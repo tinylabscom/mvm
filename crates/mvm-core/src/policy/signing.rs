@@ -106,9 +106,6 @@ mod tests {
                 mode: Some("redact".to_string()),
                 categories: vec!["email".to_string(), "cc_number".to_string()],
             },
-            tool: ToolPolicy {
-                allowed: vec!["read_file".to_string()],
-            },
             artifact: ArtifactPolicy {
                 capture_paths: vec!["/artifacts".to_string()],
                 retention_days: 30,
@@ -209,6 +206,24 @@ mod tests {
     }
 
     #[test]
+    fn signed_legacy_tool_policy_is_rejected_after_signature_verification() {
+        let (sk, vk) = fresh_key();
+        let mut value = serde_json::to_value(sample_bundle()).unwrap();
+        value["tool"] = serde_json::json!({"allowed": ["shell"]});
+        let payload = serde_json::to_vec(&value).unwrap();
+        let signature = sk.sign(&payload);
+        let signed = SignedPolicyBundle(SignedPayload {
+            payload,
+            signature: signature.to_bytes().to_vec(),
+            signer_id: "test".to_string(),
+        });
+        assert!(matches!(
+            verify_bundle(&signed, &[("test", &vk)]),
+            Err(BundleVerifyError::Parse(_))
+        ));
+    }
+
+    #[test]
     fn empty_trusted_set_fails() {
         let b = sample_bundle();
         let (sk, _vk) = fresh_key();
@@ -234,7 +249,6 @@ mod tests {
         assert!(overlay.pii.is_some());
         assert!(overlay.network.is_none());
         assert!(overlay.egress.is_none());
-        assert!(overlay.tool.is_none());
         assert!(overlay.artifact.is_none());
         assert!(overlay.keys.is_none());
         assert!(overlay.audit.is_none());

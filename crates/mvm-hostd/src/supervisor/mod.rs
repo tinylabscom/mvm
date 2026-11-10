@@ -51,7 +51,6 @@ pub mod egress;
 pub mod entropy_scanner;
 pub mod firewall;
 pub mod runtime_approval;
-pub mod tool_decision;
 // Per-VM gateway flow-event subscriber sink: the gateway bridge emits each
 // FlowEvent through here in parallel with the signer mpsc.
 pub mod gateway_audit;
@@ -120,6 +119,7 @@ pub mod aggregate;
 pub mod caller_registration;
 /// Arming a warm-claimed child's bounds in the standby supervisor it inherits.
 pub mod claimed_child;
+pub mod http_hardening;
 pub mod protected_handoff;
 /// Verification of the plan a restored child's supervisor takes as authority.
 pub mod restored_plan;
@@ -129,7 +129,6 @@ pub mod services;
 pub mod session_expiry;
 pub mod ssrf_guard;
 pub mod state;
-pub mod tools;
 /// The supervisor-side wall-clock timer — the mechanism behind
 /// `WallClockControl::SupervisorTimer`.
 pub mod wall_clock;
@@ -207,4 +206,3 @@ pub use reaper::{
 pub use secrets_scanner::{DEFAULT_RULES, SecretRule, SecretsScanner};
 pub use ssrf_guard::SsrfGuard;
 pub use state::{PlanState, PlanStateMachine, StateTransitionError};
-pub use tools::{HostMediatedTool, ToolInvokeError, ToolRegistry};

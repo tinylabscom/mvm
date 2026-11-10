@@ -1061,7 +1061,6 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         shares: Vec::new(),
         assets: Vec::new(),
         redaction: mvm_core::policy::RedactionPolicy::default(),
-        tools: Default::default(),
         network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         agent_verb_override: parent_agent_verbs.clone(),
         // A baked-entrypoint child qualifies for an attenuated grant. Forks are
@@ -2739,7 +2738,6 @@ mod tests {
             not_after: chrono::Utc::now() + chrono::Duration::hours(1),
             verbs: vec![],
             drive: None,
-            tool_mediation: None,
             application_terminal: None,
             sig: vec![0u8; 64],
         };
@@ -2784,7 +2782,6 @@ mod tests {
                 not_after: chrono::Utc::now() + chrono::Duration::hours(1),
                 verbs: vec![],
                 drive: None,
-                tool_mediation: None,
                 application_terminal: None,
                 sig: vec![0u8; 64],
             },

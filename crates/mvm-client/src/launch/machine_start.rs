@@ -289,7 +289,6 @@ pub fn start_machine_spec(
         agent_verb: spec.agent_verb.clone(),
         caller_commitment: spec.caller_commitment.clone(),
         registry_pack_image: spec.registry_pack_image.clone(),
-        tools: spec.tools.clone(),
         has_ad_hoc_argv: params.has_ad_hoc_argv,
         grants: spec.grants.clone(),
         gpu: spec.gpu,
@@ -487,7 +486,6 @@ mod tests {
             resolved_digest: None,
             runtime_pack: false,
             registry_pack_image: None,
-            tools: Default::default(),
             net: false,
             allow_host: Vec::new(),
             peer: Vec::new(),
@@ -510,6 +508,24 @@ mod tests {
             gpu: false,
             gpu_device: None,
         }
+    }
+
+    #[test]
+    fn persisted_machine_spec_rejects_legacy_tools() {
+        let mut value = serde_json::to_value(spec("legacy-tools")).expect("serialize machine spec");
+        value["tools"] = serde_json::json!({"allow": ["shell"]});
+        let error = serde_json::from_value::<mp::MachineSpec>(value)
+            .expect_err("persisted legacy tool rules must be refused");
+        assert!(error.to_string().contains("tools"), "{error}");
+    }
+
+    #[test]
+    fn persisted_machine_spec_rejects_legacy_tool_policy() {
+        let mut value = serde_json::to_value(spec("legacy-tools")).expect("serialize machine spec");
+        value["tool_policy"] = serde_json::json!("local-default");
+        let error = serde_json::from_value::<mp::MachineSpec>(value)
+            .expect_err("persisted legacy tool policy must be refused");
+        assert!(error.to_string().contains("tool_policy"), "{error}");
     }
 
     #[test]

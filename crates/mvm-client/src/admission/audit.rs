@@ -172,7 +172,6 @@ bundle_version = 1
 [network]
 [egress]
 [pii]
-[tool]
 [artifact]
 [keys]
 [audit]
@@ -181,9 +180,9 @@ chain_signing = true
         )
         .unwrap();
 
-        // Synthesize a default-refs plan, then rewrite the four
+        // Synthesize a default-refs plan, then rewrite the three
         // policy fields to `acme:vm-live`. The resolver requires
-        // all four to agree on the same ref.
+        // all three to agree on the same ref.
         let rootfs_dir = tempfile::tempdir().unwrap();
         let rootfs = write_rootfs(rootfs_dir.path(), b"live-payload");
         let ledger = InMemoryNonceLedger::new();
@@ -207,7 +206,6 @@ chain_signing = true
                 network_policy_ref: None,
                 fs_policy_ref: None,
                 egress_policy_ref: None,
-                tool_policy_ref: None,
                 secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
                 audit_event_prefix: None,
@@ -222,7 +220,6 @@ chain_signing = true
                 assets: Vec::new(),
                 redaction: mvm_core::policy::RedactionPolicy::default(),
                 reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-                tools: Default::default(),
                 caller_commitment: None,
                 audit_labels: Default::default(),
                 agent_verbs: None,
@@ -242,7 +239,6 @@ chain_signing = true
         .clone();
         plan.network_policy = PolicyRef("acme:vm-live".to_string());
         plan.egress_policy = PolicyRef("acme:vm-live".to_string());
-        plan.tool_policy = PolicyRef("acme:vm-live".to_string());
         plan.fs_policy = mvm_core::plan::FsPolicyRef("acme:vm-live".to_string());
 
         // Resolve policy, then construct the policy-derived emitter
@@ -290,7 +286,6 @@ bundle_version = 1
 [network]
 [egress]
 [pii]
-[tool]
 [artifact]
 [keys]
 [audit]
@@ -325,7 +320,6 @@ stream_destinations = ["file://{}"]
                 network_policy_ref: None,
                 fs_policy_ref: None,
                 egress_policy_ref: None,
-                tool_policy_ref: None,
                 secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
                 audit_event_prefix: None,
@@ -340,7 +334,6 @@ stream_destinations = ["file://{}"]
                 assets: Vec::new(),
                 redaction: mvm_core::policy::RedactionPolicy::default(),
                 reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-                tools: Default::default(),
                 caller_commitment: None,
                 audit_labels: Default::default(),
                 agent_verbs: None,
@@ -360,7 +353,6 @@ stream_destinations = ["file://{}"]
         .clone();
         plan.network_policy = PolicyRef("acme:vm-stream".to_string());
         plan.egress_policy = PolicyRef("acme:vm-stream".to_string());
-        plan.tool_policy = PolicyRef("acme:vm-stream".to_string());
         plan.fs_policy = mvm_core::plan::FsPolicyRef("acme:vm-stream".to_string());
 
         let resolved = resolve_policy_for_admission(&plan, Some(policy_dir.path()))
@@ -409,7 +401,6 @@ bundle_version = 1
 [network]
 [egress]
 [pii]
-[tool]
 [artifact]
 [keys]
 [audit]
@@ -441,7 +432,6 @@ chain_signing = false
                 network_policy_ref: None,
                 fs_policy_ref: None,
                 egress_policy_ref: None,
-                tool_policy_ref: None,
                 secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
                 audit_event_prefix: None,
@@ -456,7 +446,6 @@ chain_signing = false
                 assets: Vec::new(),
                 redaction: mvm_core::policy::RedactionPolicy::default(),
                 reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-                tools: Default::default(),
                 caller_commitment: None,
                 audit_labels: Default::default(),
                 agent_verbs: None,
@@ -476,7 +465,6 @@ chain_signing = false
         .clone();
         plan.network_policy = PolicyRef("acme:vm-unsigned-audit".to_string());
         plan.egress_policy = PolicyRef("acme:vm-unsigned-audit".to_string());
-        plan.tool_policy = PolicyRef("acme:vm-unsigned-audit".to_string());
         plan.fs_policy = mvm_core::plan::FsPolicyRef("acme:vm-unsigned-audit".to_string());
 
         let resolved = resolve_policy_for_admission(&plan, Some(policy_dir.path()))
@@ -532,7 +520,6 @@ chain_signing = false
                 network_policy_ref: None,
                 fs_policy_ref: None,
                 egress_policy_ref: None,
-                tool_policy_ref: None,
                 secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
                 audit_event_prefix: None,
@@ -547,7 +534,6 @@ chain_signing = false
                 assets: Vec::new(),
                 redaction: mvm_core::policy::RedactionPolicy::default(),
                 reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-                tools: Default::default(),
                 caller_commitment: None,
                 audit_labels: Default::default(),
                 agent_verbs: None,
@@ -567,7 +553,6 @@ chain_signing = false
         .clone();
         plan.network_policy = PolicyRef("acme:nope".to_string());
         plan.egress_policy = PolicyRef("acme:nope".to_string());
-        plan.tool_policy = PolicyRef("acme:nope".to_string());
         plan.fs_policy = mvm_core::plan::FsPolicyRef("acme:nope".to_string());
 
         let err = resolve_policy_for_admission(&plan, Some(policy_dir.path()))
@@ -612,7 +597,6 @@ bundle_version = 1
 [egress]
 disabled_inspectors = ["ssrf_guarrd"]
 [pii]
-[tool]
 [artifact]
 [keys]
 [audit]
@@ -643,7 +627,6 @@ disabled_inspectors = ["ssrf_guarrd"]
                 network_policy_ref: None,
                 fs_policy_ref: None,
                 egress_policy_ref: None,
-                tool_policy_ref: None,
                 secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
                 audit_event_prefix: None,
@@ -658,7 +641,6 @@ disabled_inspectors = ["ssrf_guarrd"]
                 assets: Vec::new(),
                 redaction: mvm_core::policy::RedactionPolicy::default(),
                 reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-                tools: Default::default(),
                 caller_commitment: None,
                 audit_labels: Default::default(),
                 agent_verbs: None,
@@ -678,7 +660,6 @@ disabled_inspectors = ["ssrf_guarrd"]
         .clone();
         plan.network_policy = PolicyRef("acme:vm-typo".to_string());
         plan.egress_policy = PolicyRef("acme:vm-typo".to_string());
-        plan.tool_policy = PolicyRef("acme:vm-typo".to_string());
         plan.fs_policy = mvm_core::plan::FsPolicyRef("acme:vm-typo".to_string());
 
         let err = resolve_policy_for_admission(&plan, Some(policy_dir.path()))
@@ -729,7 +710,6 @@ port_hi  = 443
 
 [egress]
 [pii]
-[tool]
 [artifact]
 [keys]
 [audit]
@@ -760,7 +740,6 @@ port_hi  = 443
                 network_policy_ref: None,
                 fs_policy_ref: None,
                 egress_policy_ref: None,
-                tool_policy_ref: None,
                 secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
                 audit_event_prefix: None,
@@ -775,7 +754,6 @@ port_hi  = 443
                 assets: Vec::new(),
                 redaction: mvm_core::policy::RedactionPolicy::default(),
                 reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-                tools: Default::default(),
                 caller_commitment: None,
                 audit_labels: Default::default(),
                 agent_verbs: None,
@@ -795,7 +773,6 @@ port_hi  = 443
         .clone();
         plan.network_policy = PolicyRef("acme:vm-bad".to_string());
         plan.egress_policy = PolicyRef("acme:vm-bad".to_string());
-        plan.tool_policy = PolicyRef("acme:vm-bad".to_string());
         plan.fs_policy = mvm_core::plan::FsPolicyRef("acme:vm-bad".to_string());
 
         let err = resolve_policy_for_admission(&plan, Some(policy_dir.path()))

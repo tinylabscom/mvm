@@ -178,9 +178,6 @@ pub struct FoldedLaunch {
     pub secret: Vec<String>,
     pub mounts: Vec<String>,
     pub allow_env: Vec<String>,
-    /// The resolved tool rules, carried to the plan the launch synthesizes.
-    /// Empty means the tool dimension is unused.
-    pub tools: mvm_contract::policy::tool_rules::ToolRules,
 }
 
 fn refuse(key: &str, message: impl Into<String>) -> PolicyError {
@@ -210,7 +207,6 @@ pub fn fold(policy: &PolicyBody, flags: &LaunchFlags) -> Result<FoldedLaunch, Po
         secret: fold_secrets(policy, flags)?,
         mounts: fold_mounts(policy, flags)?,
         allow_env: fold_env(policy, flags)?,
-        tools: policy.tools.to_tool_rules(),
     })
 }
 

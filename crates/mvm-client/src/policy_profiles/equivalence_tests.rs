@@ -43,7 +43,6 @@ fn admitted_plan(grants: &RunGrants, dir: &std::path::Path) -> mvm_core::plan::E
     let ledger = InMemoryNonceLedger::new();
     let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
         gpu: false,
-        tools: Default::default(),
         instructions: Default::default(),
         outputs: Vec::new(),
         network_mode: mvm_contract::plan::NetworkMode::default(),

@@ -120,7 +120,6 @@ mod tests {
             spawning,
             vec![
                 "Exec",
-                "MediatedExec",
                 "ExecBatch",
                 "RunEntrypoint",
                 "AgentPrompt",

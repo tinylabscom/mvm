@@ -1,13 +1,12 @@
 ---
 title: Goose with MVM
-description: Connect Goose to MVM's local MCP server under a narrow tool policy, and use the signed agent/goose policy pack for a Goose workload in a microVM.
+description: Connect Goose to MVM's local MCP server, and use the signed agent/goose policy pack for a Goose workload in a microVM.
 ---
 
 MVM meets Goose in two places. On the host, Goose can load MVM's MCP server as
 a stdio extension. In a microVM, the signed `agent/goose` policy pack decides
-what a Goose workload may reach. The two are independent: the MCP gate governs
-which MVM tools the host client may call, and the pack governs a guest's
-network and secrets.
+what a Goose workload may reach. The host MCP server exposes backend
+operations; the pack governs a guest's network and secrets.
 
 Neither one confines Goose's own developer tools when Goose runs on the host.
 To put the agent itself behind the microVM boundary, it has to run in the
@@ -17,43 +16,12 @@ Run the host integration on a host where `mvmctl` can manage machines.
 Repository contributors run MVM runtime commands in the project builder VM, not
 on the macOS development host.
 
-## Set a narrow tool policy
+## Permissions
 
-In the project directory, add `policy/mcp-readonly.toml`:
-
-```toml
-description = "Read-only machine discovery for the local MCP client"
-
-[overrides.tools]
-allow = ["mvm.machine.list"]
-```
-
-Reference that policy from the project's `mvm.toml`:
-
-```toml
-[policy]
-profile = "./policy/mcp-readonly.toml"
-```
-
-The file is a profile, so its own policy sits under `[overrides]`. An active
-`[tools]` section admits only listed tools: this one allows machine listing and
-refuses create, stop, and every unlisted tool. From the project directory,
-check that the policy resolves and query individual tools before connecting
-the client:
-
-```sh
-mvmctl policy validate
-mvmctl policy show
-mvmctl why --tool mvm.machine.list
-mvmctl why --tool mvm.machine.stop
-```
-
-The MCP gate uses this project's resolved policy. A policy that exists but
-fails to resolve prevents the server from starting. Without any `[tools]`
-section, the MCP adapter has no tool gate; do not treat a missing policy as a
-read-only configuration. Per-tool command, route, and secret detail is not
-enforced at the MCP JSON-argument boundary. See
-[Policy and profiles](/guides/policy-and-profiles/) for that limit.
+The local MCP server is not read-only: it exposes operations supported by
+the backend. Only give access to a host client authorized to manage those
+machines. An old project policy containing `[tools]` refuses MCP startup;
+tool-specific policy is not applied to MCP calls.
 
 ## Connect Goose
 
@@ -83,8 +51,8 @@ extensions:
 ```
 
 Goose starts the extension in the directory the session runs in, which is how
-MVM finds the `mvm.toml` whose policy gates the tools. A session started
-elsewhere reads a different project's policy, or none. The server speaks over
+MVM finds a project policy that might still contain unsupported `[tools]`.
+The server speaks over
 local stdin/stdout, not a network listener. See
 [Goose's extension documentation](https://goose-docs.ai/docs/getting-started/using-extensions)
 for its current config keys.

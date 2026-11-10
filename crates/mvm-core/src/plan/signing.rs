@@ -271,8 +271,6 @@ pub mod test_support {
             egress_policy: PolicyRef("agent-l7".to_string()),
             redaction: crate::policy::RedactionPolicy::default(),
             reversible_replacement: crate::policy::ReversibleReplacementPolicy::default(),
-            tool_policy: PolicyRef("read-only-tools".to_string()),
-            tools: Default::default(),
             artifact_policy: ArtifactPolicy {
                 capture_paths: vec!["/artifacts".to_string()],
                 retention_days: 30,
@@ -342,6 +340,57 @@ mod tests {
         let signed = sign_plan(&plan, &sk, "test-signer");
         let recovered = verify_plan(&signed, &[("test-signer", &vk)]).unwrap();
         assert_eq!(recovered, plan);
+    }
+
+    #[test]
+    fn signed_legacy_tool_policy_does_not_become_an_unrestricted_grant() {
+        let mut plan = sample_plan();
+        plan.agent_verbs = Some(vec![crate::plan::VerbId::new("run-entrypoint").unwrap()]);
+        let (sk, vk) = fresh_key();
+        let signed = sign_plan(&plan, &sk, "test-signer");
+        let round = verify_plan(&signed, &[("test-signer", &vk)]).expect("ordinary plan");
+        assert_eq!(round.agent_verbs, plan.agent_verbs);
+        assert_eq!(round.network_policy, plan.network_policy);
+        assert_eq!(round.fs_policy, plan.fs_policy);
+        assert_eq!(round.egress_policy, plan.egress_policy);
+        assert_eq!(round.secrets, plan.secrets);
+
+        for (field, value) in [
+            ("tools", serde_json::json!({"allow": ["shell"]})),
+            (
+                "tools",
+                serde_json::json!({"detail": {"shell": {"secrets": ["token"]}}}),
+            ),
+            ("tool_policy", serde_json::json!("read-only-tools")),
+        ] {
+            let mut legacy = serde_json::to_value(&plan).expect("plan serializes");
+            legacy[field] = value;
+            let mut signed = signed.clone();
+            signed.0.payload = serde_json::to_vec(&legacy).expect("legacy plan serializes");
+            signed.0.signature = sk.sign(&signed.0.payload).to_bytes().to_vec();
+            assert!(
+                matches!(
+                    verify_plan(&signed, &[("test-signer", &vk)]),
+                    Err(PlanVerifyError::Parse(_))
+                ),
+                "{field}"
+            );
+            let json = serde_json::to_string(&signed).expect("signed plan serializes");
+            assert!(plan_from_admitted_json(&json).is_err(), "{field}");
+            assert!(secrets_from_signed_json(&json).is_err(), "{field}");
+        }
+        let mut legacy = serde_json::to_value(&plan).expect("plan serializes");
+        legacy["admission_profile"]["tool_policy"] = serde_json::json!("read-only-tools");
+        let mut signed = signed;
+        signed.0.payload = serde_json::to_vec(&legacy).expect("legacy plan serializes");
+        signed.0.signature = sk.sign(&signed.0.payload).to_bytes().to_vec();
+        assert!(matches!(
+            verify_plan(&signed, &[("test-signer", &vk)]),
+            Err(PlanVerifyError::Parse(_))
+        ));
+        let json = serde_json::to_string(&signed).expect("signed plan serializes");
+        assert!(plan_from_admitted_json(&json).is_err());
+        assert!(secrets_from_signed_json(&json).is_err());
     }
 
     #[test]

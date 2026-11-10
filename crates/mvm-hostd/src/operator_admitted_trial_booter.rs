@@ -241,7 +241,6 @@ pub struct ProviderPolicyConfig {
     pub network_policy_ref: String,
     pub egress_policy_ref: String,
     pub fs_policy_ref: String,
-    pub tool_policy_ref: String,
 }
 
 /// Host/tenant ceiling and explicit approvals. Deserializing `ApprovalSet`
@@ -440,7 +439,6 @@ impl OperatorConfiguredTrialBooter {
             network_policy_ref: Some(&self.config.policy.network_policy_ref),
             fs_policy_ref: Some(&self.config.policy.fs_policy_ref),
             egress_policy_ref: Some(&self.config.policy.egress_policy_ref),
-            tool_policy_ref: Some(&self.config.policy.tool_policy_ref),
             secret_release: SecretReleasePolicy::None,
             secrets: Vec::new(),
             audit_event_prefix: Some("assurance.campaign"),
@@ -458,7 +456,6 @@ impl OperatorConfiguredTrialBooter {
             assets: Vec::new(),
             redaction: Default::default(),
             reversible_replacement: Default::default(),
-            tools: Default::default(),
             caller_commitment: None,
             audit_labels,
             agent_verbs: Some(vec![
@@ -531,7 +528,6 @@ impl OperatorConfiguredTrialBooter {
             &self.config.policy.network_policy_ref,
             &self.config.policy.egress_policy_ref,
             &self.config.policy.fs_policy_ref,
-            &self.config.policy.tool_policy_ref,
         );
         if effective != session.source.requested_policy_digest {
             anyhow::bail!("operator policy references do not match the requested policy digest");
@@ -785,7 +781,6 @@ impl ProviderBootConfig {
         validate_policy_ref(&self.policy.network_policy_ref)?;
         validate_policy_ref(&self.policy.egress_policy_ref)?;
         validate_policy_ref(&self.policy.fs_policy_ref)?;
-        validate_policy_ref(&self.policy.tool_policy_ref)?;
         if self.authority.grant_ttl_ms == 0
             || self.authority.grant_ttl_ms > crate::assurance_session::MAX_GRANT_TTL_MS
         {
@@ -1421,13 +1416,11 @@ mod tests {
             network_policy_ref: "operator-network-v1".to_string(),
             egress_policy_ref: "operator-egress-v1".to_string(),
             fs_policy_ref: "operator-fs-v1".to_string(),
-            tool_policy_ref: "operator-tools-v1".to_string(),
         };
         let policy_digest = policy_digest_from_refs(
             &policy.network_policy_ref,
             &policy.egress_policy_ref,
             &policy.fs_policy_ref,
-            &policy.tool_policy_ref,
         );
         let config = ProviderBootConfig {
             schema: PROVIDER_BOOT_CONFIG_SCHEMA.to_string(),

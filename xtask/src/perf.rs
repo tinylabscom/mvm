@@ -243,34 +243,6 @@ pub(crate) fn all_budgets() -> Vec<PerfBudget> {
             description: "Libkrun cold-boot wall-clock",
         },
         PerfBudget {
-            name: "default_response_body_cap",
-            limit: 1 << 20,
-            unit: "bytes",
-            source: "plan-65 follow-on (a437c0e)",
-            description: "Per-tool capped response body for web_fetch + search providers",
-        },
-        PerfBudget {
-            name: "web_fetch_max_bytes",
-            limit: 16 * (1 << 20),
-            unit: "bytes",
-            source: "plan-60 Phase 7 (e500c18)",
-            description: "Hard upper bound on mvm.web_fetch max_bytes (caller-supplied is clamped)",
-        },
-        PerfBudget {
-            name: "tool_max_query_len",
-            limit: 1024,
-            unit: "bytes",
-            source: "plan-60 Phase 7 (a4ca401)",
-            description: "Max query string length for mvm.web_search",
-        },
-        PerfBudget {
-            name: "tool_max_results",
-            limit: 50,
-            unit: "items",
-            source: "plan-60 Phase 7 (a4ca401)",
-            description: "Hard upper bound on mvm.web_search max_results",
-        },
-        PerfBudget {
             name: "overlay_quota_default",
             limit: 10 * (1 << 30),
             unit: "bytes",
@@ -1275,7 +1247,7 @@ mod tests {
         // The count is a tripwire — if someone adds a budget without
         // a corresponding constant-pin test, this assert pushes them
         // to update both.
-        assert_eq!(all_budgets().len(), 14);
+        assert_eq!(all_budgets().len(), 10);
     }
 
     #[test]

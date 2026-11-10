@@ -3,8 +3,7 @@
 //! Each sub-policy starts as a minimal shape placeholder; real
 //! enforcement contracts are filled in incrementally:
 //!
-//! - `EgressPolicy` (L7 rules), `PiiPolicy` (detect / redact / refuse
-//!   modes), and `ToolPolicy` (RPC allowlist).
+//! - `EgressPolicy` (egress rules) and `PiiPolicy` (detect / redact / refuse modes).
 //! - `KeyPolicy` (per-run secret grants) and `AuditPolicy` (chain
 //!   signing, per-tenant streams).
 //! - `BundleNetworkPolicy` (per-tenant netns) and `ArtifactPolicy` retention
@@ -206,15 +205,6 @@ pub struct PiiPolicy {
     /// Empty means all categories the redactor knows about.
     #[serde(default)]
     pub categories: Vec<String>,
-}
-
-/// Tool-call allowlist. Wires the supervisor's vsock RPC `ToolGate`.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ToolPolicy {
-    /// Names of tools the workload is allowed to invoke. Stub.
-    #[serde(default)]
-    pub allowed: Vec<String>,
 }
 
 /// Artifact policy. Distinct from `mvm-core::plan::ArtifactPolicy` —

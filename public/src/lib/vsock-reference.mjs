@@ -24,21 +24,13 @@ export const families = {
   },
   guest: {
     schema: "schema/protocol-v0.json",
-    sources: [
-      ["crates/mvm-agentd/src/vsock/response.rs", ["ToolCheckReply"]],
-    ],
+    sources: [],
   },
   flow: {
     sources: [
       ["crates/mvm-contract/src/protocol/network_flow/frame.rs", ["FrameHeader"]],
       ["crates/mvm-contract/src/protocol/network_flow/opcode.rs", ["Opcode"]],
       ["crates/mvm-contract/src/protocol/network_flow/hello.rs", ["Handshake"]],
-      ["crates/mvm-contract/src/protocol/network_flow/tool.rs", [
-        "ToolCheckRequest", "ToolDecisionReply",
-      ]],
-      ["crates/mvm-contract/src/protocol/network_flow/attribution.rs", [
-        "ToolInvocationBinding", "ToolInvocationRelease",
-      ]],
       ["crates/mvm-core/src/substitution_wire.rs", [
         "HttpFlowHead", "HttpFlowResponseHead",
       ]],
@@ -80,7 +72,6 @@ export const families = {
         "KvGetRequest", "KvGetResponse", "KvPutRequest", "KvPutResponse",
         "KvDeleteRequest", "KvDeleteResponse", "KvListRequest", "KvListResponse",
       ]],
-      ["crates/mvm-contract/src/protocol/host_tool.rs", ["ToolReleaseResponse"]],
     ],
   },
   builder: {

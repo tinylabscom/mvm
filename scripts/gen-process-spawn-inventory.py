@@ -225,8 +225,6 @@ A = {
     "mvm-agentd/src/late_volumes.rs": ("guest helper", "re-exec self as the late-volume mount helper"),
     "mvm-agentd/src/lifecycle_hooks.rs": ("guest workload", "before_/after_ lifecycle hook scripts"),
     "mvm-agentd/src/process_rpc.rs": ("guest workload", "process-control RPC start of a requested program"),
-    "mvm-agentd/src/tool_helper.rs": ("guest helper", "fork and execveat of a mediated tool invocation"),
-    "mvm-agentd/src/tool_install.rs": ("guest helper", "start the declared-command tool helper before privilege drop"),
     "mvm-agentd/src/worker_pool.rs": ("guest workload", "warm worker-pool process"),
     "mvm-setpriv/src/lib.rs": ("guest helper", "privilege-drop-and-exec of the target command"),
     # builder VM

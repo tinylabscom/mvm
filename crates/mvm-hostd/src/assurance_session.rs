@@ -991,7 +991,6 @@ fn policy_digest(plan: &ExecutionPlan) -> Sha256Digest {
         &plan.network_policy.0,
         &plan.egress_policy.0,
         &plan.fs_policy.0,
-        &plan.tool_policy.0,
     )
 }
 

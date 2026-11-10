@@ -472,6 +472,14 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Condvar, Mutex};
 
+    use super::*;
+    use crate::assurance_session::{
+        AiSessionRun, DeclaredEdge, ExecutedAiSessionRun, OpenSession, default_policy_ceiling,
+        open_on,
+    };
+    use crate::audit::emitter::AuditEmitter;
+    use crate::broker::handlers::host_assurance_v1::HOST_ASSURANCE_SERVICE;
+    use crate::plan_admission::AdmittedPlan;
     use ed25519_dalek::SigningKey;
     use mvm_contract::assurance::{
         ApprovalSet, EvidenceRef, HostObservation, TRIAL_RESULT_CANDIDATE_SCHEMA,
@@ -486,16 +494,6 @@ mod tests {
     use mvm_core::plan::signing::sign_plan;
     use mvm_core::plan::test_support::PlanFixture;
     use mvm_core::protocol::broker::ServiceId;
-    use sha2::{Digest, Sha256};
-
-    use super::*;
-    use crate::assurance_session::{
-        AiSessionRun, DeclaredEdge, ExecutedAiSessionRun, OpenSession, default_policy_ceiling,
-        open_on,
-    };
-    use crate::audit::emitter::AuditEmitter;
-    use crate::broker::handlers::host_assurance_v1::HOST_ASSURANCE_SERVICE;
-    use crate::plan_admission::AdmittedPlan;
 
     const NOW_MS: u64 = 1_800_000_000_000;
 
@@ -586,15 +584,11 @@ mod tests {
     }
 
     fn policy_digest(plan: &mvm_core::plan::ExecutionPlan) -> Sha256Digest {
-        let mut hasher = Sha256::new();
-        hasher.update(plan.network_policy.0.as_bytes());
-        hasher.update([0]);
-        hasher.update(plan.egress_policy.0.as_bytes());
-        hasher.update([0]);
-        hasher.update(plan.fs_policy.0.as_bytes());
-        hasher.update([0]);
-        hasher.update(plan.tool_policy.0.as_bytes());
-        Sha256Digest::from_bytes(&hasher.finalize().into())
+        mvm_contract::assurance::policy_digest_from_refs(
+            &plan.network_policy.0,
+            &plan.egress_policy.0,
+            &plan.fs_policy.0,
+        )
     }
 
     fn joined_input() -> (CampaignProviderRequest, AssuranceSessionRequest) {

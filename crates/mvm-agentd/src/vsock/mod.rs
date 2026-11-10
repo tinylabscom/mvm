@@ -54,14 +54,13 @@ pub use connection::{
 pub use framing::{
     AuthenticatedSession, handshake_as_guest, handshake_as_host, read_frame, write_frame,
 };
-pub use request::{DriveFileOperation, GuestRequest, MediatedExecCall, StageFile};
+pub use request::{DriveFileOperation, GuestRequest, StageFile};
 pub use request_policy::RequestClass;
 pub use response::{
     BootTimingReport, ComponentState, ConsoleSessionInfo, DriveRefusal, GuestCapability,
     GuestResponse, ProtocolNegotiation, ProtocolUpgradeAction, ReadinessReport, ReseedShortfall,
-    ResponseContract, ResponseKind, ResponseVariant, RunEntrypointError, ToolCheckReply,
-    TrafficPlane, Verb, VolumeMountErrorKind, VolumeMountResult, protocol_hello_response,
-    supported_capabilities,
+    ResponseContract, ResponseKind, ResponseVariant, RunEntrypointError, TrafficPlane, Verb,
+    VolumeMountErrorKind, VolumeMountResult, protocol_hello_response, supported_capabilities,
 };
 pub use response_payloads::{
     DisplayDeliveryRefusal, DisplayInputResult, EntrypointEvent, ExecEvent, ExecOutcomeWire,
@@ -72,11 +71,10 @@ pub use rpc::{
     AgentPromptCall, AgentServing, ControlSession, DriveOpenCall, RpcError, RunEntrypointCall,
     call_streaming, call_unary, check_response, negotiate_protocol, probe_agent_ready,
     probe_agent_serving, read_exec_stream, require_capabilities, send_agent_prompt_while,
-    send_attributed_mediated_exec_streaming, send_cancel_extension, send_close_stream_input,
-    send_display_input, send_drive_file, send_drive_open, send_entrypoint_on_authenticated_session,
-    send_exec_on_authenticated_session, send_exec_streaming, send_mediated_exec_streaming,
-    send_run_code_streaming, send_run_detached, send_run_entrypoint, send_run_entrypoint_while,
-    send_run_extension, send_stream_input,
+    send_cancel_extension, send_close_stream_input, send_display_input, send_drive_file,
+    send_drive_open, send_entrypoint_on_authenticated_session, send_exec_on_authenticated_session,
+    send_exec_streaming, send_run_code_streaming, send_run_detached, send_run_entrypoint,
+    send_run_entrypoint_while, send_run_extension, send_stream_input,
 };
 pub use verb_grant::{
     HOST_SIGNER_PUB_CMDLINE_KEY, HOST_SIGNER_PUBKEY_PATH, TrustDecision, VERB_TRUST_POLICY_PATH,

@@ -1,14 +1,13 @@
 ---
 title: Codex with MVM
-description: Use the signed agent/codex policy pack for a Codex workload in a microVM, and connect the Codex CLI to MVM's local MCP server under a narrow tool policy.
+description: Use the signed agent/codex policy pack for a Codex workload in a microVM, and connect the Codex CLI to MVM's local MCP server.
 ---
 
 MVM has two places it can meet Codex: the signed `agent/codex` policy pack,
 which decides what a Codex workload in a microVM may reach, and the local MCP
-server, which gives a Codex session on the host a set of MVM tools
-([below](#connect-codex-to-the-mcp-server)). The two are independent: the pack
-governs a guest's network and secrets, and the MCP tool gate governs which MVM
-tools the host client may call.
+server, which gives a Codex session on the host a set of MVM operations
+([below](#connect-codex-to-the-mcp-server)). The pack governs the guest's
+network and secrets; the host MCP server exposes backend operations.
 
 Neither one confines Codex's own shell and file tools when Codex runs on the
 host. To put the agent itself behind the microVM boundary, it has to run in the
@@ -141,38 +140,12 @@ until it is pulled.
 
 Run the host integration on a host where `mvmctl` can manage machines.
 
-### Set a narrow tool policy
+### Permissions
 
-In the project directory, add `policy/mcp-readonly.toml`:
-
-```toml
-description = "Read-only machine discovery for the local MCP client"
-
-[overrides.tools]
-allow = ["mvm.machine.list"]
-```
-
-Reference that policy from the project's `mvm.toml`:
-
-```toml
-[policy]
-profile = "./policy/mcp-readonly.toml"
-```
-
-An active `[tools]` section admits only listed tools: this one allows machine
-listing and refuses create, stop, and every unlisted tool. Check it from the
-project directory before connecting Codex:
-
-```sh
-mvmctl policy validate
-mvmctl why --tool mvm.machine.list
-mvmctl why --tool mvm.machine.stop
-```
-
-Without any `[tools]` section the MCP adapter has no tool gate, so do not treat
-a missing policy as a read-only configuration. See
-[Policy and profiles](/guides/policy-and-profiles/) for what the gate does and
-does not enforce.
+The local MCP server is not read-only: it exposes operations supported by
+the backend. Only give access to a host client authorized to manage those
+machines. An old project policy containing `[tools]` refuses MCP startup;
+tool-specific policy is not applied to MCP calls.
 
 ### Register the server
 
@@ -191,9 +164,8 @@ command = "mvmctl"
 args = ["ops", "mcp", "stdio"]
 ```
 
-Codex starts the server in the directory the session runs in, and that is how
-MVM finds the `mvm.toml` whose policy gates the tools. A session started in a
-directory with no `[tools]` policy gets an ungated server. The server speaks
+Codex starts the server in the directory the session runs in; MVM refuses an
+old project policy carrying `[tools]` rather than ignoring its restrictions. The server speaks
 over local stdin/stdout, not a network listener.
 
 Codex 0.147.0 opens the session with MCP protocol version `2025-06-18`. The

@@ -710,7 +710,6 @@ fn why_help_lists_every_query_and_policy_source() {
         "--method",
         "--request-path",
         "--path",
-        "--tool",
         "--secret",
         "--profile",
         "--plan",
@@ -719,17 +718,21 @@ fn why_help_lists_every_query_and_policy_source() {
     ] {
         assert!(help.contains(flag), "why help is missing {flag}:\n{help}");
     }
+    assert!(
+        !help.contains("--tool"),
+        "why must not advertise tool policy: {help}"
+    );
 }
 
 #[test]
-fn machine_exec_help_lists_declared_tool_option() {
+fn machine_exec_help_omits_declared_tool_option() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
         .args(["machine", "exec", "--help"])
         .output()
         .expect("machine exec help");
     assert!(out.status.success());
     let help = String::from_utf8_lossy(&out.stdout);
-    assert!(help.contains("--tool"), "machine exec help: {help}");
+    assert!(!help.contains("--tool"), "machine exec help: {help}");
 }
 
 #[test]
@@ -2263,18 +2266,9 @@ fn machine_console_rejects_conflicting_session_flags() {
     }
 }
 
-/// `ops mcp stdio` binds the resolved `[tools]` policy as its tool gate: a
-/// denied tool is refused before any backend work, an allowed tool passes.
+/// An old project tool policy must not silently turn into an ungated MCP server.
 #[test]
-fn ops_mcp_enforces_the_project_tool_policy() {
-    fn isolated(home: &std::path::Path) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_mvmctl"));
-        command
-            .env("MVM_HOME", home)
-            .env("HOME", home)
-            .env("MVM_NO_AUTO_DEV", "1");
-        command
-    }
+fn ops_mcp_refuses_the_project_tool_policy() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -2290,69 +2284,20 @@ fn ops_mcp_enforces_the_project_tool_policy() {
     )
     .unwrap();
 
-    let mut child = isolated(home.path())
+    let output = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", home.path())
+        .env("HOME", home.path())
+        .env("MVM_NO_AUTO_DEV", "1")
         .current_dir(project.path())
         .args(["ops", "mcp", "stdio"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn mvmctl ops mcp stdio");
-    let mut stdin = child.stdin.take().expect("stdin pipe");
-    let mut stdout = child.stdout.take().expect("stdout pipe");
-
-    let call = |id: u32, name: &str| {
-        format!(
-            r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{{}}}}}}"#
-        )
-    };
-    use std::io::Write as _;
-    writeln!(stdin, "{}", call(1, "mvm.machine.stop")).expect("write denied call");
-    writeln!(stdin, "{}", call(2, "mvm.machine.list")).expect("write allowed call");
-    writeln!(
-        stdin,
-        r#"{{"jsonrpc":"2.0","id":9,"method":"unknown/nope","params":{{}}}}"#
-    )
-    .expect("write terminator probe");
-    stdin.flush().expect("flush frames");
-
-    use std::io::BufRead as _;
-    let reader = std::io::BufReader::new(&mut stdout);
-    let mut denied_seen = false;
-    let mut allowed_seen = false;
-    for line in reader.lines() {
-        let line = line.expect("read a response line");
-        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        let method = parsed["method"].as_str().unwrap_or("");
-        if method == "unknown/nope" || parsed["id"] == 9 {
-            break;
-        }
-        let is_error = parsed["result"]["isError"].as_bool().unwrap_or(false);
-        let text = parsed["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-        match parsed["id"].as_u64() {
-            Some(1) => {
-                assert!(is_error, "denied tool must refuse: {line}");
-                assert!(text.contains("policy denies"), "{text}");
-                denied_seen = true;
-            }
-            Some(2) => {
-                assert!(!is_error, "allowed tool must reach the backend: {line}");
-                allowed_seen = true;
-            }
-            _ => {}
-        }
-        if denied_seen && allowed_seen {
-            break;
-        }
-    }
-    assert!(denied_seen, "the denied call produced no refusal");
-    assert!(allowed_seen, "the allowed call produced no result");
-    let _ = child.kill();
-    let _ = child.wait();
+        .output()
+        .expect("run mvmctl ops mcp stdio");
+    assert!(
+        !output.status.success(),
+        "legacy tool policy must refuse startup"
+    );
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("unknown field `tools`"), "{error}");
 }
 
 // ---------------------------------------------------------------------------
@@ -2413,7 +2358,7 @@ fn stage_pack_registry(root: &std::path::Path) {
     std::fs::write(root.join("index.json"), serde_json::to_vec(&index).unwrap()).unwrap();
     std::fs::write(
         pack.join("files/pack/profile.toml"),
-        b"[tools]\nallow = [\"git\"]\n",
+        b"description = \"registry pack fixture\"\n",
     )
     .unwrap();
 }

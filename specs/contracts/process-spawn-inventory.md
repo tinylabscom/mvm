@@ -67,8 +67,6 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-agentd | `src/late_volumes.rs` | 1 | guest helper | re-exec self as the late-volume mount helper | guest | CHS | - | RAW_SITES (guest) |
 | mvm-agentd | `src/lifecycle_hooks.rs` | 2 | guest workload | before_/after_ lifecycle hook scripts | guest | CHS | - | RAW_SITES (guest) |
 | mvm-agentd | `src/process_rpc.rs` | 1 | guest workload | process-control RPC start of a requested program | guest | CHS | - | RAW_SITES (guest) |
-| mvm-agentd | `src/tool_helper.rs` | 3 | guest helper | fork and execveat of a mediated tool invocation | guest | CHS | - | RAW_SITES (guest) |
-| mvm-agentd | `src/tool_install.rs` | 1 | guest helper | start the declared-command tool helper before privilege drop | guest | CHS | - | RAW_SITES (guest) |
 | mvm-agentd | `src/worker_pool.rs` | 1 | guest workload | warm worker-pool process | guest | CHS | - | RAW_SITES (guest) |
 | mvm-backends | `src/driver/fc.rs` | 1 | systemd-run / sudo | signal a Firecracker process through sudo kill on Linux | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub |
 | mvm-backends | `src/driver/hvf.rs` | 2 | hypervisor supervisor | spawn mvm-hvf-supervisor for an HVF VM (cold and restore) | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub |
@@ -150,11 +148,11 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-vmm | `src/host/network_endpoint_spawn/owned.rs` | 1 | helper bin | spawn an owned network endpoint | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub; check-single-network-path |
 | mvm-vmm | `src/host/shell/exec.rs` | 6 | shell script | run_in_vm / run_host: bash -c and direct program exec for every ShellEnvironment caller | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub |
 
-Totals: 192 production sites in 99 files.
+Totals: 188 production sites in 97 files.
 
 | Crate | Sites |
 |---|--:|
-| mvm-agentd | 33 |
+| mvm-agentd | 29 |
 | mvm-backends | 8 |
 | mvm-build | 28 |
 | mvm-builder-guest | 32 |
@@ -169,7 +167,7 @@ Totals: 192 production sites in 99 files.
 | mvm-setpriv | 1 |
 | mvm-vmm | 17 |
 
-By construct: `Command::new` 60, `SYS_execve` 1, `helper_command` 118, `helper_command_with` 3, `libc::fork` 1, `openpty` 2, `raw:execve` 1, `raw:execveat_raw` 1, `raw:execvpe` 1, `raw:fork` 2, `scrub_command` 1, `wrap_checked` 1.
+By construct: `Command::new` 59, `helper_command` 118, `helper_command_with` 3, `openpty` 2, `raw:execve` 1, `raw:execvpe` 1, `raw:fork` 2, `scrub_command` 1, `wrap_checked` 1.
 <!-- inventory:end -->
 
 Linked and Traced are host-side facts about the crate and the call graph. A `guest` or `builder VM` row is crate-linked into the host closure (so `CHS`), but its binary only ever runs inside the microVM; the host never calls it. Read those rows by Authority.

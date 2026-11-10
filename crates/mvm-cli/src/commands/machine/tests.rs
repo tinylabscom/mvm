@@ -1145,7 +1145,6 @@ fn spec_fixture(name: &str) -> MachineSpec {
         resolved_digest: None,
         runtime_pack: false,
         registry_pack_image: None,
-        tools: Default::default(),
         net: false,
         allow_host: vec![],
         peer: Vec::new(),
@@ -1213,28 +1212,16 @@ fn run_spec_maps_run_args_into_a_machine_spec() {
 }
 
 #[test]
-fn run_spec_records_tool_rules_with_their_scope() {
-    let _state = IsolatedMachineState::new();
-    let mut args =
-        parse_run(&["run", "--image", "alpine:3.20", "--name", "toolbox"]).expect("parse");
-    args.run.applied_policy = Some(
-        toml::from_str(
-            "[tools]\nallow = [\"git\"]\n[tools.detail.git]\nargv = [\"git status*\"]\n",
-        )
-        .expect("tool policy parses"),
-    );
-    let spec = machine_run_spec(&args, "toolbox".to_string(), None).expect("spec");
-    assert_eq!(spec.tools.allow, ["git"]);
-    assert_eq!(spec.tools.detail["git"].argv, ["git status*"]);
-
-    args.run.applied_policy = Some(
-        toml::from_str(
-            "[tools]\nallow = [\"git\"]\n[tools.detail.git]\nroutes = [\"example.com:443\"]\n",
-        )
-        .expect("scoped route parses"),
-    );
-    let spec = machine_run_spec(&args, "toolbox".to_string(), None).expect("scoped spec");
-    assert_eq!(spec.tools.detail["git"].routes, ["example.com:443"]);
+fn run_spec_refuses_tool_rules() {
+    for text in [
+        "[tools]\nallow = [\"git\"]\n[tools.detail.git]\nargv = [\"git status*\"]\n",
+        "[tools]\nallow = [\"git\"]\n[tools.detail.git]\nroutes = [\"example.com:443\"]\n",
+    ] {
+        assert!(
+            toml::from_str::<mvm_client::policy_profiles::PolicyBody>(text).is_err(),
+            "{text}"
+        );
+    }
 }
 
 #[test]
@@ -2475,7 +2462,6 @@ fn mark_machine_started_sets_digest_and_timestamp() {
         resolved_digest: None,
         runtime_pack: false,
         registry_pack_image: None,
-        tools: Default::default(),
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
@@ -2741,7 +2727,6 @@ fn machine_start_receipt_input_redacts_host_paths_and_surfaces_policy() {
         resolved_digest: Some("sha256:abc".to_string()),
         runtime_pack: false,
         registry_pack_image: None,
-        tools: Default::default(),
         net: false,
         allow_host: vec!["api.example.com".to_string()],
         peer: Vec::new(),
@@ -2840,7 +2825,6 @@ fn machine_start_preflight_reports_uniform_l4_enforcement_for_oci_allow_host() {
         resolved_digest: None,
         runtime_pack: false,
         registry_pack_image: None,
-        tools: Default::default(),
         net: false,
         allow_host: vec!["api.example.com".to_string()],
         peer: Vec::new(),
@@ -2914,7 +2898,6 @@ fn create_refuses_overwrite_without_force() {
         resolved_digest: None,
         runtime_pack: false,
         registry_pack_image: None,
-        tools: Default::default(),
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
@@ -2955,7 +2938,6 @@ fn remove_machine_spec_requires_confirmation_and_deletes_dir() {
         resolved_digest: None,
         runtime_pack: false,
         registry_pack_image: None,
-        tools: Default::default(),
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
@@ -2998,7 +2980,6 @@ fn seed_machine_spec(name: &str) {
         resolved_digest: None,
         runtime_pack: false,
         registry_pack_image: None,
-        tools: Default::default(),
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
@@ -3395,7 +3376,6 @@ fn top_level_cli_routes_machine_exec() {
             MachineAction::Exec(exec) => {
                 assert_eq!(exec.name, "web");
                 assert_eq!(exec.argv, vec!["echo", "hi"]);
-                assert_eq!(exec.tool, None);
             }
             other => panic!("expected exec action, got {other:?}"),
         },
@@ -3404,30 +3384,21 @@ fn top_level_cli_routes_machine_exec() {
 }
 
 #[test]
-fn top_level_cli_routes_declared_machine_tool_without_running_it() {
-    let cli = Cli::try_parse_from([
-        "mvmctl",
-        "machine",
-        "exec",
-        "web",
-        "--tool",
-        "read",
-        "--",
-        "/bin/echo",
-        "hi",
-    ])
-    .expect("top-level parse");
-    match cli.command {
-        Commands::Machine(args) => match args.action {
-            MachineAction::Exec(exec) => {
-                assert_eq!(exec.tool.as_deref(), Some("read"));
-                assert_eq!(exec.argv, vec!["/bin/echo", "hi"]);
-                assert!(!exec.tty);
-            }
-            other => panic!("expected exec action, got {other:?}"),
-        },
-        other => panic!("expected Commands::Machine, got {other:?}"),
-    }
+fn top_level_cli_refuses_retired_tool_flag() {
+    assert!(
+        Cli::try_parse_from([
+            "mvmctl",
+            "machine",
+            "exec",
+            "web",
+            "--tool",
+            "read",
+            "--",
+            "/bin/echo",
+            "hi",
+        ])
+        .is_err()
+    );
 }
 
 #[test]
@@ -3680,7 +3651,6 @@ fn reconfigure_spec_fixture() -> MachineSpec {
         resolved_digest: None,
         runtime_pack: false,
         registry_pack_image: None,
-        tools: Default::default(),
         net: false,
         allow_host: vec![],
         peer: Vec::new(),

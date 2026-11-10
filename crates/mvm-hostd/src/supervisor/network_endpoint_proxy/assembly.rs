@@ -135,7 +135,6 @@ impl SubstitutionService {
             instance_metrics: None,
             admitted: Arc::default(),
             approver: Arc::new(crate::supervisor::runtime_approval::NoApprovalBackend),
-            tool_gate: None,
             approval_required: std::collections::BTreeSet::new(),
             reflection: super::reflection::ReflectionGuard::default(),
             oauth_capture_by_secret: std::collections::BTreeMap::new(),
@@ -166,59 +165,6 @@ impl SubstitutionService {
     ) -> Self {
         self.approver = approver;
         self
-    }
-
-    /// Attach the admitted per-tool gate to this VM's endpoint.
-    #[must_use]
-    pub fn with_tool_gate(
-        mut self,
-        gate: Arc<crate::supervisor::tool_decision::ToolDecisionGate>,
-    ) -> Self {
-        self.tool_gate = Some(gate);
-        self
-    }
-
-    /// Decide one declared guest invocation through this VM's admitted gate.
-    /// An absent gate or failed audit refuses the call.
-    pub async fn decide_tool(
-        &self,
-        request: &mvm_contract::protocol::network_flow::tool::ToolCheckRequest,
-    ) -> anyhow::Result<crate::supervisor::tool_decision::ToolVerdict> {
-        let gate = self
-            .tool_gate
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("tool mediation is not configured"))?;
-        Ok(gate
-            .decide(
-                request,
-                mvm_contract::protocol::network_flow::tool::ToolOrigin::GuestFlowMux,
-            )
-            .await?)
-    }
-
-    /// Decide one host-started invocation through this VM's admitted gate,
-    /// minting a binding when the tool owns routes or secrets. An absent gate
-    /// or failed audit refuses the call.
-    pub async fn decide_tool_invocation(
-        &self,
-        request: &mvm_contract::protocol::network_flow::tool::ToolCheckRequest,
-        origin: mvm_contract::protocol::network_flow::tool::ToolOrigin,
-    ) -> anyhow::Result<crate::supervisor::tool_decision::InvocationVerdict> {
-        let gate = self
-            .tool_gate
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("tool mediation is not configured"))?;
-        Ok(gate.decide_invocation(request, origin).await?)
-    }
-
-    /// Retire a binding once its invocation has finished.
-    pub fn release_tool_invocation(
-        &self,
-        binding: &mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding,
-    ) {
-        if let Some(gate) = &self.tool_gate {
-            gate.release(binding);
-        }
     }
 
     /// Share `admitted` with the forward leg built over it.

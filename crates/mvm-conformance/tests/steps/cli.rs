@@ -659,25 +659,25 @@ pub(crate) fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) 
     run_mvmctl_isolated_live_home_argv(world, mvm_conformance::doc_examples::tokenize(&args));
 }
 
-#[when("I run the workload-origin scoped-secret live witness")]
-fn run_workload_origin_scoped_secret_live_witness(world: &mut CliWorld) {
-    run_mvmctl_isolated_live_home_argv(world, workload_origin_scoped_secret_argv());
+#[when("I run the workload-origin network-secret live witness")]
+fn run_workload_origin_network_secret_live_witness(world: &mut CliWorld) {
+    run_mvmctl_isolated_live_home_argv(world, workload_origin_network_secret_argv());
 }
 
-fn workload_origin_scoped_secret_argv() -> Vec<String> {
+fn workload_origin_network_secret_argv() -> Vec<String> {
     [
         "machine",
         "run",
         "--image",
         "python:3.12",
         "--policy",
-        "features/suites/s8_readme_contract/fixtures/tool-workload-origin.toml",
+        "features/suites/s8_readme_contract/fixtures/network-secret-egress.toml",
         "--secret",
-        "tool-live",
+        "egress-live",
         "--",
         "/bin/sh",
         "-c",
-        r#"/usr/local/bin/python3 -c "import urllib.request,sys;r=urllib.request.Request(sys.argv[1],headers=dict(Authorization=sys.argv[2]));print(urllib.request.urlopen(r).status==200)" https://httpbingo.org/bearer "Bearer $TOOL_LIVE""#,
+        r#"/usr/local/bin/python3 -c "import urllib.request,sys;r=urllib.request.Request(sys.argv[1],headers=dict(Authorization=sys.argv[2]));print(urllib.request.urlopen(r).status==200)" https://httpbingo.org/bearer "Bearer $EGRESS_LIVE""#,
     ]
     .into_iter()
     .map(str::to_string)

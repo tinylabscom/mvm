@@ -1316,8 +1316,6 @@ mod tests {
             egress_policy: PolicyRef("agent-l7".to_string()),
             redaction: Default::default(),
             reversible_replacement: Default::default(),
-            tool_policy: PolicyRef("read-only".to_string()),
-            tools: Default::default(),
             artifact_policy: ArtifactPolicy {
                 capture_paths: vec!["/artifacts".to_string()],
                 retention_days: 30,

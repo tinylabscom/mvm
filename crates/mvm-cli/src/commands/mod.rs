@@ -171,7 +171,7 @@ pub(in crate::commands) enum Commands {
     /// Explain a run and its egress refusals from the chain-signed audit log
     #[command(display_order = 7)]
     Explain(vm::explain::Args),
-    /// Explain whether a resolved policy allows one host, path, tool, or secret
+    /// Explain whether a resolved policy allows one host, path, or secret
     #[command(display_order = 7)]
     Why(why::Args),
     /// Measure this host's launch latency against the published budgets

@@ -180,7 +180,6 @@ consumed through its typed terminal event, not merely through its first frame.
 | `ProbeStatus` | `ProbeStatusReport` | Unary |
 | `PrimedStatus` | `PrimedStatusReport` | Unary |
 | `Exec`, `RunCode` | `ExecEvent` | Stream |
-| `MediatedExec` | `ToolCheckRequired`, then `ExecEvent` | Paused decision exchange, then stream |
 | `ExecBatch` | `ExecBatchResult` | Unary, buffered per-command outcomes |
 | `RunEntrypoint`, `AgentPrompt`, `RunExtension` | `EntrypointEvent` | Stream |
 | `DriveOpen` | `DriveEvent`, `DriveRefused` | Stream or refusal |
@@ -207,12 +206,6 @@ consumed through its typed terminal event, not merely through its first frame.
 | `StreamInput`, `CloseStreamInput` | `StreamInputResult` | Unary |
 | `DisplayInput` | `DisplayInputResult` | Unary |
 
-`ToolCheckReply` is a separate mid-stream host message: `allow`,
-`allow_bound` with an invocation binding, or `deny`. It is not a
-`GuestRequest` variant and is accepted only while the matching mediated
-invocation is paused. The binding is a host-minted 32-character lowercase
-hex string; it is not an authorization assertion the guest can invent.
-
 `EntrypointEvent`/`DriveEvent` terminate on `Exit` or `Error`; `ExecEvent`
 terminates on `Exit` or `TimedOut`; `ProcWaitEvent` terminates on `Exit`,
 `Killed`, `TimedOut`, or `Error`. Backpressure/control/output events are
@@ -232,7 +225,7 @@ not an additional message transmitted on port 5252.
 ## FlowMux networking
 
 Port **5253** carries the one host-mediated egress path, including DNS,
-TCP/UDP, typed HTTP/tool mediation and declared ingress. The connection is
+TCP/UDP, typed HTTP and declared ingress. The connection is
 authenticated; FlowMux's own binary codec and state machine run inside that
 transport. Do not interpret its framing as encrypted by itself.
 
@@ -253,7 +246,7 @@ from the local socket role, never a peer-supplied authorization field.
 
 | Family | Guest → host | Host → guest | Either direction |
 | --- | --- | --- | --- |
-| Session | `Hello`, `ToolCheck` | `HelloAck`, `ToolAllowed`, `ToolDenied` | `GoAway` |
+| Session | `Hello` | `HelloAck` | `GoAway` |
 | TCP | `OpenTcp` | `Opened`, `Refused`, `ConnectFailed` | `Data`, `WindowUpdate`, `HalfClose`, `Reset` |
 | UDP | `OpenUdp`, `UdpSend` | `UdpOpened`, `UdpRecv` | `CloseUdp` |
 | DNS | `Resolve` | `Resolved`, `ResolveRefused` | — |
@@ -273,7 +266,7 @@ every operation.
 | --- | --- |
 | `Hello`, `HelloAck` | `Handshake` binary payload: behavior revision `u32 BE`, build length `u16 BE`, then up to 128 UTF-8 build bytes; exact revision equality required |
 | `GoAway` | Raw reason bytes, displayed with lossy UTF-8 conversion; not a JSON error object |
-| `OpenTcp` | UTF-8 `host:port` target up to 256 bytes; optionally NUL followed by a 32-lowercase-hex invocation binding; at most 289 bytes |
+| `OpenTcp` | UTF-8 `host:port` target up to 256 bytes |
 | `Opened` | Empty payload; `Opened` confirms TCP and typed-HTTP opens in the stream's own class |
 | `Refused` | Raw refusal reason bytes, displayed with lossy UTF-8 conversion |
 | `ConnectFailed` | Raw upstream-connect failure reason bytes, distinct from policy `Refused` |
@@ -301,9 +294,6 @@ every operation.
 | `IcmpEcho` | JSON `IcmpEchoRequest`: host, count, payload length, timeout; one echo per flow |
 | `IcmpReply` | JSON `IcmpEchoReply`: `reply`, `timeout`, or `refused` under the `result` tag |
 | `IcmpRefused` | JSON `IcmpEchoReply::Refused { message }`; no echo was sent |
-| `ToolCheck` | JSON `ToolCheckRequest`; tool name up to 128 bytes, rendered argv up to 16 KiB, optional executable up to 4,096 bytes |
-| `ToolAllowed` | Empty payload in the current endpoint |
-| `ToolDenied` | Raw denial reason bytes; not the richer broker `ToolDecisionReply` envelope |
 
 The ICMP request bounds are 1–64 echoes in the generic line contract, up to
 1,024 payload bytes and a 1–10,000 ms timeout; the FlowMux host carries one
@@ -322,10 +312,6 @@ The complete field declarations follow with the shared binary/JSON types.
 Byte reduction must not remove credit, state, length or direction checks.
 See the [frame state machine](https://github.com/tinylabscom/mvm/blob/main/crates/mvm-contract/src/protocol/network_flow/state.rs#L335-L639)
 and [endpoint payload dispatch](https://github.com/tinylabscom/mvm/blob/main/crates/mvm-hostd/src/supervisor/flowmux.rs#L450-L730).
-`ToolDecisionReply` and `ToolInvocationRelease` are shown alongside their
-shared tool types, but their structured replies/releases are used by the
-broker/control surfaces, not interchangeable FlowMux payloads.
-
 <VsockTypes family="flow" />
 
 ## Telemetry
@@ -434,7 +420,6 @@ dot-separated alphanumeric/hyphen segments ending in `.v` plus digits.
 | `host.beacon.v1`: `report` | `BeaconReport`, `BeaconAck` | Requires audit signer; 4 KiB handler cap, 1 token/s |
 | `host.kv.v1`: `get`, `put`, `delete`, `list` | All `Kv*Request` / `Kv*Response` types below | Host-derived per-workload namespace; keys up to 256 bytes, nonempty printable ASCII excluding `.`, `/`, and `\`; values up to 64 KiB |
 | `host.time.v1`: `now` | Empty request object, `TimeNowResponse` | Host Unix epoch milliseconds |
-| `host.tool.v1`: `decide`, `release` | Shared `ToolCheckRequest`, `ToolDecisionReply`, `ToolInvocationRelease`; `ToolReleaseResponse` | Requires admitted tool binding/socket; release is idempotent |
 | `host.cost.v1`: `workload`, `tenant` | Empty request object, `CostReport` | DTO/client vocabulary exists; handler is not registered in the current host broker |
 
 Batch audit statuses are `ok`, `err`, or `skipped`; a stopping failure does
@@ -540,8 +525,6 @@ message:
 - `LoopbackBinding` is addon configuration, not a transmitted addon prelude.
   Local addon DNS is UDP; FlowMux DNS is a raw DNS payload, not another
   DNS-vsock JSON service.
-- `ToolCheckDenial` and `ToolOrigin` describe host tool/audit context, not
-  an extra peer-controlled FlowMux response.
 - Mailbox routing/envelope/capability/receipt types are a transport-neutral
   contract. The dedicated vsock service remains tracked by
   [#4629](https://github.com/tinylabscom/mvm/issues/4629); do not infer a live

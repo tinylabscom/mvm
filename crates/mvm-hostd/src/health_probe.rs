@@ -580,7 +580,6 @@ mod tests {
             deployment: None,
             runtime_pack: false,
             registry_pack_image: None,
-            tools: Default::default(),
             resolved_digest: None,
             net: false,
             allow_host: vec![],

@@ -20,9 +20,9 @@ use super::tcp_relay::connect_first_admitted;
 use super::wire::{lock_registry, parse_host_port};
 use super::{FlowMuxError, FlowMuxSession, registry};
 use crate::supervisor::audit_recorder::EventCategory;
-use crate::supervisor::network_endpoint_proxy::{FlowAttribution, TerminationMode};
+use crate::supervisor::network_endpoint_proxy::TerminationMode;
 use crate::supervisor::terminator;
-use mvm_contract::protocol::network_flow::attribution::decode_open_tcp;
+use mvm_contract::protocol::network_flow::open_tcp::{OpenTcpPayloadError, decode_open_tcp};
 
 /// One `OpenTcp` the claim-10 gate admitted: what the guest named, and what
 /// the gate decided about it. Carried between admission and whichever way the
@@ -42,9 +42,6 @@ struct AdmittedFlow {
     /// The admitted port, which the gate may have chosen rather than taken
     /// from the target.
     port: u16,
-    /// The tool invocation the guest attributed the flow to, resolved
-    /// against this endpoint's live bindings.
-    attribution: FlowAttribution,
 }
 
 impl AdmittedFlow {
@@ -101,15 +98,6 @@ impl FlowMuxSession {
         let Some(flow) = self.admit_open_tcp(stream_id, payload_len)? else {
             return Ok(());
         };
-        if let Err(reason) = self.enforce_tool_route(&flow) {
-            self.send_refused(
-                stream_id,
-                "destination belongs to a tool this flow is not an invocation of",
-            )?;
-            self.deny_flow(stream_id, &flow, reason);
-            return Ok(());
-        }
-
         let termination = if flow.may_terminate() {
             self.substitution
                 .as_ref()
@@ -153,18 +141,23 @@ impl FlowMuxSession {
         stream_id: u32,
         payload_len: u32,
     ) -> Result<Option<AdmittedFlow>, FlowMuxError> {
-        let (target, binding) = match decode_open_tcp(self.frame_payload(payload_len)) {
-            Ok((target, binding)) => (target.to_string(), binding),
+        let target = match decode_open_tcp(self.frame_payload(payload_len)) {
+            Ok(target) => target.to_string(),
+            Err(OpenTcpPayloadError::LegacyBinding) => {
+                self.send_refused(stream_id, "tool invocation bindings are not supported")?;
+                self.deny_unrouted_flow(
+                    stream_id,
+                    registry::FlowClass::Tcp,
+                    "legacy-binding",
+                    "tool_binding_unsupported",
+                );
+                return Ok(None);
+            }
             Err(error) => {
                 self.send_refused(stream_id, &error.to_string())?;
                 return Ok(None);
             }
         };
-        let attribution = self
-            .substitution
-            .as_ref()
-            .map(|service| service.attribute(binding))
-            .unwrap_or_default();
 
         let (host, requested_port) = match parse_host_port(&target) {
             Ok((host, port)) => (host.to_string(), port),
@@ -190,7 +183,6 @@ impl FlowMuxSession {
             route: decision.route,
             ips: Vec::new(),
             port: requested_port,
-            attribution,
         };
         match decision.verdict {
             EgressVerdict::Allow { ips, port } => {
@@ -238,7 +230,6 @@ impl FlowMuxSession {
 
         self.send_opened(stream_id)?;
         self.spawn_tcp_relay(stream_id, FlowSocket::from(upstream))?;
-        self.track_bound_stream(stream_id, flow);
         self.emit_audit(
             EventCategory::Host,
             "host.flow.allowed",
@@ -291,7 +282,6 @@ impl FlowMuxSession {
             .leaves(Arc::clone(&self.leaves))
             .authority(&flow.host, flow.port)
             .mode(mode)
-            .attribution(flow.attribution.clone())
             .build()
         {
             Ok(terminated) => terminated,
@@ -332,7 +322,6 @@ impl FlowMuxSession {
 
         self.send_opened(stream_id)?;
         self.spawn_tcp_relay(stream_id, FlowSocket::from(endpoint_side))?;
-        self.track_bound_stream(stream_id, flow);
         let mut labels = BTreeMap::from([
             ("stream_id".to_string(), stream_id.to_string()),
             ("class".to_string(), "tcp".to_string()),
@@ -356,37 +345,6 @@ impl FlowMuxSession {
         }
         self.emit_audit(EventCategory::Host, "host.flow.allowed", labels);
         Ok(())
-    }
-
-    /// Refuse an admitted flow to a destination the tool rules reserve for a
-    /// tool this flow is not an invocation of. Fails closed when the rules
-    /// declare routes and the decision cannot be run.
-    fn enforce_tool_route(&self, flow: &AdmittedFlow) -> Result<(), &'static str> {
-        let Some(service) = &self.substitution else {
-            return Ok(());
-        };
-        let Some(runtime) = &self.runtime_handle else {
-            return if service.declares_tool_routes() {
-                Err("tool_route_unavailable")
-            } else {
-                Ok(())
-            };
-        };
-        runtime.block_on(service.enforce_tool_route(&flow.host, flow.port, &flow.attribution))
-    }
-
-    /// Remember a stream opened under an invocation's binding, so it ends
-    /// when the binding is released.
-    fn track_bound_stream(&mut self, stream_id: u32, flow: &AdmittedFlow) {
-        if let Some(binding) = flow.attribution.binding() {
-            self.bound_streams.insert(
-                stream_id,
-                super::tool_binding::BoundStream {
-                    binding: binding.clone(),
-                    target: flow.target.clone(),
-                },
-            );
-        }
     }
 
     /// Take a registry slot for an admitted flow. `Ok(false)` means the guest

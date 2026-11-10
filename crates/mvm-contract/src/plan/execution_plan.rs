@@ -168,21 +168,6 @@ pub struct ExecutionPlan {
     #[serde(default)]
     pub reversible_replacement: crate::policy::reversible_replacement::ReversibleReplacementPolicy,
 
-    /// Tool-call policy (which tools the model is allowed to invoke
-    /// over the supervisor's vsock RPC).
-    pub tool_policy: PolicyRef,
-
-    /// Resolved per-tool rules carried inline so the per-VM endpoint can
-    /// answer tool questions — the host-mediated registry, MCP surface, and
-    /// in-guest mediation all read this, never a bundle. The default is the
-    /// all-empty section: the dimension is opt-in, and an empty section
-    /// admits everything.
-    #[serde(
-        default,
-        skip_serializing_if = "crate::policy::tool_rules::ToolRules::is_empty"
-    )]
-    pub tools: crate::policy::tool_rules::ToolRules,
-
     pub artifact_policy: ArtifactPolicy,
 
     /// Optional opaque caller commitment fixed before execution. The bytes are
@@ -445,8 +430,6 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
         egress_policy: PolicyRef("local-default".to_string()),
         redaction: Default::default(),
         reversible_replacement: Default::default(),
-        tool_policy: PolicyRef("local-default".to_string()),
-        tools: Default::default(),
         artifact_policy: ArtifactPolicy {
             capture_paths: Vec::new(),
             retention_days: 0,
@@ -487,6 +470,40 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+
+    #[test]
+    fn legacy_tool_policy_fields_are_refused_without_widening_other_grants() {
+        let mut plan = minimal_plan();
+        plan.agent_verbs = Some(vec![crate::plan::VerbId::new("run-entrypoint").unwrap()]);
+        let mut json = serde_json::to_value(&plan).expect("serialize plan");
+        assert!(json.get("tools").is_none());
+        assert!(json.get("tool_policy").is_none());
+        assert!(json["admission_profile"].get("tool_policy").is_none());
+        let round: ExecutionPlan = serde_json::from_value(json.clone()).expect("new plan");
+        assert_eq!(round.agent_verbs, plan.agent_verbs);
+        assert_eq!(round.network_policy, plan.network_policy);
+        assert_eq!(round.fs_policy, plan.fs_policy);
+        assert_eq!(round.egress_policy, plan.egress_policy);
+        assert_eq!(round.secrets, plan.secrets);
+        for (field, value) in [
+            ("tools", serde_json::json!({"allow": ["shell"]})),
+            (
+                "tools",
+                serde_json::json!({"detail": {"shell": {"secrets": ["token"]}}}),
+            ),
+            ("tools", serde_json::json!({})),
+            ("tool_policy", serde_json::json!("local-default")),
+        ] {
+            let mut legacy = json.clone();
+            legacy[field] = value;
+            assert!(
+                serde_json::from_value::<ExecutionPlan>(legacy).is_err(),
+                "{field}"
+            );
+        }
+        json["admission_profile"]["tool_policy"] = serde_json::json!("local-default");
+        assert!(serde_json::from_value::<ExecutionPlan>(json).is_err());
+    }
 
     /// A plan written before `sdk_uses_sidecar` existed must deserialize as
     /// *requiring* the sidecar, not forbidding one.
