@@ -116,11 +116,13 @@ pub fn build_config(
     })
 }
 
-/// The command that starts the process: no arguments, a scrubbed environment,
-/// its own process group, config over a pipe.
+/// The command that starts the process: no arguments, an empty environment,
+/// its own process group, config over a pipe. The process parses guest bytes
+/// and holds derived keys, and reads no variable, so it is given none.
 fn command(bin: &Path) -> Command {
     let mut cmd = mvm_core::env_hygiene::helper_command(bin);
-    cmd.stdin(Stdio::piped())
+    cmd.env_clear()
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .process_group(0);
@@ -298,6 +300,14 @@ mod tests {
         );
         let cmd = command(Path::new("/bin/true"));
         assert_eq!(cmd.get_args().count(), 0);
+        // Cleared, not filtered: whatever the parent holds is not inherited,
+        // and the builder sets nothing back.
+        assert_eq!(cmd.get_envs().count(), 0, "no variable is passed");
+        let out = command(Path::new("/usr/bin/env"))
+            .stdout(Stdio::piped())
+            .output()
+            .unwrap();
+        assert!(out.stdout.is_empty(), "the child's environ is empty");
         for (_, value) in cmd.get_envs() {
             let value = value
                 .map(|v| v.to_string_lossy().into_owned())
