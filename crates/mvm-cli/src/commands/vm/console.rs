@@ -333,23 +333,6 @@ fn touch_activity(name: &str) {
     mvm_client::touch_activity(name);
 }
 
-/// Open an interactive PTY console to a running VM.
-///
-/// Supports Firecracker (via UDS vsock), libkrun (via per-port Unix
-/// sockets), Apple Container (via direct vsock), and vsock proxy (via
-/// daemon Unix socket for cross-process access).
-pub(crate) fn console_pty_command(
-    name: &str,
-    command: String,
-    env: Vec<(String, String)>,
-) -> Result<()> {
-    let exit_code = run_pty_command_for_exit(name, command, env)?;
-    if exit_code != 0 {
-        crate::observability::exit(exit_code);
-    }
-    Ok(())
-}
-
 pub(crate) fn run_pty_command_for_exit(
     name: &str,
     command: String,
