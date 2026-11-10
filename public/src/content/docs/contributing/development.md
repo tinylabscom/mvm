@@ -113,7 +113,7 @@ socket-custody fix in #4808. This entrypoint alone does not complete #4764.
   uses native HVF on macOS and native `/dev/kvm` on Linux. Downloaded releases
   also carry an explicitly selected libkrun preview for macOS 13–25 Apple
   Silicon; contributors rebuilding that tier need its integration toolchain.
-- **`zig` + `cargo-zigbuild`** — source-checkout contributors only; needed to build the Linux host binaries a VM boot uses, which a release `cargo build` embeds and a debug `mvmctl` builds on first use. `just payload::toolchain` installs the pinned versions. End-users running a downloaded `mvmctl` don't need them.
+- **`zig` + `cargo-zigbuild`** — source-checkout contributors only; needed to build the Linux host binaries a VM boot uses, which a release `cargo build` embeds and a debug `mvmctl` builds on first use. `just payload::toolchain` installs the pinned Zig package into `~/.local/share/mvm/toolchains/zig/<version>` rather than system Python, so it works with externally managed Python on Ubuntu and Debian; the build detects the pinned binary there. End-users running a downloaded `mvmctl` don't need them.
 - **Nix** — not needed on the host. Nix evaluation and `nix build` run inside the builder VM.
 
 ### Do I need to install libkrun?
