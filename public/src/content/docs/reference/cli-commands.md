@@ -1744,10 +1744,13 @@ current host key when its signed manifest marks it as a local build, and cached
 in the bundle registry. The run then continues as
 `mvmctl machine run --manifest <bundle-sha256>`, so admission is unchanged: the
 plan is synthesized and signed by the host, and the bundle is re-verified at
-admit time. A bundle that is already installed is verified again and reused
-rather than re-extracted; if its extracted tree is absent, a launch recreates
-it from the digest-matched, verified archive. This does not evict an existing
-tree automatically. Installed archives are gzip-compressed at rest under
+admit time. A bundle that is already installed is verified again and reused.
+Fresh `bundle install` and application `pull` keep only the archive at rest;
+a launch recreates its extracted tree at the same bundle address from the
+digest-matched, verified archive. The tree remains while a VM owns it and is
+evicted only after every owner has a confirmed stop. Failed stops, crashes,
+and older installs without a durable ownership record retain their trees.
+Installed archives are gzip-compressed at rest under
 `~/.mvm/bundles/<sha256>.mvmpkg.gz`; older plain `.mvmpkg` installs remain
 readable. Admission re-verifies the original signed tar bytes, not the gzip
 wrapper. An unsigned, tampered, or unknown-publisher archive
@@ -2431,7 +2434,7 @@ reviewed pull request; this command does not sign or publish anything.
 | `mvmctl search [QUERY]`                                   | Search the signed pack registry, marking installed packs (`--json`)                                                                                               |
 | `mvmctl pull ns/name[@version]`                           | Fetch, verify against the publisher trust policy, install, and pin a signed registry pack and every pack its signed profile references. A built-image pack also downloads its fixed-name immutable release assets, checks their descriptor-pinned lengths and digests, and verifies rootfs and provenance signatures before installation; admission rechecks the installed bytes. A schema-v2 application descriptor is authenticated under the same publisher policy, revocation feed and pins, then its archive is acquired within the signed size bound, independently bundle-verified, installed and pinned. Text output reads `installed ns/name@version (manifest DIGEST, bundle SHA256)`, and `--json` prints `reference`, `manifest_sha256`, `bundle_sha256`, `key_id`, `status: "installed"` and `installed: true`. `pack update` prints the same text line for an application. Without `$MVM_HOME/registry/publishers.toml`, the built-in policy accepts the exact renamed `mvm-packs` workflow identity for `agent/` and `runtime/`. The former identity is accepted only for the nine exact historical versioned manifest reference/byte-digest pairs listed in [pack authoring](/guides/pack-authoring/#decide-who-may-publish), and only before 2026-11-06 00:00 UTC; the exception is checked after real Sigstore verification identifies the signer. Explicit operator publisher policy is not constrained by that built-in digest exception or cutoff. The reserved `mvm/` namespace accepts only the current exact workflow identity; operator policy may deny but never replace it. A fresh feed under the separate built-in MVM release identity is required for `mvm/` installation and execution; built-image packs outside `mvm/` require independent operator-configured revocation trust. |
 | `mvmctl bundle fetch`                                     | Verify a `.mvmpkg` from a path, an `https://` URL, or an `oci://` registry reference against the local trust store                                                |
-| `mvmctl bundle install`                                   | Verify and atomically install a `.mvmpkg` (from any `fetch` source) into `~/.mvm/bundles/<sha>/`, streaming each artifact through its hash check rather than loading the archive into memory                                                                  |
+| `mvmctl bundle install`                                   | Verify and atomically install a `.mvmpkg` (from any `fetch` source) under `~/.mvm/bundles/`, streaming each artifact through its hash check; retain the signed archive and rematerialize the extracted `<sha>/` tree for launches                                                                  |
 | `mvmctl bundle push <file> <ref>`                         | Verify a `.mvmpkg` against the local trust store, publish it to an image registry, and print its `oci://…@sha256:` reference                                      |
 | `mvmctl bundle gc`                                        | Prune installed bundles — a specific `<SHA>` or `--all`                                                                                                           |
 | `mvmctl deps inspect`                                     | Show a sealed application-dep volume's SBOM, CVE, and hash-chained metadata without spawning a VM                                                                 |

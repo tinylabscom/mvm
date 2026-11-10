@@ -168,7 +168,18 @@ fn installed_bundle(id_or_slot: &str) -> Result<Option<mvm_core::plan::bundle::I
     // A registry we cannot read must not silently skip the gate: propagate,
     // so an unparseable manifest refuses the boot rather than admitting it
     // unchecked.
-    registry.find(id_or_slot)
+    if let Some(installed) = registry.find(id_or_slot)? {
+        return Ok(Some(installed));
+    }
+    Ok(
+        installed_bundle_verified_manifest(id_or_slot)?.map(|manifest| {
+            mvm_core::plan::bundle::InstalledBundle {
+                sha256: id_or_slot.to_owned(),
+                root: registry.install_dir(id_or_slot),
+                manifest,
+            }
+        }),
+    )
 }
 
 /// Whether `id_or_slot` resolves to an installed bundle rather than a template
@@ -546,5 +557,20 @@ mod tests {
             Some(environment)
         );
         assert_eq!(installed_bundle_environment("not-a-key").unwrap(), None);
+
+        let registry = BundleRegistry::default_path().unwrap();
+        std::fs::remove_dir_all(&installed.root).unwrap();
+        assert_eq!(
+            installed_bundle_arch(&installed.sha256).unwrap(),
+            Some(manifest.arch)
+        );
+        assert_eq!(
+            installed_bundle_archive(&installed.sha256).unwrap(),
+            Some(registry.archive_path(&installed.sha256))
+        );
+        assert_eq!(
+            installed_bundle_posture(&installed.sha256).unwrap(),
+            Some(posture)
+        );
     }
 }

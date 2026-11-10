@@ -286,7 +286,21 @@ pub fn prepare_canonical_linux(
         FsTrustStore::default_path()?,
         archive,
     );
-    let inputs = capture_canonical_linux_inputs(archive, pin, &trust)?;
+    prepare_canonical_linux_with_trust(archive, pin, backend, host_protocols, &trust)
+}
+
+/// Prepare with the same trust already used to authenticate an installed
+/// bundle's origin. The caller must classify local-build provenance before
+/// granting this trust to a host-signed bundle.
+#[cfg(feature = "host-state")]
+pub fn prepare_canonical_linux_with_trust(
+    archive: &Path,
+    pin: &PlanArtifact,
+    backend: BackendKind,
+    host_protocols: HostProtocolSupport,
+    trust: &dyn crate::plan::bundle::TrustStore,
+) -> Result<PreparedCanonicalLinux> {
+    let inputs = capture_canonical_linux_inputs(archive, pin, trust)?;
     prepare_with_clock(inputs, backend, host_protocols, Utc::now)
 }
 

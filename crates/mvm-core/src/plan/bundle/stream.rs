@@ -871,6 +871,17 @@ impl BundleRegistry {
             verify_head(archive, trust).map_err(BundleInstallError::Verify)?;
         let lease = self.lock_entry(&sha).map_err(io_error)?;
         let install_dir = self.install_dir(&sha);
+        let fresh_install =
+            expected_sha.is_none() && !install_dir.exists() && !self.archive_path(&sha).exists();
+        if force
+            && self
+                .has_bundle_users(&sha)
+                .map_err(|error| io_error(error.to_string()))?
+        {
+            return Err(io_error(
+                "bundle extraction is retained by an unresolved VM".into(),
+            ));
+        }
         if install_dir.exists() && !force {
             let verified =
                 verify_bundle_file(archive, trust).map_err(BundleInstallError::Verify)?;
@@ -894,6 +905,23 @@ impl BundleRegistry {
             return Err(BundleInstallError::AlreadyInstalled {
                 bundle_sha256: sha.clone(),
             });
+        }
+        if !install_dir.exists() && !force && expected_sha.is_none() {
+            let cached = self.archive_path(&sha);
+            if cached.exists() {
+                let verified =
+                    verify_bundle_file(&cached, trust).map_err(BundleInstallError::Verify)?;
+                if verified.bundle_sha256 != sha {
+                    return Err(BundleInstallError::Verify(
+                        BundleVerifyError::ManifestParse(
+                            "cached bundle archive differs from its requested sha256".into(),
+                        ),
+                    ));
+                }
+                return Err(BundleInstallError::AlreadyInstalled {
+                    bundle_sha256: sha.clone(),
+                });
+            }
         }
         let staging = self.root.join(format!("{sha}.partial"));
         if staging.exists() {
@@ -954,6 +982,10 @@ impl BundleRegistry {
         }
         if expected_sha.is_none() {
             self.persist_archive(archive, &sha).map_err(io_error)?;
+            if fresh_install {
+                self.mark_fresh_install_evictable(&sha)
+                    .map_err(|error| io_error(error.to_string()))?;
+            }
         }
 
         Ok(BundleInstallLease {

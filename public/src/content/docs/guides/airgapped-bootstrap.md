@@ -73,12 +73,13 @@ ahead of time and boot by digest instead:
 
 ```bash
 mvmctl bundle install ./my-app.mvmpkg
-mvmctl manifest ls                        # find the installed slot (keyed by bundle sha256)
 mvmctl machine run --manifest <bundle-sha256> -- <cmd>
 ```
 
 `bundle install` re-runs the same verification as `fetch`, then
-atomically extracts the archive into `~/.mvm/bundles/<bundle_sha256>/`.
+retains the compressed archive under `~/.mvm/bundles/`. A launch verifies
+that archive and rematerializes `~/.mvm/bundles/<bundle_sha256>/` without
+contacting the registry.
 
 The bundle trust model above — a local `key_id`-pinned Ed25519 trust
 store — is self-contained and carries no revocation list of its own.
