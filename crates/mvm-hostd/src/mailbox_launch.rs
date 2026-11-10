@@ -442,7 +442,7 @@ mod tests {
     use mvm_core::mailbox::frame::OutboxMessage;
 
     fn keys_dir() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
         crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
         dir
     }
@@ -576,7 +576,11 @@ mod tests {
         std::thread::spawn(move || {
             for mut stream in listener.incoming().flatten() {
                 let v = mvm_agentd::mailbox_outbox::forward_outbox(&mut stream, &path);
-                if v != Err(mvm_core::mailbox::frame::Refusal::Malformed) {
+                if !matches!(
+                    v,
+                    Err(mvm_core::mailbox::frame::Refusal::Malformed
+                        | mvm_core::mailbox::frame::Refusal::Unavailable)
+                ) {
                     let _ = tx.send(v);
                 }
             }
@@ -617,7 +621,14 @@ mod tests {
             ..LAUNCH_LIMITS
         };
         let launch = launch_against(dir.path(), limits);
-        assert!(send_one(&outbox, &rx, 9, b"wrong recipient").is_err());
+        assert_eq!(
+            send_one(&outbox, &rx, 9, b"wrong recipient"),
+            Err(mvm_core::mailbox::frame::Refusal::NotAuthorized)
+        );
+        assert!(
+            !outbox.exists(),
+            "a terminal refusal must free the live outbox slot"
+        );
         assert_eq!(send_one(&outbox, &rx, 7, b"first"), Ok(()));
         assert_eq!(send_one(&outbox, &rx, 7, b"second"), Ok(()));
         assert!(send_one(&outbox, &rx, 7, b"over the bound").is_err());

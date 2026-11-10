@@ -331,7 +331,8 @@ pub fn serve_grant(
     socket: &Path,
     guest: (&Path, &Path),
 ) -> std::io::Result<MailboxService> {
-    let (service, mut sealer) = bind_grant(grant, trust, sealer, limits, socket)?;
+    let mut sealer = sealer.with_grant(grant)?;
+    let service = MailboxService::bind_live(socket, limits, trust.with_grant(grant)?)?;
     let _ = service.serve_guest(guest.0, guest.1, &mut sealer)?;
     Ok(service)
 }

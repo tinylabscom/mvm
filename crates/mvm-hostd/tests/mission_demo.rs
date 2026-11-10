@@ -94,7 +94,7 @@ impl Node {
         let emitter = AuditEmitter::with_dir(audit_key.clone(), audit.path()).unwrap();
         Self {
             name,
-            home: tempfile::tempdir().unwrap(),
+            home: tempfile::tempdir_in("/tmp").unwrap(),
             audit,
             audit_key,
             identity: SigningKey::from_bytes(&[seed.wrapping_add(100); 32]),
@@ -750,7 +750,7 @@ fn a_guest_addresses_its_own_mailbox_without_the_derived_recipient() {
     let Err(refusal) = verdict else {
         panic!("a recipient the policy does not name was sealed");
     };
-    assert!(matches!(refusal, Refusal::Mailbox(_)));
+    assert_eq!(refusal, Refusal::NotAuthorized);
     assert!(queued.is_none());
     // The only thing the guest reads back is a verdict, and it names no
     // recipient: the derived value stays with the host.
@@ -979,7 +979,7 @@ fn derived_keys_serve_the_guest_port_and_queue_what_the_guest_sent() {
     };
     use std::os::unix::net::UnixListener;
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
     host_keys(dir.path(), 5);
     let listener = UnixListener::bind(dir.path().join("port.sock")).unwrap();
     let authority = authority_key_for(dir.path(), &address().mailbox).unwrap();
@@ -1019,7 +1019,7 @@ fn a_running_guest_submits_again_after_its_first_message_was_consumed() {
     };
     use std::os::unix::net::UnixListener;
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
     host_keys(dir.path(), 5);
     let listener = UnixListener::bind(dir.path().join("port.sock")).unwrap();
     let authority = authority_key_for(dir.path(), &address().mailbox).unwrap();
@@ -1572,7 +1572,7 @@ fn served_mailbox_process(dir: &std::path::Path) -> (KillOnDrop, std::path::Path
 fn a_corrupt_mailbox_anchor_prevents_the_helper_from_reporting_ready() {
     use mvm_hostd::mailbox_process::build_config;
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
     let keys = dir.path().join("keys");
     std::fs::create_dir_all(&keys).unwrap();
     host_keys(&keys, 5);
@@ -1609,7 +1609,7 @@ fn a_corrupt_mailbox_anchor_prevents_the_helper_from_reporting_ready() {
 /// ends a serving process: stopping its service must not need that path.
 #[test]
 fn the_mailbox_process_exits_when_its_vm_state_dir_is_removed() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
     let (mut process, state_dir) = served_mailbox_process(dir.path());
     std::fs::remove_dir_all(&state_dir).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);

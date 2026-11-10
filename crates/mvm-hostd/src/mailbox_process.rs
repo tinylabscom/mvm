@@ -335,7 +335,7 @@ mod tests {
     }
 
     fn keys_dir() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
         crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
         dir
     }
@@ -521,7 +521,13 @@ mod tests {
             guest_route: HostDialRoute::PortSocket(dir.path().join("absent-port")),
             vm_state_dir: state_path,
         };
+        let socket = config.socket.clone();
         let serving = std::thread::spawn(move || serve(config));
+        let started = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !socket.exists() {
+            assert!(std::time::Instant::now() < started, "mailbox never bound");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         drop(state);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while !serving.is_finished() {

@@ -27,6 +27,8 @@ use mvm_core::vm_backend::HostDialRoute;
 
 use super::{GuestSealer, IO_TIMEOUT, MailboxLimits, MailboxPolicy, read_frame};
 
+const ACCEPT_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
 /// A trusted anchor advances outside the journal's rollback domain.
 pub trait JournalAnchor: Send + Sync {
     fn commit(&self, tip: JournalTip) -> Result<(), JournalError>;
@@ -92,6 +94,7 @@ impl DurableMailboxService {
         }
         let _ = std::fs::remove_file(path);
         let listener = UnixListener::bind(path)?;
+        listener.set_nonblocking(true)?;
         let shared = Arc::new(Shared {
             limits,
             state: Mutex::new(State { policy, journal }),
@@ -102,12 +105,22 @@ impl DurableMailboxService {
         let worker = {
             let (shared, stop) = (shared.clone(), stop.clone());
             std::thread::spawn(move || {
-                for stream in listener.incoming() {
-                    if stop.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    if let Ok(stream) = stream {
-                        serve(&shared, stream);
+                while !stop.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            // Some platforms inherit nonblocking on accepted sockets.
+                            let _ = stream.set_nonblocking(false);
+                            serve(&shared, stream);
+                        }
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                            ) =>
+                        {
+                            std::thread::sleep(ACCEPT_POLL);
+                        }
+                        Err(_) => break,
                     }
                 }
             })
@@ -225,7 +238,6 @@ fn reader_context(
 impl Drop for DurableMailboxService {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        let _ = UnixStream::connect(&self.path);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }

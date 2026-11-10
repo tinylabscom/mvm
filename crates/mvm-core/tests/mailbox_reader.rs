@@ -375,6 +375,41 @@ fn lease_and_ack_signatures_bind_committed_ciphertext_and_consumer() {
         ),
         Err(MailboxError::ReaderEnrollmentSignatureInvalid)
     );
+    let previous_boot = ReaderDeliveryContext {
+        reader_scope: MailboxGuestReaderScope {
+            current_boot: BootId::from_bytes([92; 32]),
+            ..context.reader_scope
+        },
+        ..context
+    };
+    assert!(
+        verify_delivery_ack(
+            &ack,
+            &lease,
+            &previous_boot,
+            &signed_enrollment,
+            &guest.verifying_key(),
+        )
+        .is_err()
+    );
+    let stale_nonce = Nonce::from_bytes([93; 16]);
+    let wrong_plan = ReaderDeliveryContext {
+        reader_scope: MailboxGuestReaderScope {
+            plan_nonce: &stale_nonce,
+            ..context.reader_scope
+        },
+        ..context
+    };
+    assert!(
+        verify_delivery_ack(
+            &ack,
+            &lease,
+            &wrong_plan,
+            &signed_enrollment,
+            &guest.verifying_key(),
+        )
+        .is_err()
+    );
     let other_guest = SigningKey::from_bytes(&[98; 32]);
     let forged_ack = sign_delivery_ack(ack.ack.clone(), &other_guest).unwrap();
     assert_eq!(
