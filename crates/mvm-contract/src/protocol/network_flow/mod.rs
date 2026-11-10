@@ -24,13 +24,12 @@
 //! about who authenticated the session, or about what a payload means; those
 //! belong to the endpoint that carries it.
 
-pub mod attribution;
 pub mod frame;
 pub mod hello;
 pub mod limits;
 pub mod opcode;
+pub mod open_tcp;
 pub mod state;
-pub mod tool;
 
 /// The vsock port a workload's FlowMux session is carried on.
 ///

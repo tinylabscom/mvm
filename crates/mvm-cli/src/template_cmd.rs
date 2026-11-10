@@ -275,7 +275,7 @@ fn prompt_generated_template(
                 provider: None,
                 model: None,
                 summary: Some(
-                    "No hosted or local LLM provider configured; used built-in prompt planner."
+                    "Used built-in prompt planner; set MVM_TEMPLATE_PROVIDER to opt into model-assisted generation."
                         .to_string(),
                 ),
                 notes: vec![],
@@ -295,14 +295,11 @@ impl LlmProvider {
 
 fn llm_generation_config_from_env() -> Result<Option<LlmGenerationConfig>> {
     let provider = std::env::var("MVM_TEMPLATE_PROVIDER")
-        .unwrap_or_else(|_| "auto".to_string())
+        .unwrap_or_else(|_| "heuristic".to_string())
         .to_ascii_lowercase();
 
     match provider.as_str() {
-        // auto: try local first (probe Ollama / llama.cpp on loopback),
-        // then fall through to OpenAI if a key is configured. The order
-        // flip lets users with a local model running get sane defaults
-        // without having to also set MVM_TEMPLATE_PROVIDER=local.
+        // Explicit auto: try local first, then OpenAI if a key is configured.
         "auto" => {
             if let Some(config) = local_generation_config_with_probe() {
                 Ok(Some(config))
@@ -1529,11 +1526,45 @@ mod tests {
     }
 
     #[test]
+    fn template_generation_defaults_to_heuristic_even_with_model_credentials() {
+        let mut env = TestEnv::new();
+        clear_llm_env(&mut env);
+        env.set("OPENAI_API_KEY", "ambient-test-key");
+        env.set("MVM_TEMPLATE_LOCAL_BASE_URL", "http://127.0.0.1:1");
+
+        assert!(
+            llm_generation_config_from_env()
+                .expect("default provider selection")
+                .is_none(),
+            "ambient model credentials and endpoints must not enable LLM planning"
+        );
+        let result = super::prompt_generated_template("demo", None, "python API")
+            .expect("default prompt scaffolding");
+        assert_eq!(result.details.generation_mode, "heuristic");
+        assert!(result.details.provider.is_none());
+
+        env.set("MVM_TEMPLATE_PROVIDER", "auto");
+        let config = llm_generation_config_from_env()
+            .expect("explicit auto provider selection")
+            .expect("explicit auto opts in to local model planning");
+        assert_eq!(config.provider, LlmProvider::Local);
+
+        env.set("MVM_TEMPLATE_PROVIDER", "openai");
+        let config = llm_generation_config_from_env()
+            .expect("explicit OpenAI provider selection")
+            .expect("explicit OpenAI opts in with the supplied key");
+        assert_eq!(config.provider, LlmProvider::OpenAi);
+
+        clear_llm_env(&mut env);
+    }
+
+    #[test]
     fn test_local_probe_scenarios() {
         let mut env = TestEnv::new();
 
         // Phase 1: probe target reachable → returns base_url; auto picks Local.
         clear_llm_env(&mut env);
+        env.set("MVM_TEMPLATE_PROVIDER", "auto");
         let Some(addr) = spawn_one_shot_http_ok(r#"{"data":[]}"#) else {
             return;
         };
@@ -1556,6 +1587,7 @@ mod tests {
 
         // Phase 2: probe targets unreachable → falls through to OpenAI.
         clear_llm_env(&mut env);
+        env.set("MVM_TEMPLATE_PROVIDER", "auto");
         // Port 1 is privileged + nothing listens; near-instant ECONNREFUSED.
         env.set("MVM_TEMPLATE_LOCAL_PROBE_TARGETS", "http://127.0.0.1:1");
         env.set("OPENAI_API_KEY", "test-key-fallthrough");
@@ -1567,6 +1599,7 @@ mod tests {
         // Phase 3: MVM_TEMPLATE_NO_LOCAL_PROBE=1 skips the probe even when
         // a target is reachable. Without OPENAI_API_KEY, auto returns None.
         clear_llm_env(&mut env);
+        env.set("MVM_TEMPLATE_PROVIDER", "auto");
         let Some(addr3) = spawn_one_shot_http_ok(r#"{"data":[]}"#) else {
             return;
         };

@@ -1,0 +1,6 @@
+[overrides.tools]
+allow = ["python"]
+
+[overrides.tools.detail.python]
+executable = "/usr/local/bin/python3"
+routes = ["example.com:443"]

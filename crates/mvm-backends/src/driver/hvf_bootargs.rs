@@ -55,7 +55,6 @@ mod tests {
                 not_after,
                 verbs: vec![VerbId::new("run-entrypoint").unwrap()],
                 drive: None,
-                tool_mediation: None,
                 application_terminal: None,
                 sig: vec![0u8; 64],
             },

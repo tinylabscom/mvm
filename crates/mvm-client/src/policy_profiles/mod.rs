@@ -4,7 +4,7 @@
 //! file, workload IR and flags. This module adds three layers on top of them:
 //!
 //! 1. **Groups** ([`model::GroupFile`]) — named, reusable TOML fragments
-//!    covering network, secrets, shares, env, tools and resources. A group
+//!    covering network, secrets, shares, env and resources. A group
 //!    may be `required`.
 //! 2. **Profiles** ([`model::ProfileFile`]) — `extends`, `groups.include` /
 //!    `groups.exclude`, `[[when]]` platform blocks and `[overrides]`,

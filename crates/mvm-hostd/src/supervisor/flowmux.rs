@@ -14,7 +14,6 @@ pub mod registry;
 mod resources;
 mod socket;
 mod tcp_relay;
-mod tool_binding;
 use socket::FlowSocket;
 mod udp_relay;
 mod wire;
@@ -32,14 +31,12 @@ use std::time::Duration;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_contract::protocol::dns::{MAX_DNS_MESSAGE, decode_query, encode_response};
 use mvm_contract::protocol::network_flow::hello::{self, Handshake, agree};
-use mvm_contract::protocol::network_flow::tool::ToolCheckRequest;
 use mvm_contract::protocol::network_flow::{
     Direction, FrameError, HEADER_LEN, IngressFlowKind, LENGTH_PREFIX_LEN, Opcode,
     SessionValidator, UDP_ADDR_PREFIX_LEN, decode,
 };
 use mvm_core::net::session::Session;
 use mvm_vmm::vsock_egress_bridge::egress_gate::{DnsVerdict, EgressGate, EgressVerdict};
-use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 pub use self::ingress::FlowMuxIngressHandle;
@@ -149,11 +146,6 @@ pub struct FlowMuxSession {
     /// client that reconnects per request does not pay for a leaf each time.
     /// Shared per VM for the same reason the budget is.
     leaves: Arc<terminator::flow::LeafCache>,
-    /// TCP streams opened under a tool invocation's binding, with the target
-    /// they were opened to. When the binding is released the stream is torn
-    /// down at the guest's next frame for it, so a connection does not outlive
-    /// the invocation that was allowed to open it.
-    bound_streams: BTreeMap<u32, tool_binding::BoundStream>,
 }
 
 impl std::fmt::Debug for FlowMuxSession {
@@ -405,7 +397,6 @@ impl FlowMuxSession {
             rate_limiter: Arc::clone(&resources.rate_limiter),
             terminated_flows: Arc::clone(&resources.terminated_flows),
             leaves: Arc::clone(&resources.leaves),
-            bound_streams: BTreeMap::new(),
         })
     }
 
@@ -604,9 +595,6 @@ impl FlowMuxSession {
                         self.remove_stream(stream_id);
                     }
                 }
-                Opcode::ToolCheck => {
-                    self.handle_tool_check(payload_len)?;
-                }
                 Opcode::OpenHttp => {
                     if let Err(e) = self.handle_open_http(stream_id) {
                         warn!(error = %e, stream_id, "FlowMux HTTP open failed");
@@ -637,58 +625,6 @@ impl FlowMuxSession {
                     return Ok(());
                 }
             }
-        }
-    }
-
-    fn handle_tool_check(&self, payload_len: u32) -> Result<(), FlowMuxError> {
-        let request = serde_json::from_slice::<ToolCheckRequest>(self.frame_payload(payload_len))
-            .ok()
-            .filter(ToolCheckRequest::is_valid);
-        let Some(request) = request else {
-            self.record_tool_protocol_refusal(
-                "invalid_invocation",
-                self.frame_payload(payload_len),
-            );
-            return self.write_frame(Opcode::ToolDenied, 0, b"invalid tool invocation");
-        };
-        let verdict = self
-            .runtime_handle
-            .as_ref()
-            .zip(self.substitution.as_ref())
-            .and_then(|(runtime, service)| runtime.block_on(service.decide_tool(&request)).ok());
-        match verdict {
-            Some(crate::supervisor::tool_decision::ToolVerdict::Allow) => {
-                self.write_frame(Opcode::ToolAllowed, 0, &[])
-            }
-            Some(crate::supervisor::tool_decision::ToolVerdict::Deny(reason)) => {
-                self.write_frame(Opcode::ToolDenied, 0, reason.as_bytes())
-            }
-            None => {
-                self.record_tool_protocol_refusal(
-                    "mediation_unavailable",
-                    self.frame_payload(payload_len),
-                );
-                self.write_frame(Opcode::ToolDenied, 0, b"tool mediation unavailable")
-            }
-        }
-    }
-
-    fn record_tool_protocol_refusal(&self, reason: &str, payload: &[u8]) {
-        let (Some(recorder), Some(runtime)) = (&self.recorder, &self.runtime_handle) else {
-            return;
-        };
-        if let Err(error) = runtime.block_on(recorder.record_unbound(
-            EventCategory::Host,
-            "host.tool.protocol_refused",
-            [
-                ("reason".to_string(), reason.to_string()),
-                (
-                    "payload_sha256".to_string(),
-                    hex::encode(Sha256::digest(payload)),
-                ),
-            ],
-        )) {
-            warn!(%error, "tool refusal audit failed");
         }
     }
 
@@ -881,11 +817,6 @@ impl FlowMuxSession {
             }
 
             match self.gate.decide_udp_request(&target) {
-                EgressVerdict::Allow { .. } if self.udp_reaches_tool_route(ip, port) => {
-                    warn!(stream_id, %target, "FlowMux UDP datagram to a tool route refused");
-                    self.deny_udp_datagram(stream_id, ip, port, "tool_route_scope");
-                    return Ok(());
-                }
                 EgressVerdict::Allow { .. } => {}
                 EgressVerdict::Deny(reason) => {
                     warn!(stream_id, %target, %reason, "FlowMux UDP datagram denied");
@@ -974,9 +905,6 @@ impl FlowMuxSession {
     }
 
     fn handle_guest_data(&mut self, stream_id: u32, payload_len: u32) -> Result<(), FlowMuxError> {
-        if self.end_released_binding(stream_id)? {
-            return Ok(());
-        }
         let payload = self.frame_payload(payload_len).to_vec();
 
         let mut streams = lock_tcp_streams(&self.streams);
@@ -1028,9 +956,6 @@ impl FlowMuxSession {
     }
 
     fn handle_guest_half_close(&mut self, stream_id: u32) -> Result<(), FlowMuxError> {
-        if self.end_released_binding(stream_id)? {
-            return Ok(());
-        }
         let mut streams = lock_tcp_streams(&self.streams);
         let Some(handle) = streams.get_mut(&stream_id) else {
             drop(streams);
@@ -1205,9 +1130,6 @@ impl FlowMuxSession {
                 "WindowUpdate payload must be 4 bytes".to_string(),
             ));
         }
-        if self.end_released_binding(stream_id)? {
-            return Ok(());
-        }
         let payload = self.frame_payload(payload_len);
         let delta = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
         lock_registry(&self.registry)
@@ -1256,7 +1178,6 @@ impl FlowMuxSession {
     /// and the relay checks the same flag under the session lock before each
     /// frame it sends (see [`wire::write_stream_frame_to`]).
     fn reset_host_stream(&mut self, stream_id: u32, reason: &str) -> Result<(), FlowMuxError> {
-        self.bound_streams.remove(&stream_id);
         let handle = lock_tcp_streams(&self.streams).remove(&stream_id);
         let _ = lock_registry(&self.registry).retire(stream_id);
         let Some(handle) = handle else {
@@ -1286,7 +1207,6 @@ impl FlowMuxSession {
     }
 
     fn remove_stream(&mut self, stream_id: u32) {
-        self.bound_streams.remove(&stream_id);
         if let Some(handle) = lock_tcp_streams(&self.streams).remove(&stream_id) {
             handle.retired.store(true, Ordering::Relaxed);
             let _ = handle.upstream.shutdown(std::net::Shutdown::Both);
@@ -2429,178 +2349,20 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_tool_checks_use_the_admitted_gate_and_audit_each_decision() {
-        use crate::supervisor::audit::CapturingAuditSigner;
-        use crate::supervisor::network_endpoint_proxy::test_support::service_with_tool_gate;
-        use crate::supervisor::runtime_approval::NoApprovalBackend;
-        use crate::supervisor::tool_decision::ToolDecisionGate;
-        use mvm_contract::policy::tool_rules::ToolRules;
-        use mvm_core::plan::TenantId;
-
-        let signer = Arc::new(CapturingAuditSigner::new());
-        let recorder = Arc::new(Recorder::new(signer.clone(), TenantId("local".into())));
-        let tool_gate = Arc::new(ToolDecisionGate::new(
-            ToolRules {
-                allow: vec!["read".into()],
-                deny: vec!["write".into()],
-                detail: [(
-                    "read".into(),
-                    mvm_contract::policy::tool_rules::ToolRuleDetail {
-                        executable: Some("/bin/read".into()),
-                        ..Default::default()
-                    },
-                )]
-                .into(),
-                ..ToolRules::default()
-            },
-            Arc::new(NoApprovalBackend),
-            Arc::clone(&recorder),
-        ));
-        let (service, _dir) = service_with_tool_gate(tool_gate);
-        let (mut guest, mut session, host) =
-            run_session_on_runtime(move |id, key, anchor, limits| {
-                FlowMuxAccept::new(id, key, anchor, limits, EgressGate::default_deny())
-                    .with_recorder(Some(recorder))
-                    .with_substitution(Some(service))
-            });
-
-        for (tool, expected) in [("read", Opcode::ToolAllowed), ("write", Opcode::ToolDenied)] {
-            let payload = serde_json::to_vec(&ToolCheckRequest {
-                tool: tool.into(),
-                executable: Some(format!("/bin/{tool}")),
-                argv: format!("{tool} data"),
-            })
-            .expect("encode invocation");
-            write_frame(&mut guest, &mut session, Opcode::ToolCheck, 0, &payload);
-            let (opcode, stream_id, _) = read_flowmux_frame(&mut guest, &mut session);
-            assert_eq!(opcode, expected);
-            assert_eq!(stream_id, 0);
-        }
-        write_frame(&mut guest, &mut session, Opcode::ToolCheck, 0, b"{{{{");
-        let (opcode, _, _) = read_flowmux_frame(&mut guest, &mut session);
-        assert_eq!(opcode, Opcode::ToolDenied);
-        drop(guest);
-        host.join().expect("host thread").expect("session");
-        let entries = signer.entries();
-        assert_eq!(entries.len(), 3);
-        let audit = serde_json::to_string(&entries).expect("serialize audit");
-        assert!(!audit.contains("read data"));
-        assert!(!audit.contains("write data"));
-    }
-
-    /// A stream opened under an invocation's binding ends when the binding is
-    /// released, and a datagram to a tool's route is refused because no
-    /// datagram is ever one invocation's.
-    #[test]
-    fn a_released_binding_ends_its_streams_and_datagrams_never_use_a_tool_route() {
-        use crate::supervisor::audit::CapturingAuditSigner;
-        use crate::supervisor::network_endpoint_proxy::test_support::service_with_tool_gate;
-        use crate::supervisor::runtime_approval::NoApprovalBackend;
-        use crate::supervisor::tool_decision::{InvocationVerdict, ToolDecisionGate};
-        use mvm_contract::policy::tool_rules::{ToolRuleDetail, ToolRules};
-        use mvm_contract::protocol::network_flow::attribution::encode_open_tcp;
-        use mvm_core::plan::TenantId;
-
-        let echo = tcp_echo_server();
-        let target = format!("{}:{}", echo.ip(), echo.port());
-        let mut rules = ToolRules {
-            allow: vec!["fetch".into()],
-            ..ToolRules::default()
-        };
-        rules.detail.insert(
-            "fetch".into(),
-            ToolRuleDetail {
-                executable: Some("/bin/fetch".into()),
-                routes: vec![target.clone()],
-                ..Default::default()
-            },
+    fn legacy_open_tcp_binding_is_refused_even_for_a_vm_allowed_destination() {
+        let target = "93.184.216.34:443";
+        let gate = gate_allowing_addr("93.184.216.34".parse().unwrap(), 443, Some(443));
+        let (mut guest, mut session, host) = run_session(gate);
+        let mut legacy = target.as_bytes().to_vec();
+        legacy.push(0);
+        legacy.extend_from_slice(b"07070707070707070707070707070707");
+        write_frame(&mut guest, &mut session, Opcode::OpenTcp, 1, &legacy);
+        let (opcode, stream_id, reason) = read_flowmux_frame(&mut guest, &mut session);
+        assert_eq!((opcode, stream_id), (Opcode::Refused, 1));
+        assert!(
+            String::from_utf8_lossy(&reason).contains("tool invocation bindings"),
+            "{reason:?}"
         );
-        let signer = Arc::new(CapturingAuditSigner::new());
-        let recorder = Arc::new(Recorder::new(signer.clone(), TenantId("local".into())));
-        let tool_gate = Arc::new(ToolDecisionGate::new(
-            rules,
-            Arc::new(NoApprovalBackend),
-            Arc::clone(&recorder),
-        ));
-        let binding = match tokio::runtime::Runtime::new()
-            .expect("runtime")
-            .block_on(tool_gate.decide_invocation(
-                &ToolCheckRequest {
-                    tool: "fetch".into(),
-                    executable: Some("/bin/fetch".into()),
-                    argv: "fetch it".into(),
-                },
-                mvm_contract::protocol::network_flow::tool::ToolOrigin::GuestFlowMux,
-            ))
-            .expect("audited decision")
-        {
-            InvocationVerdict::Allow {
-                binding: Some(binding),
-            } => binding,
-            other => panic!("expected a bound allow, got {other:?}"),
-        };
-        let (service, _dir) = service_with_tool_gate(Arc::clone(&tool_gate));
-        let gate = gate_allowing_addr(echo.ip(), echo.port(), Some(echo.port()));
-        let session_recorder = Arc::clone(&recorder);
-        let (mut guest, mut session, host) =
-            run_session_on_runtime(move |id, key, anchor, limits| {
-                FlowMuxAccept::new(id, key, anchor, limits, gate)
-                    .with_recorder(Some(session_recorder))
-                    .with_substitution(Some(service))
-            });
-
-        let bound = encode_open_tcp(&target, Some(&binding));
-        write_frame(&mut guest, &mut session, Opcode::OpenTcp, 1, &bound);
-        let (opcode, _, reason) = read_flowmux_frame(&mut guest, &mut session);
-        assert_eq!(
-            opcode,
-            Opcode::Opened,
-            "{}",
-            String::from_utf8_lossy(&reason)
-        );
-        // Credit grants may arrive between the frames a test cares about.
-        let next_frame = |guest: &mut UnixStream, session: &mut Session| loop {
-            let frame = read_flowmux_frame(guest, session);
-            if frame.0 != Opcode::WindowUpdate {
-                return frame;
-            }
-        };
-        write_frame(&mut guest, &mut session, Opcode::Data, 1, b"ping");
-        let (opcode, _, echoed) = next_frame(&mut guest, &mut session);
-        assert_eq!((opcode, echoed.as_slice()), (Opcode::Data, &b"ping"[..]));
-
-        tool_gate.release(&binding);
-        write_frame(&mut guest, &mut session, Opcode::Data, 1, b"after");
-        let (opcode, stream_id, _) = next_frame(&mut guest, &mut session);
-        assert_eq!((opcode, stream_id), (Opcode::Reset, 1));
-
-        write_frame(&mut guest, &mut session, Opcode::OpenUdp, 3, b"");
-        let (opcode, _, _) = next_frame(&mut guest, &mut session);
-        assert_eq!(opcode, Opcode::UdpOpened);
-        let mut datagram = encode_udp_addr(echo.ip(), echo.port());
-        datagram.extend_from_slice(b"hello");
-        write_frame(&mut guest, &mut session, Opcode::UdpSend, 3, &datagram);
-
-        drop(guest);
-        host.join().expect("host thread").expect("session");
-        let audit = serde_json::to_string(&signer.entries()).expect("entries");
-        assert!(audit.contains("tool_binding_released"), "{audit}");
-        assert!(audit.contains("tool_route_scope"), "{audit}");
-    }
-
-    #[test]
-    fn tool_check_without_a_gate_is_refused() {
-        let (mut guest, mut session, host) = run_session(EgressGate::default_deny());
-        let payload = serde_json::to_vec(&ToolCheckRequest {
-            tool: "read".into(),
-            executable: Some("/bin/read".into()),
-            argv: "read data".into(),
-        })
-        .expect("encode invocation");
-        write_frame(&mut guest, &mut session, Opcode::ToolCheck, 0, &payload);
-        let (opcode, stream_id, _) = read_flowmux_frame(&mut guest, &mut session);
-        assert_eq!(opcode, Opcode::ToolDenied);
-        assert_eq!(stream_id, 0);
         drop(guest);
         host.join().expect("host thread").expect("session");
     }

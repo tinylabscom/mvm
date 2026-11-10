@@ -154,7 +154,7 @@ fn validate_names_the_file_layer_and_key_and_strict_refuses_warnings() {
 }
 
 #[test]
-fn strict_validation_accepts_an_enforced_tools_section() {
+fn strict_validation_refuses_a_retired_tools_section() {
     let host = Host::new();
     let tools = host.home.path().join("tools.toml");
     std::fs::write(
@@ -164,8 +164,15 @@ fn strict_validation_accepts_an_enforced_tools_section() {
     )
     .unwrap();
     let strict = host.mvmctl(&["policy", "validate", tools.to_str().unwrap(), "--strict"]);
-    assert!(strict.status.success(), "{}", text(&strict.stderr));
-    assert!(!text(&strict.stderr).contains("not enforced"));
+    assert!(
+        !strict.status.success(),
+        "legacy tool policy must not validate"
+    );
+    assert!(
+        text(&strict.stderr).contains("tools"),
+        "{}",
+        text(&strict.stderr)
+    );
 }
 
 #[test]

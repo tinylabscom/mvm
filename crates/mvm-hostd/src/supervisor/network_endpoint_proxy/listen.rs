@@ -3,11 +3,7 @@
 
 use std::sync::Arc;
 
-use mvm_contract::protocol::network_flow::attribution::ToolInvocationRelease;
-use mvm_contract::protocol::network_flow::tool::{ToolCheckRequest, ToolDecisionReply, ToolOrigin};
-use mvm_core::protocol::host_tool::ToolReleaseResponse;
 use mvm_core::substitution_wire::WireRequest;
-use serde::Deserialize;
 use tokio::net::{UnixListener, UnixStream};
 
 #[cfg(target_os = "linux")]
@@ -17,7 +13,6 @@ use crate::framing::{FrameError, read_json_frame, write_json_frame};
 use crate::supervisor::accept_loop::{
     AcceptAction, classify_accept_error, record_listener_stopped,
 };
-use crate::supervisor::tool_decision::InvocationVerdict;
 
 // The wire envelope (`WireRequest`/`WireResponse`) lives in
 // `mvm_core::substitution_wire` so the in-guest client and this server share
@@ -29,20 +24,6 @@ enum ListenerMode {
     HostConnector,
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum ConnectorRequest {
-    /// A declared-tool question. `origin` is chosen by the host-side caller
-    /// (the connector socket is host-local; the guest can never dial it), so
-    /// the label a guest-origin decision carries is structurally honest.
-    Tool {
-        question: ToolCheckRequest,
-        origin: ToolOrigin,
-    },
-    Release(ToolInvocationRelease),
-    Http(WireRequest),
-}
-
 impl SubstitutionService {
     /// Accept loop: one routed request per connection, framed JSON, a task per
     /// connection. Runs until the listener fails in a way it cannot recover from;
@@ -52,8 +33,7 @@ impl SubstitutionService {
             .await;
     }
 
-    /// Serve host-local HTTP requests and declared-tool questions on the
-    /// endpoint's mode-0600 connector socket.
+    /// Serve host-local HTTP requests on the endpoint's mode-0600 connector socket.
     pub async fn serve_connector(self: Arc<Self>, listener: UnixListener) {
         self.serve_with_mode(listener, ListenerMode::HostConnector)
             .await;
@@ -166,31 +146,9 @@ impl SubstitutionService {
     }
 
     async fn handle_connector_connection(&self, mut stream: UnixStream) -> anyhow::Result<()> {
-        let request: ConnectorRequest = read_json_frame(&mut stream, MAX_FRAME_BYTES).await?;
-        match request {
-            ConnectorRequest::Http(wire) => {
-                let response = self.process(wire).await;
-                write_json_frame(&mut stream, &response).await?;
-            }
-            ConnectorRequest::Tool { question, origin } => {
-                anyhow::ensure!(question.is_valid(), "invalid tool invocation");
-                let decision = self.decide_tool_invocation(&question, origin).await;
-                let response = match decision {
-                    Ok(InvocationVerdict::Allow { binding: None }) => ToolDecisionReply::Allow,
-                    Ok(InvocationVerdict::Allow {
-                        binding: Some(binding),
-                    }) => ToolDecisionReply::AllowBound { binding },
-                    Ok(InvocationVerdict::Deny(_)) | Err(_) => ToolDecisionReply::Deny,
-                };
-                write_json_frame(&mut stream, &response).await?;
-            }
-            ConnectorRequest::Release(release) => {
-                self.release_tool_invocation(&release.release);
-                // A repeated release also succeeds: acknowledgement means the
-                // binding is retired, not that this call removed it first.
-                write_json_frame(&mut stream, &ToolReleaseResponse { released: true }).await?;
-            }
-        }
+        let wire: WireRequest = read_json_frame(&mut stream, MAX_FRAME_BYTES).await?;
+        let response = self.process(wire).await;
+        write_json_frame(&mut stream, &response).await?;
         Ok(())
     }
 
@@ -231,114 +189,7 @@ mod server_tests {
     use tokio::net::{UnixListener, UnixStream};
 
     #[tokio::test]
-    async fn connector_tool_decisions_use_the_vm_gate_and_chain_recorder() {
-        use crate::supervisor::audit::CapturingAuditSigner;
-        use crate::supervisor::audit_recorder::Recorder;
-        use crate::supervisor::runtime_approval::NoApprovalBackend;
-        use crate::supervisor::tool_decision::ToolDecisionGate;
-        use mvm_contract::policy::tool_rules::ToolRules;
-        use mvm_contract::protocol::network_flow::tool::{
-            ToolCheckRequest, ToolDecisionReply, ToolOrigin,
-        };
-        use mvm_core::plan::TenantId;
-
-        let signer = Arc::new(CapturingAuditSigner::new());
-        let recorder = Arc::new(Recorder::new(signer.clone(), TenantId("local".into())));
-        let gate = Arc::new(ToolDecisionGate::new(
-            ToolRules {
-                allow: vec!["read".into()],
-                deny: vec!["write".into()],
-                detail: [(
-                    "read".into(),
-                    mvm_contract::policy::tool_rules::ToolRuleDetail {
-                        executable: Some("/bin/read".into()),
-                        ..Default::default()
-                    },
-                )]
-                .into(),
-                ..ToolRules::default()
-            },
-            Arc::new(NoApprovalBackend),
-            recorder,
-        ));
-        let (service, _dir) = super::super::test_support::service_with_tool_gate(gate);
-        for tool in ["read", "write", "unlisted"] {
-            let (mut client, server) = UnixStream::pair().expect("socket pair");
-            let decision_service = Arc::clone(&service);
-            let handler =
-                tokio::spawn(
-                    async move { decision_service.handle_connector_connection(server).await },
-                );
-            let request = ToolCheckRequest {
-                tool: tool.into(),
-                executable: Some(format!("/bin/{tool}")),
-                argv: format!("{tool} data"),
-            };
-            // The host-local client frames its question with the host-chosen
-            // origin label; a bare ToolCheckRequest no longer parses.
-            write_json_frame(
-                &mut client,
-                &serde_json::json!({
-                    "question": request,
-                    "origin": ToolOrigin::Host,
-                }),
-            )
-            .await
-            .expect("send question");
-            let reply: ToolDecisionReply = read_json_frame(&mut client, MAX_FRAME_BYTES)
-                .await
-                .expect("read decision");
-            if tool == "read" {
-                let ToolDecisionReply::AllowBound { binding } = reply else {
-                    panic!("allowed invocation must have a binding");
-                };
-                // Exercise the real connector handler, including a retry of
-                // the same release after its first acknowledgement.
-                for _ in 0..2 {
-                    let (mut release_client, release_server) =
-                        UnixStream::pair().expect("release socket pair");
-                    let release_service = Arc::clone(&service);
-                    let release_handler = tokio::spawn(async move {
-                        release_service
-                            .handle_connector_connection(release_server)
-                            .await
-                    });
-                    write_json_frame(
-                        &mut release_client,
-                        &mvm_contract::protocol::network_flow::attribution::ToolInvocationRelease {
-                            release: binding.clone(),
-                        },
-                    )
-                    .await
-                    .expect("send release");
-                    let ack: mvm_core::protocol::host_tool::ToolReleaseResponse =
-                        read_json_frame(&mut release_client, MAX_FRAME_BYTES)
-                            .await
-                            .expect("read release acknowledgement");
-                    assert!(ack.released);
-                    release_handler
-                        .await
-                        .expect("release handler join")
-                        .expect("serve release");
-                }
-            } else {
-                assert_eq!(reply, ToolDecisionReply::Deny);
-            }
-            handler
-                .await
-                .expect("handler join")
-                .expect("serve question");
-        }
-        assert_eq!(signer.entries().len(), 3);
-        let recorded = serde_json::to_string(&signer.entries()).expect("serialize audit");
-        assert!(!recorded.contains("read data"));
-        assert!(!recorded.contains("write data"));
-    }
-
-    #[tokio::test]
-    async fn connector_keeps_http_and_refuses_invalid_tool_questions() {
-        use mvm_contract::protocol::network_flow::tool::ToolCheckRequest;
-
+    async fn connector_keeps_http_and_refuses_tool_questions() {
         let (service, placeholder, forwarder, _dir) =
             service_with("secret-value", &["api.example.com"]);
         let (mut client, server) = UnixStream::pair().expect("socket pair");
@@ -364,11 +215,10 @@ mod server_tests {
         let (mut client, server) = UnixStream::pair().expect("socket pair");
         let handler =
             tokio::spawn(async move { service.handle_connector_connection(server).await });
-        let invalid = ToolCheckRequest {
-            tool: String::new(),
-            executable: Some("/bin/echo".into()),
-            argv: "echo hello".into(),
-        };
+        let invalid = serde_json::json!({
+            "question": {"tool": "shell", "argv": "echo hello"},
+            "origin": "host"
+        });
         write_json_frame(&mut client, &invalid)
             .await
             .expect("send invalid question");

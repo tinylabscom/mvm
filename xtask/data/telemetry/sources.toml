@@ -348,19 +348,7 @@ activation = "on-demand"
 [[launch_edge]]
 producer = "mvm-agentd/mvm-ping"
 launcher = "crates/mvm-agentd/src/guest_bootstrap.rs"
-anchor = "MEDIATED_TOOLS"
-activation = "mediated"
-
-[[launch_edge]]
-producer = "mvm-agentd/mvm-tool-shim"
-launcher = "crates/mvm-agentd/src/tool_install.rs"
-anchor = "TOOL_SHIM_OVERLAY"
-activation = "mediated"
-
-[[launch_edge]]
-producer = "mvm-agentd/mvm-tool-helper"
-launcher = "crates/mvm-agentd/src/tool_install.rs"
-anchor = "TOOL_HELPER_OVERLAY"
+anchor = "NETWORK_UTILITY_REPLACEMENTS"
 activation = "mediated"
 
 [[launch_edge]]
