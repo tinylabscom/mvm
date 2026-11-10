@@ -174,14 +174,12 @@ implements that version, `2025-11-25` or `2025-06-18`, and with `2025-11-25`
 otherwise, leaving the client to decide whether to continue. In a Codex 0.147.0
 session the MVM tools are listed under the `mcp__mvm` namespace, each dot in a
 tool name replaced by an underscore: `mvm.machine.list` appears as
-`mvm_machine_list`. The listing shows every tool the server offers; the policy
-is applied when a tool is called, and a refused tool returns a policy denial.
+`mvm_machine_list`. The listing shows the operations the backend offers.
+MVM does not apply a guest-tool policy to these host-side MCP calls.
 
 That handshake and listing were checked against Codex 0.147.0. A tool call made
 by Codex itself has not been exercised. Keep Codex's own approval settings
 separate: MVM cannot stop an agent from using its native shell tool on the host.
 
-If a tool rule says `ask`, `mvmctl ops mcp stdio` prompts on its controlling
-terminal. A Codex session with no answering terminal is denied rather than
-silently approved. For VM-bound execution and its audit boundary, see
+For VM-bound execution and its chain-signed audit boundary, see
 [Agent tool contract](/guides/agent-tool-contract/).

@@ -37,16 +37,12 @@ a project-scoped server before it starts. See [Claude Code's MCP
 documentation](https://code.claude.com/docs/en/mcp) for its current config and
 approval controls.
 
-In Claude Code, inspect `/mcp`, then ask it to list MVM machines. The only
-permitted MVM tool in this example is `mvm.machine.list`; an attempted stop
-must receive a policy denial. Keep Claude Code's own tool permissions separate:
-MVM cannot stop an agent from using a native shell tool on the host.
-
-If a tool rule says `ask`, `mvmctl ops mcp stdio` prompts on its controlling
-terminal. A client session with no answering terminal is denied rather than
-silently approved. This MCP-local decision is recorded in the local tool-gate
-audit; it is not a substitute for the chain-signed audit of decisions inside
-an admitted VM. For VM-bound execution and its audit boundary, see
+In Claude Code, inspect `/mcp`, then ask it to list MVM machines. The MCP
+server offers the operations its backend supports; do not give this host
+client access if it must not manage those machines. Keep Claude Code's own
+tool permissions separate: MVM cannot stop an agent from using a native shell
+tool on the host. System-level decisions inside an admitted VM are recorded
+in its chain-signed audit; MCP does not provide a per-tool gate. See
 [Agent tool contract](/guides/agent-tool-contract/).
 
 This setup was checked with Claude Code 2.1.278, which opens the session with

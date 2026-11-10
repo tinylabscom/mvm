@@ -53,17 +53,12 @@ as connected once the handshake and the tool listing succeed. See
 [OpenCode's MCP documentation](https://opencode.ai/docs/mcp-servers/) for its
 current config keys.
 
-The tool listing shows every tool the server offers; the policy is applied
-when a tool is called. With the policy above, `mvm.machine.list` returns the
-machine list and `mvm.machine.stop` returns a policy denial. Keep OpenCode's
-own permissions separate: MVM cannot stop an agent from using a native shell
-tool on the host.
-
-If a tool rule says `ask`, `mvmctl ops mcp stdio` prompts on its controlling
-terminal. A client session with no answering terminal is denied rather than
-silently approved. This MCP-local decision is recorded in the local tool-gate
-audit; it is not a substitute for the chain-signed audit of decisions inside
-an admitted VM. For VM-bound execution and its audit boundary, see
+The tool listing shows the operations the backend offers; there is no
+per-tool policy for these host-side MCP calls. Only give OpenCode access if
+it may manage those machines. Keep OpenCode's own permissions separate: MVM
+cannot stop an agent from using a native shell tool on the host. System-level
+decisions inside an admitted VM have a chain-signed audit. For VM-bound
+execution and its audit boundary, see
 [Agent tool contract](/guides/agent-tool-contract/).
 
 This setup was checked with OpenCode 1.18.22, which opens the session with MCP
