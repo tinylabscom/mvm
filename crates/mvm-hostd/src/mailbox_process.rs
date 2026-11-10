@@ -297,7 +297,7 @@ mod tests {
         let dir = keys_dir();
         let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
         plan.mailbox = Some(grant(dir.path()));
-        let error = spawn_for_launch(&plan, &backend_named("libkrun"), "no-such-vm").unwrap_err();
+        let error = spawn_for_launch(&plan, &backend_named("wasm"), "no-such-vm").unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Unsupported);
     }
 
@@ -442,19 +442,14 @@ mod tests {
     fn a_grant_on_an_unwired_backend_is_refused_before_boot() {
         let dir = keys_dir();
         let granted = config_for(Some(grant(dir.path())));
-        for name in ["firecracker", "hvf"] {
+        for name in ["firecracker", "hvf", "apple-container", "libkrun", "qemu"] {
             let backend = backend_named(name);
             assert!(backend.capabilities().guest_mailbox, "{name}");
             assert!(require_servable(&granted, &backend).is_ok(), "{name}");
         }
-        for name in ["libkrun", "qemu", "wasm"] {
-            let backend = backend_named(name);
-            assert!(!backend.capabilities().guest_mailbox, "{name}");
-            assert!(require_servable(&granted, &backend).is_err(), "{name}");
-            assert!(
-                require_servable(&config_for(None), &backend).is_ok(),
-                "{name}"
-            );
-        }
+        let backend = backend_named("wasm");
+        assert!(!backend.capabilities().guest_mailbox);
+        assert!(require_servable(&granted, &backend).is_err());
+        assert!(require_servable(&config_for(None), &backend).is_ok());
     }
 }
