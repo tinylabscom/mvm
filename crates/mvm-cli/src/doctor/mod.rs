@@ -114,6 +114,61 @@ struct Check {
 /// the host. `install` keeps an existing Firecracker, so a host provisioned
 /// before the pin moved can sit below the version that added discard, and the
 /// builder stores then keep their high-water mark with nothing saying why.
+/// Which Firecracker a launch on this host will exec, and why that one.
+fn firecracker_binary_check() -> Check {
+    use mvm_backends::fc::binary::resolve_for_host;
+    describe_firecracker(resolve_for_host(), || {
+        let path = std::env::var_os(mvm_backends::fc::binary::OVERRIDE_ENV)?;
+        let out = mvm_core::env_hygiene::helper_command(path)
+            .arg("--version")
+            .output()
+            .ok()?;
+        String::from_utf8(out.stdout)
+            .ok()
+            .and_then(|text| text.lines().next().map(str::to_owned))
+    })
+}
+
+fn describe_firecracker(
+    resolved: Result<
+        mvm_backends::fc::binary::ResolvedFirecracker,
+        mvm_backends::fc::binary::ResolveError,
+    >,
+    override_version: impl FnOnce() -> Option<String>,
+) -> Check {
+    use mvm_backends::fc::binary::FirecrackerOrigin;
+    let (ok, info) = match resolved {
+        Ok(found) => match found.origin {
+            FirecrackerOrigin::Shipped => (
+                true,
+                format!(
+                    "{} — {} — pinned and digest-verified",
+                    found.path.display(),
+                    fc_version()
+                ),
+            ),
+            FirecrackerOrigin::Override => (
+                true,
+                format!(
+                    "{} — {} — named by MVM_FIRECRACKER_BIN, not checked against the pin",
+                    found.path.display(),
+                    override_version().unwrap_or_else(|| "version unknown".into())
+                ),
+            ),
+        },
+        Err(error) => (
+            false,
+            format!("{error}; run `mvmctl bootstrap` to fetch the pinned release"),
+        ),
+    };
+    Check {
+        name: "firecracker",
+        category: "tools",
+        ok,
+        info,
+    }
+}
+
 fn fc_block_discard_check(version_output: &str) -> Check {
     let installed = version_output
         .lines()
@@ -182,14 +237,23 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     } else {
         builder::builder_tool_skipped("nix", "tools")
     });
-    let firecracker = if vm_up {
+    let firecracker = if cfg!(target_os = "linux") {
+        firecracker_binary_check()
+    } else if vm_up {
         toolchain::check_vm_cmd("firecracker", "tools", "firecracker --version")
     } else {
         builder::builder_tool_skipped("firecracker", "tools")
     };
-    let block_discard = firecracker
-        .ok
-        .then(|| fc_block_discard_check(&firecracker.info));
+    // The pinned release is what a launch runs unless an override names another.
+    let pinned = cfg!(target_os = "linux")
+        && std::env::var_os(mvm_backends::fc::binary::OVERRIDE_ENV).is_none();
+    let block_discard = firecracker.ok.then(|| {
+        if pinned {
+            fc_block_discard_check(&fc_version())
+        } else {
+            fc_block_discard_check(&firecracker.info)
+        }
+    });
     checks.push(firecracker);
     checks.extend(block_discard);
 

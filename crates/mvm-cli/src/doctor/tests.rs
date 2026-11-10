@@ -311,3 +311,45 @@ fn the_snapshot_encryption_key_line_names_its_source() {
     assert!(!ok, "an unusable key is a finding");
     assert!(info.contains("local.key"), "{info}");
 }
+
+#[test]
+fn the_firecracker_line_names_the_binary_and_how_it_was_vouched_for() {
+    use mvm_backends::fc::binary::{FirecrackerOrigin, ResolveError, ResolvedFirecracker};
+    let resolved = |origin| ResolvedFirecracker {
+        path: "/opt/mvm/firecracker/firecracker".into(),
+        origin,
+    };
+
+    let shipped = describe_firecracker(Ok(resolved(FirecrackerOrigin::Shipped)), || None);
+    assert!(shipped.ok);
+    assert!(
+        shipped.info.contains("/opt/mvm/firecracker/firecracker"),
+        "{}",
+        shipped.info
+    );
+    assert!(shipped.info.contains("digest-verified"), "{}", shipped.info);
+
+    let named = describe_firecracker(Ok(resolved(FirecrackerOrigin::Override)), || {
+        Some("Firecracker v9.9.9".into())
+    });
+    assert!(named.ok);
+    assert!(named.info.contains("v9.9.9"), "{}", named.info);
+    assert!(
+        named.info.contains("not checked against the pin"),
+        "{}",
+        named.info
+    );
+
+    let missing = describe_firecracker(
+        Err(ResolveError::NotFound {
+            searched: vec!["/a".into()],
+        }),
+        || None,
+    );
+    assert!(!missing.ok);
+    assert!(
+        missing.info.contains("mvmctl bootstrap"),
+        "{}",
+        missing.info
+    );
+}
