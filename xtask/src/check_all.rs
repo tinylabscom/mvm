@@ -117,6 +117,7 @@ pub(crate) const GATES: &[Gate] = &[
     ("check-deferrals", crate::check_deferrals::run),
     ("check-honesty", crate::check_honesty::run),
     ("check-image-lock", crate::check_image_lock::run),
+    ("check-firecracker-pin", crate::check_firecracker_pin::run),
     ("check-trust-gradient", crate::check_trust_gradient::run),
     (
         "check-single-network-path",

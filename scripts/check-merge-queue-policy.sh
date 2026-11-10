@@ -9,6 +9,7 @@ rule_count=$(jq -er '[.rules[] | select(.type == "merge_queue")] | length' "$pol
 builds=$(jq -er '.rules[] | select(.type == "merge_queue") | .parameters.max_entries_to_build' "$policy")
 merge_max=$(jq -er '.rules[] | select(.type == "merge_queue") | .parameters.max_entries_to_merge' "$policy")
 wait=$(jq -er '.rules[] | select(.type == "merge_queue") | .parameters.min_entries_to_merge_wait_minutes' "$policy")
+timeout=$(jq -er '.rules[] | select(.type == "merge_queue") | .parameters.check_response_timeout_minutes' "$policy")
 
 grouping=$(jq -er '.rules[] | select(.type == "merge_queue") | .parameters.grouping_strategy' "$policy")
 merge_min=$(jq -er '.rules[] | select(.type == "merge_queue") | .parameters.min_entries_to_merge' "$policy")
@@ -39,9 +40,9 @@ elif [ "$grouping" = ALLGREEN ] && [ "$builds" = 3 ] && [ "$merge_max" = 5 ] \
   shape=batched
 fi
 if [ "$includes" != '["~DEFAULT_BRANCH"]' ] || [ "$excludes" != '[]' ] \
-  || [ "$rule_count" != 1 ] || [ -z "$shape" ]; then
-  echo "::error::Merge queue policy drifted: include=$includes exclude=$excludes merge_rules=$rule_count grouping=$grouping max_entries_to_build=$builds max_entries_to_merge=$merge_max min_entries_to_merge=$merge_min wait_minutes=$wait."
-  echo "::error::Required: include=[\"~DEFAULT_BRANCH\"], exclude=[], merge_rules=1, and either singleton (build 1, merge 1, wait 0) or batched (ALLGREEN, build 3, merge 5, min 1, wait 0 or 5)."
+  || [ "$rule_count" != 1 ] || [ -z "$shape" ] || [ "$timeout" != 40 ]; then
+  echo "::error::Merge queue policy drifted: include=$includes exclude=$excludes merge_rules=$rule_count grouping=$grouping max_entries_to_build=$builds max_entries_to_merge=$merge_max min_entries_to_merge=$merge_min wait_minutes=$wait timeout_minutes=$timeout."
+  echo "::error::Required: include=[\"~DEFAULT_BRANCH\"], exclude=[], merge_rules=1, timeout 40 minutes, and either singleton (build 1, merge 1, wait 0) or batched (ALLGREEN, build 3, merge 5, min 1, wait 0 or 5)."
   exit 1
 fi
 

@@ -7,11 +7,17 @@
 //! anything, so a refused message never occupies queue space. This socket
 //! carries mailbox frames only; telemetry and control have their own planes.
 //!
+//! A host reader sends the other kind of frame, a JSON [`HostRequest`] (its
+//! first byte is `{`, which no send frame can start with: it would read as a
+//! capability length far above any frame limit). The guest's connection never
+//! reaches that path, so a guest cannot read, or drain, the queue.
+//!
 //! Frame: `u32 BE length`, then `u32 BE capability length`, the capability as
 //! JSON, and the envelope in its canonical `encode_envelope` form.
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
+use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,11 +28,12 @@ use std::time::Duration;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_contract::protocol::mailbox::{
     ExecutionEpoch, MailboxCapabilityGrant, MailboxEnvelope, MailboxEnvelopeHeader, MailboxGrant,
-    MailboxRoutingFrame, MessageId, ReplayNonce, SequenceNumber, SignedMailboxCapability,
+    MailboxRoutingFrame, MessageId, PrincipalId, ReplayNonce, SequenceNumber,
+    SignedMailboxCapability,
 };
 use mvm_core::crypto::aead::Key;
 pub use mvm_core::mailbox::frame::Refusal;
-use mvm_core::mailbox::frame::{OutboxMessage, decode_frame, send_frame};
+use mvm_core::mailbox::frame::{OWN_MAILBOX_RECIPIENT, OutboxMessage, decode_frame, send_frame};
 use mvm_core::mailbox::{
     InMemoryReplayProtector, OpenContext, SealRequest, open_envelope, seal_envelope,
     sign_capability,
@@ -95,6 +102,20 @@ impl GuestSealer {
         Ok(self)
     }
 
+    /// The guest names its mailbox by what it can know: the mailbox id, or
+    /// [`OWN_MAILBOX_RECIPIENT`]. Either means the template's recipient, a
+    /// value derived from host keys the guest never sees. Anything else is
+    /// passed through unchanged for admission to refuse.
+    fn resolve_recipient(&self, named: PrincipalId) -> PrincipalId {
+        if named.as_bytes() == self.header.mailbox.as_bytes()
+            || named.as_bytes() == &OWN_MAILBOX_RECIPIENT
+        {
+            self.header.recipient
+        } else {
+            named
+        }
+    }
+
     fn seal(
         &mut self,
         message: OutboxMessage,
@@ -108,7 +129,7 @@ impl GuestSealer {
             bytes
         };
         let mut header = self.header.clone();
-        header.recipient = message.recipient;
+        header.recipient = self.resolve_recipient(message.recipient);
         header.message_id = MessageId::from_bytes(counter(32).try_into().unwrap());
         header.nonce = ReplayNonce::from_bytes(counter(16).try_into().unwrap());
         header.sequence = SequenceNumber::new(n).map_err(|_| Refusal::Malformed)?;
@@ -166,6 +187,8 @@ pub fn serve_grant(
 
 struct State {
     queue: VecDeque<Vec<u8>>,
+    accepted: u64,
+    read: u64,
     replay: InMemoryReplayProtector,
     policy: MailboxPolicy,
 }
@@ -174,6 +197,64 @@ struct Shared {
     limits: MailboxLimits,
     state: Mutex<State>,
 }
+
+impl Shared {
+    /// The oldest plaintext, with the queue's lifetime counters after the take.
+    fn take(&self) -> (Option<Vec<u8>>, u64, u64) {
+        let mut state = self.state.lock().unwrap();
+        let message = state.queue.pop_front();
+        state.read += u64::from(message.is_some());
+        (message, state.accepted, state.read)
+    }
+}
+
+/// What a host peer can ask of the queue. Strict: anything else is refused.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostRequest {
+    request: RequestKind,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RequestKind {
+    Recv,
+}
+
+/// The answer to [`HostRequest::Recv`]: the oldest message as hex, or none,
+/// and how many messages the queue has accepted and handed out in all.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Received {
+    pub message: Option<String>,
+    pub accepted: u64,
+    pub read: u64,
+}
+
+/// The largest reply a reader will take: a frame-limited message in hex.
+const MAX_REPLY_BYTES: u64 = 1024 * 1024;
+
+/// Ask the service at `path` for its oldest message. The caller can reach it
+/// only as the user the socket belongs to.
+pub fn recv(path: &Path) -> std::io::Result<Received> {
+    let io_err = |e: String| std::io::Error::new(std::io::ErrorKind::InvalidData, e);
+    let mut stream = UnixStream::connect(path)?;
+    stream.set_read_timeout(Some(IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(IO_TIMEOUT))?;
+    let request = serde_json::to_vec(&HostRequest {
+        request: RequestKind::Recv,
+    })?;
+    stream.write_all(&(request.len() as u32).to_be_bytes())?;
+    stream.write_all(&request)?;
+    let mut reply = Vec::new();
+    stream.take(MAX_REPLY_BYTES).read_to_end(&mut reply)?;
+    serde_json::from_slice::<Result<Received, Refusal>>(&reply)
+        .map_err(|e| io_err(format!("mailbox reply: {e}")))?
+        .map_err(|r| io_err(format!("mailbox refused the request: {r:?}")))
+}
+
+/// How often the accept loop looks for a connection and for the stop flag.
+const ACCEPT_POLL: Duration = Duration::from_millis(20);
 
 pub struct MailboxService {
     shared: Arc<Shared>,
@@ -191,10 +272,16 @@ impl MailboxService {
     ) -> std::io::Result<Self> {
         let _ = std::fs::remove_file(path);
         let listener = UnixListener::bind(path)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        // Polled rather than blocked on, so stopping never depends on the
+        // socket path still existing.
+        listener.set_nonblocking(true)?;
         let shared = Arc::new(Shared {
             limits,
             state: Mutex::new(State {
                 queue: VecDeque::new(),
+                accepted: 0,
+                read: 0,
                 replay: InMemoryReplayProtector::default(),
                 policy,
             }),
@@ -203,12 +290,14 @@ impl MailboxService {
         let worker = {
             let (shared, stop) = (shared.clone(), stop.clone());
             std::thread::spawn(move || {
-                for stream in listener.incoming() {
-                    if stop.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    if let Ok(stream) = stream {
-                        let _ = serve(&shared, stream, decode_frame);
+                while !stop.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            // A listener's non-blocking mode is inherited on some hosts.
+                            let _ = stream.set_nonblocking(false);
+                            serve_peer(&shared, stream);
+                        }
+                        Err(_) => std::thread::sleep(ACCEPT_POLL),
                     }
                 }
             })
@@ -262,14 +351,13 @@ impl MailboxService {
 
     /// Take the oldest accepted plaintext, if any.
     pub fn receive(&self) -> Option<Vec<u8>> {
-        self.shared.state.lock().unwrap().queue.pop_front()
+        self.shared.take().0
     }
 }
 
 impl Drop for MailboxService {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        let _ = UnixStream::connect(&self.path); // wake the accept loop
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -309,17 +397,59 @@ fn serve(
     mut stream: UnixStream,
     prepare: impl FnOnce(&[u8]) -> Result<(SignedMailboxCapability, MailboxEnvelope), Refusal>,
 ) -> bool {
-    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
+    arm(&stream);
     let frame = read_frame(shared, &mut stream);
     let received = frame.is_ok();
+    answer(shared, &mut stream, frame, prepare);
+    received
+}
+
+/// A host peer's connection: a read request, or a sealed send.
+fn serve_peer(shared: &Shared, mut stream: UnixStream) {
+    arm(&stream);
+    match read_frame(shared, &mut stream) {
+        Ok(body) if body.first() == Some(&b'{') => {
+            let reply = serde_json::from_slice::<HostRequest>(&body)
+                .map(
+                    |HostRequest {
+                         request: RequestKind::Recv,
+                     }| {
+                        let (message, accepted, read) = shared.take();
+                        Received {
+                            message: message.map(hex::encode),
+                            accepted,
+                            read,
+                        }
+                    },
+                )
+                .map_err(|_| Refusal::Malformed);
+            reply_with(&mut stream, &reply);
+        }
+        frame => answer(shared, &mut stream, frame, decode_frame),
+    }
+}
+
+fn arm(stream: &UnixStream) {
+    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
+}
+
+fn answer(
+    shared: &Shared,
+    stream: &mut UnixStream,
+    frame: Result<Vec<u8>, Refusal>,
+    prepare: impl FnOnce(&[u8]) -> Result<(SignedMailboxCapability, MailboxEnvelope), Refusal>,
+) {
     let verdict = frame
         .and_then(|body| prepare(&body))
         .and_then(|(capability, envelope)| admit(shared, &capability, &envelope));
-    if let Ok(reply) = serde_json::to_vec(&verdict) {
+    reply_with(stream, &verdict);
+}
+
+fn reply_with<T: serde::Serialize>(stream: &mut UnixStream, reply: &Result<T, Refusal>) {
+    if let Ok(reply) = serde_json::to_vec(reply) {
         let _ = stream.write_all(&reply);
     }
-    received
 }
 
 fn read_frame(shared: &Shared, stream: &mut UnixStream) -> Result<Vec<u8>, Refusal> {
@@ -361,5 +491,6 @@ fn admit(
     )
     .map_err(|e| Refusal::Mailbox(e.to_string()))?;
     state.queue.push_back(plaintext);
+    state.accepted += 1;
     Ok(())
 }

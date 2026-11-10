@@ -186,6 +186,7 @@ fn machine_subcommand(action: &MachineAction) -> &'static str {
         MachineAction::Stop(_) => "stop",
         MachineAction::Quarantine(_) => "quarantine",
         MachineAction::Replace(_) => "replace",
+        MachineAction::Mailbox(_) => "mailbox",
         MachineAction::Reconfigure(_) => "reconfigure",
         MachineAction::Rm(_) => "rm",
         MachineAction::Ls(_) => "ls",
@@ -2167,6 +2168,12 @@ fn readme_persistent_machine_workflow_parses() {
         parse(&["replace", "web"]).expect("machine replace parses"),
         MachineAction::Replace(_)
     ));
+    assert!(matches!(
+        parse(&["mailbox", "recv", "web"]).expect("machine mailbox recv parses"),
+        MachineAction::Mailbox(MachineMailboxAction::Recv { name }) if name == "web"
+    ));
+    assert!(parse(&["mailbox", "recv"]).is_err());
+    assert!(parse(&["mailbox", "send", "web"]).is_err());
     assert!(matches!(
         parse(&["rm", "web"]).expect("README machine rm command parses"),
         MachineAction::Rm(_)

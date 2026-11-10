@@ -15,14 +15,15 @@
 //! two nodes with separate state directories and audit chains, the sender
 //! gated by a signed transport binding and the destination re-checking
 //! signature, capability, epoch and replay. The guest mailbox port is served
-//! by a separate host process (`mvm-mailbox`) in its own tests below.
+//! by a separate host process (`mvm-mailbox`) in its own hermetic tests below.
 //!
-//! What is simulated, on purpose: no booted guest runs the mailbox
-//! client or reads the queue (the guest end is a test driving the same
-//! `send_frame` over a Firecracker-style mux), no Iroh or relay transport
-//! (the TCP transport is loopback and the two nodes are threads of one test
-//! process on one physical host; only the guest mailbox is a separate process), and the VMs (a launch is gated and
-//! audited, but nothing boots). Only the aircraft node runs a service. Run
+//! What is simulated, on purpose: the three nodes are simulated nodes in one
+//! test process, and their VMs are gated and audited but none boots here.
+//! Between nodes there is no Iroh or relay and no cross-host transport; the
+//! TCP transport is loopback inside this process. Only the aircraft node runs
+//! a service. A booted guest's mailbox path is not exercised by this test: it
+//! was witnessed by hand on a Firecracker host, as recorded under "Demo
+//! status" in `specs/contracts/host-interface-distributed-execution.md`. Run
 //! with `--nocapture` to read the timeline.
 
 use ed25519_dalek::SigningKey;
@@ -523,7 +524,7 @@ fn contain_terminate_and_rebuild() {
     }
     let timeline = ship.timeline("analyst");
     println!(
-        "\nsimulated: mailbox delivery is a local Unix socket or a loopback TCP transport between node services in one test process, with the guest mailbox in a separate host process (no booted guest, no vsock guest service, no Iroh, no cross-host transport), VMs (gated and audited, none boot)"
+        "\nsimulated: the three nodes are simulated nodes in one test process; their VMs are gated and audited but none boots here; node-to-node mailbox delivery is a local Unix socket or a loopback TCP transport (no Iroh, no cross-host transport); the booted-guest mailbox path is a separate manual Firecracker witness, see Demo status in specs/contracts/host-interface-distributed-execution.md"
     );
     println!("\n--- evidence timeline: ship / analyst ---");
     for line in &timeline {
@@ -693,6 +694,66 @@ fn a_guest_without_the_send_operation_is_refused_across_the_port() {
         .unwrap();
     assert!(matches!(guest.join().unwrap(), Err(Refusal::Mailbox(_))));
     assert!(channel.service.receive().is_none(), "nothing was queued");
+}
+
+/// What a guest that addresses `recipient` gets back, and what the host queued.
+fn guest_sends_to(recipient: PrincipalId) -> (Result<(), Refusal>, Option<Vec<u8>>) {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+
+    let (node, channel) = channel_with_one_node();
+    let mut sealer = sealer(&channel, &[MailboxOperation::Send]);
+    let mux = node.home.path().join("fc.vsock");
+    let listener = UnixListener::bind(&mux).unwrap();
+    let guest = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(stream.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        stream.write_all(b"OK 1\n").unwrap();
+        let message = OutboxMessage {
+            recipient,
+            body: b"hello".to_vec(),
+        };
+        send_outbox_message(&mut stream, &message)
+    });
+    channel
+        .service
+        .serve_guest(&node.home.path().join("absent.sock"), &mux, &mut sealer)
+        .unwrap();
+    (guest.join().unwrap(), channel.service.receive())
+}
+
+/// A workload can address its mailbox without knowing the host-derived
+/// recipient: the mailbox id or the all-zero recipient is sealed to the
+/// template's recipient and delivered; any other value is still refused.
+#[test]
+fn a_guest_addresses_its_own_mailbox_without_the_derived_recipient() {
+    use mvm_core::mailbox::frame::OWN_MAILBOX_RECIPIENT;
+
+    let mailbox = PrincipalId::from_bytes(*address().mailbox.as_bytes());
+    for named in [mailbox, PrincipalId::from_bytes(OWN_MAILBOX_RECIPIENT)] {
+        assert_ne!(named, aircraft_principal(), "the guest does not know it");
+        let (verdict, queued) = guest_sends_to(named);
+        assert_eq!(verdict, Ok(()));
+        assert_eq!(queued.as_deref(), Some(&b"hello"[..]));
+    }
+    let (verdict, queued) = guest_sends_to(PrincipalId::from_bytes([9; 32]));
+    let Err(refusal) = verdict else {
+        panic!("a recipient the policy does not name was sealed");
+    };
+    assert!(matches!(refusal, Refusal::Mailbox(_)));
+    assert!(queued.is_none());
+    // The only thing the guest reads back is a verdict, and it names no
+    // recipient: the derived value stays with the host.
+    let derived = aircraft_principal();
+    let text = format!("{refusal:?}");
+    assert!(!text.contains(&hex::encode(derived.as_bytes())), "{text}");
+    assert!(
+        !text.contains(&format!("{:?}", derived.as_bytes())),
+        "{text}"
+    );
 }
 
 /// A plan, optionally carrying a mailbox grant for `channel`'s authority and
@@ -899,6 +960,123 @@ fn derived_keys_serve_the_guest_port_and_queue_what_the_guest_sent() {
     assert_eq!(received.unwrap(), b"hello");
 }
 
+/// One framed request to the mailbox socket as a host peer; the raw reply.
+fn host_frame(socket: &std::path::Path, body: &[u8]) -> String {
+    host_frame_on(
+        &mut std::os::unix::net::UnixStream::connect(socket).unwrap(),
+        body,
+    )
+}
+
+/// Queue `bodies` through the guest port, in order, on a mux that answers
+/// CONNECT. A body that is itself a read request is sent as the raw frame.
+fn guest_sends(node: &Node, channel: &Channel, bodies: &[&[u8]]) -> Vec<Result<(), Refusal>> {
+    use std::io::{BufRead, BufReader, Write};
+    let mut sealer = sealer(channel, &[MailboxOperation::Send]);
+    let mux = node.home.path().join("fc.vsock");
+    let listener = std::os::unix::net::UnixListener::bind(&mux).unwrap();
+    let owned: Vec<Vec<u8>> = bodies.iter().map(|b| b.to_vec()).collect();
+    let guest = std::thread::spawn(move || {
+        owned
+            .iter()
+            .map(|body| {
+                let (stream, _) = listener.accept().unwrap();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut String::new())
+                    .unwrap();
+                (&stream).write_all(b"OK 1\n").unwrap();
+                let mut stream = stream;
+                if body.first() == Some(&b'{') {
+                    let reply = host_frame_on(&mut stream, body);
+                    serde_json::from_str::<Result<(), Refusal>>(&reply).unwrap()
+                } else {
+                    let message = OutboxMessage {
+                        recipient: aircraft_principal(),
+                        body: body.clone(),
+                    };
+                    send_outbox_message(&mut stream, &message)
+                }
+            })
+            .collect::<Vec<_>>()
+    });
+    let absent = node.home.path().join("absent.sock");
+    for _ in bodies {
+        channel
+            .service
+            .serve_guest(&absent, &mux, &mut sealer)
+            .unwrap();
+    }
+    guest.join().unwrap()
+}
+
+fn host_frame_on(stream: &mut std::os::unix::net::UnixStream, body: &[u8]) -> String {
+    use std::io::{Read, Write};
+    // A service that refuses on length alone closes early; the verdict is still readable.
+    let _ = stream
+        .write_all(&(body.len() as u32).to_be_bytes())
+        .and_then(|()| stream.write_all(body));
+    let mut reply = String::new();
+    let _ = stream.read_to_string(&mut reply);
+    reply
+}
+
+fn recv_message(socket: &std::path::Path) -> (Option<Vec<u8>>, u64, u64) {
+    let got = mvm_hostd::mailbox_service::recv(socket).unwrap();
+    let body = got.message.map(|m| hex::decode(m).unwrap());
+    (body, got.accepted, got.read)
+}
+
+/// A host reader takes messages oldest first, with lifetime counts, and an
+/// empty queue answers with none.
+#[test]
+fn a_host_reader_takes_the_queue_in_order_and_an_empty_queue_is_none() {
+    let (node, channel) = channel_with_one_node();
+    assert_eq!(recv_message(&channel.socket), (None, 0, 0));
+    let verdicts = guest_sends(&node, &channel, &[b"first", b"second"]);
+    assert!(verdicts.iter().all(Result::is_ok));
+    assert_eq!(
+        recv_message(&channel.socket),
+        (Some(b"first".to_vec()), 2, 1)
+    );
+    assert_eq!(
+        recv_message(&channel.socket),
+        (Some(b"second".to_vec()), 2, 2)
+    );
+    assert_eq!(recv_message(&channel.socket), (None, 2, 2));
+}
+
+/// The read request is strict and bounded, and the guest's connection never
+/// reaches it: a guest that sends one is refused and the queue is untouched.
+#[test]
+fn the_read_request_is_strict_bounded_and_not_reachable_by_the_guest() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (node, channel) = channel_with_one_node();
+    let mode = std::fs::metadata(&channel.socket)
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o077, 0, "the socket is owner-only");
+
+    for bad in [
+        &br#"{"request":"drain"}"#[..],
+        br#"{"request":"recv","extra":1}"#,
+        br#"{"request":"recv"} trailing"#,
+        br#"{}"#,
+    ] {
+        let reply = host_frame(&channel.socket, bad);
+        assert!(reply.contains("Malformed"), "{reply}");
+    }
+    let oversized = host_frame(&channel.socket, &vec![b'{'; LIMITS.max_frame_bytes + 1]);
+    assert!(oversized.contains("Oversized"), "{oversized}");
+
+    let verdicts = guest_sends(&node, &channel, &[b"kept", br#"{"request":"recv"}"#]);
+    assert!(verdicts[0].is_ok() && verdicts[1].is_err());
+    assert_eq!(
+        recv_message(&channel.socket),
+        (Some(b"kept".to_vec()), 1, 1)
+    );
+}
+
 struct KillOnDrop(std::process::Child, std::path::PathBuf);
 
 impl KillOnDrop {
@@ -942,19 +1120,16 @@ fn spawn_mailbox_process(config: &[u8]) -> KillOnDrop {
     KillOnDrop(child, log)
 }
 
-/// The separate mailbox process, handed only derived keys and the guest's
-/// paths on stdin, dials the guest's mailbox port and binds the VM's mailbox
-/// socket; the host signing seed is in its config nowhere.
-#[test]
-fn the_mailbox_process_serves_a_granted_mailbox_from_derived_keys_alone() {
+/// A mailbox process under `dir`, started for a granted mailbox, whose guest
+/// has delivered its one message. Returns the process and the VM state dir.
+fn served_mailbox_process(dir: &std::path::Path) -> (KillOnDrop, std::path::PathBuf) {
     use mvm_hostd::mailbox_process::build_config;
     use std::os::unix::net::UnixListener;
 
-    let dir = tempfile::tempdir().unwrap();
-    let keys = dir.path().join("keys");
+    let keys = dir.join("keys");
     std::fs::create_dir_all(&keys).unwrap();
     host_keys(&keys, 5);
-    let state_dir = dir.path().join("vm");
+    let state_dir = dir.join("vm");
     std::fs::create_dir_all(&state_dir).unwrap();
     let authority = mvm_hostd::mailbox_launch::authority_key_for(&keys, &address().mailbox)
         .unwrap()
@@ -970,7 +1145,7 @@ fn the_mailbox_process_serves_a_granted_mailbox_from_derived_keys_alone() {
         "the seed is not in the process config"
     );
 
-    let outbox = dir.path().join("outbox");
+    let outbox = dir.join("outbox");
     std::fs::write(&outbox, outbox_message().encode()).unwrap();
     let mut process = spawn_mailbox_process(&wire);
     let mut stream = process.accept(&listener);
@@ -986,6 +1161,57 @@ fn the_mailbox_process_serves_a_granted_mailbox_from_derived_keys_alone() {
         "the host service bound its socket; stderr:\n{}",
         process.stderr()
     );
+    (process, state_dir)
+}
+
+/// The separate mailbox process, handed only derived keys and the guest's
+/// paths on stdin, dials the guest's mailbox port and binds the VM's mailbox
+/// socket; the host signing seed is in its config nowhere.
+#[test]
+fn the_mailbox_process_serves_a_granted_mailbox_from_derived_keys_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let (process, state_dir) = served_mailbox_process(dir.path());
+    // The same process answers a host reader with what the guest sent.
+    let socket = mvm_core::config::vm_mailbox_socket_at(&state_dir);
+    let got = (0..100).find_map(|_| {
+        let got = mvm_hostd::mailbox_service::recv(&socket).ok()?;
+        got.message
+            .is_none()
+            .then(|| std::thread::sleep(std::time::Duration::from_millis(50)));
+        got.message.map(|m| (m, got.accepted, got.read))
+    });
+    assert_eq!(
+        got,
+        Some((hex::encode("hello"), 1, 1)),
+        "{}",
+        process.stderr()
+    );
+    assert_eq!(
+        mvm_hostd::mailbox_service::recv(&socket).unwrap().message,
+        None
+    );
+}
+
+/// Removing the VM's state directory, and with it the mailbox socket path,
+/// ends a serving process: stopping its service must not need that path.
+#[test]
+fn the_mailbox_process_exits_when_its_vm_state_dir_is_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut process, state_dir) = served_mailbox_process(dir.path());
+    std::fs::remove_dir_all(&state_dir).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = process.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the process outlived its VM; stderr:\n{}",
+            process.stderr()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert!(status.success(), "{status}");
 }
 
 // ---- two nodes over a loopback TCP PeerTransport ----------------------------

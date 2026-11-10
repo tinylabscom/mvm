@@ -1,0 +1,36 @@
+name: Merge queue watch
+
+# CI's own failure can precede every job; listen to the run and also catch
+# missing/stalled runs with the schedule. Run only reviewed default-branch code.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write # re-run only a failed merge-group attempt with zero jobs
+  issues: write # one alert for a queue head older than 30 minutes
+
+concurrency:
+  group: merge-queue-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    if: >-
+      github.repository == 'tinylabscom/mvm' &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.event == 'merge_group')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Recover zero-job failures and report stale queue heads
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/merge-queue-watch.py
