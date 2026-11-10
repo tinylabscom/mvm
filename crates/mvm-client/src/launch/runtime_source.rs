@@ -165,6 +165,16 @@ fn attach_runtime_overlay_selection(
     if start_config.legacy_portable_runtime.is_some()
         || start_config.legacy_bundle_runtime.is_some()
         || start_config.runtime_release_proof.is_some()
+        || {
+            #[cfg(feature = "pr-test-guest-runtime")]
+            {
+                start_config.pr_test_runtime_proof.is_some()
+            }
+            #[cfg(not(feature = "pr-test-guest-runtime"))]
+            {
+                false
+            }
+        }
         || start_config.source_runtime_archive_sha256.is_some()
         || start_config.unsigned_runtime_development
     {

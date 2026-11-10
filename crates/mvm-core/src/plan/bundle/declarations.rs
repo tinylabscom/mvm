@@ -101,6 +101,12 @@ pub(super) fn validate_declarations(manifest: &BundleManifest) -> Result<(), Bun
     }) {
         validate_canonical_linux_proof(proof, manifest)?;
     }
+    if let Some(proof) = manifest.members.iter().find_map(|member| match member {
+        BundleMember::LocalDevelopmentBaseProof(proof) => Some(proof),
+        _ => None,
+    }) {
+        validate_local_development_base_proof(proof, manifest)?;
+    }
     if let Some(composition) = manifest.members.iter().find_map(|member| match member {
         BundleMember::LocalComposition(composition) => Some(composition),
         _ => None,
@@ -152,6 +158,7 @@ fn declaration_class(member: &BundleMember) -> Option<&'static str> {
         BundleMember::EmbeddedBootAssets { .. } => Some("embedded_boot_assets"),
         BundleMember::EmbeddedCliBootAssets(_) => Some("embedded_cli_boot_assets"),
         BundleMember::CanonicalLinuxProof(_) => Some("canonical_linux_proof"),
+        BundleMember::LocalDevelopmentBaseProof(_) => Some("local_development_base_proof"),
         BundleMember::LocalComposition(_) => Some("local_composition"),
         BundleMember::KernelCmdline { .. } => Some("kernel_cmdline"),
         BundleMember::SecurityPosture(_) => Some("security_posture"),
@@ -167,7 +174,17 @@ fn validate_local_composition(
 ) -> Result<(), BundleVerifyError> {
     let refused = |reason: &str| BundleVerifyError::ManifestParse(reason.into());
     let proof = manifest.members.iter().find_map(|member| match member {
-        BundleMember::CanonicalLinuxProof(proof) => Some(proof),
+        BundleMember::CanonicalLinuxProof(proof) => Some((
+            proof.manifest_artifact.as_str(),
+            vec![
+                &proof.signature_bundle_artifact,
+                &proof.revocation_document_artifact,
+                &proof.revocation_signature_bundle_artifact,
+            ],
+        )),
+        BundleMember::LocalDevelopmentBaseProof(proof) => {
+            Some((proof.manifest_artifact.as_str(), Vec::new()))
+        }
         _ => None,
     });
     if manifest
@@ -179,10 +196,11 @@ fn validate_local_composition(
         || composition.layers.len() > 64
     {
         return Err(refused(
-            "local composition requires a verity-sealed local build with canonical Linux proof",
+            "local composition requires a verity-sealed local build with base proof",
         ));
     }
-    let proof = proof.ok_or_else(|| refused("local composition requires canonical Linux proof"))?;
+    let (base, proof_artifacts) =
+        proof.ok_or_else(|| refused("local composition requires base proof"))?;
     let mut names = std::collections::BTreeSet::new();
     let layer_names = composition.layers.iter().flat_map(|layer| {
         [
@@ -195,17 +213,8 @@ fn validate_local_composition(
         if !names.insert(name) {
             return Err(refused("duplicate local composition evidence artifact"));
         }
-        if [
-            &proof.manifest_artifact,
-            &proof.signature_bundle_artifact,
-            &proof.revocation_document_artifact,
-            &proof.revocation_signature_bundle_artifact,
-        ]
-        .contains(&name)
-        {
-            return Err(refused(
-                "composition evidence aliases a canonical Linux proof",
-            ));
+        if name == base || proof_artifacts.contains(&name) {
+            return Err(refused("composition evidence aliases a Linux base proof"));
         }
         let artifact = manifest
             .find_by_name(name)
@@ -218,6 +227,75 @@ fn validate_local_composition(
                 "local composition evidence has invalid role or size",
             ));
         }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "host-state")]
+fn validate_local_development_base_proof(
+    proof: &mvm_contract::plan::bundle::LocalDevelopmentBaseProof,
+    manifest: &BundleManifest,
+) -> Result<(), BundleVerifyError> {
+    let refused = |reason: &str| BundleVerifyError::ManifestParse(reason.into());
+    let runtime = manifest
+        .members
+        .iter()
+        .find_map(|member| match member {
+            BundleMember::EmbeddedCliBootAssets(runtime) => Some(runtime),
+            _ => None,
+        })
+        .ok_or_else(|| refused("local development base requires explicit CLI boot assets"))?;
+    let path = std::path::Path::new(&proof.composition_tar_path);
+    if manifest
+        .members
+        .iter()
+        .any(|member| matches!(member, BundleMember::CanonicalLinuxProof(_)))
+        || manifest
+            .labels
+            .get(super::BUNDLE_ORIGIN_LABEL)
+            .map(String::as_str)
+            != Some(super::LOCAL_BUILD_ORIGIN)
+        || proof.manifest_artifact != runtime.manifest_artifact
+        || proof.composition_tar_size == 0
+        || proof.composition_tar_size > super::MAX_BUNDLE_ENTRY_BYTES
+        || proof.composition_tar_sha256.len() != 64
+        || !proof
+            .composition_tar_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || proof.composition_tar_path.len() > 4096
+        || !path.is_absolute()
+        || !path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )
+        })
+        || !manifest
+            .members
+            .iter()
+            .any(|member| matches!(member, BundleMember::LocalComposition(_)))
+    {
+        return Err(refused(
+            "invalid local development base proof or mixed authority",
+        ));
+    }
+    let artifact = manifest
+        .find_by_name(&proof.manifest_artifact)
+        .ok_or_else(|| refused("local development base manifest artifact missing"))?;
+    if artifact.role != ArtifactRole::Other
+        || artifact.size_bytes == 0
+        || artifact.size_bytes > 4 * 1024 * 1024
+        || manifest
+            .artifacts
+            .iter()
+            .filter(|item| item.role == ArtifactRole::Rootfs && item.size_bytes > 0)
+            .count()
+            != 1
+    {
+        return Err(refused(
+            "local development base has invalid manifest or rootfs",
+        ));
     }
     Ok(())
 }
@@ -293,6 +371,36 @@ fn validate_cli_runtime(
     manifest: &BundleManifest,
 ) -> Result<(), BundleVerifyError> {
     let refused = |reason: &str| BundleVerifyError::ManifestParse(reason.to_owned());
+    if let Some(pull_request) = runtime.pr_test_pull_request {
+        #[cfg(not(feature = "pr-test-guest-runtime"))]
+        let _ = pull_request;
+        #[cfg(not(feature = "pr-test-guest-runtime"))]
+        return Err(refused(
+            "PR test runtime requires an explicitly compiled test-only verifier",
+        ));
+        #[cfg(feature = "pr-test-guest-runtime")]
+        if pull_request == 0
+            || manifest.profile.as_deref() != Some("dev")
+            || manifest.security_posture().map(|posture| posture.profile) != Some(AgentProfile::Dev)
+            || manifest
+                .labels
+                .get(super::BUNDLE_ORIGIN_LABEL)
+                .map(String::as_str)
+                != Some(super::LOCAL_BUILD_ORIGIN)
+            || !manifest
+                .members
+                .iter()
+                .any(|member| matches!(member, BundleMember::LocalDevelopmentBaseProof(_)))
+            || manifest
+                .members
+                .iter()
+                .any(|member| matches!(member, BundleMember::CanonicalLinuxProof(_)))
+        {
+            return Err(refused(
+                "PR test runtime requires a host-local Dev base without release or canonical authority",
+            ));
+        }
+    }
     if runtime.arch != manifest.arch
         || !matches!(runtime.arch.as_str(), "x86_64" | "aarch64")
         || runtime.version.is_empty()
@@ -674,6 +782,7 @@ mod tests {
             overlay_roothash: "a".repeat(64),
             protocol_version: 2,
             min_supported_protocol_version: 2,
+            pr_test_pull_request: None,
         };
         let proof = CanonicalLinuxProof {
             manifest_artifact: "linux.json".into(),
@@ -818,6 +927,212 @@ mod tests {
             sidecar_artifact: "rootfs.verity".to_string(),
         });
         manifest
+    }
+
+    #[test]
+    fn local_base_requires_schema_nine_sealed_output_and_no_canonical_escalation() {
+        use mvm_contract::plan::bundle::{
+            CanonicalLinuxProof, EmbeddedCliBootAssets, LocalComposition, LocalDevelopmentBaseProof,
+        };
+        let runtime = EmbeddedCliBootAssets {
+            manifest_artifact: "linux.json".into(),
+            version: "0.27.0".into(),
+            arch: "x86_64".into(),
+            archive_artifact: "runtime.tar.gz".into(),
+            checksum_artifact: "runtime.sha256".into(),
+            signature_bundle_artifact: "runtime.bundle".into(),
+            checksum_signature_bundle_artifact: "runtime.sha256.bundle".into(),
+            overlay_artifact: "overlay".into(),
+            overlay_verity_artifact: "overlay.verity".into(),
+            initramfs_artifact: "initrd".into(),
+            overlay_roothash: "a".repeat(64),
+            protocol_version: 2,
+            min_supported_protocol_version: 2,
+            pr_test_pull_request: None,
+        };
+        let proof = LocalDevelopmentBaseProof {
+            manifest_artifact: "linux.json".into(),
+            composition_tar_sha256: "a".repeat(64),
+            composition_tar_size: 16,
+            composition_tar_path: "/local/base.tar.gz".into(),
+        };
+        let names = [
+            "linux.json",
+            "runtime.tar.gz",
+            "runtime.sha256",
+            "runtime.bundle",
+            "runtime.sha256.bundle",
+            "overlay",
+            "overlay.verity",
+            "initrd",
+            "kernel",
+            "rootfs.ext4",
+            "composition-lock.json",
+        ];
+        let artifacts = names
+            .into_iter()
+            .map(|name| {
+                artifact(
+                    name,
+                    match name {
+                        "initrd" => ArtifactRole::Initrd,
+                        "kernel" => ArtifactRole::Kernel,
+                        "rootfs.ext4" => ArtifactRole::Rootfs,
+                        _ => ArtifactRole::Other,
+                    },
+                    &"a".repeat(64),
+                    16,
+                )
+            })
+            .collect();
+        let mut valid = with_verity(manifest(
+            artifacts,
+            vec![
+                BundleMember::EmbeddedCliBootAssets(runtime),
+                BundleMember::LocalDevelopmentBaseProof(proof),
+                BundleMember::LocalComposition(LocalComposition {
+                    lock_artifact: "composition-lock.json".into(),
+                    layers: Vec::new(),
+                }),
+            ],
+        ));
+        valid.labels.insert(
+            super::super::BUNDLE_ORIGIN_LABEL.into(),
+            super::super::LOCAL_BUILD_ORIGIN.into(),
+        );
+        validate_declarations(&valid).unwrap();
+        let mut pr_test = valid.clone();
+        let BundleMember::EmbeddedCliBootAssets(runtime) = &mut pr_test.members[0] else {
+            unreachable!("test fixture begins with CLI runtime")
+        };
+        runtime.pr_test_pull_request = Some(42);
+        pr_test.schema_version = 9;
+        assert!(validate_declarations(&pr_test).is_err());
+        pr_test.schema_version = 8;
+        assert!(validate_declarations(&pr_test).is_err());
+        pr_test.schema_version = 10;
+        #[cfg(not(feature = "pr-test-guest-runtime"))]
+        assert!(validate_declarations(&pr_test).is_err());
+        #[cfg(feature = "pr-test-guest-runtime")]
+        {
+            assert!(
+                validate_declarations(&pr_test).is_err(),
+                "missing Dev posture must fail"
+            );
+            pr_test.profile = Some("dev".into());
+            pr_test
+                .members
+                .push(BundleMember::SecurityPosture(BundleSecurityPosture {
+                    profile: AgentProfile::Dev,
+                    ..sealed()
+                }));
+            validate_declarations(&pr_test).unwrap();
+            {
+                use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+                struct HostKey(VerifyingKey);
+                impl super::super::TrustStore for HostKey {
+                    fn lookup(&self, _: &KeyId) -> Option<VerifyingKey> {
+                        Some(self.0)
+                    }
+                }
+                let home = tempfile::tempdir().unwrap();
+                let mut env = crate::util::test_env::TestEnv::new();
+                env.isolate_mvm_home(home.path());
+                let host = SigningKey::from_bytes(&[42; 32]);
+                let other = SigningKey::from_bytes(&[43; 32]);
+                let keys = crate::config::mvm_keys_dir();
+                std::fs::create_dir_all(&keys).unwrap();
+                std::fs::write(
+                    keys.join("host-signer.pub"),
+                    host.verifying_key().as_bytes(),
+                )
+                .unwrap();
+                let mut signed = pr_test.clone();
+                signed.key_id = super::super::key_id_from_pubkey(&host.verifying_key());
+                let bytes = super::super::canonical_manifest_bytes(&signed).unwrap();
+                let signature = host.sign(&bytes).to_bytes();
+                super::super::verify_signed_manifest(
+                    &bytes,
+                    &signature,
+                    &HostKey(host.verifying_key()),
+                )
+                .expect("this host's signed local Dev bundle may carry the PR test marker");
+                std::fs::write(
+                    keys.join("host-signer.pub"),
+                    other.verifying_key().as_bytes(),
+                )
+                .unwrap();
+                assert!(
+                    super::super::verify_signed_manifest(
+                        &bytes,
+                        &signature,
+                        &HostKey(host.verifying_key()),
+                    )
+                    .is_err(),
+                    "a different host's key cannot satisfy local PR test provenance"
+                );
+            }
+            let mut not_local = pr_test.clone();
+            not_local.labels.clear();
+            assert!(validate_declarations(&not_local).is_err());
+            let mut missing_base = pr_test.clone();
+            missing_base
+                .members
+                .retain(|member| !matches!(member, BundleMember::LocalDevelopmentBaseProof(_)));
+            assert!(validate_declarations(&missing_base).is_err());
+            let mut zero = pr_test.clone();
+            let BundleMember::EmbeddedCliBootAssets(runtime) = &mut zero.members[0] else {
+                unreachable!("test fixture begins with CLI runtime")
+            };
+            runtime.pr_test_pull_request = Some(0);
+            assert!(validate_declarations(&zero).is_err());
+            let mut prod = pr_test.clone();
+            prod.profile = Some("prod".into());
+            assert!(validate_declarations(&prod).is_err());
+            let mut canonical = pr_test.clone();
+            canonical
+                .members
+                .push(BundleMember::CanonicalLinuxProof(CanonicalLinuxProof {
+                    manifest_artifact: "linux.json".into(),
+                    signature_bundle_artifact: "linux.bundle".into(),
+                    revocation_document_artifact: "revocations.json".into(),
+                    revocation_signature_bundle_artifact: "revocations.bundle".into(),
+                }));
+            assert!(validate_declarations(&canonical).is_err());
+        }
+        let mut bad = valid.clone();
+        bad.schema_version = 8;
+        assert!(validate_declarations(&bad).is_err());
+        bad = valid.clone();
+        bad.labels.clear();
+        assert!(validate_declarations(&bad).is_err());
+        bad = valid.clone();
+        bad.members
+            .push(BundleMember::CanonicalLinuxProof(CanonicalLinuxProof {
+                manifest_artifact: "linux.json".into(),
+                signature_bundle_artifact: "linux.bundle".into(),
+                revocation_document_artifact: "revocations.json".into(),
+                revocation_signature_bundle_artifact: "revocations.bundle".into(),
+            }));
+        assert!(validate_declarations(&bad).is_err());
+        for path in ["relative/base.tar.gz", "/local/../base.tar.gz"] {
+            let mut bad = valid.clone();
+            let BundleMember::LocalDevelopmentBaseProof(proof) = &mut bad.members[1] else {
+                unreachable!()
+            };
+            proof.composition_tar_path = path.into();
+            assert!(validate_declarations(&bad).is_err(), "{path}");
+        }
+        let mut bad = valid.clone();
+        let BundleMember::LocalDevelopmentBaseProof(proof) = &mut bad.members[1] else {
+            unreachable!()
+        };
+        proof.composition_tar_sha256 = "G".repeat(64);
+        assert!(validate_declarations(&bad).is_err());
+        bad = valid.clone();
+        bad.artifacts
+            .retain(|artifact| artifact.role != ArtifactRole::Rootfs);
+        assert!(validate_declarations(&bad).is_err());
     }
 
     #[test]

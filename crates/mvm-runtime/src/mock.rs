@@ -507,6 +507,8 @@ mod tests {
             runtime_overlay_roothash: None,
             runtime_overlay_version: None,
             runtime_release_proof: None,
+            #[cfg(feature = "pr-test-guest-runtime")]
+            pr_test_runtime_proof: None,
             legacy_bundle_runtime: None,
             legacy_portable_runtime: None,
             source_runtime_archive_sha256: None,

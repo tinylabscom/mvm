@@ -179,12 +179,20 @@ pub fn factory_parent_config(
         runtime_overlay_roothash,
         runtime_overlay_version,
         runtime_release_proof,
+        #[cfg(feature = "pr-test-guest-runtime")]
+        pr_test_runtime_proof,
         unsigned_runtime_development,
         source_runtime_archive_sha256,
         mem_initial_mib,
         kernel_read_sha256,
     } = launch;
 
+    #[cfg(feature = "pr-test-guest-runtime")]
+    if pr_test_runtime_proof.is_some() {
+        return Err(StandbyError::SpawnFailed(
+            "PR test runtime supports cold launches only".into(),
+        ));
+    }
     if canonical_kernel.is_some() || kernel_read_sha256.is_some() {
         return Err(StandbyError::SpawnFailed(
             "kernel descriptor custody is cold-only; standby reuse is unsupported".into(),
@@ -225,6 +233,8 @@ pub fn factory_parent_config(
         runtime_overlay_roothash: runtime_overlay_roothash.clone(),
         runtime_overlay_version: runtime_overlay_version.clone(),
         runtime_release_proof: runtime_release_proof.clone(),
+        #[cfg(feature = "pr-test-guest-runtime")]
+        pr_test_runtime_proof: None,
         unsigned_runtime_development: *unsigned_runtime_development,
         source_runtime_archive_sha256: source_runtime_archive_sha256.clone(),
         mem_initial_mib: *mem_initial_mib,

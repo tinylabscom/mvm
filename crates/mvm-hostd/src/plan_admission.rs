@@ -566,6 +566,18 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
                         .context("canonical kernel admission requires actual backend")?,
                     &mvm_build::stage0_kernel::current_image_set_protocol_support(),
                 )
+            } else if posture.variant == Variant::Dev {
+                if let Some(host_key) = mvm_core::plan::bundle::existing_local_build_key()? {
+                    mvm_core::plan::bundle::verify_development_plan_bundle(
+                        pin,
+                        ctx.resolver,
+                        ctx.trust,
+                        &mvm_core::plan::bundle::key_id_from_pubkey(&host_key),
+                        config,
+                    )
+                } else {
+                    verify_plan_bundle(pin, ctx.resolver, ctx.trust)
+                }
             } else {
                 verify_plan_bundle(pin, ctx.resolver, ctx.trust)
             }
@@ -573,6 +585,36 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
             verify_plan_bundle(pin, ctx.resolver, ctx.trust)
         }
         .with_context(|| format!("bundle re-verify for pin {}", pin.bundle_sha256))?;
+        if verified_bundle.manifest.members.iter().any(|member| {
+            matches!(
+                member,
+                mvm_core::plan::bundle::BundleMember::LocalDevelopmentBaseProof(_)
+            )
+        }) {
+            anyhow::ensure!(
+                posture.variant == Variant::Dev && signer_id == host_signer_id(),
+                "local development base refuses production or externally signed plans"
+            );
+            let host = crate::audit::host_keypair::load_or_init()?;
+            verify_plan(&signed, &[(signer_id.as_str(), &host.verifying)])
+                .context("local development plan must be signed on this host")?;
+            anyhow::ensure!(
+                verified_bundle.key_id
+                    == mvm_core::plan::bundle::key_id_from_pubkey(&host.verifying),
+                "local development bundle signer differs from this host"
+            );
+            let kernel = verified_bundle
+                .manifest
+                .find_by_role(&mvm_core::plan::bundle::ArtifactRole::Kernel)
+                .context("local development kernel is missing")?;
+            anyhow::ensure!(
+                verified
+                    .environment
+                    .as_ref()
+                    .is_some_and(|environment| { environment.kernel_sha256 == kernel.sha256 }),
+                "local development kernel differs from signed plan environment"
+            );
+        }
         bundle_environment::verify_environment(&verified, &verified_bundle.manifest, posture)?;
         composition::verify(&verified, &verified_bundle)?;
         if !verified_bundle.embedded_image_sets.is_empty() {

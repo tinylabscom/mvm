@@ -115,6 +115,11 @@ impl RunPosture<'_> {
         let Some(config) = self.runtime_config else {
             return Ok(());
         };
+        #[cfg(feature = "pr-test-guest-runtime")]
+        anyhow::ensure!(
+            config.pr_test_runtime_proof.is_none() || self.variant == super::Variant::Dev,
+            "PR test runtime is not admitted under production posture"
+        );
         verify_selected_runtime(config)
     }
 
@@ -145,6 +150,33 @@ pub(super) fn verify_selected_runtime(config: &VmStartConfig) -> Result<()> {
 mod tests {
     use super::super::{BackendKind, Variant};
     use super::*;
+
+    #[cfg(feature = "pr-test-guest-runtime")]
+    #[test]
+    fn production_posture_refuses_pr_test_runtime_before_archive_access() {
+        let config = VmStartConfig {
+            pr_test_runtime_proof: Some(mvm_core::protocol::runtime_release::PrTestRuntimeProof {
+                input: mvm_core::protocol::runtime_release::RuntimeReleaseProof {
+                    archive: "/nonexistent/pr/archive".into(),
+                    checksum: "/nonexistent/pr/checksum".into(),
+                    signature_bundle: "/nonexistent/pr/bundle".into(),
+                    archive_sha256: "a".repeat(64),
+                    version: env!("CARGO_PKG_VERSION").into(),
+                    arch: mvm_core::arch::GuestArch::host(),
+                },
+                pull_request: 42,
+            }),
+            ..Default::default()
+        };
+        let error = RunPosture::on_backend(Variant::Prod, BackendKind::Firecracker)
+            .with_runtime(Some(&config))
+            .verify_runtime()
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("production posture"),
+            "production refusal must precede archive access: {error:#}"
+        );
+    }
 
     #[test]
     fn runtime_gate_refuses_unverified_unsigned_request_with_forged_plan() {

@@ -957,6 +957,20 @@ pub(crate) fn open_installed_registry_pack_with(
             }
             .into())
         }
+        VerifiedRegistryManifest::ApplicationComponent(component) => {
+            Err(RegistryPackVerificationError::UnsupportedManifestSchema {
+                got: component.manifest().schema_version,
+                expected: crate::registry_pack::REGISTRY_PACK_MANIFEST_SCHEMA_VERSION,
+            }
+            .into())
+        }
+        VerifiedRegistryManifest::ComponentLayer(_) => {
+            Err(RegistryPackVerificationError::UnsupportedManifestSchema {
+                got: 4,
+                expected: crate::registry_pack::REGISTRY_PACK_MANIFEST_SCHEMA_VERSION,
+            }
+            .into())
+        }
         VerifiedRegistryManifest::RuntimeLayer(layer) => {
             Err(RegistryPackVerificationError::UnsupportedManifestSchema {
                 got: layer.manifest().schema_version,
@@ -1029,6 +1043,18 @@ fn open_installed_registry_manifest_with_checks(
         }
         VerifiedRegistryManifest::Application(application) => {
             check_application(application)?;
+        }
+        VerifiedRegistryManifest::ApplicationComponent(_) => {
+            return Err(RegistryPackVerificationError::ManifestParse(
+                "application component install requires verified archive custody".to_string(),
+            )
+            .into());
+        }
+        VerifiedRegistryManifest::ComponentLayer(_) => {
+            return Err(RegistryPackVerificationError::ManifestParse(
+                "runtime/tool component install requires verified archive custody".to_string(),
+            )
+            .into());
         }
         VerifiedRegistryManifest::RuntimeLayer(_) => {
             return Err(RegistryPackVerificationError::ManifestParse(

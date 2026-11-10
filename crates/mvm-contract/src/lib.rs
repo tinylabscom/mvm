@@ -62,6 +62,9 @@ pub mod pack_spec;
 /// Versioned composition authoring, separate from the existing Nix pack contract.
 #[cfg(feature = "protocol")]
 pub mod pack_spec_v2;
+/// Ordered signed-pack graph and independent, explicit command selection.
+#[cfg(feature = "protocol")]
+pub mod pack_spec_v3;
 /// Names one workload uses to address another over the existing
 /// host-mediated egress path.
 #[cfg(feature = "protocol")]

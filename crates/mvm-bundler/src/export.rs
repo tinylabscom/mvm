@@ -186,6 +186,14 @@ fn stage_bundle_at(
             || (inputs.cli_boot_assets.is_some() && inputs.boot_assets.is_none()),
         "canonical Linux proof requires one selected CLI boot closure"
     );
+    anyhow::ensure!(
+        inputs.local_development_base_proof.is_none()
+            || (inputs.canonical_linux_proof.is_none()
+                && inputs.local_build
+                && inputs.cli_boot_assets.is_some()
+                && inputs.local_composition.is_some()),
+        "local development base requires local composition, CLI runtime and no canonical proof"
+    );
 
     let mut contents = BundleContents::default();
     contents.push_file(KERNEL_NAME, ArtifactRole::Kernel, "kernel", inputs.vmlinux)?;
@@ -207,7 +215,11 @@ fn stage_bundle_at(
             inputs.boot_assets.is_none(),
             "cannot mix CLI and legacy boot assets"
         );
-        contents.push_cli_boot_assets(boot, inputs.arch_label)?;
+        contents.push_cli_boot_assets(
+            boot,
+            inputs.arch_label,
+            inputs.local_development_base_proof.as_ref(),
+        )?;
     }
     if let Some(proof) = &inputs.canonical_linux_proof {
         let boot = inputs
@@ -453,6 +465,7 @@ impl BundleContents {
         &mut self,
         boot: &crate::CliBootAssetsInputs<'_>,
         arch: &str,
+        local: Option<&mvm_core::plan::bundle::LocalDevelopmentBaseProof>,
     ) -> Result<()> {
         use mvm_core::arch::GuestArch;
         use mvm_core::image_set::ImageSetManifest;
@@ -474,15 +487,34 @@ impl BundleContents {
             other => anyhow::bail!("unknown CLI boot architecture {other}"),
         };
         let manifest: ImageSetManifest = serde_json::from_slice(boot.manifest_bytes)?;
-        let member = select_cli_boot_kernel(&manifest, arch)?;
-        let [kernel] = member.artifacts.as_slice() else {
-            anyhow::bail!("CLI boot kernel must declare one artifact");
-        };
         let bundled = self
             .artifacts
             .iter()
             .find(|artifact| artifact.role == ArtifactRole::Kernel)
             .context("CLI boot kernel missing")?;
+        let member = if let Some(proof) = local {
+            anyhow::ensure!(
+                proof.manifest_artifact == BOOT_MANIFEST_NAME
+                    && std::fs::canonicalize(&proof.composition_tar_path)?
+                        == Path::new(&proof.composition_tar_path),
+                "local base source path is not canonical or manifest identity differs"
+            );
+            mvm_core::plan::bundle::verify_local_development_source(proof)
+                .context("local composition source differs from its proof")?;
+            mvm_core::plan::bundle::select_local_development_base(
+                &manifest,
+                arch,
+                &bundled.sha256,
+                bundled.size_bytes,
+                proof,
+            )?
+            .0
+        } else {
+            select_cli_boot_kernel(&manifest, arch)?
+        };
+        let [kernel] = member.artifacts.as_slice() else {
+            anyhow::bail!("CLI boot kernel must declare one artifact");
+        };
         anyhow::ensure!(
             bundled.sha256 == kernel.sha256.as_str() && bundled.size_bytes == kernel.size,
             "CLI boot kernel differs from the original Linux image set"
@@ -651,6 +683,9 @@ fn declarations_for(
             },
         ));
     }
+    if let Some(proof) = &inputs.local_development_base_proof {
+        members.push(BundleMember::LocalDevelopmentBaseProof(proof.clone()));
+    }
     if let Some(composition) = &inputs.local_composition {
         members.push(BundleMember::LocalComposition(composition.clone()));
     }
@@ -686,7 +721,8 @@ fn declarations_for(
 /// bundle stays readable by the oldest reader that understands it: 3 for
 /// plain declarations, 4 for historical boot assets, 5 for an environment
 /// descriptor, 6 for a portable CLI-runtime closure, and 7 for canonical
-/// Linux publisher/revocation evidence; 8 binds local composition inputs.
+/// Linux publisher/revocation evidence; 8 binds local composition inputs and 9
+/// binds the distinct same-host development base source.
 fn schema_for(members: &[BundleMember]) -> u32 {
     members
         .iter()
@@ -877,6 +913,36 @@ mod tests {
                 .get(mvm_core::plan::bundle::BUNDLE_ORIGIN_LABEL)
                 .map(String::as_str),
             Some(mvm_core::plan::bundle::LOCAL_BUILD_ORIGIN)
+        );
+    }
+
+    #[test]
+    fn local_source_proof_bumps_only_its_own_bundle_to_schema_nine() {
+        let composition =
+            BundleMember::LocalComposition(mvm_core::plan::bundle::LocalComposition {
+                lock_artifact: "composition-lock.json".into(),
+                layers: Vec::new(),
+            });
+        let local = BundleMember::LocalDevelopmentBaseProof(
+            mvm_core::plan::bundle::LocalDevelopmentBaseProof {
+                manifest_artifact: BOOT_MANIFEST_NAME.into(),
+                composition_tar_sha256: "a".repeat(64),
+                composition_tar_size: 16,
+                composition_tar_path: "/local/base.tar.gz".into(),
+            },
+        );
+        assert_eq!(schema_for(std::slice::from_ref(&composition)), 8);
+        assert_eq!(schema_for(&[composition, local]), 9);
+        assert_eq!(
+            schema_for(&[BundleMember::CanonicalLinuxProof(
+                mvm_core::plan::bundle::CanonicalLinuxProof {
+                    manifest_artifact: BOOT_MANIFEST_NAME.into(),
+                    signature_bundle_artifact: LINUX_SIGNATURE_NAME.into(),
+                    revocation_document_artifact: REVOCATIONS_NAME.into(),
+                    revocation_signature_bundle_artifact: REVOCATIONS_SIGNATURE_NAME.into(),
+                },
+            )]),
+            7
         );
     }
 

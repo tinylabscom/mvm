@@ -10,8 +10,10 @@ and `mvmctl` verifies its signature every time it is pulled and every time a
 policy that names it is loaded. The registry source is the
 [`mvm-packs`](https://github.com/tinylabscom/mvm-packs) repository.
 
-This guide uses two published packs as its worked examples: `runtime/node`, a
-group, and `agent/codex`, a profile that includes it. For the policy language
+The `runtime/node@1.0.0` group and `agent/codex@1.0.0` profile below are
+**historical policy-only examples**, not portable application bytes or
+independently runnable packs. The newer `agent/claude@2.0.1` is a complete
+boot bundle, not an application-only component. For the policy language
 itself, see [Policy and profiles](/guides/policy-and-profiles/).
 
 ## What a pack contains
@@ -117,6 +119,71 @@ image, manifest, flake, deployment, or runtime source keeps its own
 boot-source precedence; the pack still contributes its policy. The separate
 `machine run --entrypoint` boot path refuses an image-bearing pack; use the
 ordinary machine run path.
+
+## Portable application candidate (not yet released)
+
+The new component model keeps the signed application archive separate from
+the selected Linux base and the separately signed CLI guest runtime. A
+versioned application-only descriptor binds the payload digest, architecture,
+ABI/libc requirements, policy and named commands; it contains no kernel or
+bootable rootfs. Runtime/tool components bind their own archive digests and
+policy. Existing published versions keep their original meanings.
+
+The candidate `mvm.pack-spec/v2` developer recipe currently describes one
+**local** application and ordered runtime requests:
+
+```toml
+schema = "mvm.pack-spec/v2"
+target = "x86_64-linux"
+runtimes = ["runtime/python"]
+entrypoint = ["/usr/bin/python3", "/srv/app/main.py"]
+
+[identity]
+name = "agent/example"
+version = "1.0.0"
+
+[source]
+kind = "local"
+path = "."
+
+[[copy]]
+source = "main.py"
+destination = "/srv/app/main.py"
+
+[resources]
+cpu_cores = 1
+memory_mb = 256
+```
+
+The proposed development invocation is one command with either the default
+base or a selected local kernel-and-composition source:
+
+```sh
+mvmctl run --compose ./pack.toml --compose-base signed-default
+mvmctl run --compose ./pack.toml --compose-base local \
+  --compose-base-manifest /abs/local-image-set.json \
+  --compose-base-kernel /abs/vmlinux \
+  --compose-base-tar /abs/rootfs.tar.gz
+```
+
+The local manifest must describe the selected architecture's compatible
+kernel and tar with exact digest and size. A base made locally—even from a
+sealed Nix output—is development-only. The unsealed `default-tenant.dev`
+image has no composition tar; an ext4-only local manifest is insufficient.
+Neither command is yet a demonstrated `mvmctl` guest-output/cache-hit
+workflow: the latest signed image set lacks a default composition tar and
+there is no matching released full CLI runtime. Unknown/mismatched inputs
+must refuse instead of falling back to another base.
+
+Local assembly measures ext4/verity before boot and signs a **local**
+bundle/plan; it does not create publisher authority. Production export
+requires separately trusted signed base and runtime evidence and
+independent protected verification/signing of one self-contained
+`.mvmpkg`. Neither `--prod` on a local composition nor
+`mvmctl pack publish ./my-pack` is implemented as that protected path.
+Only a proved CLI cold/repeat guest value plus admission/cache-hit check
+can establish the candidate workflow. No guest NIC or network fallback
+is part of this model; permitted egress remains FlowMux/vsock.
 
 ## A group pack
 

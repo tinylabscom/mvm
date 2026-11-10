@@ -62,9 +62,12 @@ pub(super) fn verify(plan: &ExecutionPlan, bundle: &VerifiedBundle) -> Result<()
         .iter()
         .find_map(|member| match member {
             BundleMember::CanonicalLinuxProof(proof) => Some(proof.manifest_artifact.as_str()),
+            BundleMember::LocalDevelopmentBaseProof(proof) => {
+                Some(proof.manifest_artifact.as_str())
+            }
             _ => None,
         })
-        .context("composition lacks original signed Linux root")?;
+        .context("composition lacks selected Linux base evidence")?;
     let evidence = |name: &str| -> Result<&[u8]> {
         let artifact = bundle
             .manifest

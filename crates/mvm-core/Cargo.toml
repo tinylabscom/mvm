@@ -168,6 +168,8 @@ client-remote = ["client", "dep:mvm-http"]
 # Expose `plan::signing::test_support` (shared `ExecutionPlan` fixtures) to
 # other crates' test builds without shipping the fixtures in a release build.
 test-support = []
+# PR-workflow guest runtime evidence; never enabled by ordinary builds.
+pr-test-guest-runtime = []
 # The hostd IPC async transport in `protocol` (mvmd ↔ mvm-hostd control
 # channel: read/write_frame + send/recv request/response). The only
 # async surface in mvm-core besides `manifest-verify`; gated so the

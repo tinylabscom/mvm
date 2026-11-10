@@ -227,18 +227,35 @@ enum Destination<'a> {
     File(&'a Path),
 }
 
+#[cfg(feature = "host-state")]
+#[derive(Clone, Copy)]
+enum ArchiveEntries {
+    Compatible,
+    Exact,
+}
+
 /// Walk an archive once, hashing every declared artifact into the
 /// destination `route` picks for it and checking it against the manifest.
 /// Returns the bytes of the artifacts routed to [`Destination::Capture`].
 ///
-/// Entries the manifest does not declare are skipped, as the in-memory
-/// verifier skips them; a declared artifact that appears twice or never is
-/// refused.
+/// Compatible reads skip undeclared entries like the in-memory verifier;
+/// exact reads refuse them. A declared artifact that appears twice or never
+/// is always refused.
 #[cfg(feature = "host-state")]
 fn stream_artifacts<'p>(
     archive: impl Read,
     manifest: &BundleManifest,
     mut route: impl FnMut(&BundleArtifact) -> Destination<'p>,
+) -> Result<BTreeMap<String, Vec<u8>>, BundleVerifyError> {
+    stream_artifacts_with_entries(archive, manifest, &mut route, ArchiveEntries::Compatible)
+}
+
+#[cfg(feature = "host-state")]
+fn stream_artifacts_with_entries<'p>(
+    archive: impl Read,
+    manifest: &BundleManifest,
+    mut route: impl FnMut(&BundleArtifact) -> Destination<'p>,
+    entries: ArchiveEntries,
 ) -> Result<BTreeMap<String, Vec<u8>>, BundleVerifyError> {
     let tar_error = |e: io::Error| BundleVerifyError::ManifestParse(format!("tar read: {e}"));
     let declared: BTreeMap<&str, &BundleArtifact> = manifest
@@ -261,7 +278,20 @@ fn stream_artifacts<'p>(
             .into_owned();
         ensure_safe_path(&path)?;
         budget.admit(&path, entry.size())?;
+        if matches!(entries, ArchiveEntries::Exact) && !entry.header().entry_type().is_file() {
+            return Err(BundleVerifyError::ManifestParse(format!(
+                "non-file archive entry {path}"
+            )));
+        }
         let Some(artifact) = declared.get(path.as_str()) else {
+            if matches!(entries, ArchiveEntries::Exact)
+                && path != MANIFEST_FILENAME
+                && path != SIGNATURE_FILENAME
+            {
+                return Err(BundleVerifyError::ManifestParse(format!(
+                    "unexpected archive entry {path}"
+                )));
+            }
             continue;
         };
         if entry.size() != artifact.size_bytes {
@@ -363,46 +393,22 @@ pub struct VerifiedBundleFile {
     manifest_signature: [u8; 64],
 }
 
+/// Selected signed rootfs and verity bytes, owned by a private temporary directory.
+/// The paths cease to exist when this value is dropped.
+#[derive(Debug)]
+#[cfg(feature = "host-state")]
+pub struct ExtractedBundleRootfs {
+    _directory: tempfile::TempDir,
+    pub rootfs: PathBuf,
+    pub verity: PathBuf,
+    pub roothash: String,
+}
+
 #[cfg(feature = "host-state")]
 impl VerifiedBundleFile {
-    /// Reopen a bounded member from an archive matching this verified file's
-    /// full SHA-256. This is evidence, not permission to boot without admission.
-    ///
-    /// # Errors
-    ///
-    /// Refuses a changed archive, missing or ambiguous artifact, or invalid bytes.
-    pub fn read_small_verified_member(
-        &self,
-        mut archive: File,
-        name: &str,
-        maximum: u64,
-    ) -> Result<Vec<u8>, BundleVerifyError> {
+    fn verify_archive_pin(&self, mut archive: File) -> Result<File, BundleVerifyError> {
         use std::io::{Seek, SeekFrom};
         let invalid = |reason: &str| BundleVerifyError::ManifestParse(reason.to_owned());
-        let mut matches = self
-            .manifest
-            .artifacts
-            .iter()
-            .filter(|member| member.name == name);
-        let member = matches
-            .next()
-            .ok_or_else(|| BundleVerifyError::ArtifactMissing {
-                name: name.to_owned(),
-            })?;
-        if matches.next().is_some()
-            || self
-                .manifest
-                .artifacts
-                .iter()
-                .filter(|other| other.path == member.path)
-                .count()
-                != 1
-        {
-            return Err(invalid("selected signed member is ambiguous"));
-        }
-        if member.size_bytes > maximum || member.size_bytes > MAX_IMAGE_SET_MANIFEST_BYTES {
-            return Err(invalid("selected signed member exceeds its capture bound"));
-        }
         let metadata = archive
             .metadata()
             .map_err(|error| invalid(&format!("snapshot metadata: {error}")))?;
@@ -428,13 +434,152 @@ impl VerifiedBundleFile {
         archive
             .seek(SeekFrom::Start(0))
             .map_err(|error| invalid(&format!("snapshot rewind: {error}")))?;
-        let mut captured = stream_artifacts(archive, &self.manifest, |artifact| {
-            if artifact.path == member.path {
-                Destination::Capture
-            } else {
-                Destination::Discard
+        let (manifest_bytes, signature) = read_manifest_entries(&mut archive)?;
+        let signed: BundleManifest = serde_json::from_slice(&manifest_bytes)
+            .map_err(|error| invalid(&format!("snapshot manifest: {error}")))?;
+        if signed != self.manifest || signature.as_slice() != self.manifest_signature {
+            return Err(invalid("verified manifest differs from the archive pin"));
+        }
+        archive
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| invalid(&format!("snapshot rewind: {error}")))?;
+        Ok(archive)
+    }
+
+    /// Extract the unique signed rootfs and matching verity sidecar from a pinned archive.
+    ///
+    /// The returned paths remain valid while the returned value lives. This does not
+    /// install the bundle or grant permission to boot without admission.
+    ///
+    /// # Errors
+    ///
+    /// Refuses missing or ambiguous roles, absent verity, changed archive bytes,
+    /// invalid entries, or artifact bytes differing from their signed declarations.
+    pub fn extract_rootfs_with_verity(
+        &self,
+        archive: File,
+    ) -> Result<ExtractedBundleRootfs, BundleVerifyError> {
+        let invalid = |reason: &str| BundleVerifyError::ManifestParse(reason.to_owned());
+        let mut paths = BTreeSet::new();
+        let mut names = BTreeSet::new();
+        if !self
+            .manifest
+            .artifacts
+            .iter()
+            .all(|artifact| paths.insert(&artifact.path) && names.insert(&artifact.name))
+        {
+            return Err(invalid("signed artifact inventory is ambiguous"));
+        }
+        let select = |role| {
+            let mut matches = self.manifest.artifacts.iter().filter(|a| a.role == role);
+            let artifact = matches
+                .next()
+                .ok_or_else(|| invalid("required bundle role missing"))?;
+            if matches.next().is_some()
+                || artifact.size_bytes == 0
+                || self
+                    .manifest
+                    .artifacts
+                    .iter()
+                    .filter(|a| a.path == artifact.path || a.name == artifact.name)
+                    .count()
+                    != 1
+            {
+                return Err(invalid("selected signed bundle role is ambiguous"));
             }
-        })?;
+            Ok(artifact)
+        };
+        let rootfs = select(super::ArtifactRole::Rootfs)?;
+        let verity = self
+            .manifest
+            .verity
+            .as_ref()
+            .ok_or_else(|| invalid("bundle verity declaration missing"))?;
+        let sidecar = select(super::ArtifactRole::VerityHashSidecar)?;
+        if sidecar.name != verity.sidecar_artifact || sidecar.path == rootfs.path {
+            return Err(invalid(
+                "bundle verity sidecar does not match the signed role",
+            ));
+        }
+        let archive = self.verify_archive_pin(archive)?;
+        let directory = tempfile::Builder::new()
+            .prefix("bundle-rootfs-")
+            .tempdir()
+            .map_err(|error| invalid(&format!("private rootfs directory: {error}")))?;
+        crate::private_fs::create_owned_private_dir(directory.path())
+            .map_err(|error| invalid(&format!("private rootfs permissions: {error}")))?;
+        let rootfs_path = directory.path().join("rootfs.ext4");
+        let verity_path = directory.path().join("rootfs.verity");
+        stream_artifacts_with_entries(
+            archive,
+            &self.manifest,
+            |artifact| {
+                if artifact.path == rootfs.path {
+                    Destination::File(&rootfs_path)
+                } else if artifact.path == sidecar.path {
+                    Destination::File(&verity_path)
+                } else {
+                    Destination::Discard
+                }
+            },
+            ArchiveEntries::Exact,
+        )?;
+        Ok(ExtractedBundleRootfs {
+            _directory: directory,
+            rootfs: rootfs_path,
+            verity: verity_path,
+            roothash: verity.roothash.clone(),
+        })
+    }
+
+    /// Reopen a bounded member from an archive matching this verified file's
+    /// full SHA-256. This is evidence, not permission to boot without admission.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a changed archive, missing or ambiguous artifact, or invalid bytes.
+    pub fn read_small_verified_member(
+        &self,
+        archive: File,
+        name: &str,
+        maximum: u64,
+    ) -> Result<Vec<u8>, BundleVerifyError> {
+        let invalid = |reason: &str| BundleVerifyError::ManifestParse(reason.to_owned());
+        let mut matches = self
+            .manifest
+            .artifacts
+            .iter()
+            .filter(|member| member.name == name);
+        let member = matches
+            .next()
+            .ok_or_else(|| BundleVerifyError::ArtifactMissing {
+                name: name.to_owned(),
+            })?;
+        if matches.next().is_some()
+            || self
+                .manifest
+                .artifacts
+                .iter()
+                .filter(|other| other.path == member.path)
+                .count()
+                != 1
+        {
+            return Err(invalid("selected signed member is ambiguous"));
+        }
+        if member.size_bytes > maximum || member.size_bytes > MAX_IMAGE_SET_MANIFEST_BYTES {
+            return Err(invalid("selected signed member exceeds its capture bound"));
+        }
+        let mut captured = stream_artifacts(
+            self.verify_archive_pin(archive)?,
+            &self.manifest,
+            |artifact| {
+                if artifact.path == member.path {
+                    Destination::Capture
+                } else {
+                    Destination::Discard
+                }
+            },
+        )?;
         captured
             .remove(&member.path)
             .ok_or_else(|| BundleVerifyError::ArtifactMissing {
@@ -1365,6 +1510,36 @@ mod tests {
         out
     }
 
+    fn sealed_with_verity(dir: &Path, include_verity: bool) -> PathBuf {
+        let mut declared = manifest(vec![
+            artifact("vmlinux", ArtifactRole::Kernel, b"kernel"),
+            artifact("rootfs.ext4", ArtifactRole::Rootfs, b"rootfs"),
+        ]);
+        let mut payload = vec![
+            ("artifacts/vmlinux".to_owned(), b"kernel".to_vec()),
+            ("artifacts/rootfs.ext4".to_owned(), b"rootfs".to_vec()),
+        ];
+        if include_verity {
+            declared.artifacts.push(artifact(
+                "rootfs.verity",
+                ArtifactRole::VerityHashSidecar,
+                b"verity",
+            ));
+            declared.verity = Some(super::super::VerityInfo {
+                roothash: "a".repeat(64),
+                sidecar_artifact: "rootfs.verity".into(),
+            });
+            payload.push(("artifacts/rootfs.verity".to_owned(), b"verity".to_vec()));
+        }
+        let path = dir.join("verity.mvmpkg");
+        std::fs::write(
+            &path,
+            crate::plan::bundle::write_bundle(&declared, &key(), payload).unwrap(),
+        )
+        .unwrap();
+        path
+    }
+
     fn trust() -> OneKey {
         OneKey(key().verifying_key())
     }
@@ -1403,6 +1578,119 @@ mod tests {
         assert_eq!(streamed.manifest, in_memory.manifest);
         assert_eq!(streamed.key_id, in_memory.key_id);
         assert_eq!(streamed.bundle_sha256, sha256_hex(&bytes));
+    }
+
+    #[test]
+    fn verified_rootfs_extraction_owns_only_the_signed_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = sealed_with_verity(dir.path(), true);
+        let verified = verify_bundle_file(&archive, &trust()).unwrap();
+        let extracted = verified
+            .extract_rootfs_with_verity(File::open(&archive).unwrap())
+            .unwrap();
+        assert_eq!(std::fs::read(&extracted.rootfs).unwrap(), b"rootfs");
+        assert_eq!(std::fs::read(&extracted.verity).unwrap(), b"verity");
+        assert_eq!(extracted.roothash, "a".repeat(64));
+        let parent = extracted.rootfs.parent().unwrap().to_owned();
+        assert_eq!(std::fs::read_dir(&parent).unwrap().count(), 2);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&parent).unwrap().permissions().mode() & 0o077,
+                0
+            );
+        }
+        drop(extracted);
+        assert!(!parent.exists());
+    }
+
+    #[test]
+    fn rootfs_extraction_refuses_changed_archive_and_missing_verity() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = sealed_with_verity(dir.path(), true);
+        let verified = verify_bundle_file(&archive, &trust()).unwrap();
+        flip(&archive, b"rootfs", b"ROOTFS");
+        assert!(
+            verified
+                .extract_rootfs_with_verity(File::open(&archive).unwrap())
+                .is_err()
+        );
+
+        let archive = sealed_with_verity(dir.path(), false);
+        let verified = verify_bundle_file(&archive, &trust()).unwrap();
+        assert!(
+            verified
+                .extract_rootfs_with_verity(File::open(&archive).unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rootfs_extraction_refuses_mutated_verified_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = sealed_with_verity(dir.path(), true);
+        let mut verified = verify_bundle_file(&archive, &trust()).unwrap();
+        verified.manifest.verity.as_mut().unwrap().roothash = "b".repeat(64);
+        assert!(
+            verified
+                .extract_rootfs_with_verity(File::open(&archive).unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rootfs_extraction_refuses_unexpected_and_symlink_archive_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut declared = manifest(vec![
+            artifact("vmlinux", ArtifactRole::Kernel, b"k"),
+            artifact("rootfs.ext4", ArtifactRole::Rootfs, b"r"),
+            artifact("rootfs.verity", ArtifactRole::VerityHashSidecar, b"v"),
+        ]);
+        declared.verity = Some(super::super::VerityInfo {
+            roothash: "a".repeat(64),
+            sidecar_artifact: "rootfs.verity".into(),
+        });
+        let manifest_bytes = canonical_manifest_bytes(&declared).unwrap();
+        let signature = ed25519_dalek::Signer::sign(&key(), &manifest_bytes).to_bytes();
+        for symlink in [false, true] {
+            let mut tar = tar::Builder::new(Vec::new());
+            append_entry(
+                &mut tar,
+                MANIFEST_FILENAME,
+                manifest_bytes.len() as u64,
+                manifest_bytes.as_slice(),
+            )
+            .unwrap();
+            append_entry(&mut tar, SIGNATURE_FILENAME, 64, signature.as_slice()).unwrap();
+            for (name, bytes) in [
+                ("vmlinux", b"k".as_slice()),
+                ("rootfs.ext4", b"r"),
+                ("rootfs.verity", b"v"),
+            ] {
+                append_entry(&mut tar, &format!("artifacts/{name}"), 1, bytes).unwrap();
+            }
+            if symlink {
+                let mut header = tar::Header::new_gnu();
+                header.set_entry_type(tar::EntryType::Symlink);
+                header.set_size(0);
+                header.set_link_name("rootfs.ext4").unwrap();
+                header.set_cksum();
+                tar.append_data(&mut header, "artifacts/link", io::empty())
+                    .unwrap();
+            } else {
+                append_entry(&mut tar, "artifacts/unexpected", 1, b"x".as_slice()).unwrap();
+            }
+            let path = dir.path().join("extra.mvmpkg");
+            std::fs::write(&path, tar.into_inner().unwrap()).unwrap();
+            let verified = verify_bundle_file(&path, &trust()).unwrap();
+            assert!(
+                verified
+                    .extract_rootfs_with_verity(File::open(&path).unwrap())
+                    .is_err(),
+                "unexpected entry accepted: symlink={symlink}"
+            );
+        }
     }
 
     fn flip(path: &Path, needle: &[u8], replacement: &[u8]) {

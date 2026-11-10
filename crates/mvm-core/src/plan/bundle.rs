@@ -85,9 +85,10 @@ pub use mvm_contract::plan::bundle::{
     BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, BundleMember, BundleResources,
     BundleSecurityPosture, CANONICAL_LINUX_PROOF_MIN_SCHEMA, CLI_BOOT_ASSETS_MEMBER_MIN_SCHEMA,
     CanonicalLinuxProof, ENVIRONMENT_MEMBER_MIN_SCHEMA, EmbeddedCliBootAssets, KeyId,
-    LOCAL_COMPOSITION_MIN_SCHEMA, LocalComposition, LocalCompositionLayer, MANIFEST_FILENAME,
-    MAX_BUNDLE_ENTRY_BYTES, MAX_BUNDLE_TOTAL_BYTES, MAX_KERNEL_CMDLINE_BYTES, PlanArtifact,
-    SIGNATURE_FILENAME, VerityInfo, signature_from_base64, signature_to_base64,
+    LOCAL_COMPOSITION_MIN_SCHEMA, LOCAL_DEVELOPMENT_BASE_PROOF_MIN_SCHEMA, LocalComposition,
+    LocalCompositionLayer, LocalDevelopmentBaseProof, MANIFEST_FILENAME, MAX_BUNDLE_ENTRY_BYTES,
+    MAX_BUNDLE_TOTAL_BYTES, MAX_KERNEL_CMDLINE_BYTES, PlanArtifact, SIGNATURE_FILENAME, VerityInfo,
+    signature_from_base64, signature_to_base64,
 };
 pub use mvm_contract::plan::environment::{
     ApplicationService, ENVIRONMENT_DESCRIPTOR_VERSION, EnvironmentCapability,
@@ -97,10 +98,10 @@ pub use mvm_contract::plan::environment::{
 
 use crate::arch::GuestArch;
 use crate::image_set::{
-    BackendImageSupport, HostProtocolSupport, ImageSetError, ImageSetManifest, ImageSetRequirement,
-    ImageSetRole, RetiredGuestRuntimeRole, WorkloadImageProfile,
-    check_workload_protocol_compatibility, require_complete, select_member, select_workload_image,
-    validate_structure,
+    ArtifactFormat, BackendImageSupport, HostProtocolSupport, ImageSetError, ImageSetManifest,
+    ImageSetMember, ImageSetProducer, ImageSetRequirement, ImageSetRole, MemberArtifact,
+    RetiredGuestRuntimeRole, WorkloadImageProfile, check_workload_protocol_compatibility,
+    require_complete, select_member, select_workload_image, validate_structure,
 };
 use crate::packs::Sha256Hex;
 
@@ -770,6 +771,14 @@ pub fn verify_plan_bundle(
         {
             return Err(PlanBundleError::CanonicalKernelCustodyRequired);
         }
+        if verified
+            .manifest
+            .members
+            .iter()
+            .any(|member| matches!(member, BundleMember::LocalDevelopmentBaseProof(_)))
+        {
+            return Err(PlanBundleError::LocalDevelopmentCustodyRequired);
+        }
         Ok(())
     })
 }
@@ -792,6 +801,119 @@ pub fn verify_canonical_plan_bundle(
             .verify_config(config, backend, host)
             .map_err(|error| PlanBundleError::CanonicalKernelBinding(error.to_string()))
     })
+}
+
+/// Verify ordinary dev bundles, or a local base with same-host source and kernel custody.
+/// Unlike [`verify_canonical_plan_bundle`], this never accepts canonical Linux proof.
+#[cfg(feature = "host-state")]
+pub fn verify_development_plan_bundle(
+    pin: &PlanArtifact,
+    resolver: &dyn BundleResolver,
+    trust: &dyn TrustStore,
+    host_key_id: &KeyId,
+    config: &crate::vm_backend::VmStartConfig,
+) -> Result<VerifiedBundle, PlanBundleError> {
+    verify_plan_bundle_checked(pin, resolver, trust, |verified| {
+        if verified
+            .manifest
+            .members
+            .iter()
+            .any(|member| matches!(member, BundleMember::CanonicalLinuxProof(_)))
+        {
+            return Err(PlanBundleError::CanonicalKernelCustodyRequired);
+        }
+        let Some(proof) = verified
+            .manifest
+            .members
+            .iter()
+            .find_map(|member| match member {
+                BundleMember::LocalDevelopmentBaseProof(proof) => Some(proof),
+                _ => None,
+            })
+        else {
+            return Ok(());
+        };
+        let refused = |reason: &str| PlanBundleError::LocalBaseBinding(reason.into());
+        if verified.key_id != *host_key_id
+            || verified
+                .manifest
+                .labels
+                .get(BUNDLE_ORIGIN_LABEL)
+                .map(String::as_str)
+                != Some(LOCAL_BUILD_ORIGIN)
+            || config.canonical_kernel.is_some()
+        {
+            return Err(refused(
+                "local base must be signed on this host without canonical authority",
+            ));
+        }
+        let kernel = verified
+            .manifest
+            .find_by_role(&ArtifactRole::Kernel)
+            .ok_or_else(|| refused("local kernel declaration missing"))?;
+        if config.kernel_read_sha256.as_deref() != Some(&kernel.sha256)
+            || config.kernel_path.is_none()
+        {
+            return Err(refused("local kernel custody differs from selected base"));
+        }
+        let actual = crate::crypto::image_verify::sha256_file(Path::new(
+            config.kernel_path.as_deref().expect("checked above"),
+        ))
+        .map_err(|_| refused("local selected kernel is unreadable"))?;
+        if actual != kernel.sha256 {
+            return Err(refused("local selected kernel bytes differ"));
+        }
+        verify_local_development_source(proof)
+            .map_err(|_| refused("local composition source differs from signed evidence"))?;
+        Ok(())
+    })
+}
+
+#[cfg(feature = "host-state")]
+pub fn verify_local_development_source(proof: &LocalDevelopmentBaseProof) -> std::io::Result<()> {
+    use std::io::Read;
+    let path = Path::new(&proof.composition_tar_path);
+    if std::fs::canonicalize(path)? != path {
+        return Err(std::io::Error::other(
+            "local composition source path changed",
+        ));
+    }
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.len() != proof.composition_tar_size {
+        return Err(std::io::Error::other("local composition source changed"));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut file = options.open(path)?;
+    let held = file.metadata()?;
+    if !held.is_file() || held.len() != proof.composition_tar_size {
+        return Err(std::io::Error::other("local composition source changed"));
+    }
+    let mut digest = Sha256::new();
+    let mut bounded = (&mut file).take(proof.composition_tar_size + 1);
+    let mut bytes = [0u8; 64 * 1024];
+    let mut size = 0u64;
+    loop {
+        let count = bounded.read(&mut bytes)?;
+        if count == 0 {
+            break;
+        }
+        size += count as u64;
+        digest.update(&bytes[..count]);
+    }
+    if size != proof.composition_tar_size
+        || hex::encode(digest.finalize()) != proof.composition_tar_sha256
+    {
+        return Err(std::io::Error::other(
+            "local composition source digest changed",
+        ));
+    }
+    Ok(())
 }
 
 /// The canonical owner must have been prepared from this very bundle, and the
@@ -875,6 +997,10 @@ fn verify_plan_bundle_checked(
 pub enum PlanBundleError {
     #[error("canonical kernel binding refused: {0}")]
     CanonicalKernelBinding(String),
+    #[error("local development base binding refused: {0}")]
+    LocalBaseBinding(String),
+    #[error("local development base requires same-host development admission")]
+    LocalDevelopmentCustodyRequired,
     #[error(
         "canonical Linux proof requires retained backend kernel custody; this admission path does not yet support it"
     )]
@@ -987,6 +1113,8 @@ pub struct VerifiedBootAssets {
     pub arch: GuestArch,
     pub image_set: VerifiedEmbeddedImageSet,
     pub cli_runtime: Option<EmbeddedCliBootAssets>,
+    /// Local source evidence is never interchangeable with a signed Linux root.
+    pub local_development_base: Option<LocalDevelopmentBaseProof>,
 }
 
 /// The image-set role of the runtime overlay a bundle's boot assets carry.
@@ -1062,6 +1190,47 @@ pub fn check_boot_assets_for_backend(
 ) -> Result<(), ImageSetError> {
     check_workload_protocol_compatibility(&boot.image_set.manifest.compatibility, host_protocols)?;
     if boot.cli_runtime.is_some() {
+        if let Some(proof) = boot.local_development_base.as_ref() {
+            let mut selected = boot.image_set.manifest.clone();
+            let kernel_name = boot.image_set.artifact_paths.keys().next().ok_or(
+                ImageSetError::MemberNotFound {
+                    role: ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+                },
+            )?;
+            let declaration = boot
+                .image_set
+                .manifest
+                .members
+                .iter()
+                .flat_map(|member| &member.artifacts)
+                .find(|artifact| artifact.name.as_str() == kernel_name)
+                .ok_or(ImageSetError::MemberNotFound {
+                    role: ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+                })?;
+            let (selected_kernel, selected_rootfs) = select_local_development_base(
+                &boot.image_set.manifest,
+                boot.arch,
+                declaration.sha256.as_str(),
+                declaration.size,
+                proof,
+            )
+            .map_err(|_| ImageSetError::MemberNotFound {
+                role: ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+            })?;
+            let profile = match selected_kernel.role {
+                ImageSetRole::WorkloadKernel(profile) => profile,
+                _ => unreachable!("local base selection returns a workload kernel"),
+            };
+            selected.members.retain(|member| {
+                !matches!(
+                    member.role,
+                    ImageSetRole::WorkloadKernel(_) | ImageSetRole::WorkloadRootfs(_)
+                ) || member == selected_kernel
+                    || member == selected_rootfs
+            });
+            select_workload_image(&selected, profile, boot.arch, backend)?;
+            return Ok(());
+        }
         select_member(
             &boot.image_set.manifest,
             ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
@@ -1276,6 +1445,21 @@ fn verify_signed_manifest(
         });
     }
     declarations::validate_declarations(&manifest)?;
+    #[cfg(feature = "pr-test-guest-runtime")]
+    if manifest.members.iter().any(|member| {
+        matches!(member, BundleMember::EmbeddedCliBootAssets(runtime) if runtime.pr_test_pull_request.is_some())
+    }) {
+        let host_key = existing_local_build_key()
+            .map_err(|_| BundleVerifyError::ManifestParse("PR test host signer key is unreadable".into()))?
+            .ok_or_else(|| BundleVerifyError::ManifestParse("PR test host signer key is missing".into()))?;
+        if bundle_origin(&manifest, &key_id_from_pubkey(&host_key), trust_store)
+            != BundleOrigin::LocalBuild
+        {
+            return Err(BundleVerifyError::ManifestParse(
+                "PR test runtime requires this host's signed local build".into(),
+            ));
+        }
+    }
 
     Ok((manifest, declared_key_id))
 }
@@ -1306,6 +1490,7 @@ fn verify_embedded_image_sets(
             | BundleMember::EmbeddedBootAssets { .. }
             | BundleMember::EmbeddedCliBootAssets(_)
             | BundleMember::CanonicalLinuxProof(_)
+            | BundleMember::LocalDevelopmentBaseProof(_)
             | BundleMember::LocalComposition(_)
             | BundleMember::SecurityPosture(_)
             | BundleMember::BuildProvenance(_)
@@ -1337,6 +1522,7 @@ fn verify_boot_assets(
             }
             BundleMember::EmbeddedImageSet { .. }
             | BundleMember::CanonicalLinuxProof(_)
+            | BundleMember::LocalDevelopmentBaseProof(_)
             | BundleMember::LocalComposition(_)
             | BundleMember::KernelCmdline { .. }
             | BundleMember::SecurityPosture(_)
@@ -1355,7 +1541,13 @@ fn verify_boot_assets(
             )));
         }
     };
-    let selection = if cli_runtime.is_some() {
+    let local = bundle.members.iter().find_map(|member| match member {
+        BundleMember::LocalDevelopmentBaseProof(proof) => Some(proof),
+        _ => None,
+    });
+    let selection = if let Some(proof) = local {
+        ImageSetSelection::LocalKernel(arch, proof)
+    } else if cli_runtime.is_some() {
         ImageSetSelection::CliKernel(arch)
     } else {
         ImageSetSelection::LegacyRuntime(arch)
@@ -1365,15 +1557,131 @@ fn verify_boot_assets(
         arch,
         image_set,
         cli_runtime: cli_runtime.cloned(),
+        local_development_base: local.cloned(),
     }))
 }
 
-#[derive(Clone, Copy)]
 #[cfg(feature = "host-state")]
-enum ImageSetSelection {
+enum ImageSetSelection<'a> {
     Full,
     LegacyRuntime(GuestArch),
     CliKernel(GuestArch),
+    LocalKernel(GuestArch, &'a LocalDevelopmentBaseProof),
+}
+
+fn local_development_pair(
+    image_set: &ImageSetManifest,
+    arch: GuestArch,
+    profile: WorkloadImageProfile,
+) -> Result<(&ImageSetMember, &ImageSetMember), BundleVerifyError> {
+    let refused = || {
+        BundleVerifyError::ManifestParse(
+            "local base has no unique compatible sealed kernel/rootfs/tar pair".into(),
+        )
+    };
+    if image_set.schema_version != crate::image_set::IMAGE_SET_SCHEMA_VERSION
+        || !matches!(image_set.producer, ImageSetProducer::LocalCheckouts(_))
+    {
+        return Err(refused());
+    }
+    validate_structure(image_set).map_err(|_| refused())?;
+    let mut kernels = image_set.members.iter().filter(|member| {
+        member.role == ImageSetRole::WorkloadKernel(profile)
+            && member.target.admits(arch)
+            && member.build_mode.is_none()
+    });
+    let kernel = kernels.next().ok_or_else(refused)?;
+    if kernels.next().is_some() || kernel.artifacts.len() != 1 {
+        return Err(refused());
+    }
+    let mut roots = image_set.members.iter().filter(|member| {
+        member.role == ImageSetRole::WorkloadRootfs(profile)
+            && member.target.admits(arch)
+            && member.build_mode == kernel.build_mode
+    });
+    let rootfs = roots.next().ok_or_else(refused)?;
+    if roots.next().is_some()
+        || rootfs
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.format == ArtifactFormat::TarGz)
+            .count()
+            != 1
+    {
+        return Err(refused());
+    }
+    let mut selected = image_set.clone();
+    selected.members.retain(|member| {
+        !matches!(
+            member.role,
+            ImageSetRole::WorkloadKernel(_) | ImageSetRole::WorkloadRootfs(_)
+        ) || member == kernel
+            || member == rootfs
+    });
+    select_workload_image(
+        &selected,
+        profile,
+        arch,
+        &BackendImageSupport::for_backend(crate::vm_backend::BackendKind::Qemu)
+            .expect("QEMU supports portable workload boot"),
+    )
+    .map_err(|_| refused())?;
+    Ok((kernel, rootfs))
+}
+
+/// Select the same sealed local kernel and tar source the bundle reader accepts.
+/// These are declarations, not verified bytes or permission to boot.
+pub fn select_local_development_source(
+    image_set: &ImageSetManifest,
+    arch: GuestArch,
+    profile: WorkloadImageProfile,
+) -> Result<(&MemberArtifact, &MemberArtifact), BundleVerifyError> {
+    let (kernel, rootfs) = local_development_pair(image_set, arch, profile)?;
+    let tar = rootfs
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.format == ArtifactFormat::TarGz)
+        .expect("unique tar checked by local development pair");
+    Ok((&kernel.artifacts[0], tar))
+}
+
+/// Find exactly one local kernel and same-profile rootfs whose tar matches the proof.
+pub fn select_local_development_base<'a>(
+    image_set: &'a ImageSetManifest,
+    arch: GuestArch,
+    kernel_sha256: &str,
+    kernel_size: u64,
+    proof: &LocalDevelopmentBaseProof,
+) -> Result<(&'a ImageSetMember, &'a ImageSetMember), BundleVerifyError> {
+    let refused = || {
+        BundleVerifyError::ManifestParse(
+            "local base does not bind one matching kernel/rootfs source pair".into(),
+        )
+    };
+    let mut pairs = [
+        WorkloadImageProfile::DefaultTenant,
+        WorkloadImageProfile::RootlessTenant,
+    ]
+    .into_iter()
+    .filter_map(|profile| {
+        let (kernel, rootfs) = local_development_pair(image_set, arch, profile).ok()?;
+        let selected_kernel = &kernel.artifacts[0];
+        let tar = rootfs
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.format == ArtifactFormat::TarGz)
+            .expect("unique tar checked by local development pair");
+        (selected_kernel.sha256.as_str() == kernel_sha256
+            && selected_kernel.size == kernel_size
+            && tar.sha256.as_str() == proof.composition_tar_sha256
+            && tar.size == proof.composition_tar_size)
+            .then_some((kernel, rootfs))
+    });
+    let pair = pairs.next().ok_or_else(refused)?;
+    if pairs.next().is_some() {
+        return Err(refused());
+    }
+    Ok(pair)
 }
 
 #[cfg(feature = "host-state")]
@@ -1381,7 +1689,7 @@ fn verify_embedded_image_set(
     bundle: &BundleManifest,
     artifacts: &dyn stream::ArtifactSource,
     manifest_artifact: &str,
-    selection: ImageSetSelection,
+    selection: ImageSetSelection<'_>,
 ) -> Result<VerifiedEmbeddedImageSet, BundleVerifyError> {
     let declaration = bundle
         .artifacts
@@ -1406,20 +1714,35 @@ fn verify_embedded_image_set(
         name: manifest_artifact.to_string(),
         reason,
     })?;
-    require_complete(&manifest, &ImageSetRequirement::current_train()).map_err(|reason| {
-        BundleVerifyError::ImageSetRefused {
-            name: manifest_artifact.to_string(),
-            reason,
-        }
-    })?;
+    if !matches!(&selection, ImageSetSelection::LocalKernel(_, _)) {
+        require_complete(&manifest, &ImageSetRequirement::current_train()).map_err(|reason| {
+            BundleVerifyError::ImageSetRefused {
+                name: manifest_artifact.to_string(),
+                reason,
+            }
+        })?;
+    }
 
-    let selected = match selection {
+    let selected = match &selection {
         ImageSetSelection::Full => Ok(manifest.members.iter().collect()),
         ImageSetSelection::LegacyRuntime(arch) => {
-            select_boot_asset_members(&manifest, arch).map(|members| members.to_vec())
+            select_boot_asset_members(&manifest, *arch).map(|members| members.to_vec())
         }
         ImageSetSelection::CliKernel(arch) => {
-            select_cli_boot_kernel(&manifest, arch).map(|member| vec![member])
+            select_cli_boot_kernel(&manifest, *arch).map(|member| vec![member])
+        }
+        ImageSetSelection::LocalKernel(arch, proof) => {
+            let kernel = bundle.find_by_role(&ArtifactRole::Kernel).ok_or_else(|| {
+                BundleVerifyError::ManifestParse("local kernel artifact missing".into())
+            })?;
+            let (selected, _) = select_local_development_base(
+                &manifest,
+                *arch,
+                &kernel.sha256,
+                kernel.size_bytes,
+                proof,
+            )?;
+            Ok(vec![selected])
         }
     };
     let members = selected.map_err(|reason| BundleVerifyError::ImageSetRefused {
@@ -1435,8 +1758,10 @@ fn verify_embedded_image_set(
         let bundle_artifact = bundle
             .artifacts
             .iter()
-            .find(|artifact| match selection {
-                ImageSetSelection::CliKernel(_) => artifact.role == ArtifactRole::Kernel,
+            .find(|artifact| match &selection {
+                ImageSetSelection::CliKernel(_) | ImageSetSelection::LocalKernel(_, _) => {
+                    artifact.role == ArtifactRole::Kernel
+                }
                 ImageSetSelection::Full | ImageSetSelection::LegacyRuntime(_) => {
                     artifact.name == name
                 }
@@ -1489,8 +1814,8 @@ mod tests {
     use crate::image_set::{
         ArtifactFormat, ArtifactName, BootProtocol, GitCommit, GuestDeviceRequirement,
         ImageSetCompatibility, ImageSetMember, ImageSetProducer, ImageSetRole, ImageSetVersion,
-        MemberArtifact, MemberTarget, NixInputs, ProtocolRange, ReleaseProducer, ReleaseTag,
-        RepositorySlug, RevocationChannel, WorkflowPath,
+        LocalCheckouts, MemberArtifact, MemberTarget, NixInputs, ProtocolRange, ReleaseProducer,
+        ReleaseTag, RepoIdentity, RepositorySlug, RevocationChannel, WorkflowPath, WorktreeState,
     };
     use crate::kernel_format::KernelFormat;
     use crate::packs::{FlakeLockIdentity, SbomReference, SourceRevisionIdentity};
@@ -1667,6 +1992,59 @@ mod tests {
         MapTrustStore(m)
     }
 
+    #[cfg(not(feature = "pr-test-guest-runtime"))]
+    #[test]
+    fn ordinary_bundle_reader_refuses_signed_pr_marker_but_keeps_old_schemas() {
+        let key = fresh_key();
+        let directory = tempfile::tempdir().unwrap();
+        let write_signed = |manifest: &BundleManifest, name: &str| {
+            let bytes = canonical_manifest_bytes(manifest).unwrap();
+            let signature = key.sign(&bytes).to_bytes();
+            let mut tar = tar::Builder::new(Vec::new());
+            append_bytes(&mut tar, MANIFEST_FILENAME, &bytes).unwrap();
+            append_bytes(&mut tar, SIGNATURE_FILENAME, &signature).unwrap();
+            let path = directory.path().join(name);
+            std::fs::write(&path, tar.into_inner().unwrap()).unwrap();
+            path
+        };
+        let mut manifest = make_manifest(key_id_from_pubkey(&key.verifying_key()), Vec::new());
+        for schema in [8, 9] {
+            manifest.schema_version = schema;
+            let archive = write_signed(&manifest, &format!("v{schema}.mvmpkg"));
+            verify_bundle_file(&archive, &trust(&key))
+                .expect("older bundle schema without PR marker remains readable");
+        }
+        manifest.schema_version = 10;
+        manifest.members.push(
+            serde_json::from_value(serde_json::json!({
+                "class": "embedded_cli_boot_assets",
+                "manifest_artifact": "linux.json",
+                "version": "1.2.3",
+                "arch": "aarch64",
+                "archive_artifact": "runtime.tar.gz",
+                "checksum_artifact": "runtime.sha256",
+                "signature_bundle_artifact": "runtime.bundle",
+                "checksum_signature_bundle_artifact": "runtime.sha256.bundle",
+                "overlay_artifact": "overlay.ext4",
+                "overlay_verity_artifact": "overlay.verity",
+                "initramfs_artifact": "initrd",
+                "overlay_roothash": "a".repeat(64),
+                "protocol_version": 2,
+                "min_supported_protocol_version": 2,
+                "pr_test_pull_request": 42
+            }))
+            .unwrap(),
+        );
+        let archive = write_signed(&manifest, "pr-test.mvmpkg");
+        let error = verify_bundle_file(&archive, &trust(&key)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("explicitly compiled test-only verifier"),
+            "ordinary bundle reader must refuse before trusting any artifact: {error}"
+        );
+    }
+
     fn image_member_artifact(name: &str, format: ArtifactFormat) -> (MemberArtifact, Vec<u8>) {
         let bytes = format!("embedded bytes for {name}").into_bytes();
         (
@@ -1841,6 +2219,177 @@ mod tests {
             },
             bytes,
         )
+    }
+
+    #[test]
+    fn local_base_evidence_selects_only_the_exact_kernel_and_matching_tar_source() {
+        let (mut set, _) = complete_image_set();
+        set.schema_version = crate::image_set::IMAGE_SET_SCHEMA_VERSION;
+        set.mvm_source_commit = None;
+        set.revocation_channel = None;
+        set.compatibility.guest_agent_protocol = None;
+        set.compatibility.base_image_contract =
+            Some(crate::image_set::BaseImageContract::LINUX_LAYER);
+        set.compatibility.builder_boot_abi = Some(crate::image_set::BuilderBootAbi::NO_MVM_BINARY);
+        let arch = GuestArch::Aarch64;
+        let profile = WorkloadImageProfile::DefaultTenant;
+        set.members.retain(|member| {
+            member.target.admits(arch)
+                && matches!(
+                    member.role,
+                    ImageSetRole::WorkloadKernel(found) | ImageSetRole::WorkloadRootfs(found)
+                        if found == profile
+                )
+        });
+        for member in &mut set.members {
+            member.pack_hash = None;
+            member.sbom = None;
+        }
+        set.producer = ImageSetProducer::LocalCheckouts(LocalCheckouts {
+            images: RepoIdentity {
+                commit: GitCommit::new("a".repeat(40)).unwrap(),
+                worktree: WorktreeState::Clean,
+            },
+            mvm: None,
+        });
+        let kernel = set
+            .members
+            .iter()
+            .find(|member| {
+                member.role == ImageSetRole::WorkloadKernel(profile) && member.target.admits(arch)
+            })
+            .unwrap()
+            .artifacts[0]
+            .clone();
+        let rootfs = set
+            .members
+            .iter_mut()
+            .find(|member| {
+                member.role == ImageSetRole::WorkloadRootfs(profile) && member.target.admits(arch)
+            })
+            .unwrap();
+        let tar = MemberArtifact {
+            name: ArtifactName::new("base-composition.tar.gz").unwrap(),
+            format: ArtifactFormat::TarGz,
+            sha256: Sha256Hex::from_bytes(b"exact tar source"),
+            size: 16,
+        };
+        rootfs.artifacts.push(tar.clone());
+        let proof = LocalDevelopmentBaseProof {
+            manifest_artifact: "boot-image-set.json".into(),
+            composition_tar_sha256: tar.sha256.as_str().to_string(),
+            composition_tar_size: tar.size,
+            composition_tar_path: "/local/base-composition.tar.gz".into(),
+        };
+        let pair =
+            select_local_development_base(&set, arch, kernel.sha256.as_str(), kernel.size, &proof)
+                .unwrap();
+        assert_eq!(pair.0.artifacts[0], kernel);
+        assert!(pair.1.artifacts.contains(&tar));
+        let (selected_kernel, selected_tar) =
+            select_local_development_source(&set, arch, profile).unwrap();
+        assert_eq!(selected_kernel, &kernel);
+        assert_eq!(selected_tar, &tar);
+        let mut missing = set.clone();
+        missing
+            .members
+            .iter_mut()
+            .find(|member| member.role == ImageSetRole::WorkloadRootfs(profile))
+            .unwrap()
+            .artifacts
+            .retain(|artifact| artifact.format != ArtifactFormat::TarGz);
+        assert!(select_local_development_source(&missing, arch, profile).is_err());
+        let mut duplicate = set.clone();
+        let mut second_tar = tar.clone();
+        second_tar.name = ArtifactName::new("other.tar.gz").unwrap();
+        duplicate
+            .members
+            .iter_mut()
+            .find(|member| member.role == ImageSetRole::WorkloadRootfs(profile))
+            .unwrap()
+            .artifacts
+            .push(second_tar);
+        assert!(select_local_development_source(&duplicate, arch, profile).is_err());
+        let mut incomplete = set.clone();
+        incomplete
+            .members
+            .retain(|member| !matches!(member.role, ImageSetRole::WorkloadKernel(_)));
+        assert!(select_local_development_source(&incomplete, arch, profile).is_err());
+        let mut altered = proof.clone();
+        altered.composition_tar_sha256 = "0".repeat(64);
+        assert!(
+            select_local_development_base(
+                &set,
+                arch,
+                kernel.sha256.as_str(),
+                kernel.size,
+                &altered
+            )
+            .is_err()
+        );
+        assert!(select_local_development_base(&set, arch, "0", kernel.size, &proof).is_err());
+        assert!(
+            select_local_development_base(
+                &set,
+                arch,
+                kernel.sha256.as_str(),
+                kernel.size + 1,
+                &proof
+            )
+            .is_err()
+        );
+        let mut relabelled = set.clone();
+        relabelled.producer = complete_image_set().0.producer;
+        assert!(
+            select_local_development_base(
+                &relabelled,
+                arch,
+                kernel.sha256.as_str(),
+                kernel.size,
+                &proof
+            )
+            .is_err()
+        );
+        let rootfs = set
+            .members
+            .iter_mut()
+            .find(|member| {
+                member.role == ImageSetRole::WorkloadRootfs(profile) && member.target.admits(arch)
+            })
+            .unwrap();
+        rootfs.build_mode = Some(crate::image_set::MemberBuildMode::Dev);
+        assert!(
+            select_local_development_base(&set, arch, kernel.sha256.as_str(), kernel.size, &proof)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn local_base_source_requires_exact_regular_bytes_not_only_a_declared_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.tar.gz");
+        std::fs::write(&path, b"exact tar source").unwrap();
+        let proof = LocalDevelopmentBaseProof {
+            manifest_artifact: "boot-image-set.json".into(),
+            composition_tar_sha256: sha256_hex(b"exact tar source"),
+            composition_tar_size: 16,
+            composition_tar_path: std::fs::canonicalize(&path)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .into(),
+        };
+        verify_local_development_source(&proof).unwrap();
+        std::fs::write(&path, b"tampered source!").unwrap();
+        assert!(verify_local_development_source(&proof).is_err());
+        std::fs::remove_file(&path).unwrap();
+        assert!(verify_local_development_source(&proof).is_err());
+        #[cfg(unix)]
+        {
+            std::fs::write(dir.path().join("actual"), b"exact tar source").unwrap();
+            std::os::unix::fs::symlink(dir.path().join("actual"), &path).unwrap();
+            assert!(verify_local_development_source(&proof).is_err());
+        }
     }
 
     fn embedded_bundle(
@@ -2087,6 +2636,7 @@ mod tests {
             overlay_roothash: "a".repeat(64),
             protocol_version: 2,
             min_supported_protocol_version: 2,
+            pr_test_pull_request: None,
         })];
         let archive = write_bundle(&manifest, &sk, payload).unwrap();
 

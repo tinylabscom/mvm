@@ -182,18 +182,7 @@ pub fn install_signed_guest_runtime_archive(
     arch: GuestArch,
 ) -> Result<GuestRuntime, GuestRuntimeError> {
     let verified = evidence::verify_release_archive(archive, checksum, bundle, version, arch)?;
-    let base = cache_root.join("guest-runtime").join("v1");
-    fs::create_dir_all(&base)?;
-    let _lock = guest_agent_build::acquire_guest_build_lock(&base, "guest runtime")?;
-    let stage = stage_archive(&base, verified.archive_path())?;
-    let mut runtime = promote_staged_archive(
-        &base,
-        stage,
-        verified.manifest().clone(),
-        verified.archive_sha256().to_string(),
-        arch,
-        ArchiveScope::Release,
-    )?;
+    let mut runtime = install_verified_archive(cache_root, &verified, arch)?;
     runtime.release_proof = Some(evidence::RuntimeReleaseProof {
         archive: archive.canonicalize()?,
         checksum: checksum.canonicalize()?,
@@ -202,6 +191,37 @@ pub fn install_signed_guest_runtime_archive(
         version: version.to_string(),
         arch,
     });
+    Ok(runtime)
+}
+
+/// Install a PR-signed test archive; never mint release provenance.
+#[cfg(feature = "pr-test-guest-runtime")]
+pub fn install_pr_test_guest_runtime_archive(
+    cache_root: &Path,
+    proof: &mvm_core::protocol::runtime_release::PrTestRuntimeProof,
+) -> Result<GuestRuntime, GuestRuntimeError> {
+    let verified =
+        evidence::verify_pr_test_runtime_proof(proof, &proof.input.version, proof.input.arch)?;
+    install_verified_archive(cache_root, &verified, proof.input.arch)
+}
+
+fn install_verified_archive(
+    cache_root: &Path,
+    verified: &evidence::VerifiedRuntimeManifest,
+    arch: GuestArch,
+) -> Result<GuestRuntime, GuestRuntimeError> {
+    let base = cache_root.join("guest-runtime").join("v1");
+    fs::create_dir_all(&base)?;
+    let _lock = guest_agent_build::acquire_guest_build_lock(&base, "guest runtime")?;
+    let stage = stage_archive(&base, verified.archive_path())?;
+    let runtime = promote_staged_archive(
+        &base,
+        stage,
+        verified.manifest().clone(),
+        verified.archive_sha256().to_string(),
+        arch,
+        ArchiveScope::Release,
+    )?;
     Ok(runtime)
 }
 

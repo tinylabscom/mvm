@@ -155,6 +155,9 @@ pub struct VmStartConfig {
     /// Untrusted release inputs. The launch boundary authenticates the archive
     /// and snapshots the selected boot artifacts before a backend can read them.
     pub runtime_release_proof: Option<super::runtime_release::RuntimeReleaseProof>,
+    /// PR-workflow signed test runtime, never release provenance.
+    #[cfg(feature = "pr-test-guest-runtime")]
+    pub pr_test_runtime_proof: Option<super::runtime_release::PrTestRuntimeProof>,
     /// Explicit unsigned contributor runtime. Never sufficient for production
     /// assurance, regardless of cache fingerprints or declared protocol.
     pub unsigned_runtime_development: bool,

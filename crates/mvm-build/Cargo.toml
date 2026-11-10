@@ -141,6 +141,8 @@ release-channel = []
 # `builder_pack`'s tests can exercise `verify_pack_keyless_at` without
 # every mvm-build build pulling the sigstore dependency tree.
 manifest-verify = ["mvm-core/manifest-verify"]
+# PR-only signed runtime inputs; never part of the release channel.
+pr-test-guest-runtime = ["manifest-verify", "mvm-core/pr-test-guest-runtime"]
 # Exposes `published_image_set::fixture`, a signed-root-shaped image set served
 # from a directory, to other crates' tests.
 test-support = ["mvm-fs/test-support"]

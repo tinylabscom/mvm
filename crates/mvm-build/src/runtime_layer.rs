@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use mvm_contract::pack_spec::PackTarget;
 use mvm_contract::pack_spec_v2::{BuildMode, ComposablePackError, ComposablePackSpec};
 use mvm_core::arch::GuestArch;
-use mvm_core::image_set::WorkloadImageProfile;
+use mvm_core::image_set::{ArtifactFormat, ImageSetManifest, WorkloadImageProfile};
 use mvm_core::packs::Sha256Hex;
 use mvm_core::registry_pack::runtime_layer::{
     OfflineRuntimePolicyError, RuntimeLayerArchiveError, RuntimeLayerInputError,
@@ -168,6 +168,25 @@ impl ResolvedComposableLock {
             return Err(RuntimeLayerStageError::StaleLock);
         }
         Ok(())
+    }
+
+    /// Identity of filesystem bytes, excluding command and policy decisions.
+    ///
+    /// The base and runtime manifest pins bind their archive digests. The
+    /// application archive digest binds every copied file. A new assembler
+    /// revision changes the key even when its version number has not changed.
+    pub fn filesystem_identity(&self) -> anyhow::Result<Sha256Hex> {
+        let bytes = serde_json::to_vec(&(
+            "mvm.composable-rootfs/v1",
+            &self.base_manifest_sha256,
+            &self.runtime_pins,
+            &self.application_archive_sha256,
+            self.target,
+            self.profile,
+            &self.producer_revision,
+            &self.producer_version,
+        ))?;
+        Ok(Sha256Hex::from_bytes(&bytes))
     }
 }
 
@@ -497,7 +516,7 @@ pub enum RuntimeLayerStageError {
         "host filesystem case-folds distinct guest paths; compose inside a case-sensitive Linux boundary"
     )]
     CaseFolding,
-    #[error("signed base acquisition failed: {0}")]
+    #[error("base acquisition failed: {0}")]
     Base(#[from] anyhow::Error),
     #[error("signed base composition source has invalid contract or ownership")]
     BaseContract,
@@ -566,6 +585,35 @@ pub fn compose_authored_candidate(
     profile: WorkloadImageProfile,
     inputs: &[&VerifiedRuntimeLayerInputs],
 ) -> Result<ComposedWorkloadRootfs, RuntimeLayerStageError> {
+    compose_authored_candidate_with(spec, inputs, |arch, archives| {
+        compose_signed_workload_tree(images, arch, profile, archives)
+    })
+}
+
+/// Compose an explicitly selected local-development base. The local manifest
+/// must declare both input files; its ext4 artifact is not treated as the
+/// composition tree or as evidence that it matches the tar.
+pub fn compose_local_authored_candidate(
+    spec: &ComposablePackSpec,
+    manifest_bytes: &[u8],
+    kernel: &Path,
+    tar: &Path,
+    profile: WorkloadImageProfile,
+    inputs: &[&VerifiedRuntimeLayerInputs],
+) -> Result<ComposedWorkloadRootfs, RuntimeLayerStageError> {
+    compose_authored_candidate_with(spec, inputs, |arch, archives| {
+        compose_local_workload_tree(manifest_bytes, kernel, tar, arch, profile, archives)
+    })
+}
+
+fn compose_authored_candidate_with(
+    spec: &ComposablePackSpec,
+    inputs: &[&VerifiedRuntimeLayerInputs],
+    select_base: impl FnOnce(
+        GuestArch,
+        &[&VerifiedRuntimeLayerArchive],
+    ) -> Result<ComposedWorkloadRootfs, RuntimeLayerStageError>,
+) -> Result<ComposedWorkloadRootfs, RuntimeLayerStageError> {
     spec.validate()?;
     for input in inputs {
         require_offline_runtime_policy(input)?;
@@ -589,7 +637,7 @@ pub fn compose_authored_candidate(
         PackTarget::X86_64Linux => GuestArch::X86_64,
         PackTarget::Aarch64Linux => GuestArch::Aarch64,
     };
-    let mut composed = compose_signed_workload_tree(images, arch, profile, &archives)?;
+    let mut composed = select_base(arch, &archives)?;
     for input in inputs {
         // add_runtime_archives already rehashes each archive before and after
         // extraction; the small signed policy bytes still need a final check.
@@ -601,6 +649,98 @@ pub fn compose_authored_candidate(
         .map(|input| input.policies().clone())
         .collect();
     Ok(composed)
+}
+
+/// Require a local schema-3 dev pair with its own declared tar, then use
+/// exactly those bytes as the base and selected kernel for a dev-only build.
+pub fn compose_local_workload_tree(
+    manifest_bytes: &[u8],
+    kernel: &Path,
+    tar: &Path,
+    arch: GuestArch,
+    profile: WorkloadImageProfile,
+    archives: &[&VerifiedRuntimeLayerArchive],
+) -> Result<ComposedWorkloadRootfs, RuntimeLayerStageError> {
+    if manifest_bytes.len() > mvm_core::plan::bundle::MAX_IMAGE_SET_MANIFEST_BYTES as usize {
+        return Err(RuntimeLayerStageError::Unsupported(
+            "local base manifest exceeds its bound",
+        ));
+    }
+    let manifest: ImageSetManifest = serde_json::from_slice(manifest_bytes)
+        .map_err(|_| RuntimeLayerStageError::Unsupported("invalid local base manifest"))?;
+    mvm_core::image_set::check_workload_protocol_compatibility(
+        &manifest.compatibility,
+        &crate::stage0_kernel::current_image_set_protocol_support(),
+    )
+    .map_err(|error| RuntimeLayerStageError::Base(error.into()))?;
+    let (kernel_artifact, tar_artifact) =
+        mvm_core::plan::bundle::select_local_development_source(&manifest, arch, profile)
+            .map_err(|error| RuntimeLayerStageError::Base(error.into()))?;
+    let ArtifactFormat::Kernel(declared_kernel_format) = kernel_artifact.format else {
+        return Err(RuntimeLayerStageError::Unsupported(
+            "local dev kernel format is invalid",
+        ));
+    };
+    if kernel_artifact.size > 256 * 1024 * 1024 {
+        return Err(RuntimeLayerStageError::Unsupported(
+            "local base kernel exceeds the bundle capture bound",
+        ));
+    }
+    if tar_artifact.size > 2 * 1024 * 1024 * 1024 {
+        return Err(RuntimeLayerStageError::Unsupported(
+            "local base tar exceeds its bound",
+        ));
+    }
+    for (path, artifact) in [(kernel, kernel_artifact), (tar, tar_artifact)] {
+        let metadata = std::fs::symlink_metadata(path)?;
+        if !metadata.file_type().is_file()
+            || metadata.len() != artifact.size
+            || mvm_core::crypto::image_verify::sha256_file(path)? != artifact.sha256.as_str()
+        {
+            return Err(RuntimeLayerStageError::Unsupported(
+                "local base kernel or composition tar differs from its declared bytes",
+            ));
+        }
+    }
+    let mut head = vec![0; mvm_core::kernel_format::KernelFormat::SNIFF_LEN];
+    std::io::Read::read_exact(&mut std::fs::File::open(kernel)?, &mut head)?;
+    let actual_kernel_format = mvm_core::kernel_format::KernelFormat::sniff_magic(&head);
+    let expected_machine = match arch {
+        GuestArch::X86_64 => 62u16,
+        GuestArch::Aarch64 => 183u16,
+    };
+    if actual_kernel_format != Some(declared_kernel_format)
+        || (declared_kernel_format == mvm_core::kernel_format::KernelFormat::Elf
+            && head.get(18..20) != Some(expected_machine.to_le_bytes().as_slice()))
+    {
+        return Err(RuntimeLayerStageError::Unsupported(
+            "local kernel bytes do not match the declared format or architecture",
+        ));
+    }
+    let pins = runtime_pins(archives, &arch.to_string())?;
+    let mut decompressed = tempfile::tempfile()?;
+    decompress_single_gzip(
+        io::BufReader::new(std::fs::File::open(tar)?),
+        tar_artifact.size,
+        &mut decompressed,
+    )?;
+    if mvm_core::crypto::image_verify::sha256_file(tar)? != tar_artifact.sha256.as_str() {
+        return Err(RuntimeLayerStageError::Unsupported(
+            "local base tar changed while decompressing",
+        ));
+    }
+    decompressed.seek(SeekFrom::Start(0))?;
+    let mut composed = ComposedRuntimeLayers::new(pins)?;
+    composed.add_base_tar(&mut decompressed)?;
+    check_base_contract(&composed)?;
+    add_runtime_archives(&mut composed, archives)?;
+    Ok(ComposedWorkloadRootfs {
+        tree: composed,
+        base_manifest_sha256: Sha256Hex::from_bytes(manifest_bytes),
+        profile,
+        authored_spec_sha256: None,
+        runtime_policies: Vec::new(),
+    })
 }
 
 /// Combine a signed generic base and ordered runtime layers without Nix.
@@ -1256,6 +1396,157 @@ mod tests {
     }
 
     #[test]
+    fn local_composition_uses_only_the_declared_kernel_and_tar() {
+        use crate::published_image_set::fixture::ImageSetFixture;
+        use mvm_core::image_set::{
+            BaseImageContract, BuilderBootAbi, GuestDeviceRequirement, ImageSetRole,
+            MemberArtifact, MemberTarget,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let arch = GuestArch::host();
+        let profile = WorkloadImageProfile::DefaultTenant;
+        let kernel = directory.path().join("vmlinux");
+        let tar = directory.path().join("rootfs.tar.gz");
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, &base_tar(b"1\n", 901)).unwrap();
+        let tar_bytes = encoder.finish().unwrap();
+        let mut kernel_bytes = vec![0u8; mvm_core::kernel_format::KernelFormat::SNIFF_LEN];
+        match arch {
+            GuestArch::X86_64 => {
+                kernel_bytes[..4].copy_from_slice(b"\x7fELF");
+                kernel_bytes[18..20].copy_from_slice(&62u16.to_le_bytes());
+            }
+            GuestArch::Aarch64 => {
+                kernel_bytes[56..60].copy_from_slice(&0x644D_5241u32.to_le_bytes());
+            }
+        }
+        std::fs::write(&kernel, &kernel_bytes).unwrap();
+        std::fs::write(&tar, &tar_bytes).unwrap();
+        let mut manifest = ImageSetFixture::complete()
+            .with_base_image_contract(Some(BaseImageContract::LINUX_LAYER))
+            .publish(
+                ImageSetRole::WorkloadKernel(profile),
+                MemberTarget::Arch(arch),
+                "local-vmlinux",
+                kernel_bytes.clone(),
+            )
+            .publish(
+                ImageSetRole::WorkloadRootfs(profile),
+                MemberTarget::Arch(arch),
+                "local-rootfs.ext4",
+                b"unrelated ext4".to_vec(),
+            )
+            .into_manifest();
+        manifest.members.retain(|member| {
+            member.target == MemberTarget::Arch(arch)
+                && matches!(
+                    member.role,
+                    ImageSetRole::WorkloadKernel(_) | ImageSetRole::WorkloadRootfs(_)
+                )
+        });
+        manifest.schema_version = mvm_core::image_set::IMAGE_SET_SCHEMA_VERSION;
+        let release_producer = manifest.producer.clone();
+        manifest.producer = serde_json::from_value(serde_json::json!({
+            "local_checkouts": {
+                "images": {
+                    "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "worktree": {"state": "clean"}
+                }
+            }
+        }))
+        .unwrap();
+        manifest.mvm_source_commit = None;
+        manifest.revocation_channel = None;
+        manifest.compatibility.guest_agent_protocol = None;
+        manifest.compatibility.builder_boot_abi = Some(BuilderBootAbi::NO_MVM_BINARY);
+        for member in &mut manifest.members {
+            member.pack_hash = None;
+            member.sbom = None;
+            match member.role {
+                ImageSetRole::WorkloadKernel(_) => {
+                    member.required_capabilities = vec![GuestDeviceRequirement::VirtioVsock];
+                }
+                ImageSetRole::WorkloadRootfs(_) => {
+                    member.required_capabilities = vec![GuestDeviceRequirement::VirtioBlk];
+                    member.artifacts.push(MemberArtifact {
+                        name: mvm_core::image_set::ArtifactName::new("local-rootfs.tar.gz")
+                            .unwrap(),
+                        format: ArtifactFormat::TarGz,
+                        sha256: Sha256Hex::from_bytes(&tar_bytes),
+                        size: tar_bytes.len() as u64,
+                    });
+                }
+                _ => unreachable!(),
+            }
+        }
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let composed =
+            compose_local_workload_tree(&bytes, &kernel, &tar, arch, profile, &[]).unwrap();
+        assert_eq!(
+            std::fs::read(composed.root().join("usr/bin/sh")).unwrap(),
+            b"busybox"
+        );
+        assert_eq!(
+            composed.base_manifest_sha256(),
+            &Sha256Hex::from_bytes(&bytes)
+        );
+        drop(composed);
+
+        std::fs::write(&kernel, b"forged kernel").unwrap();
+        assert!(compose_local_workload_tree(&bytes, &kernel, &tar, arch, profile, &[]).is_err());
+        std::fs::write(&kernel, &kernel_bytes).unwrap();
+        std::fs::write(&tar, b"unrelated ext4").unwrap();
+        assert!(compose_local_workload_tree(&bytes, &kernel, &tar, arch, profile, &[]).is_err());
+        std::fs::write(&tar, &tar_bytes).unwrap();
+        manifest.compatibility.builder_boot_abi = Some(BuilderBootAbi::LEGACY);
+        assert!(
+            compose_local_workload_tree(
+                &serde_json::to_vec(&manifest).unwrap(),
+                &kernel,
+                &tar,
+                arch,
+                profile,
+                &[]
+            )
+            .is_err()
+        );
+        manifest.compatibility.builder_boot_abi = Some(BuilderBootAbi::NO_MVM_BINARY);
+        manifest
+            .members
+            .iter_mut()
+            .find(|member| member.role == ImageSetRole::WorkloadRootfs(profile))
+            .unwrap()
+            .artifacts
+            .retain(|artifact| artifact.format != ArtifactFormat::TarGz);
+        assert!(
+            compose_local_workload_tree(
+                &serde_json::to_vec(&manifest).unwrap(),
+                &kernel,
+                &tar,
+                arch,
+                profile,
+                &[]
+            )
+            .is_err(),
+            "an ext4 declaration is not a composition tree"
+        );
+        manifest.producer = release_producer;
+        assert!(
+            compose_local_workload_tree(
+                &serde_json::to_vec(&manifest).unwrap(),
+                &kernel,
+                &tar,
+                arch,
+                profile,
+                &[]
+            )
+            .is_err(),
+            "a release claim cannot enter the local lane"
+        );
+    }
+
+    #[test]
     fn one_application_is_sealed_into_the_composed_rootfs() {
         use std::io::Write as _;
 
@@ -1591,6 +1882,11 @@ mod tests {
         let locked_bytes = serde_json::to_vec(&lock).unwrap();
         let restored: ResolvedComposableLock = serde_json::from_slice(&locked_bytes).unwrap();
         restored.verify_current(&lock).unwrap();
+        let filesystem = restored.filesystem_identity().unwrap();
+        let mut command_only = lock.clone();
+        command_only.spec_sha256 = Sha256Hex::from_bytes(b"another admitted command");
+        assert_ne!(command_only, lock);
+        assert_eq!(command_only.filesystem_identity().unwrap(), filesystem);
         let mut changed = lock.clone();
         changed.source_tree_sha256 = Sha256Hex::from_bytes(b"edited source");
         assert!(matches!(
@@ -1599,12 +1895,14 @@ mod tests {
         ));
         changed = lock.clone();
         changed.base_manifest_sha256 = Sha256Hex::from_bytes(b"replaced base");
+        assert_ne!(changed.filesystem_identity().unwrap(), filesystem);
         assert!(matches!(
             restored.verify_current(&changed),
             Err(RuntimeLayerStageError::StaleLock)
         ));
         changed = lock.clone();
         changed.application_archive_sha256 = Sha256Hex::from_bytes(b"changed application");
+        assert_ne!(changed.filesystem_identity().unwrap(), filesystem);
         assert!(matches!(
             restored.verify_current(&changed),
             Err(RuntimeLayerStageError::StaleLock)

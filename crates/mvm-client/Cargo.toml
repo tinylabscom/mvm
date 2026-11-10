@@ -52,6 +52,11 @@ clap = ["dep:clap"]
 # checks signed artifacts and keyless instruction-file signatures. Explicit
 # no-default-features builds report signatures as uncheckable, never verified.
 manifest-verify = ["mvm-core/manifest-verify"]
+pr-test-guest-runtime = [
+    "mvm-runtime/pr-test-guest-runtime",
+    "mvm-build/pr-test-guest-runtime",
+    "mvm-hostd/pr-test-guest-runtime",
+]
 # Derive schemas for authored policy and instruction trust policy, and build
 # their emitters. Off by default so no shipped closure carries schemars;
 # mvm-contract/schema covers policy endpoint routes and backend kinds.

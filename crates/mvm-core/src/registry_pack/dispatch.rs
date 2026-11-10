@@ -1,6 +1,10 @@
 //! Authenticated manifest dispatch. Bundle metadata is not bundle admission.
 
 use super::application::{RegistryApplicationManifest, parse_application_manifest};
+use super::application_component::{
+    RegistryApplicationComponentManifest, parse_application_component_manifest,
+};
+use super::component_layer::{VerifiedRegistryComponentLayer, finish_component_layer};
 use super::runtime_layer::{RegistryRuntimeLayerManifest, parse_runtime_layer_manifest};
 use super::*;
 
@@ -76,10 +80,46 @@ impl VerifiedRegistryRuntimeLayer {
     }
 }
 
+/// Publisher-authenticated component metadata, not an executable application.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedRegistryApplicationComponent {
+    pub(super) manifest: RegistryApplicationComponentManifest,
+    pub(super) manifest_bytes: Vec<u8>,
+    pub(super) signature_bundle: Vec<u8>,
+    pub(super) manifest_sha256: Sha256Hex,
+    pub(super) signer: VerifiedSigner,
+}
+
+impl VerifiedRegistryApplicationComponent {
+    /// Strictly parsed, publisher-authenticated descriptor.
+    pub fn manifest(&self) -> &RegistryApplicationComponentManifest {
+        &self.manifest
+    }
+
+    /// Exact signed descriptor bytes.
+    pub fn manifest_bytes(&self) -> &[u8] {
+        &self.manifest_bytes
+    }
+
+    /// Detached publisher signature evidence.
+    pub fn signature_bundle(&self) -> &[u8] {
+        &self.signature_bundle
+    }
+
+    /// Require the current signed registry revocation feed before use.
+    pub fn check_current_revocations(
+        &self,
+    ) -> Result<(), crate::registry_pack_store::RegistryPackStoreError> {
+        crate::registry_pack_store::check_application_revocations(self)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifiedRegistryManifest {
     Legacy(VerifiedRegistryPack),
     Application(VerifiedRegistryApplication),
+    ApplicationComponent(VerifiedRegistryApplicationComponent),
+    ComponentLayer(VerifiedRegistryComponentLayer),
     RuntimeLayer(VerifiedRegistryRuntimeLayer),
 }
 
@@ -143,12 +183,46 @@ impl AuthenticatedRegistryManifest for VerifiedRegistryRuntimeLayer {
     }
 }
 
+impl sealed::Sealed for VerifiedRegistryApplicationComponent {}
+impl AuthenticatedRegistryManifest for VerifiedRegistryApplicationComponent {
+    fn reference(&self) -> &PackReference {
+        &self.manifest.reference
+    }
+    fn manifest_sha256(&self) -> &Sha256Hex {
+        &self.manifest_sha256
+    }
+    fn signer(&self) -> &VerifiedSigner {
+        &self.signer
+    }
+    fn requires_operator_revocations(&self) -> bool {
+        true
+    }
+}
+
+impl sealed::Sealed for VerifiedRegistryComponentLayer {}
+impl AuthenticatedRegistryManifest for VerifiedRegistryComponentLayer {
+    fn reference(&self) -> &PackReference {
+        self.manifest().reference()
+    }
+    fn manifest_sha256(&self) -> &Sha256Hex {
+        self.manifest_sha256()
+    }
+    fn signer(&self) -> &VerifiedSigner {
+        self.signer()
+    }
+    fn requires_operator_revocations(&self) -> bool {
+        true
+    }
+}
+
 impl sealed::Sealed for VerifiedRegistryManifest {}
 impl AuthenticatedRegistryManifest for VerifiedRegistryManifest {
     fn reference(&self) -> &PackReference {
         match self {
             Self::Legacy(pack) => pack.reference(),
             Self::Application(application) => application.reference(),
+            Self::ApplicationComponent(component) => component.reference(),
+            Self::ComponentLayer(component) => component.reference(),
             Self::RuntimeLayer(layer) => layer.reference(),
         }
     }
@@ -157,6 +231,8 @@ impl AuthenticatedRegistryManifest for VerifiedRegistryManifest {
         match self {
             Self::Legacy(pack) => pack.manifest_sha256(),
             Self::Application(application) => application.manifest_sha256(),
+            Self::ApplicationComponent(component) => component.manifest_sha256(),
+            Self::ComponentLayer(component) => component.manifest_sha256(),
             Self::RuntimeLayer(layer) => layer.manifest_sha256(),
         }
     }
@@ -165,6 +241,8 @@ impl AuthenticatedRegistryManifest for VerifiedRegistryManifest {
         match self {
             Self::Legacy(pack) => pack.signer(),
             Self::Application(application) => application.signer(),
+            Self::ApplicationComponent(component) => component.signer(),
+            Self::ComponentLayer(component) => component.signer(),
             Self::RuntimeLayer(layer) => layer.signer(),
         }
     }
@@ -173,6 +251,8 @@ impl AuthenticatedRegistryManifest for VerifiedRegistryManifest {
         match self {
             Self::Legacy(pack) => pack.requires_operator_revocations(),
             Self::Application(application) => application.requires_operator_revocations(),
+            Self::ApplicationComponent(component) => component.requires_operator_revocations(),
+            Self::ComponentLayer(component) => component.requires_operator_revocations(),
             Self::RuntimeLayer(layer) => layer.requires_operator_revocations(),
         }
     }
@@ -201,6 +281,20 @@ pub(super) fn verify_with(
         },
         check,
     )
+}
+
+/// Verify a component's pinned bytes and namespace publisher, without
+/// admitting its archive or policy. The public entrypoint also checks revocations.
+pub(super) fn verify_component_with(
+    request: &RegistryPackVerification<'_>,
+    check: RegistryPackSignatureChecker,
+) -> Result<VerifiedRegistryApplicationComponent, RegistryPackVerificationError> {
+    match verify_with(request, check)? {
+        VerifiedRegistryManifest::ApplicationComponent(component) => Ok(component),
+        _ => Err(RegistryPackVerificationError::ManifestParse(
+            "pinned pack is not a portable application component".into(),
+        )),
+    }
 }
 
 /// First adoption authenticates the publisher; it does not persist a pin.
@@ -300,6 +394,40 @@ pub(super) fn adopt_with(
                     signature_bundle: request.signature_bundle.to_vec(),
                 },
             ))
+        }
+        (3, Some("application_component")) => {
+            let manifest = parse_application_component_manifest(request.manifest_bytes)?;
+            if manifest.reference.coordinate != request.requested.coordinate
+                || request
+                    .requested
+                    .version
+                    .as_ref()
+                    .is_some_and(|v| Some(v) != manifest.reference.version.as_ref())
+            {
+                return Err(RegistryPackVerificationError::ManifestReferenceMismatch {
+                    manifest: manifest.reference.to_string(),
+                    locked: request.requested.to_string(),
+                });
+            }
+            let manifest_sha256 = Sha256Hex::from_bytes(request.manifest_bytes);
+            historical::check_legacy_manifest_policy(
+                request.publisher_policy,
+                &signer.identity,
+                &manifest.reference,
+                &manifest_sha256,
+            )?;
+            Ok(VerifiedRegistryManifest::ApplicationComponent(
+                VerifiedRegistryApplicationComponent {
+                    manifest,
+                    manifest_sha256,
+                    signer,
+                    manifest_bytes: request.manifest_bytes.to_vec(),
+                    signature_bundle: request.signature_bundle.to_vec(),
+                },
+            ))
+        }
+        (4, Some("runtime_component" | "tool_component")) => {
+            finish_component_layer(request, signer).map(VerifiedRegistryManifest::ComponentLayer)
         }
         _ => Err(RegistryPackVerificationError::ManifestParse(
             "unsupported registry manifest kind/schema pair".to_string(),

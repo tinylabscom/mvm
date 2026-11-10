@@ -190,6 +190,14 @@ pub(crate) fn attach_guest_runtime(config: &mut VmStartConfig, backend_name: &st
     if !mvm_runtime::universal_initramfs::KERNEL_BOOTING_HYPERVISORS.contains(&backend_name) {
         return Ok(());
     }
+    #[cfg(feature = "pr-test-guest-runtime")]
+    if config.pr_test_runtime_proof.is_some() {
+        mvm_runtime::runtime_evidence::verify_runtime_for_launch(
+            config,
+            mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+        )?;
+        return Ok(());
+    }
     let mut selected = config.clone();
     attach_runtime_overlay_from_cache(&mut selected, backend_name)?;
     let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());

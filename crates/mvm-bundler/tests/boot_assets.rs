@@ -48,6 +48,7 @@ fn cli_boot_export_preserves_linux_identity_and_refuses_incomplete_or_mixed_memb
             overlay_roothash: "a".repeat(64),
             protocol_version: 2,
             min_supported_protocol_version: 2,
+            pr_test_pull_request: None,
         };
         // Structural sealing only: synthetic runtime inputs must not pass release verification.
         let paths: Vec<_> = [
