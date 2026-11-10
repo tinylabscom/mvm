@@ -24,8 +24,8 @@ use mvm_agentd::vsock::{
 use mvm_core::config::vm_state_dir;
 use mvm_core::launch_trace::LaunchTraceRecorder;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
-    ResourceControls, SnapshotCapability, StandbyError, StandbyHandle, StandbyState,
+    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, HostDialRoute,
+    LayerCoverage, ResourceControls, SnapshotCapability, StandbyError, StandbyHandle, StandbyState,
     VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
@@ -1375,6 +1375,12 @@ impl VmmDriver for FcDriver {
 
     fn guest_channel_info(&self, _id: &VmId) -> Result<GuestChannelInfo> {
         anyhow::bail!("firecracker does not provide guest channel info")
+    }
+
+    fn host_dial_route(&self, state_dir: &Path, _port: u32) -> Option<HostDialRoute> {
+        Some(HostDialRoute::Mux(PathBuf::from(
+            mvm_agentd::vsock::vsock_uds_path(&state_dir.to_string_lossy()),
+        )))
     }
 }
 

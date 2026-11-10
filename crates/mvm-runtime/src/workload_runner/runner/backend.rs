@@ -293,6 +293,10 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
         self.driver.guest_channel_info(id)
     }
 
+    fn host_dial_route(&self, state_dir: &std::path::Path, port: u32) -> Option<HostDialRoute> {
+        self.driver.host_dial_route(state_dir, port)
+    }
+
     fn is_available(&self) -> Result<bool> {
         self.driver.is_available()
     }

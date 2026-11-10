@@ -10,8 +10,8 @@ use std::time::Duration;
 use anyhow::Result;
 use mvm_core::crypto::vmgenid::GenerationToken;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, StandbyError,
-    StandbyHandle, StandbySpec, VmCapabilities, VmExitStatus, VmId, VmStatus,
+    BackendKind, BackendSecurityProfile, GuestChannelInfo, HostDialRoute, SnapshotCapability,
+    StandbyError, StandbyHandle, StandbySpec, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 
 use crate::driver::spec::{VmmSpec, VsockPort};
@@ -349,6 +349,12 @@ pub trait VmmDriver: Send + Sync {
     /// Guest communication channel info for VM `id`. Errors when the VMM has
     /// none to report.
     fn guest_channel_info(&self, id: &VmId) -> Result<GuestChannelInfo>;
+
+    /// Where the host dials guest vsock `port` for the VM at `state_dir`;
+    /// `None` when this VMM exposes no host-dialed guest ports.
+    fn host_dial_route(&self, _state_dir: &Path, _port: u32) -> Option<HostDialRoute> {
+        None
+    }
 }
 
 /// A live VM handle. Launch-model-agnostic: an in-process VMM, a subprocess,
