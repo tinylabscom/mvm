@@ -126,6 +126,8 @@ tempfile.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 xattr.workspace = true
+# The v2 source-to-archive integration test runs the Unix-only SDK/compiler.
+mvm-sdk = { workspace = true, features = ["compiler"] }
 
 [features]
 default = ["builder-libkrun"]

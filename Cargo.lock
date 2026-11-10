@@ -3767,6 +3767,7 @@ dependencies = [
  "mvm-fs",
  "mvm-http",
  "mvm-net",
+ "mvm-sdk",
  "mvm-vmm",
  "serde",
  "serde_jcs",

@@ -166,6 +166,69 @@ pub fn copy_source(
     })
 }
 
+/// Snapshot only literal v2 copy sources, without walking unrelated directories.
+pub(crate) fn copy_selected_source(
+    src_root: &Path,
+    out_dir: &Path,
+    selected: &[String],
+) -> Result<SourcePlan, SourceError> {
+    if selected.iter().any(|path| path == ".") {
+        return copy_source(src_root, out_dir, &[], &[]);
+    }
+    if !src_root.is_dir() {
+        return Err(SourceError::PathNotDir(src_root.to_path_buf()));
+    }
+    fs::create_dir_all(out_dir).map_err(|error| SourceError::Copy(out_dir.to_path_buf(), error))?;
+    let include = build_glob_set(&[], &["**".to_string()])?;
+    let exclude = build_glob_set(&[], &[])?;
+    let mut entries = Vec::new();
+    let mut copied_dirs = Vec::<PathBuf>::new();
+    let ordered: std::collections::BTreeSet<_> = selected.iter().collect();
+    for relative in ordered {
+        let path = Path::new(relative);
+        if copied_dirs.iter().any(|copied| path.starts_with(copied)) {
+            continue;
+        }
+        let mut source = src_root.to_path_buf();
+        for component in path.components() {
+            let Component::Normal(name) = component else {
+                return Err(SourceError::Copy(
+                    path.to_path_buf(),
+                    io::Error::new(io::ErrorKind::InvalidInput, "non-relative copy source"),
+                ));
+            };
+            source.push(name);
+            let kind = fs::symlink_metadata(&source)
+                .map_err(|error| SourceError::Copy(source.clone(), error))?
+                .file_type();
+            if name == ".git" || kind.is_symlink() {
+                return Err(SourceError::Copy(
+                    source,
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "excluded or symlinked copy source",
+                    ),
+                ));
+            }
+        }
+        let kind = fs::symlink_metadata(&source)
+            .map_err(|error| SourceError::Copy(source.clone(), error))?
+            .file_type();
+        if kind.is_dir() {
+            walk_dir(src_root, &source, out_dir, &include, &exclude, &mut entries)?;
+            copied_dirs.push(path.to_path_buf());
+        } else if kind.is_file() {
+            handle_file(&source, relative, out_dir, &mut entries)?;
+        } else {
+            return Err(SourceError::Copy(
+                source,
+                io::Error::new(io::ErrorKind::InvalidInput, "unsupported copy source"),
+            ));
+        }
+    }
+    rehash(out_dir)
+}
+
 fn build_glob_set(patterns: &[String], default: &[String]) -> Result<GlobSet, SourceError> {
     let effective: &[String] = if patterns.is_empty() {
         default
