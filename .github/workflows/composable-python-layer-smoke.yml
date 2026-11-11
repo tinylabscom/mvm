@@ -159,10 +159,13 @@ jobs:
         with:
           persist-credentials: false
       # The emitter records this exact clean source checkout; it never builds images.
+      - name: Select reviewed test-only Linux source
+        id: test-images-ref
+        run: echo "ref=$(cat tests/fixtures/composable-images-source.ref)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v6
         with:
           repository: tinylabscom/mvm-images
-          ref: 34da739c12a75d56972d7e527a419124f3e3fac4
+          ref: ${{ steps.test-images-ref.outputs.ref }}
           path: mvm-images
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -175,7 +178,7 @@ jobs:
           MVM_PR_TEST_ZIP: ${{ runner.temp }}/linux-layer-x86_64.zip
         run: |
           set -euo pipefail
-          source_sha=34da739c12a75d56972d7e527a419124f3e3fac4
+          source_sha=$(cat tests/fixtures/composable-images-source.ref)
           artifact_digest=d12a6026d2858f1414f33a7692abf8693a4b158f547abe323fe19170eb301bfd
           test "$(git -C mvm-images rev-parse HEAD)" = "$source_sha"
           gh api repos/tinylabscom/mvm-images/actions/runs/42778535622 |
