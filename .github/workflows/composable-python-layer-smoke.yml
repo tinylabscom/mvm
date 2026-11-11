@@ -170,7 +170,10 @@ jobs:
             echo "wrong signed runtime architecture was accepted" >&2
             exit 1
           fi
-          grep -F "declares architecture" "$tmp/wrong-arch.log"
+          if ! grep -F "declares architecture" "$tmp/wrong-arch.log"; then
+            cat "$tmp/wrong-arch.log" >&2
+            exit 1
+          fi
 
           mkdir -p "$tmp/bad-files/pack"
           printf 'description = "Offline Python runtime"\nrequired = false\n[network]\nblock = true\n' \
@@ -196,7 +199,10 @@ jobs:
             echo "signed optional runtime policy was accepted" >&2
             exit 1
           fi
-          grep -F "requires a signed, required deny-all group" "$tmp/bad-group.log"
+          if ! grep -F "requires a signed, required deny-all group" "$tmp/bad-group.log"; then
+            cat "$tmp/bad-group.log" >&2
+            exit 1
+          fi
 
   signed-base:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
