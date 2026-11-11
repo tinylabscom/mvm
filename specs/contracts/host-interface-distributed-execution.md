@@ -415,7 +415,10 @@ the work is decomposed:
   key agreement or a wrapped key, and the derived keys do not interoperate
   across hosts. The grant's epoch is the same ledger
   value as the plan's, and a grant naming another epoch's authority key is
-  refused at launch. `machine replace` refuses while the machine is running.
+  refused at launch. `machine replace` refuses while the machine is running and works after
+  `machine stop` or `machine quarantine`: it needs only the workload ledger and
+  the audit log, never the stopped machine's plan. Each replace advances the
+  epoch again, so a second one with no launch between is another audited grant.
   The old VM's mailbox queue lives in its own process and ends with it.
 - Trusted-location volumes remain supported as named read-only or explicitly
   authorized read-write grants, configurable through both CLI and

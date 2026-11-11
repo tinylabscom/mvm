@@ -1138,7 +1138,7 @@ impl AuditEmitter {
         self.emit_entry(&entry)
     }
 
-    fn emit_entry(&self, entry: &PlanAuditEntry) -> Result<()> {
+    pub(crate) fn emit_entry(&self, entry: &PlanAuditEntry) -> Result<()> {
         // Callers may be synchronous (the CLI) or already inside an async
         // runtime (an in-process `MvmClient` consumer). Building + blocking
         // on a runtime from an async worker thread panics, so when a runtime
