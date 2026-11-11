@@ -40,11 +40,13 @@ ACK signing key inside the guest agent, not in the workload.
 
 ## Guest mailbox reader
 
-Only a signed plan granting this workload's own mailbox enables Receive. The
-agent exposes `/run/mvm/mailbox/receive.sock` to that workload when its separate
-boot ACK key was provisioned. The local protocol is versioned, length-prefixed,
-and bounded; use `ApplicationReaderRequest` and `ReaderResponse` from
-`mvm_core::mailbox::reader_wire`. `Receive` returns a destination-signed lease,
+Only a signed plan granting this workload's own mailbox can enable Receive.
+The agent binds `/run/mvm/mailbox/receive.sock` when its separate boot ACK key
+was provisioned, but the current Dev host helper refuses reader frames until
+independent journal authority and key custody are deployed. The local protocol
+is versioned, length-prefixed, and bounded; use `ApplicationReaderRequest` and
+`ReaderResponse` from `mvm_core::mailbox::reader_wire`. Once backed by an
+independent destination, `Receive` returns a signed lease,
 content type, and payload. Process the payload **before** sending
 `Ack { lease }` on a new connection. An empty inbox and a refusal are not
 successful delivery; reading never automatically ACKs.

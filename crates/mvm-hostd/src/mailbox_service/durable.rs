@@ -190,13 +190,6 @@ impl DurableMailboxService {
         })
     }
 
-    /// Install the separately verified reader identity before advertising readiness.
-    pub(crate) fn install_reader(&self, reader: GuestReaderAuthority) -> std::io::Result<()> {
-        self.shared.reader.set(reader).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::AlreadyExists, "reader already enrolled")
-        })
-    }
-
     /// Read one guest outbox operation over its dedicated mailbox port. The
     /// guest sees success only after the canonical ciphertext, dedup identity,
     /// and anchor have committed; an idle connection returns `false`.
