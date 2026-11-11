@@ -62,13 +62,22 @@ ownership decision.
 canonical encrypted mailbox frame and its deduplication identity. Its
 `JournalAnchor` interface requires an independently trusted authority to read
 the current `(cursor, head)` and atomically compare-and-advance it after a
-journal write. The journal persists unsigned receipt state in record version 2
-with a destination-signed, domain-separated admission intent binding the
-verified identity, canonical frame, and receipt state. The destination signs
-the actual acceptance receipt only after both commits. Earlier private-handoff
-version-1 records are refused, not silently reinterpreted. Recovery verifies
-the intent, refuses a missing or divergent anchored prefix, and may reconcile
-only an intact contiguous suffix written before an interrupted anchor commit.
+journal write. The journal persists unsigned receipt state with a
+destination-signed, domain-separated admission intent binding the verified
+identity, canonical frame, and receipt state. The test-scoped version 3 also
+binds a `HistoryKeyRef` (mailbox address, epoch, AES-256-GCM key ID and nonzero
+version) to the encrypted record and signed intent. Its recovery obtains the
+exact key through an existing-only `HistoryKeyCustody` lookup and refuses
+changed key identity, wrong key, or missing custody; it does not create a
+replacement key. The raw-key opener cannot issue an `accepted_durable` receipt.
+The destination signs an actual acceptance receipt only after both commits.
+Earlier private-handoff version-1 records are refused, not silently
+reinterpreted. Version-2 test/local records have no custody reference and are
+not silently promoted to version 3. Recovery verifies the intent, refuses a
+missing or divergent anchored prefix, and may reconcile only an intact
+contiguous suffix written before an interrupted anchor commit.
+The original accepted receipt body and observation time are retained with
+deduplication state; V1 retries still use their existing `duplicate` outcome.
 Retained guest-reader controls are checked against the historical signed
 Receive capability, enrollment, lease and guest ACK before recovery accepts
 their delivery state. An exact ACK retry still needs current boot, session,
@@ -76,27 +85,27 @@ policy and expiry authorization; an old committed ACK is not a new grant. A
 message ever leased to a guest cannot be closed by the legacy unsigned host
 ACK, including during recovery; it requires that guest's signed ACK.
 
-`FileJournalAnchor` is a local development aid, **not** that independent
+`FileJournalAnchor` is a local development aid, **not** an independent
 authority: restoring both the journal and its host-local anchor can hide
-rollback. The journal's current raw key input also does not establish
-persistent, versioned history-key custody or recover the separately encrypted
-payload after the per-launch mailbox secret is erased. Until those providers
-and the existing service's admission handoff are integrated and tested, local
+rollback. The custody interface has only a test provider: it does not supply
+a retained host key, rotation, or the separately encrypted payload's opening
+key after the per-launch mailbox secret is erased. Until real providers and
+the existing service's admission handoff are integrated and tested, local
 journal writes must not be presented as `accepted_durable`. The trusted-host
 profile can access plaintext; host-blind confidentiality requires a different
 attested key-release and protected-memory architecture.
 
-The intended trusted-host custody boundary is a separately retained, versioned
-mailbox-history root under host key custody. Each record must bind its key ID
-and tenant/domain/mailbox scope; reopening existing history must **load the
-existing version**, never mint a replacement or fall back to the signing seed
-or erased per-launch secret. Durable payloads also need an explicitly
-recoverable recipient encryption key: persisting the current per-launch key
-would silently negate its erasure guarantee. Rotation retains old versions
-only until their anchored history is retired. An independently operated
-checkpoint must atomically compare the anchored `(mailbox, cursor, head)` with
-the expected prior value; an unavailable or divergent checkpoint refuses
-durable acceptance. These custody and checkpoint providers are not wired yet.
+The planned standalone `accepted_local_durable` tier has a distinct versioned
+receipt contract. Its history and payload-purpose keys belong in the existing
+protected host keys directory, scoped to tenant/domain/mailbox/epoch and key
+version, with an authority signer pinned for retained history. Recovery must
+load the existing key version; it must not mint a new signer or use the erased
+per-launch secret as its only opening key. Rotation and deletion need explicit
+retention and refusal rules. A host-local chain can witness ordinary crash and
+process restart, **not** rollback of the entire host. Neither this local tier
+nor its key provider is enabled by the journal primitive. The stronger
+`accepted_durable` outcome continues to require a separately trusted
+compare-and-advance checkpoint; no such provider is wired.
 
 ## Features
 

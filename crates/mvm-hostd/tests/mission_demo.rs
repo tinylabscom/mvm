@@ -1161,8 +1161,9 @@ fn signed_guest_lease_and_exact_ack_survive_mock_anchored_restart() {
         MailboxGuestReaderEnrollment, MailboxGuestReaderScope,
     };
     use mvm_core::mailbox::journal::{
-        JournalAdmission, JournalAnchor, JournalError, JournalGuestAck, JournalGuestLease,
-        JournalLimits, JournalReceive, JournalTip, MailboxJournal,
+        HistoryKeyCustody, HistoryKeyRef, JournalAdmission, JournalAnchor, JournalError,
+        JournalGuestAck, JournalGuestLease, JournalLimits, JournalReceive, JournalTip,
+        MailboxJournal,
     };
     use mvm_core::mailbox::reader::{
         sign_delivery_ack, sign_guest_reader_enrollment, sign_reader_possession,
@@ -1205,6 +1206,17 @@ fn signed_guest_lease_and_exact_ack_survive_mock_anchored_restart() {
 
         fn advance(&self, next: JournalTip) -> Result<(), JournalError> {
             self.compare_and_advance(address(), self.tip(), next)
+        }
+    }
+
+    struct TestCustody(HistoryKeyRef);
+
+    impl HistoryKeyCustody for TestCustody {
+        fn load_existing(&self, reference: &HistoryKeyRef) -> Result<Key, JournalError> {
+            if reference != &self.0 {
+                return Err(JournalError::HistoryKeyUnavailable);
+            }
+            Ok(Key::from_bytes([90; 32]))
         }
     }
 
@@ -1350,15 +1362,18 @@ fn signed_guest_lease_and_exact_ack_survive_mock_anchored_restart() {
         max_records: 6,
         max_bytes: 64 * 1024,
     };
+    let reference =
+        HistoryKeyRef::new(address(), plan.epoch, [91; 32], 1).expect("test history key version");
+    let custody = TestCustody(reference);
     let anchor_state = Arc::new(Mutex::new(JournalTip::genesis()));
     let open = || {
         let anchor = TestAnchor(Arc::clone(&anchor_state));
-        let journal = MailboxJournal::open_with_anchor(
+        let journal = MailboxJournal::open_with_custody(
             &journal_path,
-            address(),
+            reference,
             authority,
-            [90; 32],
             limits,
+            &custody,
             &anchor,
         )
         .unwrap();
@@ -1466,12 +1481,12 @@ fn signed_guest_lease_and_exact_ack_survive_mock_anchored_restart() {
         *anchor_state.lock().expect("mock anchor lock") = forged;
         assert!(
             matches!(
-                MailboxJournal::open_with_anchor(
+                MailboxJournal::open_with_custody(
                     &journal_path,
-                    address(),
+                    reference,
                     authority,
-                    [90; 32],
                     limits,
+                    &custody,
                     &TestAnchor(Arc::clone(&anchor_state)),
                 ),
                 Err(JournalError::Corrupt)
@@ -1486,10 +1501,11 @@ fn signed_guest_lease_and_exact_ack_survive_mock_anchored_restart() {
         *anchor_state.lock().expect("mock anchor lock") = lease_tip;
     }
     let forged_host_ack = serde_json::json!({
-        "version": 2,
+        "version": 3,
         "cursor": 3,
         "previous": lease_tip.head,
         "address": address(),
+        "history_key": reference,
         "event": {
             "kind": "acknowledged",
             "identity": identity,
@@ -1500,12 +1516,12 @@ fn signed_guest_lease_and_exact_ack_survive_mock_anchored_restart() {
     *anchor_state.lock().expect("mock anchor lock") = forged;
     assert!(
         matches!(
-            MailboxJournal::open_with_anchor(
+            MailboxJournal::open_with_custody(
                 &journal_path,
-                address(),
+                reference,
                 authority,
-                [90; 32],
                 limits,
+                &custody,
                 &TestAnchor(Arc::clone(&anchor_state)),
             ),
             Err(JournalError::Corrupt)
@@ -1705,12 +1721,12 @@ fn signed_guest_lease_and_exact_ack_survive_mock_anchored_restart() {
     *anchor_state.lock().expect("mock anchor lock") = forged;
     assert!(
         matches!(
-            MailboxJournal::open_with_anchor(
+            MailboxJournal::open_with_custody(
                 &journal_path,
-                address(),
+                reference,
                 authority,
-                [90; 32],
                 limits,
+                &custody,
                 &TestAnchor(Arc::clone(&anchor_state)),
             ),
             Err(JournalError::Corrupt)
