@@ -182,6 +182,59 @@ impl From<ExecutionEpoch> for u64 {
     }
 }
 
+/// Versioned ceiling on application reports, separate from the signed Send capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    try_from = "MailboxReportSendPolicyWire",
+    into = "MailboxReportSendPolicyWire"
+)]
+pub struct MailboxReportSendPolicy {
+    max_payload_bytes: u32,
+}
+
+impl MailboxReportSendPolicy {
+    /// Refuses zero or values beyond the canonical plaintext ceiling.
+    pub fn new(max_payload_bytes: u32) -> Result<Self, MailboxContractError> {
+        if max_payload_bytes == 0 || u64::from(max_payload_bytes) > MAX_MAILBOX_PAYLOAD_BYTES as u64
+        {
+            return Err(MailboxContractError::InvalidReportPolicyBounds);
+        }
+        Ok(Self { max_payload_bytes })
+    }
+
+    #[must_use]
+    pub const fn max_payload_bytes(self) -> u32 {
+        self.max_payload_bytes
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MailboxReportSendPolicyWire {
+    version: u16,
+    max_payload_bytes: u32,
+}
+
+impl TryFrom<MailboxReportSendPolicyWire> for MailboxReportSendPolicy {
+    type Error = MailboxContractError;
+
+    fn try_from(wire: MailboxReportSendPolicyWire) -> Result<Self, Self::Error> {
+        if wire.version != 1 {
+            return Err(MailboxContractError::UnsupportedReportPolicyVersion);
+        }
+        Self::new(wire.max_payload_bytes)
+    }
+}
+
+impl From<MailboxReportSendPolicy> for MailboxReportSendPolicyWire {
+    fn from(policy: MailboxReportSendPolicy) -> Self {
+        Self {
+            version: 1,
+            max_payload_bytes: policy.max_payload_bytes,
+        }
+    }
+}
+
 /// What a signed `ExecutionPlan` admits for one workload's mailbox: which
 /// mailbox, the key whose capabilities are honored, and the execution epoch.
 /// Presence grants that workload its own mailbox, including the ability for
@@ -197,6 +250,39 @@ pub struct MailboxGrant {
     /// Ed25519 verifying key that must have signed any accepted capability.
     pub authority_key: [u8; 32],
     pub epoch: ExecutionEpoch,
+    /// An absent policy does not authorize a typed application report. Omitted
+    /// on older signed plans so their canonical bytes remain unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<MailboxReportSendPolicy>,
+}
+
+impl MailboxGrant {
+    /// Check an application report against the signed plan's exact Cast shape.
+    ///
+    /// This does not verify the plan signature or the narrower signed Send
+    /// capability, destination mailbox, current epoch, frame cap, or journal
+    /// quota. Runtime must intersect all of those before admission.
+    pub fn check_report_send(
+        &self,
+        kind: MailboxMessageKind,
+        content_type: &ContentType,
+        reply_to: Option<&ReplyRoute>,
+        encoded_payload_bytes: usize,
+    ) -> Result<(), MailboxContractError> {
+        let policy = self.report.ok_or(MailboxContractError::ReportNotGranted)?;
+        if kind != MailboxMessageKind::Cast || reply_to.is_some() {
+            return Err(MailboxContractError::InvalidReportMessageKind);
+        }
+        if content_type.name() != crate::protocol::workload_report::WORKLOAD_REPORT_CONTENT_TYPE
+            || content_type.version() != crate::protocol::workload_report::WORKLOAD_REPORT_VERSION
+        {
+            return Err(MailboxContractError::InvalidReportContentType);
+        }
+        if encoded_payload_bytes > policy.max_payload_bytes as usize {
+            return Err(MailboxContractError::ReportPayloadTooLarge);
+        }
+        Ok(())
+    }
 }
 
 /// Monotonic sequence within one declared ordering scope.
@@ -1151,6 +1237,18 @@ pub enum MailboxContractError {
     InvalidCapabilityBounds,
     #[error("capability execution epoch range is invalid")]
     InvalidEpochRange,
+    #[error("workload report policy version is unsupported")]
+    UnsupportedReportPolicyVersion,
+    #[error("workload report policy bounds are invalid")]
+    InvalidReportPolicyBounds,
+    #[error("workload report is not granted by the signed plan")]
+    ReportNotGranted,
+    #[error("workload report must be a cast without a reply route")]
+    InvalidReportMessageKind,
+    #[error("workload report content type is not granted")]
+    InvalidReportContentType,
+    #[error("workload report exceeds the signed plan ceiling")]
+    ReportPayloadTooLarge,
 }
 
 impl MailboxContractError {
@@ -1173,6 +1271,12 @@ impl MailboxContractError {
             Self::CiphertextLengthMismatch => "ciphertext_length_mismatch",
             Self::InvalidCapabilityBounds => "invalid_capability_bounds",
             Self::InvalidEpochRange => "invalid_epoch_range",
+            Self::UnsupportedReportPolicyVersion => "unsupported_report_policy_version",
+            Self::InvalidReportPolicyBounds => "invalid_report_policy_bounds",
+            Self::ReportNotGranted => "report_not_granted",
+            Self::InvalidReportMessageKind => "invalid_report_message_kind",
+            Self::InvalidReportContentType => "invalid_report_content_type",
+            Self::ReportPayloadTooLarge => "report_payload_too_large",
         }
     }
 }
