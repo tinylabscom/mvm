@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 const ALLOWED: &[&str] = &[
+    ".agents",
     ".cargo",
     ".config",
     ".envrc.example",
