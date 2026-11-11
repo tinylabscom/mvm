@@ -384,13 +384,24 @@ the work is decomposed:
   bounded communication that can continue during disconnection; physical
   air-gapped operation requires a separate approved transfer path.
 - Shutdown and termination attempt memory zeroization and revoke active
-  sessions. Strong physical erasure is not claimed; cryptographic erasure is
-  the supported mechanism for encrypted temporary state.
+  sessions. What that means per backend: the in-house HVF backend scrubs the
+  guest's RAM mapping on a clean exit before unmapping it (unit-tested, not yet
+  witnessed in a booted guest); Firecracker, libkrun and QEMU end the VMM
+  process and rely on the host kernel zeroing pages when it reallocates them.
+  A forced kill skips the HVF scrub. Strong physical erasure is not claimed;
+  cryptographic erasure is the supported mechanism for encrypted temporary
+  state.
 - Workload containment distinguishes terminate, revoke authority, quarantine,
   evict/revoke a node, kill a node, destroy data, and replace from a known-good
   image.
 - Node replacement receives a new execution epoch and cannot use stale
-  mailbox messages, capabilities, secrets, or commands.
+  mailbox messages, capabilities, secrets, or commands. The epoch is an input
+  to the per-mailbox key derivation, so the replacement's sender, authority and
+  encryption keys differ from its predecessor's: it cannot open an old-epoch
+  envelope, and a replayed one is refused. The grant's epoch is the same ledger
+  value as the plan's, and a grant naming another epoch's authority key is
+  refused at launch. `machine replace` refuses while the machine is running.
+  The old VM's mailbox queue lives in its own process and ends with it.
 - Trusted-location volumes remain supported as named read-only or explicitly
   authorized read-write grants, configurable through both CLI and
   `mvm-studio`.
@@ -464,7 +475,8 @@ authenticated inter-platform messaging, and remote recovery require end-to-end
 verification before being presented as shipped capabilities.
 
 The first demo promises **contain, terminate, and rebuild**. It does not
-promise verified physical wipe. A remote command cannot immediately affect a
+promise verified physical wipe, and it does not claim that guest RAM was
+overwritten on every backend (see the memory zeroization note above). A remote command cannot immediately affect a
 disconnected node, and revocation takes effect only where current revocation
 state is known or an offline lease has expired.
 

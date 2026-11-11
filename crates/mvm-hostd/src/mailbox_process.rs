@@ -273,9 +273,13 @@ mod tests {
         let mailbox = MailboxId::from_bytes([4; 32]);
         MailboxGrant {
             mailbox,
-            authority_key: crate::mailbox_launch::authority_key_for(dir, &mailbox)
-                .unwrap()
-                .to_bytes(),
+            authority_key: crate::mailbox_launch::authority_key_for(
+                dir,
+                &mailbox,
+                ExecutionEpoch::new(1).unwrap(),
+            )
+            .unwrap()
+            .to_bytes(),
             epoch: ExecutionEpoch::new(1).unwrap(),
         }
     }

@@ -910,9 +910,15 @@ fn derived_mailbox_keys_differ_per_mailbox_and_are_not_the_host_key() {
         MailboxId::from_bytes([1; 32]),
         MailboxId::from_bytes([2; 32]),
     );
-    let a1 = authority_key_for(keys.path(), &m1).unwrap();
-    assert_ne!(a1, authority_key_for(keys.path(), &m2).unwrap());
-    assert_ne!(a1, authority_key_for(other.path(), &m1).unwrap());
+    let a1 = authority_key_for(keys.path(), &m1, MbEpoch::new(1).unwrap()).unwrap();
+    assert_ne!(
+        a1,
+        authority_key_for(keys.path(), &m2, MbEpoch::new(1).unwrap()).unwrap()
+    );
+    assert_ne!(
+        a1,
+        authority_key_for(other.path(), &m1, MbEpoch::new(1).unwrap()).unwrap()
+    );
     assert_ne!(a1, SigningKey::from_bytes(&[5; 32]).verifying_key());
 
     let mut plan = granted_plan(a1.to_bytes());
@@ -928,7 +934,9 @@ fn derived_mailbox_keys_differ_per_mailbox_and_are_not_the_host_key() {
     );
     // An authority the host does not derive for this mailbox is refused.
     let mut foreign = grant;
-    foreign.authority_key = authority_key_for(keys.path(), &m2).unwrap().to_bytes();
+    foreign.authority_key = authority_key_for(keys.path(), &m2, MbEpoch::new(1).unwrap())
+        .unwrap()
+        .to_bytes();
     assert!(host_trust(keys.path(), &foreign).is_err());
 }
 
@@ -944,7 +952,8 @@ fn derived_keys_serve_the_guest_port_and_queue_what_the_guest_sent() {
     let dir = tempfile::tempdir().unwrap();
     host_keys(dir.path(), 5);
     let listener = UnixListener::bind(dir.path().join("port.sock")).unwrap();
-    let authority = authority_key_for(dir.path(), &address().mailbox).unwrap();
+    let authority =
+        authority_key_for(dir.path(), &address().mailbox, MbEpoch::new(1).unwrap()).unwrap();
     let grant = granted_plan(authority.to_bytes()).mailbox.unwrap();
     let keys = derive_launch_keys(dir.path(), &grant).unwrap();
     let outbox = dir.path().join("outbox");
@@ -1146,9 +1155,13 @@ fn served_mailbox_process(dir: &std::path::Path) -> (KillOnDrop, std::path::Path
     host_keys(&keys, 5);
     let state_dir = dir.join("vm");
     std::fs::create_dir_all(&state_dir).unwrap();
-    let authority = mvm_hostd::mailbox_launch::authority_key_for(&keys, &address().mailbox)
-        .unwrap()
-        .to_bytes();
+    let authority = mvm_hostd::mailbox_launch::authority_key_for(
+        &keys,
+        &address().mailbox,
+        MbEpoch::new(1).unwrap(),
+    )
+    .unwrap()
+    .to_bytes();
     let grant = granted_plan(authority).mailbox.unwrap();
     let config = build_config(
         &keys,

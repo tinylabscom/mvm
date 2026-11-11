@@ -18,7 +18,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use mvm_contract::protocol::mailbox::{
     AuthorizationDomainId, AuthorizationDomainRouteLabel, BootId, CapabilityId,
     CapabilityOperations, CausationId, CiphertextPadding, ContentType, CorrelationId, DeliveryId,
-    DestinationRouteToken, EncryptionAlgorithm, EncryptionContext, MailboxAddress,
+    DestinationRouteToken, EncryptionAlgorithm, EncryptionContext, ExecutionEpoch, MailboxAddress,
     MailboxCapabilityGrant, MailboxEnvelopeHeader, MailboxGrant, MailboxId, MailboxMessageKind,
     MailboxOperation, MailboxRoutingFrame, MessageId, OrderingScope, PrincipalId, ProtocolVersion,
     ReplayNonce, ReplyRoute, RevocationId, SequenceNumber, SignatureAlgorithm, TenantId,
@@ -77,10 +77,19 @@ pub struct MailboxTemplate {
     pub routing: MailboxRoutingFrame,
 }
 
-fn derive(root: &[u8; 32], label: &[u8], mailbox: &MailboxId) -> Zeroizing<[u8; 32]> {
+/// One key or identity for `mailbox` at `epoch`. The epoch is an input, so a
+/// replacement under a newer epoch holds different keys and cannot open, or be
+/// opened by, anything sealed under an older one.
+fn derive(
+    root: &[u8; 32],
+    label: &[u8],
+    mailbox: &MailboxId,
+    epoch: ExecutionEpoch,
+) -> Zeroizing<[u8; 32]> {
     let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(root).expect("any key length");
     mac.update(label);
     mac.update(mailbox.as_bytes());
+    mac.update(&epoch.get().to_be_bytes());
     Zeroizing::new(mac.finalize().into_bytes().into())
 }
 
@@ -93,32 +102,41 @@ fn now_unix_ms() -> i64 {
 struct Derived {
     root: Zeroizing<[u8; 32]>,
     mailbox: MailboxId,
+    epoch: ExecutionEpoch,
     sender: SigningKey,
     authority: SigningKey,
     encryption: Zeroizing<[u8; 32]>,
 }
 
-fn derived_keys(keys_dir: &Path, mailbox: &MailboxId) -> Result<Derived> {
+fn derived_keys(keys_dir: &Path, mailbox: &MailboxId, epoch: ExecutionEpoch) -> Result<Derived> {
     let (signer, _) = mvm_core::crypto::ed25519_keypair::load_existing(
         &keys_dir.join(SIGNER_SECRET),
         &keys_dir.join(SIGNER_PUBLIC),
     )
     .map_err(|e| Error::new(ErrorKind::NotFound, format!("host signing key: {e:#}")))?;
     let root = Zeroizing::new(signer.to_bytes());
-    let key = |label: &[u8]| SigningKey::from_bytes(&derive(&root, label, mailbox));
+    let key = |label: &[u8]| SigningKey::from_bytes(&derive(&root, label, mailbox, epoch));
     Ok(Derived {
         root: Zeroizing::new(*root),
         sender: key(b"mvm-mailbox-sender-v1"),
         mailbox: *mailbox,
+        epoch,
         authority: key(b"mvm-mailbox-authority-v1"),
-        encryption: derive(&root, b"mvm-mailbox-encryption-v1", mailbox),
+        encryption: derive(&root, b"mvm-mailbox-encryption-v1", mailbox, epoch),
     })
 }
 
-/// The authority verifying key this host derives for `mailbox`: what an
-/// external signer must name in a plan's grant for the host to honor it.
-pub fn authority_key_for(keys_dir: &Path, mailbox: &MailboxId) -> Result<VerifyingKey> {
-    Ok(derived_keys(keys_dir, mailbox)?.authority.verifying_key())
+/// The authority verifying key this host derives for `mailbox` at `epoch`: what
+/// an external signer must name in a plan's grant for the host to honor it. A
+/// grant at one epoch naming another epoch's key is refused at launch.
+pub fn authority_key_for(
+    keys_dir: &Path,
+    mailbox: &MailboxId,
+    epoch: ExecutionEpoch,
+) -> Result<VerifyingKey> {
+    Ok(derived_keys(keys_dir, mailbox, epoch)?
+        .authority
+        .verifying_key())
 }
 
 /// Everything a mailbox host process needs to serve one granted guest, derived
@@ -199,7 +217,7 @@ impl DerivedMailboxKeys {
 /// The grant's authority key must be the verifying half of the key this host
 /// derives for that mailbox; any other is refused.
 pub fn derive_launch_keys(keys_dir: &Path, grant: &MailboxGrant) -> Result<DerivedMailboxKeys> {
-    let derived = derived_keys(keys_dir, &grant.mailbox)?;
+    let derived = derived_keys(keys_dir, &grant.mailbox, grant.epoch)?;
     if derived.authority.verifying_key().to_bytes() != grant.authority_key {
         return Err(Error::new(
             ErrorKind::PermissionDenied,
@@ -241,7 +259,7 @@ fn template_for(
 /// mailbox: a local loopback queue whose recipient is this host's own derived
 /// principal, valid for [`VALID_FOR_MS`] from launch, send only.
 fn default_template(d: &Derived, grant: &MailboxGrant, now_ms: i64) -> MailboxTemplate {
-    let id = |label: &[u8]| *derive(&d.root, label, &d.mailbox);
+    let id = |label: &[u8]| *derive(&d.root, label, &d.mailbox, d.epoch);
     let (tenant, domain) = (
         TenantId::from_bytes(id(b"mvm-mailbox-tenant-v1")),
         AuthorizationDomainId::from_bytes(id(b"mvm-mailbox-domain-v1")),
@@ -429,7 +447,6 @@ pub const LAUNCH_LIMITS: MailboxLimits = MailboxLimits {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_contract::protocol::mailbox::ExecutionEpoch;
 
     fn keys_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
@@ -437,13 +454,23 @@ mod tests {
         dir
     }
 
-    fn grant(dir: &Path, mailbox: [u8; 32]) -> MailboxGrant {
+    fn epoch(n: u64) -> ExecutionEpoch {
+        ExecutionEpoch::new(n).unwrap()
+    }
+
+    fn grant_at(dir: &Path, mailbox: [u8; 32], n: u64) -> MailboxGrant {
         let mailbox = MailboxId::from_bytes(mailbox);
         MailboxGrant {
             mailbox,
-            authority_key: authority_key_for(dir, &mailbox).unwrap().to_bytes(),
-            epoch: ExecutionEpoch::new(1).unwrap(),
+            authority_key: authority_key_for(dir, &mailbox, epoch(n))
+                .unwrap()
+                .to_bytes(),
+            epoch: epoch(n),
         }
+    }
+
+    fn grant(dir: &Path, mailbox: [u8; 32]) -> MailboxGrant {
+        grant_at(dir, mailbox, 1)
     }
 
     #[test]
@@ -603,9 +630,30 @@ mod tests {
         let (policy, sealer) = host_trust(dir.path(), &grant(dir.path(), [4; 32])).unwrap();
         assert_eq!(
             policy.authority_key,
-            authority_key_for(dir.path(), &MailboxId::from_bytes([4; 32])).unwrap()
+            authority_key_for(dir.path(), &MailboxId::from_bytes([4; 32]), epoch(1)).unwrap()
         );
         assert_eq!(sealer.capability.address.mailbox.as_bytes(), &[4; 32]);
+    }
+
+    #[test]
+    fn keys_differ_per_epoch_and_are_deterministic_within_one() {
+        let dir = keys_dir();
+        let m = MailboxId::from_bytes([4; 32]);
+        let at = |n| authority_key_for(dir.path(), &m, epoch(n)).unwrap();
+        assert_eq!(at(1), at(1));
+        assert_ne!(at(1), at(2));
+        let (p1, _) = host_trust(dir.path(), &grant_at(dir.path(), [4; 32], 1)).unwrap();
+        let (p2, _) = host_trust(dir.path(), &grant_at(dir.path(), [4; 32], 2)).unwrap();
+        assert_ne!(p1.sender_key, p2.sender_key);
+    }
+
+    #[test]
+    fn a_grant_at_one_epoch_naming_another_epochs_authority_is_refused() {
+        let dir = keys_dir();
+        let mut g = grant_at(dir.path(), [4; 32], 2);
+        g.authority_key = grant_at(dir.path(), [4; 32], 1).authority_key;
+        let err = host_trust(dir.path(), &g).err().expect("refused");
+        assert_eq!(err.kind(), ErrorKind::PermissionDenied);
     }
 
     #[test]
@@ -622,12 +670,12 @@ mod tests {
         let (a, b) = (keys_dir(), keys_dir());
         let m = |n| MailboxId::from_bytes([n; 32]);
         assert_ne!(
-            authority_key_for(a.path(), &m(1)).unwrap(),
-            authority_key_for(a.path(), &m(2)).unwrap()
+            authority_key_for(a.path(), &m(1), epoch(1)).unwrap(),
+            authority_key_for(a.path(), &m(2), epoch(1)).unwrap()
         );
         assert_ne!(
-            authority_key_for(a.path(), &m(1)).unwrap(),
-            authority_key_for(b.path(), &m(1)).unwrap()
+            authority_key_for(a.path(), &m(1), epoch(1)).unwrap(),
+            authority_key_for(b.path(), &m(1), epoch(1)).unwrap()
         );
     }
 
