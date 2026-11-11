@@ -20,7 +20,7 @@ Every mvm project has a `mvm.toml` and a `flake.nix`:
 # my-app/mvm.toml
 flake     = "."
 profile   = "default"
-cpus      = 1          # `vcpus` is an accepted alias
+cpus      = 1
 mem       = "256M"
 ```
 
