@@ -1,10 +1,10 @@
 //! Destination-owned, bounded ciphertext admission journal.
 //!
 //! Each immutable entry is published with a no-clobber rename and a directory
-//! sync. The signed acceptance receipt and dedup identity live in the same
-//! authenticated record as the canonical envelope. A caller must retain the
-//! returned tip in an independent trusted anchor to detect whole-journal
-//! rollback; a hash chain alone cannot detect deletion of its suffix.
+//! sync. The unsigned receipt state and dedup identity live in the same
+//! authenticated record as the canonical envelope. The destination signs
+//! acceptance only after the journal and independent anchor commit. A hash
+//! chain alone cannot detect deletion of its suffix.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hmac::{Hmac, Mac, digest::KeyInit};
 use mvm_contract::protocol::mailbox::{
     ContentType, DeliveryLeaseNonce, DeliveryOutcome, DestinationReceipt, MailboxAddress,
@@ -31,7 +31,7 @@ use super::reader::{
 };
 use super::{
     MailboxError, OpenContext, ReplayIdentity, ReplayProtector, authorize_receive, frame,
-    open_authenticated_envelope, sign_receipt, verify_receipt,
+    open_authenticated_envelope, sign_receipt,
 };
 use crate::crypto::aead::{self, Key};
 use crate::private_fs;
@@ -40,6 +40,7 @@ use crate::util::atomic_io::{FileLock, atomic_write_durable, atomic_write_new, s
 const DOMAIN: &[u8] = b"mvm.mailbox.journal.v1\0";
 const ENCRYPTION_DOMAIN: &[u8] = b"mvm.mailbox.journal.encryption.v1\0";
 const ANCHOR_DOMAIN: &[u8] = b"mvm.mailbox.anchor.v1\0";
+const ACCEPTANCE_INTENT_DOMAIN: &[u8] = b"mvm.mailbox.journal-acceptance-intent.v2\0";
 const MAX_ANCHOR_BYTES: u64 = 1024;
 const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RECORDS: usize = 100_000;
@@ -71,6 +72,25 @@ impl JournalTip {
     }
 }
 
+/// Independent, authenticated high-water authority for one mailbox.
+///
+/// Implementations must persist outside the journal host's rollback domain.
+/// A local file, an in-memory value, or a best-effort transport acknowledgement
+/// cannot authorize durable acceptance. Compare-and-advance must be atomic,
+/// refuse divergent tips, and return only after the new tip is durable.
+pub trait JournalAnchor {
+    /// Read the authoritative tip, including after a host restart.
+    fn load(&self, address: MailboxAddress) -> Result<JournalTip, JournalError>;
+
+    /// Commit exactly one successor of `expected`, or refuse a stale writer.
+    fn compare_and_advance(
+        &self,
+        address: MailboxAddress,
+        expected: JournalTip,
+        next: JournalTip,
+    ) -> Result<(), JournalError>;
+}
+
 /// Fail-closed admission and recovery failures; no plaintext is included.
 #[derive(Debug, thiserror::Error)]
 pub enum JournalError {
@@ -94,6 +114,8 @@ pub enum JournalError {
     NoActiveLease,
     #[error("journal cannot be used after an uncertain write")]
     Uncertain,
+    #[error("independent rollback anchor and recoverable key custody are required")]
+    DurableAuthorityUnavailable,
     #[error("mailbox authorization refused: {0}")]
     Mailbox(#[from] MailboxError),
     #[error("journal storage is unavailable: {0}")]
@@ -111,12 +133,13 @@ struct Record {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum JournalEvent {
     Accepted {
         identity: ReplayIdentity,
         frame: String,
-        receipt: Box<SignedDestinationReceipt>,
+        receipt: Box<DestinationReceipt>,
+        authorization_signature: Vec<u8>,
     },
     Acknowledged {
         identity: ReplayIdentity,
@@ -381,6 +404,30 @@ fn anchor_mac(key: &[u8], body: &[u8]) -> [u8; 32] {
     mac.finalize().into_bytes().into()
 }
 
+#[derive(Serialize)]
+struct AcceptanceIntent<'a> {
+    identity: ReplayIdentity,
+    frame: &'a str,
+    receipt: &'a DestinationReceipt,
+}
+
+fn acceptance_intent_bytes(
+    identity: ReplayIdentity,
+    frame: &str,
+    receipt: &DestinationReceipt,
+) -> Result<Vec<u8>, JournalError> {
+    let mut bytes = ACCEPTANCE_INTENT_DOMAIN.to_vec();
+    bytes.extend(
+        serde_jcs::to_vec(&AcceptanceIntent {
+            identity,
+            frame,
+            receipt,
+        })
+        .map_err(|_| JournalError::Corrupt)?,
+    );
+    Ok(bytes)
+}
+
 impl MailboxJournal {
     /// Reconstruct under an exclusive lock and require the separately trusted
     /// high-water mark. Genesis is valid only for an empty journal.
@@ -413,6 +460,29 @@ impl MailboxJournal {
         }
         Self::open_with_recovery(root, address, authority, key, limits, anchor.tip(), |tip| {
             anchor.advance(tip)
+        })
+    }
+
+    /// Recover against an independently trusted high-water mark.
+    ///
+    /// An intact, authenticated journal suffix may be advanced after a crash.
+    /// A missing, divergent, or rolled-back anchored prefix is never repaired.
+    /// The caller must obtain `key` from persistent custody, not the erased
+    /// per-launch mailbox secret.
+    pub fn open_with_anchor(
+        root: &Path,
+        address: MailboxAddress,
+        authority: VerifyingKey,
+        key: [u8; 32],
+        limits: JournalLimits,
+        anchor: &impl JournalAnchor,
+    ) -> Result<Self, JournalError> {
+        let expected = anchor.load(address)?;
+        let mut previous = expected;
+        Self::open_with_recovery(root, address, authority, key, limits, expected, |next| {
+            anchor.compare_and_advance(address, previous, next)?;
+            previous = next;
+            Ok(())
         })
     }
 
@@ -466,6 +536,7 @@ impl MailboxJournal {
             }
         }
         paths.sort();
+        let mut suffix_synced = false;
         for path in paths {
             let cursor = journal
                 .tip
@@ -496,7 +567,7 @@ impl MailboxJournal {
             );
             let record: Record =
                 serde_json::from_slice(&plaintext).map_err(|_| JournalError::Corrupt)?;
-            if record.version != 1
+            if record.version != 2
                 || record.cursor != cursor
                 || record.previous != journal.tip.head
                 || record.address != address
@@ -508,22 +579,32 @@ impl MailboxJournal {
                     identity,
                     frame: encoded_frame,
                     receipt,
+                    authorization_signature,
                 } => {
-                    if receipt.receipt.address != address
-                        || receipt.receipt.outcome != DeliveryOutcome::AcceptedDurable
-                        || receipt.receipt.message_id != identity.message_id
-                        || receipt.receipt.execution_epoch != identity.execution_epoch
+                    if receipt.address != address
+                        || receipt.outcome != DeliveryOutcome::AcceptedDurable
+                        || receipt.message_id != identity.message_id
+                        || receipt.execution_epoch != identity.execution_epoch
                     {
                         return Err(JournalError::Corrupt);
                     }
-                    verify_receipt(&receipt, &authority).map_err(|_| JournalError::Corrupt)?;
+                    let signature: [u8; 64] = authorization_signature
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| JournalError::Corrupt)?;
+                    authority
+                        .verify(
+                            &acceptance_intent_bytes(identity, &encoded_frame, &receipt)?,
+                            &Signature::from_bytes(&signature),
+                        )
+                        .map_err(|_| JournalError::Corrupt)?;
                     let raw = STANDARD_NO_PAD
                         .decode(&encoded_frame)
                         .map_err(|_| JournalError::Corrupt)?;
                     let (capability, envelope) =
                         frame::decode_frame(&raw).map_err(|_| JournalError::Corrupt)?;
-                    if receipt.receipt.delivery_id != envelope.routing.delivery_id
-                        || receipt.receipt.ciphertext_commitment != envelope.ciphertext_commitment
+                    if receipt.delivery_id != envelope.routing.delivery_id
+                        || receipt.ciphertext_commitment != envelope.ciphertext_commitment
                         || journal
                             .seen
                             .insert(
@@ -631,6 +712,14 @@ impl MailboxJournal {
                 return Err(JournalError::Rollback);
             }
             if cursor > expected.cursor {
+                if !suffix_synced {
+                    // A predecessor could crash after publishing a record but
+                    // before syncing its directory entry. Recovery must not
+                    // advance an independent anchor ahead of that entry.
+                    sync_dir(root)
+                        .map_err(|error| JournalError::Storage(std::io::Error::other(error)))?;
+                    suffix_synced = true;
+                }
                 reconcile(next)?;
             }
             journal.tip = next;
@@ -641,10 +730,20 @@ impl MailboxJournal {
         Ok(journal)
     }
 
-    /// Verify the canonical envelope and capability, commit ciphertext and
-    /// dedup identity, then sign a destination verdict. `anchor` must commit the
-    /// new tip in a separate rollback domain before this returns success.
+    /// The legacy local callback cannot prove an independent anchor or
+    /// recoverable key custody, so it cannot issue durable acceptance.
+    ///
+    /// Use [`Self::admit_with_anchor`] only after provisioning a trusted
+    /// external checkpoint and durable mailbox-history keys.
     pub fn admit(
+        &mut self,
+        _request: JournalAdmission<'_>,
+        _anchor: impl FnOnce(JournalTip) -> Result<(), JournalError>,
+    ) -> Result<SignedDestinationReceipt, JournalError> {
+        Err(JournalError::DurableAuthorityUnavailable)
+    }
+
+    fn admit_verified(
         &mut self,
         request: JournalAdmission<'_>,
         anchor: impl FnOnce(JournalTip) -> Result<(), JournalError>,
@@ -699,14 +798,24 @@ impl MailboxJournal {
         if self.tip.cursor >= self.limits.max_records as u64 {
             return Err(JournalError::Full);
         }
-        let signed = sign_receipt(receipt(DeliveryOutcome::AcceptedDurable), signer)?;
+        let accepted = receipt(DeliveryOutcome::AcceptedDurable);
         let encoded_frame =
             frame::encode_frame(capability, envelope).map_err(|_| JournalError::Corrupt)?;
+        let encoded_frame = STANDARD_NO_PAD.encode(encoded_frame);
+        let authorization_signature = signer
+            .sign(&acceptance_intent_bytes(
+                identity,
+                &encoded_frame,
+                &accepted,
+            )?)
+            .to_bytes()
+            .to_vec();
         self.append(
             JournalEvent::Accepted {
                 identity,
-                frame: STANDARD_NO_PAD.encode(encoded_frame),
-                receipt: Box::new(signed.clone()),
+                frame: encoded_frame,
+                receipt: Box::new(accepted.clone()),
+                authorization_signature,
             },
             anchor,
         )?;
@@ -721,7 +830,26 @@ impl MailboxJournal {
             },
         );
         self.order.push(identity);
-        Ok(signed)
+        sign_receipt(accepted, signer).map_err(JournalError::from)
+    }
+
+    /// Admit only against the current independently anchored tip.
+    ///
+    /// The legacy local-file callback API refuses admission. A service may
+    /// use this path only with independent checkpoint and history-key custody.
+    pub fn admit_with_anchor(
+        &mut self,
+        request: JournalAdmission<'_>,
+        anchor: &impl JournalAnchor,
+    ) -> Result<SignedDestinationReceipt, JournalError> {
+        let expected = self.tip;
+        if anchor.load(self.address)? != expected {
+            return Err(JournalError::Rollback);
+        }
+        let address = self.address;
+        self.admit_verified(request, |next| {
+            anchor.compare_and_advance(address, expected, next)
+        })
     }
 
     fn append(
@@ -737,7 +865,7 @@ impl MailboxJournal {
             return Err(JournalError::Full);
         }
         let record = Record {
-            version: 1,
+            version: 2,
             cursor,
             previous: self.tip.head,
             address: self.address,
@@ -1144,4 +1272,606 @@ fn read_record(path: &Path) -> Result<Vec<u8>, JournalError> {
         return Err(JournalError::Corrupt);
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    use super::*;
+    use mvm_contract::protocol::mailbox::{
+        AuthorizationDomainId, AuthorizationDomainRouteLabel, BootId, CapabilityId,
+        CapabilityOperations, CausationId, CiphertextPadding, ContentType, CorrelationId,
+        DeliveryId, DestinationRouteToken, EncryptionAlgorithm, EncryptionContext, ExecutionEpoch,
+        MailboxCapabilityGrant, MailboxEnvelopeHeader, MailboxId, MailboxMessageKind,
+        MailboxRoutingFrame, MessageId, OrderingScope, PrincipalId, ReplayNonce, RevocationId,
+        SequenceNumber, TenantId, TransportBindingId,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct IndependentAnchor {
+        address: MailboxAddress,
+        tip: Mutex<JournalTip>,
+    }
+
+    impl IndependentAnchor {
+        fn new(address: MailboxAddress) -> Self {
+            Self {
+                address,
+                tip: Mutex::new(JournalTip::genesis()),
+            }
+        }
+    }
+
+    impl JournalAnchor for IndependentAnchor {
+        fn load(&self, address: MailboxAddress) -> Result<JournalTip, JournalError> {
+            if address != self.address {
+                return Err(JournalError::WrongAuthority);
+            }
+            Ok(*self.tip.lock().expect("test anchor lock"))
+        }
+
+        fn compare_and_advance(
+            &self,
+            address: MailboxAddress,
+            expected: JournalTip,
+            next: JournalTip,
+        ) -> Result<(), JournalError> {
+            if address != self.address {
+                return Err(JournalError::WrongAuthority);
+            }
+            let mut tip = self.tip.lock().expect("test anchor lock");
+            if *tip != expected || expected.cursor.checked_add(1) != Some(next.cursor) {
+                return Err(JournalError::Rollback);
+            }
+            *tip = next;
+            Ok(())
+        }
+    }
+
+    fn address() -> MailboxAddress {
+        MailboxAddress {
+            tenant: TenantId::from_bytes([1; 32]),
+            authorization_domain: AuthorizationDomainId::from_bytes([2; 32]),
+            mailbox: MailboxId::from_bytes([3; 32]),
+            recipient: PrincipalId::from_bytes([4; 32]),
+        }
+    }
+
+    fn limits() -> JournalLimits {
+        JournalLimits {
+            max_records: 4,
+            max_bytes: 64 * 1024,
+        }
+    }
+
+    #[test]
+    fn admission_intent_signature_is_bound_to_its_own_domain() {
+        let (envelope, capability, context, _, _, signer) = message();
+        let identity = ReplayIdentity {
+            sender: context.expected_sender,
+            sender_boot: BootId::from_bytes([8; 32]),
+            execution_epoch: context.current_execution_epoch,
+            message_id: MessageId::from_bytes([9; 32]),
+        };
+        let frame = STANDARD_NO_PAD
+            .encode(frame::encode_frame(&capability, &envelope).expect("canonical frame"));
+        let receipt = DestinationReceipt {
+            protocol_version: ProtocolVersion::V1,
+            signature_algorithm: SignatureAlgorithm::ED25519,
+            delivery_id: envelope.routing.delivery_id,
+            message_id: MessageId::from_bytes([9; 32]),
+            address: address(),
+            execution_epoch: context.current_execution_epoch,
+            outcome: DeliveryOutcome::AcceptedDurable,
+            observed_at_unix_ms: context.now_unix_ms,
+            ciphertext_commitment: envelope.ciphertext_commitment,
+        };
+        let intent = acceptance_intent_bytes(identity, &frame, &receipt).expect("intent");
+        let signature = signer.sign(&intent);
+        signer
+            .verifying_key()
+            .verify(&intent, &signature)
+            .expect("intended domain");
+        let bare = serde_jcs::to_vec(&AcceptanceIntent {
+            identity,
+            frame: &frame,
+            receipt: &receipt,
+        })
+        .expect("canonical intent");
+        assert!(signer.verifying_key().verify(&bare, &signature).is_err());
+        let wrong_domain = [b"mvm.mailbox.receipt.v1\0".as_slice(), bare.as_slice()].concat();
+        assert!(
+            signer
+                .verifying_key()
+                .verify(&wrong_domain, &signature)
+                .is_err()
+        );
+    }
+
+    fn message() -> (
+        MailboxEnvelope,
+        SignedMailboxCapability,
+        OpenContext,
+        Key,
+        VerifyingKey,
+        SigningKey,
+    ) {
+        let destination = address();
+        let signer = SigningKey::from_bytes(&[6; 32]);
+        let sender = SigningKey::from_bytes(&[7; 32]);
+        let sender_id = PrincipalId::from_bytes(sender.verifying_key().to_bytes());
+        let content_type = ContentType::parse("application/vnd.mvm.test", 1).expect("content type");
+        let epoch = ExecutionEpoch::new(1).expect("epoch");
+        let now = 1_800_000_000_000;
+        let header = MailboxEnvelopeHeader {
+            protocol_version: ProtocolVersion::V1,
+            signature_algorithm: SignatureAlgorithm::ED25519,
+            tenant: destination.tenant,
+            authorization_domain: destination.authorization_domain,
+            sender: sender_id,
+            recipient: destination.recipient,
+            mailbox: destination.mailbox,
+            sender_boot: BootId::from_bytes([8; 32]),
+            execution_epoch: epoch,
+            message_id: MessageId::from_bytes([9; 32]),
+            correlation_id: CorrelationId::from_bytes([10; 32]),
+            causation_id: CausationId::from_bytes([11; 32]),
+            kind: MailboxMessageKind::Cast,
+            reply_to: None,
+            ordering_scope: OrderingScope::parse("test").expect("scope"),
+            sequence: SequenceNumber::new(1).expect("sequence"),
+            issued_at_unix_ms: now - 1,
+            expires_at_unix_ms: now + 10_000,
+            nonce: ReplayNonce::from_bytes([12; 16]),
+            content_type: content_type.clone(),
+            capability_id: CapabilityId::from_bytes([13; 32]),
+            policy_epoch: 1,
+            encryption: EncryptionContext {
+                algorithm: EncryptionAlgorithm::AES_256_GCM,
+                key_id: [14; 32],
+            },
+            plaintext_len: 5,
+        };
+        let routing = MailboxRoutingFrame {
+            protocol_version: ProtocolVersion::V1,
+            authorization_domain_route_label: AuthorizationDomainRouteLabel::from_bytes([15; 32]),
+            destination_route_token: DestinationRouteToken::from_bytes([16; 32]),
+            delivery_id: DeliveryId::from_bytes([17; 32]),
+            ciphertext_len: 0,
+            padding: CiphertextPadding::Exact,
+            expires_at_unix_ms: header.expires_at_unix_ms,
+            hop_limit: 4,
+            transport_binding_id: TransportBindingId::from_bytes([18; 32]),
+        };
+        let payload_key = Key::from_bytes([19; 32]);
+        let envelope = super::super::seal_envelope(
+            super::super::SealRequest {
+                routing,
+                header: header.clone(),
+                plaintext: b"hello",
+            },
+            &payload_key,
+            &sender,
+        )
+        .expect("seal canonical frame");
+        let grant = MailboxCapabilityGrant {
+            protocol_version: ProtocolVersion::V1,
+            signature_algorithm: SignatureAlgorithm::ED25519,
+            capability_id: header.capability_id,
+            issuer: PrincipalId::from_bytes(signer.verifying_key().to_bytes()),
+            subject: sender_id,
+            address: destination,
+            operations: CapabilityOperations::from_operations(&[MailboxOperation::Send]),
+            message_kinds: vec![MailboxMessageKind::Cast],
+            content_types: vec![content_type.clone()],
+            max_payload_bytes: 64,
+            max_messages_per_minute: 60,
+            max_outstanding_calls: 1,
+            max_queue_contribution_bytes: 1024,
+            minimum_execution_epoch: epoch,
+            maximum_execution_epoch: epoch,
+            policy_epoch: 1,
+            not_before_unix_ms: now - 10,
+            expires_at_unix_ms: now + 10_000,
+            revocation_id: RevocationId::from_bytes([20; 32]),
+            delegation_depth: 0,
+        };
+        let capability = super::super::sign_capability(grant, &signer).expect("grant");
+        let context = OpenContext {
+            expected_tenant: destination.tenant,
+            expected_authorization_domain: destination.authorization_domain,
+            expected_mailbox: destination.mailbox,
+            expected_sender: sender_id,
+            expected_recipient: destination.recipient,
+            acting_principal: sender_id,
+            expected_capability_issuer: PrincipalId::from_bytes(signer.verifying_key().to_bytes()),
+            current_execution_epoch: epoch,
+            current_policy_epoch: 1,
+            required_operation: MailboxOperation::Send,
+            now_unix_ms: now,
+            accepted_content_types: vec![content_type],
+            revoked_capabilities: Vec::new(),
+        };
+        (
+            envelope,
+            capability,
+            context,
+            payload_key,
+            sender.verifying_key(),
+            signer,
+        )
+    }
+
+    fn admission<'a>(
+        envelope: &'a MailboxEnvelope,
+        capability: &'a SignedMailboxCapability,
+        context: &'a OpenContext,
+        payload_key: &'a Key,
+        sender_key: &'a VerifyingKey,
+        signer: &'a SigningKey,
+    ) -> JournalAdmission<'a> {
+        JournalAdmission {
+            envelope,
+            capability,
+            context,
+            encryption_key: payload_key,
+            sender_key,
+            signer,
+        }
+    }
+
+    #[test]
+    fn anchored_acceptance_recovers_ciphertext_and_dedup_without_plaintext_on_disk() {
+        let dir = tempfile::tempdir().expect("journal root");
+        let root = dir.path().join("journal");
+        let (envelope, capability, context, payload_key, sender_key, signer) = message();
+        let anchor = IndependentAnchor::new(address());
+        let mut journal = MailboxJournal::open_with_anchor(
+            &root,
+            address(),
+            signer.verifying_key(),
+            [21; 32],
+            limits(),
+            &anchor,
+        )
+        .expect("genesis");
+        let accepted = journal
+            .admit_with_anchor(
+                admission(
+                    &envelope,
+                    &capability,
+                    &context,
+                    &payload_key,
+                    &sender_key,
+                    &signer,
+                ),
+                &anchor,
+            )
+            .expect("anchor committed before receipt");
+        assert_eq!(accepted.receipt.outcome, DeliveryOutcome::AcceptedDurable);
+        assert_eq!(journal.tip(), anchor.load(address()).expect("remote tip"));
+        let record = fs::read(record_path(&root, 1)).expect("encrypted record");
+        assert!(
+            !record
+                .windows(b"hello".len())
+                .any(|bytes| bytes == b"hello")
+        );
+        let decrypted = aead::open(
+            &journal.record_key(),
+            &record[32..],
+            &[DOMAIN, &JournalTip::genesis().head].concat(),
+        )
+        .expect("authenticated journal record");
+        let parsed: Record = serde_json::from_slice(&decrypted).expect("record body");
+        let JournalEvent::Accepted {
+            receipt,
+            authorization_signature,
+            ..
+        } = parsed.event
+        else {
+            panic!("the first record must be an admission");
+        };
+        assert_eq!(*receipt, accepted.receipt);
+        assert_eq!(authorization_signature.len(), 64);
+        assert!(
+            !decrypted
+                .windows(accepted.signature.len())
+                .any(|bytes| bytes == accepted.signature.as_slice()),
+            "an actual acceptance signature must not be persisted before the anchor commit"
+        );
+        drop(journal);
+
+        let mut recovered = MailboxJournal::open_with_anchor(
+            &root,
+            address(),
+            signer.verifying_key(),
+            [21; 32],
+            limits(),
+            &anchor,
+        )
+        .expect("restart recovers exact anchored history");
+        let duplicate = recovered
+            .admit_with_anchor(
+                admission(
+                    &envelope,
+                    &capability,
+                    &context,
+                    &payload_key,
+                    &sender_key,
+                    &signer,
+                ),
+                &anchor,
+            )
+            .expect("retry is deduplicated");
+        assert_eq!(duplicate.receipt.outcome, DeliveryOutcome::Duplicate);
+        assert_eq!(anchor.load(address()).expect("unchanged tip").cursor, 1);
+    }
+
+    #[test]
+    fn interrupted_anchor_commit_reconciles_only_intact_suffix() {
+        let dir = tempfile::tempdir().expect("journal root");
+        let root = dir.path().join("journal");
+        let (envelope, capability, context, payload_key, sender_key, signer) = message();
+        let anchor = IndependentAnchor::new(address());
+        let mut journal = MailboxJournal::open_with_anchor(
+            &root,
+            address(),
+            signer.verifying_key(),
+            [21; 32],
+            limits(),
+            &anchor,
+        )
+        .expect("genesis");
+        let interrupted = AtomicBool::new(true);
+        assert!(matches!(
+            journal.admit_verified(
+                admission(
+                    &envelope,
+                    &capability,
+                    &context,
+                    &payload_key,
+                    &sender_key,
+                    &signer,
+                ),
+                |tip| {
+                    if interrupted.swap(false, Ordering::SeqCst) {
+                        return Err(JournalError::Uncertain);
+                    }
+                    anchor.compare_and_advance(address(), JournalTip::genesis(), tip)
+                }
+            ),
+            Err(JournalError::Uncertain)
+        ));
+        assert_eq!(
+            anchor.load(address()).expect("no receipt"),
+            JournalTip::genesis()
+        );
+        assert!(matches!(
+            journal.admit_with_anchor(
+                admission(
+                    &envelope,
+                    &capability,
+                    &context,
+                    &payload_key,
+                    &sender_key,
+                    &signer,
+                ),
+                &anchor
+            ),
+            Err(JournalError::Rollback)
+        ));
+        drop(journal);
+        let recovered = MailboxJournal::open_with_anchor(
+            &root,
+            address(),
+            signer.verifying_key(),
+            [21; 32],
+            limits(),
+            &anchor,
+        )
+        .expect("verified unanchored suffix is reconciled");
+        assert_eq!(
+            recovered.tip(),
+            anchor.load(address()).expect("advanced tip")
+        );
+    }
+
+    #[test]
+    fn legacy_callback_cannot_issue_durable_acceptance() {
+        let dir = tempfile::tempdir().expect("journal root");
+        let root = dir.path().join("journal");
+        let (envelope, capability, context, payload_key, sender_key, signer) = message();
+        let anchor = IndependentAnchor::new(address());
+        let mut journal = MailboxJournal::open_with_anchor(
+            &root,
+            address(),
+            signer.verifying_key(),
+            [21; 32],
+            limits(),
+            &anchor,
+        )
+        .expect("genesis");
+        assert!(matches!(
+            journal.admit(
+                admission(
+                    &envelope,
+                    &capability,
+                    &context,
+                    &payload_key,
+                    &sender_key,
+                    &signer,
+                ),
+                |_| Ok(())
+            ),
+            Err(JournalError::DurableAuthorityUnavailable)
+        ));
+        assert_eq!(journal.tip(), JournalTip::genesis());
+        assert_eq!(
+            anchor.load(address()).expect("no commit"),
+            JournalTip::genesis()
+        );
+    }
+
+    #[test]
+    fn wrong_key_tamper_and_truncation_fail_closed_without_changing_anchor() {
+        let dir = tempfile::tempdir().expect("journal root");
+        let root = dir.path().join("journal");
+        let (envelope, capability, context, payload_key, sender_key, signer) = message();
+        let anchor = IndependentAnchor::new(address());
+        let mut journal = MailboxJournal::open_with_anchor(
+            &root,
+            address(),
+            signer.verifying_key(),
+            [21; 32],
+            limits(),
+            &anchor,
+        )
+        .expect("genesis");
+        journal
+            .admit_with_anchor(
+                admission(
+                    &envelope,
+                    &capability,
+                    &context,
+                    &payload_key,
+                    &sender_key,
+                    &signer,
+                ),
+                &anchor,
+            )
+            .expect("admission");
+        let tip = anchor.load(address()).expect("committed tip");
+        drop(journal);
+
+        assert!(matches!(
+            MailboxJournal::open_with_anchor(
+                &root,
+                address(),
+                signer.verifying_key(),
+                [22; 32],
+                limits(),
+                &anchor,
+            ),
+            Err(JournalError::Corrupt)
+        ));
+        assert!(matches!(
+            MailboxJournal::open_with_anchor(
+                &root,
+                address(),
+                SigningKey::from_bytes(&[23; 32]).verifying_key(),
+                [21; 32],
+                limits(),
+                &anchor,
+            ),
+            Err(JournalError::Corrupt)
+        ));
+        let path = record_path(&root, 1);
+        let original = fs::read(&path).expect("stored ciphertext");
+        let mut tampered = original.clone();
+        tampered[40] ^= 1;
+        fs::write(&path, &tampered).expect("tamper record");
+        assert!(matches!(
+            MailboxJournal::open_with_anchor(
+                &root,
+                address(),
+                signer.verifying_key(),
+                [21; 32],
+                limits(),
+                &anchor,
+            ),
+            Err(JournalError::Corrupt)
+        ));
+        fs::write(&path, &original[..40]).expect("interrupted write");
+        assert!(matches!(
+            MailboxJournal::open_with_anchor(
+                &root,
+                address(),
+                signer.verifying_key(),
+                [21; 32],
+                limits(),
+                &anchor,
+            ),
+            Err(JournalError::Corrupt)
+        ));
+        assert_eq!(anchor.load(address()).expect("unchanged anchor"), tip);
+        fs::remove_file(&path).expect("simulate journal rollback");
+        assert!(matches!(
+            MailboxJournal::open_with_anchor(
+                &root,
+                address(),
+                signer.verifying_key(),
+                [21; 32],
+                limits(),
+                &anchor,
+            ),
+            Err(JournalError::Rollback)
+        ));
+    }
+
+    #[test]
+    fn independent_anchor_refuses_wrong_domain_and_stale_competing_writers() {
+        let anchor = IndependentAnchor::new(address());
+        let old = JournalTip::genesis();
+        let next = JournalTip {
+            cursor: 1,
+            head: [9; 32],
+        };
+        let mut foreign = address();
+        foreign.authorization_domain = AuthorizationDomainId::from_bytes([5; 32]);
+        assert!(matches!(
+            anchor.load(foreign),
+            Err(JournalError::WrongAuthority)
+        ));
+        anchor
+            .compare_and_advance(address(), old, next)
+            .expect("first writer advances");
+        assert!(matches!(
+            anchor.compare_and_advance(address(), old, next),
+            Err(JournalError::Rollback)
+        ));
+        assert_eq!(anchor.load(address()).expect("authoritative tip"), next);
+    }
+
+    #[test]
+    fn recovery_refuses_missing_anchored_history_and_wrong_domain() {
+        let dir = tempfile::tempdir().expect("journal root");
+        let root = dir.path().join("journal");
+        let authority = SigningKey::from_bytes(&[6; 32]).verifying_key();
+        let anchor = IndependentAnchor::new(address());
+        let journal = MailboxJournal::open_with_anchor(
+            &root,
+            address(),
+            authority,
+            [7; 32],
+            limits(),
+            &anchor,
+        )
+        .expect("empty history agrees with genesis");
+        assert_eq!(journal.tip(), JournalTip::genesis());
+        drop(journal);
+
+        let anchored = JournalTip {
+            cursor: 1,
+            head: [8; 32],
+        };
+        anchor
+            .compare_and_advance(address(), JournalTip::genesis(), anchored)
+            .expect("external anchor survives local loss");
+        assert!(matches!(
+            MailboxJournal::open_with_anchor(
+                &root,
+                address(),
+                authority,
+                [7; 32],
+                limits(),
+                &anchor,
+            ),
+            Err(JournalError::Rollback)
+        ));
+        let mut foreign = address();
+        foreign.tenant = TenantId::from_bytes([9; 32]);
+        assert!(matches!(
+            MailboxJournal::open_with_anchor(&root, foreign, authority, [7; 32], limits(), &anchor),
+            Err(JournalError::WrongAuthority)
+        ));
+    }
 }
