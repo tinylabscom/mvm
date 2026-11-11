@@ -274,6 +274,13 @@ rollback protection; an old receipt must never be relabeled as local durability,
 and version-one readers reject the new outcome. Neither receipt implies that an
 application processed or ACKed the message.
 
+An exact same-ID, same-ciphertext retry of locally accepted history returns the
+original signed version-two local receipt, including its original observation
+time, after current authority and committed-state checks. Re-signing that body
+must reproduce the original bytes; an unprovable acceptance is unknown, not a
+new version-one `duplicate` that loses the acceptance tier. Different bytes
+under the same ID conflict. Version-one `duplicate` behavior is unchanged.
+
 `accepted_ephemeral` means the message is owned by the named live mailbox
 epoch. If that epoch terminates, the signed epoch-terminal observation closes
 the volatile queue; senders that need recovery use stable IDs and retry into a

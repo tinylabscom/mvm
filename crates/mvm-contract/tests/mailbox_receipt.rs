@@ -79,8 +79,13 @@ fn v2_cannot_relabel_an_old_outcome_or_admit_unknown_versions() {
         ProtocolVersion::V2,
     ))
     .expect("valid V2");
-    value["outcome"] = "accepted_durable".into();
-    assert!(serde_json::from_value::<DestinationReceipt>(value.clone()).is_err());
+    for old_outcome in ["accepted_durable", "duplicate", "accepted_ephemeral"] {
+        value["outcome"] = old_outcome.into();
+        assert!(
+            serde_json::from_value::<DestinationReceipt>(value.clone()).is_err(),
+            "V2 cannot relabel a local acceptance as {old_outcome}"
+        );
+    }
     value["outcome"] = "accepted_local_durable".into();
     value["protocol_version"] = 3.into();
     assert!(serde_json::from_value::<DestinationReceipt>(value).is_err());
