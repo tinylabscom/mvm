@@ -686,7 +686,11 @@ fn machine_run_spec(
     let routes = crate::commands::vm::run_routes::launch_routes(&args.run)?;
     let allow_host = routes.with_allow_host(&args.run.allow_host);
     let config = mvm_core::user_config::load(None);
-    let ai = super::shared::resolve_ai_policy(args.run.ai_token_budget);
+    let ai = args
+        .run
+        .applied_ai_policy
+        .clone()
+        .or_else(|| super::shared::resolve_ai_policy(args.run.ai_token_budget));
     let resolved = super::shared::resolve_policy_run_grants(
         super::shared::GrantInputs {
             cpu_limit_millicores: args.run.cpu_limit,

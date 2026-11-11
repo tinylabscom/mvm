@@ -1824,6 +1824,11 @@ At launch of an installed bundle:
 - the descriptor's resources become the defaults for whichever of `--cpus` and
   `--memory` the command line did not name; the host's memory ceiling and
   admission budget still apply and refuse rather than clamp;
+- a signed `policy.allow_hosts` and `policy.request_budget` are folded into the
+  launch's network policy. This also applies to a positional `.mvmpkg` or its
+  installed bundle digest on a persistent `machine run -d`: the request ceiling
+  is retained in the machine spec for later starts. A wider operator policy or
+  host list is refused rather than replacing the signed ceiling;
 - a required secret slot with no `--secret` binding refuses the launch; the
   value stays on the host and is substituted at the endpoint, as for any
   binding;

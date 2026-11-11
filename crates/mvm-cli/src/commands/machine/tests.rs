@@ -1341,6 +1341,38 @@ fn run_spec_persists_agent_rules_and_ai_budget() {
 }
 
 #[test]
+fn run_spec_retains_the_folded_signed_request_ceiling() {
+    use mvm_contract::policy::network_policy::{AiBudgetModel, AiRequestBudget};
+
+    let _state = IsolatedMachineState::new();
+    let mut args = parse_run(&[
+        "run",
+        "--manifest",
+        "a".repeat(64).as_str(),
+        "--name",
+        "signed-agent",
+        "--allow-host",
+        "api.anthropic.com:443",
+        "--ai-token-budget",
+        "12000",
+    ])
+    .expect("parse");
+    let ceiling = AiRequestBudget {
+        max_requests: 1,
+        max_spend_microusd: 500_000,
+        model: AiBudgetModel::ClaudeHaiku45,
+    };
+    let mut folded =
+        super::super::shared::resolve_ai_policy(args.run.ai_token_budget).expect("token budget");
+    folded.request_budget = Some(ceiling);
+    args.run.applied_ai_policy = Some(folded.clone());
+
+    let spec = machine_run_spec(&args, "signed-agent".to_string(), None).expect("spec");
+    assert_eq!(spec.ai, Some(folded));
+    assert_eq!(spec.ai.unwrap().request_budget, Some(ceiling));
+}
+
+#[test]
 fn deployment_source_is_verified_and_persisted_as_canonical_directory() {
     let _state = IsolatedMachineState::new();
     let dir = tempfile::tempdir().expect("deployment dir");
