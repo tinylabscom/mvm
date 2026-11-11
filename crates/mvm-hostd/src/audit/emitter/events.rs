@@ -766,6 +766,37 @@ pub mod stream_audit {
     pub const LABEL_AFTER_SEQ: &str = "stream_input_after_seq";
 }
 
+pub mod guest_memory_audit {
+    //! Wire-stable event name and label keys for the guest-memory scrub entry.
+    //!
+    //! Counts only. The entry says how much of a guest's RAM the teardown
+    //! scrubbed and that none of it read non-zero afterwards; it never carries
+    //! an address or a byte of what was in memory.
+
+    /// Emitted by the supervisor after it scrubbed the guest's RAM at teardown.
+    pub const SCRUBBED_EVENT: &str = "plan.guest_memory_scrubbed";
+    /// Label: which backend's mapping was scrubbed.
+    pub const LABEL_BACKEND: &str = "backend";
+    /// Label: size of the guest RAM mapping, in bytes.
+    pub const LABEL_MAPPED_BYTES: &str = "mapped_bytes";
+    /// Label: pages the scrub found resident and zeroed.
+    pub const LABEL_SCRUBBED_PAGES: &str = "scrubbed_pages";
+    /// Label: bytes still non-zero after the scrub; zero when it worked.
+    pub const LABEL_NONZERO_BYTES_AFTER: &str = "nonzero_bytes_after";
+    /// Label: whether the whole mapping was scrubbed or only its resident pages.
+    pub const LABEL_WHOLE_MAPPING: &str = "whole_mapping";
+
+    /// What a teardown scrub reports, as the facts the entry carries.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct GuestMemoryScrub {
+        pub backend: &'static str,
+        pub mapped_bytes: u64,
+        pub scrubbed_pages: u64,
+        pub nonzero_bytes_after: u64,
+        pub whole_mapping: bool,
+    }
+}
+
 pub mod wall_clock_audit {
     //! Wire-stable event name and label keys for wall-clock enforcement entries.
     //!
