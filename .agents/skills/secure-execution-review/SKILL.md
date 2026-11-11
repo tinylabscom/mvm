@@ -10,7 +10,9 @@ contracts it links. Use Trail to locate the owning production path and its
 callers. ADR-001's claims table and backend matrix govern shipped security
 claims; proposals, fixtures, and tests for other backends do not extend them.
 Do not use this skill to turn a small unrelated change into a repository-wide
-audit.
+audit. For a focused security review, use the security-audit skill in guidance
+mode when available; a full codebase audit requires its own request. Rust
+changes still follow the repository's Rust-skill rule.
 
 1. **State the contract.** Identify the user-visible operation, selected
    backend, caller, signed plan or pack, trust boundary, and exact outcome.
