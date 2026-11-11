@@ -18,6 +18,11 @@
 //! bridges it to a per-port socket, or reaches the guest through its vsock mux,
 //! declares the capability. A grant on one that does not refuses the launch
 //! rather than boot a guest that asserts a mailbox nobody serves.
+//!
+//! Until an independent checkpoint and persistent history-key provider exist,
+//! only admitted Dev launches serve the ephemeral Send queue. Production
+//! mailbox launches refuse before boot, and reader frames fail closed.
+//! The local file anchor never authorizes a signed `AcceptedDurable` claim.
 
 use std::io::{Error, ErrorKind, Result, Write as _};
 use std::os::unix::process::CommandExt as _;
@@ -27,17 +32,18 @@ use std::sync::mpsc::sync_channel;
 use std::time::Duration;
 
 use mvm_contract::protocol::mailbox::{MAILBOX_PORT, MailboxGrant};
-use mvm_core::mailbox::journal::{FileJournalAnchor, JournalLimits, MailboxJournal};
-use mvm_core::plan::ExecutionPlan;
+use mvm_core::plan::{ExecutionPlan, Variant};
 use mvm_core::vm_backend::{HostDialRoute, VmId, VmStartConfig};
 use mvm_runtime::backend::AnyBackend;
 use mvm_vmm::host::aux_bin::AuxBin;
 use mvm_vmm::host::flowmux_identity::{MAILBOX_READER_BOOT_FILE, MailboxReaderBootBinding};
 
 use crate::mailbox_launch::{DerivedMailboxKeys, LAUNCH_LIMITS, derive_launch_keys};
-use crate::mailbox_service::durable::DurableMailboxService;
+use crate::mailbox_service::MailboxService;
+use crate::plan_admission::{MailboxLaunchPosture, MailboxPostureHandoff};
 use crate::vm_lifetime::{endpoint_needed, launcher_is_alive};
 
+#[cfg(test)]
 mod reader;
 
 /// The helper binary this module spawns.
@@ -49,6 +55,7 @@ pub use mvm_vmm::host::vm_helpers::MAILBOX_PID_FILE;
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const READY_MARKER: &[u8; 6] = b"READY\n";
+const MAX_HELPER_PLAN_BYTES: u64 = 1024 * 1024;
 
 /// What the process reads on stdin. `deny_unknown_fields`, so a field a newer
 /// launcher adds fails closed here.
@@ -59,6 +66,8 @@ pub struct MailboxProcessConfig {
     pub keys: DerivedMailboxKeys,
     pub socket: PathBuf,
     pub guest_route: HostDialRoute,
+    /// Absent on an old or unauthenticated restart: fail closed, never default Dev.
+    pub posture: Option<MailboxPostureHandoff>,
     /// Public ACK key and boot identity pinned to the admitted cold plan.
     /// Absent on a warm child until it rekeys and enrolls.
     pub reader_boot: Option<MailboxReaderBootBinding>,
@@ -71,9 +80,39 @@ pub fn parse(raw: &[u8]) -> serde_json::Result<MailboxProcessConfig> {
     serde_json::from_slice(raw)
 }
 
+fn load_admitted_plan(state_dir: &Path) -> Result<ExecutionPlan> {
+    use std::io::Read as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(state_dir.join("plan.json"))?;
+    let meta = file.metadata()?;
+    if !meta.is_file() || meta.nlink() != 1 || meta.len() > MAX_HELPER_PLAN_BYTES {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "mailbox helper plan is not a bounded single-link regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_HELPER_PLAN_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_HELPER_PLAN_BYTES {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "mailbox helper plan is oversized",
+        ));
+    }
+    mvm_core::plan::plan_from_admitted_json(
+        std::str::from_utf8(&bytes).map_err(|error| Error::new(ErrorKind::InvalidData, error))?,
+    )
+    .map_err(|error| Error::new(ErrorKind::InvalidData, error))
+}
+
 /// Serve until neither the launcher nor the VM is left; the exit code.
 pub fn serve(config: MailboxProcessConfig) -> i32 {
-    match serve_durable(config) {
+    match serve_ephemeral(config) {
         Ok(()) => 0,
         Err(error) => {
             tracing::error!(%error, "mailbox service failed closed");
@@ -82,7 +121,7 @@ pub fn serve(config: MailboxProcessConfig) -> i32 {
     }
 }
 
-fn serve_durable(config: MailboxProcessConfig) -> Result<()> {
+fn serve_ephemeral(config: MailboxProcessConfig) -> Result<()> {
     // SAFETY: `getppid` is async-signal-safe and infallible.
     let launcher = unsafe { libc::getppid() };
     let MailboxProcessConfig {
@@ -90,58 +129,52 @@ fn serve_durable(config: MailboxProcessConfig) -> Result<()> {
         keys,
         socket,
         guest_route,
+        posture,
         reader_boot,
         vm_state_dir,
     } = config;
-    if let Some(binding) = &reader_boot
-        && (binding.mailbox != grant.mailbox || binding.execution_epoch != grant.epoch)
-    {
+    let posture = posture.ok_or_else(|| {
+        Error::new(
+            ErrorKind::PermissionDenied,
+            "mailbox helper has no admitted posture",
+        )
+    })?;
+    let plan = load_admitted_plan(&vm_state_dir)?;
+    let vm_name = vm_state_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| Error::new(ErrorKind::InvalidData, "mailbox VM identity is invalid"))?;
+    if reader_boot != load_reader_boot_for_plan(&vm_state_dir, &plan)? {
         return Err(Error::new(
             ErrorKind::PermissionDenied,
-            "mailbox reader boot does not match the helper's signed grant",
+            "mailbox reader boot changed since the admitted helper handoff",
         ));
     }
-    let (policy, mut sealer) = keys.trust();
-    let (signer, journal_key, anchor_key) = keys.durable_material();
-    sealer.intent_dir = Some(vm_state_dir.join("mailbox-intents"));
-    let sealer = sealer.with_grant(&grant)?;
-    let address = sealer.capability.address;
-    let anchor = FileJournalAnchor::open(&vm_state_dir.join("mailbox-anchor"), address, anchor_key)
+    posture
+        .verify(
+            &plan,
+            vm_name,
+            reader_boot.as_ref().map(|binding| binding.boot),
+        )
         .map_err(Error::other)?;
-    let journal = MailboxJournal::open_reconciling(
-        &vm_state_dir.join("mailbox-journal"),
-        address,
-        signer.verifying_key(),
-        journal_key,
-        JournalLimits {
-            max_records: 64,
-            max_bytes: 4 * 1024 * 1024,
-        },
-        &anchor,
-    )
-    .map_err(Error::other)?;
-    let enrolled = reader_boot
-        .map(|binding| {
-            reader::load_or_enroll(&vm_state_dir, &grant, binding, &sealer.capability, &signer)
-        })
-        .transpose()?;
-    let service = DurableMailboxService::bind(
-        &socket,
-        LAUNCH_LIMITS,
-        policy.with_grant(&grant)?,
-        signer,
-        journal,
-        anchor,
-    )?;
-    if let Some(enrolled) = enrolled {
-        service.install_reader(enrolled)?;
+    if posture.variant() != Variant::Dev || plan.mailbox != Some(grant) {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            "production mailbox requires an independent checkpoint and key custody",
+        ));
     }
+    let (policy, sealer) = keys.trust();
+    let sealer = sealer.with_grant(&grant)?;
+    let service = MailboxService::bind_live(&socket, LAUNCH_LIMITS, policy.with_grant(&grant)?)?;
     std::io::stdout().write_all(READY_MARKER)?;
     let mut sealer = sealer;
     while vm_state_dir.exists()
         && endpoint_needed(launcher_is_alive(launcher), vm_is_alive(&vm_state_dir))
     {
-        if service.serve_guest(&guest_route, &mut sealer).is_err() {
+        if service
+            .serve_guest_route(&guest_route, &mut sealer)
+            .is_err()
+        {
             std::thread::sleep(POLL_INTERVAL);
         }
     }
@@ -172,6 +205,7 @@ pub fn build_config(
                     "backend cannot dial the guest mailbox port",
                 )
             })?,
+        posture: None,
         reader_boot: None,
         vm_state_dir: state_dir.to_path_buf(),
     })
@@ -274,9 +308,29 @@ fn granted_plan(config: &VmStartConfig) -> Option<ExecutionPlan> {
 
 /// Refuse, before the VM boots, a config whose guest would be told to serve a
 /// mailbox this backend cannot.
-pub fn require_servable(config: &VmStartConfig, backend: &AnyBackend) -> anyhow::Result<()> {
+pub fn require_servable(
+    config: &VmStartConfig,
+    backend: &AnyBackend,
+    posture: Option<&MailboxLaunchPosture>,
+) -> anyhow::Result<()> {
     match granted_plan(config) {
-        Some(plan) => Ok(require_wired(&plan, backend)?),
+        Some(plan) => {
+            let posture = posture.ok_or_else(|| {
+                Error::new(
+                    ErrorKind::PermissionDenied,
+                    "mailbox launch has no admitted posture",
+                )
+            })?;
+            posture.verify(&plan, &config.name)?;
+            if posture.variant() != Variant::Dev {
+                return Err(Error::new(
+                    ErrorKind::PermissionDenied,
+                    "production mailbox needs an independent checkpoint and persistent key custody",
+                )
+                .into());
+            }
+            Ok(require_wired(&plan, backend)?)
+        }
         None => Ok(()),
     }
 }
@@ -289,26 +343,36 @@ pub fn serve_started(
     backend: &AnyBackend,
     id: &VmId,
     config: &VmStartConfig,
+    posture: Option<&MailboxLaunchPosture>,
 ) -> anyhow::Result<()> {
-    serve_started_with(backend, id, config, spawn_for_launch)
+    serve_started_with(backend, id, config, posture, spawn_for_launch)
 }
 
 fn serve_started_with(
     backend: &AnyBackend,
     id: &VmId,
     config: &VmStartConfig,
-    spawn: impl FnOnce(&ExecutionPlan, &AnyBackend, &str) -> Result<Option<u32>>,
+    posture: Option<&MailboxLaunchPosture>,
+    spawn: impl FnOnce(
+        &ExecutionPlan,
+        &AnyBackend,
+        &str,
+        Option<&MailboxLaunchPosture>,
+    ) -> Result<Option<u32>>,
 ) -> anyhow::Result<()> {
     let Some(plan) = granted_plan(config) else {
         return Ok(());
     };
-    if let Err(error) = spawn(&plan, backend, &id.0) {
+    let outcome = (|| -> anyhow::Result<()> {
+        require_servable(config, backend, posture)?;
+        spawn(&plan, backend, &id.0, posture)?;
+        Ok(())
+    })();
+    if let Err(error) = outcome {
         if let Err(stop) = backend.stop(id) {
             tracing::warn!(vm = %id.0, error = %stop, "stopping a VM whose mailbox could not be served failed");
         }
-        return Err(
-            anyhow::Error::new(error).context("the granted guest mailbox could not be served")
-        );
+        return Err(error.context("the granted guest mailbox could not be served"));
     }
     Ok(())
 }
@@ -319,10 +383,24 @@ pub fn spawn_for_launch(
     plan: &ExecutionPlan,
     backend: &AnyBackend,
     vm_name: &str,
+    posture: Option<&MailboxLaunchPosture>,
 ) -> Result<Option<u32>> {
     let Some(grant) = &plan.mailbox else {
         return Ok(None);
     };
+    let posture = posture.ok_or_else(|| {
+        Error::new(
+            ErrorKind::PermissionDenied,
+            "mailbox launch has no admitted posture",
+        )
+    })?;
+    posture.verify(plan, vm_name).map_err(Error::other)?;
+    if posture.variant() != Variant::Dev {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            "production mailbox needs independent durability",
+        ));
+    }
     require_wired(plan, backend)?;
     let state_dir = mvm_core::config::vm_state_dir(vm_name);
     let mut config = build_config(
@@ -332,6 +410,7 @@ pub fn spawn_for_launch(
         backend,
     )?;
     config.reader_boot = load_reader_boot_for_plan(&state_dir, plan)?;
+    config.posture = Some(posture.handoff(config.reader_boot.as_ref().map(|binding| binding.boot)));
     let bin = mvm_vmm::host::broker_services_spawn::resolve_subprocess_bin_to_spawn(&AuxBin::new(
         MAILBOX_BIN,
         MAILBOX_BIN_ENV,
@@ -419,7 +498,8 @@ mod tests {
     fn an_ungranted_plan_spawns_nothing() {
         let plan = mvm_core::plan::test_support::PlanFixture::new().build();
         assert!(plan.mailbox.is_none());
-        let started = spawn_for_launch(&plan, &backend_named("firecracker"), "no-such-vm").unwrap();
+        let started =
+            spawn_for_launch(&plan, &backend_named("firecracker"), "no-such-vm", None).unwrap();
         assert_eq!(started, None);
     }
 
@@ -432,7 +512,16 @@ mod tests {
         let dir = keys_dir();
         let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
         plan.mailbox = Some(grant(dir.path()));
-        let error = spawn_for_launch(&plan, &backend_named("libkrun"), "no-such-vm").unwrap_err();
+        plan.image.name = "no-such-vm".into();
+        plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
+        let posture = MailboxLaunchPosture::for_test(&plan, Variant::Dev);
+        let error = spawn_for_launch(
+            &plan,
+            &backend_named("libkrun"),
+            "no-such-vm",
+            Some(&posture),
+        )
+        .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Unsupported);
     }
 
@@ -579,6 +668,8 @@ mod tests {
     fn config_for(grant: Option<MailboxGrant>) -> VmStartConfig {
         let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
         plan.mailbox = grant;
+        plan.image.name = "vm-under-test".into();
+        plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
         VmStartConfig {
             name: "vm-under-test".into(),
             plan_json: Some(serde_json::to_string(&plan).unwrap()),
@@ -588,17 +679,23 @@ mod tests {
 
     type Spawns = std::cell::RefCell<Vec<String>>;
 
+    fn posture_for(config: &VmStartConfig, variant: Variant) -> Option<MailboxLaunchPosture> {
+        granted_plan(config).map(|plan| MailboxLaunchPosture::for_test(&plan, variant))
+    }
+
     fn serve_with(
         config: &VmStartConfig,
         spawns: &Spawns,
         outcome: Result<Option<u32>>,
     ) -> anyhow::Result<()> {
         let backend = AnyBackend::from_hypervisor("firecracker");
+        let posture = posture_for(config, Variant::Dev);
         serve_started_with(
             &backend,
             &VmId("vm-under-test".into()),
             config,
-            |_, _, name| {
+            posture.as_ref(),
+            |_, _, name, _| {
                 spawns.borrow_mut().push(name.to_string());
                 outcome
             },
@@ -636,11 +733,25 @@ mod tests {
         let grant = grant(dir.path());
         let state = tempfile::tempdir().unwrap();
         let state_path = state.path().to_path_buf();
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.mailbox = Some(grant);
+        plan.image.name = state_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
+        std::fs::write(
+            state_path.join("plan.json"),
+            serde_json::to_vec(&plan).unwrap(),
+        )
+        .unwrap();
         let config = MailboxProcessConfig {
             keys: derive_launch_keys(dir.path(), &grant).unwrap(),
             grant,
             socket: dir.path().join("mailbox.sock"),
             guest_route: HostDialRoute::PortSocket(dir.path().join("absent-port")),
+            posture: Some(MailboxLaunchPosture::for_test(&plan, Variant::Dev).handoff(None)),
             reader_boot: None,
             vm_state_dir: state_path,
         };
@@ -661,6 +772,98 @@ mod tests {
     }
 
     #[test]
+    fn dev_send_stays_live_without_a_false_durable_receipt() {
+        use mvm_contract::protocol::mailbox::PrincipalId;
+        use mvm_core::mailbox::frame::{OWN_MAILBOX_RECIPIENT, OutboxMessage};
+        let keys = keys_dir();
+        let state = tempfile::tempdir().unwrap();
+        let grant = grant(keys.path());
+        let vm_name = state
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.mailbox = Some(grant);
+        plan.image.name = vm_name;
+        plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
+        std::fs::write(
+            state.path().join("plan.json"),
+            serde_json::to_vec(&plan).unwrap(),
+        )
+        .unwrap();
+
+        let guest_port = keys.path().join("guest-port.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&guest_port).unwrap();
+        let outbox = keys.path().join("outbox");
+        mvm_agentd::mailbox_outbox::write_outbox(
+            &outbox,
+            &OutboxMessage::new(
+                PrincipalId::from_bytes(OWN_MAILBOX_RECIPIENT),
+                b"ephemeral dev send".to_vec(),
+            ),
+        )
+        .unwrap();
+        let socket = keys.path().join("mailbox.sock");
+        let config = MailboxProcessConfig {
+            keys: derive_launch_keys(keys.path(), &grant).unwrap(),
+            grant,
+            socket: socket.clone(),
+            guest_route: HostDialRoute::PortSocket(guest_port),
+            posture: Some(MailboxLaunchPosture::for_test(&plan, Variant::Dev).handoff(None)),
+            reader_boot: None,
+            vm_state_dir: state.path().to_path_buf(),
+        };
+        let helper = std::thread::spawn(move || serve(config));
+        let ready = std::time::Instant::now() + Duration::from_secs(5);
+        while !socket.exists() {
+            assert!(
+                std::time::Instant::now() < ready,
+                "dev mailbox did not bind"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let guest = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            mvm_agentd::mailbox_outbox::wait_and_forward_outbox(&mut stream, &outbox).unwrap();
+            let (mut reader, _) = listener.accept().unwrap();
+            reader
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            mvm_core::mailbox::reader_wire::write_request(
+                &mut reader,
+                &mvm_core::mailbox::reader_wire::ReaderRequest::Receive,
+            )
+            .unwrap();
+            assert_eq!(
+                mvm_core::mailbox::reader_wire::read_response(&mut reader),
+                Ok(mvm_core::mailbox::reader_wire::ReaderResponse::Refused {
+                    reason: mvm_core::mailbox::frame::Refusal::Unavailable
+                }),
+                "ephemeral Send cannot grant a guest Receive lease"
+            );
+        });
+        guest.join().unwrap();
+        assert_eq!(
+            crate::mailbox_service::recv(&socket).unwrap().message,
+            Some(hex::encode(b"ephemeral dev send"))
+        );
+        assert!(!state.path().join("mailbox-journal").exists());
+        assert!(!state.path().join("mailbox-anchor").exists());
+        drop(state);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !helper.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "ephemeral helper did not stop"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(helper.join().unwrap(), 0);
+    }
+
+    #[test]
     fn a_grant_that_cannot_be_served_fails_the_launch() {
         let dir = keys_dir();
         let granted = config_for(Some(grant(dir.path())));
@@ -677,19 +880,94 @@ mod tests {
     fn a_grant_on_an_unwired_backend_is_refused_before_boot() {
         let dir = keys_dir();
         let granted = config_for(Some(grant(dir.path())));
+        let posture = posture_for(&granted, Variant::Dev);
         for name in ["firecracker", "hvf"] {
             let backend = backend_named(name);
             assert!(backend.capabilities().guest_mailbox, "{name}");
-            assert!(require_servable(&granted, &backend).is_ok(), "{name}");
+            assert!(
+                require_servable(&granted, &backend, posture.as_ref()).is_ok(),
+                "{name}"
+            );
         }
         for name in ["libkrun", "qemu", "wasm"] {
             let backend = backend_named(name);
             assert!(!backend.capabilities().guest_mailbox, "{name}");
-            assert!(require_servable(&granted, &backend).is_err(), "{name}");
             assert!(
-                require_servable(&config_for(None), &backend).is_ok(),
+                require_servable(&granted, &backend, posture.as_ref()).is_err(),
+                "{name}"
+            );
+            assert!(
+                require_servable(&config_for(None), &backend, None).is_ok(),
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn mailbox_never_defaults_missing_or_production_posture_to_dev() {
+        let dir = keys_dir();
+        let config = config_for(Some(grant(dir.path())));
+        let backend = backend_named("firecracker");
+        assert!(require_servable(&config, &backend, None).is_err());
+        let prod = posture_for(&config, Variant::Prod);
+        assert!(require_servable(&config, &backend, prod.as_ref()).is_err());
+        let dev = posture_for(&config, Variant::Dev);
+        assert!(require_servable(&config, &backend, dev.as_ref()).is_ok());
+
+        let mut forged = serde_json::to_value(dev.unwrap().handoff(None)).unwrap();
+        forged["plan_id"] = serde_json::json!("sha256:wrong");
+        let forged: MailboxPostureHandoff = serde_json::from_value(forged).unwrap();
+        let plan = granted_plan(&config).unwrap();
+        assert!(forged.verify(&plan, &config.name, None).is_err());
+        let stale_boot = posture_for(&config, Variant::Dev).unwrap().handoff(Some(
+            mvm_contract::protocol::mailbox::BootId::from_bytes([8; 32]),
+        ));
+        assert!(stale_boot.verify(&plan, &config.name, None).is_err());
+    }
+
+    #[test]
+    fn helper_restart_without_admitted_posture_refuses_before_binding() {
+        let dir = keys_dir();
+        let state = tempfile::tempdir().unwrap();
+        let grant = grant(dir.path());
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.mailbox = Some(grant);
+        plan.image.name = state
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
+        std::fs::write(
+            state.path().join("plan.json"),
+            serde_json::to_vec(&plan).unwrap(),
+        )
+        .unwrap();
+        let config = MailboxProcessConfig {
+            keys: derive_launch_keys(dir.path(), &grant).unwrap(),
+            grant,
+            socket: dir.path().join("mailbox.sock"),
+            guest_route: HostDialRoute::PortSocket(dir.path().join("absent-port")),
+            posture: None,
+            reader_boot: None,
+            vm_state_dir: state.path().to_path_buf(),
+        };
+        assert_eq!(serve(config), 1);
+        assert!(!dir.path().join("mailbox.sock").exists());
+    }
+
+    #[test]
+    fn helper_refuses_oversized_or_symlinked_plan_state() {
+        let state = tempfile::tempdir().unwrap();
+        let path = state.path().join("plan.json");
+        std::fs::write(&path, vec![b' '; MAX_HELPER_PLAN_BYTES as usize + 1]).unwrap();
+        assert_eq!(
+            load_admitted_plan(state.path()).err().unwrap().kind(),
+            ErrorKind::InvalidData
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(state.path().join("missing"), &path).unwrap();
+        assert!(load_admitted_plan(state.path()).is_err());
     }
 }

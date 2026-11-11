@@ -154,6 +154,7 @@ pub use registry_pack::{BuiltPackBootCheck, PreparedBuiltPackRuntime, prepare_bu
 pub struct AdmittedPlan {
     plan: ExecutionPlan,
     plan_id: PlanId,
+    variant: Variant,
     signer_id: String,
     signed: SignedExecutionPlan,
     extensions: Vec<AdmittedExtension>,
@@ -164,6 +165,103 @@ pub struct AdmittedPlan {
     /// admission authorizes one launch; the plan is handed back on
     /// `StartedMachine`, and holding it again must not start a second backend.
     dispatched: bool,
+}
+
+/// Launch-only posture retained from host admission, never inferred from plan labels.
+#[derive(Debug, Clone)]
+pub struct MailboxLaunchPosture {
+    variant: Variant,
+    plan_id: PlanId,
+    plan_nonce: mvm_core::plan::Nonce,
+    vm_name: String,
+    grant: mvm_contract::protocol::mailbox::MailboxGrant,
+}
+
+/// The private-pipe projection; unlike the launch token, parsing this is not
+/// admission authority. Only the launcher holding a verified token sends it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxPostureHandoff {
+    variant: Variant,
+    plan_id: PlanId,
+    plan_nonce: mvm_core::plan::Nonce,
+    vm_name: String,
+    grant: mvm_contract::protocol::mailbox::MailboxGrant,
+    reader_boot: Option<mvm_contract::protocol::mailbox::BootId>,
+}
+
+impl MailboxPostureHandoff {
+    pub(crate) fn verify(
+        &self,
+        plan: &ExecutionPlan,
+        vm_name: &str,
+        reader_boot: Option<mvm_contract::protocol::mailbox::BootId>,
+    ) -> Result<()> {
+        MailboxLaunchPosture {
+            variant: self.variant,
+            plan_id: self.plan_id.clone(),
+            plan_nonce: self.plan_nonce.clone(),
+            vm_name: self.vm_name.clone(),
+            grant: self.grant,
+        }
+        .verify(plan, vm_name)?;
+        anyhow::ensure!(
+            self.reader_boot == reader_boot,
+            "mailbox helper posture belongs to another guest boot"
+        );
+        Ok(())
+    }
+
+    pub(crate) const fn variant(&self) -> Variant {
+        self.variant
+    }
+}
+
+impl MailboxLaunchPosture {
+    #[cfg(test)]
+    pub(crate) fn for_test(plan: &ExecutionPlan, variant: Variant) -> Self {
+        Self {
+            variant,
+            plan_id: plan.plan_id.clone(),
+            plan_nonce: plan.nonce.clone(),
+            vm_name: plan.image.name.clone(),
+            grant: plan.mailbox.expect("mailbox posture fixture has a grant"),
+        }
+    }
+
+    /// Check the private helper handoff against this VM's admitted plan.
+    pub fn verify(&self, plan: &ExecutionPlan, vm_name: &str) -> Result<()> {
+        anyhow::ensure!(
+            plan.plan_id == mvm_core::plan::compute_plan_id(plan)
+                && self.plan_id == plan.plan_id
+                && self.plan_nonce == plan.nonce
+                && self.vm_name == vm_name
+                && plan.image.name == vm_name
+                && plan.mailbox == Some(self.grant),
+            "mailbox helper posture does not match the admitted VM and plan"
+        );
+        Ok(())
+    }
+
+    /// The posture admission selected; not a hint from the image or guest.
+    #[must_use]
+    pub const fn variant(&self) -> Variant {
+        self.variant
+    }
+
+    pub(crate) fn handoff(
+        &self,
+        reader_boot: Option<mvm_contract::protocol::mailbox::BootId>,
+    ) -> MailboxPostureHandoff {
+        MailboxPostureHandoff {
+            variant: self.variant,
+            plan_id: self.plan_id.clone(),
+            plan_nonce: self.plan_nonce.clone(),
+            vm_name: self.vm_name.clone(),
+            grant: self.grant,
+            reader_boot,
+        }
+    }
 }
 
 /// Re-verified host artifact behind one extension binding in the signed plan.
@@ -185,6 +283,18 @@ impl AdmittedPlan {
     #[must_use]
     pub fn plan_id(&self) -> &PlanId {
         &self.plan_id
+    }
+
+    /// Retain this host admission's mailbox posture for the exact VM it admitted.
+    #[must_use]
+    pub fn mailbox_posture(&self) -> Option<MailboxLaunchPosture> {
+        self.plan.mailbox.map(|grant| MailboxLaunchPosture {
+            variant: self.variant,
+            plan_id: self.plan_id.clone(),
+            plan_nonce: self.plan.nonce.clone(),
+            vm_name: self.plan.image.name.clone(),
+            grant,
+        })
     }
 
     /// The signer whose key the plan verified under — this host's own signer
@@ -224,6 +334,7 @@ impl AdmittedPlan {
     ) -> Self {
         Self {
             plan_id: plan.plan_id.clone(),
+            variant: Variant::Dev,
             signer_id,
             plan,
             signed,
@@ -615,6 +726,7 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
 
     Ok(AdmittedPlan {
         plan_id: verified.plan_id.clone(),
+        variant: posture.variant(),
         signer_id,
         plan: verified,
         signed,
@@ -2102,6 +2214,7 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
 
     let backend_name = backend.name().to_string();
     let vm_name = config.name.clone();
+    let mailbox_posture = admitted.mailbox_posture();
     registry_pack::verify_runtime_at_dispatch(
         _built_runtime.as_ref(),
         &config,
@@ -2110,7 +2223,7 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
     )?;
     // Before the boot, so a grant this backend cannot serve never reaches a
     // guest that would assert it.
-    crate::mailbox_process::require_servable(&config, backend)?;
+    crate::mailbox_process::require_servable(&config, backend, mailbox_posture.as_ref())?;
     // Spent before the backend starts, so an admission that reached dispatch
     // can never authorize another launch, whatever the start's outcome.
     admitted.dispatched = true;
@@ -2170,9 +2283,12 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
             // Last, so no earlier rollback leaves a mailbox process behind.
             // A grant that cannot be served is refused rather than booting a
             // guest whose mailbox port nobody answers.
-            if let Err(err) =
-                crate::mailbox_process::spawn_for_launch(admitted.plan(), backend, &vm_name)
-            {
+            if let Err(err) = crate::mailbox_process::spawn_for_launch(
+                admitted.plan(),
+                backend,
+                &vm_name,
+                mailbox_posture.as_ref(),
+            ) {
                 return Err(undo_launch(UndoLaunch {
                     backend,
                     vm_id: &vm_id,

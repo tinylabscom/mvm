@@ -542,6 +542,39 @@ impl MailboxService {
         }))
     }
 
+    /// Dev-only Send on the existing mailbox port. A reader frame is refused
+    /// explicitly until independent durable authority can back guest leases.
+    pub(crate) fn serve_guest_route(
+        &self,
+        route: &mvm_core::vm_backend::HostDialRoute,
+        sealer: &mut GuestSealer,
+    ) -> std::io::Result<bool> {
+        let mut stream = crate::telemetry_collector::dial_guest_route(
+            route,
+            mvm_contract::protocol::mailbox::MAILBOX_PORT,
+        )?;
+        stream.set_read_timeout(Some(Duration::from_secs(7)))?;
+        stream.set_write_timeout(Some(IO_TIMEOUT))?;
+        let frame = read_frame(self.shared.limits.max_frame_bytes, &mut stream);
+        if let Ok(body) = &frame
+            && mvm_core::mailbox::reader_wire::is_reader_frame(body)
+        {
+            mvm_core::mailbox::reader_wire::write_response(
+                &mut stream,
+                &mvm_core::mailbox::reader_wire::ReaderResponse::Refused {
+                    reason: Refusal::Unavailable,
+                },
+            )
+            .map_err(std::io::Error::other)?;
+            return Ok(true);
+        }
+        let received = frame.is_ok();
+        answer(&self.shared, &mut stream, frame, |body| {
+            sealer.seal(OutboxMessage::decode(body)?)
+        });
+        Ok(received)
+    }
+
     /// Take the oldest accepted plaintext, if any.
     pub fn receive(&self) -> Option<Vec<u8>> {
         self.shared.take().0

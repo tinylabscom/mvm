@@ -623,6 +623,7 @@ fn run_inner(
     let ResolvedLaunch {
         backend,
         start_config,
+        mailbox_posture,
         use_snapshot,
         root_strategy,
         image: resolved,
@@ -656,6 +657,7 @@ fn run_inner(
     let mut boot_attempt = BootAttempt {
         backend: &backend,
         start_config: &start_config,
+        mailbox_posture: mailbox_posture.as_ref(),
         resolved: &resolved,
         user_named: req.name.is_some(),
         writable_images: &mut disk_images,
@@ -1203,6 +1205,8 @@ pub struct ResolvedLaunch {
     /// which backend's capabilities shaped the config.
     pub backend: AnyBackend,
     pub start_config: VmStartConfig,
+    /// Only admission may supply Dev posture for an opted-in mailbox.
+    pub mailbox_posture: Option<mvm_hostd::plan_admission::MailboxLaunchPosture>,
     /// Whether snapshot restore survives admission (an admitted workload
     /// always cold-boots).
     pub use_snapshot: bool,
@@ -1298,6 +1302,7 @@ pub fn resolve_launch(
     );
     let mut use_snapshot = boot.use_snapshot;
     let mut built_pack_check = None;
+    let mut mailbox_posture = None;
 
     // Attach everything the boot waits on before admitting. Admission starts
     // the plan's validity window and the verb grant minted from it expires
@@ -1362,6 +1367,7 @@ pub fn resolve_launch(
     {
         let mut sub = sub;
         built_pack_check = sub.built_pack_check.take();
+        mailbox_posture = sub.mailbox_posture.take();
         let read_only_materialized_images = sub.apply_to(&mut start_config);
         for volume in &mut start_config.volumes {
             if read_only_materialized_images.contains(&volume.host)
@@ -1430,6 +1436,7 @@ pub fn resolve_launch(
     Ok(ResolvedLaunch {
         backend,
         start_config,
+        mailbox_posture,
         use_snapshot,
         root_strategy: boot.root_strategy,
         image,

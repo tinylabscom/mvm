@@ -877,6 +877,7 @@ pub(in crate::commands) fn run_secure_started(
         let substrate = crate::exec::SessionAuditSubstrate {
             tenant_id: c.admitted.plan().tenant.0.clone(),
             plan_json,
+            mailbox_posture: c.admitted.mailbox_posture(),
             built_pack_check: c.admitted.built_pack_boot_check()?,
             caller_registration: None,
             bundle_json,
