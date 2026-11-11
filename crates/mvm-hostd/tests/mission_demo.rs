@@ -1064,8 +1064,7 @@ fn a_running_guest_submits_again_after_its_first_message_was_consumed() {
 }
 
 #[test]
-fn durable_local_destination_signs_only_after_journal_and_anchor_commit() {
-    use mvm_contract::protocol::mailbox::DeliveryOutcome;
+fn local_file_anchor_cannot_issue_durable_acceptance() {
     use mvm_core::mailbox::journal::{FileJournalAnchor, JournalLimits, MailboxJournal};
     use mvm_hostd::mailbox_service::durable::{DurableMailboxService, send as send_durable};
 
@@ -1085,9 +1084,6 @@ fn durable_local_destination_signs_only_after_journal_and_anchor_commit() {
     routing.expires_at_unix_ms = header.expires_at_unix_ms;
     let mut capability_grant = grant(&[MailboxOperation::Send]);
     capability_grant.expires_at_unix_ms = header.expires_at_unix_ms;
-    let mut undersized_grant = capability_grant.clone();
-    undersized_grant.max_payload_bytes = 4;
-    let undersized = sign_capability(undersized_grant, &signer).unwrap();
     let capability = sign_capability(capability_grant, &signer).unwrap();
     let envelope = seal_envelope(
         SealRequest {
@@ -1130,78 +1126,87 @@ fn durable_local_destination_signs_only_after_journal_and_anchor_commit() {
 
     let service = start();
     assert_eq!(
-        send_durable(&socket, &undersized, &envelope, &header, &authority),
-        Err(Refusal::Oversized(4)),
-        "the signed payload ceiling is a terminal refusal, not a durable receipt"
+        send_durable(&socket, &capability, &envelope, &header, &authority),
+        Err(Refusal::Unavailable),
+        "a local anchor cannot authorize a signed durable verdict"
     );
-    let accepted = send_durable(&socket, &capability, &envelope, &header, &authority)
-        .expect("destination signed durable verdict");
-    assert_eq!(accepted.receipt.outcome, DeliveryOutcome::AcceptedDurable);
-    let mut receive_grant = grant(&[MailboxOperation::Receive]);
-    receive_grant.subject = aircraft_principal();
-    receive_grant.capability_id = CapabilityId::from_bytes([88; 32]);
-    receive_grant.expires_at_unix_ms = header.expires_at_unix_ms;
-    let receive_capability = sign_capability(receive_grant, &signer).unwrap();
-    let mut reader = context(1);
-    reader.acting_principal = aircraft_principal();
-    reader.required_operation = MailboxOperation::Receive;
-    assert!(matches!(
-        service.receive_next(&capability, &reader),
-        Err(mvm_core::mailbox::journal::JournalError::Mailbox(
-            MailboxError::WrongCapabilitySubject
-        ))
-    ));
-    let pending = service
-        .receive_next(&receive_capability, &reader)
-        .expect("independent Receive authority")
-        .expect("pending message");
-    assert_eq!(pending.payload(), b"hello");
-    let identity = pending.identity();
-    service
-        .acknowledge(identity, &receive_capability, &reader)
-        .expect("durable ACK");
-    assert!(
-        service
-            .receive_next(&receive_capability, &reader)
-            .expect("after ACK")
-            .is_none()
+    assert_eq!(
+        std::fs::read_dir(&journal_dir).unwrap().count(),
+        1,
+        "lock only"
     );
     drop(service);
     let anchor = FileJournalAnchor::open(&anchor_path, address(), [91; 32])
         .expect("anchor survived destination restart");
-    let tip = anchor.tip();
-    assert_eq!(tip.cursor, 2, "acceptance and ACK each advanced the anchor");
+    assert_eq!(
+        anchor.tip().cursor,
+        0,
+        "refused admission cannot advance a local anchor"
+    );
     drop(anchor);
     let service = start();
-    assert!(
-        service
-            .receive_next(&receive_capability, &reader)
-            .expect("ACK survived restart")
-            .is_none()
+    assert_eq!(
+        send_durable(&socket, &capability, &envelope, &header, &authority),
+        Err(Refusal::Unavailable),
+        "restart does not upgrade an untrusted local anchor"
     );
-    let duplicate = send_durable(&socket, &capability, &envelope, &header, &authority)
-        .expect("retry after service restart");
-    assert_eq!(duplicate.receipt.outcome, DeliveryOutcome::Duplicate);
     drop(service);
-    let anchor = FileJournalAnchor::open(&anchor_path, address(), [91; 32])
-        .expect("retry did not corrupt the anchor");
-    assert_eq!(anchor.tip(), tip, "retry must not append a record");
 }
 
 #[test]
-fn signed_guest_lease_and_exact_ack_survive_journal_restart() {
+fn signed_guest_lease_and_exact_ack_survive_mock_anchored_restart() {
     use mvm_contract::plan::{Nonce, PlanId};
     use mvm_contract::protocol::mailbox::{
         ConsumerSessionId, DeliveryAckNonce, MailboxDeliveryAck, MailboxGrant,
         MailboxGuestReaderEnrollment, MailboxGuestReaderScope,
     };
     use mvm_core::mailbox::journal::{
-        FileJournalAnchor, JournalAdmission, JournalError, JournalGuestAck, JournalGuestLease,
-        JournalLimits, JournalReceive, MailboxJournal,
+        JournalAdmission, JournalAnchor, JournalError, JournalGuestAck, JournalGuestLease,
+        JournalLimits, JournalReceive, JournalTip, MailboxJournal,
     };
     use mvm_core::mailbox::reader::{
         sign_delivery_ack, sign_guest_reader_enrollment, sign_reader_possession,
     };
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct TestAnchor(Arc<Mutex<JournalTip>>);
+
+    impl JournalAnchor for TestAnchor {
+        fn load(&self, target: MailboxAddress) -> Result<JournalTip, JournalError> {
+            if target != address() {
+                return Err(JournalError::WrongAuthority);
+            }
+            Ok(*self.0.lock().expect("mock anchor lock"))
+        }
+
+        fn compare_and_advance(
+            &self,
+            target: MailboxAddress,
+            expected: JournalTip,
+            next: JournalTip,
+        ) -> Result<(), JournalError> {
+            if target != address() {
+                return Err(JournalError::WrongAuthority);
+            }
+            let mut current = self.0.lock().expect("mock anchor lock");
+            if *current != expected || expected.cursor.checked_add(1) != Some(next.cursor) {
+                return Err(JournalError::Rollback);
+            }
+            *current = next;
+            Ok(())
+        }
+    }
+
+    impl TestAnchor {
+        fn tip(&self) -> JournalTip {
+            self.load(address()).expect("mock anchor tip")
+        }
+
+        fn advance(&self, next: JournalTip) -> Result<(), JournalError> {
+            self.compare_and_advance(address(), self.tip(), next)
+        }
+    }
 
     let (node, channel) = channel_with_one_node();
     let root = node.home.path();
@@ -1279,15 +1284,15 @@ fn signed_guest_lease_and_exact_ack_survive_journal_restart() {
         encryption_key: &channel.encryption_key,
         sender_key: &channel.sender_key.verifying_key(),
     };
-    let anchor_path = root.join("anchor");
     let journal_path = root.join("journal");
     let limits = JournalLimits {
         max_records: 6,
         max_bytes: 64 * 1024,
     };
+    let anchor_state = Arc::new(Mutex::new(JournalTip::genesis()));
     let open = || {
-        let anchor = FileJournalAnchor::open(&anchor_path, address(), [91; 32]).unwrap();
-        let journal = MailboxJournal::open_reconciling(
+        let anchor = TestAnchor(Arc::clone(&anchor_state));
+        let journal = MailboxJournal::open_with_anchor(
             &journal_path,
             address(),
             authority,
@@ -1300,7 +1305,7 @@ fn signed_guest_lease_and_exact_ack_survive_journal_restart() {
     };
     let (anchor, mut journal) = open();
     journal
-        .admit(
+        .admit_with_anchor(
             JournalAdmission {
                 envelope: &envelope,
                 capability: &send,
@@ -1309,7 +1314,7 @@ fn signed_guest_lease_and_exact_ack_survive_journal_restart() {
                 sender_key: &channel.sender_key.verifying_key(),
                 signer,
             },
-            |tip| anchor.advance(tip),
+            &anchor,
         )
         .unwrap();
     let challenge = [82; 32];
@@ -1573,10 +1578,9 @@ fn durable_mailbox_helper_process() {
 }
 
 #[test]
-fn a_killed_destination_reopens_its_anchor_and_deduplicates_the_retry() {
-    use mvm_contract::protocol::mailbox::DeliveryOutcome;
+fn a_killed_destination_still_refuses_unanchored_durable_acceptance() {
+    use mvm_core::mailbox::frame::send_receipted_frame;
     use mvm_core::mailbox::journal::FileJournalAnchor;
-    use mvm_hostd::mailbox_service::durable::send as send_durable;
 
     let dir = tempfile::tempdir_in("/tmp").expect("short Unix socket path");
     let socket = dir.path().join("durable.sock");
@@ -1612,22 +1616,24 @@ fn a_killed_destination_reopens_its_anchor_and_deduplicates_the_retry() {
         )
     };
     let submit = || {
-        (0..100)
-            .find_map(|_| {
-                match send_durable(&socket, &capability, &envelope, &header, &authority) {
-                    Ok(receipt) => Some(receipt),
-                    Err(Refusal::Unavailable) => {
-                        std::thread::sleep(std::time::Duration::from_millis(20));
-                        None
-                    }
-                    Err(other) => panic!("unexpected destination refusal: {other}"),
-                }
+        let mut stream = [0, 100, 250, 500, 1_000]
+            .into_iter()
+            .find_map(|delay_ms| {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                std::os::unix::net::UnixStream::connect(&socket).ok()
             })
-            .expect("destination was ready within two seconds")
+            .expect("destination was ready within two seconds");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        send_receipted_frame(&mut stream, &capability, &envelope, &header, &authority)
     };
 
     let mut process = launch();
-    assert_eq!(submit().receipt.outcome, DeliveryOutcome::AcceptedDurable);
+    assert_eq!(submit(), Err(Refusal::Unavailable));
     process.0.kill().expect("crash destination");
     process.0.wait().expect("reap crashed process");
     drop(process);
@@ -1635,12 +1641,12 @@ fn a_killed_destination_reopens_its_anchor_and_deduplicates_the_retry() {
         .expect("anchor survives process crash");
     assert_eq!(
         anchor.tip().cursor,
-        1,
-        "the signed verdict followed durable commit"
+        0,
+        "refusal cannot publish a local anchor even before a process crash"
     );
     drop(anchor);
     let _restarted = launch();
-    assert_eq!(submit().receipt.outcome, DeliveryOutcome::Duplicate);
+    assert_eq!(submit(), Err(Refusal::Unavailable));
 }
 
 /// One framed request to the mailbox socket as a host peer; the raw reply.
