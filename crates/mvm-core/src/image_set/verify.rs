@@ -121,6 +121,25 @@ impl<'a> ImageSetVerification<'a> {
         self.revocations = Some(revocations);
         self
     }
+
+    pub(super) fn lock_trust(&self) -> KeylessTrust {
+        self.lock.keyless_trust()
+    }
+
+    pub(super) fn with_current_revocations<'b>(
+        &'b self,
+        revocations: &'b dyn PackRevocationChecker,
+    ) -> ImageSetVerification<'b> {
+        ImageSetVerification {
+            manifest_bytes: self.manifest_bytes,
+            signature_bundle: self.signature_bundle,
+            lock: self.lock,
+            artifact_dir: self.artifact_dir,
+            requirement: self.requirement,
+            host_protocols: self.host_protocols,
+            revocations: Some(revocations),
+        }
+    }
 }
 
 /// What a verification established, for a caller that now wants to use the set.

@@ -65,3 +65,5 @@ pub mod boot_policy {
 pub mod plan_builder {
     pub use mvm_core::plan::{SynthesisInput, synthesize_plan};
 }
+#[cfg(all(feature = "pr-test-synthetic-base", feature = "release-channel"))]
+compile_error!("pr-test-synthetic-base is unavailable with release-channel");

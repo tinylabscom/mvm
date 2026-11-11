@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     pack_lock::lower_hex,
-    pack_spec::{PackIdentity, relative_path},
+    pack_spec::{PackIdentity, PackTarget, relative_path},
 };
 
 /// New authored graph schema; existing v1 and v2 formats remain independent.
@@ -76,6 +76,61 @@ impl GraphNode {
 pub struct ComposedGraph {
     pub schema: ComposedGraphSchema,
     pub graph: Vec<GraphNode>,
+}
+
+/// One authored invocation binds the ordered graph, target and command request.
+///
+/// Base selection and host grants remain launch inputs, not pack declarations.
+/// This document does not attest to publisher signatures or authorize a boot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "ComposedRunWire")]
+pub struct ComposedRunRequest {
+    pub schema: ComposedRunSchema,
+    pub target: PackTarget,
+    pub graph: ComposedGraph,
+    pub entrypoint: EntrypointRequest,
+}
+
+/// The single-file invocation format for the v3 graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ComposedRunSchema {
+    #[serde(rename = "mvm.composed-run/v1")]
+    V1,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ComposedRunWire {
+    schema: ComposedRunSchema,
+    target: PackTarget,
+    graph: ComposedGraph,
+    entrypoint: EntrypointRequest,
+}
+
+impl TryFrom<ComposedRunWire> for ComposedRunRequest {
+    type Error = ComposedGraphError;
+
+    fn try_from(wire: ComposedRunWire) -> Result<Self, Self::Error> {
+        let request = Self {
+            schema: wire.schema,
+            target: wire.target,
+            graph: wire.graph,
+            entrypoint: wire.entrypoint,
+        };
+        request.validate()?;
+        Ok(request)
+    }
+}
+
+impl ComposedRunRequest {
+    /// Validate directly constructed invocations before acquiring any pack bytes.
+    ///
+    /// # Errors
+    /// Refuses invalid graph pins or command requests.
+    pub fn validate(&self) -> Result<(), ComposedGraphError> {
+        self.graph.validate()?;
+        self.entrypoint.validate()
+    }
 }
 
 #[derive(Deserialize)]

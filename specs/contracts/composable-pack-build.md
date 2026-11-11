@@ -54,12 +54,24 @@ pair merely because their declared digests are well formed.
 `mvm.pack-spec/v2` currently parses one local application, ordered `runtime/*`
 requests, `/srv/app` copies, literal argv and resources. Its `[production]`
 table expresses intent only: it neither signs nor authorizes a release.
-The existing CLI candidate accepts `mvmctl run --compose PACK.TOML` only for a
-default-base local development build. A new versioned multi-component request
-must introduce exact signed app and runtime/tool pins, a selected base and
-entrypoint choice without changing the old v2 recipe's meaning. An unpinned
-production input, an unknown requirement, or a production request without
-separately trusted base evidence fails closed.
+The development-only CLI candidate accepts `mvmctl run --compose PACK.TOML`
+with the signed default or an explicit local manifest/kernel/tar selection.
+The local selection carries distinct schema-9 same-host proof, not canonical
+publisher authority. The separate `base-compatibility/v1` descriptor verifier
+binds exact base bytes and compares component requirements, but no signed
+production descriptor is published or acquired by this CLI path. A new
+versioned multi-component request must connect the existing v3 signed graph,
+verified schema-3 application/schema-4 runtime and tool inputs, and entrypoint
+choice without changing the old v2 recipe's meaning. An unpinned production
+input, an unknown requirement, or a production request without separately
+trusted base evidence fails closed.
+
+`mvm.composed-run/v1` is the proposed one-file v3 invocation envelope: it
+requires a Linux target, the `mvm.pack-spec/v3` ordered graph, and an
+`mvm.entrypoint-request/v1` command selection. Base selection and host grants
+are separate launch inputs; this authored envelope grants neither. Unknown
+fields, including implicit service startup, are refused. The contract parses
+and validates the envelope, but `mvmctl run --compose` does not consume it yet.
 
 ## Resolution, filesystem and cache
 
@@ -128,14 +140,19 @@ networking uses only host-mediated, authenticated FlowMux/vsock.
 
 ## Acceptance and currently missing evidence
 
-The staged candidate authenticates runtime descriptors/policies and a
+The staged v2 candidate authenticates runtime descriptors/policies and a
 signed-base composition tar, rejects path collisions, and creates a
-host-signed local development bundle for a fixed default. Direct-QEMU
-synthetic boots read `COMPOSED_GUEST_VALUE=print('ready')`; those are *not*
-`mvmctl run --compose` admission, guest-output or cache-hit evidence.
-The latest observed draft #5263 workspace run also fails
-`missing_bundle_never_falls_back_to_a_source_build_or_download`; investigate
-and fix that check rather than describing its CI as green.
+host-signed local development bundle for a default or explicitly selected
+local base. A verified host-signed filesystem may be reused across command
+choices when its ordered filesystem identity is unchanged; current trust,
+revocations and grants must still be readmitted. Typed v3 component readers,
+an exact-pin acquisition helper, an ordered staging function and an
+authenticated policy-snapshot adapter exist, but v3 is not wired into the
+CLI composition invocation, launch or production export.
+Direct-QEMU synthetic boots read `COMPOSED_GUEST_VALUE=print('ready')`; those
+are *not* `mvmctl run --compose` admission, guest-output or cache-hit evidence.
+The previously failing #5263 workspace test was fixed; passing it is not a
+substitute for the missing CLI cold/repeat Linux witness.
 
 Acceptance requires Linux **CLI** one-command default and selected-custom-base
 cold/repeat runs, a value actually read from the guest on both runs, a proven

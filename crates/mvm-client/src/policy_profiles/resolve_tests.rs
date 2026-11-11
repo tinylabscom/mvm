@@ -52,6 +52,234 @@ fn cli(raw: &[&str]) -> Vec<String> {
     raw.iter().map(ToString::to_string).collect()
 }
 
+#[test]
+fn signed_snapshot_preserves_pin_origin_and_merges_denies_and_minima() {
+    let resolved = resolve_signed_documents(
+        "runtime/python@3.0.0",
+        "abc123",
+        Some(b"[network]\nallow = [\"blocked.test\", \"open.test\"]\n[resources]\nmax_cpus = 4\n"),
+        Some(b"[overrides.network]\ndeny = [\"blocked.test\"]\n[overrides.resources]\nmax_cpus = 2\n"),
+        Platform::default(),
+    )
+    .unwrap();
+    assert_eq!(resolved.policy.network.allow, ["open.test:443"]);
+    assert_eq!(resolved.policy.resources.max_cpus, Some(2));
+    assert!(resolved.layers.iter().all(|layer| {
+        layer.origin == LayerOrigin::Pack
+            && layer.label.contains("runtime/python@3.0.0")
+            && layer.label.contains("sha256:abc123")
+            && layer.file.is_none()
+    }));
+}
+
+#[test]
+fn signed_snapshot_is_never_a_user_escape_hatch_or_share_grant() {
+    for text in [
+        "[env]\nreadmit = [\"PATH\"]\n",
+        "[[shares.mount]]\nhost = \"/host\"\nguest = \"/guest\"\n",
+    ] {
+        let resolved = resolve_signed_documents(
+            "tool/git@1.0.0",
+            "pin",
+            Some(text.as_bytes()),
+            None,
+            Platform::default(),
+        )
+        .unwrap();
+        assert!(resolved.policy.env.readmit.is_empty());
+        assert!(resolved.policy.shares.mount.is_empty());
+        assert!(resolved.notes.iter().any(|note| note.contains("ignored")));
+    }
+}
+
+#[test]
+fn signed_snapshot_refuses_every_unresolved_reference_even_in_inactive_conditions() {
+    for (text, key) in [
+        ("extends = \"default\"\n", "extends"),
+        ("[groups]\ninclude = [\"offline\"]\n", "groups"),
+        ("[groups]\nexclude = [\"offline\"]\n", "groups"),
+        (
+            "[[when]]\nos = \"linux\"\ninclude = [\"offline\"]\n",
+            "when[0]",
+        ),
+        (
+            "[[when]]\nos = \"linux\"\nexclude = [\"offline\"]\n",
+            "when[0]",
+        ),
+    ] {
+        let err = resolve_signed_documents(
+            "runtime/python@3.0.0",
+            "pin",
+            None,
+            Some(text.as_bytes()),
+            Platform::default(),
+        )
+        .unwrap_err();
+        assert_eq!(err.key.as_deref(), Some(key), "{text}: {err}");
+    }
+}
+
+#[test]
+fn signed_snapshot_refuses_invalid_bytes_and_merges_block() {
+    assert!(
+        resolve_signed_documents(
+            "app/a@1.0.0",
+            "pin",
+            Some(&[0xff]),
+            None,
+            Platform::default()
+        )
+        .is_err()
+    );
+    assert!(
+        resolve_signed_documents(
+            "app/a@1.0.0",
+            "pin",
+            Some(b"unknown = true\n"),
+            None,
+            Platform::default()
+        )
+        .is_err()
+    );
+    let blocked = resolve_signed_documents(
+        "app/a@1.0.0",
+        "pin",
+        Some(b"[network]\nblock = true\n"),
+        Some(b"[overrides.network]\nallow = [\"conditional.test\"]\n"),
+        Platform::default(),
+    )
+    .unwrap();
+    assert_eq!(blocked.policy.network.block, Some(true));
+    assert!(blocked.policy.network.allow.is_empty());
+    assert!(
+        resolve_signed_documents(
+            "app/a@1.0.0",
+            "pin",
+            Some(b"[network]\nblock = true\n"),
+            Some(b"[overrides.network]\nblock = false\n"),
+            Platform::default(),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn signed_snapshot_applies_only_matching_conditional_overrides() {
+    let profile = b"[[when]]\nos = \"linux\"\n[when.overrides.network]\ndeny = [\"linux.test\"]\n\
+                    [[when]]\nos = \"macos\"\n[when.overrides.network]\ndeny = [\"mac.test\"]\n";
+    let resolved = resolve_signed_documents(
+        "runtime/python@3.0.0",
+        "pin",
+        Some(b"[network]\nallow = [\"linux.test\", \"mac.test\"]\n"),
+        Some(profile),
+        Platform {
+            os: Some(super::super::model::HostOs::Linux),
+            ..Platform::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(resolved.policy.network.allow, ["mac.test:443"]);
+    assert_eq!(resolved.layers.len(), 2);
+}
+
+#[test]
+fn ordered_signed_packs_merge_denies_and_minima_across_component_boundaries() {
+    let mut layers = Vec::new();
+    let mut backend_conditioned = false;
+    for (reference, pin, group) in [
+        (
+            "runtime/base@1.0.0",
+            "first",
+            "[network]\nallow = [\"blocked.test\", \"open.test\"]\n[resources]\nmax_cpus = 4\n",
+        ),
+        (
+            "tool/guard@1.0.0",
+            "second",
+            "[network]\ndeny = [\"blocked.test\"]\n[resources]\nmax_cpus = 2\n",
+        ),
+        (
+            "app/workload@1.0.0",
+            "third",
+            "[network]\nallow = [\"blocked.test\", \"later.test\"]\n[resources]\nmax_cpus = 3\n",
+        ),
+    ] {
+        append_signed_documents(
+            reference,
+            pin,
+            Some(group.as_bytes()),
+            None,
+            Platform::default(),
+            &mut layers,
+            &mut backend_conditioned,
+        )
+        .unwrap();
+    }
+    let resolved = merge_layers(&layers).unwrap();
+    assert_eq!(
+        resolved.policy.network.allow,
+        ["open.test:443", "later.test:443"]
+    );
+    assert_eq!(resolved.policy.resources.max_cpus, Some(2));
+    assert_eq!(resolved.layers.len(), 3);
+    for (layer, pin) in resolved.layers.iter().zip(["first", "second", "third"]) {
+        assert_eq!(layer.origin, LayerOrigin::Pack);
+        assert!(layer.label.contains(&format!("sha256:{pin}")));
+    }
+}
+
+#[test]
+fn signed_pack_cannot_unblock_another_or_resolve_a_later_dependency() {
+    let mut layers = Vec::new();
+    let mut backend_conditioned = false;
+    append_signed_documents(
+        "runtime/base@1.0.0",
+        "first",
+        Some(b"[network]\nblock = true\n"),
+        None,
+        Platform::default(),
+        &mut layers,
+        &mut backend_conditioned,
+    )
+    .unwrap();
+    append_signed_documents(
+        "tool/guard@1.0.0",
+        "second",
+        Some(b"[network]\nallow = [\"outside.test\"]\n"),
+        None,
+        Platform::default(),
+        &mut layers,
+        &mut backend_conditioned,
+    )
+    .unwrap();
+    let blocked = merge_layers(&layers).unwrap();
+    assert_eq!(blocked.policy.network.block, Some(true));
+    assert!(blocked.policy.network.allow.is_empty());
+
+    let mut conflicting = layers.clone();
+    append_signed_documents(
+        "app/workload@1.0.0",
+        "third",
+        None,
+        Some(b"[overrides.network]\nblock = false\n"),
+        Platform::default(),
+        &mut conflicting,
+        &mut backend_conditioned,
+    )
+    .unwrap();
+    assert!(merge_layers(&conflicting).is_err());
+    let err = append_signed_documents(
+        "app/workload@1.0.0",
+        "third",
+        None,
+        Some(b"extends = \"runtime/base@1.0.0\"\n"),
+        Platform::default(),
+        &mut layers,
+        &mut backend_conditioned,
+    )
+    .unwrap_err();
+    assert_eq!(err.key.as_deref(), Some("extends"));
+}
+
 // ---- built-ins ------------------------------------------------------------
 
 #[test]

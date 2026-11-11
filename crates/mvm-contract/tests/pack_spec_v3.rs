@@ -1,8 +1,8 @@
 use mvm_contract::pack_spec::PackSpec;
 use mvm_contract::pack_spec_v2::ComposablePackSpec;
 use mvm_contract::pack_spec_v3::{
-    ComposedGraph, ComposedGraphError, EntrypointRequest, GraphNode, SelectedEntrypoint,
-    SignedPackPin,
+    ComposedGraph, ComposedGraphError, ComposedRunRequest, EntrypointRequest, GraphNode,
+    SelectedEntrypoint, SignedPackPin,
 };
 use serde_json::{Value, json};
 
@@ -292,4 +292,43 @@ manifest_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
         .workload_command,
         Some(vec!["/srv/app/run".into()])
     );
+}
+
+#[test]
+fn one_file_invocation_preserves_order_target_and_entrypoint_without_granting_services() {
+    let value = json!({
+        "schema": "mvm.composed-run/v1",
+        "target": "x86_64-linux",
+        "graph": graph(),
+        "entrypoint": {
+            "schema": "mvm.entrypoint-request/v1",
+            "workload_command": ["/srv/app/run"]
+        }
+    });
+    let request: ComposedRunRequest = serde_json::from_value(value.clone()).unwrap();
+    request.validate().unwrap();
+    assert_eq!(serde_json::to_value(&request).unwrap(), value);
+    assert_eq!(request.graph.graph[0].pin().name, "runtime/python");
+    assert_eq!(
+        request.entrypoint.workload_command.as_deref().unwrap(),
+        ["/srv/app/run"]
+    );
+
+    for (field, invalid) in [
+        ("schema", json!("mvm.composed-run/v2")),
+        ("target", json!("wasm32-wasi")),
+    ] {
+        let mut changed = value.clone();
+        changed[field] = invalid;
+        assert!(
+            serde_json::from_value::<ComposedRunRequest>(changed).is_err(),
+            "{field}"
+        );
+    }
+    let mut unknown = value.clone();
+    unknown["services"] = json!(["unrequested-daemon"]);
+    assert!(serde_json::from_value::<ComposedRunRequest>(unknown).is_err());
+    let mut invalid = request;
+    invalid.graph.graph.clear();
+    assert!(invalid.validate().is_err());
 }

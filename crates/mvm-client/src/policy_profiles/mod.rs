@@ -31,7 +31,10 @@ pub mod source;
 pub use manifest::{FoldedLaunch, LaunchFlags, ResolvedManifest, fold};
 pub use merge::{LayerSummary, ResolvedPolicy};
 pub use model::{GroupFile, PolicyBody, ProfileFile};
-pub use resolve::{MAX_EXTENDS_DEPTH, Platform, PolicySelection, ProjectPolicy, resolve};
+pub use resolve::{
+    MAX_EXTENDS_DEPTH, Platform, PolicySelection, ProjectPolicy, VerifiedPolicyInputs, resolve,
+    resolve_verified_policies, resolve_verified_policy,
+};
 pub use source::{LayerOrigin, PolicyError, PolicyRef, PolicyStore};
 
 #[cfg(test)]
