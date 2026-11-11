@@ -188,7 +188,9 @@ fn check_pack_entrypoint(args: &MachineRunArgs) -> Result<()> {
 }
 
 fn should_watch_denials(args: &MachineRunArgs) -> bool {
-    !args.up_json && (!args.run.argv.is_empty() || post_start_action(args) == PostStart::Attach)
+    !args.up_json
+        && ((!args.run.argv.is_empty() && command_is_followed(args))
+            || post_start_action(args) == PostStart::Attach)
 }
 
 fn denial_live(args: &MachineRunArgs) -> Live {
@@ -236,7 +238,9 @@ fn run_persistent_post_start(
     name: &str,
     denials: Denials,
 ) -> Result<()> {
-    if !args.run.argv.is_empty() {
+    if !args.run.argv.is_empty() && !command_is_followed(args) {
+        start_detached_argv(name, &args.run.argv)?;
+    } else if !args.run.argv.is_empty() {
         let outcome = if shared::wait_for_guest_agent(name, 30) {
             console::run_for_exit(
                 cli,
@@ -281,6 +285,30 @@ fn run_persistent_post_start(
         }
         PostStart::Attach => attach_to_output(name, denials),
     }
+}
+
+/// Whether a command given to a persistent run is followed to its exit.
+/// `-d` means return once the machine is started, so it is not.
+fn command_is_followed(args: &MachineRunArgs) -> bool {
+    !args.detach
+}
+
+/// `-d` with a command: start it in the guest and return once the agent has
+/// accepted it, rather than following its output.
+fn start_detached_argv(name: &str, argv: &[String]) -> Result<()> {
+    anyhow::ensure!(
+        shared::wait_for_guest_agent(name, 30),
+        "guest agent for {name:?} not reachable to start the command"
+    );
+    mvm_client::guest::start_process(
+        name,
+        mvm_client::guest::ProcStart {
+            argv: argv.to_vec(),
+            ..Default::default()
+        },
+    )
+    .with_context(|| format!("starting the detached command on machine {name:?}"))?;
+    Ok(())
 }
 
 /// What `machine run` does once a persistent machine is up.
@@ -1092,6 +1120,23 @@ mod command_denial_tests {
         };
         assert!(should_watch_denials(&command));
         assert!(should_watch_denials(&MachineRunArgs::default()));
+    }
+
+    #[test]
+    fn a_detached_command_is_started_not_followed() {
+        let mut args = MachineRunArgs {
+            run: RunArgs {
+                argv: vec!["sleep".to_string(), "300".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(command_is_followed(&args));
+        assert!(should_watch_denials(&args));
+        args.detach = true;
+        assert!(!command_is_followed(&args));
+        assert!(!should_watch_denials(&args));
+        assert_eq!(post_start_action(&args), PostStart::PrintId);
     }
 
     #[test]

@@ -32,7 +32,8 @@ use mvm_runtime::backend::AnyBackend;
 use mvm_vmm::host::aux_bin::AuxBin;
 
 use crate::mailbox_launch::{
-    DerivedMailboxKeys, LAUNCH_LIMITS, ServePaths, derive_launch_keys, serve_derived,
+    DerivedMailboxKeys, LAUNCH_LIMITS, ServePaths, derive_launch_keys, mint_epoch_secret,
+    serve_derived, shred_epoch_secret,
 };
 use crate::vm_lifetime::{endpoint_needed, launcher_is_alive};
 
@@ -88,16 +89,21 @@ fn vm_is_alive(state_dir: &Path) -> bool {
 }
 
 /// The process config for `grant` on the VM at `state_dir`, with keys derived
-/// from the host key directory `keys_dir`.
+/// from the host key directory `keys_dir` and a fresh per-epoch secret minted
+/// into `state_dir`. A failure after the mint shreds the secret again.
 pub fn build_config(
     keys_dir: &Path,
     grant: &MailboxGrant,
     state_dir: &Path,
     route: HostDialRoute,
 ) -> Result<MailboxProcessConfig> {
+    let secret = mint_epoch_secret(state_dir)?;
+    let keys = derive_launch_keys(keys_dir, grant, &secret).inspect_err(|_| {
+        let _ = shred_epoch_secret(state_dir);
+    })?;
     Ok(MailboxProcessConfig {
         grant: *grant,
-        keys: derive_launch_keys(keys_dir, grant)?,
+        keys,
         socket: mvm_core::config::vm_mailbox_socket_at(state_dir),
         route,
         vm_state_dir: state_dir.to_path_buf(),
@@ -206,6 +212,14 @@ pub fn spawn_for_launch(
             )
         })?;
     let config = build_config(&mvm_core::config::mvm_keys_dir(), grant, &state_dir, route)?;
+    let started = spawn_serving(&config, &state_dir);
+    if started.is_err() {
+        let _ = shred_epoch_secret(&state_dir);
+    }
+    started
+}
+
+fn spawn_serving(config: &MailboxProcessConfig, state_dir: &Path) -> Result<Option<u32>> {
     let bin = mvm_vmm::host::broker_services_spawn::resolve_subprocess_bin_to_spawn(&AuxBin::new(
         MAILBOX_BIN,
         MAILBOX_BIN_ENV,
@@ -217,7 +231,7 @@ pub fn spawn_for_launch(
         .stdin
         .take()
         .ok_or_else(|| Error::other("mvm-mailbox stdin was not piped"))
-        .and_then(|mut stdin| stdin.write_all(&serde_json::to_vec(&config)?));
+        .and_then(|mut stdin| stdin.write_all(&serde_json::to_vec(config)?));
     if let Err(error) = written {
         let _ = child.kill();
         let _ = child.wait();
@@ -263,6 +277,10 @@ mod tests {
         );
     }
 
+    fn test_secret() -> mvm_core::crypto::aead::Key {
+        mvm_core::crypto::aead::Key::from_bytes([5; 32])
+    }
+
     fn keys_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
@@ -303,6 +321,31 @@ mod tests {
         plan.mailbox = Some(grant(dir.path()));
         let error = spawn_for_launch(&plan, &backend_named("wasm"), "no-such-vm").unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Unsupported);
+    }
+
+    #[test]
+    fn building_the_config_mints_the_secret_in_the_state_dir_and_never_puts_it_in_the_config() {
+        let dir = keys_dir();
+        let state = tempfile::tempdir().unwrap();
+        let path = mvm_core::config::vm_mailbox_secret_at(state.path());
+        let config =
+            build_config(dir.path(), &grant(dir.path()), state.path(), test_route()).unwrap();
+        let secret = std::fs::read(&path).unwrap();
+        assert_eq!(secret.len(), 32);
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(!json.contains(&hex::encode(&secret)));
+        assert!(
+            !json.contains(
+                serde_json::to_string(&secret)
+                    .unwrap()
+                    .trim_matches(['[', ']'])
+            )
+        );
+        // A launch that fails after the mint leaves no secret behind.
+        let mut foreign = grant(dir.path());
+        foreign.authority_key = [1; 32];
+        assert!(build_config(dir.path(), &foreign, state.path(), test_route()).is_err());
+        assert!(!path.exists());
     }
 
     #[test]
@@ -413,7 +456,7 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let state_path = state.path().to_path_buf();
         let config = MailboxProcessConfig {
-            keys: derive_launch_keys(dir.path(), &grant).unwrap(),
+            keys: derive_launch_keys(dir.path(), &grant, &test_secret()).unwrap(),
             grant,
             socket: dir.path().join("mailbox.sock"),
             route: HostDialRoute::PortSocket(dir.path().join("absent-port")),

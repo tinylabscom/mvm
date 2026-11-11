@@ -177,6 +177,35 @@ pub struct HvfShutdownTimingRecord {
     pub workload_exit_write_micros: u64,
 }
 
+/// Filename for the record of the teardown scrub of guest RAM.
+pub const RAM_SCRUB_FILE: &str = "ram-scrub.json";
+
+/// What the teardown scrub did to the host mapping of a guest's RAM, written
+/// before the supervisor publishes that it has finished. It attests to this
+/// process's own mapping only: it says nothing about a physical wipe, the
+/// guest's internal state, swap, or any copy the host made elsewhere. A
+/// supervisor that is killed rather than stopped writes no record at all.
+/// Contains counts, never workload bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HvfRamScrubRecord {
+    /// Wire schema for strict consumers.
+    pub schema_version: u32,
+    /// Length of the guest RAM mapping.
+    pub mapped_bytes: u64,
+    /// Host pages overwritten with zeros.
+    pub scrubbed_pages: u64,
+    /// Non-zero bytes found on re-reading exactly those pages afterwards.
+    pub nonzero_bytes_after: u64,
+    /// True when residency could not be read and the whole mapping was scrubbed.
+    pub whole_mapping: bool,
+}
+
+/// Resolve the RAM scrub record within one canonical VM state directory.
+pub fn ram_scrub_path(state_dir: &std::path::Path) -> PathBuf {
+    state_dir.join(RAM_SCRUB_FILE)
+}
+
 /// Resolve the timing record within one canonical VM state directory.
 pub fn shutdown_timing_path(state_dir: &std::path::Path) -> PathBuf {
     state_dir.join(SHUTDOWN_TIMING_FILE)
@@ -592,6 +621,30 @@ impl HvfSupervisorConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_ram_scrub_record_round_trips_and_refuses_unknown_fields() {
+        let record = HvfRamScrubRecord {
+            schema_version: 1,
+            mapped_bytes: 1 << 30,
+            scrubbed_pages: 7,
+            nonzero_bytes_after: 0,
+            whole_mapping: false,
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        assert_eq!(
+            serde_json::from_str::<HvfRamScrubRecord>(&json).unwrap(),
+            record
+        );
+        let extra = json.replace('}', ",\"plaintext\":\"x\"}");
+        assert!(serde_json::from_str::<HvfRamScrubRecord>(&extra).is_err());
+    }
+
+    #[test]
+    fn the_ram_scrub_record_lives_in_the_vm_state_dir() {
+        let dir = std::path::Path::new("/var/mvm/vms/a");
+        assert_eq!(ram_scrub_path(dir), dir.join("ram-scrub.json"));
+    }
+
     use super::*;
 
     #[cfg(unix)]
