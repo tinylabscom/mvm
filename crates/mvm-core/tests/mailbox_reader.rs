@@ -13,9 +13,10 @@ use mvm_contract::protocol::mailbox::{
 };
 use mvm_core::crypto::aead::Key;
 use mvm_core::mailbox::reader::{
-    ReaderDeliveryContext, sign_delivery_ack, sign_delivery_lease, sign_guest_reader_enrollment,
-    sign_reader_possession, verify_delivery_ack, verify_delivery_lease,
-    verify_guest_reader_enrollment, verify_reader_possession,
+    MailboxReaderBootBinding, ReaderDeliveryContext, mint_guest_receive_capability,
+    sign_delivery_ack, sign_delivery_lease, sign_guest_reader_enrollment, sign_reader_possession,
+    verify_delivery_ack, verify_delivery_lease, verify_guest_reader_enrollment,
+    verify_reader_possession,
 };
 use mvm_core::mailbox::{MailboxError, SealRequest, seal_envelope, sign_capability};
 
@@ -85,6 +86,109 @@ fn fixture() -> (
     (
         authority, guest, plan, plan_id, plan_nonce, receive, enrollment,
     )
+}
+
+#[test]
+fn own_mailbox_grant_mints_a_distinct_boot_bound_receive_capability() {
+    let (authority, guest, grant, plan_id, plan_nonce, mut send, mut enrollment) = fixture();
+    let binding = MailboxReaderBootBinding {
+        plan_id: plan_id.clone(),
+        plan_nonce: plan_nonce.clone(),
+        mailbox: grant.mailbox,
+        authority_key: grant.authority_key,
+        execution_epoch: grant.epoch,
+        boot: enrollment.consumer_boot,
+        guest_identity_key: SigningKey::from_bytes(&[17; 32]).verifying_key().to_bytes(),
+        ack_public_key: guest.verifying_key().to_bytes(),
+    };
+    send.issuer = PrincipalId::from_bytes(authority.verifying_key().to_bytes());
+    send.subject = PrincipalId::from_bytes([21; 32]);
+    send.operations = CapabilityOperations::from_operations(&[MailboxOperation::Send]);
+    let signed_send = sign_capability(send.clone(), &authority).unwrap();
+    let receive =
+        mint_guest_receive_capability(&grant, &binding, &signed_send, send.address, &authority)
+            .unwrap();
+    assert!(receive.grant.operations.allows(MailboxOperation::Receive));
+    assert!(!receive.grant.operations.allows(MailboxOperation::Send));
+    assert_eq!(receive.grant.subject, send.address.recipient);
+    assert_eq!(receive.grant.address, send.address);
+    assert_eq!(receive.grant.expires_at_unix_ms, send.expires_at_unix_ms);
+    assert_ne!(receive.grant.capability_id, send.capability_id);
+    assert_ne!(receive.grant.revocation_id, send.revocation_id);
+    let mut next_boot = binding.clone();
+    next_boot.boot = BootId::from_bytes([42; 32]);
+    assert_ne!(
+        mint_guest_receive_capability(&grant, &next_boot, &signed_send, send.address, &authority,)
+            .unwrap()
+            .grant
+            .capability_id,
+        receive.grant.capability_id,
+        "a warm child must receive a fresh boot-scoped capability",
+    );
+
+    enrollment.consumer = receive.grant.subject;
+    enrollment.receive_capability_id = receive.grant.capability_id;
+    let signed_enrollment = sign_guest_reader_enrollment(enrollment, &authority).unwrap();
+    let scope = MailboxGuestReaderScope {
+        plan: &grant,
+        plan_id: &plan_id,
+        plan_nonce: &plan_nonce,
+        receive: &receive.grant,
+        current_boot: binding.boot,
+        current_session: signed_enrollment.enrollment.consumer_session,
+        now_unix_ms: 150,
+    };
+    verify_guest_reader_enrollment(
+        &signed_enrollment,
+        &receive,
+        &scope,
+        &authority.verifying_key(),
+        &[],
+    )
+    .unwrap();
+
+    let mut stale = binding.clone();
+    stale.boot = BootId::from_bytes([0; 32]);
+    assert!(
+        mint_guest_receive_capability(&grant, &stale, &signed_send, send.address, &authority)
+            .is_err()
+    );
+    stale = binding.clone();
+    stale.execution_epoch = ExecutionEpoch::new(8).unwrap();
+    assert!(
+        mint_guest_receive_capability(&grant, &stale, &signed_send, send.address, &authority)
+            .is_err()
+    );
+    stale = binding.clone();
+    stale.mailbox = MailboxId::from_bytes([99; 32]);
+    assert!(
+        mint_guest_receive_capability(&grant, &stale, &signed_send, send.address, &authority)
+            .is_err()
+    );
+    let mut wrong_address = send.clone();
+    wrong_address.address.tenant = TenantId::from_bytes([99; 32]);
+    let signed_other = sign_capability(wrong_address, &authority).unwrap();
+    assert!(
+        mint_guest_receive_capability(&grant, &binding, &signed_other, send.address, &authority)
+            .is_err(),
+        "a signed Send grant for another tenant must not authorize our inbox",
+    );
+    let mut tampered = signed_send.clone();
+    tampered.grant.address.recipient = PrincipalId::from_bytes([24; 32]);
+    assert!(
+        mint_guest_receive_capability(&grant, &binding, &tampered, send.address, &authority)
+            .is_err()
+    );
+    assert!(
+        mint_guest_receive_capability(
+            &grant,
+            &binding,
+            &signed_send,
+            send.address,
+            &SigningKey::from_bytes(&[75; 32]),
+        )
+        .is_err()
+    );
 }
 
 #[test]

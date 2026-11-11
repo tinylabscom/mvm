@@ -16,8 +16,9 @@ use mvm_contract::protocol::mailbox::{
     SignedMailboxDeliveryAck, SignedMailboxDeliveryLease, SignedMailboxGuestReaderEnrollment,
 };
 use rand::TryRng as _;
+use sha2::{Digest as _, Sha256};
 
-use super::{MailboxError, canonical_bytes, verify_capability_signature};
+use super::{MailboxError, canonical_bytes, sign_capability, verify_capability_signature};
 
 /// Name shared by the host writer and guest reader of one public boot binding.
 pub const MAILBOX_READER_BOOT_FILE: &str = "mailbox-reader-boot.json";
@@ -132,6 +133,72 @@ impl MailboxReaderBootBinding {
             .context("invalid mailbox authority public key")?;
         Ok(())
     }
+}
+
+/// Derive a *separate* Receive capability for a guest already granted its
+/// own mailbox by the signed plan. The plan's presence is the opt-in; a Send
+/// capability or a boot from another plan cannot confer Receive authority.
+///
+/// The authority must still verify a fresh possession proof from this boot
+/// before releasing a message. The capability is limited by the host's
+/// existing send-policy window, address, content types, and quotas.
+/// `expected_address` must come from the admitted host mailbox policy, never
+/// from the guest's request.
+pub fn mint_guest_receive_capability(
+    grant: &MailboxGrant,
+    binding: &MailboxReaderBootBinding,
+    send: &SignedMailboxCapability,
+    expected_address: MailboxAddress,
+    authority: &SigningKey,
+) -> Result<SignedMailboxCapability, MailboxError> {
+    if binding.mailbox != grant.mailbox
+        || binding.authority_key != grant.authority_key
+        || binding.execution_epoch != grant.epoch
+        || binding.boot.as_bytes() == &[0; 32]
+        || binding.ack_public_key == [0; 32]
+        || binding.guest_identity_key == [0; 32]
+        || grant.authority_key != authority.verifying_key().to_bytes()
+        || expected_address.mailbox != grant.mailbox
+        || send.grant.address != expected_address
+        || send.grant.minimum_execution_epoch != grant.epoch
+        || send.grant.maximum_execution_epoch != grant.epoch
+        || send.grant.issuer.as_bytes() != &grant.authority_key
+        || !send
+            .grant
+            .operations
+            .allows(mvm_contract::protocol::mailbox::MailboxOperation::Send)
+        || send
+            .grant
+            .operations
+            .allows(mvm_contract::protocol::mailbox::MailboxOperation::Receive)
+    {
+        return Err(MailboxError::WrongCapability);
+    }
+    VerifyingKey::from_bytes(&binding.ack_public_key)
+        .map_err(|_| MailboxError::ReaderKeyInvalid)?;
+    VerifyingKey::from_bytes(&binding.guest_identity_key)
+        .map_err(|_| MailboxError::ReaderKeyInvalid)?;
+    verify_capability_signature(send, &authority.verifying_key())?;
+    let id = |purpose: &[u8]| {
+        let mut digest = Sha256::new();
+        digest.update(b"mvm.mailbox.own-reader.v1\0");
+        digest.update(purpose);
+        digest.update(binding.plan_id.0.as_bytes());
+        digest.update(binding.plan_nonce.as_hex().as_bytes());
+        digest.update(binding.boot.as_bytes());
+        digest.update(send.grant.capability_id.as_bytes());
+        digest.finalize().into()
+    };
+    let mut receive = send.grant.clone();
+    receive.capability_id =
+        mvm_contract::protocol::mailbox::CapabilityId::from_bytes(id(b"capability"));
+    receive.revocation_id =
+        mvm_contract::protocol::mailbox::RevocationId::from_bytes(id(b"revocation"));
+    receive.subject = receive.address.recipient;
+    receive.operations = mvm_contract::protocol::mailbox::CapabilityOperations::from_operations(&[
+        mvm_contract::protocol::mailbox::MailboxOperation::Receive,
+    ]);
+    sign_capability(receive, authority)
 }
 
 const READER_POSSESSION_SIGNATURE_DOMAIN: &[u8] = b"mvm.mailbox.reader-possession.v1\0";

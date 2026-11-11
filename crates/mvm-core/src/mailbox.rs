@@ -35,6 +35,9 @@ pub mod journal;
 /// Cryptographic guest reader enrollment, separate from transport admission.
 pub mod reader;
 
+/// Bounded, versioned guest-reader frames on the existing mailbox port.
+pub mod reader_wire;
+
 /// Overlay resolution and authenticated, bounded byte-transport seams.
 pub mod transport;
 

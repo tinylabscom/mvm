@@ -184,6 +184,10 @@ impl From<ExecutionEpoch> for u64 {
 
 /// What a signed `ExecutionPlan` admits for one workload's mailbox: which
 /// mailbox, the key whose capabilities are honored, and the execution epoch.
+/// Presence grants that workload its own mailbox, including the ability for
+/// the host to issue a separate boot-bound Receive capability. Absence grants
+/// neither Send nor Receive. This grant is not itself a capability: the host
+/// must still authenticate the current guest and sign each scoped operation.
 /// Everything else the receiving node trusts (encryption and sender keys,
 /// identities) is host-held and never rides in a plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
