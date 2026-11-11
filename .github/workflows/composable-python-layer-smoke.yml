@@ -258,3 +258,91 @@ jobs:
           print(f"{sys.argv[2]} guest read: {marker}")
           PY
           done
+
+  # Capability probes only. A VM creation is not a guest boot, and neither
+  # result qualifies a .mvmpkg or substitutes for the exact-file witness.
+  native-arm-kvm-vsock-capability:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Linux, ARM64]
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - name: Require native aarch64 KVM and host vsock for this runner user
+        run: |
+          python3 - <<'PY'
+          import fcntl
+          import json
+          import os
+          import platform
+          import socket
+          import sys
+
+          evidence = {"scope": "host capability only; no guest or package boot",
+                      "system": platform.system(), "architecture": platform.machine()}
+          try:
+              if evidence["system"] != "Linux" or evidence["architecture"] not in ("aarch64", "arm64"):
+                  raise RuntimeError("runner is not native aarch64 Linux")
+              with open("/dev/kvm", "rb+", buffering=0) as kvm:
+                  api = fcntl.ioctl(kvm.fileno(), 0xAE00, 0)  # KVM_GET_API_VERSION
+                  if api != 12:
+                      raise RuntimeError(f"KVM API version {api}, expected 12")
+                  evidence["kvm_api_version"] = api
+                  vm = fcntl.ioctl(kvm.fileno(), 0xAE01, 0)  # KVM_CREATE_VM
+                  os.close(vm)
+                  evidence["kvm_vm_created_and_closed"] = True
+              vsock = os.open("/dev/vhost-vsock", os.O_RDWR | os.O_CLOEXEC)
+              os.close(vsock)
+              evidence["vhost_vsock_opened"] = True
+              with socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM):
+                  evidence["af_vsock_socket_created"] = True
+              evidence["result"] = "capability-confirmed"
+          except (OSError, RuntimeError) as error:
+              evidence["result"] = "unavailable"
+              evidence["reason"] = str(error)
+          print(json.dumps(evidence, sort_keys=True))
+          sys.exit(0 if evidence["result"] == "capability-confirmed" else 1)
+          PY
+
+  native-macos-hvf-capability:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, macOS, ARM64, m1]
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - name: Create and destroy an entitled native Apple Silicon HVF VM
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          test "$(sysctl -n kern.hv_support)" = 1
+          scratch="$(mktemp -d "$RUNNER_TEMP/hvf-capability-XXXXXX")"
+          trap 'rm -rf -- "$scratch"' EXIT
+          cat > "$scratch/hvf.c" <<'C'
+          #include <Hypervisor/hv_error.h>
+          #include <Hypervisor/hv_vm.h>
+          #include <stdio.h>
+          int main(void) {
+              hv_return_t status = hv_vm_create(NULL);
+              if (status != HV_SUCCESS) {
+                  fprintf(stderr, "hv_vm_create refused: %d\n", status);
+                  return 1;
+              }
+              status = hv_vm_destroy();
+              if (status != HV_SUCCESS) {
+                  fprintf(stderr, "hv_vm_destroy refused: %d\n", status);
+                  return 1;
+              }
+              puts("HVF_VM_CREATE_DESTROY_OK (no guest or package boot)");
+              return 0;
+          }
+          C
+          cat > "$scratch/entitlements.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict><key>com.apple.security.hypervisor</key><true/></dict></plist>
+          PLIST
+          clang -arch arm64 -framework Hypervisor -o "$scratch/hvf" "$scratch/hvf.c"
+          codesign --force --sign - --entitlements "$scratch/entitlements.plist" "$scratch/hvf"
+          codesign --verify --strict "$scratch/hvf"
+          printf 'runner: %s %s macOS %s\n' "$(uname -s)" "$(uname -m)" "$(sw_vers -productVersion)"
+          "$scratch/hvf"
