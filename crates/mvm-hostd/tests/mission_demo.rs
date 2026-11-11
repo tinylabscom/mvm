@@ -1208,6 +1208,45 @@ fn signed_guest_lease_and_exact_ack_survive_mock_anchored_restart() {
         }
     }
 
+    fn forge_record_signature(
+        root: &std::path::Path,
+        cursor: u64,
+        previous: [u8; 32],
+        signature_path: &[&str],
+    ) -> (Vec<u8>, JournalTip) {
+        use hmac::{Hmac, Mac, digest::KeyInit};
+        use sha2::Sha256;
+
+        let path = root.join(format!("entry-{cursor:020}.bin"));
+        let original = std::fs::read(&path).expect("record");
+        let journal_key = [90; 32];
+        let mut derivation =
+            <Hmac<Sha256> as KeyInit>::new_from_slice(&journal_key).expect("journal key");
+        derivation.update(b"mvm.mailbox.journal.encryption.v1\0");
+        let record_key = Key::from_bytes(derivation.finalize().into_bytes().into());
+        let aad = [b"mvm.mailbox.journal.v1\0".as_slice(), &previous].concat();
+        let plaintext =
+            mvm_core::crypto::aead::open(&record_key, &original[32..], &aad).expect("open record");
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&plaintext).expect("record JSON");
+        let mut field = &mut record["event"];
+        for component in signature_path {
+            field = &mut field[*component];
+        }
+        let signature = field.as_str().expect("base64 signature");
+        let replacement = if signature.starts_with('A') { 'B' } else { 'A' };
+        *field = serde_json::Value::String(format!("{replacement}{}", &signature[1..]));
+        let body = serde_json::to_vec(&record).expect("modified record");
+        let ciphertext = mvm_core::crypto::aead::seal(&record_key, &body, &aad);
+        let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&journal_key).expect("journal key");
+        mac.update(b"mvm.mailbox.journal.v1\0");
+        mac.update(&previous);
+        mac.update(&ciphertext);
+        let head: [u8; 32] = mac.finalize().into_bytes().into();
+        std::fs::write(&path, [&head[..], &ciphertext].concat()).expect("rewrite sealed record");
+        (original, JournalTip { cursor, head })
+    }
+
     let (node, channel) = channel_with_one_node();
     let root = node.home.path();
     let signer = &channel.authority_key;
@@ -1317,6 +1356,7 @@ fn signed_guest_lease_and_exact_ack_survive_mock_anchored_restart() {
             &anchor,
         )
         .unwrap();
+    let accepted_tip = anchor.tip();
     let challenge = [82; 32];
     let proof = sign_reader_possession(&enrollment, &challenge, &guest).unwrap();
     let mut wrong_tenant = reader.clone();
@@ -1381,8 +1421,38 @@ fn signed_guest_lease_and_exact_ack_survive_mock_anchored_restart() {
         .unwrap();
     assert_eq!(leased.payload(), b"hello");
     assert_eq!(leased.content_type(), &content_type());
+    let lease_tip = anchor.tip();
     drop(journal);
     drop(anchor);
+    for signature_path in [
+        &["lease", "signature"][..],
+        &["enrollment", "signature"],
+        &["receive_capability", "signature"],
+    ] {
+        let (original, forged) =
+            forge_record_signature(&journal_path, 2, accepted_tip.head, signature_path);
+        *anchor_state.lock().expect("mock anchor lock") = forged;
+        assert!(
+            matches!(
+                MailboxJournal::open_with_anchor(
+                    &journal_path,
+                    address(),
+                    authority,
+                    [90; 32],
+                    limits,
+                    &TestAnchor(Arc::clone(&anchor_state)),
+                ),
+                Err(JournalError::Corrupt)
+            ),
+            "a history-key holder cannot forge a signed lease, enrollment or Receive grant"
+        );
+        std::fs::write(
+            journal_path.join("entry-00000000000000000002.bin"),
+            original,
+        )
+        .expect("restore valid lease");
+        *anchor_state.lock().expect("mock anchor lock") = lease_tip;
+    }
     let (anchor, mut journal) = open();
     assert_eq!(
         anchor.tip().cursor,
@@ -1495,6 +1565,7 @@ fn signed_guest_lease_and_exact_ack_survive_mock_anchored_restart() {
             .acknowledge_signed(wrong_boot, |tip| anchor.advance(tip))
             .is_err()
     );
+    let before_ack = anchor.tip();
     let tip = journal
         .acknowledge_signed(request, |tip| anchor.advance(tip))
         .unwrap();
@@ -1506,6 +1577,52 @@ fn signed_guest_lease_and_exact_ack_survive_mock_anchored_restart() {
         tip,
         "a lost ACK response retries the exact bytes without a second commit"
     );
+    let stale_boot = JournalGuestAck {
+        scope: MailboxGuestReaderScope {
+            current_boot: BootId::from_bytes([84; 32]),
+            ..scope
+        },
+        ..request
+    };
+    assert!(
+        journal
+            .acknowledge_signed(stale_boot, |tip| anchor.advance(tip))
+            .is_err(),
+        "a committed ACK cannot bypass current boot authority on retry"
+    );
+    let stale_session = JournalGuestAck {
+        scope: MailboxGuestReaderScope {
+            current_session: ConsumerSessionId::from_bytes([85; 32]),
+            ..scope
+        },
+        ..request
+    };
+    assert!(
+        journal
+            .acknowledge_signed(stale_session, |tip| anchor.advance(tip))
+            .is_err(),
+        "a committed ACK cannot bypass current session authority on retry"
+    );
+    let mut expired_reader = reader.clone();
+    expired_reader.now_unix_ms = 4_000_000_000_000;
+    let expired = JournalGuestAck {
+        receive: JournalReceive {
+            context: &expired_reader,
+            ..read
+        },
+        scope: MailboxGuestReaderScope {
+            now_unix_ms: expired_reader.now_unix_ms,
+            ..scope
+        },
+        ..request
+    };
+    assert!(
+        journal
+            .acknowledge_signed(expired, |tip| anchor.advance(tip))
+            .is_err(),
+        "an expired message cannot borrow a prior ACK to appear authorized"
+    );
+    assert_eq!(anchor.tip(), tip, "refused retries do not append");
     let mut changed = ack.clone();
     changed.ack.ack_nonce = DeliveryAckNonce::from_bytes([85; 16]);
     let changed = sign_delivery_ack(changed.ack, &guest).unwrap();
@@ -1521,6 +1638,29 @@ fn signed_guest_lease_and_exact_ack_survive_mock_anchored_restart() {
     ));
     drop(journal);
     drop(anchor);
+    let (original, forged) =
+        forge_record_signature(&journal_path, 6, before_ack.head, &["ack", "signature"]);
+    *anchor_state.lock().expect("mock anchor lock") = forged;
+    assert!(
+        matches!(
+            MailboxJournal::open_with_anchor(
+                &journal_path,
+                address(),
+                authority,
+                [90; 32],
+                limits,
+                &TestAnchor(Arc::clone(&anchor_state)),
+            ),
+            Err(JournalError::Corrupt)
+        ),
+        "a history-key holder cannot fabricate a guest-signed ACK"
+    );
+    std::fs::write(
+        journal_path.join("entry-00000000000000000006.bin"),
+        original,
+    )
+    .expect("restore valid ACK");
+    *anchor_state.lock().expect("mock anchor lock") = tip;
     let (anchor, mut journal) = open();
     assert_eq!(anchor.tip(), tip);
     assert!(journal.receive_next(read).unwrap().is_none());

@@ -69,6 +69,10 @@ the actual acceptance receipt only after both commits. Earlier private-handoff
 version-1 records are refused, not silently reinterpreted. Recovery verifies
 the intent, refuses a missing or divergent anchored prefix, and may reconcile
 only an intact contiguous suffix written before an interrupted anchor commit.
+Retained guest-reader controls are checked against the historical signed
+Receive capability, enrollment, lease and guest ACK before recovery accepts
+their delivery state. An exact ACK retry still needs current boot, session,
+policy and expiry authorization; an old committed ACK is not a new grant.
 
 `FileJournalAnchor` is a local development aid, **not** that independent
 authority: restoring both the journal and its host-local anchor can hide

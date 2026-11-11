@@ -16,10 +16,11 @@ use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hmac::{Hmac, Mac, digest::KeyInit};
 use mvm_contract::protocol::mailbox::{
-    ContentType, DeliveryLeaseNonce, DeliveryOutcome, DestinationReceipt, MailboxAddress,
-    MailboxDeliveryLease, MailboxEnvelope, MailboxGrant, MailboxGuestReaderScope, MailboxOperation,
-    ProtocolVersion, SignatureAlgorithm, SignedDestinationReceipt, SignedMailboxCapability,
-    SignedMailboxDeliveryAck, SignedMailboxDeliveryLease, SignedMailboxGuestReaderEnrollment,
+    ContentType, DELIVERY_ACK_SIGNATURE_DOMAIN, DeliveryLeaseNonce, DeliveryOutcome,
+    DestinationReceipt, MailboxAddress, MailboxDeliveryLease, MailboxEnvelope, MailboxGrant,
+    MailboxGuestReaderScope, MailboxOperation, ProtocolVersion, SignatureAlgorithm,
+    SignedDestinationReceipt, SignedMailboxCapability, SignedMailboxDeliveryAck,
+    SignedMailboxDeliveryLease, SignedMailboxGuestReaderEnrollment,
 };
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -27,11 +28,11 @@ use zeroize::Zeroizing;
 
 use super::reader::{
     ReaderDeliveryContext, sign_delivery_lease, verify_delivery_ack, verify_delivery_lease,
-    verify_guest_reader_enrollment, verify_reader_possession,
+    verify_delivery_lease_signature, verify_guest_reader_enrollment, verify_reader_possession,
 };
 use super::{
-    MailboxError, OpenContext, ReplayIdentity, ReplayProtector, authorize_receive, frame,
-    open_authenticated_envelope, sign_receipt,
+    MailboxError, OpenContext, ReplayIdentity, ReplayProtector, authorize_receive, canonical_bytes,
+    frame, open_authenticated_envelope, sign_receipt,
 };
 use crate::crypto::aead::{self, Key};
 use crate::private_fs;
@@ -428,6 +429,50 @@ fn acceptance_intent_bytes(
     Ok(bytes)
 }
 
+/// Authenticate retained reader controls at their original issuance time.
+/// Current boot, policy and revocation are checked separately before use.
+fn verify_recovered_lease(
+    entry: &Seen,
+    identity: ReplayIdentity,
+    lease: &SignedMailboxDeliveryLease,
+    enrollment: &SignedMailboxGuestReaderEnrollment,
+    capability: &SignedMailboxCapability,
+    authority: &VerifyingKey,
+    now_unix_ms: i64,
+) -> Result<VerifyingKey, JournalError> {
+    let plan = MailboxGrant {
+        mailbox: lease.lease.address.mailbox,
+        authority_key: authority.to_bytes(),
+        epoch: lease.lease.execution_epoch,
+    };
+    let scope = MailboxGuestReaderScope {
+        plan: &plan,
+        plan_id: &enrollment.enrollment.plan_id,
+        plan_nonce: &enrollment.enrollment.plan_nonce,
+        receive: &capability.grant,
+        current_boot: enrollment.enrollment.consumer_boot,
+        current_session: enrollment.enrollment.consumer_session,
+        now_unix_ms,
+    };
+    let guest_key = verify_guest_reader_enrollment(enrollment, capability, &scope, authority, &[])
+        .map_err(|_| JournalError::Corrupt)?;
+    lease
+        .check_scope(&plan, &capability.grant, scope.current_session, now_unix_ms)
+        .map_err(|_| JournalError::Corrupt)?;
+    verify_delivery_lease_signature(lease, authority).map_err(|_| JournalError::Corrupt)?;
+    if lease.lease.sender != identity.sender
+        || lease.lease.sender_boot != identity.sender_boot
+        || lease.lease.message_id != identity.message_id
+        || lease.lease.execution_epoch != identity.execution_epoch
+        || lease.lease.delivery_id != entry.envelope.routing.delivery_id
+        || lease.lease.ciphertext_commitment != entry.envelope.ciphertext_commitment
+        || lease.lease.expires_at_unix_ms > entry.envelope.routing.expires_at_unix_ms
+    {
+        return Err(JournalError::Corrupt);
+    }
+    Ok(guest_key)
+}
+
 impl MailboxJournal {
     /// Reconstruct under an exclusive lock and require the separately trusted
     /// high-water mark. Genesis is valid only for an empty journal.
@@ -661,6 +706,15 @@ impl MailboxJournal {
                     {
                         return Err(JournalError::Corrupt);
                     }
+                    verify_recovered_lease(
+                        entry,
+                        identity,
+                        &lease,
+                        &enrollment,
+                        &receive_capability,
+                        &authority,
+                        lease.lease.issued_at_unix_ms,
+                    )?;
                     entry.lease = Some(LeaseState {
                         retry_count: 0,
                         signed: *lease,
@@ -700,6 +754,27 @@ impl MailboxJournal {
                     {
                         return Err(JournalError::Corrupt);
                     }
+                    let guest_key = verify_recovered_lease(
+                        entry,
+                        identity,
+                        &active.signed,
+                        &active.enrollment,
+                        &active.receive_capability,
+                        &authority,
+                        ack.ack.acknowledged_at_unix_ms,
+                    )?;
+                    let signature: [u8; 64] = ack
+                        .signature
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| JournalError::Corrupt)?;
+                    guest_key
+                        .verify(
+                            &canonical_bytes(DELIVERY_ACK_SIGNATURE_DOMAIN, &ack.ack)
+                                .map_err(|_| JournalError::Corrupt)?,
+                            &Signature::from_bytes(&signature),
+                        )
+                        .map_err(|_| JournalError::Corrupt)?;
                     entry.acknowledged = true;
                     entry.signed_ack = Some(*ack);
                 }
@@ -1153,13 +1228,6 @@ impl MailboxJournal {
         {
             return Err(JournalError::Mailbox(MailboxError::CapabilityRevoked));
         }
-        if entry.acknowledged {
-            return if entry.signed_ack.as_ref() == Some(request.signed) {
-                Ok(self.tip)
-            } else {
-                Err(JournalError::ConflictingRetry)
-            };
-        }
         let opened = self.open_for_reader(identity, entry, &request.receive)?;
         let guest_key = VerifyingKey::from_bytes(&request.enrollment.enrollment.ack_public_key)
             .map_err(|_| JournalError::Mailbox(MailboxError::ReaderKeyInvalid))?;
@@ -1180,6 +1248,13 @@ impl MailboxJournal {
             request.enrollment,
             &guest_key,
         )?;
+        if entry.acknowledged {
+            return if entry.signed_ack.as_ref() == Some(request.signed) {
+                Ok(self.tip)
+            } else {
+                Err(JournalError::ConflictingRetry)
+            };
+        }
         let tip = self.append(
             JournalEvent::AcknowledgedSigned {
                 identity,
