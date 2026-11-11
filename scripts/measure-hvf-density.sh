@@ -186,6 +186,10 @@ if [[ "${CUSTOM_WORKLOAD}" == "0" ]] && awk \
   exit 70
 fi
 
+if [[ -e "${DATA_DIR}" || -L "${DATA_DIR}" ]]; then
+  echo "refusing: density data directory must be new, so cleanup cannot stop existing machines: ${DATA_DIR}" >&2
+  exit 65
+fi
 mkdir -p "${DATA_DIR}" "${CACHE_DIR}" "${TARGET_DIR}"
 DATA_DIR="$(cd "${DATA_DIR}" && pwd)"
 CACHE_DIR="$(cd "${CACHE_DIR}" && pwd)"
@@ -350,6 +354,16 @@ cleanup_active_pids() {
     [[ -n "${pid}" ]] || continue
     kill "${pid}" 2>/dev/null || true
   done <"${active_pids_file}"
+  # Only this run could have populated the fresh MVM_HOME. An interrupted wave
+  # must not leave its VMs resident after the parent launchers are stopped.
+  if [[ -d "${DATA_DIR}/vms" ]]; then
+    "${run_env[@]}" "${MVMCTL_BIN}" machine stop --all --yes \
+      >"${OUT_DIR}/interrupted-stop.stdout" 2>"${OUT_DIR}/interrupted-stop.stderr" \
+      || echo "warning: interrupted VM stop failed; inspect ${OUT_DIR}/interrupted-stop.stderr" >&2
+    "${run_env[@]}" "${MVMCTL_BIN}" machine rm --all --yes \
+      >"${OUT_DIR}/interrupted-rm.stdout" 2>"${OUT_DIR}/interrupted-rm.stderr" \
+      || echo "warning: interrupted VM removal failed; inspect ${OUT_DIR}/interrupted-rm.stderr" >&2
+  fi
 }
 trap cleanup_active_pids INT TERM EXIT
 
