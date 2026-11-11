@@ -358,8 +358,8 @@ impl Drop for MailboxLaunch {
 /// Where the guest's mailbox port is reached, and where the host serves.
 pub struct ServePaths {
     pub socket: PathBuf,
-    pub guest_port: PathBuf,
-    pub firecracker_mux: PathBuf,
+    /// How the backend says the guest's mailbox port is dialed.
+    pub route: mvm_core::vm_backend::HostDialRoute,
 }
 
 /// Bind the mailbox, then dial the guest's mailbox port from its own thread
@@ -405,7 +405,7 @@ fn serve_derived_with(
         while !thread_stop.load(Ordering::SeqCst) {
             // Ok means a frame arrived, delivered or refused; Err means the
             // guest had nothing yet (or was not up). Neither ends the loop.
-            match service.serve_guest(&paths.guest_port, &paths.firecracker_mux, &mut sealer) {
+            match service.serve_guest(&paths.route, &mut sealer) {
                 Ok(()) => {
                     attempt = 0;
                     sleep_unless_stopped(&thread_stop, POST_FRAME_PAUSE);
@@ -457,8 +457,7 @@ mod tests {
     fn serve_paths(dir: &Path) -> ServePaths {
         ServePaths {
             socket: dir.join("mailbox.sock"),
-            guest_port: dir.join("port.sock"),
-            firecracker_mux: dir.join("absent-mux"),
+            route: mvm_core::vm_backend::HostDialRoute::PortSocket(dir.join("port.sock")),
         }
     }
 

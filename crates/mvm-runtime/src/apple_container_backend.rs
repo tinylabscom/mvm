@@ -138,6 +138,14 @@ impl VmBackend for AppleContainerBackend {
         capabilities
     }
 
+    fn host_dial_route(
+        &self,
+        state_dir: &Path,
+        port: u32,
+    ) -> Option<mvm_core::vm_backend::HostDialRoute> {
+        self.runner.host_dial_route(state_dir, port)
+    }
+
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
         self.runner.start(&self.config_with_kernel(config)?)
     }
@@ -358,6 +366,12 @@ mod tests {
         assert_eq!(mine.no_routable_guest_nic, theirs.no_routable_guest_nic);
         assert!(!mine.standby_pool);
         assert!(theirs.standby_pool);
+        assert!(mine.guest_mailbox && theirs.guest_mailbox);
+        let state = Path::new("/var/mvm/vm-a");
+        assert_eq!(
+            b.host_dial_route(state, 5257),
+            runner.host_dial_route(state, 5257)
+        );
         assert_eq!(mine.snapshot_capability, theirs.snapshot_capability);
         assert_eq!(mine.pause_resume, theirs.pause_resume);
 

@@ -21,8 +21,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT};
 use mvm_core::config::{vm_state_dir, vm_vsock_port_socket_at};
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
-    ResourceControls, VmCapabilities, VmExitStatus, VmId, VmStatus,
+    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, HostDialRoute,
+    LayerCoverage, ResourceControls, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
 
@@ -487,6 +487,12 @@ impl VmmDriver for QemuDriver {
         Ok(qemu_process::locate_qemu().is_ok())
     }
 
+    fn host_dial_route(&self, state_dir: &Path, port: u32) -> Option<HostDialRoute> {
+        Some(HostDialRoute::PortSocket(vm_vsock_port_socket_at(
+            state_dir, port,
+        )))
+    }
+
     fn capabilities(&self) -> VmCapabilities {
         // The runner-backed, NIC-less profile: the converged QEMU boot
         // attaches no slirp user-mode network (the raw backend's dev
@@ -503,6 +509,9 @@ impl VmmDriver for QemuDriver {
             // GPU remoting rides real AF_VSOCK here; the endpoint binds the
             // port directly.
             gpu: true,
+            // The vsock bridge binds every host-dialed port at the flat
+            // per-port socket `host_dial_route` names.
+            guest_mailbox: true,
             // User-mode (slirp) networking — no host TAP device.
             tap_networking: false,
             no_routable_guest_nic: true,

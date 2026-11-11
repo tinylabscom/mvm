@@ -161,7 +161,7 @@ pub fn serve_granted_guest(
     sealer: GuestSealer,
     limits: MailboxLimits,
     socket: &Path,
-    guest: (&Path, &Path),
+    guest: &mvm_core::vm_backend::HostDialRoute,
 ) -> std::io::Result<Option<MailboxService>> {
     let Some(grant) = grant else {
         return Ok(None);
@@ -178,10 +178,10 @@ pub fn serve_grant(
     sealer: GuestSealer,
     limits: MailboxLimits,
     socket: &Path,
-    guest: (&Path, &Path),
+    guest: &mvm_core::vm_backend::HostDialRoute,
 ) -> std::io::Result<MailboxService> {
     let (service, mut sealer) = bind_grant(grant, trust, sealer, limits, socket)?;
-    service.serve_guest(guest.0, guest.1, &mut sealer)?;
+    service.serve_guest(guest, &mut sealer)?;
     Ok(service)
 }
 
@@ -355,7 +355,7 @@ impl MailboxService {
     }
 
     /// Serve one connection the host dialed to the guest's mailbox port
-    /// (per-port socket, or the Firecracker mux), the way the telemetry
+    /// (the backend's `HostDialRoute`), the way the telemetry
     /// collector attaches. The guest sends plaintext; `sealer` seals it, then
     /// admission and the queue are the service's own, so a guest that floods
     /// this port fills only this queue.
@@ -366,13 +366,11 @@ impl MailboxService {
     /// first dial. A frame the queue refuses is still a served connection.
     pub fn serve_guest(
         &self,
-        per_port: &Path,
-        firecracker_mux: &Path,
+        route: &mvm_core::vm_backend::HostDialRoute,
         sealer: &mut GuestSealer,
     ) -> std::io::Result<()> {
-        let stream = crate::telemetry_collector::dial_guest_port(
-            per_port,
-            firecracker_mux,
+        let stream = crate::telemetry_collector::dial_route(
+            route,
             mvm_contract::protocol::mailbox::MAILBOX_PORT,
         )?;
         serve(&self.shared, stream, |body| {
