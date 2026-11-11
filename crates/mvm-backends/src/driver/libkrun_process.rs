@@ -130,8 +130,13 @@ fn libkrun_supervisor_spec() -> mvm_vmm::host::aux_bin::AuxBin<'static> {
 }
 
 pub(crate) fn read_pid(path: &Path) -> Option<libc::pid_t> {
-    let s = std::fs::read_to_string(path).ok()?;
-    s.trim().parse::<libc::pid_t>().ok()
+    // The marker is the pid, then the process start time.
+    std::fs::read_to_string(path)
+        .ok()?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
 }
 
 pub(crate) fn pid_alive(pid: libc::pid_t) -> bool {
