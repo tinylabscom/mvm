@@ -81,6 +81,12 @@ missing or divergent anchored prefix, and may reconcile only an intact
 contiguous suffix written before an interrupted anchor commit.
 The original accepted receipt body and observation time are retained with
 deduplication state; V1 retries still use their existing `duplicate` outcome.
+The test-scoped local opener and `admit_local` sign a distinct V2
+`accepted_local_durable` receipt only after the encrypted record and local
+anchor have been fsynced. An exact local retry re-verifies current admission
+and the committed local tip before re-signing the original body/time, yielding
+the same signed bytes after restart. Recovery refuses a local V2 receipt in an
+independently anchored journal or a V1 strong receipt in a local journal.
 Retained guest-reader controls are checked against the historical signed
 Receive capability, enrollment, lease and guest ACK before recovery accepts
 their delivery state. An exact ACK retry still needs current boot, session,
@@ -99,14 +105,15 @@ profile can access plaintext; host-blind confidentiality requires a different
 attested key-release and protected-memory architecture.
 
 The planned standalone `accepted_local_durable` tier has a distinct versioned
-receipt contract. Its history and payload-purpose keys belong in the existing
+receipt contract and signer. Its history and payload-purpose keys belong in the existing
 protected host keys directory, scoped to tenant/domain/mailbox/epoch and key
 version, with an authority signer pinned for retained history. Recovery must
 load the existing key version; it must not mint a new signer or use the erased
 per-launch secret as its only opening key. Rotation and deletion need explicit
 retention and refusal rules. A host-local chain can witness ordinary crash and
-process restart, **not** rollback of the entire host. Neither this local tier
-nor its key provider is enabled by the journal primitive. The stronger
+process restart, **not** rollback of the entire host. The local journal test
+path is not production activation: its custody is synthetic, with no retained
+key provider, authenticated restart manifest, or service adapter. The stronger
 `accepted_durable` outcome continues to require a separately trusted
 compare-and-advance checkpoint; no such provider is wired.
 

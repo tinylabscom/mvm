@@ -236,6 +236,17 @@ struct Record {
 struct JournalKey {
     bytes: Zeroizing<[u8; 32]>,
     reference: Option<HistoryKeyRef>,
+    tier: AcceptanceTier,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AcceptanceTier {
+    Independent,
+    #[cfg_attr(
+        not(any(test, feature = "test-support")),
+        expect(dead_code, reason = "local custody opener is not production-wired yet")
+    )]
+    Local,
 }
 
 impl JournalKey {
@@ -243,6 +254,7 @@ impl JournalKey {
         Self {
             bytes: Zeroizing::new(bytes),
             reference: None,
+            tier: AcceptanceTier::Independent,
         }
     }
 }
@@ -311,6 +323,7 @@ pub struct MailboxJournal {
     authority: VerifyingKey,
     key: Zeroizing<[u8; 32]>,
     history_key: Option<HistoryKeyRef>,
+    tier: AcceptanceTier,
     limits: JournalLimits,
     tip: JournalTip,
     bytes: u64,
@@ -693,9 +706,43 @@ impl MailboxJournal {
             JournalKey {
                 bytes: Zeroizing::new(*key.expose_bytes()),
                 reference: Some(reference),
+                tier: AcceptanceTier::Independent,
             },
             limits,
             anchor,
+        )
+    }
+
+    /// Test the software-only local tier against a fsynced same-host anchor.
+    ///
+    /// Production must obtain the reference from an authenticated restart
+    /// manifest and verified mailbox scope, not a deserialized route hint.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_local_with_custody(
+        root: &Path,
+        reference: HistoryKeyRef,
+        authority: VerifyingKey,
+        limits: JournalLimits,
+        custody: &impl HistoryKeyCustody,
+        anchor: &FileJournalAnchor,
+    ) -> Result<Self, JournalError> {
+        reference.validate()?;
+        if reference.address != anchor.address {
+            return Err(JournalError::WrongAuthority);
+        }
+        let key = custody.load_existing(&reference)?;
+        Self::open_with_recovery(
+            root,
+            reference.address,
+            authority,
+            JournalKey {
+                bytes: Zeroizing::new(*key.expose_bytes()),
+                reference: Some(reference),
+                tier: AcceptanceTier::Local,
+            },
+            limits,
+            anchor.tip(),
+            |next| anchor.advance(next),
         )
     }
 
@@ -747,6 +794,7 @@ impl MailboxJournal {
             authority,
             key: key.bytes,
             history_key: key.reference,
+            tier: key.tier,
             limits,
             tip: JournalTip::genesis(),
             bytes: 0,
@@ -819,10 +867,15 @@ impl MailboxJournal {
                     receipt,
                     authorization_signature,
                 } => {
+                    let expected_outcome = match journal.tier {
+                        AcceptanceTier::Independent => DeliveryOutcome::AcceptedDurable,
+                        AcceptanceTier::Local => DeliveryOutcome::AcceptedLocalDurable,
+                    };
                     if receipt.address != address
-                        || receipt.outcome != DeliveryOutcome::AcceptedDurable
+                        || receipt.outcome != expected_outcome
                         || receipt.message_id != identity.message_id
                         || receipt.execution_epoch != identity.execution_epoch
+                        || receipt.validate_versioned_outcome().is_err()
                     {
                         return Err(JournalError::Corrupt);
                     }
@@ -1022,6 +1075,15 @@ impl MailboxJournal {
         request: JournalAdmission<'_>,
         anchor: impl FnOnce(JournalTip) -> Result<(), JournalError>,
     ) -> Result<SignedDestinationReceipt, JournalError> {
+        self.admit_at_tier(request, AcceptanceTier::Independent, anchor)
+    }
+
+    fn admit_at_tier(
+        &mut self,
+        request: JournalAdmission<'_>,
+        tier: AcceptanceTier,
+        anchor: impl FnOnce(JournalTip) -> Result<(), JournalError>,
+    ) -> Result<SignedDestinationReceipt, JournalError> {
         let JournalAdmission {
             envelope,
             capability,
@@ -1032,6 +1094,9 @@ impl MailboxJournal {
         } = request;
         if self.poisoned {
             return Err(JournalError::Uncertain);
+        }
+        if self.tier != tier {
+            return Err(JournalError::DurableAuthorityUnavailable);
         }
         if self.address.tenant != context.expected_tenant
             || self.address.authorization_domain != context.expected_authorization_domain
@@ -1059,7 +1124,10 @@ impl MailboxJournal {
         )?;
         let identity = probe.0.ok_or(JournalError::Corrupt)?;
         let receipt = |outcome| DestinationReceipt {
-            protocol_version: ProtocolVersion::V1,
+            protocol_version: match tier {
+                AcceptanceTier::Independent => ProtocolVersion::V1,
+                AcceptanceTier::Local => ProtocolVersion::V2,
+            },
             signature_algorithm: SignatureAlgorithm::ED25519,
             delivery_id: envelope.routing.delivery_id,
             message_id: opened.header().message_id,
@@ -1073,19 +1141,32 @@ impl MailboxJournal {
             if previous.envelope != *envelope || previous.capability != *capability {
                 return Err(JournalError::ConflictingRetry);
             }
-            if previous.accepted_receipt.outcome != DeliveryOutcome::AcceptedDurable
+            let expected_outcome = match tier {
+                AcceptanceTier::Independent => DeliveryOutcome::AcceptedDurable,
+                AcceptanceTier::Local => DeliveryOutcome::AcceptedLocalDurable,
+            };
+            if previous.accepted_receipt.outcome != expected_outcome
                 || previous.accepted_receipt.address != self.address
                 || previous.accepted_receipt.message_id != opened.header().message_id
                 || previous.accepted_receipt.ciphertext_commitment != envelope.ciphertext_commitment
             {
                 return Err(JournalError::Corrupt);
             }
-            return Ok(sign_receipt(receipt(DeliveryOutcome::Duplicate), signer)?);
+            return Ok(sign_receipt(
+                match tier {
+                    AcceptanceTier::Independent => receipt(DeliveryOutcome::Duplicate),
+                    AcceptanceTier::Local => previous.accepted_receipt.clone(),
+                },
+                signer,
+            )?);
         }
         if self.tip.cursor >= self.limits.max_records as u64 {
             return Err(JournalError::Full);
         }
-        let accepted = receipt(DeliveryOutcome::AcceptedDurable);
+        let accepted = receipt(match tier {
+            AcceptanceTier::Independent => DeliveryOutcome::AcceptedDurable,
+            AcceptanceTier::Local => DeliveryOutcome::AcceptedLocalDurable,
+        });
         let encoded_frame =
             frame::encode_frame(capability, envelope).map_err(|_| JournalError::Corrupt)?;
         let encoded_frame = STANDARD_NO_PAD.encode(encoded_frame);
@@ -1142,6 +1223,23 @@ impl MailboxJournal {
         self.admit_verified(request, |next| {
             anchor.compare_and_advance(address, expected, next)
         })
+    }
+
+    /// Commit local acceptance only after the ciphertext/dedup record and
+    /// same-host anchor are fsynced. This cannot detect whole-host rollback.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn admit_local(
+        &mut self,
+        request: JournalAdmission<'_>,
+        anchor: &FileJournalAnchor,
+    ) -> Result<SignedDestinationReceipt, JournalError> {
+        if self.tier != AcceptanceTier::Local || self.history_key.is_none() {
+            return Err(JournalError::DurableAuthorityUnavailable);
+        }
+        if anchor.address != self.address || anchor.tip() != self.tip {
+            return Err(JournalError::Rollback);
+        }
+        self.admit_at_tier(request, AcceptanceTier::Local, |next| anchor.advance(next))
     }
 
     fn append(
@@ -1847,6 +1945,107 @@ mod anchor_tests {
             sender_key,
             signer,
         }
+    }
+
+    #[test]
+    fn local_acceptance_restarts_with_exact_receipt_and_refuses_rollback() {
+        let dir = tempfile::tempdir().expect("journal root");
+        let root = dir.path().join("journal");
+        let anchor_path = dir.path().join("anchor").join("tip.json");
+        let (envelope, capability, mut context, payload_key, sender_key, signer) = message();
+        let (reference, custody) = versioned_custody();
+        let anchor = FileJournalAnchor::open(&anchor_path, address(), [22; 32])
+            .expect("local anchor genesis");
+        let mut journal = MailboxJournal::open_local_with_custody(
+            &root,
+            reference,
+            signer.verifying_key(),
+            limits(),
+            &custody,
+            &anchor,
+        )
+        .expect("empty local journal");
+        let accepted = journal
+            .admit_local(
+                admission(
+                    &envelope,
+                    &capability,
+                    &context,
+                    &payload_key,
+                    &sender_key,
+                    &signer,
+                ),
+                &anchor,
+            )
+            .expect("local record and anchor fsynced before signature");
+        assert_eq!(accepted.receipt.protocol_version, ProtocolVersion::V2);
+        assert_eq!(
+            accepted.receipt.outcome,
+            DeliveryOutcome::AcceptedLocalDurable
+        );
+        super::super::verify_receipt(&accepted, &signer.verifying_key())
+            .expect("local receipt signature");
+        assert_eq!(journal.tip(), anchor.tip());
+        drop(journal);
+        drop(anchor);
+
+        let anchor = FileJournalAnchor::open(&anchor_path, address(), [22; 32])
+            .expect("recover local anchor");
+        let mut journal = MailboxJournal::open_local_with_custody(
+            &root,
+            reference,
+            signer.verifying_key(),
+            limits(),
+            &custody,
+            &anchor,
+        )
+        .expect("recover retained ciphertext and dedup");
+        context.now_unix_ms += 1;
+        let duplicate = journal
+            .admit_local(
+                admission(
+                    &envelope,
+                    &capability,
+                    &context,
+                    &payload_key,
+                    &sender_key,
+                    &signer,
+                ),
+                &anchor,
+            )
+            .expect("recover original local receipt after lost reply");
+        assert_eq!(
+            serde_jcs::to_vec(&duplicate).expect("signed retry bytes"),
+            serde_jcs::to_vec(&accepted).expect("signed original bytes")
+        );
+        assert_eq!(journal.tip().cursor, 1, "retry must not append");
+        assert!(matches!(
+            journal.admit_with_anchor(
+                admission(
+                    &envelope,
+                    &capability,
+                    &context,
+                    &payload_key,
+                    &sender_key,
+                    &signer,
+                ),
+                &IndependentAnchor::new(address()),
+            ),
+            Err(JournalError::Rollback | JournalError::DurableAuthorityUnavailable)
+        ));
+        drop(journal);
+        fs::remove_file(record_path(&root, 1)).expect("simulate journal-only rollback");
+        assert!(matches!(
+            MailboxJournal::open_local_with_custody(
+                &root,
+                reference,
+                signer.verifying_key(),
+                limits(),
+                &custody,
+                &anchor
+            ),
+            Err(JournalError::Rollback)
+        ));
     }
 
     #[test]
