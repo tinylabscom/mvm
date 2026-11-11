@@ -21,6 +21,7 @@ use std::ptr::NonNull;
 
 use super::snapshot::RamLayout;
 use super::{BootFault, HvfError};
+use mvm_vmm::host::hvf_supervisor::HvfRamScrubRecord;
 use mvm_vmm::vmm::virtio_balloon::{GuestSpan, RamBacking, RamRegion};
 use std::ops::Range;
 use zeroize::Zeroize;
@@ -168,14 +169,19 @@ impl GuestRam {
     /// This is intentionally separate from construction: demand-zero
     /// allocation must not fault in every page, while teardown must not leave
     /// guest runtime data in a host mapping that can be reused.
-    fn zeroize_mapping(&mut self) {
+    fn zeroize_mapping(&mut self) -> HvfRamScrubRecord {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        if !self.scrub_resident() {
-            self.zeroize_all();
-        }
-
+        let resident = self.scrub_resident();
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        self.zeroize_all();
+        let resident: Option<(u64, u64)> = None;
+        let (scrubbed_pages, nonzero_bytes_after, whole_mapping) = match resident {
+            Some((pages, nonzero)) => (pages, nonzero, false),
+            None => {
+                self.zeroize_all();
+                let pages = self.len.div_ceil(HVF_PAGE_SIZE) as u64;
+                (pages, self.nonzero_bytes(), true)
+            }
+        };
 
         // Discard clean anonymous and private-COW pages after scrubbing the
         // resident pages. Anonymous pages will be zero-filled if faulted
@@ -186,6 +192,27 @@ impl GuestRam {
         unsafe {
             let _ = libc::madvise(self.as_ptr().cast(), self.len, libc::MADV_DONTNEED);
         }
+        HvfRamScrubRecord {
+            schema_version: 1,
+            mapped_bytes: self.len as u64,
+            scrubbed_pages,
+            nonzero_bytes_after,
+            whole_mapping,
+        }
+    }
+
+    /// Scrub the mapping now and report what was done. Idempotent; the drop
+    /// scrub that follows finds nothing left to overwrite.
+    pub(crate) fn scrub(&mut self) -> HvfRamScrubRecord {
+        self.zeroize_mapping()
+    }
+
+    /// Bytes in the whole mapping that are not zero.
+    fn nonzero_bytes(&self) -> u64 {
+        // SAFETY: the mapping is live for `self`'s lifetime and `self.len` is
+        // its exact mapped length.
+        let bytes = unsafe { std::slice::from_raw_parts(self.as_ptr(), self.len) };
+        bytes.iter().filter(|b| **b != 0).count() as u64
     }
 
     /// Zero every resident page that can hold guest data this process owns.
@@ -199,15 +226,16 @@ impl GuestRam {
     /// copy it first, so scrubbing every clean page of a restored guest's RAM
     /// would allocate a second copy of the whole image just to zero it.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    fn scrub_resident(&mut self) -> bool {
+    fn scrub_resident(&mut self) -> Option<(u64, u64)> {
         let Ok((page_size, residency)) = self.page_residency() else {
-            return false;
+            return None;
         };
         let file_runs: Vec<_> = backing_layout(self.len, &self.file_backed)
             .into_iter()
             .filter(|(_, backing)| *backing == RamBacking::PrivateFile)
             .map(|(range, _)| range)
             .collect();
+        let (mut pages, mut nonzero) = (0_u64, 0_u64);
         for (index, state) in residency.iter().enumerate() {
             let offset = index * page_size;
             let len = page_size.min(self.len - offset);
@@ -219,11 +247,12 @@ impl GuestRam {
             }
             // SAFETY: `offset` comes from the mapping's page count and
             // `len` is clipped to the exact mapping length.
-            unsafe {
-                std::slice::from_raw_parts_mut(self.as_ptr().add(offset), len).zeroize();
-            }
+            let page = unsafe { std::slice::from_raw_parts_mut(self.as_ptr().add(offset), len) };
+            page.zeroize();
+            pages += 1;
+            nonzero += page.iter().filter(|byte| **byte != 0).count() as u64;
         }
-        true
+        Some((pages, nonzero))
     }
 
     fn zeroize_all(&mut self) {
@@ -494,7 +523,7 @@ pub(crate) fn page_rounded_len(len: usize) -> Result<usize, HvfError> {
 
 impl Drop for GuestRam {
     fn drop(&mut self) {
-        self.zeroize_mapping();
+        let _ = self.zeroize_mapping();
         // SAFETY: ptr/len come from a successful mmap in new() and are unmapped
         // exactly once, here.
         unsafe {
@@ -569,6 +598,34 @@ mod tests {
         assert!(ram.copy_at(HVF_PAGE_SIZE - 3, b"tail").is_err());
     }
 
+    /// The report must describe what happened, not what was hoped: a canary
+    /// the guest left behind is overwritten, counted, and re-read as zero.
+    #[test]
+    fn scrub_reports_the_pages_it_zeroed_and_finds_nothing_left() {
+        let mut ram = GuestRam::new(HVF_PAGE_SIZE * 4).expect("mmap");
+        ram.copy_at(0, &[0xa5; HVF_PAGE_SIZE * 2]).unwrap();
+
+        let record = ram.scrub();
+
+        assert_eq!(record.schema_version, 1);
+        assert_eq!(record.mapped_bytes, (HVF_PAGE_SIZE * 4) as u64);
+        assert!(record.scrubbed_pages >= 1, "{record:?}");
+        assert_eq!(record.nonzero_bytes_after, 0, "{record:?}");
+        assert!(ram.snapshot_bytes().iter().all(|byte| *byte == 0));
+    }
+
+    /// A second scrub, which is what drop runs, has nothing left to overwrite.
+    #[test]
+    fn a_second_scrub_finds_nothing_to_overwrite() {
+        let mut ram = GuestRam::new(HVF_PAGE_SIZE * 2).expect("mmap");
+        ram.copy_at(0, &[0x5a; HVF_PAGE_SIZE]).unwrap();
+        let _ = ram.scrub();
+
+        let again = ram.scrub();
+
+        assert_eq!(again.nonzero_bytes_after, 0);
+    }
+
     #[test]
     fn zeroize_mapping_clears_guest_runtime_bytes() {
         let mut ram = GuestRam::new(HVF_PAGE_SIZE * 2).expect("mmap");
@@ -607,7 +664,7 @@ mod tests {
         assert_eq!(ram.snapshot_bytes(), image);
         assert_eq!(private_copies(&ram), 0);
 
-        assert!(ram.scrub_resident());
+        assert!(ram.scrub_resident().is_some());
 
         assert_eq!(
             private_copies(&ram),
@@ -632,7 +689,7 @@ mod tests {
         ram.copy_at(HVF_PAGE_SIZE * 5, b"another").unwrap();
         assert!(private_copies(&ram) >= 2);
 
-        assert!(ram.scrub_resident());
+        assert!(ram.scrub_resident().is_some());
 
         let bytes = ram.snapshot_bytes();
         for (page, chunk) in bytes.chunks(HVF_PAGE_SIZE).enumerate() {

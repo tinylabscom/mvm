@@ -1094,6 +1094,21 @@ fn run() -> anyhow::Result<()> {
             let _ = std::fs::write(path, json);
         }
     }
+    // The scrub record is evidence that teardown ran. A failed write must not
+    // stop the supervisor from finishing (that would leave a machine that
+    // cannot be stopped), and a missing record already reads as "no scrub", so
+    // the failure is reported on stderr and the stop proceeds.
+    if let (Some(scrub), Some(state_dir)) = (r.ram_scrub, cfg.pid_file.parent()) {
+        let write = || -> anyhow::Result<()> {
+            mvm_core::atomic_io::atomic_write_durable(
+                &mvm_vmm::host::hvf_supervisor::ram_scrub_path(state_dir),
+                &serde_json::to_vec(&scrub)?,
+            )
+        };
+        if let Err(error) = write() {
+            eprintln!("mvm-hvf-supervisor: the RAM scrub record was not written: {error:#}");
+        }
+    }
     match stop_control.publish_finalized()? {
         mvm_hostd::supervisor::hvf_stop::FinalizationPublication::Durable => {}
         mvm_hostd::supervisor::hvf_stop::FinalizationPublication::PublishedDurabilityUnconfirmed(
