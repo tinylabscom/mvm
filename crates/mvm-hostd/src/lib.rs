@@ -64,6 +64,8 @@ pub mod jailer;
 /// [`keyholder::SecretResolver`] trait + the single-host
 /// [`keyholder::LocalResolver`].
 pub mod keyholder;
+#[cfg(test)]
+mod mailbox_custody;
 pub mod mailbox_launch;
 pub mod mailbox_process;
 pub mod mailbox_service;

@@ -64,13 +64,13 @@ canonical encrypted mailbox frame and its deduplication identity. Its
 the current `(cursor, head)` and atomically compare-and-advance it after a
 journal write. The journal persists unsigned receipt state with a
 destination-signed, domain-separated admission intent binding the verified
-identity, canonical frame, and receipt state. The test-scoped version 3 also
+identity, canonical frame, and receipt state. The version-3 test path also
 binds a `HistoryKeyRef` (mailbox address, epoch, AES-256-GCM key ID and nonzero
 version) to the encrypted record and signed intent. Its recovery obtains the
 exact key through an existing-only `HistoryKeyCustody` lookup and refuses
 changed key identity, wrong key, or missing custody; it does not create a
 replacement key. The raw-key opener cannot issue an `accepted_durable` receipt.
-Deserializing a `HistoryKeyRef` does not grant authority: production reopening
+Constructing or deserializing a `HistoryKeyRef` does not grant authority: production reopening
 must verify its scope against the admitted plan and an authenticated retained
 manifest before loading a key.
 The destination signs an actual acceptance receipt only after both commits.
@@ -94,12 +94,12 @@ policy and expiry authorization; an old committed ACK is not a new grant. A
 message ever leased to a guest cannot be closed by the legacy unsigned host
 ACK, including during recovery; it requires that guest's signed ACK.
 
-`FileJournalAnchor` is a local development aid, **not** an independent
+`FileJournalAnchor` is a host-local anchor, **not** an independent
 authority: restoring both the journal and its host-local anchor can hide
-rollback. The custody interface has only a test provider: it does not supply
-a retained host key, rotation, or the separately encrypted payload's opening
-key after the per-launch mailbox secret is erased. Until real providers and
-the existing service's admission handoff are integrated and tested, local
+rollback. The hostd test-scoped custody prototype stores distinct retained
+purpose keys under a signed restart binding, but it is not connected to the
+production service. Until verified custody and the existing service's
+admission handoff are integrated and tested, local
 journal writes must not be presented as `accepted_durable`. The trusted-host
 profile can access plaintext; host-blind confidentiality requires a different
 attested key-release and protected-memory architecture.

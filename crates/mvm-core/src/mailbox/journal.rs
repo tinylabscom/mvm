@@ -119,8 +119,10 @@ impl std::fmt::Debug for HistoryKeyRef {
 }
 
 impl HistoryKeyRef {
-    /// Bind one synthetic key version in tests; production needs verified scope.
-    #[cfg(any(test, feature = "test-support"))]
+    /// Identify a custody key version; construction alone is not authority.
+    ///
+    /// The host must bind these fields to a verified plan and authenticated
+    /// restart manifest before using the reference to reopen retained history.
     pub fn new(
         address: MailboxAddress,
         execution_epoch: ExecutionEpoch,

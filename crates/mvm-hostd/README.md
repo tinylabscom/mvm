@@ -41,6 +41,16 @@ signing, and audit emission each pass through their dedicated policy gate. Key
 material remains inside the smallest role that needs it; callers receive only
 the result.
 
+The test-scoped `mailbox_custody` prototype retains three distinct random
+purpose keys (journal history, recipient payload opening, local anchor) in a
+private bundle under the existing host keys directory. A host-signed manifest
+binds their IDs and version to the admitted plan, VM, address, epoch and
+authority; recovery loads the existing signer and exact bundle, never mints a
+replacement. An interrupted first provision leaves an orphan and refuses.
+This is trusted-host local crash recovery only: it is not wired to the
+production mailbox process, cannot detect whole-host rollback, and does not
+provide host-blind confidentiality.
+
 ## Main areas
 
 | Area | Representative modules |
