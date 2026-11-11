@@ -1208,25 +1208,52 @@ fn signed_guest_lease_and_exact_ack_survive_mock_anchored_restart() {
         }
     }
 
+    fn test_record_key() -> Key {
+        use hmac::{Hmac, Mac, digest::KeyInit};
+        use sha2::Sha256;
+
+        let mut derivation =
+            <Hmac<Sha256> as KeyInit>::new_from_slice(&[90; 32]).expect("journal key");
+        derivation.update(b"mvm.mailbox.journal.encryption.v1\0");
+        Key::from_bytes(derivation.finalize().into_bytes().into())
+    }
+
+    fn write_resealed_record(
+        root: &std::path::Path,
+        cursor: u64,
+        previous: [u8; 32],
+        record: &serde_json::Value,
+    ) -> JournalTip {
+        use hmac::{Hmac, Mac, digest::KeyInit};
+        use sha2::Sha256;
+
+        let aad = [b"mvm.mailbox.journal.v1\0".as_slice(), &previous].concat();
+        let body = serde_json::to_vec(record).expect("modified record");
+        let ciphertext = mvm_core::crypto::aead::seal(&test_record_key(), &body, &aad);
+        let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&[90; 32]).expect("journal key");
+        mac.update(b"mvm.mailbox.journal.v1\0");
+        mac.update(&previous);
+        mac.update(&ciphertext);
+        let head: [u8; 32] = mac.finalize().into_bytes().into();
+        std::fs::write(
+            root.join(format!("entry-{cursor:020}.bin")),
+            [&head[..], &ciphertext].concat(),
+        )
+        .expect("rewrite sealed record");
+        JournalTip { cursor, head }
+    }
+
     fn forge_record_signature(
         root: &std::path::Path,
         cursor: u64,
         previous: [u8; 32],
         signature_path: &[&str],
     ) -> (Vec<u8>, JournalTip) {
-        use hmac::{Hmac, Mac, digest::KeyInit};
-        use sha2::Sha256;
-
         let path = root.join(format!("entry-{cursor:020}.bin"));
         let original = std::fs::read(&path).expect("record");
-        let journal_key = [90; 32];
-        let mut derivation =
-            <Hmac<Sha256> as KeyInit>::new_from_slice(&journal_key).expect("journal key");
-        derivation.update(b"mvm.mailbox.journal.encryption.v1\0");
-        let record_key = Key::from_bytes(derivation.finalize().into_bytes().into());
         let aad = [b"mvm.mailbox.journal.v1\0".as_slice(), &previous].concat();
-        let plaintext =
-            mvm_core::crypto::aead::open(&record_key, &original[32..], &aad).expect("open record");
+        let plaintext = mvm_core::crypto::aead::open(&test_record_key(), &original[32..], &aad)
+            .expect("open record");
         let mut record: serde_json::Value =
             serde_json::from_slice(&plaintext).expect("record JSON");
         let mut field = &mut record["event"];
@@ -1236,15 +1263,10 @@ fn signed_guest_lease_and_exact_ack_survive_mock_anchored_restart() {
         let signature = field.as_str().expect("base64 signature");
         let replacement = if signature.starts_with('A') { 'B' } else { 'A' };
         *field = serde_json::Value::String(format!("{replacement}{}", &signature[1..]));
-        let body = serde_json::to_vec(&record).expect("modified record");
-        let ciphertext = mvm_core::crypto::aead::seal(&record_key, &body, &aad);
-        let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&journal_key).expect("journal key");
-        mac.update(b"mvm.mailbox.journal.v1\0");
-        mac.update(&previous);
-        mac.update(&ciphertext);
-        let head: [u8; 32] = mac.finalize().into_bytes().into();
-        std::fs::write(&path, [&head[..], &ciphertext].concat()).expect("rewrite sealed record");
-        (original, JournalTip { cursor, head })
+        (
+            original,
+            write_resealed_record(root, cursor, previous, &record),
+        )
     }
 
     let (node, channel) = channel_with_one_node();
@@ -1422,6 +1444,16 @@ fn signed_guest_lease_and_exact_ack_survive_mock_anchored_restart() {
     assert_eq!(leased.payload(), b"hello");
     assert_eq!(leased.content_type(), &content_type());
     let lease_tip = anchor.tip();
+    let identity = journal.receive_next(read).unwrap().unwrap().identity();
+    assert!(matches!(
+        journal.acknowledge(identity, read, |tip| anchor.advance(tip)),
+        Err(JournalError::GuestAckRequired)
+    ));
+    assert_eq!(
+        anchor.tip(),
+        lease_tip,
+        "host ACK cannot close a guest lease"
+    );
     drop(journal);
     drop(anchor);
     for signature_path in [
@@ -1453,6 +1485,36 @@ fn signed_guest_lease_and_exact_ack_survive_mock_anchored_restart() {
         .expect("restore valid lease");
         *anchor_state.lock().expect("mock anchor lock") = lease_tip;
     }
+    let forged_host_ack = serde_json::json!({
+        "version": 2,
+        "cursor": 3,
+        "previous": lease_tip.head,
+        "address": address(),
+        "event": {
+            "kind": "acknowledged",
+            "identity": identity,
+            "acknowledged_at_unix_ms": reader.now_unix_ms,
+        }
+    });
+    let forged = write_resealed_record(&journal_path, 3, lease_tip.head, &forged_host_ack);
+    *anchor_state.lock().expect("mock anchor lock") = forged;
+    assert!(
+        matches!(
+            MailboxJournal::open_with_anchor(
+                &journal_path,
+                address(),
+                authority,
+                [90; 32],
+                limits,
+                &TestAnchor(Arc::clone(&anchor_state)),
+            ),
+            Err(JournalError::Corrupt)
+        ),
+        "an encrypted unsigned host ACK cannot close a guest-leased delivery"
+    );
+    std::fs::remove_file(journal_path.join("entry-00000000000000000003.bin"))
+        .expect("remove forged host ACK");
+    *anchor_state.lock().expect("mock anchor lock") = lease_tip;
     let (anchor, mut journal) = open();
     assert_eq!(
         anchor.tip().cursor,

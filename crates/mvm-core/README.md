@@ -72,7 +72,9 @@ only an intact contiguous suffix written before an interrupted anchor commit.
 Retained guest-reader controls are checked against the historical signed
 Receive capability, enrollment, lease and guest ACK before recovery accepts
 their delivery state. An exact ACK retry still needs current boot, session,
-policy and expiry authorization; an old committed ACK is not a new grant.
+policy and expiry authorization; an old committed ACK is not a new grant. A
+message ever leased to a guest cannot be closed by the legacy unsigned host
+ACK, including during recovery; it requires that guest's signed ACK.
 
 `FileJournalAnchor` is a local development aid, **not** that independent
 authority: restoring both the journal and its host-local anchor can hide

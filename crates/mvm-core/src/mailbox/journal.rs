@@ -113,6 +113,8 @@ pub enum JournalError {
     UnknownMessage,
     #[error("mailbox message has no active delivery lease")]
     NoActiveLease,
+    #[error("guest-leased message requires a signed guest acknowledgement")]
+    GuestAckRequired,
     #[error("journal cannot be used after an uncertain write")]
     Uncertain,
     #[error("independent rollback anchor and recoverable key custody are required")]
@@ -675,7 +677,7 @@ impl MailboxJournal {
                     let Some(entry) = journal.seen.get_mut(&identity) else {
                         return Err(JournalError::Corrupt);
                     };
-                    if entry.acknowledged || acknowledged_at_unix_ms < 0 {
+                    if entry.acknowledged || entry.lease.is_some() || acknowledged_at_unix_ms < 0 {
                         return Err(JournalError::Corrupt);
                     }
                     entry.acknowledged = true;
@@ -1169,6 +1171,9 @@ impl MailboxJournal {
             .get(&identity)
             .ok_or(JournalError::UnknownMessage)?;
         let _opened = self.open_for_reader(identity, entry, &request)?;
+        if entry.lease.is_some() {
+            return Err(JournalError::GuestAckRequired);
+        }
         if entry.acknowledged {
             return Ok(self.tip);
         }
@@ -1679,6 +1684,80 @@ mod anchor_tests {
             .expect("retry is deduplicated");
         assert_eq!(duplicate.receipt.outcome, DeliveryOutcome::Duplicate);
         assert_eq!(anchor.load(address()).expect("unchanged tip").cursor, 1);
+    }
+
+    #[test]
+    fn unsigned_host_ack_remains_available_only_before_a_guest_lease() {
+        let dir = tempfile::tempdir().expect("journal root");
+        let root = dir.path().join("journal");
+        let (envelope, capability, context, payload_key, sender_key, signer) = message();
+        let anchor = IndependentAnchor::new(address());
+        let mut journal = MailboxJournal::open_with_anchor(
+            &root,
+            address(),
+            signer.verifying_key(),
+            [21; 32],
+            limits(),
+            &anchor,
+        )
+        .expect("genesis");
+        journal
+            .admit_with_anchor(
+                admission(
+                    &envelope,
+                    &capability,
+                    &context,
+                    &payload_key,
+                    &sender_key,
+                    &signer,
+                ),
+                &anchor,
+            )
+            .expect("accepted under test anchor");
+        let mut receive_grant = capability.grant.clone();
+        receive_grant.subject = address().recipient;
+        receive_grant.capability_id = CapabilityId::from_bytes([31; 32]);
+        receive_grant.operations =
+            CapabilityOperations::from_operations(&[MailboxOperation::Receive]);
+        let receive = super::super::sign_capability(receive_grant, &signer).expect("Receive grant");
+        let mut reader_context = context;
+        reader_context.acting_principal = address().recipient;
+        reader_context.required_operation = MailboxOperation::Receive;
+        let reader = JournalReceive {
+            capability: &receive,
+            context: &reader_context,
+            encryption_key: &payload_key,
+            sender_key: &sender_key,
+        };
+        let identity = ReplayIdentity {
+            sender: reader_context.expected_sender,
+            sender_boot: BootId::from_bytes([8; 32]),
+            execution_epoch: reader_context.current_execution_epoch,
+            message_id: MessageId::from_bytes([9; 32]),
+        };
+        let previous = journal.tip();
+        let tip = journal
+            .acknowledge(identity, reader, |next| {
+                anchor.compare_and_advance(address(), previous, next)
+            })
+            .expect("never-leased host message can be acknowledged");
+        assert_eq!(tip.cursor, 2);
+        drop(journal);
+        let recovered = MailboxJournal::open_with_anchor(
+            &root,
+            address(),
+            signer.verifying_key(),
+            [21; 32],
+            limits(),
+            &anchor,
+        )
+        .expect("host ACK survives restart");
+        assert!(
+            recovered
+                .receive_next(reader)
+                .expect("authorized reader")
+                .is_none()
+        );
     }
 
     #[test]
