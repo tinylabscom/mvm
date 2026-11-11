@@ -107,6 +107,10 @@ knowledge of the binding above nor acceptance of this document fills that
 proof gap. If existing custody cannot authorize a path, that path remains
 explicitly unrecorded; it must not silently discover name-only write access.
 
+The [owned-call protocol proposal](hvf-owned-capture-protocol.md) makes the
+candidate peer proof, one-call authorization, finite budgets and receipt
+semantics concrete for that review. It is not approval or production wiring.
+
 ## Capture and acknowledgement semantics
 
 1. Accept only bounded typed stdout/stderr frames for the authorized call.
