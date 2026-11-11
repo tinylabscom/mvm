@@ -101,11 +101,24 @@ pub(super) fn validate_declarations(manifest: &BundleManifest) -> Result<(), Bun
     }) {
         validate_canonical_linux_proof(proof, manifest)?;
     }
-    if let Some(composition) = manifest.members.iter().find_map(|member| match member {
+    let local = manifest.members.iter().find_map(|member| match member {
         BundleMember::LocalComposition(composition) => Some(composition),
         _ => None,
-    }) {
+    });
+    let production = manifest.members.iter().find_map(|member| match member {
+        BundleMember::ProductionComposition(composition) => Some(composition),
+        _ => None,
+    });
+    if local.is_some() && production.is_some() {
+        return Err(BundleVerifyError::ManifestParse(
+            "local and production composition cannot be combined".into(),
+        ));
+    }
+    if let Some(composition) = local {
         validate_local_composition(composition, manifest)?;
+    }
+    if let Some(composition) = production {
+        validate_production_composition(composition, manifest)?;
     }
     if manifest
         .members
@@ -153,6 +166,7 @@ fn declaration_class(member: &BundleMember) -> Option<&'static str> {
         BundleMember::EmbeddedCliBootAssets(_) => Some("embedded_cli_boot_assets"),
         BundleMember::CanonicalLinuxProof(_) => Some("canonical_linux_proof"),
         BundleMember::LocalComposition(_) => Some("local_composition"),
+        BundleMember::ProductionComposition(_) => Some("production_composition"),
         BundleMember::KernelCmdline { .. } => Some("kernel_cmdline"),
         BundleMember::SecurityPosture(_) => Some("security_posture"),
         BundleMember::BuildProvenance(_) => Some("build_provenance"),
@@ -166,40 +180,79 @@ fn validate_local_composition(
     manifest: &BundleManifest,
 ) -> Result<(), BundleVerifyError> {
     let refused = |reason: &str| BundleVerifyError::ManifestParse(reason.into());
-    let proof = manifest.members.iter().find_map(|member| match member {
-        BundleMember::CanonicalLinuxProof(proof) => Some(proof),
-        _ => None,
-    });
     if manifest
         .labels
         .get(super::BUNDLE_ORIGIN_LABEL)
         .map(String::as_str)
         != Some(super::LOCAL_BUILD_ORIGIN)
         || manifest.verity.is_none()
-        || composition.layers.len() > 64
     {
         return Err(refused(
             "local composition requires a verity-sealed local build with canonical Linux proof",
         ));
     }
-    let proof = proof.ok_or_else(|| refused("local composition requires canonical Linux proof"))?;
+    validate_composition_inventory(&composition.lock_artifact, &composition.layers, manifest)
+}
+
+#[cfg(feature = "host-state")]
+fn validate_production_composition(
+    composition: &mvm_contract::plan::bundle::ProductionComposition,
+    manifest: &BundleManifest,
+) -> Result<(), BundleVerifyError> {
+    let posture = manifest.security_posture();
+    if manifest.labels.contains_key(super::BUNDLE_ORIGIN_LABEL)
+        || !posture.is_some_and(|p| {
+            p.profile == AgentProfile::SealedProd
+                && p.verity_protected
+                && p.requires_auth
+                && !p.allows_egress
+                && !p.allows_volumes
+        })
+    {
+        return Err(BundleVerifyError::ManifestParse(
+            "production composition requires a sealed, authenticated, offline posture without a local origin".into(),
+        ));
+    }
+    validate_composition_inventory(&composition.lock_artifact, &composition.layers, manifest)
+}
+
+#[cfg(feature = "host-state")]
+fn validate_composition_inventory(
+    lock_artifact: &str,
+    layers: &[mvm_contract::plan::bundle::LocalCompositionLayer],
+    manifest: &BundleManifest,
+) -> Result<(), BundleVerifyError> {
+    let refused = |reason: &str| BundleVerifyError::ManifestParse(reason.into());
+    if manifest.verity.is_none() || layers.len() > 64 {
+        return Err(refused(
+            "composition requires verity and at most 64 signed inputs",
+        ));
+    }
+    let proof = manifest
+        .members
+        .iter()
+        .find_map(|member| match member {
+            BundleMember::CanonicalLinuxProof(proof) => Some(proof),
+            _ => None,
+        })
+        .ok_or_else(|| refused("composition requires canonical Linux proof"))?;
     let mut names = std::collections::BTreeSet::new();
-    let layer_names = composition.layers.iter().flat_map(|layer| {
+    let layer_names = layers.iter().flat_map(|layer| {
         [
-            &layer.manifest_artifact,
-            &layer.signature_artifact,
-            &layer.group_artifact,
+            layer.manifest_artifact.as_str(),
+            layer.signature_artifact.as_str(),
+            layer.group_artifact.as_str(),
         ]
     });
-    for name in std::iter::once(&composition.lock_artifact).chain(layer_names) {
+    for name in std::iter::once(lock_artifact).chain(layer_names) {
         if !names.insert(name) {
             return Err(refused("duplicate local composition evidence artifact"));
         }
         if [
-            &proof.manifest_artifact,
-            &proof.signature_bundle_artifact,
-            &proof.revocation_document_artifact,
-            &proof.revocation_signature_bundle_artifact,
+            proof.manifest_artifact.as_str(),
+            proof.signature_bundle_artifact.as_str(),
+            proof.revocation_document_artifact.as_str(),
+            proof.revocation_signature_bundle_artifact.as_str(),
         ]
         .contains(&name)
         {
@@ -809,6 +862,44 @@ mod tests {
         assert!(validate_declarations(&bad).is_err());
         bad = composed.clone();
         bad.members.push(composed.members.last().unwrap().clone());
+        assert!(validate_declarations(&bad).is_err());
+
+        let mut production = composed.clone();
+        production.labels.clear();
+        production.members.pop();
+        production.members.push(BundleMember::ProductionComposition(
+            mvm_contract::plan::bundle::ProductionComposition {
+                lock_artifact: "composition-lock.json".into(),
+                layers: Vec::new(),
+            },
+        ));
+        production
+            .members
+            .push(BundleMember::SecurityPosture(BundleSecurityPosture {
+                profile: AgentProfile::SealedProd,
+                verity_protected: true,
+                requires_auth: true,
+                allows_volumes: false,
+                allows_egress: false,
+            }));
+        validate_declarations(&production).unwrap();
+        let mut bad = production.clone();
+        bad.labels.insert(
+            super::super::BUNDLE_ORIGIN_LABEL.into(),
+            super::super::LOCAL_BUILD_ORIGIN.into(),
+        );
+        assert!(validate_declarations(&bad).is_err());
+        let mut bad = production.clone();
+        bad.members.push(composed.members.last().unwrap().clone());
+        assert!(validate_declarations(&bad).is_err());
+        let mut bad = production.clone();
+        bad.members.pop();
+        assert!(validate_declarations(&bad).is_err());
+        let mut bad = production;
+        let BundleMember::SecurityPosture(posture) = bad.members.last_mut().unwrap() else {
+            unreachable!("last member is the production posture");
+        };
+        posture.allows_egress = true;
         assert!(validate_declarations(&bad).is_err());
     }
 

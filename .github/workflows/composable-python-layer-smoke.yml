@@ -34,6 +34,7 @@ jobs:
       - name: Reproduce and verify an unpublished Python runtime input
         env:
           MVM_EMBED: "0"
+          GH_TOKEN: ${{ github.token }}
           ARCH: ${{ matrix.arch }}
           IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/composable-python-layer-smoke.yml@${{ github.ref }}
         run: |
@@ -62,6 +63,11 @@ jobs:
           cmp "$tmp/layer.tar" "$tmp/again.tar"
           printf '%s  %s\n' "$expected" "$tmp/layer.tar" | sha256sum --check
           test "$(stat -c %s "$tmp/layer.tar")" -eq "$size"
+          mkdir "$tmp/feed"
+          gh release download registry-pack-revocations --repo tinylabscom/mvm-packs \
+            --pattern revocations.json --pattern revocations.sigstore.json --dir "$tmp/feed"
+          test -s "$tmp/feed/revocations.json"
+          test -s "$tmp/feed/revocations.sigstore.json"
 
           mkdir -p "$tmp/files/pack"
           printf 'description = "Offline Python runtime"\nrequired = true\n[network]\nblock = true\n' \
@@ -99,36 +105,40 @@ jobs:
           PY
           cosign sign-blob --yes --new-bundle-format --bundle "$tmp/manifest.bundle" \
             "$tmp/manifest.json"
-          cargo run --locked -p mvm-core --example verify-runtime-layer-fixture \
+          MVM_HOME="$tmp/home-good" cargo run --locked -p mvm-core --example verify-runtime-layer-fixture \
             --features host-state,manifest-verify -- \
             "$tmp/manifest.json" "$tmp/manifest.bundle" "$tmp/layer.tar" \
-            "$tmp/files" "$IDENTITY"
+            "$tmp/files" "$IDENTITY" "$tmp/feed/revocations.json" \
+            "$tmp/feed/revocations.sigstore.json"
           MVM_TEST_PYTHON_LAYER_TAR="$tmp/layer.tar" cargo test --locked -p mvm-build \
             --lib runtime_layer::tests::pinned_python_layer_passes_the_real_runtime_tar_preflight \
             -- --ignored --exact
           cp "$tmp/layer.tar" "$tmp/tampered.tar"
           printf x >> "$tmp/tampered.tar"
-          if cargo run --locked -p mvm-core --example verify-runtime-layer-fixture \
+          if MVM_HOME="$tmp/home-tampered" cargo run --locked -p mvm-core --example verify-runtime-layer-fixture \
             --features host-state,manifest-verify -- \
             "$tmp/manifest.json" "$tmp/manifest.bundle" "$tmp/tampered.tar" \
-            "$tmp/files" "$IDENTITY"; then
+            "$tmp/files" "$IDENTITY" "$tmp/feed/revocations.json" \
+            "$tmp/feed/revocations.sigstore.json"; then
             echo "tampered signed input was accepted" >&2
             exit 1
           fi
           printf '# changed after signing\n' >> "$tmp/files/pack/group.toml"
-          if cargo run --locked -p mvm-core --example verify-runtime-layer-fixture \
+          if MVM_HOME="$tmp/home-policy" cargo run --locked -p mvm-core --example verify-runtime-layer-fixture \
             --features host-state,manifest-verify -- \
             "$tmp/manifest.json" "$tmp/manifest.bundle" "$tmp/layer.tar" \
-            "$tmp/files" "$IDENTITY"; then
+            "$tmp/files" "$IDENTITY" "$tmp/feed/revocations.json" \
+            "$tmp/feed/revocations.sigstore.json"; then
             echo "tampered signed policy was accepted" >&2
             exit 1
           fi
           printf 'description = "Offline Python runtime"\nrequired = true\n[network]\nblock = true\n' \
             > "$tmp/files/pack/group.toml"
-          if cargo run --locked -p mvm-core --example verify-runtime-layer-fixture \
+          if MVM_HOME="$tmp/home-wrong-publisher" cargo run --locked -p mvm-core --example verify-runtime-layer-fixture \
             --features host-state,manifest-verify -- \
             "$tmp/manifest.json" "$tmp/manifest.bundle" "$tmp/layer.tar" \
-            "$tmp/files" "https://example.invalid/untrusted-publisher"; then
+            "$tmp/files" "https://example.invalid/untrusted-publisher" \
+            "$tmp/feed/revocations.json" "$tmp/feed/revocations.sigstore.json"; then
             echo "wrong publisher identity was accepted" >&2
             exit 1
           fi

@@ -654,6 +654,9 @@ fn declarations_for(
     if let Some(composition) = &inputs.local_composition {
         members.push(BundleMember::LocalComposition(composition.clone()));
     }
+    if let Some(composition) = &inputs.production_composition {
+        members.push(BundleMember::ProductionComposition(composition.clone()));
+    }
     if inputs.boot_assets.is_some() {
         members.push(BundleMember::EmbeddedBootAssets {
             manifest_artifact: BOOT_MANIFEST_NAME.to_string(),
@@ -877,6 +880,47 @@ mod tests {
                 .get(mvm_core::plan::bundle::BUNDLE_ORIGIN_LABEL)
                 .map(String::as_str),
             Some(mvm_core::plan::bundle::LOCAL_BUILD_ORIGIN)
+        );
+    }
+
+    #[test]
+    fn production_composition_never_inherits_the_local_build_label() {
+        let mut inputs = BundleExportInputs::new(
+            "/tmp/kernel",
+            "/tmp/rootfs",
+            "x86_64",
+            Path::new("/tmp/production.mvmpkg"),
+        );
+        inputs.production_composition = Some(mvm_core::plan::bundle::ProductionComposition {
+            lock_artifact: "composition-lock.json".into(),
+            layers: Vec::new(),
+        });
+        let signer = TestSigner(ed25519_dalek::SigningKey::from_bytes(&[8; 32]));
+        let manifest = manifest_for(
+            &inputs,
+            &signer,
+            &signer.key_id(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        assert_eq!(manifest.schema_version, 8);
+        assert!(
+            !manifest
+                .labels
+                .contains_key(mvm_core::plan::bundle::BUNDLE_ORIGIN_LABEL)
+        );
+        assert!(
+            manifest
+                .members
+                .iter()
+                .any(|member| { matches!(member, BundleMember::ProductionComposition(_)) })
+        );
+        assert!(
+            !manifest
+                .members
+                .iter()
+                .any(|member| { matches!(member, BundleMember::LocalComposition(_)) })
         );
     }
 

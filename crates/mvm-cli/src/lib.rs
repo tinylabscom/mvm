@@ -11,6 +11,7 @@ pub mod approval;
 pub mod bench;
 pub mod bootstrap;
 pub mod commands;
+pub mod composable_export;
 pub mod config_watcher;
 pub mod doctor;
 pub mod exec;

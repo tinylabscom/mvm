@@ -1049,7 +1049,8 @@ mod builtin_author_keys;
 #[cfg(any(test, feature = "test-support"))]
 pub use builtin_author_keys::register_test_author_key;
 pub use builtin_author_keys::{
-    BuiltinAuthorTrust, OFFICIAL_BUNDLE_AUTHOR_KEYS, REVOKED_OFFICIAL_BUNDLE_AUTHOR_KEY_IDS,
+    BuiltinAuthorTrust, OFFICIAL_BUNDLE_AUTHOR_KEYS, OFFICIAL_PYTHON_BUNDLE_AUTHOR_KEYS,
+    REVOKED_OFFICIAL_BUNDLE_AUTHOR_KEY_IDS, is_official_python_bundle_author_key,
 };
 mod dispatch;
 pub mod runtime_layer;

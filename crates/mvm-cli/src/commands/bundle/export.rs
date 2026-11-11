@@ -326,6 +326,7 @@ pub(in crate::commands) fn stage_template(
         canonical_linux_proof: None,
         supplemental_artifacts: &[],
         local_composition: None,
+        production_composition: None,
         out: &export.out,
         debug_out: None,
     };

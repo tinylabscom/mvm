@@ -85,7 +85,8 @@ pub use mvm_contract::plan::bundle::{
     CanonicalLinuxProof, ENVIRONMENT_MEMBER_MIN_SCHEMA, EmbeddedCliBootAssets, KeyId,
     LOCAL_COMPOSITION_MIN_SCHEMA, LocalComposition, LocalCompositionLayer, MANIFEST_FILENAME,
     MAX_BUNDLE_ENTRY_BYTES, MAX_BUNDLE_TOTAL_BYTES, MAX_KERNEL_CMDLINE_BYTES, PlanArtifact,
-    SIGNATURE_FILENAME, VerityInfo, signature_from_base64, signature_to_base64,
+    ProductionComposition, SIGNATURE_FILENAME, VerityInfo, signature_from_base64,
+    signature_to_base64,
 };
 pub use mvm_contract::plan::environment::{
     ApplicationService, ENVIRONMENT_DESCRIPTOR_VERSION, EnvironmentCapability,
@@ -1265,6 +1266,7 @@ fn verify_embedded_image_sets(
             | BundleMember::EmbeddedCliBootAssets(_)
             | BundleMember::CanonicalLinuxProof(_)
             | BundleMember::LocalComposition(_)
+            | BundleMember::ProductionComposition(_)
             | BundleMember::SecurityPosture(_)
             | BundleMember::BuildProvenance(_)
             | BundleMember::Environment(_) => None,
@@ -1296,6 +1298,7 @@ fn verify_boot_assets(
             BundleMember::EmbeddedImageSet { .. }
             | BundleMember::CanonicalLinuxProof(_)
             | BundleMember::LocalComposition(_)
+            | BundleMember::ProductionComposition(_)
             | BundleMember::KernelCmdline { .. }
             | BundleMember::SecurityPosture(_)
             | BundleMember::BuildProvenance(_)

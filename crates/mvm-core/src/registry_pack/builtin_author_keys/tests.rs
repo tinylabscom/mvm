@@ -21,6 +21,21 @@ fn the_embedded_key_matches_its_published_key_id() {
 }
 
 #[test]
+fn python_authority_is_separate_from_claude_and_operator_enrollment() {
+    let claude = id(OFFICIAL_KEY_ID);
+    assert!(!is_official_python_bundle_author_key(&claude));
+    let operator = SigningKey::from_bytes(&[7; 32]).verifying_key();
+    let key_id = key_id_from_pubkey(&operator);
+    assert!(!is_official_python_bundle_author_key(&key_id));
+    assert!(python_author_key_in(&key_id, &[operator.to_bytes()], &[]));
+    assert!(!python_author_key_in(
+        &key_id,
+        &[operator.to_bytes()],
+        &[key_id.0.as_str()],
+    ));
+}
+
+#[test]
 fn a_builtin_key_resolves_without_enrollment_and_writes_nothing() {
     let (_dir, store) = empty_store();
     let trust = BuiltinAuthorTrust::with_lists(&store, OFFICIAL_BUNDLE_AUTHOR_KEYS.to_vec(), &[]);

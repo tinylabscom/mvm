@@ -50,6 +50,9 @@ pub struct BundleExportInputs<'a> {
     pub supplemental_artifacts: &'a [(&'a str, &'a Path)],
     /// Development-only signed composition inventory; admission rechecks its inputs.
     pub local_composition: Option<mvm_core::plan::bundle::LocalComposition>,
+    /// Production composition inventory; authority is checked against a
+    /// separately signed application descriptor at recipient admission.
+    pub production_composition: Option<mvm_core::plan::bundle::ProductionComposition>,
     pub boot_assets: Option<BootAssetsInputs<'a>>,
     pub cli_boot_assets: Option<CliBootAssetsInputs<'a>>,
     pub canonical_linux_proof: Option<CanonicalLinuxProofInputs<'a>>,
@@ -102,6 +105,7 @@ impl<'a> BundleExportInputs<'a> {
         Self {
             supplemental_artifacts: &[],
             local_composition: None,
+            production_composition: None,
             boot_assets: None,
             cli_boot_assets: None,
             canonical_linux_proof: None,

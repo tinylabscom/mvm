@@ -23,7 +23,7 @@ use super::Cli;
 use super::host_signer::{host_signer_id, load_or_init};
 
 pub(in crate::commands) mod application_source;
-mod composition;
+pub(crate) mod composition;
 pub(in crate::commands) mod detect;
 mod image_source;
 pub(in crate::commands) mod positional_source;

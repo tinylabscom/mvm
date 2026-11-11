@@ -22,9 +22,31 @@ pub const OFFICIAL_BUNDLE_AUTHOR_KEYS: &[[u8; 32]] = &[
     ],
 ];
 
+/// Production Python bundle authors. A reviewed client release must pin the
+/// publisher's new public key here before any Python package can be official.
+/// Never substitute the Claude key or an operator-enrolled local key.
+pub const OFFICIAL_PYTHON_BUNDLE_AUTHOR_KEYS: &[[u8; 32]] = &[];
+
 /// Built-in author key ids a client release has disabled. Checked before trust,
 /// so a compromised key is dropped by shipping a release.
 pub const REVOKED_OFFICIAL_BUNDLE_AUTHOR_KEY_IDS: &[&str] = &[];
+
+/// Only a distinct, nonrevoked Python publisher key may author a production composition.
+pub fn is_official_python_bundle_author_key(key_id: &KeyId) -> bool {
+    python_author_key_in(
+        key_id,
+        OFFICIAL_PYTHON_BUNDLE_AUTHOR_KEYS,
+        REVOKED_OFFICIAL_BUNDLE_AUTHOR_KEY_IDS,
+    )
+}
+
+fn python_author_key_in(key_id: &KeyId, keys: &[[u8; 32]], revoked: &[&str]) -> bool {
+    !revoked.contains(&key_id.0.as_str())
+        && keys
+            .iter()
+            .filter_map(|raw| VerifyingKey::from_bytes(raw).ok())
+            .any(|key| key_id_from_pubkey(&key) == *key_id)
+}
 
 impl<T: TrustStore + ?Sized> TrustStore for &T {
     fn lookup(&self, key_id: &KeyId) -> Option<VerifyingKey> {
@@ -46,8 +68,8 @@ pub fn register_test_author_key(key: [u8; 32]) {
 }
 
 fn pinned_keys() -> Vec<[u8; 32]> {
-    #[allow(unused_mut)]
     let mut keys = OFFICIAL_BUNDLE_AUTHOR_KEYS.to_vec();
+    keys.extend_from_slice(OFFICIAL_PYTHON_BUNDLE_AUTHOR_KEYS);
     #[cfg(any(test, feature = "test-support"))]
     keys.extend(TEST_AUTHOR_KEYS.lock().unwrap().iter().copied());
     keys

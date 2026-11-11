@@ -1,4 +1,4 @@
-//! Assemble a development-only local bundle; the ordinary run path admits it.
+//! Assemble authenticated composition inputs into distinct development and production archives.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -10,13 +10,14 @@ use mvm_client::bundle::{BundleExportInputs, BundleSigner, HostBundleSigner, Pos
 use mvm_client::portable_boot_assets::PreparedPortableBootAssets;
 use mvm_client::registry_application::discovery::resolve_runtime_layer_pin;
 use mvm_contract::pack_spec::PackTarget;
+use mvm_contract::pack_spec_v2::BuildMode;
 use mvm_core::arch::GuestArch;
 use mvm_core::image_set::WorkloadImageProfile;
 use mvm_core::packs::Sha256Hex;
 use mvm_core::plan::bundle::{
     BundleMember, BundleOrigin, EnvironmentDescriptor, EnvironmentEntrypoint, EnvironmentPolicy,
-    FsTrustStore, LocalBundleTrustStore, LocalComposition, LocalCompositionLayer, bundle_origin,
-    verify_bundle_file,
+    FsTrustStore, LocalBundleTrustStore, LocalComposition, LocalCompositionLayer,
+    ProductionComposition, TrustStore, bundle_origin, key_id_from_pubkey, verify_bundle_file,
 };
 use mvm_core::plan::types::{BuildProvenance, InputKind};
 use mvm_core::registry_pack::runtime_layer::{
@@ -40,12 +41,57 @@ impl PreparedComposition {
 }
 
 pub(super) fn prepare(path: &Path) -> Result<PreparedComposition> {
+    assemble(path, CompositionOutput::Development)
+}
+
+/// Build an unpublished production candidate using a separately held publisher signer.
+/// A candidate is not official until its descriptor, current feeds, and native boots pass.
+pub(crate) fn export_production(
+    path: &Path,
+    destination: &Path,
+    signer: &dyn BundleSigner,
+) -> Result<PathBuf> {
+    refuse_existing_destination(destination)?;
+    Ok(assemble(
+        path,
+        CompositionOutput::Production {
+            destination,
+            signer,
+        },
+    )?
+    .archive)
+}
+
+fn refuse_existing_destination(destination: &Path) -> Result<()> {
+    ensure!(
+        std::fs::symlink_metadata(destination)
+            .is_err_and(|error| { error.kind() == std::io::ErrorKind::NotFound }),
+        "production archive destination already exists or cannot be inspected"
+    );
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum CompositionOutput<'a> {
+    Development,
+    Production {
+        destination: &'a Path,
+        signer: &'a dyn BundleSigner,
+    },
+}
+
+fn assemble(path: &Path, output: CompositionOutput<'_>) -> Result<PreparedComposition> {
     let metadata = std::fs::symlink_metadata(path)?;
     ensure!(
         metadata.file_type().is_file() && metadata.len() <= 64 * 1024,
         "composition recipe must be a regular file no larger than 64 KiB"
     );
-    let spec = parse_toml(&std::fs::read_to_string(path)?)?;
+    let authored = std::fs::read(path)?;
+    let spec = parse_toml(std::str::from_utf8(&authored)?)?;
+    spec.check_mode_request(match output {
+        CompositionOutput::Development => BuildMode::Development,
+        CompositionOutput::Production { .. } => BuildMode::Production,
+    })?;
     let directory = path.parent().context("composition recipe has no parent")?;
     let arch = match spec.target {
         PackTarget::X86_64Linux => GuestArch::X86_64,
@@ -87,13 +133,32 @@ pub(super) fn prepare(path: &Path) -> Result<PreparedComposition> {
     let archive_sha = Sha256Hex::new(prepared.archive_sha256())?;
     let source_sha = Sha256Hex::new(prepared.source_sha256())?;
     let application = tree.with_application_archive(prepared.archive_bytes(), &archive_sha)?;
-    let lock = application.development_lock(&spec, &source_sha, env!("MVM_SOURCE_COMMIT"))?;
+    let lock = match output {
+        CompositionOutput::Development => {
+            application.development_lock(&spec, &source_sha, env!("MVM_SOURCE_COMMIT"))?
+        }
+        CompositionOutput::Production { .. } => {
+            application.resolved_lock(&spec, &source_sha, env!("MVM_SOURCE_COMMIT"))?
+        }
+    };
     let lock_bytes = serde_json::to_vec(&lock)?;
     let lock_sha = Sha256Hex::from_bytes(&lock_bytes);
-    let cache = PathBuf::from(mvm_core::config::mvm_cache_dir()).join("compositions");
-    mvm_core::config::create_private_dir(&cache)?;
-    let target = cache.join(format!("{}.mvmpkg", lock_sha.as_str()));
+    let target = match output {
+        CompositionOutput::Development => {
+            let cache = PathBuf::from(mvm_core::config::mvm_cache_dir()).join("compositions");
+            mvm_core::config::create_private_dir(&cache)?;
+            cache.join(format!("{}.mvmpkg", lock_sha.as_str()))
+        }
+        CompositionOutput::Production { destination, .. } => {
+            refuse_existing_destination(destination)?;
+            destination.to_path_buf()
+        }
+    };
     let reverify_inputs = || -> Result<()> {
+        ensure!(
+            std::fs::read(path)? == authored,
+            "authored composition spec changed before signing"
+        );
         prepared.reverify()?;
         for input in &inputs {
             mvm_core::registry_pack::runtime_layer::require_offline_runtime_policy(input)?;
@@ -101,7 +166,9 @@ pub(super) fn prepare(path: &Path) -> Result<PreparedComposition> {
         images.retained_publisher_proof()?;
         Ok(())
     };
-    if std::fs::symlink_metadata(&target).is_ok() {
+    if matches!(output, CompositionOutput::Development)
+        && std::fs::symlink_metadata(&target).is_ok()
+    {
         reverify_inputs()?;
         verify_cached_bundle(&target, &lock_bytes)?;
         eprintln!(
@@ -161,12 +228,20 @@ pub(super) fn prepare(path: &Path) -> Result<PreparedComposition> {
         .initramfs_path()
         .to_str()
         .context("initramfs path is not UTF-8")?;
+    let profile = match output {
+        CompositionOutput::Development => AgentProfile::Dev,
+        CompositionOutput::Production { .. } => AgentProfile::SealedProd,
+    };
     let mut export = BundleExportInputs::new(kernel, rootfs, &arch_label, &target)
         .initrd(initrd)
         .verity(&verity, roothash)
-        .profile("dev")
+        .profile(if profile == AgentProfile::Dev {
+            "dev"
+        } else {
+            "prod"
+        })
         .resources(spec.resources.cpu_cores.into(), spec.resources.memory_mb)
-        .posture(PostureInputs::new(AgentProfile::Dev))
+        .posture(PostureInputs::new(profile))
         .environment(environment)
         .provenance(BuildProvenance {
             input_kind: InputKind::LocalProject,
@@ -174,28 +249,98 @@ pub(super) fn prepare(path: &Path) -> Result<PreparedComposition> {
             lock_digest: Some(lock_sha.as_str().to_owned()),
             builder_id: None,
             artifacts: Default::default(),
-        })
-        .local_build();
-    export.local_composition = Some(member);
+        });
+    let host_signer = if matches!(output, CompositionOutput::Development) {
+        Some(HostBundleSigner::load()?)
+    } else {
+        None
+    };
+    let signer: &dyn BundleSigner = match output {
+        CompositionOutput::Development => {
+            export = export.local_build();
+            export.local_composition = Some(member);
+            host_signer.as_ref().context("local signer not loaded")?
+        }
+        CompositionOutput::Production { signer, .. } => {
+            export.production_composition = Some(ProductionComposition {
+                lock_artifact: member.lock_artifact,
+                layers: member.layers,
+            });
+            signer
+        }
+    };
     export.supplemental_artifacts = &supplemental;
-    let signed = boot.stage(&export, &HostBundleSigner::load()?)?;
+    let mut signed = boot.stage(&export, signer)?;
     reverify_inputs()?;
     ensure!(
         mvm_core::crypto::image_verify::sha256_file(&image)? == output_sha256,
-        "composed output changed before local signing"
+        "composed output changed before signing"
     );
+    let staged_sha256 = signed.sha256()?;
     if let Err(error) = signed.publish() {
-        if std::fs::symlink_metadata(&target).is_err() {
+        if !matches!(output, CompositionOutput::Development)
+            || std::fs::symlink_metadata(&target).is_err()
+        {
             return Err(error);
         }
         reverify_inputs()?;
     }
-    verify_cached_bundle(&target, &lock_bytes)?;
-    eprintln!(
-        "[mvm] assembled and cached composition {}",
-        lock_sha.as_str()
-    );
+    match output {
+        CompositionOutput::Development => verify_cached_bundle(&target, &lock_bytes)?,
+        CompositionOutput::Production { .. } => {
+            verify_production_candidate(&target, &lock_bytes, signer, &staged_sha256)?
+        }
+    }
+    eprintln!("[mvm] assembled composition {}", lock_sha.as_str());
     Ok(PreparedComposition { archive: target })
+}
+
+fn verify_production_candidate(
+    path: &Path,
+    lock: &[u8],
+    signer: &dyn BundleSigner,
+    staged_sha256: &str,
+) -> Result<()> {
+    struct CandidateTrust<'a>(&'a dyn BundleSigner);
+    impl TrustStore for CandidateTrust<'_> {
+        fn lookup(
+            &self,
+            key_id: &mvm_core::plan::bundle::KeyId,
+        ) -> Option<ed25519_dalek::VerifyingKey> {
+            let key = self.0.verifying_key();
+            (key_id_from_pubkey(&key) == *key_id).then_some(key)
+        }
+    }
+    ensure!(
+        mvm_core::crypto::image_verify::sha256_file(path)? == staged_sha256,
+        "published production candidate differs from staged signed bytes"
+    );
+    let verified = verify_bundle_file(path, &CandidateTrust(signer))?;
+    ensure!(
+        !verified
+            .manifest
+            .labels
+            .contains_key(mvm_core::plan::bundle::BUNDLE_ORIGIN_LABEL),
+        "production candidate carries a local-build origin"
+    );
+    let member = verified
+        .manifest
+        .members
+        .iter()
+        .find_map(|member| match member {
+            BundleMember::ProductionComposition(member) => Some(member),
+            _ => None,
+        })
+        .context("production candidate has no composition evidence")?;
+    ensure!(
+        verified.read_small_verified_member(
+            std::fs::File::open(path)?,
+            &member.lock_artifact,
+            1024 * 1024,
+        )? == lock,
+        "published production candidate differs from frozen composition lock"
+    );
+    Ok(())
 }
 
 fn verify_cached_bundle(path: &Path, lock: &[u8]) -> Result<()> {

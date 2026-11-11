@@ -14,7 +14,7 @@ pub(in crate::commands) mod egress_denials;
 pub(in crate::commands) mod replay;
 pub(in crate::commands) mod workspace_apply;
 use mvm_client::admission::entrypoint_resolve;
-pub(super) mod exec;
+pub(crate) mod exec;
 pub(in crate::commands) mod explain;
 pub(super) mod forward;
 pub(super) mod fs;

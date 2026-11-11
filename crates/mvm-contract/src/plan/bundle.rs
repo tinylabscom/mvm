@@ -51,7 +51,7 @@ use crate::policy::security::AgentProfile;
 /// descriptor stays readable by version-4 readers.
 /// Version 6 separates the signed CLI runtime from the original Linux image set.
 /// Version 7 carries original canonical Linux publisher and revocation proofs.
-/// Version 8 binds a host-local composition to its authenticated input inventory.
+/// Version 8 binds composition outputs to authenticated input inventories.
 pub const BUNDLE_SCHEMA_VERSION: u32 = 8;
 
 /// The first schema that may carry [`BundleMember::Environment`].
@@ -207,6 +207,9 @@ pub enum BundleMember {
     /// Development-only assembly inputs, not a publisher signature or a grant.
     /// The bundle's rootfs and verity declarations bind the measured output.
     LocalComposition(LocalComposition),
+    /// Production assembly inventory. Authority comes from an independent
+    /// publisher-signed application descriptor and bundle author key, not this class.
+    ProductionComposition(ProductionComposition),
     /// The kernel command line the publisher built and tested the workload
     /// with. Advisory: the launcher derives the command line it boots with,
     /// so a bundle cannot use this to switch off dm-verity or redirect init.
@@ -234,7 +237,9 @@ impl BundleMember {
             Self::EmbeddedBootAssets { .. } => BOOT_ASSETS_MEMBER_MIN_SCHEMA,
             Self::EmbeddedCliBootAssets(_) => CLI_BOOT_ASSETS_MEMBER_MIN_SCHEMA,
             Self::CanonicalLinuxProof(_) => CANONICAL_LINUX_PROOF_MIN_SCHEMA,
-            Self::LocalComposition(_) => LOCAL_COMPOSITION_MIN_SCHEMA,
+            Self::LocalComposition(_) | Self::ProductionComposition(_) => {
+                LOCAL_COMPOSITION_MIN_SCHEMA
+            }
             Self::Environment(_) => ENVIRONMENT_MEMBER_MIN_SCHEMA,
             Self::EmbeddedImageSet { .. }
             | Self::KernelCmdline { .. }
@@ -282,6 +287,14 @@ pub struct CanonicalLinuxProof {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalComposition {
+    pub lock_artifact: String,
+    pub layers: Vec<LocalCompositionLayer>,
+}
+
+/// Production input inventory; a distinct signed class cannot acquire local authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductionComposition {
     pub lock_artifact: String,
     pub layers: Vec<LocalCompositionLayer>,
 }
@@ -567,6 +580,24 @@ mod tests {
         });
         assert_eq!(member.minimum_schema_version(), 8);
         let encoded = serde_json::to_value(&member).unwrap();
+        assert_eq!(
+            serde_json::from_value::<BundleMember>(encoded.clone()).unwrap(),
+            member
+        );
+        let mut forged = encoded;
+        forged["publisher_verified"] = true.into();
+        assert!(serde_json::from_value::<BundleMember>(forged).is_err());
+    }
+
+    #[test]
+    fn production_composition_is_distinct_and_closed() {
+        let member = BundleMember::ProductionComposition(ProductionComposition {
+            lock_artifact: "composition-lock.json".into(),
+            layers: Vec::new(),
+        });
+        assert_eq!(member.minimum_schema_version(), 8);
+        let encoded = serde_json::to_value(&member).unwrap();
+        assert_eq!(encoded["class"], "production_composition");
         assert_eq!(
             serde_json::from_value::<BundleMember>(encoded.clone()).unwrap(),
             member
