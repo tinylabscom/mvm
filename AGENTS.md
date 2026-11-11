@@ -9,6 +9,11 @@ The fuller AI-assisted issue-to-PR playbook lives in
 setup in `public/src/content/docs/contributing/development.md`. If you change
 anything this file describes, update this file in the same change.
 
+For security-sensitive runtime, policy, package, backend, networking, or
+lifecycle changes, read `.agents/skills/secure-execution-review/SKILL.md`
+before designing the change. This file's invariants apply even to agents
+that cannot invoke skills directly.
+
 ## Product and design boundaries
 
 Build secure execution infrastructure, not a product defined solely by microVMs.
