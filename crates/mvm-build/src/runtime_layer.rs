@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod component_lock;
+mod entrypoint;
 pub use component_lock::{
     ComponentArchivePin, ComponentFilesystemLockSchema, MaterializedComponentRootfs,
     ResolvedComponentFilesystemLock,
@@ -132,6 +133,7 @@ pub struct ComposedWorkloadRootfs {
 pub struct ComposedApplicationRootfs {
     tree: ComposedWorkloadRootfs,
     application_archive_sha256: Sha256Hex,
+    entrypoint_script_sha256: Option<Sha256Hex>,
 }
 
 /// A private, authenticated ordered component tree; not a launch or export grant.
@@ -160,6 +162,8 @@ pub struct ResolvedComposableLock {
     spec_sha256: Sha256Hex,
     source_tree_sha256: Sha256Hex,
     application_archive_sha256: Sha256Hex,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    entrypoint_script_sha256: Option<Sha256Hex>,
     base_manifest_sha256: Sha256Hex,
     runtime_pins: Vec<PackPin>,
     target: PackTarget,
@@ -196,17 +200,19 @@ impl ResolvedComposableLock {
         Ok(())
     }
 
-    /// Identity of filesystem bytes, excluding command and policy decisions.
+    /// Identity of filesystem bytes, excluding policy-only decisions.
     ///
     /// The base and runtime manifest pins bind their archive digests. The
-    /// application archive digest binds every copied file. A new assembler
-    /// revision changes the key even when its version number has not changed.
+    /// application archive digest binds every copied file; the selected
+    /// entrypoint script is also a filesystem input. A new assembler revision
+    /// changes the key even when its version number has not changed.
     pub fn filesystem_identity(&self) -> anyhow::Result<Sha256Hex> {
         let bytes = serde_json::to_vec(&(
             "mvm.composable-rootfs/v1",
             &self.base_manifest_sha256,
             &self.runtime_pins,
             &self.application_archive_sha256,
+            &self.entrypoint_script_sha256,
             self.target,
             self.profile,
             &self.producer_revision,
@@ -230,6 +236,25 @@ impl ComposedApplicationRootfs {
     /// Guest tree with exactly one authored application copied under `/srv/app`.
     pub fn root(&self) -> &Path {
         self.tree.root()
+    }
+
+    /// Bake the authored command into the sealed guest tree, not host grants.
+    ///
+    /// # Errors
+    /// Refuses another recipe or an occupied or unsafe guest marker path.
+    pub fn with_authored_entrypoint(
+        mut self,
+        spec: &ComposablePackSpec,
+    ) -> Result<Self, RuntimeLayerStageError> {
+        spec.validate()?;
+        if self.tree.authored_spec_sha256.as_ref()
+            != Some(&Sha256Hex::from_bytes(&spec.canonical_json()?))
+        {
+            return Err(RuntimeLayerStageError::InconsistentLayers);
+        }
+        self.entrypoint_script_sha256 =
+            Some(entrypoint::write_script(self.root(), &spec.entrypoint)?);
+        Ok(self)
     }
 
     /// Bind one authored spec to the selected input graph after composition.
@@ -279,11 +304,17 @@ impl ComposedApplicationRootfs {
             return Err(RuntimeLayerStageError::InconsistentLayers);
         }
         self.tree.reverify_runtime_policies()?;
+        let expected_script = Sha256Hex::from_bytes(&entrypoint::script(&spec.entrypoint));
+        if self.entrypoint_script_sha256.as_ref() != Some(&expected_script) {
+            return Err(RuntimeLayerStageError::Entrypoint);
+        }
+        entrypoint::verify_script(self.root(), &expected_script)?;
         Ok(ResolvedComposableLock {
             schema: ComposableLockSchema::V1,
             spec_sha256,
             source_tree_sha256: source_tree_sha256.clone(),
             application_archive_sha256: self.application_archive_sha256.clone(),
+            entrypoint_script_sha256: self.entrypoint_script_sha256.clone(),
             base_manifest_sha256: self.tree.base_manifest_sha256.clone(),
             runtime_pins: self.tree.runtime_pins().to_vec(),
             target: spec.target,
@@ -302,7 +333,14 @@ impl ComposedApplicationRootfs {
         &self,
         output: &Path,
     ) -> Result<crate::rootfs::MaterializedExt4, RuntimeLayerStageError> {
-        self.tree.materialize_candidate(output)
+        if let Some(digest) = &self.entrypoint_script_sha256 {
+            entrypoint::verify_script(self.root(), digest)?;
+        }
+        let image = self.tree.materialize_candidate(output)?;
+        if let Some(digest) = &self.entrypoint_script_sha256 {
+            entrypoint::verify_script(self.root(), digest)?;
+        }
+        Ok(image)
     }
 }
 
@@ -384,6 +422,7 @@ impl ComposedWorkloadRootfs {
         Ok(ComposedApplicationRootfs {
             tree: self,
             application_archive_sha256: expected.clone(),
+            entrypoint_script_sha256: None,
         })
     }
 
@@ -562,6 +601,8 @@ pub enum RuntimeLayerStageError {
     BaseContract,
     #[error("application archive bytes do not match the resolved input digest")]
     ApplicationDigest,
+    #[error("authored entrypoint changed or conflicts with the guest tree")]
+    Entrypoint,
     #[error("composable pack inputs differ from the frozen lock")]
     StaleLock,
     #[error("ordered component graph, signed inputs or selected base disagree")]
@@ -2519,7 +2560,13 @@ mod tests {
         let digest = Sha256Hex::new(prepared.archive_sha256().to_owned()).unwrap();
         let application = composed
             .with_application_archive(prepared.archive_bytes(), &digest)
+            .unwrap()
+            .with_authored_entrypoint(&spec)
             .unwrap();
+        assert_eq!(
+            std::fs::read(application.root().join("etc/mvm/entrypoint")).unwrap(),
+            b"#!/bin/sh\nexec '/srv/app/probe.sh'\n"
+        );
         prepared.reverify().unwrap();
         let source_sha256 = Sha256Hex::new(prepared.source_sha256().to_owned()).unwrap();
         let revision = "a".repeat(40);
@@ -2567,6 +2614,8 @@ mod tests {
         command_only.spec_sha256 = Sha256Hex::from_bytes(b"another admitted command");
         assert_ne!(command_only, lock);
         assert_eq!(command_only.filesystem_identity().unwrap(), filesystem);
+        command_only.entrypoint_script_sha256 = Some(Sha256Hex::from_bytes(b"another script"));
+        assert_ne!(command_only.filesystem_identity().unwrap(), filesystem);
         let mut changed = lock.clone();
         changed.source_tree_sha256 = Sha256Hex::from_bytes(b"edited source");
         assert!(matches!(
@@ -2656,6 +2705,13 @@ mod tests {
                 .read_regular_file_no_symlinks("srv/app/main.py", 128)
                 .unwrap(),
             b"print('ready')\n"
+        );
+        assert_eq!(
+            mvm_fs::tree_diff::Ext4Tree::open(&image)
+                .unwrap()
+                .read_regular_file_no_symlinks("etc/mvm/entrypoint", 128)
+                .unwrap(),
+            b"#!/bin/sh\nexec '/srv/app/probe.sh'\n"
         );
         if real_tar.is_some() && std::env::var_os("MVM_TEST_SIGNED_BASE_VERIFY").is_some() {
             let directory = PathBuf::from(std::env::var_os("MVM_TEST_SIGNED_BASE_DIR").unwrap());

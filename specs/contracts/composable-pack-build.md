@@ -112,7 +112,10 @@ composition bytes, ordered component archive digests and declared filesystem
 ABI, and assembler version. Do not key those bytes on the effective policy,
 host grants or command if they are not written into the filesystem. If any
 such data *is* embedded in the filesystem, it is explicitly hashed as an
-assembly input. Reverify cached bytes and their verity binding before use;
+assembly input. The v2 `run --compose` candidate bakes its literal authored
+argv as a sealed `/etc/mvm/entrypoint` script, so its script digest belongs
+in the filesystem key; changing that command rebuilds the filesystem.
+Reverify cached bytes and their verity binding before use;
 the cache is not a trust decision. First-run assembly, repeat boot, transfer
 and retained disk must be measured separately. Reuse the candidate's
 host-signed local-bundle/schema-8 path, not another composer or cache.
@@ -159,7 +162,8 @@ The staged v2 candidate authenticates runtime descriptors/policies and a
 signed-base composition tar, rejects path collisions, and creates a
 host-signed local development bundle for a default or explicitly selected
 local base. A verified host-signed filesystem may be reused across command
-choices when its ordered filesystem identity is unchanged; current trust,
+choices only when no command bytes are baked into it and its ordered
+filesystem identity is unchanged; current trust,
 revocations and grants must still be readmitted. Typed v3 component readers,
 an exact-pin acquisition helper, ordered staging and measured filesystem-only
 lock, a separately signed base-descriptor verifier, and an authenticated

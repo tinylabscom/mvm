@@ -186,7 +186,9 @@ pub(super) fn prepare(path: &Path, base: Base<'_>) -> Result<PreparedComposition
     prepared.reverify()?;
     let archive_sha = Sha256Hex::new(prepared.archive_sha256())?;
     let source_sha = Sha256Hex::new(prepared.source_sha256())?;
-    let application = tree.with_application_archive(prepared.archive_bytes(), &archive_sha)?;
+    let application = tree
+        .with_application_archive(prepared.archive_bytes(), &archive_sha)?
+        .with_authored_entrypoint(&spec)?;
     let lock = application.development_lock(&spec, &source_sha, env!("MVM_SOURCE_COMMIT"))?;
     let lock_bytes = serde_json::to_vec(&lock)?;
     let lock_sha = Sha256Hex::from_bytes(&lock_bytes);
