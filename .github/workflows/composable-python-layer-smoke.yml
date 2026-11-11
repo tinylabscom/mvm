@@ -261,24 +261,30 @@ jobs:
 
   # Capability probes only. A VM creation is not a guest boot, and neither
   # result qualifies a .mvmpkg or substitutes for the exact-file witness.
-  native-arm-kvm-vsock-capability:
+  native-arm-kvm-unix-transport-capability:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Linux, ARM64]
     timeout-minutes: 10
     permissions: {}
     steps:
-      - name: Require native aarch64 KVM and host vsock for this runner user
+      - name: Require native aarch64 KVM and Unix transport for Firecracker
         run: |
           python3 - <<'PY'
           import fcntl
           import json
           import os
           import platform
+          import shutil
           import socket
           import sys
+          import tempfile
 
-          evidence = {"scope": "host capability only; no guest or package boot",
-                      "system": platform.system(), "architecture": platform.machine()}
+          evidence = {
+              "scope": "KVM and host Unix transport only; no guest-vsock or package boot",
+              "system": platform.system(),
+              "architecture": platform.machine(),
+              "firecracker_binary": shutil.which("firecracker"),
+          }
           try:
               if evidence["system"] != "Linux" or evidence["architecture"] not in ("aarch64", "arm64"):
                   raise RuntimeError("runner is not native aarch64 Linux")
@@ -290,17 +296,37 @@ jobs:
                   vm = fcntl.ioctl(kvm.fileno(), 0xAE01, 0)  # KVM_CREATE_VM
                   os.close(vm)
                   evidence["kvm_vm_created_and_closed"] = True
+              with tempfile.TemporaryDirectory(prefix="fc-host-", dir=os.environ["RUNNER_TEMP"]) as root:
+                  path = os.path.join(root, "vsock.sock")
+                  with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+                      listener.bind(path)
+                      listener.listen(1)
+                      with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                          client.connect(path)
+                          with listener.accept()[0] as accepted:
+                              client.sendall(b"v")
+                              if accepted.recv(1) != b"v":
+                                  raise RuntimeError("Firecracker host Unix transport did not round-trip")
+                  evidence["firecracker_host_unix_transport"] = True
+              evidence["result"] = "host-capability-confirmed; guest-vsock-unproven"
+          except (OSError, RuntimeError, KeyError) as error:
+              evidence["result"] = "host-capability-unavailable"
+              evidence["reason"] = str(error)
+          # Direct-QEMU vhost-vsock is a separate privilege requirement;
+          # its absence cannot invalidate Firecracker's Unix-backed route.
+          try:
               vsock = os.open("/dev/vhost-vsock", os.O_RDWR | os.O_CLOEXEC)
               os.close(vsock)
-              evidence["vhost_vsock_opened"] = True
+              evidence["qemu_vhost_vsock_opened"] = True
+          except OSError as error:
+              evidence["qemu_vhost_vsock"] = str(error)
+          try:
               with socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM):
-                  evidence["af_vsock_socket_created"] = True
-              evidence["result"] = "capability-confirmed"
-          except (OSError, RuntimeError) as error:
-              evidence["result"] = "unavailable"
-              evidence["reason"] = str(error)
+                  evidence["host_af_vsock_socket_created"] = True
+          except (AttributeError, OSError) as error:
+              evidence["host_af_vsock"] = str(error)
           print(json.dumps(evidence, sort_keys=True))
-          sys.exit(0 if evidence["result"] == "capability-confirmed" else 1)
+          sys.exit(0 if evidence["result"].startswith("host-capability-confirmed") else 1)
           PY
 
   native-macos-hvf-capability:
