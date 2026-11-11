@@ -43,6 +43,7 @@ const ENCRYPTION_DOMAIN: &[u8] = b"mvm.mailbox.journal.encryption.v1\0";
 const ANCHOR_DOMAIN: &[u8] = b"mvm.mailbox.anchor.v1\0";
 const ACCEPTANCE_INTENT_DOMAIN_V2: &[u8] = b"mvm.mailbox.journal-acceptance-intent.v2\0";
 const ACCEPTANCE_INTENT_DOMAIN_V3: &[u8] = b"mvm.mailbox.journal-acceptance-intent.v3\0";
+const EXPIRY_INTENT_DOMAIN: &[u8] = b"mvm.mailbox.journal-expiry.v1\0";
 const MAX_ANCHOR_BYTES: u64 = 1024;
 const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RECORDS: usize = 100_000;
@@ -289,6 +290,11 @@ enum JournalEvent {
         identity: ReplayIdentity,
         ack: Box<SignedMailboxDeliveryAck>,
     },
+    Expired {
+        identity: ReplayIdentity,
+        expired_at_unix_ms: i64,
+        authorization_signature: Vec<u8>,
+    },
 }
 
 struct LeaseState {
@@ -303,6 +309,7 @@ struct Seen {
     capability: SignedMailboxCapability,
     accepted_receipt: DestinationReceipt,
     acknowledged: bool,
+    expired_at_unix_ms: Option<i64>,
     lease: Option<LeaseState>,
     signed_ack: Option<SignedMailboxDeliveryAck>,
 }
@@ -563,6 +570,33 @@ fn acceptance_intent_bytes(
             frame,
             receipt,
             history_key,
+        })
+        .map_err(|_| JournalError::Corrupt)?,
+    );
+    Ok(bytes)
+}
+
+#[derive(Serialize)]
+struct ExpiryIntent {
+    address: MailboxAddress,
+    identity: ReplayIdentity,
+    ciphertext_commitment: [u8; 32],
+    expired_at_unix_ms: i64,
+}
+
+fn expiry_intent_bytes(
+    address: MailboxAddress,
+    identity: ReplayIdentity,
+    entry: &Seen,
+    expired_at_unix_ms: i64,
+) -> Result<Vec<u8>, JournalError> {
+    let mut bytes = EXPIRY_INTENT_DOMAIN.to_vec();
+    bytes.extend(
+        serde_jcs::to_vec(&ExpiryIntent {
+            address,
+            identity,
+            ciphertext_commitment: entry.envelope.ciphertext_commitment,
+            expired_at_unix_ms,
         })
         .map_err(|_| JournalError::Corrupt)?,
     );
@@ -912,6 +946,7 @@ impl MailboxJournal {
                                     capability,
                                     accepted_receipt: *receipt,
                                     acknowledged: false,
+                                    expired_at_unix_ms: None,
                                     lease: None,
                                     signed_ack: None,
                                 },
@@ -929,7 +964,11 @@ impl MailboxJournal {
                     let Some(entry) = journal.seen.get_mut(&identity) else {
                         return Err(JournalError::Corrupt);
                     };
-                    if entry.acknowledged || entry.lease.is_some() || acknowledged_at_unix_ms < 0 {
+                    if entry.acknowledged
+                        || entry.expired_at_unix_ms.is_some()
+                        || entry.lease.is_some()
+                        || acknowledged_at_unix_ms < 0
+                    {
                         return Err(JournalError::Corrupt);
                     }
                     entry.acknowledged = true;
@@ -946,6 +985,7 @@ impl MailboxJournal {
                         .get_mut(&identity)
                         .ok_or(JournalError::Corrupt)?;
                     if entry.acknowledged
+                        || entry.expired_at_unix_ms.is_some()
                         || lease.encode().is_err()
                         || enrollment.encode().is_err()
                         || lease.lease.address != address
@@ -986,7 +1026,7 @@ impl MailboxJournal {
                     let active = journal
                         .seen
                         .get_mut(&identity)
-                        .filter(|entry| !entry.acknowledged)
+                        .filter(|entry| !entry.acknowledged && entry.expired_at_unix_ms.is_none())
                         .and_then(|entry| entry.lease.as_mut())
                         .ok_or(JournalError::Corrupt)?;
                     active.retry_count = active
@@ -1004,7 +1044,10 @@ impl MailboxJournal {
                         .get_mut(&identity)
                         .ok_or(JournalError::Corrupt)?;
                     let active = entry.lease.as_ref().ok_or(JournalError::Corrupt)?;
-                    if entry.acknowledged || ack.encode().is_err() || ack.ack.lease != active.signed
+                    if entry.acknowledged
+                        || entry.expired_at_unix_ms.is_some()
+                        || ack.encode().is_err()
+                        || ack.ack.lease != active.signed
                     {
                         return Err(JournalError::Corrupt);
                     }
@@ -1031,6 +1074,33 @@ impl MailboxJournal {
                         .map_err(|_| JournalError::Corrupt)?;
                     entry.acknowledged = true;
                     entry.signed_ack = Some(*ack);
+                }
+                JournalEvent::Expired {
+                    identity,
+                    expired_at_unix_ms,
+                    authorization_signature,
+                } => {
+                    let entry = journal
+                        .seen
+                        .get_mut(&identity)
+                        .ok_or(JournalError::Corrupt)?;
+                    if entry.acknowledged
+                        || entry.expired_at_unix_ms.is_some()
+                        || expired_at_unix_ms < entry.envelope.routing.expires_at_unix_ms
+                    {
+                        return Err(JournalError::Corrupt);
+                    }
+                    let signature: [u8; 64] = authorization_signature
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| JournalError::Corrupt)?;
+                    authority
+                        .verify(
+                            &expiry_intent_bytes(address, identity, entry, expired_at_unix_ms)?,
+                            &Signature::from_bytes(&signature),
+                        )
+                        .map_err(|_| JournalError::Corrupt)?;
+                    entry.expired_at_unix_ms = Some(expired_at_unix_ms);
                 }
             }
             let next = JournalTip {
@@ -1143,6 +1213,9 @@ impl MailboxJournal {
             if previous.envelope != *envelope || previous.capability != *capability {
                 return Err(JournalError::ConflictingRetry);
             }
+            if previous.expired_at_unix_ms.is_some() {
+                return Err(JournalError::Mailbox(MailboxError::Expired));
+            }
             let expected_outcome = match tier {
                 AcceptanceTier::Independent => DeliveryOutcome::AcceptedDurable,
                 AcceptanceTier::Local => DeliveryOutcome::AcceptedLocalDurable,
@@ -1197,6 +1270,7 @@ impl MailboxJournal {
                 capability: capability.clone(),
                 accepted_receipt: accepted.clone(),
                 acknowledged: false,
+                expired_at_unix_ms: None,
                 lease: None,
                 signed_ack: None,
             },
@@ -1300,8 +1374,93 @@ impl MailboxJournal {
         Ok(tip)
     }
 
-    /// Inspect the oldest unacknowledged ciphertext under an independently
-    /// signed Receive grant. No journal state changes until `acknowledge`.
+    /// Commit one expired message's terminal state before returning its signed
+    /// outcome. A full journal refuses rather than dropping retained dedup data.
+    pub fn expire_next(
+        &mut self,
+        now_unix_ms: i64,
+        signer: &SigningKey,
+        anchor: impl FnOnce(JournalTip) -> Result<(), JournalError>,
+    ) -> Result<Option<SignedDestinationReceipt>, JournalError> {
+        if self.poisoned {
+            return Err(JournalError::Uncertain);
+        }
+        if now_unix_ms < 0 || signer.verifying_key() != self.authority {
+            return Err(JournalError::WrongAuthority);
+        }
+        let Some(identity) = self.order.iter().copied().find(|identity| {
+            self.seen.get(identity).is_some_and(|entry| {
+                !entry.acknowledged
+                    && entry.expired_at_unix_ms.is_none()
+                    && now_unix_ms >= entry.envelope.routing.expires_at_unix_ms
+            })
+        }) else {
+            return Ok(None);
+        };
+        let entry = self.seen.get(&identity).ok_or(JournalError::Corrupt)?;
+        let authorization_signature = signer
+            .sign(&expiry_intent_bytes(
+                self.address,
+                identity,
+                entry,
+                now_unix_ms,
+            )?)
+            .to_bytes()
+            .to_vec();
+        self.append(
+            JournalEvent::Expired {
+                identity,
+                expired_at_unix_ms: now_unix_ms,
+                authorization_signature,
+            },
+            anchor,
+        )?;
+        self.seen
+            .get_mut(&identity)
+            .ok_or(JournalError::Corrupt)?
+            .expired_at_unix_ms = Some(now_unix_ms);
+        Ok(Some(self.expired_receipt(identity, signer)?))
+    }
+
+    /// Reconstruct the original signed terminal expiry after a lost response,
+    /// but only from the verified and committed journal state.
+    pub fn expired_receipt(
+        &self,
+        identity: ReplayIdentity,
+        signer: &SigningKey,
+    ) -> Result<SignedDestinationReceipt, JournalError> {
+        if self.poisoned {
+            return Err(JournalError::Uncertain);
+        }
+        if signer.verifying_key() != self.authority {
+            return Err(JournalError::WrongAuthority);
+        }
+        let entry = self
+            .seen
+            .get(&identity)
+            .ok_or(JournalError::UnknownMessage)?;
+        let observed_at_unix_ms = entry
+            .expired_at_unix_ms
+            .ok_or(JournalError::UnknownMessage)?;
+        Ok(sign_receipt(
+            DestinationReceipt {
+                protocol_version: ProtocolVersion::V1,
+                signature_algorithm: SignatureAlgorithm::ED25519,
+                delivery_id: entry.envelope.routing.delivery_id,
+                message_id: identity.message_id,
+                address: self.address,
+                execution_epoch: identity.execution_epoch,
+                outcome: DeliveryOutcome::Expired,
+                observed_at_unix_ms,
+                ciphertext_commitment: entry.envelope.ciphertext_commitment,
+            },
+            signer,
+        )?)
+    }
+
+    /// Inspect the oldest unacknowledged, unexpired ciphertext under a signed
+    /// Receive grant. Call `expire_next` first to durably settle expired entries;
+    /// an empty read alone is not an expiry receipt.
     pub fn receive_next(
         &self,
         request: JournalReceive<'_>,
@@ -1311,7 +1470,10 @@ impl MailboxJournal {
         }
         for identity in &self.order {
             let entry = self.seen.get(identity).ok_or(JournalError::Corrupt)?;
-            if entry.acknowledged {
+            if entry.acknowledged
+                || entry.expired_at_unix_ms.is_some()
+                || request.context.now_unix_ms >= entry.envelope.routing.expires_at_unix_ms
+            {
                 continue;
             }
             let opened = self.open_for_reader(*identity, entry, &request)?;
@@ -1486,6 +1648,9 @@ impl MailboxJournal {
             .seen
             .get(&identity)
             .ok_or(JournalError::UnknownMessage)?;
+        if entry.expired_at_unix_ms.is_some() {
+            return Err(JournalError::Mailbox(MailboxError::Expired));
+        }
         let _opened = self.open_for_reader(identity, entry, &request)?;
         if entry.lease.is_some() {
             return Err(JournalError::GuestAckRequired);
@@ -1534,6 +1699,9 @@ impl MailboxJournal {
             .seen
             .get(&identity)
             .ok_or(JournalError::UnknownMessage)?;
+        if entry.expired_at_unix_ms.is_some() {
+            return Err(JournalError::Mailbox(MailboxError::Expired));
+        }
         let active = entry.lease.as_ref().ok_or(JournalError::NoActiveLease)?;
         if active.signed != request.signed.ack.lease
             || active.enrollment != *request.enrollment
@@ -2048,6 +2216,199 @@ mod anchor_tests {
             ),
             Err(JournalError::Rollback)
         ));
+    }
+
+    #[test]
+    fn interrupted_terminal_expiry_reconciles_without_an_early_receipt() {
+        let dir = tempfile::tempdir().expect("journal root");
+        let root = dir.path().join("journal");
+        let anchor_path = dir.path().join("anchor").join("tip.json");
+        let (envelope, capability, context, payload_key, sender_key, signer) = message();
+        let (reference, custody) = versioned_custody();
+        let anchor =
+            FileJournalAnchor::open(&anchor_path, address(), [22; 32]).expect("local anchor");
+        let mut journal = MailboxJournal::open_local_with_custody(
+            &root,
+            reference,
+            signer.verifying_key(),
+            limits(),
+            &custody,
+            &anchor,
+        )
+        .expect("empty journal");
+        journal
+            .admit_local(
+                admission(
+                    &envelope,
+                    &capability,
+                    &context,
+                    &payload_key,
+                    &sender_key,
+                    &signer,
+                ),
+                &anchor,
+            )
+            .expect("local acceptance");
+        let identity = journal.order[0];
+        let deadline = envelope.routing.expires_at_unix_ms;
+        assert!(
+            journal
+                .expire_next(deadline - 1, &signer, |_| Ok(()))
+                .expect("not expired yet")
+                .is_none()
+        );
+        assert!(matches!(
+            journal.expire_next(deadline, &SigningKey::from_bytes(&[42; 32]), |_| Ok(())),
+            Err(JournalError::WrongAuthority)
+        ));
+        assert!(matches!(
+            journal.expire_next(deadline, &signer, |_| Err(JournalError::Rollback)),
+            Err(JournalError::Rollback)
+        ));
+        assert_eq!(anchor.tip().cursor, 1, "no unanchored terminal receipt");
+        assert!(matches!(
+            journal.expired_receipt(identity, &signer),
+            Err(JournalError::Uncertain)
+        ));
+        drop(journal);
+        drop(anchor);
+
+        let anchor =
+            FileJournalAnchor::open(&anchor_path, address(), [22; 32]).expect("retained anchor");
+        let mut journal = MailboxJournal::open_local_with_custody(
+            &root,
+            reference,
+            signer.verifying_key(),
+            limits(),
+            &custody,
+            &anchor,
+        )
+        .expect("verify and reconcile terminal suffix");
+        assert_eq!(anchor.tip().cursor, 2);
+        let expired = journal
+            .expired_receipt(identity, &signer)
+            .expect("terminal receipt after reconciliation");
+        assert_eq!(expired.receipt.outcome, DeliveryOutcome::Expired);
+        assert_eq!(expired.receipt.observed_at_unix_ms, deadline);
+        super::super::verify_receipt(&expired, &signer.verifying_key())
+            .expect("signed terminal outcome");
+        assert!(matches!(
+            journal.admit_local(
+                admission(
+                    &envelope,
+                    &capability,
+                    &context,
+                    &payload_key,
+                    &sender_key,
+                    &signer,
+                ),
+                &anchor,
+            ),
+            Err(JournalError::Mailbox(MailboxError::Expired))
+        ));
+        assert!(
+            journal
+                .expire_next(deadline + 1, &signer, |_| Ok(()))
+                .expect("idempotent expiry")
+                .is_none()
+        );
+        assert!(matches!(
+            journal.acknowledge(
+                identity,
+                JournalReceive {
+                    capability: &capability,
+                    context: &context,
+                    encryption_key: &payload_key,
+                    sender_key: &sender_key,
+                },
+                |_| Ok(())
+            ),
+            Err(JournalError::Mailbox(MailboxError::Expired))
+        ));
+        assert_eq!(journal.tip(), anchor.tip(), "no duplicate terminal event");
+    }
+
+    #[test]
+    fn recovered_expiry_rejects_a_forged_authority_signature_even_with_a_valid_history_mac() {
+        let dir = tempfile::tempdir().expect("journal root");
+        let root = dir.path().join("journal");
+        let anchor_path = dir.path().join("anchor").join("tip.json");
+        let (envelope, capability, context, payload_key, sender_key, signer) = message();
+        let (reference, custody) = versioned_custody();
+        let anchor =
+            FileJournalAnchor::open(&anchor_path, address(), [22; 32]).expect("local anchor");
+        let mut journal = MailboxJournal::open_local_with_custody(
+            &root,
+            reference,
+            signer.verifying_key(),
+            limits(),
+            &custody,
+            &anchor,
+        )
+        .expect("empty journal");
+        journal
+            .admit_local(
+                admission(
+                    &envelope,
+                    &capability,
+                    &context,
+                    &payload_key,
+                    &sender_key,
+                    &signer,
+                ),
+                &anchor,
+            )
+            .expect("accepted");
+        let accepted_tip = journal.tip();
+        journal
+            .expire_next(envelope.routing.expires_at_unix_ms, &signer, |tip| {
+                anchor.advance(tip)
+            })
+            .expect("expiry commit")
+            .expect("terminal receipt");
+        let path = record_path(&root, 2);
+        let ciphertext = fs::read(&path).expect("expiry record");
+        let plaintext = aead::open(
+            &journal.record_key(),
+            &ciphertext[32..],
+            &[DOMAIN, &accepted_tip.head].concat(),
+        )
+        .expect("decrypt expiry");
+        let mut record: Record = serde_json::from_slice(&plaintext).expect("parse expiry");
+        let JournalEvent::Expired {
+            authorization_signature,
+            ..
+        } = &mut record.event
+        else {
+            panic!("the second record must be the terminal expiry");
+        };
+        authorization_signature[0] ^= 1;
+        let forged = aead::seal(
+            &journal.record_key(),
+            &serde_json::to_vec(&record).expect("encode forged record"),
+            &[DOMAIN, &accepted_tip.head].concat(),
+        );
+        journal.tip = accepted_tip;
+        let mut bytes = journal.mac(&forged).to_vec();
+        bytes.extend(forged);
+        fs::write(path, bytes).expect("install valid-MAC forged expiry");
+        drop(journal);
+        drop(anchor);
+
+        let anchor =
+            FileJournalAnchor::open(&anchor_path, address(), [22; 32]).expect("retained anchor");
+        assert!(matches!(
+            MailboxJournal::open_local_with_custody(
+                &root,
+                reference,
+                signer.verifying_key(),
+                limits(),
+                &custody,
+                &anchor,
+            ),
+            Err(JournalError::Corrupt)
+        ));
+        assert_eq!(anchor.tip().cursor, 2, "recovery must not amend the anchor");
     }
 
     #[test]

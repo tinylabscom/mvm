@@ -393,6 +393,107 @@ fn identity_scope_epoch_expiry_and_content_type_are_checked() {
     }
 }
 
+#[cfg(feature = "test-support")]
+#[test]
+fn local_journal_expiry_recovers_after_interrupted_anchor_commit() {
+    use mvm_core::mailbox::journal::{
+        FileJournalAnchor, HistoryKeyCustody, HistoryKeyRef, JournalAdmission, JournalError,
+        JournalLimits, MailboxJournal,
+    };
+
+    struct ExistingKey(HistoryKeyRef);
+    impl HistoryKeyCustody for ExistingKey {
+        fn load_existing(&self, reference: &HistoryKeyRef) -> Result<Key, JournalError> {
+            if reference != &self.0 {
+                return Err(JournalError::HistoryKeyMismatch);
+            }
+            Ok(Key::from_bytes([41; 32]))
+        }
+    }
+
+    let dir = tempfile::tempdir().expect("private journal fixture");
+    let root = dir.path().join("journal");
+    let anchor_path = dir.path().join("anchor").join("tip");
+    let signer = SigningKey::from_bytes(&[22; 32]);
+    let sender_key = SigningKey::from_bytes(&[21; 32]);
+    let payload_key = Key::from_bytes([23; 32]);
+    let capability = sign_capability(grant(), &signer).expect("send grant");
+    let envelope = seal_envelope(
+        SealRequest {
+            routing: routing(),
+            header: header(),
+            plaintext: b"hello",
+        },
+        &payload_key,
+        &sender_key,
+    )
+    .expect("canonical encrypted envelope");
+    let context = context();
+    let reference = HistoryKeyRef::new(address(), header().execution_epoch, [42; 32], 1)
+        .expect("history identity");
+    let custody = ExistingKey(reference);
+    let limits = JournalLimits {
+        max_records: 4,
+        max_bytes: 64 * 1024,
+    };
+    let anchor =
+        FileJournalAnchor::open(&anchor_path, address(), [43; 32]).expect("local anchor genesis");
+    let mut journal = MailboxJournal::open_local_with_custody(
+        &root,
+        reference,
+        signer.verifying_key(),
+        limits,
+        &custody,
+        &anchor,
+    )
+    .expect("empty local journal");
+    let accepted = journal
+        .admit_local(
+            JournalAdmission {
+                envelope: &envelope,
+                capability: &capability,
+                context: &context,
+                encryption_key: &payload_key,
+                sender_key: &sender_key.verifying_key(),
+                signer: &signer,
+            },
+            &anchor,
+        )
+        .expect("fsynced local acceptance");
+    assert_eq!(
+        accepted.receipt.outcome,
+        DeliveryOutcome::AcceptedLocalDurable
+    );
+    let identity = mvm_core::mailbox::ReplayIdentity::from_header(&header());
+    assert!(matches!(
+        journal.expire_next(routing().expires_at_unix_ms, &signer, |_| {
+            Err(JournalError::Rollback)
+        }),
+        Err(JournalError::Rollback)
+    ));
+    assert_eq!(anchor.tip().cursor, 1, "no terminal receipt before anchor");
+    drop(journal);
+    drop(anchor);
+
+    let anchor =
+        FileJournalAnchor::open(&anchor_path, address(), [43; 32]).expect("recover local anchor");
+    let journal = MailboxJournal::open_local_with_custody(
+        &root,
+        reference,
+        signer.verifying_key(),
+        limits,
+        &custody,
+        &anchor,
+    )
+    .expect("reconcile verified terminal state");
+    let expired = journal
+        .expired_receipt(identity, &signer)
+        .expect("signed terminal outcome after restart");
+    assert_eq!(expired.receipt.outcome, DeliveryOutcome::Expired);
+    verify_receipt(&expired, &signer.verifying_key()).expect("signed expiry");
+    assert_eq!(anchor.tip().cursor, 2);
+}
+
 #[test]
 fn destination_receipt_wire_roundtrip_and_signature_cover_outcome_and_identity() {
     let destination_key = SigningKey::from_bytes(&[31; 32]);

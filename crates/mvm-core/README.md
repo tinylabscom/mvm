@@ -87,6 +87,12 @@ anchor have been fsynced. An exact local retry re-verifies current admission
 and the committed local tip before re-signing the original body/time, yielding
 the same signed bytes after restart. Recovery refuses a local V2 receipt in an
 independently anchored journal or a V1 strong receipt in a local journal.
+`expire_next` records an authority-signed terminal expiry only after the
+message's absolute deadline; a lost response can be reconstructed after
+recovery. Expired messages are not disclosed, and an uncertain expiry write
+cannot mint a terminal receipt. This does not yet implement an anchored
+retention/compaction boundary: exhausted record or byte quotas still refuse
+new work instead of deleting dedup history.
 Retained guest-reader controls are checked against the historical signed
 Receive capability, enrollment, lease and guest ACK before recovery accepts
 their delivery state. An exact ACK retry still needs current boot, session,
