@@ -1537,7 +1537,7 @@ async fn a_restart_re_admits_under_the_persisted_grants_not_deny_all() {
     mp::save_machine_spec(&spec, false).unwrap();
 
     let (started, _) = client
-        .boot_spec(&mut spec, None, false)
+        .boot_spec(&mut spec, None, false, None)
         .await
         .expect("the start boots");
     let admitted = started
@@ -2050,4 +2050,75 @@ async fn cleanup_keeps_secret_references_changed_after_the_session_wrote_them() 
     client.cleanup_transient(name).unwrap();
 
     assert!(sidecar.exists());
+}
+
+/// The mock cannot serve guest mailboxes. Reaching its canonical capability
+/// refusal proves the persistent request retained its one-start grant through
+/// admission instead of silently booting an ungranted machine (native EE006).
+#[tokio::test]
+async fn persistent_request_mailbox_reaches_canonical_backend_admission() {
+    let home = Isolated::new();
+    let client = mock_client();
+    let name = "p-mailbox-one-start";
+    let grant = crate::admission::mailbox_grant::resolve(Some(&"ab".repeat(32)), None)
+        .expect("host-authorized grant")
+        .expect("requested grant");
+    let request = persistent_request(&home.rootfs(), name)
+        .mailbox(grant)
+        .build()
+        .expect("persistent mailbox request");
+    let error = client.launch(request).await.expect_err(
+        "an unsupported mailbox must refuse admission, not boot after stripping its grant",
+    );
+    assert!(
+        error.to_string().contains("mailbox") && error.to_string().contains("cannot serve"),
+        "must reach the canonical guest-mailbox capability gate, got: {error}"
+    );
+    assert!(
+        !client.machine_running(name),
+        "refusal must precede backend boot"
+    );
+    assert!(
+        !machine_spec_path(name).exists(),
+        "remove only the definition this failed launch created"
+    );
+}
+
+/// Persisting a definition never persists the request's mailbox authority.
+/// A later ordinary start must explicitly re-admit without that one-start grant.
+#[tokio::test]
+async fn persistent_definition_restart_does_not_inherit_request_mailbox() {
+    let home = Isolated::new();
+    let client = mock_client();
+    let name = "p-mailbox-restart";
+    let grant = crate::admission::mailbox_grant::resolve(Some(&"cd".repeat(32)), None)
+        .expect("host-authorized grant")
+        .expect("requested grant");
+    let request = persistent_request(&home.rootfs(), name)
+        .mailbox(grant)
+        .build()
+        .expect("persistent definition request");
+    client
+        .create_from_request(&request)
+        .expect("definition only; no boot");
+    let definition_before = std::fs::read(machine_spec_path(name)).expect("definition");
+    let value: serde_json::Value = serde_json::from_slice(&definition_before).unwrap();
+    assert!(
+        value.get("mailbox").is_none(),
+        "a one-start grant is not definition state"
+    );
+    let started = client
+        .start_persistent(name)
+        .await
+        .expect("plain start on mock without mailbox");
+    assert_eq!(
+        started.status,
+        mvm_core::client::dto::MachineStatus::Running
+    );
+    let plan =
+        mvm_hostd::audit::plan_persist::read_plan(name).expect("canonical persisted admission");
+    assert!(
+        plan.mailbox.is_none(),
+        "plain restart must not recover an earlier request's mailbox grant"
+    );
 }
