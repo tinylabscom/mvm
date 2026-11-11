@@ -38,6 +38,8 @@ use crate::mailbox_launch::{DerivedMailboxKeys, LAUNCH_LIMITS, derive_launch_key
 use crate::mailbox_service::durable::DurableMailboxService;
 use crate::vm_lifetime::{endpoint_needed, launcher_is_alive};
 
+mod reader;
+
 /// The helper binary this module spawns.
 pub const MAILBOX_BIN: &str = "mvm-mailbox";
 /// Path-override variable for the helper binary.
@@ -118,6 +120,11 @@ fn serve_durable(config: MailboxProcessConfig) -> Result<()> {
         &anchor,
     )
     .map_err(Error::other)?;
+    let enrolled = reader_boot
+        .map(|binding| {
+            reader::load_or_enroll(&vm_state_dir, &grant, binding, &sealer.capability, &signer)
+        })
+        .transpose()?;
     let service = DurableMailboxService::bind(
         &socket,
         LAUNCH_LIMITS,
@@ -126,6 +133,9 @@ fn serve_durable(config: MailboxProcessConfig) -> Result<()> {
         journal,
         anchor,
     )?;
+    if let Some(enrolled) = enrolled {
+        service.install_reader(enrolled)?;
+    }
     std::io::stdout().write_all(READY_MARKER)?;
     let mut sealer = sealer;
     while vm_state_dir.exists()
@@ -498,6 +508,12 @@ mod tests {
         assert_eq!(
             load_reader_boot_for_plan(state.path(), &plan).unwrap(),
             Some(binding.clone())
+        );
+        let mut tampered = plan.clone();
+        tampered.audit_labels.insert("changed".into(), "yes".into());
+        assert!(
+            load_reader_boot_for_plan(state.path(), &tampered).is_err(),
+            "a changed plan body cannot reuse its old content address"
         );
         let mut stale = plan.clone();
         stale.nonce = mvm_core::plan::Nonce::from_bytes([99; 16]);

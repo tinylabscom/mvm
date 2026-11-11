@@ -1189,6 +1189,346 @@ fn durable_local_destination_signs_only_after_journal_and_anchor_commit() {
 }
 
 #[test]
+fn signed_guest_lease_and_exact_ack_survive_journal_restart() {
+    use mvm_contract::plan::{Nonce, PlanId};
+    use mvm_contract::protocol::mailbox::{
+        ConsumerSessionId, DeliveryAckNonce, MailboxDeliveryAck, MailboxGrant,
+        MailboxGuestReaderEnrollment, MailboxGuestReaderScope,
+    };
+    use mvm_core::mailbox::journal::{
+        FileJournalAnchor, JournalAdmission, JournalError, JournalGuestAck, JournalGuestLease,
+        JournalLimits, JournalReceive, MailboxJournal,
+    };
+    use mvm_core::mailbox::reader::{
+        sign_delivery_ack, sign_guest_reader_enrollment, sign_reader_possession,
+    };
+
+    let (node, channel) = channel_with_one_node();
+    let root = node.home.path();
+    let signer = &channel.authority_key;
+    let authority = signer.verifying_key();
+    let guest = SigningKey::from_bytes(&[78; 32]);
+    let mut message = header(1, 3);
+    message.expires_at_unix_ms = 4_000_000_000_000;
+    let mut route = routing();
+    route.expires_at_unix_ms = message.expires_at_unix_ms;
+    let mut send_grant = grant(&[MailboxOperation::Send]);
+    send_grant.expires_at_unix_ms = message.expires_at_unix_ms;
+    let send = sign_capability(send_grant, signer).unwrap();
+    let envelope = seal_envelope(
+        SealRequest {
+            routing: route,
+            header: message,
+            plaintext: b"hello",
+        },
+        &channel.encryption_key,
+        &channel.sender_key,
+    )
+    .unwrap();
+    let plan = MailboxGrant {
+        mailbox: address().mailbox,
+        authority_key: authority.to_bytes(),
+        epoch: MbEpoch::new(1).unwrap(),
+    };
+    let mut reader_grant = grant(&[MailboxOperation::Receive]);
+    reader_grant.subject = aircraft_principal();
+    reader_grant.capability_id = CapabilityId::from_bytes([88; 32]);
+    reader_grant.minimum_execution_epoch = plan.epoch;
+    reader_grant.maximum_execution_epoch = plan.epoch;
+    reader_grant.expires_at_unix_ms = 4_000_000_000_000;
+    let receive = sign_capability(reader_grant, signer).unwrap();
+    let plan_id = PlanId("reader-plan".into());
+    let plan_nonce = Nonce::from_bytes([79; 16]);
+    let boot = BootId::from_bytes([80; 32]);
+    let session = ConsumerSessionId::from_bytes([81; 32]);
+    let enrollment = sign_guest_reader_enrollment(
+        MailboxGuestReaderEnrollment {
+            protocol_version: ProtocolVersion::V1,
+            signature_algorithm: SignatureAlgorithm::ED25519,
+            plan_id: plan_id.clone(),
+            plan_nonce: plan_nonce.clone(),
+            address: address(),
+            consumer: aircraft_principal(),
+            consumer_boot: boot,
+            consumer_session: session,
+            receive_capability_id: receive.grant.capability_id,
+            ack_public_key: guest.verifying_key().to_bytes(),
+            execution_epoch: plan.epoch,
+            policy_epoch: receive.grant.policy_epoch,
+            issued_at_unix_ms: 1_100,
+            expires_at_unix_ms: 4_000_000_000_000,
+        },
+        signer,
+    )
+    .unwrap();
+    let mut reader = context(1);
+    reader.acting_principal = aircraft_principal();
+    reader.required_operation = MailboxOperation::Receive;
+    let scope = MailboxGuestReaderScope {
+        plan: &plan,
+        plan_id: &plan_id,
+        plan_nonce: &plan_nonce,
+        receive: &receive.grant,
+        current_boot: boot,
+        current_session: session,
+        now_unix_ms: reader.now_unix_ms,
+    };
+    let read = JournalReceive {
+        capability: &receive,
+        context: &reader,
+        encryption_key: &channel.encryption_key,
+        sender_key: &channel.sender_key.verifying_key(),
+    };
+    let anchor_path = root.join("anchor");
+    let journal_path = root.join("journal");
+    let limits = JournalLimits {
+        max_records: 6,
+        max_bytes: 64 * 1024,
+    };
+    let open = || {
+        let anchor = FileJournalAnchor::open(&anchor_path, address(), [91; 32]).unwrap();
+        let journal = MailboxJournal::open_reconciling(
+            &journal_path,
+            address(),
+            authority,
+            [90; 32],
+            limits,
+            &anchor,
+        )
+        .unwrap();
+        (anchor, journal)
+    };
+    let (anchor, mut journal) = open();
+    journal
+        .admit(
+            JournalAdmission {
+                envelope: &envelope,
+                capability: &send,
+                context: &context(1),
+                encryption_key: &channel.encryption_key,
+                sender_key: &channel.sender_key.verifying_key(),
+                signer,
+            },
+            |tip| anchor.advance(tip),
+        )
+        .unwrap();
+    let challenge = [82; 32];
+    let proof = sign_reader_possession(&enrollment, &challenge, &guest).unwrap();
+    let mut wrong_tenant = reader.clone();
+    wrong_tenant.expected_tenant = TenantId::from_bytes([98; 32]);
+    assert!(
+        journal
+            .lease_next(
+                JournalGuestLease {
+                    receive: JournalReceive {
+                        context: &wrong_tenant,
+                        ..read
+                    },
+                    plan: &plan,
+                    scope,
+                    enrollment: &enrollment,
+                    challenge: &challenge,
+                    possession_signature: &proof,
+                    signer,
+                },
+                |tip| anchor.advance(tip),
+            )
+            .is_err()
+    );
+    let mut revoked = reader.clone();
+    revoked
+        .revoked_capabilities
+        .push(receive.grant.revocation_id);
+    assert!(
+        journal
+            .lease_next(
+                JournalGuestLease {
+                    receive: JournalReceive {
+                        context: &revoked,
+                        ..read
+                    },
+                    plan: &plan,
+                    scope,
+                    enrollment: &enrollment,
+                    challenge: &challenge,
+                    possession_signature: &proof,
+                    signer,
+                },
+                |tip| anchor.advance(tip),
+            )
+            .is_err()
+    );
+    assert_eq!(anchor.tip().cursor, 1, "refusals did not lease plaintext");
+    let leased = journal
+        .lease_next(
+            JournalGuestLease {
+                receive: read,
+                plan: &plan,
+                scope,
+                enrollment: &enrollment,
+                challenge: &challenge,
+                possession_signature: &proof,
+                signer,
+            },
+            |tip| anchor.advance(tip),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(leased.payload(), b"hello");
+    assert_eq!(leased.content_type(), &content_type());
+    drop(journal);
+    drop(anchor);
+    let (anchor, mut journal) = open();
+    assert_eq!(
+        anchor.tip().cursor,
+        2,
+        "signed lease survives helper restart"
+    );
+    let retry_challenge = [86; 32];
+    let retry_proof = sign_reader_possession(&enrollment, &retry_challenge, &guest).unwrap();
+    let retried = journal
+        .lease_next(
+            JournalGuestLease {
+                receive: read,
+                plan: &plan,
+                scope,
+                enrollment: &enrollment,
+                challenge: &retry_challenge,
+                possession_signature: &retry_proof,
+                signer,
+            },
+            |tip| anchor.advance(tip),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        retried.lease(),
+        leased.lease(),
+        "lost delivery keeps its lease"
+    );
+    assert_eq!(anchor.tip().cursor, 3, "fresh challenge is durable first");
+    assert!(matches!(
+        journal.lease_next(
+            JournalGuestLease {
+                receive: read,
+                plan: &plan,
+                scope,
+                enrollment: &enrollment,
+                challenge: &retry_challenge,
+                possession_signature: &retry_proof,
+                signer,
+            },
+            |tip| anchor.advance(tip),
+        ),
+        Err(JournalError::ConflictingRetry)
+    ));
+    for n in [87, 88] {
+        let next = [n; 32];
+        let proof = sign_reader_possession(&enrollment, &next, &guest).unwrap();
+        let delivered = journal
+            .lease_next(
+                JournalGuestLease {
+                    receive: read,
+                    plan: &plan,
+                    scope,
+                    enrollment: &enrollment,
+                    challenge: &next,
+                    possession_signature: &proof,
+                    signer,
+                },
+                |tip| anchor.advance(tip),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(delivered.lease(), leased.lease());
+    }
+    let exhausted = [89; 32];
+    let proof = sign_reader_possession(&enrollment, &exhausted, &guest).unwrap();
+    assert!(matches!(
+        journal.lease_next(
+            JournalGuestLease {
+                receive: read,
+                plan: &plan,
+                scope,
+                enrollment: &enrollment,
+                challenge: &exhausted,
+                possession_signature: &proof,
+                signer,
+            },
+            |tip| anchor.advance(tip),
+        ),
+        Err(JournalError::Busy)
+    ));
+    assert_eq!(anchor.tip().cursor, 5, "retry exhaustion does not append");
+    let ack = sign_delivery_ack(
+        MailboxDeliveryAck {
+            protocol_version: ProtocolVersion::V1,
+            signature_algorithm: SignatureAlgorithm::ED25519,
+            lease: leased.lease().clone(),
+            ack_nonce: DeliveryAckNonce::from_bytes([83; 16]),
+            acknowledged_at_unix_ms: reader.now_unix_ms,
+        },
+        &guest,
+    )
+    .unwrap();
+    let request = JournalGuestAck {
+        receive: read,
+        plan: &plan,
+        scope,
+        enrollment: &enrollment,
+        signed: &ack,
+    };
+    let wrong_boot = JournalGuestAck {
+        scope: MailboxGuestReaderScope {
+            current_boot: BootId::from_bytes([84; 32]),
+            ..scope
+        },
+        ..request
+    };
+    assert!(
+        journal
+            .acknowledge_signed(wrong_boot, |tip| anchor.advance(tip))
+            .is_err()
+    );
+    let tip = journal
+        .acknowledge_signed(request, |tip| anchor.advance(tip))
+        .unwrap();
+    assert_eq!(tip.cursor, 6, "admission, leases and ACK committed");
+    assert_eq!(
+        journal
+            .acknowledge_signed(request, |tip| anchor.advance(tip))
+            .unwrap(),
+        tip,
+        "a lost ACK response retries the exact bytes without a second commit"
+    );
+    let mut changed = ack.clone();
+    changed.ack.ack_nonce = DeliveryAckNonce::from_bytes([85; 16]);
+    let changed = sign_delivery_ack(changed.ack, &guest).unwrap();
+    assert!(matches!(
+        journal.acknowledge_signed(
+            JournalGuestAck {
+                signed: &changed,
+                ..request
+            },
+            |tip| anchor.advance(tip),
+        ),
+        Err(JournalError::ConflictingRetry)
+    ));
+    drop(journal);
+    drop(anchor);
+    let (anchor, mut journal) = open();
+    assert_eq!(anchor.tip(), tip);
+    assert!(journal.receive_next(read).unwrap().is_none());
+    assert_eq!(
+        journal
+            .acknowledge_signed(request, |tip| anchor.advance(tip))
+            .unwrap(),
+        tip,
+        "the exact ACK survives helper restart"
+    );
+}
+
+#[test]
 fn durable_mailbox_helper_process() {
     let Ok(root) = std::env::var("MVM_MAILBOX_TEST_ROOT") else {
         return;

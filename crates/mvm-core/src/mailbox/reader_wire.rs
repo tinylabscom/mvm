@@ -5,13 +5,13 @@
 //! Decoding never supplies authority: the destination must verify the signed
 //! Receive capability, current boot, possession proof, lease and ACK against
 //! its journal before releasing plaintext or committing an acknowledgement.
-//! The guest listener and destination service do not serve these frames yet.
+//! The discriminator is inspected only after the outer length has been bounded.
 
 use std::io::{Read, Write};
 
 use base64::Engine as _;
 use mvm_contract::protocol::mailbox::{
-    SignedMailboxCapability, SignedMailboxDeliveryAck, SignedMailboxDeliveryLease,
+    ContentType, SignedMailboxCapability, SignedMailboxDeliveryAck, SignedMailboxDeliveryLease,
     SignedMailboxGuestReaderEnrollment,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -21,6 +21,9 @@ use super::frame::Refusal;
 const READER_MAGIC: &[u8; 5] = b"MVMR\x01";
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+
+/// Guest-local socket for explicit application Receive and ACK-after-processing.
+pub const GUEST_READER_SOCKET_PATH: &str = "/run/mvm/mailbox/receive.sock";
 
 /// One on-demand guest request. `Possession` answers the immediately preceding
 /// destination challenge on the same connection, not an arbitrary old one.
@@ -36,6 +39,17 @@ pub enum ReaderRequest {
     },
 }
 
+/// The guest application asks for a delivery or explicitly acknowledges one
+/// after processing. It never receives the per-boot ACK signing key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ApplicationReaderRequest {
+    Receive,
+    Ack {
+        lease: Box<SignedMailboxDeliveryLease>,
+    },
+}
+
 /// Destination response; a delivery is never sent before its lease is durable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
@@ -47,11 +61,16 @@ pub enum ReaderResponse {
     },
     Delivery {
         lease: Box<SignedMailboxDeliveryLease>,
+        content_type: ContentType,
         #[serde(with = "payload_base64")]
         payload: Vec<u8>,
     },
     Empty,
-    Acknowledged,
+    Acknowledged {
+        /// The exact guest-signed operation committed and anchored locally.
+        /// This is correlation, not a destination-signed exportable receipt.
+        ack: Box<SignedMailboxDeliveryAck>,
+    },
     Refused {
         reason: Refusal,
     },
@@ -72,6 +91,41 @@ pub fn write_request(stream: &mut impl Write, request: &ReaderRequest) -> Result
 /// Read a request only after bounding its complete length.
 pub fn read_request(stream: &mut impl Read) -> Result<ReaderRequest, Refusal> {
     read_frame(stream, MAX_REQUEST_BYTES)
+}
+
+/// Distinguish the reader plane from an outbox body after bounding the outer frame.
+/// The legacy outbox begins with an arbitrary recipient ID, so a four-byte
+/// prefix alone would misclassify valid Send operations. Unknown versions with
+/// the versioned JSON envelope still fail closed in `decode_request_body`.
+#[must_use]
+pub fn is_reader_frame(body: &[u8]) -> bool {
+    body.starts_with(b"MVMR")
+        && body
+            .get(READER_MAGIC.len()..)
+            .is_some_and(|json| json.starts_with(b"{\"version\":"))
+}
+
+/// Decode a request when the shared mailbox listener has already read its length.
+pub fn decode_request_body(body: &[u8]) -> Result<ReaderRequest, Refusal> {
+    if body.len() > MAX_REQUEST_BYTES {
+        return Err(Refusal::Oversized(MAX_REQUEST_BYTES));
+    }
+    decode_body(body)
+}
+
+/// Read one bounded, explicit application operation from the guest-local socket.
+pub fn read_application_request(
+    stream: &mut impl Read,
+) -> Result<ApplicationReaderRequest, Refusal> {
+    read_frame(stream, MAX_REQUEST_BYTES)
+}
+
+/// Send an explicit application operation to the guest-local socket.
+pub fn write_application_request(
+    stream: &mut impl Write,
+    request: &ApplicationReaderRequest,
+) -> Result<(), Refusal> {
+    write_frame(stream, request, MAX_REQUEST_BYTES)
 }
 
 /// Write one destination response, including at most a bounded payload.
@@ -149,18 +203,16 @@ fn read_frame<T: DeserializeOwned>(stream: &mut impl Read, limit: usize) -> Resu
     if !(READER_MAGIC.len()..=limit).contains(&len) {
         return Err(Refusal::Oversized(limit));
     }
-    let mut magic = [0u8; 5];
+    let mut body = vec![0; len];
     stream
-        .read_exact(&mut magic)
+        .read_exact(&mut body)
         .map_err(|_| Refusal::Malformed)?;
-    if &magic != READER_MAGIC {
-        return Err(Refusal::Malformed);
-    }
-    let mut json = vec![0; len - magic.len()];
-    stream
-        .read_exact(&mut json)
-        .map_err(|_| Refusal::Malformed)?;
-    let frame: Versioned<T> = serde_json::from_slice(&json).map_err(|_| Refusal::Malformed)?;
+    decode_body(&body)
+}
+
+fn decode_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, Refusal> {
+    let json = body.strip_prefix(READER_MAGIC).ok_or(Refusal::Malformed)?;
+    let frame: Versioned<T> = serde_json::from_slice(json).map_err(|_| Refusal::Malformed)?;
     if frame.version != 1 {
         return Err(Refusal::Malformed);
     }

@@ -34,6 +34,8 @@ mod init;
 mod interactive;
 #[path = "mvm-guest-agent/mailbox.rs"]
 mod mailbox;
+#[path = "mvm-guest-agent/mailbox_reader.rs"]
+mod mailbox_reader;
 #[path = "mvm-guest-agent/monitoring.rs"]
 mod monitoring;
 #[path = "mvm-guest-agent/port_forward.rs"]

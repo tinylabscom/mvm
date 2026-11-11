@@ -648,7 +648,7 @@ fn reply_with<T: serde::Serialize>(stream: &mut UnixStream, reply: &Result<T, Re
     }
 }
 
-fn read_frame(max: usize, stream: &mut UnixStream) -> Result<Vec<u8>, Refusal> {
+fn read_frame(max: usize, stream: &mut impl Read) -> Result<Vec<u8>, Refusal> {
     let mut len = [0u8; 4];
     stream
         .read_exact(&mut len)

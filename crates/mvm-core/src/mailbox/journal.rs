@@ -16,9 +16,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use hmac::{Hmac, Mac, digest::KeyInit};
 use mvm_contract::protocol::mailbox::{
-    DeliveryLeaseNonce, DeliveryOutcome, DestinationReceipt, MailboxAddress, MailboxDeliveryLease,
-    MailboxEnvelope, MailboxGrant, MailboxGuestReaderScope, MailboxOperation, ProtocolVersion,
-    SignatureAlgorithm, SignedDestinationReceipt, SignedMailboxCapability,
+    ContentType, DeliveryLeaseNonce, DeliveryOutcome, DestinationReceipt, MailboxAddress,
+    MailboxDeliveryLease, MailboxEnvelope, MailboxGrant, MailboxGuestReaderScope, MailboxOperation,
+    ProtocolVersion, SignatureAlgorithm, SignedDestinationReceipt, SignedMailboxCapability,
     SignedMailboxDeliveryAck, SignedMailboxDeliveryLease, SignedMailboxGuestReaderEnrollment,
 };
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,7 @@ const MAX_ANCHOR_BYTES: u64 = 1024;
 const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RECORDS: usize = 100_000;
 const MAX_JOURNAL_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_LEASE_RETRIES: u8 = 3;
 
 /// Limits are checked both before admission and while reconstructing state.
 #[derive(Debug, Clone, Copy)]
@@ -128,6 +129,10 @@ enum JournalEvent {
         enrollment: Box<SignedMailboxGuestReaderEnrollment>,
         receive_capability: Box<SignedMailboxCapability>,
     },
+    LeasedRetry {
+        identity: ReplayIdentity,
+        challenge: [u8; 32],
+    },
     AcknowledgedSigned {
         identity: ReplayIdentity,
         ack: Box<SignedMailboxDeliveryAck>,
@@ -135,7 +140,7 @@ enum JournalEvent {
 }
 
 struct LeaseState {
-    challenge: [u8; 32],
+    retry_count: u8,
     signed: SignedMailboxDeliveryLease,
     enrollment: SignedMailboxGuestReaderEnrollment,
     receive_capability: SignedMailboxCapability,
@@ -210,6 +215,7 @@ pub struct JournalGuestLease<'a> {
 }
 
 /// One guest-authored ACK of the previously persisted active lease.
+#[derive(Clone, Copy)]
 pub struct JournalGuestAck<'a> {
     pub receive: JournalReceive<'a>,
     pub plan: &'a MailboxGrant,
@@ -233,6 +239,11 @@ impl LeasedMailboxMessage {
     #[must_use]
     pub fn lease(&self) -> &SignedMailboxDeliveryLease {
         &self.lease
+    }
+
+    #[must_use]
+    pub fn content_type(&self) -> &ContentType {
+        &self.message.opened.header().content_type
     }
 }
 
@@ -570,12 +581,31 @@ impl MailboxJournal {
                         return Err(JournalError::Corrupt);
                     }
                     entry.lease = Some(LeaseState {
-                        challenge,
+                        retry_count: 0,
                         signed: *lease,
                         enrollment: *enrollment,
                         receive_capability: *receive_capability,
                     });
                     if !journal.used_challenges.insert(challenge) {
+                        return Err(JournalError::Corrupt);
+                    }
+                }
+                JournalEvent::LeasedRetry {
+                    identity,
+                    challenge,
+                } => {
+                    let active = journal
+                        .seen
+                        .get_mut(&identity)
+                        .filter(|entry| !entry.acknowledged)
+                        .and_then(|entry| entry.lease.as_mut())
+                        .ok_or(JournalError::Corrupt)?;
+                    active.retry_count = active
+                        .retry_count
+                        .checked_add(1)
+                        .filter(|count| *count <= MAX_LEASE_RETRIES)
+                        .ok_or(JournalError::Corrupt)?;
+                    if challenge == [0; 32] || !journal.used_challenges.insert(challenge) {
                         return Err(JournalError::Corrupt);
                     }
                 }
@@ -814,15 +844,37 @@ impl MailboxJournal {
         if let Some(active) = &entry.lease
             && active.signed.lease.expires_at_unix_ms > now
         {
-            if active.challenge != *request.challenge
-                || active.enrollment != *request.enrollment
+            if active.enrollment != *request.enrollment
                 || active.receive_capability != *request.receive.capability
             {
                 return Err(JournalError::Busy);
             }
+            if self.used_challenges.contains(request.challenge) {
+                return Err(JournalError::ConflictingRetry);
+            }
+            if active.retry_count >= MAX_LEASE_RETRIES {
+                return Err(JournalError::Busy);
+            }
+            let signed = active.signed.clone();
+            // A lost delivery response may be retried by this same enrolled
+            // guest, but every fresh possession proof gets its own anchored
+            // challenge event before plaintext is released again.
+            self.append(
+                JournalEvent::LeasedRetry {
+                    identity,
+                    challenge: *request.challenge,
+                },
+                anchor,
+            )?;
+            self.used_challenges.insert(*request.challenge);
+            self.seen
+                .get_mut(&identity)
+                .and_then(|entry| entry.lease.as_mut())
+                .ok_or(JournalError::Corrupt)?
+                .retry_count += 1;
             return Ok(Some(LeasedMailboxMessage {
                 message,
-                lease: active.signed.clone(),
+                lease: signed,
             }));
         }
         if self.used_challenges.contains(request.challenge) {
@@ -887,7 +939,7 @@ impl MailboxJournal {
             .get_mut(&identity)
             .ok_or(JournalError::Corrupt)?
             .lease = Some(LeaseState {
-            challenge: *request.challenge,
+            retry_count: 0,
             signed: signed.clone(),
             enrollment: request.enrollment.clone(),
             receive_capability: request.receive.capability.clone(),

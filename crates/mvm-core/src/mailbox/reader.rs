@@ -116,7 +116,8 @@ impl MailboxReaderBootBinding {
             .mailbox
             .context("reader boot requires a mailbox grant")?;
         anyhow::ensure!(
-            self.plan_id == plan.plan_id
+            plan.plan_id == crate::plan::compute_plan_id(plan)
+                && self.plan_id == plan.plan_id
                 && self.plan_nonce == plan.nonce
                 && self.mailbox == grant.mailbox
                 && self.authority_key == grant.authority_key
@@ -323,6 +324,26 @@ pub fn sign_delivery_lease(
     Ok(signed)
 }
 
+/// Verify the destination's signature before a guest accepts or acknowledges
+/// a lease. Scope checks against the enrolled boot are still required.
+pub fn verify_delivery_lease_signature(
+    signed: &SignedMailboxDeliveryLease,
+    authority: &VerifyingKey,
+) -> Result<(), MailboxError> {
+    signed.encode()?;
+    let signature: [u8; 64] = signed
+        .signature
+        .as_slice()
+        .try_into()
+        .map_err(|_| MailboxError::DeliveryLeaseSignatureInvalid)?;
+    authority
+        .verify(
+            &canonical_bytes(DELIVERY_LEASE_SIGNATURE_DOMAIN, &signed.lease)?,
+            &Signature::from_bytes(&signature),
+        )
+        .map_err(|_| MailboxError::DeliveryLeaseSignatureInvalid)
+}
+
 /// Already-authenticated destination facts for one leased ciphertext.
 /// The runtime must derive these from its verified plan, active reader
 /// session, current revocation state, and committed journal entry.
@@ -382,17 +403,7 @@ pub fn verify_delivery_lease(
     {
         return Err(MailboxError::DeliveryLeaseMismatch);
     }
-    let signature: [u8; 64] = signed
-        .signature
-        .as_slice()
-        .try_into()
-        .map_err(|_| MailboxError::DeliveryLeaseSignatureInvalid)?;
-    authority
-        .verify(
-            &canonical_bytes(DELIVERY_LEASE_SIGNATURE_DOMAIN, lease)?,
-            &Signature::from_bytes(&signature),
-        )
-        .map_err(|_| MailboxError::DeliveryLeaseSignatureInvalid)
+    verify_delivery_lease_signature(signed, authority)
 }
 
 /// Sign one acknowledgement with the guest's independently enrolled mailbox

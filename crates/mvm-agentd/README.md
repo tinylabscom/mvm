@@ -34,9 +34,39 @@ Specialized binaries keep privilege and dependency boundaries small:
   `mvm-setpriv` crate, applies the final identity.
 
 The guest treats host replies as protocol input, while the host treats every
-guest request as untrusted. Secrets and authorization decisions remain
-host-side; the agent receives only the capabilities and values needed for the
-admitted execution.
+guest request as untrusted. Host sealing and destination signing material
+remain host-side; an opt-in mailbox reader additionally holds its own per-boot
+ACK signing key inside the guest agent, not in the workload.
+
+## Guest mailbox reader
+
+Only a signed plan granting this workload's own mailbox enables Receive. The
+agent exposes `/run/mvm/mailbox/receive.sock` to that workload when its separate
+boot ACK key was provisioned. The local protocol is versioned, length-prefixed,
+and bounded; use `ApplicationReaderRequest` and `ReaderResponse` from
+`mvm_core::mailbox::reader_wire`. `Receive` returns a destination-signed lease,
+content type, and payload. Process the payload **before** sending
+`Ack { lease }` on a new connection. An empty inbox and a refusal are not
+successful delivery; reading never automatically ACKs.
+
+For a guest application example, build:
+
+```sh
+cargo build -p mvm-agentd --example mailbox_reader_client --target aarch64-unknown-linux-musl
+```
+
+Run it without arguments to read without acknowledging; pass `--ack` only when
+writing and flushing its stdout counts as completed processing. The returned
+`Acknowledged { ack }` echoes the exact guest-signed operation after the local
+journal and anchor commit. This is a trusted-local confirmation, **not** a
+destination-signed, exportable ACK receipt. A lost delivery or ACK response is
+**unknown**, not success. Retry with the same lease and signed ACK identity
+while this boot's agent remains active, or reconcile against the durable
+journal; a different ACK for the same lease conflicts.
+
+`mailbox_writer_client` is a separate guest example for staging a message in
+the existing outbox. It reports **local staging only**, not signed destination
+acceptance; use a host-side durable receipt or journal witness for that claim.
 
 ## Bounded entrypoint capture
 

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use ed25519_dalek::SigningKey;
 use mvm_agentd::flowmux_drive::{MAILBOX_ACK_SIGNING_KEY_FILE, RUN_MVM_DIR};
-use mvm_agentd::mailbox_outbox::{MAILBOX_CMDLINE_TOKEN, OUTBOX_PATH, wait_and_forward_outbox};
+use mvm_agentd::mailbox_outbox::{MAILBOX_CMDLINE_TOKEN, OUTBOX_PATH, forward_outbox};
 use mvm_agentd::telemetry_capture::session::TimedStream;
 use mvm_contract::protocol::mailbox::MAILBOX_PORT;
 use mvm_core::mailbox::frame::Refusal;
@@ -57,6 +57,23 @@ pub(crate) fn capture_ack_key_before_privilege_drop() {
         }
         Ok(_) | Err(_) => eprintln!("mvm-guest-agent: mailbox ACK key does not match this boot"),
     }
+}
+
+/// The workload runs under the same UID as the agent. A captured ACK key must
+/// not become readable through ptrace or `/proc/<pid>/mem` after the UID drop.
+pub(crate) fn protect_ack_key_after_privilege_drop()
+-> Result<(), mvm_agentd::guest_mount::MountError> {
+    #[cfg(target_os = "linux")]
+    if ACK_SEED.get().is_some() {
+        // SAFETY: prctl receives only integer arguments and affects this process.
+        if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+            return Err(mvm_agentd::guest_mount::MountError::InvalidConfig(format!(
+                "protect mailbox ACK key after privilege drop: {}",
+                io::Error::last_os_error()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn load_ack_seed(path: &Path, owner_uid: u32) -> io::Result<Zeroizing<[u8; 32]>> {
@@ -184,18 +201,30 @@ pub(crate) fn init_mailbox() {
     if !asserted || unix_transport_selected() {
         return;
     }
-    let _ = mvm_agentd::detached::spawn_named("mailbox-listener", || {
-        match bind_vsock_listener(MAILBOX_PORT) {
-            Ok(fd) => accept_loop(fd),
-            Err(e) => eprintln!(
-                "mvm-guest-agent: mailbox listener bind failed (port {MAILBOX_PORT}): {e}"
-            ),
-        }
-    });
+    let reader_boot = READER_BOOT.get().cloned();
+    let ack_seed = ACK_SEED.get();
+    let _ =
+        mvm_agentd::detached::spawn_named("mailbox-listener", move || {
+            match bind_vsock_listener(MAILBOX_PORT) {
+                Ok(fd) => {
+                    let reader = match (reader_boot, ack_seed) {
+                        (Some(binding), Some(seed)) => crate::mailbox_reader::start(binding, seed),
+                        _ => None,
+                    };
+                    accept_loop(fd, reader);
+                }
+                Err(e) => eprintln!(
+                    "mvm-guest-agent: mailbox listener bind failed (port {MAILBOX_PORT}): {e}"
+                ),
+            }
+        });
 }
 
 /// One host connection at a time, each answered from the outbox.
-fn accept_loop(listener_fd: RawFd) {
+fn accept_loop(
+    listener_fd: RawFd,
+    reader: Option<std::sync::mpsc::Receiver<crate::mailbox_reader::PendingReader>>,
+) {
     let mut refused = 0u32;
     while !SHUTDOWN_REQUESTED.load(Ordering::Acquire) {
         let Some(cfd) = accept_vsock(listener_fd, "mailbox") else {
@@ -208,10 +237,9 @@ fn accept_loop(listener_fd: RawFd) {
             eprintln!("mvm-guest-agent: mailbox connection has no bounded I/O: {error}");
             continue;
         }
-        match wait_and_forward_outbox(
-            &mut MailboxDeadline::new(&mut stream),
-            Path::new(OUTBOX_PATH),
-        ) {
+        let mut deadline = MailboxDeadline::new(&mut stream);
+        let result = wait_for_operation(&mut deadline, reader.as_ref(), Path::new(OUTBOX_PATH));
+        match result {
             Ok(()) | Err(Refusal::Unavailable) => {}
             Err(refusal) => {
                 if refused < 3 || refused.is_multiple_of(100) {
@@ -221,6 +249,25 @@ fn accept_loop(listener_fd: RawFd) {
             }
         }
     }
+}
+
+fn wait_for_operation(
+    stream: &mut (impl Read + Write),
+    reader: Option<&std::sync::mpsc::Receiver<crate::mailbox_reader::PendingReader>>,
+    outbox: &Path,
+) -> Result<(), Refusal> {
+    for _ in 0..16 {
+        // A pending Send always gets the existing port first; reader traffic
+        // cannot starve a workload's outbox.
+        if outbox.exists() {
+            return forward_outbox(stream, outbox);
+        }
+        if let Some(Ok(pending)) = reader.map(std::sync::mpsc::Receiver::try_recv) {
+            return crate::mailbox_reader::exchange(stream, pending);
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Err(Refusal::Unavailable)
 }
 
 #[cfg(test)]
@@ -266,6 +313,34 @@ mod tests {
             bounded.read(&mut [0u8; 1]).unwrap_err().kind(),
             io::ErrorKind::TimedOut
         );
+    }
+
+    #[test]
+    fn a_pending_send_still_uses_the_existing_port_when_receive_is_enabled() {
+        use mvm_contract::protocol::mailbox::PrincipalId;
+        use mvm_core::mailbox::frame::OutboxMessage;
+        let dir = tempfile::tempdir().unwrap();
+        let outbox = dir.path().join("outbox");
+        mvm_agentd::mailbox_outbox::write_outbox(
+            &outbox,
+            &OutboxMessage::new(PrincipalId::from_bytes([0; 32]), b"hello".to_vec()),
+        )
+        .unwrap();
+        let (mut guest, mut host) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (_sender, reader) = std::sync::mpsc::sync_channel(1);
+        let peer = std::thread::spawn(move || {
+            let mut len = [0; 4];
+            host.read_exact(&mut len).unwrap();
+            let mut body = vec![0; u32::from_be_bytes(len) as usize];
+            host.read_exact(&mut body).unwrap();
+            assert!(!mvm_core::mailbox::reader_wire::is_reader_frame(&body));
+            assert_eq!(OutboxMessage::decode(&body).unwrap().body, b"hello");
+            host.write_all(&serde_json::to_vec(&Ok::<(), Refusal>(())).unwrap())
+                .unwrap();
+        });
+        wait_for_operation(&mut guest, Some(&reader), &outbox).unwrap();
+        peer.join().unwrap();
+        assert!(!outbox.exists(), "accepted Send is removed as before");
     }
 
     #[test]
