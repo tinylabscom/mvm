@@ -398,7 +398,22 @@ the work is decomposed:
   mailbox messages, capabilities, secrets, or commands. The epoch is an input
   to the per-mailbox key derivation, so the replacement's sender, authority and
   encryption keys differ from its predecessor's: it cannot open an old-epoch
-  envelope, and a replayed one is refused. The grant's epoch is the same ledger
+  envelope, and a replayed one is refused. The encryption key additionally
+  derives from a random per-launch secret kept only in the VM's state
+  directory, and from a host-held encryption root that is separate from the
+  signing seed, so the seed alone cannot open ciphertext and the root alone
+  cannot forge a signature. Every stop path shreds the secret (overwritten with
+  zeros, flushed, unlinked), so after termination or replacement a captured
+  envelope cannot be reopened from the host keys. Erasure covers that key
+  material and the queued state, which lives in the mailbox process's memory
+  and ends with it. It is not a verified physical wipe: a journaling or
+  copy-on-write filesystem may retain the overwritten blocks, and a compromised
+  host can read plaintext while the VM runs. The authority and signing keys are intentionally not salted by the
+  secret, because the authority key is named in a signed plan before any VM
+  exists. The encryption key depends on a secret that never leaves the sending
+  host, so a receiving node cannot derive it: cross-host delivery must use a
+  key agreement or a wrapped key, and the derived keys do not interoperate
+  across hosts. The grant's epoch is the same ledger
   value as the plan's, and a grant naming another epoch's authority key is
   refused at launch. `machine replace` refuses while the machine is running.
   The old VM's mailbox queue lives in its own process and ends with it.

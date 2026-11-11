@@ -898,6 +898,10 @@ fn granted_plan(authority_key: [u8; 32]) -> ExecutionPlan {
     plan
 }
 
+fn test_secret() -> mvm_core::crypto::aead::Key {
+    mvm_core::crypto::aead::Key::from_bytes([5; 32])
+}
+
 /// The sealing keys are derived from the host key per mailbox: they differ
 /// between mailboxes and hosts, and none is the host signing key.
 #[test]
@@ -924,7 +928,7 @@ fn derived_mailbox_keys_differ_per_mailbox_and_are_not_the_host_key() {
     let mut plan = granted_plan(a1.to_bytes());
     plan.mailbox.as_mut().unwrap().mailbox = m1;
     let grant = plan.mailbox.unwrap();
-    let (policy, sealer) = host_trust(keys.path(), &grant).unwrap();
+    let (policy, sealer) = host_trust(keys.path(), &grant, &test_secret()).unwrap();
     assert_eq!(policy.authority_key, a1);
     assert_ne!(sealer.sender_key.to_bytes(), [5; 32]);
     assert_ne!(sealer.authority_key.to_bytes(), [5; 32]);
@@ -937,7 +941,7 @@ fn derived_mailbox_keys_differ_per_mailbox_and_are_not_the_host_key() {
     foreign.authority_key = authority_key_for(keys.path(), &m2, MbEpoch::new(1).unwrap())
         .unwrap()
         .to_bytes();
-    assert!(host_trust(keys.path(), &foreign).is_err());
+    assert!(host_trust(keys.path(), &foreign, &test_secret()).is_err());
 }
 
 /// A granted plan's derived keys serve the guest port from their own thread
@@ -955,7 +959,7 @@ fn derived_keys_serve_the_guest_port_and_queue_what_the_guest_sent() {
     let authority =
         authority_key_for(dir.path(), &address().mailbox, MbEpoch::new(1).unwrap()).unwrap();
     let grant = granted_plan(authority.to_bytes()).mailbox.unwrap();
-    let keys = derive_launch_keys(dir.path(), &grant).unwrap();
+    let keys = derive_launch_keys(dir.path(), &grant, &test_secret()).unwrap();
     let outbox = dir.path().join("outbox");
     std::fs::create_dir(&outbox).unwrap();
     mvm_agentd::mailbox_outbox::write_outbox(&outbox, &outbox_message()).unwrap();
