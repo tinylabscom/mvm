@@ -71,8 +71,8 @@ grep -q "^FINDING: the install asked for 'mvmctl bootstrap'" <<<"${out}" || fail
 
 # The frame builder below must stay the one the script runs in the guest.
 # shellcheck disable=SC2016  # a literal fragment, deliberately unexpanded
-grep -qF 'head -c 32 /dev/zero | tr "\\0" "\\$1"; printf "%s" "$2"' "${repo}/scripts/mailbox-live-witness.sh" \
-  || fail "the script's frame builder changed; update this test's copy"
+grep -qF 'head -c 32 /dev/zero | tr "\\0" "\\$1"; printf "%s" "$2"' "${repo}/scripts/lib/mailbox-frame.sh" \
+  || fail "the shared frame builder changed; update this test's copy"
 
 # The frame the guest-side snippet writes: 32 recipient bytes, then the body.
 d="${work}/guest"; mkdir -p "${d}"

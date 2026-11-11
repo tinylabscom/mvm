@@ -22,7 +22,7 @@
 #
 # Messages are sent one at a time, each read before the next is written. This
 # witnesses sequential delivery, not a back-to-back burst. The frame layout
-# is owned by write_frame below.
+# is owned by scripts/lib/mailbox-frame.sh.
 set -euo pipefail
 
 MVMCTL="${MVMCTL:-mvmctl}"
@@ -67,22 +67,9 @@ wait_for() { # <what> <cmd...>
   done
 }
 
-# Leave one outbox frame in the guest: a 32-byte recipient (every byte is the
-# octal <fill>), then the body, put in place with a rename so the agent never
-# reads half a frame. Written as the directory's own owner, which is the
-# identity that may use it.
-write_frame() { # <vm> <fill: 000 = own mailbox, 377 = anyone else> <body>
-  # The script expands in the guest, not here.
-  # shellcheck disable=SC2016
-  mvm machine exec "$1" -- sh -c '
-    d=/run/mvm/mailbox; owner=$(stat -c %u "$d"); t="$d/.witness.$$"
-    { head -c 32 /dev/zero | tr "\\0" "\\$1"; printf "%s" "$2"; } > "$t"
-    [ "$(id -u)" != 0 ] || chown "$owner" "$t"
-    chmod 640 "$t"
-    # BusyBox date has no %N: seconds plus the pid keeps names unique per exec
-    # and ordered across execs; the temp name is dotted so it is never read.
-    mv "$t" "$d/outbox/$(date +%s)-$$"' _ "$2" "$3"
-}
+# shellcheck source-path=SCRIPTDIR source=lib/mailbox-frame.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/mailbox-frame.sh"
+write_frame() { mailbox_write_frame "$@"; } # <vm> <fill: 000 = own mailbox, 377 = anyone else> <body>
 
 recv() { mvm machine mailbox recv "$1"; }
 got() { [ "$(recv "$NAME")" = "$1" ]; }
