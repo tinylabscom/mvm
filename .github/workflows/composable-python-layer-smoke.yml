@@ -33,6 +33,42 @@ jobs:
     permissions:
       contents: read
 
+  pr-cli-bins:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - name: Build unpublished fixture-only CLI and host helpers
+        env:
+          MVM_EMBED: "0"
+        run: |
+          set -euo pipefail
+          cargo build --locked --bin mvmctl \
+            --features user,pr-test-guest-runtime,mvm-cli/pr-test-synthetic-base
+          cargo build --locked -p mvm-hostd --features pr-test-guest-runtime \
+            --bin mvm-host-agent --bin mvm-signer-helper --bin mvm-network-endpoint
+          for binary in mvmctl mvm-host-agent mvm-signer-helper mvm-network-endpoint; do
+            test -x "target/debug/$binary"
+          done
+          target/debug/mvmctl --version
+      - name: Retain unpublished CLI for an authorized KVM witness
+        uses: actions/upload-artifact@v7
+        with:
+          name: pr-test-cli-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/debug/mvmctl
+            target/debug/mvm-host-agent
+            target/debug/mvm-signer-helper
+            target/debug/mvm-network-endpoint
+          if-no-files-found: error
+          retention-days: 1
+
   signed-pr-guest-runtime:
     needs: pr-guest-bins
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
