@@ -14,8 +14,8 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use mvm_contract::protocol::mailbox::{
     AuthorizationDomainRouteLabel, DestinationRouteToken, ED25519_SIGNATURE_BYTES, ExecutionEpoch,
     MAILBOX_PROTOCOL_VERSION, MAX_ENCODED_ENVELOPE_BYTES, MailboxAddress, MailboxEnvelope,
-    MailboxEnvelopeHeader, MailboxOperation, PrincipalId, ProtocolVersion, SignatureAlgorithm,
-    SignedMailboxCapability, TransportBindingId,
+    MailboxEnvelopeHeader, MailboxMessageKind, MailboxOperation, PrincipalId, ProtocolVersion,
+    SignatureAlgorithm, SignedMailboxCapability, TransportBindingId,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -580,11 +580,21 @@ impl AuthorizedMailboxFrame {
 pub fn authorize_outbound(
     request: OutboundAuthorization<'_>,
 ) -> Result<AuthorizedMailboxFrame, OutboundAuthorizationError> {
-    if request.context.required_operation != MailboxOperation::Send {
-        return Err(OutboundAuthorizationError::SendOperationRequired);
-    }
     let envelope = &request.prepared.envelope;
     let header = &request.prepared.header;
+    match header.kind {
+        MailboxMessageKind::Call | MailboxMessageKind::Cast
+            if request.context.required_operation != MailboxOperation::Send =>
+        {
+            return Err(OutboundAuthorizationError::SendOperationRequired);
+        }
+        MailboxMessageKind::Reply
+            if request.context.required_operation != MailboxOperation::Reply =>
+        {
+            return Err(OutboundAuthorizationError::ReplyOperationRequired);
+        }
+        MailboxMessageKind::Call | MailboxMessageKind::Cast | MailboxMessageKind::Reply => {}
+    }
     envelope.validate_bounds().map_err(MailboxError::from)?;
     validate_outer_versions(envelope)?;
     validate_inner_versions(header)?;
@@ -625,6 +635,8 @@ pub enum OutboundAuthorizationError {
     Mailbox(#[from] MailboxError),
     #[error("outbound transport authorization requires the send operation")]
     SendOperationRequired,
+    #[error("outbound reply authorization requires the reply operation")]
+    ReplyOperationRequired,
     #[error("mailbox envelope and supplied signed header do not match")]
     EnvelopeHeaderMismatch,
     #[error("mailbox envelope does not match the authorized transport route")]

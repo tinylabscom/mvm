@@ -488,45 +488,55 @@ fn verify_capability_scope(
     Ok(())
 }
 
-/// A message whose signed inner header, capability and replay identity passed
-/// the destination's authority checks. The header can be journaled with the
-/// unchanged ciphertext without parsing untrusted routing hints as identity.
+/// Authenticated header and plaintext from one successful canonical open.
+/// This is verification under the supplied context, not a delivery receipt or
+/// permission to skip a later admission check.
+///
+/// ```compile_fail
+/// use mvm_contract::protocol::mailbox::MailboxEnvelopeHeader;
+/// use mvm_core::mailbox::OpenedMailboxEnvelope;
+/// fn forge(header: MailboxEnvelopeHeader, payload: Vec<u8>) -> OpenedMailboxEnvelope {
+///     OpenedMailboxEnvelope { header, payload }
+/// }
+/// ```
 #[derive(PartialEq, Eq)]
-pub struct OpenedMailboxMessage {
+pub struct OpenedMailboxEnvelope {
     header: MailboxEnvelopeHeader,
     payload: Vec<u8>,
 }
 
-impl std::fmt::Debug for OpenedMailboxMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OpenedMailboxMessage")
-            .field("payload_len", &self.payload.len())
+impl std::fmt::Debug for OpenedMailboxEnvelope {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OpenedMailboxEnvelope")
             .finish_non_exhaustive()
     }
 }
 
-impl OpenedMailboxMessage {
-    /// The authenticated inner header used to bind journal and dedup records.
+/// Compatibility name for a verified, opened mailbox message.
+pub type OpenedMailboxMessage = OpenedMailboxEnvelope;
+
+impl OpenedMailboxEnvelope {
+    /// The exact signed header authenticated with these bytes.
     #[must_use]
     pub fn header(&self) -> &MailboxEnvelopeHeader {
         &self.header
     }
 
-    /// Plaintext for the authorized recipient, not for a router or store.
+    /// The verified plaintext without copying it.
     #[must_use]
     pub fn payload(&self) -> &[u8] {
         &self.payload
     }
 
-    /// Consume the opened message to hand plaintext to its authorized reader.
+    /// Consume the verified result, retaining the original plaintext allocation.
     #[must_use]
     pub fn into_payload(self) -> Vec<u8> {
         self.payload
     }
 }
 
-/// Verify identities, signature, capability, current state, ciphertext, and
-/// replay identity before returning plaintext.
+/// Verify an envelope and return its plaintext through the canonical open path.
 pub fn open_envelope(
     envelope: &MailboxEnvelope,
     capability: &SignedMailboxCapability,
@@ -536,7 +546,7 @@ pub fn open_envelope(
     authority_key: &VerifyingKey,
     replay: &mut impl ReplayProtector,
 ) -> Result<Vec<u8>, MailboxError> {
-    open_authenticated_envelope(
+    open_verified_envelope(
         envelope,
         capability,
         context,
@@ -545,12 +555,13 @@ pub fn open_envelope(
         authority_key,
         replay,
     )
-    .map(OpenedMailboxMessage::into_payload)
+    .map(OpenedMailboxEnvelope::into_payload)
 }
 
-/// Open the envelope and retain the verified inner header for destination
-/// admission. `replay` must stage its identity until any durable commit is
-/// complete; an in-memory protector is appropriate only for ephemeral delivery.
+/// Open the canonical envelope and retain its authenticated inner header.
+///
+/// `replay` must stage identity until journal commit; in-memory replay is
+/// appropriate only for ephemeral delivery.
 pub fn open_authenticated_envelope(
     envelope: &MailboxEnvelope,
     capability: &SignedMailboxCapability,
@@ -560,6 +571,27 @@ pub fn open_authenticated_envelope(
     authority_key: &VerifyingKey,
     replay: &mut impl ReplayProtector,
 ) -> Result<OpenedMailboxMessage, MailboxError> {
+    open_verified_envelope(
+        envelope,
+        capability,
+        context,
+        encryption_key,
+        sender_key,
+        authority_key,
+        replay,
+    )
+}
+
+/// Verify identities, signature, capability, current state, ciphertext, and replay.
+pub fn open_verified_envelope(
+    envelope: &MailboxEnvelope,
+    capability: &SignedMailboxCapability,
+    context: &OpenContext,
+    encryption_key: &Key,
+    sender_key: &VerifyingKey,
+    authority_key: &VerifyingKey,
+    replay: &mut impl ReplayProtector,
+) -> Result<OpenedMailboxEnvelope, MailboxError> {
     envelope.validate_bounds()?;
     validate_outer_versions(envelope)?;
     let actual_commitment: [u8; 32] = Sha256::digest(&envelope.ciphertext).into();
@@ -601,7 +633,7 @@ pub fn open_authenticated_envelope(
     if !replay.check_and_record(ReplayIdentity::from_header(&message.header)) {
         return Err(MailboxError::Replay);
     }
-    Ok(OpenedMailboxMessage {
+    Ok(OpenedMailboxEnvelope {
         header: message.header,
         payload: message.payload,
     })
