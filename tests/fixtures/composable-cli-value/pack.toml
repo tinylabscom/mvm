@@ -1,0 +1,21 @@
+# Synthetic development-only guest-output witness; no Claude or runtime layer.
+schema = "mvm.pack-spec/v2"
+target = "x86_64-linux"
+runtimes = []
+entrypoint = ["/bin/cat", "/srv/app/value.txt"]
+
+[identity]
+name = "agent/example"
+version = "1.0.0"
+
+[source]
+kind = "local"
+path = "."
+
+[[copy]]
+source = "value.txt"
+destination = "/srv/app/value.txt"
+
+[resources]
+cpu_cores = 1
+memory_mb = 256

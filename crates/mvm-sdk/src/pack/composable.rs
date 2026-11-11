@@ -147,6 +147,23 @@ memory_mb = 256
 "#;
 
     #[test]
+    fn synthetic_cli_guest_value_is_a_valid_authored_input() {
+        let recipe = include_str!("../../../../tests/fixtures/composable-cli-value/pack.toml");
+        let spec = parse_toml(recipe).unwrap();
+        assert!(spec.runtimes.is_empty());
+        assert_eq!(spec.entrypoint, ["/bin/cat", "/srv/app/value.txt"]);
+        #[cfg(feature = "compiler")]
+        {
+            let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/composable-cli-value");
+            prepare_composable_application(&spec, &directory)
+                .unwrap()
+                .reverify()
+                .unwrap();
+        }
+    }
+
+    #[test]
     fn dev_is_the_default_and_prod_requires_a_separate_table() {
         let spec = parse_toml(PYTHON).unwrap();
         spec.check_mode_request(BuildMode::Development).unwrap();
