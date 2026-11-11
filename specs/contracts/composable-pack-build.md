@@ -51,12 +51,17 @@ incompatible production base is rejected with no fallback. Do not accept
 unsupported special files, symlink escapes or an inconsistent base ext4/tar
 pair merely because their declared digests are well formed.
 
-Schema-8 host-signed local bundles have a separate operator-enrollment
-boundary under review in mvm PR #5301. Same-host signing alone is not
-operator enrollment or release trust. A transient one-command Dev composition
-must not bypass the final local-bundle run/install rule by treating its cache
-as an enrolled publisher; either explicit enrollment or a distinct,
-narrowly scoped transient admission proof is required.
+Schema-8+ host-signed local bundles that can be installed or launched later
+require explicit operator enrollment under mvm PR #5301. Same-host signing
+alone is not operator enrollment or release trust. For one-command first use,
+the chosen development path is a separate, one-use, Dev-only transient
+admission proof (#5341), bound to the exact host-signed archive and its
+reverified base. It never enters the installed registry or publisher trust
+store, and a repeat run must mint a new proof after rechecking cached bytes.
+This path is not implemented by the current `run --compose` candidate: it
+still settles its archive through installation. Neither route grants
+production/export authority; the separately signed and fully bound
+production composition remains the long-term direction.
 
 `mvm.pack-spec/v2` currently parses one local application, ordered `runtime/*`
 requests, `/srv/app` copies, literal argv and resources. Its `[production]`
