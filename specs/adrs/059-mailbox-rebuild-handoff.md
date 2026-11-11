@@ -48,11 +48,14 @@ be called `queued_for_rebuild`, but never `accepted_ephemeral`,
 application facts. Lost outbox-commit responses are reconciled by the same
 logical task ID and payload commitment; conflicting reuse is refused.
 
-At cutover the old owner is durably fenced before the new owner may accept
-MVM-mediated effects or write shared state. A replacement may be prewarmed
-alongside the old VM only if it cannot run effectful workload code before
-fencing; otherwise the old VM must stop before the replacement starts. Only
-after the new VM and its declared handlers are verified may the sender
+At cutover the old owner and every participating mailbox, credential, egress,
+and shared-state holder must be durably fenced before the new owner may accept
+MVM-mediated effects or write shared state. A missing PID or a fresh directory
+does not prove that a detached holder retired. If holder custody is unknown,
+refuse the cutover rather than reassign authority. A replacement may be
+prewarmed alongside the old VM only if it cannot run effectful workload code
+before fencing; otherwise the old VM must stop before the replacement starts.
+Only after the new VM and its declared handlers are verified may the sender
 recheck current capability, tenant, recipient, policy, handler/schema,
 expiry, and route/epoch. The sender, never an intermediary impersonating it,
 creates and persists the canonical signed envelope before attempting
@@ -106,10 +109,10 @@ it does not mutate a running guest.
 ## Evidence before acceptance
 
 Review a finite-state model for outbox commit, build success/failure, old
-owner fence, new ready/switch, envelope persistence, dispatch, lost response,
-destination receipt, and application outcome. Inject crashes at every
-commit/I/O edge; demonstrate the same task ID with conflicting payload is
-refused, no old and new owner simultaneously accept effects, and no
+owner and holder fence, new ready/switch, envelope persistence, dispatch,
+lost response, destination receipt, and application outcome. Inject crashes
+at every commit/I/O edge; demonstrate that conflicting reuse of a task ID
+is refused, no old and new owner simultaneously accept effects, and no
 uncertain old operation is automatically replayed. Cover malformed or stale
 route/epoch, revoked or expired capability, tenant/recipient/handler/schema
 mismatch, quota/full conditions, key loss, rollback, cancellation, and
