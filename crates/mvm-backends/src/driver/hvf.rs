@@ -8,7 +8,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use ed25519_dalek::Signer;
@@ -750,6 +750,17 @@ fn boot_retaining_child(
     })
 }
 
+/// How long a waiter blocks on the supervisor's exit event. The wait returns
+/// the moment the supervisor exits, so this is an upper bound in name only: a
+/// workload that legitimately runs for hours must not be cut off at the fixed
+/// cap the file-polling backends use. The supervisor enforces the plan's wall
+/// clock itself.
+const SUPERVISOR_WAIT_BOUND: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+
+fn supervisor_wait_deadline(now: Instant) -> Instant {
+    now + SUPERVISOR_WAIT_BOUND
+}
+
 impl VmmDriver for HvfDriver {
     fn name(&self) -> &str {
         "hvf"
@@ -1396,7 +1407,7 @@ impl RunningVm for HvfRunningVm {
     }
 
     fn wait(&self) -> Result<VmExitStatus> {
-        let deadline = Instant::now() + mvm_vmm::host::workload_wait::WORKLOAD_WAIT_TIMEOUT;
+        let deadline = supervisor_wait_deadline(Instant::now());
         match &self.owned {
             Some(owned) => owned.wait(deadline)?,
             None => ConnectedInstance::connect_instance(self.instance.clone())?.wait(deadline)?,
@@ -1491,6 +1502,15 @@ impl RunningVm for HvfRunningVm {
 
 #[cfg(test)]
 mod tests {
+    /// A workload that runs past the 300 s cap the file-polling backends use
+    /// must still be waited for; the wait ends when the supervisor exits.
+    #[test]
+    fn the_supervisor_wait_outlasts_the_file_polling_cap() {
+        let now = Instant::now();
+        let waited = supervisor_wait_deadline(now) - now;
+        assert!(waited > mvm_vmm::host::workload_wait::WORKLOAD_WAIT_TIMEOUT * 100);
+    }
+
     #[test]
     fn readiness_deadline_is_the_pid_file_timeout_after_launch() {
         let t = Instant::now();
