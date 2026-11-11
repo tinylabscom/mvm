@@ -360,6 +360,99 @@ impl PublishedImageSet {
         })
     }
 
+    /// Verify a separately signed production base descriptor against this set.
+    ///
+    /// `artifact_dir` must contain the selected production kernel and composition
+    /// tar under their exact manifest names. No other set members are read or
+    /// fetched. The retained result refers to these files; keep them for rechecks.
+    /// Local or host-signed bases cannot satisfy the locked publisher identity.
+    ///
+    /// # Errors
+    /// Refuses missing or changed files, an unsigned or incompatible descriptor,
+    /// or missing, stale, or revoked publisher evidence.
+    pub fn verify_base_compatibility(
+        &self,
+        descriptor: &[u8],
+        signature_bundle: &[u8],
+        arch: GuestArch,
+        profile: WorkloadImageProfile,
+        artifact_dir: &Path,
+    ) -> Result<mvm_core::image_set::base_compatibility::ProductionBaseCompatibility> {
+        self.with_base_verification(arch, profile, artifact_dir, |request| {
+            mvm_core::image_set::base_compatibility::verify_production_base_compatibility(
+                descriptor,
+                signature_bundle,
+                request,
+                arch,
+                profile,
+            )
+            .map_err(Into::into)
+        })
+    }
+
+    /// Reverify held descriptor evidence against the original signed root and current feed.
+    ///
+    /// `artifact_dir` must still contain the selected kernel and tar under their
+    /// manifest names. The returned evidence replaces the earlier verification.
+    ///
+    /// # Errors
+    /// Refuses changed files, signatures, or expired or revoked evidence.
+    pub fn reverify_base_compatibility(
+        &self,
+        verified: &mvm_core::image_set::base_compatibility::ProductionBaseCompatibility,
+        artifact_dir: &Path,
+    ) -> Result<mvm_core::image_set::base_compatibility::ProductionBaseCompatibility> {
+        self.with_base_verification(
+            verified.descriptor().arch(),
+            verified.descriptor().profile(),
+            artifact_dir,
+            |request| verified.reverify(request).map_err(Into::into),
+        )
+    }
+
+    fn with_base_verification<T>(
+        &self,
+        arch: GuestArch,
+        profile: WorkloadImageProfile,
+        artifact_dir: &Path,
+        verify: impl FnOnce(&mvm_core::image_set::ImageSetVerification<'_>) -> Result<T>,
+    ) -> Result<T> {
+        anyhow::ensure!(
+            self.manifest.schema_version == mvm_core::image_set::IMAGE_SET_SCHEMA_VERSION
+                && self.manifest.compatibility.base_image_contract
+                    == Some(mvm_core::image_set::BaseImageContract::LINUX_LAYER),
+            "production base compatibility requires a signed Linux-layer image set"
+        );
+        anyhow::ensure!(
+            self.manifest.members.iter().any(|member| {
+                member.build_mode.is_none()
+                    && member.role == ImageSetRole::WorkloadRootfs(profile)
+                    && member.target == MemberTarget::Arch(arch)
+                    && member.artifacts.iter().any(|artifact| {
+                        artifact.format == mvm_core::image_set::ArtifactFormat::TarGz
+                    })
+            }),
+            "production base compatibility requires a signed composition tar"
+        );
+        let proof = self.retained_publisher_proof()?;
+        let requirement = ImageSetRequirement::current_train();
+        let host = crate::stage0_kernel::current_image_set_protocol_support();
+        let request = mvm_core::image_set::ImageSetVerification::new(
+            proof.root().manifest_bytes(),
+            proof.root().signature_bundle(),
+            &mvm_core::image_set::image_train_lock().image_set,
+            artifact_dir,
+        )
+        .require(&requirement)
+        .with_revocations(proof.revocations().verified());
+        let request = if self.workload_only {
+            request.with_workload_protocols(&host)
+        } else {
+            request.with_host_protocols(&host)
+        };
+        verify(&request)
+    }
+
     pub fn member_cache(&self) -> SetMemberCache {
         SetMemberCache::for_root(self.root.clone())
     }

@@ -146,9 +146,11 @@ host-signed local development bundle for a default or explicitly selected
 local base. A verified host-signed filesystem may be reused across command
 choices when its ordered filesystem identity is unchanged; current trust,
 revocations and grants must still be readmitted. Typed v3 component readers,
-an exact-pin acquisition helper, an ordered staging function and an
-authenticated policy-snapshot adapter exist, but v3 is not wired into the
-CLI composition invocation, launch or production export.
+an exact-pin acquisition helper, ordered staging and measured filesystem-only
+lock, a separately signed base-descriptor verifier, and an authenticated
+policy-snapshot adapter exist. The filesystem lock grants no command or host
+authority; v3 is not wired into the CLI invocation, admission or production
+export.
 Direct-QEMU synthetic boots read `COMPOSED_GUEST_VALUE=print('ready')`; those
 are *not* `mvmctl run --compose` admission, guest-output or cache-hit evidence.
 The previously failing #5263 workspace test was fixed; passing it is not a
