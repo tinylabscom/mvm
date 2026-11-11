@@ -4312,6 +4312,7 @@ dependencies = [
  "security-framework",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "socket2",
  "tempfile",
  "tracing",

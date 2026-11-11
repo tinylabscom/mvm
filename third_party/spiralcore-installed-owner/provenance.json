@@ -1,0 +1,32 @@
+{
+  "source_repository": "https://github.com/R4-Laboratories/SpiralCore",
+  "source_revision": "179fb1eba84e1056b86ac7027de5dc777138c512",
+  "files": [
+    {
+      "source_path": "crates/spiralcore-mvm-live/src/installed_owner.rs",
+      "destination_path": "crates/mvm-vmm/src/host/installed_owner.rs",
+      "sha256": "94006668298fbb172ae52e23105db51b57a44aa881ae6a84c556e0f85991100c",
+      "portability_edits": []
+    },
+    {
+      "source_path": "crates/spiralcore-mvm-live/src/installed_owner/tests.rs",
+      "destination_path": "crates/mvm-vmm/src/host/installed_owner/tests.rs",
+      "sha256": "4d9b5151bdf013e2c27e553dd74d69599fa058b3d141017a64a2e722382f66bf",
+      "portability_edits": []
+    },
+    {
+      "source_path": "crates/spiralcore-mvm-live/src/installed_owner/binding_tests.rs",
+      "destination_path": "crates/mvm-vmm/src/host/installed_owner/binding_tests.rs",
+      "sha256": "e992c83c683dfc8b597f0fcbf0c6dde7a35195de517149977377b2073f4087fa",
+      "portability_edits": []
+    }
+  ],
+  "integration_test": {
+    "source_path": "crates/spiralcore-mvm-live/tests/installed-owner-harness/tests/lifecycle.rs",
+    "destination_path": "crates/mvm-vmm/tests/installed_owner.rs",
+    "edits": [
+      "Change library import from installed_owner to mvm_vmm::host::installed_owner."
+    ]
+  },
+  "dependencies": "Existing libc and workspace sha2 0.11.0; original component used sha2 0.10. No format or checksum-domain change."
+}
