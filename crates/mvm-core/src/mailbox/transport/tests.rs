@@ -424,6 +424,131 @@ fn authenticated_connection_is_not_mailbox_authority() {
     assert!(transport.drain(route.route_id()).expect("drain").is_empty());
 }
 
+fn fixture_for_operation(kind: MailboxMessageKind, operation: MailboxOperation) -> MailboxFixture {
+    let mut fixture = mailbox_fixture();
+    let mut header = fixture.prepared.header.clone();
+    header.kind = kind;
+    header.reply_to = match kind {
+        MailboxMessageKind::Call => Some(mvm_contract::protocol::mailbox::ReplyRoute {
+            address: address(),
+            capability_id: header.capability_id,
+        }),
+        MailboxMessageKind::Cast | MailboxMessageKind::Reply => None,
+    };
+    fixture.prepared = prepare_mailbox_envelope(
+        SealRequest {
+            routing: fixture.prepared.envelope().routing.clone(),
+            header,
+            plaintext: b"hello",
+        },
+        &Key::from_bytes(id(21)),
+        &SigningKey::from_bytes(&id(22)),
+    )
+    .expect("message seals");
+    let mut grant = fixture.capability.grant.clone();
+    grant.operations = CapabilityOperations::from_operations(&[operation]);
+    grant.message_kinds = vec![kind];
+    fixture.capability = sign_capability(grant, &fixture.capability_authority).expect("grant");
+    fixture.context.required_operation = operation;
+    fixture
+}
+
+#[test]
+fn reply_only_grant_authorizes_the_exact_prepared_reply() {
+    let route_authority = SigningKey::from_bytes(&id(61));
+    let (_, route) = signed_route(TransportPath::Direct, 62, &route_authority);
+    let fixture = fixture_for_operation(MailboxMessageKind::Reply, MailboxOperation::Reply);
+    let authorized = authorize_outbound(OutboundAuthorization {
+        prepared: &fixture.prepared,
+        capability: &fixture.capability,
+        context: &fixture.context,
+        capability_authority_key: &fixture.capability_authority.verifying_key(),
+        route: &route,
+    })
+    .expect("reply-only authority");
+    assert_eq!(
+        authorized.as_bytes(),
+        encode_envelope(fixture.prepared.envelope()).expect("canonical bytes")
+    );
+}
+
+#[test]
+fn outbound_message_kind_cannot_borrow_another_operation() {
+    let authority = SigningKey::from_bytes(&id(63));
+    let (_, route) = signed_route(TransportPath::Direct, 64, &authority);
+    for kind in [
+        MailboxMessageKind::Call,
+        MailboxMessageKind::Cast,
+        MailboxMessageKind::Reply,
+    ] {
+        for operation in [
+            MailboxOperation::Send,
+            MailboxOperation::Reply,
+            MailboxOperation::Receive,
+        ] {
+            let fixture = fixture_for_operation(kind, operation);
+            let result = authorize_outbound(OutboundAuthorization {
+                prepared: &fixture.prepared,
+                capability: &fixture.capability,
+                context: &fixture.context,
+                capability_authority_key: &fixture.capability_authority.verifying_key(),
+                route: &route,
+            });
+            match kind {
+                MailboxMessageKind::Call | MailboxMessageKind::Cast
+                    if operation == MailboxOperation::Send =>
+                {
+                    assert!(result.is_ok());
+                }
+                MailboxMessageKind::Reply if operation == MailboxOperation::Reply => {
+                    assert!(result.is_ok());
+                }
+                MailboxMessageKind::Reply => assert_eq!(
+                    result,
+                    Err(OutboundAuthorizationError::ReplyOperationRequired)
+                ),
+                MailboxMessageKind::Call | MailboxMessageKind::Cast => assert_eq!(
+                    result,
+                    Err(OutboundAuthorizationError::SendOperationRequired)
+                ),
+            }
+        }
+    }
+}
+
+#[test]
+fn reply_context_still_requires_a_reply_capability_and_matching_route() {
+    let authority = SigningKey::from_bytes(&id(65));
+    let (_, route) = signed_route(TransportPath::Direct, 66, &authority);
+    let mut fixture = fixture_for_operation(MailboxMessageKind::Reply, MailboxOperation::Send);
+    fixture.context.required_operation = MailboxOperation::Reply;
+    let request = |current: &MailboxFixture, selected: &AuthorizedRoute| {
+        authorize_outbound(OutboundAuthorization {
+            prepared: &current.prepared,
+            capability: &current.capability,
+            context: &current.context,
+            capability_authority_key: &current.capability_authority.verifying_key(),
+            route: selected,
+        })
+    };
+    assert_eq!(
+        request(&fixture, &route),
+        Err(MailboxError::OperationNotAuthorized.into())
+    );
+    let valid = fixture_for_operation(MailboxMessageKind::Reply, MailboxOperation::Reply);
+    let mut mismatched = claims(TransportPath::Direct, 67);
+    mismatched.address.recipient = PrincipalId::from_bytes(id(68));
+    let signed = sign_transport_binding(mismatched, &authority).expect("different route");
+    let mut context = binding_context();
+    context.expected_address = signed.claims.address;
+    let foreign_route = authorize_route(&signed, &context, &authority.verifying_key())
+        .expect("valid foreign route");
+    assert_eq!(
+        request(&valid, &foreign_route),
+        Err(OutboundAuthorizationError::RouteMismatch)
+    );
+}
+
 #[test]
 fn direct_delivery_is_pass_by_value_bounded_and_cancelable() {
     let authority = SigningKey::from_bytes(&id(46));

@@ -457,8 +457,51 @@ fn verify_capability_scope(
     Ok(())
 }
 
-/// Verify identities, signature, capability, current state, ciphertext, and
-/// replay identity before returning plaintext.
+/// Authenticated header and plaintext from one successful canonical open.
+/// This is verification under the supplied context, not a delivery receipt or
+/// permission to skip a later admission check.
+///
+/// ```compile_fail
+/// use mvm_contract::protocol::mailbox::MailboxEnvelopeHeader;
+/// use mvm_core::mailbox::OpenedMailboxEnvelope;
+/// fn forge(header: MailboxEnvelopeHeader, payload: Vec<u8>) -> OpenedMailboxEnvelope {
+///     OpenedMailboxEnvelope { header, payload }
+/// }
+/// ```
+pub struct OpenedMailboxEnvelope {
+    header: MailboxEnvelopeHeader,
+    payload: Vec<u8>,
+}
+
+impl std::fmt::Debug for OpenedMailboxEnvelope {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OpenedMailboxEnvelope")
+            .finish_non_exhaustive()
+    }
+}
+
+impl OpenedMailboxEnvelope {
+    /// The exact signed header authenticated with these bytes.
+    #[must_use]
+    pub fn header(&self) -> &MailboxEnvelopeHeader {
+        &self.header
+    }
+
+    /// The verified plaintext without copying it.
+    #[must_use]
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    /// Consume the verified result, retaining the original plaintext allocation.
+    #[must_use]
+    pub fn into_payload(self) -> Vec<u8> {
+        self.payload
+    }
+}
+
+/// Verify an envelope and return its plaintext through the canonical open path.
 pub fn open_envelope(
     envelope: &MailboxEnvelope,
     capability: &SignedMailboxCapability,
@@ -468,6 +511,29 @@ pub fn open_envelope(
     authority_key: &VerifyingKey,
     replay: &mut impl ReplayProtector,
 ) -> Result<Vec<u8>, MailboxError> {
+    open_verified_envelope(
+        envelope,
+        capability,
+        context,
+        encryption_key,
+        sender_key,
+        authority_key,
+        replay,
+    )
+    .map(OpenedMailboxEnvelope::into_payload)
+}
+
+/// Verify identities, signature, capability, current state, ciphertext, and
+/// replay identity before returning the authenticated header and plaintext.
+pub fn open_verified_envelope(
+    envelope: &MailboxEnvelope,
+    capability: &SignedMailboxCapability,
+    context: &OpenContext,
+    encryption_key: &Key,
+    sender_key: &VerifyingKey,
+    authority_key: &VerifyingKey,
+    replay: &mut impl ReplayProtector,
+) -> Result<OpenedMailboxEnvelope, MailboxError> {
     envelope.validate_bounds()?;
     validate_outer_versions(envelope)?;
     let actual_commitment: [u8; 32] = Sha256::digest(&envelope.ciphertext).into();
@@ -509,7 +575,10 @@ pub fn open_envelope(
     if !replay.check_and_record(ReplayIdentity::from_header(&message.header)) {
         return Err(MailboxError::Replay);
     }
-    Ok(message.payload)
+    Ok(OpenedMailboxEnvelope {
+        header: message.header,
+        payload: message.payload,
+    })
 }
 
 /// Sign a destination receipt in a domain distinct from envelopes and grants.

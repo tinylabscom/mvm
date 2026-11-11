@@ -809,6 +809,97 @@ fn open_under(
 }
 
 #[test]
+fn verified_open_retains_authenticated_header_and_records_replay_once() {
+    #[derive(Default)]
+    struct CountingReplay(usize);
+
+    impl mvm_core::mailbox::ReplayProtector for CountingReplay {
+        fn check_and_record(&mut self, _: mvm_core::mailbox::ReplayIdentity) -> bool {
+            self.0 += 1;
+            self.0 == 1
+        }
+    }
+
+    let (sender_key, authority_key, encryption_key) = contract_keys();
+    let capability = sign_capability(grant(), &authority_key).expect("capability");
+    let expected = header();
+    let envelope = seal_with(expected.clone(), b"hello");
+    let mut replay = CountingReplay::default();
+    let opened = mvm_core::mailbox::open_verified_envelope(
+        &envelope,
+        &capability,
+        &context(),
+        &encryption_key,
+        &sender_key.verifying_key(),
+        &authority_key.verifying_key(),
+        &mut replay,
+    )
+    .expect("verified header and bytes");
+    assert_eq!(opened.header(), &expected);
+    assert_eq!(opened.payload(), b"hello");
+    assert_eq!(replay.0, 1);
+    assert_eq!(opened.into_payload(), b"hello");
+    assert_eq!(
+        open_envelope(
+            &envelope,
+            &capability,
+            &context(),
+            &encryption_key,
+            &sender_key.verifying_key(),
+            &authority_key.verifying_key(),
+            &mut replay,
+        )
+        .expect_err("legacy open shares replay authority"),
+        MailboxError::Replay
+    );
+    assert_eq!(replay.0, 2);
+}
+
+#[test]
+fn refused_verified_open_exposes_no_proof_and_preserves_replay_identity() {
+    let (sender_key, authority_key, encryption_key) = contract_keys();
+    let capability = sign_capability(grant(), &authority_key).expect("capability");
+    let envelope = seal_with(header(), b"hello");
+    let open = |current: &OpenContext, replay: &mut InMemoryReplayProtector| {
+        mvm_core::mailbox::open_verified_envelope(
+            &envelope,
+            &capability,
+            current,
+            &encryption_key,
+            &sender_key.verifying_key(),
+            &authority_key.verifying_key(),
+            replay,
+        )
+    };
+    let mut recipient = context();
+    recipient.expected_recipient = PrincipalId::from_bytes([41; 32]);
+    let mut epoch = context();
+    epoch.current_execution_epoch = ExecutionEpoch::new(8).expect("epoch");
+    let mut policy = context();
+    policy.current_policy_epoch += 1;
+    let mut revoked = context();
+    revoked.revoked_capabilities.push(grant().revocation_id);
+    let mut expired = context();
+    expired.now_unix_ms = 2_000;
+    for (refused, expected) in [
+        (recipient, MailboxError::WrongRecipient),
+        (epoch, MailboxError::StaleExecutionEpoch),
+        (policy, MailboxError::StalePolicyEpoch),
+        (revoked, MailboxError::CapabilityRevoked),
+        (expired, MailboxError::Expired),
+    ] {
+        let mut replay = InMemoryReplayProtector::default();
+        assert_eq!(open(&refused, &mut replay).expect_err("no proof"), expected);
+        let accepted = open(&context(), &mut replay).expect("refusal did not consume identity");
+        assert_eq!(accepted.header(), &header());
+        assert_eq!(accepted.payload(), b"hello");
+        let debug = format!("{accepted:?}");
+        assert!(!debug.contains("hello"));
+        assert!(!debug.contains("capability_id"));
+    }
+}
+
+#[test]
 fn a_refused_message_does_not_consume_its_dedup_identity() {
     let envelope = seal_with(header(), b"hello");
     let mut replay = InMemoryReplayProtector::default();
