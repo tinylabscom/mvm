@@ -42,6 +42,12 @@ impl PreparedComposition {
 
 pub(super) enum Base<'a> {
     SignedDefault,
+    #[cfg(feature = "pr-test-synthetic-base")]
+    Synthetic {
+        fixture: mvm_build::pr_test_synthetic_base::PrTestSyntheticBase,
+        #[cfg(feature = "pr-test-guest-runtime")]
+        pr_test: PrTestInput<'a>,
+    },
     Local {
         manifest: &'a Path,
         kernel: &'a Path,
@@ -102,10 +108,27 @@ pub(super) fn prepare(path: &Path, base: Base<'_>) -> Result<PreparedComposition
     #[cfg(feature = "pr-test-guest-runtime")]
     let pr_test = match &base {
         Base::SignedDefault => None,
+        #[cfg(feature = "pr-test-synthetic-base")]
+        Base::Synthetic { pr_test, .. } => Some(*pr_test),
         Base::Local { pr_test, .. } => *pr_test,
     };
-    let local = match base {
+    #[cfg(feature = "pr-test-synthetic-base")]
+    let synthetic = match &base {
+        Base::Synthetic { fixture, .. } => Some(fixture),
+        Base::SignedDefault | Base::Local { .. } => None,
+    };
+    let local = match &base {
         Base::SignedDefault => None,
+        #[cfg(feature = "pr-test-synthetic-base")]
+        Base::Synthetic { fixture, .. } => {
+            let verified = fixture.verify(arch)?;
+            Some((
+                verified.manifest_path,
+                verified.manifest,
+                verified.kernel,
+                verified.tar,
+            ))
+        }
         Base::Local {
             manifest,
             kernel,
@@ -183,7 +206,7 @@ pub(super) fn prepare(path: &Path, base: Base<'_>) -> Result<PreparedComposition
     // Local source custody is path-bound, even when two paths have identical bytes.
     let cache_sha = if let Some((_, _, _, tar)) = &local {
         #[cfg(feature = "pr-test-guest-runtime")]
-        if let Some(proof) = &pr_test_proof {
+        let ordinary = if let Some(proof) = &pr_test_proof {
             Sha256Hex::from_bytes(
                 &[
                     lock_bytes.as_slice(),
@@ -197,9 +220,28 @@ pub(super) fn prepare(path: &Path, base: Base<'_>) -> Result<PreparedComposition
             Sha256Hex::from_bytes(
                 &[lock_bytes.as_slice(), tar.as_os_str().as_encoded_bytes()].concat(),
             )
-        }
+        };
         #[cfg(not(feature = "pr-test-guest-runtime"))]
-        Sha256Hex::from_bytes(&[lock_bytes.as_slice(), tar.as_os_str().as_encoded_bytes()].concat())
+        let ordinary = Sha256Hex::from_bytes(
+            &[lock_bytes.as_slice(), tar.as_os_str().as_encoded_bytes()].concat(),
+        );
+        #[cfg(feature = "pr-test-synthetic-base")]
+        {
+            if let Some(fixture) = synthetic {
+                Sha256Hex::from_bytes(
+                    &[
+                        b"pr-test-synthetic-base".as_slice(),
+                        ordinary.as_str().as_bytes(),
+                        &fixture.pull_request().to_be_bytes(),
+                    ]
+                    .concat(),
+                )
+            } else {
+                ordinary
+            }
+        }
+        #[cfg(not(feature = "pr-test-synthetic-base"))]
+        ordinary
     } else {
         lock_sha.clone()
     };
@@ -208,6 +250,17 @@ pub(super) fn prepare(path: &Path, base: Base<'_>) -> Result<PreparedComposition
     let target = cache.join(format!("{}.mvmpkg", cache_sha.as_str()));
     let reverify_inputs = || -> Result<()> {
         prepared.reverify()?;
+        #[cfg(feature = "pr-test-synthetic-base")]
+        if let Some(fixture) = synthetic {
+            let current = fixture.verify(arch)?;
+            let (_, original, kernel, tar) = local
+                .as_ref()
+                .context("synthetic base selection was lost")?;
+            ensure!(
+                current.manifest == *original && current.kernel == *kernel && current.tar == *tar,
+                "PR synthetic base selection changed before use"
+            );
+        }
         #[cfg(feature = "pr-test-guest-runtime")]
         if let Some(proof) = &pr_test_proof {
             mvm_build::guest_runtime::evidence::verify_pr_test_runtime_proof(
@@ -393,6 +446,7 @@ pub(super) fn prepare(path: &Path, base: Base<'_>) -> Result<PreparedComposition
         .local_build();
     export.local_composition = Some(member);
     export.supplemental_artifacts = &supplemental;
+    reverify_inputs()?;
     let signed = if let Some((_, manifest_bytes, _, tar)) = &local {
         let source: mvm_core::image_set::ImageSetManifest = serde_json::from_slice(manifest_bytes)?;
         let member = source
@@ -432,6 +486,7 @@ pub(super) fn prepare(path: &Path, base: Base<'_>) -> Result<PreparedComposition
         }
         reverify_inputs()?;
     }
+    reverify_inputs()?;
     record_filesystem_bundle(&cache, &filesystem_identity, &cache_sha)?;
     verify_cached_bundle(
         &target,

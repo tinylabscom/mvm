@@ -143,6 +143,8 @@ release-channel = []
 manifest-verify = ["mvm-core/manifest-verify"]
 # PR-only signed runtime inputs; never part of the release channel.
 pr-test-guest-runtime = ["manifest-verify", "mvm-core/pr-test-guest-runtime"]
+# Authenticate a synthetic PR base only as a local development input.
+pr-test-synthetic-base = ["manifest-verify"]
 # Exposes `published_image_set::fixture`, a signed-root-shaped image set served
 # from a directory, to other crates' tests.
 test-support = ["mvm-fs/test-support"]

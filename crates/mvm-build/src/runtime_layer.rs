@@ -9,9 +9,18 @@ use std::path::{Path, PathBuf};
 
 use mvm_contract::pack_spec::PackTarget;
 use mvm_contract::pack_spec_v2::{BuildMode, ComposablePackError, ComposablePackSpec};
+use mvm_contract::pack_spec_v3::{ComposedGraph, GraphNode, SignedPackPin};
 use mvm_core::arch::GuestArch;
-use mvm_core::image_set::{ArtifactFormat, ImageSetManifest, WorkloadImageProfile};
+use mvm_core::image_set::base_compatibility::{
+    DevelopmentBaseCompatibility, ProductionBaseCompatibility,
+};
+use mvm_core::image_set::{
+    ArtifactFormat, ImageSetManifest, ImageTrustTier, LocalImageSetVerification,
+    WorkloadImageProfile,
+};
 use mvm_core::packs::Sha256Hex;
+use mvm_core::registry_pack::application_component::VerifiedApplicationComponentInputs;
+use mvm_core::registry_pack::component_layer::{ComponentLayerKind, VerifiedComponentLayerInputs};
 use mvm_core::registry_pack::runtime_layer::{
     OfflineRuntimePolicyError, RuntimeLayerArchiveError, RuntimeLayerInputError,
     RuntimeLayerPolicyError, RuntimeLayerResolveError, VerifiedRuntimeLayerArchive,
@@ -117,6 +126,36 @@ pub struct ComposedWorkloadRootfs {
 pub struct ComposedApplicationRootfs {
     tree: ComposedWorkloadRootfs,
     application_archive_sha256: Sha256Hex,
+}
+
+/// A private, authenticated ordered component tree; not a launch or export grant.
+#[derive(Debug)]
+pub struct ComposedComponentRootfs {
+    tree: ComposedWorkloadRootfs,
+    pins: Vec<PackPin>,
+    tier: ImageTrustTier,
+}
+
+impl ComposedComponentRootfs {
+    /// Trust tier of the selected base; a local base remains development-only.
+    pub fn tier(&self) -> ImageTrustTier {
+        self.tier
+    }
+
+    /// The staged tree, which remains private until separately sealed and admitted.
+    pub fn root(&self) -> &Path {
+        self.tree.root()
+    }
+
+    /// Original file owners to preserve during later image materialization.
+    pub fn ownership(&self) -> &OwnerTable {
+        self.tree.ownership()
+    }
+
+    /// Exact signed manifest pins in filesystem application order.
+    pub fn pins(&self) -> &[PackPin] {
+        &self.pins
+    }
 }
 
 /// This lock has its own schema; it never changes the v1 Nix pack lock.
@@ -440,6 +479,16 @@ impl ComposedRuntimeLayers {
             {
                 return Err(RuntimeLayerStageError::Collision(path.clone()));
             }
+            if *kind == PathKind::Directory
+                && let Some(mode) = inventory.directory_modes.get(path)
+                && self.claimed.contains_key(path)
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let existing = std::fs::symlink_metadata(self.root().join(path))?;
+                if !existing.is_dir() || existing.permissions().mode() & 0o7777 != *mode {
+                    return Err(RuntimeLayerStageError::Collision(path.clone()));
+                }
+            }
         }
         let options = UnpackOptions::builder()
             .max_total_bytes(inventory.bytes)
@@ -524,8 +573,268 @@ pub enum RuntimeLayerStageError {
     ApplicationDigest,
     #[error("composable pack inputs differ from the frozen lock")]
     StaleLock,
+    #[error("ordered component graph, signed inputs or selected base disagree")]
+    ComponentGraph,
+    #[error("component archive differs from its signed descriptor")]
+    ComponentDigest,
+    #[error("component base requirements are not satisfied: {0}")]
+    ComponentBase(#[from] mvm_core::image_set::base_compatibility::BaseCompatibilityError),
+    #[error("application component input failed: {0}")]
+    ApplicationComponent(
+        #[from] mvm_core::registry_pack::application_component::ApplicationComponentInputError,
+    ),
+    #[error("runtime/tool component input failed: {0}")]
+    ComponentInput(#[from] mvm_core::registry_pack::component_layer::ComponentLayerInputError),
     #[error(transparent)]
     Materialize(#[from] crate::rootfs::RootfsError),
+}
+
+/// Select the base for an ordered component graph without upgrading local evidence.
+pub enum ComponentGraphBase<'a> {
+    /// A publisher-verified production image set and its signed compatibility.
+    Production {
+        images: &'a crate::published_image_set::PublishedImageSet,
+        compatibility: &'a ProductionBaseCompatibility,
+    },
+    /// An unsigned local schema-3 set, with exact selected kernel and tar paths.
+    Development {
+        compatibility: &'a DevelopmentBaseCompatibility,
+        evidence: &'a LocalImageSetVerification<'a>,
+        manifest_bytes: &'a [u8],
+        kernel: &'a Path,
+        tar: &'a Path,
+    },
+}
+
+/// Apply exact signed v3 components to a matching production or development base.
+///
+/// This does not select an entrypoint, resolve policy, seal an image or export
+/// a bundle. The caller must supply separately verified base compatibility and
+/// held component inputs. Local evidence remains development-only, and its
+/// checkout identities must be freshly sampled for this call.
+///
+/// # Errors
+///
+/// Refuses missing/extra/drifted inputs, unsatisfied requirements, unordered
+/// dependencies, revoked signatures, changed archives and path collisions.
+pub fn compose_verified_component_graph(
+    source: ComponentGraphBase<'_>,
+    graph: &ComposedGraph,
+    applications: &[VerifiedApplicationComponentInputs],
+    components: &[VerifiedComponentLayerInputs],
+) -> Result<ComposedComponentRootfs, RuntimeLayerStageError> {
+    graph
+        .validate()
+        .map_err(|_| RuntimeLayerStageError::ComponentGraph)?;
+    if graph.graph.len() > MAX_LAYERS || graph.graph.len() != applications.len() + components.len()
+    {
+        return Err(RuntimeLayerStageError::ComponentGraph);
+    }
+    let descriptor = match &source {
+        ComponentGraphBase::Production { compatibility, .. } => compatibility.descriptor(),
+        ComponentGraphBase::Development { compatibility, .. } => compatibility.descriptor(),
+    };
+    let arch = descriptor.arch();
+    let mut base = match &source {
+        ComponentGraphBase::Production { images, .. } => {
+            if descriptor.image_set_manifest_sha256()
+                != &Sha256Hex::from_bytes(images.manifest_bytes())
+            {
+                return Err(RuntimeLayerStageError::ComponentGraph);
+            }
+            compose_signed_workload_tree(images, arch, descriptor.profile(), &[])?
+        }
+        ComponentGraphBase::Development { .. } => compose_local_component_base(&source)?,
+    };
+    let mut pins = Vec::with_capacity(graph.graph.len());
+    for node in &graph.graph {
+        let requested = node.pin();
+        let pin = graph_pin(requested)?;
+        match node {
+            GraphNode::Application { .. } => {
+                let input = applications
+                    .iter()
+                    .find(|input| {
+                        input.descriptor().manifest().reference == *pin.reference()
+                            && Sha256Hex::from_bytes(input.descriptor().manifest_bytes())
+                                == *pin.manifest_sha256()
+                    })
+                    .ok_or(RuntimeLayerStageError::ComponentGraph)?;
+                let manifest = input.descriptor().manifest();
+                if manifest.application_component.guest_arch != arch.to_string() {
+                    return Err(RuntimeLayerStageError::ComponentGraph);
+                }
+                check_graph_requirements(
+                    &source,
+                    &manifest.application_component.requirements,
+                    arch,
+                )?;
+                let archive = input.open_verified_archive()?;
+                apply_component_archive(
+                    &mut base.tree,
+                    archive,
+                    &manifest.application_component.archive.archive_sha256,
+                    TarRole::Application,
+                )?;
+                input.reverify()?;
+            }
+            GraphNode::Runtime { .. } | GraphNode::Tool { .. } => {
+                let input = components
+                    .iter()
+                    .find(|input| {
+                        input.descriptor().manifest().reference() == pin.reference()
+                            && input.descriptor().manifest_sha256() == pin.manifest_sha256()
+                    })
+                    .ok_or(RuntimeLayerStageError::ComponentGraph)?;
+                let manifest = input.descriptor().manifest();
+                let expected_kind = match node {
+                    GraphNode::Runtime { .. } => ComponentLayerKind::Runtime,
+                    GraphNode::Tool { .. } => ComponentLayerKind::Tool,
+                    GraphNode::Application { .. } => unreachable!("matched component node"),
+                };
+                if manifest.kind() != expected_kind
+                    || manifest.component().guest_arch != arch.to_string()
+                    || !dependencies_before(&manifest.component().dependencies, &pins)
+                {
+                    return Err(RuntimeLayerStageError::ComponentGraph);
+                }
+                check_graph_requirements(&source, &manifest.component().requirements, arch)?;
+                let archive = input.open_verified_archive()?;
+                apply_component_archive(
+                    &mut base.tree,
+                    archive,
+                    &manifest.component().archive.archive_sha256,
+                    TarRole::Runtime,
+                )?;
+                input.reverify()?;
+            }
+        }
+        pins.push(pin);
+    }
+    // A later signer must not infer trust merely from this staged tree.
+    for input in applications {
+        input.reverify()?;
+    }
+    for input in components {
+        input.reverify()?;
+    }
+    let tier = match source {
+        ComponentGraphBase::Production { images, .. } => {
+            images.retained_publisher_proof()?;
+            ImageTrustTier::VerifiedRelease
+        }
+        ComponentGraphBase::Development {
+            compatibility,
+            evidence,
+            manifest_bytes,
+            kernel,
+            tar,
+        } => {
+            reverify_local_component_base(compatibility, evidence, manifest_bytes, kernel, tar)?;
+            ImageTrustTier::LocalDev
+        }
+    };
+    Ok(ComposedComponentRootfs {
+        tree: base,
+        pins,
+        tier,
+    })
+}
+
+fn reverify_local_component_base(
+    compatibility: &DevelopmentBaseCompatibility,
+    evidence: &LocalImageSetVerification<'_>,
+    manifest_bytes: &[u8],
+    kernel: &Path,
+    tar: &Path,
+) -> Result<(), RuntimeLayerStageError> {
+    let current = compatibility.reverify(evidence)?;
+    let (selected_kernel, selected_tar) = current.artifacts();
+    if current.descriptor().image_set_manifest_sha256() != &Sha256Hex::from_bytes(manifest_bytes)
+        || selected_kernel.path != kernel
+        || selected_tar.path != tar
+    {
+        return Err(RuntimeLayerStageError::ComponentGraph);
+    }
+    Ok(())
+}
+
+fn compose_local_component_base(
+    source: &ComponentGraphBase<'_>,
+) -> Result<ComposedWorkloadRootfs, RuntimeLayerStageError> {
+    let ComponentGraphBase::Development {
+        compatibility,
+        evidence,
+        manifest_bytes,
+        kernel,
+        tar,
+    } = source
+    else {
+        return Err(RuntimeLayerStageError::ComponentGraph);
+    };
+    reverify_local_component_base(compatibility, evidence, manifest_bytes, kernel, tar)?;
+    compose_local_workload_tree(
+        manifest_bytes,
+        kernel,
+        tar,
+        compatibility.descriptor().arch(),
+        compatibility.descriptor().profile(),
+        &[],
+    )
+}
+
+fn check_graph_requirements(
+    source: &ComponentGraphBase<'_>,
+    requirements: &mvm_core::registry_pack::application_component::ComponentRequirements,
+    arch: GuestArch,
+) -> Result<(), RuntimeLayerStageError> {
+    match source {
+        ComponentGraphBase::Production { compatibility, .. } => {
+            compatibility.check_component_requirements(requirements, arch)?;
+        }
+        ComponentGraphBase::Development { compatibility, .. } => {
+            compatibility.check_component_requirements(requirements, arch)?;
+        }
+    }
+    Ok(())
+}
+
+fn graph_pin(requested: &SignedPackPin) -> Result<PackPin, RuntimeLayerStageError> {
+    let reference = format!("{}@{}", requested.name, requested.version)
+        .parse()
+        .map_err(|_| RuntimeLayerStageError::ComponentGraph)?;
+    let digest = Sha256Hex::new(&requested.manifest_sha256)
+        .map_err(|_| RuntimeLayerStageError::ComponentGraph)?;
+    PackPin::new(reference, digest).map_err(|_| RuntimeLayerStageError::ComponentGraph)
+}
+
+fn dependencies_before(dependencies: &[PackPin], preceding: &[PackPin]) -> bool {
+    dependencies.iter().all(|pin| preceding.contains(pin))
+}
+
+fn apply_component_archive(
+    tree: &mut ComposedRuntimeLayers,
+    mut archive: std::fs::File,
+    expected: &Sha256Hex,
+    role: TarRole,
+) -> Result<(), RuntimeLayerStageError> {
+    let size = archive.metadata()?.len();
+    if mvm_core::crypto::image_verify::sha256_reader(&mut archive)? != expected.as_str() {
+        return Err(RuntimeLayerStageError::ComponentDigest);
+    }
+    archive.seek(SeekFrom::Start(0))?;
+    let mut magic = [0; 2];
+    archive.read_exact(&mut magic)?;
+    archive.seek(SeekFrom::Start(0))?;
+    if magic == [0x1f, 0x8b] {
+        let mut tar = tempfile::tempfile()?;
+        decompress_single_gzip(io::BufReader::new(archive), size, &mut tar)?;
+        tar.seek(SeekFrom::Start(0))?;
+        tree.apply_tar(&mut tar, role)?;
+    } else {
+        tree.apply_tar(&mut archive, role)?;
+    }
+    Ok(())
 }
 
 /// Verify revocation and snapshot custody around strict, bounded extraction.
@@ -1216,6 +1525,109 @@ mod tests {
     }
 
     #[test]
+    fn component_archive_refuses_tamper_before_extraction() {
+        use std::io::Write as _;
+
+        let bytes = archive(&[("bin/tool", b"trusted", tar::EntryType::Regular, 0o755)]);
+        let mut snapshot = tempfile::tempfile().unwrap();
+        snapshot.write_all(&bytes).unwrap();
+        snapshot.rewind().unwrap();
+        let mut accepted = ComposedRuntimeLayers::new(Vec::new()).unwrap();
+        apply_component_archive(
+            &mut accepted,
+            snapshot.try_clone().unwrap(),
+            &Sha256Hex::from_bytes(&bytes),
+            TarRole::Runtime,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(accepted.root().join("bin/tool")).unwrap(),
+            b"trusted"
+        );
+        snapshot.rewind().unwrap();
+        let mut tree = ComposedRuntimeLayers::new(Vec::new()).unwrap();
+        let wrong = Sha256Hex::from_bytes(b"different signed archive");
+        assert!(matches!(
+            apply_component_archive(&mut tree, snapshot, &wrong, TarRole::Runtime),
+            Err(RuntimeLayerStageError::ComponentDigest)
+        ));
+        assert!(!tree.root().join("bin/tool").exists());
+    }
+
+    #[test]
+    fn component_accepts_digest_pinned_gzip_without_an_extension_rule() {
+        use std::io::Write as _;
+
+        let raw = archive(&[("bin/tool", b"compressed", tar::EntryType::Regular, 0o755)]);
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&raw).unwrap();
+        let gzip = encoder.finish().unwrap();
+        let mut snapshot = tempfile::tempfile().unwrap();
+        snapshot.write_all(&gzip).unwrap();
+        snapshot.rewind().unwrap();
+        let mut tree = ComposedRuntimeLayers::new(Vec::new()).unwrap();
+        apply_component_archive(
+            &mut tree,
+            snapshot,
+            &Sha256Hex::from_bytes(&gzip),
+            TarRole::Runtime,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(tree.root().join("bin/tool")).unwrap(),
+            b"compressed"
+        );
+    }
+
+    #[test]
+    fn component_dependencies_require_exact_preceding_manifest_pins() {
+        let reference = "runtime/python@1.0.0".parse().unwrap();
+        let pinned = PackPin::new(reference, Sha256Hex::from_bytes(b"trusted manifest")).unwrap();
+        let drift = PackPin::new(
+            pinned.reference().clone(),
+            Sha256Hex::from_bytes(b"different manifest"),
+        )
+        .unwrap();
+        assert!(!dependencies_before(std::slice::from_ref(&pinned), &[]));
+        assert!(!dependencies_before(
+            std::slice::from_ref(&pinned),
+            &[drift]
+        ));
+        assert!(dependencies_before(
+            std::slice::from_ref(&pinned),
+            std::slice::from_ref(&pinned)
+        ));
+    }
+
+    #[test]
+    fn ordered_components_refuse_leaf_and_directory_mode_collisions() {
+        let mut tree = ComposedRuntimeLayers::new(Vec::new()).unwrap();
+        let first = archive(&[
+            ("usr", b"", tar::EntryType::Directory, 0o755),
+            ("usr/bin/tool", b"first", tar::EntryType::Regular, 0o755),
+        ]);
+        tree.add_tar(&mut Cursor::new(first)).unwrap();
+        let overlapping = archive(&[("usr/bin/tool", b"second", tar::EntryType::Regular, 0o755)]);
+        assert!(matches!(
+            tree.add_tar(&mut Cursor::new(overlapping)),
+            Err(RuntimeLayerStageError::Collision(_))
+        ));
+        let changed_mode = archive(&[
+            ("usr", b"", tar::EntryType::Directory, 0o777),
+            ("usr/bin/other", b"other", tar::EntryType::Regular, 0o755),
+        ]);
+        assert!(matches!(
+            tree.add_tar(&mut Cursor::new(changed_mode)),
+            Err(RuntimeLayerStageError::Collision(_))
+        ));
+        assert_eq!(
+            std::fs::read(tree.root().join("usr/bin/tool")).unwrap(),
+            b"first"
+        );
+        assert!(!tree.root().join("usr/bin/other").exists());
+    }
+
+    #[test]
     fn runtime_tar_refuses_changes_to_earlier_layers_and_boot() {
         for path in [
             ".wh.bin",
@@ -1544,6 +1956,200 @@ mod tests {
             .is_err(),
             "a release claim cannot enter the local lane"
         );
+    }
+
+    #[test]
+    fn component_graph_local_base_is_development_and_rejects_mismatches_and_tampering() {
+        use crate::published_image_set::fixture::ImageSetFixture;
+        use mvm_core::image_set::base_compatibility::verify_development_base_compatibility;
+        use mvm_core::image_set::{
+            BaseImageContract, BuilderBootAbi, GuestDeviceRequirement, ImageSetProducer,
+            ImageSetRole, LocalCheckouts, MemberArtifact, MemberTarget,
+        };
+        use mvm_core::registry_pack::application_component::ComponentRequirements;
+
+        let directory = tempfile::tempdir().unwrap();
+        let arch = GuestArch::host();
+        let profile = WorkloadImageProfile::DefaultTenant;
+        let mut kernel_bytes = vec![0; mvm_core::kernel_format::KernelFormat::SNIFF_LEN];
+        match arch {
+            GuestArch::X86_64 => {
+                kernel_bytes[..4].copy_from_slice(b"\x7fELF");
+                kernel_bytes[18..20].copy_from_slice(&62u16.to_le_bytes());
+            }
+            GuestArch::Aarch64 => {
+                kernel_bytes[56..60].copy_from_slice(&0x644D_5241u32.to_le_bytes());
+            }
+        }
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, &base_tar(b"1\n", 901)).unwrap();
+        let tar_bytes = encoder.finish().unwrap();
+        let kernel = directory.path().join("local-vmlinux");
+        let tar = directory.path().join("local-rootfs.tar.gz");
+        std::fs::write(&kernel, &kernel_bytes).unwrap();
+        std::fs::write(&tar, &tar_bytes).unwrap();
+        std::fs::write(directory.path().join("local-rootfs.ext4"), b"ext4").unwrap();
+        let current: LocalCheckouts = serde_json::from_value(serde_json::json!({
+            "images": {"commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "worktree": {"state": "clean"}}
+        }))
+        .unwrap();
+        let mut manifest = ImageSetFixture::complete()
+            .with_base_image_contract(Some(BaseImageContract::LINUX_LAYER))
+            .publish(
+                ImageSetRole::WorkloadKernel(profile),
+                MemberTarget::Arch(arch),
+                "local-vmlinux",
+                kernel_bytes.clone(),
+            )
+            .publish(
+                ImageSetRole::WorkloadRootfs(profile),
+                MemberTarget::Arch(arch),
+                "local-rootfs.ext4",
+                b"ext4".to_vec(),
+            )
+            .into_manifest();
+        manifest.members.retain(|member| {
+            member.target == MemberTarget::Arch(arch)
+                && (member.role == ImageSetRole::WorkloadKernel(profile)
+                    || member.role == ImageSetRole::WorkloadRootfs(profile))
+        });
+        manifest.schema_version = mvm_core::image_set::IMAGE_SET_SCHEMA_VERSION;
+        manifest.producer = ImageSetProducer::LocalCheckouts(current.clone());
+        manifest.mvm_source_commit = None;
+        manifest.revocation_channel = None;
+        manifest.compatibility.guest_agent_protocol = None;
+        manifest.compatibility.builder_boot_abi = Some(BuilderBootAbi::NO_MVM_BINARY);
+        for member in &mut manifest.members {
+            member.pack_hash = None;
+            member.sbom = None;
+            match member.role {
+                ImageSetRole::WorkloadKernel(_) => {
+                    member.required_capabilities = vec![GuestDeviceRequirement::VirtioVsock];
+                }
+                ImageSetRole::WorkloadRootfs(_) => {
+                    member.required_capabilities = vec![GuestDeviceRequirement::VirtioBlk];
+                    member.artifacts.push(MemberArtifact {
+                        name: mvm_core::image_set::ArtifactName::new("local-rootfs.tar.gz")
+                            .unwrap(),
+                        format: ArtifactFormat::TarGz,
+                        sha256: Sha256Hex::from_bytes(&tar_bytes),
+                        size: tar_bytes.len() as u64,
+                    });
+                }
+                _ => unreachable!(),
+            }
+        }
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let descriptor_bytes = serde_json::to_vec(&serde_json::json!({
+            "schema": "base-compatibility/v1",
+            "image_set_manifest_sha256": Sha256Hex::from_bytes(&manifest_bytes),
+            "arch": if arch == GuestArch::X86_64 { "x86_64" } else { "aarch64" },
+            "profile": "default_tenant",
+            "kernel": {"name": "local-vmlinux", "sha256": Sha256Hex::from_bytes(&kernel_bytes), "size": kernel_bytes.len()},
+            "composition_tar": {"name": "local-rootfs.tar.gz", "sha256": Sha256Hex::from_bytes(&tar_bytes), "size": tar_bytes.len()},
+            "base_image_contract": 1, "boot_protocol": "linux_direct", "filesystem_abi": 1,
+            "kernel_version": "6.12.3",
+            "libc_loaders": [{"libc": "musl", "path": if arch == GuestArch::X86_64 { "/lib/ld-musl-x86_64.so.1" } else { "/lib/ld-musl-aarch64.so.1" }}],
+            "kernel_capabilities": ["virtio_vsock"]
+        }))
+        .unwrap();
+        let evidence =
+            LocalImageSetVerification::new(&manifest_bytes, directory.path(), &current, arch);
+        let compatibility =
+            verify_development_base_compatibility(&descriptor_bytes, &evidence, arch, profile)
+                .unwrap();
+        let source = ComponentGraphBase::Development {
+            compatibility: &compatibility,
+            evidence: &evidence,
+            manifest_bytes: &manifest_bytes,
+            kernel: &kernel,
+            tar: &tar,
+        };
+        let base = compose_local_component_base(&source).unwrap();
+        assert_eq!(
+            std::fs::read(base.root().join("usr/bin/sh")).unwrap(),
+            b"busybox"
+        );
+        assert_eq!(
+            base.base_manifest_sha256(),
+            &Sha256Hex::from_bytes(&manifest_bytes)
+        );
+        let requirements = ComponentRequirements {
+            filesystem_abi: 1,
+            libc: "musl".into(),
+            loader: Some(
+                if arch == GuestArch::X86_64 {
+                    "/lib/ld-musl-x86_64.so.1"
+                } else {
+                    "/lib/ld-musl-aarch64.so.1"
+                }
+                .into(),
+            ),
+            minimum_kernel: "6.12.3".into(),
+            required_capabilities: vec!["virtio_vsock".into()],
+        };
+        check_graph_requirements(&source, &requirements, arch).unwrap();
+        let mut incompatible = requirements.clone();
+        incompatible.minimum_kernel = "6.12.4".into();
+        assert!(matches!(
+            check_graph_requirements(&source, &incompatible, arch),
+            Err(RuntimeLayerStageError::ComponentBase(_))
+        ));
+
+        let wrong_manifest = b"another image set";
+        assert!(matches!(
+            reverify_local_component_base(&compatibility, &evidence, wrong_manifest, &kernel, &tar),
+            Err(RuntimeLayerStageError::ComponentGraph)
+        ));
+        let alternate_kernel = directory.path().join("alternate-vmlinux");
+        std::fs::write(&alternate_kernel, &kernel_bytes).unwrap();
+        assert!(matches!(
+            reverify_local_component_base(
+                &compatibility,
+                &evidence,
+                &manifest_bytes,
+                &alternate_kernel,
+                &tar
+            ),
+            Err(RuntimeLayerStageError::ComponentGraph)
+        ));
+        let alternate_tar = directory.path().join("alternate-rootfs.tar.gz");
+        std::fs::write(&alternate_tar, &tar_bytes).unwrap();
+        assert!(matches!(
+            reverify_local_component_base(
+                &compatibility,
+                &evidence,
+                &manifest_bytes,
+                &kernel,
+                &alternate_tar
+            ),
+            Err(RuntimeLayerStageError::ComponentGraph)
+        ));
+        let changed_checkout: LocalCheckouts = serde_json::from_value(serde_json::json!({
+            "images": {"commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "worktree": {"state": "clean"}}
+        }))
+        .unwrap();
+        let stale_evidence = LocalImageSetVerification::new(
+            &manifest_bytes,
+            directory.path(),
+            &changed_checkout,
+            arch,
+        );
+        assert!(matches!(
+            reverify_local_component_base(
+                &compatibility,
+                &stale_evidence,
+                &manifest_bytes,
+                &kernel,
+                &tar
+            ),
+            Err(RuntimeLayerStageError::ComponentBase(_))
+        ));
+        std::fs::write(&tar, b"tampered").unwrap();
+        assert!(matches!(
+            compose_local_component_base(&source),
+            Err(RuntimeLayerStageError::ComponentBase(_))
+        ));
     }
 
     #[test]

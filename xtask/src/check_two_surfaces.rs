@@ -26,7 +26,7 @@ const SURFACES: [&str; 2] = ["host", "user"];
 /// forwards are inlined in the root Cargo.toml); what remains here is `default`
 /// plus platform/storage opt-ins that genuinely cannot always be on. Keep this
 /// list tiny — a new entry is a conscious "this cannot live in a surface".
-const INTERNAL: [&str; 10] = [
+const INTERNAL: [&str; 12] = [
     "default",
     // Platform-native caller custody; included by the user product surface.
     "native-caller-identity",
@@ -47,6 +47,10 @@ const INTERNAL: [&str; 10] = [
     // Dev/test-only: the hermetic in-memory mock VM backend. Never part of a
     // shipped binary; only this workspace's own test suite turns it on.
     "test-support",
+    // PR-only signed runtime fixtures; normal and release-channel builds refuse them.
+    "pr-test-guest-runtime",
+    // PR-only authenticated base fixture; its output remains host-local Dev.
+    "pr-test-synthetic-base",
 ];
 
 /// A couple of release/build-only flags are allowed but explicitly *not* part of

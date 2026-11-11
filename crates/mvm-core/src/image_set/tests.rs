@@ -442,7 +442,7 @@ fn manifest_at(set_version: &str) -> ImageSetManifest {
     }
 }
 
-fn manifest() -> ImageSetManifest {
+pub(super) fn manifest() -> ImageSetManifest {
     manifest_at("1.0.0")
 }
 
@@ -557,7 +557,7 @@ fn digest(manifest: &ImageSetManifest) -> Sha256Hex {
     Sha256Hex::from_bytes(&serde_json::to_vec(manifest).unwrap())
 }
 
-fn lock_for(manifest: &ImageSetManifest) -> ImageLock {
+pub(super) fn lock_for(manifest: &ImageSetManifest) -> ImageLock {
     let release_tag = release(manifest).release_tag.clone();
     ImageLock {
         schema_version: IMAGE_LOCK_SCHEMA_VERSION,

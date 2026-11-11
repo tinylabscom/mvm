@@ -7,6 +7,8 @@ on:
       - scripts/build-python-runtime-layer.py
       - scripts/test_build_python_runtime_layer.py
       - crates/mvm-build/src/runtime_layer.rs
+      - crates/mvm-build/src/pr_test_synthetic_base.rs
+      - crates/mvm-cli/src/commands/vm/exec.rs
       - crates/mvm-cli/src/commands/vm/exec/**
       - crates/mvm-hostd/src/plan_admission/composition.rs
       - crates/mvm-contract/src/plan/bundle.rs
@@ -46,7 +48,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: sigstore/cosign-installer@v3
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: mvm-guest-bins-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/pr-runtime
@@ -69,6 +71,43 @@ jobs:
             -- --ignored --exact
           cargo test --locked -p mvm-client --features pr-test-guest-runtime --lib \
             portable_boot_assets::tests::pr_test_local_acquisition_checks_assembled_runtime_independently \
+            -- --ignored --exact
+      - name: Retain synthetic PR quartet for a builder-VM CLI witness
+        uses: actions/upload-artifact@v7
+        with:
+          name: pr-test-guest-runtime-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pr-runtime/mvm-guest-bins-v*.tar.gz*
+          if-no-files-found: error
+          retention-days: 1
+
+  signed-pr-base-input:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: sigstore/cosign-installer@v3
+      - name: Authenticate only the PR's nonbootable synthetic base input
+        env:
+          MVM_EMBED: "0"
+          MVM_PR_TEST_BASE_DIR: ${{ runner.temp }}/pr-base
+          MVM_PR_TEST_PULL_REQUEST: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          cargo test --locked -p mvm-build --features pr-test-synthetic-base --lib \
+            pr_test_synthetic_base::tests::write_synthetic_pr_base_fixture_for_ci \
+            -- --ignored --exact
+          cosign sign-blob --yes --new-bundle-format \
+            --bundle "$MVM_PR_TEST_BASE_DIR/image-set.bundle" \
+            "$MVM_PR_TEST_BASE_DIR/image-set.json"
+          cargo test --locked -p mvm-build --features pr-test-synthetic-base --lib \
+            pr_test_synthetic_base::tests::real_pr_signature_accepts_only_unchanged_exact_identity \
             -- --ignored --exact
 
   signed-input:

@@ -179,6 +179,7 @@ pr-test-guest-runtime = [
     "mvm-client/pr-test-guest-runtime",
     "mvm-hostd/pr-test-guest-runtime",
 ]
+pr-test-synthetic-base = ["mvm-build/pr-test-synthetic-base"]
 template-registry-s3 = ["mvm-runtime/template-registry-s3"]
 # Forwards to `mvm-runtime/test-support` + `mvm-client/test-support`: the
 # hermetic in-memory `MockBackend` and the `--hypervisor mock` fast paths in

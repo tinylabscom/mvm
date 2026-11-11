@@ -24,6 +24,10 @@ use super::host_signer::{host_signer_id, load_or_init};
 
 pub(in crate::commands) mod application_source;
 mod composition;
+mod composition_request;
+pub(in crate::commands) use composition_request::SdkTransportArgs;
+#[cfg(test)]
+pub(in crate::commands) use composition_request::validate_composition_request;
 pub(in crate::commands) mod detect;
 mod image_source;
 pub(in crate::commands) mod positional_source;
@@ -430,63 +434,6 @@ const PLAN_EXCLUDES: [&str; 12] = [
     "secret",
 ];
 
-/// The SDK transport surface, carried by `mvmctl run` alone.
-///
-/// These are kept out of [`RunArgs`] deliberately. `RunArgs` is flattened into
-/// both `run` and `machine run` so a shared flag is declared exactly once;
-/// `--mode`/`--dev`/`--ack-divergence` are not shared — `machine run` is the
-/// beginner contract and has no business growing an SDK transport — so putting
-/// them here is what lets the rest be flattened.
-#[derive(ClapArgs, Debug, Clone, Default)]
-pub(in crate::commands) struct SdkTransportArgs {
-    /// Assemble a signed, digest-pinned pack recipe and run its entrypoint.
-    #[arg(long = "compose", value_name = "PACK.TOML", conflicts_with_all = ["mode", "dev"])]
-    pub compose: Option<PathBuf>,
-    /// Select the locked signed default or an explicitly supplied local base.
-    #[arg(long = "compose-base", value_enum, requires = "compose")]
-    pub compose_base: Option<ComposeBase>,
-    /// Local schema-3 image-set manifest declaring the selected kernel and tar.
-    #[arg(long = "compose-base-manifest", requires_all = ["compose", "compose_base_kernel", "compose_base_tar"])]
-    pub compose_base_manifest: Option<PathBuf>,
-    /// Kernel declared by the local image-set manifest.
-    #[arg(long = "compose-base-kernel", requires_all = ["compose", "compose_base_manifest", "compose_base_tar"])]
-    pub compose_base_kernel: Option<PathBuf>,
-    /// Composition tar declared by the local image-set manifest (not its ext4).
-    #[arg(long = "compose-base-tar", requires_all = ["compose", "compose_base_manifest", "compose_base_kernel"])]
-    pub compose_base_tar: Option<PathBuf>,
-    /// Test-only, keyless-signed PR runtime quartet directory; requires local development.
-    #[cfg(feature = "pr-test-guest-runtime")]
-    #[arg(long = "compose-pr-test-runtime-dir", requires_all = ["compose", "compose_pr_test_pull_request"])]
-    pub compose_pr_test_runtime_dir: Option<PathBuf>,
-    /// Exact PR whose workflow signed the runtime input, never a release identity.
-    #[cfg(feature = "pr-test-guest-runtime")]
-    #[arg(long = "compose-pr-test-pull-request", requires_all = ["compose", "compose_pr_test_runtime_dir"])]
-    pub compose_pr_test_pull_request: Option<u64>,
-    /// SDK transport mode for `mvmctl run`.
-    ///
-    /// - `--mode plan`: synthesize an ExecutionPlan per Sandbox call
-    ///   and route through `mvm_hostd::supervisor::admit_for_run`; no
-    ///   microVM ever boots.
-    /// - `--mode live`: spawn the user's script with `MVM_SDK_MODE=live`
-    ///   so the SDK shells each `Sandbox` operation to existing
-    ///   `mvmctl` verbs against a real microVM.
-    /// - `--mode record` redirects users to `mvmctl dev compile` (where
-    ///   record is the default mode).
-    ///
-    /// When unset, the verb behaves as a transient-sandbox runner
-    /// over the trailing argv.
-    #[arg(long = "mode", value_enum)]
-    pub mode: Option<RunMode>,
-    /// Friendly alias for `--mode live`.
-    #[arg(long = "dev", conflicts_with_all = ["prod", "mode"])]
-    pub dev: bool,
-    /// Acknowledge a divergence class on the plan-mode admission
-    /// path (repeatable). Unacknowledged divergence refuses
-    /// admission: what you previewed is not what would ship.
-    #[arg(long = "ack-divergence", value_name = "KIND")]
-    pub ack_divergence: Vec<String>,
-}
-
 /// `mvmctl run` — `machine run`, plus the SDK transport only `run` carries.
 #[derive(ClapArgs, Debug, Clone, Default)]
 pub(in crate::commands) struct RunVerbArgs {
@@ -612,72 +559,7 @@ pub(in crate::commands) fn run_verb(
     mut args: RunVerbArgs,
     cfg: &MvmConfig,
 ) -> Result<()> {
-    let composition = if let Some(path) = args.sdk.compose.take() {
-        validate_composition_request(&args.machine)?;
-        let base = match args.sdk.compose_base {
-            Some(ComposeBase::Local) => {
-                let (Some(manifest), Some(kernel), Some(tar)) = (
-                    args.sdk.compose_base_manifest.as_deref(),
-                    args.sdk.compose_base_kernel.as_deref(),
-                    args.sdk.compose_base_tar.as_deref(),
-                ) else {
-                    anyhow::bail!(
-                        "--compose-base local requires --compose-base-manifest, --compose-base-kernel and --compose-base-tar"
-                    );
-                };
-                #[cfg(feature = "pr-test-guest-runtime")]
-                let pr_test = match (
-                    args.sdk.compose_pr_test_runtime_dir.as_deref(),
-                    args.sdk.compose_pr_test_pull_request,
-                ) {
-                    (Some(directory), Some(pull_request)) => {
-                        anyhow::ensure!(
-                            pull_request > 0
-                                && args.machine.run.profile == RunProfile::Dev
-                                && !args.machine.run.prod,
-                            "PR test runtime requires --compose-base local, --profile dev and no --prod"
-                        );
-                        Some(composition::PrTestInput {
-                            directory,
-                            pull_request,
-                        })
-                    }
-                    (None, None) => None,
-                    _ => anyhow::bail!(
-                        "PR test runtime requires both the quartet directory and pull request"
-                    ),
-                };
-                composition::Base::Local {
-                    manifest,
-                    kernel,
-                    tar,
-                    #[cfg(feature = "pr-test-guest-runtime")]
-                    pr_test,
-                }
-            }
-            Some(ComposeBase::SignedDefault) | None => {
-                #[cfg(feature = "pr-test-guest-runtime")]
-                anyhow::ensure!(
-                    args.sdk.compose_pr_test_runtime_dir.is_none()
-                        && args.sdk.compose_pr_test_pull_request.is_none(),
-                    "PR test runtime requires --compose-base local"
-                );
-                anyhow::ensure!(
-                    args.sdk.compose_base_manifest.is_none()
-                        && args.sdk.compose_base_kernel.is_none()
-                        && args.sdk.compose_base_tar.is_none(),
-                    "local base paths require --compose-base local"
-                );
-                composition::Base::SignedDefault
-            }
-        };
-        let built = composition::prepare(&path, base)?;
-        args.machine.run.manifest = Some(built.archive().to_string_lossy().into_owned());
-        args.machine.entrypoint = true;
-        Some(built)
-    } else {
-        None
-    };
+    let composition = composition_request::prepare_composition(&mut args)?;
     let run = &mut args.machine.run;
     // Checked before the script is moved into argv below: a script path never
     // looks like a flag, so it would hide a misplaced one behind it.
@@ -694,31 +576,6 @@ pub(in crate::commands) fn run_verb(
     let result = crate::commands::machine::run_dispatch(cli, args.machine, cfg);
     drop(composition);
     result
-}
-
-pub(in crate::commands) fn validate_composition_request(
-    machine: &crate::commands::machine::MachineRunArgs,
-) -> Result<()> {
-    let run = &machine.run;
-    anyhow::ensure!(
-        run.source.is_none()
-            && run.application.is_none()
-            && run.image.is_none()
-            && run.manifest.is_none()
-            && run.flake.is_none()
-            && run.deployment.is_none()
-            && run.runtime.is_none()
-            && !run.runtime_pack
-            && !run.prod
-            && !run.dry_run
-            && run.launch_plan.is_none()
-            && run.argv.is_empty()
-            && !machine.interactive()
-            && !machine.persistent()
-            && !machine.attach,
-        "--compose requires an unambiguous transient development run without another boot source or command"
-    );
-    Ok(())
 }
 
 /// Run a transient workload through the admitted path from the instant launch

@@ -21,6 +21,7 @@ use crate::arch::GuestArch;
 use crate::kernel_format::KernelFormat;
 use crate::packs::{FlakeLockIdentity, SbomReference, Sha256Hex, SourceRevisionIdentity};
 
+pub mod base_compatibility;
 mod base_contract;
 mod boot_abi;
 mod checkout;

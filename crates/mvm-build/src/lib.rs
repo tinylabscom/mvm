@@ -4,6 +4,9 @@
 //! Non-Unix hosts can observe repositories and produce/verify local manifests.
 //! They do not expose a VM launcher or a fallback implementation of one.
 
+#[cfg(all(feature = "pr-test-synthetic-base", feature = "release-channel"))]
+compile_error!("pr-test-synthetic-base is unavailable with release-channel");
+
 pub mod artifact_acquisition;
 pub mod base_image_contract;
 pub mod build_cache;
@@ -16,6 +19,8 @@ pub mod embed_toolchain;
 pub use mvm_builder_guest::host_payload_manifest;
 pub mod image_protocol;
 pub mod image_source;
+#[cfg(all(unix, feature = "pr-test-synthetic-base"))]
+pub mod pr_test_synthetic_base;
 pub mod source_closure;
 mod source_copy;
 pub mod workspace_graph;

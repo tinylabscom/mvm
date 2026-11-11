@@ -134,6 +134,7 @@ const DEFAULT_TENANT: TargetContract = TargetContract {
     files: &[
         kernel("vmlinux", "default_tenant_workload_kernel"),
         file("rootfs.ext4", "default_tenant_workload_rootfs", "ext4"),
+        file("rootfs.tar.gz", "default_tenant_workload_rootfs", "tar_gz"),
         file(
             "rootfs.verity",
             "default_tenant_workload_rootfs",
@@ -181,6 +182,7 @@ const ROOTLESS_TENANT: TargetContract = TargetContract {
     files: &[
         kernel("vmlinux", "rootless_tenant_workload_kernel"),
         file("rootfs.ext4", "rootless_tenant_workload_rootfs", "ext4"),
+        file("rootfs.tar.gz", "rootless_tenant_workload_rootfs", "tar_gz"),
         file(
             "rootfs.verity",
             "rootless_tenant_workload_rootfs",
@@ -1075,6 +1077,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn sealed_local_bases_carry_the_composition_tar_but_dev_roots_do_not() {
+        for role in [
+            ImageBuildRole::DefaultTenant,
+            ImageBuildRole::RootlessTenant,
+        ] {
+            let files = contract_for(&target(role, "default")).unwrap().files;
+            assert!(
+                files.iter().any(|output| *output
+                    == file(
+                        "rootfs.tar.gz",
+                        if role == ImageBuildRole::DefaultTenant {
+                            "default_tenant_workload_rootfs"
+                        } else {
+                            "rootless_tenant_workload_rootfs"
+                        },
+                        "tar_gz"
+                    )),
+                "{role} sealed output must bind the exact tar"
+            );
+        }
+        let dev = contract_for(&target(ImageBuildRole::DefaultTenant, "dev"))
+            .unwrap()
+            .files;
+        assert!(
+            dev.iter().all(|output| output.name != "rootfs.tar.gz"),
+            "unsealed dev output must not imply a composition tar"
+        );
     }
 
     /// The builder-vm set is installed into the builder-VM cache, which

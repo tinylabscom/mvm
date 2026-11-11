@@ -14,6 +14,9 @@
 use std::path::{Path, PathBuf};
 
 use mvm_contract::protocol::vm_backend::BackendKind;
+use mvm_core::registry_pack::AuthenticatedRegistryManifest;
+use mvm_core::registry_pack::application_component::VerifiedApplicationComponentInputs;
+use mvm_core::registry_pack::component_layer::VerifiedComponentLayerInputs;
 
 use super::merge::{Layer, ResolvedPolicy, merge_layers};
 use super::model::{GroupFile, HostArch, HostOs, PolicyBody, ProfileFile, WhenBlock};
@@ -222,6 +225,193 @@ pub fn resolve(
     let mut resolved = merge_layers(&layers)?;
     resolved.backend_conditioned = backend_conditioned;
     Ok(resolved)
+}
+
+/// A held, publisher-authenticated pack snapshot; raw policy bytes are not accepted here.
+#[derive(Debug, Clone, Copy)]
+pub enum VerifiedPolicyInputs<'a> {
+    /// Schema 3 application component.
+    Application(&'a VerifiedApplicationComponentInputs),
+    /// Schema 4 runtime or tool component.
+    Component(&'a VerifiedComponentLayerInputs),
+}
+
+/// Interpret one signed pack's policy *request*, without granting it host authority.
+///
+/// Only self-contained documents are supported: every external profile or group
+/// reference is refused, even when a conditional block would not match. A caller
+/// must separately enforce host authorization before admitting any requested grant.
+///
+/// # Errors
+///
+/// Refuses stale or changed verified inputs, malformed documents, references,
+/// and policy requests rejected by [`merge_layers`].
+pub fn resolve_verified_policy(
+    inputs: VerifiedPolicyInputs<'_>,
+    platform: Platform,
+) -> Result<ResolvedPolicy, PolicyError> {
+    resolve_verified_policies(&[inputs], platform)
+}
+
+/// Merge an ordered graph of signed pack policy requests in one pass.
+///
+/// Inputs must be supplied in graph order. This is not a host grant: callers
+/// must separately enforce host authorization for the resulting requests.
+///
+/// # Errors
+///
+/// Refuses any stale or changed input, unresolved reference, malformed document,
+/// or policy conflict across packs.
+pub fn resolve_verified_policies(
+    inputs: &[VerifiedPolicyInputs<'_>],
+    platform: Platform,
+) -> Result<ResolvedPolicy, PolicyError> {
+    let mut layers = Vec::new();
+    let mut backend_conditioned = false;
+    for input in inputs {
+        let (reference, pin, group, profile) = match input {
+            VerifiedPolicyInputs::Application(inputs) => {
+                inputs
+                    .reverify()
+                    .map_err(|error| PolicyError::new("pack", error.to_string()))?;
+                let descriptor = inputs.descriptor();
+                (
+                    descriptor.reference().to_string(),
+                    descriptor.manifest_sha256().as_str().to_string(),
+                    inputs.group(),
+                    inputs.profile(),
+                )
+            }
+            VerifiedPolicyInputs::Component(inputs) => {
+                inputs
+                    .reverify()
+                    .map_err(|error| PolicyError::new("pack", error.to_string()))?;
+                let descriptor = inputs.descriptor();
+                (
+                    descriptor.reference().to_string(),
+                    descriptor.manifest_sha256().as_str().to_string(),
+                    inputs.group(),
+                    inputs.profile(),
+                )
+            }
+        };
+        append_signed_documents(
+            &reference,
+            &pin,
+            group,
+            profile,
+            platform,
+            &mut layers,
+            &mut backend_conditioned,
+        )?;
+    }
+    let mut resolved = merge_layers(&layers)?;
+    resolved.backend_conditioned = backend_conditioned;
+    Ok(resolved)
+}
+
+fn append_signed_documents(
+    reference: &str,
+    pin: &str,
+    group: Option<&[u8]>,
+    profile: Option<&[u8]>,
+    platform: Platform,
+    layers: &mut Vec<Layer>,
+    backend_conditioned: &mut bool,
+) -> Result<(), PolicyError> {
+    let label = format!("pack `{reference}` manifest sha256:{pin}");
+    let group: Option<GroupFile> = group
+        .map(|bytes| parse_signed_document(bytes, &format!("{label} group")))
+        .transpose()?;
+    let profile: Option<ProfileFile> = profile
+        .map(|bytes| parse_signed_document(bytes, &format!("{label} profile")))
+        .transpose()?;
+    if let Some(group) = group {
+        layers.push(Layer {
+            label: format!("{label} group"),
+            file: None,
+            origin: LayerOrigin::Pack,
+            body: group.body(),
+        });
+    }
+    if let Some(profile) = profile {
+        if !profile.extends.is_empty() {
+            return Err(
+                PolicyError::new(&label, "signed profile dependencies are not resolved")
+                    .at_key("extends"),
+            );
+        }
+        if !profile.groups.include.is_empty() || !profile.groups.exclude.is_empty() {
+            return Err(
+                PolicyError::new(&label, "signed group references are not resolved")
+                    .at_key("groups"),
+            );
+        }
+        for (index, when) in profile.when.iter().enumerate() {
+            if !when.include.is_empty() || !when.exclude.is_empty() {
+                return Err(PolicyError::new(
+                    &label,
+                    "signed conditional group references are not resolved",
+                )
+                .at_key(format!("when[{index}]")));
+            }
+            if !when.backend.is_empty() {
+                *backend_conditioned = true;
+            }
+            if platform.matches(when) && !when.overrides.is_empty() {
+                layers.push(Layer {
+                    label: format!("{label} when[{index}]"),
+                    file: None,
+                    origin: LayerOrigin::Pack,
+                    body: when.overrides.clone(),
+                });
+            }
+        }
+        if !profile.overrides.is_empty() {
+            layers.push(Layer {
+                label: format!("{label} overrides"),
+                file: None,
+                origin: LayerOrigin::Pack,
+                body: profile.overrides,
+            });
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn resolve_signed_documents(
+    reference: &str,
+    pin: &str,
+    group: Option<&[u8]>,
+    profile: Option<&[u8]>,
+    platform: Platform,
+) -> Result<ResolvedPolicy, PolicyError> {
+    let mut layers = Vec::new();
+    let mut backend_conditioned = false;
+    append_signed_documents(
+        reference,
+        pin,
+        group,
+        profile,
+        platform,
+        &mut layers,
+        &mut backend_conditioned,
+    )?;
+    let mut resolved = merge_layers(&layers)?;
+    resolved.backend_conditioned = backend_conditioned;
+    Ok(resolved)
+}
+
+fn parse_signed_document<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+    label: &str,
+) -> Result<T, PolicyError> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|error| PolicyError::new(label, format!("invalid UTF-8: {error}")))?;
+    DocFormat::Toml
+        .parse(text)
+        .map_err(|error| PolicyError::new(label, error))
 }
 
 /// Resolve a single file that is a profile or, failing that, a group, as a

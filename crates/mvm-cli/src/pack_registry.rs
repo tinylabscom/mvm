@@ -19,14 +19,20 @@ use mvm_core::registry_pack::application_bundle::{
     ApplicationInstallStore, InstalledRegistryApplication, install_application_bundle,
     verify_application_bundle,
 };
+use mvm_core::registry_pack::application_component::{
+    ComponentArchive, VerifiedApplicationComponentInputs, verify_application_component_inputs,
+};
+use mvm_core::registry_pack::component_layer::{
+    VerifiedComponentLayerInputs, verify_component_layer_inputs,
+};
 use mvm_core::registry_pack::runtime_layer::{
     VerifiedRuntimeLayerInputs, verify_runtime_layer_inputs,
 };
 use mvm_core::registry_pack::{
     AuthenticatedRegistryManifest, InstalledRegistryPack, PackAdoption, PackLockfile, PackPin,
-    PackReference, RegistryPackImage, RegistryPackVerification, VerifiedRegistryApplication,
-    VerifiedRegistryManifest, VerifiedRegistryPack, adopt_registry_manifest,
-    verify_registry_manifest,
+    PackReference, RegistryPackFile, RegistryPackImage, RegistryPackVerification,
+    VerifiedRegistryApplication, VerifiedRegistryManifest, VerifiedRegistryPack,
+    adopt_registry_manifest, verify_registry_manifest,
 };
 use mvm_core::registry_pack_store::{
     PackPolicyDocument, adopt_install_and_pin, check_registry_pack_revocations_if_configured,
@@ -141,6 +147,108 @@ pub fn acquire_runtime_layer(
     let held = verify_runtime_layer_inputs(&layer, &archive, fetched.staged_path())?;
     mvm_client::registry_pack_local::require_offline_runtime_policy(&held)?;
     Ok(held)
+}
+
+/// Private, verified component inputs; neither variant installs or admits a layer.
+#[derive(Debug)]
+pub enum AcquiredComponentInputs {
+    Application(VerifiedApplicationComponentInputs),
+    Layer(VerifiedComponentLayerInputs),
+}
+
+/// Acquire exactly the graph's signed component pin without consulting the catalog.
+///
+/// # Errors
+///
+/// Refuses drift, untrusted metadata, stale or revoked trust, unsupported
+/// sources, and any archive or policy bytes differing from the signed descriptor.
+pub fn acquire_component_inputs(
+    config: &PackRegistryConfig,
+    expected: &PackPin,
+) -> Result<AcquiredComponentInputs> {
+    let fetched = download_pack(config, expected.reference())?;
+    let policy = load_publisher_policy_or_official_default(
+        &mvm_core::config::registry_pack_publisher_policy_path(),
+    )?
+    .policy;
+    let lock = PackLockfile::new(vec![expected.clone()])?;
+    let verified = verify_registry_manifest(&RegistryPackVerification::new(
+        expected.reference(),
+        &fetched.manifest_bytes,
+        &fetched.signature_bundle,
+        &lock,
+        &policy,
+    ))?;
+    if verified.reference().namespace() == "mvm"
+        || verified.signer().identity == mvm_core::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY
+    {
+        crate::official_revocations::ensure_official_feed_fresh();
+    }
+    let (source, files) = match &verified {
+        VerifiedRegistryManifest::ApplicationComponent(component) => {
+            component.check_current_revocations()?;
+            (
+                &component.manifest().application_component.archive,
+                component.manifest().files.as_slice(),
+            )
+        }
+        VerifiedRegistryManifest::ComponentLayer(component) => {
+            component.check_current_revocations()?;
+            (
+                &component.manifest().component().archive,
+                component.manifest().files(),
+            )
+        }
+        _ => bail!("pinned pack is not an application, runtime or tool component"),
+    };
+    let archive = stage_component_inputs(config, &fetched, source, files)?;
+    match verified {
+        VerifiedRegistryManifest::ApplicationComponent(component) => {
+            Ok(AcquiredComponentInputs::Application(
+                verify_application_component_inputs(&component, &archive, fetched.staged_path())?,
+            ))
+        }
+        VerifiedRegistryManifest::ComponentLayer(component) => Ok(AcquiredComponentInputs::Layer(
+            verify_component_layer_inputs(&component, &archive, fetched.staged_path())?,
+        )),
+        _ => unreachable!("component kind was checked before staging"),
+    }
+}
+
+fn stage_component_inputs(
+    config: &PackRegistryConfig,
+    fetched: &FetchedPack,
+    source: &ComponentArchive,
+    files: &[RegistryPackFile],
+) -> Result<PathBuf> {
+    if !supported_runtime_layer_source(&source.source) {
+        bail!("component source is not a supported pinned HTTPS release asset");
+    }
+    stage_component_policies(config, fetched, files)?;
+    let archive = fetched.staged_path().join("component.tar");
+    download_payload_file(&source.source, &archive, source.archive_size, true)?;
+    Ok(archive)
+}
+
+fn stage_component_policies(
+    config: &PackRegistryConfig,
+    fetched: &FetchedPack,
+    files: &[RegistryPackFile],
+) -> Result<()> {
+    for file in files {
+        let target = fetched.staged_path().join(&file.path);
+        std::fs::create_dir_all(target.parent().context("component policy has no parent")?)?;
+        let url = pack_url(
+            config,
+            &fetched.reference,
+            &format!("{FILES_DIR}/{}", file.path),
+        );
+        download_payload_file(&url, &target, file.size, false)?;
+        if Sha256Hex::from_bytes(&std::fs::read(&target)?) != file.sha256 {
+            bail!("component policy bytes differ from signed descriptor");
+        }
+    }
+    Ok(())
 }
 
 fn supported_runtime_layer_source(source: &str) -> bool {
@@ -1076,6 +1184,82 @@ mod tests {
         };
         let fetched = download_pack(&config, &"runtime/python@1.0.0".parse().unwrap()).unwrap();
         assert_eq!(fetched.manifest_bytes, manifest);
+        assert_eq!(std::fs::read_dir(fetched.staged_path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn component_policy_staging_uses_the_exact_version_and_private_directory() {
+        let registry = tempfile::tempdir().unwrap();
+        let reference: PackReference = "runtime/python@1.0.0".parse().unwrap();
+        let pack = registry
+            .path()
+            .join("packs/runtime/python/1.0.0/files/pack");
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::write(pack.join("group.toml"), b"group = 1").unwrap();
+        let config = PackRegistryConfig {
+            registry_url: format!("file://{}", registry.path().display()),
+        };
+        let fetched = FetchedPack {
+            reference,
+            manifest_bytes: Vec::new(),
+            signature_bundle: Vec::new(),
+            staged: TempDir::new().unwrap(),
+        };
+        let file = RegistryPackFile {
+            path: "pack/group.toml".into(),
+            sha256: Sha256Hex::from_bytes(b"group = 1"),
+            size: 9,
+        };
+        stage_component_policies(&config, &fetched, std::slice::from_ref(&file)).unwrap();
+        assert_eq!(
+            std::fs::read(fetched.staged_path().join(&file.path)).unwrap(),
+            b"group = 1"
+        );
+        std::fs::write(pack.join("group.toml"), b"changed!!").unwrap();
+        let second = FetchedPack {
+            reference: fetched.reference.clone(),
+            manifest_bytes: Vec::new(),
+            signature_bundle: Vec::new(),
+            staged: TempDir::new().unwrap(),
+        };
+        let error = stage_component_policies(&config, &second, &[file]).unwrap_err();
+        assert!(error.to_string().contains("differ"), "{error}");
+    }
+
+    #[test]
+    fn component_acquisition_refuses_a_drifted_graph_pin_before_payload() {
+        let manifest = br#"{"schema_version":4,"kind":"tool_component"}"#;
+        let (registry, config) = file_registry(manifest);
+        let reference: PackReference = "runtime/python@1.2.3".parse().unwrap();
+        let pin = PackPin::new(reference, Sha256Hex::from_bytes(b"older signed manifest")).unwrap();
+        let error = acquire_component_inputs(&config, &pin).unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("digest") || text.contains("hash"), "{text}");
+        assert!(
+            !registry
+                .path()
+                .join("packs/runtime/python/1.2.3/files")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn component_source_is_refused_before_policy_or_archive_fetch() {
+        let config = PackRegistryConfig {
+            registry_url: "file:///nonexistent-registry".into(),
+        };
+        let fetched = FetchedPack {
+            reference: "runtime/python@1.0.0".parse().unwrap(),
+            manifest_bytes: Vec::new(),
+            signature_bundle: Vec::new(),
+            staged: TempDir::new().unwrap(),
+        };
+        let source = ComponentArchive {
+            source: "https://attacker.example.invalid/layer.tar".into(),
+            archive_sha256: Sha256Hex::from_bytes(b"archive"),
+            archive_size: 7,
+        };
+        assert!(stage_component_inputs(&config, &fetched, &source, &[]).is_err());
         assert_eq!(std::fs::read_dir(fetched.staged_path()).unwrap().count(), 0);
     }
 
