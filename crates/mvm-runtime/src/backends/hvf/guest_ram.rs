@@ -18,6 +18,7 @@ use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::snapshot::RamLayout;
 use super::{BootFault, HvfError};
@@ -41,6 +42,9 @@ pub struct GuestRam {
     len: usize,
     /// Byte ranges replaced by a private file mapping, in mapping order.
     file_backed: Vec<Range<usize>>,
+    /// Set once [`Self::scrub`] has run and cleared whenever the base pointer
+    /// is handed out again, so drop scrubs only memory that may hold data.
+    scrubbed: AtomicBool,
 }
 
 impl GuestRam {
@@ -70,12 +74,14 @@ impl GuestRam {
             ptr,
             len,
             file_backed: Vec::new(),
+            scrubbed: AtomicBool::new(false),
         })
     }
 
     /// Base of the mapped region. Guest RAM is written and mapped through raw
     /// pointers, so a shared borrow hands out the mutable base directly.
     pub(crate) fn as_ptr(&self) -> *mut u8 {
+        self.scrubbed.store(false, Ordering::Relaxed);
         self.ptr.as_ptr()
     }
 
@@ -201,10 +207,12 @@ impl GuestRam {
         }
     }
 
-    /// Scrub the mapping now and report what was done. Idempotent; the drop
-    /// scrub that follows finds nothing left to overwrite.
+    /// Scrub the mapping now and report what was done. The drop that follows
+    /// skips its own scrub unless the pointer was handed out again.
     pub(crate) fn scrub(&mut self) -> HvfRamScrubRecord {
-        self.zeroize_mapping()
+        let record = self.zeroize_mapping();
+        self.scrubbed.store(true, Ordering::Relaxed);
+        record
     }
 
     /// Bytes in the whole mapping that are not zero.
@@ -212,7 +220,7 @@ impl GuestRam {
         // SAFETY: the mapping is live for `self`'s lifetime and `self.len` is
         // its exact mapped length.
         let bytes = unsafe { std::slice::from_raw_parts(self.as_ptr(), self.len) };
-        bytes.iter().filter(|b| **b != 0).count() as u64
+        nonzero_bytes_in(bytes)
     }
 
     /// Zero every resident page that can hold guest data this process owns.
@@ -250,7 +258,7 @@ impl GuestRam {
             let page = unsafe { std::slice::from_raw_parts_mut(self.as_ptr().add(offset), len) };
             page.zeroize();
             pages += 1;
-            nonzero += page.iter().filter(|byte| **byte != 0).count() as u64;
+            nonzero += nonzero_bytes_in(page);
         }
         Some((pages, nonzero))
     }
@@ -436,6 +444,23 @@ const MINCORE_ANONYMOUS: u8 = 0x80;
 /// the guest wrote it — because an unwritten one is the page cache's shared
 /// copy of the saved image. Only XNU reports that distinction; elsewhere every
 /// resident file-backed page is scrubbed, which is the safe answer.
+/// Bytes in `bytes` that are not zero. Each block is compared against zeros
+/// first, so the expected all-zero case costs a block compare and not a byte
+/// loop; teardown time already scales with guest RAM and this must not add to it.
+fn nonzero_bytes_in(bytes: &[u8]) -> u64 {
+    const ZEROS: [u8; 4096] = [0; 4096];
+    bytes
+        .chunks(ZEROS.len())
+        .map(|chunk| {
+            if chunk == &ZEROS[..chunk.len()] {
+                0
+            } else {
+                chunk.iter().filter(|byte| **byte != 0).count() as u64
+            }
+        })
+        .sum()
+}
+
 fn page_needs_scrub(state: u8, file_backed: bool) -> bool {
     if state & MINCORE_INCORE == 0 {
         return false;
@@ -523,7 +548,9 @@ pub(crate) fn page_rounded_len(len: usize) -> Result<usize, HvfError> {
 
 impl Drop for GuestRam {
     fn drop(&mut self) {
-        let _ = self.zeroize_mapping();
+        if !self.scrubbed.load(Ordering::Relaxed) {
+            let _ = self.zeroize_mapping();
+        }
         // SAFETY: ptr/len come from a successful mmap in new() and are unmapped
         // exactly once, here.
         unsafe {
@@ -615,6 +642,28 @@ mod tests {
     }
 
     /// A second scrub, which is what drop runs, has nothing left to overwrite.
+    #[test]
+    fn nonzero_bytes_are_counted_across_block_boundaries() {
+        let mut bytes = vec![0_u8; 4096 * 3 + 17];
+        assert_eq!(nonzero_bytes_in(&bytes), 0);
+        for index in [0, 4095, 4096, 8191, 4096 * 3 + 16] {
+            bytes[index] = 7;
+        }
+        assert_eq!(nonzero_bytes_in(&bytes), 5);
+        assert_eq!(nonzero_bytes_in(&[]), 0);
+    }
+
+    /// Drop scrubs memory that may have been written since the last scrub, and
+    /// leaves alone memory that was scrubbed and then not touched.
+    #[test]
+    fn drop_skips_its_scrub_only_when_nothing_touched_the_memory_since() {
+        let mut ram = GuestRam::new(HVF_PAGE_SIZE).expect("mmap");
+        let _ = ram.scrub();
+        assert!(ram.scrubbed.load(Ordering::Relaxed));
+        let _ = ram.as_ptr();
+        assert!(!ram.scrubbed.load(Ordering::Relaxed));
+    }
+
     #[test]
     fn a_second_scrub_finds_nothing_to_overwrite() {
         let mut ram = GuestRam::new(HVF_PAGE_SIZE * 2).expect("mmap");
