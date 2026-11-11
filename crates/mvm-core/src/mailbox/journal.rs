@@ -96,7 +96,9 @@ pub trait JournalAnchor {
 /// Recoverable storage-key identity for one mailbox and execution epoch.
 ///
 /// This identifies the journal key, not the separately encrypted payload's
-/// opening key. A later epoch or rotation needs an explicit anchored handoff.
+/// opening key. Deserialization is not admission authority; production must
+/// bind it to a verified plan and authenticated restart manifest. A later
+/// epoch or rotation needs an explicit anchored handoff.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryKeyRef {
@@ -2133,10 +2135,33 @@ mod anchor_tests {
             ),
             Err(JournalError::Corrupt)
         ));
-        let mut foreign = address();
-        foreign.authorization_domain = AuthorizationDomainId::from_bytes([55; 32]);
-        let foreign_ref = HistoryKeyRef::new(foreign, context.current_execution_epoch, [30; 32], 1)
-            .expect("other domain");
+        for (field, value) in [
+            ("/version", serde_json::json!(2)),
+            ("/key_id", serde_json::json!(vec![31u8; 32])),
+            ("/execution_epoch", serde_json::json!(2)),
+        ] {
+            let mut forged = serde_json::to_value(reference).expect("reference JSON");
+            *forged.pointer_mut(field).expect("reference field") = value;
+            let forged: HistoryKeyRef = serde_json::from_value(forged).expect("forged reference");
+            assert!(matches!(
+                MailboxJournal::open_with_custody(
+                    &root,
+                    forged,
+                    signer.verifying_key(),
+                    limits(),
+                    &TestCustody {
+                        reference: forged,
+                        bytes: Some([21; 32]),
+                    },
+                    &anchor,
+                ),
+                Err(JournalError::HistoryKeyMismatch)
+            ));
+        }
+        let mut foreign = serde_json::to_value(reference).expect("reference JSON");
+        foreign["address"]["authorization_domain"] = serde_json::json!(vec![55u8; 32]);
+        let foreign_ref: HistoryKeyRef =
+            serde_json::from_value(foreign).expect("forged foreign-domain reference");
         assert!(matches!(
             MailboxJournal::open_with_custody(
                 &root,

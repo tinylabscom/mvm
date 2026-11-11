@@ -70,6 +70,9 @@ version) to the encrypted record and signed intent. Its recovery obtains the
 exact key through an existing-only `HistoryKeyCustody` lookup and refuses
 changed key identity, wrong key, or missing custody; it does not create a
 replacement key. The raw-key opener cannot issue an `accepted_durable` receipt.
+Deserializing a `HistoryKeyRef` does not grant authority: production reopening
+must verify its scope against the admitted plan and an authenticated retained
+manifest before loading a key.
 The destination signs an actual acceptance receipt only after both commits.
 Earlier private-handoff version-1 records are refused, not silently
 reinterpreted. Version-2 test/local records have no custody reference and are
