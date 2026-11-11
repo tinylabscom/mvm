@@ -849,16 +849,12 @@ jobs:
     # ceiling below never executed. This is wall-clock headroom for the job,
     # not a loosening of the 6s boot budget that gate enforces.
     timeout-minutes: 45
-    env:
       # `IMAGE_TAG` is resolved from images.lock by a step below, not written
       # here. Pinned, not `latest`: auto-tracking a moving release is how this
       # lane would surprise-break on an unrelated image cut, and it would look
       # like a latency regression when it is not. And the boot image train, not
       # the CLI train — `v0.18.0` was a workspace version bump, never a cut
       # release, so this lane once 404'd on an asset nobody had published.
-      # Must track `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT` so this
-      # witness exercises the same VMM release as product boots.
-      FC_VERSION: v1.17.0
     steps:
       - uses: actions/checkout@v6
 
@@ -886,14 +882,8 @@ jobs:
         with:
           key: boot-latency
 
-      - name: Install firecracker
-        run: |
-          set -euo pipefail
-          curl -fL -o firecracker.tgz \
-            "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz"
-          tar -xzf firecracker.tgz
-          sudo install -m 0755 "release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" /usr/bin/firecracker
-          /usr/bin/firecracker --version
+      - name: Install the locked firecracker
+        uses: ./.github/actions/install-firecracker
 
       - name: Grant /dev/kvm access for the job
         # ubuntu-latest's /dev/kvm is root:kvm 0660 and the runner user is not
@@ -1067,8 +1057,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      # Must track `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`.
-      FC_VERSION: v1.17.0
       # A home of the job's own, so the overlay below is the one this run
       # assembled and not one a cache restored.
       MVM_HOME: ${{ github.workspace }}/.guest-image-home
@@ -1186,14 +1174,8 @@ jobs:
             cmp "overlay-staging/$f" "$dir/$f"
           done
 
-      - name: Install firecracker
-        run: |
-          set -euo pipefail
-          curl -fL -o firecracker.tgz \
-            "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz"
-          tar -xzf firecracker.tgz
-          sudo install -m 0755 "release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" /usr/bin/firecracker
-          /usr/bin/firecracker --version
+      - name: Install the locked firecracker
+        uses: ./.github/actions/install-firecracker
 
       - name: Grant /dev/kvm access for the job
         run: |
