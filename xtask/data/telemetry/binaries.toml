@@ -304,6 +304,16 @@ reason = "Development schema or SDK generator; not a VM runtime producer."
 
 [[binary]]
 package = "mvm-contract"
+name = "emit_authored_policy_schema"
+source = "crates/mvm-contract/src/bin/emit_authored_policy_schema.rs"
+required_features = ["schema"]
+[binary.capture]
+kind = "non-runtime"
+category = "code-generator"
+reason = "Development schema or SDK generator; not a VM runtime producer."
+
+[[binary]]
+package = "mvm-contract"
 name = "emit_assurance_schema"
 source = "crates/mvm-contract/src/bin/emit_assurance_schema.rs"
 required_features = ["schema"]
