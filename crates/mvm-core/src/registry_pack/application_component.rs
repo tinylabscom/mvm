@@ -169,7 +169,7 @@ pub fn parse_application_component_manifest(
         ));
     }
     validate_application_source(&archive.source)?;
-    validate_component_requirements(&component.requirements)?;
+    validate_component_requirements(&component.requirements, &component.guest_arch)?;
     let mut names = BTreeSet::new();
     if component.entrypoints.len() > 16
         || component.entrypoints.iter().any(|entry| {
@@ -207,12 +207,17 @@ pub fn parse_application_component_manifest(
 
 pub(super) fn validate_component_requirements(
     requirements: &ComponentRequirements,
+    guest_arch: &str,
 ) -> Result<(), RegistryPackVerificationError> {
     if requirements.filesystem_abi != 1
         || !kernel_version(&requirements.minimum_kernel)
         || match requirements.libc.as_str() {
             "static" => requirements.loader.is_some(),
-            "musl" | "glibc" => requirements
+            "musl" => {
+                requirements.loader.as_deref()
+                    != Some(format!("/lib/ld-musl-{guest_arch}.so.1").as_str())
+            }
+            "glibc" => requirements
                 .loader
                 .as_deref()
                 .is_none_or(|p| !absolute_path(p)),

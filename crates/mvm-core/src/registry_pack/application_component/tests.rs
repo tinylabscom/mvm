@@ -116,6 +116,7 @@ fn requirements_and_entrypoints_are_strict_and_bounded() {
         ("filesystem_abi", json!(2)),
         ("libc", json!("unknown")),
         ("loader", json!("/lib/../ld.so")),
+        ("loader", json!("/lib/ld-musl-x86_64.so.1")),
         ("minimum_kernel", json!("06.1.0")),
         ("required_capabilities", json!(["pty", "pty"])),
     ] {

@@ -171,7 +171,7 @@ pub fn parse_component_layer_manifest(
             "component layer guest architecture is not canonical",
         ));
     }
-    validate_component_requirements(&component.requirements)?;
+    validate_component_requirements(&component.requirements, &component.guest_arch)?;
     if component.archive.archive_size == 0 || component.archive.archive_size > MAX_COMPONENT_BYTES {
         return Err(invalid("component layer archive size is out of bounds"));
     }

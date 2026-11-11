@@ -122,6 +122,10 @@ fn both_kinds_have_closed_schema4_shapes_and_roundtrip() {
             ),
             (vec![field, "requirements", "filesystem_abi"], json!(2)),
             (
+                vec![field, "requirements", "loader"],
+                json!("/lib/ld-musl-x86_64.so.1"),
+            ),
+            (
                 vec![field, "requirements", "required_capabilities"],
                 json!(["pty", "pty"]),
             ),
