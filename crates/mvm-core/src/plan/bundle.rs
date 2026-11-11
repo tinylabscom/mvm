@@ -1557,6 +1557,7 @@ mod tests {
         let host = fresh_key();
         let mut manifest = make_manifest(key_id_from_pubkey(&host.verifying_key()), Vec::new());
         mark_local_build(&mut manifest);
+        manifest.schema_version = CANONICAL_LINUX_PROOF_MIN_SCHEMA;
         let empty = MapTrustStore(HashMap::new());
         assert!(require_composable_local_enrollment(&manifest, &empty).is_ok());
         manifest.schema_version = LOCAL_COMPOSITION_MIN_SCHEMA;
