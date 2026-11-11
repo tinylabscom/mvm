@@ -115,6 +115,76 @@ fn portable_publisher_proof_requires_current_feed_even_for_fixture_acquisition()
 }
 
 #[test]
+fn production_base_verification_refuses_legacy_and_tarless_sets() {
+    let mut env = unsigned_env();
+    let home = tempfile::tempdir().unwrap();
+    env.isolate_mvm_home(home.path());
+    let served = tempfile::tempdir().unwrap();
+    let selected = tempfile::tempdir().unwrap();
+    let role = ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant);
+    let target = MemberTarget::Arch(ARCH);
+    for (fixture, reason) in [
+        (ImageSetFixture::complete(), "signed Linux-layer image set"),
+        (
+            ImageSetFixture::complete()
+                .with_base_image_contract(Some(mvm_core::image_set::BaseImageContract::LINUX_LAYER))
+                .publish(role, target, "default-rootfs.ext4", b"ext4".to_vec()),
+            "signed composition tar",
+        ),
+    ] {
+        let set =
+            PublishedImageSet::acquire_workload_from(fixture.serve_from(served.path())).unwrap();
+        let error = set
+            .verify_base_compatibility(
+                b"{}",
+                b"not a signature",
+                ARCH,
+                WorkloadImageProfile::DefaultTenant,
+                selected.path(),
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains(reason), "{error:#}");
+    }
+    assert_eq!(std::fs::read_dir(selected.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn production_base_verification_requires_retained_publisher_and_checkpointed_feed() {
+    let mut env = unsigned_env();
+    let home = tempfile::tempdir().unwrap();
+    env.isolate_mvm_home(home.path());
+    let served = tempfile::tempdir().unwrap();
+    let selected = tempfile::tempdir().unwrap();
+    let role = ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant);
+    let target = MemberTarget::Arch(ARCH);
+    let fixture = ImageSetFixture::complete()
+        .with_base_image_contract(Some(mvm_core::image_set::BaseImageContract::LINUX_LAYER))
+        .publish(role, target, "default-rootfs.ext4", b"ext4".to_vec())
+        .publish_extra(role, target, "default-rootfs.tar.gz", b"tar".to_vec());
+    for acquire in [
+        PublishedImageSet::acquire_from,
+        PublishedImageSet::acquire_workload_from,
+    ] {
+        let set = acquire(fixture.serve_from(served.path())).unwrap();
+        let error = set
+            .verify_base_compatibility(
+                b"{}",
+                b"not a signature",
+                ARCH,
+                WorkloadImageProfile::DefaultTenant,
+                selected.path(),
+            )
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("current signed image-set revocations required"),
+            "{error:#}"
+        );
+    }
+    assert_eq!(std::fs::read_dir(selected.path()).unwrap().count(), 0);
+    assert!(!mvm_core::image_set::image_set_root_proof_cache().exists());
+}
+
+#[test]
 fn cached_compatibility_binding_accepts_matching_authenticated_contract_shape() {
     let expected = ImageSetFixture::complete()
         .with_base_image_contract(Some(mvm_core::image_set::BaseImageContract::LINUX_LAYER))

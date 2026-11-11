@@ -36,6 +36,12 @@ use mvm_fs::ownership::OwnerTable;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod component_lock;
+pub use component_lock::{
+    ComponentArchivePin, ComponentFilesystemLockSchema, MaterializedComponentRootfs,
+    ResolvedComponentFilesystemLock,
+};
+
 const MAX_UNPACKED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_ENTRIES: u64 = 200_000;
 const MAX_LAYERS: usize = 64;
@@ -133,29 +139,10 @@ pub struct ComposedApplicationRootfs {
 pub struct ComposedComponentRootfs {
     tree: ComposedWorkloadRootfs,
     pins: Vec<PackPin>,
+    archives: Vec<ComponentArchivePin>,
+    base_descriptor_sha256: Sha256Hex,
+    arch: GuestArch,
     tier: ImageTrustTier,
-}
-
-impl ComposedComponentRootfs {
-    /// Trust tier of the selected base; a local base remains development-only.
-    pub fn tier(&self) -> ImageTrustTier {
-        self.tier
-    }
-
-    /// The staged tree, which remains private until separately sealed and admitted.
-    pub fn root(&self) -> &Path {
-        self.tree.root()
-    }
-
-    /// Original file owners to preserve during later image materialization.
-    pub fn ownership(&self) -> &OwnerTable {
-        self.tree.ownership()
-    }
-
-    /// Exact signed manifest pins in filesystem application order.
-    pub fn pins(&self) -> &[PackPin] {
-        &self.pins
-    }
 }
 
 /// This lock has its own schema; it never changes the v1 Nix pack lock.
@@ -287,10 +274,7 @@ impl ComposedApplicationRootfs {
     ) -> Result<ResolvedComposableLock, RuntimeLayerStageError> {
         let spec_sha256 = Sha256Hex::from_bytes(&spec.canonical_json()?);
         if self.tree.authored_spec_sha256.as_ref() != Some(&spec_sha256)
-            || producer_revision.len() != 40
-            || !producer_revision
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || !valid_producer_revision(producer_revision)
         {
             return Err(RuntimeLayerStageError::InconsistentLayers);
         }
@@ -320,6 +304,13 @@ impl ComposedApplicationRootfs {
     ) -> Result<crate::rootfs::MaterializedExt4, RuntimeLayerStageError> {
         self.tree.materialize_candidate(output)
     }
+}
+
+fn valid_producer_revision(revision: &str) -> bool {
+    revision.len() == 40
+        && revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 impl ComposedWorkloadRootfs {
@@ -590,6 +581,7 @@ pub enum RuntimeLayerStageError {
 }
 
 /// Select the base for an ordered component graph without upgrading local evidence.
+#[derive(Clone, Copy)]
 pub enum ComponentGraphBase<'a> {
     /// A publisher-verified production image set and its signed compatibility.
     Production {
@@ -647,6 +639,7 @@ pub fn compose_verified_component_graph(
         ComponentGraphBase::Development { .. } => compose_local_component_base(&source)?,
     };
     let mut pins = Vec::with_capacity(graph.graph.len());
+    let mut archives = Vec::with_capacity(graph.graph.len());
     for node in &graph.graph {
         let requested = node.pin();
         let pin = graph_pin(requested)?;
@@ -677,6 +670,14 @@ pub fn compose_verified_component_graph(
                     TarRole::Application,
                 )?;
                 input.reverify()?;
+                archives.push(ComponentArchivePin {
+                    sha256: manifest
+                        .application_component
+                        .archive
+                        .archive_sha256
+                        .clone(),
+                    size: manifest.application_component.archive.archive_size,
+                });
             }
             GraphNode::Runtime { .. } | GraphNode::Tool { .. } => {
                 let input = components
@@ -707,6 +708,10 @@ pub fn compose_verified_component_graph(
                     TarRole::Runtime,
                 )?;
                 input.reverify()?;
+                archives.push(ComponentArchivePin {
+                    sha256: manifest.component().archive.archive_sha256.clone(),
+                    size: manifest.component().archive.archive_size,
+                });
             }
         }
         pins.push(pin);
@@ -718,6 +723,10 @@ pub fn compose_verified_component_graph(
     for input in components {
         input.reverify()?;
     }
+    let base_descriptor_sha256 = Sha256Hex::from_bytes(match &source {
+        ComponentGraphBase::Production { compatibility, .. } => compatibility.descriptor_bytes(),
+        ComponentGraphBase::Development { compatibility, .. } => compatibility.descriptor_bytes(),
+    });
     let tier = match source {
         ComponentGraphBase::Production { images, .. } => {
             images.retained_publisher_proof()?;
@@ -737,6 +746,9 @@ pub fn compose_verified_component_graph(
     Ok(ComposedComponentRootfs {
         tree: base,
         pins,
+        archives,
+        base_descriptor_sha256,
+        arch,
         tier,
     })
 }
@@ -2073,6 +2085,68 @@ mod tests {
         assert_eq!(
             base.base_manifest_sha256(),
             &Sha256Hex::from_bytes(&manifest_bytes)
+        );
+        let candidate = ComposedComponentRootfs {
+            tree: base,
+            pins: Vec::new(),
+            archives: Vec::new(),
+            base_descriptor_sha256: Sha256Hex::from_bytes(&descriptor_bytes),
+            arch,
+            tier: ImageTrustTier::LocalDev,
+        };
+        let output = tempfile::tempdir().unwrap();
+        let image = output.path().join("rootfs.ext4");
+        assert!(
+            candidate
+                .materialize_candidate(&image, "not-a-revision", source, &[], &[])
+                .is_err()
+        );
+        assert!(!image.exists());
+        let materialized = candidate
+            .materialize_candidate(&image, &"a".repeat(40), source, &[], &[])
+            .unwrap();
+        assert_eq!(materialized.lock.tier(), ImageTrustTier::LocalDev);
+        materialized
+            .lock
+            .verify_materialized_bytes(&materialized.image)
+            .unwrap();
+        let encoded = serde_json::to_vec(&materialized.lock).unwrap();
+        let restored: ResolvedComponentFilesystemLock = serde_json::from_slice(&encoded).unwrap();
+        restored.verify_current(&materialized.lock).unwrap();
+        let filesystem = restored.filesystem_identity().unwrap();
+        let mut changed = restored.clone();
+        changed.verity_sha256 = Sha256Hex::from_bytes(b"changed output");
+        assert_eq!(changed.filesystem_identity().unwrap(), filesystem);
+        assert!(restored.verify_current(&changed).is_err());
+        let reference = "agent/example@1.0.0".parse().unwrap();
+        changed = restored.clone();
+        changed.components.push((
+            PackPin::new(reference, Sha256Hex::from_bytes(b"first signed manifest")).unwrap(),
+            ComponentArchivePin {
+                sha256: Sha256Hex::from_bytes(b"application bytes"),
+                size: b"application bytes".len() as u64,
+            },
+        ));
+        let archive_identity = changed.filesystem_identity().unwrap();
+        changed.components[0].0 = PackPin::new(
+            "agent/example@1.0.0".parse().unwrap(),
+            Sha256Hex::from_bytes(b"changed signed policy or command"),
+        )
+        .unwrap();
+        assert_eq!(changed.filesystem_identity().unwrap(), archive_identity);
+        changed.components[0].1.sha256 = Sha256Hex::from_bytes(b"different application bytes");
+        assert_ne!(changed.filesystem_identity().unwrap(), archive_identity);
+        changed = restored.clone();
+        changed.producer_revision = "b".repeat(40);
+        assert_ne!(changed.filesystem_identity().unwrap(), filesystem);
+        changed = restored.clone();
+        changed.base_tier = ImageTrustTier::VerifiedRelease;
+        assert_ne!(changed.filesystem_identity().unwrap(), filesystem);
+        std::fs::write(output.path().join("rootfs.roothash"), b"tampered").unwrap();
+        assert!(
+            restored
+                .verify_materialized_bytes(&materialized.image)
+                .is_err()
         );
         let requirements = ComponentRequirements {
             filesystem_abi: 1,
