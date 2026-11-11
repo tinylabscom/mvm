@@ -617,44 +617,6 @@ impl AuditEmitter {
         )
     }
 
-    /// Emit `plan.guest_memory_scrubbed` — what the teardown scrub did to the
-    /// guest's RAM, as counts. It is the durable half of the self-destruction
-    /// claim: the scrub's own record is a file the VM's state directory loses
-    /// when the VM is cleaned up, and this entry is signed into the chain
-    /// before that happens.
-    pub fn emit_guest_memory_scrubbed(
-        &self,
-        plan: &ExecutionPlan,
-        scrub: &GuestMemoryScrub,
-    ) -> Result<()> {
-        self.emit(
-            plan,
-            guest_memory_audit::SCRUBBED_EVENT,
-            [
-                (
-                    guest_memory_audit::LABEL_BACKEND.to_string(),
-                    scrub.backend.to_string(),
-                ),
-                (
-                    guest_memory_audit::LABEL_MAPPED_BYTES.to_string(),
-                    scrub.mapped_bytes.to_string(),
-                ),
-                (
-                    guest_memory_audit::LABEL_SCRUBBED_PAGES.to_string(),
-                    scrub.scrubbed_pages.to_string(),
-                ),
-                (
-                    guest_memory_audit::LABEL_NONZERO_BYTES_AFTER.to_string(),
-                    scrub.nonzero_bytes_after.to_string(),
-                ),
-                (
-                    guest_memory_audit::LABEL_WHOLE_MAPPING.to_string(),
-                    scrub.whole_mapping.to_string(),
-                ),
-            ],
-        )
-    }
-
     /// Emit `plan.boot_posture` — records which rootfs strategy the run path
     /// selected for this boot. Every boot is `"block-ext4"`, the path the
     /// numbered claim-3 witness rides on; the label is still written, and still
