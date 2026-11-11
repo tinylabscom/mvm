@@ -328,7 +328,7 @@ fn health_call(slot: &str, spec: &PackSpec, args: &BuildArgs) -> EntrypointCall 
         reset: false,
         keep_alive: false,
         machine_name: None,
-        keep_alive_dev: false,
+        dev_profile: false,
         session: None,
         r#fn: None,
         attach: false,

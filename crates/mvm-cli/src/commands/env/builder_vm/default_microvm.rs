@@ -889,6 +889,22 @@ mod pair_default_image_tests {
             );
             std::fs::write(&root, original).unwrap();
             ensure().unwrap();
+            if variant == DefaultMicrovmVariant::Prod {
+                let manifest: mvm_core::image_set::ImageSetManifest =
+                    serde_json::from_slice(&std::fs::read(&proof).unwrap()).unwrap();
+                let tar = manifest
+                    .members
+                    .iter()
+                    .flat_map(|member| &member.artifacts)
+                    .find(|artifact| artifact.format == mvm_core::image_set::ArtifactFormat::TarGz)
+                    .expect("sealed local set declares a composition tar");
+                let tar_path = proof.parent().unwrap().join(tar.name.as_str());
+                let original = std::fs::read(&tar_path).expect("retained tar survives eviction");
+                std::fs::write(&tar_path, b"tampered").unwrap();
+                assert!(ensure().is_err(), "changed retained tar must refuse");
+                std::fs::write(&tar_path, original).unwrap();
+                ensure().unwrap();
+            }
             write(
                 &pair.images.root().join("images/default-tenant/image.nix"),
                 b"# changed source\n",

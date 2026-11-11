@@ -54,16 +54,21 @@ pub fn retain_local_workload_proof(entry: &CachedImageSet, directory: &Path) -> 
         "local proof directory is not a directory"
     );
     for artifact in &entry.set.artifacts {
-        if entry.set.manifest.members.iter().any(|member| {
-            member.artifacts.iter().any(|declared| {
-                declared.name == artifact.name
-                    && matches!(
-                        declared.format,
-                        mvm_core::image_set::ArtifactFormat::Json
-                            | mvm_core::image_set::ArtifactFormat::Text
-                    )
-            })
-        }) {
+        let format = entry
+            .set
+            .manifest
+            .members
+            .iter()
+            .flat_map(|member| &member.artifacts)
+            .find(|declared| declared.name == artifact.name)
+            .map(|declared| &declared.format);
+        if matches!(
+            format,
+            Some(
+                mvm_core::image_set::ArtifactFormat::Json
+                    | mvm_core::image_set::ArtifactFormat::Text
+            )
+        ) {
             let metadata = read_regular(&artifact.path)?;
             ensure!(
                 metadata.len() as u64 == artifact.size
@@ -75,6 +80,27 @@ pub fn retain_local_workload_proof(entry: &CachedImageSet, directory: &Path) -> 
                 &proof.join(artifact.name.as_str()),
                 &metadata,
             )?;
+        } else if format == Some(&mvm_core::image_set::ArtifactFormat::TarGz) {
+            ensure!(
+                std::fs::symlink_metadata(&artifact.path)?
+                    .file_type()
+                    .is_file(),
+                "local composition source is not a regular file"
+            );
+            let source = std::fs::File::open(&artifact.path)?;
+            let mut temp = tempfile::NamedTempFile::new_in(&proof)?;
+            let copied = std::io::copy(
+                &mut std::io::Read::take(source, artifact.size.saturating_add(1)),
+                temp.as_file_mut(),
+            )?;
+            ensure!(
+                copied == artifact.size
+                    && mvm_core::crypto::image_verify::sha256_file(temp.path())?
+                        == artifact.sha256.as_str(),
+                "local composition source changed after verification"
+            );
+            temp.as_file_mut().sync_all()?;
+            temp.persist(proof.join(artifact.name.as_str()))?;
         }
     }
     mvm_core::util::atomic_io::atomic_write_durable(
@@ -164,7 +190,7 @@ fn installed_paths(
         .filter(|file| {
             !matches!(
                 file.format,
-                crate::image_source::OutputFormat::Fixed("json" | "text")
+                crate::image_source::OutputFormat::Fixed("json" | "text" | "tar_gz")
             )
         })
         .map(|file| file.name)

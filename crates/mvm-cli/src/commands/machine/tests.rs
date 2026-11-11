@@ -741,6 +741,31 @@ fn run_defaults_match_the_lower_level_runner() {
 }
 
 #[test]
+fn entrypoint_admission_uses_the_requested_run_profile() {
+    let dev = parse_run(&[
+        "run",
+        "--entrypoint",
+        "--manifest",
+        "slot",
+        "--profile",
+        "dev",
+    ])
+    .expect("parse dev entrypoint");
+    assert!(super::runtime::entrypoint_dev_profile(&dev));
+
+    let standard = parse_run(&[
+        "run",
+        "--entrypoint",
+        "--manifest",
+        "slot",
+        "--profile",
+        "standard",
+    ])
+    .expect("parse standard entrypoint");
+    assert!(!super::runtime::entrypoint_dev_profile(&standard));
+}
+
+#[test]
 fn run_accepts_passthrough_flags() {
     let args = parse_run(&[
         "run",

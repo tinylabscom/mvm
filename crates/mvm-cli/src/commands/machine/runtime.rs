@@ -478,6 +478,10 @@ pub(crate) fn launch_carries_restricted_grant(args: &MachineRunArgs) -> bool {
     )
 }
 
+pub(super) fn entrypoint_dev_profile(args: &MachineRunArgs) -> bool {
+    matches!(args.run.profile, crate::commands::vm::exec::RunProfile::Dev)
+}
+
 /// Resolve a machine's `build_mode` (`"dev"` / `"prod"`) for the boot-time
 /// SDK envelope. Delegates to the shared inventory service's fail-closed
 /// posture resolution so this envelope, `machine ps --json`, and every other
@@ -555,7 +559,7 @@ fn run_entrypoint_action(
         machine_name,
         reset: args.reset,
         keep_alive: args.persistent(),
-        keep_alive_dev: false,
+        dev_profile: entrypoint_dev_profile(&args),
         session: None,
         r#fn: None,
         attach: args.attach,

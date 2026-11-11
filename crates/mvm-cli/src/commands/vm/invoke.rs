@@ -74,9 +74,8 @@ pub(in crate::commands) struct EntrypointCall {
     /// shared persistent-machine naming policy. Transient calls leave this
     /// empty and receive a collision-resistant internal name.
     pub machine_name: Option<String>,
-    /// Mark the kept-alive session `mode=dev` so subsequent `session exec` /
-    /// `run-code` are allowed. No effect without `keep_alive`.
-    pub keep_alive_dev: bool,
+    /// Run under Dev admission; kept-alive sessions also retain `mode=dev`.
+    pub dev_profile: bool,
     /// Attach this call to an existing warm session id. Accepted but not
     /// acted on in this build; a non-empty value warns and falls back to the
     /// transient path.
@@ -310,7 +309,7 @@ fn boot_entrypoint_with_application(
         .secrets(secrets)
         .agent_verb_override(call.agent_verb_override)
         .caller_commitment(call.caller_commitment)
-        .dev(call.keep_alive_dev)
+        .dev(call.dev_profile)
         .network_policy(call.network_policy)
         .assets(assets)
         .bundle_posture(bundle_posture);
@@ -322,7 +321,7 @@ fn boot_entrypoint_with_application(
     .build()?;
     let lifecycle = if call.keep_alive {
         CallLifecycle::KeepAlive {
-            mode: if call.keep_alive_dev {
+            mode: if call.dev_profile {
                 mvm_core::session::SessionMode::Dev
             } else {
                 mvm_core::session::SessionMode::Prod
@@ -2125,7 +2124,7 @@ mod streamed_stdin_tests {
             machine_name: None,
             reset: false,
             keep_alive: false,
-            keep_alive_dev: false,
+            dev_profile: false,
             session: None,
             r#fn: None,
             attach: true,
