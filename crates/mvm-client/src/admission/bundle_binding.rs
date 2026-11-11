@@ -33,6 +33,7 @@ pub struct BundlePin<'a> {
     archive: &'a Path,
     lineage: BundleLineage<'a>,
     production: bool,
+    transient: Option<&'a crate::launch::transient_composition::TransientBoot<'a>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -51,6 +52,17 @@ impl<'a> BundlePin<'a> {
             archive,
             lineage: BundleLineage::Boots,
             production: false,
+            transient: None,
+        }
+    }
+
+    /// One invocation-private Dev boot, not a publisher enrollment or installation.
+    pub fn transient(source: &'a crate::launch::transient_composition::TransientBoot<'a>) -> Self {
+        Self {
+            archive: source.archive(),
+            lineage: BundleLineage::Boots,
+            production: false,
+            transient: Some(source),
         }
     }
 
@@ -61,6 +73,7 @@ impl<'a> BundlePin<'a> {
             archive,
             lineage: BundleLineage::Boots,
             production: true,
+            transient: None,
         }
     }
 
@@ -71,6 +84,12 @@ impl<'a> BundlePin<'a> {
 
     pub(super) fn is_production(&self) -> bool {
         self.production
+    }
+
+    pub(super) fn transient_source(
+        &self,
+    ) -> Option<&crate::launch::transient_composition::TransientBoot<'_>> {
+        self.transient
     }
 }
 
@@ -135,6 +154,7 @@ impl InheritedBundle {
                 bundle_sha256: &self.bundle_sha256,
             },
             production: false,
+            transient: None,
         }
     }
 }

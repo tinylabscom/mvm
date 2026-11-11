@@ -176,7 +176,12 @@ there is no matching released full CLI runtime. Unknown/mismatched inputs
 must refuse instead of falling back to another base.
 
 Local assembly measures ext4/verity before boot and signs a **local**
-bundle/plan; it does not create publisher authority. Production export
+bundle/plan. The source candidate privately stages each invocation rather
+than installing its composed bundle; a repeat rechecks cached bytes and
+needs a fresh Dev admission. This does not create publisher authority.
+If an admitted run fails, its private evidence may be retained at the path
+printed on stderr for recovery; stop the VM before removing that directory.
+Production export
 requires separately trusted signed base and runtime evidence and
 independent protected verification/signing of one self-contained
 `.mvmpkg`. Neither `--prod` on a local composition nor

@@ -33,11 +33,22 @@ use crate::pack_registry::{self, PackIndexEntry, PackRegistryConfig};
 /// Retains the unpublished local archive through verification and launch.
 pub(super) struct PreparedComposition {
     archive: PathBuf,
+    private: mvm_client::launch::transient_composition::TransientComposition,
 }
 
 impl PreparedComposition {
     pub(super) fn archive(&self) -> &Path {
         &self.archive
+    }
+
+    pub(super) fn consume(
+        &mut self,
+    ) -> Result<mvm_client::launch::transient_composition::TransientBoot<'_>> {
+        self.private.consume()
+    }
+
+    pub(super) fn retain_on_error(&mut self) -> Option<PathBuf> {
+        self.private.retain_on_error()
     }
 }
 
@@ -322,7 +333,12 @@ pub(super) fn prepare(path: &Path, base: Base<'_>) -> Result<PreparedComposition
             "[mvm] authenticated cached composition {}",
             cache_sha.as_str()
         );
-        return Ok(PreparedComposition { archive: target });
+        return Ok(PreparedComposition {
+            private: mvm_client::launch::transient_composition::TransientComposition::stage(
+                &target,
+            )?,
+            archive: target,
+        });
     }
     #[cfg(feature = "pr-test-guest-runtime")]
     let boot = if let Some(input) = pr_test {
@@ -512,7 +528,10 @@ pub(super) fn prepare(path: &Path, base: Base<'_>) -> Result<PreparedComposition
             cache_sha.as_str()
         );
     }
-    Ok(PreparedComposition { archive: target })
+    Ok(PreparedComposition {
+        private: mvm_client::launch::transient_composition::TransientComposition::stage(&target)?,
+        archive: target,
+    })
 }
 
 fn verified_local_bundle(path: &Path) -> Result<mvm_core::plan::bundle::VerifiedBundleFile> {

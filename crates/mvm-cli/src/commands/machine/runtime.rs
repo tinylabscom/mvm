@@ -495,6 +495,7 @@ fn run_entrypoint_action(
     args: MachineRunArgs,
     resolved_flake_slot: Option<String>,
     review_source: ReviewSource,
+    transient: Option<&mvm_client::launch::transient_composition::TransientBoot<'_>>,
 ) -> Result<()> {
     crate::commands::vm::exec::application_source::require_entrypoint_request(&args.run)?;
     if !args.run.outputs.is_empty() {
@@ -515,7 +516,9 @@ fn run_entrypoint_action(
              default argv action — drop --entrypoint"
         );
     }
-    let source = if args.attach {
+    let source = if let Some(boot) = transient {
+        boot.sha256().to_owned()
+    } else if args.attach {
         resolve_machine_run_name(&args)?
     } else if let Some(slot) = resolved_flake_slot {
         slot
@@ -569,6 +572,7 @@ fn run_entrypoint_action(
         network_policy,
         hypervisor: args.run.hypervisor.clone(),
         portable_boot_assets: None,
+        transient,
     };
     if let Some(application) = args.run.resolved_application {
         return invoke::run_application_entrypoint(call, application);
@@ -666,8 +670,26 @@ fn select_application_action(args: &mut MachineRunArgs) -> Result<()> {
 
 pub(in crate::commands) fn run_dispatch(
     cli: &Cli,
+    args: MachineRunArgs,
+    cfg: &MvmConfig,
+) -> Result<()> {
+    run_dispatch_inner(cli, args, cfg, None)
+}
+
+pub(in crate::commands) fn run_dispatch_composed(
+    cli: &Cli,
+    args: MachineRunArgs,
+    cfg: &MvmConfig,
+    transient: &mvm_client::launch::transient_composition::TransientBoot<'_>,
+) -> Result<()> {
+    run_dispatch_inner(cli, args, cfg, Some(transient))
+}
+
+fn run_dispatch_inner(
+    cli: &Cli,
     mut args: MachineRunArgs,
     cfg: &MvmConfig,
+    transient: Option<&mvm_client::launch::transient_composition::TransientBoot<'_>>,
 ) -> Result<()> {
     let startup_started = std::time::Instant::now();
     // Settle the cold-build policy before any launch phase runs: `machine
@@ -715,11 +737,21 @@ pub(in crate::commands) fn run_dispatch(
     // flag or as the positional source) becomes the installed bundle's sha256
     // here, so nothing downstream parses the archive as an `mvm.toml` and the
     // boot is a plain `--manifest <bundle-sha256>`.
-    crate::commands::bundle::settle_manifest_archive(
-        &mut args.run.manifest,
-        args.run.dry_run,
-        args.run.prod,
-    )?;
+    if let Some(boot) = transient {
+        boot.reverify()?;
+        // The private bundle is not a registry slot; admission receives its
+        // exact archive from the held boot instead of a durable manifest name.
+        args.run.manifest = None;
+        if let Some(environment) = boot.manifest().environment() {
+            crate::commands::vm::exec::environment_defaults::apply(&mut args.run, environment);
+        }
+    } else {
+        crate::commands::bundle::settle_manifest_archive(
+            &mut args.run.manifest,
+            args.run.dry_run,
+            args.run.prod,
+        )?;
+    }
     // Before the flake is built into a slot below: the project's `[policy]`
     // table is read from the flake directory the run names.
     crate::commands::vm::run_policy::apply_run_policy(&mut args.run)?;
@@ -762,7 +794,7 @@ pub(in crate::commands) fn run_dispatch(
                  ceiling through entrypoint admission; use machine run with an argv"
             );
         }
-        return run_entrypoint_action(args, resolved_flake_slot, review_source);
+        return run_entrypoint_action(args, resolved_flake_slot, review_source, transient);
     }
 
     // A flake was built into a manifest slot above, and that image carries its

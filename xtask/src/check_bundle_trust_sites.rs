@@ -33,6 +33,7 @@ const MUST_COMPOSE: &[&str] = &[
     "crates/mvm-client/src/admission/pinned_bundle.rs",
     "crates/mvm-client/src/launch/bundle_runtime.rs",
     "crates/mvm-client/src/launch/canonical_linux.rs",
+    "crates/mvm-client/src/launch/transient_composition.rs",
     "crates/mvm-runtime/src/vm/template/lifecycle/snapshot.rs",
     "crates/mvm-cli/src/pack_registry.rs",
     "crates/mvm-cli/src/commands/pack/inspect.rs",

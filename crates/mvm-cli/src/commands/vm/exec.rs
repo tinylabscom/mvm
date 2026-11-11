@@ -559,12 +559,16 @@ pub(in crate::commands) fn run_verb(
     mut args: RunVerbArgs,
     cfg: &MvmConfig,
 ) -> Result<()> {
-    let composition = composition_request::prepare_composition(&mut args)?;
+    let mut composition = composition_request::prepare_composition(&mut args)?;
     let run = &mut args.machine.run;
     // Checked before the script is moved into argv below: a script path never
     // looks like a flag, so it would hide a misplaced one behind it.
     detect::refuse_run_flag_after_double_dash(&run.argv)?;
     if let Some(mode) = resolve_run_mode(&args.sdk, run)? {
+        anyhow::ensure!(
+            composition.is_none(),
+            "--compose cannot select an SDK transport mode"
+        );
         // Under an SDK mode the positional names the script to run, not a boot
         // source: `mvmctl run --mode plan ./script.py`.
         if let Some(script) = run.source.take() {
@@ -573,7 +577,23 @@ pub(in crate::commands) fn run_verb(
         return super::run_plan::dispatch_sdk_mode(mode, run, &args.sdk);
     }
     args.machine.default_image_when_sourceless = true;
-    let result = crate::commands::machine::run_dispatch(cli, args.machine, cfg);
+    let result = if let Some(prepared) = composition.as_mut() {
+        let boot = prepared.consume()?;
+        let result = crate::commands::machine::run_dispatch_composed(cli, args.machine, cfg, &boot);
+        let admitted = boot.was_admitted();
+        if result.is_err()
+            && admitted
+            && let Some(path) = prepared.retain_on_error()
+        {
+            eprintln!(
+                "[mvm] retained invocation-private bundle evidence at {} after a failed admitted run",
+                path.display()
+            );
+        }
+        result
+    } else {
+        crate::commands::machine::run_dispatch(cli, args.machine, cfg)
+    };
     drop(composition);
     result
 }
@@ -726,6 +746,7 @@ pub(in crate::commands) fn run_secure_started(
             volumes,
             bundle_archive,
             runtime_config,
+            transient: _,
         } = inputs;
         denials_for_admit.arm(vm_name);
         let ledger = mvm_client::admission::InMemoryNonceLedger::default();

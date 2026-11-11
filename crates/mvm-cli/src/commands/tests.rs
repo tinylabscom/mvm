@@ -4849,6 +4849,32 @@ fn composed_run_parses_one_command_and_refuses_other_boot_sources() {
         "run",
         "--compose",
         "./pack.toml",
+        "--profile",
+        "standard",
+    ])
+    .unwrap();
+    let Commands::Run(exec::RunVerbArgs { machine, .. }) = parsed.command else {
+        panic!("expected run command");
+    };
+    assert!(exec::validate_composition_request(&machine).is_err());
+    let parsed = Cli::try_parse_from([
+        "mvmctl",
+        "run",
+        "--compose",
+        "./pack.toml",
+        "--grants-file",
+        "./grants.toml",
+    ])
+    .unwrap();
+    let Commands::Run(exec::RunVerbArgs { machine, .. }) = parsed.command else {
+        panic!("expected run command");
+    };
+    assert!(exec::validate_composition_request(&machine).is_err());
+    let parsed = Cli::try_parse_from([
+        "mvmctl",
+        "run",
+        "--compose",
+        "./pack.toml",
         "--image",
         "alpine:latest",
     ])

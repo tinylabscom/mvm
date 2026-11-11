@@ -14,6 +14,7 @@ pub(super) type BundleTrust =
 
 pub(super) struct PreparePinnedBundleParams<'a> {
     pub pin: BundlePin<'a>,
+    pub dev: bool,
     pub keys_dir: Option<&'a std::path::Path>,
     pub backend_kind: Option<mvm_core::vm_backend::BackendKind>,
     pub image_support: Option<&'a BackendImageSupport>,
@@ -53,10 +54,6 @@ pub(super) fn prepare_pinned_bundle(
     let trust = BundleTrust::new(release_trust, host_key_id.clone(), host_signer.verifying);
     let verified = mvm_core::plan::read_and_verify_bundle(&bytes, &trust)
         .with_context(|| format!("verifying bundle at {}", path.display()))?;
-    mvm_core::plan::bundle::require_composable_local_enrollment(
-        &verified.manifest,
-        &FsTrustStore::default_path()?,
-    )?;
     let origin = bundle_origin(&verified.manifest, &host_key_id, trust.release());
     match origin {
         BundleOrigin::LocalBuild => anyhow::ensure!(
@@ -68,6 +65,24 @@ pub(super) fn prepare_pinned_bundle(
             "refusing bundle {}: its signed origin is neither release-verified nor a local build signed by this host",
             path.display()
         ),
+    }
+    if let Some(source) = pin.transient_source() {
+        anyhow::ensure!(
+            params.dev
+                && !pin.is_production()
+                && origin == BundleOrigin::LocalBuild
+                && source.archive() == path
+                && source.sha256() == mvm_core::plan::bundle_sha256(&bytes)
+                && source.manifest() == &verified.manifest,
+            "transient composition cannot authorize this admission"
+        );
+        source.reverify()?;
+        source.admit_once()?;
+    } else {
+        mvm_core::plan::bundle::require_composable_local_enrollment(
+            &verified.manifest,
+            &FsTrustStore::default_path()?,
+        )?;
     }
 
     if !verified.embedded_image_sets.is_empty() {

@@ -1357,6 +1357,7 @@ pub fn resolve_launch(
             assets: shape.assets,
             volumes: &start_config.volumes,
             bundle_archive: bundle_archive.as_deref(),
+            transient: None,
             runtime_config: Some(&start_config),
         })?
     {

@@ -313,7 +313,7 @@ fn pack_ref(lock: &PackLock) -> String {
     format!("{}@{}", lock.identity.name, lock.identity.version)
 }
 
-fn health_call(slot: &str, spec: &PackSpec, args: &BuildArgs) -> EntrypointCall {
+fn health_call(slot: &str, spec: &PackSpec, args: &BuildArgs) -> EntrypointCall<'static> {
     EntrypointCall {
         source: slot.to_string(),
         stdin: EntrypointStdin::OneShot(Vec::new()),
@@ -338,6 +338,7 @@ fn health_call(slot: &str, spec: &PackSpec, args: &BuildArgs) -> EntrypointCall 
         network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         hypervisor: args.hypervisor.clone(),
         portable_boot_assets: None,
+        transient: None,
     }
 }
 

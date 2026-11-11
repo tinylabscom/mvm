@@ -518,6 +518,8 @@ pub struct AdmitInputs<'a> {
     /// archive, or the extracted files beside it, no longer match what the
     /// publisher signed.
     pub bundle_archive: Option<&'a std::path::Path>,
+    /// Invocation-private custody in place of an installed bundle address.
+    pub transient: Option<&'a crate::launch::transient_composition::TransientBoot<'a>>,
     /// The selected runtime artifacts and their untrusted release proof.
     /// Admission verifies this same config before the backend consumes it.
     pub runtime_config: Option<&'a VmStartConfig>,
@@ -547,6 +549,7 @@ impl SessionVmName<'_> {
 /// on which backend.
 pub struct SessionBoot<'a> {
     slot: &'a str,
+    transient: Option<&'a crate::launch::transient_composition::TransientBoot<'a>>,
     vm_name: SessionVmName<'a>,
     cpus: u32,
     memory_mib: u32,
@@ -562,6 +565,7 @@ impl<'a> SessionBoot<'a> {
     pub fn builder(slot: &'a str, vm_name: SessionVmName<'a>) -> SessionBootBuilder<'a> {
         SessionBootBuilder(Self {
             slot,
+            transient: None,
             vm_name,
             cpus: 1,
             memory_mib: 256,
@@ -576,6 +580,16 @@ impl<'a> SessionBoot<'a> {
 pub struct SessionBootBuilder<'a>(SessionBoot<'a>);
 
 impl<'a> SessionBootBuilder<'a> {
+    /// Use a verified invocation-private composition instead of a stored slot.
+    #[must_use]
+    pub fn transient(
+        mut self,
+        source: Option<&'a crate::launch::transient_composition::TransientBoot<'a>>,
+    ) -> Self {
+        self.0.transient = source;
+        self
+    }
+
     /// Producer health may select an already verified release closure. This is
     /// not a consumer acquisition path or an admission grant.
     #[must_use]
@@ -721,6 +735,7 @@ fn boot_session_core(
 ) -> Result<SessionBootResult> {
     let SessionBoot {
         slot,
+        transient,
         vm_name,
         cpus,
         memory_mib,
@@ -728,10 +743,39 @@ fn boot_session_core(
         backend_name,
         portable_boot_assets,
     } = boot;
-    let (spec, vmlinux, initrd, rootfs, rev) =
-        mvm_runtime::vm::template::lifecycle::template_artifacts_for_boot(slot)
-            .with_context(|| format!("Loading template '{slot}'"))?;
-    let bundle_archive = mvm_runtime::vm::template::lifecycle::installed_bundle_archive(slot)?;
+    let (vmlinux, initrd, rootfs, rev, flake_ref, profile, bundle_archive) =
+        if let Some(source) = transient {
+            source.reverify()?;
+            anyhow::ensure!(
+                source.sha256() == slot,
+                "transient composition differs from selected entrypoint"
+            );
+            (
+                source.kernel()?.to_string_lossy().into_owned(),
+                source
+                    .initrd()
+                    .map(|path| path.to_string_lossy().into_owned()),
+                source.rootfs()?.to_string_lossy().into_owned(),
+                source.sha256().to_owned(),
+                "transient-composition".to_owned(),
+                "dev".to_owned(),
+                Some(source.archive().to_path_buf()),
+            )
+        } else {
+            let (spec, vmlinux, initrd, rootfs, rev) =
+                mvm_runtime::vm::template::lifecycle::template_artifacts_for_boot(slot)
+                    .with_context(|| format!("Loading template '{slot}'"))?;
+            let archive = mvm_runtime::vm::template::lifecycle::installed_bundle_archive(slot)?;
+            (
+                vmlinux,
+                initrd,
+                rootfs,
+                rev,
+                spec.flake_ref,
+                spec.profile,
+                archive,
+            )
+        };
     let backend = resolve_backend(backend_name)?;
     let vm_name = vm_name.resolve();
     let (verity_path, roothash) = mvm_runtime::microvm::probe_verity_sidecar(&rootfs);
@@ -744,8 +788,8 @@ fn boot_session_core(
         verity_path,
         roothash,
         revision_hash: rev,
-        flake_ref: spec.flake_ref,
-        profile: Some(spec.profile),
+        flake_ref,
+        profile: Some(profile),
         cpus,
         memory_mib,
         // Session VMs are short-lived boots; balloon elasticity isn't useful
@@ -763,7 +807,17 @@ fn boot_session_core(
     // The runtime overlay is the single source of the guest agent and its
     // helpers here, as on the transient path; a missing required overlay is
     // built or acquired, never replaced by a copy baked into the rootfs.
-    if let Some(assets) = portable_boot_assets {
+    if let Some(source) = transient {
+        anyhow::ensure!(
+            portable_boot_assets.is_none(),
+            "transient composition cannot replace its signed boot closure"
+        );
+        crate::launch::bundle_runtime::attach_transient_bundle(
+            &mut start_config,
+            backend.name(),
+            source,
+        )?;
+    } else if let Some(assets) = portable_boot_assets {
         anyhow::ensure!(
             bundle_archive.is_none(),
             "producer health cannot replace an installed bundle's boot closure"
@@ -791,6 +845,7 @@ fn boot_session_core(
         assets: &[],
         volumes: &start_config.volumes,
         bundle_archive: bundle_archive.as_deref(),
+        transient,
         runtime_config: Some(&start_config),
     })?;
     let (mut substrate, context) = match admitted {
@@ -815,6 +870,9 @@ fn boot_session_core(
         .flatten();
     if let Some(runtime) = &_built_runtime {
         runtime.verify_config(&start_config)?;
+    }
+    if let Some(source) = transient {
+        source.reverify()?;
     }
     if mvm_runtime::catalog::descriptor(backend.kind()).is_workload {
         mvm_hostd::plan_admission::stash_plan_for_bridge(&start_config)

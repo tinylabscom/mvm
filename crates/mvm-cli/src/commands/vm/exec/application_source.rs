@@ -37,6 +37,11 @@ pub(in crate::commands) fn require_entrypoint_request(args: &RunArgs) -> Result<
     if args.resolved_application.is_none() {
         return Ok(());
     }
+    require_held_entrypoint_request(args)
+}
+
+/// Refuse flags the verified bundle entrypoint cannot carry into admission.
+pub(in crate::commands) fn require_held_entrypoint_request(args: &RunArgs) -> Result<()> {
     anyhow::ensure!(
         args.grants_file.is_none()
             && args.cpu_limit.is_none()
@@ -51,7 +56,7 @@ pub(in crate::commands) fn require_entrypoint_request(args: &RunArgs) -> Result<
             && args.mounts.is_empty()
             && args.env.is_empty()
             && args.allow_env.is_empty(),
-        "application --entrypoint cannot yet preserve --grants-file, --cpu-limit, \
+        "bundle --entrypoint cannot yet preserve --grants-file, --cpu-limit, \
          --dry-run, --launch-plan, --peer, --host-service, --asset, --receipt, \
          GPU options, --mount, --env or --allow-env"
     );

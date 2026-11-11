@@ -35,7 +35,7 @@ use crate::ui;
 /// lifecycle dispatcher can drive it directly. `machine run --entrypoint`
 /// builds this from `MachineRunArgs` (source → `source`, `-d`/`--name` →
 /// `keep_alive`, `--attach` → `attach`); there is no separate `invoke` verb.
-pub(in crate::commands) struct EntrypointCall {
+pub(in crate::commands) struct EntrypointCall<'a> {
     /// Template name / pre-built manifest slot to boot, resolved the same way
     /// as `machine exec --manifest`. With `attach`, this is the running VM's
     /// name instead.
@@ -107,6 +107,8 @@ pub(in crate::commands) struct EntrypointCall {
     /// Same producer-owned release closure used for health and export.
     pub portable_boot_assets:
         Option<std::sync::Arc<mvm_client::portable_boot_assets::PreparedPortableBootAssets>>,
+    /// Invocation-private composed boot source, never a registry slot.
+    pub transient: Option<&'a mvm_client::launch::transient_composition::TransientBoot<'a>>,
 }
 
 /// How a call's stdin is supplied.
@@ -162,7 +164,7 @@ impl EntrypointStdin {
     }
 }
 
-pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
+pub(in crate::commands) fn run_entrypoint(call: EntrypointCall<'_>) -> Result<()> {
     if call.attach {
         let exit_code = dispatch_attached(call)?;
         if exit_code != 0 {
@@ -177,7 +179,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
 /// --name <NAME>`), reusing its substitution endpoint and boot-minted
 /// placeholders, and return the entrypoint's exit status. No transient boot,
 /// no teardown — the VM is the user's to reap.
-pub(in crate::commands) fn dispatch_attached(call: EntrypointCall) -> Result<i32> {
+pub(in crate::commands) fn dispatch_attached(call: EntrypointCall<'_>) -> Result<i32> {
     if call.stdin.is_streaming() {
         // The grant lives on the plan the *boot* was admitted under, and
         // that admission happened in whatever process ran `machine run
@@ -211,7 +213,7 @@ pub(in crate::commands) fn dispatch_attached(call: EntrypointCall) -> Result<i32
     outcome
 }
 
-fn run_booted_entrypoint(call: EntrypointCall) -> Result<()> {
+fn run_booted_entrypoint(call: EntrypointCall<'_>) -> Result<()> {
     let exit_code = boot_entrypoint(call)?;
     if exit_code != 0 {
         crate::observability::exit(exit_code);
@@ -222,12 +224,12 @@ fn run_booted_entrypoint(call: EntrypointCall) -> Result<()> {
 /// Boot the slot an entrypoint call names under the admitted path, dispatch
 /// its baked entrypoint, and return the workload's exit status rather than
 /// exiting with it.
-pub(in crate::commands) fn boot_entrypoint(call: EntrypointCall) -> Result<i32> {
+pub(in crate::commands) fn boot_entrypoint(call: EntrypointCall<'_>) -> Result<i32> {
     boot_entrypoint_with_application(call, None)
 }
 
 pub(in crate::commands) fn run_application_entrypoint(
-    call: EntrypointCall,
+    call: EntrypointCall<'_>,
     application: mvm_core::registry_pack::application_bundle::ResolvedApplication,
 ) -> Result<()> {
     anyhow::ensure!(
@@ -242,7 +244,7 @@ pub(in crate::commands) fn run_application_entrypoint(
 }
 
 fn boot_entrypoint_with_application(
-    call: EntrypointCall,
+    call: EntrypointCall<'_>,
     application: Option<mvm_core::registry_pack::application_bundle::ResolvedApplication>,
 ) -> Result<i32> {
     let selected_backend = mvm_client::entrypoint::backend_name_for(call.hypervisor.as_deref())?;
@@ -250,7 +252,7 @@ fn boot_entrypoint_with_application(
         mvm_client::backend_kind_for(&selected_backend) == mvm_core::vm_backend::BackendKind::Hvf;
     anyhow::ensure!(
         !native
-            || (application.is_some()
+            || ((application.is_some() || call.transient.is_some())
                 && !call.keep_alive
                 && !call.attach
                 && !call.stdin.is_streaming()
@@ -258,7 +260,7 @@ fn boot_entrypoint_with_application(
                 && !call.reset
                 && call.r#fn.is_none()
                 && call.portable_boot_assets.is_none()),
-        "native entrypoint requires a fresh installed application with original signed boot inputs and one-shot stdin"
+        "native entrypoint requires a fresh signed application or transient composition with one-shot stdin"
     );
     if let Some(application) = &application {
         anyhow::ensure!(
@@ -268,9 +270,16 @@ fn boot_entrypoint_with_application(
     }
     warn_accepted_but_inert(&call);
 
-    // The entrypoint action targets a manifest slot, resolved through the same
-    // helper as `machine exec --manifest`.
-    let slot = mvm_client::entrypoint::resolve_slot(WorkloadSource::Manifest(&call.source))?;
+    let slot = if let Some(boot) = call.transient {
+        boot.reverify()?;
+        anyhow::ensure!(
+            call.source == boot.sha256(),
+            "transient composition selection changed"
+        );
+        call.source.clone()
+    } else {
+        mvm_client::entrypoint::resolve_slot(WorkloadSource::Manifest(&call.source))?
+    };
     let producer_identity = native
         .then(crate::commands::load_enrolled_identity)
         .transpose()?;
@@ -287,7 +296,11 @@ fn boot_entrypoint_with_application(
         .transpose()?
         .into_iter()
         .collect();
-    let bundle_posture = mvm_client::installed_bundle_posture(&call.source)?;
+    let bundle_posture = if let Some(boot) = call.transient {
+        boot.manifest().security_posture().copied()
+    } else {
+        mvm_client::installed_bundle_posture(&call.source)?
+    };
     let lifecycle_label = if call.keep_alive {
         "warm session"
     } else {
@@ -345,6 +358,7 @@ fn boot_entrypoint_with_application(
             memory_mib: call.memory_mib,
             admission,
             portable_boot_assets: call.portable_boot_assets.as_deref(),
+            transient: call.transient,
         },
         stdin: call.stdin.into_call_stdin(),
         timeout_secs: call.timeout,
@@ -431,7 +445,7 @@ fn run_native_entrypoint(
 
 /// Say which accepted flags this build does not act on, rather than ignoring
 /// them silently.
-fn warn_accepted_but_inert(call: &EntrypointCall) {
+fn warn_accepted_but_inert(call: &EntrypointCall<'_>) {
     if call.reset {
         ui::warn(
             "--reset is accepted but not acted on in this build; treating as default behaviour",
@@ -2109,7 +2123,7 @@ mod streamed_stdin_tests {
     use super::*;
     use mvm_client::entrypoint::stdin_stream::StreamedInputReport;
 
-    fn streaming_attach_call() -> EntrypointCall {
+    fn streaming_attach_call() -> EntrypointCall<'static> {
         EntrypointCall {
             source: "already-running".to_string(),
             stdin: EntrypointStdin::Streaming,
@@ -2134,6 +2148,7 @@ mod streamed_stdin_tests {
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             hypervisor: None,
             portable_boot_assets: None,
+            transient: None,
         }
     }
 

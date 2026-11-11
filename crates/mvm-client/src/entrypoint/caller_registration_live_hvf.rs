@@ -341,6 +341,7 @@ fn boot(inputs: &Inputs, vm: &mut OwnedVm, opted_in: bool) -> Result<BootEvidenc
             memory_mib: 256,
             admission: policy,
             portable_boot_assets: None,
+            transient: None,
         },
         None,
     )?);

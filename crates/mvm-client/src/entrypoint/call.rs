@@ -51,6 +51,8 @@ pub struct EntrypointVm<'a> {
     /// Producer-owned release inputs for health. Ordinary consumers leave this
     /// unset and may not use it to repair an incomplete installed archive.
     pub portable_boot_assets: Option<&'a crate::portable_boot_assets::PreparedPortableBootAssets>,
+    /// Invocation-private composed source, never a stored workload slot.
+    pub transient: Option<&'a crate::launch::transient_composition::TransientBoot<'a>>,
 }
 
 /// A booted entrypoint VM and the admission it booted under.
@@ -462,6 +464,7 @@ impl<O: CallObserver> OwnedTransientResult<O> {
                         memory_mib: vm.memory_mib,
                         admission: vm.admission,
                         portable_boot_assets: vm.portable_boot_assets,
+                        transient: vm.transient,
                     },
                     pair,
                 )?);
@@ -544,6 +547,7 @@ pub fn boot_entrypoint_vm_owned(
         .network_policy(vm.admission.network_policy().clone())
         .backend_name(&backend_name)
         .portable_boot_assets(vm.portable_boot_assets)
+        .transient(vm.transient)
         .build();
     let owner = super::boot::boot_session_vm_owned(boot, &vm.admission, pair)?;
     emit_launched(&owner.resources().admission, &backend_name, true);
@@ -587,6 +591,7 @@ pub fn boot_entrypoint_vm(
         memory_mib,
         admission,
         portable_boot_assets,
+        transient,
     } = vm;
     let backend_name = admission.backend_name().to_string();
     let admitted: RefCell<Option<AdmissionContext>> = RefCell::new(None);
@@ -601,6 +606,7 @@ pub fn boot_entrypoint_vm(
         .network_policy(admission.network_policy().clone())
         .backend_name(&backend_name)
         .portable_boot_assets(portable_boot_assets)
+        .transient(transient)
         .build();
     match boot_session_vm(boot, &admit, pair) {
         Ok(vm) => {
@@ -700,6 +706,7 @@ fn run_entrypoint_call_recording(
             memory_mib: vm.memory_mib,
             admission: vm.admission,
             portable_boot_assets: vm.portable_boot_assets,
+            transient: vm.transient,
         },
         pair,
     )?;
@@ -987,6 +994,7 @@ mod tests {
                 memory_mib: 512,
                 admission: EntrypointAdmission::builder("hvf").build().unwrap(),
                 portable_boot_assets: None,
+                transient: None,
             },
             stdin: CallStdin::Streaming(Box::new(std::io::Cursor::new(b"must-not-read"))),
             timeout_secs: 1,
@@ -1221,6 +1229,7 @@ mod tests {
                     memory_mib: 256,
                     admission,
                     portable_boot_assets: None,
+                    transient: None,
                 },
                 stdin: CallStdin::OneShot(b"[[], {}]".to_vec()),
                 timeout_secs: 5,

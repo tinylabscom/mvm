@@ -457,6 +457,7 @@ fn native_claude_foreground_request_refusal() -> Result<()> {
             memory_mib: 4096,
             admission: policy,
             portable_boot_assets: None,
+            transient: None,
         },
         None,
     )?);

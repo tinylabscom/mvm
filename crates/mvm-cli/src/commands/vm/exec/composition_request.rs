@@ -8,7 +8,6 @@ use clap::Args as ClapArgs;
 use std::path::Path;
 use std::path::PathBuf;
 
-#[cfg(any(feature = "pr-test-guest-runtime", feature = "pr-test-synthetic-base"))]
 use super::RunProfile;
 use super::{ComposeBase, RunMode, RunVerbArgs, composition};
 
@@ -73,6 +72,7 @@ pub(in crate::commands) fn validate_composition_request(
     machine: &crate::commands::machine::MachineRunArgs,
 ) -> Result<()> {
     let run = &machine.run;
+    super::application_source::require_held_entrypoint_request(run)?;
     anyhow::ensure!(
         run.source.is_none()
             && run.application.is_none()
@@ -83,13 +83,14 @@ pub(in crate::commands) fn validate_composition_request(
             && run.runtime.is_none()
             && !run.runtime_pack
             && !run.prod
+            && run.profile == RunProfile::Dev
             && !run.dry_run
             && run.launch_plan.is_none()
             && run.argv.is_empty()
             && !machine.interactive()
             && !machine.persistent()
             && !machine.attach,
-        "--compose requires an unambiguous transient development run without another boot source or command"
+        "--compose requires --profile dev and an unambiguous transient run without another boot source or command"
     );
     Ok(())
 }

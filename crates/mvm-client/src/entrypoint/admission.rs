@@ -140,6 +140,7 @@ impl EntrypointAdmission {
             assets,
             volumes,
             bundle_archive,
+            transient,
             runtime_config,
         } = inputs;
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
@@ -171,7 +172,15 @@ impl EntrypointAdmission {
             keys_dir: None,
             audit_dir: None,
             policy_dir: None,
-            bundle_pin: bundle_archive.map(crate::admission::BundlePin::boots),
+            bundle_pin: if let Some(source) = transient {
+                anyhow::ensure!(
+                    self.dev && bundle_archive == Some(source.archive()),
+                    "transient composition requires the held Dev bundle"
+                );
+                Some(crate::admission::BundlePin::transient(source))
+            } else {
+                bundle_archive.map(crate::admission::BundlePin::boots)
+            },
             bundle_posture: self.bundle_posture,
             deps_volume: None,
             shares: mvm_hostd::run::shares_from_vm_volumes(volumes),
@@ -406,6 +415,7 @@ mod tests {
             assets: &[],
             volumes: &[],
             bundle_archive: None,
+            transient: None,
             runtime_config: None,
         }
     }
@@ -772,6 +782,7 @@ mod stdin_grant_tests {
                     assets: &[],
                     volumes: &[],
                     bundle_archive: None,
+                    transient: None,
                     runtime_config: None,
                 })
         }

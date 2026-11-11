@@ -519,6 +519,7 @@ fn admit(
             let prepared =
                 pinned_bundle::prepare_pinned_bundle(pinned_bundle::PreparePinnedBundleParams {
                     pin,
+                    dev: !p.restrict_agent_verbs,
                     keys_dir: p.keys_dir,
                     backend_kind: p.backend_kind,
                     image_support: bundle_image_support.as_ref(),

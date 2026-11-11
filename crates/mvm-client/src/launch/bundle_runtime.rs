@@ -53,16 +53,46 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
         return Ok(false);
     };
     let registry = BundleRegistry::default_path()?;
+    attach_bundle_from_registry(config, backend, &registry, &archive, None)
+}
+
+/// Attach a held composition without consulting or modifying the installed registry.
+pub(crate) fn attach_transient_bundle(
+    config: &mut VmStartConfig,
+    backend: &str,
+    source: &super::transient_composition::TransientBoot<'_>,
+) -> Result<()> {
+    source.reverify()?;
+    ensure!(
+        Path::new(&config.rootfs_path) == source.rootfs()?
+            && config.kernel_path.as_deref().map(Path::new) == Some(source.kernel()?.as_path()),
+        "transient boot differs from its private signed files"
+    );
+    let registry = BundleRegistry::new(source.registry_root().join("bundles"));
+    ensure!(
+        attach_bundle_from_registry(config, backend, &registry, source.archive(), Some(source))?,
+        "transient composition has no signed boot closure"
+    );
+    source.reverify()
+}
+
+fn attach_bundle_from_registry(
+    config: &mut VmStartConfig,
+    backend: &str,
+    registry: &BundleRegistry,
+    archive: &Path,
+    transient: Option<&super::transient_composition::TransientBoot<'_>>,
+) -> Result<bool> {
     let release = mvm_core::registry_pack::application_bundle::trust_for_installed_archive(
         FsTrustStore::default_path()?,
-        &archive,
+        archive,
     );
     let (verified, trust): (VerifiedBundleFile, Box<dyn TrustStore>) =
         if let Some(host_key) = crate::bundle::existing_host_verifying_key()? {
             let host_key_id = key_id_from_pubkey(&host_key);
             let trust = LocalBundleTrustStore::new(release, host_key_id.clone(), host_key);
             let verified =
-                verify_bundle_file(&archive, &trust).context("verifying bundle boot assets")?;
+                verify_bundle_file(archive, &trust).context("verifying bundle boot assets")?;
             ensure!(
                 bundle_origin(&verified.manifest, &host_key_id, trust.release())
                     != BundleOrigin::Untrusted,
@@ -71,7 +101,7 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
             (verified, Box::new(trust))
         } else {
             let verified =
-                verify_bundle_file(&archive, &release).context("verifying bundle boot assets")?;
+                verify_bundle_file(archive, &release).context("verifying bundle boot assets")?;
             ensure!(
                 verified
                     .manifest
@@ -82,10 +112,24 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
             );
             (verified, Box::new(release))
         };
-    mvm_core::plan::bundle::require_composable_local_enrollment(
-        &verified.manifest,
-        &FsTrustStore::default_path()?,
-    )?;
+    if let Some(source) = transient {
+        ensure!(
+            verified.bundle_sha256 == source.sha256()
+                && source.manifest() == &verified.manifest
+                && verified
+                    .manifest
+                    .labels
+                    .get(BUNDLE_ORIGIN_LABEL)
+                    .is_some_and(|label| label == LOCAL_BUILD_ORIGIN),
+            "transient composition differs from this host's signed local bundle"
+        );
+        source.reverify()?;
+    } else {
+        mvm_core::plan::bundle::require_composable_local_enrollment(
+            &verified.manifest,
+            &FsTrustStore::default_path()?,
+        )?;
+    }
     let canonical = verified.manifest.members.iter().any(|member| {
         matches!(
             member,
@@ -185,7 +229,7 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
         )?;
         if needs_owner {
             let owner = std::sync::Arc::new(mvm_core::canonical_linux::prepare_canonical_linux(
-                &archive,
+                archive,
                 &verified.plan_artifact(),
                 kind,
                 mvm_build::stage0_kernel::current_image_set_protocol_support(),
@@ -203,7 +247,7 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
         "conflicting portable runtime evidence"
     );
     let proof = mvm_core::vm_backend::LegacyPortableRuntimeProof {
-        archive: archive.clone(),
+        archive: archive.to_path_buf(),
         pin: verified.plan_artifact(),
         manifest_sha256: boot.image_set.manifest_sha256.as_str().to_owned(),
         arch: boot.arch,

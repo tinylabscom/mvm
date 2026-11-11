@@ -30,6 +30,7 @@ pub mod startup_budget;
 #[cfg(test)]
 mod tests;
 mod transient;
+pub mod transient_composition;
 mod unbooted;
 
 use unbooted::DefinitionOrigin;

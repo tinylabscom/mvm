@@ -76,6 +76,7 @@ use receipt::{
 };
 pub(in crate::commands) use runtime::boot_persistent_by_name;
 pub(in crate::commands) use runtime::run_dispatch;
+pub(in crate::commands) use runtime::run_dispatch_composed;
 use spec_ops::{
     create_machine, inspect_machine, persistent_workload_dir_for_run, remove_machine,
     run_reconfigure,
