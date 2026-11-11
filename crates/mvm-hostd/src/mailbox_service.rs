@@ -450,7 +450,9 @@ fn serve(
     prepare: impl FnOnce(&[u8]) -> Result<(SignedMailboxCapability, MailboxEnvelope), Refusal>,
 ) -> Served {
     arm(&stream);
-    let frame = read_frame(shared, &mut stream);
+    let Some(frame) = read_frame(shared, &mut stream) else {
+        return Served::NoFrame;
+    };
     let received = frame.is_ok();
     let verdict = answer(shared, &mut stream, frame, prepare);
     match (received, verdict) {
@@ -463,7 +465,10 @@ fn serve(
 /// A host peer's connection: a read request, or a sealed send.
 fn serve_peer(shared: &Shared, mut stream: UnixStream) {
     arm(&stream);
-    match read_frame(shared, &mut stream) {
+    let Some(frame) = read_frame(shared, &mut stream) else {
+        return;
+    };
+    match frame {
         Ok(body) if body.first() == Some(&b'{') => {
             let reply = serde_json::from_slice::<HostRequest>(&body)
                 .map(
@@ -511,13 +516,23 @@ fn reply_with<T: serde::Serialize>(stream: &mut UnixStream, reply: &Result<T, Re
     }
 }
 
-fn read_frame(shared: &Shared, stream: &mut UnixStream) -> Result<Vec<u8>, Refusal> {
+/// `None` means the peer sent not one byte (hung up, reset or timed out), so
+/// there is nobody to answer; a peer that began a frame gets its refusal.
+fn read_frame(shared: &Shared, stream: &mut UnixStream) -> Option<Result<Vec<u8>, Refusal>> {
     let max = shared.limits.max_frame_bytes;
     let mut len = [0u8; 4];
+    match stream.read(&mut len[..1]) {
+        Ok(1) => {}
+        _ => return None,
+    }
+    Some(read_rest(stream, &mut len, max))
+}
+
+fn read_rest(stream: &mut UnixStream, len: &mut [u8; 4], max: usize) -> Result<Vec<u8>, Refusal> {
     stream
-        .read_exact(&mut len)
+        .read_exact(&mut len[1..])
         .map_err(|_| Refusal::Malformed)?;
-    let len = u32::from_be_bytes(len) as usize;
+    let len = u32::from_be_bytes(*len) as usize;
     if len > max {
         return Err(Refusal::Oversized(max));
     }
@@ -611,6 +626,77 @@ mod accept_loop_tests {
             let got = recv(&dir.path().join("m.sock")).unwrap();
             assert!(got.message.is_none());
         }
+    }
+
+    /// Feed `bytes` to `f` over a pair, half-close, and return what `f` wrote
+    /// back, read to EOF under a deadline.
+    fn exchange(bytes: &[u8], f: impl FnOnce(UnixStream)) -> Vec<u8> {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        client.write_all(bytes).unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        f(server);
+        let mut got = Vec::new();
+        client.read_to_end(&mut got).unwrap();
+        got
+    }
+
+    fn guest(service: &MailboxService, bytes: &[u8]) -> (Vec<u8>, bool) {
+        let mut no_frame = false;
+        let got = exchange(bytes, |s| {
+            no_frame = matches!(
+                serve(&service.shared, s, |_| Err(Refusal::Malformed)),
+                Served::NoFrame
+            );
+        });
+        (got, no_frame)
+    }
+
+    #[test]
+    fn a_silent_guest_is_not_answered() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = service(dir.path());
+        assert_eq!(guest(&service, b""), (Vec::new(), true));
+    }
+
+    #[test]
+    fn a_partial_guest_frame_still_gets_its_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = service(dir.path());
+        let (got, no_frame) = guest(&service, &[0, 0]);
+        assert_eq!(got, br#"{"Err":"Malformed"}"#);
+        assert!(no_frame);
+    }
+
+    #[test]
+    fn an_oversized_guest_frame_still_gets_its_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = service(dir.path());
+        let (got, _) = guest(&service, &u32::MAX.to_be_bytes());
+        assert!(String::from_utf8(got).unwrap().contains("Oversized"));
+    }
+
+    #[test]
+    fn a_whole_guest_frame_is_answered() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = service(dir.path());
+        let (got, no_frame) = guest(&service, &[0, 0, 0, 1, 7]);
+        assert_eq!(got, br#"{"Err":"Malformed"}"#);
+        assert!(!no_frame);
+    }
+
+    #[test]
+    fn a_silent_host_peer_is_not_answered_and_recv_is_still_served() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = service(dir.path());
+        assert!(exchange(b"", |s| serve_peer(&service.shared, s)).is_empty());
+        let req = br#"{"request":"Recv"}"#;
+        let mut framed = (req.len() as u32).to_be_bytes().to_vec();
+        framed.extend_from_slice(req);
+        let got = exchange(&framed, |s| serve_peer(&service.shared, s));
+        assert!(!got.is_empty());
     }
 }
 
