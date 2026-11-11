@@ -51,6 +51,13 @@ incompatible production base is rejected with no fallback. Do not accept
 unsupported special files, symlink escapes or an inconsistent base ext4/tar
 pair merely because their declared digests are well formed.
 
+Schema-8 host-signed local bundles have a separate operator-enrollment
+boundary under review in mvm PR #5301. Same-host signing alone is not
+operator enrollment or release trust. A transient one-command Dev composition
+must not bypass the final local-bundle run/install rule by treating its cache
+as an enrolled publisher; either explicit enrollment or a distinct,
+narrowly scoped transient admission proof is required.
+
 `mvm.pack-spec/v2` currently parses one local application, ordered `runtime/*`
 requests, `/srv/app` copies, literal argv and resources. Its `[production]`
 table expresses intent only: it neither signs nor authorizes a release.
