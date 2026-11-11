@@ -721,6 +721,55 @@ mod tests {
     }
 
     #[test]
+    fn restarted_mailbox_refuses_old_frame_and_accepts_new_frame() {
+        let keys = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        crate::audit::host_keypair::load_or_init_at(keys.path()).unwrap();
+        let grant = grant_at(keys.path(), 1);
+        let socket = keys.path().join("restart.sock");
+
+        let old_secret = crate::mailbox_launch::mint_epoch_secret(state.path()).unwrap();
+        let (policy, mut sealer) = derive_launch_keys(keys.path(), &grant, &old_secret)
+            .unwrap()
+            .trust();
+        let service = MailboxService::bind(&socket, LAUNCH_LIMITS, policy).unwrap();
+        let (capability, envelope) = sealer.seal(greeting()).unwrap();
+        send(&socket, &capability, &envelope).expect("first send accepted");
+        assert_eq!(
+            send(&socket, &capability, &envelope),
+            Err(Refusal::Mailbox(
+                mvm_core::mailbox::MailboxError::Replay.to_string()
+            ))
+        );
+        assert_eq!(
+            recv(&socket).unwrap().message,
+            Some(hex::encode(b"epoch one secret"))
+        );
+        drop(service);
+
+        let new_secret = crate::mailbox_launch::mint_epoch_secret(state.path()).unwrap();
+        assert_ne!(old_secret.expose_bytes(), new_secret.expose_bytes());
+        let (policy, mut sealer) = derive_launch_keys(keys.path(), &grant, &new_secret)
+            .unwrap()
+            .trust();
+        let _restarted = MailboxService::bind(&socket, LAUNCH_LIMITS, policy).unwrap();
+        assert_eq!(
+            send(&socket, &capability, &envelope),
+            Err(Refusal::Mailbox(
+                mvm_core::mailbox::MailboxError::DecryptionFailed.to_string()
+            ))
+        );
+        assert_eq!(recv(&socket).unwrap().message, None);
+
+        let (capability, envelope) = sealer.seal(greeting()).unwrap();
+        send(&socket, &capability, &envelope).expect("new launch frame accepted");
+        assert_eq!(
+            recv(&socket).unwrap().message,
+            Some(hex::encode(b"epoch one secret"))
+        );
+    }
+
+    #[test]
     fn the_signing_seed_alone_cannot_open_and_the_encryption_root_alone_cannot_forge() {
         let host = tempfile::tempdir().unwrap();
         crate::audit::host_keypair::load_or_init_at(host.path()).unwrap();
