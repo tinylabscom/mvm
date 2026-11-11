@@ -69,6 +69,7 @@ impl Drop for PeerChild {
 
 fn read_child_id(stream: &mut UnixStream) -> u32 {
     stream.set_read_timeout(Some(DEADLINE)).unwrap();
+    stream.set_write_timeout(Some(DEADLINE)).unwrap();
     let mut bytes = [0; 4];
     stream.read_exact(&mut bytes).unwrap();
     u32::from_be_bytes(bytes)
@@ -88,8 +89,12 @@ fn peer_process_helper() {
         }
         None => UnixStream::from(std::io::stdin().as_fd().try_clone_to_owned().unwrap()),
     };
+    stream.set_read_timeout(Some(DEADLINE)).unwrap();
     stream.set_write_timeout(Some(DEADLINE)).unwrap();
     stream.write_all(&std::process::id().to_be_bytes()).unwrap();
+    let mut release = [0];
+    stream.read_exact(&mut release).unwrap();
+    assert_eq!(release, [1]);
 }
 
 #[test]
@@ -120,6 +125,7 @@ fn a_fresh_connection_identifies_both_actual_processes() {
     stream.set_nonblocking(false).unwrap();
     let kernel_peer = connected_peer_pid(&stream).unwrap();
     let reported_child = read_child_id(&mut stream);
+    stream.write_all(&[1]).unwrap();
     child.finish();
     assert_eq!(reported_child, child.child.id());
     assert_eq!(kernel_peer, i32::try_from(reported_child).unwrap());
@@ -138,6 +144,7 @@ fn inherited_socketpair_peer_identity_depends_on_the_platform() {
     let mut child = PeerChild::spawn(Stdio::from(inherited), None);
     let reported_child = read_child_id(&mut retained);
     let kernel_peer = connected_peer_pid(&retained).unwrap();
+    retained.write_all(&[1]).unwrap();
     child.finish();
     assert_eq!(reported_child, child.child.id());
     #[cfg(target_os = "linux")]
@@ -209,4 +216,21 @@ fn cloexec_socket_aliases_stay_private_unless_explicitly_exported() {
         assert_cloexec(fd);
     }
     assert!(!exec_sees_socket(alias.as_fd(), false));
+}
+
+#[test]
+fn a_socket_alias_delays_eof_but_shutdown_revokes_all_local_aliases() {
+    let (mut peer, original) = UnixStream::pair().unwrap();
+    let mut alias = original.try_clone().unwrap();
+    drop(original);
+    peer.set_nonblocking(true).unwrap();
+    assert_eq!(
+        peer.read(&mut [0]).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    alias.shutdown(std::net::Shutdown::Both).unwrap();
+    peer.set_nonblocking(false).unwrap();
+    peer.set_read_timeout(Some(DEADLINE)).unwrap();
+    assert_eq!(peer.read(&mut [0]).unwrap(), 0);
+    assert!(alias.write_all(b"retired").is_err());
 }

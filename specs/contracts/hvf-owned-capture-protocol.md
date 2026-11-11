@@ -330,9 +330,11 @@ cannot inherit this permit or reconnect it to another recorder.
 
 `mvm-vmm`'s `host::uds_peer::process_tests` exercises real owned subprocesses.
 A fresh connection identifies both actual processes; EOF and reaped child
-status remain separate from retained socket identity. The inherited-pair
-test checks the platform distinction: Darwin reports the child after its
-write; Linux retains the creator identity. The Darwin branch was exercised
+status remain separate from retained socket identity. Fixtures hold the
+child on an explicit release event until live identity queries complete;
+a lookup after peer exit may refuse and cannot prove successful shutdown.
+The inherited-pair test checks the platform distinction: Darwin reports the
+child after its write; Linux retains the creator identity. The Darwin branch was exercised
 locally; the Linux branch requires the Linux test lane. Neither identity
 result grants capture authority. These are socket-identity prerequisite
 tests, **not** capture authorization, signature, recorder or HVF-boot witnesses.
@@ -343,6 +345,40 @@ allowlisted child does, without changing flags in the parent. This
 demonstrates why flags alone are not a capture-FD exclusion policy. It does
 not exercise a capture worker, actual supervisor/signing re-exec, raw fork,
 descriptor passing or retirement of runtime aliases.
+
+### Test-only reference qualification
+
+[`entrypoint_source::qualification`](../../crates/mvm-hostd/src/stream/owned_capture_qualification_tests.rs#L1)
+is an executable reference model compiled only in tests. It exercises
+serialized spend/retirement, competing completed-verifier callbacks, sequence
+refusal, bounded frame/byte accounting, a frozen terminal cut, unsent versus
+unconfirmed copies, and validation/loss of final replies.
+
+Its binding values and connection IDs are **fixtures**, not the canonical
+proof encoding, enrolled identities, verified peers, original child handles
+or startup permits. It assumes the verifier's facts; it authenticates no
+one. The queue and receiver driver are a small deterministic reference
+model, not the production callback/IPC implementation. It does not qualify
+clock deadlines, counter overflow, append-versus-retirement concurrency,
+signature/session verification or the complete public divergence report.
+
+Component cases pass queued synthetic bytes through the existing
+`EntrypointSink`/`StreamBroker`: returned bytes remain unchanged, the actual
+broker supplies record sequences, masked copies reach its real encrypted
+transcript, and a deliberately lost reply stays unconfirmed even though the
+broker appended. The fixture's known test key and self-consistent seal are
+not an independently authenticated host audit anchor or public reader
+witness. This is not the actual supervisor's `CaptureOwner`, an admitted
+guest, a durable publication receipt or a second production recorder.
+
+The socket alias lifetime test separately observes that dropping one local
+handle does not produce peer EOF while an alias is retained, and that
+explicit socket shutdown invalidates that local connection. It does not
+establish that the actual runtime revokes its permit, finds every alias or
+shuts down its own FD group correctly.
+
+Passing these tests advances component/reference qualification only. The
+real supervisor/HVF witness and all activation gates below remain required.
 
 Before production wiring, obtain runtime/security approval of:
 

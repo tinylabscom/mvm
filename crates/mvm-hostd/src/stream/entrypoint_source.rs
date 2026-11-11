@@ -200,9 +200,9 @@ mod tests {
 
     /// A broker writing real encrypted chunks into a real directory, held
     /// alive alongside it.
-    struct Fixture {
-        broker: SharedBroker,
-        _dir: TempDir,
+    pub(super) struct Fixture {
+        pub(super) broker: SharedBroker,
+        pub(super) _dir: TempDir,
     }
 
     fn fixture_with(vm: &str, seam: StreamRedaction) -> Fixture {
@@ -226,7 +226,7 @@ mod tests {
         }
     }
 
-    fn fixture(vm: &str) -> Fixture {
+    pub(super) fn fixture(vm: &str) -> Fixture {
         fixture_with(vm, StreamRedaction::curated(&RedactionPolicy::default()))
     }
 
@@ -452,3 +452,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "owned_capture_qualification_tests.rs"]
+mod qualification;
