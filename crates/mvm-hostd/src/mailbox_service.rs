@@ -41,6 +41,9 @@ use mvm_core::mailbox::{
 };
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a dialed guest may hold its connection before sending a frame:
+/// longer than the guest's own hold, so the guest ends it.
+const GUEST_HOLD_TIMEOUT: Duration = Duration::from_secs(150);
 
 /// Bounds on what one node will hold or accept.
 #[derive(Debug, Clone, Copy)]
@@ -376,10 +379,36 @@ impl MailboxService {
         route: &mvm_core::vm_backend::HostDialRoute,
         sealer: &mut GuestSealer,
     ) -> std::io::Result<()> {
+        self.serve_guest_waiting(route, sealer, IO_TIMEOUT, &AtomicBool::new(false))
+    }
+
+    /// [`Self::serve_guest`] for the launch path: waits up to
+    /// [`GUEST_HOLD_TIMEOUT`] for a guest that holds its connection open until
+    /// the workload writes, and gives the connection up within a poll of
+    /// `stop` being set.
+    pub fn serve_guest_until(
+        &self,
+        route: &mvm_core::vm_backend::HostDialRoute,
+        sealer: &mut GuestSealer,
+        stop: &AtomicBool,
+    ) -> std::io::Result<()> {
+        self.serve_guest_waiting(route, sealer, GUEST_HOLD_TIMEOUT, stop)
+    }
+
+    fn serve_guest_waiting(
+        &self,
+        route: &mvm_core::vm_backend::HostDialRoute,
+        sealer: &mut GuestSealer,
+        first_byte: Duration,
+        stop: &AtomicBool,
+    ) -> std::io::Result<()> {
         let stream = crate::telemetry_collector::dial_route(
             route,
             mvm_contract::protocol::mailbox::MAILBOX_PORT,
         )?;
+        if !await_first_byte(&stream, first_byte, stop) {
+            return Err(std::io::Error::other("the guest sent no mailbox frame"));
+        }
         match serve(&self.shared, stream, |body| {
             sealer.seal(OutboxMessage::decode(body)?)
         }) {
@@ -459,6 +488,33 @@ fn serve(
         (false, _) => Served::NoFrame,
         (true, Err(Refusal::QueueFull(_))) => Served::QueueFull,
         (true, _) => Served::Frame,
+    }
+}
+
+/// Wait for the first byte (or EOF) of a dialed connection without consuming
+/// it, in short slices so `stop` is honoured. False when the peer sent nothing
+/// within `wait`, hung up, or `stop` was set.
+fn await_first_byte(stream: &UnixStream, wait: Duration, stop: &AtomicBool) -> bool {
+    const SLICE_MS: i32 = 200;
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        let mut p = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: `p` is one valid pollfd for an fd `stream` keeps open, and
+        // the slice bounds how long the call blocks.
+        let rc = unsafe { libc::poll(&mut p, 1, SLICE_MS) };
+        if rc > 0 {
+            // Readable: a byte, or EOF, which `read_frame` then reports as no frame.
+            return p.revents & libc::POLLIN != 0;
+        }
+        let interrupted =
+            rc < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted;
+        if interrupted || stop.load(Ordering::SeqCst) || std::time::Instant::now() >= deadline {
+            return false;
+        }
     }
 }
 

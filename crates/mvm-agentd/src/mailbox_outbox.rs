@@ -81,6 +81,46 @@ pub fn bound_socket_io(
     Ok(())
 }
 
+/// How long the agent holds a host connection open waiting for the workload to
+/// write a message, before answering with nothing so the host dials again.
+/// One long hold replaces a dial every couple of seconds on an idle guest.
+pub const MAILBOX_HOLD: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Wait up to `hold` for the spool to hold a message, checking every `tick`.
+/// Stops early, returning `false`, when `abandoned` says the host went away or
+/// the agent is shutting down; returns `true` as soon as a message is spooled.
+pub fn wait_for_outbox(
+    spool: &Path,
+    hold: std::time::Duration,
+    tick: std::time::Duration,
+    mut abandoned: impl FnMut() -> bool,
+) -> bool {
+    let deadline = std::time::Instant::now() + hold;
+    loop {
+        if spooled(spool).is_ok_and(|files| !files.is_empty()) {
+            return true;
+        }
+        if abandoned() || std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(tick);
+    }
+}
+
+/// Whether the peer of the connected socket `fd` has hung up or sent bytes.
+/// The host sends nothing before the agent answers, so either means the
+/// connection is no longer a live request.
+pub fn peer_gone(fd: std::os::fd::RawFd) -> bool {
+    let mut p = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: `p` is one valid pollfd and the count is 1; a zero timeout never blocks.
+    let rc = unsafe { libc::poll(&mut p, 1, 0) };
+    rc > 0 && p.revents != 0
+}
+
 /// The spooled message files, oldest first. Temp files are skipped.
 fn spooled(spool: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
     let mut files = Vec::new();
