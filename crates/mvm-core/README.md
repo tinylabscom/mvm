@@ -81,12 +81,15 @@ missing or divergent anchored prefix, and may reconcile only an intact
 contiguous suffix written before an interrupted anchor commit.
 The original accepted receipt body and observation time are retained with
 deduplication state; V1 retries still use their existing `duplicate` outcome.
-The test-scoped local opener and `admit_local` sign a distinct V2
+The local opener and `admit_local` sign a distinct V2
 `accepted_local_durable` receipt only after the encrypted record and local
 anchor have been fsynced. An exact local retry re-verifies current admission
 and the committed local tip before re-signing the original body/time, yielding
 the same signed bytes after restart. Recovery refuses a local V2 receipt in an
 independently anchored journal or a V1 strong receipt in a local journal.
+The hostd service can bind that local journal to its existing endpoint, but
+the production launch path still refuses until verified custody, retention,
+and guest receipt handoff are integrated end to end.
 `expire_next` records an authority-signed terminal expiry only after the
 message's absolute deadline; a lost response can be reconstructed after
 recovery. Expired messages are not disclosed, and an uncertain expiry write

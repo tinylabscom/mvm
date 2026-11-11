@@ -50,6 +50,13 @@ replacement. An interrupted first provision leaves an orphan and refuses.
 This is trusted-host local crash recovery only: it is not wired to the
 production mailbox process, cannot detect whole-host rollback, and does not
 provide host-blind confidentiality.
+The journal-backed service can bind a V2 local receipt to its existing endpoint
+and recover an exact retry after restart; on Send and Receive it settles at most
+eight expired entries per request, returning unavailable when maintenance
+remains rather than reporting an uncommitted terminal state. The guest outbox
+still speaks an older untyped success wire. Production mailbox launch remains
+refused until the signed receipt handoff and anchored retention/compaction
+rules are qualified.
 
 ## Main areas
 

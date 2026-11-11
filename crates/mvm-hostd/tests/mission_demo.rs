@@ -1156,6 +1156,167 @@ fn local_file_anchor_cannot_issue_durable_acceptance() {
 }
 
 #[test]
+fn local_mailbox_service_returns_exact_signed_v2_receipt_after_restart() {
+    use mvm_contract::protocol::mailbox::DeliveryOutcome;
+    use mvm_core::mailbox::frame::{send_local_receipted_frame, send_receipted_frame};
+    use mvm_core::mailbox::journal::{
+        FileJournalAnchor, HistoryKeyCustody, HistoryKeyRef, JournalError, JournalLimits,
+        MailboxJournal,
+    };
+    use mvm_hostd::mailbox_service::durable::DurableMailboxService;
+    use std::os::unix::net::UnixStream;
+
+    struct Custody(HistoryKeyRef);
+    impl HistoryKeyCustody for Custody {
+        fn load_existing(&self, reference: &HistoryKeyRef) -> Result<Key, JournalError> {
+            if reference != &self.0 {
+                return Err(JournalError::HistoryKeyMismatch);
+            }
+            Ok(Key::from_bytes([90; 32]))
+        }
+    }
+
+    let (node, channel) = channel_with_one_node();
+    let journal_dir = node.home.path().join("journal");
+    let anchor_path = node.home.path().join("mailbox-anchor");
+    let socket = node.home.path().join("local.sock");
+    let signer = channel.authority_key.clone();
+    let authority = signer.verifying_key();
+    let reference = HistoryKeyRef::new(address(), MbEpoch::new(1).unwrap(), [30; 32], 1)
+        .expect("versioned history identity");
+    let custody = Custody(reference);
+    let limits = JournalLimits {
+        max_records: 4,
+        max_bytes: 64 * 1024,
+    };
+    let mut message_header = header(1, 3);
+    message_header.expires_at_unix_ms = 4_000_000_000_000;
+    let mut message_routing = routing();
+    message_routing.expires_at_unix_ms = message_header.expires_at_unix_ms;
+    let mut send_grant = grant(&[MailboxOperation::Send]);
+    send_grant.expires_at_unix_ms = message_header.expires_at_unix_ms;
+    let capability = sign_capability(send_grant, &signer).expect("signed Send");
+    let envelope = seal_envelope(
+        SealRequest {
+            routing: message_routing,
+            header: message_header.clone(),
+            plaintext: b"hello",
+        },
+        &channel.encryption_key,
+        &channel.sender_key,
+    )
+    .expect("canonical encrypted envelope");
+
+    let start = || {
+        let anchor =
+            FileJournalAnchor::open(&anchor_path, address(), [91; 32]).expect("local anchor");
+        let journal = MailboxJournal::open_local_with_custody(
+            &journal_dir,
+            reference,
+            authority,
+            limits,
+            &custody,
+            &anchor,
+        )
+        .expect("recover local journal");
+        DurableMailboxService::bind_local(
+            &socket,
+            LIMITS,
+            MailboxPolicy {
+                context: context(1),
+                encryption_key: Key::from_bytes([23; 32]),
+                sender_key: channel.sender_key.verifying_key(),
+                authority_key: authority,
+            },
+            signer.clone(),
+            journal,
+            anchor,
+        )
+        .expect("bind verified local endpoint")
+    };
+    let service = start();
+    let mut stream = UnixStream::connect(&socket).expect("local Send");
+    let accepted = send_local_receipted_frame(
+        &mut stream,
+        &capability,
+        &envelope,
+        &message_header,
+        &authority,
+    )
+    .expect("signed local acceptance");
+    assert_eq!(accepted.receipt.protocol_version, ProtocolVersion::V2);
+    assert_eq!(
+        accepted.receipt.outcome,
+        DeliveryOutcome::AcceptedLocalDurable
+    );
+    drop(service);
+
+    let service = start();
+    let mut stream = UnixStream::connect(&socket).expect("retry after restart");
+    let retried = send_local_receipted_frame(
+        &mut stream,
+        &capability,
+        &envelope,
+        &message_header,
+        &authority,
+    )
+    .expect("recover exact original receipt");
+    assert_eq!(retried, accepted);
+    let mut strong_stream = UnixStream::connect(&socket).expect("strong-tier client");
+    assert_eq!(
+        send_receipted_frame(
+            &mut strong_stream,
+            &capability,
+            &envelope,
+            &message_header,
+            &authority,
+        ),
+        Err(Refusal::Malformed),
+        "a V1 strong-tier client must not upgrade the local receipt"
+    );
+    drop(service);
+    let anchor = FileJournalAnchor::open(&anchor_path, address(), [91; 32])
+        .expect("anchor after service teardown");
+    assert_eq!(anchor.tip().cursor, 1, "exact retries must not append");
+    drop(anchor);
+
+    let foreign_path = node.home.path().join("foreign.sock");
+    let foreign_anchor = FileJournalAnchor::open(
+        &node.home.path().join("foreign-anchor"),
+        address(),
+        [91; 32],
+    )
+    .expect("fresh anchor");
+    let foreign_journal = MailboxJournal::open_local_with_custody(
+        &node.home.path().join("foreign-journal"),
+        reference,
+        SigningKey::from_bytes(&[67; 32]).verifying_key(),
+        limits,
+        &custody,
+        &foreign_anchor,
+    )
+    .expect("empty history under a different authority");
+    assert!(
+        DurableMailboxService::bind_local(
+            &foreign_path,
+            LIMITS,
+            MailboxPolicy {
+                context: context(1),
+                encryption_key: Key::from_bytes([23; 32]),
+                sender_key: channel.sender_key.verifying_key(),
+                authority_key: authority,
+            },
+            signer,
+            foreign_journal,
+            foreign_anchor,
+        )
+        .is_err(),
+        "wrong journal authority must refuse before listener publication"
+    );
+    assert!(!foreign_path.exists());
+}
+
+#[test]
 fn signed_guest_lease_and_exact_ack_survive_mock_anchored_restart() {
     use mvm_contract::plan::{Nonce, PlanId};
     use mvm_contract::protocol::mailbox::{

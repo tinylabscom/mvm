@@ -196,6 +196,8 @@ pub enum JournalError {
     Busy,
     #[error("journal quota exhausted")]
     Full,
+    #[error("mailbox expiry settlement needs another bounded pass")]
+    MaintenancePending,
     #[error("journal record or chain is invalid")]
     Corrupt,
     #[error("journal high-water mark does not match its trusted anchor")]
@@ -245,10 +247,6 @@ struct JournalKey {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AcceptanceTier {
     Independent,
-    #[cfg_attr(
-        not(any(test, feature = "test-support")),
-        expect(dead_code, reason = "local custody opener is not production-wired yet")
-    )]
     Local,
 }
 
@@ -749,11 +747,11 @@ impl MailboxJournal {
         )
     }
 
-    /// Test the software-only local tier against a fsynced same-host anchor.
+    /// Reopen the software-only local tier against a fsynced same-host anchor.
     ///
-    /// Production must obtain the reference from an authenticated restart
-    /// manifest and verified mailbox scope, not a deserialized route hint.
-    #[cfg(any(test, feature = "test-support"))]
+    /// The trusted host must obtain the reference and existing key from an
+    /// authenticated restart manifest bound to its admitted plan/VM/mailbox.
+    /// A deserialized reference alone is never authorization to open history.
     pub fn open_local_with_custody(
         root: &Path,
         reference: HistoryKeyRef,
@@ -1301,20 +1299,36 @@ impl MailboxJournal {
         })
     }
 
+    /// Verify that an opened local journal still agrees with its held anchor
+    /// and the destination authority before binding a listener.
+    pub fn local_ready(
+        &self,
+        anchor: &FileJournalAnchor,
+        authority: &VerifyingKey,
+    ) -> Result<(), JournalError> {
+        if self.poisoned {
+            return Err(JournalError::Uncertain);
+        }
+        if self.tier != AcceptanceTier::Local || self.history_key.is_none() {
+            return Err(JournalError::DurableAuthorityUnavailable);
+        }
+        if &self.authority != authority {
+            return Err(JournalError::WrongAuthority);
+        }
+        if anchor.address != self.address || anchor.tip() != self.tip {
+            return Err(JournalError::Rollback);
+        }
+        Ok(())
+    }
+
     /// Commit local acceptance only after the ciphertext/dedup record and
     /// same-host anchor are fsynced. This cannot detect whole-host rollback.
-    #[cfg(any(test, feature = "test-support"))]
     pub fn admit_local(
         &mut self,
         request: JournalAdmission<'_>,
         anchor: &FileJournalAnchor,
     ) -> Result<SignedDestinationReceipt, JournalError> {
-        if self.tier != AcceptanceTier::Local || self.history_key.is_none() {
-            return Err(JournalError::DurableAuthorityUnavailable);
-        }
-        if anchor.address != self.address || anchor.tip() != self.tip {
-            return Err(JournalError::Rollback);
-        }
+        self.local_ready(anchor, &request.signer.verifying_key())?;
         self.admit_at_tier(request, AcceptanceTier::Local, |next| anchor.advance(next))
     }
 

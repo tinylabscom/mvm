@@ -2,8 +2,8 @@
 //!
 //! This listener is separate from the ephemeral mailbox queue. It never
 //! interprets a successful connection as authority or a signed verdict:
-//! authorization, journal fsync, and external anchor publication precede the
-//! destination signature being returned to the caller.
+//! authorization, journal fsync, and the tier's anchor publication precede
+//! the destination signature being returned to the caller.
 
 use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
@@ -36,6 +36,7 @@ use super::{GuestSealer, IO_TIMEOUT, MailboxLimits, MailboxPolicy, read_frame};
 
 const ACCEPT_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 const GUEST_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(12);
+const MAX_EXPIRY_RECORDS_PER_REQUEST: usize = 8;
 
 struct GuestDeadline<'a> {
     stream: &'a mut UnixStream,
@@ -74,7 +75,8 @@ impl Write for GuestDeadline<'_> {
     }
 }
 
-/// A trusted anchor advances outside the journal's rollback domain.
+/// Commit delivery-state events; this callback alone cannot authorize a
+/// strong `accepted_durable` receipt.
 pub trait JournalAnchor: Send + Sync {
     fn commit(&self, tip: JournalTip) -> Result<(), JournalError>;
 }
@@ -104,6 +106,7 @@ struct Shared {
     state: Mutex<State>,
     signer: SigningKey,
     anchor: Box<dyn JournalAnchor>,
+    local_anchor: Option<Arc<FileJournalAnchor>>,
     reader: OnceLock<GuestReaderAuthority>,
 }
 
@@ -117,7 +120,7 @@ pub(crate) struct GuestReaderAuthority {
     pub(crate) revocations_path: PathBuf,
 }
 
-/// One destination authority's bounded, journal-backed local admission socket.
+/// One destination authority's bounded, journal-backed admission socket.
 pub struct DurableMailboxService {
     shared: Arc<Shared>,
     path: PathBuf,
@@ -135,6 +138,56 @@ impl DurableMailboxService {
         signer: SigningKey,
         journal: MailboxJournal,
         anchor: impl JournalAnchor + 'static,
+    ) -> std::io::Result<Self> {
+        Self::bind_with(
+            path,
+            limits,
+            policy,
+            signer,
+            journal,
+            Box::new(anchor),
+            None,
+        )
+    }
+
+    /// Bind the existing mailbox endpoint to a verified local journal. The
+    /// held anchor and journal must agree before the socket becomes visible.
+    /// This tier does not claim independent whole-host rollback detection.
+    pub fn bind_local(
+        path: &Path,
+        limits: MailboxLimits,
+        policy: MailboxPolicy,
+        signer: SigningKey,
+        journal: MailboxJournal,
+        anchor: FileJournalAnchor,
+    ) -> std::io::Result<Self> {
+        journal
+            .local_ready(&anchor, &signer.verifying_key())
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let anchor = Arc::new(anchor);
+        let commit = {
+            let anchor = Arc::clone(&anchor);
+            move |tip| anchor.advance(tip)
+        };
+        Self::bind_with(
+            path,
+            limits,
+            policy,
+            signer,
+            journal,
+            Box::new(commit),
+            Some(anchor),
+        )
+    }
+
+    fn bind_with(
+        path: &Path,
+        limits: MailboxLimits,
+        policy: MailboxPolicy,
+        signer: SigningKey,
+        journal: MailboxJournal,
+        anchor: Box<dyn JournalAnchor>,
+        local_anchor: Option<Arc<FileJournalAnchor>>,
     ) -> std::io::Result<Self> {
         if signer.verifying_key() != policy.authority_key {
             return Err(std::io::Error::new(
@@ -155,7 +208,8 @@ impl DurableMailboxService {
             limits,
             state: Mutex::new(State { policy, journal }),
             signer,
-            anchor: Box::new(anchor),
+            anchor,
+            local_anchor,
             reader: OnceLock::new(),
         });
         let stop = Arc::new(AtomicBool::new(false));
@@ -192,7 +246,9 @@ impl DurableMailboxService {
 
     /// Read one guest outbox operation over its dedicated mailbox port. The
     /// guest sees success only after the canonical ciphertext, dedup identity,
-    /// and anchor have committed; an idle connection returns `false`.
+    /// and anchor have committed; an idle connection returns `false`. The
+    /// guest's older `Result<(), Refusal>` wire does not yet carry a signed
+    /// receipt, so production may not present it as a receipt-bearing Send.
     pub fn serve_guest(
         &self,
         route: &HostDialRoute,
@@ -234,12 +290,13 @@ impl DurableMailboxService {
         capability: &SignedMailboxCapability,
         reader: &OpenContext,
     ) -> Result<Option<ReceivedMailboxMessage>, JournalError> {
-        let state = self
+        let mut state = self
             .shared
             .state
             .lock()
             .expect("mailbox journal lock poisoned");
         let context = reader_context(&state.policy, reader)?;
+        settle_expired(&self.shared, &mut state.journal, context.now_unix_ms)?;
         state.journal.receive_next(JournalReceive {
             capability,
             context: &context,
@@ -263,6 +320,7 @@ impl DurableMailboxService {
             .expect("mailbox journal lock poisoned");
         let context = reader_context(&state.policy, reader)?;
         let State { policy, journal } = &mut *state;
+        settle_expired(&self.shared, journal, context.now_unix_ms)?;
         journal.acknowledge(
             identity,
             JournalReceive {
@@ -282,7 +340,7 @@ fn serve_reader(shared: &Shared, stream: &mut (impl Read + Write), body: &[u8]) 
         match request {
             ReaderRequest::Receive => {
                 {
-                    let state = shared.state.lock().expect("mailbox journal lock poisoned");
+                    let mut state = shared.state.lock().expect("mailbox journal lock poisoned");
                     let context = guest_context(&state.policy, reader)?;
                     verify_guest_reader_enrollment(
                         &reader.enrollment,
@@ -292,6 +350,8 @@ fn serve_reader(shared: &Shared, stream: &mut (impl Read + Write), body: &[u8]) 
                         &context.revoked_capabilities,
                     )
                     .map_err(|_| Refusal::NotAuthorized)?;
+                    settle_expired(shared, &mut state.journal, context.now_unix_ms)
+                        .map_err(reader_refusal)?;
                 }
                 let challenge: [u8; 32] = rand::random();
                 if challenge == [0; 32] {
@@ -312,6 +372,7 @@ fn serve_reader(shared: &Shared, stream: &mut (impl Read + Write), body: &[u8]) 
                 let context = guest_context(&state.policy, reader)?;
                 let scope = guest_scope(reader, &context);
                 let State { policy, journal } = &mut *state;
+                settle_expired(shared, journal, context.now_unix_ms).map_err(reader_refusal)?;
                 let leased = journal
                     .lease_next(
                         JournalGuestLease {
@@ -453,6 +514,22 @@ fn reader_refusal(error: JournalError) -> Refusal {
     }
 }
 
+fn settle_expired(
+    shared: &Shared,
+    journal: &mut MailboxJournal,
+    now_unix_ms: i64,
+) -> Result<(), JournalError> {
+    for _ in 0..MAX_EXPIRY_RECORDS_PER_REQUEST {
+        if journal
+            .expire_next(now_unix_ms, &shared.signer, |tip| shared.anchor.commit(tip))?
+            .is_none()
+        {
+            return Ok(());
+        }
+    }
+    Err(JournalError::MaintenancePending)
+}
+
 fn reader_context(
     policy: &MailboxPolicy,
     reader: &OpenContext,
@@ -512,28 +589,29 @@ fn admit(
     let mut state = shared.state.lock().expect("mailbox journal lock poisoned");
     state.policy.context.now_unix_ms = now;
     let State { policy, journal } = &mut *state;
-    journal
-        .admit(
-            JournalAdmission {
-                envelope,
-                capability,
-                context: &policy.context,
-                encryption_key: &policy.encryption_key,
-                sender_key: &policy.sender_key,
-                signer: &shared.signer,
-            },
-            |tip| shared.anchor.commit(tip),
-        )
-        .map_err(|error| match error {
-            JournalError::Mailbox(MailboxError::WrongRecipient) => Refusal::NotAuthorized,
-            JournalError::Mailbox(MailboxError::CapabilityPayloadExceeded) => {
-                Refusal::Oversized(capability.grant.max_payload_bytes as usize)
-            }
-            JournalError::Mailbox(error) => Refusal::Mailbox(error.to_string()),
-            JournalError::Full => Refusal::StorageFull,
-            JournalError::ConflictingRetry => Refusal::Mailbox(error.to_string()),
-            _ => Refusal::Unavailable,
-        })
+    settle_expired(shared, journal, now).map_err(reader_refusal)?;
+    let request = JournalAdmission {
+        envelope,
+        capability,
+        context: &policy.context,
+        encryption_key: &policy.encryption_key,
+        sender_key: &policy.sender_key,
+        signer: &shared.signer,
+    };
+    let accepted = match &shared.local_anchor {
+        Some(anchor) => journal.admit_local(request, anchor),
+        None => journal.admit(request, |tip| shared.anchor.commit(tip)),
+    };
+    accepted.map_err(|error| match error {
+        JournalError::Mailbox(MailboxError::WrongRecipient) => Refusal::NotAuthorized,
+        JournalError::Mailbox(MailboxError::CapabilityPayloadExceeded) => {
+            Refusal::Oversized(capability.grant.max_payload_bytes as usize)
+        }
+        JournalError::Mailbox(error) => Refusal::Mailbox(error.to_string()),
+        JournalError::Full => Refusal::StorageFull,
+        JournalError::ConflictingRetry => Refusal::Mailbox(error.to_string()),
+        _ => Refusal::Unavailable,
+    })
 }
 
 /// Send an immutable, already-sealed delivery to the local destination.

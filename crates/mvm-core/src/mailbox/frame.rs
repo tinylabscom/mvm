@@ -155,6 +155,43 @@ pub fn send_receipted_frame<S: Read + Write>(
     expected_header: &MailboxEnvelopeHeader,
     destination_key: &VerifyingKey,
 ) -> Result<SignedDestinationReceipt, Refusal> {
+    send_expected_receipt(
+        stream,
+        capability,
+        envelope,
+        expected_header,
+        destination_key,
+        &[DeliveryOutcome::AcceptedDurable, DeliveryOutcome::Duplicate],
+    )
+}
+
+/// Verify the separate trusted-host local receipt without upgrading it to the
+/// stronger independently anchored acceptance tier.
+pub fn send_local_receipted_frame<S: Read + Write>(
+    stream: &mut S,
+    capability: &SignedMailboxCapability,
+    envelope: &MailboxEnvelope,
+    expected_header: &MailboxEnvelopeHeader,
+    destination_key: &VerifyingKey,
+) -> Result<SignedDestinationReceipt, Refusal> {
+    send_expected_receipt(
+        stream,
+        capability,
+        envelope,
+        expected_header,
+        destination_key,
+        &[DeliveryOutcome::AcceptedLocalDurable],
+    )
+}
+
+fn send_expected_receipt<S: Read + Write>(
+    stream: &mut S,
+    capability: &SignedMailboxCapability,
+    envelope: &MailboxEnvelope,
+    expected_header: &MailboxEnvelopeHeader,
+    destination_key: &VerifyingKey,
+    allowed: &[DeliveryOutcome],
+) -> Result<SignedDestinationReceipt, Refusal> {
     let receipt: SignedDestinationReceipt = exchange(stream, &encode_frame(capability, envelope)?)?;
     verify_receipt(&receipt, destination_key).map_err(|_| Refusal::Malformed)?;
     let address = MailboxAddress {
@@ -168,10 +205,7 @@ pub fn send_receipted_frame<S: Read + Write>(
         || receipt.receipt.message_id != expected_header.message_id
         || receipt.receipt.address != address
         || receipt.receipt.execution_epoch != expected_header.execution_epoch
-        || !matches!(
-            receipt.receipt.outcome,
-            DeliveryOutcome::AcceptedDurable | DeliveryOutcome::Duplicate
-        )
+        || !allowed.contains(&receipt.receipt.outcome)
     {
         return Err(Refusal::Malformed);
     }
