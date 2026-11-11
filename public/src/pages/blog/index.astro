@@ -6,7 +6,15 @@ const posts = (await getCollection("blog")).sort(
   (a, b) => b.data.date.valueOf() - a.data.date.valueOf(),
 );
 
-const [featuredPost, ...otherPosts] = posts;
+const tagAliases: Record<string, string> = { microvms: "microvm", cve: "cve-teardown" };
+const topicTag = (tag: string) => tagAliases[tag.toLowerCase()] ?? tag.toLowerCase();
+const topics = [
+  { tag: "microvm", label: "MicroVMs" },
+  { tag: "agent-containment", label: "Agent containment" },
+  { tag: "cve-teardown", label: "CVE breakdowns" },
+  { tag: "supply-chain", label: "Supply chain" },
+  { tag: "static-analysis", label: "Static analysis" },
+].filter(({ tag }) => posts.some((post) => post.data.tags.some((item) => topicTag(item) === tag)));
 ---
 
 <BlogLayout
@@ -14,73 +22,81 @@ const [featuredPost, ...otherPosts] = posts;
   description="High-level notes on mvm architecture, microVM security, Nix, and secure sandboxing."
 >
   <section class="blog-index">
-    <div class="blog-index-hero">
-      <div>
-        <p class="blog-eyebrow">mvm blog</p>
-        <h1>Notes on secure infrastructure</h1>
-      </div>
-      <p class="blog-lede">
-        High-level posts on microVMs, Nix, sandboxing, and the architecture behind mvm.
-      </p>
-    </div>
+    <header class="blog-index-hero">
+      <h1>Blog</h1>
+      <p class="blog-lede">Notes on microVMs, security, and running untrusted code.</p>
+    </header>
 
-    {
-      featuredPost && (
-        <article class="blog-featured">
-          <a href={`/blog/${featuredPost.id}/`}>
-            <img src={featuredPost.data.heroImage} alt="" loading="eager" />
-            <div class="blog-featured-copy">
-              <div class="blog-list-meta">
-                <time datetime={featuredPost.data.date.toISOString()}>
-                  {featuredPost.data.date.toLocaleDateString("en-US", {
-                    month: "long",
-                    day: "numeric",
-                    year: "numeric",
-                  })}
-                </time>
-                <span>{featuredPost.data.tags.join(" / ")}</span>
-              </div>
-              <h2>{featuredPost.data.title}</h2>
-              <p>{featuredPost.data.description}</p>
-              <span class="blog-read-more">Read the post</span>
-            </div>
-          </a>
-        </article>
-      )
-    }
-
-    <div class="blog-section-heading">
-      <h2>Latest posts</h2>
-    </div>
+    {topics.length > 0 && (
+      <nav class="blog-topics" aria-label="Filter posts by topic" hidden>
+        <span>Explore topics</span>
+        <button type="button" data-topic="" aria-pressed="true">All posts</button>
+        {topics.map(({ tag, label }) => (
+          <button type="button" data-topic={tag} aria-pressed="false">{label}</button>
+        ))}
+      </nav>
+    )}
 
     <div class="blog-list">
       {
-        otherPosts.length > 0 ? (
-          otherPosts.map((post) => (
-          <article class="blog-list-item">
-            <a href={`/blog/${post.id}/`}>
-              <img src={post.data.heroImage} alt="" loading="lazy" />
-              <div>
-                <h2>{post.data.title}</h2>
-                <p>{post.data.description}</p>
+        posts.length > 0 ? (
+          posts.map((post) => (
+            <article class="blog-list-item" data-topics={post.data.tags.map(topicTag).join(" ")}>
+              <a href={`/blog/${post.id}/`}>
                 <div class="blog-list-meta">
                   <time datetime={post.data.date.toISOString()}>
                     {post.data.date.toLocaleDateString("en-US", {
-                      month: "long",
+                      month: "short",
                       day: "numeric",
                       year: "numeric",
+                      timeZone: "UTC",
                     })}
                   </time>
-                  <span>{post.data.tags.join(" / ")}</span>
+                  <span aria-hidden="true">·</span>
+                  <span>{(post.data.tags.find((tag) => tag.toLowerCase() !== "security") ?? post.data.tags[0])?.replaceAll("-", " ")}</span>
                 </div>
-              </div>
-            </a>
-          </article>
+                <h2>{post.data.title}</h2>
+                <p>{post.data.description}</p>
+                <span class="blog-read-more">Read post <span aria-hidden="true">→</span></span>
+              </a>
+            </article>
           ))
         ) : (
-          <p class="blog-empty">More posts are coming soon.</p>
+          <p class="blog-empty">No posts yet. Check back soon.</p>
         )
       }
     </div>
   </section>
 </BlogLayout>
+
+<script>
+  const topics = document.querySelector<HTMLElement>(".blog-topics");
+  if (topics) {
+    const buttons = [...topics.querySelectorAll<HTMLButtonElement>("button[data-topic]")];
+    const posts = [...document.querySelectorAll<HTMLElement>(".blog-list-item")];
+    const available = new Set(buttons.map((button) => button.dataset.topic));
+    const selected = new URLSearchParams(location.search).get("topic") ?? "";
+
+    function showTopic(topic: string) {
+      for (const button of buttons) {
+        button.setAttribute("aria-pressed", String(button.dataset.topic === topic));
+      }
+      for (const post of posts) {
+        post.hidden = !!topic && !post.dataset.topics?.split(" ").includes(topic);
+      }
+    }
+
+    topics.hidden = false;
+    showTopic(available.has(selected) ? selected : "");
+    topics.addEventListener("click", (event) => {
+      const button = (event.target as Element).closest<HTMLButtonElement>("button[data-topic]");
+      if (!button) return;
+      const topic = button.dataset.topic ?? "";
+      showTopic(topic);
+      const url = new URL(location.href);
+      if (topic) url.searchParams.set("topic", topic);
+      else url.searchParams.delete("topic");
+      history.replaceState(null, "", url);
+    });
+  }
+</script>
