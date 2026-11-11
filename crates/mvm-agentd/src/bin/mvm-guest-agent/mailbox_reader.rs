@@ -187,6 +187,7 @@ fn perform_exchange(
                 mailbox: boot.mailbox,
                 authority_key: boot.authority_key,
                 epoch: boot.execution_epoch,
+                report: None,
             };
             let authority = VerifyingKey::from_bytes(&boot.authority_key)
                 .map_err(|_| Refusal::NotAuthorized)?;
