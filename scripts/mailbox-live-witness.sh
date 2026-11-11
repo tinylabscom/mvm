@@ -78,7 +78,10 @@ write_frame() { # <vm> <fill: 000 = own mailbox, 377 = anyone else> <body>
     d=/run/mvm/mailbox; owner=$(stat -c %u "$d"); t="$d/.witness.$$"
     { head -c 32 /dev/zero | tr "\\0" "\\$1"; printf "%s" "$2"; } > "$t"
     [ "$(id -u)" != 0 ] || chown "$owner" "$t"
-    chmod 640 "$t"; mv "$t" "$d/outbox"' _ "$2" "$3"
+    chmod 640 "$t"
+    # BusyBox date has no %N: seconds plus the pid keeps names unique per exec
+    # and ordered across execs; the temp name is dotted so it is never read.
+    mv "$t" "$d/outbox/$(date +%s)-$$"' _ "$2" "$3"
 }
 
 recv() { mvm machine mailbox recv "$1"; }
