@@ -1915,7 +1915,7 @@ fn served_mailbox_process(dir: &std::path::Path) -> (KillOnDrop, std::path::Path
 }
 
 #[test]
-fn a_corrupt_mailbox_anchor_prevents_the_helper_from_reporting_ready() {
+fn missing_verified_posture_prevents_the_helper_from_reporting_ready() {
     use mvm_hostd::mailbox_process::build_config;
 
     let dir = tempfile::tempdir_in("/tmp").unwrap();
@@ -1930,7 +1930,10 @@ fn a_corrupt_mailbox_anchor_prevents_the_helper_from_reporting_ready() {
     let grant = granted_plan(authority).mailbox.unwrap();
     let backend = mvm_runtime::backend::AnyBackend::from_hypervisor("hvf");
     let config = build_config(&keys, &grant, &state_dir, &backend).unwrap();
-    std::fs::write(state_dir.join("mailbox-anchor"), b"{").unwrap();
+    assert!(
+        config.posture.is_none(),
+        "unadmitted helper has no Dev token"
+    );
     let mut process = spawn_mailbox_process(&serde_json::to_vec(&config).unwrap());
     let status = (0..100).find_map(|_| {
         let exited = process.0.try_wait().unwrap();
@@ -1942,12 +1945,12 @@ fn a_corrupt_mailbox_anchor_prevents_the_helper_from_reporting_ready() {
     assert_eq!(
         status.and_then(|status| status.code()),
         Some(1),
-        "a corrupt anchor must fail closed; stderr:\n{}",
+        "missing verified posture must fail closed; stderr:\n{}",
         process.stderr()
     );
     assert!(
         !config.socket.exists(),
-        "no mailbox endpoint may be published from a corrupt anchor"
+        "no mailbox endpoint may be published without verified admission"
     );
 }
 
