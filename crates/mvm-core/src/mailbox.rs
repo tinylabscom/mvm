@@ -9,12 +9,12 @@ use std::collections::BTreeSet;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use mvm_contract::protocol::mailbox::{
     AES_256_GCM_ALGORITHM, AuthorizationDomainId, BootId, ContentType, DestinationReceipt,
-    ED25519_ALGORITHM, ED25519_SIGNATURE_BYTES, ExecutionEpoch, MAILBOX_PROTOCOL_VERSION,
-    MAX_ENCODED_ENVELOPE_BYTES, MAX_MAILBOX_PAYLOAD_BYTES, MailboxCapabilityGrant,
-    MailboxContractError, MailboxDeliveryError, MailboxEnvelope, MailboxEnvelopeHeader, MailboxId,
-    MailboxMessage, MailboxOperation, MailboxRoutingFrame, MessageId, PrincipalId, ProtocolVersion,
-    RevocationId, SignedDestinationReceipt, SignedMailboxCapability, SignedMailboxMessage,
-    TenantId,
+    ED25519_ALGORITHM, ED25519_SIGNATURE_BYTES, ExecutionEpoch,
+    LOCAL_DURABLE_RECEIPT_SIGNATURE_DOMAIN, MAILBOX_PROTOCOL_VERSION, MAX_ENCODED_ENVELOPE_BYTES,
+    MAX_MAILBOX_PAYLOAD_BYTES, MailboxCapabilityGrant, MailboxContractError, MailboxDeliveryError,
+    MailboxEnvelope, MailboxEnvelopeHeader, MailboxId, MailboxMessage, MailboxOperation,
+    MailboxRoutingFrame, MessageId, PrincipalId, ProtocolVersion, RevocationId,
+    SignedDestinationReceipt, SignedMailboxCapability, SignedMailboxMessage, TenantId,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -947,13 +947,27 @@ pub fn authorize_receive(
     verify_capability_scope(header, capability, context, false)
 }
 
-/// Sign a destination receipt in a domain distinct from envelopes and grants.
+fn receipt_signature_domain(receipt: &DestinationReceipt) -> Result<&'static [u8], MailboxError> {
+    receipt
+        .validate_versioned_outcome()
+        .map_err(MailboxError::Contract)?;
+    if receipt.signature_algorithm.0 != ED25519_ALGORITHM {
+        return Err(MailboxError::UnsupportedSignatureAlgorithm);
+    }
+    match receipt.protocol_version {
+        ProtocolVersion::V1 => Ok(RECEIPT_SIGNATURE_DOMAIN),
+        ProtocolVersion::V2 => Ok(LOCAL_DURABLE_RECEIPT_SIGNATURE_DOMAIN),
+        _ => Err(MailboxError::UnsupportedProtocolVersion),
+    }
+}
+
+/// Sign a destination receipt in its versioned outcome domain.
 pub fn sign_receipt(
     receipt: DestinationReceipt,
     destination_key: &SigningKey,
 ) -> Result<SignedDestinationReceipt, MailboxError> {
-    validate_signed_object_versions(receipt.protocol_version, receipt.signature_algorithm)?;
-    let signature = destination_key.sign(&canonical_bytes(RECEIPT_SIGNATURE_DOMAIN, &receipt)?);
+    let domain = receipt_signature_domain(&receipt)?;
+    let signature = destination_key.sign(&canonical_bytes(domain, &receipt)?);
     Ok(SignedDestinationReceipt {
         receipt,
         signature: signature.to_bytes().to_vec(),
@@ -965,10 +979,7 @@ pub fn verify_receipt(
     signed: &SignedDestinationReceipt,
     destination_key: &VerifyingKey,
 ) -> Result<(), MailboxError> {
-    validate_signed_object_versions(
-        signed.receipt.protocol_version,
-        signed.receipt.signature_algorithm,
-    )?;
+    let domain = receipt_signature_domain(&signed.receipt)?;
     let signature: [u8; ED25519_SIGNATURE_BYTES] = signed
         .signature
         .as_slice()
@@ -976,7 +987,7 @@ pub fn verify_receipt(
         .map_err(|_| MailboxError::ReceiptSignatureInvalid)?;
     destination_key
         .verify(
-            &canonical_bytes(RECEIPT_SIGNATURE_DOMAIN, &signed.receipt)?,
+            &canonical_bytes(domain, &signed.receipt)?,
             &Signature::from_bytes(&signature),
         )
         .map_err(|_| MailboxError::ReceiptSignatureInvalid)

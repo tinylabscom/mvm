@@ -1,4 +1,4 @@
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer, SigningKey};
 use mvm_contract::plan::{Nonce, PlanId};
 use mvm_contract::protocol::mailbox::{
     AuthorizationDomainId, AuthorizationDomainRouteLabel, BootId, CapabilityId,
@@ -424,6 +424,49 @@ fn destination_receipt_wire_roundtrip_and_signature_cover_outcome_and_identity()
         verify_receipt(&signed, &destination_key.verifying_key()),
         Err(MailboxError::ReceiptSignatureInvalid)
     ));
+}
+
+#[test]
+fn local_receipt_uses_only_its_v2_signature_domain() {
+    let destination_key = SigningKey::from_bytes(&[31; 32]);
+    let receipt = mvm_contract::protocol::mailbox::DestinationReceipt {
+        protocol_version: ProtocolVersion::V2,
+        signature_algorithm: SignatureAlgorithm::ED25519,
+        delivery_id: DeliveryId::from_bytes([32; 32]),
+        message_id: MessageId::from_bytes([6; 32]),
+        address: address(),
+        execution_epoch: ExecutionEpoch::new(7).expect("epoch"),
+        outcome: DeliveryOutcome::AcceptedLocalDurable,
+        observed_at_unix_ms: 1_600,
+        ciphertext_commitment: [33; 32],
+    };
+    let signed = sign_receipt(receipt.clone(), &destination_key).expect("sign V2 local receipt");
+    verify_receipt(&signed, &destination_key.verifying_key()).expect("verify V2 local receipt");
+    assert_eq!(
+        sign_receipt(receipt, &destination_key)
+            .expect("deterministic local signature")
+            .signature,
+        signed.signature
+    );
+
+    let mut wrong_domain = signed.clone();
+    let mut v1_bytes = b"mvm.mailbox.receipt.v1\0".to_vec();
+    v1_bytes.extend(serde_jcs::to_vec(&signed.receipt).expect("canonical receipt"));
+    wrong_domain.signature = destination_key.sign(&v1_bytes).to_bytes().to_vec();
+    assert_eq!(
+        verify_receipt(&wrong_domain, &destination_key.verifying_key()),
+        Err(MailboxError::ReceiptSignatureInvalid)
+    );
+    assert_eq!(
+        verify_receipt(&signed, &SigningKey::from_bytes(&[34; 32]).verifying_key()),
+        Err(MailboxError::ReceiptSignatureInvalid)
+    );
+    let mut old_outcome = signed.receipt.clone();
+    old_outcome.outcome = DeliveryOutcome::Duplicate;
+    assert!(sign_receipt(old_outcome, &destination_key).is_err());
+    let mut old_version = signed.receipt;
+    old_version.protocol_version = ProtocolVersion::V1;
+    assert!(sign_receipt(old_version, &destination_key).is_err());
 }
 
 #[test]
