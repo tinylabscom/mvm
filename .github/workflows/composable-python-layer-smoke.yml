@@ -21,12 +21,16 @@ permissions:
 jobs:
   signed-input:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        arch: [x86_64, aarch64]
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -142,6 +146,54 @@ jobs:
             echo "wrong publisher identity was accepted" >&2
             exit 1
           fi
+          python3 - "$tmp/manifest.json" "$tmp/wrong-arch.json" "$ARCH" <<'PY'
+          import json, sys
+          from pathlib import Path
+          manifest = json.loads(Path(sys.argv[1]).read_bytes())
+          manifest["runtime_layer"]["guest_arch"] = (
+              "aarch64" if sys.argv[3] == "x86_64" else "x86_64"
+          )
+          Path(sys.argv[2]).write_bytes(
+              json.dumps(manifest, separators=(",", ":"), sort_keys=True).encode()
+          )
+          PY
+          cosign sign-blob --yes --new-bundle-format --bundle "$tmp/wrong-arch.bundle" \
+            "$tmp/wrong-arch.json"
+          if MVM_HOME="$tmp/home-wrong-arch" cargo run --locked -p mvm-core --example verify-runtime-layer-fixture \
+            --features host-state,manifest-verify -- \
+            "$tmp/wrong-arch.json" "$tmp/wrong-arch.bundle" "$tmp/layer.tar" \
+            "$tmp/files" "$IDENTITY" "$tmp/feed/revocations.json" \
+            "$tmp/feed/revocations.sigstore.json" > "$tmp/wrong-arch.log" 2>&1; then
+            echo "wrong signed runtime architecture was accepted" >&2
+            exit 1
+          fi
+          grep -F "declares architecture" "$tmp/wrong-arch.log"
+
+          mkdir -p "$tmp/bad-files/pack"
+          printf 'description = "Offline Python runtime"\nrequired = false\n[network]\nblock = true\n' \
+            > "$tmp/bad-files/pack/group.toml"
+          python3 - "$tmp/manifest.json" "$tmp/bad-group.json" "$tmp/bad-files/pack/group.toml" <<'PY'
+          import hashlib, json, sys
+          from pathlib import Path
+          manifest = json.loads(Path(sys.argv[1]).read_bytes())
+          policy = Path(sys.argv[3]).read_bytes()
+          manifest["files"][0]["sha256"] = hashlib.sha256(policy).hexdigest()
+          manifest["files"][0]["size"] = len(policy)
+          Path(sys.argv[2]).write_bytes(
+              json.dumps(manifest, separators=(",", ":"), sort_keys=True).encode()
+          )
+          PY
+          cosign sign-blob --yes --new-bundle-format --bundle "$tmp/bad-group.bundle" \
+            "$tmp/bad-group.json"
+          if MVM_HOME="$tmp/home-bad-group" cargo run --locked -p mvm-core --example verify-runtime-layer-fixture \
+            --features host-state,manifest-verify -- \
+            "$tmp/bad-group.json" "$tmp/bad-group.bundle" "$tmp/layer.tar" \
+            "$tmp/bad-files" "$IDENTITY" "$tmp/feed/revocations.json" \
+            "$tmp/feed/revocations.sigstore.json" > "$tmp/bad-group.log" 2>&1; then
+            echo "signed optional runtime policy was accepted" >&2
+            exit 1
+          fi
+          grep -F "requires a signed, required deny-all group" "$tmp/bad-group.log"
 
   signed-base:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository

@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use mvm_core::registry_pack::runtime_layer::{
-    verify_runtime_layer_archive, verify_runtime_layer_policies,
+    require_offline_runtime_policies, verify_runtime_layer_archive, verify_runtime_layer_policies,
 };
 use mvm_core::registry_pack::{
     PackAdoption, RegistryPackPublisher, RegistryPackPublisherPolicy, VerifiedRegistryManifest,
@@ -77,9 +77,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     else {
         return Err("fixture must be a signed runtime layer".into());
     };
+    mvm_core::arch::GuestArch::require_host(&layer.manifest().runtime_layer.guest_arch)?;
     verify_runtime_layer_archive(&layer, Path::new(archive))?;
-    verify_runtime_layer_policies(&layer, Path::new(files))?;
-    layer.check_current_revocations()?;
-    println!("signed runtime layer, independent current feed and declared bytes verified");
+    let policies = verify_runtime_layer_policies(&layer, Path::new(files))?;
+    require_offline_runtime_policies(&policies)?;
+    println!(
+        "signed host-architecture runtime layer, independent current feed and required deny-all policy verified"
+    );
     Ok(())
 }
