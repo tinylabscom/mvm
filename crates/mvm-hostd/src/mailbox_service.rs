@@ -534,6 +534,10 @@ fn admit(
 #[cfg(test)]
 mod accept_loop_tests {
     use super::*;
+
+    fn test_secret() -> mvm_core::crypto::aead::Key {
+        mvm_core::crypto::aead::Key::from_bytes([5; 32])
+    }
     use std::time::Instant;
 
     fn service(dir: &Path) -> MailboxService {
@@ -550,7 +554,7 @@ mod accept_loop_tests {
             .to_bytes(),
             epoch: ExecutionEpoch::new(1).unwrap(),
         };
-        let (trust, _) = crate::mailbox_launch::host_trust(dir, &grant).unwrap();
+        let (trust, _) = crate::mailbox_launch::host_trust(dir, &grant, &test_secret()).unwrap();
         let limits = MailboxLimits {
             max_depth: 4,
             max_frame_bytes: 1024,
@@ -593,6 +597,10 @@ mod tests {
     use crate::mailbox_launch::{LAUNCH_LIMITS, authority_key_for, derive_launch_keys};
     use mvm_contract::protocol::mailbox::MailboxId;
 
+    fn test_secret() -> mvm_core::crypto::aead::Key {
+        mvm_core::crypto::aead::Key::from_bytes([5; 32])
+    }
+
     const MAILBOX: [u8; 32] = [4; 32];
 
     fn grant_at(keys: &Path, epoch: u64) -> MailboxGrant {
@@ -616,7 +624,9 @@ mod tests {
     /// sealer, both from the host key directory through the grant.
     fn launch(keys: &Path, socket: &Path, epoch: u64) -> (MailboxService, GuestSealer) {
         let grant = grant_at(keys, epoch);
-        let (policy, sealer) = derive_launch_keys(keys, &grant).unwrap().trust();
+        let (policy, sealer) = derive_launch_keys(keys, &grant, &test_secret())
+            .unwrap()
+            .trust();
         bind_grant(&grant, policy, sealer, LAUNCH_LIMITS, socket).unwrap()
     }
 
@@ -656,7 +666,7 @@ mod tests {
         let (capability, envelope) = sealer.seal(greeting()).unwrap();
 
         let socket = dir.path().join("b.sock");
-        let (policy, _) = derive_launch_keys(dir.path(), &grant_at(dir.path(), 1))
+        let (policy, _) = derive_launch_keys(dir.path(), &grant_at(dir.path(), 1), &test_secret())
             .unwrap()
             .trust();
         let service = MailboxService::bind(&socket, LAUNCH_LIMITS, policy).unwrap();
@@ -667,5 +677,75 @@ mod tests {
                 mvm_core::mailbox::MailboxError::StaleExecutionEpoch.to_string()
             ))
         );
+    }
+
+    fn open_under(
+        keys: &Path,
+        secret: &mvm_core::crypto::aead::Key,
+        name: &str,
+        sealed: &(
+            mvm_contract::protocol::mailbox::SignedMailboxCapability,
+            mvm_contract::protocol::mailbox::MailboxEnvelope,
+        ),
+    ) -> std::result::Result<(), Refusal> {
+        let grant = grant_at(keys, 1);
+        let (policy, sealer) = derive_launch_keys(keys, &grant, secret).unwrap().trust();
+        let socket = keys.join(name);
+        let _bound = bind_grant(&grant, policy, sealer, LAUNCH_LIMITS, &socket).unwrap();
+        send(&socket, &sealed.0, &sealed.1)
+    }
+
+    fn sealed_under(
+        keys: &Path,
+        secret: &mvm_core::crypto::aead::Key,
+    ) -> (
+        mvm_contract::protocol::mailbox::SignedMailboxCapability,
+        mvm_contract::protocol::mailbox::MailboxEnvelope,
+    ) {
+        let grant = grant_at(keys, 1);
+        let (_, mut sealer) = derive_launch_keys(keys, &grant, secret).unwrap().trust();
+        sealer.seal(greeting()).unwrap()
+    }
+
+    #[test]
+    fn a_frame_sealed_before_the_secret_was_erased_cannot_be_reopened_without_it() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
+        let secret = mvm_core::crypto::aead::Key::from_bytes([9; 32]);
+        let sealed = sealed_under(dir.path(), &secret);
+        // Positive control: the surviving secret opens it.
+        assert!(open_under(dir.path(), &secret, "with.sock", &sealed).is_ok());
+        // The seed and the encryption root, with a re-minted secret, do not.
+        let reminted = mvm_core::crypto::aead::Key::from_bytes([8; 32]);
+        assert!(open_under(dir.path(), &reminted, "without.sock", &sealed).is_err());
+    }
+
+    #[test]
+    fn the_signing_seed_alone_cannot_open_and_the_encryption_root_alone_cannot_forge() {
+        let host = tempfile::tempdir().unwrap();
+        crate::audit::host_keypair::load_or_init_at(host.path()).unwrap();
+        let secret = mvm_core::crypto::aead::Key::from_bytes([9; 32]);
+        let sealed = sealed_under(host.path(), &secret);
+
+        // Same seed, own encryption root: cannot open what the host sealed.
+        let seed_only = tempfile::tempdir().unwrap();
+        for f in ["host-signer.ed25519", "host-signer.pub"] {
+            std::fs::copy(host.path().join(f), seed_only.path().join(f)).unwrap();
+        }
+        assert!(open_under(seed_only.path(), &secret, "a.sock", &sealed).is_err());
+
+        // Same encryption root, own signing seed: what it seals is refused.
+        let root_only = tempfile::tempdir().unwrap();
+        crate::audit::host_keypair::load_or_init_at(root_only.path()).unwrap();
+        std::fs::copy(
+            host.path().join("mailbox-encryption.root"),
+            root_only.path().join("mailbox-encryption.root"),
+        )
+        .unwrap();
+        let forged = sealed_under(root_only.path(), &secret);
+        assert!(open_under(host.path(), &secret, "b.sock", &forged).is_err());
+
+        // Positive control: the host's own seed and root open its own frame.
+        assert!(open_under(host.path(), &secret, "c.sock", &sealed).is_ok());
     }
 }

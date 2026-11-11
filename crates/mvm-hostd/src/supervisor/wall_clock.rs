@@ -104,6 +104,10 @@ impl SupervisorExitKiller {
         if let Err(err) = std::fs::write(&path, TIMEOUT_EXIT_CODE.to_string()) {
             tracing::warn!(error = %err, path = %path.display(), "recording the wall-clock timeout exit code failed");
         }
+        // Evidence retention keeps the state dir, never the mailbox key.
+        if let Err(err) = crate::mailbox_launch::shred_epoch_secret(&self.vm_state_dir) {
+            tracing::warn!(error = %err, "shredding the mailbox epoch secret failed");
+        }
         if self.retain_evidence {
             return;
         }
