@@ -569,6 +569,7 @@ fn verify_recovered_lease(
         mailbox: lease.lease.address.mailbox,
         authority_key: authority.to_bytes(),
         epoch: lease.lease.execution_epoch,
+        report: None,
     };
     let scope = MailboxGuestReaderScope {
         plan: &plan,
