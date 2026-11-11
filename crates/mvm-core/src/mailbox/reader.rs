@@ -4,16 +4,135 @@
 //! Callers must obtain the scope from an authenticated current guest boot and
 //! persist one-time challenge use before publishing a lease.
 
+use std::path::Path;
+
+use anyhow::{Context as _, Result as AnyResult};
 use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
 use mvm_contract::protocol::mailbox::{
-    ConsumerSessionId, DELIVERY_ACK_SIGNATURE_DOMAIN, DELIVERY_LEASE_SIGNATURE_DOMAIN,
-    MailboxAddress, MailboxDeliveryAck, MailboxDeliveryLease, MailboxEnvelope,
+    BootId, ConsumerSessionId, DELIVERY_ACK_SIGNATURE_DOMAIN, DELIVERY_LEASE_SIGNATURE_DOMAIN,
+    ExecutionEpoch, MailboxAddress, MailboxDeliveryAck, MailboxDeliveryLease, MailboxEnvelope,
     MailboxEnvelopeHeader, MailboxGrant, MailboxGuestReaderEnrollment, MailboxGuestReaderScope,
-    READER_ENROLLMENT_SIGNATURE_DOMAIN, RevocationId, SignedMailboxCapability,
+    MailboxId, READER_ENROLLMENT_SIGNATURE_DOMAIN, RevocationId, SignedMailboxCapability,
     SignedMailboxDeliveryAck, SignedMailboxDeliveryLease, SignedMailboxGuestReaderEnrollment,
 };
+use rand::TryRng as _;
 
 use super::{MailboxError, canonical_bytes, verify_capability_signature};
+
+/// Name shared by the host writer and guest reader of one public boot binding.
+pub const MAILBOX_READER_BOOT_FILE: &str = "mailbox-reader-boot.json";
+/// Maximum encoded size before parsing a guest-visible boot binding.
+pub const MAX_MAILBOX_READER_BOOT_BYTES: u64 = 2048;
+
+/// Public plan/boot/ACK-key binding projected into one cold guest identity
+/// drive and retained privately by the host for helper restart.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxReaderBootBinding {
+    pub plan_id: crate::plan::PlanId,
+    pub plan_nonce: crate::plan::Nonce,
+    pub mailbox: MailboxId,
+    pub authority_key: [u8; 32],
+    pub execution_epoch: ExecutionEpoch,
+    pub boot: BootId,
+    pub guest_identity_key: [u8; 32],
+    pub ack_public_key: [u8; 32],
+}
+
+impl MailboxReaderBootBinding {
+    /// Mint a distinct boot ID for a content-addressed admitted plan.
+    pub fn mint(
+        plan: &crate::plan::ExecutionPlan,
+        guest_identity: VerifyingKey,
+        ack_public_key: [u8; 32],
+    ) -> AnyResult<Self> {
+        let grant = plan
+            .mailbox
+            .context("reader boot requires a mailbox grant")?;
+        anyhow::ensure!(
+            plan.plan_id == crate::plan::compute_plan_id(plan),
+            "mailbox reader boot requires a content-addressed admitted plan"
+        );
+        VerifyingKey::from_bytes(&ack_public_key).context("invalid mailbox ACK public key")?;
+        let mut boot = [0u8; 32];
+        rand::rngs::SysRng
+            .try_fill_bytes(&mut boot)
+            .context("drawing system entropy for the mailbox reader boot")?;
+        Ok(Self {
+            plan_id: plan.plan_id.clone(),
+            plan_nonce: plan.nonce.clone(),
+            mailbox: grant.mailbox,
+            authority_key: grant.authority_key,
+            execution_epoch: grant.epoch,
+            boot: BootId::from_bytes(boot),
+            guest_identity_key: guest_identity.to_bytes(),
+            ack_public_key,
+        })
+    }
+
+    /// Persist the host-side public binding atomically before the guest boots.
+    pub fn persist(&self, state_dir: &Path) -> AnyResult<()> {
+        crate::private_fs::ensure_private_dir(state_dir)?;
+        let bytes = serde_json::to_vec(self).context("encode mailbox reader boot binding")?;
+        anyhow::ensure!(
+            bytes.len() <= MAX_MAILBOX_READER_BOOT_BYTES as usize,
+            "mailbox reader boot binding exceeds the encoded bound"
+        );
+        crate::atomic_io::write_private(&state_dir.join(MAILBOX_READER_BOOT_FILE), &bytes)
+            .context("persist mailbox reader boot binding")
+    }
+
+    /// Reopen a bounded host record without following a symlink.
+    pub fn load(state_dir: &Path) -> AnyResult<Self> {
+        use std::io::Read as _;
+        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+        let path = state_dir.join(MAILBOX_READER_BOOT_FILE);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        let metadata = file.metadata()?;
+        anyhow::ensure!(
+            metadata.is_file()
+                && metadata.nlink() == 1
+                && metadata.len() <= MAX_MAILBOX_READER_BOOT_BYTES,
+            "mailbox reader boot binding is not a bounded regular file"
+        );
+        let mut bytes = Vec::new();
+        file.take(MAX_MAILBOX_READER_BOOT_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            bytes.len() as u64 <= MAX_MAILBOX_READER_BOOT_BYTES,
+            "mailbox reader boot binding exceeds the encoded bound"
+        );
+        serde_json::from_slice(&bytes).context("decode mailbox reader boot binding")
+    }
+
+    /// Refuse a stale parent or moved mailbox before this boot can enroll.
+    pub fn check_plan(&self, plan: &crate::plan::ExecutionPlan) -> AnyResult<()> {
+        let grant = plan
+            .mailbox
+            .context("reader boot requires a mailbox grant")?;
+        anyhow::ensure!(
+            self.plan_id == plan.plan_id
+                && self.plan_nonce == plan.nonce
+                && self.mailbox == grant.mailbox
+                && self.authority_key == grant.authority_key
+                && self.execution_epoch == grant.epoch
+                && self.boot.as_bytes() != &[0; 32]
+                && self.ack_public_key != [0; 32]
+                && self.guest_identity_key != [0; 32],
+            "mailbox reader boot binding is stale or does not match the admitted plan"
+        );
+        VerifyingKey::from_bytes(&self.ack_public_key).context("invalid mailbox ACK public key")?;
+        VerifyingKey::from_bytes(&self.guest_identity_key)
+            .context("invalid guest identity public key")?;
+        VerifyingKey::from_bytes(&self.authority_key)
+            .context("invalid mailbox authority public key")?;
+        Ok(())
+    }
+}
 
 const READER_POSSESSION_SIGNATURE_DOMAIN: &[u8] = b"mvm.mailbox.reader-possession.v1\0";
 

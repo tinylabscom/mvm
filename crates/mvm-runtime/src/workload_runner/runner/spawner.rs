@@ -289,21 +289,18 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
             FlowMuxIdentitySource::Mint => {
                 let material = FlowMuxIdentityMaterial::mint_from_host_signer(req.vm_name)
                     .context("minting this boot's FlowMux identity")?;
-                let mailbox_ack_key = mint_mailbox_ack_key(req)?;
+                let reader_boot = mint_mailbox_reader_boot(req, material.guest_verifying_key())?;
                 let drive = req.state_dir.join(IDENTITY_DRIVE_FILE);
                 material.write_drive_with(
                     &drive,
                     &IdentityDriveContents {
                         ingress: req.ingress,
                         egress_ca_cert_pem: egress_ca.guest_cert_pem(),
-                        mailbox_ack_key: mailbox_ack_key.as_ref(),
+                        mailbox_ack_key: reader_boot.as_ref().map(|(key, _)| key),
+                        mailbox_reader_boot: reader_boot.as_ref().map(|(_, binding)| binding),
                     },
                 )?;
-                persist_mailbox_reader_boot(
-                    req,
-                    material.guest_verifying_key(),
-                    mailbox_ack_key.as_ref(),
-                )?;
+                persist_mailbox_reader_boot(req, reader_boot.as_ref().map(|(_, binding)| binding))?;
                 // Persisted so a warm child claimed from this VM pins the key
                 // its restored guest actually holds.
                 material.persist_inheritable(req.state_dir)?;
@@ -376,12 +373,26 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
     }
 }
 
-fn mint_mailbox_ack_key(
+fn mint_mailbox_reader_boot(
     req: &NetworkEndpointSpawnRequest<'_>,
-) -> Result<Option<mvm_vmm::host::flowmux_identity::MailboxAckKeyMaterial>> {
+    guest_identity: ed25519_dalek::VerifyingKey,
+) -> Result<
+    Option<(
+        mvm_vmm::host::flowmux_identity::MailboxAckKeyMaterial,
+        mvm_vmm::host::flowmux_identity::MailboxReaderBootBinding,
+    )>,
+> {
     req.reader_plan
         .filter(|plan| plan.mailbox.is_some())
-        .map(|_| mvm_vmm::host::flowmux_identity::MailboxAckKeyMaterial::mint())
+        .map(|plan| {
+            let key = mvm_vmm::host::flowmux_identity::MailboxAckKeyMaterial::mint()?;
+            let binding = mvm_vmm::host::flowmux_identity::MailboxReaderBootBinding::mint(
+                plan,
+                guest_identity,
+                key.verifying_key().to_bytes(),
+            )?;
+            Ok((key, binding))
+        })
         .transpose()
 }
 
@@ -396,16 +407,13 @@ fn clear_mailbox_reader_boot(state_dir: &Path) -> Result<()> {
 
 fn persist_mailbox_reader_boot(
     req: &NetworkEndpointSpawnRequest<'_>,
-    guest_identity: ed25519_dalek::VerifyingKey,
-    key: Option<&mvm_vmm::host::flowmux_identity::MailboxAckKeyMaterial>,
+    binding: Option<&mvm_vmm::host::flowmux_identity::MailboxReaderBootBinding>,
 ) -> Result<()> {
-    match (req.reader_plan, key) {
-        (Some(plan), Some(key)) => mvm_vmm::host::flowmux_identity::MailboxReaderBootBinding::mint(
-            plan,
-            guest_identity,
-            key,
-        )?
-        .persist(req.state_dir),
+    match (req.reader_plan, binding) {
+        (Some(plan), Some(binding)) => {
+            binding.check_plan(plan)?;
+            binding.persist(req.state_dir)
+        }
         (None, None) => clear_mailbox_reader_boot(req.state_dir),
         _ => anyhow::bail!("mailbox reader key projection disagrees with admitted plan"),
     }
@@ -426,16 +434,17 @@ fn prepare_observation_identity(
             let anchor = mvm_agentd::vsock::load_host_signer_verifying_key(anchor_path)?
                 .context("guest observations require the host signer public anchor")?;
             let guest = GuestIdentityMaterial::mint(anchor)?;
-            let mailbox_ack_key = mint_mailbox_ack_key(req)?;
+            let reader_boot = mint_mailbox_reader_boot(req, guest.verifying_key())?;
             let drive = req.state_dir.join(IDENTITY_DRIVE_FILE);
             guest.write_drive_with(
                 &drive,
                 &IdentityDriveContents {
-                    mailbox_ack_key: mailbox_ack_key.as_ref(),
+                    mailbox_ack_key: reader_boot.as_ref().map(|(key, _)| key),
+                    mailbox_reader_boot: reader_boot.as_ref().map(|(_, binding)| binding),
                     ..IdentityDriveContents::default()
                 },
             )?;
-            persist_mailbox_reader_boot(req, guest.verifying_key(), mailbox_ack_key.as_ref())?;
+            persist_mailbox_reader_boot(req, reader_boot.as_ref().map(|(_, binding)| binding))?;
             (
                 InheritableIdentity {
                     session_id: req.vm_name.to_string(),

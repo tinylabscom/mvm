@@ -33,6 +33,9 @@ pub const GUEST_SIGNING_KEY_FILE: &str = "flowmux-guest-signing-key";
 /// The root-owned guest agent alone may read this; the egress client cannot.
 pub const MAILBOX_ACK_SIGNING_KEY_FILE: &str = "mailbox-ack-signing-key";
 
+/// Public boot/plan binding that accompanies the guest-held ACK key.
+pub use mvm_core::mailbox::reader::{MAILBOX_READER_BOOT_FILE, MAX_MAILBOX_READER_BOOT_BYTES};
+
 /// Basename of the host-signer trust anchor on the drive.
 pub const HOST_SIGNER_PUB_FILE: &str = "host-signer.pub";
 
@@ -300,8 +303,8 @@ mod linux {
         EGRESS_CA_CERT_FILE, EGRESS_CA_CERT_MODE, GUEST_SIGNING_KEY_FILE, GUEST_SIGNING_KEY_MODE,
         HOST_SIGNER_PUB_FILE, HOST_SIGNER_PUB_MODE, IDENTITY_DRIVE_LABEL, INGRESS_TARGETS_FILE,
         INGRESS_TARGETS_MODE, IdentityDriveError, MAILBOX_ACK_SIGNING_KEY_FILE,
-        MAILBOX_ACK_SIGNING_KEY_MODE, RUN_MVM_DIR, find_labeled_ext4_disk_among,
-        virtio_block_devices,
+        MAILBOX_ACK_SIGNING_KEY_MODE, MAILBOX_READER_BOOT_FILE, MAX_MAILBOX_READER_BOOT_BYTES,
+        RUN_MVM_DIR, find_labeled_ext4_disk_among, virtio_block_devices,
     };
     use std::path::Path;
 
@@ -330,6 +333,7 @@ mod linux {
             find_labeled_ext4_disk_among(virtio_block_devices(), IDENTITY_DRIVE_LABEL)
         else {
             clear_mailbox_ack_key(&Path::new(RUN_MVM_DIR).join(MAILBOX_ACK_SIGNING_KEY_FILE))?;
+            clear_mailbox_reader_boot(&Path::new(RUN_MVM_DIR).join(MAILBOX_READER_BOOT_FILE))?;
             return Err(IdentityDriveError::NotAttached);
         };
 
@@ -370,7 +374,76 @@ mod linux {
             EGRESS_CA_CERT_MODE,
             "the per-VM egress CA certificate",
         )?;
-        install_mailbox_ack_key(Path::new(MOUNTPOINT), Path::new(RUN_MVM_DIR))
+        let run_dir = Path::new(RUN_MVM_DIR);
+        clear_mailbox_reader_boot(&run_dir.join(MAILBOX_READER_BOOT_FILE))?;
+        install_mailbox_ack_key(Path::new(MOUNTPOINT), run_dir)?;
+        copy_mailbox_reader_boot(Path::new(MOUNTPOINT), run_dir)?;
+        if run_dir.join(MAILBOX_ACK_SIGNING_KEY_FILE).exists()
+            != run_dir.join(MAILBOX_READER_BOOT_FILE).exists()
+        {
+            clear_mailbox_ack_key(&run_dir.join(MAILBOX_ACK_SIGNING_KEY_FILE))?;
+            clear_mailbox_reader_boot(&run_dir.join(MAILBOX_READER_BOOT_FILE))?;
+            return Err(IdentityDriveError::Unreadable(
+                "mailbox ACK key and boot binding must be provisioned together".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn clear_mailbox_reader_boot(path: &Path) -> Result<(), IdentityDriveError> {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(IdentityDriveError::Unreadable(format!(
+                "retire stale mailbox reader boot: {error}"
+            ))),
+        }
+    }
+
+    pub(super) fn copy_mailbox_reader_boot(
+        drive_dir: &Path,
+        run_dir: &Path,
+    ) -> Result<(), IdentityDriveError> {
+        use std::io::{Read as _, Write as _};
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let from = drive_dir.join(MAILBOX_READER_BOOT_FILE);
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&from)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(io_err("open mailbox reader boot")(error)),
+        };
+        let metadata = file
+            .metadata()
+            .map_err(io_err("inspect mailbox reader boot"))?;
+        if !metadata.is_file() || metadata.len() > MAX_MAILBOX_READER_BOOT_BYTES {
+            return Err(IdentityDriveError::Unreadable(
+                "mailbox reader boot is not a bounded regular file".into(),
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_MAILBOX_READER_BOOT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(io_err("read mailbox reader boot"))?;
+        if bytes.len() as u64 > MAX_MAILBOX_READER_BOOT_BYTES {
+            return Err(IdentityDriveError::Unreadable(
+                "mailbox reader boot exceeds the encoded bound".into(),
+            ));
+        }
+        let to = run_dir.join(MAILBOX_READER_BOOT_FILE);
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o444)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&to)
+            .map_err(io_err("create mailbox reader boot"))?;
+        output
+            .write_all(&bytes)
+            .map_err(io_err("copy mailbox reader boot"))
     }
 
     pub(super) fn install_mailbox_ack_key(
@@ -601,6 +674,37 @@ mod tests {
         std::fs::write(&supplied, [7; 31]).expect("malformed next boot key");
         assert!(linux::install_mailbox_ack_key(drive.path(), run.path()).is_err());
         assert!(!output.exists(), "malformed new key must clear the old one");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reader_boot_binding_copy_is_bounded_nofollow_and_clears_stale_boot() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let drive = tempfile::tempdir().unwrap();
+        let run = tempfile::tempdir().unwrap();
+        let source = drive.path().join(MAILBOX_READER_BOOT_FILE);
+        let dest = run.path().join(MAILBOX_READER_BOOT_FILE);
+        std::fs::write(&source, b"{\"boot\":\"synthetic\"}").unwrap();
+        linux::copy_mailbox_reader_boot(drive.path(), run.path()).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"{\"boot\":\"synthetic\"}");
+        assert_eq!(
+            std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777,
+            0o444
+        );
+        std::fs::write(
+            &source,
+            vec![b'x'; MAX_MAILBOX_READER_BOOT_BYTES as usize + 1],
+        )
+        .unwrap();
+        std::fs::remove_file(&dest).unwrap();
+        assert!(linux::copy_mailbox_reader_boot(drive.path(), run.path()).is_err());
+        assert!(!dest.exists());
+        std::fs::remove_file(&source).unwrap();
+        std::os::unix::fs::symlink(drive.path().join("missing"), &source).unwrap();
+        assert!(linux::copy_mailbox_reader_boot(drive.path(), run.path()).is_err());
+        std::fs::remove_file(&source).unwrap();
+        linux::copy_mailbox_reader_boot(drive.path(), run.path()).unwrap();
+        assert!(!dest.exists());
     }
 
     #[test]

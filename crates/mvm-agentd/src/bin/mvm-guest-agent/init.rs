@@ -184,6 +184,7 @@ pub(crate) fn apply_activation(
     // The telemetry signing key is the egress client's, mode 0400; read it now
     // or the listener can never answer a session.
     crate::telemetry::capture_session_keys_before_privilege_drop();
+    crate::mailbox::capture_ack_key_before_privilege_drop();
     guest_mount::drop_guest_agent_privilege(guest_mount::WORKLOAD_UID, guest_mount::WORKLOAD_GID)?;
 
     boot_state.set_activation(ActivationState::Activated);

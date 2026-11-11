@@ -481,7 +481,12 @@ mod tests {
         plan.mailbox = Some(grant(keys.path()));
         plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
         let ack = MailboxAckKeyMaterial::mint().unwrap();
-        let binding = MailboxReaderBootBinding::mint(&plan, guest.verifying_key(), &ack).unwrap();
+        let binding = MailboxReaderBootBinding::mint(
+            &plan,
+            guest.verifying_key(),
+            ack.verifying_key().to_bytes(),
+        )
+        .unwrap();
         binding.persist(state.path()).unwrap();
         InheritableIdentity {
             session_id: "guest-current".into(),

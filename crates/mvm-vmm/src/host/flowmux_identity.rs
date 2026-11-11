@@ -35,113 +35,10 @@ use rand::TryRng;
 use super::network_endpoint_spawn::FlowMuxIdentitySpawnConfig;
 use mvm_core::atomic_io::write_private_ephemeral;
 
-/// Host-only public binding for the ACK key carried by one cold boot's drive.
-/// A warm-restored guest must rekey before a new binding can be issued.
-pub const MAILBOX_READER_BOOT_FILE: &str = "mailbox-reader-boot.json";
-const MAX_MAILBOX_READER_BOOT_BYTES: u64 = 2048;
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MailboxReaderBootBinding {
-    pub plan_id: mvm_core::plan::PlanId,
-    pub plan_nonce: mvm_core::plan::Nonce,
-    pub mailbox: mvm_contract::protocol::mailbox::MailboxId,
-    pub execution_epoch: mvm_contract::protocol::mailbox::ExecutionEpoch,
-    pub boot: mvm_contract::protocol::mailbox::BootId,
-    pub guest_identity_key: [u8; 32],
-    pub ack_public_key: [u8; 32],
-}
-
-impl MailboxReaderBootBinding {
-    /// Bind a fresh key to an admitted plan and the separately pinned guest
-    /// identity; possession and Receive authority still require live checks.
-    pub fn mint(
-        plan: &mvm_core::plan::ExecutionPlan,
-        guest_identity: VerifyingKey,
-        ack_key: &MailboxAckKeyMaterial,
-    ) -> Result<Self> {
-        let grant = plan
-            .mailbox
-            .context("reader boot requires a mailbox grant")?;
-        anyhow::ensure!(
-            plan.plan_id == mvm_core::plan::compute_plan_id(plan),
-            "mailbox reader boot requires a content-addressed admitted plan"
-        );
-        let mut boot = [0u8; 32];
-        rand::rngs::SysRng
-            .try_fill_bytes(&mut boot)
-            .context("drawing system entropy for the mailbox reader boot")?;
-        Ok(Self {
-            plan_id: plan.plan_id.clone(),
-            plan_nonce: plan.nonce.clone(),
-            mailbox: grant.mailbox,
-            execution_epoch: grant.epoch,
-            boot: mvm_contract::protocol::mailbox::BootId::from_bytes(boot),
-            guest_identity_key: guest_identity.to_bytes(),
-            ack_public_key: ack_key.verifying_key().to_bytes(),
-        })
-    }
-
-    /// Persist the host-side public binding atomically before the guest boots.
-    pub fn persist(&self, state_dir: &Path) -> Result<()> {
-        mvm_core::private_fs::ensure_private_dir(state_dir)?;
-        let bytes = serde_json::to_vec(self).context("encode mailbox reader boot binding")?;
-        anyhow::ensure!(
-            bytes.len() <= MAX_MAILBOX_READER_BOOT_BYTES as usize,
-            "mailbox reader boot binding exceeds the encoded bound"
-        );
-        mvm_core::atomic_io::write_private(&state_dir.join(MAILBOX_READER_BOOT_FILE), &bytes)
-            .context("persist mailbox reader boot binding")
-    }
-
-    /// Reopen the bounded host record without following a symlink.
-    pub fn load(state_dir: &Path) -> Result<Self> {
-        use std::io::Read as _;
-        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
-        let path = state_dir.join(MAILBOX_READER_BOOT_FILE);
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&path)
-            .with_context(|| format!("open {}", path.display()))?;
-        let metadata = file.metadata()?;
-        anyhow::ensure!(
-            metadata.is_file()
-                && metadata.nlink() == 1
-                && metadata.len() <= MAX_MAILBOX_READER_BOOT_BYTES,
-            "mailbox reader boot binding is not a bounded regular file"
-        );
-        let mut bytes = Vec::new();
-        file.take(MAX_MAILBOX_READER_BOOT_BYTES + 1)
-            .read_to_end(&mut bytes)?;
-        anyhow::ensure!(
-            bytes.len() as u64 <= MAX_MAILBOX_READER_BOOT_BYTES,
-            "mailbox reader boot binding exceeds the encoded bound"
-        );
-        serde_json::from_slice(&bytes).context("decode mailbox reader boot binding")
-    }
-
-    /// Require the exact admitted plan, not a stale parent or moved mailbox.
-    pub fn check_plan(&self, plan: &mvm_core::plan::ExecutionPlan) -> Result<()> {
-        let grant = plan
-            .mailbox
-            .context("reader boot requires a mailbox grant")?;
-        anyhow::ensure!(
-            self.plan_id == plan.plan_id
-                && self.plan_nonce == plan.nonce
-                && self.mailbox == grant.mailbox
-                && self.execution_epoch == grant.epoch
-                && self.boot.as_bytes() != &[0; 32]
-                && self.ack_public_key != [0; 32]
-                && self.guest_identity_key != [0; 32],
-            "mailbox reader boot binding is stale or does not match the admitted plan"
-        );
-        VerifyingKey::from_bytes(&self.ack_public_key).context("invalid mailbox ACK public key")?;
-        VerifyingKey::from_bytes(&self.guest_identity_key)
-            .context("invalid guest identity public key")?;
-        Ok(())
-    }
-}
+/// A warm-restored guest must rekey before a new reader binding can be issued.
+pub use mvm_core::mailbox::reader::{
+    MAILBOX_READER_BOOT_FILE, MAX_MAILBOX_READER_BOOT_BYTES, MailboxReaderBootBinding,
+};
 
 // The drive's label and filenames are declared on the reading side, in
 // `mvm_agentd::flowmux_keys`, and used here. One declaration, so a rename
@@ -179,6 +76,8 @@ pub struct IdentityDriveContents<'a> {
     /// Only project a distinct guest-held ACK key when a signed Receive
     /// capability and current-boot enrollment will authorize its use.
     pub mailbox_ack_key: Option<&'a MailboxAckKeyMaterial>,
+    /// Public plan/boot binding accompanying the root-only ACK key.
+    pub mailbox_reader_boot: Option<&'a MailboxReaderBootBinding>,
 }
 
 impl std::fmt::Debug for IdentityDriveContents<'_> {
@@ -190,6 +89,7 @@ impl std::fmt::Debug for IdentityDriveContents<'_> {
                 "mailbox_ack_key",
                 &self.mailbox_ack_key.map(|_| "<redacted>"),
             )
+            .field("mailbox_reader_boot", &self.mailbox_reader_boot)
             .finish()
     }
 }
@@ -453,11 +353,29 @@ impl GuestIdentityMaterial {
                 owner: Owner::ROOT,
             });
         }
+        if contents.mailbox_ack_key.is_some() != contents.mailbox_reader_boot.is_some() {
+            bail!("mailbox reader boot binding and ACK key must be projected together");
+        }
         if let Some(ack_key) = contents.mailbox_ack_key {
+            let binding = contents
+                .mailbox_reader_boot
+                .context("mailbox reader binding")?;
+            if binding.ack_public_key != ack_key.verifying_key().to_bytes()
+                || binding.guest_identity_key != self.verifying_key().to_bytes()
+            {
+                bail!("mailbox ACK key and boot binding do not match this identity drive");
+            }
             nodes.push(Node::File {
                 path: format!("/{MAILBOX_ACK_SIGNING_KEY_FILE}"),
                 mode: GUEST_SIGNING_KEY_MODE,
                 data: ack_key.seed.to_vec(),
+                xattrs: Vec::new(),
+                owner: Owner::ROOT,
+            });
+            nodes.push(Node::File {
+                path: format!("/{MAILBOX_READER_BOOT_FILE}"),
+                mode: HOST_SIGNER_PUB_MODE,
+                data: serde_json::to_vec(binding).context("encode guest mailbox reader binding")?,
                 xattrs: Vec::new(),
                 owner: Owner::ROOT,
             });
@@ -600,6 +518,7 @@ mod tests {
 
     #[test]
     fn mailbox_ack_key_is_distinct_optional_and_redacted() {
+        use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxGrant, MailboxId};
         let anchor = host_key().verifying_key();
         let guest = GuestIdentityMaterial::mint(anchor).expect("guest key");
         let ack = MailboxAckKeyMaterial::mint().expect("mailbox key");
@@ -620,8 +539,22 @@ mod tests {
                 .any(|part| part == MAILBOX_ACK_SIGNING_KEY_FILE.as_bytes())
         );
 
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.mailbox = Some(MailboxGrant {
+            mailbox: MailboxId::from_bytes([8; 32]),
+            authority_key: anchor.to_bytes(),
+            epoch: ExecutionEpoch::new(3).unwrap(),
+        });
+        plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
+        let binding = MailboxReaderBootBinding::mint(
+            &plan,
+            guest.verifying_key(),
+            ack.verifying_key().to_bytes(),
+        )
+        .unwrap();
         let contents = IdentityDriveContents {
             mailbox_ack_key: Some(&ack),
+            mailbox_reader_boot: Some(&binding),
             ..Default::default()
         };
         assert!(!format!("{ack:?}").contains(&hex::encode(ack.seed.as_slice())));
@@ -637,10 +570,21 @@ mod tests {
         );
         assert!(enrolled.windows(32).any(|part| part == ack.seed.as_slice()));
         assert!(
+            enrolled
+                .windows(MAILBOX_READER_BOOT_FILE.len())
+                .any(|part| part == MAILBOX_READER_BOOT_FILE.as_bytes())
+        );
+        assert!(
             !enrolled
                 .windows(32)
                 .any(|part| part == host_key().to_bytes())
         );
+        let mismatched = IdentityDriveContents {
+            mailbox_ack_key: Some(&other),
+            mailbox_reader_boot: Some(&binding),
+            ..Default::default()
+        };
+        assert!(guest.write_drive_with(&drive, &mismatched).is_err());
     }
 
     #[test]
@@ -656,7 +600,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let guest = GuestIdentityMaterial::mint(host_key().verifying_key()).unwrap();
         let ack = MailboxAckKeyMaterial::mint().unwrap();
-        let binding = MailboxReaderBootBinding::mint(&plan, guest.verifying_key(), &ack).unwrap();
+        let binding = MailboxReaderBootBinding::mint(
+            &plan,
+            guest.verifying_key(),
+            ack.verifying_key().to_bytes(),
+        )
+        .unwrap();
         binding.persist(dir.path()).unwrap();
         assert_eq!(MailboxReaderBootBinding::load(dir.path()).unwrap(), binding);
         binding.check_plan(&plan).unwrap();
@@ -844,6 +793,7 @@ mod tests {
                     ingress: &[],
                     egress_ca_cert_pem: Some(ca.cert_pem()),
                     mailbox_ack_key: None,
+                    mailbox_reader_boot: None,
                 },
             )
             .expect("write drive");
@@ -880,6 +830,7 @@ mod tests {
                     ingress: &[],
                     egress_ca_cert_pem: Some(poisoned),
                     mailbox_ack_key: None,
+                    mailbox_reader_boot: None,
                 },
             );
 

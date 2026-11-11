@@ -9,19 +9,78 @@
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::path::Path;
-use std::sync::atomic::Ordering;
+use std::sync::{OnceLock, atomic::Ordering};
 use std::time::{Duration, Instant};
 
+use ed25519_dalek::SigningKey;
+use mvm_agentd::flowmux_drive::{MAILBOX_ACK_SIGNING_KEY_FILE, RUN_MVM_DIR};
 use mvm_agentd::mailbox_outbox::{MAILBOX_CMDLINE_TOKEN, OUTBOX_PATH, wait_and_forward_outbox};
 use mvm_agentd::telemetry_capture::session::TimedStream;
 use mvm_contract::protocol::mailbox::MAILBOX_PORT;
 use mvm_core::mailbox::frame::Refusal;
+use mvm_core::mailbox::reader::MailboxReaderBootBinding;
+use zeroize::Zeroizing;
 
 use crate::globals::SHUTDOWN_REQUESTED;
 use crate::telemetry::cmdline_asserts;
 use crate::transport::{accept_vsock, bind_vsock_listener, unix_transport_selected};
 
 const MAILBOX_IO_TIMEOUT: Duration = Duration::from_secs(12);
+static ACK_SEED: OnceLock<Zeroizing<[u8; 32]>> = OnceLock::new();
+static READER_BOOT: OnceLock<MailboxReaderBootBinding> = OnceLock::new();
+
+/// Retain the root-only ACK key before PID 1 drops to the workload UID.
+/// A missing or malformed key disables Receive; the existing Send path
+/// remains available, and warm children never inherit reader authority.
+pub(crate) fn capture_ack_key_before_privilege_drop() {
+    let dir = Path::new(RUN_MVM_DIR);
+    let binding = match MailboxReaderBootBinding::load(dir) {
+        Ok(binding) => binding,
+        Err(error) => {
+            if dir
+                .join(mvm_core::mailbox::reader::MAILBOX_READER_BOOT_FILE)
+                .exists()
+            {
+                eprintln!("mvm-guest-agent: mailbox reader boot unavailable: {error}");
+            }
+            return;
+        }
+    };
+    match load_ack_seed(&dir.join(MAILBOX_ACK_SIGNING_KEY_FILE), 0) {
+        Ok(seed)
+            if SigningKey::from_bytes(&seed).verifying_key().to_bytes()
+                == binding.ack_public_key =>
+        {
+            if ACK_SEED.set(seed).is_err() || READER_BOOT.set(binding).is_err() {
+                eprintln!("mvm-guest-agent: mailbox ACK identity already initialized");
+            }
+        }
+        Ok(_) | Err(_) => eprintln!("mvm-guest-agent: mailbox ACK key does not match this boot"),
+    }
+}
+
+fn load_ack_seed(path: &Path, owner_uid: u32) -> io::Result<Zeroizing<[u8; 32]>> {
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file()
+        || meta.len() != 32
+        || meta.nlink() != 1
+        || meta.uid() != owner_uid
+        || meta.permissions().mode() & 0o777 != 0o400
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "mailbox ACK key is not root-only",
+        ));
+    }
+    let mut seed = Zeroizing::new([0u8; 32]);
+    file.read_exact(seed.as_mut())?;
+    Ok(seed)
+}
 
 struct MailboxDeadline<'a, S> {
     stream: &'a mut S,
@@ -207,5 +266,24 @@ mod tests {
             bounded.read(&mut [0u8; 1]).unwrap_err().kind(),
             io::ErrorKind::TimedOut
         );
+    }
+
+    #[test]
+    fn ack_seed_loader_requires_exact_private_regular_file() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let dir = tempfile::tempdir().unwrap();
+        let uid = dir.path().metadata().unwrap().uid();
+        let path = dir.path().join(MAILBOX_ACK_SIGNING_KEY_FILE);
+        std::fs::write(&path, [8; 32]).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        assert_eq!(*load_ack_seed(&path, uid).unwrap(), [8; 32]);
+        assert!(load_ack_seed(&path, uid.wrapping_add(1)).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(load_ack_seed(&path, uid).is_err());
+        std::fs::write(&path, [8; 31]).unwrap();
+        assert!(load_ack_seed(&path, uid).is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("missing"), &path).unwrap();
+        assert!(load_ack_seed(&path, uid).is_err());
     }
 }
