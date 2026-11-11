@@ -9,6 +9,82 @@ The fuller AI-assisted issue-to-PR playbook lives in
 setup in `public/src/content/docs/contributing/development.md`. If you change
 anything this file describes, update this file in the same change.
 
+## Product and design boundaries
+
+Build secure execution infrastructure, not a product defined solely by microVMs.
+This repository owns the canonical local workload, signed-plan, policy, mailbox,
+host-service, guest-runtime, and backend contracts. Local execution must work
+without `mvmd`; `mvmd` adds fleet coordination and cross-host transport, not a
+second local authority. `mvm-images` owns the Linux image layer, while
+`mvm-packs` owns official pack publication. A new target such as an embedded
+device, Wasm, or Windows must use the common contracts where applicable and
+advertise only the isolation and capabilities it actually enforces. The
+current backend claims and their witnesses remain in ADR-001; the product
+direction here is not evidence that an unshipped target works.
+
+- **Security claims are conditional.** Name the adversary, data state, backend,
+  required trust, enforced boundary, and witness before claiming a guarantee.
+  Protect against a compromised workload on a trusted host; do not promise
+  confidentiality from a compromised active host without an independently
+  qualified hardware boundary. Destroying the last recoverable key may protect
+  encrypted data at rest, but cannot undo plaintext exposure or prove physical
+  erasure. Hardware assurance is optional unless signed policy requires it.
+- **One admitted path.** Complete required launch preflight and establish
+  isolation and signed-plan enforcement before boot. An isolated guest may
+  initialize while capability-specific checks finish, but no readiness claim,
+  secret use, writable volume, egress, or mailbox authority precedes its
+  applicable admission check. A failed required check refuses or stops
+  execution; optional monitoring is not a substitute for admission.
+  Workload microVMs have no guest NIC and no SSH. The host mediates authorized
+  effects and owns the canonical local mailbox path, even without `mvmd`.
+- **Compose without widening.** A pack or application requests permissions; it
+  does not grant them. Host, organization, user, pack, application, and invocation
+  limits must be resolved by the existing policy owner into one effective,
+  explainable policy; a deny or ceiling cannot be overridden by a later layer.
+  Start authoring with one editable workload file and compose smaller files when
+  reuse warrants it. Do not introduce another policy or network data path.
+- **Capabilities are contracts.** Reuse the existing backend traits for real
+  variation. An unsupported requested guarantee fails before execution; never
+  return success from a stub or silently downgrade to another backend. A target
+  without durable mailbox storage may use an authorized durable provider, but
+  cannot acknowledge a message as durable before that provider commits it.
+- **Artifacts stay immutable and verifiable.** Keep published signed pack and
+  wire meanings intact unless an approved versioned migration changes them.
+  Prefer a signed target index with digest-pinned, self-contained `.mvmpkg`
+  variants over making every small device download every platform's assets.
+  A locally signed development build never gains official publisher authority.
+  Rebuild from declared inputs; reuse verified bytes, never cached authorization.
+  A development watch session may build alongside the running workload and
+  automatically cut over only after the candidate passes verification,
+  admission, and readiness. Preserve accepted, still-authorized mailbox
+  messages and keep the old workload on candidate failure unless its
+  enforcement is no longer trustworthy; production rollout has its own
+  policy. Do not claim this workflow is shipped without a live witness on the
+  named backend.
+- **Offline is bounded.** Retry lost coordinator connections with bounded
+  exponential backoff and jitter; retries cannot extend a signed lease. Only
+  already-authorized operations continue before expiry. Managed workloads stop
+  at expiry by default; an explicitly authorized alternative may allow isolated
+  computation without external effects. The host controller must remain able to
+  reconnect and re-admit under a fresh epoch. Choose finite lease durations and
+  organization ceilings from operational evidence, not an invented constant.
+- **Speed is measured end to end.** Preserve the cold <300 ms and warm <50 ms
+  launch requirements, including admission; do not move required checks outside
+  the measured boundary or weaken them for a benchmark. Measure deterministic
+  image construction, first-use preparation, launch, and safe replacement
+  separately. Design for 1,000 concurrent workloads per suitably provisioned
+  host with bounded memory, threads, queues, idle CPU, and backpressure. Treat
+  one million handwritten, non-test production source lines per repository as
+  a preferred ceiling, excluding generated and vendored code; never compress
+  readable code or remove security coverage to meet it.
+- **Review the lifecycle you touch.** For launch, build/cutover, mailbox,
+  lease/reconnect, containment, and pack admission, identify state transitions,
+  their owner, durable evidence, deadlines, cancellation, and crash recovery.
+  Keep the change small and complete, reuse the source of truth, and prove
+  changed observable behavior and failure paths. Do not cite a planned feature
+  as shipped, name competitors in new prose or filenames, or attribute work to
+  an assistant in commits, PRs, or documentation.
+
 ## Documentation and editing hygiene
 
 - **No placeholders in shipped docs or guidance.** Do not land `TODO`,
