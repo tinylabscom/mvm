@@ -720,6 +720,7 @@ mod tests {
             mailbox: MailboxId::from_bytes([1; 32]),
             authority_key: [2; 32],
             epoch: ExecutionEpoch::new(1).unwrap(),
+            report: None,
         };
         let error = boot(Some(granted)).err().expect("the grant is refused");
         assert!(format!("{error:#}").contains("mailbox"), "{error:#}");

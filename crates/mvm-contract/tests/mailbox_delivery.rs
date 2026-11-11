@@ -4,9 +4,9 @@ use mvm_contract::protocol::mailbox::{
     ContentType, DeliveryAckNonce, DeliveryId, DeliveryLeaseNonce, ExecutionEpoch, MailboxAddress,
     MailboxCapabilityGrant, MailboxDeliveryAck, MailboxDeliveryError, MailboxDeliveryLease,
     MailboxGrant, MailboxGuestReaderEnrollment, MailboxGuestReaderScope, MailboxId,
-    MailboxMessageKind, MailboxOperation, MessageId, PrincipalId, ProtocolVersion, RevocationId,
-    SignatureAlgorithm, SignedMailboxDeliveryAck, SignedMailboxDeliveryLease,
-    SignedMailboxGuestReaderEnrollment, TenantId,
+    MailboxMessageKind, MailboxOperation, MailboxReportSendPolicy, MessageId, PrincipalId,
+    ProtocolVersion, ReplyRoute, RevocationId, SignatureAlgorithm, SignedMailboxDeliveryAck,
+    SignedMailboxDeliveryLease, SignedMailboxGuestReaderEnrollment, TenantId,
 };
 
 fn address() -> MailboxAddress {
@@ -23,7 +23,82 @@ fn plan_grant() -> MailboxGrant {
         mailbox: address().mailbox,
         authority_key: [5; 32],
         epoch: ExecutionEpoch::new(7).expect("epoch"),
+        report: None,
     }
+}
+
+#[test]
+fn report_policy_is_signed_plan_only_and_legacy_grants_stay_byte_identical() {
+    let old = plan_grant();
+    let encoded = serde_json::to_vec(&old).expect("serialize legacy grant");
+    assert!(!String::from_utf8_lossy(&encoded).contains("report"));
+    assert_eq!(
+        serde_json::from_slice::<MailboxGrant>(&encoded).expect("old plan grant"),
+        old
+    );
+    let mut enabled = old;
+    enabled.report = Some(MailboxReportSendPolicy::new(16 * 1024).expect("bound"));
+    let encoded = serde_json::to_vec(&enabled).expect("serialize plan grant");
+    assert_eq!(
+        serde_json::from_slice::<MailboxGrant>(&encoded).expect("report plan grant"),
+        enabled
+    );
+    assert!(String::from_utf8_lossy(&encoded).contains("\"report\""));
+    assert_ne!(old, enabled, "missing policy cannot authorize a report");
+    for (version, max_payload_bytes) in [(2, 100), (1, 0), (1, 1024 * 1024 + 1)] {
+        let mut changed: serde_json::Value = serde_json::from_slice(&encoded).expect("JSON");
+        changed["report"]["version"] = version.into();
+        changed["report"]["max_payload_bytes"] = max_payload_bytes.into();
+        assert!(
+            serde_json::from_value::<MailboxGrant>(changed).is_err(),
+            "unsupported version or payload bound must refuse"
+        );
+    }
+}
+
+#[test]
+fn report_policy_allows_only_its_signed_cast_type_and_bounded_body() {
+    use mvm_contract::protocol::mailbox::MailboxContractError;
+    use mvm_contract::protocol::workload_report::{
+        WORKLOAD_REPORT_CONTENT_TYPE, WORKLOAD_REPORT_VERSION,
+    };
+
+    let report_type = ContentType::parse(WORKLOAD_REPORT_CONTENT_TYPE, WORKLOAD_REPORT_VERSION)
+        .expect("static content type");
+    let ordinary_type =
+        ContentType::parse("application/vnd.mvm.guest-message", 1).expect("static content type");
+    let old = plan_grant();
+    assert_eq!(
+        old.check_report_send(MailboxMessageKind::Cast, &report_type, None, 1),
+        Err(MailboxContractError::ReportNotGranted)
+    );
+
+    let mut enabled = old;
+    enabled.report = Some(MailboxReportSendPolicy::new(16 * 1024).expect("bound"));
+    assert_eq!(
+        enabled.check_report_send(MailboxMessageKind::Cast, &report_type, None, 16 * 1024),
+        Ok(())
+    );
+    assert_eq!(
+        enabled.check_report_send(MailboxMessageKind::Cast, &report_type, None, 16 * 1024 + 1),
+        Err(MailboxContractError::ReportPayloadTooLarge)
+    );
+    assert_eq!(
+        enabled.check_report_send(MailboxMessageKind::Call, &report_type, None, 1),
+        Err(MailboxContractError::InvalidReportMessageKind)
+    );
+    let reply = ReplyRoute {
+        address: address(),
+        capability_id: CapabilityId::from_bytes([19; 32]),
+    };
+    assert_eq!(
+        enabled.check_report_send(MailboxMessageKind::Cast, &report_type, Some(&reply), 1),
+        Err(MailboxContractError::InvalidReportMessageKind)
+    );
+    assert_eq!(
+        enabled.check_report_send(MailboxMessageKind::Cast, &ordinary_type, None, 1),
+        Err(MailboxContractError::InvalidReportContentType)
+    );
 }
 
 fn receive_capability() -> MailboxCapabilityGrant {

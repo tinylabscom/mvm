@@ -491,6 +491,7 @@ mod tests {
                 .unwrap()
                 .to_bytes(),
             epoch: ExecutionEpoch::new(1).unwrap(),
+            report: None,
         }
     }
 

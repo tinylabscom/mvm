@@ -7,7 +7,8 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::plan::{Nonce, PlanId};
 
@@ -17,6 +18,10 @@ use crate::plan::{Nonce, PlanId};
 pub const MAILBOX_PORT: u32 = 5257;
 /// Current mailbox protocol version.
 pub const MAILBOX_PROTOCOL_VERSION: u16 = 1;
+/// Receipt-only version for a locally fsynced, trusted-host acceptance.
+pub const LOCAL_DURABLE_RECEIPT_VERSION: u16 = 2;
+/// Local receipt signatures must not reuse the V1 destination-receipt domain.
+pub const LOCAL_DURABLE_RECEIPT_SIGNATURE_DOMAIN: &[u8] = b"mvm.mailbox.receipt.v2\0";
 /// Current signature algorithm identifier (Ed25519).
 pub const ED25519_ALGORITHM: u16 = 1;
 /// Current payload-encryption algorithm identifier (AES-256-GCM).
@@ -129,6 +134,8 @@ pub struct ProtocolVersion(pub u16);
 
 impl ProtocolVersion {
     pub const V1: Self = Self(MAILBOX_PROTOCOL_VERSION);
+    /// Only local-durable destination receipts use version two.
+    pub const V2: Self = Self(LOCAL_DURABLE_RECEIPT_VERSION);
 }
 
 /// Signature algorithm carried on every signed object.
@@ -182,6 +189,59 @@ impl From<ExecutionEpoch> for u64 {
     }
 }
 
+/// Versioned ceiling on application reports, separate from the signed Send capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    try_from = "MailboxReportSendPolicyWire",
+    into = "MailboxReportSendPolicyWire"
+)]
+pub struct MailboxReportSendPolicy {
+    max_payload_bytes: u32,
+}
+
+impl MailboxReportSendPolicy {
+    /// Refuses zero or values beyond the canonical plaintext ceiling.
+    pub fn new(max_payload_bytes: u32) -> Result<Self, MailboxContractError> {
+        if max_payload_bytes == 0 || u64::from(max_payload_bytes) > MAX_MAILBOX_PAYLOAD_BYTES as u64
+        {
+            return Err(MailboxContractError::InvalidReportPolicyBounds);
+        }
+        Ok(Self { max_payload_bytes })
+    }
+
+    #[must_use]
+    pub const fn max_payload_bytes(self) -> u32 {
+        self.max_payload_bytes
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MailboxReportSendPolicyWire {
+    version: u16,
+    max_payload_bytes: u32,
+}
+
+impl TryFrom<MailboxReportSendPolicyWire> for MailboxReportSendPolicy {
+    type Error = MailboxContractError;
+
+    fn try_from(wire: MailboxReportSendPolicyWire) -> Result<Self, Self::Error> {
+        if wire.version != 1 {
+            return Err(MailboxContractError::UnsupportedReportPolicyVersion);
+        }
+        Self::new(wire.max_payload_bytes)
+    }
+}
+
+impl From<MailboxReportSendPolicy> for MailboxReportSendPolicyWire {
+    fn from(policy: MailboxReportSendPolicy) -> Self {
+        Self {
+            version: 1,
+            max_payload_bytes: policy.max_payload_bytes,
+        }
+    }
+}
+
 /// What a signed `ExecutionPlan` admits for one workload's mailbox: which
 /// mailbox, the key whose capabilities are honored, and the execution epoch.
 /// Presence grants that workload its own mailbox, including the ability for
@@ -197,6 +257,39 @@ pub struct MailboxGrant {
     /// Ed25519 verifying key that must have signed any accepted capability.
     pub authority_key: [u8; 32],
     pub epoch: ExecutionEpoch,
+    /// An absent policy does not authorize a typed application report. Omitted
+    /// on older signed plans so their canonical bytes remain unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<MailboxReportSendPolicy>,
+}
+
+impl MailboxGrant {
+    /// Check an application report against the signed plan's exact Cast shape.
+    ///
+    /// This does not verify the plan signature or the narrower signed Send
+    /// capability, destination mailbox, current epoch, frame cap, or journal
+    /// quota. Runtime must intersect all of those before admission.
+    pub fn check_report_send(
+        &self,
+        kind: MailboxMessageKind,
+        content_type: &ContentType,
+        reply_to: Option<&ReplyRoute>,
+        encoded_payload_bytes: usize,
+    ) -> Result<(), MailboxContractError> {
+        let policy = self.report.ok_or(MailboxContractError::ReportNotGranted)?;
+        if kind != MailboxMessageKind::Cast || reply_to.is_some() {
+            return Err(MailboxContractError::InvalidReportMessageKind);
+        }
+        if content_type.name() != crate::protocol::workload_report::WORKLOAD_REPORT_CONTENT_TYPE
+            || content_type.version() != crate::protocol::workload_report::WORKLOAD_REPORT_VERSION
+        {
+            return Err(MailboxContractError::InvalidReportContentType);
+        }
+        if encoded_payload_bytes > policy.max_payload_bytes as usize {
+            return Err(MailboxContractError::ReportPayloadTooLarge);
+        }
+        Ok(())
+    }
 }
 
 /// Monotonic sequence within one declared ordering scope.
@@ -626,6 +719,8 @@ pub struct SignedMailboxCapability {
 pub enum DeliveryOutcome {
     AcceptedEphemeral,
     AcceptedDurable,
+    /// Local crash durability only; no independent whole-host rollback witness.
+    AcceptedLocalDurable,
     Duplicate,
     Expired,
     Refused,
@@ -636,8 +731,7 @@ pub enum DeliveryOutcome {
 }
 
 /// Receipt body signed only by the destination mailbox authority.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DestinationReceipt {
     pub protocol_version: ProtocolVersion,
     pub signature_algorithm: SignatureAlgorithm,
@@ -648,6 +742,73 @@ pub struct DestinationReceipt {
     pub outcome: DeliveryOutcome,
     pub observed_at_unix_ms: i64,
     pub ciphertext_commitment: [u8; 32],
+}
+
+impl DestinationReceipt {
+    /// Keeps V1 receipt claims distinct from the V2 local-only durability claim.
+    pub fn validate_versioned_outcome(&self) -> Result<(), MailboxContractError> {
+        let expected = match self.outcome {
+            DeliveryOutcome::AcceptedLocalDurable => ProtocolVersion::V2,
+            _ => ProtocolVersion::V1,
+        };
+        if self.protocol_version == expected {
+            Ok(())
+        } else {
+            Err(MailboxContractError::InvalidReceiptVersion)
+        }
+    }
+}
+
+impl Serialize for DestinationReceipt {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.validate_versioned_outcome()
+            .map_err(serde::ser::Error::custom)?;
+        let mut receipt = serializer.serialize_struct("DestinationReceipt", 9)?;
+        receipt.serialize_field("protocol_version", &self.protocol_version)?;
+        receipt.serialize_field("signature_algorithm", &self.signature_algorithm)?;
+        receipt.serialize_field("delivery_id", &self.delivery_id)?;
+        receipt.serialize_field("message_id", &self.message_id)?;
+        receipt.serialize_field("address", &self.address)?;
+        receipt.serialize_field("execution_epoch", &self.execution_epoch)?;
+        receipt.serialize_field("outcome", &self.outcome)?;
+        receipt.serialize_field("observed_at_unix_ms", &self.observed_at_unix_ms)?;
+        receipt.serialize_field("ciphertext_commitment", &self.ciphertext_commitment)?;
+        receipt.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for DestinationReceipt {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            protocol_version: ProtocolVersion,
+            signature_algorithm: SignatureAlgorithm,
+            delivery_id: DeliveryId,
+            message_id: MessageId,
+            address: MailboxAddress,
+            execution_epoch: ExecutionEpoch,
+            outcome: DeliveryOutcome,
+            observed_at_unix_ms: i64,
+            ciphertext_commitment: [u8; 32],
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let receipt = Self {
+            protocol_version: wire.protocol_version,
+            signature_algorithm: wire.signature_algorithm,
+            delivery_id: wire.delivery_id,
+            message_id: wire.message_id,
+            address: wire.address,
+            execution_epoch: wire.execution_epoch,
+            outcome: wire.outcome,
+            observed_at_unix_ms: wire.observed_at_unix_ms,
+            ciphertext_commitment: wire.ciphertext_commitment,
+        };
+        receipt
+            .validate_versioned_outcome()
+            .map_err(serde::de::Error::custom)?;
+        Ok(receipt)
+    }
 }
 
 /// Signed destination receipt.
@@ -1151,6 +1312,20 @@ pub enum MailboxContractError {
     InvalidCapabilityBounds,
     #[error("capability execution epoch range is invalid")]
     InvalidEpochRange,
+    #[error("workload report policy version is unsupported")]
+    UnsupportedReportPolicyVersion,
+    #[error("workload report policy bounds are invalid")]
+    InvalidReportPolicyBounds,
+    #[error("workload report is not granted by the signed plan")]
+    ReportNotGranted,
+    #[error("workload report must be a cast without a reply route")]
+    InvalidReportMessageKind,
+    #[error("workload report content type is not granted")]
+    InvalidReportContentType,
+    #[error("workload report exceeds the signed plan ceiling")]
+    ReportPayloadTooLarge,
+    #[error("receipt outcome is unsupported for its protocol version")]
+    InvalidReceiptVersion,
 }
 
 impl MailboxContractError {
@@ -1173,6 +1348,13 @@ impl MailboxContractError {
             Self::CiphertextLengthMismatch => "ciphertext_length_mismatch",
             Self::InvalidCapabilityBounds => "invalid_capability_bounds",
             Self::InvalidEpochRange => "invalid_epoch_range",
+            Self::UnsupportedReportPolicyVersion => "unsupported_report_policy_version",
+            Self::InvalidReportPolicyBounds => "invalid_report_policy_bounds",
+            Self::ReportNotGranted => "report_not_granted",
+            Self::InvalidReportMessageKind => "invalid_report_message_kind",
+            Self::InvalidReportContentType => "invalid_report_content_type",
+            Self::ReportPayloadTooLarge => "report_payload_too_large",
+            Self::InvalidReceiptVersion => "invalid_receipt_version",
         }
     }
 }
