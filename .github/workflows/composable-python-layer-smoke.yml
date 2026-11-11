@@ -263,16 +263,8 @@ jobs:
   # result qualifies a .mvmpkg or substitutes for the exact-file witness.
   native-arm-kvm-unix-transport-capability:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    name: Native ARM KVM host capability (${{ matrix.host }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - host: self-hosted
-            runner: [self-hosted, Linux, ARM64]
-          - host: hosted
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
+    name: Native ARM KVM host capability (self-hosted)
+    runs-on: [self-hosted, Linux, ARM64]
     timeout-minutes: 10
     permissions: {}
     steps:
