@@ -219,16 +219,19 @@ pub enum VolumeMountSource {
     AdHocHost,
 }
 
-/// The live host directory behind an ad-hoc snapshot image.
+/// The host directory a frozen ad-hoc snapshot was created from.
 ///
 /// The image path in [`VolumeMountEntry::host_path`] is the artifact attached
-/// to the guest. This record retains the source identity needed to decide at
-/// the next start whether that artifact must be refreshed.
+/// to the guest. The source identity is used only by an explicit refresh;
+/// a start never reads the source directory.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSnapshotSource {
     pub source_path: String,
     pub fingerprint: String,
+    /// Exact digest of an immutable read-only image; writable guest images mutate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_sha256: Option<String>,
 }
 
 /// Security-relevant source classification after launch-time resolution.
@@ -416,6 +419,14 @@ fn validate_host_snapshot_source(entry: &VolumeMountEntry) -> Result<()> {
     {
         bail!(
             "host snapshot fingerprint for volume {:?} must be 64 hexadecimal characters",
+            entry.volume_name
+        );
+    }
+    if snapshot.image_sha256.as_ref().is_some_and(|digest| {
+        digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        bail!(
+            "invalid image digest for host snapshot volume {:?}",
             entry.volume_name
         );
     }
@@ -809,6 +820,7 @@ mod tests {
         entry.host_snapshot = Some(HostSnapshotSource {
             source_path: "/host/work".to_string(),
             fingerprint: "a".repeat(64),
+            image_sha256: Some("b".repeat(64)),
         });
         let registry = VolumeMountRegistry {
             mounts: BTreeMap::from([(entry.guest_path.clone(), entry.clone())]),
@@ -891,6 +903,7 @@ mod tests {
             entry.host_snapshot = Some(HostSnapshotSource {
                 source_path: tmp.path().display().to_string(),
                 fingerprint: "a".repeat(64),
+                image_sha256: requested_read_only.then(|| "b".repeat(64)),
             });
             let registry = VolumeMountRegistry {
                 mounts: BTreeMap::from([("/work/input".to_string(), entry)]),

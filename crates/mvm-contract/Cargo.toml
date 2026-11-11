@@ -85,3 +85,8 @@ required-features = ["schema"]
 name = "emit_pack_spec_schema"
 path = "src/bin/emit_pack_spec_schema.rs"
 required-features = ["schema"]
+
+[[bin]]
+name = "emit_authored_policy_schema"
+path = "src/bin/emit_authored_policy_schema.rs"
+required-features = ["schema"]

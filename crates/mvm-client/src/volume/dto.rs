@@ -351,6 +351,9 @@ pub enum AttachmentSource {
 pub struct HostSnapshotRecord {
     pub source_path: String,
     pub fingerprint: String,
+    /// Digest of a read-only snapshot's image; absent for a writable guest copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_sha256: Option<String>,
 }
 
 /// One registered attachment, described without any key material.
@@ -657,6 +660,7 @@ mod tests {
             host_snapshot: Some(HostSnapshotRecord {
                 source_path: "/host/work".to_string(),
                 fingerprint: "a".repeat(64),
+                image_sha256: Some("b".repeat(64)),
             }),
             attached_at: "2026-09-03T00:00:00Z".to_string(),
         };

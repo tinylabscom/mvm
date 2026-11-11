@@ -252,6 +252,7 @@ fn apply_selected_policy(
     environment: Option<mvm_core::plan::EnvironmentDescriptor>,
 ) -> Result<()> {
     if selected.is_none() && environment.as_ref().is_none_or(|env| env.policy.is_none()) {
+        mvm_client::policy_profiles::require_readmit_permitted(&args.allow_env, args.profile)?;
         return Ok(());
     }
     let mut selected = selected.unwrap_or_else(|| Selected {
@@ -276,6 +277,8 @@ fn apply_selected_policy(
         fold(&selected.resolved.policy, &flags)
             .with_context(|| format!("applying {}", selected.label))?
     };
+    mvm_client::policy_profiles::require_readmit_permitted(&folded.allow_env, args.profile)
+        .with_context(|| format!("applying {}", selected.label))?;
     args.allow_host = folded.allow_host;
     args.policy_routes = folded.routes;
     args.applied_ai_policy = folded.ai;
@@ -455,6 +458,38 @@ mod tests {
         let mut env = TestEnv::new();
         env.isolate_mvm_home(home.path());
         (env, home)
+    }
+
+    #[test]
+    fn sealed_run_refuses_authored_env_readmission() {
+        let (_env, home) = isolated();
+        let path = home.path().join("readmit.toml");
+        std::fs::write(&path, "[overrides.env]\nreadmit = [\"LD_PRELOAD\"]\n").unwrap();
+        let mut args = RunArgs {
+            policy: vec![path.display().to_string()],
+            ..RunArgs::default()
+        };
+        let err = apply_run_policy(&mut args).expect_err("standard must refuse readmission");
+        assert!(format!("{err:#}").contains("sealed production"), "{err:#}");
+        assert!(
+            args.applied_policy.is_none(),
+            "refusal precedes launch mutation"
+        );
+
+        args.profile = crate::commands::RunProfile::Dev;
+        apply_run_policy(&mut args).expect("explicit dev profile admits readmission");
+        assert_eq!(args.allow_env, ["LD_PRELOAD"]);
+    }
+
+    #[test]
+    fn sealed_run_refuses_flag_readmission_without_a_policy() {
+        let (_env, _home) = isolated();
+        let mut args = RunArgs {
+            allow_env: vec!["LD_PRELOAD".into()],
+            ..RunArgs::default()
+        };
+        let err = apply_run_policy(&mut args).expect_err("flag is a readmission too");
+        assert!(format!("{err:#}").contains("env.readmit"), "{err:#}");
     }
 
     #[test]

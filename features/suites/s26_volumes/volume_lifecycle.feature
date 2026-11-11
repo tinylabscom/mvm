@@ -153,7 +153,7 @@ Feature: Encrypted block volume lifecycle and attachment
   #
   # It now snapshots the directory into a cached ext4 image and registers that,
   # the same treatment `--mount HOST:/GUEST` gives a transient run. A start
-  # fingerprints the source again and refreshes the registered image on change.
+  # reuses the registered image; a stopped machine refreshes only on request.
   Scenario: a host directory is registered as a snapshot image
     Given an isolated mvm home
     When I run mvmctl in the isolated mvm home with "machine create bdd-dir-volume --image alpine"
@@ -162,19 +162,19 @@ Feature: Encrypted block volume lifecycle and attachment
     Then the command exits with code 0
     And the output contains ".ext4"
 
-  Scenario: a missing registered host snapshot source refuses start
+  Scenario: a missing registered host snapshot source refuses explicit refresh
     Given an isolated mvm home
     When I run mvmctl in the isolated mvm home with "machine create bdd-missing-dir-volume --image alpine"
     Then the command exits with code 0
     When I register host directory volume "missing-dirvol" at "/data/dirvol" for machine "bdd-missing-dir-volume"
     Then the command exits with code 0
     When I remove the source for host directory volume "missing-dirvol"
-    And I attempt a direct start of machine "bdd-missing-dir-volume" with backend "firecracker"
+    And I run mvmctl in the isolated mvm home with "machine volume refresh bdd-missing-dir-volume"
     Then the command exits with code 1
     And the error output contains "does not exist"
 
   @live @firecracker @workload_kernel
-  Scenario: restarting refreshes a registered host directory snapshot
+  Scenario: a host directory snapshot changes only after explicit refresh
     Given an isolated mvm home
     And a cached live workload kernel
     When I run mvmctl in the isolated mvm home with "machine create bdd-refresh-dir-volume --image alpine"
@@ -190,6 +190,15 @@ Feature: Encrypted block volume lifecycle and attachment
     Then the command exits with code 0
     When I replace the marker in host directory volume "refresh-dirvol" with "dir-volume-refreshed"
     And I run mvmctl in an isolated live home with "machine start bdd-refresh-dir-volume --hypervisor firecracker"
+    Then the command exits with code 0
+    When I execute shell command "cat /data/dirvol/marker" in machine "bdd-refresh-dir-volume"
+    Then the command exits with code 0
+    And the output contains "dir-volume-visible"
+    When I run mvmctl in the isolated mvm home with "machine stop bdd-refresh-dir-volume --yes"
+    Then the command exits with code 0
+    When I run mvmctl in the isolated mvm home with "machine volume refresh bdd-refresh-dir-volume"
+    Then the command exits with code 0
+    When I run mvmctl in an isolated live home with "machine start bdd-refresh-dir-volume --hypervisor firecracker"
     Then the command exits with code 0
     When I execute shell command "cat /data/dirvol/marker" in machine "bdd-refresh-dir-volume"
     Then the command exits with code 0

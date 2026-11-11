@@ -125,7 +125,7 @@ deny = ["/home"]                         # no share may come from here
 [env]
 allow = ["APP_MODE", "RUST_LOG"]         # once any layer lists names, --env is confined to them
 deny  = ["DEBUG"]
-# readmit = ["LD_PRELOAD"]               # escape hatch: user-authored profiles only
+# readmit = ["LD_PRELOAD"]               # user-authored + explicit dev/permissive profile only
 
 [resources]                              # every value is a ceiling; the smallest wins
 cpu_millicores = 1500
@@ -196,9 +196,7 @@ These are the security contract of composition:
 
 | Rule | Effect |
 | --- | --- |
-| Allows are unioned | Hosts, secrets, user-authored shares, env names and tools add up. A signed pack cannot add a host share. |
-| Tool `ask` sits between | `deny` beats `ask` beats `allow` for whole-tool decisions. |
-| Tool detail only narrows | A later layer may repeat or restrict the `argv`, `routes` and `secrets` an earlier layer set for a tool, never extend them; per-tool `deny` argv patterns union. An `executable` must be a normalized absolute guest path; later layers cannot add one to an existing detail or redirect it. |
+| Allows are unioned | Hosts, secrets, user-authored shares and env names add up. A signed pack cannot add a host share. |
 | Denies are unioned, and a deny beats an allow | Anything a deny covers is removed from the result, whichever layer allowed it. The note says which layer did what. |
 | Blocked network stays blocked | Once a layer sets `network.block = true`, every allowed host and route is dropped. A later `block = false` is an error, not a no-op. |
 | Required groups cannot be excluded | `groups.exclude` naming a required group that is already included is an error. |
@@ -206,7 +204,7 @@ These are the security contract of composition:
 | A share is writable only if every layer says so | Two different host sources for one guest path is an error. |
 | Signed packs cannot mount host directories | A pack's `shares.mount` entries are stripped with a note; `shares.deny` can still narrow a user-authored share. |
 | Resources are ceilings | The smallest value from any layer wins, and a flag cannot exceed it. |
-| Escape hatches are user-only | `env.readmit` (re-admitting a variable the hygiene denylist refuses) is honoured only in a profile from your policy directory or a path you pass. In a project or pack layer the entry is stripped with a note, never honoured. |
+| Escape hatches require an unsealed guest | `env.readmit` (re-admitting a variable the hygiene denylist refuses) is honoured only in a user-authored profile under the explicit `dev` or `permissive` security profile. `standard` and `restrictive` refuse it even if no initial command uses it. Project and pack entries are stripped with a note, never honoured. |
 | Signed packs cannot import local policy | A pack-authored `extends` or group include may name an unshadowed built-in or another installed, verified pack. A filesystem path or a name resolved from your policy directory is refused, so local files cannot silently become part of a signed pack's policy. |
 | Route rules cannot be extended | A route a later layer declares for a destination an earlier layer already routes is an error: composition cannot add rules to someone else's route. |
 
@@ -230,6 +228,9 @@ Flags are the last, most specific layer. They follow the same rules:
 - `--cpus` and `--memory` must fit within `max_cpus` and `max_memory`.
 - `--mount` cannot come from a denied source.
 - `--env` must name an allowed variable when the policy lists any.
+- `--allow-env` re-admits a denied name and, like `env.readmit`, is refused
+  under sealed `standard` and `restrictive` profiles even without an authored
+  policy. Ordinary `--env` values never inherit from the host implicitly.
 
 ### Templates that ship their own policy
 

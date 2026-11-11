@@ -2232,6 +2232,19 @@ mod tests {
     }
 
     #[test]
+    fn sealed_profile_refuses_readmission_without_an_authored_policy() {
+        for profile in [RunProfile::Restrictive, RunProfile::Standard] {
+            let mut args = run_args(profile);
+            args.allow_env = vec!["LD_PRELOAD".into()];
+            let err = validate_run_profile(&args).expect_err("sealed profile cannot readmit");
+            assert!(err.to_string().contains("--allow-env"), "{err}");
+        }
+        let mut args = run_args(RunProfile::Dev);
+        args.allow_env = vec!["LD_PRELOAD".into()];
+        validate_run_profile(&args).expect("explicit dev guest can readmit");
+    }
+
+    #[test]
     fn restrictive_profile_rejects_host_share() {
         let mut args = run_args(RunProfile::Restrictive);
         args.mounts.push(".:/work".to_string());

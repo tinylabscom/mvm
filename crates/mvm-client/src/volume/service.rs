@@ -246,6 +246,11 @@ impl LocalVolumeService {
         lifecycle::validate_volume_name(request.volume.as_str())?;
         validate_snapshot_source(source_dir, fingerprint)?;
         validate_snapshot_image(image)?;
+        let image_sha256 = request
+            .access
+            .is_read_only()
+            .then(|| mvm_core::crypto::image_verify::sha256_file(image))
+            .transpose()?;
         register_attachment(
             request,
             image.to_string_lossy().into_owned(),
@@ -254,6 +259,7 @@ impl LocalVolumeService {
             Some(HostSnapshotSource {
                 source_path: source_dir.to_string_lossy().into_owned(),
                 fingerprint: fingerprint.to_string(),
+                image_sha256,
             }),
             &_lock,
         )
@@ -287,17 +293,46 @@ impl LocalVolumeService {
                 entry.guest_path
             );
         }
+        refuse_leased_snapshot_refresh(entry)?;
+        let image_sha256 = entry
+            .read_only
+            .then(|| mvm_core::crypto::image_verify::sha256_file(image))
+            .transpose()?;
         entry.host_path = image.to_string_lossy().into_owned();
         entry.kind = LocalVolumeKind::BlockImage { size_mib };
-        entry
+        let snapshot = entry
             .host_snapshot
             .as_mut()
-            .expect("host snapshot presence checked above")
-            .fingerprint = fingerprint.to_string();
+            .expect("host snapshot presence checked above");
+        snapshot.fingerprint = fingerprint.to_string();
+        snapshot.image_sha256 = image_sha256;
         let refreshed = entry.clone();
         registry.save(owner)?;
         ownership::advance_epoch(owner, &_lock)?;
         Ok(attachment_record(owner, &refreshed))
+    }
+
+    /// Refuse a snapshot refresh while its registered image is under a live lease.
+    ///
+    /// The refresh itself checks again under the lifecycle lock: callers use
+    /// this preflight before making a private writable copy, but it does not
+    /// authorize a later registry update on its own.
+    pub fn ensure_snapshot_refreshable(&self, owner: &str, guest_path: &str) -> Result<()> {
+        validate_vm_name(owner).with_context(|| format!("invalid VM name: {owner:?}"))?;
+        let guest = validate_mount_path(guest_path)?;
+        let _lock = lifecycle::acquire_volume_lifecycle_lock()?;
+        let registry = VolumeMountRegistry::load(owner)?;
+        let entry = registry
+            .mounts
+            .get(&guest)
+            .with_context(|| format!("VM {owner:?} has no volume mount at {guest:?}"))?;
+        if entry.source != VolumeMountSource::AdHocHost || entry.host_snapshot.is_none() {
+            bail!(
+                "volume {:?} at {guest:?} is not a host snapshot",
+                entry.volume_name
+            );
+        }
+        refuse_leased_snapshot_refresh(entry)
     }
 
     /// Create an immutable encrypted snapshot of a locked managed volume.
@@ -309,6 +344,18 @@ impl LocalVolumeService {
     pub fn restore_volume(&self, name: &str, snapshot: &str) -> Result<()> {
         super::snapshot::restore(name, snapshot)
     }
+}
+
+fn refuse_leased_snapshot_refresh(entry: &VolumeMountEntry) -> Result<()> {
+    let key = lease::lease_key(Path::new(&entry.host_path))?;
+    if let Some(active) = AttachmentLeaseCatalog::load()?.leases.get(&key) {
+        bail!(
+            "cannot refresh host snapshot {:?}: image is attached to VM {:?}; stop it first",
+            entry.volume_name,
+            active.vm_name
+        );
+    }
+    Ok(())
 }
 
 impl VolumeService for LocalVolumeService {
@@ -561,6 +608,27 @@ impl LocalVolumeService {
                                     attachment.volume_name
                                 )
                             })?
+                    }
+                }
+                if let Some(snapshot) = registry
+                    .mounts
+                    .get(&guest)
+                    .and_then(|entry| entry.host_snapshot.as_ref())
+                    && attachment.read_only
+                {
+                    let expected = snapshot.image_sha256.as_deref().with_context(|| {
+                        format!(
+                            "read-only host snapshot {:?} has no pinned image digest; refresh it explicitly",
+                            attachment.volume_name
+                        )
+                    })?;
+                    let actual =
+                        mvm_core::crypto::image_verify::sha256_file(&attachment.host_path)?;
+                    if actual != expected {
+                        bail!(
+                            "read-only host snapshot {:?} image digest changed; refusing boot",
+                            attachment.volume_name
+                        );
                     }
                 }
                 let vm_volume = attachment.as_vm_volume();
@@ -866,6 +934,7 @@ fn attachment_record(owner: &str, entry: &VolumeMountEntry) -> AttachmentRecord 
             .map(|snapshot| HostSnapshotRecord {
                 source_path: snapshot.source_path.clone(),
                 fingerprint: snapshot.fingerprint.clone(),
+                image_sha256: snapshot.image_sha256.clone(),
             }),
         attached_at: entry.attached_at.clone(),
     }

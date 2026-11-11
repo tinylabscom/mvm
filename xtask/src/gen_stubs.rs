@@ -163,6 +163,24 @@ fn artifacts() -> &'static [StubArtifact] {
             class_name: "HostAbi",
             stem: "host-abi-v0",
         },
+        StubArtifact {
+            label: "authored policies",
+            emit_args: &[
+                "run",
+                "-q",
+                "-p",
+                "mvm-contract",
+                "--features",
+                "schema",
+                "--bin",
+                "emit_authored_policy_schema",
+            ],
+            schema_path: "schema/authored-policy-v1.json",
+            python_path: "crates/mvm-sdk/sdks/python/mvm/policy.py",
+            ts_path: "crates/mvm-sdk/sdks/typescript/src/policy.ts",
+            class_name: "AuthoredPolicyDocuments",
+            stem: "authored-policy-v1",
+        },
     ]
 }
 

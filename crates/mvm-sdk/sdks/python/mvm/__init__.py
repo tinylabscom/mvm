@@ -165,8 +165,8 @@ from mvm import audit, host, kv
 # Host-side built-manifest inspection; the host library loads only on use.
 from mvm import checkpoint, manifest, telemetry
 
-# Host-side pack authoring is pure data construction, with no build at import.
-from mvm import packs
+# Host-side pack and policy authoring is pure data construction, with no build at import.
+from mvm import packs, policy
 
 from mvm import attestation, image_revocations
 from mvm._hostlib import RecoveryRequiredDetails
@@ -182,6 +182,7 @@ __all__ = [
     "checkpoint",
     "telemetry",
     "packs",
+    "policy",
     "DEFAULT_TTL_SECONDS",
     "MVM_HOSTLIB_PATH_ENV",
     "MVM_SDK_MODE_ENV",

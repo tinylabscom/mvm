@@ -2276,10 +2276,11 @@ Exec](/guides/exec/) guide for the full background.
 | `mvmctl machine volume catalog`                                                                       | List managed local volumes                                                               |
 | `mvmctl machine volume catalog --json`                                                                | List managed local volumes as JSON                                                       |
 | `mvmctl machine volume mount <vm> --volume <name> --guest <absolute-path>`                            | Register an unlocked managed local virtio-fs volume mount for a VM. Read-only by default |
-| `mvmctl machine volume mount <vm> --volume <name> --host <absolute-dir> --guest <absolute-path>`      | Register an ad-hoc encrypted host directory as a virtio-fs volume mount                  |
+| `mvmctl machine volume mount <vm> --volume <name> --host <absolute-dir> --guest <absolute-path>`      | Snapshot an encrypted host directory into an ext4 volume for the machine                |
 | `mvmctl machine volume mount <vm> --volume <name> --host <absolute-dir> --guest <absolute-path> --rw` | Register the volume read-write                                                           |
 | `mvmctl machine volume ls <vm>`                                                                       | List registered volume mounts                                                            |
 | `mvmctl machine volume ls <vm> --json`                                                                | List registered volume mounts as JSON                                                    |
+| `mvmctl machine volume refresh <vm> [--discard-guest-writes]`                                         | Refresh host snapshots explicitly while stopped; writable guest data needs confirmation |
 | `mvmctl machine volume unmount <vm> <guest-path>`                                                     | Remove a registered volume mount                                                         |
 
 Guest destinations must be at or under `/data` or `/work`. Every destination

@@ -1124,6 +1124,43 @@ mod tests {
     }
 
     #[test]
+    fn read_only_host_snapshot_refuses_tampered_image_on_restart() {
+        let home = TestVolumeHome::new();
+        let source_dir = home.path().join("adhoc-source");
+        fs::create_dir(&source_dir).unwrap();
+        home.create_block("source", TEST_VOLUME_MIB);
+        service().unlock_volume("source").unwrap();
+        let image = host_path("source");
+        let request = AttachmentRequest::builder("vm-1", "input")
+            .unwrap()
+            .guest_path("/work/input")
+            .profile(RunProfile::Dev)
+            .build()
+            .unwrap();
+        let svc = LocalVolumeService::with_host_encryption_probe(super::probe_from_fn(|_| Ok(())));
+        let record = svc
+            .prepare_ad_hoc_snapshot_attachment(
+                &request,
+                &source_dir,
+                &image,
+                &"a".repeat(64),
+                TEST_VOLUME_MIB,
+            )
+            .unwrap();
+        assert!(record.host_snapshot.unwrap().image_sha256.is_some());
+        let mut image = fs::OpenOptions::new().write(true).open(&image).unwrap();
+        image.seek(SeekFrom::Start(4096)).unwrap();
+        image.write_all(b"tampered").unwrap();
+        image.sync_all().unwrap();
+
+        let error = svc.acquire_launch_lease(&dev_launch("vm-1")).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("image digest changed"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
     fn ad_hoc_image_attachment_refuses_non_ext4_bytes() {
         let home = TestVolumeHome::new();
         let source_dir = home.path().join("adhoc-source");

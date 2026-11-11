@@ -101,6 +101,7 @@ mod tests {
             host_snapshot: snapshot.then(|| HostSnapshotRecord {
                 source_path: format!("/home/me/{volume}"),
                 fingerprint: format!("key-{volume}"),
+                image_sha256: None,
             }),
             attached_at: "2026-09-27T00:00:00Z".into(),
         }

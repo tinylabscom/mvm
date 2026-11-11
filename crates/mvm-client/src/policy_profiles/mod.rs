@@ -28,10 +28,12 @@ pub mod query;
 pub mod resolve;
 pub mod source;
 
-pub use manifest::{FoldedLaunch, LaunchFlags, ResolvedManifest, fold};
+pub use manifest::{FoldedLaunch, LaunchFlags, ResolvedManifest, fold, require_readmit_permitted};
 pub use merge::{LayerSummary, ResolvedPolicy};
 pub use model::{GroupFile, PolicyBody, ProfileFile};
-pub use resolve::{MAX_EXTENDS_DEPTH, Platform, PolicySelection, ProjectPolicy, resolve};
+pub use resolve::{
+    MAX_EXTENDS_DEPTH, Platform, PolicySelection, ProjectPolicy, resolve, resolve_authored,
+};
 pub use source::{LayerOrigin, PolicyError, PolicyRef, PolicyStore};
 
 #[cfg(test)]

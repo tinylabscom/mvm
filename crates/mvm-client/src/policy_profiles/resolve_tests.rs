@@ -52,6 +52,129 @@ fn cli(raw: &[&str]) -> Vec<String> {
     raw.iter().map(ToString::to_string).collect()
 }
 
+#[test]
+fn rust_sdk_authored_profile_uses_the_host_resolver() {
+    use mvm_sdk::policy::{GroupSelection, HostOs, OneOrMany, PolicyBody, ProfileFile};
+
+    let dir = Dir::new();
+    dir.group(
+        "team",
+        "required = true\n[network]\nallow = [\"a.test\"]\ndeny = [\"b.test\"]\n",
+    );
+    let profile = ProfileFile {
+        extends: OneOrMany::One("default".into()),
+        groups: GroupSelection {
+            include: vec!["team".into()],
+            ..GroupSelection::default()
+        },
+        when: vec![mvm_sdk::policy::WhenBlock {
+            os: OneOrMany::One(HostOs::Linux),
+            overrides: PolicyBody {
+                network: NetworkSection {
+                    allow: vec!["b.test".into()],
+                    ..NetworkSection::default()
+                },
+                ..PolicyBody::default()
+            },
+            ..Default::default()
+        }],
+        ..ProfileFile::default()
+    };
+    let platform = Platform {
+        os: Some(HostOs::Linux),
+        ..Platform::default()
+    };
+    let inline = resolve_authored(&dir.store, profile.clone(), platform).unwrap();
+    let path = dir.dir.path().join("sdk.json");
+    std::fs::write(&path, serde_json::to_vec(&profile).unwrap()).unwrap();
+    let resolved =
+        crate::policy_profiles::resolve::resolve_file(&dir.store, &path, platform).unwrap();
+    assert_eq!(inline.policy, resolved.policy);
+    assert_eq!(allow(&resolved), ["a.test:443"]);
+    assert!(
+        resolved
+            .notes
+            .iter()
+            .any(|note| note.contains("b.test:443"))
+    );
+    assert!(
+        serde_json::from_str::<ProfileFile>(r#"{"overrides":{"network":{"allowed":["x"]}}}"#)
+            .is_err()
+    );
+}
+
+#[test]
+fn inline_resolution_captures_exact_transitive_sources_including_excluded_groups() {
+    use sha2::{Digest, Sha256};
+
+    let dir = Dir::new();
+    let parent = "[groups]\ninclude = [\"keep\", \"drop\"]\n";
+    let kept = "[network]\nallow = [\"allowed.test\"]\n";
+    let dropped = "[network]\nallow = [\"dropped.test\"]\n";
+    dir.profile("parent", parent);
+    dir.group("keep", kept);
+    dir.group("drop", dropped);
+    let authored = ProfileFile {
+        extends: super::super::model::OneOrMany::One("parent".into()),
+        groups: super::super::model::GroupSelection {
+            exclude: vec!["drop".into()],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let captured = resolve_authored_snapshot(&dir.store, authored.clone(), Platform::default())
+        .expect("resolve and capture");
+    assert_eq!(captured.authored, authored);
+    assert_eq!(allow(&captured.resolved), ["allowed.test:443"]);
+    assert_eq!(captured.dependencies.len(), 3);
+    for (identity, kind, text) in [
+        ("user:profile:parent", PolicyDocumentKind::Profile, parent),
+        ("user:group:keep", PolicyDocumentKind::Group, kept),
+        ("user:group:drop", PolicyDocumentKind::Group, dropped),
+    ] {
+        let source = captured
+            .dependencies
+            .iter()
+            .find(|source| source.identity == identity && source.kind == kind)
+            .expect("captured dependency");
+        assert_eq!(source.text, text);
+        assert_eq!(source.sha256, hex::encode(Sha256::digest(text.as_bytes())));
+        assert_eq!(source.origin, LayerOrigin::User);
+    }
+
+    dir.group("keep", "[network]\nallow = [\"changed.test\"]\n");
+    assert_eq!(allow(&captured.resolved), ["allowed.test:443"]);
+    assert_eq!(
+        allow(
+            &resolve_authored_snapshot(&dir.store, authored, Platform::default())
+                .unwrap()
+                .resolved
+        ),
+        ["changed.test:443"]
+    );
+}
+
+#[test]
+fn inline_policy_never_resolves_relative_references_against_cwd() {
+    let dir = Dir::new();
+    for profile in [
+        ProfileFile {
+            extends: crate::policy_profiles::model::OneOrMany::One("./base.toml".into()),
+            ..ProfileFile::default()
+        },
+        ProfileFile {
+            groups: crate::policy_profiles::model::GroupSelection {
+                include: vec!["./group.toml".into()],
+                ..Default::default()
+            },
+            ..ProfileFile::default()
+        },
+    ] {
+        let err = resolve_authored(&dir.store, profile, Platform::default()).unwrap_err();
+        assert!(err.message.contains("relative policy path"), "{err}");
+    }
+}
+
 // ---- built-ins ------------------------------------------------------------
 
 #[test]

@@ -332,6 +332,33 @@ fn an_env_allow_list_confines_env_flags_and_readmits_flow_through() {
 }
 
 #[test]
+fn sealed_profiles_refuse_readmission_even_without_an_initial_command() {
+    let policy = PolicyBody {
+        env: EnvSection {
+            readmit: vec!["LD_PRELOAD".into()],
+            ..EnvSection::default()
+        },
+        ..PolicyBody::default()
+    };
+    let folded = fold(&policy, &LaunchFlags::default()).expect("policy folds");
+    for profile in [
+        crate::profile::RunProfile::Restrictive,
+        crate::profile::RunProfile::Standard,
+    ] {
+        let err = require_readmit_permitted(&folded.allow_env, profile).unwrap_err();
+        assert_eq!(err.key.as_deref(), Some("env.readmit"));
+        assert!(err.message.contains("sealed production"), "{err}");
+    }
+    for profile in [
+        crate::profile::RunProfile::Dev,
+        crate::profile::RunProfile::Permissive,
+    ] {
+        require_readmit_permitted(&folded.allow_env, profile)
+            .expect("explicit dev posture permits readmit");
+    }
+}
+
+#[test]
 fn without_an_allow_list_env_flags_pass() {
     let folded = fold(
         &PolicyBody::default(),

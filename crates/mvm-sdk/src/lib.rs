@@ -63,6 +63,8 @@ pub mod error_taxonomy;
 /// working. Authoring + runtime SDKs lower to these types.
 pub use mvm_contract::ir;
 pub use mvm_contract::policy::approval;
+/// Typed policy documents shared with the host resolver.
+pub use mvm_contract::policy::authored as policy;
 /// Durable agent session identifiers, commands, events, cursors, and the
 /// transport-neutral reference journal.
 pub use mvm_contract::protocol::agent_session;

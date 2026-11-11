@@ -54,6 +54,12 @@ pub(super) fn validate_run_profile(args: &RunArgs) -> Result<()> {
     if !grants.env && !args.env.is_empty() {
         anyhow::bail!("--profile {name} does not allow --env");
     }
+    if !grants.dev_guest && !args.allow_env.is_empty() {
+        anyhow::bail!(
+            "--allow-env re-admits denied variables and is unavailable under sealed \
+             --profile {name}; use an explicitly authorized development profile"
+        );
+    }
     if !grants.host_shares && !(args.mounts.is_empty() && args.outputs.is_empty()) {
         anyhow::bail!("--profile {name} does not allow --mount or --output");
     }

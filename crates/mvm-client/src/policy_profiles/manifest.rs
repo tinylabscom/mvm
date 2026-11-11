@@ -26,6 +26,7 @@ use super::merge::{canonical_allow, deny_covers, split_host_port};
 use super::model::PolicyBody;
 use super::source::PolicyError;
 use crate::admission::run_secrets::RunSecretSpec;
+use crate::profile::RunProfile;
 
 /// A resolved policy as a document.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,6 +183,27 @@ pub struct FoldedLaunch {
 
 fn refuse(key: &str, message: impl Into<String>) -> PolicyError {
     PolicyError::new("command line", message).at_key(key)
+}
+
+/// Refuse environment readmission under a sealed guest security profile.
+///
+/// # Errors
+///
+/// Any effective readmission (from a policy or a launch flag) under
+/// `restrictive` or `standard` is refused, even without an initial command.
+pub fn require_readmit_permitted(
+    readmitted: &[String],
+    profile: RunProfile,
+) -> Result<(), PolicyError> {
+    if !profile.grants().dev_guest && !readmitted.is_empty() {
+        return Err(PolicyError::new(
+            "security profile",
+            "env.readmit is unavailable on sealed production workloads; use an explicitly \
+             authorized development profile",
+        )
+        .at_key("env.readmit"));
+    }
+    Ok(())
 }
 
 /// Fold `policy` into `flags`. The flags are the last, most specific layer:

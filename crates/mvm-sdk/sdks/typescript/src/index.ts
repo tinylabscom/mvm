@@ -189,6 +189,7 @@ export * as imageRevocations from "./image_revocations.js";
 
 // PackSpec authoring: data only, no host library, no build.
 export * as packs from "./packs.js";
+export * as policy from "./policy.js";
 
 // In-guest host-services runtime surface (`mvm.audit.emit`, `mvm.host.time()`).
 // Namespaces, so `import * as mvm; mvm.audit.emit(...)` works inside a booted

@@ -1069,6 +1069,44 @@ fn volume_mount_managed_omits_host() {
     }
 }
 
+#[test]
+fn volume_refresh_requires_explicit_confirmation_to_discard_writable_guest_data() {
+    for (args, expected) in [
+        (
+            vec!["mvmctl", "machine", "volume", "refresh", "vm-1"],
+            false,
+        ),
+        (
+            vec![
+                "mvmctl",
+                "machine",
+                "volume",
+                "refresh",
+                "vm-1",
+                "--discard-guest-writes",
+            ],
+            true,
+        ),
+    ] {
+        let cli = Cli::try_parse_from(args).unwrap();
+        let Commands::Machine(mg) = cli.command else {
+            panic!("expected machine group")
+        };
+        let machine::MachineAction::Vm(group::VmCmd::Volume(volume::Args {
+            command:
+                volume::VolumeCmd::Refresh {
+                    name,
+                    discard_guest_writes,
+                },
+        })) = mg.action
+        else {
+            panic!("expected volume refresh command")
+        };
+        assert_eq!(name, "vm-1");
+        assert_eq!(discard_guest_writes, expected);
+    }
+}
+
 // ---- Build --flake tests ----
 
 #[test]

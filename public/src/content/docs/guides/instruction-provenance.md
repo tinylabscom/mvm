@@ -328,9 +328,10 @@ their signature sidecars out of that image â€” the bytes the guest will mount â€
 rather than out of the directory they were copied from. The image is read in
 place; nothing is extracted to the host first.
 
-For a persistent machine this covers the cached immutable snapshot reused across
-restarts and refreshed after a host edit. A snapshot containing a file selected
-by the effective instruction include rules is attached read-only, even when the
+For a persistent machine this covers the cached snapshot reused across
+restarts until an explicit `machine volume refresh` after a host edit. A
+snapshot containing a file selected by the effective instruction include
+rules is attached read-only, even when the
 original request asked for write access. A snapshot with no selected instruction
 file retains its requested mode, preserving writable workspace/apply flows. An
 image that cannot be classified safely fails admission.

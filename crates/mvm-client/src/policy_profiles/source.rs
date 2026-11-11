@@ -54,7 +54,7 @@ impl DocFormat {
 /// layers.
 ///
 /// [`User`]: LayerOrigin::User
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LayerOrigin {
     /// Shipped inside `mvmctl`.
@@ -215,6 +215,8 @@ pub struct Loaded<T> {
     pub doc: T,
     /// The file, for a user- or project-authored document.
     pub file: Option<PathBuf>,
+    /// Exact UTF-8 source text parsed, without a second filesystem read.
+    pub source_text: Option<String>,
     /// Human label, e.g. ``profile `agent-apis` (built-in)``.
     pub label: String,
     /// A stable identity for cycle detection and de-duplication.
@@ -392,6 +394,7 @@ impl PolicyStore {
                     doc,
                     label: format!("{noun} `{spelling}` (pack)"),
                     file: Some(path),
+                    source_text: Some(text),
                     identity: format!(
                         "pack:{}#{}",
                         verified.manifest().reference,
@@ -415,11 +418,12 @@ impl PolicyStore {
                     .unwrap_or_else(|_| path.clone())
                     .display()
                     .to_string();
-                let doc = read_doc(&path, kind, referrer)?;
+                let (doc, text) = read_doc(&path, kind, referrer)?;
                 Ok(Loaded {
                     doc,
                     label: format!("{} {}", kind.noun(), path.display()),
                     file: Some(path),
+                    source_text: Some(text),
                     identity,
                     origin: path_origin,
                 })
@@ -438,11 +442,12 @@ impl PolicyStore {
                             ),
                         ));
                     }
-                    let doc = read_doc(&user_file, kind, referrer)?;
+                    let (doc, text) = read_doc(&user_file, kind, referrer)?;
                     return Ok(Loaded {
                         doc,
                         label: format!("{} `{name}`", kind.noun()),
                         file: Some(user_file),
+                        source_text: Some(text),
                         identity: format!("user:{}:{name}", kind.noun()),
                         origin: LayerOrigin::User,
                     });
@@ -465,6 +470,7 @@ impl PolicyStore {
                     doc,
                     label,
                     file: None,
+                    source_text: None,
                     identity: format!("builtin:{}:{name}", kind.noun()),
                     origin: LayerOrigin::Builtin,
                 })
@@ -500,7 +506,7 @@ fn read_doc<T: serde::de::DeserializeOwned>(
     path: &Path,
     kind: Kind,
     referrer: &str,
-) -> Result<T, PolicyError> {
+) -> Result<(T, String), PolicyError> {
     let format = DocFormat::for_path(path);
     let text = std::fs::read_to_string(path).map_err(|error| {
         PolicyError::new(
@@ -508,7 +514,7 @@ fn read_doc<T: serde::de::DeserializeOwned>(
             format!("reading {} {}: {error}", kind.noun(), path.display()),
         )
     })?;
-    format.parse(&text).map_err(|message| {
+    let doc = format.parse(&text).map_err(|message| {
         let error = PolicyError::new(
             format!("{} {} ({})", kind.noun(), path.display(), format.noun()),
             message.clone(),
@@ -518,7 +524,8 @@ fn read_doc<T: serde::de::DeserializeOwned>(
             DocFormat::Toml => error.at_key(error_key(&message)),
             DocFormat::Json => error,
         }
-    })
+    })?;
+    Ok((doc, text))
 }
 
 /// The key a parser error message names, best effort: serde's messages lead

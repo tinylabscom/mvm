@@ -132,11 +132,12 @@ mvmctl machine run --flake . --name build -d --mount ~/cargo.img:/data/cargo:8G:
 mvmctl machine exec build -- cargo build --manifest-path /work/src/Cargo.toml
 ```
 
-The directory is copied into an ext4 image each time the machine starts, so
-host edits appear after the next stop and start. `--host` must be absolute and
-on encrypted storage. With `--rw` the guest writes into the machine's private
-copy of the image; those writes never reach the host directory, and a changed
-host directory replaces the copy at the next start. Because it is a disk image,
+The directory is copied into an ext4 image when registered. Host edits appear
+only after stopping the machine and running `mvmctl machine volume refresh build`.
+`--host` must be absolute and on encrypted storage. With `--rw` the guest
+writes into a private copy of the image; those writes never reach the host
+directory. Refreshing a changed writable source requires
+`--discard-guest-writes` and replaces that copy. Because it is a disk image,
 a read-write registration follows the writable-disk-image grant: `standard`,
 `dev`, and `permissive` take it, `restrictive` does not. See the [machine volume docs](/guides/machine-use-cases/).
 

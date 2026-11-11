@@ -44,8 +44,8 @@ and `machine run` and `machine create` say so before anything boots. Register
 a snapshot-backed volume instead, or attach a sized disk image:
 
 ```bash
-# Snapshotted into an ext4 image before each machine start; host edits
-# become visible after the machine's next stop/start.
+# Snapshotted into an ext4 image now; host edits need an explicit refresh
+# after the machine stops.
 mvmctl machine volume mount app --volume config \
     --host /tmp/my-config --guest /data/config
 
@@ -115,9 +115,9 @@ mvmctl machine run --flake ./openclaw --name oc --port 3000:3000
 `--port` makes `oc` a persistent machine, and a persistent machine cannot
 attach a live host directory, so the directories are registered rather than
 passed with `--mount`. Each registration snapshots its directory into a
-read-only ext4 image at every start: host edits appear after the machine's
-next stop and start. `--host` must be absolute and on encrypted storage, and
-the registration can come before the machine exists.
+read-only ext4 image when registered. After host edits, stop the machine and
+run `mvmctl machine volume refresh oc` before starting it again. `--host`
+must be absolute and on encrypted storage; registration can precede creation.
 
 ### Custom config + API keys at runtime
 

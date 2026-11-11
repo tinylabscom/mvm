@@ -125,9 +125,8 @@ pub(in crate::commands) enum VolumeCmd {
         /// Must be lowercase alphanumeric + hyphens, ≤32 chars.
         #[arg(long)]
         volume: String,
-        /// Absolute host directory, snapshotted into an ext4 image before each
-        /// machine start and attached as a block device. Host edits made while
-        /// the machine runs become visible after its next stop/start.
+        /// Absolute host directory, snapshotted into an ext4 image now.
+        /// Host edits require an explicit `machine volume refresh` after stop.
         #[arg(long)]
         host: Option<String>,
         #[arg(long, help = GUEST_MOUNT_HELP)]
@@ -150,6 +149,14 @@ pub(in crate::commands) enum VolumeCmd {
         /// registry.
         #[arg(long)]
         remote: bool,
+    },
+    /// Refresh registered host-directory snapshots explicitly while stopped.
+    Refresh {
+        #[arg(value_parser = clap_vm_name)]
+        name: String,
+        /// Replace writable guest images with fresh host snapshots, discarding guest writes.
+        #[arg(long)]
+        discard_guest_writes: bool,
     },
     /// Unmount a registered volume.
     Unmount {
@@ -246,6 +253,21 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 return remote::ls(&name, json);
             }
             ls(&name, json)
+        }
+        VolumeCmd::Refresh {
+            name,
+            discard_guest_writes,
+        } => {
+            if !mvm_core::config::machine_spec_path(&name).is_file() {
+                bail!("machine {name:?} has no persistent definition to refresh");
+            }
+            refresh_registered_host_snapshots_with_service(
+                &service(),
+                &name,
+                discard_guest_writes,
+            )?;
+            println!("{name}: host-directory snapshots refreshed");
+            Ok(())
         }
         VolumeCmd::Unmount {
             name,
@@ -357,6 +379,24 @@ fn host_snapshot_image(vm_name: &str, volume_name: &str) -> std::path::PathBuf {
         .join(format!("{volume_name}.ext4"))
 }
 
+fn private_writable_snapshot(
+    image: &crate::mount_cache::CachedMountImage,
+    volume_service: &LocalVolumeService,
+    vm_name: &str,
+    volume_name: &str,
+) -> Result<std::path::PathBuf> {
+    // Never replace a previously registered image: another process may have
+    // leased it after refresh preflight, or a stopped guest may have written
+    // state the operator has not yet reviewed.
+    let label = format!("{volume_name}-{}", uuid::Uuid::new_v4());
+    let target = host_snapshot_image(vm_name, &label);
+    let parent = target.parent().context("snapshot image has no parent")?;
+    mvm_core::config::create_private_dir(parent)?;
+    volume_service.require_host_encryption(parent)?;
+    let _lock = mvm_core::util::atomic_io::FileLock::acquire(&target)?;
+    image.writable_image(&target)
+}
+
 fn host_snapshot_volume_label(volume_name: &str) -> String {
     format!("mvmvol{volume_name}")
 }
@@ -409,7 +449,7 @@ fn mount_with_service(
             volume_service.require_host_encryption(fingerprint.source())?;
             let image = cache.lookup(fingerprint)?.resolve()?;
             let attachment_image = if rw {
-                image.writable_image(&host_snapshot_image(vm_name, volume_name))?
+                private_writable_snapshot(&image, volume_service, vm_name, volume_name)?
             } else {
                 image.path().to_path_buf()
             };
@@ -529,7 +569,6 @@ fn merge_registered_volumes_with_service(
     explicit: &[mvm_client::volume::RuntimeVolume],
     profile: AdmittedProfile,
 ) -> Result<PreparedLaunchVolumes> {
-    refresh_registered_host_snapshots_with_service(volume_service, vm_name)?;
     // Leased under the machine's own profile; locked managed volumes keep
     // failing closed (the operator unlocks explicitly before launch).
     let request = LaunchLeaseRequest::builder(vm_name)
@@ -545,10 +584,12 @@ fn merge_registered_volumes_with_service(
 fn refresh_registered_host_snapshots_with_service(
     volume_service: &LocalVolumeService,
     vm_name: &str,
+    discard_guest_writes: bool,
 ) -> Result<()> {
     refresh_registered_host_snapshots_using(
         volume_service,
         vm_name,
+        discard_guest_writes,
         crate::mount_cache::MountImageCache::new,
     )
 }
@@ -564,6 +605,7 @@ fn refresh_registered_host_snapshots_with_service(
 fn refresh_registered_host_snapshots_using(
     volume_service: &LocalVolumeService,
     vm_name: &str,
+    discard_guest_writes: bool,
     open_cache: impl FnOnce() -> Result<crate::mount_cache::MountImageCache>,
 ) -> Result<()> {
     // Nothing to refresh means nothing to build. Constructing the cache
@@ -589,6 +631,8 @@ fn refresh_registered_host_snapshots_using(
         let Some(snapshot) = attachment.host_snapshot else {
             continue;
         };
+        // Reject an active attachment before reading or writing image bytes.
+        volume_service.ensure_snapshot_refreshable(vm_name, &attachment.guest_path)?;
         let fingerprint = cache
             .fingerprint(
                 Path::new(&snapshot.source_path),
@@ -609,17 +653,29 @@ fn refresh_registered_host_snapshots_using(
                 )
             })?;
         let unchanged = fingerprint.cache_key() == snapshot.fingerprint;
-        if !attachment.access.is_read_only()
-            && unchanged
-            && Path::new(&attachment.host_path).is_file()
-        {
+        let image_valid = if attachment.access.is_read_only() {
+            snapshot.image_sha256.as_ref().is_some_and(|expected| {
+                mvm_core::crypto::image_verify::sha256_file(Path::new(&attachment.host_path))
+                    .is_ok_and(|actual| &actual == expected)
+            })
+        } else {
+            Path::new(&attachment.host_path).is_file()
+        };
+        if unchanged && image_valid && (attachment.access.is_read_only() || !discard_guest_writes) {
             continue;
+        }
+        if !attachment.access.is_read_only() && !discard_guest_writes {
+            bail!(
+                "refreshing writable snapshot {:?} would discard guest writes; \
+                 pass --discard-guest-writes to confirm",
+                attachment.volume
+            );
         }
         let cached = cache.lookup(fingerprint)?.resolve()?;
         let attachment_image = if attachment.access.is_read_only() {
             cached.path().to_path_buf()
         } else {
-            cached.writable_image(&host_snapshot_image(vm_name, &attachment.volume))?
+            private_writable_snapshot(&cached, volume_service, vm_name, &attachment.volume)?
         };
         let size_mib = image_size_mib(&attachment_image)?;
         volume_service.refresh_ad_hoc_snapshot_attachment(
@@ -865,7 +921,7 @@ mod tests {
         ))
     }
 
-    /// A launch with nothing mounted never opens the mount-image cache.
+    /// An explicit refresh with nothing mounted never opens the mount-image cache.
     ///
     /// Opening it verifies that its directory sits on encrypted backing
     /// storage. Doing that on entry charged the check to every launch: a named
@@ -878,23 +934,23 @@ mod tests {
     /// `#[cfg(test)]`-stubbed to skip the very verification that failed, so
     /// calling the real one here would prove nothing either way.
     #[test]
-    fn a_launch_with_no_host_snapshots_never_opens_the_mount_cache() {
+    fn a_refresh_with_no_host_snapshots_never_opens_the_mount_cache() {
         let _guard = DataDirGuard::new();
         let volume_service = accepting_host_encryption_service();
 
-        refresh_registered_host_snapshots_using(&volume_service, "vm-no-mounts", || {
+        refresh_registered_host_snapshots_using(&volume_service, "vm-no-mounts", false, || {
             panic!("the mount-image cache must not be opened for a launch with no host snapshots")
         })
-        .expect("a launch that mounts nothing must not be refused");
+        .expect("a refresh with nothing mounted must not be refused");
     }
 
-    /// The converse, so the laziness cannot be "never opens it".
+    /// The converse, so the explicit operation cannot skip encryption checks.
     ///
     /// One attachment carrying a host snapshot is enough: the cache is opened,
     /// and the encrypted-backing verification it performs still applies
     /// wherever a host directory's bytes actually come to rest.
     #[test]
-    fn a_launch_with_a_host_snapshot_opens_the_mount_cache() {
+    fn a_refresh_with_a_host_snapshot_opens_the_mount_cache() {
         let guard = DataDirGuard::new();
         let volume_service = accepting_host_encryption_service();
         let source = guard.path().join("mounted");
@@ -911,7 +967,7 @@ mod tests {
         .unwrap();
 
         let opened = std::cell::Cell::new(false);
-        refresh_registered_host_snapshots_using(&volume_service, "vm-mounted", || {
+        refresh_registered_host_snapshots_using(&volume_service, "vm-mounted", false, || {
             opened.set(true);
             crate::mount_cache::MountImageCache::new()
         })
@@ -925,7 +981,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_host_bytes_with_equal_mtime_refresh_before_launch() {
+    fn explicit_refresh_detects_changed_host_bytes_with_equal_mtime() {
         let guard = DataDirGuard::new();
         let volume_service = accepting_host_encryption_service();
         let source = guard.path().join("source");
@@ -952,7 +1008,7 @@ mod tests {
             .unwrap()
             .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
             .unwrap();
-        refresh_registered_host_snapshots_with_service(&volume_service, "vm-1").unwrap();
+        refresh_registered_host_snapshots_with_service(&volume_service, "vm-1", false).unwrap();
         let after = volume_service.list_attachments("vm-1").unwrap().remove(0);
         assert_ne!(before.host_path, after.host_path);
         assert_ne!(
@@ -963,7 +1019,35 @@ mod tests {
     }
 
     #[test]
-    fn missing_host_snapshot_source_refuses_launch_and_keeps_last_image() {
+    fn restart_does_not_refresh_a_changed_host_directory() {
+        let guard = DataDirGuard::new();
+        let volume_service = accepting_host_encryption_service();
+        let source = guard.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("marker"), b"before").unwrap();
+        mount_with_service(
+            &volume_service,
+            "vm-1",
+            "source",
+            Some(source.to_str().unwrap()),
+            "/data/source",
+            false,
+        )
+        .unwrap();
+        let before = volume_service.list_attachments("vm-1").unwrap().remove(0);
+        fs::write(source.join("marker"), b"after").unwrap();
+
+        drop(
+            merge_registered_volumes_with_service(&volume_service, "vm-1", &[], dev())
+                .expect("restart uses the frozen snapshot"),
+        );
+        let after = volume_service.list_attachments("vm-1").unwrap().remove(0);
+        assert_eq!(before.host_path, after.host_path);
+        assert_eq!(read_snapshot_marker(Path::new(&after.host_path)), "before");
+    }
+
+    #[test]
+    fn missing_source_refuses_refresh_but_not_restart_from_the_frozen_image() {
         let guard = DataDirGuard::new();
         let volume_service = accepting_host_encryption_service();
         let source = guard.path().join("source");
@@ -981,11 +1065,12 @@ mod tests {
         let registered = volume_service.list_attachments("vm-1").unwrap().remove(0);
         fs::remove_dir_all(&source).unwrap();
 
-        let error = match merge_registered_volumes_with_service(&volume_service, "vm-1", &[], dev())
-        {
-            Ok(_) => panic!("a missing source must refuse before a launch lease is acquired"),
-            Err(error) => error,
-        };
+        drop(
+            merge_registered_volumes_with_service(&volume_service, "vm-1", &[], dev())
+                .expect("the stored snapshot does not depend on its source at restart"),
+        );
+        let error = refresh_registered_host_snapshots_with_service(&volume_service, "vm-1", false)
+            .expect_err("a missing source cannot be refreshed");
         assert!(format!("{error:#}").contains("does not exist"), "{error:#}");
         assert_eq!(
             read_snapshot_marker(Path::new(&registered.host_path)),
@@ -994,7 +1079,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_host_source_replaces_a_private_writable_snapshot() {
+    fn changed_host_source_selects_a_new_private_writable_snapshot() {
         let guard = DataDirGuard::new();
         let volume_service = accepting_host_encryption_service();
         let source = guard.path().join("source");
@@ -1010,17 +1095,54 @@ mod tests {
         )
         .unwrap();
         let before = volume_service.list_attachments("vm-1").unwrap().remove(0);
-        assert_eq!(
-            Path::new(&before.host_path),
-            host_snapshot_image("vm-1", "source")
+        assert!(
+            Path::new(&before.host_path)
+                .parent()
+                .is_some_and(|p| p == host_snapshot_image("vm-1", "source").parent().unwrap())
         );
         assert_eq!(read_snapshot_marker(Path::new(&before.host_path)), "first");
 
         fs::write(source.join("marker"), b"second").unwrap();
-        refresh_registered_host_snapshots_with_service(&volume_service, "vm-1").unwrap();
+        let refused =
+            refresh_registered_host_snapshots_with_service(&volume_service, "vm-1", false)
+                .expect_err("writable guest data cannot be discarded implicitly");
+        assert!(
+            format!("{refused:#}").contains("--discard-guest-writes"),
+            "{refused:#}"
+        );
+        assert_eq!(read_snapshot_marker(Path::new(&before.host_path)), "first");
+        refresh_registered_host_snapshots_with_service(&volume_service, "vm-1", true).unwrap();
         let after = volume_service.list_attachments("vm-1").unwrap().remove(0);
-        assert_eq!(before.host_path, after.host_path);
+        assert_ne!(before.host_path, after.host_path);
+        assert_eq!(read_snapshot_marker(Path::new(&before.host_path)), "first");
         assert_eq!(read_snapshot_marker(Path::new(&after.host_path)), "second");
+    }
+
+    #[test]
+    fn explicit_refresh_refuses_an_attached_snapshot() {
+        let guard = DataDirGuard::new();
+        let volume_service = accepting_host_encryption_service();
+        let source = guard.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("marker"), b"before").unwrap();
+        mount_with_service(
+            &volume_service,
+            "vm-1",
+            "source",
+            Some(source.to_str().unwrap()),
+            "/data/source",
+            true,
+        )
+        .unwrap();
+        let mut prepared =
+            merge_registered_volumes_with_service(&volume_service, "vm-1", &[], dev()).unwrap();
+        prepared.commit();
+        drop(prepared);
+        fs::write(source.join("marker"), b"after").unwrap();
+        let error = refresh_registered_host_snapshots_with_service(&volume_service, "vm-1", false)
+            .expect_err("refresh must not replace a live attachment");
+        assert!(format!("{error:#}").contains("stop it first"), "{error:#}");
+        release_volume_leases_for_vm("vm-1").unwrap();
     }
 
     #[test]

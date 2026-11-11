@@ -94,9 +94,9 @@ still require both operating systems and a signed candidate.
 Save both Linux shard job logs from the run page; this lane does not upload
 log artifacts. Retain the run URL, tested SHA, both scenario summaries and their
 “did NOT run” tallies, and the witness output. The scenario
-`restarting refreshes a registered host directory snapshot` in
+`a host directory snapshot changes only after explicit refresh` in
 `features/suites/s26_volumes/volume_lifecycle.feature` must actually pass,
-including the initial marker and the refreshed marker after stop/start. It is
+including the initial marker, unchanged restart and explicit refresh. It is
 not runtime-candidate tagged and must not be accepted as skipped. A failed
 shard, missing summary or skipped witness is not Linux live evidence for the
 socket-custody fix in #4808. This entrypoint alone does not complete #4764.

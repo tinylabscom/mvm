@@ -14,6 +14,8 @@
 use std::path::{Path, PathBuf};
 
 use mvm_contract::protocol::vm_backend::BackendKind;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::merge::{Layer, ResolvedPolicy, merge_layers};
 use super::model::{GroupFile, HostArch, HostOs, PolicyBody, ProfileFile, WhenBlock};
@@ -21,6 +23,48 @@ use super::source::{DocFormat, LayerOrigin, Loaded, PolicyError, PolicyRef, Poli
 
 /// The deepest `extends` chain accepted.
 pub const MAX_EXTENDS_DEPTH: usize = 10;
+
+/// One dependency captured from the same bytes the resolver parsed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrozenPolicyDocument {
+    /// Resolver identity for de-duplication and cycle checks.
+    pub identity: String,
+    /// Absolute source path, retained only as provenance.
+    pub file: PathBuf,
+    /// Trust origin at the time of resolution.
+    pub origin: LayerOrigin,
+    /// Shape used to parse the captured text.
+    pub kind: PolicyDocumentKind,
+    /// SHA-256 digest of the exact UTF-8 bytes parsed.
+    pub sha256: String,
+    /// Exact parsed source; do not reread `file` to re-admit this snapshot.
+    pub text: String,
+}
+
+/// The document shape used when interpreting captured source bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyDocumentKind {
+    /// A profile or an inherited parent.
+    Profile,
+    /// A selected or excluded group.
+    Group,
+}
+
+/// An inline profile and the exact transitive documents used to resolve it.
+///
+/// This is a capture for future persistent admission, not an admitted or
+/// signed policy. The host must still apply current ceilings at each start.
+#[derive(Debug, Clone)]
+pub struct FrozenPolicyResolution {
+    /// Original inline profile, including conditional and composition rules.
+    pub authored: ProfileFile,
+    /// Resolved policy for this platform at capture time, not an admission.
+    pub resolved: ResolvedPolicy,
+    /// Every referenced document the resolver read, including excluded groups.
+    pub dependencies: Vec<FrozenPolicyDocument>,
+}
 
 /// What `[[when]]` predicates are matched against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -36,8 +80,16 @@ impl Platform {
     #[must_use]
     pub fn current(backend: Option<BackendKind>) -> Self {
         Self {
-            os: HostOs::current(),
-            arch: HostArch::current(),
+            os: match std::env::consts::OS {
+                "linux" => Some(HostOs::Linux),
+                "macos" => Some(HostOs::Macos),
+                _ => None,
+            },
+            arch: match std::env::consts::ARCH {
+                "x86_64" => Some(HostArch::X86_64),
+                "aarch64" => Some(HostArch::Aarch64),
+                _ => None,
+            },
             backend,
         }
     }
@@ -145,15 +197,7 @@ pub fn resolve(
     selection: &PolicySelection,
     platform: Platform,
 ) -> Result<ResolvedPolicy, PolicyError> {
-    let mut walker = Walker {
-        store,
-        platform,
-        stack: Vec::new(),
-        visited: Vec::new(),
-        groups: Vec::new(),
-        overrides: Vec::new(),
-        backend_conditioned: false,
-    };
+    let mut walker = Walker::new(store, platform);
     for reference in &selection.profiles {
         match store.load_profile(reference, None, LayerOrigin::User, "--policy") {
             Ok(root) => walker.walk(root, 0)?,
@@ -209,6 +253,7 @@ pub fn resolve(
             Loaded {
                 doc: virtual_root,
                 file: Some(project.manifest.clone()),
+                source_text: None,
                 label: format!("project {}", project.manifest.display()),
                 identity: format!("project:{}", project.manifest.display()),
                 origin: LayerOrigin::Project,
@@ -216,12 +261,95 @@ pub fn resolve(
             0,
         )?;
     }
-    let backend_conditioned = walker.backend_conditioned;
-    let mut layers: Vec<Layer> = walker.groups.into_iter().map(|g| g.layer).collect();
-    layers.extend(walker.overrides);
-    let mut resolved = merge_layers(&layers)?;
-    resolved.backend_conditioned = backend_conditioned;
-    Ok(resolved)
+    walker.finish()
+}
+
+/// Resolve an in-memory user-authored profile through the host's composition rules.
+///
+/// Names and absolute paths use the usual [`PolicyStore`] trust checks. An inline
+/// profile has no file directory, so its own relative references and share
+/// sources are refused instead of resolving against the process's working
+/// directory. File-backed parents and groups retain their own relative bases.
+///
+/// # Errors
+///
+/// Invalid references, relative root paths, and any merge refusal are errors.
+pub fn resolve_authored(
+    store: &PolicyStore,
+    profile: ProfileFile,
+    platform: Platform,
+) -> Result<ResolvedPolicy, PolicyError> {
+    Ok(resolve_authored_inner(store, profile, platform, false)?.resolved)
+}
+
+/// Resolve an inline profile and capture every loaded dependency from its
+/// parsed bytes. No later filesystem read is used to construct the capture.
+///
+/// # Errors
+///
+/// Invalid references, relative source paths, conflicting repeated reads,
+/// and any merge refusal are errors.
+pub fn resolve_authored_snapshot(
+    store: &PolicyStore,
+    profile: ProfileFile,
+    platform: Platform,
+) -> Result<FrozenPolicyResolution, PolicyError> {
+    resolve_authored_inner(store, profile, platform, true)
+}
+
+fn resolve_authored_inner(
+    store: &PolicyStore,
+    profile: ProfileFile,
+    platform: Platform,
+    capture: bool,
+) -> Result<FrozenPolicyResolution, PolicyError> {
+    fn check_reference(raw: &str, key: &str) -> Result<(), PolicyError> {
+        if matches!(PolicyRef::parse(raw), Ok(PolicyRef::Path(path)) if path.is_relative()) {
+            return Err(PolicyError::new(
+                "inline policy",
+                "a relative policy path needs a source file; use a name or absolute path",
+            )
+            .at_key(key));
+        }
+        Ok(())
+    }
+    for parent in profile.extends.to_vec() {
+        check_reference(&parent, "extends")?;
+    }
+    for raw in &profile.groups.include {
+        check_reference(raw, "groups.include")?;
+    }
+    for raw in &profile.groups.exclude {
+        check_reference(raw, "groups.exclude")?;
+    }
+    for (index, when) in profile.when.iter().enumerate() {
+        for raw in &when.include {
+            check_reference(raw, &format!("when[{index}].include"))?;
+        }
+        for raw in &when.exclude {
+            check_reference(raw, &format!("when[{index}].exclude"))?;
+        }
+    }
+    let mut walker = Walker::new(store, platform);
+    walker.capture_dependencies = capture;
+    let authored = profile.clone();
+    walker.walk(
+        Loaded {
+            doc: profile,
+            file: None,
+            source_text: None,
+            label: "inline policy".into(),
+            identity: "sdk:inline".into(),
+            origin: LayerOrigin::User,
+        },
+        0,
+    )?;
+    let dependencies = std::mem::take(&mut walker.dependencies);
+    Ok(FrozenPolicyResolution {
+        authored,
+        resolved: walker.finish()?,
+        dependencies,
+    })
 }
 
 /// Resolve a single file that is a profile or, failing that, a group, as a
@@ -271,6 +399,8 @@ struct Walker<'a> {
     platform: Platform,
     stack: Vec<(String, String)>,
     visited: Vec<String>,
+    dependencies: Vec<FrozenPolicyDocument>,
+    capture_dependencies: bool,
     groups: Vec<SelectedGroup>,
     overrides: Vec<Layer>,
     backend_conditioned: bool,
@@ -290,7 +420,74 @@ fn base_dir(file: Option<&Path>) -> Option<&Path> {
 }
 
 impl Walker<'_> {
+    fn new(store: &PolicyStore, platform: Platform) -> Walker<'_> {
+        Walker {
+            store,
+            platform,
+            stack: Vec::new(),
+            visited: Vec::new(),
+            dependencies: Vec::new(),
+            capture_dependencies: false,
+            groups: Vec::new(),
+            overrides: Vec::new(),
+            backend_conditioned: false,
+        }
+    }
+
+    fn finish(self) -> Result<ResolvedPolicy, PolicyError> {
+        let mut layers: Vec<Layer> = self.groups.into_iter().map(|g| g.layer).collect();
+        layers.extend(self.overrides);
+        let mut resolved = merge_layers(&layers)?;
+        resolved.backend_conditioned = self.backend_conditioned;
+        Ok(resolved)
+    }
+
+    fn capture<T>(
+        &mut self,
+        loaded: &Loaded<T>,
+        kind: PolicyDocumentKind,
+    ) -> Result<(), PolicyError> {
+        if !self.capture_dependencies {
+            return Ok(());
+        }
+        let (Some(file), Some(text)) = (&loaded.file, &loaded.source_text) else {
+            return Ok(());
+        };
+        if !file.is_absolute() {
+            return Err(PolicyError::new(
+                &loaded.label,
+                "capturing a policy dependency requires an absolute source path",
+            )
+            .in_file(Some(file)));
+        }
+        let sha256 = hex::encode(Sha256::digest(text.as_bytes()));
+        if let Some(previous) = self
+            .dependencies
+            .iter()
+            .find(|document| document.identity == loaded.identity && document.kind == kind)
+        {
+            if previous.sha256 != sha256 {
+                return Err(PolicyError::new(
+                    &loaded.label,
+                    "policy dependency changed during resolution; retry with stable source files",
+                )
+                .in_file(Some(file)));
+            }
+            return Ok(());
+        }
+        self.dependencies.push(FrozenPolicyDocument {
+            identity: loaded.identity.clone(),
+            file: file.clone(),
+            origin: loaded.origin,
+            kind,
+            sha256,
+            text: text.clone(),
+        });
+        Ok(())
+    }
+
     fn walk(&mut self, profile: Loaded<ProfileFile>, depth: usize) -> Result<(), PolicyError> {
+        self.capture(&profile, PolicyDocumentKind::Profile)?;
         if let Some(position) = self
             .stack
             .iter()
@@ -389,6 +586,7 @@ impl Walker<'_> {
         for raw in include {
             let group =
                 self.load_group(profile, raw, base.as_deref(), &format!("{key}.include"))?;
+            self.capture(&group, PolicyDocumentKind::Group)?;
             if self.groups.iter().any(|g| g.identity == group.identity) {
                 continue;
             }
@@ -402,6 +600,7 @@ impl Walker<'_> {
         for raw in exclude {
             let group =
                 self.load_group(profile, raw, base.as_deref(), &format!("{key}.exclude"))?;
+            self.capture(&group, PolicyDocumentKind::Group)?;
             let Some(position) = self
                 .groups
                 .iter()
