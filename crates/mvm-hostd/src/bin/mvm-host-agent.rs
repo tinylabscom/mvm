@@ -19,7 +19,6 @@
 //! signer-helper child. The moat (keyless parser / key-holding signer) is
 //! preserved; this is the keyless half.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -40,15 +39,6 @@ const HOST_AGENT_WORKER_ENV: &str = "MVM_HOST_AGENT_WORKER";
 const SIGNER_HELPER_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const WORKER_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const WORKER_RESTART_BACKOFF: Duration = Duration::from_millis(250);
-
-fn read_stdin_blocking() -> Result<Vec<u8>> {
-    let mut buf = Vec::with_capacity(1024);
-    std::io::stdin()
-        .lock()
-        .read_to_end(&mut buf)
-        .context("mvm-host-agent stdin read failed")?;
-    Ok(buf)
-}
 
 fn is_worker_mode() -> bool {
     std::env::var(HOST_AGENT_WORKER_ENV)
@@ -413,7 +403,7 @@ fn main() -> Result<()> {
         .json()
         .init();
 
-    let raw = read_stdin_blocking()?;
+    let raw = mvm_hostd::read_launch_config("mvm-host-agent")?;
     let cfg: HostAgentConfig =
         serde_json::from_slice(&raw).context("mvm-host-agent config parse failed")?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
