@@ -37,19 +37,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     std::fs::create_dir(&home)?;
+    mvm_core::private_fs::set_mode(&home, 0o700)?;
     let trust_path = mvm_core::config::registry_pack_revocation_trust_path();
-    std::fs::create_dir_all(
-        trust_path
-            .parent()
-            .ok_or("revocation trust has no parent")?,
-    )?;
+    let trust_directory = trust_path
+        .parent()
+        .ok_or("revocation trust has no parent")?;
+    std::fs::create_dir_all(trust_directory)?;
+    mvm_core::private_fs::set_mode(trust_directory, 0o700)?;
     std::fs::write(
-        trust_path,
+        &trust_path,
         format!(
             "schema_version = 1\nissuer = 'https://token.actions.githubusercontent.com'\naccepted_identities = ['{}']\n",
             mvm_core::registry_pack_store::OFFICIAL_REGISTRY_PACK_REVOCATION_IDENTITY
         ),
     )?;
+    mvm_core::private_fs::set_mode(&trust_path, 0o600)?;
     let manifest = std::fs::read(manifest)?;
     let signature = std::fs::read(signature)?;
     let reference = "runtime/python@1.1.0".parse()?;
