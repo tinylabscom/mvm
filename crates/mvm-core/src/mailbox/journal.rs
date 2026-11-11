@@ -6,7 +6,7 @@
 //! returned tip in an independent trusted anchor to detect whole-journal
 //! rollback; a hash chain alone cannot detect deletion of its suffix.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -16,13 +16,19 @@ use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use hmac::{Hmac, Mac, digest::KeyInit};
 use mvm_contract::protocol::mailbox::{
-    DeliveryOutcome, DestinationReceipt, MailboxAddress, MailboxEnvelope, MailboxOperation,
-    ProtocolVersion, SignatureAlgorithm, SignedDestinationReceipt, SignedMailboxCapability,
+    DeliveryLeaseNonce, DeliveryOutcome, DestinationReceipt, MailboxAddress, MailboxDeliveryLease,
+    MailboxEnvelope, MailboxGrant, MailboxGuestReaderScope, MailboxOperation, ProtocolVersion,
+    SignatureAlgorithm, SignedDestinationReceipt, SignedMailboxCapability,
+    SignedMailboxDeliveryAck, SignedMailboxDeliveryLease, SignedMailboxGuestReaderEnrollment,
 };
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
+use super::reader::{
+    ReaderDeliveryContext, sign_delivery_lease, verify_delivery_ack, verify_delivery_lease,
+    verify_guest_reader_enrollment, verify_reader_possession,
+};
 use super::{
     MailboxError, OpenContext, ReplayIdentity, ReplayProtector, authorize_receive, frame,
     open_authenticated_envelope, sign_receipt, verify_receipt,
@@ -83,6 +89,8 @@ pub enum JournalError {
     ConflictingRetry,
     #[error("mailbox message does not exist")]
     UnknownMessage,
+    #[error("mailbox message has no active delivery lease")]
+    NoActiveLease,
     #[error("journal cannot be used after an uncertain write")]
     Uncertain,
     #[error("mailbox authorization refused: {0}")]
@@ -113,12 +121,32 @@ enum JournalEvent {
         identity: ReplayIdentity,
         acknowledged_at_unix_ms: i64,
     },
+    Leased {
+        identity: ReplayIdentity,
+        challenge: [u8; 32],
+        lease: Box<SignedMailboxDeliveryLease>,
+        enrollment: Box<SignedMailboxGuestReaderEnrollment>,
+        receive_capability: Box<SignedMailboxCapability>,
+    },
+    AcknowledgedSigned {
+        identity: ReplayIdentity,
+        ack: Box<SignedMailboxDeliveryAck>,
+    },
+}
+
+struct LeaseState {
+    challenge: [u8; 32],
+    signed: SignedMailboxDeliveryLease,
+    enrollment: SignedMailboxGuestReaderEnrollment,
+    receive_capability: SignedMailboxCapability,
 }
 
 struct Seen {
     envelope: MailboxEnvelope,
     capability: SignedMailboxCapability,
     acknowledged: bool,
+    lease: Option<LeaseState>,
+    signed_ack: Option<SignedMailboxDeliveryAck>,
 }
 
 #[derive(Default)]
@@ -143,6 +171,7 @@ pub struct MailboxJournal {
     bytes: u64,
     seen: BTreeMap<ReplayIdentity, Seen>,
     order: Vec<ReplayIdentity>,
+    used_challenges: BTreeSet<[u8; 32]>,
     poisoned: bool,
     _lock: FileLock,
 }
@@ -159,11 +188,52 @@ pub struct JournalAdmission<'a> {
 
 /// Independent reader authority and host-held decryption material for the
 /// trusted-host profile. A sender's grant cannot substitute for Receive.
+#[derive(Clone, Copy)]
 pub struct JournalReceive<'a> {
     pub capability: &'a SignedMailboxCapability,
     pub context: &'a OpenContext,
     pub encryption_key: &'a Key,
     pub sender_key: &'a VerifyingKey,
+}
+
+/// Verified current guest facts and proof for issuing one durable lease.
+/// The caller must obtain the boot/session and challenge from its authenticated
+/// guest channel, not from untrusted request fields.
+pub struct JournalGuestLease<'a> {
+    pub receive: JournalReceive<'a>,
+    pub plan: &'a MailboxGrant,
+    pub scope: MailboxGuestReaderScope<'a>,
+    pub enrollment: &'a SignedMailboxGuestReaderEnrollment,
+    pub challenge: &'a [u8; 32],
+    pub possession_signature: &'a [u8],
+    pub signer: &'a SigningKey,
+}
+
+/// One guest-authored ACK of the previously persisted active lease.
+pub struct JournalGuestAck<'a> {
+    pub receive: JournalReceive<'a>,
+    pub plan: &'a MailboxGrant,
+    pub scope: MailboxGuestReaderScope<'a>,
+    pub enrollment: &'a SignedMailboxGuestReaderEnrollment,
+    pub signed: &'a SignedMailboxDeliveryAck,
+}
+
+/// A message whose signed lease was durably committed before payload release.
+pub struct LeasedMailboxMessage {
+    message: ReceivedMailboxMessage,
+    lease: SignedMailboxDeliveryLease,
+}
+
+impl LeasedMailboxMessage {
+    #[must_use]
+    pub fn payload(&self) -> &[u8] {
+        self.message.payload()
+    }
+
+    #[must_use]
+    pub fn lease(&self) -> &SignedMailboxDeliveryLease {
+        &self.lease
+    }
 }
 
 /// A pending, independently authorized message. Debug omits its plaintext.
@@ -370,6 +440,7 @@ impl MailboxJournal {
             bytes: 0,
             seen: BTreeMap::new(),
             order: Vec::new(),
+            used_challenges: BTreeSet::new(),
             poisoned: false,
             _lock: lock,
         };
@@ -450,6 +521,8 @@ impl MailboxJournal {
                                     envelope,
                                     capability,
                                     acknowledged: false,
+                                    lease: None,
+                                    signed_ack: None,
                                 },
                             )
                             .is_some()
@@ -469,6 +542,55 @@ impl MailboxJournal {
                         return Err(JournalError::Corrupt);
                     }
                     entry.acknowledged = true;
+                }
+                JournalEvent::Leased {
+                    identity,
+                    challenge,
+                    lease,
+                    enrollment,
+                    receive_capability,
+                } => {
+                    let entry = journal
+                        .seen
+                        .get_mut(&identity)
+                        .ok_or(JournalError::Corrupt)?;
+                    if entry.acknowledged
+                        || lease.encode().is_err()
+                        || enrollment.encode().is_err()
+                        || lease.lease.address != address
+                        || lease.lease.delivery_id != entry.envelope.routing.delivery_id
+                        || lease.lease.message_id != identity.message_id
+                        || lease.lease.execution_epoch != identity.execution_epoch
+                        || lease.lease.ciphertext_commitment != entry.envelope.ciphertext_commitment
+                        || lease.lease.consumer_session != enrollment.enrollment.consumer_session
+                        || lease.lease.receive_capability_id
+                            != receive_capability.grant.capability_id
+                        || challenge == [0; 32]
+                    {
+                        return Err(JournalError::Corrupt);
+                    }
+                    entry.lease = Some(LeaseState {
+                        challenge,
+                        signed: *lease,
+                        enrollment: *enrollment,
+                        receive_capability: *receive_capability,
+                    });
+                    if !journal.used_challenges.insert(challenge) {
+                        return Err(JournalError::Corrupt);
+                    }
+                }
+                JournalEvent::AcknowledgedSigned { identity, ack } => {
+                    let entry = journal
+                        .seen
+                        .get_mut(&identity)
+                        .ok_or(JournalError::Corrupt)?;
+                    let active = entry.lease.as_ref().ok_or(JournalError::Corrupt)?;
+                    if entry.acknowledged || ack.encode().is_err() || ack.ack.lease != active.signed
+                    {
+                        return Err(JournalError::Corrupt);
+                    }
+                    entry.acknowledged = true;
+                    entry.signed_ack = Some(*ack);
                 }
             }
             let next = JournalTip {
@@ -564,6 +686,8 @@ impl MailboxJournal {
                 envelope: envelope.clone(),
                 capability: capability.clone(),
                 acknowledged: false,
+                lease: None,
+                signed_ack: None,
             },
         );
         self.order.push(identity);
@@ -648,6 +772,132 @@ impl MailboxJournal {
         Ok(None)
     }
 
+    /// Commit one signed lease and its one-time possession challenge before
+    /// releasing plaintext to the authenticated guest reader.
+    pub fn lease_next(
+        &mut self,
+        request: JournalGuestLease<'_>,
+        anchor: impl FnOnce(JournalTip) -> Result<(), JournalError>,
+    ) -> Result<Option<LeasedMailboxMessage>, JournalError> {
+        if self.poisoned {
+            return Err(JournalError::Uncertain);
+        }
+        if request.signer.verifying_key() != self.authority
+            || request.scope.plan != request.plan
+            || request.scope.receive != &request.receive.capability.grant
+            || request.scope.now_unix_ms != request.receive.context.now_unix_ms
+            || request.scope.current_session.as_bytes() == &[0; 32]
+            || request.scope.current_boot.as_bytes() == &[0; 32]
+            || request.receive.context.acting_principal != request.enrollment.enrollment.consumer
+        {
+            return Err(JournalError::WrongAuthority);
+        }
+        let key = verify_guest_reader_enrollment(
+            request.enrollment,
+            request.receive.capability,
+            &request.scope,
+            &self.authority,
+            &request.receive.context.revoked_capabilities,
+        )?;
+        verify_reader_possession(
+            request.enrollment,
+            request.challenge,
+            request.possession_signature,
+            &key,
+        )?;
+        let Some(message) = self.receive_next(request.receive)? else {
+            return Ok(None);
+        };
+        let identity = message.identity;
+        let entry = self.seen.get(&identity).ok_or(JournalError::Corrupt)?;
+        let now = request.scope.now_unix_ms;
+        if let Some(active) = &entry.lease
+            && active.signed.lease.expires_at_unix_ms > now
+        {
+            if active.challenge != *request.challenge
+                || active.enrollment != *request.enrollment
+                || active.receive_capability != *request.receive.capability
+            {
+                return Err(JournalError::Busy);
+            }
+            return Ok(Some(LeasedMailboxMessage {
+                message,
+                lease: active.signed.clone(),
+            }));
+        }
+        if self.used_challenges.contains(request.challenge) {
+            return Err(JournalError::ConflictingRetry);
+        }
+        let header = message.opened.header();
+        let expires_at_unix_ms = now
+            .saturating_add(30_000)
+            .min(header.expires_at_unix_ms)
+            .min(request.receive.capability.grant.expires_at_unix_ms)
+            .min(request.enrollment.enrollment.expires_at_unix_ms);
+        if expires_at_unix_ms <= now {
+            return Err(JournalError::Mailbox(MailboxError::Expired));
+        }
+        let signed = sign_delivery_lease(
+            MailboxDeliveryLease {
+                protocol_version: ProtocolVersion::V1,
+                signature_algorithm: SignatureAlgorithm::ED25519,
+                address: self.address,
+                sender: header.sender,
+                sender_boot: header.sender_boot,
+                message_id: header.message_id,
+                delivery_id: entry.envelope.routing.delivery_id,
+                execution_epoch: header.execution_epoch,
+                consumer: request.enrollment.enrollment.consumer,
+                consumer_session: request.scope.current_session,
+                receive_capability_id: request.receive.capability.grant.capability_id,
+                policy_epoch: request.receive.capability.grant.policy_epoch,
+                ciphertext_commitment: entry.envelope.ciphertext_commitment,
+                issued_at_unix_ms: now,
+                expires_at_unix_ms,
+                lease_nonce: DeliveryLeaseNonce::from_bytes(rand::random()),
+            },
+            request.signer,
+        )?;
+        verify_delivery_lease(
+            &signed,
+            &ReaderDeliveryContext {
+                plan: request.plan,
+                capability: request.receive.capability,
+                reader_scope: request.scope,
+                consumer_session: request.scope.current_session,
+                now_unix_ms: now,
+                envelope: &entry.envelope,
+                header,
+                authority: &self.authority,
+                revoked: &request.receive.context.revoked_capabilities,
+            },
+        )?;
+        self.append(
+            JournalEvent::Leased {
+                identity,
+                challenge: *request.challenge,
+                lease: Box::new(signed.clone()),
+                enrollment: Box::new(request.enrollment.clone()),
+                receive_capability: Box::new(request.receive.capability.clone()),
+            },
+            anchor,
+        )?;
+        self.used_challenges.insert(*request.challenge);
+        self.seen
+            .get_mut(&identity)
+            .ok_or(JournalError::Corrupt)?
+            .lease = Some(LeaseState {
+            challenge: *request.challenge,
+            signed: signed.clone(),
+            enrollment: request.enrollment.clone(),
+            receive_capability: request.receive.capability.clone(),
+        });
+        Ok(Some(LeasedMailboxMessage {
+            message,
+            lease: signed,
+        }))
+    }
+
     /// Fsync an append-only ACK and advance the trusted tip. An uncertain
     /// commit poisons this writer; recovery must reconcile it before retry.
     pub fn acknowledge(
@@ -678,6 +928,88 @@ impl MailboxJournal {
             .get_mut(&identity)
             .ok_or(JournalError::Corrupt)?
             .acknowledged = true;
+        Ok(tip)
+    }
+
+    /// Verify the enrolled guest signature over the exact active lease,
+    /// commit its replay identity and signed bytes, then advance the anchor.
+    pub fn acknowledge_signed(
+        &mut self,
+        request: JournalGuestAck<'_>,
+        anchor: impl FnOnce(JournalTip) -> Result<(), JournalError>,
+    ) -> Result<JournalTip, JournalError> {
+        if self.poisoned {
+            return Err(JournalError::Uncertain);
+        }
+        if request.scope.plan != request.plan
+            || request.scope.receive != &request.receive.capability.grant
+            || request.scope.now_unix_ms != request.receive.context.now_unix_ms
+        {
+            return Err(JournalError::WrongAuthority);
+        }
+        let lease = &request.signed.ack.lease.lease;
+        let identity = ReplayIdentity {
+            sender: lease.sender,
+            sender_boot: lease.sender_boot,
+            execution_epoch: lease.execution_epoch,
+            message_id: lease.message_id,
+        };
+        let entry = self
+            .seen
+            .get(&identity)
+            .ok_or(JournalError::UnknownMessage)?;
+        let active = entry.lease.as_ref().ok_or(JournalError::NoActiveLease)?;
+        if active.signed != request.signed.ack.lease
+            || active.enrollment != *request.enrollment
+            || active.receive_capability != *request.receive.capability
+        {
+            return Err(JournalError::ConflictingRetry);
+        }
+        if request
+            .receive
+            .context
+            .revoked_capabilities
+            .contains(&request.receive.capability.grant.revocation_id)
+        {
+            return Err(JournalError::Mailbox(MailboxError::CapabilityRevoked));
+        }
+        if entry.acknowledged {
+            return if entry.signed_ack.as_ref() == Some(request.signed) {
+                Ok(self.tip)
+            } else {
+                Err(JournalError::ConflictingRetry)
+            };
+        }
+        let opened = self.open_for_reader(identity, entry, &request.receive)?;
+        let guest_key = VerifyingKey::from_bytes(&request.enrollment.enrollment.ack_public_key)
+            .map_err(|_| JournalError::Mailbox(MailboxError::ReaderKeyInvalid))?;
+        verify_delivery_ack(
+            request.signed,
+            &active.signed,
+            &ReaderDeliveryContext {
+                plan: request.plan,
+                capability: request.receive.capability,
+                reader_scope: request.scope,
+                consumer_session: request.scope.current_session,
+                now_unix_ms: request.scope.now_unix_ms,
+                envelope: &entry.envelope,
+                header: opened.header(),
+                authority: &self.authority,
+                revoked: &request.receive.context.revoked_capabilities,
+            },
+            request.enrollment,
+            &guest_key,
+        )?;
+        let tip = self.append(
+            JournalEvent::AcknowledgedSigned {
+                identity,
+                ack: Box::new(request.signed.clone()),
+            },
+            anchor,
+        )?;
+        let entry = self.seen.get_mut(&identity).ok_or(JournalError::Corrupt)?;
+        entry.acknowledged = true;
+        entry.signed_ack = Some(request.signed.clone());
         Ok(tip)
     }
 

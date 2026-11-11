@@ -32,6 +32,7 @@ use mvm_core::plan::ExecutionPlan;
 use mvm_core::vm_backend::{HostDialRoute, VmId, VmStartConfig};
 use mvm_runtime::backend::AnyBackend;
 use mvm_vmm::host::aux_bin::AuxBin;
+use mvm_vmm::host::flowmux_identity::{MAILBOX_READER_BOOT_FILE, MailboxReaderBootBinding};
 
 use crate::mailbox_launch::{DerivedMailboxKeys, LAUNCH_LIMITS, derive_launch_keys};
 use crate::mailbox_service::durable::DurableMailboxService;
@@ -56,6 +57,9 @@ pub struct MailboxProcessConfig {
     pub keys: DerivedMailboxKeys,
     pub socket: PathBuf,
     pub guest_route: HostDialRoute,
+    /// Public ACK key and boot identity pinned to the admitted cold plan.
+    /// Absent on a warm child until it rekeys and enrolls.
+    pub reader_boot: Option<MailboxReaderBootBinding>,
     /// The VM whose lifetime bounds this process.
     pub vm_state_dir: PathBuf,
 }
@@ -84,8 +88,17 @@ fn serve_durable(config: MailboxProcessConfig) -> Result<()> {
         keys,
         socket,
         guest_route,
+        reader_boot,
         vm_state_dir,
     } = config;
+    if let Some(binding) = &reader_boot
+        && (binding.mailbox != grant.mailbox || binding.execution_epoch != grant.epoch)
+    {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            "mailbox reader boot does not match the helper's signed grant",
+        ));
+    }
     let (policy, mut sealer) = keys.trust();
     let (signer, journal_key, anchor_key) = keys.durable_material();
     sealer.intent_dir = Some(vm_state_dir.join("mailbox-intents"));
@@ -149,8 +162,48 @@ pub fn build_config(
                     "backend cannot dial the guest mailbox port",
                 )
             })?,
+        reader_boot: None,
         vm_state_dir: state_dir.to_path_buf(),
     })
+}
+
+fn load_reader_boot_for_plan(
+    state_dir: &Path,
+    plan: &ExecutionPlan,
+) -> Result<Option<MailboxReaderBootBinding>> {
+    use base64::Engine as _;
+    let path = state_dir.join(MAILBOX_READER_BOOT_FILE);
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            return Err(Error::new(
+                ErrorKind::PermissionDenied,
+                "mailbox reader boot binding is not a regular file",
+            ));
+        }
+        Ok(_) => {}
+    }
+    let binding = MailboxReaderBootBinding::load(state_dir).map_err(Error::other)?;
+    binding.check_plan(plan).map_err(|_| {
+        Error::new(
+            ErrorKind::PermissionDenied,
+            "mailbox reader boot binding does not match the admitted plan",
+        )
+    })?;
+    let identity = mvm_vmm::host::flowmux_identity::load_inheritable_identity(state_dir)
+        .map_err(Error::other)?
+        .ok_or_else(|| Error::new(ErrorKind::PermissionDenied, "guest identity is absent"))?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(identity.guest_verifying_key_base64)
+        .map_err(|_| Error::new(ErrorKind::InvalidData, "guest identity encoding is invalid"))?;
+    if bytes != binding.guest_identity_key {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            "mailbox ACK key belongs to a different guest boot identity",
+        ));
+    }
+    Ok(Some(binding))
 }
 
 /// The command that starts the process: no arguments, an empty environment,
@@ -262,12 +315,13 @@ pub fn spawn_for_launch(
     };
     require_wired(plan, backend)?;
     let state_dir = mvm_core::config::vm_state_dir(vm_name);
-    let config = build_config(
+    let mut config = build_config(
         &mvm_core::config::mvm_keys_dir(),
         grant,
         &state_dir,
         backend,
     )?;
+    config.reader_boot = load_reader_boot_for_plan(&state_dir, plan)?;
     let bin = mvm_vmm::host::broker_services_spawn::resolve_subprocess_bin_to_spawn(&AuxBin::new(
         MAILBOX_BIN,
         MAILBOX_BIN_ENV,
@@ -415,6 +469,53 @@ mod tests {
     }
 
     #[test]
+    fn guest_reader_boot_must_match_the_admitted_plan_and_pinned_guest_identity() {
+        use base64::Engine as _;
+        use mvm_vmm::host::flowmux_identity::{
+            InheritableIdentity, MAILBOX_READER_BOOT_FILE, MailboxAckKeyMaterial,
+        };
+        let keys = keys_dir();
+        let state = tempfile::tempdir().unwrap();
+        let guest = ed25519_dalek::SigningKey::from_bytes(&[66; 32]);
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.mailbox = Some(grant(keys.path()));
+        plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
+        let ack = MailboxAckKeyMaterial::mint().unwrap();
+        let binding = MailboxReaderBootBinding::mint(&plan, guest.verifying_key(), &ack).unwrap();
+        binding.persist(state.path()).unwrap();
+        InheritableIdentity {
+            session_id: "guest-current".into(),
+            guest_verifying_key_base64: base64::engine::general_purpose::STANDARD
+                .encode(guest.verifying_key().as_bytes()),
+        }
+        .persist(state.path())
+        .unwrap();
+        assert_eq!(
+            load_reader_boot_for_plan(state.path(), &plan).unwrap(),
+            Some(binding.clone())
+        );
+        let mut stale = plan.clone();
+        stale.nonce = mvm_core::plan::Nonce::from_bytes([99; 16]);
+        assert!(load_reader_boot_for_plan(state.path(), &stale).is_err());
+        InheritableIdentity {
+            session_id: "guest-other".into(),
+            guest_verifying_key_base64: base64::engine::general_purpose::STANDARD.encode(
+                ed25519_dalek::SigningKey::from_bytes(&[67; 32])
+                    .verifying_key()
+                    .as_bytes(),
+            ),
+        }
+        .persist(state.path())
+        .unwrap();
+        assert!(load_reader_boot_for_plan(state.path(), &plan).is_err());
+        std::fs::remove_file(state.path().join(MAILBOX_READER_BOOT_FILE)).unwrap();
+        let outside = state.path().join("outside");
+        std::fs::write(&outside, serde_json::to_vec(&binding).unwrap()).unwrap();
+        std::os::unix::fs::symlink(&outside, state.path().join(MAILBOX_READER_BOOT_FILE)).unwrap();
+        assert!(load_reader_boot_for_plan(state.path(), &plan).is_err());
+    }
+
+    #[test]
     fn the_config_carries_no_seed_and_the_command_carries_no_argv_or_env_secret() {
         let dir = keys_dir();
         let seed = std::fs::read(dir.path().join("host-signer.ed25519")).unwrap();
@@ -519,6 +620,7 @@ mod tests {
             grant,
             socket: dir.path().join("mailbox.sock"),
             guest_route: HostDialRoute::PortSocket(dir.path().join("absent-port")),
+            reader_boot: None,
             vm_state_dir: state_path,
         };
         let socket = config.socket.clone();

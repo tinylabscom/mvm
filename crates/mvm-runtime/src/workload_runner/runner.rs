@@ -441,6 +441,13 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         )?;
         let network_limits = admitted_network_limits(inputs.config.plan_json.as_deref())?;
         let ingress = admitted_ingress(inputs.config.plan_json.as_deref())?;
+        let reader_plan = inputs
+            .config
+            .plan_json
+            .as_deref()
+            .map(mvm_core::plan::plan_from_admitted_json)
+            .transpose()
+            .context("parse admitted mailbox reader plan")?;
 
         // Spawn the per-child substitution endpoint through the shared
         // `ClaimGuards`, so a warm claim stands up the identical guarded endpoint
@@ -457,6 +464,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 network_policy: inputs.network_policy,
                 network_limits,
                 ingress: &ingress,
+                reader_plan: reader_plan.as_ref().filter(|plan| plan.mailbox.is_some()),
                 // A cold boot mints this guest's identity and hands it a drive.
                 identity: FlowMuxIdentitySource::Mint,
             },
@@ -918,6 +926,9 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                     network_policy: &claim.network_policy,
                     network_limits,
                     ingress: &ingress,
+                    // A warm child must rekey and enroll independently; it
+                    // cannot inherit a parent's mailbox ACK authority.
+                    reader_plan: None,
                     // A restored child already holds its parent's signing key
                     // in the memory image it woke from, and there is no way to
                     // put a different one there. Its endpoint pins what the

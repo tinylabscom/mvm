@@ -443,6 +443,290 @@ fn receive_and_ack_require_independent_authority_and_survive_recovery() {
 }
 
 #[test]
+fn guest_lease_and_signed_ack_are_durable_replay_fenced_and_boot_bound() {
+    use crate::mailbox::journal::{JournalGuestAck, JournalGuestLease};
+    use crate::mailbox::reader::{
+        sign_delivery_ack, sign_guest_reader_enrollment, sign_reader_possession,
+    };
+    use mvm_contract::plan::{Nonce, PlanId};
+    use mvm_contract::protocol::mailbox::{
+        ConsumerSessionId, DeliveryAckNonce, MailboxDeliveryAck, MailboxGrant,
+        MailboxGuestReaderEnrollment, MailboxGuestReaderScope,
+    };
+
+    let dir = tempfile::tempdir().expect("journal directory");
+    let fixture = mailbox_fixture();
+    let signer = &fixture.capability_authority;
+    let sender = SigningKey::from_bytes(&id(22)).verifying_key();
+    let encryption_key = Key::from_bytes(id(21));
+    let limits = JournalLimits {
+        max_records: 5,
+        max_bytes: 128 * 1024,
+    };
+    let mut journal = MailboxJournal::open(
+        dir.path(),
+        address(),
+        signer.verifying_key(),
+        id(90),
+        limits,
+        JournalTip::genesis(),
+    )
+    .unwrap();
+    let mut tip = JournalTip::genesis();
+    journal
+        .admit(
+            JournalAdmission {
+                envelope: fixture.prepared.envelope(),
+                capability: &fixture.capability,
+                context: &fixture.context,
+                encryption_key: &encryption_key,
+                sender_key: &sender,
+                signer,
+            },
+            |next| {
+                tip = next;
+                Ok(())
+            },
+        )
+        .expect("durable send before guest reader");
+    let mut receive_grant = fixture.capability.grant.clone();
+    receive_grant.capability_id = CapabilityId::from_bytes(id(51));
+    receive_grant.subject = address().recipient;
+    receive_grant.operations = CapabilityOperations::from_operations(&[MailboxOperation::Receive]);
+    let receive_cap = sign_capability(receive_grant, signer).unwrap();
+    let mut reader = fixture.context.clone();
+    reader.acting_principal = address().recipient;
+    reader.required_operation = MailboxOperation::Receive;
+    let receive = || JournalReceive {
+        capability: &receive_cap,
+        context: &reader,
+        encryption_key: &encryption_key,
+        sender_key: &sender,
+    };
+    let plan = MailboxGrant {
+        mailbox: address().mailbox,
+        authority_key: signer.verifying_key().to_bytes(),
+        epoch: epoch(),
+    };
+    let plan_id = PlanId(format!("sha256:{}", "a".repeat(64)));
+    let plan_nonce = Nonce::from_bytes(id(52));
+    let boot = BootId::from_bytes(id(53));
+    let session = ConsumerSessionId::from_bytes(id(54));
+    let scope = MailboxGuestReaderScope {
+        plan: &plan,
+        plan_id: &plan_id,
+        plan_nonce: &plan_nonce,
+        receive: &receive_cap.grant,
+        current_boot: boot,
+        current_session: session,
+        now_unix_ms: NOW,
+    };
+    let guest = SigningKey::from_bytes(&id(55));
+    let enrollment = sign_guest_reader_enrollment(
+        MailboxGuestReaderEnrollment {
+            protocol_version: ProtocolVersion::V1,
+            signature_algorithm: SignatureAlgorithm::ED25519,
+            plan_id: plan_id.clone(),
+            plan_nonce: plan_nonce.clone(),
+            address: address(),
+            consumer: address().recipient,
+            consumer_boot: boot,
+            consumer_session: session,
+            receive_capability_id: receive_cap.grant.capability_id,
+            ack_public_key: guest.verifying_key().to_bytes(),
+            execution_epoch: epoch(),
+            policy_epoch: receive_cap.grant.policy_epoch,
+            issued_at_unix_ms: NOW - 1,
+            expires_at_unix_ms: NOW + 5_000,
+        },
+        signer,
+    )
+    .unwrap();
+    let challenge = id(56);
+    let proof = sign_reader_possession(&enrollment, &challenge, &guest).unwrap();
+    let lease_req = |scope| JournalGuestLease {
+        receive: receive(),
+        plan: &plan,
+        scope,
+        enrollment: &enrollment,
+        challenge: &challenge,
+        possession_signature: &proof,
+        signer,
+    };
+    assert!(matches!(
+        journal.lease_next(
+            JournalGuestLease {
+                possession_signature: &[0; 64],
+                ..lease_req(scope)
+            },
+            |_| panic!("forgery cannot commit"),
+        ),
+        Err(JournalError::Mailbox(MailboxError::ReaderPossessionInvalid))
+    ));
+    assert!(matches!(
+        journal.lease_next(
+            lease_req(MailboxGuestReaderScope {
+                current_boot: BootId::from_bytes(id(57)),
+                ..scope
+            }),
+            |_| panic!("stale boot cannot commit"),
+        ),
+        Err(JournalError::Mailbox(MailboxError::DeliveryContract(_)))
+    ));
+    assert_eq!(journal.tip(), tip);
+    let leased = journal
+        .lease_next(lease_req(scope), |next| {
+            tip = next;
+            Ok(())
+        })
+        .expect("verified guest obtains a lease")
+        .expect("pending ciphertext");
+    assert_eq!(leased.payload(), b"hello");
+    let signed_lease = leased.lease().clone();
+    assert_eq!(journal.tip(), tip);
+    assert_eq!(
+        journal
+            .lease_next(lease_req(scope), |_| panic!("same lease does not append"))
+            .unwrap()
+            .unwrap()
+            .lease(),
+        &signed_lease
+    );
+    let ack = sign_delivery_ack(
+        MailboxDeliveryAck {
+            protocol_version: ProtocolVersion::V1,
+            signature_algorithm: SignatureAlgorithm::ED25519,
+            lease: signed_lease.clone(),
+            ack_nonce: DeliveryAckNonce::from_bytes(id(58)),
+            acknowledged_at_unix_ms: NOW,
+        },
+        &guest,
+    )
+    .unwrap();
+    let ack_req = |signed| JournalGuestAck {
+        receive: receive(),
+        plan: &plan,
+        scope,
+        enrollment: &enrollment,
+        signed,
+    };
+    let forged = sign_delivery_ack(ack.ack.clone(), signer).unwrap();
+    assert!(matches!(
+        journal.acknowledge_signed(ack_req(&forged), |_| panic!("wrong signer")),
+        Err(JournalError::Mailbox(
+            MailboxError::DeliveryAckSignatureInvalid
+        ))
+    ));
+    assert_eq!(journal.tip(), tip);
+    journal
+        .acknowledge_signed(ack_req(&ack), |next| {
+            tip = next;
+            Ok(())
+        })
+        .expect("signed ACK commits");
+    assert_eq!(
+        journal
+            .acknowledge_signed(ack_req(&ack), |_| panic!("exact ACK is idempotent"))
+            .unwrap(),
+        tip
+    );
+    let mut changed_ack = ack.ack.clone();
+    changed_ack.ack_nonce = DeliveryAckNonce::from_bytes(id(59));
+    let conflict = sign_delivery_ack(changed_ack, &guest).unwrap();
+    assert!(matches!(
+        journal.acknowledge_signed(ack_req(&conflict), |_| panic!("conflicting ACK")),
+        Err(JournalError::ConflictingRetry)
+    ));
+    assert!(journal.receive_next(receive()).unwrap().is_none());
+    drop(journal);
+    let mut recovered = MailboxJournal::open(
+        dir.path(),
+        address(),
+        signer.verifying_key(),
+        id(90),
+        limits,
+        tip,
+    )
+    .expect("lease and ACK survive restart");
+    assert!(recovered.receive_next(receive()).unwrap().is_none());
+    assert_eq!(
+        recovered
+            .acknowledge_signed(ack_req(&ack), |_| panic!("recovered ACK is idempotent"))
+            .unwrap(),
+        tip
+    );
+    assert!(matches!(
+        recovered.acknowledge_signed(ack_req(&conflict), |_| panic!("replayed ACK conflict")),
+        Err(JournalError::ConflictingRetry)
+    ));
+    assert!(
+        matches!(
+            recovered.lease_next(lease_req(scope), |_| panic!("challenge replay")),
+            Ok(None),
+        ),
+        "a consumed message cannot be leased a second time"
+    );
+    let mut next_header = fixture.prepared.header.clone();
+    next_header.message_id = MessageId::from_bytes(id(61));
+    next_header.nonce = ReplayNonce::from_bytes(id(62));
+    next_header.sequence = SequenceNumber::new(2).unwrap();
+    let mut next_routing = fixture.prepared.envelope().routing.clone();
+    next_routing.delivery_id = DeliveryId::from_bytes(id(63));
+    let next = crate::mailbox::seal_envelope(
+        SealRequest {
+            routing: next_routing,
+            header: next_header,
+            plaintext: b"hello",
+        },
+        &encryption_key,
+        &SigningKey::from_bytes(&id(22)),
+    )
+    .unwrap();
+    recovered
+        .admit(
+            JournalAdmission {
+                envelope: &next,
+                capability: &fixture.capability,
+                context: &fixture.context,
+                encryption_key: &encryption_key,
+                sender_key: &sender,
+                signer,
+            },
+            |committed| {
+                tip = committed;
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        recovered.lease_next(lease_req(scope), |_| panic!("reused challenge")),
+        Err(JournalError::ConflictingRetry)
+    ));
+    assert_eq!(recovered.tip(), tip);
+    let fresh_challenge = id(64);
+    let fresh_proof = sign_reader_possession(&enrollment, &fresh_challenge, &guest).unwrap();
+    let next_lease = recovered
+        .lease_next(
+            JournalGuestLease {
+                challenge: &fresh_challenge,
+                possession_signature: &fresh_proof,
+                ..lease_req(scope)
+            },
+            |committed| {
+                tip = committed;
+                Ok(())
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        next_lease.lease().lease.message_id,
+        MessageId::from_bytes(id(61))
+    );
+    assert_eq!(recovered.tip(), tip);
+}
+
+#[test]
 fn durable_admission_recovers_ciphertext_dedup_and_a_signed_destination_verdict() {
     use mvm_contract::protocol::mailbox::DeliveryOutcome;
 
