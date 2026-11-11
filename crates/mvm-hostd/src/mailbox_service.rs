@@ -367,7 +367,10 @@ impl MailboxService {
     /// Returns an error when the guest sent no frame at all, which is what a
     /// guest whose workload has not written its outbox yet looks like; the
     /// launch path dials again rather than miss a message written after the
-    /// first dial. A frame the queue refuses is still a served connection.
+    /// first dial. A frame the queue refuses is still a served connection,
+    /// except when the queue is full: the guest keeps that frame to resend, so
+    /// the launch path treats it as no progress and backs off rather than
+    /// redialing at the post-frame pace.
     pub fn serve_guest(
         &self,
         route: &mvm_core::vm_backend::HostDialRoute,
@@ -377,11 +380,15 @@ impl MailboxService {
             route,
             mvm_contract::protocol::mailbox::MAILBOX_PORT,
         )?;
-        serve(&self.shared, stream, |body| {
+        match serve(&self.shared, stream, |body| {
             sealer.seal(OutboxMessage::decode(body)?)
-        })
-        .then_some(())
-        .ok_or_else(|| std::io::Error::other("the guest sent no mailbox frame"))
+        }) {
+            Served::Frame => Ok(()),
+            Served::QueueFull => Err(std::io::Error::other(
+                "the mailbox queue is full; the guest keeps its frame",
+            )),
+            Served::NoFrame => Err(std::io::Error::other("the guest sent no mailbox frame")),
+        }
     }
 
     /// Take the oldest accepted plaintext, if any.
@@ -426,18 +433,31 @@ pub fn send_on(
     send_frame(&mut stream, capability, envelope)
 }
 
+/// How a guest connection ended.
+enum Served {
+    /// A frame arrived and was answered, delivered or refused for good.
+    Frame,
+    /// A frame arrived and the queue had no room for it.
+    QueueFull,
+    NoFrame,
+}
+
 /// Read one frame, turn it into a capability and envelope with `prepare`, and
-/// answer with the admission verdict. Returns whether a frame arrived.
+/// answer with the admission verdict.
 fn serve(
     shared: &Shared,
     mut stream: UnixStream,
     prepare: impl FnOnce(&[u8]) -> Result<(SignedMailboxCapability, MailboxEnvelope), Refusal>,
-) -> bool {
+) -> Served {
     arm(&stream);
     let frame = read_frame(shared, &mut stream);
     let received = frame.is_ok();
-    answer(shared, &mut stream, frame, prepare);
-    received
+    let verdict = answer(shared, &mut stream, frame, prepare);
+    match (received, verdict) {
+        (false, _) => Served::NoFrame,
+        (true, Err(Refusal::QueueFull(_))) => Served::QueueFull,
+        (true, _) => Served::Frame,
+    }
 }
 
 /// A host peer's connection: a read request, or a sealed send.
@@ -461,7 +481,9 @@ fn serve_peer(shared: &Shared, mut stream: UnixStream) {
                 .map_err(|_| Refusal::Malformed);
             reply_with(&mut stream, &reply);
         }
-        frame => answer(shared, &mut stream, frame, decode_frame),
+        frame => {
+            let _ = answer(shared, &mut stream, frame, decode_frame);
+        }
     }
 }
 
@@ -475,11 +497,12 @@ fn answer(
     stream: &mut UnixStream,
     frame: Result<Vec<u8>, Refusal>,
     prepare: impl FnOnce(&[u8]) -> Result<(SignedMailboxCapability, MailboxEnvelope), Refusal>,
-) {
+) -> Result<(), Refusal> {
     let verdict = frame
         .and_then(|body| prepare(&body))
         .and_then(|(capability, envelope)| admit(shared, &capability, &envelope));
     reply_with(stream, &verdict);
+    verdict
 }
 
 fn reply_with<T: serde::Serialize>(stream: &mut UnixStream, reply: &Result<T, Refusal>) {
