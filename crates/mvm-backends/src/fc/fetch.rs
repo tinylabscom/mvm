@@ -32,6 +32,33 @@ pub fn install_locked() -> Result<PathBuf> {
     install_pinned(&cache_dir(), lock.pin(arch), &lock.tarball_url(arch), &curl)
 }
 
+/// Resolve the Firecracker to launch, fetching the pinned release first when
+/// none is shipped or cached. A host that never ran bootstrap, such as a source
+/// build, then still boots its first guest. Only an absent binary triggers the
+/// fetch: one that is present and wrong is an error, never replaced silently.
+pub fn resolve_or_fetch() -> Result<super::binary::ResolvedFirecracker> {
+    resolve_or_fetch_with(super::binary::resolve_for_host, || {
+        eprintln!(
+            "[mvm] No Firecracker ships with this mvmctl; fetching the pinned release (first use only)..."
+        );
+        install_locked().map(|_| ())
+    })
+}
+
+fn resolve_or_fetch_with(
+    resolve: impl Fn() -> Result<super::binary::ResolvedFirecracker, super::binary::ResolveError>,
+    fetch: impl FnOnce() -> Result<()>,
+) -> Result<super::binary::ResolvedFirecracker> {
+    match resolve() {
+        Ok(found) => Ok(found),
+        Err(super::binary::ResolveError::NotFound { .. }) => {
+            fetch()?;
+            resolve().map_err(Into::into)
+        }
+        Err(other) => Err(other.into()),
+    }
+}
+
 /// Fetch `url` into `dest` over HTTPS only.
 fn curl(url: &str, dest: &Path) -> Result<()> {
     let status = mvm_core::env_hygiene::helper_command("curl")
@@ -177,6 +204,89 @@ mod tests {
         let err = install_pinned(dest.path(), &pin, "u", &copy_from(tarball)).unwrap_err();
         assert!(err.to_string().contains("pins"), "{err}");
         assert!(!dest.path().join("firecracker").exists());
+    }
+
+    mod first_use {
+        use super::super::*;
+        use crate::fc::binary::{FirecrackerOrigin, ResolveError, ResolvedFirecracker};
+        use std::cell::Cell;
+
+        fn found() -> ResolvedFirecracker {
+            ResolvedFirecracker {
+                path: "/c/firecracker".into(),
+                origin: FirecrackerOrigin::Shipped,
+            }
+        }
+
+        fn missing() -> ResolveError {
+            ResolveError::NotFound { searched: vec![] }
+        }
+
+        #[test]
+        fn a_present_binary_is_used_and_nothing_is_fetched() {
+            let fetched = Cell::new(false);
+            let got = resolve_or_fetch_with(
+                || Ok(found()),
+                || {
+                    fetched.set(true);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(got, found());
+            assert!(!fetched.get());
+        }
+
+        #[test]
+        fn an_absent_binary_is_fetched_once_then_resolved() {
+            let fetched = Cell::new(0);
+            let resolved = Cell::new(0);
+            let got = resolve_or_fetch_with(
+                || {
+                    resolved.set(resolved.get() + 1);
+                    if resolved.get() == 1 {
+                        Err(missing())
+                    } else {
+                        Ok(found())
+                    }
+                },
+                || {
+                    fetched.set(fetched.get() + 1);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(got, found());
+            assert_eq!((fetched.get(), resolved.get()), (1, 2));
+        }
+
+        #[test]
+        fn a_binary_that_is_present_and_wrong_is_never_replaced_by_a_fetch() {
+            let fetched = Cell::new(false);
+            let err = resolve_or_fetch_with(
+                || {
+                    Err(ResolveError::DigestMismatch {
+                        path: "/c/firecracker".into(),
+                        expected: "a".into(),
+                        found: "b".into(),
+                    })
+                },
+                || {
+                    fetched.set(true);
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+            assert!(!fetched.get());
+            assert!(err.to_string().contains("pin"), "{err}");
+        }
+
+        #[test]
+        fn a_failed_fetch_is_reported_and_not_retried() {
+            let err =
+                resolve_or_fetch_with(|| Err(missing()), || anyhow::bail!("offline")).unwrap_err();
+            assert!(err.to_string().contains("offline"), "{err}");
+        }
     }
 
     #[test]

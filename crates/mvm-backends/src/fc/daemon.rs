@@ -437,7 +437,7 @@ pub(crate) fn effective_user_id() -> u32 {
 /// acceptable Firecracker fails before it has changed anything.
 fn launch_binary() -> Result<String> {
     let resolved =
-        super::binary::resolve_for_host().context("locating the Firecracker to launch")?;
+        super::fetch::resolve_or_fetch().context("locating the Firecracker to launch")?;
     script_safe_path(&resolved.path)
 }
 
@@ -1399,8 +1399,18 @@ mod tests {
     /// changed anything: no marker retired, no script run.
     #[test]
     fn a_launch_with_no_acceptable_firecracker_runs_no_script() {
+        // A cached file that is not the pinned release is present and wrong: it
+        // is refused, and never replaced by a fetch the test could not make.
+        let home = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
         env.set(super::super::binary::OVERRIDE_ENV, "");
+        let cached = super::super::fetch::cache_dir();
+        std::fs::create_dir_all(&cached).unwrap();
+        let wrong = cached.join("firecracker");
+        std::fs::write(&wrong, b"not the pinned release").unwrap();
+        std::fs::set_permissions(&wrong, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
         let (ran, _handler) = capture_scripts();
         let dir = tempfile::tempdir().unwrap();
         let abs_dir = dir.path().to_str().unwrap();
@@ -1408,7 +1418,7 @@ mod tests {
 
         let started = start_vm_firecracker_inner(abs_dir, &socket, "", None, None);
         let error = format!("{:#}", started.unwrap_err());
-        assert!(error.contains("no Firecracker ships"), "{error}");
+        assert!(error.contains("pins"), "{error}");
         let idle = start_idle_firecracker(abs_dir, &socket, "mvm-scope");
         assert!(idle.is_err());
         assert!(
