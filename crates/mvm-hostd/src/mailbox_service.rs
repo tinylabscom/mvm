@@ -127,15 +127,10 @@ impl GuestSealer {
         let gate = |e: mvm_core::mailbox::MailboxError| Refusal::Mailbox(e.to_string());
         self.sent += 1;
         let n = self.sent;
-        let counter = |width: usize| {
-            let mut bytes = vec![0; width];
-            bytes[width - 8..].copy_from_slice(&n.to_be_bytes());
-            bytes
-        };
         let mut header = self.header.clone();
         header.recipient = self.resolve_recipient(message.recipient);
-        header.message_id = MessageId::from_bytes(counter(32).try_into().unwrap());
-        header.nonce = ReplayNonce::from_bytes(counter(16).try_into().unwrap());
+        header.message_id = MessageId::from_bytes(counter_bytes(n));
+        header.nonce = ReplayNonce::from_bytes(counter_bytes(n));
         header.sequence = SequenceNumber::new(n).map_err(|_| Refusal::Malformed)?;
         header.plaintext_len = message.body.len() as u32;
         let capability =
@@ -599,6 +594,14 @@ fn read_rest(stream: &mut UnixStream, len: &mut [u8; 4], max: usize) -> Result<V
     Ok(body)
 }
 
+/// `n` big-endian in the low eight bytes of an `N`-byte identifier.
+fn counter_bytes<const N: usize>(n: u64) -> [u8; N] {
+    const { assert!(N >= 8) };
+    let mut bytes = [0u8; N];
+    bytes[N - 8..].copy_from_slice(&n.to_be_bytes());
+    bytes
+}
+
 fn admit(
     shared: &Shared,
     capability: &SignedMailboxCapability,
@@ -767,6 +770,16 @@ mod tests {
     }
 
     const MAILBOX: [u8; 32] = [4; 32];
+
+    #[test]
+    fn a_counter_identifier_carries_its_number_in_the_low_bytes_only() {
+        let id: [u8; 16] = counter_bytes(0x0102);
+        assert_eq!(id[..8], [0; 8]);
+        assert_eq!(id[8..], 0x0102u64.to_be_bytes());
+        let wide: [u8; 32] = counter_bytes(1);
+        assert_eq!(wide[31], 1);
+        assert_eq!(wide.iter().filter(|b| **b != 0).count(), 1);
+    }
 
     fn grant_at(keys: &Path, epoch: u64) -> MailboxGrant {
         let mailbox = MailboxId::from_bytes(MAILBOX);
