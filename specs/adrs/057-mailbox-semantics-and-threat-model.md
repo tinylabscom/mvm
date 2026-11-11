@@ -244,6 +244,7 @@ Receipts distinguish:
 
 ```text
 accepted_ephemeral
+accepted_local_durable
 accepted_durable
 duplicate
 expired
@@ -262,13 +263,22 @@ epoch, and ordering scope. Gaps block only that scope until the missing
 sequence arrives, expires, or receives a terminal disposition. There is no
 order across senders, mailboxes, or epochs and no global total order.
 
-`accepted_durable` means the encrypted envelope and deduplication identity are
-durably committed before the receipt is signed. `accepted_ephemeral` means the
-message is owned by the named live mailbox epoch. If that epoch terminates,
-the signed epoch-terminal observation closes the volatile queue; senders that
-need recovery use stable IDs and retry into a newly authorized epoch. A
-partitioned observer may remain uncertain until reconciliation; the protocol
-does not invent a terminal fact it cannot observe.
+`accepted_local_durable` is a distinct version-two destination receipt: the
+encrypted envelope, deduplication identity, and required delivery state are
+fsynced outside the source VM's lifetime before signing. Its locally fsynced
+chain head permits ordinary process-crash recovery but does not detect a whole
+host rollback or survive destruction of all host storage. It is available to
+standalone MVM without a fleet service or hardware dependency. The existing
+version-one `accepted_durable` remains reserved for independently witnessed
+rollback protection; an old receipt must never be relabeled as local durability,
+and version-one readers reject the new outcome. Neither receipt implies that an
+application processed or ACKed the message.
+
+`accepted_ephemeral` means the message is owned by the named live mailbox
+epoch. If that epoch terminates, the signed epoch-terminal observation closes
+the volatile queue; senders that need recovery use stable IDs and retry into a
+newly authorized epoch. A partitioned observer may remain uncertain until
+reconciliation; the protocol does not invent a terminal fact it cannot observe.
 
 ### 7. Durability, retry, poison messages, and dead letters
 
@@ -356,6 +366,14 @@ that migration is implemented.
 | Development / trusted host | Sender and recipient processes; the host or debugger may inspect guest memory. | Authenticated encrypted protocol, not host-blindness. |
 | Isolated production on ordinary virtualization | Sender and recipient guests; transport and stores hold ciphertext, but the hypervisor owner can inspect guest memory. | Relay- and service-process-blind payloads, not malicious-host confidentiality. |
 | Host-blind sealed execution | Only measured sender/recipient confidential guests after attestation-bound key release; ordinary host and `mvmd` processes never receive decryption material. | Host-blind payload confidentiality after hardware, attestation, rollback, and key-release witnesses pass. |
+
+The trusted-host local-durable receipt is an acceptance class, not an assurance
+tier upgrade: the same host remains trusted for key custody and rollback. A
+missing or rotated history/payload key must refuse recovery rather than mint a
+replacement. Standalone MVM may keep versioned, purpose-separated keys in its
+existing protected host key directory; an independently operated checkpoint
+and optional confidential hardware remain upgrades, never implicit dependencies
+of a local mailbox launch.
 
 Encryption at rest, TLS, a microVM boundary, Keychain, TPM storage, or an
 honest host does not by itself establish host-blind execution. A platform

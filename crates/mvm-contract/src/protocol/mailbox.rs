@@ -7,7 +7,8 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::plan::{Nonce, PlanId};
 
@@ -17,6 +18,10 @@ use crate::plan::{Nonce, PlanId};
 pub const MAILBOX_PORT: u32 = 5257;
 /// Current mailbox protocol version.
 pub const MAILBOX_PROTOCOL_VERSION: u16 = 1;
+/// Receipt-only version for a locally fsynced, trusted-host acceptance.
+pub const LOCAL_DURABLE_RECEIPT_VERSION: u16 = 2;
+/// Local receipt signatures must not reuse the V1 destination-receipt domain.
+pub const LOCAL_DURABLE_RECEIPT_SIGNATURE_DOMAIN: &[u8] = b"mvm.mailbox.receipt.v2\0";
 /// Current signature algorithm identifier (Ed25519).
 pub const ED25519_ALGORITHM: u16 = 1;
 /// Current payload-encryption algorithm identifier (AES-256-GCM).
@@ -129,6 +134,8 @@ pub struct ProtocolVersion(pub u16);
 
 impl ProtocolVersion {
     pub const V1: Self = Self(MAILBOX_PROTOCOL_VERSION);
+    /// Only local-durable destination receipts use version two.
+    pub const V2: Self = Self(LOCAL_DURABLE_RECEIPT_VERSION);
 }
 
 /// Signature algorithm carried on every signed object.
@@ -712,6 +719,8 @@ pub struct SignedMailboxCapability {
 pub enum DeliveryOutcome {
     AcceptedEphemeral,
     AcceptedDurable,
+    /// Local crash durability only; no independent whole-host rollback witness.
+    AcceptedLocalDurable,
     Duplicate,
     Expired,
     Refused,
@@ -722,8 +731,7 @@ pub enum DeliveryOutcome {
 }
 
 /// Receipt body signed only by the destination mailbox authority.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DestinationReceipt {
     pub protocol_version: ProtocolVersion,
     pub signature_algorithm: SignatureAlgorithm,
@@ -734,6 +742,73 @@ pub struct DestinationReceipt {
     pub outcome: DeliveryOutcome,
     pub observed_at_unix_ms: i64,
     pub ciphertext_commitment: [u8; 32],
+}
+
+impl DestinationReceipt {
+    /// Keeps V1 receipt claims distinct from the V2 local-only durability claim.
+    pub fn validate_versioned_outcome(&self) -> Result<(), MailboxContractError> {
+        let expected = match self.outcome {
+            DeliveryOutcome::AcceptedLocalDurable => ProtocolVersion::V2,
+            _ => ProtocolVersion::V1,
+        };
+        if self.protocol_version == expected {
+            Ok(())
+        } else {
+            Err(MailboxContractError::InvalidReceiptVersion)
+        }
+    }
+}
+
+impl Serialize for DestinationReceipt {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.validate_versioned_outcome()
+            .map_err(serde::ser::Error::custom)?;
+        let mut receipt = serializer.serialize_struct("DestinationReceipt", 9)?;
+        receipt.serialize_field("protocol_version", &self.protocol_version)?;
+        receipt.serialize_field("signature_algorithm", &self.signature_algorithm)?;
+        receipt.serialize_field("delivery_id", &self.delivery_id)?;
+        receipt.serialize_field("message_id", &self.message_id)?;
+        receipt.serialize_field("address", &self.address)?;
+        receipt.serialize_field("execution_epoch", &self.execution_epoch)?;
+        receipt.serialize_field("outcome", &self.outcome)?;
+        receipt.serialize_field("observed_at_unix_ms", &self.observed_at_unix_ms)?;
+        receipt.serialize_field("ciphertext_commitment", &self.ciphertext_commitment)?;
+        receipt.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for DestinationReceipt {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            protocol_version: ProtocolVersion,
+            signature_algorithm: SignatureAlgorithm,
+            delivery_id: DeliveryId,
+            message_id: MessageId,
+            address: MailboxAddress,
+            execution_epoch: ExecutionEpoch,
+            outcome: DeliveryOutcome,
+            observed_at_unix_ms: i64,
+            ciphertext_commitment: [u8; 32],
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let receipt = Self {
+            protocol_version: wire.protocol_version,
+            signature_algorithm: wire.signature_algorithm,
+            delivery_id: wire.delivery_id,
+            message_id: wire.message_id,
+            address: wire.address,
+            execution_epoch: wire.execution_epoch,
+            outcome: wire.outcome,
+            observed_at_unix_ms: wire.observed_at_unix_ms,
+            ciphertext_commitment: wire.ciphertext_commitment,
+        };
+        receipt
+            .validate_versioned_outcome()
+            .map_err(serde::de::Error::custom)?;
+        Ok(receipt)
+    }
 }
 
 /// Signed destination receipt.
@@ -1249,6 +1324,8 @@ pub enum MailboxContractError {
     InvalidReportContentType,
     #[error("workload report exceeds the signed plan ceiling")]
     ReportPayloadTooLarge,
+    #[error("receipt outcome is unsupported for its protocol version")]
+    InvalidReceiptVersion,
 }
 
 impl MailboxContractError {
@@ -1277,6 +1354,7 @@ impl MailboxContractError {
             Self::InvalidReportMessageKind => "invalid_report_message_kind",
             Self::InvalidReportContentType => "invalid_report_content_type",
             Self::ReportPayloadTooLarge => "report_payload_too_large",
+            Self::InvalidReceiptVersion => "invalid_receipt_version",
         }
     }
 }

@@ -408,6 +408,12 @@ fn destination_receipt_wire_roundtrip_and_signature_cover_outcome_and_identity()
         ciphertext_commitment: [33; 32],
     };
     let mut signed = sign_receipt(receipt, &destination_key).expect("sign receipt");
+    let mut invalid = signed.receipt.clone();
+    invalid.outcome = DeliveryOutcome::AcceptedLocalDurable;
+    assert!(
+        sign_receipt(invalid, &destination_key).is_err(),
+        "a V1 signer must not label local acceptance as durable"
+    );
     let wire = serde_jcs::to_vec(&signed).expect("encode receipt");
     let decoded: mvm_contract::protocol::mailbox::SignedDestinationReceipt =
         serde_json::from_slice(&wire).expect("decode receipt");
@@ -1064,6 +1070,7 @@ fn the_delivery_and_message_vocabularies_are_closed() {
         match outcome {
             DeliveryOutcome::AcceptedEphemeral => "accepted_ephemeral",
             DeliveryOutcome::AcceptedDurable => "accepted_durable",
+            DeliveryOutcome::AcceptedLocalDurable => "accepted_local_durable",
             DeliveryOutcome::Duplicate => "duplicate",
             DeliveryOutcome::Expired => "expired",
             DeliveryOutcome::Refused => "refused",
@@ -1083,6 +1090,7 @@ fn the_delivery_and_message_vocabularies_are_closed() {
     for outcome in [
         DeliveryOutcome::AcceptedEphemeral,
         DeliveryOutcome::AcceptedDurable,
+        DeliveryOutcome::AcceptedLocalDurable,
         DeliveryOutcome::Duplicate,
         DeliveryOutcome::Expired,
         DeliveryOutcome::Refused,
