@@ -501,6 +501,297 @@ impl OpenedMailboxEnvelope {
     }
 }
 
+/// A fixed-size snapshot of the successful verifier's authenticated header and
+/// supplied local context. This is historical verification data, not current
+/// authorization, a journal commit, or permission to sign a durable receipt.
+/// Accepted-content and revocation vectors are deliberately not retained.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct VerifiedMailboxScope {
+    tenant: TenantId,
+    authorization_domain: AuthorizationDomainId,
+    mailbox: MailboxId,
+    sender: PrincipalId,
+    recipient: PrincipalId,
+    sender_boot: BootId,
+    message_id: MessageId,
+    capability_id: mvm_contract::protocol::mailbox::CapabilityId,
+    encryption_key_id: [u8; 32],
+    execution_epoch: ExecutionEpoch,
+    policy_epoch: u64,
+    expires_at_unix_ms: i64,
+    acting_principal: PrincipalId,
+    required_operation: MailboxOperation,
+    capability_issuer: PrincipalId,
+    current_execution_epoch: ExecutionEpoch,
+    current_policy_epoch: u64,
+    verified_at_unix_ms: i64,
+}
+
+impl std::fmt::Debug for VerifiedMailboxScope {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VerifiedMailboxScope")
+            .finish_non_exhaustive()
+    }
+}
+
+impl VerifiedMailboxScope {
+    #[must_use]
+    pub fn tenant(&self) -> TenantId {
+        self.tenant
+    }
+    #[must_use]
+    pub fn authorization_domain(&self) -> AuthorizationDomainId {
+        self.authorization_domain
+    }
+    #[must_use]
+    pub fn mailbox(&self) -> MailboxId {
+        self.mailbox
+    }
+    #[must_use]
+    pub fn sender(&self) -> PrincipalId {
+        self.sender
+    }
+    #[must_use]
+    pub fn recipient(&self) -> PrincipalId {
+        self.recipient
+    }
+    #[must_use]
+    pub fn sender_boot(&self) -> BootId {
+        self.sender_boot
+    }
+    #[must_use]
+    pub fn message_id(&self) -> MessageId {
+        self.message_id
+    }
+    #[must_use]
+    pub fn capability_id(&self) -> mvm_contract::protocol::mailbox::CapabilityId {
+        self.capability_id
+    }
+    #[must_use]
+    pub fn encryption_key_id(&self) -> [u8; 32] {
+        self.encryption_key_id
+    }
+    #[must_use]
+    pub fn execution_epoch(&self) -> ExecutionEpoch {
+        self.execution_epoch
+    }
+    #[must_use]
+    pub fn policy_epoch(&self) -> u64 {
+        self.policy_epoch
+    }
+    #[must_use]
+    pub fn expires_at_unix_ms(&self) -> i64 {
+        self.expires_at_unix_ms
+    }
+    #[must_use]
+    pub fn acting_principal(&self) -> PrincipalId {
+        self.acting_principal
+    }
+    #[must_use]
+    pub fn required_operation(&self) -> MailboxOperation {
+        self.required_operation
+    }
+    #[must_use]
+    pub fn capability_issuer(&self) -> PrincipalId {
+        self.capability_issuer
+    }
+    #[must_use]
+    pub fn current_execution_epoch(&self) -> ExecutionEpoch {
+        self.current_execution_epoch
+    }
+    #[must_use]
+    pub fn current_policy_epoch(&self) -> u64 {
+        self.current_policy_epoch
+    }
+    #[must_use]
+    pub fn verified_at_unix_ms(&self) -> i64 {
+        self.verified_at_unix_ms
+    }
+}
+
+/// Original ciphertext ownership plus exactly one canonical verified-open result.
+/// The service may inspect plaintext; the journal receives only a narrow view.
+/// No constructor accepts caller assertions of verification. This capsule is
+/// neither Clone nor serializable/deserializable.
+///
+/// ```compile_fail
+/// use mvm_core::mailbox::{OpenedMailboxEnvelope, VerifiedMailboxAdmission, VerifiedMailboxScope};
+/// use mvm_contract::protocol::mailbox::MailboxEnvelope;
+/// fn forge(envelope: MailboxEnvelope, opened: OpenedMailboxEnvelope, scope: VerifiedMailboxScope) -> VerifiedMailboxAdmission {
+///     VerifiedMailboxAdmission { envelope, opened, scope }
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use mvm_core::mailbox::VerifiedMailboxAdmission;
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<VerifiedMailboxAdmission>();
+/// ```
+///
+/// ```compile_fail
+/// use mvm_core::mailbox::VerifiedMailboxAdmission;
+/// fn requires_serialize<T: serde::Serialize>() {}
+/// requires_serialize::<VerifiedMailboxAdmission>();
+/// ```
+///
+/// ```compile_fail
+/// use mvm_core::mailbox::VerifiedMailboxAdmission;
+/// fn requires_deserialize<T: serde::de::DeserializeOwned>() {}
+/// requires_deserialize::<VerifiedMailboxAdmission>();
+/// ```
+pub struct VerifiedMailboxAdmission {
+    envelope: MailboxEnvelope,
+    opened: OpenedMailboxEnvelope,
+    scope: VerifiedMailboxScope,
+}
+
+impl std::fmt::Debug for VerifiedMailboxAdmission {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VerifiedMailboxAdmission")
+            .finish_non_exhaustive()
+    }
+}
+
+impl VerifiedMailboxAdmission {
+    /// Borrow only verified metadata and original ciphertext, never plaintext.
+    #[must_use]
+    pub fn journal_view(&self) -> JournalAdmissionView<'_> {
+        JournalAdmissionView {
+            envelope: &self.envelope,
+            header: self.opened.header(),
+            scope: &self.scope,
+            replay_identity: ReplayIdentity::from_header(self.opened.header()),
+        }
+    }
+
+    /// Service-facing plaintext access. A journal view intentionally has none.
+    #[must_use]
+    pub fn payload(&self) -> &[u8] {
+        self.opened.payload()
+    }
+
+    /// Consume the capsule, preserving both original ciphertext and verified
+    /// plaintext allocations. This does not create a journal or delivery result.
+    #[must_use]
+    pub fn into_parts(self) -> (MailboxEnvelope, OpenedMailboxEnvelope) {
+        (self.envelope, self.opened)
+    }
+}
+
+/// Ciphertext-only journal handoff borrowed from a canonical verified capsule.
+/// Header and commitment are authenticated by canonical verification; the outer
+/// envelope remains the exact admitted representation, including routing fields.
+/// This view does not turn transport-mutable routing data into route authority.
+/// A journal must still require actual destination/Receive scope, current
+/// authorization, resource admission, durable commit, anchor and key custody.
+/// In particular, a view verified for Send is not Receive admission authority.
+///
+/// ```compile_fail
+/// use mvm_core::mailbox::{JournalAdmissionView, ReplayIdentity, VerifiedMailboxScope};
+/// use mvm_contract::protocol::mailbox::{MailboxEnvelope, MailboxEnvelopeHeader};
+/// fn forge<'a>(envelope: &'a MailboxEnvelope, header: &'a MailboxEnvelopeHeader, scope: &'a VerifiedMailboxScope) -> JournalAdmissionView<'a> {
+///     JournalAdmissionView { envelope, header, scope, replay_identity: ReplayIdentity::from_header(header) }
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use mvm_core::mailbox::JournalAdmissionView;
+/// fn plaintext<'a>(view: &'a JournalAdmissionView<'a>) -> &'a [u8] {
+///     view.payload()
+/// }
+/// ```
+pub struct JournalAdmissionView<'a> {
+    envelope: &'a MailboxEnvelope,
+    header: &'a MailboxEnvelopeHeader,
+    scope: &'a VerifiedMailboxScope,
+    replay_identity: ReplayIdentity,
+}
+
+impl std::fmt::Debug for JournalAdmissionView<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("JournalAdmissionView")
+            .finish_non_exhaustive()
+    }
+}
+
+impl JournalAdmissionView<'_> {
+    #[must_use]
+    pub fn envelope(&self) -> &MailboxEnvelope {
+        self.envelope
+    }
+    #[must_use]
+    pub fn header(&self) -> &MailboxEnvelopeHeader {
+        self.header
+    }
+    /// Data identity, not a replay reservation or durable admission token.
+    #[must_use]
+    pub fn replay_identity(&self) -> ReplayIdentity {
+        self.replay_identity
+    }
+    #[must_use]
+    pub fn ciphertext_commitment(&self) -> &[u8; 32] {
+        &self.envelope.ciphertext_commitment
+    }
+    #[must_use]
+    pub fn verified_scope(&self) -> &VerifiedMailboxScope {
+        self.scope
+    }
+}
+
+/// Take ownership of an envelope and run the existing canonical verifier once,
+/// including its original replay decision. No ciphertext clone, second replay
+/// check, alternative crypto path or context-vector clone is performed.
+/// Verification under the supplied context is historical, not current permission.
+/// No journal I/O, commit evidence or receipt authority is created here.
+pub fn open_verified_admission(
+    envelope: MailboxEnvelope,
+    capability: &SignedMailboxCapability,
+    context: &OpenContext,
+    encryption_key: &Key,
+    sender_key: &VerifyingKey,
+    authority_key: &VerifyingKey,
+    replay: &mut impl ReplayProtector,
+) -> Result<VerifiedMailboxAdmission, MailboxError> {
+    let opened = open_verified_envelope(
+        &envelope,
+        capability,
+        context,
+        encryption_key,
+        sender_key,
+        authority_key,
+        replay,
+    )?;
+    let header = opened.header();
+    let scope = VerifiedMailboxScope {
+        tenant: header.tenant,
+        authorization_domain: header.authorization_domain,
+        mailbox: header.mailbox,
+        sender: header.sender,
+        recipient: header.recipient,
+        sender_boot: header.sender_boot,
+        message_id: header.message_id,
+        capability_id: header.capability_id,
+        encryption_key_id: header.encryption.key_id,
+        execution_epoch: header.execution_epoch,
+        policy_epoch: header.policy_epoch,
+        expires_at_unix_ms: header.expires_at_unix_ms,
+        acting_principal: context.acting_principal,
+        required_operation: context.required_operation,
+        capability_issuer: context.expected_capability_issuer,
+        current_execution_epoch: context.current_execution_epoch,
+        current_policy_epoch: context.current_policy_epoch,
+        verified_at_unix_ms: context.now_unix_ms,
+    };
+    Ok(VerifiedMailboxAdmission {
+        envelope,
+        opened,
+        scope,
+    })
+}
+
 /// Verify an envelope and return its plaintext through the canonical open path.
 pub fn open_envelope(
     envelope: &MailboxEnvelope,

@@ -1189,3 +1189,236 @@ fn only_the_destination_authority_can_sign_acceptance() {
         Err(MailboxError::ReceiptSignatureInvalid)
     ));
 }
+
+#[test]
+fn verified_admission_retains_original_ciphertext_and_service_plaintext_allocations() {
+    use mvm_core::mailbox::{ReplayIdentity, ReplayProtector, open_verified_admission};
+    #[derive(Default)]
+    struct CountingReplay(usize);
+    impl ReplayProtector for CountingReplay {
+        fn check_and_record(&mut self, _: ReplayIdentity) -> bool {
+            self.0 += 1;
+            self.0 == 1
+        }
+    }
+    let (sender_key, authority_key, encryption_key) = contract_keys();
+    let capability = sign_capability(grant(), &authority_key).unwrap();
+    let expected = header();
+    let envelope = seal_with(expected.clone(), b"hello");
+    let ciphertext_ptr = envelope.ciphertext.as_ptr();
+    let ciphertext_capacity = envelope.ciphertext.capacity();
+    let mut replay = CountingReplay::default();
+    let admission = open_verified_admission(
+        envelope,
+        &capability,
+        &context(),
+        &encryption_key,
+        &sender_key.verifying_key(),
+        &authority_key.verifying_key(),
+        &mut replay,
+    )
+    .unwrap();
+    assert_eq!(replay.0, 1);
+    {
+        let view = admission.journal_view();
+        assert_eq!(view.envelope().ciphertext.as_ptr(), ciphertext_ptr);
+        assert_eq!(view.envelope().ciphertext.capacity(), ciphertext_capacity);
+        assert_eq!(view.header(), &expected);
+        assert_eq!(
+            view.replay_identity(),
+            ReplayIdentity::from_header(&expected)
+        );
+        assert_eq!(
+            view.ciphertext_commitment(),
+            &view.envelope().ciphertext_commitment
+        );
+        assert_eq!(
+            view.verified_scope().acting_principal(),
+            context().acting_principal
+        );
+        assert_eq!(
+            view.verified_scope().required_operation(),
+            context().required_operation
+        );
+        assert_eq!(
+            view.verified_scope().capability_issuer(),
+            context().expected_capability_issuer
+        );
+        assert_eq!(
+            view.verified_scope().current_execution_epoch(),
+            context().current_execution_epoch
+        );
+        assert_eq!(
+            view.verified_scope().current_policy_epoch(),
+            context().current_policy_epoch
+        );
+        assert_eq!(
+            view.verified_scope().verified_at_unix_ms(),
+            context().now_unix_ms
+        );
+    }
+    assert_eq!(admission.payload(), b"hello");
+    let plaintext_ptr = admission.payload().as_ptr();
+    let view = admission.journal_view();
+    assert_eq!(view.header(), &expected);
+    assert_eq!(replay.0, 1, "views must not verify or consume replay again");
+    let (envelope, opened) = admission.into_parts();
+    assert_eq!(envelope.ciphertext.as_ptr(), ciphertext_ptr);
+    assert_eq!(opened.payload().as_ptr(), plaintext_ptr);
+    assert_eq!(opened.header(), &expected);
+    assert_eq!(opened.into_payload(), b"hello");
+    assert_eq!(
+        open_envelope(
+            &envelope,
+            &capability,
+            &context(),
+            &encryption_key,
+            &sender_key.verifying_key(),
+            &authority_key.verifying_key(),
+            &mut replay
+        )
+        .unwrap_err(),
+        MailboxError::Replay
+    );
+    assert_eq!(replay.0, 2);
+}
+
+#[test]
+fn verified_admission_refusals_do_not_mint_capsule_or_record_replay() {
+    use mvm_core::mailbox::{ReplayIdentity, ReplayProtector, open_verified_admission};
+    #[derive(Default)]
+    struct CountingReplay(usize);
+    impl ReplayProtector for CountingReplay {
+        fn check_and_record(&mut self, _: ReplayIdentity) -> bool {
+            self.0 += 1;
+            true
+        }
+    }
+    let (sender_key, authority_key, encryption_key) = contract_keys();
+    let capability = sign_capability(grant(), &authority_key).unwrap();
+    for failure in [
+        "ciphertext",
+        "sender_key",
+        "authority_key",
+        "tenant",
+        "domain",
+        "recipient",
+        "acting_principal",
+        "operation",
+        "issuer",
+        "epoch",
+        "policy",
+        "expired",
+        "revoked",
+    ] {
+        let mut envelope = seal_with(header(), b"hello");
+        let mut current = context();
+        let mut sender_public = sender_key.verifying_key();
+        let mut authority_public = authority_key.verifying_key();
+        match failure {
+            "ciphertext" => envelope.ciphertext[0] ^= 1,
+            "sender_key" => sender_public = SigningKey::from_bytes(&[99; 32]).verifying_key(),
+            "authority_key" => authority_public = SigningKey::from_bytes(&[99; 32]).verifying_key(),
+            "tenant" => current.expected_tenant = TenantId::from_bytes([99; 32]),
+            "domain" => {
+                current.expected_authorization_domain = AuthorizationDomainId::from_bytes([99; 32])
+            }
+            "recipient" => current.expected_recipient = PrincipalId::from_bytes([99; 32]),
+            "acting_principal" => current.acting_principal = PrincipalId::from_bytes([99; 32]),
+            "operation" => current.required_operation = MailboxOperation::Monitor,
+            "issuer" => current.expected_capability_issuer = PrincipalId::from_bytes([99; 32]),
+            "epoch" => current.current_execution_epoch = ExecutionEpoch::new(8).unwrap(),
+            "policy" => current.current_policy_epoch += 1,
+            "expired" => current.now_unix_ms = 2_000,
+            _ => current.revoked_capabilities.push(grant().revocation_id),
+        }
+        let mut replay = CountingReplay::default();
+        assert!(
+            open_verified_admission(
+                envelope,
+                &capability,
+                &current,
+                &encryption_key,
+                &sender_public,
+                &authority_public,
+                &mut replay
+            )
+            .is_err(),
+            "{failure}"
+        );
+        assert_eq!(replay.0, 0, "{failure}");
+    }
+}
+
+#[test]
+fn verified_admission_debug_never_contains_payload_or_ciphertext() {
+    use mvm_core::mailbox::open_verified_admission;
+    let (sender_key, authority_key, encryption_key) = contract_keys();
+    let capability = sign_capability(grant(), &authority_key).unwrap();
+    let admission = open_verified_admission(
+        seal_with(header(), b"hello"),
+        &capability,
+        &context(),
+        &encryption_key,
+        &sender_key.verifying_key(),
+        &authority_key.verifying_key(),
+        &mut InMemoryReplayProtector::default(),
+    )
+    .unwrap();
+    assert_eq!(format!("{admission:?}"), "VerifiedMailboxAdmission { .. }");
+    assert_eq!(
+        format!("{:?}", admission.journal_view()),
+        "JournalAdmissionView { .. }"
+    );
+}
+
+#[test]
+fn verified_admission_scope_preserves_supplied_operation_and_historical_context() {
+    use mvm_core::mailbox::{VerifiedMailboxScope, open_verified_admission};
+    let (sender_key, authority_key, encryption_key) = contract_keys();
+    let capability = sign_capability(grant(), &authority_key).unwrap();
+    let mut current = context();
+    let admission = open_verified_admission(
+        seal_with(header(), b"hello"),
+        &capability,
+        &current,
+        &encryption_key,
+        &sender_key.verifying_key(),
+        &authority_key.verifying_key(),
+        &mut InMemoryReplayProtector::default(),
+    )
+    .unwrap();
+    current.now_unix_ms += 100;
+    current.current_policy_epoch += 1;
+    current.required_operation = MailboxOperation::Receive;
+    current.revoked_capabilities.push(grant().revocation_id);
+    let view = admission.journal_view();
+    let scope = view.verified_scope();
+    assert_eq!(
+        scope.required_operation(),
+        MailboxOperation::Send,
+        "verification cannot become receive authority"
+    );
+    assert_eq!(scope.verified_at_unix_ms(), 1_500);
+    assert_eq!(scope.current_policy_epoch(), 4);
+    assert_ne!(scope.current_policy_epoch(), current.current_policy_epoch);
+    assert_eq!(scope.tenant(), view.header().tenant);
+    assert_eq!(
+        scope.authorization_domain(),
+        view.header().authorization_domain
+    );
+    assert_eq!(scope.mailbox(), view.header().mailbox);
+    assert_eq!(scope.sender(), view.header().sender);
+    assert_eq!(scope.recipient(), view.header().recipient);
+    assert_eq!(scope.sender_boot(), view.header().sender_boot);
+    assert_eq!(scope.message_id(), view.header().message_id);
+    assert_eq!(scope.capability_id(), view.header().capability_id);
+    assert_eq!(scope.encryption_key_id(), view.header().encryption.key_id);
+    assert_eq!(scope.execution_epoch(), view.header().execution_epoch);
+    assert_eq!(scope.policy_epoch(), view.header().policy_epoch);
+    assert_eq!(scope.expires_at_unix_ms(), view.header().expires_at_unix_ms);
+    assert!(
+        !std::mem::needs_drop::<VerifiedMailboxScope>(),
+        "fixed scope must not retain owned context vectors"
+    );
+}
