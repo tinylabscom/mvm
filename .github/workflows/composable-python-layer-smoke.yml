@@ -35,6 +35,9 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: sigstore/cosign-installer@v3
+      - name: Install ARM host linker
+        if: matrix.arch == 'aarch64'
+        run: sudo apt-get update && sudo apt-get install -y binutils lld
       - name: Reproduce and verify an unpublished Python runtime input
         env:
           MVM_EMBED: "0"
