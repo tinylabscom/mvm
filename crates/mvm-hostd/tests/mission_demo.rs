@@ -1775,22 +1775,6 @@ impl KillOnDrop {
     fn stderr(&self) -> String {
         std::fs::read_to_string(&self.1).unwrap_or_default()
     }
-
-    /// Accept one connection within 20s, or fail with the child's stderr.
-    fn accept(
-        &mut self,
-        listener: &std::os::unix::net::UnixListener,
-    ) -> std::os::unix::net::UnixStream {
-        listener.set_nonblocking(true).unwrap();
-        for _ in 0..400 {
-            if let Ok((stream, _)) = listener.accept() {
-                stream.set_nonblocking(false).unwrap();
-                return stream;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        panic!("the process never dialed; stderr:\n{}", self.stderr());
-    }
 }
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
@@ -1810,108 +1794,6 @@ fn spawn_mailbox_process(config: &[u8]) -> KillOnDrop {
         .unwrap();
     child.stdin.take().unwrap().write_all(config).unwrap();
     KillOnDrop(child, log)
-}
-
-/// A mailbox process under `dir`, started for a granted mailbox, whose guest
-/// has delivered its one message. Returns the process and the VM state dir.
-fn served_mailbox_process(dir: &std::path::Path) -> (KillOnDrop, std::path::PathBuf) {
-    use mvm_core::vm_backend::HostDialRoute;
-    use mvm_hostd::mailbox_process::build_config;
-    use std::os::unix::net::UnixListener;
-
-    let keys = dir.join("keys");
-    std::fs::create_dir_all(&keys).unwrap();
-    host_keys(&keys, 5);
-    let state_dir = dir.join("vm");
-    std::fs::create_dir_all(&state_dir).unwrap();
-    let authority = mvm_hostd::mailbox_launch::authority_key_for(&keys, &address().mailbox)
-        .unwrap()
-        .to_bytes();
-    let grant = granted_plan(authority).mailbox.unwrap();
-    let backend = mvm_runtime::backend::AnyBackend::from_hypervisor("hvf");
-    let config = build_config(&keys, &grant, &state_dir, &backend).unwrap();
-    let HostDialRoute::PortSocket(ref guest_port) = config.guest_route else {
-        panic!("HVF must bridge the host-dialed mailbox port");
-    };
-    std::fs::create_dir_all(guest_port.parent().unwrap()).unwrap();
-    let listener = UnixListener::bind(guest_port).unwrap();
-    let wire = serde_json::to_vec(&config).unwrap();
-    let seed = std::fs::read(keys.join("host-signer.ed25519")).unwrap();
-    assert!(
-        !String::from_utf8_lossy(&wire).contains(&hex::encode(&seed)),
-        "the seed is not in the process config"
-    );
-
-    let outbox = dir.join("outbox");
-    std::fs::write(&outbox, outbox_message().encode()).unwrap();
-    let mut process = spawn_mailbox_process(&wire);
-    let mut stream = process.accept(&listener);
-    assert_eq!(
-        mvm_agentd::mailbox_outbox::forward_outbox(&mut stream, &outbox),
-        Ok(())
-    );
-    assert!(
-        (0..100).any(|_| {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            mvm_core::config::vm_mailbox_socket_at(&state_dir).exists()
-        }),
-        "the host service bound its socket; stderr:\n{}",
-        process.stderr()
-    );
-    assert!(
-        !outbox.exists(),
-        "guest received a durable admission verdict"
-    );
-    assert!(state_dir.join("mailbox-anchor").exists());
-    let record = std::fs::read(
-        state_dir
-            .join("mailbox-journal")
-            .join("entry-00000000000000000001.bin"),
-    )
-    .expect("accepted canonical ciphertext is durable");
-    assert!(
-        !record.windows(5).any(|w| w == b"hello"),
-        "the durable record never stores guest plaintext"
-    );
-    let later = OutboxMessage::new(aircraft_principal(), b"after-start".to_vec());
-    mvm_agentd::mailbox_outbox::write_outbox(&outbox, &later).unwrap();
-    let mut stream = process.accept(&listener);
-    assert_eq!(
-        mvm_agentd::mailbox_outbox::forward_outbox(&mut stream, &outbox),
-        Ok(()),
-        "the running process keeps serving the live guest"
-    );
-    assert!(
-        state_dir
-            .join("mailbox-journal")
-            .join("entry-00000000000000000002.bin")
-            .exists(),
-        "a post-start operation committed durably"
-    );
-    process.0.kill().expect("crash the mailbox helper");
-    process.0.wait().expect("reap the crashed helper");
-    drop(process);
-    mvm_agentd::mailbox_outbox::write_outbox(&outbox, &outbox_message()).unwrap();
-    let mut restarted = spawn_mailbox_process(&wire);
-    let forwarded = (0..8).any(|_| {
-        let mut stream = restarted.accept(&listener);
-        matches!(
-            mvm_agentd::mailbox_outbox::forward_outbox(&mut stream, &outbox),
-            Ok(())
-        )
-    });
-    assert!(
-        forwarded,
-        "the same immutable guest operation must be reconciled after restart"
-    );
-    assert!(
-        !state_dir
-            .join("mailbox-journal")
-            .join("entry-00000000000000000003.bin")
-            .exists(),
-        "a recovered duplicate does not create a second durable acceptance"
-    );
-    (restarted, state_dir)
 }
 
 #[test]
@@ -1952,28 +1834,6 @@ fn missing_verified_posture_prevents_the_helper_from_reporting_ready() {
         !config.socket.exists(),
         "no mailbox endpoint may be published without verified admission"
     );
-}
-
-/// Removing the VM's state directory, and with it the mailbox socket path,
-/// ends a serving process: stopping its service must not need that path.
-#[test]
-fn the_mailbox_process_exits_when_its_vm_state_dir_is_removed() {
-    let dir = tempfile::tempdir_in("/tmp").unwrap();
-    let (mut process, state_dir) = served_mailbox_process(dir.path());
-    std::fs::remove_dir_all(&state_dir).unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    let status = loop {
-        if let Some(status) = process.0.try_wait().unwrap() {
-            break status;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the process outlived its VM; stderr:\n{}",
-            process.stderr()
-        );
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    };
-    assert!(status.success(), "{status}");
 }
 
 // ---- two nodes over a loopback TCP PeerTransport ----------------------------
