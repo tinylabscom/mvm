@@ -109,6 +109,86 @@ fn a_host_signed_local_build_is_audited_with_its_origin_and_digest() {
 }
 
 #[test]
+fn transient_composition_admits_once_without_enrolling_or_installing() {
+    let home = tempfile::tempdir().expect("mvm home");
+    let mut env = TestEnv::new();
+    env.isolate_mvm_home(home.path());
+    let (archive, _) =
+        crate::launch::transient_composition::tests::signed_local_composition(home.path());
+    let mut staged =
+        crate::launch::transient_composition::TransientComposition::stage(&archive).unwrap();
+    let source = staged.consume().unwrap();
+    let rootfs = source.rootfs().unwrap();
+    let kernel = source.kernel().unwrap();
+    let config = mvm_core::vm_backend::VmStartConfig {
+        name: "vm-pinned".into(),
+        rootfs_path: rootfs.to_string_lossy().into_owned(),
+        kernel_path: Some(kernel.to_string_lossy().into_owned()),
+        kernel_read_sha256: Some(mvm_core::crypto::image_verify::sha256_file(&kernel).unwrap()),
+        ..Default::default()
+    };
+    let ledger = InMemoryNonceLedger::new();
+    let mut ordinary = pinning_params(&rootfs, &ledger);
+    ordinary.kernel_path = Some(&kernel);
+    ordinary.backend_kind = Some(mvm_core::vm_backend::BackendKind::Firecracker);
+    ordinary.bundle_pin = Some(BundlePin::boots(source.archive()));
+    ordinary.restrict_agent_verbs = false;
+    ordinary.runtime_config = Some(&config);
+    let error = admit_plan_for_boot(ordinary).expect_err("private bytes are not enrollment");
+    assert!(
+        format!("{error:#}").contains("trust store has no entry"),
+        "{error:#}"
+    );
+
+    let mut prod = pinning_params(&rootfs, &ledger);
+    prod.kernel_path = Some(&kernel);
+    prod.backend_kind = Some(mvm_core::vm_backend::BackendKind::Firecracker);
+    prod.bundle_pin = Some(BundlePin::transient(&source));
+    prod.restrict_agent_verbs = true;
+    prod.runtime_config = Some(&config);
+    let error = admit_plan_for_boot(prod).expect_err("transient proof is Dev-only");
+    assert!(
+        format!("{error:#}").contains("cannot authorize this admission"),
+        "{error:#}"
+    );
+
+    let original = std::fs::read(source.archive()).unwrap();
+    std::fs::write(source.archive(), b"tampered").unwrap();
+    assert!(source.reverify().is_err(), "private archive is rechecked");
+    std::fs::write(source.archive(), original).unwrap();
+    let mut params = pinning_params(&rootfs, &ledger);
+    params.kernel_path = Some(&kernel);
+    params.backend_kind = Some(mvm_core::vm_backend::BackendKind::Firecracker);
+    params.bundle_pin = Some(BundlePin::transient(&source));
+    params.restrict_agent_verbs = false;
+    params.runtime_config = Some(&config);
+
+    let admitted = admit_plan_for_boot(params).expect("private Dev boot admits");
+    assert_eq!(
+        admitted.admitted.plan().audit_labels["origin"],
+        "local-build"
+    );
+    assert!(
+        !mvm_core::plan::BundleRegistry::default_path()
+            .unwrap()
+            .root()
+            .exists()
+    );
+
+    let mut replay = pinning_params(&rootfs, &ledger);
+    replay.kernel_path = Some(&kernel);
+    replay.backend_kind = Some(mvm_core::vm_backend::BackendKind::Firecracker);
+    replay.bundle_pin = Some(BundlePin::transient(&source));
+    replay.restrict_agent_verbs = false;
+    replay.runtime_config = Some(&config);
+    let error = admit_plan_for_boot(replay).expect_err("transient permit cannot be replayed");
+    assert!(
+        format!("{error:#}").contains("already admitted"),
+        "{error:#}"
+    );
+}
+
+#[test]
 fn a_host_signed_local_build_is_refused_by_production_admission() {
     let home = tempfile::tempdir().expect("mvm home");
     let mut env = TestEnv::new();

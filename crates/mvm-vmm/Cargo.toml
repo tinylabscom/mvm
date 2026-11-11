@@ -71,6 +71,9 @@ workspace = true
 
 [features]
 default = []
+# PR-only runtime evidence changes the universal-initramfs activation gate,
+# never production authority.
+pr-test-guest-runtime = ["mvm-core/pr-test-guest-runtime"]
 # The test-support surface builds plan fixtures out of mvm-core, so it has to
 # turn that crate's feature on itself. Leaving it off only worked while every
 # consumer happened to enable mvm-core/test-support for its own reasons.

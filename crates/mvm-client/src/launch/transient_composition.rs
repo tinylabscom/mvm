@@ -252,9 +252,219 @@ impl TransientBoot<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use mvm_contract::plan::bundle::{
+        EmbeddedCliBootAssets, LocalComposition, LocalDevelopmentBaseProof,
+    };
+    use mvm_core::arch::GuestArch;
     use mvm_core::util::test_env::TestEnv;
+
+    pub(crate) fn signed_local_composition(home: &Path) -> (PathBuf, Vec<u8>) {
+        use mvm_core::plan::bundle::{
+            ArtifactRole, BundleArtifact, BundleManifest, VerityInfo, write_bundle,
+        };
+        let signer = mvm_hostd::audit::host_keypair::load_or_init().unwrap();
+        let arch = GuestArch::host().to_string();
+        let kernel = b"kernel bytes";
+        let tar = b"composition tar bytes";
+        let tar_path = home.join("base.tar.gz");
+        std::fs::write(&tar_path, tar).unwrap();
+        let tar_path = std::fs::canonicalize(tar_path).unwrap();
+        let mut linux = serde_json::to_value(
+            mvm_build::published_image_set::fixture::ImageSetFixture::complete().into_manifest(),
+        )
+        .unwrap();
+        linux["schema_version"] = 3.into();
+        linux["set_version"] = "0.0.0-local".into();
+        linux["producer"] = serde_json::json!({
+            "local_checkouts": {
+                "images": { "commit": "a".repeat(40), "worktree": { "state": "clean" } }
+            }
+        });
+        linux.as_object_mut().unwrap().remove("mvm_source_commit");
+        linux.as_object_mut().unwrap().remove("revocation_channel");
+        linux["compatibility"]
+            .as_object_mut()
+            .unwrap()
+            .remove("guest_agent_protocol");
+        linux["compatibility"]["builder_boot_abi"] = 2.into();
+        linux["compatibility"]["base_image_contract"] = 1.into();
+        linux["members"] = serde_json::json!([
+            {
+                "role": {"workload_kernel": "default_tenant"},
+                "target": {"arch": arch},
+                "boot_protocol": "linux_direct",
+                "artifacts": [{
+                    "name": "vmlinux",
+                    "format": {"kernel": if arch == "x86_64" { "elf" } else { "image" }},
+                    "sha256": mvm_core::plan::bundle::sha256_hex(kernel),
+                    "size": kernel.len()
+                }],
+                "required_capabilities": ["virtio_vsock"]
+            },
+            {
+                "role": {"workload_rootfs": "default_tenant"},
+                "target": {"arch": arch},
+                "artifacts": [
+                    {
+                        "name": "rootfs.ext4",
+                        "format": "ext4",
+                        "sha256": mvm_core::plan::bundle::sha256_hex(b"rootfs"),
+                        "size": 6
+                    },
+                    {
+                        "name": "rootfs.verity",
+                        "format": "verity_hash_tree",
+                        "sha256": mvm_core::plan::bundle::sha256_hex(b"verity"),
+                        "size": 6
+                    },
+                    {
+                        "name": "rootfs.roothash",
+                        "format": "verity_root_hash",
+                        "sha256": mvm_core::plan::bundle::sha256_hex("a".repeat(64).as_bytes()),
+                        "size": 64
+                    },
+                    {
+                        "name": "rootfs.tar.gz",
+                        "format": "tar_gz",
+                        "sha256": mvm_core::plan::bundle::sha256_hex(tar),
+                        "size": tar.len()
+                    }
+                ],
+                "required_capabilities": ["virtio_blk", "dm_verity"]
+            }
+        ]);
+        let linux = serde_json::to_vec(&linux).unwrap();
+        let lock = serde_json::to_vec(&serde_json::json!({
+            "schema": "mvm.composable-pack-lock/v1",
+            "spec_sha256": mvm_core::plan::bundle::sha256_hex(b"spec"),
+            "source_tree_sha256": mvm_core::plan::bundle::sha256_hex(b"source"),
+            "application_archive_sha256": mvm_core::plan::bundle::sha256_hex(b"app"),
+            "base_manifest_sha256": mvm_core::plan::bundle::sha256_hex(&linux),
+            "runtime_pins": [],
+            "target": if arch == "x86_64" { "x86_64-linux" } else { "aarch64-linux" },
+            "profile": "default_tenant",
+            "producer_revision": "a".repeat(40),
+            "producer_version": "0.27.0"
+        }))
+        .unwrap();
+        let boot = EmbeddedCliBootAssets {
+            manifest_artifact: "boot-image-set.json".into(),
+            version: "0.27.0".into(),
+            arch: arch.clone(),
+            archive_artifact: "guest-runtime.tar.gz".into(),
+            checksum_artifact: "guest-runtime.sha256".into(),
+            signature_bundle_artifact: "guest-runtime.bundle".into(),
+            checksum_signature_bundle_artifact: "guest-runtime.sha256.bundle".into(),
+            overlay_artifact: "runtime-overlay.ext4".into(),
+            overlay_verity_artifact: "runtime-overlay.verity".into(),
+            initramfs_artifact: "initrd".into(),
+            overlay_roothash: "a".repeat(64),
+            protocol_version: 2,
+            min_supported_protocol_version: 2,
+            pr_test_pull_request: None,
+        };
+        let items: Vec<(&str, ArtifactRole, Vec<u8>)> = vec![
+            ("vmlinux", ArtifactRole::Kernel, kernel.to_vec()),
+            ("rootfs.ext4", ArtifactRole::Rootfs, b"rootfs".to_vec()),
+            (
+                "rootfs.verity",
+                ArtifactRole::VerityHashSidecar,
+                b"verity".to_vec(),
+            ),
+            (
+                "rootfs.roothash",
+                ArtifactRole::Other,
+                "a".repeat(64).into_bytes(),
+            ),
+            ("boot-image-set.json", ArtifactRole::Other, linux),
+            ("composition-lock.json", ArtifactRole::Other, lock),
+            (
+                "guest-runtime.tar.gz",
+                ArtifactRole::Other,
+                b"runtime".to_vec(),
+            ),
+            (
+                "guest-runtime.sha256",
+                ArtifactRole::Other,
+                b"checksum".to_vec(),
+            ),
+            (
+                "guest-runtime.bundle",
+                ArtifactRole::Other,
+                b"signature".to_vec(),
+            ),
+            (
+                "guest-runtime.sha256.bundle",
+                ArtifactRole::Other,
+                b"signature".to_vec(),
+            ),
+            (
+                "runtime-overlay.ext4",
+                ArtifactRole::Other,
+                b"overlay".to_vec(),
+            ),
+            (
+                "runtime-overlay.verity",
+                ArtifactRole::Other,
+                b"verity".to_vec(),
+            ),
+            ("initrd", ArtifactRole::Initrd, b"initrd".to_vec()),
+        ];
+        let mut manifest = BundleManifest {
+            schema_version: 9,
+            publisher: "local".into(),
+            key_id: key_id_from_pubkey(&signer.verifying),
+            arch,
+            kernel_version: None,
+            profile: Some("dev".into()),
+            workload_label: None,
+            created_at: "2026-11-11T00:00:00Z".into(),
+            labels: Default::default(),
+            artifacts: items
+                .iter()
+                .map(|(name, role, bytes)| BundleArtifact {
+                    name: (*name).into(),
+                    role: role.clone(),
+                    path: format!("artifacts/{name}"),
+                    sha256: mvm_core::plan::bundle::sha256_hex(bytes),
+                    size_bytes: bytes.len() as u64,
+                })
+                .collect(),
+            members: vec![
+                BundleMember::EmbeddedCliBootAssets(boot),
+                BundleMember::LocalDevelopmentBaseProof(LocalDevelopmentBaseProof {
+                    manifest_artifact: "boot-image-set.json".into(),
+                    composition_tar_sha256: mvm_core::plan::bundle::sha256_hex(tar),
+                    composition_tar_size: tar.len() as u64,
+                    composition_tar_path: tar_path.to_str().unwrap().into(),
+                }),
+                BundleMember::LocalComposition(LocalComposition {
+                    lock_artifact: "composition-lock.json".into(),
+                    layers: Vec::new(),
+                }),
+            ],
+            verity: Some(VerityInfo {
+                roothash: "a".repeat(64),
+                sidecar_artifact: "rootfs.verity".into(),
+            }),
+            resources: None,
+        };
+        mvm_core::plan::bundle::mark_local_build(&mut manifest);
+        let bytes = write_bundle(
+            &manifest,
+            &signer.signing,
+            items
+                .into_iter()
+                .map(|(name, _, bytes)| (format!("artifacts/{name}"), bytes))
+                .collect(),
+        )
+        .unwrap();
+        let path = home.join("composition.mvmpkg");
+        std::fs::write(&path, &bytes).unwrap();
+        (path, bytes)
+    }
 
     #[test]
     fn unverified_source_never_creates_an_installed_bundle_entry() {
@@ -266,5 +476,75 @@ mod tests {
 
         assert!(TransientComposition::stage(&source).is_err());
         assert!(!BundleRegistry::default_path().unwrap().root().exists());
+    }
+
+    #[test]
+    fn admitted_transient_source_cannot_be_replayed_or_used_after_expiry() {
+        let directory = tempfile::tempdir().unwrap();
+        let manifest = mvm_core::plan::bundle::BundleManifest {
+            schema_version: 8,
+            publisher: "test".into(),
+            key_id: mvm_core::plan::KeyId("0".repeat(32)),
+            arch: mvm_core::arch::GuestArch::host().to_string(),
+            kernel_version: None,
+            profile: None,
+            workload_label: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            labels: Default::default(),
+            artifacts: Vec::new(),
+            members: Vec::new(),
+            verity: None,
+            resources: None,
+        };
+        let staged = TransientComposition {
+            installed: InstalledBundle {
+                sha256: "0".repeat(64),
+                root: directory.path().join("bundles"),
+                manifest,
+            },
+            archive: directory.path().join("unused"),
+            archive_sha256: "0".repeat(64),
+            host_key_id: mvm_core::plan::KeyId("0".repeat(32)),
+            created: Instant::now(),
+            process_id: std::process::id(),
+            consumed: true,
+            directory: Some(directory),
+        };
+        let boot = TransientBoot {
+            staged: &staged,
+            admitted: Cell::new(false),
+        };
+        boot.admit_once().unwrap();
+        assert!(boot.admit_once().is_err());
+
+        let expired = TransientComposition {
+            created: Instant::now() - Duration::from_secs(121),
+            ..staged
+        };
+        let boot = TransientBoot {
+            staged: &expired,
+            admitted: Cell::new(false),
+        };
+        assert!(boot.admit_once().is_err());
+    }
+
+    #[test]
+    fn signed_composition_stages_privately_and_rechecks_selected_bytes() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let (archive, _) = signed_local_composition(home.path());
+        let mut staged = TransientComposition::stage(&archive).unwrap();
+        assert!(!BundleRegistry::default_path().unwrap().root().exists());
+        {
+            let source = staged.consume().unwrap();
+            source.reverify().unwrap();
+            assert_eq!(std::fs::read(source.rootfs().unwrap()).unwrap(), b"rootfs");
+            assert!(
+                crate::launch::manifest_ref::resolve_manifest_arg(source.sha256()).is_err(),
+                "private composition has no reusable installed-bundle address"
+            );
+        }
+        assert!(staged.consume().is_err());
     }
 }

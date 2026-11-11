@@ -58,9 +58,14 @@ pub fn booted_with_universal_initramfs(config: &mvm_core::vm_backend::VmStartCon
     let Some(initrd) = &config.initrd_path else {
         return false;
     };
+    #[cfg(feature = "pr-test-guest-runtime")]
+    let pr_test_runtime = config.pr_test_runtime_proof.is_some();
+    #[cfg(not(feature = "pr-test-guest-runtime"))]
+    let pr_test_runtime = false;
     if config.bundle_boot_assets.is_some()
         || config.legacy_portable_runtime.is_some()
         || config.runtime_release_proof.is_some()
+        || pr_test_runtime
         || config.unsigned_runtime_development
     {
         return true;
@@ -212,6 +217,33 @@ mod tests {
             ..config
         };
         assert!(!booted_with_universal_initramfs(&without_initramfs));
+    }
+
+    #[cfg(feature = "pr-test-guest-runtime")]
+    #[test]
+    fn a_pr_test_generation_outside_the_cache_must_activate_before_readiness() {
+        let proof = mvm_core::protocol::runtime_release::RuntimeReleaseProof {
+            archive: "/pr/archive".into(),
+            checksum: "/pr/checksum".into(),
+            signature_bundle: "/pr/signature".into(),
+            archive_sha256: "a".repeat(64),
+            version: "0.28.0-rc.1".into(),
+            arch: mvm_core::arch::GuestArch::host(),
+        };
+        let mut config = mvm_core::vm_backend::VmStartConfig {
+            initrd_path: Some("/private/pr-runtime/initramfs.cpio.gz".into()),
+            pr_test_runtime_proof: Some(mvm_core::protocol::runtime_release::PrTestRuntimeProof {
+                input: proof,
+                pull_request: 5326,
+            }),
+            ..Default::default()
+        };
+        assert!(booted_with_universal_initramfs(&config));
+        config.initrd_path = None;
+        assert!(!booted_with_universal_initramfs(&config));
+        config.initrd_path = Some("/private/pr-runtime/initramfs.cpio.gz".into());
+        config.pr_test_runtime_proof = None;
+        assert!(!booted_with_universal_initramfs(&config));
     }
 
     #[test]

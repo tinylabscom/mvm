@@ -695,6 +695,11 @@ fn run_entrypoint_call_recording(
     let streams_stdin = stdin.is_streaming();
     vm.admission = vm.admission.with_stream_stdin(streams_stdin);
     let slot = vm.slot;
+    let private = vm.transient.is_some();
+    anyhow::ensure!(
+        !private || matches!(lifecycle, CallLifecycle::Transient),
+        "transient composition cannot become a kept-alive session"
+    );
     let backend_name = vm.admission.backend_name().to_string();
     let named = vm.vm_name.resolve();
     observer.vm_named(&named);
@@ -717,7 +722,11 @@ fn run_entrypoint_call_recording(
         CallLifecycle::Transient => SessionMode::Prod,
         CallLifecycle::KeepAlive { mode } => mode,
     };
-    let session_id = register_call_session(&vm_name, slot, mode);
+    let session_id = if private {
+        None
+    } else {
+        register_call_session(&vm_name, slot, mode)
+    };
     // Agent-wait teardown is best-effort and does not return its stop result.
     // On failure retain the session record: removing it would hide a VM whose
     // stop is unconfirmed. This path emits no stop-acknowledgement observation.
