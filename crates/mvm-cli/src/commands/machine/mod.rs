@@ -410,7 +410,7 @@ impl MachineRunArgs {
     }
 
     /// `-t`/`--tty` or its `-i` alias requests an interactive PTY shell.
-    fn interactive(&self) -> bool {
+    pub(in crate::commands) fn interactive(&self) -> bool {
         self.tty || self.interactive
     }
 
@@ -419,7 +419,7 @@ impl MachineRunArgs {
     /// makes the machine survive the command. `--tty`/`--name` are deliberately
     /// not consulted — persistence, interactivity, and identity are independent
     /// axes.
-    fn persistent(&self) -> bool {
+    pub(in crate::commands) fn persistent(&self) -> bool {
         self.detach
             || self.up_json
             || self.ttl.is_some()

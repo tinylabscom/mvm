@@ -482,6 +482,10 @@ impl ColdHvfChannel {
         );
         custody
             .preparation
+            ._lifecycle
+            .release_installed_bundle_after_stop(&custody.preparation.launch.config().name)?;
+        custody
+            .preparation
             .streamer
             .stop(&custody.preparation.launch.config().name);
         let proof = custody.native_exit.take();

@@ -68,11 +68,6 @@ const DOWNLOAD_PATTERN: &str = "firecracker-microvm/firecracker/releases/downloa
 /// Files that may name an upstream Firecracker download, and why.
 const ALLOWED_DOWNLOADS: &[(&str, &str)] = &[
     (
-        "crates/mvm-backends/src/fc/host.rs",
-        "bootstrap installs Firecracker from the upstream tarball; this entry goes when it \
-         installs the locked, digest-checked artifact instead",
-    ),
-    (
         REMOTE_RUNNER,
         "the remote runner checks its tarball against a digest this gate compares to the lock",
     ),

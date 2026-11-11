@@ -91,11 +91,7 @@ pub fn download_pack(
     })
 }
 
-/// Acquire one explicitly pinned runtime layer as private build input only.
-///
-/// This path does not install a boot image, update the user's pack lock, or
-/// treat signed policy requests as host grants. The caller must resolve and
-/// verify the entire layer dependency graph before composing a workload.
+/// Acquire an already resolved, exact-version-and-manifest-digest runtime.
 ///
 /// # Errors
 ///
@@ -461,13 +457,16 @@ fn acquire_application(
         mvm_core::config::pack_lockfile_path(),
         registry.root(),
     );
-    install_application_bundle(
+    let installed = install_application_bundle(
         &candidate,
         &store,
         &mvm_core::config::registry_pack_publisher_policy_path(),
         &trust,
-    )
-    .map_err(Into::into)
+    )?;
+    registry
+        .evict_extracted_if_unused(&installed.bundle().sha256)
+        .context("retaining only the installed application archive")?;
+    Ok(installed)
 }
 
 fn register_dependency(

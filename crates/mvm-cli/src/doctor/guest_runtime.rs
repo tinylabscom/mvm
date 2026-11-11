@@ -127,7 +127,7 @@ fn guest_runtime_line(
     let acquisition = match (mode, current) {
         (_, CurrentArchive::Release { .. }) => "assembled from the release guest runtime",
         (RuntimeOverlayAcquireMode::DownloadPublishedArtifact, CurrentArchive::NoSourceTree) => {
-            "not adopted yet; `mvmctl bootstrap` assembles them from the release guest runtime"
+            "not adopted yet; the first launch or `mvmctl bootstrap` assembles them from the release guest runtime"
         }
         _ => "assembled from the source guest runtime",
     };
@@ -322,8 +322,8 @@ mod tests {
         assert!(c.ok, "{}", c.info);
         assert!(
             c.info.starts_with(
-                "no source or release archive — not adopted yet; `mvmctl bootstrap` assembles \
-                 them from the release guest runtime — "
+                "no source or release archive — not adopted yet; the first launch or \
+                 `mvmctl bootstrap` assembles them from the release guest runtime — "
             ),
             "{}",
             c.info

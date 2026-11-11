@@ -225,6 +225,16 @@ impl PreparedPortableBootAssets {
         &self.initrd
     }
 
+    /// Authenticated workload kernel selected for this portable closure.
+    pub fn kernel_path(&self) -> &Path {
+        &self.kernel
+    }
+
+    /// Original signed Linux root selected for the portable boot closure.
+    pub fn image_set_manifest_sha256(&self) -> &mvm_core::packs::Sha256Hex {
+        self.publisher.root().root().manifest_sha256()
+    }
+
     /// Private producer input directories, for retention diagnostics only.
     /// Their existence is not launch, health, or cleanup evidence.
     pub fn retention_paths(&self) -> [&Path; 2] {
