@@ -18,6 +18,13 @@ PRODUCER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PRODUCER)
 
 
+def elf(machine):
+    header = bytearray(64)
+    header[:6] = b"\x7fELF\x02\x01"
+    header[18:20] = machine.to_bytes(2, "little")
+    return bytes(header)
+
+
 @unittest.skipUnless(shutil.which("zstd"), "zstd required for the pinned upstream source")
 class PythonRuntimeLayerTests(unittest.TestCase):
     def setUp(self):
@@ -27,7 +34,7 @@ class PythonRuntimeLayerTests(unittest.TestCase):
         self.source = self.root / "source.tar.zst"
         self.members = [
             ("python/install/lib/python3.13/importlib/__init__.py", b"# importlib\n", 0o644),
-            ("python/install/bin/python3.13", b"\x7fELFtest", 0o755),
+            ("python/install/bin/python3.13", elf(62), 0o755),
             ("python/install/lib/python3.13/encodings/__init__.py", b"# encodings\n", 0o644),
             ("python/install/lib/python3.13/test/irrelevant.py", b"skip", 0o644),
         ]
@@ -70,19 +77,32 @@ class PythonRuntimeLayerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "already exists"):
             PRODUCER.build(self.source, first, expected)
 
+    def test_arm64_layer_and_cross_architecture_payload_refusal(self):
+        self.members[1] = ("python/install/bin/python3.13", elf(183), 0o755)
+        expected = self.write_source()
+        output = self.root / "arm.tar"
+        digest, size = PRODUCER.build(self.source, output, expected, arch="aarch64")
+        self.assertEqual(hashlib.sha256(output.read_bytes()).hexdigest(), digest)
+        self.assertGreater(size, 0)
+
+        other = self.root / "wrong.tar"
+        with self.assertRaisesRegex(ValueError, "architecture"):
+            PRODUCER.build(self.source, other, expected, arch="x86_64")
+        self.assertFalse(other.exists())
+
     def test_wrong_source_digest_and_unsafe_selected_entry_never_publish(self):
         output = self.root / "layer.tar"
         with self.assertRaisesRegex(ValueError, "pinned digest"):
             PRODUCER.build(self.source, output, "0" * 64)
         self.assertFalse(output.exists())
 
-        self.members[1] = ("python/install/bin/python3.13", b"\x7fELFtest", 0o4755)
+        self.members[1] = ("python/install/bin/python3.13", elf(62), 0o4755)
         expected = self.write_source()
         with self.assertRaisesRegex(ValueError, "unsafe"):
             PRODUCER.build(self.source, output, expected)
         self.assertFalse(output.exists())
 
-        self.members[1] = ("python/install/bin/python3.13", b"\x7fELFtest", 0o755)
+        self.members[1] = ("python/install/bin/python3.13", elf(62), 0o755)
         self.members.append(self.members[1])
         expected = self.write_source()
         with self.assertRaisesRegex(ValueError, "duplicate"):

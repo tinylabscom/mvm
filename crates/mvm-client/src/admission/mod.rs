@@ -689,7 +689,10 @@ fn admit(
         );
     }
     let input = SynthesisInput {
-        mailbox: p.mailbox,
+        mailbox: p
+            .mailbox
+            .map(|grant| mailbox_grant::at_workload_epoch(grant, p.vm_name))
+            .transpose()?,
         outputs: p.outputs.clone(),
         // The resolved permission set rides into the plan body, so the ceiling
         // check below measures what the user actually asked for and the

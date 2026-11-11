@@ -17,10 +17,11 @@
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -160,7 +161,7 @@ pub fn serve_granted_guest(
     sealer: GuestSealer,
     limits: MailboxLimits,
     socket: &Path,
-    guest: (&Path, &Path),
+    guest: &mvm_core::vm_backend::HostDialRoute,
 ) -> std::io::Result<Option<MailboxService>> {
     let Some(grant) = grant else {
         return Ok(None);
@@ -177,12 +178,26 @@ pub fn serve_grant(
     sealer: GuestSealer,
     limits: MailboxLimits,
     socket: &Path,
-    guest: (&Path, &Path),
+    guest: &mvm_core::vm_backend::HostDialRoute,
 ) -> std::io::Result<MailboxService> {
-    let mut sealer = sealer.with_grant(grant)?;
-    let service = MailboxService::bind(socket, limits, trust.with_grant(grant)?)?;
-    service.serve_guest(guest.0, guest.1, &mut sealer)?;
+    let (service, mut sealer) = bind_grant(grant, trust, sealer, limits, socket)?;
+    service.serve_guest(guest, &mut sealer)?;
     Ok(service)
+}
+
+/// Bind the service for `grant` without dialing the guest, and hand back the
+/// grant-bound sealer to serve it with, so a caller can serve the same queue
+/// and replay state over many connections.
+pub fn bind_grant(
+    grant: &MailboxGrant,
+    trust: MailboxPolicy,
+    sealer: GuestSealer,
+    limits: MailboxLimits,
+    socket: &Path,
+) -> std::io::Result<(MailboxService, GuestSealer)> {
+    let sealer = sealer.with_grant(grant)?;
+    let service = MailboxService::bind(socket, limits, trust.with_grant(grant)?)?;
+    Ok((service, sealer))
 }
 
 struct State {
@@ -253,13 +268,26 @@ pub fn recv(path: &Path) -> std::io::Result<Received> {
         .map_err(|r| io_err(format!("mailbox refused the request: {r:?}")))
 }
 
-/// How often the accept loop looks for a connection and for the stop flag.
-const ACCEPT_POLL: Duration = Duration::from_millis(20);
+/// Block until `listener` or `wake` is readable. Returns whether `listener` is.
+fn wait_readable(listener: &UnixListener, wake: &UnixStream) -> bool {
+    let mut fds = [listener.as_raw_fd(), wake.as_raw_fd()].map(|fd| libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    });
+    // SAFETY: `fds` is a live array of two descriptors the caller owns for the call.
+    let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+    ready > 0 && fds[0].revents & libc::POLLIN != 0
+}
 
 pub struct MailboxService {
     shared: Arc<Shared>,
     path: PathBuf,
     stop: Arc<AtomicBool>,
+    wake: UnixStream,
+    /// Accept-loop wakeups; only the idle-cost test reads it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    wakeups: Arc<AtomicU64>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -273,9 +301,11 @@ impl MailboxService {
         let _ = std::fs::remove_file(path);
         let listener = UnixListener::bind(path)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-        // Polled rather than blocked on, so stopping never depends on the
-        // socket path still existing.
+        // Non-blocking so a connection that vanishes between poll and accept
+        // cannot park the worker past a stop.
         listener.set_nonblocking(true)?;
+        let (wake, wake_read) = UnixStream::pair()?;
+        let wakeups = Arc::new(AtomicU64::new(0));
         let shared = Arc::new(Shared {
             limits,
             state: Mutex::new(State {
@@ -288,16 +318,17 @@ impl MailboxService {
         });
         let stop = Arc::new(AtomicBool::new(false));
         let worker = {
-            let (shared, stop) = (shared.clone(), stop.clone());
+            let (shared, stop, wakeups) = (shared.clone(), stop.clone(), wakeups.clone());
             std::thread::spawn(move || {
+                // Blocks on the listener and the wake end, so an idle service
+                // costs no wakeups and a stop never depends on the socket path.
                 while !stop.load(Ordering::SeqCst) {
-                    match listener.accept() {
-                        Ok((stream, _)) => {
-                            // A listener's non-blocking mode is inherited on some hosts.
-                            let _ = stream.set_nonblocking(false);
-                            serve_peer(&shared, stream);
-                        }
-                        Err(_) => std::thread::sleep(ACCEPT_POLL),
+                    let connection = wait_readable(&listener, &wake_read);
+                    wakeups.fetch_add(1, Ordering::Relaxed);
+                    if let (true, Ok((stream, _))) = (connection, listener.accept()) {
+                        // A listener's non-blocking mode is inherited on some hosts.
+                        let _ = stream.set_nonblocking(false);
+                        serve_peer(&shared, stream);
                     }
                 }
             })
@@ -306,11 +337,17 @@ impl MailboxService {
             shared,
             path: path.to_owned(),
             stop,
+            wake,
+            wakeups,
             worker: Some(worker),
         })
     }
 
-    /// The execution epoch this node currently accepts.
+    /// The execution epoch this node currently accepts, for a service that
+    /// outlives a workload replacement (the scripted three-node demo). The
+    /// per-VM mailbox process never calls it: it takes its epoch from its
+    /// grant, and a replacement is a new process under a grant whose epoch
+    /// and keys are both new.
     pub fn set_current_epoch(&self, epoch: ExecutionEpoch) {
         self.shared
             .state
@@ -322,7 +359,7 @@ impl MailboxService {
     }
 
     /// Serve one connection the host dialed to the guest's mailbox port
-    /// (per-port socket, or the Firecracker mux), the way the telemetry
+    /// (the backend's `HostDialRoute`), the way the telemetry
     /// collector attaches. The guest sends plaintext; `sealer` seals it, then
     /// admission and the queue are the service's own, so a guest that floods
     /// this port fills only this queue.
@@ -333,13 +370,11 @@ impl MailboxService {
     /// first dial. A frame the queue refuses is still a served connection.
     pub fn serve_guest(
         &self,
-        per_port: &Path,
-        firecracker_mux: &Path,
+        route: &mvm_core::vm_backend::HostDialRoute,
         sealer: &mut GuestSealer,
     ) -> std::io::Result<()> {
-        let stream = crate::telemetry_collector::dial_guest_port(
-            per_port,
-            firecracker_mux,
+        let stream = crate::telemetry_collector::dial_route(
+            route,
             mvm_contract::protocol::mailbox::MAILBOX_PORT,
         )?;
         serve(&self.shared, stream, |body| {
@@ -358,6 +393,7 @@ impl MailboxService {
 impl Drop for MailboxService {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        let _ = (&self.wake).write_all(&[0]);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -493,4 +529,143 @@ fn admit(
     state.queue.push_back(plaintext);
     state.accepted += 1;
     Ok(())
+}
+
+#[cfg(test)]
+mod accept_loop_tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn service(dir: &Path) -> MailboxService {
+        crate::audit::host_keypair::load_or_init_at(dir).unwrap();
+        let mailbox = mvm_contract::protocol::mailbox::MailboxId::from_bytes([5; 32]);
+        let grant = MailboxGrant {
+            mailbox,
+            authority_key: crate::mailbox_launch::authority_key_for(
+                dir,
+                &mailbox,
+                ExecutionEpoch::new(1).unwrap(),
+            )
+            .unwrap()
+            .to_bytes(),
+            epoch: ExecutionEpoch::new(1).unwrap(),
+        };
+        let (trust, _) = crate::mailbox_launch::host_trust(dir, &grant).unwrap();
+        let limits = MailboxLimits {
+            max_depth: 4,
+            max_frame_bytes: 1024,
+        };
+        MailboxService::bind(&dir.join("m.sock"), limits, trust).unwrap()
+    }
+
+    #[test]
+    fn an_idle_service_blocks_instead_of_polling() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = service(dir.path());
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(service.wakeups.load(Ordering::Relaxed) <= 2);
+    }
+
+    #[test]
+    fn stopping_is_prompt_with_the_socket_path_already_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = service(dir.path());
+        std::fs::remove_file(dir.path().join("m.sock")).unwrap();
+        let start = Instant::now();
+        drop(service);
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_burst_of_sequential_requests_is_served() {
+        let dir = tempfile::tempdir().unwrap();
+        let _service = service(dir.path());
+        for _ in 0..50 {
+            let got = recv(&dir.path().join("m.sock")).unwrap();
+            assert!(got.message.is_none());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mailbox_launch::{LAUNCH_LIMITS, authority_key_for, derive_launch_keys};
+    use mvm_contract::protocol::mailbox::MailboxId;
+
+    const MAILBOX: [u8; 32] = [4; 32];
+
+    fn grant_at(keys: &Path, epoch: u64) -> MailboxGrant {
+        let mailbox = MailboxId::from_bytes(MAILBOX);
+        let epoch = ExecutionEpoch::new(epoch).unwrap();
+        MailboxGrant {
+            mailbox,
+            authority_key: authority_key_for(keys, &mailbox, epoch).unwrap().to_bytes(),
+            epoch,
+        }
+    }
+
+    fn greeting() -> OutboxMessage {
+        OutboxMessage {
+            recipient: PrincipalId::from_bytes(OWN_MAILBOX_RECIPIENT),
+            body: b"epoch one secret".to_vec(),
+        }
+    }
+
+    /// What the real launch path builds for one epoch: the service and the
+    /// sealer, both from the host key directory through the grant.
+    fn launch(keys: &Path, socket: &Path, epoch: u64) -> (MailboxService, GuestSealer) {
+        let grant = grant_at(keys, epoch);
+        let (policy, sealer) = derive_launch_keys(keys, &grant).unwrap().trust();
+        bind_grant(&grant, policy, sealer, LAUNCH_LIMITS, socket).unwrap()
+    }
+
+    #[test]
+    fn an_old_epoch_envelope_is_refused_by_the_replacement_and_a_fresh_one_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
+
+        // The replaced workload's mailbox, at epoch 1, seals a message.
+        let (old_service, mut old_sealer) = launch(dir.path(), &dir.path().join("old.sock"), 1);
+        let (capability, envelope) = old_sealer.seal(greeting()).unwrap();
+        send(&dir.path().join("old.sock"), &capability, &envelope).expect("the old epoch opens it");
+        assert_eq!(
+            old_service.receive().as_deref(),
+            Some(&b"epoch one secret"[..])
+        );
+        drop(old_service);
+
+        // The replacement runs under epoch 2: it cannot open the captured
+        // envelope, and nothing is queued for it.
+        let socket = dir.path().join("new.sock");
+        let (new_service, mut new_sealer) = launch(dir.path(), &socket, 2);
+        assert!(send(&socket, &capability, &envelope).is_err());
+        assert!(new_service.receive().is_none());
+
+        // Its own message, sealed under its own epoch, is accepted.
+        let (capability, envelope) = new_sealer.seal(greeting()).unwrap();
+        send(&socket, &capability, &envelope).expect("the replacement's own epoch opens");
+        assert!(new_service.receive().is_some());
+    }
+
+    #[test]
+    fn the_same_keys_at_a_newer_epoch_are_refused_as_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
+        let (_service, mut sealer) = launch(dir.path(), &dir.path().join("a.sock"), 1);
+        let (capability, envelope) = sealer.seal(greeting()).unwrap();
+
+        let socket = dir.path().join("b.sock");
+        let (policy, _) = derive_launch_keys(dir.path(), &grant_at(dir.path(), 1))
+            .unwrap()
+            .trust();
+        let service = MailboxService::bind(&socket, LAUNCH_LIMITS, policy).unwrap();
+        service.set_current_epoch(ExecutionEpoch::new(2).unwrap());
+        assert_eq!(
+            send(&socket, &capability, &envelope),
+            Err(Refusal::Mailbox(
+                mvm_core::mailbox::MailboxError::StaleExecutionEpoch.to_string()
+            ))
+        );
+    }
 }

@@ -256,15 +256,19 @@ and entry budget. A digest-bound application archive can be added under
 `/srv/app` and emitted as an ext4+verity candidate. Its resolved input record
 is not a cache install or a runnable bundle: source custody, symlink closure,
 policy, release proof and health boot still require final checks.
-The workload bundle needs a versioned, signed composition member that
-binds runtime manifest pins for transitive revocation checks; old bundle
-schemas remain unchanged. Coordinate its schema floor with the separate
-universal-pack work in `mvm-packs` ADR 004 (builder version, policy and
-keyless provenance members), rather than independently claiming the next
-number. Carry one typed composition member, not reuse the v7 `other` role
-as an implicit grant. Its Ed25519-signed manifest binds the authored
-spec/source/producer lock, selected signed Linux root, ordered runtime manifest pins, policy
-digests, output artifact hashes and health-tested entrypoint. Embed each
+The proposed bundle schema 8 is reserved for one signed composable-application
+member that binds runtime manifest pins for transitive revocation checks.
+Coordinate this floor with `mvm-packs` ADR 004 before landing the public
+format; its later policy-only kind, builder-version and in-file keyless
+signature/provenance changes have no assigned floors yet. New composable
+exports use schema 8 only: no legacy-output option, version downgrade or
+fallback that drops composition evidence. Existing Nix/v1 builds and older
+bundle readers remain unchanged; removing them is a separate migration, not
+a prerequisite for this format. Carry one typed composition member, not
+reuse the v7 `other` role as an implicit grant. Its Ed25519-signed manifest
+binds the authored spec/source/producer lock, selected signed Linux root,
+ordered runtime manifest pins, policy digests, output artifact hashes and
+health-tested entrypoint. Embed each
 runtime's original keyless-signed descriptor, signature bundle and declared
 policy document as small digest-bound bundle artifacts; a clean offline
 recipient must verify both publisher and bundle trust roots and check
@@ -277,6 +281,19 @@ contract, not a completed exporter or consumer.
 The CLI must not interpret any new source, mode or layer field as optional
 and silently fall back to Nix. A local production-mode build is not an
 official published release merely because it is sealed and host-signed.
+Both local and official schema-8 packages use the same verifier and archive
+format. Every schema-8 install or run requires a trusted bundle signing key:
+local keys require explicit operator enrollment, even on their build host;
+an official key must be enrolled or part of authenticated built-in trust.
+A direct non-packaged development build need not install a package.
+Official release admission additionally authenticates the publisher identity
+and exact distribution pin. Local admission remains operator-approved; it
+never claims release verification just because the host signed or enrolled
+a key. The current local-build development auto-trust and production refusal cannot
+authorize schema-8 packages without a distinct admission rule. Keep current
+signed revocation evidence independent of the archive's self-contained boot
+bytes; missing or stale trust state refuses offline admission. Reuse one
+composition and verifier path rather than adding a legacy compatibility layer.
 
 The format owner is `mvm`, coordinated with the `mvm-packs` publisher owner.
 The registry producer and consumer must learn the new layer kind together
@@ -285,22 +302,31 @@ application or policy-only manifests to imitate it.
 
 ## Spike and decision rule
 
-The first **unsigned** x86_64 Python source experiment is
+The **unsigned** per-architecture Python source experiment is
 [`scripts/build-python-runtime-layer.py`](../../scripts/build-python-runtime-layer.py).
-It accepts only the SHA-256-pinned `cpython-3.13.18+20261026`
-`x86_64-unknown-linux-musl-lto+static-full.tar.zst` from the Astral
-python-build-standalone release (`e0bb0840e127aa95dbb1212202a29cde715711ae6826132e548f5eb04a958533`).
+It accepts only the architecture-selected, SHA-256-pinned
+`cpython-3.13.18+20261026` musl static-full tar from the Astral
+python-build-standalone release: x86_64 source
+`e0bb0840e127aa95dbb1212202a29cde715711ae6826132e548f5eb04a958533`
+or aarch64 source
+`9968a4b1fc3db172ba3b3ab36235fa76fab91c3ec83204f269adca756c87261d`.
 It repacks the static interpreter and runtime-only standard library as a
 deterministic plain `layer.tar`; it does not run untrusted install scripts,
-sign, publish, or grant policy. The interpreter has no ELF `PT_INTERP` loader.
-Independent macOS and Linux runs produced SHA-256
+sign, publish, or grant policy. The selected ELF machine must match the
+target. The x86_64 interpreter has no ELF `PT_INTERP` loader.
+Independent macOS and Linux x86_64 runs produced SHA-256
 `9f5dfaf983a54a62212184f08f5dfc36d1474052d71a799cdfd3f1a53dc970d4`
-and 63,836,160 bytes; the signing smoke pins these output bytes.
+and 63,836,160 bytes. Two local macOS aarch64 runs produced SHA-256
+`2c65e1c400098a3a8141a58f2f2f66a3df667d5f947d86d982f3d115b023b0f2`
+and 64,798,720 bytes; independent Linux reproduction and native boot remain
+unwitnessed. The signing smoke pins both architecture outputs.
 The upstream GitHub asset digest establishes *byte identity*, not an
 independent publisher-signature or reproduction claim. A production publisher
-must accept that upstream trust choice explicitly, sign a new
-`runtime/python@1.1.0` descriptor binding the actual output SHA-256 and size,
-and pass the consumer and exact-archive boot gates. The historical revoked
+must accept that upstream trust choice explicitly, sign a distinct immutable
+descriptor per architecture binding its actual output SHA-256 and size,
+and pass the consumer and exact-archive boot gates. The current schema binds
+one architecture per version; do not publish both under the same coordinate
+without a new, reviewed multi-architecture index contract. The historical revoked
 policy-only `runtime/python@1.0.0` is not reusable.
 
 Keep the Nix producer working unchanged. Resolve one authenticated Python

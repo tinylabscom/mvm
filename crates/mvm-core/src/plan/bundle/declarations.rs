@@ -101,6 +101,12 @@ pub(super) fn validate_declarations(manifest: &BundleManifest) -> Result<(), Bun
     }) {
         validate_canonical_linux_proof(proof, manifest)?;
     }
+    if let Some(composition) = manifest.members.iter().find_map(|member| match member {
+        BundleMember::LocalComposition(composition) => Some(composition),
+        _ => None,
+    }) {
+        validate_local_composition(composition, manifest)?;
+    }
     if manifest
         .members
         .iter()
@@ -146,11 +152,74 @@ fn declaration_class(member: &BundleMember) -> Option<&'static str> {
         BundleMember::EmbeddedBootAssets { .. } => Some("embedded_boot_assets"),
         BundleMember::EmbeddedCliBootAssets(_) => Some("embedded_cli_boot_assets"),
         BundleMember::CanonicalLinuxProof(_) => Some("canonical_linux_proof"),
+        BundleMember::LocalComposition(_) => Some("local_composition"),
         BundleMember::KernelCmdline { .. } => Some("kernel_cmdline"),
         BundleMember::SecurityPosture(_) => Some("security_posture"),
         BundleMember::BuildProvenance(_) => Some("build_provenance"),
         BundleMember::Environment(_) => Some("environment"),
     }
+}
+
+#[cfg(feature = "host-state")]
+fn validate_local_composition(
+    composition: &mvm_contract::plan::bundle::LocalComposition,
+    manifest: &BundleManifest,
+) -> Result<(), BundleVerifyError> {
+    let refused = |reason: &str| BundleVerifyError::ManifestParse(reason.into());
+    let proof = manifest.members.iter().find_map(|member| match member {
+        BundleMember::CanonicalLinuxProof(proof) => Some(proof),
+        _ => None,
+    });
+    if manifest
+        .labels
+        .get(super::BUNDLE_ORIGIN_LABEL)
+        .map(String::as_str)
+        != Some(super::LOCAL_BUILD_ORIGIN)
+        || manifest.verity.is_none()
+        || composition.layers.len() > 64
+    {
+        return Err(refused(
+            "local composition requires a verity-sealed local build with canonical Linux proof",
+        ));
+    }
+    let proof = proof.ok_or_else(|| refused("local composition requires canonical Linux proof"))?;
+    let mut names = std::collections::BTreeSet::new();
+    let layer_names = composition.layers.iter().flat_map(|layer| {
+        [
+            &layer.manifest_artifact,
+            &layer.signature_artifact,
+            &layer.group_artifact,
+        ]
+    });
+    for name in std::iter::once(&composition.lock_artifact).chain(layer_names) {
+        if !names.insert(name) {
+            return Err(refused("duplicate local composition evidence artifact"));
+        }
+        if [
+            &proof.manifest_artifact,
+            &proof.signature_bundle_artifact,
+            &proof.revocation_document_artifact,
+            &proof.revocation_signature_bundle_artifact,
+        ]
+        .contains(&name)
+        {
+            return Err(refused(
+                "composition evidence aliases a canonical Linux proof",
+            ));
+        }
+        let artifact = manifest
+            .find_by_name(name)
+            .ok_or_else(|| refused("local composition evidence artifact missing"))?;
+        if artifact.role != ArtifactRole::Other
+            || artifact.size_bytes == 0
+            || artifact.size_bytes > 1024 * 1024
+        {
+            return Err(refused(
+                "local composition evidence has invalid role or size",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "host-state")]
@@ -701,6 +770,46 @@ mod tests {
             mixed.members.push(member);
             assert!(validate_declarations(&mixed).is_err());
         }
+
+        let mut composed = with_verity(valid.clone());
+        composed.labels.insert(
+            super::super::BUNDLE_ORIGIN_LABEL.into(),
+            super::super::LOCAL_BUILD_ORIGIN.into(),
+        );
+        composed.artifacts.push(artifact(
+            "composition-lock.json",
+            ArtifactRole::Other,
+            &"a".repeat(64),
+            1,
+        ));
+        composed.members.push(BundleMember::LocalComposition(
+            mvm_contract::plan::bundle::LocalComposition {
+                lock_artifact: "composition-lock.json".into(),
+                layers: Vec::new(),
+            },
+        ));
+        validate_declarations(&composed).unwrap();
+        let mut bad = composed.clone();
+        bad.schema_version = 7;
+        assert!(validate_declarations(&bad).is_err());
+        bad = composed.clone();
+        bad.labels.clear();
+        assert!(validate_declarations(&bad).is_err());
+        bad = composed.clone();
+        bad.verity = None;
+        assert!(validate_declarations(&bad).is_err());
+        bad = composed.clone();
+        bad.artifacts.pop();
+        assert!(validate_declarations(&bad).is_err());
+        bad = composed.clone();
+        let BundleMember::LocalComposition(local) = bad.members.last_mut().unwrap() else {
+            unreachable!()
+        };
+        local.lock_artifact = "linux.json".into();
+        assert!(validate_declarations(&bad).is_err());
+        bad = composed.clone();
+        bad.members.push(composed.members.last().unwrap().clone());
+        assert!(validate_declarations(&bad).is_err());
     }
 
     fn with_verity(mut manifest: BundleManifest) -> BundleManifest {

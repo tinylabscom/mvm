@@ -281,8 +281,10 @@ pub fn resolve_for_host() -> Result<ResolvedFirecracker, ResolveError> {
     let override_bin = std::env::var_os(OVERRIDE_ENV)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
+    let mut locations = shipped_locations(&executable);
+    locations.push(super::fetch::cache_dir());
     resolve_with(
-        &shipped_locations(&executable),
+        &locations,
         firecracker_lock().pin(GuestArch::host()),
         override_bin.as_deref(),
         super::daemon::effective_user_id(),

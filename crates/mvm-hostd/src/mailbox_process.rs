@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use mvm_contract::protocol::mailbox::{MAILBOX_PORT, MailboxGrant};
 use mvm_core::plan::ExecutionPlan;
-use mvm_core::vm_backend::{VmId, VmStartConfig};
+use mvm_core::vm_backend::{HostDialRoute, VmId, VmStartConfig};
 use mvm_runtime::backend::AnyBackend;
 use mvm_vmm::host::aux_bin::AuxBin;
 
@@ -52,8 +52,8 @@ pub struct MailboxProcessConfig {
     pub grant: MailboxGrant,
     pub keys: DerivedMailboxKeys,
     pub socket: PathBuf,
-    pub guest_port: PathBuf,
-    pub firecracker_mux: PathBuf,
+    /// How the backend says the guest's mailbox port is dialed.
+    pub route: HostDialRoute,
     /// The VM whose lifetime bounds this process.
     pub vm_state_dir: PathBuf,
 }
@@ -71,20 +71,10 @@ pub fn serve(config: MailboxProcessConfig) -> i32 {
         grant,
         keys,
         socket,
-        guest_port,
-        firecracker_mux,
+        route,
         vm_state_dir,
     } = config;
-    let _serving = serve_derived(
-        grant,
-        keys,
-        ServePaths {
-            socket,
-            guest_port,
-            firecracker_mux,
-        },
-        LAUNCH_LIMITS,
-    );
+    let _serving = serve_derived(grant, keys, ServePaths { socket, route }, LAUNCH_LIMITS);
     while vm_state_dir.exists()
         && endpoint_needed(launcher_is_alive(launcher), vm_is_alive(&vm_state_dir))
     {
@@ -103,24 +93,24 @@ pub fn build_config(
     keys_dir: &Path,
     grant: &MailboxGrant,
     state_dir: &Path,
+    route: HostDialRoute,
 ) -> Result<MailboxProcessConfig> {
     Ok(MailboxProcessConfig {
         grant: *grant,
         keys: derive_launch_keys(keys_dir, grant)?,
         socket: mvm_core::config::vm_mailbox_socket_at(state_dir),
-        guest_port: mvm_core::config::vm_hvf_vsock_port_socket_at(state_dir, MAILBOX_PORT),
-        firecracker_mux: PathBuf::from(mvm_agentd::vsock::vsock_uds_path(
-            &state_dir.to_string_lossy(),
-        )),
+        route,
         vm_state_dir: state_dir.to_path_buf(),
     })
 }
 
-/// The command that starts the process: no arguments, a scrubbed environment,
-/// its own process group, config over a pipe.
+/// The command that starts the process: no arguments, an empty environment,
+/// its own process group, config over a pipe. The process parses guest bytes
+/// and holds derived keys, and reads no variable, so it is given none.
 fn command(bin: &Path) -> Command {
     let mut cmd = mvm_core::env_hygiene::helper_command(bin);
-    cmd.stdin(Stdio::piped())
+    cmd.env_clear()
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .process_group(0);
@@ -204,7 +194,18 @@ pub fn spawn_for_launch(
     };
     require_wired(plan, backend)?;
     let state_dir = mvm_core::config::vm_state_dir(vm_name);
-    let config = build_config(&mvm_core::config::mvm_keys_dir(), grant, &state_dir)?;
+    let route = backend
+        .host_dial_route(&state_dir, MAILBOX_PORT)
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::Unsupported,
+                format!(
+                    "the {:?} backend names no route to the guest's mailbox port",
+                    backend.kind()
+                ),
+            )
+        })?;
+    let config = build_config(&mvm_core::config::mvm_keys_dir(), grant, &state_dir, route)?;
     let bin = mvm_vmm::host::broker_services_spawn::resolve_subprocess_bin_to_spawn(&AuxBin::new(
         MAILBOX_BIN,
         MAILBOX_BIN_ENV,
@@ -231,6 +232,37 @@ mod tests {
     use super::*;
     use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxId};
 
+    fn test_route() -> HostDialRoute {
+        HostDialRoute::PortSocket(PathBuf::from("/p"))
+    }
+
+    #[test]
+    fn the_config_round_trips_each_route() {
+        let dir = keys_dir();
+        let state = tempfile::tempdir().unwrap();
+        for route in [test_route(), HostDialRoute::Mux(PathBuf::from("/m"))] {
+            let config =
+                build_config(dir.path(), &grant(dir.path()), state.path(), route.clone()).unwrap();
+            let back = parse(&serde_json::to_vec(&config).unwrap()).unwrap();
+            assert_eq!(back.route, route);
+        }
+    }
+
+    #[test]
+    fn firecracker_and_hvf_name_the_routes_the_process_used_to_hardcode() {
+        let state = Path::new("/vm");
+        assert!(matches!(
+            backend_named("firecracker").host_dial_route(state, MAILBOX_PORT),
+            Some(HostDialRoute::Mux(_))
+        ));
+        assert_eq!(
+            backend_named("hvf").host_dial_route(state, MAILBOX_PORT),
+            Some(HostDialRoute::PortSocket(
+                mvm_core::config::vm_hvf_vsock_port_socket_at(state, MAILBOX_PORT)
+            ))
+        );
+    }
+
     fn keys_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
@@ -241,9 +273,13 @@ mod tests {
         let mailbox = MailboxId::from_bytes([4; 32]);
         MailboxGrant {
             mailbox,
-            authority_key: crate::mailbox_launch::authority_key_for(dir, &mailbox)
-                .unwrap()
-                .to_bytes(),
+            authority_key: crate::mailbox_launch::authority_key_for(
+                dir,
+                &mailbox,
+                ExecutionEpoch::new(1).unwrap(),
+            )
+            .unwrap()
+            .to_bytes(),
             epoch: ExecutionEpoch::new(1).unwrap(),
         }
     }
@@ -265,7 +301,7 @@ mod tests {
         let dir = keys_dir();
         let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
         plan.mailbox = Some(grant(dir.path()));
-        let error = spawn_for_launch(&plan, &backend_named("libkrun"), "no-such-vm").unwrap_err();
+        let error = spawn_for_launch(&plan, &backend_named("wasm"), "no-such-vm").unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Unsupported);
     }
 
@@ -273,7 +309,8 @@ mod tests {
     fn the_config_refuses_unknown_fields() {
         let dir = keys_dir();
         let state = tempfile::tempdir().unwrap();
-        let config = build_config(dir.path(), &grant(dir.path()), state.path()).unwrap();
+        let config =
+            build_config(dir.path(), &grant(dir.path()), state.path(), test_route()).unwrap();
         let mut value = serde_json::to_value(&config).unwrap();
         assert!(parse(value.to_string().as_bytes()).is_ok());
         value["seed"] = serde_json::json!("00");
@@ -285,7 +322,8 @@ mod tests {
         let dir = keys_dir();
         let seed = std::fs::read(dir.path().join("host-signer.ed25519")).unwrap();
         let state = tempfile::tempdir().unwrap();
-        let config = build_config(dir.path(), &grant(dir.path()), state.path()).unwrap();
+        let config =
+            build_config(dir.path(), &grant(dir.path()), state.path(), test_route()).unwrap();
         let json = serde_json::to_string(&config).unwrap();
         assert!(!json.contains(&hex::encode(&seed)));
         assert!(
@@ -298,6 +336,14 @@ mod tests {
         );
         let cmd = command(Path::new("/bin/true"));
         assert_eq!(cmd.get_args().count(), 0);
+        // Cleared, not filtered: whatever the parent holds is not inherited,
+        // and the builder sets nothing back.
+        assert_eq!(cmd.get_envs().count(), 0, "no variable is passed");
+        let out = command(Path::new("/usr/bin/env"))
+            .stdout(Stdio::piped())
+            .output()
+            .unwrap();
+        assert!(out.stdout.is_empty(), "the child's environ is empty");
         for (_, value) in cmd.get_envs() {
             let value = value
                 .map(|v| v.to_string_lossy().into_owned())
@@ -370,8 +416,7 @@ mod tests {
             keys: derive_launch_keys(dir.path(), &grant).unwrap(),
             grant,
             socket: dir.path().join("mailbox.sock"),
-            guest_port: dir.path().join("absent-port"),
-            firecracker_mux: dir.path().join("absent-mux"),
+            route: HostDialRoute::PortSocket(dir.path().join("absent-port")),
             vm_state_dir: state_path,
         };
         let serving = std::thread::spawn(move || serve(config));
@@ -401,19 +446,14 @@ mod tests {
     fn a_grant_on_an_unwired_backend_is_refused_before_boot() {
         let dir = keys_dir();
         let granted = config_for(Some(grant(dir.path())));
-        for name in ["firecracker", "hvf"] {
+        for name in ["firecracker", "hvf", "apple-container", "libkrun", "qemu"] {
             let backend = backend_named(name);
             assert!(backend.capabilities().guest_mailbox, "{name}");
             assert!(require_servable(&granted, &backend).is_ok(), "{name}");
         }
-        for name in ["libkrun", "qemu", "wasm"] {
-            let backend = backend_named(name);
-            assert!(!backend.capabilities().guest_mailbox, "{name}");
-            assert!(require_servable(&granted, &backend).is_err(), "{name}");
-            assert!(
-                require_servable(&config_for(None), &backend).is_ok(),
-                "{name}"
-            );
-        }
+        let backend = backend_named("wasm");
+        assert!(!backend.capabilities().guest_mailbox);
+        assert!(require_servable(&granted, &backend).is_err());
+        assert!(require_servable(&config_for(None), &backend).is_ok());
     }
 }

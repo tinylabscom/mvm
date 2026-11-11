@@ -1,8 +1,8 @@
 use crate::catalog;
 use anyhow::Result;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, SnapshotCapability, VmBackend, VmCapabilities, VmId,
-    VmInfo, VmStartConfig, VmStatus, WarmStartOutcome,
+    BackendKind, BackendSecurityProfile, HostDialRoute, SnapshotCapability, VmBackend,
+    VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus, WarmStartOutcome,
 };
 
 // Every backend variant + the FC support modules live in this crate.
@@ -558,6 +558,11 @@ impl AnyBackend {
 
     pub fn capabilities(&self) -> VmCapabilities {
         self.inner().capabilities()
+    }
+
+    /// Where the host dials guest vsock `port` for the VM at `state_dir`.
+    pub fn host_dial_route(&self, state_dir: &std::path::Path, port: u32) -> Option<HostDialRoute> {
+        self.inner().host_dial_route(state_dir, port)
     }
 
     pub fn snapshot_capability(&self) -> SnapshotCapability {
@@ -1187,8 +1192,9 @@ mod tests {
         for (name, declared) in [
             ("firecracker", true),
             ("hvf", true),
-            ("libkrun", false),
-            ("qemu", false),
+            ("apple-container", true),
+            ("libkrun", true),
+            ("qemu", true),
             ("wasm", false),
         ] {
             assert_eq!(
@@ -1199,6 +1205,62 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// A backend that declares the mailbox must also say where the host dials it.
+    #[test]
+    fn every_backend_that_declares_the_mailbox_names_a_dial_route() {
+        let state = std::path::Path::new("/var/mvm/vm-a");
+        for name in [
+            "firecracker",
+            "hvf",
+            "apple-container",
+            "libkrun",
+            "qemu",
+            "wasm",
+        ] {
+            let backend = AnyBackend::from_hypervisor(name);
+            let route = backend.host_dial_route(state, 5257);
+            if backend.capabilities().guest_mailbox {
+                assert!(route.is_some(), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn hvf_dials_a_per_port_socket_and_firecracker_the_mux() {
+        let state = std::path::Path::new("/var/mvm/vm-a");
+        assert_eq!(
+            AnyBackend::from_hypervisor("hvf").host_dial_route(state, 5257),
+            Some(HostDialRoute::PortSocket(
+                mvm_core::config::vm_hvf_vsock_port_socket_at(state, 5257)
+            ))
+        );
+        assert_eq!(
+            AnyBackend::from_hypervisor("firecracker").host_dial_route(state, 5257),
+            Some(HostDialRoute::Mux(std::path::PathBuf::from(
+                mvm_agentd::vsock::vsock_uds_path(&state.to_string_lossy())
+            )))
+        );
+    }
+
+    #[test]
+    fn libkrun_and_qemu_dial_the_flat_per_port_socket_and_apple_container_hvfs() {
+        let state = std::path::Path::new("/var/mvm/vm-a");
+        let flat = Some(HostDialRoute::PortSocket(
+            mvm_core::config::vm_vsock_port_socket_at(state, 5257),
+        ));
+        for name in ["libkrun", "qemu"] {
+            assert_eq!(
+                AnyBackend::from_hypervisor(name).host_dial_route(state, 5257),
+                flat,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            AnyBackend::from_hypervisor("apple-container").host_dial_route(state, 5257),
+            AnyBackend::from_hypervisor("hvf").host_dial_route(state, 5257)
+        );
     }
 
     #[test]
