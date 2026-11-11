@@ -289,6 +289,37 @@ impl Pair {
         self.publish_with_base_contract(role, attr, members, None, mvm_root)
     }
 
+    fn linux_composition_tar() -> Vec<u8> {
+        let mut archive = tar::Builder::new(Vec::new());
+        for path in ["etc/", "etc/mvm/"] {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_mode(0o755);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_mtime(0);
+            header.set_size(0);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, path, std::io::empty())
+                .unwrap();
+        }
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o444);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        header.set_size(2);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, "etc/mvm/base-image-contract", &b"1\n"[..])
+            .unwrap();
+        let mut compressed =
+            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut compressed, &archive.into_inner().unwrap()).unwrap();
+        compressed.finish().unwrap()
+    }
+
     pub(crate) fn publish_linux_workload(
         &self,
         attr: &str,
@@ -340,6 +371,11 @@ impl Pair {
         ];
         if attr == "default" {
             artifacts.extend([
+                TestArtifact {
+                    name: "rootfs.tar.gz",
+                    bytes: Self::linux_composition_tar(),
+                    format: "tar_gz",
+                },
                 TestArtifact {
                     name: "rootfs.verity",
                     bytes: b"verity\n".to_vec(),
