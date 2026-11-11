@@ -125,13 +125,86 @@ exchange deadline cannot be extended by peer traffic or wall-clock movement.
 Consume the permit exactly once after successful authentication and before
 the first append. Failed authentication consumes no producer sequence.
 
+### One-call spend and retirement
+
+A UUID labels the call; it does not enforce one-call use. Neither a
+non-cloneable launcher handle nor a successful signature check is the
+receiver's spend decision. The receiver must serialize these transitions in
+one owner state, before any append:
+
+| State | Permitted transition |
+| --- | --- |
+| Bound | The trusted original startup has installed one permit. Reserve at most one bounded authentication attempt for the actual expected peer. |
+| Authorizing | Validate against the retained permit, native generation and live peer. Invalid proof releases only the transient reservation; cancellation, parent death or retirement must not be undone by late verification. |
+| Spent | Atomically consume Bound/Authorizing into this exact connection and call **before Ready**. Initialize sequence/counters in the same transition. A competing successful verifier cannot also spend the permit. |
+| Closing | After valid Finish, stop accepting data; serialize final disposition/counters and retire before publishing Final. |
+| Retired | Absorbing. Reject every later proof/frame even if an alias keeps the socket open. No transition returns to Bound. |
+
+The atomic spend must recheck that the permit, native generation, peer and
+lifetime are still current; checking them before acquiring the state is not
+sufficient. Loss of Ready, zero output, parser failure, timeout, cancellation
+or loss of Final never refunds a spent permit. A replacement or restarted
+owner cannot reconstruct it from serialized startup/receipt bytes; it needs
+fresh admission and distinct original native custody.
+
+The trusted client must bind capture to the actual owned dispatch, not merely
+sign a caller-selected UUID. Create the call ID before native effects, retain
+it with that invocation's admission/frozen configuration and original guest
+channel, and consume its capture preparation only in that invocation's
+before-dispatch path. Public VM names, DTOs and receipt IDs cannot mint or
+recover this handle. If capture preparation fails and dispatch proceeds
+unrecorded, that invocation cannot later reopen capture as a complete replay.
+These constructor/dispatch constraints need runtime qualification alongside
+the receiver's atomic spend.
+
+Reuse the existing
+[`ColdHvfChannel::entrypoint` phase guard](../../crates/mvm-runtime/src/workload_runner/runner/cold_hvf_channel.rs#L318):
+it requires Activated, enters Uncertain before the native request, and only
+then records Dispatched. Do not add a second guest-dispatch lifecycle or
+retry after uncertainty. That existing guard limits guest invocation; it
+does not spend the new receiver-side capture permit. One authorized call
+may produce many fragments, each appended at most once.
+
 A copied proof fails under a new challenge, peer, run or call. A byte-relaying
 proxy is rejected by actual-connector identity. **Do not claim this prevents
 an authorized process deliberately exporting an already-connected FD or its
-credential.** Descriptor non-delegation is an explicit qualification boundary:
-the implementation must keep capture FDs close-on-exec and out of child
-inheritance lists. Review and test that restriction; inherited-FD identity
-alone is not evidence of the process currently using it.
+credential.** The FD policy below is an implementation qualification boundary,
+not a malicious-holder confinement or host-blind guarantee.
+
+### FD custody, aliases and subprocesses
+
+Both listener and connected endpoints must have close-on-exec protection
+from creation/acceptance, including every cancellation or worker alias. Use
+the platform's atomic mechanism or a qualified spawn-synchronized fallback;
+a later `fcntl` alone does not close a concurrent-spawn race. The current
+flag tests do not prove creation-time atomicity.
+
+Keep the endpoints under one internal custody group, with an explicit list
+of any indispensable aliases. Do not expose raw/owned capture FDs, serialize
+them, pass them over `SCM_RIGHTS`, redirect them into child stdio, or give a
+generic helper a capture-stream accessor. Lifetime/peer inspection may borrow
+the endpoint without transferring ownership. Every permitted internal alias
+must be close-on-exec and share cancellation/retirement ownership.
+
+Audit every exec/re-exec path while capture is live. In particular,
+[`inherit_descriptors`](../../crates/mvm-vmm/src/host/restore_image.rs#L300)
+intentionally clears close-on-exec in the selected child. Capture endpoints
+and all aliases must be excluded from that allowlist, boot/DATA/writable
+descriptor vectors, startup diagnostics, signing helpers, re-exec keep
+sets, snapshot/restore and handoff. Do not identify aliases solely by a saved
+FD number, which can be reused after close.
+
+Close-on-exec has **no effect before exec in a forked child**. Any supported
+fork path must close capture copies before running another role; arbitrary
+post-fork user callbacks or deliberate exports are unsupported. Qualify
+fork-to-exec/re-exec behavior, not only flags in the parent.
+
+Retirement first revokes the receiver's right to append, then cancels I/O,
+shuts down the connection and closes every tracked alias within its bound.
+Do not wait for last-FD EOF to revoke authority: an alias can delay EOF. A
+timed-out join/close remains unconfirmed; it cannot become a clean Final,
+successful native stop or permission to release execution resources. Socket
+peer identity is not proof of the process currently using a transferred FD.
 
 ## Finite first-slice limits
 
@@ -221,6 +294,17 @@ longer frame-exchange wait; do not join an uninterruptible worker on the
 guest-callback thread. A lost final reply remains unconfirmed even if
 individual accepted frames were observed.
 
+At terminal, first close the local offer side and freeze the offered/queued
+accounting cut. Drain only that already-queued prefix within the **single**
+250 ms final budget; Finish describes that cut, not counters sampled while
+another producer is still appending. On deadline or cancellation, classify
+provably unsent copies as local drops and any possibly sent fragment without
+its validated disposition as unconfirmed. Validate Final's call/challenge,
+last sequence and counts against retained state before reporting completion;
+a short, conflicting or lost summary cannot project success. Runtime tests
+must race terminal/cancellation with a full local queue and an in-flight
+owner append, and independently verify the protected readback.
+
 Proposed owned-path client result has independent fields for:
 
 - availability/refusal reason and final-close confirmation;
@@ -235,10 +319,12 @@ returned stdout/stderr, guest terminal, capture status and native completion
 independent. Review the owned-path public report shape before changing the
 existing `CaptureReport.recorded` meaning or its callers.
 
-EOF, parent/owner exit, timeout, protocol refusal or call end retires the
-permit. In-flight or unacknowledged copies remain unconfirmed unless the
-owner has reported a disposition. Replacement, handoff and restart cannot
-inherit this permit or reconnect it to another recorder.
+EOF, parent/owner exit, timeout, protocol refusal or capture-close completion
+retires the permit. Guest terminal starts the bounded frozen-prefix drain;
+it does not authorize another call or require pretending that unsent copies
+were already recorded. In-flight or unacknowledged copies remain unconfirmed
+unless the owner has reported a disposition. Replacement, handoff and restart
+cannot inherit this permit or reconnect it to another recorder.
 
 ## Executable evidence and remaining activation gates
 
@@ -251,6 +337,13 @@ locally; the Linux branch requires the Linux test lane. Neither identity
 result grants capture authority. These are socket-identity prerequisite
 tests, **not** capture authorization, signature, recorder or HVF-boot witnesses.
 
+The FD export prerequisite test checks real socket aliases across exec:
+ordinary children do not see close-on-exec aliases, but an explicitly
+allowlisted child does, without changing flags in the parent. This
+demonstrates why flags alone are not a capture-FD exclusion policy. It does
+not exercise a capture worker, actual supervisor/signing re-exec, raw fork,
+descriptor passing or retirement of runtime aliases.
+
 Before production wiring, obtain runtime/security approval of:
 
 1. The exact permit establishment, signing encoding/purpose, actual peer and
@@ -260,6 +353,16 @@ Before production wiring, obtain runtime/security approval of:
 3. Real transport tests for correct/wrong enrollment, tenant, configuration,
    native generation, call, challenge and peer; registration/recovery proof
    substitution; forwarding, replay, oversized/incomplete frames and teardown.
+4. Competing handshakes, cancellation during verification, lost Ready, an
+   empty call, duplicate Finish and lost Final: one atomic spend, no second
+   Ready or append from a competing/replayed connection, and no refund.
+   Normal fragments on the winning connection still append once each.
+   Wrong proof consumes no output sequence.
+5. Actual producer/owner FD inventories before/after signing helpers,
+   re-exec, cancellation and teardown; exclusion of every alias from export
+   and inheritance paths, original-process death/reparenting, attempted
+   handoff/restart, and receiver refusal after retirement even with an FD
+   deliberately kept open.
 
 Then implement the approved connection into the existing owner, prove both
 channels and protected redaction/readback, and run the clean-revision native

@@ -4,10 +4,10 @@ use super::connected_peer_pid;
 use crate::host::process_exit::wait_for_test_child;
 use mio::{Events, Interest, Poll, Token, unix::SourceFd};
 use std::io::{Read, Write};
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::process::{Child, Stdio};
+use std::process::{Child, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 const HELPER: &str = "host::uds_peer::process_tests::peer_process_helper";
@@ -39,11 +39,16 @@ impl PeerChild {
         }
     }
 
-    fn finish(&mut self) {
+    fn wait(&mut self) -> ExitStatus {
         let status = wait_for_test_child(&mut self.child, Instant::now() + DEADLINE)
             .unwrap()
             .expect("peer helper must exit before the deadline");
         self.reaped = true;
+        status
+    }
+
+    fn finish(&mut self) {
+        let status = self.wait();
         assert!(status.success(), "peer helper failed: {status}");
     }
 }
@@ -142,4 +147,66 @@ fn inherited_socketpair_peer_identity_depends_on_the_platform() {
     }
     #[cfg(target_os = "macos")]
     assert_eq!(kernel_peer, i32::try_from(reported_child).unwrap());
+}
+
+fn duplicate_high_cloexec(fd: BorrowedFd<'_>, minimum: i32) -> OwnedFd {
+    // SAFETY: fd is borrowed live; fcntl creates a new owned close-on-exec alias.
+    let alias = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, minimum) };
+    assert!(
+        alias >= minimum,
+        "duplicate socket into a controlled high slot"
+    );
+    // SAFETY: the successful duplication returned a fresh descriptor owned here.
+    unsafe { OwnedFd::from_raw_fd(alias) }
+}
+
+fn assert_cloexec(fd: BorrowedFd<'_>) {
+    // SAFETY: this only reads flags on a borrowed live fixture descriptor.
+    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+    assert!(flags >= 0);
+    assert_ne!(flags & libc::FD_CLOEXEC, 0);
+}
+
+fn exec_sees_socket(fd: BorrowedFd<'_>, explicitly_export: bool) -> bool {
+    let mut command = mvm_core::env_hygiene::helper_command("/bin/sh");
+    command
+        .args(["-c", &format!("test -S /dev/fd/{}", fd.as_raw_fd())])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    if explicitly_export {
+        crate::host::restore_image::inherit_descriptors(&mut command, vec![fd.as_raw_fd()]);
+    }
+    let mut child = PeerChild {
+        child: command.spawn().unwrap(),
+        reaped: false,
+    };
+    child.wait().success()
+}
+
+#[test]
+fn cloexec_socket_aliases_stay_private_unless_explicitly_exported() {
+    let (stream, _peer) = UnixStream::pair().unwrap();
+    let cancellation_alias = stream.try_clone().unwrap();
+    let alias = duplicate_high_cloexec(cancellation_alias.as_fd(), 128);
+    let second_alias = duplicate_high_cloexec(alias.as_fd(), alias.as_raw_fd() + 1);
+    let descriptors = [
+        stream.as_fd(),
+        cancellation_alias.as_fd(),
+        alias.as_fd(),
+        second_alias.as_fd(),
+    ];
+    for fd in descriptors {
+        assert_cloexec(fd);
+    }
+    assert!(!exec_sees_socket(alias.as_fd(), false));
+    assert!(!exec_sees_socket(second_alias.as_fd(), false));
+    assert!(
+        exec_sees_socket(alias.as_fd(), true),
+        "an explicit child export overrides CLOEXEC"
+    );
+    for fd in descriptors {
+        assert_cloexec(fd);
+    }
+    assert!(!exec_sees_socket(alias.as_fd(), false));
 }
