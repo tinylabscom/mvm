@@ -8,6 +8,9 @@
 //! Only the embedded image-set manifests, which verification has to parse,
 //! are read whole, and they are capped at [`MAX_IMAGE_SET_MANIFEST_BYTES`].
 
+#[cfg(feature = "host-state")]
+mod writer;
+
 use std::collections::BTreeMap;
 #[cfg(feature = "host-state")]
 use std::collections::BTreeSet;
@@ -16,19 +19,18 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-#[cfg(feature = "host-state")]
-use ed25519_dalek::{Signature, Verifier};
 use sha2::{Digest, Sha256};
 
 use super::{BundleArtifact, BundleManifest, BundleVerifyError};
 #[cfg(feature = "host-state")]
 use super::{
     BundleInstallError, BundleMember, BundleRegistry, BundleSizeBudget, ImageSetSource,
-    InstalledBundle, KeyId, MANIFEST_FILENAME, ManifestSigner, SIGNATURE_FILENAME, TrustStore,
-    VerifiedEmbeddedImageSet, canonical_manifest_bytes, declarations, ensure_safe_path,
-    install_embedded_image_set_cache, key_id_from_pubkey, verify_embedded_image_sets,
-    verify_signed_manifest,
+    InstalledBundle, KeyId, MANIFEST_FILENAME, SIGNATURE_FILENAME, TrustStore,
+    VerifiedEmbeddedImageSet, declarations, ensure_safe_path, install_embedded_image_set_cache,
+    verify_embedded_image_sets, verify_signed_manifest,
 };
+#[cfg(feature = "host-state")]
+pub use writer::{BundlePayload, write_bundle_to};
 
 /// Read `manifest.json` and `manifest.sig` out of an archive, stopping as soon
 /// as both are found. A bundle writes them first, so a multi-GiB archive is
@@ -1389,192 +1391,13 @@ fn stage(
     Ok(embedded)
 }
 
-/// The bytes of one artifact being sealed into a bundle.
-#[derive(Debug, Clone)]
-#[cfg(feature = "host-state")]
-pub enum BundlePayload {
-    /// Bytes already in memory.
-    Bytes(Vec<u8>),
-    /// A file read as it is written into the archive.
-    File(PathBuf),
-}
-
-#[cfg(feature = "host-state")]
-impl BundlePayload {
-    fn len(&self) -> io::Result<u64> {
-        match self {
-            Self::Bytes(bytes) => Ok(bytes.len() as u64),
-            Self::File(path) => Ok(std::fs::metadata(path)?.len()),
-        }
-    }
-
-    fn reader(&self) -> io::Result<Box<dyn Read + '_>> {
-        match self {
-            Self::Bytes(bytes) => Ok(Box::new(bytes.as_slice())),
-            Self::File(path) => Ok(Box::new(File::open(path)?)),
-        }
-    }
-}
-
-/// A reader that hashes and counts what is read through it.
-#[cfg(feature = "host-state")]
-struct HashingReader<R> {
-    inner: R,
-    hasher: Sha256,
-    read: u64,
-}
-
-#[cfg(feature = "host-state")]
-impl<R: Read> Read for HashingReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        self.hasher.update(&buf[..n]);
-        self.read += n as u64;
-        Ok(n)
-    }
-}
-
-/// Seal `manifest` and the artifacts it declares into a `.mvmpkg` written to
-/// `out`, streaming each artifact from its payload.
-///
-/// The manifest is validated and signed before a byte is written, and the
-/// signature is checked against the signer's own key. Each artifact is hashed
-/// as it is copied into the archive and compared with its declaration, so a
-/// file that changed between hashing and sealing fails the write rather than
-/// producing a bundle that installs nowhere. A caller writing to a file
-/// should write to a temporary path and rename it on success.
-#[cfg(feature = "host-state")]
-pub fn write_bundle_to(
-    manifest: &BundleManifest,
-    signer: &dyn ManifestSigner,
-    mut artifacts: Vec<(String, BundlePayload)>,
-    out: impl Write,
-) -> Result<()> {
-    let verifying_key = signer.verifying_key();
-    let derived = key_id_from_pubkey(&verifying_key);
-    declarations::validate_declarations(manifest).context("refusing to seal the bundle")?;
-    anyhow::ensure!(
-        manifest.key_id == derived,
-        "manifest key_id ({}) does not match signing key derivation ({})",
-        manifest.key_id.0,
-        derived.0
-    );
-    let mut declared = Vec::with_capacity(artifacts.len());
-    for (path, payload) in &artifacts {
-        ensure_safe_path(path).context("artifact path validation")?;
-        let artifact = manifest
-            .artifacts
-            .iter()
-            .find(|a| a.path == *path)
-            .with_context(|| {
-                format!("archive contains {path:?} not declared in manifest.artifacts")
-            })?;
-        let size = payload
-            .len()
-            .with_context(|| format!("reading artifact {}", artifact.name))?;
-        anyhow::ensure!(
-            artifact.size_bytes == size,
-            "artifact {} size mismatch at write time: manifest {}, actual {}",
-            artifact.name,
-            artifact.size_bytes,
-            size,
-        );
-        // Bytes in memory can be checked before anything is signed; a file is
-        // checked as it streams into the archive below.
-        if let BundlePayload::Bytes(bytes) = payload {
-            let actual = super::sha256_hex(bytes);
-            anyhow::ensure!(
-                artifact.sha256 == actual,
-                "artifact {} sha256 mismatch at write time: manifest {}, actual {}",
-                artifact.name,
-                artifact.sha256,
-                actual,
-            );
-        }
-        declared.push(artifact);
-    }
-
-    let manifest_bytes = canonical_manifest_bytes(manifest)?;
-    let sig_bytes = signer
-        .sign_manifest(&manifest_bytes)
-        .context("signing the bundle manifest")?;
-    verifying_key
-        .verify(&manifest_bytes, &Signature::from_bytes(&sig_bytes))
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "the signer returned a signature that does not verify under its own key {}: {e}",
-                derived.0
-            )
-        })?;
-
-    let mut tar = tar::Builder::new(out);
-    // manifest.json first so a reader finds it — and stops — at the head.
-    append_entry(
-        &mut tar,
-        MANIFEST_FILENAME,
-        manifest_bytes.len() as u64,
-        manifest_bytes.as_slice(),
-    )?;
-    append_entry(
-        &mut tar,
-        SIGNATURE_FILENAME,
-        sig_bytes.len() as u64,
-        sig_bytes.as_slice(),
-    )?;
-
-    // Artifacts in path order — deterministic output.
-    artifacts.sort_by(|(a, _), (b, _)| a.cmp(b));
-    for (path, payload) in &artifacts {
-        let artifact = declared
-            .iter()
-            .find(|a| a.path == *path)
-            .context("declared artifact disappeared")?;
-        let mut reader = HashingReader {
-            inner: payload
-                .reader()
-                .with_context(|| format!("opening artifact {}", artifact.name))?
-                .take(artifact.size_bytes),
-            hasher: Sha256::new(),
-            read: 0,
-        };
-        append_entry(&mut tar, path, artifact.size_bytes, &mut reader)?;
-        let actual = hex::encode(reader.hasher.finalize());
-        anyhow::ensure!(
-            reader.read == artifact.size_bytes && actual == artifact.sha256,
-            "artifact {} changed while it was being sealed: manifest {} ({} bytes), read {} ({} bytes)",
-            artifact.name,
-            artifact.sha256,
-            artifact.size_bytes,
-            actual,
-            reader.read,
-        );
-    }
-    tar.into_inner()
-        .and_then(|mut out| out.flush())
-        .context("finalise tar archive")?;
-    Ok(())
-}
-
-#[cfg(feature = "host-state")]
-fn append_entry<W: Write>(
-    tar: &mut tar::Builder<W>,
-    path: &str,
-    size: u64,
-    data: impl Read,
-) -> Result<()> {
-    let mut header = tar::Header::new_gnu();
-    header.set_size(size);
-    header.set_mode(0o644);
-    header.set_cksum();
-    tar.append_data(&mut header, path, data)
-        .with_context(|| format!("write tar entry {path:?}"))
-}
-
 #[cfg(all(test, feature = "host-state"))]
 mod tests {
+    use super::writer::append_entry;
     use super::*;
     use crate::plan::bundle::{
-        ArtifactRole, BUNDLE_SCHEMA_VERSION, read_and_verify_bundle, sha256_hex,
+        ArtifactRole, BUNDLE_SCHEMA_VERSION, canonical_manifest_bytes, key_id_from_pubkey,
+        read_and_verify_bundle, sha256_hex,
     };
     use ed25519_dalek::{SigningKey, VerifyingKey};
 
