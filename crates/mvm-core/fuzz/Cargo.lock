@@ -621,7 +621,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-contract"
-version = "0.27.0"
+version = "0.28.0-rc.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -637,7 +637,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-core"
-version = "0.27.0"
+version = "0.28.0-rc.1"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -685,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-macho-sign"
-version = "0.27.0"
+version = "0.28.0-rc.1"
 dependencies = [
  "plist",
  "sha1",
