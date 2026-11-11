@@ -141,12 +141,15 @@ pub(crate) fn prepare_launch_pieces_for_running_binary(cache_root: &Path) -> Res
     Ok(())
 }
 
-/// Whether this binary's guest-runtime pieces were already assembled from its
+/// Whether `version`'s guest-runtime pieces were already assembled from its
 /// release archive: the adoption record is written last, after every piece,
 /// and the OCI shims are what an image launch needs beside it.
-fn release_pieces_ready(cache_root: &Path, oci_cache_root: &Path) -> bool {
-    let version = crate::update::current_version();
-    let arch = mvm_core::arch::GuestArch::host();
+fn release_pieces_ready(
+    cache_root: &Path,
+    oci_cache_root: &Path,
+    version: &str,
+    arch: mvm_core::arch::GuestArch,
+) -> bool {
     matches!(
         mvm_build::runtime_pieces::adopted_release_archive(cache_root, version, arch),
         Ok(Some(_))
@@ -164,15 +167,70 @@ pub(crate) fn ensure_release_pieces_prepared() -> Result<()> {
     let published = compiled_channel() == DistributionChannel::Release
         && mvm_client::launch::runtime_overlay::runtime_overlay_acquire_mode()
             == mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireMode::DownloadPublishedArtifact;
-    let cache_root = cache_root();
-    if !published || release_pieces_ready(&cache_root, &mvm_core::config::oci_cache_dir()) {
+    if !published {
+        return Ok(());
+    }
+    let exe = std::env::current_exe().context("locating the running mvmctl")?;
+    ensure_prepared_with(
+        &cache_root(),
+        &mvm_core::config::oci_cache_dir(),
+        crate::update::current_version(),
+        mvm_core::arch::GuestArch::host(),
+        &installed_guest_runtime_dirs(&exe),
+        prepare_for_running_binary,
+    )
+}
+
+/// [`ensure_release_pieces_prepared`] for an explicit version, architecture
+/// and acquisition. `acquire` runs only when the pieces are missing; its
+/// failure is reported with the version and every place the archive was
+/// looked for, and nothing is assembled or recorded.
+fn ensure_prepared_with(
+    cache_root: &Path,
+    oci_cache_root: &Path,
+    version: &str,
+    arch: mvm_core::arch::GuestArch,
+    searched: &[PathBuf],
+    acquire: impl FnOnce() -> Result<ReleaseGuestRuntime>,
+) -> Result<()> {
+    if release_pieces_ready(cache_root, oci_cache_root, version, arch) {
         return Ok(());
     }
     ui::notice(&format!(
-        "Preparing the guest runtime of mvmctl {} from its release archive (first use only, about a minute)...",
-        crate::update::current_version()
+        "Preparing the guest runtime of mvmctl {version} from its release archive (first use only, about a minute)..."
     ));
-    prepare_launch_pieces_for_running_binary(&cache_root)
+    let release = acquire().with_context(|| {
+        let name = mvm_build::guest_bins::guest_bins_archive_name(version);
+        let places: Vec<String> = searched
+            .iter()
+            .map(|dir| dir.display().to_string())
+            .chain([
+                mvm_build::guest_bins::release::release_guest_runtime_cache_dir(
+                    cache_root, version,
+                )
+                .display()
+                .to_string(),
+            ])
+            .collect();
+        format!(
+            "the guest runtime of mvmctl {version} is not prepared and {name} was not usable; \
+             looked in {}",
+            places.join(", ")
+        )
+    })?;
+    mvm_build::runtime_pieces::assemble_release_runtime_pieces(
+        cache_root,
+        version,
+        arch,
+        &release.archive,
+    )
+    .with_context(|| {
+        format!(
+            "assembling the release guest runtime {} for first launch",
+            release.archive.display()
+        )
+    })?;
+    Ok(())
 }
 
 /// Fetch and verify the guest runtime the release `tag` ships, for
@@ -192,12 +250,63 @@ pub(crate) fn stage_for_update(tag: &str) -> Result<ReleaseGuestRuntime> {
 mod tests {
     use super::*;
 
+    const FIXTURE_VERSION: &str = "9.9.9";
+
+    struct FirstUse {
+        cache: tempfile::TempDir,
+        installed: tempfile::TempDir,
+    }
+
+    impl FirstUse {
+        fn new() -> Self {
+            Self {
+                cache: tempfile::TempDir::new().unwrap(),
+                installed: tempfile::TempDir::new().unwrap(),
+            }
+        }
+
+        fn oci(&self) -> PathBuf {
+            self.cache.path().join("oci")
+        }
+
+        fn ensure(&self, acquired: &std::sync::atomic::AtomicUsize) -> Result<()> {
+            ensure_prepared_with(
+                self.cache.path(),
+                &self.oci(),
+                FIXTURE_VERSION,
+                mvm_core::arch::GuestArch::host(),
+                &[self.installed.path().to_path_buf()],
+                || {
+                    acquired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    acquire_release_guest_runtime(&ReleaseGuestRuntimeRequest {
+                        release_url: "file:///no-release-is-reachable",
+                        version: FIXTURE_VERSION,
+                        cache_root: self.cache.path(),
+                        installed_dirs: &[self.installed.path().to_path_buf()],
+                    })
+                    .map_err(Into::into)
+                },
+            )
+        }
+
+        fn adopted(&self) -> Option<String> {
+            mvm_build::runtime_pieces::adopted_release_archive(
+                self.cache.path(),
+                FIXTURE_VERSION,
+                mvm_core::arch::GuestArch::host(),
+            )
+            .unwrap()
+        }
+    }
+
     #[test]
     fn pieces_are_not_ready_before_any_release_archive_is_adopted() {
-        let cache = tempfile::TempDir::new().unwrap();
+        let first = FirstUse::new();
         assert!(!release_pieces_ready(
-            cache.path(),
-            &cache.path().join("oci")
+            first.cache.path(),
+            &first.oci(),
+            FIXTURE_VERSION,
+            mvm_core::arch::GuestArch::host()
         ));
     }
 
@@ -206,6 +315,103 @@ mod tests {
         if compiled_channel() == DistributionChannel::Source {
             ensure_release_pieces_prepared().expect("a source build is a no-op here");
         }
+    }
+
+    #[test]
+    fn first_use_assembles_once_and_a_second_call_does_not_touch_the_archive() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let first = FirstUse::new();
+        mvm_build::guest_runtime::release_fixture::write_release_archive(
+            first.installed.path(),
+            FIXTURE_VERSION,
+        );
+        let acquired = AtomicUsize::new(0);
+        first.ensure(&acquired).expect("first use assembles");
+        assert_eq!(acquired.load(Ordering::SeqCst), 1);
+        assert!(first.adopted().is_some(), "the adopted digest is recorded");
+
+        std::fs::remove_dir_all(first.installed.path()).unwrap();
+        first.ensure(&acquired).expect("second use is a no-op");
+        assert_eq!(
+            acquired.load(Ordering::SeqCst),
+            1,
+            "a prepared version must not read the archive again"
+        );
+    }
+
+    #[test]
+    fn an_archive_that_misses_its_manifest_is_refused_and_nothing_is_cached() {
+        let first = FirstUse::new();
+        let tampered = format!(
+            "{}/lib/glibc/libmvm_host_services.so",
+            mvm_core::arch::GuestArch::host()
+        );
+        mvm_build::guest_runtime::release_fixture::write_release_archive_tampering(
+            first.installed.path(),
+            FIXTURE_VERSION,
+            Some(&tampered),
+        );
+        let acquired = std::sync::atomic::AtomicUsize::new(0);
+        let err = first.ensure(&acquired).expect_err("a tampered archive");
+        assert!(format!("{err:#}").contains(FIXTURE_VERSION), "{err:#}");
+        assert!(first.adopted().is_none());
+        assert!(!first.oci().exists(), "no OCI shims may be installed");
+        assert!(
+            !first.cache.path().join("guest-runtime/v1/objects").exists(),
+            "a refused archive must not enter the store"
+        );
+    }
+
+    #[test]
+    fn a_missing_archive_refuses_naming_the_version_and_every_place_searched() {
+        let first = FirstUse::new();
+        let acquired = std::sync::atomic::AtomicUsize::new(0);
+        let err = first.ensure(&acquired).expect_err("no archive anywhere");
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains(FIXTURE_VERSION), "{rendered}");
+        assert!(
+            rendered.contains("mvm-guest-bins-v9.9.9.tar.gz"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(&first.installed.path().display().to_string()),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(&first.cache.path().display().to_string()),
+            "{rendered}"
+        );
+        assert!(first.adopted().is_none());
+    }
+
+    #[test]
+    fn concurrent_first_use_leaves_one_valid_set_of_pieces() {
+        let first = FirstUse::new();
+        mvm_build::guest_runtime::release_fixture::write_release_archive(
+            first.installed.path(),
+            FIXTURE_VERSION,
+        );
+        let acquired = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let a = scope.spawn(|| first.ensure(&acquired));
+            let b = scope.spawn(|| first.ensure(&acquired));
+            a.join().unwrap().expect("first caller");
+            b.join().unwrap().expect("second caller");
+        });
+        assert!(first.adopted().is_some());
+        let arch = mvm_core::arch::GuestArch::host().to_string();
+        mvm_fs::overlay::RuntimeOverlayResolver::new(
+            first.cache.path().to_path_buf(),
+            FIXTURE_VERSION.to_string(),
+        )
+        .resolve(&arch)
+        .expect("the overlay both callers raced to build is valid");
+        assert!(release_pieces_ready(
+            first.cache.path(),
+            &first.oci(),
+            FIXTURE_VERSION,
+            mvm_core::arch::GuestArch::host()
+        ));
     }
 
     #[test]
