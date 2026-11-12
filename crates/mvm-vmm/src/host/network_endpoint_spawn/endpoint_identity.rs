@@ -34,10 +34,11 @@ impl EndpointPid {
     }
 
     /// Parse a pid file. The first field is the pid, so a reader that only
-    /// wants the pid keeps working on either shape.
+    /// wants the pid keeps working on either shape. A pid no endpoint can
+    /// have (0, 1, negative) is refused so it never reaches a `kill`.
     pub fn parse(text: &str) -> Option<Self> {
         let mut fields = text.split_whitespace();
-        let pid = fields.next()?.parse().ok()?;
+        let pid: libc::pid_t = fields.next()?.parse().ok().filter(|pid| *pid > 1)?;
         let started = fields.next().and_then(|field| field.parse().ok());
         Some(Self { pid, started })
     }
@@ -111,6 +112,13 @@ fn process_start(_pid: libc::pid_t) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_refuses_pids_that_must_never_be_signalled() {
+        for text in ["0", "-1", "1", "2147483648", "garbage", ""] {
+            assert_eq!(EndpointPid::parse(text), None, "{text:?}");
+        }
+    }
 
     fn sleeper() -> std::process::Child {
         std::process::Command::new("sleep")

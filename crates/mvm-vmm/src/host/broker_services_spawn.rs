@@ -584,12 +584,11 @@ pub fn reap_broker(state_dir: &Path) {
 }
 
 pub(crate) fn read_pid(path: &Path) -> Option<libc::pid_t> {
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+    super::process_liveness::read_pid_file(path)
 }
 
 pub(crate) fn pid_alive(pid: libc::pid_t) -> bool {
-    // SAFETY: kill(pid, 0) only probes for existence and delivers no signal.
-    unsafe { libc::kill(pid, 0) == 0 }
+    super::process_liveness::pid_is_alive(pid)
 }
 
 pub(crate) fn kill(pid: libc::pid_t, sig: libc::c_int) {
