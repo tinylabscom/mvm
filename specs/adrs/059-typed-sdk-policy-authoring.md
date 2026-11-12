@@ -1,6 +1,6 @@
 # ADR-059: Typed policy authoring across SDKs
 
-Backing: design
+Backing: preview
 Validation: none
 
 ## Status
