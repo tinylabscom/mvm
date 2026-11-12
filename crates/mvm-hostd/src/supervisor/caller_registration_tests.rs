@@ -210,7 +210,7 @@ fn startup_restore_files_retain_original_custody_and_transfer_once() {
 }
 
 fn assert_startup_lock_failure_cleanup(restore: bool) {
-    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+    use std::os::fd::{AsRawFd, IntoRawFd};
 
     let (dir, data) = readonly_data_fixture();
     let (_kernel_dir, kernel) = readonly_data_fixture();
@@ -267,6 +267,10 @@ fn assert_startup_lock_failure_cleanup(restore: bool) {
         files.push(frame);
     }
     preflight_startup_files(&cfg).unwrap();
+    let identities = files
+        .iter()
+        .map(|file| descriptor_identity(file.as_raw_fd()).expect("transferred file is open"))
+        .collect::<Vec<_>>();
     let transferred = files
         .into_iter()
         .map(IntoRawFd::into_raw_fd)
@@ -274,19 +278,13 @@ fn assert_startup_lock_failure_cleanup(restore: bool) {
     let result = adopt_startup_files(&cfg);
     let failed = result.is_err();
     drop(result);
+    // A parallel test can reuse a closed fd number. Inspect the original
+    // inode rather than adopting and closing a number now owned elsewhere.
     let closed = transferred
         .iter()
-        .map(|fd| {
-            // SAFETY: inspect a transferred locator without adopting it.
-            (unsafe { libc::fcntl(*fd, libc::F_GETFD) }) == -1
-        })
+        .zip(identities)
+        .map(|(fd, identity)| descriptor_identity(*fd) != Some(identity))
         .collect::<Vec<_>>();
-    for (fd, closed) in transferred.into_iter().zip(&closed) {
-        if !*closed {
-            // SAFETY: on regression, reclaim only a transferred fd still unowned.
-            drop(unsafe { std::fs::File::from_raw_fd(fd) });
-        }
-    }
     assert!(failed, "the separately held sidecar must refuse adoption");
     assert!(
         closed.iter().all(|closed| *closed),
