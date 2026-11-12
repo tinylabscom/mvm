@@ -11,7 +11,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use mvm_contract::policy::routes::EgressRoute;
 use mvm_core::network_policy::AiPolicy;
 use serde::{Deserialize, Serialize};
@@ -24,6 +24,8 @@ use mvm_core::{config, naming};
 /// field change is introduced; new optional fields use `#[serde(default)]`.
 pub const MACHINE_SPEC_SCHEMA_VERSION: u32 = 1;
 
+const MAX_LOCAL_PACK_RECIPE_BYTES: u64 = 64 * 1024;
+
 /// Data-only identity of a locally composed pack; never an installed-bundle authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -34,6 +36,51 @@ pub struct LocalPackSource {
     pub recipe_sha256: mvm_core::packs::Sha256Hex,
     /// Verified, host-signed cache entry selected at creation.
     pub archive_sha256: mvm_core::packs::Sha256Hex,
+}
+
+impl LocalPackSource {
+    /// Record the authored recipe and the already-verified archive's identity as data.
+    ///
+    /// # Errors
+    /// Refuses a linked, non-regular or oversized recipe.
+    pub fn from_prepared(
+        recipe: &Path,
+        archive_sha256: mvm_core::packs::Sha256Hex,
+    ) -> Result<Self> {
+        let recipe_sha256 = local_recipe_digest(recipe)?;
+        Ok(Self {
+            recipe: fs::canonicalize(recipe).context("resolving local pack recipe")?,
+            recipe_sha256,
+            archive_sha256,
+        })
+    }
+
+    /// Check the authored bytes still match this machine's data-only recipe pin.
+    ///
+    /// # Errors
+    /// Refuses replacement, changed bytes or non-regular input.
+    pub fn verify_recipe(&self) -> Result<()> {
+        ensure!(
+            self.recipe.is_absolute(),
+            "local pack recipe must be absolute"
+        );
+        ensure!(
+            local_recipe_digest(&self.recipe)? == self.recipe_sha256,
+            "local pack recipe differs from the recorded machine source"
+        );
+        Ok(())
+    }
+}
+
+fn local_recipe_digest(recipe: &Path) -> Result<mvm_core::packs::Sha256Hex> {
+    let metadata = fs::symlink_metadata(recipe).context("inspecting local pack recipe")?;
+    ensure!(
+        metadata.file_type().is_file() && metadata.len() <= MAX_LOCAL_PACK_RECIPE_BYTES,
+        "local pack recipe must be a regular file no larger than 64 KiB"
+    );
+    Ok(mvm_core::packs::Sha256Hex::from_bytes(
+        &fs::read(recipe).context("reading local pack recipe")?,
+    ))
 }
 
 /// Declarative persistent machine spec. Runtime state lives elsewhere.
@@ -598,6 +645,36 @@ mod tests {
             .recipe_sha256 = mvm_core::packs::Sha256Hex::from_bytes(b"changed recipe");
         assert!(!machine_config_matches(&round_trip, &changed));
         assert_eq!(machine_config_diff(&round_trip, &changed), "source");
+    }
+
+    #[test]
+    fn local_pack_source_refuses_changed_or_linked_recipe_before_start() {
+        let directory = tempfile::tempdir().expect("recipe directory");
+        let recipe = directory.path().join("pack.toml");
+        std::fs::write(&recipe, b"original").expect("write recipe");
+        let source = LocalPackSource::from_prepared(
+            &recipe,
+            mvm_core::packs::Sha256Hex::from_bytes(b"verified archive"),
+        )
+        .expect("record recipe");
+        assert_eq!(
+            source.recipe,
+            std::fs::canonicalize(&recipe).expect("canonical recipe")
+        );
+        source.verify_recipe().expect("unchanged recipe");
+
+        std::fs::write(&recipe, b"changed").expect("change recipe");
+        assert!(
+            source.verify_recipe().is_err(),
+            "changed recipe must refuse"
+        );
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&recipe).expect("remove changed recipe");
+            std::os::unix::fs::symlink(directory.path().join("elsewhere"), &recipe)
+                .expect("link recipe");
+            assert!(source.verify_recipe().is_err(), "linked recipe must refuse");
+        }
     }
 
     #[test]
