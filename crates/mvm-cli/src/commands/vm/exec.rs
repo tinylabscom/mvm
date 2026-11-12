@@ -246,7 +246,7 @@ pub(in crate::commands) struct RunArgs {
     /// Grant a mailbox, named by a 64-character hex id.
     #[arg(long, value_name = "ID")]
     pub mailbox: Option<String>,
-    /// Retain local mailbox dedup identities this many milliseconds after expiry.
+    /// Retain local mailbox dedup IDs after expiry (milliseconds).
     #[arg(long, value_name = "MILLISECONDS", value_parser = clap::value_parser!(u64).range(1..))]
     pub mailbox_retention_ms: Option<u64>,
     /// Set memory (for example, 512M or 1G).
