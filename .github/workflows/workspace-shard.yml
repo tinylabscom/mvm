@@ -331,12 +331,22 @@ jobs:
           printf 'CARGO_HOME=%s\nRUSTUP_HOME=%s\n' \
             "${CARGO_HOME:-$HOME/.cargo}" "${RUSTUP_HOME:-$(rustup show home)}" >> "$GITHUB_ENV"
 
-      - name: Require an existing systemd user session
+      - name: Start a temporary systemd user session if needed
         run: |
           set -euo pipefail
           uid="$(id -u)"
+          if [ ! -S "/run/user/${uid}/bus" ]; then
+            # Record ownership before starting, so even a partial start is
+            # stopped by the always-run cleanup. Never enable linger.
+            echo 'BOOT_STARTED_USER_MANAGER=1' >> "$GITHUB_ENV"
+            sudo -n systemctl start "user@${uid}.service"
+            for _ in $(seq 1 30); do
+              [ -S "/run/user/${uid}/bus" ] && break
+              sleep 1
+            done
+          fi
           test -S "/run/user/${uid}/bus" || {
-            echo "::error::no existing systemd user bus; refusing to change linger or host services" >&2
+            echo "::error::systemd user bus unavailable after temporary user manager start" >&2
             exit 1
           }
           printf 'XDG_RUNTIME_DIR=/run/user/%s\nDBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%s/bus\n' \
@@ -436,5 +446,10 @@ jobs:
       - name: Clean isolated state
         if: always()
         run: |
+          status=0
           bash nix/ops/hetzner/job-cleanup.sh \
-            "$RUNNER_TEMP/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-1"
+            "$RUNNER_TEMP/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-1" || status=$?
+          if [ "${BOOT_STARTED_USER_MANAGER:-}" = 1 ]; then
+            sudo -n systemctl stop "user@$(id -u).service" || status=1
+          fi
+          exit "$status"

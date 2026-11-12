@@ -657,7 +657,10 @@ fn inventory_is_opt_in_and_leaves_reusable_and_default_dispatch_tests_unchanged(
         boot.contains("runs-on: [self-hosted, Linux, X64, mvm, hetzner, kvm, debian-kvm-boot]")
             && boot.contains("test \"$RUNNER_NAME\" = mvm-hetzner")
             && boot.contains("MVM_RUNTIME_BOOT_READY: guest-agent")
-            && boot.contains("prebuilt_runtime_image_boots_within_budget"),
+            && boot.contains("prebuilt_runtime_image_boots_within_budget")
+            && boot.contains("sudo -n systemctl start \"user@${uid}.service\"")
+            && boot.contains("sudo -n systemctl stop \"user@$(id -u).service\"")
+            && !boot.contains("enable-linger"),
         "the recovery witness must target Debian and boot a real guest"
     );
     assert_eq!(missing_cleanup(boot), None);
