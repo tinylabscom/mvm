@@ -65,6 +65,7 @@ use mvm_build::guest_libc::GuestLibc;
 use mvm_contract::grants::ceiling::GrantCeiling;
 use mvm_contract::grants::{CpuGrant, Grants};
 use mvm_contract::protocol::capability_negotiation::negotiate_grants;
+use mvm_contract::protocol::mailbox::{MailboxGrant, MailboxRetentionPolicy};
 use mvm_contract::protocol::resource_controls::{EnforcedGrants, ResourceControls};
 use mvm_contract::provenance::{
     ActorRef, AttestationBinding, DecisionActorRole, DecisionCategory, DecisionOutcome,
@@ -481,6 +482,10 @@ pub fn admit_plan_for_run(
     // signed admitted one to anything downstream that only checks the
     // signature.
     admit_grants(plan, &host_grant_ceiling(), posture)?;
+    enforce_mailbox_retention(
+        plan.mailbox.as_ref(),
+        mvm_core::user_config::load(None).max_mailbox_retention_ms,
+    )?;
 
     // The ceiling above bounds this one workload; the budget bounds the sum of
     // every live one. Both sit in the pre-keystore window for the same reason,
@@ -565,6 +570,10 @@ pub fn admit_signed_plan_for_run(
     let extensions = verify_extension_packs(&verified, None)?;
     verify_registry_pack_assets(&verified)?;
     admit_grants(&verified, &host_grant_ceiling(), posture)?;
+    enforce_mailbox_retention(
+        verified.mailbox.as_ref(),
+        mvm_core::user_config::load(None).max_mailbox_retention_ms,
+    )?;
     admit_within_host_budget(&verified)?;
     admit_host_interface(&verified)?;
 
@@ -1008,6 +1017,23 @@ fn admit_grants(plan: &ExecutionPlan, ceiling: &GrantCeiling, posture: RunPostur
 
     display_grants::admit_display_input(grants, posture.variant)?;
     enforceability_gate(grants, plan, posture)
+}
+
+fn enforce_mailbox_retention(mailbox: Option<&MailboxGrant>, max_ms: Option<u64>) -> Result<()> {
+    let Some(requested) = mailbox.and_then(|grant| grant.retention) else {
+        return Ok(());
+    };
+    let max_ms = max_ms
+        .context("local mailbox retention requires max_mailbox_retention_ms in host config.toml")?;
+    let ceiling = MailboxRetentionPolicy::new(max_ms)
+        .context("host max_mailbox_retention_ms must be a finite, nonzero duration")?;
+    anyhow::ensure!(
+        requested.retention_ms() <= ceiling.retention_ms(),
+        "local mailbox retention {} ms exceeds this host's {} ms ceiling",
+        requested.retention_ms(),
+        ceiling.retention_ms(),
+    );
+    Ok(())
 }
 
 /// Refuse a plan whose two encodings of one wall-clock bound disagree.
@@ -2458,10 +2484,32 @@ mod admitted_environment_tests {
 mod tests {
     use super::*;
     use chrono::{DateTime, TimeZone, Utc};
+    use mvm_contract::protocol::mailbox::{
+        ExecutionEpoch, MailboxGrant, MailboxId, MailboxRetentionPolicy,
+    };
     use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy};
     use rand::Rng;
 
     const FIXTURE_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[test]
+    fn local_retention_requires_a_configured_host_ceiling() {
+        let mut grant = MailboxGrant {
+            mailbox: MailboxId::from_bytes([1; 32]),
+            authority_key: [2; 32],
+            epoch: ExecutionEpoch::new(1).expect("epoch"),
+            report: None,
+            retention: None,
+        };
+        assert!(enforce_mailbox_retention(Some(&grant), None).is_ok());
+        grant.retention = Some(MailboxRetentionPolicy::new(10_000).expect("window"));
+        assert!(enforce_mailbox_retention(Some(&grant), None).is_err());
+        assert!(enforce_mailbox_retention(Some(&grant), Some(0)).is_err());
+        assert!(enforce_mailbox_retention(Some(&grant), Some(u64::MAX)).is_err());
+        assert!(enforce_mailbox_retention(Some(&grant), Some(9_999)).is_err());
+        assert!(enforce_mailbox_retention(Some(&grant), Some(10_000)).is_ok());
+        assert!(enforce_mailbox_retention(Some(&grant), Some(20_000)).is_ok());
+    }
 
     #[cfg(feature = "manifest-verify")]
     const PYTHON_MANIFEST: &[u8] =
@@ -4007,6 +4055,48 @@ mod tests {
             RunPosture::without_backend(Variant::Dev),
         )
         .expect("a grant inside the ceiling admits");
+    }
+
+    #[test]
+    fn mailbox_retention_above_or_without_host_ceiling_refuses_before_signing() {
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let keys = tempfile::tempdir().expect("keystore");
+        let mut input = fixture_input("vm-retention");
+        input.mailbox = Some(MailboxGrant {
+            mailbox: MailboxId::from_bytes([1; 32]),
+            authority_key: [2; 32],
+            epoch: ExecutionEpoch::new(1).expect("epoch"),
+            report: None,
+            retention: Some(MailboxRetentionPolicy::new(10_000).expect("window")),
+        });
+        let attempt = || {
+            admit_for_run(
+                &input,
+                &SystemClock,
+                &InMemoryNonceLedger::new(),
+                Some(keys.path()),
+                None,
+                RunPosture::without_backend(Variant::Dev),
+            )
+        };
+        let missing = attempt().expect_err("missing operator ceiling must refuse");
+        assert!(
+            missing.to_string().contains("max_mailbox_retention_ms"),
+            "{missing:#}"
+        );
+        assert!(
+            !keys.path().join("host-signer.ed25519").exists(),
+            "a refused grant must not reach the keystore"
+        );
+        let mut config = mvm_core::user_config::load(None);
+        config.max_mailbox_retention_ms = Some(9_999);
+        mvm_core::user_config::save(&config, None).expect("set host ceiling");
+        let over = attempt().expect_err("request above host ceiling must refuse");
+        assert!(over.to_string().contains("ceiling"), "{over:#}");
+        assert!(
+            !keys.path().join("host-signer.ed25519").exists(),
+            "an over-ceiling grant must not be signed"
+        );
     }
 
     #[test]

@@ -246,6 +246,9 @@ pub(in crate::commands) struct RunArgs {
     /// Grant a mailbox, named by a 64-character hex id.
     #[arg(long, value_name = "ID")]
     pub mailbox: Option<String>,
+    /// Retain local mailbox dedup identities this many milliseconds after expiry.
+    #[arg(long, value_name = "MILLISECONDS", value_parser = clap::value_parser!(u64).range(1..))]
+    pub mailbox_retention_ms: Option<u64>,
     /// Set memory (for example, 512M or 1G).
     #[arg(long, default_value = "512M")]
     pub memory: String,
@@ -677,6 +680,7 @@ pub(in crate::commands) fn run_secure_started(
     let admit_outputs = outputs.grants();
     let admit_mailbox = mvm_client::admission::mailbox_grant::resolve(
         args.mailbox.as_deref(),
+        args.mailbox_retention_ms,
         args.from_workload_ir.as_deref(),
     )?;
     let host_config = mvm_core::user_config::load(None);
@@ -1936,6 +1940,10 @@ mod tests {
         assert_eq!(
             parsed.machine.run.cpu_limit, expected.machine.run.cpu_limit,
             "--cpu-limit default"
+        );
+        assert_eq!(
+            parsed.machine.run.mailbox_retention_ms, expected.machine.run.mailbox_retention_ms,
+            "--mailbox-retention-ms default"
         );
         assert_eq!(
             parsed.machine.run.allow_host, expected.machine.run.allow_host,

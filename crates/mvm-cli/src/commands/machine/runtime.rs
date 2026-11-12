@@ -339,6 +339,7 @@ pub(crate) fn start_args_with_grant(args: &MachineRunArgs, name: &str) -> Result
     let mut start = start_args_for_run(args, name);
     start.mailbox = mvm_client::admission::mailbox_grant::resolve(
         args.run.mailbox.as_deref(),
+        args.run.mailbox_retention_ms,
         args.run.from_workload_ir.as_deref(),
     )?;
     Ok(start)

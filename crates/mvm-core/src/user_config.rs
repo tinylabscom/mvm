@@ -8,8 +8,8 @@ pub const DEFAULT_STANDBY_MEMORY_MIB: u64 = 2048;
 
 /// Persistent operator configuration stored at `~/.mvm/config/config.toml`.
 ///
-/// CLI flags always take precedence over these values. This config is
-/// `mvmctl`-specific; `mvmd` maintains its own separate config.
+/// CLI flags take precedence over defaults, but never over host ceilings.
+/// This config is `mvmctl`-specific; `mvmd` maintains its own separate config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MvmConfig {
@@ -53,6 +53,9 @@ pub struct MvmConfig {
     /// value here refuses an explicitly unbounded grant rather than clamping
     /// it, so a caller learns the host forbids what it asked for.
     pub max_wall_clock_secs: Option<u32>,
+    /// Maximum local mailbox retention after envelope expiry, in milliseconds.
+    /// `None` refuses a requested local-durable window; it does not mean unbounded.
+    pub max_mailbox_retention_ms: Option<u64>,
     /// Default CPU share, in thousandths of one host core, for a workload no
     /// higher surface capped. `None` = uncapped.
     ///
@@ -266,6 +269,7 @@ impl Default for MvmConfig {
             max_cpu_millicores: None,
             max_memory_mib: None,
             max_wall_clock_secs: None,
+            max_mailbox_retention_ms: None,
             // Also unset: a default invented here would cap every local run
             // with a number nobody chose.
             default_cpu_millicores: None,
@@ -469,6 +473,26 @@ pub fn set_key(cfg: &mut MvmConfig, key: &str, value: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::util::test_env::TestEnv;
+
+    #[test]
+    fn mailbox_retention_ceiling_is_optional_and_roundtrips() {
+        assert_eq!(MvmConfig::default().max_mailbox_retention_ms, None);
+        assert!(
+            !toml::to_string(&MvmConfig::default())
+                .expect("default operator config")
+                .contains("max_mailbox_retention_ms"),
+            "the default config must not suggest local durability is enabled"
+        );
+        let mut config = MvmConfig::default();
+        config.max_mailbox_retention_ms = Some(10_000);
+        let encoded = toml::to_string(&config).expect("operator config");
+        assert_eq!(
+            toml::from_str::<MvmConfig>(&encoded)
+                .expect("operator config roundtrip")
+                .max_mailbox_retention_ms,
+            Some(10_000)
+        );
+    }
 
     #[test]
     fn config_parse_errors_do_not_retain_sensitive_source() {
