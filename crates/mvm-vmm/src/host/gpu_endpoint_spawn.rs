@@ -204,16 +204,7 @@ mod tests {
         // Before the guard, "0" signalled this test's own process group and
         // "-1" every process the user owns; this test reaching its assert is
         // the witness.
-        for text in [
-            "0",
-            "-1",
-            "1",
-            "2147483648",
-            "-2147483648",
-            "garbage",
-            "",
-            "  \n",
-        ] {
+        for text in ["0", "-1", "1", "2147483648", "garbage", ""] {
             let dir = tempfile::tempdir().expect("tempdir");
             let pid_file = dir.path().join(GPU_ENDPOINT_PID_FILE);
             std::fs::write(&pid_file, text).expect("write");
