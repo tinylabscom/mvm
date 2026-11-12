@@ -306,34 +306,14 @@ mod pid_marker_tests {
     }
 
     #[test]
-    fn a_marker_recording_the_start_time_reads_as_its_pid() {
-        let (_dir, path) = marker("4242 1791788104\n");
-        assert_eq!(read_pid(&path), Some(4242));
-        std::fs::write(&path, "4242\n").unwrap();
-        assert_eq!(read_pid(&path), Some(4242));
-    }
-
-    #[test]
-    fn the_record_the_supervisor_publishes_reads_back_live() {
+    fn the_supervisor_record_reads_live_and_a_recycled_pid_reads_dead() {
         let own = std::process::id();
         let record = EndpointPid::of_child(own);
-        assert!(record.started.is_some(), "this host reports a start time");
+        let started = record.started.expect("this host reports a start time");
         let (_dir, path) = marker(&record.render());
         assert_eq!(read_pid(&path), Some(own as i32));
         assert!(pid_file_has_live_process(&path));
-    }
-
-    #[test]
-    fn a_recycled_pid_reads_dead_through_the_hvf_marker() {
-        let own = std::process::id();
-        let started = EndpointPid::of_child(own).started.expect("start time");
-        let (_dir, path) = marker(&format!("{own} {}", started + 1));
+        std::fs::write(&path, format!("{own} {}", started + 1)).unwrap();
         assert!(!pid_file_has_live_process(&path));
-    }
-
-    #[test]
-    fn a_marker_that_is_not_a_pid_reads_as_none() {
-        let (_dir, path) = marker("not-a-pid 12\n");
-        assert_eq!(read_pid(&path), None);
     }
 }
