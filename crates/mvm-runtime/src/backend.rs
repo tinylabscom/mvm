@@ -1192,8 +1192,9 @@ mod tests {
         for (name, declared) in [
             ("firecracker", true),
             ("hvf", true),
-            ("libkrun", false),
-            ("qemu", false),
+            ("apple-container", true),
+            ("libkrun", true),
+            ("qemu", true),
             ("wasm", false),
         ] {
             assert_eq!(
@@ -1210,7 +1211,14 @@ mod tests {
     #[test]
     fn every_backend_that_declares_the_mailbox_names_a_dial_route() {
         let state = std::path::Path::new("/var/mvm/vm-a");
-        for name in ["firecracker", "hvf", "libkrun", "qemu", "wasm"] {
+        for name in [
+            "firecracker",
+            "hvf",
+            "apple-container",
+            "libkrun",
+            "qemu",
+            "wasm",
+        ] {
             let backend = AnyBackend::from_hypervisor(name);
             let route = backend.host_dial_route(state, 5257);
             if backend.capabilities().guest_mailbox {
@@ -1233,6 +1241,25 @@ mod tests {
             Some(HostDialRoute::Mux(std::path::PathBuf::from(
                 mvm_agentd::vsock::vsock_uds_path(&state.to_string_lossy())
             )))
+        );
+    }
+
+    #[test]
+    fn libkrun_and_qemu_dial_the_flat_per_port_socket_and_apple_container_hvfs() {
+        let state = std::path::Path::new("/var/mvm/vm-a");
+        let flat = Some(HostDialRoute::PortSocket(
+            mvm_core::config::vm_vsock_port_socket_at(state, 5257),
+        ));
+        for name in ["libkrun", "qemu"] {
+            assert_eq!(
+                AnyBackend::from_hypervisor(name).host_dial_route(state, 5257),
+                flat,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            AnyBackend::from_hypervisor("apple-container").host_dial_route(state, 5257),
+            AnyBackend::from_hypervisor("hvf").host_dial_route(state, 5257)
         );
     }
 
@@ -1537,8 +1564,20 @@ mod tests {
             std::fs::create_dir_all(vms.join(name)).expect("mkdir vm dir");
             std::fs::write(vms.join(name).join(marker), "123").expect("write marker");
         }
+        // A libkrun marker that also records the start time classifies alike.
+        std::fs::create_dir_all(vms.join("l2")).expect("mkdir vm dir");
+        std::fs::write(
+            vms.join("l2").join("libkrun.pid"),
+            mvm_vmm::host::network_endpoint_spawn::EndpointPid::of_child(std::process::id())
+                .render(),
+        )
+        .expect("write marker");
         env.set("HOME", temp.path());
         env.set("MVM_HOME", temp.path());
+        assert!(matches!(
+            AnyBackend::for_started_vm("l2"),
+            Some(AnyBackend::Libkrun(_))
+        ));
 
         let q = AnyBackend::for_started_vm("q1");
         let l = AnyBackend::for_started_vm("l1");

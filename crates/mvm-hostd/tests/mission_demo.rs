@@ -631,12 +631,13 @@ fn a_guest_flooding_the_mailbox_port_is_refused_at_its_own_queue() {
         }
         verdicts
     });
-    let absent = node.home.path().join("absent.sock");
-    for _ in 0..=LIMITS.max_depth {
-        channel
-            .service
-            .serve_guest(&absent, &mux, &mut sealer)
-            .unwrap();
+    for served in 0..=LIMITS.max_depth {
+        let outcome = channel.service.serve_guest(
+            &mvm_core::vm_backend::HostDialRoute::Mux(mux.clone()),
+            &mut sealer,
+        );
+        // A refusal for capacity is no progress: the launch backs off.
+        assert_eq!(outcome.is_err(), served == LIMITS.max_depth);
     }
     let verdicts = guest.join().unwrap();
     assert!(verdicts[..LIMITS.max_depth].iter().all(Result::is_ok));
@@ -644,6 +645,66 @@ fn a_guest_flooding_the_mailbox_port_is_refused_at_its_own_queue() {
         verdicts[LIMITS.max_depth],
         Err(Refusal::QueueFull(LIMITS.max_depth))
     );
+}
+
+/// More messages than the host queue holds are all delivered, in order and
+/// once each, as the reader drains it: the guest keeps what the full queue
+/// refused instead of consuming it.
+#[test]
+fn a_full_host_queue_delays_the_guest_outbox_instead_of_dropping_it() {
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::net::UnixListener;
+
+    let (node, channel) = channel_with_one_node();
+    let mut sealer = sealer(
+        &channel,
+        &[MailboxOperation::Send, MailboxOperation::Receive],
+    );
+    let total = LIMITS.max_depth + 10;
+    let outbox = node.home.path().join("outbox");
+    std::fs::create_dir(&outbox).unwrap();
+    for i in 0..total {
+        let message = OutboxMessage {
+            body: format!("m{i}").into_bytes(),
+            ..outbox_message()
+        };
+        mvm_agentd::mailbox_outbox::write_outbox(&outbox, &message).unwrap();
+    }
+    let mux = node.home.path().join("fc.vsock");
+    let listener = UnixListener::bind(&mux).unwrap();
+    let guest_outbox = outbox.clone();
+    // Each dial is one guest connection; the guest side forwards the oldest
+    // spooled message, exactly as the agent's accept loop does.
+    let guest = std::thread::spawn(move || {
+        while std::fs::read_dir(&guest_outbox).unwrap().next().is_some() {
+            let (stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            (&stream).write_all(b"OK 1\n").unwrap();
+            let mut stream = stream;
+            let _ = mvm_agentd::mailbox_outbox::forward_outbox(&mut stream, &guest_outbox);
+        }
+    });
+    let route = mvm_core::vm_backend::HostDialRoute::Mux(mux);
+    let mut received = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while received.len() < total && std::time::Instant::now() < deadline {
+        let dialed = channel.service.serve_guest(&route, &mut sealer);
+        if dialed.is_err() {
+            // The queue is full: the reader drains it, then the dial resumes.
+            while let Some(message) = channel.service.receive() {
+                received.push(String::from_utf8(message).unwrap());
+            }
+        }
+    }
+    while let Some(message) = channel.service.receive() {
+        received.push(String::from_utf8(message).unwrap());
+    }
+    let want: Vec<String> = (0..total).map(|i| format!("m{i}")).collect();
+    assert_eq!(received, want);
+    guest.join().unwrap();
 }
 
 /// A guest whose workload has not written its outbox yet accepts the dial and
@@ -666,11 +727,13 @@ fn a_guest_that_closes_without_a_frame_is_dialed_again() {
             .unwrap();
         stream.write_all(b"OK 1\n").unwrap();
     });
-    let absent = node.home.path().join("absent.sock");
     assert!(
         channel
             .service
-            .serve_guest(&absent, &mux, &mut sealer)
+            .serve_guest(
+                &mvm_core::vm_backend::HostDialRoute::Mux(mux.clone()),
+                &mut sealer
+            )
             .is_err()
     );
     guest.join().unwrap();
@@ -696,7 +759,10 @@ fn a_guest_without_the_send_operation_is_refused_across_the_port() {
     });
     channel
         .service
-        .serve_guest(&node.home.path().join("absent.sock"), &mux, &mut sealer)
+        .serve_guest(
+            &mvm_core::vm_backend::HostDialRoute::Mux(mux.clone()),
+            &mut sealer,
+        )
         .unwrap();
     assert!(matches!(guest.join().unwrap(), Err(Refusal::Mailbox(_))));
     assert!(channel.service.receive().is_none(), "nothing was queued");
@@ -727,7 +793,10 @@ fn guest_sends_to(recipient: PrincipalId) -> (Result<(), Refusal>, Option<Vec<u8
     });
     channel
         .service
-        .serve_guest(&node.home.path().join("absent.sock"), &mux, &mut sealer)
+        .serve_guest(
+            &mvm_core::vm_backend::HostDialRoute::Mux(mux.clone()),
+            &mut sealer,
+        )
         .unwrap();
     (guest.join().unwrap(), channel.service.receive())
 }
@@ -796,13 +865,14 @@ fn a_signed_mailbox_grant_alone_makes_the_host_serve_the_guest_port() {
     let (node, channel) = channel_with_one_node();
     let ops = [MailboxOperation::Send, MailboxOperation::Receive];
     let outbox = node.home.path().join("outbox");
-    std::fs::write(&outbox, outbox_message().encode()).unwrap();
+    std::fs::create_dir(&outbox).unwrap();
+    mvm_agentd::mailbox_outbox::write_outbox(&outbox, &outbox_message()).unwrap();
     let per_port = node.home.path().join("port.sock");
     let socket = node.home.path().join("granted.sock");
-    let absent_mux = node.home.path().join("absent-mux");
 
     // No grant: nothing is bound and the guest port is never dialed.
     let listener = UnixListener::bind(&per_port).unwrap();
+    let route = mvm_core::vm_backend::HostDialRoute::PortSocket(per_port.clone());
     listener.set_nonblocking(true).unwrap();
     let (plan, trust) = plan_and_trust(&channel, false);
     let sealer_for = || {
@@ -819,7 +889,7 @@ fn a_signed_mailbox_grant_alone_makes_the_host_serve_the_guest_port() {
         sealer_for(),
         LIMITS,
         &socket,
-        (&per_port, &absent_mux),
+        &route,
     );
     assert!(none.unwrap().is_none());
     assert!(!socket.exists(), "no service socket without a grant");
@@ -837,7 +907,7 @@ fn a_signed_mailbox_grant_alone_makes_the_host_serve_the_guest_port() {
         sealer_for(),
         LIMITS,
         &socket,
-        (&per_port, &absent_mux),
+        &route,
     );
     assert!(foreign.is_err(), "a foreign authority key is not honored");
 
@@ -854,7 +924,7 @@ fn a_signed_mailbox_grant_alone_makes_the_host_serve_the_guest_port() {
         sealer_for(),
         LIMITS,
         &socket,
-        (&per_port, &absent_mux),
+        &route,
     )
     .unwrap()
     .expect("a granted plan is served");
@@ -926,9 +996,10 @@ fn a_restarted_mailbox_sealer_does_not_reuse_its_sender_boot() {
 
     let dir = tempfile::tempdir().unwrap();
     host_keys(dir.path(), 5);
-    let authority = authority_key_for(dir.path(), &address().mailbox).unwrap();
+    let authority =
+        authority_key_for(dir.path(), &address().mailbox, MbEpoch::new(1).unwrap()).unwrap();
     let grant = granted_plan(authority.to_bytes()).mailbox.unwrap();
-    let keys = derive_launch_keys(dir.path(), &grant).unwrap();
+    let keys = derive_launch_keys(dir.path(), &grant, &test_secret()).unwrap();
     let (_, first) = keys.trust();
     let (_, restarted) = keys.trust();
     let first = first.with_grant(&grant).unwrap();
@@ -938,6 +1009,10 @@ fn a_restarted_mailbox_sealer_does_not_reuse_its_sender_boot() {
         first.header.sender_boot, restarted.header.sender_boot,
         "a fresh process starts its sequence at one but must not replay the prior boot's identity"
     );
+}
+
+fn test_secret() -> mvm_core::crypto::aead::Key {
+    mvm_core::crypto::aead::Key::from_bytes([5; 32])
 }
 
 /// The sealing keys are derived from the host key per mailbox: they differ
@@ -952,15 +1027,21 @@ fn derived_mailbox_keys_differ_per_mailbox_and_are_not_the_host_key() {
         MailboxId::from_bytes([1; 32]),
         MailboxId::from_bytes([2; 32]),
     );
-    let a1 = authority_key_for(keys.path(), &m1).unwrap();
-    assert_ne!(a1, authority_key_for(keys.path(), &m2).unwrap());
-    assert_ne!(a1, authority_key_for(other.path(), &m1).unwrap());
+    let a1 = authority_key_for(keys.path(), &m1, MbEpoch::new(1).unwrap()).unwrap();
+    assert_ne!(
+        a1,
+        authority_key_for(keys.path(), &m2, MbEpoch::new(1).unwrap()).unwrap()
+    );
+    assert_ne!(
+        a1,
+        authority_key_for(other.path(), &m1, MbEpoch::new(1).unwrap()).unwrap()
+    );
     assert_ne!(a1, SigningKey::from_bytes(&[5; 32]).verifying_key());
 
     let mut plan = granted_plan(a1.to_bytes());
     plan.mailbox.as_mut().unwrap().mailbox = m1;
     let grant = plan.mailbox.unwrap();
-    let (policy, sealer) = host_trust(keys.path(), &grant).unwrap();
+    let (policy, sealer) = host_trust(keys.path(), &grant, &test_secret()).unwrap();
     assert_eq!(policy.authority_key, a1);
     assert_ne!(sealer.sender_key.to_bytes(), [5; 32]);
     assert_ne!(sealer.authority_key.to_bytes(), [5; 32]);
@@ -970,8 +1051,10 @@ fn derived_mailbox_keys_differ_per_mailbox_and_are_not_the_host_key() {
     );
     // An authority the host does not derive for this mailbox is refused.
     let mut foreign = grant;
-    foreign.authority_key = authority_key_for(keys.path(), &m2).unwrap().to_bytes();
-    assert!(host_trust(keys.path(), &foreign).is_err());
+    foreign.authority_key = authority_key_for(keys.path(), &m2, MbEpoch::new(1).unwrap())
+        .unwrap()
+        .to_bytes();
+    assert!(host_trust(keys.path(), &foreign, &test_secret()).is_err());
 }
 
 /// A granted plan's derived keys serve the guest port from their own thread
@@ -986,11 +1069,13 @@ fn derived_keys_serve_the_guest_port_and_queue_what_the_guest_sent() {
     let dir = tempfile::tempdir_in("/tmp").unwrap();
     host_keys(dir.path(), 5);
     let listener = UnixListener::bind(dir.path().join("port.sock")).unwrap();
-    let authority = authority_key_for(dir.path(), &address().mailbox).unwrap();
+    let authority =
+        authority_key_for(dir.path(), &address().mailbox, MbEpoch::new(1).unwrap()).unwrap();
     let grant = granted_plan(authority.to_bytes()).mailbox.unwrap();
-    let keys = derive_launch_keys(dir.path(), &grant).unwrap();
+    let keys = derive_launch_keys(dir.path(), &grant, &test_secret()).unwrap();
     let outbox = dir.path().join("outbox");
-    std::fs::write(&outbox, outbox_message().encode()).unwrap();
+    std::fs::create_dir(&outbox).unwrap();
+    mvm_agentd::mailbox_outbox::write_outbox(&outbox, &outbox_message()).unwrap();
     let guest = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         mvm_agentd::mailbox_outbox::forward_outbox(&mut stream, &outbox)
@@ -1000,9 +1085,8 @@ fn derived_keys_serve_the_guest_port_and_queue_what_the_guest_sent() {
         keys,
         ServePaths {
             socket: dir.path().join("mailbox.sock"),
-            guest_port: dir.path().join("port.sock"),
-            firecracker_mux: dir.path().join("absent-mux"),
             intent_dir: Some(dir.path().join("intents")),
+            route: mvm_core::vm_backend::HostDialRoute::PortSocket(dir.path().join("port.sock")),
         },
         LAUNCH_LIMITS,
     );
@@ -1026,9 +1110,10 @@ fn a_running_guest_submits_again_after_its_first_message_was_consumed() {
     let dir = tempfile::tempdir_in("/tmp").unwrap();
     host_keys(dir.path(), 5);
     let listener = UnixListener::bind(dir.path().join("port.sock")).unwrap();
-    let authority = authority_key_for(dir.path(), &address().mailbox).unwrap();
+    let authority =
+        authority_key_for(dir.path(), &address().mailbox, MbEpoch::new(1).unwrap()).unwrap();
     let grant = granted_plan(authority.to_bytes()).mailbox.unwrap();
-    let keys = derive_launch_keys(dir.path(), &grant).unwrap();
+    let keys = derive_launch_keys(dir.path(), &grant, &test_secret()).unwrap();
     let outbox = dir.path().join("outbox");
     mvm_agentd::mailbox_outbox::write_outbox(&outbox, &outbox_message()).unwrap();
     let guest_outbox = outbox.clone();
@@ -1044,9 +1129,8 @@ fn a_running_guest_submits_again_after_its_first_message_was_consumed() {
         keys,
         ServePaths {
             socket: dir.path().join("mailbox.sock"),
-            guest_port: dir.path().join("port.sock"),
-            firecracker_mux: dir.path().join("absent-mux"),
             intent_dir: Some(dir.path().join("intents")),
+            route: mvm_core::vm_backend::HostDialRoute::PortSocket(dir.path().join("port.sock")),
         },
         LAUNCH_LIMITS,
     );
@@ -2159,11 +2243,13 @@ fn guest_sends(node: &Node, channel: &Channel, bodies: &[&[u8]]) -> Vec<Result<(
             })
             .collect::<Vec<_>>()
     });
-    let absent = node.home.path().join("absent.sock");
     for _ in bodies {
         channel
             .service
-            .serve_guest(&absent, &mux, &mut sealer)
+            .serve_guest(
+                &mvm_core::vm_backend::HostDialRoute::Mux(mux.clone()),
+                &mut sealer,
+            )
             .unwrap();
     }
     guest.join().unwrap()
@@ -2274,12 +2360,23 @@ fn missing_verified_posture_prevents_the_helper_from_reporting_ready() {
     host_keys(&keys, 5);
     let state_dir = dir.path().join("vm");
     std::fs::create_dir_all(&state_dir).unwrap();
-    let authority = mvm_hostd::mailbox_launch::authority_key_for(&keys, &address().mailbox)
-        .unwrap()
-        .to_bytes();
+    let authority = mvm_hostd::mailbox_launch::authority_key_for(
+        &keys,
+        &address().mailbox,
+        MbEpoch::new(1).unwrap(),
+    )
+    .unwrap()
+    .to_bytes();
     let grant = granted_plan(authority).mailbox.unwrap();
-    let backend = mvm_runtime::backend::AnyBackend::from_hypervisor("hvf");
-    let config = build_config(&keys, &grant, &state_dir, &backend).unwrap();
+    let config = build_config(
+        &keys,
+        &grant,
+        &state_dir,
+        mvm_runtime::backend::AnyBackend::from_hypervisor("hvf")
+            .host_dial_route(&state_dir, mvm_contract::protocol::mailbox::MAILBOX_PORT)
+            .unwrap(),
+    )
+    .unwrap();
     assert!(
         config.posture.is_none(),
         "unadmitted helper has no Dev token"

@@ -9,13 +9,15 @@ use mvm_contract::protocol::mailbox::{
 
 use crate::crypto::aead::Key;
 use crate::mailbox::journal::{
-    FileJournalAnchor, JournalAdmission, JournalError, JournalLimits, JournalReceive, JournalTip,
-    MailboxJournal,
+    FileJournalAnchor, HistoryKeyCustody, HistoryKeyRef, JournalAdmission, JournalAnchor,
+    JournalError, JournalLimits, JournalReceive, JournalTip, MailboxJournal,
 };
 use crate::mailbox::{
     InMemoryReplayProtector, SealRequest, decode_envelope, open_authenticated_envelope,
     sign_capability,
 };
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const NOW: i64 = 1_800_000_000_000;
 
@@ -30,6 +32,102 @@ fn address() -> MailboxAddress {
         mailbox: MailboxId::from_bytes(id(3)),
         recipient: PrincipalId::from_bytes(id(4)),
     }
+}
+
+// Independent storage and existing-only key custody are simulated here only
+// to exercise the stronger protocol; the shipped local tier uses a host-file
+// anchor and must never return this tier's V1 acceptance.
+struct TestAnchor {
+    tip: Mutex<JournalTip>,
+    fail_next: AtomicBool,
+}
+
+impl TestAnchor {
+    fn new() -> Self {
+        Self {
+            tip: Mutex::new(JournalTip::genesis()),
+            fail_next: AtomicBool::new(false),
+        }
+    }
+
+    fn tip(&self) -> JournalTip {
+        *self.tip.lock().unwrap()
+    }
+
+    fn fail_next(&self) {
+        self.fail_next.store(true, Ordering::SeqCst);
+    }
+}
+
+impl JournalAnchor for TestAnchor {
+    fn load(&self, requested: MailboxAddress) -> Result<JournalTip, JournalError> {
+        if requested != address() {
+            return Err(JournalError::WrongAuthority);
+        }
+        Ok(self.tip())
+    }
+
+    fn compare_and_advance(
+        &self,
+        requested: MailboxAddress,
+        expected: JournalTip,
+        next: JournalTip,
+    ) -> Result<(), JournalError> {
+        if requested != address() {
+            return Err(JournalError::WrongAuthority);
+        }
+        if self.fail_next.swap(false, Ordering::SeqCst) {
+            return Err(JournalError::Uncertain);
+        }
+        let mut current = self.tip.lock().unwrap();
+        if *current != expected || expected.cursor.checked_add(1) != Some(next.cursor) {
+            return Err(JournalError::Rollback);
+        }
+        *current = next;
+        Ok(())
+    }
+}
+
+fn history_reference() -> HistoryKeyRef {
+    HistoryKeyRef::new(address(), epoch(), id(92), 1).expect("test history key")
+}
+
+struct TestCustody(u8);
+
+impl HistoryKeyCustody for TestCustody {
+    fn load_existing(&self, reference: &HistoryKeyRef) -> Result<Key, JournalError> {
+        if *reference != history_reference() {
+            return Err(JournalError::HistoryKeyMismatch);
+        }
+        Ok(Key::from_bytes([self.0; 32]))
+    }
+}
+
+fn open_test_journal(
+    root: &std::path::Path,
+    signer: &SigningKey,
+    limits: JournalLimits,
+    anchor: &TestAnchor,
+    key: u8,
+) -> Result<MailboxJournal, JournalError> {
+    MailboxJournal::open_with_custody(
+        root,
+        history_reference(),
+        signer.verifying_key(),
+        limits,
+        &TestCustody(key),
+        anchor,
+    )
+}
+
+fn advance_tip(
+    anchor: &TestAnchor,
+    tip: &mut JournalTip,
+    next: JournalTip,
+) -> Result<(), JournalError> {
+    anchor.compare_and_advance(address(), *tip, next)?;
+    *tip = next;
+    Ok(())
 }
 
 fn issuer() -> PrincipalId {
@@ -301,18 +399,11 @@ fn receive_and_ack_require_independent_authority_and_survive_recovery() {
         max_records: 3,
         max_bytes: 64 * 1024,
     };
-    let mut journal = MailboxJournal::open(
-        dir.path(),
-        address(),
-        signer.verifying_key(),
-        id(90),
-        limits,
-        JournalTip::genesis(),
-    )
-    .expect("empty journal");
-    let mut tip = JournalTip::genesis();
+    let anchor = TestAnchor::new();
+    let mut journal =
+        open_test_journal(dir.path(), signer, limits, &anchor, 90).expect("empty journal");
     journal
-        .admit(
+        .admit_with_anchor(
             JournalAdmission {
                 envelope: fixture.prepared.envelope(),
                 capability: &fixture.capability,
@@ -321,12 +412,10 @@ fn receive_and_ack_require_independent_authority_and_survive_recovery() {
                 sender_key: &sender,
                 signer,
             },
-            |committed| {
-                tip = committed;
-                Ok(())
-            },
+            &anchor,
         )
         .expect("durable Send");
+    let mut tip = anchor.tip();
     let mut grant = fixture.capability.grant.clone();
     grant.capability_id = CapabilityId::from_bytes(id(99));
     grant.subject = address().recipient;
@@ -361,8 +450,7 @@ fn receive_and_ack_require_independent_authority_and_survive_recovery() {
     );
     journal
         .acknowledge(identity, request(&receive_capability), |committed| {
-            tip = committed;
-            Ok(())
+            advance_tip(&anchor, &mut tip, committed)
         })
         .expect("durable ACK");
     assert_eq!(
@@ -395,15 +483,8 @@ fn receive_and_ack_require_independent_authority_and_survive_recovery() {
             .is_none()
     );
     drop(journal);
-    let recovered = MailboxJournal::open(
-        dir.path(),
-        address(),
-        signer.verifying_key(),
-        id(90),
-        limits,
-        tip,
-    )
-    .expect("journal and ACK recover");
+    let recovered = open_test_journal(dir.path(), signer, limits, &anchor, 90)
+        .expect("journal and ACK recover");
     assert!(
         recovered
             .receive_next(request(&receive_capability))
@@ -417,26 +498,12 @@ fn receive_and_ack_require_independent_authority_and_survive_recovery() {
     tampered[40] ^= 1;
     std::fs::write(&ack_path, tampered).expect("tamper ACK fixture");
     assert!(matches!(
-        MailboxJournal::open(
-            dir.path(),
-            address(),
-            signer.verifying_key(),
-            id(90),
-            limits,
-            tip
-        ),
+        open_test_journal(dir.path(), signer, limits, &anchor, 90),
         Err(JournalError::Corrupt)
     ));
     std::fs::remove_file(&ack_path).expect("roll back ACK fixture");
     assert!(matches!(
-        MailboxJournal::open(
-            dir.path(),
-            address(),
-            signer.verifying_key(),
-            id(90),
-            limits,
-            tip
-        ),
+        open_test_journal(dir.path(), signer, limits, &anchor, 90),
         Err(JournalError::Rollback)
     ));
     std::fs::write(&ack_path, ack).expect("restore ACK fixture");
@@ -463,18 +530,10 @@ fn guest_lease_and_signed_ack_are_durable_replay_fenced_and_boot_bound() {
         max_records: 5,
         max_bytes: 128 * 1024,
     };
-    let mut journal = MailboxJournal::open(
-        dir.path(),
-        address(),
-        signer.verifying_key(),
-        id(90),
-        limits,
-        JournalTip::genesis(),
-    )
-    .unwrap();
-    let mut tip = JournalTip::genesis();
+    let anchor = TestAnchor::new();
+    let mut journal = open_test_journal(dir.path(), signer, limits, &anchor, 90).unwrap();
     journal
-        .admit(
+        .admit_with_anchor(
             JournalAdmission {
                 envelope: fixture.prepared.envelope(),
                 capability: &fixture.capability,
@@ -483,12 +542,10 @@ fn guest_lease_and_signed_ack_are_durable_replay_fenced_and_boot_bound() {
                 sender_key: &sender,
                 signer,
             },
-            |next| {
-                tip = next;
-                Ok(())
-            },
+            &anchor,
         )
         .expect("durable send before guest reader");
+    let mut tip = anchor.tip();
     let mut receive_grant = fixture.capability.grant.clone();
     receive_grant.capability_id = CapabilityId::from_bytes(id(51));
     receive_grant.subject = address().recipient;
@@ -578,22 +635,20 @@ fn guest_lease_and_signed_ack_are_durable_replay_fenced_and_boot_bound() {
     assert_eq!(journal.tip(), tip);
     let leased = journal
         .lease_next(lease_req(scope), |next| {
-            tip = next;
-            Ok(())
+            advance_tip(&anchor, &mut tip, next)
         })
         .expect("verified guest obtains a lease")
         .expect("pending ciphertext");
     assert_eq!(leased.payload(), b"hello");
     let signed_lease = leased.lease().clone();
     assert_eq!(journal.tip(), tip);
-    assert_eq!(
-        journal
-            .lease_next(lease_req(scope), |_| panic!("same lease does not append"))
-            .unwrap()
-            .unwrap()
-            .lease(),
-        &signed_lease
-    );
+    assert!(matches!(
+        journal.lease_next(lease_req(scope), |_| panic!(
+            "replayed challenge cannot append"
+        )),
+        Err(JournalError::ConflictingRetry)
+    ));
+    assert_eq!(journal.tip(), tip);
     let ack = sign_delivery_ack(
         MailboxDeliveryAck {
             protocol_version: ProtocolVersion::V1,
@@ -621,10 +676,7 @@ fn guest_lease_and_signed_ack_are_durable_replay_fenced_and_boot_bound() {
     ));
     assert_eq!(journal.tip(), tip);
     journal
-        .acknowledge_signed(ack_req(&ack), |next| {
-            tip = next;
-            Ok(())
-        })
+        .acknowledge_signed(ack_req(&ack), |next| advance_tip(&anchor, &mut tip, next))
         .expect("signed ACK commits");
     assert_eq!(
         journal
@@ -641,15 +693,8 @@ fn guest_lease_and_signed_ack_are_durable_replay_fenced_and_boot_bound() {
     ));
     assert!(journal.receive_next(receive()).unwrap().is_none());
     drop(journal);
-    let mut recovered = MailboxJournal::open(
-        dir.path(),
-        address(),
-        signer.verifying_key(),
-        id(90),
-        limits,
-        tip,
-    )
-    .expect("lease and ACK survive restart");
+    let mut recovered = open_test_journal(dir.path(), signer, limits, &anchor, 90)
+        .expect("lease and ACK survive restart");
     assert!(recovered.receive_next(receive()).unwrap().is_none());
     assert_eq!(
         recovered
@@ -685,7 +730,7 @@ fn guest_lease_and_signed_ack_are_durable_replay_fenced_and_boot_bound() {
     )
     .unwrap();
     recovered
-        .admit(
+        .admit_with_anchor(
             JournalAdmission {
                 envelope: &next,
                 capability: &fixture.capability,
@@ -694,12 +739,10 @@ fn guest_lease_and_signed_ack_are_durable_replay_fenced_and_boot_bound() {
                 sender_key: &sender,
                 signer,
             },
-            |committed| {
-                tip = committed;
-                Ok(())
-            },
+            &anchor,
         )
         .unwrap();
+    tip = anchor.tip();
     assert!(matches!(
         recovered.lease_next(lease_req(scope), |_| panic!("reused challenge")),
         Err(JournalError::ConflictingRetry)
@@ -714,10 +757,7 @@ fn guest_lease_and_signed_ack_are_durable_replay_fenced_and_boot_bound() {
                 possession_signature: &fresh_proof,
                 ..lease_req(scope)
             },
-            |committed| {
-                tip = committed;
-                Ok(())
-            },
+            |committed| advance_tip(&anchor, &mut tip, committed),
         )
         .unwrap()
         .unwrap();
@@ -740,18 +780,11 @@ fn durable_admission_recovers_ciphertext_dedup_and_a_signed_destination_verdict(
         max_records: 2,
         max_bytes: 64 * 1024,
     };
-    let mut journal = MailboxJournal::open(
-        dir.path(),
-        address(),
-        signer.verifying_key(),
-        id(90),
-        limits,
-        JournalTip::genesis(),
-    )
-    .expect("empty journal");
-    let mut anchored = None;
+    let anchor = TestAnchor::new();
+    let mut journal =
+        open_test_journal(dir.path(), signer, limits, &anchor, 90).expect("empty journal");
     let receipt = journal
-        .admit(
+        .admit_with_anchor(
             JournalAdmission {
                 envelope: fixture.prepared.envelope(),
                 capability: &fixture.capability,
@@ -760,16 +793,13 @@ fn durable_admission_recovers_ciphertext_dedup_and_a_signed_destination_verdict(
                 sender_key: &sender,
                 signer,
             },
-            |tip| {
-                anchored = Some(tip);
-                Ok(())
-            },
+            &anchor,
         )
         .expect("durable acceptance");
     assert_eq!(receipt.receipt.outcome, DeliveryOutcome::AcceptedDurable);
     crate::mailbox::verify_receipt(&receipt, &signer.verifying_key())
         .expect("destination authority signature");
-    let tip = anchored.expect("external anchor is published before acceptance");
+    let tip = anchor.tip();
     assert_eq!(journal.tip(), tip);
     let bytes =
         std::fs::read(dir.path().join("entry-00000000000000000001.bin")).expect("durable record");
@@ -785,17 +815,10 @@ fn durable_admission_recovers_ciphertext_dedup_and_a_signed_destination_verdict(
     }
     drop(journal);
 
-    let mut recovered = MailboxJournal::open(
-        dir.path(),
-        address(),
-        signer.verifying_key(),
-        id(90),
-        limits,
-        tip,
-    )
-    .expect("recover accepted entry");
+    let mut recovered =
+        open_test_journal(dir.path(), signer, limits, &anchor, 90).expect("recover accepted entry");
     let duplicate = recovered
-        .admit(
+        .admit_with_anchor(
             JournalAdmission {
                 envelope: fixture.prepared.envelope(),
                 capability: &fixture.capability,
@@ -804,7 +827,7 @@ fn durable_admission_recovers_ciphertext_dedup_and_a_signed_destination_verdict(
                 sender_key: &sender,
                 signer,
             },
-            |_| panic!("a duplicate cannot advance the external anchor"),
+            &anchor,
         )
         .expect("duplicate receipt");
     assert_eq!(duplicate.receipt.outcome, DeliveryOutcome::Duplicate);
@@ -825,7 +848,7 @@ fn durable_admission_recovers_ciphertext_dedup_and_a_signed_destination_verdict(
     )
     .expect("fresh ciphertext with the same signed message identity");
     assert!(matches!(
-        recovered.admit(
+        recovered.admit_with_anchor(
             JournalAdmission {
                 envelope: &conflicting,
                 capability: &fixture.capability,
@@ -834,7 +857,7 @@ fn durable_admission_recovers_ciphertext_dedup_and_a_signed_destination_verdict(
                 sender_key: &sender,
                 signer,
             },
-            |_| Ok(()),
+            &anchor,
         ),
         Err(JournalError::ConflictingRetry)
     ));
@@ -952,17 +975,11 @@ fn journal_recovery_refuses_wrong_key_tamper_truncation_and_rollback() {
         max_records: 1,
         max_bytes: 64 * 1024,
     };
-    let mut journal = MailboxJournal::open(
-        dir.path(),
-        address(),
-        signer.verifying_key(),
-        id(90),
-        limits,
-        JournalTip::genesis(),
-    )
-    .expect("empty journal");
+    let anchor = TestAnchor::new();
+    let mut journal =
+        open_test_journal(dir.path(), signer, limits, &anchor, 90).expect("empty journal");
     journal
-        .admit(
+        .admit_with_anchor(
             JournalAdmission {
                 envelope: fixture.prepared.envelope(),
                 capability: &fixture.capability,
@@ -971,45 +988,28 @@ fn journal_recovery_refuses_wrong_key_tamper_truncation_and_rollback() {
                 sender_key: &sender,
                 signer,
             },
-            |_| Ok(()),
+            &anchor,
         )
         .expect("accepted");
-    let tip = journal.tip();
+    assert_eq!(journal.tip(), anchor.tip());
     drop(journal);
     assert!(matches!(
-        MailboxJournal::open(
-            dir.path(),
-            address(),
-            signer.verifying_key(),
-            id(91),
-            limits,
-            tip
-        ),
+        open_test_journal(dir.path(), signer, limits, &anchor, 91),
         Err(JournalError::Corrupt)
     ));
     let mut wrong_address = address();
     wrong_address.tenant = TenantId::from_bytes(id(99));
+    let wrong_reference = HistoryKeyRef::new(wrong_address, epoch(), id(92), 1).unwrap();
     assert!(matches!(
-        MailboxJournal::open(
+        MailboxJournal::open_with_custody(
             dir.path(),
-            wrong_address,
+            wrong_reference,
             signer.verifying_key(),
-            id(90),
             limits,
-            tip
+            &TestCustody(90),
+            &anchor,
         ),
-        Err(JournalError::Corrupt)
-    ));
-    assert!(matches!(
-        MailboxJournal::open(
-            dir.path(),
-            address(),
-            signer.verifying_key(),
-            id(90),
-            limits,
-            JournalTip::genesis()
-        ),
-        Err(JournalError::Rollback)
+        Err(JournalError::HistoryKeyMismatch | JournalError::WrongAuthority)
     ));
     let path = dir.path().join("entry-00000000000000000001.bin");
     let original = std::fs::read(&path).expect("record");
@@ -1017,27 +1017,18 @@ fn journal_recovery_refuses_wrong_key_tamper_truncation_and_rollback() {
     tampered[40] ^= 1;
     std::fs::write(&path, tampered).expect("tamper fixture");
     assert!(matches!(
-        MailboxJournal::open(
-            dir.path(),
-            address(),
-            signer.verifying_key(),
-            id(90),
-            limits,
-            tip
-        ),
+        open_test_journal(dir.path(), signer, limits, &anchor, 90),
         Err(JournalError::Corrupt)
     ));
     std::fs::write(&path, &original[..original.len() - 1]).expect("truncate fixture");
     assert!(matches!(
-        MailboxJournal::open(
-            dir.path(),
-            address(),
-            signer.verifying_key(),
-            id(90),
-            limits,
-            tip
-        ),
+        open_test_journal(dir.path(), signer, limits, &anchor, 90),
         Err(JournalError::Corrupt)
+    ));
+    std::fs::remove_file(&path).expect("roll back anchored record");
+    assert!(matches!(
+        open_test_journal(dir.path(), signer, limits, &anchor, 90),
+        Err(JournalError::Rollback)
     ));
 }
 
@@ -1047,20 +1038,20 @@ fn a_full_journal_never_publishes_a_durable_acceptance_or_advances_its_tip() {
     let fixture = mailbox_fixture();
     let signer = &fixture.capability_authority;
     let sender = SigningKey::from_bytes(&id(22)).verifying_key();
-    let mut journal = MailboxJournal::open(
+    let anchor = TestAnchor::new();
+    let mut journal = open_test_journal(
         dir.path(),
-        address(),
-        signer.verifying_key(),
-        id(90),
+        signer,
         JournalLimits {
             max_records: 1,
             max_bytes: 1,
         },
-        JournalTip::genesis(),
+        &anchor,
+        90,
     )
     .expect("empty journal");
     assert!(matches!(
-        journal.admit(
+        journal.admit_with_anchor(
             JournalAdmission {
                 envelope: fixture.prepared.envelope(),
                 capability: &fixture.capability,
@@ -1069,11 +1060,12 @@ fn a_full_journal_never_publishes_a_durable_acceptance_or_advances_its_tip() {
                 sender_key: &sender,
                 signer,
             },
-            |_| panic!("a quota refusal must not update the external anchor"),
+            &anchor,
         ),
         Err(JournalError::Full)
     ));
     assert_eq!(journal.tip(), JournalTip::genesis());
+    assert_eq!(anchor.tip(), JournalTip::genesis());
     assert_eq!(
         std::fs::read_dir(dir.path())
             .expect("journal directory")
@@ -1093,15 +1085,9 @@ fn anchor_failure_after_fsync_returns_uncertain_and_blocks_further_admission() {
         max_records: 2,
         max_bytes: 64 * 1024,
     };
-    let mut journal = MailboxJournal::open(
-        dir.path(),
-        address(),
-        signer.verifying_key(),
-        id(90),
-        limits,
-        JournalTip::genesis(),
-    )
-    .expect("empty journal");
+    let anchor = TestAnchor::new();
+    let mut journal =
+        open_test_journal(dir.path(), signer, limits, &anchor, 90).expect("empty journal");
     let encryption_key = Key::from_bytes(id(21));
     let request = || JournalAdmission {
         envelope: fixture.prepared.envelope(),
@@ -1111,8 +1097,9 @@ fn anchor_failure_after_fsync_returns_uncertain_and_blocks_further_admission() {
         sender_key: &sender,
         signer,
     };
+    anchor.fail_next();
     assert!(matches!(
-        journal.admit(request(), |_| Err(JournalError::Uncertain)),
+        journal.admit_with_anchor(request(), &anchor),
         Err(JournalError::Uncertain)
     ));
     assert_eq!(
@@ -1122,33 +1109,21 @@ fn anchor_failure_after_fsync_returns_uncertain_and_blocks_further_admission() {
     );
     assert!(
         matches!(
-            journal.admit(request(), |_| Ok(())),
+            journal.admit_with_anchor(request(), &anchor),
             Err(JournalError::Uncertain)
         ),
         "a failed anchor cannot be mistaken for a fresh acceptance"
     );
     drop(journal);
-    assert!(
-        matches!(
-            MailboxJournal::open(
-                dir.path(),
-                address(),
-                signer.verifying_key(),
-                id(90),
-                limits,
-                JournalTip::genesis()
-            ),
-            Err(JournalError::Rollback)
-        ),
-        "recovery with the old anchor fails closed until reconciliation"
-    );
+    let recovered = open_test_journal(dir.path(), signer, limits, &anchor, 90)
+        .expect("reconcile intact suffix");
+    assert_eq!(recovered.tip(), anchor.tip());
 }
 
 #[test]
 fn startup_reconciles_only_a_verified_fsynced_suffix_before_accepting_retries() {
     let dir = tempfile::tempdir().expect("destination");
     let root = dir.path().join("journal");
-    let anchor_path = dir.path().join("anchor");
     let fixture = mailbox_fixture();
     let signer = &fixture.capability_authority;
     let sender = SigningKey::from_bytes(&id(22)).verifying_key();
@@ -1157,16 +1132,8 @@ fn startup_reconciles_only_a_verified_fsynced_suffix_before_accepting_retries() 
         max_records: 2,
         max_bytes: 64 * 1024,
     };
-    let anchor = FileJournalAnchor::open(&anchor_path, address(), id(91)).expect("anchor");
-    let mut journal = MailboxJournal::open_reconciling(
-        &root,
-        address(),
-        signer.verifying_key(),
-        id(90),
-        limits,
-        &anchor,
-    )
-    .expect("empty journal");
+    let anchor = TestAnchor::new();
+    let mut journal = open_test_journal(&root, signer, limits, &anchor, 90).expect("empty journal");
     let request = || JournalAdmission {
         envelope: fixture.prepared.envelope(),
         capability: &fixture.capability,
@@ -1175,52 +1142,34 @@ fn startup_reconciles_only_a_verified_fsynced_suffix_before_accepting_retries() 
         sender_key: &sender,
         signer,
     };
+    anchor.fail_next();
     assert!(matches!(
-        journal.admit(request(), |_| Err(JournalError::Uncertain)),
+        journal.admit_with_anchor(request(), &anchor),
         Err(JournalError::Uncertain)
     ));
     assert_eq!(anchor.tip(), JournalTip::genesis());
     let fsynced = journal.tip();
     drop(journal);
-    drop(anchor);
 
-    let anchor = FileJournalAnchor::open(&anchor_path, address(), id(91)).expect("reopen anchor");
-    let mut recovered = MailboxJournal::open_reconciling(
-        &root,
-        address(),
-        signer.verifying_key(),
-        id(90),
-        limits,
-        &anchor,
-    )
-    .expect("reconcile verified suffix");
+    let mut recovered =
+        open_test_journal(&root, signer, limits, &anchor, 90).expect("reconcile verified suffix");
     assert_eq!(anchor.tip(), fsynced);
     let duplicate = recovered
-        .admit(request(), |_| panic!("a duplicate must not append"))
+        .admit_with_anchor(request(), &anchor)
         .expect("retry after reconciliation");
     assert_eq!(duplicate.receipt.outcome, DeliveryOutcome::Duplicate);
     assert_eq!(recovered.tip(), fsynced);
     drop(recovered);
-    drop(anchor);
 
-    let bad_anchor_path = dir.path().join("wrong-anchor");
-    let bad_anchor = FileJournalAnchor::open(&bad_anchor_path, address(), id(91))
-        .expect("independent wrong anchor");
-    bad_anchor
-        .advance(JournalTip {
+    let bad_anchor = TestAnchor {
+        tip: Mutex::new(JournalTip {
             cursor: 1,
             head: id(99),
-        })
-        .expect("valid MAC, wrong chain head");
+        }),
+        fail_next: AtomicBool::new(false),
+    };
     assert!(matches!(
-        MailboxJournal::open_reconciling(
-            &root,
-            address(),
-            signer.verifying_key(),
-            id(90),
-            limits,
-            &bad_anchor,
-        ),
+        open_test_journal(&root, signer, limits, &bad_anchor, 90),
         Err(JournalError::Rollback)
     ));
 }

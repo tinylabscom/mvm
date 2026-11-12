@@ -49,3 +49,6 @@ from that host.
 - Use secret references instead of plaintext credentials.
 - Name backend-specific limits for snapshots and cold mode.
 - Do not use broad phrases such as "impossible to leak" or "instant boot."
+
+For the distinct confidentiality and key-lifecycle limits of mailboxes, snapshots,
+volumes, and checkpoints, see [Encryption guarantees and limits](/security/encryption-guarantees/).

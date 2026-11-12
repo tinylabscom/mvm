@@ -4,7 +4,6 @@
 //! signing key material, opens per-VM workload chains on `RegisterVm`, routes
 //! appends by server-derived `vm_id`, and closes chains on `DeregisterVm`.
 
-use std::io::Read;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -13,15 +12,6 @@ use tracing::{error, info};
 
 use mvm_hostd::audit_signer::config::{SignerHelperConfig, parse_signer_helper as parse_config};
 use mvm_hostd::audit_signer::helper::{SignerHelper, serve_on_listener};
-
-fn read_stdin_blocking() -> Result<Vec<u8>> {
-    let mut buf = Vec::with_capacity(1024);
-    std::io::stdin()
-        .lock()
-        .read_to_end(&mut buf)
-        .context("mvm-signer-helper stdin read failed")?;
-    Ok(buf)
-}
 
 fn main() -> Result<()> {
     // First statement in the process: a panic before this line would
@@ -38,7 +28,7 @@ fn main() -> Result<()> {
         .json()
         .init();
 
-    let raw = read_stdin_blocking()?;
+    let raw = mvm_hostd::read_launch_config("mvm-signer-helper")?;
     let cfg: SignerHelperConfig =
         parse_config(&raw).context("mvm-signer-helper config parse failed")?;
     info!(

@@ -33,7 +33,7 @@ pub fn resolve_warm_artifact_plan(
                 false,
             )
             .with_context(|| format!("resolve prewarm OCI image {reference:?}"))?;
-            let kernel_path = super::super::env::builder_vm::ensure_workload_kernel()
+            let kernel_path = super::super::env::builder_vm::prepare_workload_kernel_for_launch()
                 .context("resolve prewarm workload kernel")?;
             Ok(WarmArtifactBuildPlan {
                 rootfs_path: image.rootfs_path,

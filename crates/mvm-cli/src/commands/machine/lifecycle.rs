@@ -240,12 +240,14 @@ impl CliStartHost {
 
 impl mvm_client::launch::machine_start::StartHost for CliStartHost {
     /// The CLI boots an explicit kernel on every backend: the pinned one, or a
-    /// workload kernel prepared by `mvmctl bootstrap`. Launch never acquires
-    /// one on a cache miss.
+    /// workload kernel, prepared on first use exactly as a transient run does. A
+    /// refusal means that preparation failed.
     fn workload_kernel(&self, _backend: &str) -> Result<Option<String>> {
         match up::resolve_kernel_pin_path(self.kernel_pinned)? {
             Some(kernel_path) => Ok(Some(kernel_path)),
-            None => crate::commands::env::builder_vm::ensure_workload_kernel().map(Some),
+            None => {
+                crate::commands::env::builder_vm::prepare_workload_kernel_for_launch().map(Some)
+            }
         }
     }
 
@@ -468,7 +470,19 @@ pub(super) fn quarantine_machine(
     .with_context(|| format!("{} is quarantined but could not be stopped", args.name))
 }
 
+/// A replacement starts a new epoch; the VM still running under the old one
+/// must be gone first, so no process outlives the authority it was granted.
+fn ensure_not_running(name: &str, running: bool) -> Result<()> {
+    anyhow::ensure!(
+        !running,
+        "{name} is still running under its current execution epoch; stop it first \
+         (`mvmctl machine stop {name}`), then replace it"
+    );
+    Ok(())
+}
+
 pub(super) fn replace_machine(args: &super::MachineReplaceArgs) -> Result<()> {
+    ensure_not_running(&args.name, machine_is_running(&args.name))?;
     let epoch = mvm_client::containment::replace(&args.name)?;
     println!(
         "{} may launch again under execution epoch {epoch}",
@@ -495,3 +509,15 @@ pub(super) fn confirm_stop(
 }
 
 pub(super) use mvm_client::launch::detached::{machine_is_running, stop_running_machine};
+
+#[cfg(test)]
+mod replace_tests {
+    use super::ensure_not_running;
+
+    #[test]
+    fn replacing_a_running_machine_is_refused_and_names_the_stop_verb() {
+        let err = ensure_not_running("web", true).unwrap_err().to_string();
+        assert!(err.contains("machine stop web"), "{err}");
+        assert!(ensure_not_running("web", false).is_ok());
+    }
+}

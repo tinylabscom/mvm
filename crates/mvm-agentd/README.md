@@ -67,9 +67,14 @@ destination-signed, exportable ACK receipt. A lost delivery or ACK response is
 while this boot's agent remains active, or reconcile against the durable
 journal; a different ACK for the same lease conflicts.
 
-`mailbox_writer_client` is a separate guest example for staging a message in
-the existing outbox. It reports **local staging only**, not signed destination
-acceptance; use a host-side durable receipt or journal witness for that claim.
+`mailbox_writer_client <message>` stages into the Dev/legacy spool.
+`mailbox_writer_client --local <message>` uses the separate immutable
+`outbox-local` request for the production local-durable tier; the guest agent
+retains it until it verifies the boot-bound signed V2 receipt. A response it
+cannot verify is not acceptance. Both commands report **local staging only**,
+not a destination receipt; verify the host-side receipt or journal before
+claiming destination acceptance. Do not use the legacy spool for a production
+local-durable claim.
 
 ## Bounded entrypoint capture
 

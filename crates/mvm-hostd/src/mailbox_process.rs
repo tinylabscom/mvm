@@ -41,7 +41,9 @@ use mvm_vmm::host::aux_bin::AuxBin;
 use mvm_vmm::host::flowmux_identity::{MAILBOX_READER_BOOT_FILE, MailboxReaderBootBinding};
 
 use crate::mailbox_custody::RetainedMailboxKeys;
-use crate::mailbox_launch::{DerivedMailboxKeys, LAUNCH_LIMITS, derive_launch_keys};
+use crate::mailbox_launch::{
+    DerivedMailboxKeys, LAUNCH_LIMITS, derive_launch_keys, mint_epoch_secret, shred_epoch_secret,
+};
 use crate::mailbox_service::MailboxService;
 use crate::mailbox_service::durable::DurableMailboxService;
 use crate::plan_admission::{MailboxLaunchPosture, MailboxPostureHandoff};
@@ -74,7 +76,8 @@ pub struct MailboxProcessConfig {
     /// Absolute host key directory from the launcher; helper environment is empty.
     pub keys_dir: PathBuf,
     pub socket: PathBuf,
-    pub guest_route: HostDialRoute,
+    /// How the backend says the guest's mailbox port is dialed.
+    pub route: HostDialRoute,
     /// Absent on an old or unauthenticated restart: fail closed, never default Dev.
     pub posture: Option<MailboxPostureHandoff>,
     /// Public ACK key and boot identity pinned to the admitted cold plan.
@@ -138,7 +141,7 @@ fn serve_verified(config: MailboxProcessConfig) -> Result<()> {
         keys,
         keys_dir,
         socket,
-        guest_route,
+        route,
         posture,
         reader_boot,
         vm_state_dir,
@@ -182,7 +185,7 @@ fn serve_verified(config: MailboxProcessConfig) -> Result<()> {
                 keys,
                 keys_dir,
                 socket,
-                guest_route,
+                route,
                 posture: Some(posture),
                 reader_boot,
                 vm_state_dir,
@@ -200,11 +203,11 @@ fn serve_verified(config: MailboxProcessConfig) -> Result<()> {
     let service = MailboxService::bind_live(&socket, LAUNCH_LIMITS, policy.with_grant(&grant)?)?;
     std::io::stdout().write_all(READY_MARKER)?;
     let mut sealer = sealer;
-    while vm_state_dir.exists()
-        && endpoint_needed(launcher_is_alive(launcher), vm_is_alive(&vm_state_dir))
-    {
+    while keep_serving(launcher, &vm_state_dir) {
         if service
-            .serve_guest_route(&guest_route, &mut sealer)
+            .serve_guest_while(&route, &mut sealer, || {
+                keep_serving(launcher, &vm_state_dir)
+            })
             .is_err()
         {
             std::thread::sleep(POLL_INTERVAL);
@@ -223,7 +226,7 @@ fn serve_local(
         keys,
         keys_dir,
         socket,
-        guest_route,
+        route,
         posture,
         reader_boot,
         vm_state_dir,
@@ -314,10 +317,13 @@ fn serve_local(
     )?;
     service.install_guest_reader(reader)?;
     std::io::stdout().write_all(READY_MARKER)?;
-    while vm_state_dir.exists()
-        && endpoint_needed(launcher_is_alive(launcher), vm_is_alive(&vm_state_dir))
-    {
-        if service.serve_guest(&guest_route, &mut sealer).is_err() {
+    while keep_serving(launcher, &vm_state_dir) {
+        if service
+            .serve_guest_while(&route, &mut sealer, || {
+                keep_serving(launcher, &vm_state_dir)
+            })
+            .is_err()
+        {
             std::thread::sleep(POLL_INTERVAL);
         }
         match service.maintain_local() {
@@ -332,27 +338,29 @@ fn vm_is_alive(state_dir: &Path) -> bool {
     mvm_vmm::host::process_liveness::state_dir_has_live_process(state_dir)
 }
 
+fn keep_serving(launcher: libc::pid_t, state_dir: &Path) -> bool {
+    state_dir.exists() && endpoint_needed(launcher_is_alive(launcher), vm_is_alive(state_dir))
+}
+
 /// The process config for `grant` on the VM at `state_dir`, with keys derived
-/// from the host key directory `keys_dir`.
+/// from the host key directory `keys_dir` and a fresh per-epoch secret minted
+/// into `state_dir`. A failure after the mint shreds the secret again.
 pub fn build_config(
     keys_dir: &Path,
     grant: &MailboxGrant,
     state_dir: &Path,
-    backend: &AnyBackend,
+    route: HostDialRoute,
 ) -> Result<MailboxProcessConfig> {
+    let secret = mint_epoch_secret(state_dir)?;
+    let keys = derive_launch_keys(keys_dir, grant, &secret).inspect_err(|_| {
+        let _ = shred_epoch_secret(state_dir);
+    })?;
     Ok(MailboxProcessConfig {
         grant: *grant,
-        keys: derive_launch_keys(keys_dir, grant)?,
+        keys,
         keys_dir: keys_dir.to_path_buf(),
         socket: mvm_core::config::vm_mailbox_socket_at(state_dir),
-        guest_route: backend
-            .host_dial_route(state_dir, MAILBOX_PORT)
-            .ok_or_else(|| {
-                Error::new(
-                    ErrorKind::Unsupported,
-                    "backend cannot dial the guest mailbox port",
-                )
-            })?,
+        route,
         posture: None,
         reader_boot: None,
         vm_state_dir: state_dir.to_path_buf(),
@@ -553,38 +561,55 @@ pub fn spawn_for_launch(
     }
     require_wired(plan, backend)?;
     let state_dir = mvm_core::config::vm_state_dir(vm_name);
-    let mut config = build_config(
-        &mvm_core::config::mvm_keys_dir(),
-        grant,
-        &state_dir,
-        backend,
-    )?;
-    config.reader_boot = load_reader_boot_for_plan(&state_dir, plan)?;
-    if posture.variant() == Variant::Prod {
-        let binding = config.reader_boot.as_ref().ok_or_else(|| {
+    let route = backend
+        .host_dial_route(&state_dir, MAILBOX_PORT)
+        .ok_or_else(|| {
             Error::new(
-                ErrorKind::PermissionDenied,
-                "production mailbox requires guest boot binding",
+                ErrorKind::Unsupported,
+                format!(
+                    "the {:?} backend names no route to the guest's mailbox port",
+                    backend.kind()
+                ),
             )
         })?;
-        let (policy, _) = config.keys.trust();
-        let address = mvm_contract::protocol::mailbox::MailboxAddress {
-            tenant: policy.context.expected_tenant,
-            authorization_domain: policy.context.expected_authorization_domain,
-            mailbox: grant.mailbox,
-            recipient: policy.context.expected_recipient,
-        };
-        RetainedMailboxKeys::provision_or_open(
-            &config.keys_dir,
-            plan,
-            vm_name,
-            posture,
-            Some(binding.boot),
-            address,
-        )
-        .map_err(Error::other)?;
+    let mut config = build_config(&mvm_core::config::mvm_keys_dir(), grant, &state_dir, route)?;
+    let started = (|| {
+        config.reader_boot = load_reader_boot_for_plan(&state_dir, plan)?;
+        if posture.variant() == Variant::Prod {
+            let binding = config.reader_boot.as_ref().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::PermissionDenied,
+                    "production mailbox requires guest boot binding",
+                )
+            })?;
+            let (policy, _) = config.keys.trust();
+            let address = mvm_contract::protocol::mailbox::MailboxAddress {
+                tenant: policy.context.expected_tenant,
+                authorization_domain: policy.context.expected_authorization_domain,
+                mailbox: grant.mailbox,
+                recipient: policy.context.expected_recipient,
+            };
+            RetainedMailboxKeys::provision_or_open(
+                &config.keys_dir,
+                plan,
+                vm_name,
+                posture,
+                Some(binding.boot),
+                address,
+            )
+            .map_err(Error::other)?;
+        }
+        config.posture =
+            Some(posture.handoff(config.reader_boot.as_ref().map(|binding| binding.boot)));
+        spawn_serving(&config, &state_dir)
+    })();
+    if started.is_err() {
+        let _ = shred_epoch_secret(&state_dir);
     }
-    config.posture = Some(posture.handoff(config.reader_boot.as_ref().map(|binding| binding.boot)));
+    started
+}
+
+fn spawn_serving(config: &MailboxProcessConfig, state_dir: &Path) -> Result<Option<u32>> {
     let bin = mvm_vmm::host::broker_services_spawn::resolve_subprocess_bin_to_spawn(&AuxBin::new(
         MAILBOX_BIN,
         MAILBOX_BIN_ENV,
@@ -596,7 +621,7 @@ pub fn spawn_for_launch(
         .stdin
         .take()
         .ok_or_else(|| Error::other("mvm-mailbox stdin was not piped"))
-        .and_then(|mut stdin| stdin.write_all(&serde_json::to_vec(&config)?));
+        .and_then(|mut stdin| stdin.write_all(&serde_json::to_vec(config)?));
     if let Err(error) = written {
         let _ = child.kill();
         let _ = child.wait();
@@ -651,6 +676,41 @@ mod tests {
         drop(peer);
     }
 
+    fn test_route() -> HostDialRoute {
+        HostDialRoute::PortSocket(PathBuf::from("/p"))
+    }
+
+    #[test]
+    fn the_config_round_trips_each_route() {
+        let dir = keys_dir();
+        let state = tempfile::tempdir().unwrap();
+        for route in [test_route(), HostDialRoute::Mux(PathBuf::from("/m"))] {
+            let config =
+                build_config(dir.path(), &grant(dir.path()), state.path(), route.clone()).unwrap();
+            let back = parse(&serde_json::to_vec(&config).unwrap()).unwrap();
+            assert_eq!(back.route, route);
+        }
+    }
+
+    #[test]
+    fn firecracker_and_hvf_name_the_routes_the_process_used_to_hardcode() {
+        let state = Path::new("/vm");
+        assert!(matches!(
+            backend_named("firecracker").host_dial_route(state, MAILBOX_PORT),
+            Some(HostDialRoute::Mux(_))
+        ));
+        assert_eq!(
+            backend_named("hvf").host_dial_route(state, MAILBOX_PORT),
+            Some(HostDialRoute::PortSocket(
+                mvm_core::config::vm_hvf_vsock_port_socket_at(state, MAILBOX_PORT)
+            ))
+        );
+    }
+
+    fn test_secret() -> mvm_core::crypto::aead::Key {
+        mvm_core::crypto::aead::Key::from_bytes([5; 32])
+    }
+
     fn keys_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir_in("/tmp").unwrap();
         crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
@@ -686,9 +746,13 @@ mod tests {
         let mailbox = MailboxId::from_bytes([4; 32]);
         MailboxGrant {
             mailbox,
-            authority_key: crate::mailbox_launch::authority_key_for(dir, &mailbox)
-                .unwrap()
-                .to_bytes(),
+            authority_key: crate::mailbox_launch::authority_key_for(
+                dir,
+                &mailbox,
+                ExecutionEpoch::new(1).unwrap(),
+            )
+            .unwrap()
+            .to_bytes(),
             epoch: ExecutionEpoch::new(1).unwrap(),
             report: None,
             retention: None,
@@ -716,27 +780,42 @@ mod tests {
         plan.image.name = "no-such-vm".into();
         plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
         let posture = MailboxLaunchPosture::for_test(&plan, Variant::Dev);
-        let error = spawn_for_launch(
-            &plan,
-            &backend_named("libkrun"),
-            "no-such-vm",
-            Some(&posture),
-        )
-        .unwrap_err();
+        let error = spawn_for_launch(&plan, &backend_named("wasm"), "no-such-vm", Some(&posture))
+            .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Unsupported);
+    }
+
+    #[test]
+    fn building_the_config_mints_the_secret_in_the_state_dir_and_never_puts_it_in_the_config() {
+        let dir = keys_dir();
+        let state = tempfile::tempdir().unwrap();
+        let path = mvm_core::config::vm_mailbox_secret_at(state.path());
+        let config =
+            build_config(dir.path(), &grant(dir.path()), state.path(), test_route()).unwrap();
+        let secret = std::fs::read(&path).unwrap();
+        assert_eq!(secret.len(), 32);
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(!json.contains(&hex::encode(&secret)));
+        assert!(
+            !json.contains(
+                serde_json::to_string(&secret)
+                    .unwrap()
+                    .trim_matches(['[', ']'])
+            )
+        );
+        // A launch that fails after the mint leaves no secret behind.
+        let mut foreign = grant(dir.path());
+        foreign.authority_key = [1; 32];
+        assert!(build_config(dir.path(), &foreign, state.path(), test_route()).is_err());
+        assert!(!path.exists());
     }
 
     #[test]
     fn the_config_refuses_unknown_fields() {
         let dir = keys_dir();
         let state = tempfile::tempdir().unwrap();
-        let config = build_config(
-            dir.path(),
-            &grant(dir.path()),
-            state.path(),
-            &backend_named("hvf"),
-        )
-        .unwrap();
+        let config =
+            build_config(dir.path(), &grant(dir.path()), state.path(), test_route()).unwrap();
         let mut value = serde_json::to_value(&config).unwrap();
         assert!(parse(value.to_string().as_bytes()).is_ok());
         value["seed"] = serde_json::json!("00");
@@ -750,21 +829,15 @@ mod tests {
         let grant = grant(dir.path());
         for (backend, expected_mux) in [("hvf", false), ("firecracker", true)] {
             let backend = backend_named(backend);
-            let config = build_config(dir.path(), &grant, state.path(), &backend).unwrap();
-            assert_eq!(
-                matches!(config.guest_route, HostDialRoute::Mux(_)),
-                expected_mux
-            );
-            assert_eq!(
-                config.guest_route,
-                backend.host_dial_route(state.path(), MAILBOX_PORT).unwrap()
-            );
+            let route = backend.host_dial_route(state.path(), MAILBOX_PORT).unwrap();
+            let config = build_config(dir.path(), &grant, state.path(), route.clone()).unwrap();
+            assert_eq!(matches!(config.route, HostDialRoute::Mux(_)), expected_mux);
+            assert_eq!(config.route, route);
         }
-        assert_eq!(
-            build_config(dir.path(), &grant, state.path(), &backend_named("libkrun"),)
-                .unwrap_err()
-                .kind(),
-            ErrorKind::Unsupported
+        assert!(
+            backend_named("wasm")
+                .host_dial_route(state.path(), MAILBOX_PORT)
+                .is_none()
         );
     }
 
@@ -831,13 +904,8 @@ mod tests {
         let dir = keys_dir();
         let seed = std::fs::read(dir.path().join("host-signer.ed25519")).unwrap();
         let state = tempfile::tempdir().unwrap();
-        let config = build_config(
-            dir.path(),
-            &grant(dir.path()),
-            state.path(),
-            &backend_named("firecracker"),
-        )
-        .unwrap();
+        let config =
+            build_config(dir.path(), &grant(dir.path()), state.path(), test_route()).unwrap();
         let json = serde_json::to_string(&config).unwrap();
         assert!(!json.contains(&hex::encode(&seed)));
         assert!(
@@ -948,11 +1016,11 @@ mod tests {
         )
         .unwrap();
         let config = MailboxProcessConfig {
-            keys: derive_launch_keys(dir.path(), &grant).unwrap(),
+            keys: derive_launch_keys(dir.path(), &grant, &test_secret()).unwrap(),
             keys_dir: dir.path().to_path_buf(),
             grant,
             socket: dir.path().join("mailbox.sock"),
-            guest_route: HostDialRoute::PortSocket(dir.path().join("absent-port")),
+            route: HostDialRoute::PortSocket(dir.path().join("absent-port")),
             posture: Some(MailboxLaunchPosture::for_test(&plan, Variant::Dev).handoff(None)),
             reader_boot: None,
             vm_state_dir: state_path,
@@ -1009,11 +1077,11 @@ mod tests {
         .unwrap();
         let socket = keys.path().join("mailbox.sock");
         let config = MailboxProcessConfig {
-            keys: derive_launch_keys(keys.path(), &grant).unwrap(),
+            keys: derive_launch_keys(keys.path(), &grant, &test_secret()).unwrap(),
             keys_dir: keys.path().to_path_buf(),
             grant,
             socket: socket.clone(),
-            guest_route: HostDialRoute::PortSocket(guest_port),
+            route: HostDialRoute::PortSocket(guest_port),
             posture: Some(MailboxLaunchPosture::for_test(&plan, Variant::Dev).handoff(None)),
             reader_boot: None,
             vm_state_dir: state.path().to_path_buf(),
@@ -1115,7 +1183,8 @@ mod tests {
             .expect("persist pinned guest identity");
         }
         let posture = MailboxLaunchPosture::for_test(&plan, Variant::Prod);
-        let keys = derive_launch_keys(&keys_dir, &grant).expect("derived mailbox keys");
+        let keys =
+            derive_launch_keys(&keys_dir, &grant, &test_secret()).expect("derived mailbox keys");
         let (policy, _) = keys.trust();
         let address = mvm_contract::protocol::mailbox::MailboxAddress {
             tenant: policy.context.expected_tenant,
@@ -1148,7 +1217,7 @@ mod tests {
             keys_dir: home.path().join("missing-keys"),
             grant,
             socket: socket.clone(),
-            guest_route: HostDialRoute::PortSocket(guest_port.clone()),
+            route: HostDialRoute::PortSocket(guest_port.clone()),
             posture: Some(posture.handoff(Some(binding.boot))),
             reader_boot: Some(binding.clone()),
             vm_state_dir: state.path().to_path_buf(),
@@ -1163,7 +1232,7 @@ mod tests {
             keys_dir: keys_dir.clone(),
             grant,
             socket: socket.clone(),
-            guest_route: HostDialRoute::PortSocket(guest_port.clone()),
+            route: HostDialRoute::PortSocket(guest_port.clone()),
             posture: Some(posture.handoff(Some(binding.boot))),
             reader_boot: Some(binding),
             vm_state_dir: state.path().to_path_buf(),
@@ -1337,7 +1406,7 @@ mod tests {
             keys_dir: keys_dir.clone(),
             grant,
             socket,
-            guest_route: HostDialRoute::PortSocket(guest_port),
+            route: HostDialRoute::PortSocket(guest_port),
             posture: Some(posture.handoff(Some(restart_binding.boot))),
             reader_boot: Some(restart_binding),
             vm_state_dir: state_path,
@@ -1423,7 +1492,7 @@ mod tests {
         let dir = keys_dir();
         let granted = config_for(Some(grant(dir.path())));
         let posture = posture_for(&granted, Variant::Dev);
-        for name in ["firecracker", "hvf"] {
+        for name in ["firecracker", "hvf", "apple-container", "libkrun", "qemu"] {
             let backend = backend_named(name);
             assert!(backend.capabilities().guest_mailbox, "{name}");
             assert!(
@@ -1431,7 +1500,7 @@ mod tests {
                 "{name}"
             );
         }
-        for name in ["libkrun", "qemu", "wasm"] {
+        for name in ["wasm"] {
             let backend = backend_named(name);
             assert!(!backend.capabilities().guest_mailbox, "{name}");
             assert!(
@@ -1504,11 +1573,11 @@ mod tests {
         )
         .unwrap();
         let config = MailboxProcessConfig {
-            keys: derive_launch_keys(dir.path(), &grant).unwrap(),
+            keys: derive_launch_keys(dir.path(), &grant, &test_secret()).unwrap(),
             keys_dir: dir.path().to_path_buf(),
             grant,
             socket: dir.path().join("mailbox.sock"),
-            guest_route: HostDialRoute::PortSocket(dir.path().join("absent-port")),
+            route: HostDialRoute::PortSocket(dir.path().join("absent-port")),
             posture: None,
             reader_boot: None,
             vm_state_dir: state.path().to_path_buf(),
@@ -1538,10 +1607,10 @@ mod tests {
         let socket = state.path().join("mailbox.sock");
         let config = MailboxProcessConfig {
             grant,
-            keys: derive_launch_keys(keys.path(), &grant).expect("mailbox keys"),
+            keys: derive_launch_keys(keys.path(), &grant, &test_secret()).expect("mailbox keys"),
             keys_dir: keys.path().to_path_buf(),
             socket: socket.clone(),
-            guest_route: HostDialRoute::PortSocket(state.path().join("guest-port.sock")),
+            route: HostDialRoute::PortSocket(state.path().join("guest-port.sock")),
             posture: Some(MailboxLaunchPosture::for_test(&plan, Variant::Prod).handoff(None)),
             reader_boot: None,
             vm_state_dir,

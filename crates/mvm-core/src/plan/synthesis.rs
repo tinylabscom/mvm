@@ -755,7 +755,7 @@ pub fn workload_seccomp_tier(
 /// containment ledger. A fresh host, or a workload never replaced, is epoch 1.
 /// An unreadable ledger is an error: synthesizing at a guessed epoch could
 /// mint a plan the admission check then accepts for a contained workload.
-fn current_local_epoch(workload: &str) -> Result<u64> {
+pub fn current_local_epoch(workload: &str) -> Result<u64> {
     let home = std::path::PathBuf::from(crate::config::mvm_home());
     let ledger = crate::host_interface::workload::WorkloadLedger::load_at(&home)
         .map_err(|e| anyhow::anyhow!("reading the workload ledger: {e}"))?;
@@ -763,6 +763,14 @@ fn current_local_epoch(workload: &str) -> Result<u64> {
 }
 
 pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
+    let execution_epoch = current_local_epoch(input.vm_name)?;
+    if let Some(grant) = &input.mailbox {
+        anyhow::ensure!(
+            grant.epoch.get() == execution_epoch,
+            "mailbox grant is for execution epoch {} but the workload runs at epoch {execution_epoch}",
+            grant.epoch.get()
+        );
+    }
     let nonce = fresh_nonce();
     let now = Utc::now();
 
@@ -845,7 +853,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         network_limits: Default::default(),
         ingress: input.ingress.clone(),
         schema_version: SCHEMA_VERSION,
-        execution_epoch: current_local_epoch(input.vm_name)?,
+        execution_epoch,
         // Placeholder — overwritten below with the content-address once every
         // load-bearing field is set. The derivation excludes `plan_id`, so this
         // seed value never influences the result.

@@ -213,9 +213,13 @@ mod tests {
         let mailbox = MailboxId::from_bytes([42; 32]);
         let grant = MailboxGrant {
             mailbox,
-            authority_key: crate::mailbox_launch::authority_key_for(keys.path(), &mailbox)
-                .unwrap()
-                .to_bytes(),
+            authority_key: crate::mailbox_launch::authority_key_for(
+                keys.path(),
+                &mailbox,
+                ExecutionEpoch::new(1).unwrap(),
+            )
+            .unwrap()
+            .to_bytes(),
             epoch: ExecutionEpoch::new(1).unwrap(),
             report: None,
             retention: None,
@@ -231,7 +235,9 @@ mod tests {
         )
         .unwrap();
         binding.persist(state.path()).unwrap();
-        let derive = || crate::mailbox_launch::derive_launch_keys(keys.path(), &grant).unwrap();
+        let secret = mvm_core::crypto::aead::Key::from_bytes([5; 32]);
+        let derive =
+            || crate::mailbox_launch::derive_launch_keys(keys.path(), &grant, &secret).unwrap();
         let first_keys = derive();
         let first_send = first_keys.trust().1.capability;
         let first = load_or_enroll(

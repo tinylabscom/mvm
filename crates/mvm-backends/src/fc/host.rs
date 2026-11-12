@@ -5,13 +5,14 @@ use mvm_core::checkpoint::ContentBlob;
 
 use mvm_core::config::{ARCH, FC_CI_ASSETS_VERSION, fc_version};
 use mvm_vmm::host::config::*;
-use mvm_vmm::host::shell::{run_in_vm, run_in_vm_stdout, run_in_vm_visible};
+#[cfg(not(target_os = "linux"))]
+use mvm_vmm::host::shell::run_in_vm_stdout;
+use mvm_vmm::host::shell::{run_in_vm, run_in_vm_visible};
 use mvm_vmm::host::ui;
 
 /// Check if Firecracker is installed on the Linux host.
 pub fn is_installed() -> Result<bool> {
-    let output = run_in_vm("command -v firecracker >/dev/null 2>&1")?;
-    Ok(output.status.success())
+    Ok(super::binary::resolve_for_host().is_ok())
 }
 
 /// Check if the kernel image exists in ~/microvm/.
@@ -37,7 +38,6 @@ pub fn has_base_assets() -> Result<bool> {
     Ok(has_kernel()? && has_squashfs()?)
 }
 
-/// Check if the jailer binary is installed.
 /// Tear down a paused restore after a failed step. The step's own error is the
 /// one the caller returns, so a teardown failure is logged, not propagated.
 fn warn_teardown_paused(io: &super::io::FirecrackerIO) {
@@ -46,84 +46,20 @@ fn warn_teardown_paused(io: &super::io::FirecrackerIO) {
     }
 }
 
-fn jailer_is_installed() -> Result<bool> {
-    let output = run_in_vm("command -v jailer >/dev/null 2>&1")?;
-    Ok(output.status.success())
-}
-
-/// Install Firecracker (and jailer) on the Linux host.
+/// Make the pinned Firecracker available to this user.
 ///
-/// Idempotent: skips if both binaries are already present. If firecracker
-/// is installed but the jailer is missing, downloads the release tarball
-/// and extracts just the jailer.
+/// Idempotent: skips when [`super::binary::resolve_for_host`] already finds a
+/// binary, whether shipped beside `mvmctl`, fetched earlier or named by
+/// `MVM_FIRECRACKER_BIN`. Otherwise it fetches the release `firecracker.lock`
+/// pins into the user's own cache, digest-checked, with no elevation.
 pub fn install() -> Result<()> {
-    let fc_present = is_installed()?;
-    let jailer_present = jailer_is_installed()?;
-
-    if fc_present && jailer_present {
-        let version = run_in_vm_stdout("firecracker --version 2>&1 | head -1")?;
-        ui::info(&format!(
-            "Firecracker + jailer already installed: {}",
-            version
-        ));
+    if is_installed()? {
+        ui::info("Firecracker already available.");
         return Ok(());
     }
-
-    let version = fc_version();
-
-    if fc_present && !jailer_present {
-        ui::info("Jailer not found, installing from Firecracker release tarball...");
-        install_jailer_from_tarball(&version)?;
-        return Ok(());
-    }
-
-    ui::info(&format!("Installing Firecracker {}...", version));
-    run_in_vm_visible(&format!(
-        r#"
-        cd /tmp
-        # Root needs no privilege-escalation helper — and root hosts such as
-        # rescue shells and root containers often have no sudo at all.
-        SUDO=""; [ "$(id -u)" -eq 0 ] || SUDO="sudo"
-        wget --progress=bar:force:noscroll https://github.com/firecracker-microvm/firecracker/releases/download/{fc_version}/firecracker-{fc_version}-{arch}.tgz
-        tar -xzf firecracker-{fc_version}-{arch}.tgz
-        $SUDO mv release-{fc_version}-{arch}/firecracker-{fc_version}-{arch} /usr/local/bin/firecracker
-        $SUDO chmod +x /usr/local/bin/firecracker
-        if [ -f release-{fc_version}-{arch}/jailer-{fc_version}-{arch} ]; then
-            $SUDO mv release-{fc_version}-{arch}/jailer-{fc_version}-{arch} /usr/local/bin/jailer
-            $SUDO chmod +x /usr/local/bin/jailer
-        fi
-        rm -rf firecracker-{fc_version}-{arch}.tgz release-{fc_version}-{arch}
-        firecracker --version
-        "#,
-        fc_version = version,
-        arch = ARCH,
-    ))?;
-
-    ui::success("Firecracker installed.");
-    Ok(())
-}
-
-/// Download the release tarball and extract just the jailer binary.
-fn install_jailer_from_tarball(version: &str) -> Result<()> {
-    run_in_vm_visible(&format!(
-        r#"
-        cd /tmp
-        # Root needs no privilege-escalation helper — see install_firecracker.
-        SUDO=""; [ "$(id -u)" -eq 0 ] || SUDO="sudo"
-        wget -q https://github.com/firecracker-microvm/firecracker/releases/download/{fc_version}/firecracker-{fc_version}-{arch}.tgz
-        tar -xzf firecracker-{fc_version}-{arch}.tgz
-        if [ -f release-{fc_version}-{arch}/jailer-{fc_version}-{arch} ]; then
-            $SUDO mv release-{fc_version}-{arch}/jailer-{fc_version}-{arch} /usr/local/bin/jailer
-            $SUDO chmod +x /usr/local/bin/jailer
-            echo "Jailer installed."
-        else
-            echo "Jailer binary not found in release tarball."
-        fi
-        rm -rf firecracker-{fc_version}-{arch}.tgz release-{fc_version}-{arch}
-        "#,
-        fc_version = version,
-        arch = ARCH,
-    ))?;
+    ui::info(&format!("Fetching Firecracker {}...", fc_version()));
+    let path = super::fetch::install_locked()?;
+    ui::success(&format!("Firecracker installed at {}.", path.display()));
     Ok(())
 }
 
@@ -1094,11 +1030,9 @@ mod tests {
     #[test]
     fn each_host_probe_reports_exactly_what_its_shell_probe_answered() {
         type Probe = fn() -> anyhow::Result<bool>;
-        let probes: [(&str, Probe); 6] = [
-            ("command -v firecracker", super::is_installed),
+        let probes: [(&str, Probe); 4] = [
             ("vmlinux-", super::has_kernel),
             ("ubuntu-*.squashfs.upstream >/dev/null", super::has_squashfs),
-            ("command -v jailer", super::jailer_is_installed),
             ("unsquashfs -l", super::validate_rootfs_squashfs),
             ("pgrep -x firecracker", super::is_running),
         ];
@@ -1126,41 +1060,13 @@ mod tests {
     }
 
     #[test]
-    fn install_runs_only_the_steps_the_host_is_missing() {
-        // (firecracker present, jailer present) -> what install did.
-        let ran = |fc: i32, jailer: i32| {
-            let (_guard, seen) = shell_double(vec![
-                ("command -v firecracker", fc),
-                ("command -v jailer", jailer),
-            ]);
-            super::install().unwrap();
-            seen.borrow().clone()
-        };
-        let both = ran(0, 0);
-        assert!(both.iter().all(|s| !s.contains("wget")), "{both:?}");
-        assert!(both.iter().any(|s| s.contains("firecracker --version")));
-
-        let jailer_missing = ran(0, 1);
-        assert!(jailer_missing.iter().any(|s| s.contains("jailer-")));
-        assert!(
-            jailer_missing
-                .iter()
-                .all(|s| !s.contains("/usr/local/bin/firecracker")),
-            "{jailer_missing:?}"
-        );
-
-        let nothing = ran(1, 1);
-        assert!(
-            nothing
-                .iter()
-                .any(|s| s.contains("/usr/local/bin/firecracker"))
-        );
-        let no_firecracker = ran(1, 0);
-        assert!(
-            no_firecracker
-                .iter()
-                .any(|s| s.contains("/usr/local/bin/firecracker"))
-        );
+    fn install_does_nothing_when_a_firecracker_already_resolves() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set(crate::fc::binary::OVERRIDE_ENV, "/bin/sh");
+        let (_guard, seen) = shell_double(vec![]);
+        assert!(super::is_installed().unwrap());
+        super::install().unwrap();
+        assert!(seen.borrow().is_empty(), "no shell, no download: {seen:?}");
     }
 
     #[test]

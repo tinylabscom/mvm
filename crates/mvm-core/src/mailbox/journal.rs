@@ -874,6 +874,9 @@ impl MailboxJournal {
         request: JournalAdmission<'_>,
         anchor: &impl JournalAnchor,
     ) -> Result<SignedDestinationReceipt, JournalError> {
+        if self.poisoned {
+            return Err(JournalError::Uncertain);
+        }
         if self.history_key.is_none() {
             return Err(JournalError::DurableAuthorityUnavailable);
         }
@@ -2888,7 +2891,7 @@ mod anchor_tests {
                 ),
                 &anchor
             ),
-            Err(JournalError::Rollback)
+            Err(JournalError::Uncertain)
         ));
         drop(journal);
         let recovered = MailboxJournal::open_with_custody(

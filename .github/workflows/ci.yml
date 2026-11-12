@@ -576,6 +576,12 @@ jobs:
       - name: Dev-run guard tests
         run: bash scripts/dev-run-guard.test.sh
 
+      - name: Mailbox live-witness tests
+        run: bash scripts/mailbox-live-witness.test.sh
+
+      - name: Mission demo live-runbook tests
+        run: bash scripts/mission-demo-live.test.sh
+
       - name: Zig bootstrap tests
         run: python3 scripts/test_install_zigbuild.py
 

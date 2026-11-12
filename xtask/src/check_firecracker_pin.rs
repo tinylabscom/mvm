@@ -66,34 +66,10 @@ const SCANNED_DIRS: [&str; 5] = [".github", "scripts", "crates", "just", "nix"];
 const DOWNLOAD_PATTERN: &str = "firecracker-microvm/firecracker/releases/download";
 
 /// Files that may name an upstream Firecracker download, and why.
-const ALLOWED_DOWNLOADS: &[(&str, &str)] = &[
-    (
-        "crates/mvm-backends/src/fc/host.rs",
-        "bootstrap installs Firecracker from the upstream tarball; this entry goes when it \
-         installs the locked, digest-checked artifact instead",
-    ),
-    (
-        REMOTE_RUNNER,
-        "the remote runner checks its tarball against a digest this gate compares to the lock",
-    ),
-    (
-        ".github/workflows/bdd.yml",
-        "installs the tarball unverified; migrate to a verified install that reads the lock",
-    ),
-    (
-        ".github/workflows/ci-main.yml",
-        "installs the tarball unverified in two jobs; migrate to a verified install that reads the lock",
-    ),
-    (
-        ".github/workflows/e2e-docs.yml",
-        "installs the tarball unverified; migrate to a verified install that reads the lock",
-    ),
-    (
-        "nix/ops/hetzner/cloud-init.yaml",
-        "provisions a fresh VM with no checkout, so it cannot read the lock; migrate to verify \
-         against pinned digests this gate compares to the lock",
-    ),
-];
+const ALLOWED_DOWNLOADS: &[(&str, &str)] = &[(
+    REMOTE_RUNNER,
+    "the remote runner checks its tarball against a digest this gate compares to the lock",
+)];
 
 /// The version the lock pins, spelled the way `mvm-core` spells its default.
 fn default_version_finding(default: &str, lock: &FirecrackerLock) -> Option<String> {

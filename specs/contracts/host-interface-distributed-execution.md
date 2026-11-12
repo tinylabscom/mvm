@@ -384,13 +384,42 @@ the work is decomposed:
   bounded communication that can continue during disconnection; physical
   air-gapped operation requires a separate approved transfer path.
 - Shutdown and termination attempt memory zeroization and revoke active
-  sessions. Strong physical erasure is not claimed; cryptographic erasure is
-  the supported mechanism for encrypted temporary state.
+  sessions. What that means per backend: the in-house HVF backend scrubs the
+  guest's RAM mapping on a clean exit before unmapping it (unit-tested, not yet
+  witnessed in a booted guest); Firecracker, libkrun and QEMU end the VMM
+  process and rely on the host kernel zeroing pages when it reallocates them.
+  A forced kill skips the HVF scrub. Strong physical erasure is not claimed;
+  cryptographic erasure is the supported mechanism for encrypted temporary
+  state.
 - Workload containment distinguishes terminate, revoke authority, quarantine,
   evict/revoke a node, kill a node, destroy data, and replace from a known-good
   image.
 - Node replacement receives a new execution epoch and cannot use stale
-  mailbox messages, capabilities, secrets, or commands.
+  mailbox messages, capabilities, secrets, or commands. The epoch is an input
+  to the per-mailbox key derivation, so the replacement's sender, authority and
+  encryption keys differ from its predecessor's: it cannot open an old-epoch
+  envelope, and a replayed one is refused. The encryption key additionally
+  derives from a random per-launch secret kept only in the VM's state
+  directory, and from a host-held encryption root that is separate from the
+  signing seed, so the seed alone cannot open ciphertext and the root alone
+  cannot forge a signature. Every stop path shreds the secret (overwritten with
+  zeros, flushed, unlinked), so after termination or replacement a captured
+  envelope cannot be reopened from the host keys. Erasure covers that key
+  material and the queued state, which lives in the mailbox process's memory
+  and ends with it. It is not a verified physical wipe: a journaling or
+  copy-on-write filesystem may retain the overwritten blocks, and a compromised
+  host can read plaintext while the VM runs. The authority and signing keys are intentionally not salted by the
+  secret, because the authority key is named in a signed plan before any VM
+  exists. The encryption key depends on a secret that never leaves the sending
+  host, so a receiving node cannot derive it: cross-host delivery must use a
+  key agreement or a wrapped key, and the derived keys do not interoperate
+  across hosts. The grant's epoch is the same ledger
+  value as the plan's, and a grant naming another epoch's authority key is
+  refused at launch. `machine replace` refuses while the machine is running and works after
+  `machine stop` or `machine quarantine`: it needs only the workload ledger and
+  the audit log, never the stopped machine's plan. Each replace advances the
+  epoch again, so a second one with no launch between is another audited grant.
+  The old VM's mailbox queue lives in its own process and ends with it.
 - Trusted-location volumes remain supported as named read-only or explicitly
   authorized read-write grants, configurable through both CLI and
   `mvm-studio`.
@@ -464,7 +493,8 @@ authenticated inter-platform messaging, and remote recovery require end-to-end
 verification before being presented as shipped capabilities.
 
 The first demo promises **contain, terminate, and rebuild**. It does not
-promise verified physical wipe. A remote command cannot immediately affect a
+promise verified physical wipe, and it does not claim that guest RAM was
+overwritten on every backend (see the memory zeroization note above). A remote command cannot immediately affect a
 disconnected node, and revocation takes effect only where current revocation
 state is known or an offline lease has expired.
 
@@ -576,10 +606,11 @@ launch's life into the same queue; manual, not a CI lane). Observed:
   served `recv`. Pool-claimed VMs lacked `launch.sh`; whether that predates this
   work is not confirmed.
 
-The outbox is one file. A writer must let the guest agent consume the previous
-frame before writing the next: two writes back to back, or 100 with no gap,
-delivered only the last, and the others were overwritten, not queued. The agent
-consumes it per frame (rename to `.outbox.forwarding`, forward, unlink).
+The outbox is a spool directory, `/run/mvm/mailbox/outbox/`: one file per
+message, delivered oldest first, one frame per host dial. A writer adds a file
+atomically and is refused (`QueueFull`) once 256 are waiting. This replaced a
+single file in which a second write overwrote the first. The burst fix is
+hermetic-tested only; a live back-to-back burst has not been re-run.
 
 Guest console noise is bounded: while the host re-dials, the guest logs
 `mailbox frame not delivered` (9 to 17 lines over a 20 s run), and an idle VM
@@ -596,8 +627,9 @@ MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build ./target/debug/mvmctl bootstrap
 ./target/debug/mvmctl machine run --image alpine --mailbox <64-hex id> \
     --hypervisor firecracker --name n -- sleep 900
 # as uid 901 in the guest (machine cp / machine exec), run a writer that
-# calls mvm_agentd::mailbox_outbox::write_outbox; let each frame be consumed
-# (about a second) before writing the next
+# calls mvm_agentd::mailbox_outbox::write_outbox (or writes a dot-prefixed
+# temp file in /run/mvm/mailbox/outbox/ and renames it to a name that sorts
+# after every earlier one); no need to wait between frames
 ./target/debug/mvmctl machine mailbox recv n  # each plaintext once, then empty
 ./target/debug/mvmctl trust audit verify
 ./target/debug/mvmctl machine stop n --yes    # no mvm-mailbox process remains
@@ -619,8 +651,8 @@ All witnesses are in the dev profile and manual.
 - Late frames: the host re-dials every 100 ms for about 30 s, then every 2 s
   for the VM's life, so a late frame is delivered. Firecracker witnessed this;
   HVF has not been re-witnessed.
-- Single-file outbox: a burst loses frames (see above), and a full queue of 64
-  drops newer messages. Neither is a delivery guarantee.
+- A full host queue of 64 drops newer messages, and a full spool of 256 refuses
+  the writer. Neither is a delivery guarantee.
 - Multi-message delivery is Firecracker-witnessed only; HVF delivered one
   message per VM when last run.
 - `build_config` still names the per-port socket and the Firecracker mux path

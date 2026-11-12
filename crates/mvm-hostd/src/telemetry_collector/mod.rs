@@ -455,6 +455,48 @@ mod collector_only_tests {
             dial_guest_port(&dir.path().join("a.sock"), &dir.path().join("b.sock"), 0).is_err()
         );
     }
+
+    #[test]
+    fn a_route_is_dialed_the_way_its_variant_says() {
+        use mvm_core::vm_backend::HostDialRoute;
+        use std::io::{BufRead as _, BufReader, Read as _};
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+
+        let port = dir.path().join("p.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&port).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.write_all(b"hi").unwrap();
+        });
+        let mut stream = dial_route(&HostDialRoute::PortSocket(port), 9).unwrap();
+        let mut got = String::new();
+        stream.read_to_string(&mut got).unwrap();
+        assert_eq!(got, "hi", "a per-port socket is connected to, no handshake");
+        server.join().unwrap();
+
+        let mux = dir.path().join("m.sock");
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let listener = std::os::unix::net::UnixListener::bind(&mux).unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let mut stream = stream;
+            stream.write_all(b"OK 1\n").unwrap();
+            // Hold the guest end open, as a live guest does.
+            let _ = done_rx.recv();
+            line
+        });
+        let stream = dial_route(&HostDialRoute::Mux(mux), 9).unwrap();
+        drop(done_tx);
+        assert_eq!(server.join().unwrap().trim(), "CONNECT 9");
+        assert_eq!(stream.read_timeout().unwrap(), None);
+
+        assert!(dial_route(&HostDialRoute::PortSocket(dir.path().join("none")), 9).is_err());
+        assert!(dial_route(&HostDialRoute::Mux(dir.path().join("none")), 9).is_err());
+    }
 }
 
 #[cfg(test)]
@@ -936,6 +978,33 @@ const MUX_CONNECT_TIMEOUT_SECS: u64 = 5;
 /// Dial a guest listener on `port`. A VMM that bridges host-dialed ports
 /// (HVF, libkrun) exposes it as a per-port socket; Firecracker does not, and
 /// is reached through its vsock mux with the `CONNECT <port>` handshake.
+pub(crate) fn dial_route(
+    route: &mvm_core::vm_backend::HostDialRoute,
+    port: u32,
+) -> std::io::Result<std::os::unix::net::UnixStream> {
+    match route {
+        mvm_core::vm_backend::HostDialRoute::PortSocket(path) => {
+            std::os::unix::net::UnixStream::connect(path)
+        }
+        mvm_core::vm_backend::HostDialRoute::Mux(mux) => dial_mux(mux, port),
+    }
+}
+
+fn dial_mux(mux: &std::path::Path, port: u32) -> std::io::Result<std::os::unix::net::UnixStream> {
+    let stream = mvm_agentd::vsock::connect_to_port_once(
+        &mux.to_string_lossy(),
+        port,
+        MUX_CONNECT_TIMEOUT_SECS,
+    )
+    .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+    // The handshake's timeouts bounded the dial. A session
+    // is long and often quiet; left in place they would end it, and
+    // re-announce it, every few idle seconds.
+    stream.set_read_timeout(None)?;
+    stream.set_write_timeout(None)?;
+    Ok(stream)
+}
+
 pub(crate) fn dial_guest_port(
     per_port: &std::path::Path,
     firecracker_mux: &std::path::Path,
@@ -946,33 +1015,6 @@ pub(crate) fn dial_guest_port(
         Err(_) if firecracker_mux.exists() => dial_mux(firecracker_mux, port),
         Err(error) => Err(error),
     }
-}
-
-/// Dial the exact host route declared by the backend, without guessing an
-/// alternative socket when that route fails.
-pub(crate) fn dial_guest_route(
-    route: &mvm_core::vm_backend::HostDialRoute,
-    port: u32,
-) -> std::io::Result<std::os::unix::net::UnixStream> {
-    match route {
-        mvm_core::vm_backend::HostDialRoute::PortSocket(path) => {
-            std::os::unix::net::UnixStream::connect(path)
-        }
-        mvm_core::vm_backend::HostDialRoute::Mux(path) => dial_mux(path, port),
-    }
-}
-
-fn dial_mux(path: &std::path::Path, port: u32) -> std::io::Result<std::os::unix::net::UnixStream> {
-    let stream = mvm_agentd::vsock::connect_to_port_once(
-        &path.to_string_lossy(),
-        port,
-        MUX_CONNECT_TIMEOUT_SECS,
-    )
-    .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
-    // Only the handshake is short-lived; a quiet session must stay open.
-    stream.set_read_timeout(None)?;
-    stream.set_write_timeout(None)?;
-    Ok(stream)
 }
 
 /// What a collector-only process reads on stdin: the collector's own inputs

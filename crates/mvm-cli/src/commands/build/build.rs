@@ -354,7 +354,7 @@ fn build_manifest_from_image(
     let persisted =
         PersistedManifest::from_manifest(manifest, canonical, &backend, Provenance::current())?;
 
-    let kernel = super::super::env::builder_vm::ensure_workload_kernel()
+    let kernel = super::super::env::builder_vm::prepare_workload_kernel_for_launch()
         .context("resolving the workload kernel for an image-backed build")?;
 
     // Keyed by the slot, not by a machine name: the artifact belongs to the
@@ -876,7 +876,7 @@ fn build_flake_slot(
     // Populate the verified workload-kernel cache before slot installation so
     // it cannot fall back to the builder kernel, which lacks device-mapper.
     if !build_stub_outdir_set() {
-        crate::commands::env::builder_vm::ensure_workload_kernel()
+        crate::commands::env::builder_vm::prepare_workload_kernel_for_launch()
             .context("resolving the dm-verity-capable workload kernel for flake slot")?;
     }
     let backend = mvm_client::AnyBackend::auto_select().name().to_string();

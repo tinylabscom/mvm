@@ -145,7 +145,9 @@ fn identity<'a>(
         address.mailbox == grant.mailbox && plan.image.name == vm_name,
         "mailbox custody identity does not match the admitted VM"
     );
-    let (policy, _) = derive_launch_keys(keys_dir, &grant)?.trust();
+    // Only the host-trusted template's address is checked here; the transient
+    // seed is never used to open retained ciphertext or re-sign history.
+    let (policy, _) = derive_launch_keys(keys_dir, &grant, &Key::random())?.trust();
     ensure!(
         address
             == MailboxAddress {
@@ -414,17 +416,22 @@ mod tests {
         let mut plan = PlanFixture::new().build();
         plan.mailbox = Some(MailboxGrant {
             mailbox,
-            authority_key: crate::mailbox_launch::authority_key_for(dir.path(), &mailbox)
-                .expect("mailbox authority")
-                .to_bytes(),
+            authority_key: crate::mailbox_launch::authority_key_for(
+                dir.path(),
+                &mailbox,
+                ExecutionEpoch::new(1).expect("epoch"),
+            )
+            .expect("mailbox authority")
+            .to_bytes(),
             epoch: ExecutionEpoch::new(1).expect("epoch"),
             report: None,
             retention: Some(MailboxRetentionPolicy::new(10_000).expect("signed retention")),
         });
         plan.plan_id = compute_plan_id(&plan);
-        let (policy, _) = derive_launch_keys(dir.path(), &plan.mailbox.expect("grant"))
-            .expect("host mailbox keys")
-            .trust();
+        let (policy, _) =
+            derive_launch_keys(dir.path(), &plan.mailbox.expect("grant"), &Key::random())
+                .expect("host mailbox keys")
+                .trust();
         let address = MailboxAddress {
             tenant: policy.context.expected_tenant,
             authorization_domain: policy.context.expected_authorization_domain,
@@ -603,7 +610,7 @@ mod tests {
         fs::create_dir(&source_state).expect("source VM state");
         let keys = RetainedMailboxKeys::provision(dir.path(), &plan, vm, &posture, address)
             .expect("verified first provision");
-        let derived = derive_launch_keys(dir.path(), &plan.mailbox.expect("grant"))
+        let derived = derive_launch_keys(dir.path(), &plan.mailbox.expect("grant"), &Key::random())
             .expect("mailbox signing material")
             .with_retained(&keys)
             .expect("bind retained purpose keys to the canonical template");

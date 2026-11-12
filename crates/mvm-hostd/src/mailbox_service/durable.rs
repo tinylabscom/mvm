@@ -32,7 +32,10 @@ use mvm_core::mailbox::reader_wire::{
 use mvm_core::mailbox::{MailboxError, OpenContext, ReplayIdentity};
 use mvm_core::vm_backend::HostDialRoute;
 
-use super::{GuestSealer, IO_TIMEOUT, MailboxLimits, MailboxPolicy, read_frame};
+use super::{
+    GUEST_HOLD_TIMEOUT, GuestSealer, IO_TIMEOUT, MailboxLimits, MailboxPolicy, await_first_byte,
+    read_frame,
+};
 
 const ACCEPT_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 const GUEST_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(12);
@@ -298,10 +301,34 @@ impl DurableMailboxService {
         route: &HostDialRoute,
         sealer: &mut GuestSealer,
     ) -> std::io::Result<bool> {
-        let mut stream = crate::telemetry_collector::dial_guest_route(
+        self.serve_guest_waiting(route, sealer, GUEST_EXCHANGE_TIMEOUT, || true)
+    }
+
+    /// Keep one idle production connection open without redialing until this
+    /// VM stops; the owner cancels it without an extra per-VM worker thread.
+    pub(crate) fn serve_guest_while(
+        &self,
+        route: &HostDialRoute,
+        sealer: &mut GuestSealer,
+        active: impl Fn() -> bool,
+    ) -> std::io::Result<bool> {
+        self.serve_guest_waiting(route, sealer, GUEST_HOLD_TIMEOUT, active)
+    }
+
+    fn serve_guest_waiting(
+        &self,
+        route: &HostDialRoute,
+        sealer: &mut GuestSealer,
+        hold: Duration,
+        active: impl Fn() -> bool,
+    ) -> std::io::Result<bool> {
+        let mut stream = crate::telemetry_collector::dial_route(
             route,
             mvm_contract::protocol::mailbox::MAILBOX_PORT,
         )?;
+        if !await_first_byte(&stream, hold, active) {
+            return Ok(false);
+        }
         let mut stream = GuestDeadline {
             stream: &mut stream,
             until: Instant::now() + GUEST_EXCHANGE_TIMEOUT,

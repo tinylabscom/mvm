@@ -45,8 +45,8 @@ use std::io::Read;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock, mpsc};
 use std::time::Instant;
 
 use super::host_write::{HostWrite, HostWriteBacklog};
@@ -71,6 +71,30 @@ struct HostDialConn {
     last_activity: Instant,
     /// Guest bytes the host socket has not taken yet.
     backlog: HostWriteBacklog,
+}
+
+/// Where closed host sockets are dropped. A close can block in the kernel, and
+/// the bridge is closed from a vCPU thread holding the device's locks, so the
+/// drop happens on this thread and a stuck close stalls only it.
+fn reaper() -> Option<&'static mpsc::Sender<UnixStream>> {
+    static REAPER: OnceLock<Option<mpsc::Sender<UnixStream>>> = OnceLock::new();
+    REAPER
+        .get_or_init(|| {
+            let (tx, rx) = mpsc::channel::<UnixStream>();
+            std::thread::Builder::new()
+                .name("mvm-dial-reaper".into())
+                .spawn(move || rx.into_iter().for_each(drop))
+                .ok()
+                .map(|_| tx)
+        })
+        .as_ref()
+}
+
+/// Close `stream` off the calling thread, or on it when no reaper exists.
+fn close_off_thread(stream: UnixStream) {
+    if let Some(Err(mpsc::SendError(stream))) = reaper().map(|tx| tx.send(stream)) {
+        drop(stream);
+    }
 }
 
 /// Host→guest console stream bridge for one guest: a per-guest-port set of Unix
@@ -339,7 +363,8 @@ impl HostDialBridge {
 
     /// Close a stream (guest `OP_SHUTDOWN`/`OP_RST`, or a host EOF/error).
     pub(crate) fn close(&mut self, conn_id: u32) {
-        if self.conns.remove(&conn_id).is_some() {
+        if let Some(conn) = self.conns.remove(&conn_id) {
+            close_off_thread(conn.stream);
             self.bump(-1);
         }
     }
@@ -397,6 +422,19 @@ mod tests {
     /// remembers the guest console port, and once the guest "accepts"
     /// (`on_established`) the bridge relays the client's bytes to the guest and the
     /// guest's reply back to the host.
+    /// A stream handed to the reaper is closed: the peer sees EOF without the
+    /// caller having dropped the socket itself.
+    #[test]
+    fn closing_off_thread_closes_the_socket() {
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        theirs
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        close_off_thread(ours);
+        let mut buf = [0u8; 1];
+        assert_eq!(theirs.read(&mut buf).unwrap(), 0, "peer must see EOF");
+    }
+
     #[test]
     fn host_connection_opens_stream_on_its_port_and_relays_both_ways() {
         let dir = tempfile::tempdir().unwrap();

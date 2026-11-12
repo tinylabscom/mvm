@@ -11,7 +11,6 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use clap::Args as ClapArgs;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 use mvm_build::app_deps::{GateLevel, Language, derive_lockfile_hash};
@@ -21,7 +20,7 @@ use mvm_core::deps_audit::{
 };
 use mvm_sdk::ir::{Dependencies, NodeTool, PythonTool};
 
-use super::audit::{copy_dir_recursive, refresh_index_pointer};
+use super::audit::{copy_dir_recursive, read_manifest, refresh_index_pointer};
 
 /// Arguments for importing a dependency tree captured from a development
 /// sandbox. The sidecars must come from the same capture as the content.
@@ -406,14 +405,8 @@ fn write_declaration(path: &Path, declaration: &Dependencies) -> Result<()> {
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
-    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    Ok(hex::encode(Sha256::digest(bytes)))
-}
-
-fn read_manifest(volume_dir: &Path) -> Result<VolumeManifest> {
-    let path = volume_dir.join(FILE_MANIFEST);
-    let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-    serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
+    mvm_core::crypto::image_verify::sha256_file(path)
+        .with_context(|| format!("reading {}", path.display()))
 }
 
 fn scratch_dir(cache_root: &Path, prior_hash: &str) -> Result<PathBuf> {

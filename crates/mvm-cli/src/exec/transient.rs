@@ -7,6 +7,7 @@
 //! here rather than at the call site.
 
 use super::*;
+use std::io::Write as _;
 
 /// Everything [`boot_transient_vm`] needs beyond the caller-varying
 /// `vm_name` / `use_snapshot`.
@@ -280,30 +281,83 @@ pub(super) fn leave_standby_when(
     }
 }
 
-/// Arm the Ctrl-C handler for this transient run: on interrupt, flag the
-/// returned `AtomicBool` and best-effort stop the VM immediately, rather
-/// than waiting for the in-flight guest command to return. The normal
-/// teardown sequence still runs afterward when the run returns — this only
-/// shortens the window an interrupted VM stays up.
-pub(super) fn install_ctrlc_teardown(
+/// Register the teardown a signal runs for this transient run: stop the VM
+/// (which reaps its supervisor, endpoint and mailbox helpers), seal the
+/// session, and remove its state, before the process exits with the signal's
+/// status. The global handler owns the signal; this only gives it work to do.
+/// Dropping the guard withdraws it once the normal teardown has finished.
+pub(super) fn arm_interrupt_teardown(
     vm_name: &str,
+    requested_vm_name: &str,
     backend_name: &str,
-) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
-    let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let handler_interrupted = interrupted.clone();
-    let vm_name = vm_name.to_string();
+    signed_plan_json: Option<&str>,
+) -> mvm_runtime::interrupt_cleanup::InterruptCleanup {
     let backend_name = backend_name.to_string();
-    let installed = crate::signal::set_ctrlc_handler(move |_signal| {
-        handler_interrupted.store(true, std::sync::atomic::Ordering::SeqCst);
-        let backend = AnyBackend::from_hypervisor(&backend_name);
-        if let Err(error) = backend.stop_transient(&VmId(vm_name.clone())) {
-            tracing::warn!(%error, vm = %vm_name, "stopping the transient VM on Ctrl-C failed");
+    arm_interrupt_teardown_with(
+        vm_name,
+        requested_vm_name,
+        backend_name.clone(),
+        signed_plan_json,
+        move |id| {
+            AnyBackend::from_hypervisor(&backend_name)
+                .stop_transient(id)
+                .map(|_| ())
+        },
+    )
+}
+
+fn arm_interrupt_teardown_with(
+    vm_name: &str,
+    requested_vm_name: &str,
+    backend_name: String,
+    signed_plan_json: Option<&str>,
+    stop: impl FnOnce(&VmId) -> Result<()> + Send + 'static,
+) -> mvm_runtime::interrupt_cleanup::InterruptCleanup {
+    let (vm, requested) = (vm_name.to_string(), requested_vm_name.to_string());
+    let plan = signed_plan_json.map(str::to_string);
+    mvm_runtime::interrupt_cleanup::on_interrupt(&format!("transient VM {vm_name}"), move || {
+        let audit =
+            plan.as_deref()
+                .map(|signed_plan_json| mvm_client::launch::TransientExitAudit {
+                    signed_plan_json,
+                    vm_name: &vm,
+                    backend: &backend_name,
+                    exit_code: None,
+                    completed: false,
+                    posture: None,
+                });
+        if let Err(error) = stop_for_interrupt(&vm, &requested, audit, stop) {
+            // The process exits right after this; the line is all that is left.
+            let _ = writeln!(
+                std::io::stderr(),
+                "could not stop transient VM '{vm}': {error:#}; `mvmctl machine stop {vm}` finishes it"
+            );
         }
-    });
-    if let Err(error) = installed {
-        tracing::warn!(%error, "Ctrl-C will not stop the transient VM early; normal teardown still runs");
+    })
+}
+
+/// The interrupt teardown itself: stop, record the end, remove state. A failed
+/// stop retains the state and is returned, never swallowed.
+fn stop_for_interrupt(
+    vm_name: &str,
+    requested_vm_name: &str,
+    exit_audit: Option<mvm_client::launch::TransientExitAudit<'_>>,
+    stop: impl FnOnce(&VmId) -> Result<()>,
+) -> Result<()> {
+    if let Err(error) = stop(&VmId(vm_name.to_string())) {
+        if let Some(exit_audit) = exit_audit {
+            mvm_client::launch::record_transient_stop_failure(exit_audit, &format!("{error:#}"));
+        }
+        return Err(error);
     }
-    interrupted
+    if let Some(exit_audit) = exit_audit {
+        let _ = mvm_client::launch::record_transient_exit(exit_audit);
+    }
+    remove_transient_state_dirs(
+        &mvm_core::config::vm_state_dir(vm_name),
+        &mvm_core::config::vm_state_dir(requested_vm_name),
+    );
+    Ok(())
 }
 
 pub(super) fn has_writable_disk(volumes: &[VmVolume]) -> bool {
@@ -535,6 +589,80 @@ pub(super) fn restore_via_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::test_env::TestEnv;
+
+    fn state_dirs(home: &Path) -> (TestEnv, (std::path::PathBuf, std::path::PathBuf)) {
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home);
+        env.remove("MVM_PRESERVE_TRANSIENT_STATE");
+        let dirs = (
+            mvm_core::config::vm_state_dir("sig-vm"),
+            mvm_core::config::vm_state_dir("sig-requested"),
+        );
+        for dir in [&dirs.0, &dirs.1] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        (env, dirs)
+    }
+
+    #[test]
+    fn state_dirs_releases_its_environment_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let (env, _) = state_dirs(home.path());
+        drop(env);
+        let _next = TestEnv::new();
+    }
+
+    #[test]
+    fn an_interrupt_stops_the_transient_vm_once_and_removes_its_state() {
+        let home = tempfile::tempdir().unwrap();
+        let (_env, (effective, requested)) = state_dirs(home.path());
+        let stops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = stops.clone();
+        let _armed = arm_interrupt_teardown_with(
+            "sig-vm",
+            "sig-requested",
+            "mock".to_string(),
+            None,
+            move |id| {
+                assert_eq!(id.0, "sig-vm");
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        assert!(mvm_runtime::interrupt_cleanup::run_all().contains(&"transient VM sig-vm".into()));
+        mvm_runtime::interrupt_cleanup::run_all();
+        assert_eq!(stops.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(!effective.exists() && !requested.exists());
+    }
+
+    #[test]
+    fn a_withdrawn_interrupt_teardown_never_stops_the_vm() {
+        let home = tempfile::tempdir().unwrap();
+        let (_env, (effective, _)) = state_dirs(home.path());
+        let armed = arm_interrupt_teardown_with(
+            "sig-vm",
+            "sig-requested",
+            "mock".to_string(),
+            None,
+            |_| panic!("a finished run must not be stopped again"),
+        );
+        drop(armed);
+        assert!(!mvm_runtime::interrupt_cleanup::pending().contains(&"transient VM sig-vm".into()));
+        assert!(effective.exists());
+    }
+
+    #[test]
+    fn a_failed_interrupt_stop_is_reported_and_keeps_the_state() {
+        let home = tempfile::tempdir().unwrap();
+        let (_env, (effective, requested)) = state_dirs(home.path());
+        let error = stop_for_interrupt("sig-vm", "sig-requested", None, |_| {
+            Err(anyhow::anyhow!("vmm would not die"))
+        })
+        .expect_err("a failed stop is returned");
+        assert!(error.to_string().contains("vmm would not die"));
+        assert!(effective.exists() && requested.exists());
+    }
 
     #[test]
     fn stop_failure_overrides_success_but_retains_the_primary_run_error() {

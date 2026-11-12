@@ -96,3 +96,16 @@ mod test_fixtures;
 /// that outlive the `mvmctl` that started them.
 pub mod vm_lifetime;
 pub mod workload_env;
+
+/// Read a daemon bin's launch config: the supervisor writes it to stdin and
+/// closes it, so this blocks until EOF.
+pub fn read_launch_config(bin: &str) -> anyhow::Result<Vec<u8>> {
+    use anyhow::Context;
+    use std::io::Read;
+    let mut buf = Vec::with_capacity(4096);
+    std::io::stdin()
+        .lock()
+        .read_to_end(&mut buf)
+        .with_context(|| format!("{bin} stdin read failed"))?;
+    Ok(buf)
+}

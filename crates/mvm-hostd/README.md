@@ -55,8 +55,9 @@ and recover an exact retry after restart; on Send and Receive it settles at most
 eight expired entries per request, returning unavailable when maintenance
 remains rather than reporting an uncommitted terminal state. A separate guest
 `outbox-local` path now requires a boot-pinned authority and a verified signed
-V2 receipt before removing the pending message; the old `outbox` path retains
-its ephemeral unit-verdict behavior. Expired submissions receive a typed
+V2 receipt before removing the pending message. The old `outbox` spool is for
+the ephemeral unit-verdict path; an unexpected V2-shaped reply cannot silently
+delete its pending operation. Expired submissions receive a typed
 terminal refusal and retain a bounded guest-side rejection record. Production
 mailboxes require a signed retention window under the host's configured ceiling;
 the local helper returns only `accepted_local_durable` after anchoring and

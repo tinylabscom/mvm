@@ -72,6 +72,7 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-backends | `src/driver/libkrun.rs` | 1 | hypervisor supervisor | spawn mvm-libkrun-supervisor | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-backends | `src/driver/qemu.rs` | 1 | hypervisor | launch QEMU | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-backends | `src/driver/qemu_process.rs` | 1 | mvmctl self re-exec | start `mvmctl __qemu-vsock-bridge` | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub; embedder refusal | embedder-refused |
+| mvm-backends | `src/fc/fetch.rs` | 2 | network fetch | curl of the pinned Firecracker release, then tar of the digest-checked archive | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub | fixed-argv-utility |
 | mvm-backends | `src/fc/idle_pool.rs` | 1 | process control | setsid-detached idle standby holder | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-build | `src/builder_egress_process.rs` | 1 | mvmctl self re-exec | start `mvmctl __builder-egress-supervisor` | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub; embedder refusal | embedder-refused |
 | mvm-build | `src/builder_vm_bootstrap.rs` | 1 | mvmctl self re-exec | run the bootstrap helper to prepare the builder image | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub; embedder refusal | embedder-refused |
@@ -111,6 +112,7 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-cli | `src/commands/pool/refill.rs` | 1 | mvmctl self re-exec | detached `mvmctl` pool refill helper | CLI (`mvmctl`) | - | - | `helper_command` env scrub | cli-only |
 | mvm-cli | `src/commands/seccomp_audit.rs` | 2 | fork + execvpe | audit a program under a seccomp filter (filtered env) | CLI (`mvmctl`) | - | - | RAW_SITES (on_host) | cli-only |
 | mvm-cli | `src/commands/vm/sdk_no_vm.rs` | 1 | user script | run an SDK wrapper script without a VM | CLI (`mvmctl`) | - | - | `helper_command` env scrub | cli-only |
+| mvm-cli | `src/doctor/mod.rs` | 1 | host probe | probe the explicit Firecracker override with --version | CLI (`mvmctl`) | - | - | `helper_command` env scrub | cli-only |
 | mvm-cli | `src/doctor/security_checks.rs` | 3 | host probe | fdesetup / findmnt / lsblk posture checks | CLI (`mvmctl`) | - | - | `helper_command` env scrub | cli-only |
 | mvm-cli | `src/doctor/toolchain.rs` | 1 | host probe | `<tool> --version` probes in doctor | CLI (`mvmctl`) | - | - | `helper_command` env scrub | cli-only |
 | mvm-cli | `src/host_binaries/payload_build.rs` | 2 | toolchain | cargo zigbuild of the embedded host binaries (refusal is in host_binaries/source.rs) | CLI (`mvmctl`) | - | - | `helper_command` env scrub | cli-only |
@@ -145,16 +147,16 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-vmm | `src/host/network_endpoint_spawn/owned.rs` | 1 | helper bin | spawn an owned network endpoint | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub; check-single-network-path | required-host-primitive |
 | mvm-vmm | `src/host/shell/exec.rs` | 6 | shell script | run_in_vm / run_host: bash -c and direct program exec for every ShellEnvironment caller | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | open-review |
 
-Totals: 183 production sites in 94 files.
+Totals: 186 production sites in 96 files.
 
 | Crate | Sites |
 |---|--:|
 | mvm-agentd | 27 |
-| mvm-backends | 7 |
+| mvm-backends | 9 |
 | mvm-build | 27 |
 | mvm-builder-guest | 32 |
 | mvm-capture | 6 |
-| mvm-cli | 26 |
+| mvm-cli | 27 |
 | mvm-client | 1 |
 | mvm-conformance | 3 |
 | mvm-core | 14 |
@@ -168,10 +170,10 @@ Totals: 183 production sites in 94 files.
 |---|--:|--:|
 | bounded-fixed-argv-utility | 12 | 6 |
 | bounded-user-adapter | 1 | 1 |
-| cli-only | 32 | 22 |
+| cli-only | 33 | 23 |
 | embedder-refused | 11 | 8 |
 | embedder-refused-by-caller | 8 | 1 |
-| fixed-argv-utility | 7 | 4 |
+| fixed-argv-utility | 9 | 5 |
 | guest-side | 60 | 27 |
 | open-review | 12 | 3 |
 | required-host-primitive | 36 | 20 |
@@ -181,6 +183,7 @@ Reviewed library-reachable sites (disposition, then why):
 
 | File | Disposition | Reason |
 |---|---|---|
+| `mvm-backends/src/fc/fetch.rs` | fixed-argv-utility | `curl` accepts only the lock-derived HTTPS URL and writes to a private temporary file; `tar` extracts only the lock-named member after verifying the archive digest. Both use separate argv under `helper_command`, and the binary's size and digest are checked before installation. Neither spawn has a wall-clock bound. |
 | `mvm-build/src/builder_vm_image.rs` | fixed-argv-utility | `prepopulate_with_mkfs`: program is the e2fsprogs `mkfs.ext4` path from `find_host_mkfs_ext4` (fixed candidate list), argv is a fixed flag list plus typed paths and a block count, no shell, status checked and mapped to `BuilderVmError`. Formats the builder's own store image from a digest-verified seed; no caller-supplied text reaches argv. Stdio is inherited and there is no wall-clock bound (not changed: the output is the operator's progress display, not captured). |
 | `mvm-build/src/builder_vm_runtime.rs` | bounded-fixed-argv-utility | `debugfs_cat`: read-only `debugfs -R` on the builder store image. The request comes from `debugfs_cat_request` (refuses a relative path or whitespace and control characters). It runs under `mvm_core::bounded_run::run_bounded` with a 60 s timeout (typed error) and a 1 MiB stdout cap, and its error text is `excerpt`-capped; tests drive a fake tool for the hang, the 10 MB output and the normal and not-found paths. |
 | `mvm-build/src/embed_toolchain.rs` | embedder-refused-by-caller | The module is shared with `build.rs` and the CLI payload build, which are not library paths. The only non-CLI caller is `rustc_has_target`, reached from `guest_agent_build::ensure_rust_targets` after `zigbuild_tools`, whose first statement is `refuse_toolchain_spawn` (`CliSpawn::GuestRuntimeToolchain`); a library embedder is refused before any `rustup`, `cargo`, `rustc`, `zig` or `python3` probe runs. The module cannot call that function itself because `build.rs` includes it without `mvm-vmm`. |
@@ -202,7 +205,7 @@ Still open-review, and the concrete missing piece:
 | `mvm-vmm/src/host/linux_env.rs` | `NativeEnv::{run, run_visible, run_capture}` run `bash -c <script>` for every `LinuxEnv` caller. Same gap as `shell/exec.rs`: callers are audited and tested, the wrapper is not constrained. |
 | `mvm-vmm/src/host/shell/exec.rs` | `run_in_vm*`/`run_on_vm*` hand a caller-built script to `bash -c` (host bash on native Linux and for custom VM names); `run_host` runs a caller-named program but has CLI callers only. Every library caller was read (see the shell-wrapper caller audit) and the unquoted ones fixed, but the seam itself still accepts any string, so nothing stops a new caller interpolating raw. Missing: a gate or typed command form that makes unquoted interpolation into these scripts unrepresentable, and a wall-clock bound (builds are long-running, so the bound has to be per caller). |
 
-By construct: `Command::new` 57, `helper_command` 115, `helper_command_with` 3, `openpty` 2, `raw:execve` 1, `raw:execvpe` 1, `raw:fork` 2, `scrub_command` 1, `wrap_checked` 1.
+By construct: `Command::new` 57, `helper_command` 118, `helper_command_with` 3, `openpty` 2, `raw:execve` 1, `raw:execvpe` 1, `raw:fork` 2, `scrub_command` 1, `wrap_checked` 1.
 <!-- inventory:end -->
 
 Linked and Traced are host-side facts about the crate and the call graph. A `guest` or `builder VM` row is crate-linked into the host closure (so `CHS`), but its binary only ever runs inside the microVM; the host never calls it. Read those rows by Authority.

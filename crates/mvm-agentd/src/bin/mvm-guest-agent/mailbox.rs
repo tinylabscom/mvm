@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_agentd::flowmux_drive::{MAILBOX_ACK_SIGNING_KEY_FILE, RUN_MVM_DIR};
 use mvm_agentd::mailbox_outbox::{
-    LOCAL_OUTBOX_PATH, MAILBOX_CMDLINE_TOKEN, OUTBOX_PATH, forward_local_outbox, forward_outbox,
+    LOCAL_OUTBOX_PATH, MAILBOX_CMDLINE_TOKEN, MAILBOX_HOLD, MAILBOX_IO_TIMEOUT, OUTBOX_PATH,
+    forward_local_outbox, forward_outbox, peer_gone, wait_for_outbox,
 };
 use mvm_agentd::telemetry_capture::session::TimedStream;
 use mvm_contract::protocol::mailbox::MAILBOX_PORT;
@@ -27,7 +28,6 @@ use crate::globals::SHUTDOWN_REQUESTED;
 use crate::telemetry::cmdline_asserts;
 use crate::transport::{accept_vsock, bind_vsock_listener, unix_transport_selected};
 
-const MAILBOX_IO_TIMEOUT: Duration = Duration::from_secs(12);
 static ACK_SEED: OnceLock<Zeroizing<[u8; 32]>> = OnceLock::new();
 static READER_BOOT: OnceLock<MailboxReaderBootBinding> = OnceLock::new();
 
@@ -103,19 +103,22 @@ fn load_ack_seed(path: &Path, owner_uid: u32) -> io::Result<Zeroizing<[u8; 32]>>
 
 struct MailboxDeadline<'a, S> {
     stream: &'a mut S,
-    until: Instant,
+    until: Option<Instant>,
 }
 
 impl<'a, S> MailboxDeadline<'a, S> {
     fn new(stream: &'a mut S) -> Self {
         Self {
             stream,
-            until: Instant::now() + MAILBOX_IO_TIMEOUT,
+            until: None,
         }
     }
 
-    fn remaining(&self) -> io::Result<Duration> {
-        let remaining = self.until.saturating_duration_since(Instant::now());
+    fn remaining(&mut self) -> io::Result<Duration> {
+        let until = *self
+            .until
+            .get_or_insert_with(|| Instant::now() + MAILBOX_IO_TIMEOUT);
+        let remaining = until.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -124,6 +127,12 @@ impl<'a, S> MailboxDeadline<'a, S> {
         } else {
             Ok(remaining)
         }
+    }
+}
+
+impl<S: AsRawFd> AsRawFd for MailboxDeadline<'_, S> {
+    fn as_raw_fd(&self) -> RawFd {
+        self.stream.as_raw_fd()
     }
 }
 
@@ -222,6 +231,12 @@ pub(crate) fn init_mailbox() {
         });
 }
 
+/// The host re-dials an idle guest forever, so only the first few refusals
+/// and then one in a hundred are logged.
+fn logs_refusal(refused: u32) -> bool {
+    refused < 3 || refused.is_multiple_of(100)
+}
+
 /// One host connection at a time, each answered from the outbox.
 fn accept_loop(
     listener_fd: RawFd,
@@ -251,7 +266,7 @@ fn accept_loop(
         match result {
             Ok(()) | Err(Refusal::Unavailable) => {}
             Err(refusal) => {
-                if refused < 3 || refused.is_multiple_of(100) {
+                if logs_refusal(refused) {
                     eprintln!("mvm-guest-agent: mailbox frame not delivered: {refusal}");
                 }
                 refused = refused.saturating_add(1);
@@ -261,13 +276,14 @@ fn accept_loop(
 }
 
 fn wait_for_operation(
-    stream: &mut (impl Read + Write),
+    stream: &mut (impl Read + Write + AsRawFd),
     reader: Option<&std::sync::mpsc::Receiver<crate::mailbox_reader::PendingReader>>,
     reader_boot: Option<&MailboxReaderBootBinding>,
     local_outbox: &Path,
     outbox: &Path,
 ) -> Result<(), Refusal> {
-    for _ in 0..16 {
+    let until = Instant::now() + MAILBOX_HOLD;
+    loop {
         // A local-durable request cannot be downgraded to the older unit
         // verdict even when both requests share the guest mailbox port.
         if local_outbox.exists()
@@ -285,7 +301,7 @@ fn wait_for_operation(
             .map(|_| ());
         }
         // A pending Send gets the existing port before reader traffic.
-        if outbox.exists() {
+        if outbox.is_file() || wait_for_outbox(outbox, Duration::ZERO, Duration::ZERO, || false) {
             return forward_outbox(stream, outbox);
         }
         if local_outbox.exists() {
@@ -294,14 +310,24 @@ fn wait_for_operation(
         if let Some(Ok(pending)) = reader.map(std::sync::mpsc::Receiver::try_recv) {
             return crate::mailbox_reader::exchange(stream, pending);
         }
-        std::thread::sleep(Duration::from_millis(250));
+        if peer_gone(stream.as_raw_fd())
+            || SHUTDOWN_REQUESTED.load(Ordering::Acquire)
+            || Instant::now() >= until
+        {
+            return Err(Refusal::Unavailable);
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
-    Err(Refusal::Unavailable)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_idle_guest_logs_a_bounded_number_of_refusals() {
+        assert_eq!((0..1000).filter(|&n| logs_refusal(n)).count(), 3 + 10 - 1);
+    }
 
     #[test]
     fn only_the_exact_token_asserts_a_mailbox() {
@@ -319,7 +345,7 @@ mod tests {
         let (mut stream, _peer) = std::os::unix::net::UnixStream::pair().expect("socket");
         let mut expired = MailboxDeadline {
             stream: &mut stream,
-            until: Instant::now() - Duration::from_millis(1),
+            until: Some(Instant::now() - Duration::from_millis(1)),
         };
         assert_eq!(
             expired.read(&mut [0u8; 1]).unwrap_err().kind(),
@@ -336,7 +362,7 @@ mod tests {
         let (mut stream, _silent_peer) = std::os::unix::net::UnixStream::pair().expect("socket");
         let mut bounded = MailboxDeadline {
             stream: &mut stream,
-            until: Instant::now() + Duration::from_millis(25),
+            until: Some(Instant::now() + Duration::from_millis(25)),
         };
         assert_eq!(
             bounded.read(&mut [0u8; 1]).unwrap_err().kind(),
