@@ -49,23 +49,23 @@ jobs:
           MVM_EMBED: "0"
         run: |
           set -euo pipefail
-          cargo build --locked --bin mvmctl \
+          cargo build --locked --profile release-witness --bin mvmctl \
             --features user,pr-test-guest-runtime,mvm-cli/pr-test-synthetic-base
-          cargo build --locked -p mvm-hostd --features pr-test-guest-runtime \
+          cargo build --locked --profile release-witness -p mvm-hostd --features pr-test-guest-runtime \
             --bin mvm-host-agent --bin mvm-signer-helper --bin mvm-network-endpoint
           for binary in mvmctl mvm-host-agent mvm-signer-helper mvm-network-endpoint; do
-            test -x "target/debug/$binary"
+            test -x "target/release-witness/$binary"
           done
-          target/debug/mvmctl --version
+          target/release-witness/mvmctl --version
       - name: Retain unpublished CLI for an authorized KVM witness
         uses: actions/upload-artifact@v7
         with:
           name: pr-test-cli-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            target/debug/mvmctl
-            target/debug/mvm-host-agent
-            target/debug/mvm-signer-helper
-            target/debug/mvm-network-endpoint
+            target/release-witness/mvmctl
+            target/release-witness/mvm-host-agent
+            target/release-witness/mvm-signer-helper
+            target/release-witness/mvm-network-endpoint
           if-no-files-found: error
           retention-days: 1
 
