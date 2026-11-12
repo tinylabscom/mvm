@@ -65,11 +65,12 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use mvm_contract::hash::hex;
+use mvm_core::crypto::image_verify::sha256_file;
 use mvm_core::deps_audit::{
     FILE_CONTENT_DIR, FILE_CVE, FILE_FETCH_LOG, FILE_MANIFEST, FILE_SBOM, VolumeError, seal_volume,
     verify_sealed_volume,
@@ -690,20 +691,6 @@ fn lookup_cached_volume(
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(source) => Err(InstallError::IndexIo { path, source }),
     }
-}
-
-fn sha256_file(path: &Path) -> Result<String, io::Error> {
-    let mut f = fs::File::open(path)?;
-    let mut h = Sha256::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        h.update(&buf[..n]);
-    }
-    Ok(hex(&h.finalize()))
 }
 
 #[cfg(test)]
