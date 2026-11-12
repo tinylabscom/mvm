@@ -34,11 +34,11 @@ use super::mmio_layout::{
     BALLOON_IRQ, BALLOON_MMIO_BASE, MAX_DISKS, RNG_IRQ, RNG_MMIO_BASE, VSOCK_IRQ, VSOCK_MMIO_BASE,
     disk_mmio,
 };
-use super::smp::{CreationOrder, Release, SecondaryGates, VcpuStart, psci};
+use super::smp::{CreationOrder, OnDrop, Release, SecondaryGates, VcpuStart, psci};
 use super::snapshot::{HVF_SNAPSHOT_BACKEND_KIND, HvfVcpuState};
 use super::stop_wake::{RunOver, wake_until_done};
 use super::sys::*;
-use super::vcpu::esr_ec;
+use super::vcpu::{esr_ec, next_pc};
 use super::{BootFault, default_bootargs};
 use crate::vmm::device::Pl011;
 use crate::vmm::device_state::SnapshotDeviceState;
@@ -186,7 +186,7 @@ fn handle_exception(
         }
         // Advance past the faulting instruction and keep going.
         let pc = vc.get_core(CoreReg::Pc)?;
-        vc.set_core(CoreReg::Pc, pc + 4)?;
+        vc.set_core(CoreReg::Pc, next_pc(pc))?;
         return Ok(RunControl::Continue);
     }
 
@@ -1331,6 +1331,7 @@ fn run_secondary<B: run::DeviceBus>(
     let clock = ThreadCpuHandle::for_current_thread().ok().map(Arc::new);
     let registered = created.send(Ok(clock.clone())).is_ok();
 
+    let _end_on_unwind = OnDrop(|| shared.end());
     let result = (|| {
         if !registered {
             // The boot CPU gave up on the bring-up. Do not enter the guest.
@@ -1980,6 +1981,7 @@ unsafe fn run(
                     .collect();
                 drop(created_tx);
                 drop(ready_tx);
+                let _end_on_unwind = OnDrop(|| shared.end());
 
                 // Wait for the whole machine to exist before starting the
                 // guest. The device tree already describes these CPUs, so a
