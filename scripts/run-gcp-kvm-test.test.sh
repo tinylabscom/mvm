@@ -98,6 +98,14 @@ grep -Fq 'just_sha256=4a5cc2f53e6f0f8c59092a6cc38291eb729d46a7dd95d3ae582008881b
 grep -Fq '[[ "$(just --version)" == "just $just_version" ]]' "$remote_runner"
 grep -Fq 'firecracker_sha256=06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558' "$remote_runner"
 grep -Fq '| sha256sum -c -' "$remote_runner"
+# The bootstrap is privileged, but Firecracker and the requested witness are not.
+# These are literal source fragments, not expressions for this test shell.
+# shellcheck disable=SC2016
+grep -Fq 'useradd -m -s /bin/bash -G "$kvm_group" mvm-test' "$remote_runner"
+grep -Fq 'runuser -u mvm-test -- test -r /dev/kvm -a -w /dev/kvm' "$remote_runner"
+grep -Fq 'runuser -u mvm-test -- env' "$remote_runner"
+# shellcheck disable=SC2016
+grep -Fq 'RUSTUP_HOME="$repo/.mvm-test/rustup"' "$remote_runner"
 
 # A tracked-only upload has no .git directory. Recover the real, reachable
 # commit without changing any uploaded bytes, and reject malformed or
