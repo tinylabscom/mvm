@@ -56,8 +56,11 @@ runs:
         TARBALL="zig-${TARGET}-${ZIG_VERSION}.tar.xz"
         WORK=$(mktemp -d)
         trap 'rm -rf "$WORK"' EXIT
-        curl -fL --retry 3 --retry-all-errors --retry-delay 2 \
-          --connect-timeout 10 --max-time 120 --retry-max-time 300 \
+        # The pinned aarch64 tarball is large enough to exceed 120s on a slow
+        # hosted runner. Resume partial retries instead of starting from zero;
+        # the SHA-256 check below still refuses any incomplete or altered bytes.
+        curl -fL -C - --retry 3 --retry-all-errors --retry-delay 2 \
+          --connect-timeout 10 --max-time 300 --retry-max-time 900 \
           -o "$WORK/$TARBALL" "https://ziglang.org/download/${ZIG_VERSION}/${TARBALL}"
         if [ "$OS" = Darwin ]; then
           printf '%s  %s\n' "$SHA256" "$WORK/$TARBALL" | shasum -a 256 -c -

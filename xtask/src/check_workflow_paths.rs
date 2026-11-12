@@ -1539,7 +1539,7 @@ mod tests {
             "run: cargo nextest run --workspace --exclude mvm-fs --all-targets\n",
             "MVM_GUEST_PRIVILEGED_TESTS=1",
             "grep -q \"test result: ok. 4 passed\" \"$RUNNER_TEMP/helper.log\"",
-            "tool_attribution::tests::egress_identity_alone_receives_live_attribution_over_unix_credentials",
+            "grep -q \"1 passed\" \"$RUNNER_TEMP/witness.log\"",
             "printf 'HOME=%s\\nMVM_HOME=%s\\nTMPDIR=%s\\n'",
         ] {
             assert!(
