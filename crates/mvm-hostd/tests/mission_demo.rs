@@ -664,7 +664,9 @@ fn a_full_host_queue_delays_the_guest_outbox_instead_of_dropping_it() {
     let outbox = node.home.path().join("outbox");
     std::fs::create_dir(&outbox).unwrap();
     for i in 0..total {
+        let identity_byte: u8 = (i + 1).try_into().expect("bounded spool fixture");
         let message = OutboxMessage {
+            message_id: MessageId::from_bytes([identity_byte; 32]),
             body: format!("m{i}").into_bytes(),
             ..outbox_message()
         };
@@ -1117,11 +1119,15 @@ fn a_running_guest_submits_again_after_its_first_message_was_consumed() {
     let outbox = dir.path().join("outbox");
     mvm_agentd::mailbox_outbox::write_outbox(&outbox, &outbox_message()).unwrap();
     let guest_outbox = outbox.clone();
+    let (forwarded_tx, forwarded_rx) = std::sync::mpsc::sync_channel(1);
     let guest = std::thread::spawn(move || {
         for _ in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
             mvm_agentd::mailbox_outbox::wait_and_forward_outbox(&mut stream, &guest_outbox)
                 .expect("guest submits pending operation");
+            forwarded_tx
+                .send(())
+                .expect("forwarding completion observer");
         }
     });
     let launch = serve_derived(
@@ -1145,6 +1151,9 @@ fn a_running_guest_submits_again_after_its_first_message_was_consumed() {
             .expect("the live guest message arrives")
     };
     assert_eq!(receive(), b"hello");
+    forwarded_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("first guest operation was removed");
     let next = OutboxMessage::new(aircraft_principal(), b"after-start".to_vec());
     mvm_agentd::mailbox_outbox::write_outbox(&outbox, &next).unwrap();
     assert_eq!(receive(), b"after-start");

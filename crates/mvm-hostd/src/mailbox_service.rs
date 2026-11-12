@@ -341,8 +341,8 @@ pub fn serve_grant(
 }
 
 /// Bind the service for `grant` without dialing the guest, and hand back the
-/// grant-bound sealer to serve it with, so a caller can serve the same queue
-/// and replay state over many connections.
+/// grant-bound sealer to serve it with. Live admission uses the current wall
+/// clock on every request, not the time the helper first bound the listener.
 pub fn bind_grant(
     grant: &MailboxGrant,
     trust: MailboxPolicy,
@@ -351,7 +351,7 @@ pub fn bind_grant(
     socket: &Path,
 ) -> std::io::Result<(MailboxService, GuestSealer)> {
     let sealer = sealer.with_grant(grant)?;
-    let service = MailboxService::bind(socket, limits, trust.with_grant(grant)?)?;
+    let service = MailboxService::bind_live(socket, limits, trust.with_grant(grant)?)?;
     Ok((service, sealer))
 }
 
@@ -1009,14 +1009,26 @@ mod tests {
         }
     }
 
-    /// What the real launch path builds for one epoch: the service and the
-    /// sealer, both from the host key directory through the grant.
+    // These historical-epoch fixtures use their fixed context time; production
+    // bind_grant instead consults the current wall clock on every admission.
+    fn bind_fixture_grant(
+        grant: &MailboxGrant,
+        trust: MailboxPolicy,
+        sealer: GuestSealer,
+        limits: MailboxLimits,
+        socket: &Path,
+    ) -> std::io::Result<(MailboxService, GuestSealer)> {
+        let sealer = sealer.with_grant(grant)?;
+        let service = MailboxService::bind(socket, limits, trust.with_grant(grant)?)?;
+        Ok((service, sealer))
+    }
+
     fn launch(keys: &Path, socket: &Path, epoch: u64) -> (MailboxService, GuestSealer) {
         let grant = grant_at(keys, epoch);
         let (policy, sealer) = derive_launch_keys(keys, &grant, &test_secret())
             .unwrap()
             .trust();
-        bind_grant(&grant, policy, sealer, LAUNCH_LIMITS, socket).unwrap()
+        bind_fixture_grant(&grant, policy, sealer, LAUNCH_LIMITS, socket).unwrap()
     }
 
     #[test]
@@ -1080,7 +1092,7 @@ mod tests {
         let grant = grant_at(keys, 1);
         let (policy, sealer) = derive_launch_keys(keys, &grant, secret).unwrap().trust();
         let socket = keys.join(name);
-        let _bound = bind_grant(&grant, policy, sealer, LAUNCH_LIMITS, &socket).unwrap();
+        let _bound = bind_fixture_grant(&grant, policy, sealer, LAUNCH_LIMITS, &socket).unwrap();
         send(&socket, &sealed.0, &sealed.1)
     }
 
