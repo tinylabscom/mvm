@@ -3114,6 +3114,7 @@ mod tests {
             runtime_pack: false,
             registry_pack_image: None,
             resolved_digest: None,
+            local_pack: None,
             net: false,
             allow_host: vec![],
             peer: vec![],

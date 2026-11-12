@@ -306,6 +306,10 @@ pub fn start_machine_spec(
 }
 
 pub(super) fn validate_registry_pack_source(spec: &mp::MachineSpec) -> Result<()> {
+    anyhow::ensure!(
+        spec.local_pack.is_none(),
+        "local pack machine requires a freshly admitted composition start"
+    );
     if let Some(pin) = &spec.registry_pack_image {
         anyhow::ensure!(
             spec.image.is_none() && spec.deployment.is_none() && !spec.runtime_pack,
@@ -488,6 +492,7 @@ mod tests {
             resolved_digest: None,
             runtime_pack: false,
             registry_pack_image: None,
+            local_pack: None,
             net: false,
             allow_host: Vec::new(),
             peer: Vec::new(),
@@ -572,6 +577,20 @@ mod tests {
         machine.runtime_pack = false;
         machine.deployment = Some("/unrelated/deployment".into());
         assert!(validate_registry_pack_source(&machine).is_err());
+    }
+
+    #[test]
+    fn a_local_recipe_cannot_fall_back_to_the_image_or_installed_bundle_path() {
+        let mut machine = spec("local-pack");
+        machine.image = Some("alpine:latest".into());
+        machine.local_pack = Some(mp::LocalPackSource {
+            recipe: std::path::PathBuf::from("/project/pack.toml"),
+            recipe_sha256: mvm_core::packs::Sha256Hex::from_bytes(b"recipe"),
+            archive_sha256: mvm_core::packs::Sha256Hex::from_bytes(b"archive"),
+        });
+        let error = validate_registry_pack_source(&machine)
+            .expect_err("a local recipe needs its own freshly admitted start path");
+        assert!(error.to_string().contains("local pack"), "{error:#}");
     }
 
     #[test]

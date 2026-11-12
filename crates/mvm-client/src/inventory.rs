@@ -424,6 +424,7 @@ mod tests {
             resolved_digest: None,
             runtime_pack: false,
             registry_pack_image: None,
+            local_pack: None,
             net: false,
             allow_host: vec![],
             peer: Vec::new(),

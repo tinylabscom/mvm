@@ -9,7 +9,7 @@
 //! description of a workload.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use mvm_contract::policy::routes::EgressRoute;
@@ -23,6 +23,18 @@ use mvm_core::{config, naming};
 /// Schema version stored in every `machine.json`.  Bump only if a breaking
 /// field change is introduced; new optional fields use `#[serde(default)]`.
 pub const MACHINE_SPEC_SCHEMA_VERSION: u32 = 1;
+
+/// Data-only identity of a locally composed pack; never an installed-bundle authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalPackSource {
+    /// Absolute recipe path to re-read on every start.
+    pub recipe: PathBuf,
+    /// Exact authored recipe selected when the machine was created.
+    pub recipe_sha256: mvm_core::packs::Sha256Hex,
+    /// Verified, host-signed cache entry selected at creation.
+    pub archive_sha256: mvm_core::packs::Sha256Hex,
+}
 
 /// Declarative persistent machine spec. Runtime state lives elsewhere.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +67,9 @@ pub struct MachineSpec {
     /// reopens it under current publisher trust before signing the plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registry_pack_image: Option<mvm_core::registry_pack::PackPin>,
+    /// A recipe and cache identity, never publisher enrollment or plan admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_pack: Option<LocalPackSource>,
     pub net: bool,
     pub allow_host: Vec<String>,
     /// Peer routes this machine may dial (`NAME:PORT=ADDR:PORT`), persisted so
@@ -281,6 +296,7 @@ pub fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
         && a.deployment == b.deployment
         && a.runtime_pack == b.runtime_pack
         && a.registry_pack_image == b.registry_pack_image
+        && a.local_pack == b.local_pack
         && a.net == b.net
         && same_allow_host(&a.allow_host, &b.allow_host)
         && a.peer == b.peer
@@ -311,6 +327,7 @@ pub fn machine_config_diff(current: &MachineSpec, desired: &MachineSpec) -> Stri
         || current.deployment != desired.deployment
         || current.runtime_pack != desired.runtime_pack
         || current.registry_pack_image != desired.registry_pack_image
+        || current.local_pack != desired.local_pack
         || current.workload_dir != desired.workload_dir
     {
         changed.push("source");
@@ -504,6 +521,7 @@ mod tests {
             resolved_digest: None,
             runtime_pack: false,
             registry_pack_image: None,
+            local_pack: None,
             net: false,
             allow_host: vec![],
             peer: Vec::new(),
@@ -548,9 +566,38 @@ mod tests {
             serde_json::from_str(&legacy).expect("a pre-grants spec still loads");
         assert_eq!(spec.caller_commitment, None);
         assert_eq!(spec.grants, None);
+        assert_eq!(spec.local_pack, None);
         // And a spec that granted nothing must not start emitting the key, so
         // rewriting an old spec does not gratuitously change its bytes.
         assert!(!serde_json::to_string(&spec).unwrap().contains("grants"));
+        assert!(!serde_json::to_string(&spec).unwrap().contains("local_pack"));
+    }
+
+    #[test]
+    fn local_pack_source_round_trips_as_data_and_changes_trigger_reconciliation() {
+        let mut current = spec_fixture("packed");
+        current.image = None;
+        current.profile = "dev".into();
+        current.local_pack = Some(LocalPackSource {
+            recipe: std::path::PathBuf::from("/project/pack.toml"),
+            recipe_sha256: mvm_core::packs::Sha256Hex::from_bytes(b"recipe"),
+            archive_sha256: mvm_core::packs::Sha256Hex::from_bytes(b"archive"),
+        });
+        let stored = serde_json::to_vec(&current).expect("serialize local source");
+        let round_trip: MachineSpec =
+            serde_json::from_slice(&stored).expect("deserialize local source");
+        assert_eq!(round_trip, current);
+        assert!(round_trip.manifest.is_none());
+        assert!(round_trip.registry_pack_image.is_none());
+
+        let mut changed = round_trip.clone();
+        changed
+            .local_pack
+            .as_mut()
+            .expect("local source")
+            .recipe_sha256 = mvm_core::packs::Sha256Hex::from_bytes(b"changed recipe");
+        assert!(!machine_config_matches(&round_trip, &changed));
+        assert_eq!(machine_config_diff(&round_trip, &changed), "source");
     }
 
     #[test]
@@ -883,6 +930,7 @@ mod tests {
             resolved_digest: None,
             runtime_pack: false,
             registry_pack_image: None,
+            local_pack: None,
             net: false,
             allow_host: vec![],
             peer: Vec::new(),

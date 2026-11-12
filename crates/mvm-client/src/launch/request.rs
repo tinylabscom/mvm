@@ -217,6 +217,7 @@ pub(crate) fn persisted_spec_from_request(
             LaunchSource::RegistryPack { pin } => Some(pin.clone()),
             _ => None,
         },
+        local_pack: None,
         net: false,
         allow_host: vec![],
         peer: Vec::new(),

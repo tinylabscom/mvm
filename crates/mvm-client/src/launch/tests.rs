@@ -1001,6 +1001,7 @@ async fn start_refuses_spec_shapes_the_in_process_backend_cannot_honor() {
         resolved_digest: None,
         runtime_pack: false,
         registry_pack_image: None,
+        local_pack: None,
         net: false,
         allow_host: vec![],
         peer: Vec::new(),

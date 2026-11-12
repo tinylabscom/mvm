@@ -1188,6 +1188,9 @@ fn ensure_spec_bootable_in_process(spec: &mp::MachineSpec) -> Result<()> {
     if spec.runtime_pack {
         return Err(unsupported("a runtime-pack source"));
     }
+    if spec.local_pack.is_some() {
+        return Err(unsupported("a local pack source"));
+    }
     if !spec.volumes.is_empty() {
         return Err(unsupported(
             "CLI-grammar volume strings (use typed attachments)",
