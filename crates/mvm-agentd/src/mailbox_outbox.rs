@@ -209,8 +209,14 @@ pub fn bound_socket_io(
     fd: std::os::fd::RawFd,
     timeout: std::time::Duration,
 ) -> std::io::Result<()> {
+    let secs = timeout.as_secs().try_into().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "mailbox timeout exceeds socket timeval range",
+        )
+    })?;
     let tv = libc::timeval {
-        tv_sec: timeout.as_secs() as libc::time_t,
+        tv_sec: secs,
         tv_usec: 0,
     };
     for opt in [libc::SO_RCVTIMEO, libc::SO_SNDTIMEO] {
@@ -462,6 +468,13 @@ mod tests {
             1,
             "unknown reply retains the operation"
         );
+    }
+
+    #[test]
+    fn a_timeout_outside_timeval_range_is_refused_before_touching_the_socket() {
+        let error = bound_socket_io(-1, std::time::Duration::from_secs(u64::MAX))
+            .expect_err("an overflowing timeout must not wrap or disable the bound");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]
