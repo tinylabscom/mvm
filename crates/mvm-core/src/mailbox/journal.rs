@@ -45,6 +45,7 @@ const ANCHOR_DOMAIN: &[u8] = b"mvm.mailbox.anchor.v1\0";
 const ACCEPTANCE_INTENT_DOMAIN_V2: &[u8] = b"mvm.mailbox.journal-acceptance-intent.v2\0";
 const ACCEPTANCE_INTENT_DOMAIN_V3: &[u8] = b"mvm.mailbox.journal-acceptance-intent.v3\0";
 const EXPIRY_INTENT_DOMAIN: &[u8] = b"mvm.mailbox.journal-expiry.v1\0";
+const CHECKPOINT_DOMAIN: &[u8] = b"mvm.mailbox.local-checkpoint.v1\0";
 const MAX_ANCHOR_BYTES: u64 = 1024;
 const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RECORDS: usize = 100_000;
@@ -296,8 +297,14 @@ enum JournalEvent {
         expired_at_unix_ms: i64,
         authorization_signature: Vec<u8>,
     },
+    Checkpoint {
+        state: Box<CheckpointState>,
+        authorization_signature: Vec<u8>,
+    },
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LeaseState {
     retry_count: u8,
     signed: SignedMailboxDeliveryLease,
@@ -305,6 +312,8 @@ struct LeaseState {
     receive_capability: SignedMailboxCapability,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Seen {
     envelope: MailboxEnvelope,
     capability: SignedMailboxCapability,
@@ -313,6 +322,25 @@ struct Seen {
     expired_at_unix_ms: Option<i64>,
     lease: Option<LeaseState>,
     signed_ack: Option<SignedMailboxDeliveryAck>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointEntry {
+    identity: ReplayIdentity,
+    seen: Seen,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointState {
+    source: JournalTip,
+    address: MailboxAddress,
+    history_key: HistoryKeyRef,
+    retention: MailboxRetentionPolicy,
+    created_at_unix_ms: i64,
+    entries: Vec<CheckpointEntry>,
+    used_challenges: Vec<([u8; 32], ReplayIdentity)>,
 }
 
 #[derive(Default)]
@@ -338,9 +366,10 @@ pub struct MailboxJournal {
     limits: JournalLimits,
     tip: JournalTip,
     bytes: u64,
+    records: usize,
     seen: BTreeMap<ReplayIdentity, Seen>,
     order: Vec<ReplayIdentity>,
-    used_challenges: BTreeSet<[u8; 32]>,
+    used_challenges: BTreeMap<[u8; 32], ReplayIdentity>,
     poisoned: bool,
     _lock: FileLock,
 }
@@ -842,25 +871,68 @@ impl MailboxJournal {
             limits,
             tip: JournalTip::genesis(),
             bytes: 0,
+            records: 0,
             seen: BTreeMap::new(),
             order: Vec::new(),
-            used_challenges: BTreeSet::new(),
+            used_challenges: BTreeMap::new(),
             poisoned: false,
             _lock: lock,
         };
         let mut paths = Vec::new();
+        let mut checkpoints = Vec::new();
         for entry in fs::read_dir(root)? {
             let entry = entry?;
-            if entry.file_name() != "journal.lock" {
-                paths.push(entry.path());
-                if paths.len() > limits.max_records {
-                    return Err(JournalError::Full);
+            if entry.file_name() == "journal.lock" {
+                continue;
+            }
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_str().ok_or(JournalError::Corrupt)?;
+            if let Some(raw) = name.strip_prefix("checkpoint-") {
+                let cursor = raw
+                    .strip_suffix(".bin")
+                    .and_then(|raw| raw.parse::<u64>().ok())
+                    .ok_or(JournalError::Corrupt)?;
+                if path != checkpoint_path(root, cursor) {
+                    return Err(JournalError::Corrupt);
                 }
+                checkpoints.push((cursor, path));
+            } else if let Some(raw) = name.strip_prefix("entry-") {
+                let cursor = raw
+                    .strip_suffix(".bin")
+                    .and_then(|raw| raw.parse::<u64>().ok())
+                    .ok_or(JournalError::Corrupt)?;
+                if path != record_path(root, cursor) {
+                    return Err(JournalError::Corrupt);
+                }
+                paths.push((cursor, path));
+            } else {
+                return Err(JournalError::Corrupt);
+            }
+            if paths.len() > limits.max_records || checkpoints.len() > 2 {
+                return Err(JournalError::Full);
             }
         }
+        checkpoints.sort();
+        if !checkpoints.is_empty() && journal.tier != AcceptanceTier::Local {
+            return Err(JournalError::Corrupt);
+        }
+        if let Some((cursor, path)) = checkpoints
+            .iter()
+            .rev()
+            .find(|(cursor, _)| *cursor <= expected.cursor)
+        {
+            journal.restore_checkpoint(path, *cursor)?;
+            if *cursor == expected.cursor && journal.tip != expected {
+                return Err(JournalError::Rollback);
+            }
+        }
+        let start = journal.tip.cursor;
+        let (mut paths, obsolete): (Vec<_>, Vec<_>) =
+            paths.into_iter().partition(|(cursor, _)| *cursor > start);
         paths.sort();
         let mut suffix_synced = false;
-        for path in paths {
+        for (_, path) in paths {
             let cursor = journal
                 .tip
                 .cursor
@@ -875,6 +947,7 @@ impl MailboxJournal {
                 .checked_add(bytes.len() as u64)
                 .filter(|n| *n <= limits.max_bytes)
                 .ok_or(JournalError::Full)?;
+            journal.records += 1;
             let (tag, ciphertext) = bytes.split_at_checked(32).ok_or(JournalError::Corrupt)?;
             let expected_tag = journal.mac(ciphertext);
             if tag != expected_tag {
@@ -1028,7 +1101,11 @@ impl MailboxJournal {
                         enrollment: *enrollment,
                         receive_capability: *receive_capability,
                     });
-                    if !journal.used_challenges.insert(challenge) {
+                    if journal
+                        .used_challenges
+                        .insert(challenge, identity)
+                        .is_some()
+                    {
                         return Err(JournalError::Corrupt);
                     }
                 }
@@ -1047,7 +1124,12 @@ impl MailboxJournal {
                         .checked_add(1)
                         .filter(|count| *count <= MAX_LEASE_RETRIES)
                         .ok_or(JournalError::Corrupt)?;
-                    if challenge == [0; 32] || !journal.used_challenges.insert(challenge) {
+                    if challenge == [0; 32]
+                        || journal
+                            .used_challenges
+                            .insert(challenge, identity)
+                            .is_some()
+                    {
                         return Err(JournalError::Corrupt);
                     }
                 }
@@ -1115,6 +1197,7 @@ impl MailboxJournal {
                         .map_err(|_| JournalError::Corrupt)?;
                     entry.expired_at_unix_ms = Some(expired_at_unix_ms);
                 }
+                JournalEvent::Checkpoint { .. } => return Err(JournalError::Corrupt),
             }
             let next = JournalTip {
                 cursor,
@@ -1139,7 +1222,170 @@ impl MailboxJournal {
         if journal.tip.cursor < expected.cursor {
             return Err(JournalError::Rollback);
         }
+        if start != 0 {
+            for (_, path) in obsolete {
+                fs::remove_file(path)?;
+            }
+        }
+        for (cursor, path) in checkpoints {
+            if cursor > expected.cursor || cursor < start {
+                // Pre-anchor or superseded generations are removed only after
+                // the committed prefix has been verified against the anchor.
+                fs::remove_file(&path)?;
+            }
+        }
+        sync_dir(root).map_err(|error| JournalError::Storage(std::io::Error::other(error)))?;
         Ok(journal)
+    }
+
+    fn restore_checkpoint(&mut self, path: &Path, cursor: u64) -> Result<(), JournalError> {
+        let bytes = read_record(path)?;
+        if bytes.len() as u64 > self.limits.max_bytes {
+            return Err(JournalError::Full);
+        }
+        let (previous, sealed) = bytes.split_at_checked(32).ok_or(JournalError::Corrupt)?;
+        let (tag, ciphertext) = sealed.split_at_checked(32).ok_or(JournalError::Corrupt)?;
+        let previous: [u8; 32] = previous.try_into().map_err(|_| JournalError::Corrupt)?;
+        let expected_tag = self.mac_after(previous, ciphertext);
+        if self.tier != AcceptanceTier::Local || tag != expected_tag {
+            return Err(JournalError::Corrupt);
+        }
+        let plaintext = Zeroizing::new(
+            aead::open(
+                &self.record_key(),
+                ciphertext,
+                &[DOMAIN, &previous].concat(),
+            )
+            .map_err(|_| JournalError::Corrupt)?,
+        );
+        let record: Record =
+            serde_json::from_slice(&plaintext).map_err(|_| JournalError::Corrupt)?;
+        if record.version != 3
+            || record.cursor != cursor
+            || record.previous != previous
+            || record.address != self.address
+            || record.history_key != self.history_key
+        {
+            return Err(JournalError::Corrupt);
+        }
+        let JournalEvent::Checkpoint {
+            state,
+            authorization_signature,
+        } = record.event
+        else {
+            return Err(JournalError::Corrupt);
+        };
+        if state.source.cursor.checked_add(1) != Some(cursor)
+            || state.source.head != previous
+            || state.address != self.address
+            || Some(state.history_key) != self.history_key
+            || Some(state.retention) != self.retention
+            || state.created_at_unix_ms < 0
+        {
+            return Err(JournalError::Corrupt);
+        }
+        let signature: [u8; 64] = authorization_signature
+            .as_slice()
+            .try_into()
+            .map_err(|_| JournalError::Corrupt)?;
+        self.authority
+            .verify(
+                &canonical_bytes(CHECKPOINT_DOMAIN, &state).map_err(|_| JournalError::Corrupt)?,
+                &Signature::from_bytes(&signature),
+            )
+            .map_err(|_| JournalError::Corrupt)?;
+        let mut seen = BTreeMap::new();
+        let mut order = Vec::new();
+        for CheckpointEntry {
+            identity,
+            seen: entry,
+        } in state.entries
+        {
+            let receipt = &entry.accepted_receipt;
+            if receipt.address != self.address
+                || receipt.outcome != DeliveryOutcome::AcceptedLocalDurable
+                || receipt.message_id != identity.message_id
+                || receipt.execution_epoch != identity.execution_epoch
+                || receipt.delivery_id != entry.envelope.routing.delivery_id
+                || receipt.ciphertext_commitment != entry.envelope.ciphertext_commitment
+                || receipt.validate_versioned_outcome().is_err()
+                || state
+                    .retention
+                    .retained_until(entry.envelope.routing.expires_at_unix_ms)
+                    .is_err()
+                || entry
+                    .expired_at_unix_ms
+                    .is_some_and(|time| time < entry.envelope.routing.expires_at_unix_ms)
+                || (entry.acknowledged && entry.expired_at_unix_ms.is_some())
+                || (entry.signed_ack.is_some() && !entry.acknowledged)
+            {
+                return Err(JournalError::Corrupt);
+            }
+            if let Some(lease) = &entry.lease {
+                if lease.retry_count > MAX_LEASE_RETRIES {
+                    return Err(JournalError::Corrupt);
+                }
+                let at = entry
+                    .signed_ack
+                    .as_ref()
+                    .map_or(lease.signed.lease.issued_at_unix_ms, |ack| {
+                        ack.ack.acknowledged_at_unix_ms
+                    });
+                let guest_key = verify_recovered_lease(
+                    &entry,
+                    identity,
+                    &lease.signed,
+                    &lease.enrollment,
+                    &lease.receive_capability,
+                    &self.authority,
+                    at,
+                )?;
+                if let Some(ack) = &entry.signed_ack {
+                    if ack.ack.lease != lease.signed || ack.encode().is_err() {
+                        return Err(JournalError::Corrupt);
+                    }
+                    let signature: [u8; 64] = ack
+                        .signature
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| JournalError::Corrupt)?;
+                    guest_key
+                        .verify(
+                            &canonical_bytes(DELIVERY_ACK_SIGNATURE_DOMAIN, &ack.ack)
+                                .map_err(|_| JournalError::Corrupt)?,
+                            &Signature::from_bytes(&signature),
+                        )
+                        .map_err(|_| JournalError::Corrupt)?;
+                } else if entry.acknowledged {
+                    return Err(JournalError::Corrupt);
+                }
+            } else if entry.signed_ack.is_some() {
+                return Err(JournalError::Corrupt);
+            }
+            if seen.insert(identity, entry).is_some() {
+                return Err(JournalError::Corrupt);
+            }
+            order.push(identity);
+        }
+        let mut used_challenges = BTreeMap::new();
+        for (challenge, identity) in state.used_challenges {
+            if challenge == [0; 32]
+                || !seen.contains_key(&identity)
+                || used_challenges.insert(challenge, identity).is_some()
+            {
+                return Err(JournalError::Corrupt);
+            }
+        }
+        self.seen = seen;
+        self.order = order;
+        self.used_challenges = used_challenges;
+        self.tip = JournalTip {
+            cursor,
+            head: expected_tag,
+        };
+        self.bytes = bytes.len() as u64;
+        self.records = 1;
+        Ok(())
     }
 
     /// The legacy local callback cannot prove an independent anchor or
@@ -1353,6 +1599,136 @@ impl MailboxJournal {
         self.admit_at_tier(request, AcceptanceTier::Local, |next| anchor.advance(next))
     }
 
+    /// Commit a signed local snapshot before pruning the superseded prefix.
+    ///
+    /// A quota refusal leaves the old history untouched; uncertain I/O poisons
+    /// this handle until recovery has verified the committed anchor. The caller
+    /// must provide trusted UNIX time for terminal-state retention.
+    pub fn compact_local(
+        &mut self,
+        now_unix_ms: i64,
+        signer: &SigningKey,
+        anchor: &FileJournalAnchor,
+    ) -> Result<JournalTip, JournalError> {
+        self.local_ready(anchor, &signer.verifying_key())?;
+        let retention = self.retention.ok_or(JournalError::InvalidLimits)?;
+        let history_key = self
+            .history_key
+            .ok_or(JournalError::HistoryKeyUnavailable)?;
+        if now_unix_ms < 0 {
+            return Err(JournalError::InvalidLimits);
+        }
+        let mut retired = BTreeSet::new();
+        for (identity, entry) in &self.seen {
+            if (entry.acknowledged || entry.expired_at_unix_ms.is_some())
+                && now_unix_ms
+                    > retention
+                        .retained_until(entry.envelope.routing.expires_at_unix_ms)
+                        .map_err(|_| JournalError::Corrupt)?
+            {
+                retired.insert(*identity);
+            }
+        }
+        let state = CheckpointState {
+            source: self.tip,
+            address: self.address,
+            history_key,
+            retention,
+            created_at_unix_ms: now_unix_ms,
+            entries: self
+                .order
+                .iter()
+                .filter(|identity| !retired.contains(identity))
+                .map(|identity| {
+                    self.seen
+                        .get(identity)
+                        .cloned()
+                        .map(|seen| CheckpointEntry {
+                            identity: *identity,
+                            seen,
+                        })
+                })
+                .collect::<Option<Vec<_>>>()
+                .ok_or(JournalError::Corrupt)?,
+            used_challenges: self
+                .used_challenges
+                .iter()
+                .filter(|(_, identity)| !retired.contains(identity))
+                .map(|(challenge, identity)| (*challenge, *identity))
+                .collect(),
+        };
+        let signature = signer
+            .sign(&canonical_bytes(CHECKPOINT_DOMAIN, &state)?)
+            .to_bytes()
+            .to_vec();
+        let cursor = self.tip.cursor.checked_add(1).ok_or(JournalError::Full)?;
+        let record = Record {
+            version: 3,
+            cursor,
+            previous: self.tip.head,
+            address: self.address,
+            history_key: self.history_key,
+            event: JournalEvent::Checkpoint {
+                state: Box::new(state),
+                authorization_signature: signature,
+            },
+        };
+        let body = Zeroizing::new(serde_json::to_vec(&record).map_err(|_| JournalError::Corrupt)?);
+        if body.len() + 64 + aead::NONCE_SIZE + aead::TAG_SIZE > MAX_RECORD_BYTES {
+            return Err(JournalError::Full);
+        }
+        let ciphertext = aead::seal(
+            &self.record_key(),
+            &body,
+            &[DOMAIN, &self.tip.head].concat(),
+        );
+        let size = (ciphertext.len() + 64) as u64;
+        if self
+            .bytes
+            .checked_add(size)
+            .is_none_or(|n| n > self.limits.max_bytes)
+        {
+            return Err(JournalError::Full);
+        }
+        let tag = self.mac(&ciphertext);
+        let mut bytes = self.tip.head.to_vec();
+        bytes.extend_from_slice(&tag);
+        bytes.extend_from_slice(&ciphertext);
+        let path = checkpoint_path(&self.root, cursor);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => return Err(JournalError::Corrupt),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        if let Err(error) = atomic_write_new(&path, &bytes).and_then(|()| sync_dir(&self.root)) {
+            self.poisoned = true;
+            return Err(JournalError::Storage(std::io::Error::other(error)));
+        }
+        let next = JournalTip { cursor, head: tag };
+        if let Err(error) = anchor.advance(next) {
+            self.poisoned = true;
+            return Err(error);
+        }
+        self.tip = next;
+        self.poisoned = true;
+        for entry in fs::read_dir(&self.root)? {
+            let old = entry?.path();
+            if old != path && old != self.root.join("journal.lock") {
+                fs::remove_file(old)?;
+            }
+        }
+        sync_dir(&self.root)
+            .map_err(|error| JournalError::Storage(std::io::Error::other(error)))?;
+        self.order.retain(|identity| !retired.contains(identity));
+        self.seen.retain(|identity, _| !retired.contains(identity));
+        self.used_challenges
+            .retain(|_, identity| !retired.contains(identity));
+        self.bytes = size;
+        self.records = 1;
+        self.poisoned = false;
+        Ok(next)
+    }
+
     fn append(
         &mut self,
         event: JournalEvent,
@@ -1362,7 +1738,7 @@ impl MailboxJournal {
             return Err(JournalError::Uncertain);
         }
         let cursor = self.tip.cursor.checked_add(1).ok_or(JournalError::Full)?;
-        if cursor > self.limits.max_records as u64 {
+        if self.records >= self.limits.max_records {
             return Err(JournalError::Full);
         }
         let record = Record {
@@ -1402,6 +1778,7 @@ impl MailboxJournal {
         }
         self.tip = tip;
         self.bytes += bytes.len() as u64;
+        self.records += 1;
         if let Err(error) = anchor(tip) {
             self.poisoned = true;
             return Err(error);
@@ -1567,7 +1944,7 @@ impl MailboxJournal {
             {
                 return Err(JournalError::Busy);
             }
-            if self.used_challenges.contains(request.challenge) {
+            if self.used_challenges.contains_key(request.challenge) {
                 return Err(JournalError::ConflictingRetry);
             }
             if active.retry_count >= MAX_LEASE_RETRIES {
@@ -1584,7 +1961,7 @@ impl MailboxJournal {
                 },
                 anchor,
             )?;
-            self.used_challenges.insert(*request.challenge);
+            self.used_challenges.insert(*request.challenge, identity);
             self.seen
                 .get_mut(&identity)
                 .and_then(|entry| entry.lease.as_mut())
@@ -1595,7 +1972,7 @@ impl MailboxJournal {
                 lease: signed,
             }));
         }
-        if self.used_challenges.contains(request.challenge) {
+        if self.used_challenges.contains_key(request.challenge) {
             return Err(JournalError::ConflictingRetry);
         }
         let header = message.opened.header();
@@ -1652,7 +2029,7 @@ impl MailboxJournal {
             },
             anchor,
         )?;
-        self.used_challenges.insert(*request.challenge);
+        self.used_challenges.insert(*request.challenge, identity);
         self.seen
             .get_mut(&identity)
             .ok_or(JournalError::Corrupt)?
@@ -1838,10 +2215,14 @@ impl MailboxJournal {
     }
 
     fn mac(&self, bytes: &[u8]) -> [u8; 32] {
+        self.mac_after(self.tip.head, bytes)
+    }
+
+    fn mac_after(&self, previous: [u8; 32], bytes: &[u8]) -> [u8; 32] {
         let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&self.key[..])
             .expect("a 32-byte HMAC key is valid");
         mac.update(DOMAIN);
-        mac.update(&self.tip.head);
+        mac.update(&previous);
         mac.update(bytes);
         mac.finalize().into_bytes().into()
     }
@@ -1856,6 +2237,10 @@ impl MailboxJournal {
 
 fn record_path(root: &Path, cursor: u64) -> PathBuf {
     root.join(format!("entry-{cursor:020}.bin"))
+}
+
+fn checkpoint_path(root: &Path, cursor: u64) -> PathBuf {
+    root.join(format!("checkpoint-{cursor:020}.bin"))
 }
 
 fn read_record(path: &Path) -> Result<Vec<u8>, JournalError> {
@@ -2297,6 +2682,261 @@ mod anchor_tests {
         ));
         assert_eq!(journal.tip(), JournalTip::genesis());
         assert_eq!(anchor.tip(), JournalTip::genesis());
+    }
+
+    #[test]
+    fn local_checkpoint_preserves_the_original_receipt_after_pruning() {
+        let dir = tempfile::tempdir().expect("journal root");
+        let root = dir.path().join("journal");
+        let anchor_path = dir.path().join("anchor").join("tip.json");
+        let (envelope, capability, mut context, payload_key, sender_key, signer) = message();
+        let (reference, custody) = versioned_custody();
+        let anchor =
+            FileJournalAnchor::open(&anchor_path, address(), [22; 32]).expect("local anchor");
+        let mut journal = MailboxJournal::open_local_with_custody(
+            &root,
+            reference,
+            signer.verifying_key(),
+            limits(),
+            &custody,
+            &anchor,
+            local_retention(),
+        )
+        .expect("empty journal");
+        let original = journal
+            .admit_local(
+                admission(
+                    &envelope,
+                    &capability,
+                    &context,
+                    &payload_key,
+                    &sender_key,
+                    &signer,
+                ),
+                &anchor,
+            )
+            .expect("signed local receipt");
+        let old_record = fs::read(record_path(&root, 1)).expect("pre-checkpoint prefix");
+        journal.limits.max_bytes = journal.bytes + 1;
+        assert!(matches!(
+            journal.compact_local(context.now_unix_ms, &signer, &anchor),
+            Err(JournalError::Full)
+        ));
+        assert_eq!(journal.tip(), anchor.tip(), "quota refusal cannot advance");
+        assert!(record_path(&root, 1).exists(), "quota keeps old prefix");
+        journal.limits = limits();
+        journal
+            .compact_local(context.now_unix_ms, &signer, &anchor)
+            .expect("signed checkpoint and anchor");
+        assert!(
+            !record_path(&root, 1).exists(),
+            "old prefix pruned after anchor"
+        );
+        assert!(
+            !fs::read(checkpoint_path(&root, 2))
+                .expect("encrypted checkpoint")
+                .windows(b"hello".len())
+                .any(|window| window == b"hello"),
+            "checkpoint cannot expose guest payload"
+        );
+        assert_eq!(journal.tip(), anchor.tip());
+        fs::write(record_path(&root, 1), old_record).expect("simulated post-anchor prune crash");
+        drop(journal);
+        drop(anchor);
+
+        let anchor =
+            FileJournalAnchor::open(&anchor_path, address(), [22; 32]).expect("retained anchor");
+        let mut recovered = MailboxJournal::open_local_with_custody(
+            &root,
+            reference,
+            signer.verifying_key(),
+            limits(),
+            &custody,
+            &anchor,
+            local_retention(),
+        )
+        .expect("reopen from signed checkpoint without old prefix");
+        assert!(
+            !record_path(&root, 1).exists(),
+            "recovery finishes the interrupted prune"
+        );
+        context.now_unix_ms += 1;
+        let duplicate = recovered
+            .admit_local(
+                admission(
+                    &envelope,
+                    &capability,
+                    &context,
+                    &payload_key,
+                    &sender_key,
+                    &signer,
+                ),
+                &anchor,
+            )
+            .expect("same immutable acceptance after restart");
+        assert_eq!(
+            serde_jcs::to_vec(&duplicate).expect("duplicate bytes"),
+            serde_jcs::to_vec(&original).expect("original bytes")
+        );
+        assert_eq!(recovered.tip().cursor, 2, "duplicate cannot append");
+        let first_checkpoint = checkpoint_path(&root, 2);
+        recovered
+            .compact_local(context.now_unix_ms, &signer, &anchor)
+            .expect("subsequent generation can replace the first");
+        assert!(!first_checkpoint.exists(), "superseded checkpoint pruned");
+        assert_eq!(recovered.tip().cursor, 3);
+        drop(recovered);
+        drop(anchor);
+        let anchor =
+            FileJournalAnchor::open(&anchor_path, address(), [22; 32]).expect("later anchor");
+        let recovered = MailboxJournal::open_local_with_custody(
+            &root,
+            reference,
+            signer.verifying_key(),
+            limits(),
+            &custody,
+            &anchor,
+            local_retention(),
+        )
+        .expect("later checkpoint reopens");
+        assert_eq!(recovered.tip(), anchor.tip());
+    }
+
+    #[test]
+    fn anchored_checkpoint_cannot_fall_back_to_a_shorter_prefix() {
+        let dir = tempfile::tempdir().expect("journal root");
+        let root = dir.path().join("journal");
+        let anchor_path = dir.path().join("anchor").join("tip.json");
+        let (envelope, capability, context, payload_key, sender_key, signer) = message();
+        let (reference, custody) = versioned_custody();
+        let anchor =
+            FileJournalAnchor::open(&anchor_path, address(), [22; 32]).expect("local anchor");
+        let mut journal = MailboxJournal::open_local_with_custody(
+            &root,
+            reference,
+            signer.verifying_key(),
+            limits(),
+            &custody,
+            &anchor,
+            local_retention(),
+        )
+        .expect("empty journal");
+        journal
+            .admit_local(
+                admission(
+                    &envelope,
+                    &capability,
+                    &context,
+                    &payload_key,
+                    &sender_key,
+                    &signer,
+                ),
+                &anchor,
+            )
+            .expect("accepted");
+        journal
+            .compact_local(context.now_unix_ms, &signer, &anchor)
+            .expect("checkpoint anchored");
+        drop(journal);
+        drop(anchor);
+        let path = checkpoint_path(&root, 2);
+        let original = fs::read(&path).expect("checkpoint bytes");
+        let mut tampered = original.clone();
+        let last = tampered.last_mut().expect("nonempty checkpoint");
+        *last ^= 1;
+        fs::write(&path, tampered).expect("corrupt stored ciphertext");
+        let anchor =
+            FileJournalAnchor::open(&anchor_path, address(), [22; 32]).expect("retained anchor");
+        assert!(matches!(
+            MailboxJournal::open_local_with_custody(
+                &root,
+                reference,
+                signer.verifying_key(),
+                limits(),
+                &custody,
+                &anchor,
+                local_retention(),
+            ),
+            Err(JournalError::Corrupt)
+        ));
+        fs::remove_file(&path).expect("delete checkpoint");
+        assert!(matches!(
+            MailboxJournal::open_local_with_custody(
+                &root,
+                reference,
+                signer.verifying_key(),
+                limits(),
+                &custody,
+                &anchor,
+                local_retention(),
+            ),
+            Err(JournalError::Rollback)
+        ));
+    }
+
+    #[test]
+    fn checkpoint_keeps_tombstone_through_window_then_retires_terminal_state() {
+        let dir = tempfile::tempdir().expect("journal root");
+        let root = dir.path().join("journal");
+        let (envelope, capability, context, payload_key, sender_key, signer) = message();
+        let (reference, custody) = versioned_custody();
+        let anchor = FileJournalAnchor::open(
+            &dir.path().join("anchor").join("tip.json"),
+            address(),
+            [22; 32],
+        )
+        .expect("local anchor");
+        let mut journal = MailboxJournal::open_local_with_custody(
+            &root,
+            reference,
+            signer.verifying_key(),
+            limits(),
+            &custody,
+            &anchor,
+            local_retention(),
+        )
+        .expect("empty journal");
+        journal
+            .admit_local(
+                admission(
+                    &envelope,
+                    &capability,
+                    &context,
+                    &payload_key,
+                    &sender_key,
+                    &signer,
+                ),
+                &anchor,
+            )
+            .expect("accepted");
+        let expiry = envelope.routing.expires_at_unix_ms;
+        journal
+            .expire_next(expiry, &signer, |next| anchor.advance(next))
+            .expect("terminal settlement");
+        let horizon = local_retention()
+            .retained_until(expiry)
+            .expect("finite horizon");
+        journal
+            .compact_local(horizon, &signer, &anchor)
+            .expect("retain through the horizon");
+        assert_eq!(journal.seen.len(), 1);
+        journal
+            .compact_local(horizon + 1, &signer, &anchor)
+            .expect("retire after the horizon");
+        assert!(journal.seen.is_empty());
+        drop(journal);
+        let recovered = MailboxJournal::open_local_with_custody(
+            &root,
+            reference,
+            signer.verifying_key(),
+            limits(),
+            &custody,
+            &anchor,
+            local_retention(),
+        )
+        .expect("empty retired generation reopens");
+        assert!(recovered.seen.is_empty());
+        assert_eq!(recovered.tip(), anchor.tip());
     }
 
     #[test]

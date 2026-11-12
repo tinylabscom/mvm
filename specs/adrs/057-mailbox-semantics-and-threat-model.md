@@ -338,6 +338,25 @@ genesis from a gap. If the snapshot or retained tombstones cannot fit the
 finite quota, new acceptance refuses rather than discarding replay evidence.
 This host-local sequence does not detect rollback of the entire host.
 
+The checkpoint is an immutable journal generation, not a second acceptance
+authority. It binds the previous committed tip, the next monotonic cursor,
+the history-key version, the exact signed retention window, and a content
+commitment over the retained ciphertext, receipt bodies, leases, signed guest
+ACKs, terminal dispositions, and dedup state. The destination signs this
+commitment before encrypting and fsyncing the checkpoint. The local anchor
+then advances to the checkpoint tip before any earlier record is removed.
+Only terminal messages strictly past expiry plus their signed retention
+window, and challenges owned by those messages, may leave that snapshot;
+pending messages and their replay evidence remain until terminal settlement.
+Recovery of a pre-anchor interruption requires the complete old prefix;
+recovery of a post-anchor interruption requires the checkpoint and its
+matching tip even when old files are still present or partly pruned. A
+missing, divergent, oversized, or unverifiable checkpoint refuses rather
+than falling back to a shorter history. Snapshotting cannot turn a leased
+message into an unsigned host ACK or reset the original signed acceptance
+time. The same bounded writer lock excludes concurrent admission, lease,
+ACK, and compaction while this transition is in flight.
+
 ### 8. Selective receive is bounded and fair
 
 Selective receive may match only authenticated inner-header fields declared by
