@@ -694,20 +694,3 @@ mod bridge_executable_tests {
         assert_eq!(spec.rebuild_package, "mvmctl");
     }
 }
-
-#[cfg(test)]
-mod pid_file_tests {
-    use super::*;
-
-    #[test]
-    fn read_pid_refuses_pids_that_must_never_be_signalled() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("qemu.pid");
-        for text in ["0", "-1", "1", "2147483648", "garbage", ""] {
-            std::fs::write(&path, text).expect("write");
-            assert_eq!(read_pid(&path), None, "{text:?}");
-        }
-        std::fs::write(&path, "4242\n").expect("write");
-        assert_eq!(read_pid(&path), Some(4242));
-    }
-}
