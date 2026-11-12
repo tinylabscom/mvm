@@ -27,6 +27,7 @@ pub fn grant_for(mailbox: MailboxId, authority: &VerifyingKey) -> MailboxGrant {
         authority_key: authority.to_bytes(),
         epoch: ExecutionEpoch::new(1).expect("epoch 1 is nonzero"),
         report: None,
+        retention: None,
     }
 }
 

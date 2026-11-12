@@ -552,6 +552,7 @@ mod tests {
             authority_key: [2; 32],
             epoch: ExecutionEpoch::new(1).unwrap(),
             report: None,
+            retention: None,
         }));
         let absent = build(None);
         let tokens = |c: &str| c.split_whitespace().map(str::to_owned).collect::<Vec<_>>();

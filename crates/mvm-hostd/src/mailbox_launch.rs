@@ -493,6 +493,7 @@ mod tests {
             authority_key: authority_key_for(dir, &mailbox).unwrap().to_bytes(),
             epoch: ExecutionEpoch::new(1).unwrap(),
             report: None,
+            retention: None,
         }
     }
 

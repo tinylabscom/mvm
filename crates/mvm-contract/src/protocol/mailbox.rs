@@ -242,6 +242,69 @@ impl From<MailboxReportSendPolicy> for MailboxReportSendPolicyWire {
     }
 }
 
+/// Signed, versioned retention window for a mailbox's dedup identity after expiry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    try_from = "MailboxRetentionPolicyWire",
+    into = "MailboxRetentionPolicyWire"
+)]
+pub struct MailboxRetentionPolicy {
+    retention_ms: u64,
+}
+
+impl MailboxRetentionPolicy {
+    /// Refuse zero or a duration that cannot be checked against signed `i64` expiry.
+    pub fn new(retention_ms: u64) -> Result<Self, MailboxContractError> {
+        if retention_ms == 0 || retention_ms > i64::MAX as u64 {
+            return Err(MailboxContractError::InvalidRetentionPolicyBounds);
+        }
+        Ok(Self { retention_ms })
+    }
+
+    #[must_use]
+    pub const fn retention_ms(self) -> u64 {
+        self.retention_ms
+    }
+
+    /// The last millisecond for which this signed grant retains a dedup identity.
+    /// Refuse negative expiry or overflow instead of wrapping the deadline.
+    pub fn retained_until(self, expires_at_unix_ms: i64) -> Result<i64, MailboxContractError> {
+        if expires_at_unix_ms < 0 {
+            return Err(MailboxContractError::InvalidRetentionPolicyBounds);
+        }
+        expires_at_unix_ms
+            .checked_add(self.retention_ms as i64)
+            .ok_or(MailboxContractError::InvalidRetentionPolicyBounds)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MailboxRetentionPolicyWire {
+    version: u16,
+    retention_ms: u64,
+}
+
+impl TryFrom<MailboxRetentionPolicyWire> for MailboxRetentionPolicy {
+    type Error = MailboxContractError;
+
+    fn try_from(wire: MailboxRetentionPolicyWire) -> Result<Self, Self::Error> {
+        if wire.version != 1 {
+            return Err(MailboxContractError::UnsupportedRetentionPolicyVersion);
+        }
+        Self::new(wire.retention_ms)
+    }
+}
+
+impl From<MailboxRetentionPolicy> for MailboxRetentionPolicyWire {
+    fn from(policy: MailboxRetentionPolicy) -> Self {
+        Self {
+            version: 1,
+            retention_ms: policy.retention_ms,
+        }
+    }
+}
+
 /// What a signed `ExecutionPlan` admits for one workload's mailbox: which
 /// mailbox, the key whose capabilities are honored, and the execution epoch.
 /// Presence grants that workload its own mailbox, including the ability for
@@ -261,6 +324,10 @@ pub struct MailboxGrant {
     /// on older signed plans so their canonical bytes remain unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report: Option<MailboxReportSendPolicy>,
+    /// Required for local-durable retention; absent legacy grants remain
+    /// unchanged and do not authorize this stronger acceptance tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<MailboxRetentionPolicy>,
 }
 
 impl MailboxGrant {
@@ -1316,6 +1383,10 @@ pub enum MailboxContractError {
     UnsupportedReportPolicyVersion,
     #[error("workload report policy bounds are invalid")]
     InvalidReportPolicyBounds,
+    #[error("mailbox retention policy version is unsupported")]
+    UnsupportedRetentionPolicyVersion,
+    #[error("mailbox retention policy bounds are invalid")]
+    InvalidRetentionPolicyBounds,
     #[error("workload report is not granted by the signed plan")]
     ReportNotGranted,
     #[error("workload report must be a cast without a reply route")]
@@ -1350,6 +1421,8 @@ impl MailboxContractError {
             Self::InvalidEpochRange => "invalid_epoch_range",
             Self::UnsupportedReportPolicyVersion => "unsupported_report_policy_version",
             Self::InvalidReportPolicyBounds => "invalid_report_policy_bounds",
+            Self::UnsupportedRetentionPolicyVersion => "unsupported_retention_policy_version",
+            Self::InvalidRetentionPolicyBounds => "invalid_retention_policy_bounds",
             Self::ReportNotGranted => "report_not_granted",
             Self::InvalidReportMessageKind => "invalid_report_message_kind",
             Self::InvalidReportContentType => "invalid_report_content_type",

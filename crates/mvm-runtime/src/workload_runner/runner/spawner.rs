@@ -770,6 +770,7 @@ mod tests {
             authority_key: host.verifying_key().to_bytes(),
             epoch: ExecutionEpoch::new(3).unwrap(),
             report: None,
+            retention: None,
         });
         plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
         let redaction = RedactionPolicy::default();

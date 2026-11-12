@@ -24,6 +24,7 @@ fn plan_grant() -> MailboxGrant {
         authority_key: [5; 32],
         epoch: ExecutionEpoch::new(7).expect("epoch"),
         report: None,
+        retention: None,
     }
 }
 

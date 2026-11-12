@@ -40,6 +40,7 @@ struct Binding {
     vm_name: String,
     address: MailboxAddress,
     epoch: ExecutionEpoch,
+    retention_ms: u64,
     authority_key: [u8; 32],
     host_signer: [u8; 32],
     key_version: u32,
@@ -62,6 +63,7 @@ struct Identity<'a> {
     vm_name: &'a str,
     address: MailboxAddress,
     epoch: ExecutionEpoch,
+    retention_ms: u64,
 }
 
 /// Three independent purpose keys in one no-clobber, fsynced private bundle.
@@ -129,6 +131,10 @@ fn identity<'a>(
     let grant = plan
         .mailbox
         .context("admitted plan does not grant a mailbox")?;
+    let retention_ms = grant
+        .retention
+        .context("admitted plan does not declare local mailbox retention")?
+        .retention_ms();
     ensure!(
         address.mailbox == grant.mailbox && plan.image.name == vm_name,
         "mailbox custody identity does not match the admitted VM"
@@ -150,6 +156,7 @@ fn identity<'a>(
         vm_name,
         address,
         epoch: grant.epoch,
+        retention_ms,
     })
 }
 
@@ -189,6 +196,7 @@ impl RetainedMailboxKeys {
             vm_name: vm_name.to_owned(),
             address,
             epoch: identity.epoch,
+            retention_ms: identity.retention_ms,
             authority_key: plan.mailbox.context("mailbox grant")?.authority_key,
             host_signer: signer.verifying_key().to_bytes(),
             key_version: KEY_VERSION,
@@ -247,6 +255,7 @@ impl RetainedMailboxKeys {
                 && binding.vm_name == identity.vm_name
                 && binding.address == address
                 && binding.epoch == identity.epoch
+                && binding.retention_ms == identity.retention_ms
                 && binding.authority_key == plan.mailbox.context("mailbox grant")?.authority_key
                 && binding.host_signer == signer.verifying_key().to_bytes()
                 && binding.key_version == KEY_VERSION
@@ -326,7 +335,9 @@ impl HistoryKeyCustody for RetainedMailboxKeys {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_contract::protocol::mailbox::{AuthorizationDomainId, MailboxGrant, MailboxId};
+    use mvm_contract::protocol::mailbox::{
+        AuthorizationDomainId, MailboxGrant, MailboxId, MailboxRetentionPolicy,
+    };
     use mvm_core::plan::{Variant, compute_plan_id, test_support::PlanFixture};
     use std::fs;
 
@@ -342,6 +353,7 @@ mod tests {
                 .to_bytes(),
             epoch: ExecutionEpoch::new(1).expect("epoch"),
             report: None,
+            retention: Some(MailboxRetentionPolicy::new(10_000).expect("signed retention")),
         });
         plan.plan_id = compute_plan_id(&plan);
         let (policy, _) = derive_launch_keys(dir.path(), &plan.mailbox.expect("grant"))
@@ -354,6 +366,78 @@ mod tests {
             recipient: policy.context.expected_recipient,
         };
         (dir, plan, address)
+    }
+
+    #[test]
+    fn local_custody_requires_and_binds_the_signed_retention_window() {
+        let (dir, plan, address) = setup();
+        let vm = plan.image.name.as_str();
+        let posture = MailboxLaunchPosture::for_test(&plan, Variant::Dev);
+        let mut absent = plan.clone();
+        absent.mailbox.as_mut().expect("grant").retention = None;
+        absent.plan_id = compute_plan_id(&absent);
+        let absent_posture = MailboxLaunchPosture::for_test(&absent, Variant::Dev);
+        assert!(
+            RetainedMailboxKeys::provision(dir.path(), &absent, vm, &absent_posture, address,)
+                .is_err(),
+            "legacy signed plans cannot provision local custody"
+        );
+        let retained = RetainedMailboxKeys::provision(dir.path(), &plan, vm, &posture, address)
+            .expect("declared retention");
+        assert_eq!(retained.binding.retention_ms, 10_000);
+        assert!(
+            RetainedMailboxKeys::open_existing(
+                dir.path(),
+                &absent,
+                vm,
+                &absent_posture.handoff(None),
+                None,
+                address,
+            )
+            .is_err(),
+            "legacy signed plans cannot recover local custody either"
+        );
+
+        let mut changed = plan.clone();
+        changed.mailbox.as_mut().expect("grant").retention =
+            Some(MailboxRetentionPolicy::new(20_000).expect("changed window"));
+        changed.plan_id = compute_plan_id(&changed);
+        let changed_posture = MailboxLaunchPosture::for_test(&changed, Variant::Dev);
+        assert!(
+            RetainedMailboxKeys::open_existing(
+                dir.path(),
+                &changed,
+                vm,
+                &changed_posture.handoff(None),
+                None,
+                address,
+            )
+            .is_err(),
+            "a different signed retention policy cannot inherit prior custody"
+        );
+        let identity = identity(dir.path(), &plan, vm, address).expect("trusted identity");
+        let (_, manifest) = paths(dir.path(), &identity).expect("scope path");
+        let mut forged: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest).expect("signed manifest"))
+                .expect("manifest JSON");
+        forged["binding"]["retention_ms"] = serde_json::json!(20_000);
+        fs::write(
+            &manifest,
+            serde_json::to_vec(&forged).expect("forged manifest"),
+        )
+        .expect("alter manifest");
+        assert!(
+            RetainedMailboxKeys::open_existing(
+                dir.path(),
+                &plan,
+                vm,
+                &posture.handoff(None),
+                None,
+                address,
+            )
+            .is_err(),
+            "a modified manifest window must fail signature verification"
+        );
     }
 
     #[test]

@@ -218,6 +218,7 @@ mod tests {
                 .to_bytes(),
             epoch: ExecutionEpoch::new(1).unwrap(),
             report: None,
+            retention: None,
         };
         let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
         plan.mailbox = Some(grant);

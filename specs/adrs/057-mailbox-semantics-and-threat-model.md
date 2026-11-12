@@ -320,6 +320,9 @@ path.
 
 For the standalone local tier, a signed plan must declare a finite retention
 window before admission; an absent policy does not imply an infinite default.
+The versioned optional `MailboxGrant.retention` preserves old signed-plan
+bytes when absent; a present duration is an explicit request bounded by host
+policy, and expiry-plus-retention arithmetic fails closed on overflow.
 Compaction first durably publishes an encrypted, destination-authenticated
 snapshot of still-live delivery state and dedup tombstones through each
 message's expiry plus that window, then advances the local chain head, and

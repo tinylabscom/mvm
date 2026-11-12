@@ -508,6 +508,7 @@ fn guest_lease_and_signed_ack_are_durable_replay_fenced_and_boot_bound() {
         authority_key: signer.verifying_key().to_bytes(),
         epoch: epoch(),
         report: None,
+        retention: None,
     };
     let plan_id = PlanId(format!("sha256:{}", "a".repeat(64)));
     let plan_nonce = Nonce::from_bytes(id(52));

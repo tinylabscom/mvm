@@ -137,6 +137,7 @@ mod tests {
             authority_key: [0; 32],
             epoch: mvm_contract::protocol::mailbox::ExecutionEpoch::new(1).unwrap(),
             report: None,
+            retention: None,
         });
         let config = VmStartConfig {
             plan_json: Some(serde_json::to_string(&plan).unwrap()),

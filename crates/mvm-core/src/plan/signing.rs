@@ -504,6 +504,7 @@ mod tests {
             authority_key: [9; 32],
             epoch: ExecutionEpoch::new(3).unwrap(),
             report: None,
+            retention: None,
         }
     }
 

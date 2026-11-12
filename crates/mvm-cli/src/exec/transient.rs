@@ -721,6 +721,7 @@ mod tests {
             authority_key: [2; 32],
             epoch: ExecutionEpoch::new(1).unwrap(),
             report: None,
+            retention: None,
         };
         let error = boot(Some(granted)).err().expect("the grant is refused");
         assert!(format!("{error:#}").contains("mailbox"), "{error:#}");

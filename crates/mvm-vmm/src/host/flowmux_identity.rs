@@ -545,6 +545,7 @@ mod tests {
             authority_key: anchor.to_bytes(),
             epoch: ExecutionEpoch::new(3).unwrap(),
             report: None,
+            retention: None,
         });
         plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
         let binding = MailboxReaderBootBinding::mint(
@@ -597,6 +598,7 @@ mod tests {
             authority_key: host_key().verifying_key().to_bytes(),
             epoch: ExecutionEpoch::new(3).unwrap(),
             report: None,
+            retention: None,
         });
         plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
         let dir = tempfile::tempdir().unwrap();

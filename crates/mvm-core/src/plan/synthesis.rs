@@ -1627,6 +1627,7 @@ mod tests {
             authority_key: [9; 32],
             epoch: ExecutionEpoch::new(1).unwrap(),
             report: None,
+            retention: None,
         };
         let mut inp = input("vm");
         inp.mailbox = Some(grant);
