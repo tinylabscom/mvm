@@ -228,18 +228,27 @@ jobs:
             sha256sum "$MVM_PR_TEST_SOURCE_DIR/$name"
           done
           case "$arch" in
-            x86_64) expected_machine='Advanced Micro Devices X86-64' ;;
-            aarch64) expected_machine='AArch64' ;;
+            x86_64)
+              readelf -h "$MVM_PR_TEST_SOURCE_DIR/default-microvm-vmlinux-$arch" |
+                grep -q 'Machine:.*Advanced Micro Devices X86-64'
+              kernel_format=kernel:elf
+              ;;
+            aarch64)
+              # The arm64 loader consumes Image, not ELF; Linux's ARMd
+              # magic at byte 56 identifies the selected boot bytes.
+              magic=$(od -An -c -j56 -N4 "$MVM_PR_TEST_SOURCE_DIR/default-microvm-vmlinux-$arch" |
+                tr -d ' \n')
+              test "$magic" = ARMd
+              kernel_format=kernel:image
+              ;;
           esac
-          readelf -h "$MVM_PR_TEST_SOURCE_DIR/default-microvm-vmlinux-$arch" |
-            grep -q "Machine:.*$expected_machine"
           python3 -m venv "$RUNNER_TEMP/local-manifest-venv"
           PURE=1 "$RUNNER_TEMP/local-manifest-venv/bin/pip" install \
             -r mvm-images/scripts/requirements-local-manifest.txt
           "$RUNNER_TEMP/local-manifest-venv/bin/python" mvm-images/scripts/emit-local-manifest.py \
             --images-checkout mvm-images --arch "$arch" --builder-cache-contract 5 \
             --out "$MVM_PR_TEST_BASE_DIR" \
-            --artifact default_tenant_workload_kernel kernel:elf \
+            --artifact default_tenant_workload_kernel "$kernel_format" \
               "$MVM_PR_TEST_SOURCE_DIR/default-microvm-vmlinux-$arch" \
             --capability default_tenant_workload_kernel virtio_vsock \
             --artifact default_tenant_workload_rootfs ext4 \
