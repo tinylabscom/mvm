@@ -31,7 +31,6 @@ const ALLOWED: &[&str] = &[
     "SECURITY.md",
     "assets",
     "bin",
-    "build.rs",
     "cliff.toml",
     "crates",
     "deny.toml",
