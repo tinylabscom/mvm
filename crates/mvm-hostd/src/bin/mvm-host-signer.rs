@@ -14,7 +14,6 @@
 //! 6. Process exits when the supervisor dies (parent-death signal —
 //!    deferred).
 
-use std::io::Read;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -27,15 +26,6 @@ use mvm_hostd::host_signer::keystore::Keystore;
 use mvm_hostd::host_signer::server::{
     default_max_frame_bytes, serve_on_listener, serve_via_helper_on_listener,
 };
-
-fn read_stdin_blocking() -> Result<Vec<u8>> {
-    let mut buf = Vec::with_capacity(4096);
-    std::io::stdin()
-        .lock()
-        .read_to_end(&mut buf)
-        .context("mvm-host-signer stdin read failed")?;
-    Ok(buf)
-}
 
 fn main() -> Result<()> {
     // First statement in the process: a panic before this line would
@@ -53,7 +43,7 @@ fn main() -> Result<()> {
         .json()
         .init();
 
-    let raw = read_stdin_blocking()?;
+    let raw = mvm_hostd::read_launch_config("mvm-host-signer")?;
     let cfg: SubprocessConfig =
         parse_config(&raw).context("mvm-host-signer config parse failed")?;
     info!(

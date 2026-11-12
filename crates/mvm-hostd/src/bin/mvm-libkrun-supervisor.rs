@@ -289,6 +289,17 @@ fn dispatch_config(mut cfg: SupervisorConfig) -> ExitCode {
     // that can still fire when `mvmctl` is long gone. Held to the end of the
     // scope: dropping the guard stands the timer down.
     let pid_file = cfg.pid_file();
+    // libkrun-sys, which wrote the marker, sits below the process probes, so
+    // the start time is added here. The builder's named markers stay bare: other
+    // code parses them as a lone pid.
+    if cfg.pid_file_name.is_none() {
+        let record =
+            mvm_vmm::host::network_endpoint_spawn::EndpointPid::of_child(std::process::id())
+                .render();
+        if let Err(e) = mvm_core::atomic_io::write_private_ephemeral(&pid_file, record.as_bytes()) {
+            eprintln!("mvm-libkrun-supervisor: record start time in pid file: {e}");
+        }
+    }
     let timer_inputs = mvm_hostd::supervisor::wall_clock::SupervisorTimerInputs {
         plan_json: cfg.plan.as_ref(),
         audit_dir: cfg.audit_dir.as_deref(),
