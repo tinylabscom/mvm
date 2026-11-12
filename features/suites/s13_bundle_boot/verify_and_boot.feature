@@ -46,10 +46,21 @@ Feature: s13_bundle_boot verify-and-boot
     And the isolated mvm home has no installed bundle
 
   @MVM-SEC-25 @build @local_build
-  Scenario: This host can dry-run its own labeled local build without enrollment
+  Scenario: A local build needs explicit host-key enrollment before dry-run
     Given an isolated mvm home
     And a scratch working directory
     And a host-signed local build "app.mvmpkg" in the scratch directory
+    When I run mvmctl in the scratch directory with "machine run --dry-run ./app.mvmpkg -- /bin/true"
+    Then the command exits with code 1
+    And the error output contains "trust store has no entry"
+    And the isolated mvm home has no installed bundle
+
+  @MVM-SEC-25 @build @local_build
+  Scenario: This host can dry-run its enrolled local build without installing it
+    Given an isolated mvm home
+    And a scratch working directory
+    And a host-signed local build "app.mvmpkg" in the scratch directory
+    And the isolated home explicitly enrolls its host key
     When I run mvmctl in the scratch directory with "machine run --dry-run ./app.mvmpkg -- /bin/true"
     Then the command exits with code 0
     And the error output contains "local build, signed by this host's key; not release-verified"
@@ -72,6 +83,7 @@ Feature: s13_bundle_boot verify-and-boot
     Given an isolated mvm home
     And a scratch working directory
     And a host-signed local build "app.mvmpkg" in the scratch directory
+    And the isolated home explicitly enrolls its host key
     When I run mvmctl in the scratch directory with "machine run --prod --dry-run ./app.mvmpkg"
     Then the command exits with code 1
     And the error output contains "local builds are not release-verified"

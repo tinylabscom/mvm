@@ -34,9 +34,9 @@ use std::process::Command;
 
 use crate::rust_source::{CommentSyntax, blank_comments};
 
-// The portable composition and named-machine paths measure 976,881 SLOC and
-// 1,243,243 physical lines at the reviewed PR candidate. Keep the ceiling
-// close to that tree without dropping its security and backend tests.
+// Main's CI witness repairs and the portable composition/named-machine paths
+// measure 976,881 SLOC and 1,243,243 physical lines before this sync. Keep
+// the ceiling close to the measured tree without dropping security coverage.
 /// Ceiling on total SLOC, all categories.
 const MAX_TOTAL_SLOC: usize = 977_500;
 /// Ceiling on total physical lines, all categories.
