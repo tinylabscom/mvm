@@ -47,6 +47,9 @@ jobs:
       - name: Build unpublished fixture-only CLI and host helpers
         env:
           MVM_EMBED: "0"
+          # This job only builds for the hosted runner. The toolchain action
+          # installed 1.97.1; avoid a second toolchain-file component install.
+          RUSTUP_TOOLCHAIN: "1.97.1"
         run: |
           set -euo pipefail
           cargo build --locked --profile release-witness --bin mvmctl \
@@ -92,6 +95,7 @@ jobs:
         env:
           MVM_PR_TEST_RUNTIME_DIR: ${{ runner.temp }}/pr-runtime
           MVM_PR_TEST_PULL_REQUEST: ${{ github.event.pull_request.number }}
+          RUSTUP_TOOLCHAIN: "1.97.1"
         run: |
           set -euo pipefail
           version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
@@ -134,6 +138,7 @@ jobs:
           MVM_EMBED: "0"
           MVM_PR_TEST_BASE_DIR: ${{ runner.temp }}/pr-base
           MVM_PR_TEST_PULL_REQUEST: ${{ github.event.pull_request.number }}
+          RUSTUP_TOOLCHAIN: "1.97.1"
         run: |
           set -euo pipefail
           cargo test --locked -p mvm-build --features pr-test-synthetic-base --lib \
@@ -262,6 +267,7 @@ jobs:
           MVM_PR_TEST_BASE_DIR: ${{ runner.temp }}/pr-bootable-base
           MVM_PR_TEST_PULL_REQUEST: ${{ github.event.pull_request.number }}
           MVM_PR_TEST_ARCH: ${{ matrix.arch }}
+          RUSTUP_TOOLCHAIN: "1.97.1"
         run: |
           set -euo pipefail
           cosign sign-blob --yes --new-bundle-format \
