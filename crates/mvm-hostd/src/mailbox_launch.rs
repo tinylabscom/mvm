@@ -165,6 +165,44 @@ impl DerivedMailboxKeys {
         )
     }
 
+    /// Bind the retained purpose keys to this host-derived mailbox identity.
+    #[cfg(test)]
+    pub(crate) fn with_retained(
+        mut self,
+        retained: &crate::mailbox_custody::RetainedMailboxKeys,
+    ) -> Result<Self> {
+        use mvm_core::mailbox::journal::HistoryKeyCustody as _;
+
+        let header = &self.template.header;
+        let address = MailboxAddress {
+            tenant: header.tenant,
+            authorization_domain: header.authorization_domain,
+            mailbox: header.mailbox,
+            recipient: header.recipient,
+        };
+        if address != retained.address()
+            || self.template.capability.address != address
+            || header.execution_epoch != retained.epoch()
+            || SigningKey::from_bytes(&self.authority)
+                .verifying_key()
+                .to_bytes()
+                != retained.authority_key()
+        {
+            return Err(Error::new(
+                ErrorKind::PermissionDenied,
+                "retained mailbox purpose keys do not match the admitted template",
+            ));
+        }
+        self.encryption = *retained.payload_key().expose_bytes();
+        self.template.header.encryption.key_id = retained.payload_key_id();
+        self.journal_mac = *retained
+            .load_existing(&retained.history_reference())
+            .map_err(Error::other)?
+            .expose_bytes();
+        self.anchor_mac = retained.anchor_key();
+        Ok(self)
+    }
+
     /// The host trust and sealer these keys stand for. Pure: no file is read,
     /// so it can be rebuilt on every dial attempt.
     pub fn trust(&self) -> (MailboxPolicy, GuestSealer) {

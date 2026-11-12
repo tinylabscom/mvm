@@ -279,6 +279,18 @@ impl RetainedMailboxKeys {
         self.binding.history
     }
 
+    pub(crate) fn address(&self) -> MailboxAddress {
+        self.binding.address
+    }
+
+    pub(crate) fn epoch(&self) -> ExecutionEpoch {
+        self.binding.epoch
+    }
+
+    pub(crate) fn authority_key(&self) -> [u8; 32] {
+        self.binding.authority_key
+    }
+
     pub(crate) fn payload_key(&self) -> Key {
         Key::from_bytes(
             self.material[32..64]
@@ -424,6 +436,127 @@ mod tests {
             .is_err(),
             "another execution epoch cannot inherit this key version"
         );
+    }
+
+    #[test]
+    fn retained_keys_reopen_the_same_encrypted_envelope_and_local_acceptance() {
+        use mvm_contract::protocol::mailbox::DeliveryOutcome;
+        use mvm_core::mailbox::frame::OutboxMessage;
+        use mvm_core::mailbox::journal::{
+            FileJournalAnchor, JournalAdmission, JournalLimits, MailboxJournal,
+        };
+
+        let (dir, plan, address) = setup();
+        let vm = plan.image.name.as_str();
+        let posture = MailboxLaunchPosture::for_test(&plan, Variant::Dev);
+        let source_state = dir.path().join("source-vm");
+        fs::create_dir(&source_state).expect("source VM state");
+        let keys = RetainedMailboxKeys::provision(dir.path(), &plan, vm, &posture, address)
+            .expect("verified first provision");
+        let derived = derive_launch_keys(dir.path(), &plan.mailbox.expect("grant"))
+            .expect("mailbox signing material")
+            .with_retained(&keys)
+            .expect("bind retained purpose keys to the canonical template");
+        let (signer, journal_key, anchor_key) = derived.durable_material();
+        assert_eq!(
+            journal_key,
+            *keys
+                .load_existing(&keys.history_reference())
+                .expect("history key")
+                .expose_bytes()
+        );
+        assert_eq!(anchor_key, keys.anchor_key());
+        let (policy, mut sealer) = derived.trust();
+        let payload_key = keys.payload_key();
+        assert_eq!(
+            *policy.encryption_key.expose_bytes(),
+            *payload_key.expose_bytes()
+        );
+        assert_eq!(sealer.header.encryption.key_id, keys.payload_key_id());
+        let (capability, envelope) = sealer
+            .seal(OutboxMessage::new(
+                policy.context.expected_recipient,
+                b"hello".to_vec(),
+            ))
+            .expect("seal under retained payload key");
+        let journal_root = dir.path().join("recipient-journal");
+        let anchor_path = dir.path().join("recipient-anchor");
+        let limits = JournalLimits {
+            max_records: 4,
+            max_bytes: 64 * 1024,
+        };
+        let anchor = FileJournalAnchor::open(&anchor_path, address, keys.anchor_key())
+            .expect("local anchor genesis");
+        let mut journal = MailboxJournal::open_local_with_custody(
+            &journal_root,
+            keys.history_reference(),
+            signer.verifying_key(),
+            limits,
+            &keys,
+            &anchor,
+        )
+        .expect("empty recipient journal");
+        let accepted = journal
+            .admit_local(
+                JournalAdmission {
+                    envelope: &envelope,
+                    capability: &capability,
+                    context: &policy.context,
+                    encryption_key: &payload_key,
+                    sender_key: &policy.sender_key,
+                    signer: &signer,
+                },
+                &anchor,
+            )
+            .expect("local encrypted acceptance");
+        assert_eq!(
+            accepted.receipt.outcome,
+            DeliveryOutcome::AcceptedLocalDurable
+        );
+        assert_eq!(journal.tip(), anchor.tip());
+        drop(journal);
+        drop(anchor);
+        drop(keys);
+        fs::remove_dir(&source_state).expect("source teardown");
+
+        let keys = RetainedMailboxKeys::open_existing(
+            dir.path(),
+            &plan,
+            vm,
+            &posture.handoff(None),
+            None,
+            address,
+        )
+        .expect("authenticated restart binding");
+        let anchor = FileJournalAnchor::open(&anchor_path, address, keys.anchor_key())
+            .expect("retained local anchor");
+        let mut journal = MailboxJournal::open_local_with_custody(
+            &journal_root,
+            keys.history_reference(),
+            signer.verifying_key(),
+            limits,
+            &keys,
+            &anchor,
+        )
+        .expect("decrypt and authenticate retained envelope");
+        let retry = journal
+            .admit_local(
+                JournalAdmission {
+                    envelope: &envelope,
+                    capability: &capability,
+                    context: &policy.context,
+                    encryption_key: &keys.payload_key(),
+                    sender_key: &policy.sender_key,
+                    signer: &signer,
+                },
+                &anchor,
+            )
+            .expect("recover original signed receipt");
+        assert_eq!(
+            serde_jcs::to_vec(&retry).expect("retry bytes"),
+            serde_jcs::to_vec(&accepted).expect("original bytes")
+        );
+        assert_eq!(anchor.tip().cursor, 1, "a retry cannot append");
     }
 
     #[test]

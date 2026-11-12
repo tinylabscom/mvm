@@ -19,10 +19,11 @@
 //! declares the capability. A grant on one that does not refuses the launch
 //! rather than boot a guest that asserts a mailbox nobody serves.
 //!
-//! Until an independent checkpoint and persistent history-key provider exist,
-//! only admitted Dev launches serve the ephemeral Send queue. Production
-//! mailbox launches refuse before boot, and reader frames fail closed.
-//! The local file anchor never authorizes a signed `AcceptedDurable` claim.
+//! Until the separate local receipt, retained custody, retention, and guest
+//! handoff are qualified end to end, only admitted Dev launches serve the
+//! ephemeral Send queue. Production mailbox launches refuse before boot, and
+//! reader frames fail closed. The local anchor never authorizes a signed
+//! `AcceptedDurable` claim.
 
 use std::io::{Error, ErrorKind, Result, Write as _};
 use std::os::unix::process::CommandExt as _;
@@ -160,7 +161,7 @@ fn serve_ephemeral(config: MailboxProcessConfig) -> Result<()> {
     if posture.variant() != Variant::Dev || plan.mailbox != Some(grant) {
         return Err(Error::new(
             ErrorKind::PermissionDenied,
-            "production mailbox requires an independent checkpoint and key custody",
+            "production mailbox local-durable path is not yet qualified",
         ));
     }
     let (policy, sealer) = keys.trust();
@@ -325,7 +326,7 @@ pub fn require_servable(
             if posture.variant() != Variant::Dev {
                 return Err(Error::new(
                     ErrorKind::PermissionDenied,
-                    "production mailbox needs an independent checkpoint and persistent key custody",
+                    "production mailbox local-durable path is not yet qualified",
                 )
                 .into());
             }
@@ -398,7 +399,7 @@ pub fn spawn_for_launch(
     if posture.variant() != Variant::Dev {
         return Err(Error::new(
             ErrorKind::PermissionDenied,
-            "production mailbox needs independent durability",
+            "production mailbox local-durable path is not yet qualified",
         ));
     }
     require_wired(plan, backend)?;
