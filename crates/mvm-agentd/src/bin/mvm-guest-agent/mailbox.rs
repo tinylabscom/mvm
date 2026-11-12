@@ -12,9 +12,11 @@ use std::path::Path;
 use std::sync::{OnceLock, atomic::Ordering};
 use std::time::{Duration, Instant};
 
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_agentd::flowmux_drive::{MAILBOX_ACK_SIGNING_KEY_FILE, RUN_MVM_DIR};
-use mvm_agentd::mailbox_outbox::{MAILBOX_CMDLINE_TOKEN, OUTBOX_PATH, forward_outbox};
+use mvm_agentd::mailbox_outbox::{
+    LOCAL_OUTBOX_PATH, MAILBOX_CMDLINE_TOKEN, OUTBOX_PATH, forward_local_outbox, forward_outbox,
+};
 use mvm_agentd::telemetry_capture::session::TimedStream;
 use mvm_contract::protocol::mailbox::MAILBOX_PORT;
 use mvm_core::mailbox::frame::Refusal;
@@ -207,11 +209,11 @@ pub(crate) fn init_mailbox() {
         mvm_agentd::detached::spawn_named("mailbox-listener", move || {
             match bind_vsock_listener(MAILBOX_PORT) {
                 Ok(fd) => {
-                    let reader = match (reader_boot, ack_seed) {
+                    let reader = match (reader_boot.clone(), ack_seed) {
                         (Some(binding), Some(seed)) => crate::mailbox_reader::start(binding, seed),
                         _ => None,
                     };
-                    accept_loop(fd, reader);
+                    accept_loop(fd, reader, reader_boot);
                 }
                 Err(e) => eprintln!(
                     "mvm-guest-agent: mailbox listener bind failed (port {MAILBOX_PORT}): {e}"
@@ -224,6 +226,7 @@ pub(crate) fn init_mailbox() {
 fn accept_loop(
     listener_fd: RawFd,
     reader: Option<std::sync::mpsc::Receiver<crate::mailbox_reader::PendingReader>>,
+    reader_boot: Option<MailboxReaderBootBinding>,
 ) {
     let mut refused = 0u32;
     while !SHUTDOWN_REQUESTED.load(Ordering::Acquire) {
@@ -238,7 +241,13 @@ fn accept_loop(
             continue;
         }
         let mut deadline = MailboxDeadline::new(&mut stream);
-        let result = wait_for_operation(&mut deadline, reader.as_ref(), Path::new(OUTBOX_PATH));
+        let result = wait_for_operation(
+            &mut deadline,
+            reader.as_ref(),
+            reader_boot.as_ref(),
+            Path::new(LOCAL_OUTBOX_PATH),
+            Path::new(OUTBOX_PATH),
+        );
         match result {
             Ok(()) | Err(Refusal::Unavailable) => {}
             Err(refusal) => {
@@ -254,13 +263,33 @@ fn accept_loop(
 fn wait_for_operation(
     stream: &mut (impl Read + Write),
     reader: Option<&std::sync::mpsc::Receiver<crate::mailbox_reader::PendingReader>>,
+    reader_boot: Option<&MailboxReaderBootBinding>,
+    local_outbox: &Path,
     outbox: &Path,
 ) -> Result<(), Refusal> {
     for _ in 0..16 {
-        // A pending Send always gets the existing port first; reader traffic
-        // cannot starve a workload's outbox.
+        // A local-durable request cannot be downgraded to the older unit
+        // verdict even when both requests share the guest mailbox port.
+        if local_outbox.exists()
+            && let Some(binding) = reader_boot
+        {
+            let authority =
+                VerifyingKey::from_bytes(&binding.authority_key).map_err(|_| Refusal::Malformed)?;
+            return forward_local_outbox(
+                stream,
+                local_outbox,
+                &authority,
+                binding.mailbox,
+                binding.execution_epoch,
+            )
+            .map(|_| ());
+        }
+        // A pending Send gets the existing port before reader traffic.
         if outbox.exists() {
             return forward_outbox(stream, outbox);
+        }
+        if local_outbox.exists() {
+            return Err(Refusal::Unavailable);
         }
         if let Some(Ok(pending)) = reader.map(std::sync::mpsc::Receiver::try_recv) {
             return crate::mailbox_reader::exchange(stream, pending);
@@ -321,9 +350,15 @@ mod tests {
         use mvm_core::mailbox::frame::OutboxMessage;
         let dir = tempfile::tempdir().unwrap();
         let outbox = dir.path().join("outbox");
+        let local_outbox = dir.path().join("outbox-local");
         mvm_agentd::mailbox_outbox::write_outbox(
             &outbox,
             &OutboxMessage::new(PrincipalId::from_bytes([0; 32]), b"hello".to_vec()),
+        )
+        .unwrap();
+        mvm_agentd::mailbox_outbox::write_outbox(
+            &local_outbox,
+            &OutboxMessage::new(PrincipalId::from_bytes([0; 32]), b"local".to_vec()),
         )
         .unwrap();
         let (mut guest, mut host) = std::os::unix::net::UnixStream::pair().unwrap();
@@ -338,9 +373,85 @@ mod tests {
             host.write_all(&serde_json::to_vec(&Ok::<(), Refusal>(())).unwrap())
                 .unwrap();
         });
-        wait_for_operation(&mut guest, Some(&reader), &outbox).unwrap();
+        wait_for_operation(&mut guest, Some(&reader), None, &local_outbox, &outbox).unwrap();
         peer.join().unwrap();
         assert!(!outbox.exists(), "accepted Send is removed as before");
+        assert!(
+            local_outbox.exists(),
+            "missing boot authority cannot downgrade a local request"
+        );
+    }
+
+    #[test]
+    fn local_send_requires_boot_authority_and_signed_acceptance() {
+        use ed25519_dalek::SigningKey;
+        use mvm_contract::protocol::mailbox::{
+            AuthorizationDomainId, BootId, DeliveryId, DeliveryOutcome, DestinationReceipt,
+            ExecutionEpoch, MailboxAddress, MailboxId, PrincipalId, ProtocolVersion,
+            SignatureAlgorithm, TenantId,
+        };
+        use mvm_core::mailbox::frame::OutboxMessage;
+        use mvm_core::mailbox::sign_receipt;
+
+        let dir = tempfile::tempdir().expect("outbox root");
+        let local = dir.path().join("outbox-local");
+        let legacy = dir.path().join("outbox");
+        let operation = OutboxMessage::new(PrincipalId::from_bytes([0; 32]), b"report".to_vec());
+        mvm_agentd::mailbox_outbox::write_outbox(&local, &operation).expect("pending report");
+        let (mut guest, _host) = std::os::unix::net::UnixStream::pair().expect("socket");
+        assert_eq!(
+            wait_for_operation(&mut guest, None, None, &local, &legacy),
+            Err(Refusal::Unavailable)
+        );
+        assert!(local.exists(), "no boot authority means no acceptance");
+        drop(guest);
+
+        let signer = SigningKey::from_bytes(&[51; 32]);
+        let plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        let boot = MailboxReaderBootBinding {
+            plan_id: plan.plan_id,
+            plan_nonce: plan.nonce,
+            mailbox: MailboxId::from_bytes([52; 32]),
+            authority_key: signer.verifying_key().to_bytes(),
+            execution_epoch: ExecutionEpoch::new(1).expect("epoch"),
+            boot: BootId::from_bytes([53; 32]),
+            guest_identity_key: [54; 32],
+            ack_public_key: [55; 32],
+        };
+        let (mut guest, mut host) = std::os::unix::net::UnixStream::pair().expect("socket");
+        let responder = std::thread::spawn(move || {
+            let mut length = [0; 4];
+            host.read_exact(&mut length).expect("frame length");
+            let mut frame = vec![0; u32::from_be_bytes(length) as usize];
+            host.read_exact(&mut frame).expect("outbox frame");
+            let sent = OutboxMessage::decode(&frame).expect("operation");
+            let signed = sign_receipt(
+                DestinationReceipt {
+                    protocol_version: ProtocolVersion::V2,
+                    signature_algorithm: SignatureAlgorithm::ED25519,
+                    delivery_id: DeliveryId::from_bytes([56; 32]),
+                    message_id: sent.message_id,
+                    address: MailboxAddress {
+                        tenant: TenantId::from_bytes([57; 32]),
+                        authorization_domain: AuthorizationDomainId::from_bytes([58; 32]),
+                        mailbox: MailboxId::from_bytes([52; 32]),
+                        recipient: PrincipalId::from_bytes([59; 32]),
+                    },
+                    execution_epoch: ExecutionEpoch::new(1).expect("epoch"),
+                    outcome: DeliveryOutcome::AcceptedLocalDurable,
+                    observed_at_unix_ms: 1_500,
+                    ciphertext_commitment: [60; 32],
+                },
+                &signer,
+            )
+            .expect("destination signs");
+            host.write_all(&serde_json::to_vec(&Ok::<_, Refusal>(signed)).expect("receipt wire"))
+                .expect("reply");
+        });
+        wait_for_operation(&mut guest, None, Some(&boot), &local, &legacy)
+            .expect("boot-pinned signed acceptance");
+        responder.join().expect("host reply");
+        assert!(!local.exists(), "verified V2 receipt closes pending send");
     }
 
     #[test]

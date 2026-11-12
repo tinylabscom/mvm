@@ -246,9 +246,9 @@ impl DurableMailboxService {
 
     /// Read one guest outbox operation over its dedicated mailbox port. The
     /// guest sees success only after the canonical ciphertext, dedup identity,
-    /// and anchor have committed; an idle connection returns `false`. The
-    /// guest's older `Result<(), Refusal>` wire does not yet carry a signed
-    /// receipt, so production may not present it as a receipt-bearing Send.
+    /// and anchor have committed; an idle connection returns `false`. Local
+    /// admission returns its signed V2 receipt; the legacy branch retains its
+    /// original unit-verdict wire.
     pub fn serve_guest(
         &self,
         route: &HostDialRoute,
@@ -271,13 +271,16 @@ impl DurableMailboxService {
             }
             other => other,
         };
-        let verdict: Result<(), Refusal> = body
+        let verdict: Result<SignedDestinationReceipt, Refusal> = body
             .and_then(|body| OutboxMessage::decode(&body))
             .and_then(|message| sealer.seal(message))
-            .and_then(|(capability, envelope)| {
-                admit(&self.shared, &capability, &envelope).map(|_| ())
-            });
-        if let Ok(reply) = serde_json::to_vec(&verdict) {
+            .and_then(|(capability, envelope)| admit(&self.shared, &capability, &envelope));
+        let reply = if self.shared.local_anchor.is_some() {
+            serde_json::to_vec(&verdict)
+        } else {
+            serde_json::to_vec(&verdict.map(|_| ()))
+        };
+        if let Ok(reply) = reply {
             let _ = stream.write_all(&reply);
         }
         Ok(received)
@@ -504,6 +507,7 @@ fn guest_scope<'a>(
 fn reader_refusal(error: JournalError) -> Refusal {
     match error {
         JournalError::Full => Refusal::StorageFull,
+        JournalError::Mailbox(MailboxError::Expired) => Refusal::Expired,
         JournalError::Mailbox(_)
         | JournalError::WrongAuthority
         | JournalError::ConflictingRetry
@@ -604,6 +608,7 @@ fn admit(
     };
     accepted.map_err(|error| match error {
         JournalError::Mailbox(MailboxError::WrongRecipient) => Refusal::NotAuthorized,
+        JournalError::Mailbox(MailboxError::Expired) => Refusal::Expired,
         JournalError::Mailbox(MailboxError::CapabilityPayloadExceeded) => {
             Refusal::Oversized(capability.grant.max_payload_bytes as usize)
         }

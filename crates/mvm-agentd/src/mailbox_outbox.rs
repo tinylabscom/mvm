@@ -10,18 +10,27 @@
 //! [`write_outbox`] is the workload side: it leaves that one message where
 //! [`forward_outbox`] will find it, using the same [`OutboxMessage`] encoding
 //! and size limits the host decodes with.
+//! `outbox-local` uses that same operation identity but is removed only after
+//! [`forward_local_outbox`] verifies a boot-bound signed V2 local receipt.
 
 use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::time::Duration;
 
-use mvm_contract::protocol::mailbox::MAX_MAILBOX_PAYLOAD_BYTES;
-use mvm_core::mailbox::frame::{OutboxMessage, Refusal, send_outbox_message};
+use ed25519_dalek::VerifyingKey;
+use mvm_contract::protocol::mailbox::{
+    ExecutionEpoch, MAX_MAILBOX_PAYLOAD_BYTES, MailboxId, SignedDestinationReceipt,
+};
+use mvm_core::mailbox::frame::{
+    OutboxMessage, Refusal, send_local_outbox_message, send_outbox_message,
+};
 use mvm_core::util::atomic_io::{atomic_write_new, sync_dir};
 
 /// Where the workload leaves its message and the agent reads it.
 pub const OUTBOX_PATH: &str = "/run/mvm/mailbox/outbox";
+/// An explicit local-durable request never accepts the older unit-verdict wire.
+pub const LOCAL_OUTBOX_PATH: &str = "/run/mvm/mailbox/outbox-local";
 
 /// The launch assertion that grants a guest a mailbox. The agent creates the
 /// outbox directory and binds the mailbox port only when the kernel cmdline
@@ -63,6 +72,27 @@ pub fn wait_and_forward_outbox<S: Read + Write>(
 /// send leaves it in place for a same-ID retry; only an accepted verdict removes
 /// it under the writer lock.
 pub fn forward_outbox<S: Read + Write>(stream: &mut S, outbox: &Path) -> Result<(), Refusal> {
+    forward_with(stream, outbox, send_outbox_message)
+}
+
+/// Keep a local-durable request pending until a signed V2 receipt is verified.
+pub fn forward_local_outbox<S: Read + Write>(
+    stream: &mut S,
+    outbox: &Path,
+    authority: &VerifyingKey,
+    mailbox: MailboxId,
+    epoch: ExecutionEpoch,
+) -> Result<SignedDestinationReceipt, Refusal> {
+    forward_with(stream, outbox, |stream, message| {
+        send_local_outbox_message(stream, message, authority, mailbox, epoch)
+    })
+}
+
+fn forward_with<S: Read + Write, R>(
+    stream: &mut S,
+    outbox: &Path,
+    send: impl FnOnce(&mut S, &OutboxMessage) -> Result<R, Refusal>,
+) -> Result<R, Refusal> {
     let dir = outbox.parent().ok_or(Refusal::Malformed)?;
     let _lock = lock_outbox_dir(dir)?;
     let mut bytes = Vec::new();
@@ -70,12 +100,18 @@ pub fn forward_outbox<S: Read + Write>(stream: &mut S, outbox: &Path) -> Result<
         .and_then(|file| file.take(MAX_OUTBOX_BYTES + 1).read_to_end(&mut bytes))
         .map_err(|_| Refusal::Malformed)?;
     let message = OutboxMessage::decode(&bytes)?;
-    match send_outbox_message(stream, &message) {
-        Ok(()) => {}
+    let accepted = match send(stream, &message) {
+        Ok(accepted) => accepted,
         Err(
-            refusal @ (Refusal::RetriesExhausted | Refusal::Oversized(_) | Refusal::NotAuthorized),
+            refusal @ (Refusal::RetriesExhausted
+            | Refusal::Oversized(_)
+            | Refusal::NotAuthorized
+            | Refusal::Expired),
         ) => {
-            let prefix = if matches!(refusal, Refusal::Oversized(_) | Refusal::NotAuthorized) {
+            let prefix = if matches!(
+                refusal,
+                Refusal::Oversized(_) | Refusal::NotAuthorized | Refusal::Expired
+            ) {
                 "rejected"
             } else {
                 "uncertain"
@@ -84,9 +120,10 @@ pub fn forward_outbox<S: Read + Write>(stream: &mut S, outbox: &Path) -> Result<
             return Err(refusal);
         }
         Err(error) => return Err(error),
-    }
+    };
     std::fs::remove_file(outbox).map_err(|_| Refusal::Unavailable)?;
-    sync_dir(dir).map_err(|_| Refusal::Unavailable)
+    sync_dir(dir).map_err(|_| Refusal::Unavailable)?;
+    Ok(accepted)
 }
 
 fn archive_outbox(outbox: &Path, message: &OutboxMessage, prefix: &str) -> Result<(), Refusal> {
@@ -248,6 +285,86 @@ mod tests {
         assert!(
             !outbox.exists(),
             "accepted submission frees the single slot"
+        );
+    }
+
+    #[test]
+    fn local_outbox_is_retained_until_a_signed_v2_receipt_arrives() {
+        use ed25519_dalek::SigningKey;
+        use mvm_contract::protocol::mailbox::{
+            AuthorizationDomainId, DeliveryId, DeliveryOutcome, DestinationReceipt, MailboxAddress,
+            ProtocolVersion, SignatureAlgorithm, TenantId,
+        };
+        use mvm_core::mailbox::sign_receipt;
+
+        let dir = tempfile::tempdir().expect("private guest outbox");
+        let path = dir.path().join("outbox-local");
+        let operation = message(b"report");
+        write_outbox(&path, &operation).expect("retain original operation");
+        let signer = SigningKey::from_bytes(&[10; 32]);
+        let mailbox = MailboxId::from_bytes([9; 32]);
+        let epoch = ExecutionEpoch::new(1).expect("epoch");
+        let signed = sign_receipt(
+            DestinationReceipt {
+                protocol_version: ProtocolVersion::V2,
+                signature_algorithm: SignatureAlgorithm::ED25519,
+                delivery_id: DeliveryId::from_bytes([11; 32]),
+                message_id: operation.message_id,
+                address: MailboxAddress {
+                    tenant: TenantId::from_bytes([12; 32]),
+                    authorization_domain: AuthorizationDomainId::from_bytes([13; 32]),
+                    mailbox,
+                    recipient: operation.recipient,
+                },
+                execution_epoch: epoch,
+                outcome: DeliveryOutcome::AcceptedLocalDurable,
+                observed_at_unix_ms: 1_500,
+                ciphertext_commitment: [14; 32],
+            },
+            &signer,
+        )
+        .expect("signed local verdict");
+        let exchange = |reply: Vec<u8>| {
+            let (mut guest, mut host) = std::os::unix::net::UnixStream::pair().expect("socket");
+            let peer = std::thread::spawn(move || {
+                let mut len = [0; 4];
+                host.read_exact(&mut len).expect("outbox length");
+                let mut body = vec![0; u32::from_be_bytes(len) as usize];
+                host.read_exact(&mut body).expect("outbox operation");
+                host.write_all(&reply).expect("host verdict");
+                OutboxMessage::decode(&body).expect("original operation")
+            });
+            let result =
+                forward_local_outbox(&mut guest, &path, &signer.verifying_key(), mailbox, epoch);
+            assert_eq!(peer.join().expect("host thread"), operation);
+            result
+        };
+        assert_eq!(
+            exchange(b"{\"Ok\":null}".to_vec()),
+            Err(Refusal::Malformed),
+            "an untyped transport success cannot remove a durable request"
+        );
+        assert!(path.exists(), "uncertain operation retains its stable ID");
+        assert_eq!(
+            exchange(
+                serde_json::to_vec(&Ok::<_, Refusal>(signed.clone())).expect("V2 receipt wire")
+            ),
+            Ok(signed)
+        );
+        assert!(
+            !path.exists(),
+            "only verified acceptance removes the outbox"
+        );
+        write_outbox(&path, &operation).expect("another local attempt");
+        assert_eq!(
+            exchange(serde_json::to_vec(&Err::<(), _>(Refusal::Expired)).expect("expired verdict")),
+            Err(Refusal::Expired)
+        );
+        assert!(!path.exists(), "terminal expiry leaves no pending retry");
+        let archived = dir.path().join(format!("rejected-{}", "08".repeat(32)));
+        assert_eq!(
+            std::fs::read(archived).expect("terminal operation archived"),
+            operation.encode()
         );
     }
 

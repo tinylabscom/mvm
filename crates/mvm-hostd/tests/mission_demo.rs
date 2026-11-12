@@ -1157,14 +1157,17 @@ fn local_file_anchor_cannot_issue_durable_acceptance() {
 
 #[test]
 fn local_mailbox_service_returns_exact_signed_v2_receipt_after_restart() {
+    use mvm_agentd::mailbox_outbox::{forward_local_outbox, write_outbox};
     use mvm_contract::protocol::mailbox::DeliveryOutcome;
-    use mvm_core::mailbox::frame::{send_local_receipted_frame, send_receipted_frame};
+    use mvm_core::mailbox::frame::{
+        OutboxMessage, send_local_receipted_frame, send_receipted_frame,
+    };
     use mvm_core::mailbox::journal::{
         FileJournalAnchor, HistoryKeyCustody, HistoryKeyRef, JournalError, JournalLimits,
         MailboxJournal,
     };
     use mvm_hostd::mailbox_service::durable::DurableMailboxService;
-    use std::os::unix::net::UnixStream;
+    use std::os::unix::net::{UnixListener, UnixStream};
 
     struct Custody(HistoryKeyRef);
     impl HistoryKeyCustody for Custody {
@@ -1274,10 +1277,86 @@ fn local_mailbox_service_returns_exact_signed_v2_receipt_after_restart() {
         Err(Refusal::Malformed),
         "a V1 strong-tier client must not upgrade the local receipt"
     );
+
+    let guest_port = node.home.path().join("guest-port.sock");
+    let guest_listener = UnixListener::bind(&guest_port).expect("guest mailbox port");
+    let guest_outbox = node.home.path().join("outbox-local");
+    let operation = OutboxMessage::new(aircraft_principal(), b"guest".to_vec());
+    write_outbox(&guest_outbox, &operation).expect("pending local guest operation");
+    let guest = std::thread::spawn(move || {
+        let (mut stream, _) = guest_listener.accept().expect("host dials guest port");
+        forward_local_outbox(
+            &mut stream,
+            &guest_outbox,
+            &authority,
+            address().mailbox,
+            MbEpoch::new(1).expect("execution epoch"),
+        )
+        .expect("guest verifies V2 receipt before removing outbox")
+    });
+    let mut guest_sealer = sealer(&channel, &[MailboxOperation::Send]);
+    guest_sealer.header.expires_at_unix_ms = message_header.expires_at_unix_ms;
+    guest_sealer.routing.expires_at_unix_ms = message_header.expires_at_unix_ms;
+    guest_sealer.capability.expires_at_unix_ms = message_header.expires_at_unix_ms;
+    let intent_dir = node.home.path().join("source-intents");
+    guest_sealer.intent_dir = Some(intent_dir.clone());
+    assert!(
+        service
+            .serve_guest(
+                &mvm_core::vm_backend::HostDialRoute::PortSocket(guest_port),
+                &mut guest_sealer,
+            )
+            .expect("host serves guest on existing port")
+    );
+    let guest_receipt = guest.join().expect("guest send thread");
+    assert_eq!(
+        guest_receipt.receipt.outcome,
+        DeliveryOutcome::AcceptedLocalDurable
+    );
+    assert_eq!(guest_receipt.receipt.message_id, operation.message_id);
+    drop(service);
+
+    let service = start();
+    let retry_port = node.home.path().join("guest-port-retry.sock");
+    let listener = UnixListener::bind(&retry_port).expect("restarted guest port");
+    let retry_outbox = node.home.path().join("outbox-local");
+    write_outbox(&retry_outbox, &operation).expect("same-ID source retry");
+    let retry_guest = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("host redials guest");
+        forward_local_outbox(
+            &mut stream,
+            &retry_outbox,
+            &authority,
+            address().mailbox,
+            MbEpoch::new(1).expect("execution epoch"),
+        )
+        .expect("original signed local verdict")
+    });
+    let mut retry_sealer = sealer(&channel, &[MailboxOperation::Send]);
+    retry_sealer.header.expires_at_unix_ms = message_header.expires_at_unix_ms;
+    retry_sealer.routing.expires_at_unix_ms = message_header.expires_at_unix_ms;
+    retry_sealer.capability.expires_at_unix_ms = message_header.expires_at_unix_ms;
+    retry_sealer.intent_dir = Some(intent_dir);
+    assert!(
+        service
+            .serve_guest(
+                &mvm_core::vm_backend::HostDialRoute::PortSocket(retry_port),
+                &mut retry_sealer,
+            )
+            .expect("host redials after helper restart")
+    );
+    assert_eq!(
+        retry_guest.join().expect("guest retry thread"),
+        guest_receipt
+    );
     drop(service);
     let anchor = FileJournalAnchor::open(&anchor_path, address(), [91; 32])
         .expect("anchor after service teardown");
-    assert_eq!(anchor.tip().cursor, 1, "exact retries must not append");
+    assert_eq!(
+        anchor.tip().cursor,
+        2,
+        "exact retries append nothing; guest Send commits once"
+    );
     drop(anchor);
 
     let foreign_path = node.home.path().join("foreign.sock");

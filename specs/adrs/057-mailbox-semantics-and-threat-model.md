@@ -281,6 +281,16 @@ must reproduce the original bytes; an unprovable acceptance is unknown, not a
 new version-one `duplicate` that loses the acceptance tier. Different bytes
 under the same ID conflict. Version-one `duplicate` behavior is unchanged.
 
+The guest's local-durable outbox request is sender-owned pending work, not an
+acceptance receipt. Its host retains the canonical sealed bytes and records a
+bounded dispatch attempt before destination I/O. The guest removes the
+pending request only after checking a version-two destination signature bound
+to its boot-pinned mailbox authority, execution epoch, and message ID. An
+older unit success cannot satisfy this path; wrong-key, stale-epoch, or
+unverifiable replies keep the operation pending or yield a typed terminal
+refusal. An already-dispatched envelope is not rewritten for a replacement
+epoch, and this rule does not authorize transfer of an accepted message.
+
 `accepted_ephemeral` means the message is owned by the named live mailbox
 epoch. If that epoch terminates, the signed epoch-terminal observation closes
 the volatile queue; senders that need recovery use stable IDs and retry into a
@@ -307,6 +317,17 @@ dead letters, and tombstones per mailbox and tenant. Disk full, rollback,
 corruption, wrong key, and quota exhaustion fail closed. Crash recovery is an
 idempotent reconciliation of durable state, not a sleep-polled foreground
 path.
+
+For the standalone local tier, a signed plan must declare a finite retention
+window before admission; an absent policy does not imply an infinite default.
+Compaction first durably publishes an encrypted, destination-authenticated
+snapshot of still-live delivery state and dedup tombstones through each
+message's expiry plus that window, then advances the local chain head, and
+only then prunes superseded records. Recovery verifies the appropriate old
+prefix or committed snapshot after interruption; it never guesses a new
+genesis from a gap. If the snapshot or retained tombstones cannot fit the
+finite quota, new acceptance refuses rather than discarding replay evidence.
+This host-local sequence does not detect rollback of the entire host.
 
 ### 8. Selective receive is bounded and fair
 

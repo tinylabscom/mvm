@@ -1,9 +1,9 @@
 //! The one-frame mailbox exchange both ends of the mailbox port share.
 //!
 //! A peer writes a length-prefixed frame (a capability and a sealed envelope),
-//! a guest a length-prefixed plaintext [`OutboxMessage`]; either reads one
-//! typed verdict, a serialized `Result<(), Refusal>`. Keeping both directions
-//! here means the two ends cannot drift.
+//! a guest a length-prefixed plaintext [`OutboxMessage`]; a legacy guest reads
+//! `Result<(), Refusal>`, while a locally durable sender requires a signed V2
+//! receipt. Keeping both directions here means the two ends cannot drift.
 //!
 //! Frame: `u32 BE length`, then `u32 BE capability length`, the capability as
 //! JSON, and the envelope in its canonical `encode_envelope` form.
@@ -12,8 +12,8 @@ use std::io::{Read, Write};
 
 use ed25519_dalek::VerifyingKey;
 use mvm_contract::protocol::mailbox::{
-    DeliveryOutcome, MAX_MAILBOX_PAYLOAD_BYTES, MailboxAddress, MailboxEnvelope,
-    MailboxEnvelopeHeader, MessageId, PrincipalId, SignedDestinationReceipt,
+    DeliveryOutcome, ExecutionEpoch, MAX_MAILBOX_PAYLOAD_BYTES, MailboxAddress, MailboxEnvelope,
+    MailboxEnvelopeHeader, MailboxId, MessageId, PrincipalId, SignedDestinationReceipt,
     SignedMailboxCapability,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -33,6 +33,8 @@ pub enum Refusal {
     QueueFull(usize),
     #[error("durable mailbox storage quota is full")]
     StorageFull,
+    #[error("mailbox message expired before acceptance")]
+    Expired,
     #[error("mailbox retry budget exhausted; reconcile the stable message ID")]
     RetriesExhausted,
     #[error("mailbox operation is not authorized")]
@@ -217,13 +219,44 @@ pub fn send_outbox_message<S: Read + Write>(
     stream: &mut S,
     message: &OutboxMessage,
 ) -> Result<(), Refusal> {
+    validate_outbox(message)?;
+    exchange(stream, &message.encode())
+}
+
+/// Require a signed V2 local acceptance for one guest-authored operation.
+///
+/// The guest cannot independently bind the host-sealed ciphertext commitment
+/// to its plaintext. This is a trusted-host receipt, not host-blind delivery.
+pub fn send_local_outbox_message<S: Read + Write>(
+    stream: &mut S,
+    message: &OutboxMessage,
+    destination_key: &VerifyingKey,
+    mailbox: MailboxId,
+    execution_epoch: ExecutionEpoch,
+) -> Result<SignedDestinationReceipt, Refusal> {
+    validate_outbox(message)?;
+    let signed: SignedDestinationReceipt = exchange(stream, &message.encode())?;
+    verify_receipt(&signed, destination_key).map_err(|_| Refusal::Malformed)?;
+    if signed.receipt.outcome != DeliveryOutcome::AcceptedLocalDurable
+        || signed.receipt.message_id != message.message_id
+        || signed.receipt.address.mailbox != mailbox
+        || signed.receipt.execution_epoch != execution_epoch
+        || (message.recipient.as_bytes() != &OWN_MAILBOX_RECIPIENT
+            && signed.receipt.address.recipient != message.recipient)
+    {
+        return Err(Refusal::Malformed);
+    }
+    Ok(signed)
+}
+
+fn validate_outbox(message: &OutboxMessage) -> Result<(), Refusal> {
     if message.body.is_empty() {
         return Err(Refusal::Malformed);
     }
     if message.body.len() > MAX_MAILBOX_PAYLOAD_BYTES {
         return Err(Refusal::Oversized(MAX_MAILBOX_PAYLOAD_BYTES));
     }
-    exchange(stream, &message.encode())
+    Ok(())
 }
 
 fn exchange<S: Read + Write, T: DeserializeOwned>(
@@ -249,6 +282,24 @@ fn exchange<S: Read + Write, T: DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ReplyPeer(std::io::Cursor<Vec<u8>>);
+
+    impl Read for ReplyPeer {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.0.read(buf)
+        }
+    }
+
+    impl Write for ReplyPeer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn an_outbox_message_round_trips_and_malformed_input_is_refused() {
@@ -280,22 +331,7 @@ mod tests {
 
     #[test]
     fn a_peer_cannot_make_the_verdict_reader_grow_without_bound() {
-        struct Peer(std::io::Cursor<Vec<u8>>);
-        impl Read for Peer {
-            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-                self.0.read(buf)
-            }
-        }
-        impl Write for Peer {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-
-        let mut peer = Peer(std::io::Cursor::new(vec![
+        let mut peer = ReplyPeer(std::io::Cursor::new(vec![
             b'x';
             MAX_VERDICT_BYTES as usize + 2
         ]));
@@ -328,5 +364,94 @@ mod tests {
             Err(Refusal::Oversized(MAX_MAILBOX_PAYLOAD_BYTES))
         );
         assert!(peer.into_inner().is_empty());
+    }
+
+    #[test]
+    fn guest_local_outbox_needs_a_signed_v2_receipt_for_its_own_identity() {
+        use ed25519_dalek::SigningKey;
+        use mvm_contract::protocol::mailbox::{
+            AuthorizationDomainId, DeliveryId, DestinationReceipt, ProtocolVersion,
+            SignatureAlgorithm, TenantId,
+        };
+
+        let signer = SigningKey::from_bytes(&[9; 32]);
+        let mailbox = MailboxId::from_bytes([3; 32]);
+        let epoch = ExecutionEpoch::new(7).expect("epoch");
+        let message = OutboxMessage {
+            recipient: PrincipalId::from_bytes(OWN_MAILBOX_RECIPIENT),
+            message_id: MessageId::from_bytes([4; 32]),
+            body: b"hello".to_vec(),
+        };
+        let receipt = DestinationReceipt {
+            protocol_version: ProtocolVersion::V2,
+            signature_algorithm: SignatureAlgorithm::ED25519,
+            delivery_id: DeliveryId::from_bytes([5; 32]),
+            message_id: message.message_id,
+            address: MailboxAddress {
+                tenant: TenantId::from_bytes([6; 32]),
+                authorization_domain: AuthorizationDomainId::from_bytes([7; 32]),
+                mailbox,
+                recipient: PrincipalId::from_bytes([8; 32]),
+            },
+            execution_epoch: epoch,
+            outcome: DeliveryOutcome::AcceptedLocalDurable,
+            observed_at_unix_ms: 1_500,
+            ciphertext_commitment: [10; 32],
+        };
+        let signed = super::super::sign_receipt(receipt.clone(), &signer).expect("V2 receipt");
+        let wire = serde_json::to_vec(&Ok::<_, Refusal>(signed.clone())).expect("verdict");
+        let mut peer = ReplyPeer(std::io::Cursor::new(wire));
+        assert_eq!(
+            send_local_outbox_message(&mut peer, &message, &signer.verifying_key(), mailbox, epoch),
+            Ok(signed)
+        );
+
+        let mut unit = ReplyPeer(std::io::Cursor::new(
+            serde_json::to_vec(&Ok::<(), Refusal>(())).expect("legacy verdict"),
+        ));
+        assert_eq!(
+            send_local_outbox_message(&mut unit, &message, &signer.verifying_key(), mailbox, epoch),
+            Err(Refusal::Malformed),
+            "a transport-level success cannot satisfy local acceptance"
+        );
+        for wrong in [
+            DestinationReceipt {
+                message_id: MessageId::from_bytes([11; 32]),
+                ..receipt.clone()
+            },
+            DestinationReceipt {
+                execution_epoch: ExecutionEpoch::new(8).expect("foreign epoch"),
+                ..receipt.clone()
+            },
+            DestinationReceipt {
+                outcome: DeliveryOutcome::AcceptedDurable,
+                protocol_version: ProtocolVersion::V1,
+                ..receipt.clone()
+            },
+        ] {
+            let signed = super::super::sign_receipt(wrong.clone(), &signer).expect("signed wrong");
+            let mut peer = ReplyPeer(std::io::Cursor::new(
+                serde_json::to_vec(&Ok::<_, Refusal>(signed)).expect("wrong verdict"),
+            ));
+            assert_eq!(
+                send_local_outbox_message(
+                    &mut peer,
+                    &message,
+                    &signer.verifying_key(),
+                    mailbox,
+                    epoch,
+                ),
+                Err(Refusal::Malformed)
+            );
+        }
+        let foreign = super::super::sign_receipt(receipt, &SigningKey::from_bytes(&[12; 32]))
+            .expect("foreign authority signs");
+        let mut peer = ReplyPeer(std::io::Cursor::new(
+            serde_json::to_vec(&Ok::<_, Refusal>(foreign)).expect("foreign verdict"),
+        ));
+        assert_eq!(
+            send_local_outbox_message(&mut peer, &message, &signer.verifying_key(), mailbox, epoch),
+            Err(Refusal::Malformed)
+        );
     }
 }

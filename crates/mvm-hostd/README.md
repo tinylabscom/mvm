@@ -53,10 +53,13 @@ provide host-blind confidentiality.
 The journal-backed service can bind a V2 local receipt to its existing endpoint
 and recover an exact retry after restart; on Send and Receive it settles at most
 eight expired entries per request, returning unavailable when maintenance
-remains rather than reporting an uncommitted terminal state. The guest outbox
-still speaks an older untyped success wire. Production mailbox launch remains
-refused until the signed receipt handoff and anchored retention/compaction
-rules are qualified.
+remains rather than reporting an uncommitted terminal state. A separate guest
+`outbox-local` path now requires a boot-pinned authority and a verified signed
+V2 receipt before removing the pending message; the old `outbox` path retains
+its ephemeral unit-verdict behavior. Expired submissions receive a typed
+terminal refusal and retain a bounded guest-side rejection record. Production
+mailbox launch remains refused until this handoff, the retained custody path,
+and anchored retention/compaction are qualified end to end.
 
 ## Main areas
 
