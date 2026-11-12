@@ -748,11 +748,12 @@ impl MailboxJournal {
         )
     }
 
-    /// Reopen the software-only local tier against a fsynced same-host anchor.
+    /// Reopen a test-scoped software-only local tier against a fsynced same-host anchor.
     ///
-    /// The trusted host must obtain the reference and existing key from an
-    /// authenticated restart manifest bound to its admitted plan/VM/mailbox.
-    /// A deserialized reference alone is never authorization to open history.
+    /// Production must first supply an authenticated restart binding to the
+    /// admitted plan/VM/mailbox and the signed retention policy. A deserialized
+    /// reference alone is never authorization to open history.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn open_local_with_custody(
         root: &Path,
         reference: HistoryKeyRef,
