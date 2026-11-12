@@ -2,6 +2,20 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.28.0-rc.2] — 2026-11-12
+
+### Documentation
+- **contracts**: Record fresh graph coverage and name workstream owners in the cleanup inventory
+
+### Fixed
+- **deps**: Update hickory-net and hickory-resolver to 0.26.3 for RUSTSEC-2026-0506 through 0520
+
+### Other
+- Capture secure execution discovery in product PRD
+
+### Refactored
+- Isolate private filesystem platform implementations
+
 ## [0.28.0-rc.1] — 2026-11-11
 
 ### Added
