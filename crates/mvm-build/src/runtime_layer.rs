@@ -526,30 +526,6 @@ pub fn stage_runtime_layer(
     Ok(stage)
 }
 
-/// Compose authenticated runtime archives without Nix or a builder VM.
-///
-/// This prepares reusable filesystem input only. It cannot be booted, signed as
-/// an application, or installed as a `.mvmpkg` without the signed base, an
-/// application entrypoint, policy admission, verity and final bundle signing.
-/// A directory may recur across layers, but no file or symlink may overlap.
-///
-/// # Errors
-///
-/// Refuses revoked or changed archives, unresolved dependencies, path
-/// collisions, and any tar semantics not faithfully retained by extraction.
-pub fn compose_runtime_layers(
-    archives: &[&VerifiedRuntimeLayerArchive],
-) -> Result<ComposedRuntimeLayers, RuntimeLayerStageError> {
-    if archives.is_empty() || archives.len() > MAX_LAYERS {
-        return Err(RuntimeLayerStageError::InconsistentLayers);
-    }
-    let arch = &archives[0].descriptor().manifest().runtime_layer.guest_arch;
-    let pins = runtime_pins(archives, arch)?;
-    let mut composed = ComposedRuntimeLayers::new(pins)?;
-    add_runtime_archives(&mut composed, archives)?;
-    Ok(composed)
-}
-
 /// Compose precisely the authenticated layers a v2 application requests.
 ///
 /// The host selects the generic base profile; the author cannot choose a
