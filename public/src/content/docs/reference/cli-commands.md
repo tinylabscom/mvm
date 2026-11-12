@@ -987,8 +987,8 @@ never served from a standby and always boots cold.
 | `mvmctl run <image> -- <cmd>...`                                    | Boot an OCI image; the same as `--image <image>`                                                                                                    |
 | `mvmctl run ./app.mvmpkg -- <cmd>...`                               | Verify and boot a publisher-trusted bundle or an explicitly enrolled same-host local build; schema-8+ local builds require operator enrollment and remain refused under `--prod` |
 | `mvmctl run <namespace/name[@version]> -- <cmd>...`                 | Acquire and run an `agent/*` application, or run another installed application; `-a`, `--app` and `--application` acquire any application reference with no image fallback |
-| `mvmctl run --compose ./pack.toml`                                   | Resolve signed runtime inputs and privately stage a host-signed **Dev** composition for this invocation, without installing it as a reusable bundle. Rechecks publisher and revocation evidence on cache hits; refuses until a compatible signed Linux image set supplies a composition tar. Never publishes a pack or claims an official signature. A successful cold/repeat guest witness remains outstanding. |
-| `mvmctl run --compose ./pack.toml --compose-base local --compose-base-manifest ./base/image-set.json --compose-base-kernel ./base/vmlinux --compose-base-tar ./base/rootfs.tar.gz` | Select an explicitly measured local kernel and composition tar under a schema-3 `local-dev` manifest. Development-only and host-signed; refuses `--prod`, missing tar, changed input bytes and incompatible architecture/boot contract instead of using the signed default. A successful Linux CLI guest-output/cache-hit run is not yet established. |
+| `mvmctl run --compose ./pack.toml`                                   | Resolve signed runtime inputs and privately stage a host-signed **Dev** composition for this invocation, without installing it as a reusable bundle. Rechecks publisher and revocation evidence on cache hits; refuses until a compatible signed Linux image set supplies a composition tar. Never publishes a pack or claims an official signature. A PR-only x86_64 Firecracker test produced guest output on both a cold run and an authenticated cache hit; this is not a published CLI or a speed witness. |
+| `mvmctl run --compose ./pack.toml --compose-base local --compose-base-manifest ./base/image-set.json --compose-base-kernel ./base/vmlinux --compose-base-tar ./base/rootfs.tar.gz` | Select an explicitly measured local kernel and composition tar under a schema-3 `local-dev` manifest. Development-only and host-signed; refuses `--prod`, missing tar, changed input bytes and incompatible architecture/boot contract instead of using the signed default. This selected-base path produced guest output on cold and repeat PR-only x86_64 Firecracker runs, not a release or a speed claim. |
 | `mvmctl run --manifest <name-or-path> -- <cmd>...`                  | Boot a registered manifest/template instead of the default                                                                                                                                                                                                                                                                                                                            |
 | `mvmctl run --manifest <app.mvmpkg> -- <cmd>...`                    | Verify, install, and boot a signed `.mvmpkg` bundle, as `machine run --manifest <app.mvmpkg>` does |
 | `mvmctl run -- npm test`                                            | Infer the runtime when no source is given (see **Runtime detection** below)                                                                                                                                                                                                                                                                                                           |
@@ -1520,6 +1520,16 @@ both. When `--image` is omitted, it searches the current directory for
 `mvm.toml` / `Mvmfile.toml`; `--manifest <path>` selects a file explicitly. The
 persisted spec carries the manifest's image, CPU/memory sizing, `mem_initial`,
 network defaults, allow-hosts, volumes, and its `[grants]` table.
+
+The draft development-only `machine create <name> --pack <pack.toml>` instead
+records a local recipe and its verified archive digest as data, without
+enrolling a publisher. Hidden `--pack-base-manifest`, `--pack-base-kernel` and
+`--pack-base-tar` select a measured local base; PR-test-enabled builds also
+accept a signed test runtime with `--pack-pr-test-runtime-dir` and
+`--pack-pr-test-pull-request`. `machine start <name>` must recheck those inputs
+and freshly admit the exact bundle. This named-pack path has not yet passed a
+live guest-output or launch-speed witness; it does not grant production,
+installation, or publisher authority.
 
 A workload's grants — what it may consume and where it may reach — can be
 declared in four places, resolved **per dimension** from highest precedence to

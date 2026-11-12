@@ -28,7 +28,7 @@ mod composition_request;
 pub(in crate::commands) use composition_request::SdkTransportArgs;
 pub(in crate::commands) fn prepare_local_pack_data(
     path: &Path,
-    selected: Option<&mvm_runtime::machine::persist::LocalPackBaseSource>,
+    selected: Option<&mvm_client::machine_spec::LocalPackBaseSource>,
 ) -> Result<PathBuf> {
     let base = if let Some(selected) = selected {
         #[cfg(feature = "pr-test-guest-runtime")]
