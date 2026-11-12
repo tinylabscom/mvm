@@ -564,6 +564,7 @@ impl LocalBackend {
             volumes: params.volumes,
             destroy_on_exit: params.transient,
             grants: params.grants.clone(),
+            authored_policy: None,
             mailbox: params.mailbox,
             secret_release: params.secrets.secret_release,
             secrets: params.secrets.secrets,

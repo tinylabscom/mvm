@@ -81,6 +81,9 @@ pub struct LocalRunRequest {
     /// `None` keeps the pre-grant baseline: no CPU cap, no wall-clock bound,
     /// deny-all egress.
     pub grants: Option<mvm_contract::grants::Grants>,
+    /// Resolved authored constraints; only an enforceable narrowing of host
+    /// grants is admitted. Unsupported sections refuse before rootfs I/O.
+    pub authored_policy: Option<mvm_contract::policy::authored::PolicyBody>,
     /// Mailbox this run may send into, minted into the synthesized plan.
     /// `None` grants none. Ignored when `signed_plan` is set.
     pub mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
@@ -238,6 +241,12 @@ pub fn admit_and_boot_local(
     req: &LocalRunRequest,
     ctx: LocalRunContext<'_>,
 ) -> Result<StartedMachine> {
+    let projected = req
+        .authored_policy
+        .as_ref()
+        .map(|policy| authored_local_request(req, policy))
+        .transpose()?;
+    let req = projected.as_ref().unwrap_or(req);
     anyhow::ensure!(
         req.volumes
             .iter()
@@ -376,26 +385,6 @@ pub fn admit_and_boot_local(
             assurance: ctx.assurance,
         },
     )
-}
-
-/// Admit a resolved authored policy only when every selected effect has a
-/// signed and enforceable projection through this local-run seam.
-///
-/// This internal entrypoint deliberately refuses sections the seam cannot
-/// enforce; it is not yet a public SDK policy launch API.
-///
-/// # Errors
-///
-/// Unsupported sections, bounds wider than the policy, an external signed
-/// plan, and any ordinary admission or boot refusal fail before a guest starts.
-pub fn admit_and_boot_local_with_policy(
-    backend: &AnyBackend,
-    req: &LocalRunRequest,
-    policy: &mvm_contract::policy::authored::PolicyBody,
-    ctx: LocalRunContext<'_>,
-) -> Result<StartedMachine> {
-    let effective = authored_local_request(req, policy)?;
-    admit_and_boot_local(backend, &effective, ctx)
 }
 
 fn authored_local_request(
@@ -611,6 +600,7 @@ mod tests {
             volumes: Vec::new(),
             destroy_on_exit: false,
             grants: None,
+            authored_policy: None,
             mailbox: None,
             secrets: Vec::new(),
             secret_release: SecretReleasePolicy::None,
@@ -731,10 +721,11 @@ mod tests {
         );
         let backend = AnyBackend::from_hypervisor("mock");
         let ledger = InMemoryNonceLedger::new();
-        let error = admit_and_boot_local_with_policy(
+        let mut authored = req.clone();
+        authored.authored_policy = Some(policy.clone());
+        let error = admit_and_boot_local(
             &backend,
-            &req,
-            &policy,
+            &authored,
             LocalRunContext {
                 clock: &SystemClock,
                 ledger: &ledger,
@@ -792,6 +783,23 @@ mod tests {
                 .to_string()
                 .contains("externally signed")
         );
+        signed.authored_policy = Some(PolicyBody::default());
+        let error = admit_and_boot_local(
+            &backend,
+            &signed,
+            LocalRunContext {
+                clock: &SystemClock,
+                ledger: &ledger,
+                host_signer_keys_dir: None,
+                emitter: None,
+                assurance: None,
+            },
+        )
+        .expect_err("an authored policy must not modify an externally signed plan");
+        assert!(
+            error.to_string().contains("externally signed"),
+            "refusal must precede rootfs I/O: {error:#}"
+        );
     }
 
     #[test]
@@ -805,12 +813,12 @@ mod tests {
         req.rootfs_path = rootfs;
         let mut policy = PolicyBody::default();
         policy.network.block = Some(true);
+        req.authored_policy = Some(policy.clone());
         let backend = AnyBackend::from_hypervisor("mock");
         let ledger = InMemoryNonceLedger::new();
-        let started = admit_and_boot_local_with_policy(
+        let started = admit_and_boot_local(
             &backend,
             &req,
-            &policy,
             LocalRunContext {
                 clock: &SystemClock,
                 ledger: &ledger,
@@ -848,10 +856,10 @@ mod tests {
         });
         policy.network.block = None;
         policy.network.allow = vec!["api.test:443".into()];
-        let opened = admit_and_boot_local_with_policy(
+        allowed.authored_policy = Some(policy);
+        let opened = admit_and_boot_local(
             &backend,
             &allowed,
-            &policy,
             LocalRunContext {
                 clock: &SystemClock,
                 ledger: &ledger,
@@ -905,6 +913,7 @@ mod tests {
             volumes: Vec::new(),
             destroy_on_exit: false,
             grants: None,
+            authored_policy: None,
             mailbox: None,
             secrets: vec![SecretBinding {
                 name: "API_KEY".into(),
@@ -977,6 +986,7 @@ mod tests {
                 }],
                 destroy_on_exit: false,
                 grants: None,
+                authored_policy: None,
                 mailbox: None,
                 secrets: Vec::new(),
                 secret_release: SecretReleasePolicy::PlanBound,
@@ -1086,6 +1096,7 @@ mod tests {
             }],
             destroy_on_exit: true,
             grants: None,
+            authored_policy: None,
             mailbox: None,
             secrets: Vec::new(),
             secret_release: SecretReleasePolicy::None,
@@ -1159,6 +1170,7 @@ mod tests {
             }],
             destroy_on_exit: true,
             grants: None,
+            authored_policy: None,
             mailbox: None,
             secrets: Vec::new(),
             secret_release: SecretReleasePolicy::None,
@@ -1359,6 +1371,7 @@ mod tests {
             volumes: Vec::new(),
             destroy_on_exit: false,
             grants: None,
+            authored_policy: None,
             mailbox: None,
             secrets: Vec::new(),
             secret_release: SecretReleasePolicy::None,
@@ -1436,6 +1449,7 @@ mod signed_boot_tests {
             volumes: Vec::new(),
             destroy_on_exit: true,
             grants: None,
+            authored_policy: None,
             mailbox: None,
             secrets: Vec::new(),
             secret_release: SecretReleasePolicy::None,
