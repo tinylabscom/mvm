@@ -61,7 +61,7 @@ fn embed_recipe_builds_native_vm_helpers_in_the_requested_profile() {
     );
 }
 
-const OBJCOPY_ENV: &str = "../../scripts/macos-objcopy-env.sh";
+const OBJCOPY_ENV: &str = "scripts/macos-objcopy-env.sh";
 
 /// Writes an executable shell stub named `name` into `dir`.
 fn stub(dir: &std::path::Path, name: &str, body: &str) {
@@ -71,14 +71,48 @@ fn stub(dir: &std::path::Path, name: &str, body: &str) {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// This file is also compiled on its own with plain `rustc` from the repo
+/// root, so it uses only `std` and finds the checkout by walking up from the
+/// working directory to the `Justfile`.
 fn script(rel: &str) -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)
+    std::env::current_dir()
+        .unwrap()
+        .ancestors()
+        .find(|dir| dir.join("Justfile").is_file())
+        .expect("repo root")
+        .join(rel)
+}
+
+/// A scratch directory removed on drop.
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "embed-recipe-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// Sources the env script under a stubbed `uname` and `rustup`, then prints
 /// the two variables it is responsible for.
 fn sourced_env(uname: &str, inherited_loader_path: Option<&str>) -> String {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = Scratch::new();
     let bin = tmp.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
     stub(&bin, "uname", &format!("echo {uname}"));
@@ -144,8 +178,8 @@ fn macos_objcopy_env_changes_nothing_off_darwin() {
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn macos_rustc_wrapper_restores_the_sysroot_loader_path() {
-    const RUSTC_WRAPPER: &str = "../../scripts/rustc-macos-loader.sh";
-    let tmp = tempfile::tempdir().unwrap();
+    const RUSTC_WRAPPER: &str = "scripts/rustc-macos-loader.sh";
+    let tmp = Scratch::new();
     stub(
         tmp.path(),
         "fake-rustc",
