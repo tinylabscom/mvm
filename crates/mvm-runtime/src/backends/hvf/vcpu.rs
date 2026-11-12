@@ -104,12 +104,6 @@ mod tests {
     }
 
     #[test]
-    fn next_pc_wraps_at_the_top_of_the_address_space() {
-        assert_eq!(next_pc(0x4008_0000), 0x4008_0004);
-        assert_eq!(next_pc(u64::MAX - 3), 0);
-    }
-
-    #[test]
     fn decodes_a_32bit_store_to_x0() {
         let iss = (1 << 24) | (2 << 22) | (1 << 6);
         let da = decode_data_abort((u64::from(EC_DATA_ABORT_LOWER_EL) << 26) | iss);

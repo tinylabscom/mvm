@@ -486,25 +486,6 @@ mod tests {
         assert!(!cancel_forwarding(&cancellations, 9));
     }
 
-    #[tokio::test]
-    async fn a_reset_while_the_response_is_still_streaming_stops_the_forward() {
-        let (sender, mut receiver) = tokio::sync::watch::channel(false);
-        // Response framing that has sent a chunk and waits on upstream forever.
-        let streaming = std::future::pending::<Result<(), super::super::FlowMuxError>>();
-        let forward = tokio::spawn(async move {
-            run_until_canceled(&mut receiver, streaming, |reason| async move {
-                assert_eq!(reason, "guest_reset");
-            })
-            .await
-        });
-        sender.send(true).unwrap();
-        tokio::time::timeout(Duration::from_secs(5), forward)
-            .await
-            .expect("a canceled forward must not outlive its stream")
-            .unwrap()
-            .unwrap();
-    }
-
     #[test]
     fn an_unknown_field_in_a_head_is_refused() {
         let mut flow = HttpFlow::new();

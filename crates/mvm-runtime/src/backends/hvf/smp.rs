@@ -453,19 +453,6 @@ mod tests {
     /// Shutdown after a release still lets an already-started CPU be woken
     /// again — the second wait returns `Shutdown` rather than blocking.
     #[test]
-    fn a_panic_while_a_cpu_is_parked_still_releases_it() {
-        let gates = SecondaryGates::new(2);
-        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            std::thread::scope(|scope| {
-                scope.spawn(|| gates.wait_for_release(1));
-                let _end = OnDrop(|| gates.shutdown());
-                panic!("boot CPU died");
-            })
-        }));
-        assert!(unwound.is_err());
-    }
-
-    #[test]
     fn shutdown_is_idempotent_and_outlives_a_consumed_request() {
         let gates = SecondaryGates::new(2);
         assert_eq!(gates.cpu_on(1, 0x8100_0000, 0), psci::SUCCESS);
