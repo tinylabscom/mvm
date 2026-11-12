@@ -57,7 +57,7 @@ Feature: README persistent machine lifecycle works end to end
     And the image "python:3.12" is prepared in the live home
     When I run mvmctl in an isolated live home with "machine create bdd-tool-command --image python:3.12 --policy features/suites/s8_readme_contract/fixtures/legacy-tool-policy.toml"
     Then the command exits with code 1
-    And the output contains "tool-specific policy is no longer supported"
+    And the output contains "unknown field `tools`"
 
   @live @firecracker @ci_live
   Scenario: a workload process uses admitted egress and a destination-bound secret
