@@ -1058,6 +1058,8 @@ mod tests {
 
     #[test]
     fn the_producer_records_the_producing_tree_and_every_member() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.remove(crate::image_source::GUEST_RUNTIME_SOURCE_ROOT_ENV);
         let workspace = guest_agent_build::detect_source_workspace()
             .expect("the test runs inside the mvm workspace");
         let tmp = tempfile::tempdir().unwrap();
