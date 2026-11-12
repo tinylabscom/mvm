@@ -393,7 +393,7 @@ fn identity_scope_epoch_expiry_and_content_type_are_checked() {
     }
 }
 
-#[cfg(feature = "test-support")]
+#[cfg(all(feature = "test-support", unix))]
 #[test]
 fn local_journal_expiry_recovers_after_interrupted_anchor_commit() {
     use mvm_core::mailbox::journal::{

@@ -84,6 +84,7 @@ impl MailboxReaderBootBinding {
     }
 
     /// Reopen a bounded host record without following a symlink.
+    #[cfg(unix)]
     pub fn load(state_dir: &Path) -> AnyResult<Self> {
         use std::io::Read as _;
         use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};

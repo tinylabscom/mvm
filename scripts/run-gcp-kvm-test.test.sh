@@ -53,7 +53,7 @@ run_case() {
 }
 
 run_case success 0 0 0 0 0 1
-run_case create-failure 13 13 0 0 0 0
+run_case create-failure 13 13 0 0 0 1
 run_case upload-failure 17 0 17 0 0 1
 run_case remote-failure 23 0 0 23 0 1
 run_case results-failure 1 0 0 0 29 1
@@ -106,6 +106,11 @@ grep -Fq 'runuser -u mvm-test -- test -r /dev/kvm -a -w /dev/kvm' "$remote_runne
 grep -Fq 'runuser -u mvm-test -- env' "$remote_runner"
 # shellcheck disable=SC2016
 grep -Fq 'RUSTUP_HOME="$repo/.mvm-test/rustup"' "$remote_runner"
+grep -Fq 'loginctl enable-linger mvm-test' "$remote_runner"
+# shellcheck disable=SC2016
+grep -Fq 'systemctl start "user@${test_uid}.service"' "$remote_runner"
+# shellcheck disable=SC2016
+grep -Fq 'DBUS_SESSION_BUS_ADDRESS="unix:path=$user_runtime_dir/bus"' "$remote_runner"
 
 # A tracked-only upload has no .git directory. Recover the real, reachable
 # commit without changing any uploaded bytes, and reject malformed or

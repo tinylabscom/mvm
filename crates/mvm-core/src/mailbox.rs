@@ -30,6 +30,7 @@ const ENVELOPE_AEAD_DOMAIN: &[u8] = b"mvm.mailbox.payload.v1\0";
 pub mod frame;
 
 /// Bounded destination-side ciphertext journal and durable acceptance.
+#[cfg(unix)]
 pub mod journal;
 
 /// Cryptographic guest reader enrollment, separate from transport admission.

@@ -198,7 +198,7 @@ per-boot guest-held mailbox ACK signing key, not the FlowMux egress identity or
 the host's mailbox sealing key. The destination authority enrolls its public
 key against the signed plan ID/nonce, recipient, current authenticated guest
 boot and reader session, execution/policy epoch, capability ID, and validity
-window. The guest proves possession over a fresh challenge before delivery;
+window. The guest must demonstrate possession over a fresh challenge before delivery;
 the destination signs a lease binding that session, delivery, ciphertext
 commitment, and deadline. ACKs are signed by the enrolled guest key over the
 exact lease and are replay-checked and journaled before a terminal disposition.

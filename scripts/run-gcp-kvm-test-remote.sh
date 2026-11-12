@@ -172,12 +172,28 @@ if ! runuser -u mvm-test -- test -r /dev/kvm -a -w /dev/kvm; then
   echo "error: unprivileged test user cannot access /dev/kvm" >&2
   exit 1
 fi
+# Firecracker's resource limits require a real user-manager bus and delegated
+# systemd scope. A bare runuser process has neither, even with /dev/kvm access.
+loginctl enable-linger mvm-test
+test_uid="$(id -u mvm-test)"
+systemctl start "user@${test_uid}.service"
+user_runtime_dir="/run/user/$test_uid"
+if [[ ! -S "$user_runtime_dir/bus" ]] \
+  || ! runuser -u mvm-test -- env \
+    XDG_RUNTIME_DIR="$user_runtime_dir" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=$user_runtime_dir/bus" \
+    systemctl --user is-active --quiet default.target; then
+  echo "error: unprivileged test user has no active systemd session bus" >&2
+  exit 1
+fi
 printf '>> running:'
 printf ' %q' "${command_argv[@]}"
 printf '\n'
 set +e
 runuser -u mvm-test -- env \
   HOME=/home/mvm-test \
+  XDG_RUNTIME_DIR="$user_runtime_dir" \
+  DBUS_SESSION_BUS_ADDRESS="unix:path=$user_runtime_dir/bus" \
   PATH="$CARGO_HOME/bin:/usr/local/bin:/usr/bin:/bin" \
   RUSTUP_HOME="$RUSTUP_HOME" \
   CARGO_HOME="$CARGO_HOME" \
