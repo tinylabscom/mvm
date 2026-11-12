@@ -595,13 +595,11 @@ fn instruction_trust_examples_run(
 /// A pack reference needs a verified install, and `pack-sources` lives in a
 /// separate checkout. Neither is present in the offline example fixture.
 fn needs_external_policy_source(path: &[String], example: &DocExample) -> bool {
-    matches!(
-        path.join(" ").as_str(),
-        "policy show" | "policy validate" | "why"
-    ) && example
-        .argv
-        .iter()
-        .any(|arg| arg.starts_with("agent/") || arg.starts_with("./pack-sources/"))
+    matches!(path.join(" ").as_str(), "policy show" | "why")
+        && example
+            .argv
+            .iter()
+            .any(|arg| arg.starts_with("agent/") || arg.starts_with("./pack-sources/"))
 }
 
 #[then(expr = "every side-effect-free documented example executes successfully")]
@@ -679,7 +677,7 @@ fn every_exec_tier_example_runs(_world: &mut CliWorld) {
     }
 
     assert!(ran > 0, "no exec-tier examples were found to run");
-    for path in ["policy show", "policy validate", "why"] {
+    for path in ["policy show", "why"] {
         assert!(
             seen.iter().any(|seen| seen.join(" ") == path),
             "no offline policy example exercised {path}"

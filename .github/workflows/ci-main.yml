@@ -1125,6 +1125,16 @@ jobs:
           done
           mv default-microvm-vmlinux-x86_64 vmlinux
           mv default-microvm-rootfs-x86_64.ext4 rootfs.ext4
+          # The runtime refuses an unlabelled or incompatible rootfs. Name
+          # the provenance and protocol from the verified image-set manifest
+          # just as the boot-latency lane does before it launches.
+          protocol="$(sed -n 's/^pub const PROTOCOL_VERSION: u32 = \([0-9][0-9]*\);$/\1/p' \
+            "$GITHUB_WORKSPACE/crates/mvm-agentd/src/vsock/mod.rs")"
+          test -n "$protocol"
+          jq -n --arg rev "$(jq -r .mvm_source_commit image-set.json)" \
+            --argjson protocol "$protocol" \
+            '{name:"mvm-default-microvm",accessible:false,sealed:true,entrypointKind:"command",entrypointArgv:[],initSystem:"busybox",expectedBootMs:300,agentBinary:"real",rootlessEntrypoint:true,hypervisor:"firecracker",overlayAware:true,runtimeLean:true,imageTag:"",source:"fetched",builtAt:"",protocolVersion:$protocol,generatorRev:$rev,libc:"unknown"}' \
+            > mvm-meta.json
 
       - name: Assert the pinned rootfs has an exec'able /init
         run: |

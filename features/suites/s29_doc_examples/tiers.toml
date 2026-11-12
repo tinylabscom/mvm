@@ -702,8 +702,8 @@ fixture = "project-policy"
 
 [[command]]
 path = "policy validate"
-tier = "exec"
-fixture = "project-policy"
+tier = "parse"
+reason = "documented invocations need published packs or the separate mvm-packs checkout; focused CLI tests cover offline validation"
 
 [[command]]
 path = "pull"
