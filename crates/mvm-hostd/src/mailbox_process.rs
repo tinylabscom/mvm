@@ -19,11 +19,11 @@
 //! declares the capability. A grant on one that does not refuses the launch
 //! rather than boot a guest that asserts a mailbox nobody serves.
 //!
-//! Until the separate local receipt, retained custody, retention, and guest
-//! handoff are qualified end to end, only admitted Dev launches serve the
-//! ephemeral Send queue. Production mailbox launches refuse before boot, and
-//! reader frames fail closed. The local anchor never authorizes a signed
-//! `AcceptedDurable` claim.
+//! Admitted Dev launches retain the ephemeral Send queue. Production requires
+//! an explicit signed retention window, verified guest boot, and retained
+//! custody before binding a receipt-bearing local journal and guest reader.
+//! The same-host anchor authorizes `AcceptedLocalDurable`, never the stronger
+//! whole-host rollback-resistant `AcceptedDurable` claim.
 
 use std::io::{Error, ErrorKind, Result, Write as _};
 use std::os::unix::process::CommandExt as _;
@@ -33,18 +33,20 @@ use std::sync::mpsc::sync_channel;
 use std::time::Duration;
 
 use mvm_contract::protocol::mailbox::{MAILBOX_PORT, MailboxGrant};
+use mvm_core::mailbox::journal::{FileJournalAnchor, JournalError, JournalLimits, MailboxJournal};
 use mvm_core::plan::{ExecutionPlan, Variant};
 use mvm_core::vm_backend::{HostDialRoute, VmId, VmStartConfig};
 use mvm_runtime::backend::AnyBackend;
 use mvm_vmm::host::aux_bin::AuxBin;
 use mvm_vmm::host::flowmux_identity::{MAILBOX_READER_BOOT_FILE, MailboxReaderBootBinding};
 
+use crate::mailbox_custody::RetainedMailboxKeys;
 use crate::mailbox_launch::{DerivedMailboxKeys, LAUNCH_LIMITS, derive_launch_keys};
 use crate::mailbox_service::MailboxService;
+use crate::mailbox_service::durable::DurableMailboxService;
 use crate::plan_admission::{MailboxLaunchPosture, MailboxPostureHandoff};
 use crate::vm_lifetime::{endpoint_needed, launcher_is_alive};
 
-#[cfg(test)]
 mod reader;
 
 /// The helper binary this module spawns.
@@ -57,6 +59,10 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const READY_MARKER: &[u8; 6] = b"READY\n";
 const MAX_HELPER_PLAN_BYTES: u64 = 1024 * 1024;
+const LOCAL_JOURNAL_LIMITS: JournalLimits = JournalLimits {
+    max_records: 10_000,
+    max_bytes: 64 * 1024 * 1024,
+};
 
 /// What the process reads on stdin. `deny_unknown_fields`, so a field a newer
 /// launcher adds fails closed here.
@@ -65,6 +71,8 @@ const MAX_HELPER_PLAN_BYTES: u64 = 1024 * 1024;
 pub struct MailboxProcessConfig {
     pub grant: MailboxGrant,
     pub keys: DerivedMailboxKeys,
+    /// Absolute host key directory from the launcher; helper environment is empty.
+    pub keys_dir: PathBuf,
     pub socket: PathBuf,
     pub guest_route: HostDialRoute,
     /// Absent on an old or unauthenticated restart: fail closed, never default Dev.
@@ -113,7 +121,7 @@ fn load_admitted_plan(state_dir: &Path) -> Result<ExecutionPlan> {
 
 /// Serve until neither the launcher nor the VM is left; the exit code.
 pub fn serve(config: MailboxProcessConfig) -> i32 {
-    match serve_ephemeral(config) {
+    match serve_verified(config) {
         Ok(()) => 0,
         Err(error) => {
             tracing::error!(%error, "mailbox service failed closed");
@@ -122,12 +130,13 @@ pub fn serve(config: MailboxProcessConfig) -> i32 {
     }
 }
 
-fn serve_ephemeral(config: MailboxProcessConfig) -> Result<()> {
+fn serve_verified(config: MailboxProcessConfig) -> Result<()> {
     // SAFETY: `getppid` is async-signal-safe and infallible.
     let launcher = unsafe { libc::getppid() };
     let MailboxProcessConfig {
         grant,
         keys,
+        keys_dir,
         socket,
         guest_route,
         posture,
@@ -158,10 +167,32 @@ fn serve_ephemeral(config: MailboxProcessConfig) -> Result<()> {
             reader_boot.as_ref().map(|binding| binding.boot),
         )
         .map_err(Error::other)?;
-    if posture.variant() != Variant::Dev || plan.mailbox != Some(grant) {
+    if plan.mailbox != Some(grant) {
         return Err(Error::new(
             ErrorKind::PermissionDenied,
-            "production mailbox local-durable path is not yet qualified",
+            "mailbox helper grant does not match its admitted plan",
+        ));
+    }
+    if posture.variant() == Variant::Prod {
+        return serve_local(
+            launcher,
+            &plan,
+            MailboxProcessConfig {
+                grant,
+                keys,
+                keys_dir,
+                socket,
+                guest_route,
+                posture: Some(posture),
+                reader_boot,
+                vm_state_dir,
+            },
+        );
+    }
+    if posture.variant() != Variant::Dev {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            "invalid mailbox posture",
         ));
     }
     let (policy, sealer) = keys.trust();
@@ -182,6 +213,121 @@ fn serve_ephemeral(config: MailboxProcessConfig) -> Result<()> {
     Ok(())
 }
 
+fn serve_local(
+    launcher: libc::pid_t,
+    plan: &ExecutionPlan,
+    config: MailboxProcessConfig,
+) -> Result<()> {
+    let MailboxProcessConfig {
+        grant,
+        keys,
+        keys_dir,
+        socket,
+        guest_route,
+        posture,
+        reader_boot,
+        vm_state_dir,
+    } = config;
+    let posture = posture.ok_or_else(|| {
+        Error::new(
+            ErrorKind::PermissionDenied,
+            "production mailbox has no admitted posture",
+        )
+    })?;
+    let vm_name = vm_state_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| Error::new(ErrorKind::InvalidData, "mailbox VM identity is invalid"))?;
+    if !keys_dir.is_absolute() {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            "mailbox custody directory must be absolute",
+        ));
+    }
+    let binding = reader_boot.as_ref().ok_or_else(|| {
+        Error::new(
+            ErrorKind::PermissionDenied,
+            "production mailbox requires a verified guest reader boot",
+        )
+    })?;
+    let retention = grant.retention.ok_or_else(|| {
+        Error::new(
+            ErrorKind::PermissionDenied,
+            "production mailbox has no signed retention",
+        )
+    })?;
+    let (initial_policy, _) = keys.trust();
+    let address = mvm_contract::protocol::mailbox::MailboxAddress {
+        tenant: initial_policy.context.expected_tenant,
+        authorization_domain: initial_policy.context.expected_authorization_domain,
+        mailbox: grant.mailbox,
+        recipient: initial_policy.context.expected_recipient,
+    };
+    let retained = RetainedMailboxKeys::open_existing(
+        &keys_dir,
+        plan,
+        vm_name,
+        &posture,
+        Some(binding.boot),
+        address,
+    )
+    .map_err(Error::other)?;
+    if retained.retention().map_err(Error::other)? != retention {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            "local mailbox retention differs from signed custody",
+        ));
+    }
+    let paths = retained.storage_paths(&keys_dir).map_err(Error::other)?;
+    let derived = keys.with_retained(&retained)?;
+    let (signer, _, _) = derived.durable_material();
+    let (policy, sealer) = derived.trust();
+    let mut sealer = sealer.with_grant(&grant)?;
+    mvm_core::private_fs::ensure_private_dir(&paths.source_intents).map_err(Error::other)?;
+    sealer.intent_dir = Some(paths.source_intents);
+    let anchor = FileJournalAnchor::open(&paths.anchor, address, retained.anchor_key())
+        .map_err(Error::other)?;
+    let journal = MailboxJournal::open_local_with_custody(
+        &paths.journal,
+        retained.history_reference(),
+        signer.verifying_key(),
+        LOCAL_JOURNAL_LIMITS,
+        &retained,
+        &anchor,
+        retention,
+    )
+    .map_err(Error::other)?;
+    let reader = reader::load_or_enroll(
+        &vm_state_dir,
+        &grant,
+        binding.clone(),
+        &sealer.capability,
+        &signer,
+    )?;
+    let service = DurableMailboxService::bind_local(
+        &socket,
+        LAUNCH_LIMITS,
+        policy.with_grant(&grant)?,
+        signer,
+        journal,
+        anchor,
+    )?;
+    service.install_guest_reader(reader)?;
+    std::io::stdout().write_all(READY_MARKER)?;
+    while vm_state_dir.exists()
+        && endpoint_needed(launcher_is_alive(launcher), vm_is_alive(&vm_state_dir))
+    {
+        if service.serve_guest(&guest_route, &mut sealer).is_err() {
+            std::thread::sleep(POLL_INTERVAL);
+        }
+        match service.maintain_local() {
+            Ok(()) | Err(JournalError::MaintenancePending) => {}
+            Err(error) => return Err(Error::other(error)),
+        }
+    }
+    Ok(())
+}
+
 fn vm_is_alive(state_dir: &Path) -> bool {
     mvm_vmm::host::process_liveness::state_dir_has_live_process(state_dir)
 }
@@ -197,6 +343,7 @@ pub fn build_config(
     Ok(MailboxProcessConfig {
         grant: *grant,
         keys: derive_launch_keys(keys_dir, grant)?,
+        keys_dir: keys_dir.to_path_buf(),
         socket: mvm_core::config::vm_mailbox_socket_at(state_dir),
         guest_route: backend
             .host_dial_route(state_dir, MAILBOX_PORT)
@@ -323,10 +470,12 @@ pub fn require_servable(
                 )
             })?;
             posture.verify(&plan, &config.name)?;
-            if posture.variant() != Variant::Dev {
+            if posture.variant() == Variant::Prod
+                && plan.mailbox.is_some_and(|grant| grant.retention.is_none())
+            {
                 return Err(Error::new(
                     ErrorKind::PermissionDenied,
-                    "production mailbox local-durable path is not yet qualified",
+                    "production mailbox requires signed retention",
                 )
                 .into());
             }
@@ -396,10 +545,10 @@ pub fn spawn_for_launch(
         )
     })?;
     posture.verify(plan, vm_name).map_err(Error::other)?;
-    if posture.variant() != Variant::Dev {
+    if posture.variant() == Variant::Prod && grant.retention.is_none() {
         return Err(Error::new(
             ErrorKind::PermissionDenied,
-            "production mailbox local-durable path is not yet qualified",
+            "production mailbox requires signed retention",
         ));
     }
     require_wired(plan, backend)?;
@@ -411,6 +560,30 @@ pub fn spawn_for_launch(
         backend,
     )?;
     config.reader_boot = load_reader_boot_for_plan(&state_dir, plan)?;
+    if posture.variant() == Variant::Prod {
+        let binding = config.reader_boot.as_ref().ok_or_else(|| {
+            Error::new(
+                ErrorKind::PermissionDenied,
+                "production mailbox requires guest boot binding",
+            )
+        })?;
+        let (policy, _) = config.keys.trust();
+        let address = mvm_contract::protocol::mailbox::MailboxAddress {
+            tenant: policy.context.expected_tenant,
+            authorization_domain: policy.context.expected_authorization_domain,
+            mailbox: grant.mailbox,
+            recipient: policy.context.expected_recipient,
+        };
+        RetainedMailboxKeys::provision_or_open(
+            &config.keys_dir,
+            plan,
+            vm_name,
+            posture,
+            Some(binding.boot),
+            address,
+        )
+        .map_err(Error::other)?;
+    }
     config.posture = Some(posture.handoff(config.reader_boot.as_ref().map(|binding| binding.boot)));
     let bin = mvm_vmm::host::broker_services_spawn::resolve_subprocess_bin_to_spawn(&AuxBin::new(
         MAILBOX_BIN,
@@ -482,6 +655,31 @@ mod tests {
         let dir = tempfile::tempdir_in("/tmp").unwrap();
         crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
         dir
+    }
+
+    fn accept_guest(listener: &std::os::unix::net::UnixListener) -> std::os::unix::net::UnixStream {
+        use std::os::fd::AsRawFd as _;
+        let mut ready = libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: `ready` is a live pollfd for this owned listener, valid for one entry.
+        let result = unsafe { libc::poll(&mut ready, 1, 10_000) };
+        assert_eq!(result, 1, "helper did not dial before the guest deadline");
+        assert_ne!(
+            ready.revents & libc::POLLIN,
+            0,
+            "guest port was not readable"
+        );
+        let (stream, _) = listener.accept().expect("helper dialed guest port");
+        stream
+            .set_nonblocking(false)
+            .expect("blocking guest exchange");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("bounded guest read");
+        stream
     }
 
     fn grant(dir: &Path) -> MailboxGrant {
@@ -751,6 +949,7 @@ mod tests {
         .unwrap();
         let config = MailboxProcessConfig {
             keys: derive_launch_keys(dir.path(), &grant).unwrap(),
+            keys_dir: dir.path().to_path_buf(),
             grant,
             socket: dir.path().join("mailbox.sock"),
             guest_route: HostDialRoute::PortSocket(dir.path().join("absent-port")),
@@ -811,6 +1010,7 @@ mod tests {
         let socket = keys.path().join("mailbox.sock");
         let config = MailboxProcessConfig {
             keys: derive_launch_keys(keys.path(), &grant).unwrap(),
+            keys_dir: keys.path().to_path_buf(),
             grant,
             socket: socket.clone(),
             guest_route: HostDialRoute::PortSocket(guest_port),
@@ -867,6 +1067,345 @@ mod tests {
     }
 
     #[test]
+    fn production_helper_requires_retained_custody_and_returns_signed_local_receipt() {
+        use ed25519_dalek::SigningKey;
+        use mvm_contract::protocol::mailbox::{DeliveryOutcome, PrincipalId};
+        use mvm_core::mailbox::frame::{OWN_MAILBOX_RECIPIENT, OutboxMessage};
+
+        let home = tempfile::tempdir_in("/tmp").expect("isolated host home");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let keys_dir = mvm_core::config::mvm_keys_dir();
+        crate::audit::host_keypair::load_or_init_at(&keys_dir).expect("host signer");
+        let state = tempfile::tempdir_in("/tmp").expect("VM state");
+        let mut grant = grant(&keys_dir);
+        grant.retention = Some(
+            mvm_contract::protocol::mailbox::MailboxRetentionPolicy::new(10_000)
+                .expect("signed retention"),
+        );
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.mailbox = Some(grant);
+        plan.image.name = state
+            .path()
+            .file_name()
+            .expect("VM name")
+            .to_string_lossy()
+            .into_owned();
+        plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
+        std::fs::write(
+            state.path().join("plan.json"),
+            serde_json::to_vec(&plan).expect("plan"),
+        )
+        .expect("admitted plan");
+        let binding = MailboxReaderBootBinding::mint(
+            &plan,
+            SigningKey::from_bytes(&[45; 32]).verifying_key(),
+            SigningKey::from_bytes(&[44; 32]).verifying_key().to_bytes(),
+        )
+        .expect("cold boot identity");
+        binding.persist(state.path()).expect("persist guest boot");
+        {
+            use base64::Engine as _;
+            mvm_vmm::host::flowmux_identity::InheritableIdentity {
+                session_id: "production-guest".into(),
+                guest_verifying_key_base64: base64::engine::general_purpose::STANDARD
+                    .encode(SigningKey::from_bytes(&[45; 32]).verifying_key().as_bytes()),
+            }
+            .persist(state.path())
+            .expect("persist pinned guest identity");
+        }
+        let posture = MailboxLaunchPosture::for_test(&plan, Variant::Prod);
+        let keys = derive_launch_keys(&keys_dir, &grant).expect("derived mailbox keys");
+        let (policy, _) = keys.trust();
+        let address = mvm_contract::protocol::mailbox::MailboxAddress {
+            tenant: policy.context.expected_tenant,
+            authorization_domain: policy.context.expected_authorization_domain,
+            mailbox: grant.mailbox,
+            recipient: policy.context.expected_recipient,
+        };
+        let retained = RetainedMailboxKeys::provision_or_open(
+            &keys_dir,
+            &plan,
+            &plan.image.name,
+            &posture,
+            Some(binding.boot),
+            address,
+        )
+        .expect("signed custody");
+        let paths = retained.storage_paths(&keys_dir).expect("persistent paths");
+        let guest_port = home.path().join("guest-port.sock");
+        let listener = std::sync::Arc::new(
+            std::os::unix::net::UnixListener::bind(&guest_port).expect("guest port"),
+        );
+        listener
+            .set_nonblocking(true)
+            .expect("bounded guest accept");
+        let socket = home.path().join("mailbox.sock");
+        let restart_keys = keys.clone();
+        let restart_binding = binding.clone();
+        let wrong_keys = MailboxProcessConfig {
+            keys: keys.clone(),
+            keys_dir: home.path().join("missing-keys"),
+            grant,
+            socket: socket.clone(),
+            guest_route: HostDialRoute::PortSocket(guest_port.clone()),
+            posture: Some(posture.handoff(Some(binding.boot))),
+            reader_boot: Some(binding.clone()),
+            vm_state_dir: state.path().to_path_buf(),
+        };
+        assert!(
+            serve_verified(wrong_keys).is_err(),
+            "the helper must load exact retained custody, not use its launch keys alone"
+        );
+        assert!(!socket.exists(), "failed custody cannot bind a listener");
+        let config = MailboxProcessConfig {
+            keys,
+            keys_dir: keys_dir.clone(),
+            grant,
+            socket: socket.clone(),
+            guest_route: HostDialRoute::PortSocket(guest_port.clone()),
+            posture: Some(posture.handoff(Some(binding.boot))),
+            reader_boot: Some(binding),
+            vm_state_dir: state.path().to_path_buf(),
+        };
+        let (stopped_tx, stopped_rx) = sync_channel(1);
+        let helper = std::thread::spawn(move || {
+            let outcome = serve_verified(config);
+            let _ = stopped_tx.send(());
+            outcome
+        });
+        let outbox = home.path().join("outbox");
+        let message = OutboxMessage::new(
+            PrincipalId::from_bytes(OWN_MAILBOX_RECIPIENT),
+            b"local report".to_vec(),
+        );
+        mvm_agentd::mailbox_outbox::write_outbox(&outbox, &message).expect("outbox");
+        let retry_outbox = outbox.clone();
+        let send_listener = std::sync::Arc::clone(&listener);
+        let guest = std::thread::spawn(move || {
+            let mut stream = accept_guest(&send_listener);
+            mvm_agentd::mailbox_outbox::forward_local_outbox(
+                &mut stream,
+                &outbox,
+                &ed25519_dalek::VerifyingKey::from_bytes(&grant.authority_key).expect("authority"),
+                grant.mailbox,
+                grant.epoch,
+            )
+            .expect("verified signed local receipt")
+        });
+        let accepted = match guest.join() {
+            Ok(accepted) => accepted,
+            Err(panic) => {
+                if helper.is_finished() {
+                    panic!(
+                        "production helper failed: {:?}",
+                        helper.join().expect("helper task")
+                    );
+                }
+                std::panic::resume_unwind(panic);
+            }
+        };
+        assert_eq!(
+            accepted.receipt.outcome,
+            DeliveryOutcome::AcceptedLocalDurable
+        );
+        assert!(paths.journal.is_dir(), "history survives outside VM state");
+        assert!(paths.anchor.is_file(), "anchor committed before receipt");
+
+        use mvm_contract::protocol::mailbox::{
+            DeliveryAckNonce, MailboxDeliveryAck, ProtocolVersion, SignatureAlgorithm,
+        };
+        use mvm_core::mailbox::reader::{sign_delivery_ack, sign_reader_possession};
+        use mvm_core::mailbox::reader_wire::{
+            ReaderRequest, ReaderResponse, read_response, write_request,
+        };
+        let ack_key = SigningKey::from_bytes(&[44; 32]);
+        let mut receiving = accept_guest(&listener);
+        write_request(&mut receiving, &ReaderRequest::Receive).expect("request Receive");
+        let ReaderResponse::Challenge {
+            enrollment,
+            challenge,
+            ..
+        } = read_response(&mut receiving).expect("reader challenge")
+        else {
+            panic!("guest did not receive a boot-bound challenge");
+        };
+        let signature = sign_reader_possession(&enrollment, &challenge, &ack_key)
+            .expect("guest possession proof");
+        write_request(
+            &mut receiving,
+            &ReaderRequest::Possession {
+                signature: signature.to_vec(),
+            },
+        )
+        .expect("answer challenge");
+        let ReaderResponse::Delivery { lease, payload, .. } =
+            read_response(&mut receiving).expect("leased delivery")
+        else {
+            panic!("guest did not receive a durable lease");
+        };
+        assert_eq!(payload, b"local report");
+        drop(receiving);
+
+        let now: i64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis()
+            .try_into()
+            .expect("bounded time");
+        let signed_ack = sign_delivery_ack(
+            MailboxDeliveryAck {
+                protocol_version: ProtocolVersion::V1,
+                signature_algorithm: SignatureAlgorithm::ED25519,
+                lease: *lease,
+                ack_nonce: DeliveryAckNonce::from_bytes([66; 16]),
+                acknowledged_at_unix_ms: now,
+            },
+            &ack_key,
+        )
+        .expect("signed guest ACK");
+        let mut forged = signed_ack.clone();
+        forged.signature[0] ^= 1;
+        let mut rejecting = accept_guest(&listener);
+        write_request(
+            &mut rejecting,
+            &ReaderRequest::Ack {
+                signed: Box::new(forged),
+            },
+        )
+        .expect("forged guest ACK request");
+        assert_eq!(
+            read_response(&mut rejecting),
+            Ok(ReaderResponse::Refused {
+                reason: mvm_core::mailbox::frame::Refusal::NotAuthorized
+            }),
+            "a forged guest signature must not complete the lease"
+        );
+        drop(rejecting);
+        let mut acknowledging = accept_guest(&listener);
+        write_request(
+            &mut acknowledging,
+            &ReaderRequest::Ack {
+                signed: Box::new(signed_ack.clone()),
+            },
+        )
+        .expect("guest ACK");
+        assert_eq!(
+            read_response(&mut acknowledging),
+            Ok(ReaderResponse::Acknowledged {
+                ack: Box::new(signed_ack)
+            }),
+            "only the guest's exact signed ACK may complete the lease"
+        );
+        drop(acknowledging);
+        drop(listener);
+        let state_path = state.path().to_path_buf();
+        let parked = home.path().join("paused-vm-state");
+        std::fs::rename(&state_path, &parked).expect("stop helper without losing VM state");
+        stopped_rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("helper stopped after VM state moved");
+        helper.join().expect("helper task").expect("clean stop");
+        std::fs::rename(&parked, &state_path).expect("restore same VM identity");
+        let anchor = FileJournalAnchor::open(&paths.anchor, address, retained.anchor_key())
+            .expect("held local anchor");
+        let mut journal = MailboxJournal::open_local_with_custody(
+            &paths.journal,
+            retained.history_reference(),
+            ed25519_dalek::VerifyingKey::from_bytes(&grant.authority_key).expect("authority"),
+            LOCAL_JOURNAL_LIMITS,
+            &retained,
+            &anchor,
+            grant.retention.expect("signed retention"),
+        )
+        .expect("recover signed guest ACK");
+        journal
+            .compact_local(now, &restart_keys.durable_material().0, &anchor)
+            .expect("checkpoint ACK before helper restart");
+        drop(journal);
+        drop(anchor);
+
+        std::fs::remove_file(&guest_port).expect("release old guest socket");
+        let listener = std::sync::Arc::new(
+            std::os::unix::net::UnixListener::bind(&guest_port).expect("restart guest port"),
+        );
+        listener
+            .set_nonblocking(true)
+            .expect("bounded guest accept");
+        let config = MailboxProcessConfig {
+            keys: restart_keys,
+            keys_dir: keys_dir.clone(),
+            grant,
+            socket,
+            guest_route: HostDialRoute::PortSocket(guest_port),
+            posture: Some(posture.handoff(Some(restart_binding.boot))),
+            reader_boot: Some(restart_binding),
+            vm_state_dir: state_path,
+        };
+        let (restarted_tx, restarted_rx) = sync_channel(1);
+        let restarted = std::thread::spawn(move || {
+            let outcome = serve_verified(config);
+            let _ = restarted_tx.send(());
+            outcome
+        });
+        mvm_agentd::mailbox_outbox::write_outbox(&retry_outbox, &message)
+            .expect("replay same operation");
+        let retry_listener = std::sync::Arc::clone(&listener);
+        let retry = std::thread::spawn(move || {
+            let mut stream = accept_guest(&retry_listener);
+            mvm_agentd::mailbox_outbox::forward_local_outbox(
+                &mut stream,
+                &retry_outbox,
+                &ed25519_dalek::VerifyingKey::from_bytes(&grant.authority_key).expect("authority"),
+                grant.mailbox,
+                grant.epoch,
+            )
+            .expect("recover exact signed receipt")
+        })
+        .join()
+        .expect("retry guest");
+        assert_eq!(retry, accepted, "checkpoint retained exact acceptance");
+        let mut receiving = accept_guest(&listener);
+        write_request(&mut receiving, &ReaderRequest::Receive).expect("Receive after restart");
+        let ReaderResponse::Challenge {
+            enrollment,
+            challenge,
+            ..
+        } = read_response(&mut receiving).expect("restart challenge")
+        else {
+            panic!("guest reader enrollment was not restored");
+        };
+        let signature = sign_reader_possession(&enrollment, &challenge, &ack_key)
+            .expect("same guest boot possession");
+        write_request(
+            &mut receiving,
+            &ReaderRequest::Possession {
+                signature: signature.to_vec(),
+            },
+        )
+        .expect("answer restart challenge");
+        assert_eq!(
+            read_response(&mut receiving),
+            Ok(ReaderResponse::Empty),
+            "signed ACK must remain terminal after checkpoint and restart"
+        );
+        drop(receiving);
+        drop(listener);
+        drop(state);
+        restarted_rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("restarted helper stopped after VM teardown");
+        restarted
+            .join()
+            .expect("restarted helper task")
+            .expect("clean stop");
+        assert!(
+            paths.journal.is_dir(),
+            "VM teardown cannot erase accepted history"
+        );
+    }
+
+    #[test]
     fn a_grant_that_cannot_be_served_fails_the_launch() {
         let dir = keys_dir();
         let granted = config_for(Some(grant(dir.path())));
@@ -917,6 +1456,23 @@ mod tests {
         let dev = posture_for(&config, Variant::Dev);
         assert!(require_servable(&config, &backend, dev.as_ref()).is_ok());
 
+        let mut retained = grant(dir.path());
+        retained.retention = Some(
+            mvm_contract::protocol::mailbox::MailboxRetentionPolicy::new(10_000)
+                .expect("finite signed window"),
+        );
+        let prod_config = config_for(Some(retained));
+        let prod = posture_for(&prod_config, Variant::Prod);
+        assert!(
+            require_servable(&prod_config, &backend, prod.as_ref()).is_ok(),
+            "a verified production grant with explicit retention may reach the helper"
+        );
+        let unwired = backend_named("wasm");
+        assert!(
+            require_servable(&prod_config, &unwired, prod.as_ref()).is_err(),
+            "a signed window cannot make an unwired backend serve"
+        );
+
         let mut forged = serde_json::to_value(dev.unwrap().handoff(None)).unwrap();
         forged["plan_id"] = serde_json::json!("sha256:wrong");
         let forged: MailboxPostureHandoff = serde_json::from_value(forged).unwrap();
@@ -949,6 +1505,7 @@ mod tests {
         .unwrap();
         let config = MailboxProcessConfig {
             keys: derive_launch_keys(dir.path(), &grant).unwrap(),
+            keys_dir: dir.path().to_path_buf(),
             grant,
             socket: dir.path().join("mailbox.sock"),
             guest_route: HostDialRoute::PortSocket(dir.path().join("absent-port")),
@@ -958,6 +1515,43 @@ mod tests {
         };
         assert_eq!(serve(config), 1);
         assert!(!dir.path().join("mailbox.sock").exists());
+    }
+
+    #[test]
+    fn production_helper_without_guest_boot_refuses_before_custody_or_binding() {
+        let keys = keys_dir();
+        let mut grant = grant(keys.path());
+        grant.retention = Some(
+            mvm_contract::protocol::mailbox::MailboxRetentionPolicy::new(10_000)
+                .expect("signed window"),
+        );
+        let start = config_for(Some(grant));
+        let plan = granted_plan(&start).expect("admitted plan");
+        let state = tempfile::tempdir_in("/tmp").expect("VM state root");
+        let vm_state_dir = state.path().join("vm-under-test");
+        std::fs::create_dir(&vm_state_dir).expect("VM state");
+        std::fs::write(
+            vm_state_dir.join("plan.json"),
+            start.plan_json.expect("plan JSON"),
+        )
+        .expect("persist admitted plan");
+        let socket = state.path().join("mailbox.sock");
+        let config = MailboxProcessConfig {
+            grant,
+            keys: derive_launch_keys(keys.path(), &grant).expect("mailbox keys"),
+            keys_dir: keys.path().to_path_buf(),
+            socket: socket.clone(),
+            guest_route: HostDialRoute::PortSocket(state.path().join("guest-port.sock")),
+            posture: Some(MailboxLaunchPosture::for_test(&plan, Variant::Prod).handoff(None)),
+            reader_boot: None,
+            vm_state_dir,
+        };
+        let error = serve_verified(config).expect_err("no signed guest boot");
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert!(
+            !socket.exists(),
+            "a refused helper cannot publish a listener"
+        );
     }
 
     #[test]

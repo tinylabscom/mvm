@@ -65,7 +65,6 @@ use mvm_build::guest_libc::GuestLibc;
 use mvm_contract::grants::ceiling::GrantCeiling;
 use mvm_contract::grants::{CpuGrant, Grants};
 use mvm_contract::protocol::capability_negotiation::negotiate_grants;
-use mvm_contract::protocol::mailbox::{MailboxGrant, MailboxRetentionPolicy};
 use mvm_contract::protocol::resource_controls::{EnforcedGrants, ResourceControls};
 use mvm_contract::provenance::{
     ActorRef, AttestationBinding, DecisionActorRole, DecisionCategory, DecisionOutcome,
@@ -97,13 +96,17 @@ mod canonical_kernel;
 mod composition;
 mod display_grants;
 mod final_gates;
+mod grant_validation;
 mod host_gates;
+mod mailbox_posture;
 mod nonce_ledger;
 mod registry_pack;
 mod verb_grant_sidecar;
 
 use assurance_runtime::{AssuranceRuntimeBinding, verify_selected_runtime};
+use grant_validation::{enforce_mailbox_retention, enforce_wall_clock_projection};
 use host_gates::{admit_host_interface, admit_within_host_budget};
+pub use mailbox_posture::{MailboxLaunchPosture, MailboxPostureHandoff};
 pub use nonce_ledger::InMemoryNonceLedger;
 use registry_pack::verify_registry_pack_assets;
 use verb_grant_sidecar::mint_verb_grant_sidecar;
@@ -166,103 +169,6 @@ pub struct AdmittedPlan {
     /// admission authorizes one launch; the plan is handed back on
     /// `StartedMachine`, and holding it again must not start a second backend.
     dispatched: bool,
-}
-
-/// Launch-only posture retained from host admission, never inferred from plan labels.
-#[derive(Debug, Clone)]
-pub struct MailboxLaunchPosture {
-    variant: Variant,
-    plan_id: PlanId,
-    plan_nonce: mvm_core::plan::Nonce,
-    vm_name: String,
-    grant: mvm_contract::protocol::mailbox::MailboxGrant,
-}
-
-/// The private-pipe projection; unlike the launch token, parsing this is not
-/// admission authority. Only the launcher holding a verified token sends it.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MailboxPostureHandoff {
-    variant: Variant,
-    plan_id: PlanId,
-    plan_nonce: mvm_core::plan::Nonce,
-    vm_name: String,
-    grant: mvm_contract::protocol::mailbox::MailboxGrant,
-    reader_boot: Option<mvm_contract::protocol::mailbox::BootId>,
-}
-
-impl MailboxPostureHandoff {
-    pub(crate) fn verify(
-        &self,
-        plan: &ExecutionPlan,
-        vm_name: &str,
-        reader_boot: Option<mvm_contract::protocol::mailbox::BootId>,
-    ) -> Result<()> {
-        MailboxLaunchPosture {
-            variant: self.variant,
-            plan_id: self.plan_id.clone(),
-            plan_nonce: self.plan_nonce.clone(),
-            vm_name: self.vm_name.clone(),
-            grant: self.grant,
-        }
-        .verify(plan, vm_name)?;
-        anyhow::ensure!(
-            self.reader_boot == reader_boot,
-            "mailbox helper posture belongs to another guest boot"
-        );
-        Ok(())
-    }
-
-    pub(crate) const fn variant(&self) -> Variant {
-        self.variant
-    }
-}
-
-impl MailboxLaunchPosture {
-    #[cfg(test)]
-    pub(crate) fn for_test(plan: &ExecutionPlan, variant: Variant) -> Self {
-        Self {
-            variant,
-            plan_id: plan.plan_id.clone(),
-            plan_nonce: plan.nonce.clone(),
-            vm_name: plan.image.name.clone(),
-            grant: plan.mailbox.expect("mailbox posture fixture has a grant"),
-        }
-    }
-
-    /// Check the private helper handoff against this VM's admitted plan.
-    pub fn verify(&self, plan: &ExecutionPlan, vm_name: &str) -> Result<()> {
-        anyhow::ensure!(
-            plan.plan_id == mvm_core::plan::compute_plan_id(plan)
-                && self.plan_id == plan.plan_id
-                && self.plan_nonce == plan.nonce
-                && self.vm_name == vm_name
-                && plan.image.name == vm_name
-                && plan.mailbox == Some(self.grant),
-            "mailbox helper posture does not match the admitted VM and plan"
-        );
-        Ok(())
-    }
-
-    /// The posture admission selected; not a hint from the image or guest.
-    #[must_use]
-    pub const fn variant(&self) -> Variant {
-        self.variant
-    }
-
-    pub(crate) fn handoff(
-        &self,
-        reader_boot: Option<mvm_contract::protocol::mailbox::BootId>,
-    ) -> MailboxPostureHandoff {
-        MailboxPostureHandoff {
-            variant: self.variant,
-            plan_id: self.plan_id.clone(),
-            plan_nonce: self.plan_nonce.clone(),
-            vm_name: self.vm_name.clone(),
-            grant: self.grant,
-            reader_boot,
-        }
-    }
 }
 
 /// Re-verified host artifact behind one extension binding in the signed plan.
@@ -1017,48 +923,6 @@ fn admit_grants(plan: &ExecutionPlan, ceiling: &GrantCeiling, posture: RunPostur
 
     display_grants::admit_display_input(grants, posture.variant)?;
     enforceability_gate(grants, plan, posture)
-}
-
-fn enforce_mailbox_retention(mailbox: Option<&MailboxGrant>, max_ms: Option<u64>) -> Result<()> {
-    let Some(requested) = mailbox.and_then(|grant| grant.retention) else {
-        return Ok(());
-    };
-    let max_ms = max_ms
-        .context("local mailbox retention requires max_mailbox_retention_ms in host config.toml")?;
-    let ceiling = MailboxRetentionPolicy::new(max_ms)
-        .context("host max_mailbox_retention_ms must be a finite, nonzero duration")?;
-    anyhow::ensure!(
-        requested.retention_ms() <= ceiling.retention_ms(),
-        "local mailbox retention {} ms exceeds this host's {} ms ceiling",
-        requested.retention_ms(),
-        ceiling.retention_ms(),
-    );
-    Ok(())
-}
-
-/// Refuse a plan whose two encodings of one wall-clock bound disagree.
-///
-/// `resources.timeouts.exec_secs` is the projection of `grants.wall_clock`, and
-/// synthesis is the only thing that writes it. A signed plan reaching admission
-/// with the two out of step was not produced by that path, and there is no
-/// right answer to pick between them: enforcing the grant ignores a signed
-/// field, enforcing the field ignores what the ceiling was applied to. Refusing
-/// is the only choice that cannot silently run a workload under a bound nobody
-/// authored.
-///
-/// The comparison runs against the projection, never against the grant
-/// directly, because the projection is lossy: an absent grant and an explicit
-/// `Unbounded` both encode as `0`, and only the ceiling distinguishes them.
-fn enforce_wall_clock_projection(plan: &ExecutionPlan, grants: &Grants) -> Result<()> {
-    let projected = mvm_contract::grants::projection::exec_secs_from_grants(grants);
-    let carried = plan.resources.timeouts.exec_secs;
-    if projected != carried {
-        anyhow::bail!(
-            "plan carries exec_secs {carried} but its wall-clock grant projects to \
-             {projected}; refusing to choose between two encodings of one bound"
-        );
-    }
-    Ok(())
 }
 
 /// Refuse (prod) or warn (dev) when the backend this run boots on has no

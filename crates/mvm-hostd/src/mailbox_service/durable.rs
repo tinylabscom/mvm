@@ -129,6 +129,50 @@ pub struct DurableMailboxService {
 }
 
 impl DurableMailboxService {
+    /// Install the verified, boot-bound Receive authority before advertising
+    /// readiness to the guest. It cannot be replaced within this helper.
+    pub(crate) fn install_guest_reader(&self, reader: GuestReaderAuthority) -> std::io::Result<()> {
+        self.shared.reader.set(reader).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "mailbox guest reader was already installed",
+            )
+        })
+    }
+
+    /// Reclaim the bounded local prefix and settle expiry even when no guest
+    /// connects. An incomplete expiry pass resumes on the helper's next loop.
+    pub(crate) fn maintain_local(&self) -> Result<(), JournalError> {
+        let anchor = self
+            .shared
+            .local_anchor
+            .as_ref()
+            .ok_or(JournalError::DurableAuthorityUnavailable)?;
+        let now_unix_ms: i64 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| JournalError::Uncertain)?
+            .as_millis()
+            .try_into()
+            .map_err(|_| JournalError::Uncertain)?;
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .expect("mailbox journal lock poisoned");
+        if state.journal.local_compaction_due(now_unix_ms)? {
+            state
+                .journal
+                .compact_local(now_unix_ms, &self.shared.signer, anchor)?;
+        }
+        settle_expired(&self.shared, &mut state.journal, now_unix_ms)?;
+        if state.journal.local_compaction_due(now_unix_ms)? {
+            state
+                .journal
+                .compact_local(now_unix_ms, &self.shared.signer, anchor)?;
+        }
+        Ok(())
+    }
+
     /// Bind a live destination. Caller provides an already-recovered journal
     /// and an anchor backed by a different rollback domain.
     pub fn bind(

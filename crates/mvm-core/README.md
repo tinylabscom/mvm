@@ -64,7 +64,7 @@ canonical encrypted mailbox frame and its deduplication identity. Its
 the current `(cursor, head)` and atomically compare-and-advance it after a
 journal write. The journal persists unsigned receipt state with a
 destination-signed, domain-separated admission intent binding the verified
-identity, canonical frame, and receipt state. The version-3 test path also
+identity, canonical frame, and receipt state. Version-3 local history also
 binds a `HistoryKeyRef` (mailbox address, epoch, AES-256-GCM key ID and nonzero
 version) to the encrypted record and signed intent. Its recovery obtains the
 exact key through an existing-only `HistoryKeyCustody` lookup and refuses
@@ -87,15 +87,18 @@ anchor have been fsynced. An exact local retry re-verifies current admission
 and the committed local tip before re-signing the original body/time, yielding
 the same signed bytes after restart. Recovery refuses a local V2 receipt in an
 independently anchored journal or a V1 strong receipt in a local journal.
-The hostd service can bind that local journal to its existing endpoint, but
-the production launch path still refuses until verified custody, retention,
-and guest receipt handoff are integrated end to end.
+The production hostd helper binds the local journal to its existing endpoint
+only after verifying signed-plan custody, retained purpose keys, the journal
+anchor, the finite retention window, and the guest boot identity. Dev retains
+the separate ephemeral Send queue and does not serve Receive.
 `expire_next` records an authority-signed terminal expiry only after the
 message's absolute deadline; a lost response can be reconstructed after
 recovery. Expired messages are not disclosed, and an uncertain expiry write
-cannot mint a terminal receipt. This does not yet implement an anchored
-retention/compaction boundary: exhausted record or byte quotas still refuse
-new work instead of deleting dedup history.
+cannot mint a terminal receipt. Local compaction fsyncs a destination-signed,
+encrypted checkpoint and advances the host-local anchor before pruning old
+entries. It preserves pending delivery and dedup state through expiry plus
+the signed window, retires terminal state only after that horizon, and
+refuses when a checkpoint cannot fit the bounded quota.
 Retained guest-reader controls are checked against the historical signed
 Receive capability, enrollment, lease and guest ACK before recovery accepts
 their delivery state. An exact ACK retry still needs current boot, session,
@@ -105,24 +108,20 @@ ACK, including during recovery; it requires that guest's signed ACK.
 
 `FileJournalAnchor` is a host-local anchor, **not** an independent
 authority: restoring both the journal and its host-local anchor can hide
-rollback. The hostd test-scoped custody prototype stores distinct retained
-purpose keys under a signed restart binding, but it is not connected to the
-production service. Until verified custody and the existing service's
-admission handoff are integrated and tested, local
-journal writes must not be presented as `accepted_durable`. The trusted-host
+rollback. Hostd retains distinct purpose keys under a signed restart binding
+and uses them for the production local-durable service. Local journal writes
+must not be presented as the stronger `accepted_durable`. The trusted-host
 profile can access plaintext; host-blind confidentiality requires a different
 attested key-release and protected-memory architecture.
 
-The planned standalone `accepted_local_durable` tier has a distinct versioned
-receipt contract and signer. Its history and payload-purpose keys belong in the existing
+The standalone `accepted_local_durable` tier has a distinct versioned
+receipt contract and signer. Its history and payload-purpose keys live in the existing
 protected host keys directory, scoped to tenant/domain/mailbox/epoch and key
 version, with an authority signer pinned for retained history. Recovery must
 load the existing key version; it must not mint a new signer or use the erased
 per-launch secret as its only opening key. Rotation and deletion need explicit
 retention and refusal rules. A host-local chain can witness ordinary crash and
-process restart, **not** rollback of the entire host. The local journal test
-path is not production activation: its custody is synthetic, with no retained
-key provider, authenticated restart manifest, or service adapter. The stronger
+process restart, **not** rollback of the entire host. The stronger
 `accepted_durable` outcome continues to require a separately trusted
 compare-and-advance checkpoint; no such provider is wired.
 

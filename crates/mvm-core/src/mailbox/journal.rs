@@ -6,22 +6,21 @@
 //! acceptance only after the journal and independent anchor commit. A hash
 //! chain alone cannot detect deletion of its suffix.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use hmac::{Hmac, Mac, digest::KeyInit};
 use mvm_contract::protocol::mailbox::{
-    ContentType, DELIVERY_ACK_SIGNATURE_DOMAIN, DeliveryLeaseNonce, DeliveryOutcome,
-    DestinationReceipt, EncryptionAlgorithm, ExecutionEpoch, MailboxAddress, MailboxDeliveryLease,
-    MailboxEnvelope, MailboxGrant, MailboxGuestReaderScope, MailboxOperation,
-    MailboxRetentionPolicy, ProtocolVersion, SignatureAlgorithm, SignedDestinationReceipt,
-    SignedMailboxCapability, SignedMailboxDeliveryAck, SignedMailboxDeliveryLease,
-    SignedMailboxGuestReaderEnrollment,
+    ContentType, DeliveryLeaseNonce, DeliveryOutcome, DestinationReceipt, EncryptionAlgorithm,
+    ExecutionEpoch, MailboxAddress, MailboxDeliveryLease, MailboxEnvelope, MailboxGrant,
+    MailboxGuestReaderScope, MailboxOperation, MailboxRetentionPolicy, ProtocolVersion,
+    SignatureAlgorithm, SignedDestinationReceipt, SignedMailboxCapability,
+    SignedMailboxDeliveryAck, SignedMailboxDeliveryLease, SignedMailboxGuestReaderEnrollment,
 };
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -36,21 +35,23 @@ use super::{
     frame, open_authenticated_envelope, sign_receipt,
 };
 use crate::crypto::aead::{self, Key};
-use crate::private_fs;
-use crate::util::atomic_io::{FileLock, atomic_write_durable, atomic_write_new, sync_dir};
+use crate::util::atomic_io::{FileLock, atomic_write_new, sync_dir};
 
 const DOMAIN: &[u8] = b"mvm.mailbox.journal.v1\0";
 const ENCRYPTION_DOMAIN: &[u8] = b"mvm.mailbox.journal.encryption.v1\0";
-const ANCHOR_DOMAIN: &[u8] = b"mvm.mailbox.anchor.v1\0";
 const ACCEPTANCE_INTENT_DOMAIN_V2: &[u8] = b"mvm.mailbox.journal-acceptance-intent.v2\0";
 const ACCEPTANCE_INTENT_DOMAIN_V3: &[u8] = b"mvm.mailbox.journal-acceptance-intent.v3\0";
 const EXPIRY_INTENT_DOMAIN: &[u8] = b"mvm.mailbox.journal-expiry.v1\0";
-const CHECKPOINT_DOMAIN: &[u8] = b"mvm.mailbox.local-checkpoint.v1\0";
-const MAX_ANCHOR_BYTES: u64 = 1024;
 const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RECORDS: usize = 100_000;
 const MAX_JOURNAL_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_LEASE_RETRIES: u8 = 3;
+
+mod anchor;
+mod checkpoint;
+mod recovery;
+pub use anchor::FileJournalAnchor;
+use checkpoint::{CheckpointState, checkpoint_path};
 
 /// Limits are checked both before admission and while reconstructing state.
 #[derive(Debug, Clone, Copy)]
@@ -324,25 +325,6 @@ struct Seen {
     signed_ack: Option<SignedMailboxDeliveryAck>,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CheckpointEntry {
-    identity: ReplayIdentity,
-    seen: Seen,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CheckpointState {
-    source: JournalTip,
-    address: MailboxAddress,
-    history_key: HistoryKeyRef,
-    retention: MailboxRetentionPolicy,
-    created_at_unix_ms: i64,
-    entries: Vec<CheckpointEntry>,
-    used_challenges: Vec<([u8; 32], ReplayIdentity)>,
-}
-
 #[derive(Default)]
 struct Probe(Option<ReplayIdentity>);
 
@@ -465,113 +447,6 @@ impl ReceivedMailboxMessage {
     pub fn payload(&self) -> &[u8] {
         self.opened.payload()
     }
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AnchorBody {
-    version: u8,
-    address: MailboxAddress,
-    tip: JournalTip,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AnchorRecord {
-    body: AnchorBody,
-    tag: [u8; 32],
-}
-
-/// A software-first, locally fsynced anchor. Keep its file outside the
-/// journal directory. It detects journal-only rollback, not simultaneous
-/// rollback of the entire trusted host and its anchor storage.
-pub struct FileJournalAnchor {
-    path: PathBuf,
-    address: MailboxAddress,
-    key: Zeroizing<[u8; 32]>,
-    tip: Mutex<JournalTip>,
-    _lock: FileLock,
-}
-
-impl FileJournalAnchor {
-    /// Open a private anchor file, or genesis if none exists.
-    pub fn open(path: &Path, address: MailboxAddress, key: [u8; 32]) -> Result<Self, JournalError> {
-        let parent = path.parent().ok_or(JournalError::Corrupt)?;
-        private_fs::ensure_private_dir(parent)?;
-        let lock = FileLock::try_acquire(path)
-            .map_err(|e| std::io::Error::other(e.to_string()))?
-            .ok_or(JournalError::Busy)?;
-        let tip = match fs::symlink_metadata(path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => JournalTip::genesis(),
-            Err(e) => return Err(e.into()),
-            Ok(meta) if !meta.file_type().is_file() || meta.len() > MAX_ANCHOR_BYTES => {
-                return Err(JournalError::Corrupt);
-            }
-            Ok(_) => {
-                let mut bytes = Vec::new();
-                fs::File::open(path)?
-                    .take(MAX_ANCHOR_BYTES + 1)
-                    .read_to_end(&mut bytes)?;
-                if bytes.len() as u64 > MAX_ANCHOR_BYTES {
-                    return Err(JournalError::Corrupt);
-                }
-                let record: AnchorRecord =
-                    serde_json::from_slice(&bytes).map_err(|_| JournalError::Corrupt)?;
-                let body = serde_json::to_vec(&record.body).map_err(|_| JournalError::Corrupt)?;
-                if record.body.version != 1
-                    || record.body.address != address
-                    || anchor_mac(&key, &body) != record.tag
-                {
-                    return Err(JournalError::Corrupt);
-                }
-                record.body.tip
-            }
-        };
-        Ok(Self {
-            path: path.to_owned(),
-            address,
-            key: Zeroizing::new(key),
-            tip: Mutex::new(tip),
-            _lock: lock,
-        })
-    }
-
-    #[must_use]
-    pub fn tip(&self) -> JournalTip {
-        *self.tip.lock().expect("mailbox anchor lock poisoned")
-    }
-
-    /// Advance by one committed journal entry, fsyncing the file and its
-    /// containing directory before returning.
-    pub fn advance(&self, tip: JournalTip) -> Result<(), JournalError> {
-        let mut current = self.tip.lock().expect("mailbox anchor lock poisoned");
-        if current.cursor.checked_add(1) != Some(tip.cursor) {
-            return Err(JournalError::Rollback);
-        }
-        let body = AnchorBody {
-            version: 1,
-            address: self.address,
-            tip,
-        };
-        let tag = anchor_mac(
-            &self.key[..],
-            &serde_json::to_vec(&body).map_err(|_| JournalError::Corrupt)?,
-        );
-        let bytes =
-            serde_json::to_vec(&AnchorRecord { body, tag }).map_err(|_| JournalError::Corrupt)?;
-        atomic_write_durable(&self.path, &bytes)
-            .map_err(|e| JournalError::Storage(std::io::Error::other(e.to_string())))?;
-        *current = tip;
-        Ok(())
-    }
-}
-
-fn anchor_mac(key: &[u8], body: &[u8]) -> [u8; 32] {
-    let mut mac =
-        <Hmac<Sha256> as KeyInit>::new_from_slice(key).expect("a 32-byte HMAC key is valid");
-    mac.update(ANCHOR_DOMAIN);
-    mac.update(body);
-    mac.finalize().into_bytes().into()
 }
 
 #[derive(Serialize)]
@@ -782,12 +657,11 @@ impl MailboxJournal {
         )
     }
 
-    /// Reopen a test-scoped software-only local tier against a fsynced same-host anchor.
+    /// Reopen the software-only local tier against a fsynced same-host anchor.
     ///
-    /// Production must first supply an authenticated restart binding to the
-    /// admitted plan/VM/mailbox and the signed retention policy. A deserialized
+    /// The caller must first verify the admitted plan, VM, mailbox, signed
+    /// retention policy and authenticated custody manifest. A deserialized
     /// reference alone is never authorization to open history.
-    #[cfg(any(test, feature = "test-support"))]
     pub fn open_local_with_custody(
         root: &Path,
         reference: HistoryKeyRef,
@@ -833,559 +707,6 @@ impl MailboxJournal {
             previous = next;
             Ok(())
         })
-    }
-
-    fn open_with_recovery(
-        root: &Path,
-        address: MailboxAddress,
-        authority: VerifyingKey,
-        key: JournalKey,
-        limits: JournalLimits,
-        expected: JournalTip,
-        mut reconcile: impl FnMut(JournalTip) -> Result<(), JournalError>,
-    ) -> Result<Self, JournalError> {
-        if limits.max_records == 0
-            || limits.max_records > MAX_RECORDS
-            || limits.max_bytes == 0
-            || limits.max_bytes > MAX_JOURNAL_BYTES
-        {
-            return Err(JournalError::InvalidLimits);
-        }
-        if expected.cursor == 0 && expected != JournalTip::genesis() {
-            return Err(JournalError::Rollback);
-        }
-        private_fs::ensure_private_dir(root)?;
-        sync_dir(root.parent().ok_or(JournalError::Corrupt)?)
-            .map_err(|e| JournalError::Storage(std::io::Error::other(e.to_string())))?;
-        let lock = FileLock::try_acquire(&root.join("journal"))
-            .map_err(|e| std::io::Error::other(e.to_string()))?
-            .ok_or(JournalError::Busy)?;
-        let mut journal = Self {
-            root: root.to_owned(),
-            address,
-            authority,
-            key: key.bytes,
-            history_key: key.reference,
-            tier: key.tier,
-            retention: key.retention,
-            limits,
-            tip: JournalTip::genesis(),
-            bytes: 0,
-            records: 0,
-            seen: BTreeMap::new(),
-            order: Vec::new(),
-            used_challenges: BTreeMap::new(),
-            poisoned: false,
-            _lock: lock,
-        };
-        let mut paths = Vec::new();
-        let mut checkpoints = Vec::new();
-        for entry in fs::read_dir(root)? {
-            let entry = entry?;
-            if entry.file_name() == "journal.lock" {
-                continue;
-            }
-            let path = entry.path();
-            let name = entry.file_name();
-            let name = name.to_str().ok_or(JournalError::Corrupt)?;
-            if let Some(raw) = name.strip_prefix("checkpoint-") {
-                let cursor = raw
-                    .strip_suffix(".bin")
-                    .and_then(|raw| raw.parse::<u64>().ok())
-                    .ok_or(JournalError::Corrupt)?;
-                if path != checkpoint_path(root, cursor) {
-                    return Err(JournalError::Corrupt);
-                }
-                checkpoints.push((cursor, path));
-            } else if let Some(raw) = name.strip_prefix("entry-") {
-                let cursor = raw
-                    .strip_suffix(".bin")
-                    .and_then(|raw| raw.parse::<u64>().ok())
-                    .ok_or(JournalError::Corrupt)?;
-                if path != record_path(root, cursor) {
-                    return Err(JournalError::Corrupt);
-                }
-                paths.push((cursor, path));
-            } else {
-                return Err(JournalError::Corrupt);
-            }
-            if paths.len() > limits.max_records || checkpoints.len() > 2 {
-                return Err(JournalError::Full);
-            }
-        }
-        checkpoints.sort();
-        if !checkpoints.is_empty() && journal.tier != AcceptanceTier::Local {
-            return Err(JournalError::Corrupt);
-        }
-        if let Some((cursor, path)) = checkpoints
-            .iter()
-            .rev()
-            .find(|(cursor, _)| *cursor <= expected.cursor)
-        {
-            journal.restore_checkpoint(path, *cursor)?;
-            if *cursor == expected.cursor && journal.tip != expected {
-                return Err(JournalError::Rollback);
-            }
-        }
-        let start = journal.tip.cursor;
-        let (mut paths, obsolete): (Vec<_>, Vec<_>) =
-            paths.into_iter().partition(|(cursor, _)| *cursor > start);
-        paths.sort();
-        let mut suffix_synced = false;
-        for (_, path) in paths {
-            let cursor = journal
-                .tip
-                .cursor
-                .checked_add(1)
-                .ok_or(JournalError::Full)?;
-            if path != record_path(root, cursor) {
-                return Err(JournalError::Corrupt);
-            }
-            let bytes = read_record(&path)?;
-            journal.bytes = journal
-                .bytes
-                .checked_add(bytes.len() as u64)
-                .filter(|n| *n <= limits.max_bytes)
-                .ok_or(JournalError::Full)?;
-            journal.records += 1;
-            let (tag, ciphertext) = bytes.split_at_checked(32).ok_or(JournalError::Corrupt)?;
-            let expected_tag = journal.mac(ciphertext);
-            if tag != expected_tag {
-                return Err(JournalError::Corrupt);
-            }
-            let plaintext = Zeroizing::new(
-                aead::open(
-                    &journal.record_key(),
-                    ciphertext,
-                    &[DOMAIN, &journal.tip.head].concat(),
-                )
-                .map_err(|_| JournalError::Corrupt)?,
-            );
-            let record: Record =
-                serde_json::from_slice(&plaintext).map_err(|_| JournalError::Corrupt)?;
-            let expected_version = if journal.history_key.is_some() { 3 } else { 2 };
-            if record.version != expected_version
-                || record.cursor != cursor
-                || record.previous != journal.tip.head
-                || record.address != address
-            {
-                return Err(JournalError::Corrupt);
-            }
-            if let Some(reference) = &record.history_key {
-                reference.validate().map_err(|_| JournalError::Corrupt)?;
-            }
-            if record.history_key != journal.history_key {
-                return Err(JournalError::HistoryKeyMismatch);
-            }
-            match record.event {
-                JournalEvent::Accepted {
-                    identity,
-                    frame: encoded_frame,
-                    receipt,
-                    authorization_signature,
-                } => {
-                    let expected_outcome = match journal.tier {
-                        AcceptanceTier::Independent => DeliveryOutcome::AcceptedDurable,
-                        AcceptanceTier::Local => DeliveryOutcome::AcceptedLocalDurable,
-                    };
-                    if receipt.address != address
-                        || receipt.outcome != expected_outcome
-                        || receipt.message_id != identity.message_id
-                        || receipt.execution_epoch != identity.execution_epoch
-                        || receipt.validate_versioned_outcome().is_err()
-                    {
-                        return Err(JournalError::Corrupt);
-                    }
-                    let signature: [u8; 64] = authorization_signature
-                        .as_slice()
-                        .try_into()
-                        .map_err(|_| JournalError::Corrupt)?;
-                    authority
-                        .verify(
-                            &acceptance_intent_bytes(
-                                identity,
-                                &encoded_frame,
-                                &receipt,
-                                journal.history_key.as_ref(),
-                            )?,
-                            &Signature::from_bytes(&signature),
-                        )
-                        .map_err(|_| JournalError::Corrupt)?;
-                    let raw = STANDARD_NO_PAD
-                        .decode(&encoded_frame)
-                        .map_err(|_| JournalError::Corrupt)?;
-                    let (capability, envelope) =
-                        frame::decode_frame(&raw).map_err(|_| JournalError::Corrupt)?;
-                    if receipt.delivery_id != envelope.routing.delivery_id
-                        || receipt.ciphertext_commitment != envelope.ciphertext_commitment
-                        || journal.retention.is_some_and(|policy| {
-                            policy
-                                .retained_until(envelope.routing.expires_at_unix_ms)
-                                .is_err()
-                        })
-                        || journal
-                            .seen
-                            .insert(
-                                identity,
-                                Seen {
-                                    envelope,
-                                    capability,
-                                    accepted_receipt: *receipt,
-                                    acknowledged: false,
-                                    expired_at_unix_ms: None,
-                                    lease: None,
-                                    signed_ack: None,
-                                },
-                            )
-                            .is_some()
-                    {
-                        return Err(JournalError::Corrupt);
-                    }
-                    journal.order.push(identity);
-                }
-                JournalEvent::Acknowledged {
-                    identity,
-                    acknowledged_at_unix_ms,
-                } => {
-                    let Some(entry) = journal.seen.get_mut(&identity) else {
-                        return Err(JournalError::Corrupt);
-                    };
-                    if entry.acknowledged
-                        || entry.expired_at_unix_ms.is_some()
-                        || entry.lease.is_some()
-                        || acknowledged_at_unix_ms < 0
-                    {
-                        return Err(JournalError::Corrupt);
-                    }
-                    entry.acknowledged = true;
-                }
-                JournalEvent::Leased {
-                    identity,
-                    challenge,
-                    lease,
-                    enrollment,
-                    receive_capability,
-                } => {
-                    let entry = journal
-                        .seen
-                        .get_mut(&identity)
-                        .ok_or(JournalError::Corrupt)?;
-                    if entry.acknowledged
-                        || entry.expired_at_unix_ms.is_some()
-                        || lease.encode().is_err()
-                        || enrollment.encode().is_err()
-                        || lease.lease.address != address
-                        || lease.lease.delivery_id != entry.envelope.routing.delivery_id
-                        || lease.lease.message_id != identity.message_id
-                        || lease.lease.execution_epoch != identity.execution_epoch
-                        || lease.lease.ciphertext_commitment != entry.envelope.ciphertext_commitment
-                        || lease.lease.consumer_session != enrollment.enrollment.consumer_session
-                        || lease.lease.receive_capability_id
-                            != receive_capability.grant.capability_id
-                        || challenge == [0; 32]
-                    {
-                        return Err(JournalError::Corrupt);
-                    }
-                    verify_recovered_lease(
-                        entry,
-                        identity,
-                        &lease,
-                        &enrollment,
-                        &receive_capability,
-                        &authority,
-                        lease.lease.issued_at_unix_ms,
-                    )?;
-                    entry.lease = Some(LeaseState {
-                        retry_count: 0,
-                        signed: *lease,
-                        enrollment: *enrollment,
-                        receive_capability: *receive_capability,
-                    });
-                    if journal
-                        .used_challenges
-                        .insert(challenge, identity)
-                        .is_some()
-                    {
-                        return Err(JournalError::Corrupt);
-                    }
-                }
-                JournalEvent::LeasedRetry {
-                    identity,
-                    challenge,
-                } => {
-                    let active = journal
-                        .seen
-                        .get_mut(&identity)
-                        .filter(|entry| !entry.acknowledged && entry.expired_at_unix_ms.is_none())
-                        .and_then(|entry| entry.lease.as_mut())
-                        .ok_or(JournalError::Corrupt)?;
-                    active.retry_count = active
-                        .retry_count
-                        .checked_add(1)
-                        .filter(|count| *count <= MAX_LEASE_RETRIES)
-                        .ok_or(JournalError::Corrupt)?;
-                    if challenge == [0; 32]
-                        || journal
-                            .used_challenges
-                            .insert(challenge, identity)
-                            .is_some()
-                    {
-                        return Err(JournalError::Corrupt);
-                    }
-                }
-                JournalEvent::AcknowledgedSigned { identity, ack } => {
-                    let entry = journal
-                        .seen
-                        .get_mut(&identity)
-                        .ok_or(JournalError::Corrupt)?;
-                    let active = entry.lease.as_ref().ok_or(JournalError::Corrupt)?;
-                    if entry.acknowledged
-                        || entry.expired_at_unix_ms.is_some()
-                        || ack.encode().is_err()
-                        || ack.ack.lease != active.signed
-                    {
-                        return Err(JournalError::Corrupt);
-                    }
-                    let guest_key = verify_recovered_lease(
-                        entry,
-                        identity,
-                        &active.signed,
-                        &active.enrollment,
-                        &active.receive_capability,
-                        &authority,
-                        ack.ack.acknowledged_at_unix_ms,
-                    )?;
-                    let signature: [u8; 64] = ack
-                        .signature
-                        .as_slice()
-                        .try_into()
-                        .map_err(|_| JournalError::Corrupt)?;
-                    guest_key
-                        .verify(
-                            &canonical_bytes(DELIVERY_ACK_SIGNATURE_DOMAIN, &ack.ack)
-                                .map_err(|_| JournalError::Corrupt)?,
-                            &Signature::from_bytes(&signature),
-                        )
-                        .map_err(|_| JournalError::Corrupt)?;
-                    entry.acknowledged = true;
-                    entry.signed_ack = Some(*ack);
-                }
-                JournalEvent::Expired {
-                    identity,
-                    expired_at_unix_ms,
-                    authorization_signature,
-                } => {
-                    let entry = journal
-                        .seen
-                        .get_mut(&identity)
-                        .ok_or(JournalError::Corrupt)?;
-                    if entry.acknowledged
-                        || entry.expired_at_unix_ms.is_some()
-                        || expired_at_unix_ms < entry.envelope.routing.expires_at_unix_ms
-                    {
-                        return Err(JournalError::Corrupt);
-                    }
-                    let signature: [u8; 64] = authorization_signature
-                        .as_slice()
-                        .try_into()
-                        .map_err(|_| JournalError::Corrupt)?;
-                    authority
-                        .verify(
-                            &expiry_intent_bytes(address, identity, entry, expired_at_unix_ms)?,
-                            &Signature::from_bytes(&signature),
-                        )
-                        .map_err(|_| JournalError::Corrupt)?;
-                    entry.expired_at_unix_ms = Some(expired_at_unix_ms);
-                }
-                JournalEvent::Checkpoint { .. } => return Err(JournalError::Corrupt),
-            }
-            let next = JournalTip {
-                cursor,
-                head: expected_tag,
-            };
-            if cursor == expected.cursor && next != expected {
-                return Err(JournalError::Rollback);
-            }
-            if cursor > expected.cursor {
-                if !suffix_synced {
-                    // A predecessor could crash after publishing a record but
-                    // before syncing its directory entry. Recovery must not
-                    // advance an independent anchor ahead of that entry.
-                    sync_dir(root)
-                        .map_err(|error| JournalError::Storage(std::io::Error::other(error)))?;
-                    suffix_synced = true;
-                }
-                reconcile(next)?;
-            }
-            journal.tip = next;
-        }
-        if journal.tip.cursor < expected.cursor {
-            return Err(JournalError::Rollback);
-        }
-        if start != 0 {
-            for (_, path) in obsolete {
-                fs::remove_file(path)?;
-            }
-        }
-        for (cursor, path) in checkpoints {
-            if cursor > expected.cursor || cursor < start {
-                // Pre-anchor or superseded generations are removed only after
-                // the committed prefix has been verified against the anchor.
-                fs::remove_file(&path)?;
-            }
-        }
-        sync_dir(root).map_err(|error| JournalError::Storage(std::io::Error::other(error)))?;
-        Ok(journal)
-    }
-
-    fn restore_checkpoint(&mut self, path: &Path, cursor: u64) -> Result<(), JournalError> {
-        let bytes = read_record(path)?;
-        if bytes.len() as u64 > self.limits.max_bytes {
-            return Err(JournalError::Full);
-        }
-        let (previous, sealed) = bytes.split_at_checked(32).ok_or(JournalError::Corrupt)?;
-        let (tag, ciphertext) = sealed.split_at_checked(32).ok_or(JournalError::Corrupt)?;
-        let previous: [u8; 32] = previous.try_into().map_err(|_| JournalError::Corrupt)?;
-        let expected_tag = self.mac_after(previous, ciphertext);
-        if self.tier != AcceptanceTier::Local || tag != expected_tag {
-            return Err(JournalError::Corrupt);
-        }
-        let plaintext = Zeroizing::new(
-            aead::open(
-                &self.record_key(),
-                ciphertext,
-                &[DOMAIN, &previous].concat(),
-            )
-            .map_err(|_| JournalError::Corrupt)?,
-        );
-        let record: Record =
-            serde_json::from_slice(&plaintext).map_err(|_| JournalError::Corrupt)?;
-        if record.version != 3
-            || record.cursor != cursor
-            || record.previous != previous
-            || record.address != self.address
-            || record.history_key != self.history_key
-        {
-            return Err(JournalError::Corrupt);
-        }
-        let JournalEvent::Checkpoint {
-            state,
-            authorization_signature,
-        } = record.event
-        else {
-            return Err(JournalError::Corrupt);
-        };
-        if state.source.cursor.checked_add(1) != Some(cursor)
-            || state.source.head != previous
-            || state.address != self.address
-            || Some(state.history_key) != self.history_key
-            || Some(state.retention) != self.retention
-            || state.created_at_unix_ms < 0
-        {
-            return Err(JournalError::Corrupt);
-        }
-        let signature: [u8; 64] = authorization_signature
-            .as_slice()
-            .try_into()
-            .map_err(|_| JournalError::Corrupt)?;
-        self.authority
-            .verify(
-                &canonical_bytes(CHECKPOINT_DOMAIN, &state).map_err(|_| JournalError::Corrupt)?,
-                &Signature::from_bytes(&signature),
-            )
-            .map_err(|_| JournalError::Corrupt)?;
-        let mut seen = BTreeMap::new();
-        let mut order = Vec::new();
-        for CheckpointEntry {
-            identity,
-            seen: entry,
-        } in state.entries
-        {
-            let receipt = &entry.accepted_receipt;
-            if receipt.address != self.address
-                || receipt.outcome != DeliveryOutcome::AcceptedLocalDurable
-                || receipt.message_id != identity.message_id
-                || receipt.execution_epoch != identity.execution_epoch
-                || receipt.delivery_id != entry.envelope.routing.delivery_id
-                || receipt.ciphertext_commitment != entry.envelope.ciphertext_commitment
-                || receipt.validate_versioned_outcome().is_err()
-                || state
-                    .retention
-                    .retained_until(entry.envelope.routing.expires_at_unix_ms)
-                    .is_err()
-                || entry
-                    .expired_at_unix_ms
-                    .is_some_and(|time| time < entry.envelope.routing.expires_at_unix_ms)
-                || (entry.acknowledged && entry.expired_at_unix_ms.is_some())
-                || (entry.signed_ack.is_some() && !entry.acknowledged)
-            {
-                return Err(JournalError::Corrupt);
-            }
-            if let Some(lease) = &entry.lease {
-                if lease.retry_count > MAX_LEASE_RETRIES {
-                    return Err(JournalError::Corrupt);
-                }
-                let at = entry
-                    .signed_ack
-                    .as_ref()
-                    .map_or(lease.signed.lease.issued_at_unix_ms, |ack| {
-                        ack.ack.acknowledged_at_unix_ms
-                    });
-                let guest_key = verify_recovered_lease(
-                    &entry,
-                    identity,
-                    &lease.signed,
-                    &lease.enrollment,
-                    &lease.receive_capability,
-                    &self.authority,
-                    at,
-                )?;
-                if let Some(ack) = &entry.signed_ack {
-                    if ack.ack.lease != lease.signed || ack.encode().is_err() {
-                        return Err(JournalError::Corrupt);
-                    }
-                    let signature: [u8; 64] = ack
-                        .signature
-                        .as_slice()
-                        .try_into()
-                        .map_err(|_| JournalError::Corrupt)?;
-                    guest_key
-                        .verify(
-                            &canonical_bytes(DELIVERY_ACK_SIGNATURE_DOMAIN, &ack.ack)
-                                .map_err(|_| JournalError::Corrupt)?,
-                            &Signature::from_bytes(&signature),
-                        )
-                        .map_err(|_| JournalError::Corrupt)?;
-                } else if entry.acknowledged {
-                    return Err(JournalError::Corrupt);
-                }
-            } else if entry.signed_ack.is_some() {
-                return Err(JournalError::Corrupt);
-            }
-            if seen.insert(identity, entry).is_some() {
-                return Err(JournalError::Corrupt);
-            }
-            order.push(identity);
-        }
-        let mut used_challenges = BTreeMap::new();
-        for (challenge, identity) in state.used_challenges {
-            if challenge == [0; 32]
-                || !seen.contains_key(&identity)
-                || used_challenges.insert(challenge, identity).is_some()
-            {
-                return Err(JournalError::Corrupt);
-            }
-        }
-        self.seen = seen;
-        self.order = order;
-        self.used_challenges = used_challenges;
-        self.tip = JournalTip {
-            cursor,
-            head: expected_tag,
-        };
-        self.bytes = bytes.len() as u64;
-        self.records = 1;
-        Ok(())
     }
 
     /// The legacy local callback cannot prove an independent anchor or
@@ -1597,136 +918,6 @@ impl MailboxJournal {
     ) -> Result<SignedDestinationReceipt, JournalError> {
         self.local_ready(anchor, &request.signer.verifying_key())?;
         self.admit_at_tier(request, AcceptanceTier::Local, |next| anchor.advance(next))
-    }
-
-    /// Commit a signed local snapshot before pruning the superseded prefix.
-    ///
-    /// A quota refusal leaves the old history untouched; uncertain I/O poisons
-    /// this handle until recovery has verified the committed anchor. The caller
-    /// must provide trusted UNIX time for terminal-state retention.
-    pub fn compact_local(
-        &mut self,
-        now_unix_ms: i64,
-        signer: &SigningKey,
-        anchor: &FileJournalAnchor,
-    ) -> Result<JournalTip, JournalError> {
-        self.local_ready(anchor, &signer.verifying_key())?;
-        let retention = self.retention.ok_or(JournalError::InvalidLimits)?;
-        let history_key = self
-            .history_key
-            .ok_or(JournalError::HistoryKeyUnavailable)?;
-        if now_unix_ms < 0 {
-            return Err(JournalError::InvalidLimits);
-        }
-        let mut retired = BTreeSet::new();
-        for (identity, entry) in &self.seen {
-            if (entry.acknowledged || entry.expired_at_unix_ms.is_some())
-                && now_unix_ms
-                    > retention
-                        .retained_until(entry.envelope.routing.expires_at_unix_ms)
-                        .map_err(|_| JournalError::Corrupt)?
-            {
-                retired.insert(*identity);
-            }
-        }
-        let state = CheckpointState {
-            source: self.tip,
-            address: self.address,
-            history_key,
-            retention,
-            created_at_unix_ms: now_unix_ms,
-            entries: self
-                .order
-                .iter()
-                .filter(|identity| !retired.contains(identity))
-                .map(|identity| {
-                    self.seen
-                        .get(identity)
-                        .cloned()
-                        .map(|seen| CheckpointEntry {
-                            identity: *identity,
-                            seen,
-                        })
-                })
-                .collect::<Option<Vec<_>>>()
-                .ok_or(JournalError::Corrupt)?,
-            used_challenges: self
-                .used_challenges
-                .iter()
-                .filter(|(_, identity)| !retired.contains(identity))
-                .map(|(challenge, identity)| (*challenge, *identity))
-                .collect(),
-        };
-        let signature = signer
-            .sign(&canonical_bytes(CHECKPOINT_DOMAIN, &state)?)
-            .to_bytes()
-            .to_vec();
-        let cursor = self.tip.cursor.checked_add(1).ok_or(JournalError::Full)?;
-        let record = Record {
-            version: 3,
-            cursor,
-            previous: self.tip.head,
-            address: self.address,
-            history_key: self.history_key,
-            event: JournalEvent::Checkpoint {
-                state: Box::new(state),
-                authorization_signature: signature,
-            },
-        };
-        let body = Zeroizing::new(serde_json::to_vec(&record).map_err(|_| JournalError::Corrupt)?);
-        if body.len() + 64 + aead::NONCE_SIZE + aead::TAG_SIZE > MAX_RECORD_BYTES {
-            return Err(JournalError::Full);
-        }
-        let ciphertext = aead::seal(
-            &self.record_key(),
-            &body,
-            &[DOMAIN, &self.tip.head].concat(),
-        );
-        let size = (ciphertext.len() + 64) as u64;
-        if self
-            .bytes
-            .checked_add(size)
-            .is_none_or(|n| n > self.limits.max_bytes)
-        {
-            return Err(JournalError::Full);
-        }
-        let tag = self.mac(&ciphertext);
-        let mut bytes = self.tip.head.to_vec();
-        bytes.extend_from_slice(&tag);
-        bytes.extend_from_slice(&ciphertext);
-        let path = checkpoint_path(&self.root, cursor);
-        match fs::symlink_metadata(&path) {
-            Ok(_) => return Err(JournalError::Corrupt),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        if let Err(error) = atomic_write_new(&path, &bytes).and_then(|()| sync_dir(&self.root)) {
-            self.poisoned = true;
-            return Err(JournalError::Storage(std::io::Error::other(error)));
-        }
-        let next = JournalTip { cursor, head: tag };
-        if let Err(error) = anchor.advance(next) {
-            self.poisoned = true;
-            return Err(error);
-        }
-        self.tip = next;
-        self.poisoned = true;
-        for entry in fs::read_dir(&self.root)? {
-            let old = entry?.path();
-            if old != path && old != self.root.join("journal.lock") {
-                fs::remove_file(old)?;
-            }
-        }
-        sync_dir(&self.root)
-            .map_err(|error| JournalError::Storage(std::io::Error::other(error)))?;
-        self.order.retain(|identity| !retired.contains(identity));
-        self.seen.retain(|identity, _| !retired.contains(identity));
-        self.used_challenges
-            .retain(|_, identity| !retired.contains(identity));
-        self.bytes = size;
-        self.records = 1;
-        self.poisoned = false;
-        Ok(next)
     }
 
     fn append(
@@ -2239,18 +1430,17 @@ fn record_path(root: &Path, cursor: u64) -> PathBuf {
     root.join(format!("entry-{cursor:020}.bin"))
 }
 
-fn checkpoint_path(root: &Path, cursor: u64) -> PathBuf {
-    root.join(format!("checkpoint-{cursor:020}.bin"))
-}
-
 fn read_record(path: &Path) -> Result<Vec<u8>, JournalError> {
-    let meta = fs::symlink_metadata(path)?;
-    if !meta.file_type().is_file() || meta.len() > MAX_RECORD_BYTES as u64 {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() || meta.nlink() != 1 || meta.len() > MAX_RECORD_BYTES as u64 {
         return Err(JournalError::Corrupt);
     }
     let mut bytes = Vec::new();
-    fs::File::open(path)?
-        .take(MAX_RECORD_BYTES as u64 + 1)
+    file.take(MAX_RECORD_BYTES as u64 + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() > MAX_RECORD_BYTES {
         return Err(JournalError::Corrupt);
@@ -2261,6 +1451,7 @@ fn read_record(path: &Path) -> Result<Vec<u8>, JournalError> {
 #[cfg(test)]
 mod anchor_tests {
     use super::*;
+    use ed25519_dalek::{Signature, Verifier};
     use mvm_contract::protocol::mailbox::{
         AuthorizationDomainId, AuthorizationDomainRouteLabel, BootId, CapabilityId,
         CapabilityOperations, CausationId, CiphertextPadding, ContentType, CorrelationId,
@@ -2269,6 +1460,7 @@ mod anchor_tests {
         MailboxRoutingFrame, MessageId, OrderingScope, PrincipalId, ReplayNonce, RevocationId,
         SequenceNumber, TenantId, TransportBindingId,
     };
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     struct IndependentAnchor {
@@ -2872,6 +2064,42 @@ mod anchor_tests {
             ),
             Err(JournalError::Rollback)
         ));
+    }
+
+    #[test]
+    fn recovery_never_follows_a_replaced_record_outside_its_private_directory() {
+        let dir = tempfile::tempdir().expect("journal root");
+        let root = dir.path().join("journal");
+        crate::private_fs::ensure_private_dir(&root).expect("private journal");
+        let external = dir.path().join("outside");
+        fs::write(&external, b"outside must not be read").expect("external file");
+        std::os::unix::fs::symlink(&external, record_path(&root, 1))
+            .expect("replace record with symlink");
+        let signer = SigningKey::from_bytes(&[6; 32]);
+        let (reference, custody) = versioned_custody();
+        let anchor = FileJournalAnchor::open(
+            &dir.path().join("anchor").join("tip.json"),
+            address(),
+            [22; 32],
+        )
+        .expect("local anchor");
+        assert!(
+            MailboxJournal::open_local_with_custody(
+                &root,
+                reference,
+                signer.verifying_key(),
+                limits(),
+                &custody,
+                &anchor,
+                local_retention(),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            fs::read(&external).expect("external file retained"),
+            b"outside must not be read"
+        );
+        assert_eq!(anchor.tip(), JournalTip::genesis());
     }
 
     #[test]

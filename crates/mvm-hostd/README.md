@@ -41,15 +41,15 @@ signing, and audit emission each pass through their dedicated policy gate. Key
 material remains inside the smallest role that needs it; callers receive only
 the result.
 
-The test-scoped `mailbox_custody` prototype retains three distinct random
+`mailbox_custody` retains three distinct random
 purpose keys (journal history, recipient payload opening, local anchor) in a
 private bundle under the existing host keys directory. A host-signed manifest
 binds their IDs and version to the admitted plan, VM, address, epoch and
 authority; recovery loads the existing signer and exact bundle, never mints a
 replacement. An interrupted first provision leaves an orphan and refuses.
-This is trusted-host local crash recovery only: it is not wired to the
-production mailbox process, cannot detect whole-host rollback, and does not
-provide host-blind confidentiality.
+The production helper verifies this custody and the guest boot binding before
+binding its listener. This is trusted-host local crash recovery only: it
+cannot detect whole-host rollback or provide host-blind confidentiality.
 The journal-backed service can bind a V2 local receipt to its existing endpoint
 and recover an exact retry after restart; on Send and Receive it settles at most
 eight expired entries per request, returning unavailable when maintenance
@@ -58,8 +58,12 @@ remains rather than reporting an uncommitted terminal state. A separate guest
 V2 receipt before removing the pending message; the old `outbox` path retains
 its ephemeral unit-verdict behavior. Expired submissions receive a typed
 terminal refusal and retain a bounded guest-side rejection record. Production
-mailbox launch remains refused until this handoff, the retained custody path,
-and anchored retention/compaction are qualified end to end.
+mailboxes require a signed retention window under the host's configured ceiling;
+the local helper returns only `accepted_local_durable` after anchoring and
+retains signed guest ACK and dedup state across checkpoint and restart.
+The source retry spool holds at most 64 immutable intents per admitted mailbox
+scope; saturation refuses further sends rather than discarding uncertain
+operations or inventing fresh envelopes for their IDs.
 
 ## Main areas
 

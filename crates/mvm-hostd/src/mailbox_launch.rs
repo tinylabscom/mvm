@@ -156,7 +156,6 @@ impl Drop for DerivedMailboxKeys {
 
 impl DerivedMailboxKeys {
     /// Mailbox-scoped destination signer and separate journal/anchor MAC keys.
-    #[cfg(test)]
     pub(crate) fn durable_material(&self) -> (SigningKey, [u8; 32], [u8; 32]) {
         (
             SigningKey::from_bytes(&self.authority),
@@ -166,7 +165,6 @@ impl DerivedMailboxKeys {
     }
 
     /// Bind the retained purpose keys to this host-derived mailbox identity.
-    #[cfg(test)]
     pub(crate) fn with_retained(
         mut self,
         retained: &crate::mailbox_custody::RetainedMailboxKeys,

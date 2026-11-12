@@ -75,6 +75,12 @@ pub(crate) struct RetainedMailboxKeys {
     material: Zeroizing<[u8; KEY_BYTES]>,
 }
 
+pub(crate) struct MailboxStoragePaths {
+    pub(crate) journal: PathBuf,
+    pub(crate) anchor: PathBuf,
+    pub(crate) source_intents: PathBuf,
+}
+
 fn paths(keys_dir: &Path, identity: &Identity<'_>) -> Result<(PathBuf, PathBuf)> {
     let digest = Sha256::digest(serde_jcs::to_vec(identity)?);
     let name = hex::encode(digest);
@@ -161,6 +167,61 @@ fn identity<'a>(
 }
 
 impl RetainedMailboxKeys {
+    /// First launch provisions once; subsequent launches require the exact
+    /// existing signed manifest. A partial first write cannot be replaced.
+    pub(crate) fn provision_or_open(
+        keys_dir: &Path,
+        plan: &ExecutionPlan,
+        vm_name: &str,
+        posture: &MailboxLaunchPosture,
+        current_boot: Option<BootId>,
+        address: MailboxAddress,
+    ) -> Result<Self> {
+        posture.verify(plan, vm_name)?;
+        let identity = identity(keys_dir, plan, vm_name, address)?;
+        let (bundle, manifest) = paths(keys_dir, &identity)?;
+        let mut existing = false;
+        for path in [&bundle, &manifest] {
+            match std::fs::symlink_metadata(path) {
+                Ok(_) => existing = true,
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if existing {
+            Self::open_existing(
+                keys_dir,
+                plan,
+                vm_name,
+                &posture.handoff(current_boot),
+                current_boot,
+                address,
+            )
+        } else {
+            Self::provision(keys_dir, plan, vm_name, posture, address)
+        }
+    }
+
+    /// Host-local storage remains outside the per-VM state directory so a VM
+    /// teardown cannot erase accepted history or its high-water mark.
+    pub(crate) fn storage_paths(&self, keys_dir: &Path) -> Result<MailboxStoragePaths> {
+        let binding = &self.binding;
+        let identity = Identity {
+            plan_id: &binding.plan_id,
+            plan_nonce: &binding.plan_nonce,
+            vm_name: &binding.vm_name,
+            address: binding.address,
+            epoch: binding.epoch,
+            retention_ms: binding.retention_ms,
+        };
+        let (bundle, _) = paths(keys_dir, &identity)?;
+        Ok(MailboxStoragePaths {
+            journal: bundle.with_extension("journal"),
+            anchor: bundle.with_extension("anchor"),
+            source_intents: bundle.with_extension("intents"),
+        })
+    }
+
     /// Provision once under a verified launch posture; an interrupted first
     /// provision leaves an orphan bundle and refuses instead of replacing it.
     pub(crate) fn provision(
