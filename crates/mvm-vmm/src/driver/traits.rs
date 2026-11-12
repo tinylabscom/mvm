@@ -10,8 +10,8 @@ use std::time::Duration;
 use anyhow::Result;
 use mvm_core::crypto::vmgenid::GenerationToken;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, StandbyError,
-    StandbyHandle, StandbySpec, VmCapabilities, VmExitStatus, VmId, VmStatus,
+    BackendKind, BackendSecurityProfile, GuestChannelInfo, HostDialRoute, SnapshotCapability,
+    StandbyError, StandbyHandle, StandbySpec, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 
 use crate::driver::spec::{VmmSpec, VsockPort};
@@ -183,23 +183,24 @@ pub trait VmmDriver: Send + Sync {
         anyhow::bail!("backend does not support verified kernel descriptor handoff")
     }
 
-    /// Boot through the existing driver while retaining prepared writable files.
+    /// Boot through the existing driver while retaining original prepared files.
     ///
     /// Empty resources preserve the verified-kernel or ordinary boot route.
     /// A driver must explicitly implement nonempty handoff; the default refuses
     /// before either boot method rather than discarding files or reopening paths.
+    /// This data-plane input grants no builder ownership or admission.
     #[cfg(unix)]
     fn boot_custodied(
         &self,
         spec: &VmmSpec,
-        kernel: Option<&crate::host::restore_image::VerifiedRestoreFile>,
-        disks: crate::driver::prepared_disks::PreparedWritableDisks,
+        files: crate::driver::prepared_disks::PreparedBootFiles<'_>,
     ) -> Result<Box<dyn RunningVm>> {
+        files.require_no_data()?;
         anyhow::ensure!(
-            disks.is_empty(),
+            files.writable.is_empty(),
             "backend does not support prepared writable descriptor handoff"
         );
-        match kernel {
+        match files.kernel {
             Some(kernel) => self.boot_verified_kernel(spec, kernel),
             None => self.boot(spec),
         }
@@ -271,7 +272,7 @@ pub trait VmmDriver: Send + Sync {
         })
     }
 
-    /// Resume a child previously returned by [`preload_standby_child`](Self::preload_standby_child).
+    /// Resume a child returned earlier by [`preload_standby_child`](Self::preload_standby_child).
     /// The caller wires all claim-specific channels before invoking this method.
     fn resume_preloaded_child(
         &self,
@@ -348,6 +349,12 @@ pub trait VmmDriver: Send + Sync {
     /// Guest communication channel info for VM `id`. Errors when the VMM has
     /// none to report.
     fn guest_channel_info(&self, id: &VmId) -> Result<GuestChannelInfo>;
+
+    /// Where the host dials guest vsock `port` for the VM at `state_dir`;
+    /// `None` when this VMM exposes no host-dialed guest ports.
+    fn host_dial_route(&self, _state_dir: &Path, _port: u32) -> Option<HostDialRoute> {
+        None
+    }
 }
 
 /// A live VM handle. Launch-model-agnostic: an in-process VMM, a subprocess,

@@ -261,8 +261,7 @@ The manifest is the signed object. For `runtime/node@1.0.0` it is:
 **A published version is immutable.** Change a source without changing its
 version and the build stops, naming the pack and telling you to bump the
 version in `pack.toml`. Publish a fix as a new version; consumers move to it
-with `mvmctl pack update runtime/node`. The older
-`mvmctl pack registry update runtime/node` spelling remains available.
+with `mvmctl pack update runtime/node`.
 
 The same check the workflow runs is available in a `mvm-packs` checkout:
 
@@ -286,9 +285,7 @@ mvmctl pack verify runtime/node
 
 `mvmctl pack registry ls` and `mvmctl pack registry rm` remain compatibility
 spellings of `pack ls` and `pack rm`. The distinct builder/runtime system pack
-cache is under `mvmctl pack system`; its former top-level commands also remain
-available. A bare `pack update runtime` selects that system cache, whereas
-`pack update runtime/node` selects the signed workload pack.
+cache is under `mvmctl pack system` (`list`, `rollback`, `prune`).
 
 `pack info` and `pack verify` work from the installed copy, without fetching a
 registry index. Both check the lock pin, publisher signature and every declared
@@ -311,7 +308,7 @@ admission require a fresh signed feed in the private revocation cache and
 reject a revoked signer or manifest digest. A missing, expired, corrupt, or
 rolled-back feed fails closed. Built-image packs outside `mvm/` require this independently
 anchored operator trust and a fresh feed at pull and every installed-pack reopen.
-Removing the operator trust file refuses those packs. Legacy policy-only and source-image packs retain
+Removing the operator trust file refuses those packs. The bundle-author key of an official application pack is pinned in the client release and needs no `mvmctl trust add`; with an operator publisher policy, or for any other author, enrol the key explicitly. Legacy policy-only and source-image packs retain
 the legacy publisher-only behavior when no trust file is configured. After
 obtaining the signed JSON document and its
 signature bundle through an operator-controlled channel, run
@@ -320,7 +317,8 @@ signature bundle through an operator-controlled channel, run
 document bytes under `trust.toml` before advancing the durable checkpoint.
 This operator path does not confer official status on a pack.
 
-Every `mvm/` pack instead requires a fresh feed signed by the separate,
+Every `mvm/` pack, and every application whose authenticated signer is the
+built-in publish identity under the built-in publisher policy, instead requires a fresh feed signed by the separate,
 built-in MVM release identity
 `https://github.com/tinylabscom/mvm-packs/.github/workflows/registry-pack-revocations.yml@refs/heads/main`
 under the GitHub OIDC issuer. Download
@@ -331,9 +329,12 @@ under the GitHub OIDC issuer. Download
 The CLI verifies the exact document bytes against the built-in identity and
 advances a private, rollback-resistant checkpoint. It refuses a missing,
 expired, corrupt, revoked or rolled-back feed at pull and every subsequent
-installed-pack open, including execution. Feed retrieval is manual in this
-release; downloading the files does not establish trust until the update
-command succeeds. The verifier permits an official feed validity
+installed-pack open, including execution. `mvmctl pull` and `mvmctl run`
+download both files themselves when the cached feed is absent, expired or has
+under 12 hours of validity left, and never during launch admission; a download
+establishes no trust until the same verification succeeds. A failed refresh
+proceeds only on a still-valid cache, and the manual command remains for
+air-gapped hosts. The verifier permits an official feed validity
 interval of at most 30 days, but always rejects it at its signed `not_after`;
 the operator-configured feed maximum remains 48 hours. If publication or
 retrieval fails, official packs stop working when that cached feed expires. A
@@ -604,9 +605,7 @@ own document and asset trees; it is not signed into the environment archive.
   versions, more than 128 packs, or an unpublished dependency stop the pull.
   Packs already installed before a later dependency fails remain pinned, but a run
   cannot load a missing dependency.
-- A `[tools]` section in a pack composes like any other, and is enforced as
-  [Tool privileges](/guides/policy-and-profiles/#tool-privileges) describes,
-  with the limits listed under
-  [Not yet](/guides/policy-and-profiles/#not-yet).
+- Packs containing `[tools]` are refused at boot; grant system-level network
+  and credential access through the admitted policy instead.
 - The official registry signs on `main` only. A pack on a branch or in a fork
   has no signature the default trust policy accepts.

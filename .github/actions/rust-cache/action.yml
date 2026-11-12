@@ -17,6 +17,19 @@ inputs:
       share a cache.
     required: false
     default: "workspace"
+  workspace-crates:
+    description: >
+      Whether workspace crate outputs are cached along with dependencies.
+      Release and signing jobs pass "false" so only third-party dependency
+      units are ever restored into a shipped artifact.
+    required: false
+    default: "true"
+  cache-bin:
+    description: >
+      Whether binaries installed with `cargo install` are cached. Release jobs
+      pass "false" so no cached executable runs inside them.
+    required: false
+    default: "true"
 
 runs:
   using: composite
@@ -50,9 +63,9 @@ runs:
         # avoids recompiling every unchanged workspace crate in every sibling
         # lane while keeping untrusted refs out of the shared write boundary.
         cache-all-crates: "false"
-        cache-workspace-crates: "true"
+        cache-workspace-crates: ${{ inputs.workspace-crates }}
         # The eBPF lane's pinned bpf-linker install also benefits from this.
-        cache-bin: "true"
+        cache-bin: ${{ inputs.cache-bin }}
 
     # The two-worker repository default protects shared developer hosts, not
     # dedicated runners. Configure after restore so a scheduling-only setting

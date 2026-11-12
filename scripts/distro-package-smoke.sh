@@ -18,16 +18,24 @@ sums="$3"
 
 fail() { echo "distro-package-smoke: $*" >&2; exit 1; }
 
+# A mirror that is briefly unreachable must not fail a release witness: retry
+# the fetches, and bound each so a dead mirror still ends the job.
+apt() {
+  DEBIAN_FRONTEND=noninteractive apt-get \
+    -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 "$@"
+}
+dnf_retrying() { dnf --setopt=retries=5 --setopt=timeout=30 "$@"; }
+
 case "${package}" in
   *.deb)
     format=deb
-    apt-get update -qq >/dev/null
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${package}" python3 >/dev/null
-    remove() { DEBIAN_FRONTEND=noninteractive apt-get remove -y -qq mvmctl >/dev/null; }
+    apt update -qq >/dev/null
+    apt install -y -qq "${package}" python3 >/dev/null
+    remove() { apt remove -y -qq mvmctl >/dev/null; }
     ;;
   *.rpm)
     format=rpm
-    dnf install -y -q "${package}" python3 >/dev/null
+    dnf_retrying install -y -q "${package}" python3 >/dev/null
     remove() { dnf remove -y -q mvmctl >/dev/null; }
     ;;
   *) fail "not a .deb or .rpm: ${package}" ;;

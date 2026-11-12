@@ -106,19 +106,9 @@ pub(crate) fn record_build_history(
     );
     let json_entry = serde_json::to_string(revision)?;
 
-    env.shell_exec(&format!(
-        r#"
-        if [ -f {path} ]; then
-            EXISTING=$(cat {path})
-            echo "$EXISTING" | head -49 > {path}.tmp
-            echo '{entry}' >> {path}.tmp
-            mv {path}.tmp {path}
-        else
-            echo '{entry}' > {path}
-        fi
-        "#,
-        path = history_path,
-        entry = json_entry,
+    env.shell_exec(&crate::shell_scripts::record_history(
+        &history_path,
+        &json_entry,
     ))?;
 
     Ok(())

@@ -73,7 +73,7 @@ pub struct GuestRuntimeBinaryPaths<'a> {
 
 /// Bump when a previously populated source-keyed guest cache may contain
 /// outputs produced through an incompatible build-cache contract.
-const GUEST_SOURCE_CACHE_EPOCH: u32 = 2;
+const GUEST_SOURCE_CACHE_EPOCH: u32 = 3;
 
 impl GuestAgentLayout {
     /// `cache_key` names the cache generation: an mvmctl `version` for a
@@ -123,8 +123,6 @@ pub struct RuntimeOverlayGuestBinaries {
     pub addon_dns: PathBuf,
     pub exit_report: PathBuf,
     pub ping: PathBuf,
-    pub tool_shim: PathBuf,
-    pub tool_helper: PathBuf,
 }
 
 impl RuntimeOverlayGuestBinaries {
@@ -133,7 +131,7 @@ impl RuntimeOverlayGuestBinaries {
     /// The overlay itself stages these under short names (`agent`,
     /// `netinit`, …); a consumer that builds images from the binaries knows
     /// them by their Cargo names, so that is the name an exported set uses.
-    pub fn artifacts(&self) -> [(&'static str, &Path); 11] {
+    pub fn artifacts(&self) -> [(&'static str, &Path); 9] {
         [
             ("mvm-guest-agent", self.agent.as_path()),
             ("mvm-guest-netinit", self.netinit.as_path()),
@@ -144,8 +142,6 @@ impl RuntimeOverlayGuestBinaries {
             ("mvm-addon-dns", self.addon_dns.as_path()),
             ("mvm-exit-report", self.exit_report.as_path()),
             ("mvm-ping", self.ping.as_path()),
-            ("mvm-tool-shim", self.tool_shim.as_path()),
-            ("mvm-tool-helper", self.tool_helper.as_path()),
         ]
     }
 }
@@ -162,8 +158,6 @@ pub struct RuntimeOverlayGuestLayout {
     pub addon_dns: PathBuf,
     pub exit_report: PathBuf,
     pub ping: PathBuf,
-    pub tool_shim: PathBuf,
-    pub tool_helper: PathBuf,
 }
 
 impl RuntimeOverlayGuestLayout {
@@ -183,8 +177,6 @@ impl RuntimeOverlayGuestLayout {
             addon_dns: dir.join("addon-dns"),
             exit_report: dir.join("exit-report"),
             ping: dir.join("ping"),
-            tool_shim: dir.join("tool-shim"),
-            tool_helper: dir.join("tool-helper"),
             dir,
         }
     }
@@ -199,8 +191,6 @@ impl RuntimeOverlayGuestLayout {
             && self.addon_dns.is_file()
             && self.exit_report.is_file()
             && self.ping.is_file()
-            && self.tool_shim.is_file()
-            && self.tool_helper.is_file()
     }
 
     fn binaries(&self) -> RuntimeOverlayGuestBinaries {
@@ -214,8 +204,6 @@ impl RuntimeOverlayGuestLayout {
             addon_dns: self.addon_dns.clone(),
             exit_report: self.exit_report.clone(),
             ping: self.ping.clone(),
-            tool_shim: self.tool_shim.clone(),
-            tool_helper: self.tool_helper.clone(),
         }
     }
 }
@@ -719,25 +707,6 @@ pub fn cached_guest_binaries(
     layout.is_complete().then(|| layout.binaries())
 }
 
-/// Whether resolving the guest runtime for `(cache_root, arch)` would trigger a
-/// source-checkout cross-compile: a source workspace is detected and its
-/// content-keyed cache is cold. Mirrors [`resolve_or_build_guest_binaries`]'s
-/// build/no-build decision so a caller can announce the slow, output-silent
-/// `cargo zigbuild` before it runs.
-pub fn source_build_pending(cache_root: &Path, arch: GuestArch) -> bool {
-    match detect_source_workspace() {
-        Some(ws) => source_build_pending_for(cache_root, arch, &ws),
-        None => false,
-    }
-}
-
-fn source_build_pending_for(cache_root: &Path, arch: GuestArch, workspace_root: &Path) -> bool {
-    match source_cache_key(workspace_root) {
-        Ok(cache_key) => cached_guest_binaries(cache_root, &cache_key, arch).is_none(),
-        Err(_) => false,
-    }
-}
-
 /// Resolve the full runtime-overlay guest-binary set for `(version, arch)`,
 /// building + caching it from `workspace_root` on a cache miss.
 ///
@@ -770,7 +739,7 @@ pub fn runtime_overlay_source_checkout_fingerprint(
 
 /// Runtime-overlay binaries built without `mvm-agentd/addons`: the sealed
 /// agent and the helpers it launches, none of which may link an async runtime.
-pub const RUNTIME_OVERLAY_SEALED_BINS: [&str; 9] = [
+pub const RUNTIME_OVERLAY_SEALED_BINS: [&str; 7] = [
     "mvm-guest-agent",
     "mvm-guest-netinit",
     "mvm-seccomp-apply",
@@ -778,8 +747,6 @@ pub const RUNTIME_OVERLAY_SEALED_BINS: [&str; 9] = [
     "mvm-ping",
     "mvm-runner",
     "mvm-exit-report",
-    "mvm-tool-shim",
-    "mvm-tool-helper",
 ];
 
 /// Runtime-overlay binaries that need `mvm-agentd/addons`: the async loopback
@@ -852,8 +819,6 @@ fn build_runtime_overlay_guest_binaries_into_cache(
         &layout.display_bridge,
     )?;
     install_one(&output_dir.join("mvm-ping"), &layout.ping)?;
-    install_one(&output_dir.join("mvm-tool-shim"), &layout.tool_shim)?;
-    install_one(&output_dir.join("mvm-tool-helper"), &layout.tool_helper)?;
     install_one(&output_dir.join("mvm-runner"), &layout.runner)?;
     install_one(&output_dir.join("mvm-egress-client"), &layout.egress_client)?;
     install_one(&output_dir.join("mvm-addon-dns"), &layout.addon_dns)?;
@@ -1264,26 +1229,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn source_build_pending_flips_when_the_source_keyed_cache_is_seeded() {
-        // A deterministic workspace root: this crate's manifest dir has the
-        // workspace root as an ancestor, independent of the test's CWD.
-        let ws = source_workspace_from(Path::new(env!("CARGO_MANIFEST_DIR")))
-            .expect("workspace root resolves from the crate manifest dir");
-        let cache = tempfile::tempdir().expect("tempdir");
-        let arch = GuestArch::Aarch64;
-
-        // Cold cache: resolving the guest runtime would cross-compile.
-        assert!(source_build_pending_for(cache.path(), arch, &ws));
-
-        // Seed the exact content-keyed slot the resolver would fill.
-        let key = source_cache_key(&ws).expect("source cache key");
-        seed_complete_guest_cache(cache.path(), &key, arch, b"x");
-
-        // Warm cache: no cross-compile pending.
-        assert!(!source_build_pending_for(cache.path(), arch, &ws));
-    }
-
     /// The cache must not accept an artifact the guest could not execute.
     /// Without this, a wrong-architecture cross-compile is cached under a
     /// key that looks valid and surfaces as a guest that never reaches the
@@ -1496,8 +1441,6 @@ mod tests {
                 "mvm-ping",
                 "mvm-runner",
                 "mvm-exit-report",
-                "mvm-tool-shim",
-                "mvm-tool-helper",
             ]
         );
         assert!(features_of(&sealed).is_empty(), "{sealed:?}");
@@ -1875,16 +1818,6 @@ rust = "1.91.1"
         assert!(matches!(
             guest_binary_source().expect("explicit source guest runtime"),
             GuestBinarySource::SourceCheckout { .. }
-        ));
-    }
-
-    #[cfg(feature = "release-channel")]
-    #[test]
-    fn official_build_does_not_detect_the_checkout_it_was_compiled_in() {
-        assert_eq!(detect_source_workspace(), None);
-        assert!(!source_build_pending(
-            Path::new("/tmp/official-release-empty-cache"),
-            GuestArch::host(),
         ));
     }
 

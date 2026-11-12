@@ -1,7 +1,7 @@
 //! Host-process mechanics for the HVF backend.
 //!
-//! Not a `VmBackend` impl — the lifecycle that used to live beside these
-//! helpers moved to `mvm-runtime`'s workload runner, and the `VmmDriver` half
+//! Not a `VmBackend` impl — the lifecycle lives in `mvm-runtime`'s
+//! workload runner, and the `VmmDriver` half
 //! is [`super::hvf`]. What is left here is everything the host does *around*
 //! the guest: resolve `mvm-hvf-supervisor`, wait on its PID file, enumerate the
 //! console sockets and workload disks, and answer whether this platform can run
@@ -15,9 +15,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use mvm_core::config::vms_dir;
 use mvm_core::vm_backend::VmStartConfig;
-use mvm_vmm::host::hvf_supervisor::{HostDialSocket, HvfDisk};
+use mvm_vmm::host::hvf_supervisor::HvfDisk;
 
 use mvm_vmm::host::cmdline;
 
@@ -33,18 +32,9 @@ pub(crate) const PID_FILE_NAME: &str = "hvf.pid";
 pub(crate) const PID_FILE_TIMEOUT: Duration = Duration::from_secs(60);
 pub const PAUSE_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 
-pub fn hvf_console_data_sockets(state_dir: &Path, dev_console: bool) -> Vec<HostDialSocket> {
-    mvm_vmm::host::spec_map::console_data_sockets(state_dir, dev_console)
-        .into_iter()
-        .map(|(guest_port, host_socket)| HostDialSocket {
-            guest_port,
-            host_socket,
-        })
-        .collect()
-}
-
+/// The marker is the pid, then the process start time; a bare pid still reads.
 pub(crate) fn read_pid(path: &Path) -> Option<libc::pid_t> {
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+    mvm_vmm::host::process_liveness::read_pid_file(path)
 }
 
 pub(crate) fn pid_alive(pid: libc::pid_t) -> bool {
@@ -130,25 +120,6 @@ fn hvf_supervisor_spec() -> mvm_vmm::host::aux_bin::AuxBin<'static> {
     .signed_with(mvm_vmm::host::codesign::RequiredEntitlement::Hypervisor)
 }
 
-pub fn vms_root() -> PathBuf {
-    vms_dir()
-}
-
-/// The per-VM gating endpoint is the sole egress gate on hvf (claim-10
-/// default-deny plus optional secret substitution). It only needs to run for a
-/// workload that can actually reach the network: an admitted egress policy, or a
-/// bound-secret authority whose credentials are substituted on the egress path.
-/// A deny-all run carrying no secrets has no reachable egress, so the endpoint is
-/// skipped and `EGRESS_PORT` is left unwired — any guest dial then fails closed,
-/// mirroring libkrun's no-secrets no-op.
-pub fn hvf_endpoint_needed(
-    network_policy: &mvm_core::policy::network_policy::NetworkPolicy,
-    state_dir: &Path,
-) -> bool {
-    network_policy.allows_egress()
-        || mvm_vmm::host::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false)
-}
-
 pub fn hvf_workload_disks(config: &VmStartConfig) -> Vec<HvfDisk> {
     if let Some(verity_path) = config
         .verity_path
@@ -207,33 +178,6 @@ pub fn hvf_workload_disks(config: &VmStartConfig) -> Vec<HvfDisk> {
         });
     }
     disks
-}
-
-pub fn ensure_hvf_runtime_source_supported(config: &VmStartConfig) -> Result<()> {
-    // Two supported required-overlay shapes, keyed on whether the rootfs asks to
-    // be sealed. A sealed boot (verity metadata present) must be fully verity
-    // capable — a missing initrd fails closed rather than silently downgrading to
-    // an unverified root — and carries the dm-verity overlay triple its initramfs
-    // (mvm-verity-init) mounts. A non-verity dev boot instead mounts a plain
-    // read-only overlay from `/dev/vdb` in its guest `/init`.
-    let verity_intended = config.roothash.is_some() || config.verity_path.is_some();
-    if verity_intended {
-        if !cmdline::verity_enabled(config) {
-            bail!(
-                "required-overlay hvf boot requires verity metadata plus an initrd \
-                 (`--initrd` or sibling rootfs.initrd)"
-            );
-        }
-        if cmdline::runtime_overlay(config).is_none() {
-            bail!("required-overlay hvf boot requires the runtime overlay artifact triple");
-        }
-    } else if mvm_vmm::host::boot_config::non_verity_overlay_ext4(config).is_none() {
-        bail!(
-            "required-overlay hvf boot requires the runtime overlay artifact triple \
-             (a non-verity boot mounts it as a plain read-only /dev/vdb)"
-        );
-    }
-    Ok(())
 }
 
 pub fn workspace_root_from_manifest_dir() -> Option<PathBuf> {
@@ -345,5 +289,31 @@ mod host_binary_dir_tests {
         std::fs::write(declared.path().join("mvm-hvf-supervisor"), b"bin").unwrap();
 
         assert!(supervisor_in_host_binary_dir(&host));
+    }
+}
+
+#[cfg(test)]
+mod pid_marker_tests {
+    use super::read_pid;
+    use mvm_vmm::host::network_endpoint_spawn::EndpointPid;
+    use mvm_vmm::host::process_liveness::pid_file_has_live_process;
+
+    fn marker(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(super::PID_FILE_NAME);
+        std::fs::write(&path, body).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn the_supervisor_record_reads_live_and_a_recycled_pid_reads_dead() {
+        let own = std::process::id();
+        let record = EndpointPid::of_child(own);
+        let started = record.started.expect("this host reports a start time");
+        let (_dir, path) = marker(&record.render());
+        assert_eq!(read_pid(&path), Some(own as i32));
+        assert!(pid_file_has_live_process(&path));
+        std::fs::write(&path, format!("{own} {}", started + 1)).unwrap();
+        assert!(!pid_file_has_live_process(&path));
     }
 }

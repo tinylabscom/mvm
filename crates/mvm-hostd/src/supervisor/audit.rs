@@ -314,13 +314,13 @@ pub(crate) mod tests {
         KeyRotationSpec, Nonce, PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources,
         RuntimeProfileRef, SCHEMA_VERSION, SignedImageRef, TimeoutSpec, WorkloadId,
     };
-    use mvm_core::policy::{
-        AuditPolicy, BundleNetworkPolicy, EgressPolicy, KeyPolicy, PiiPolicy, ToolPolicy,
-    };
+    use mvm_core::policy::{AuditPolicy, BundleNetworkPolicy, EgressPolicy, KeyPolicy, PiiPolicy};
     use std::collections::BTreeMap;
 
     pub(crate) fn sample_plan() -> ExecutionPlan {
         ExecutionPlan {
+            execution_epoch: 1,
+            mailbox: None,
             grants: None,
             environment: None,
             build_provenance: Default::default(),
@@ -362,8 +362,6 @@ pub(crate) mod tests {
             egress_policy: PolicyRef("e".to_string()),
             redaction: Default::default(),
             reversible_replacement: Default::default(),
-            tool_policy: PolicyRef("t".to_string()),
-            tools: Default::default(),
             artifact_policy: ArtifactPolicy {
                 capture_paths: vec![],
                 retention_days: 0,
@@ -405,7 +403,6 @@ pub(crate) mod tests {
             network: BundleNetworkPolicy::default(),
             egress: EgressPolicy::default(),
             pii: PiiPolicy::default(),
-            tool: ToolPolicy::default(),
             artifact: mvm_core::policy::policies::ArtifactPolicy::default(),
             keys: KeyPolicy::default(),
             audit: AuditPolicy::default(),

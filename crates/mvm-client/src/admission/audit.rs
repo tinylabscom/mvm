@@ -132,7 +132,7 @@ pub(super) fn emit_policy_audit_invalid(
 #[cfg(test)]
 mod policy_audit_admission_tests {
     use super::*;
-    use mvm_core::plan::SynthesisInput;
+    use mvm_core::plan::{PolicyRef, SynthesisInput};
     use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock, admit_for_run};
     use std::io::Write;
 
@@ -172,7 +172,6 @@ bundle_version = 1
 [network]
 [egress]
 [pii]
-[tool]
 [artifact]
 [keys]
 [audit]
@@ -181,25 +180,27 @@ chain_signing = true
         )
         .unwrap();
 
-        // Synthesize a default-refs plan, then rewrite the four
+        // Synthesize a default-refs plan, then rewrite the three
         // policy fields to `acme:vm-live`. The resolver requires
-        // all four to agree on the same ref.
+        // all three to agree on the same ref.
         let rootfs_dir = tempfile::tempdir().unwrap();
         let rootfs = write_rootfs(rootfs_dir.path(), b"live-payload");
         let ledger = InMemoryNonceLedger::new();
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
+        let vm_name = "vm-live";
         let mut plan = admit_for_run(
             &SynthesisInput {
+                mailbox: None,
                 outputs: Vec::new(),
                 grants: None,
                 stream_edges: Vec::new(),
                 kernel_sha256: None,
                 network_mode: Default::default(),
                 ingress: Vec::new(),
-                vm_name: "vm-live",
+                vm_name,
                 tenant: Some("acme"),
                 backend_name: "firecracker",
-                image_name: "vm-live",
+                image_name: vm_name,
                 image_sha256: &sha,
                 image_cosign_bundle: None,
                 intent: None,
@@ -207,7 +208,6 @@ chain_signing = true
                 network_policy_ref: None,
                 fs_policy_ref: None,
                 egress_policy_ref: None,
-                tool_policy_ref: None,
                 secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
                 audit_event_prefix: None,
@@ -222,7 +222,6 @@ chain_signing = true
                 assets: Vec::new(),
                 redaction: mvm_core::policy::RedactionPolicy::default(),
                 reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-                tools: Default::default(),
                 caller_commitment: None,
                 audit_labels: Default::default(),
                 agent_verbs: None,
@@ -242,7 +241,6 @@ chain_signing = true
         .clone();
         plan.network_policy = PolicyRef("acme:vm-live".to_string());
         plan.egress_policy = PolicyRef("acme:vm-live".to_string());
-        plan.tool_policy = PolicyRef("acme:vm-live".to_string());
         plan.fs_policy = mvm_core::plan::FsPolicyRef("acme:vm-live".to_string());
 
         // Resolve policy, then construct the policy-derived emitter
@@ -271,7 +269,6 @@ chain_signing = true
 
     #[test]
     fn admission_uses_bundle_audit_file_destination() {
-        use mvm_core::plan::PolicyRef;
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let policy_dir = tempfile::tempdir().unwrap();
@@ -290,7 +287,6 @@ bundle_version = 1
 [network]
 [egress]
 [pii]
-[tool]
 [artifact]
 [keys]
 [audit]
@@ -308,6 +304,7 @@ stream_destinations = ["file://{}"]
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                mailbox: None,
                 outputs: Vec::new(),
                 grants: None,
                 stream_edges: Vec::new(),
@@ -325,7 +322,6 @@ stream_destinations = ["file://{}"]
                 network_policy_ref: None,
                 fs_policy_ref: None,
                 egress_policy_ref: None,
-                tool_policy_ref: None,
                 secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
                 audit_event_prefix: None,
@@ -340,7 +336,6 @@ stream_destinations = ["file://{}"]
                 assets: Vec::new(),
                 redaction: mvm_core::policy::RedactionPolicy::default(),
                 reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-                tools: Default::default(),
                 caller_commitment: None,
                 audit_labels: Default::default(),
                 agent_verbs: None,
@@ -360,7 +355,6 @@ stream_destinations = ["file://{}"]
         .clone();
         plan.network_policy = PolicyRef("acme:vm-stream".to_string());
         plan.egress_policy = PolicyRef("acme:vm-stream".to_string());
-        plan.tool_policy = PolicyRef("acme:vm-stream".to_string());
         plan.fs_policy = mvm_core::plan::FsPolicyRef("acme:vm-stream".to_string());
 
         let resolved = resolve_policy_for_admission(&plan, Some(policy_dir.path()))
@@ -393,7 +387,6 @@ stream_destinations = ["file://{}"]
 
     #[test]
     fn admission_audits_rejected_unsigned_policy_audit() {
-        use mvm_core::plan::PolicyRef;
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let policy_dir = tempfile::tempdir().unwrap();
@@ -409,7 +402,6 @@ bundle_version = 1
 [network]
 [egress]
 [pii]
-[tool]
 [artifact]
 [keys]
 [audit]
@@ -424,6 +416,7 @@ chain_signing = false
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                mailbox: None,
                 outputs: Vec::new(),
                 grants: None,
                 stream_edges: Vec::new(),
@@ -441,7 +434,6 @@ chain_signing = false
                 network_policy_ref: None,
                 fs_policy_ref: None,
                 egress_policy_ref: None,
-                tool_policy_ref: None,
                 secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
                 audit_event_prefix: None,
@@ -456,7 +448,6 @@ chain_signing = false
                 assets: Vec::new(),
                 redaction: mvm_core::policy::RedactionPolicy::default(),
                 reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-                tools: Default::default(),
                 caller_commitment: None,
                 audit_labels: Default::default(),
                 agent_verbs: None,
@@ -476,7 +467,6 @@ chain_signing = false
         .clone();
         plan.network_policy = PolicyRef("acme:vm-unsigned-audit".to_string());
         plan.egress_policy = PolicyRef("acme:vm-unsigned-audit".to_string());
-        plan.tool_policy = PolicyRef("acme:vm-unsigned-audit".to_string());
         plan.fs_policy = mvm_core::plan::FsPolicyRef("acme:vm-unsigned-audit".to_string());
 
         let resolved = resolve_policy_for_admission(&plan, Some(policy_dir.path()))
@@ -505,7 +495,6 @@ chain_signing = false
         // A plan whose refs name `acme:nope` but no bundle exists on
         // disk must fail admission with a typed `policy-bundle-not-found`
         // error and emit `plan.failed` with that class.
-        use mvm_core::plan::PolicyRef;
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let policy_dir = tempfile::tempdir().unwrap();
@@ -515,6 +504,7 @@ chain_signing = false
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                mailbox: None,
                 outputs: Vec::new(),
                 grants: None,
                 stream_edges: Vec::new(),
@@ -532,7 +522,6 @@ chain_signing = false
                 network_policy_ref: None,
                 fs_policy_ref: None,
                 egress_policy_ref: None,
-                tool_policy_ref: None,
                 secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
                 audit_event_prefix: None,
@@ -547,7 +536,6 @@ chain_signing = false
                 assets: Vec::new(),
                 redaction: mvm_core::policy::RedactionPolicy::default(),
                 reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-                tools: Default::default(),
                 caller_commitment: None,
                 audit_labels: Default::default(),
                 agent_verbs: None,
@@ -567,7 +555,6 @@ chain_signing = false
         .clone();
         plan.network_policy = PolicyRef("acme:nope".to_string());
         plan.egress_policy = PolicyRef("acme:nope".to_string());
-        plan.tool_policy = PolicyRef("acme:nope".to_string());
         plan.fs_policy = mvm_core::plan::FsPolicyRef("acme:nope".to_string());
 
         let err = resolve_policy_for_admission(&plan, Some(policy_dir.path()))
@@ -595,7 +582,6 @@ chain_signing = false
         // typo must fail admission with
         // `error_class=policy-egress-invalid` rather than silently
         // booting with the inspector still enforced.
-        use mvm_core::plan::PolicyRef;
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let policy_dir = tempfile::tempdir().unwrap();
@@ -612,7 +598,6 @@ bundle_version = 1
 [egress]
 disabled_inspectors = ["ssrf_guarrd"]
 [pii]
-[tool]
 [artifact]
 [keys]
 [audit]
@@ -626,6 +611,7 @@ disabled_inspectors = ["ssrf_guarrd"]
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                mailbox: None,
                 outputs: Vec::new(),
                 grants: None,
                 stream_edges: Vec::new(),
@@ -643,7 +629,6 @@ disabled_inspectors = ["ssrf_guarrd"]
                 network_policy_ref: None,
                 fs_policy_ref: None,
                 egress_policy_ref: None,
-                tool_policy_ref: None,
                 secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
                 audit_event_prefix: None,
@@ -658,7 +643,6 @@ disabled_inspectors = ["ssrf_guarrd"]
                 assets: Vec::new(),
                 redaction: mvm_core::policy::RedactionPolicy::default(),
                 reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-                tools: Default::default(),
                 caller_commitment: None,
                 audit_labels: Default::default(),
                 agent_verbs: None,
@@ -678,7 +662,6 @@ disabled_inspectors = ["ssrf_guarrd"]
         .clone();
         plan.network_policy = PolicyRef("acme:vm-typo".to_string());
         plan.egress_policy = PolicyRef("acme:vm-typo".to_string());
-        plan.tool_policy = PolicyRef("acme:vm-typo".to_string());
         plan.fs_policy = mvm_core::plan::FsPolicyRef("acme:vm-typo".to_string());
 
         let err = resolve_policy_for_admission(&plan, Some(policy_dir.path()))
@@ -706,7 +689,6 @@ disabled_inspectors = ["ssrf_guarrd"]
         // unparseable `dst_cidr` must fail admission with
         // `policy-l4-spec-invalid`. Same hermetic shape as the
         // missing-bundle test.
-        use mvm_core::plan::PolicyRef;
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let policy_dir = tempfile::tempdir().unwrap();
@@ -729,7 +711,6 @@ port_hi  = 443
 
 [egress]
 [pii]
-[tool]
 [artifact]
 [keys]
 [audit]
@@ -743,6 +724,7 @@ port_hi  = 443
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                mailbox: None,
                 outputs: Vec::new(),
                 grants: None,
                 stream_edges: Vec::new(),
@@ -760,7 +742,6 @@ port_hi  = 443
                 network_policy_ref: None,
                 fs_policy_ref: None,
                 egress_policy_ref: None,
-                tool_policy_ref: None,
                 secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
                 audit_event_prefix: None,
@@ -775,7 +756,6 @@ port_hi  = 443
                 assets: Vec::new(),
                 redaction: mvm_core::policy::RedactionPolicy::default(),
                 reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-                tools: Default::default(),
                 caller_commitment: None,
                 audit_labels: Default::default(),
                 agent_verbs: None,
@@ -795,7 +775,6 @@ port_hi  = 443
         .clone();
         plan.network_policy = PolicyRef("acme:vm-bad".to_string());
         plan.egress_policy = PolicyRef("acme:vm-bad".to_string());
-        plan.tool_policy = PolicyRef("acme:vm-bad".to_string());
         plan.fs_policy = mvm_core::plan::FsPolicyRef("acme:vm-bad".to_string());
 
         let err = resolve_policy_for_admission(&plan, Some(policy_dir.path()))

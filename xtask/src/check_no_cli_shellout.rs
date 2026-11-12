@@ -205,7 +205,7 @@ const RUST: &[Needle] = &[
 
 /// What the client is held to: it may spawn role helpers, never the CLI.
 const CLI_ONLY: &[Needle] = &[Needle {
-    pattern: r"\b(Command::new|helper_command\w*)\s*\(\s*[^)]*mvmctl",
+    pattern: r"(?s)\b(Command\s*::\s*new|helper_command\w*)\s*\([^;{}]*mvmctl",
     why: "runs the CLI",
 }];
 
@@ -260,6 +260,14 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
     let mut findings = Vec::new();
     for surface in SURFACES {
         findings.extend(scan_surface(workspace, surface)?);
+    }
+    let structural = crate::cli_self_reach::findings(workspace)?;
+    if !structural.is_empty() {
+        bail!(
+            "check-no-cli-shellout: {} library path(s) that could run the CLI:\n  {}",
+            structural.len(),
+            structural.join("\n  ")
+        );
     }
     if findings.is_empty() {
         println!(
@@ -343,18 +351,24 @@ fn collect(dir: &Path, extensions: &[&str], out: &mut Vec<PathBuf>) -> Result<()
 fn scan_text(path: &Path, text: &str, lang: Lang, cli_only: bool) -> Vec<Finding> {
     let code = strip_comments(text, lang);
     let mut findings = Vec::new();
-    for (index, line) in code.lines().enumerate() {
-        for (pattern, why) in compiled(lang, cli_only) {
-            if let Some(m) = pattern.find(line) {
-                findings.push(Finding {
-                    path: path.to_path_buf(),
-                    line: index + 1,
-                    matched: m.as_str().to_string(),
-                    why,
-                });
+    // Whole-text, not per line: rustfmt wraps a long constructor argument.
+    for (pattern, why) in compiled(lang, cli_only) {
+        let mut last_line = 0;
+        for m in pattern.find_iter(&code) {
+            let line = code[..m.start()].matches('\n').count() + 1;
+            if line == last_line {
+                continue;
             }
+            last_line = line;
+            findings.push(Finding {
+                path: path.to_path_buf(),
+                line,
+                matched: m.as_str().lines().next().unwrap_or_default().to_string(),
+                why,
+            });
         }
     }
+    findings.sort_by_key(|f| f.line);
     findings
 }
 
@@ -511,6 +525,30 @@ mod tests {
 
     fn failure(root: &Path) -> String {
         format!("{:#}", run(root).expect_err("the gate must fail"))
+    }
+
+    #[test]
+    fn a_wrapped_or_nested_client_constructor_naming_the_cli_is_flagged() {
+        for body in [
+            "fn f() {\n    Command::new(\n        bin_dir.join(\"mvmctl\"),\n    );\n}\n",
+            "fn f() { Command::new(dir(x).join(\"mvmctl\")); }\n",
+            "fn f() { std::process::Command :: new(\"mvmctl\"); }\n",
+        ] {
+            let tmp = clean_workspace();
+            write(tmp.path(), "crates/mvm-client/src/x.rs", body);
+            assert!(run(tmp.path()).is_err(), "not flagged: {body}");
+        }
+    }
+
+    #[test]
+    fn a_client_spawn_of_another_helper_next_to_a_later_mvmctl_mention_passes() {
+        let tmp = clean_workspace();
+        write(
+            tmp.path(),
+            "crates/mvm-client/src/x.rs",
+            "fn f() { Command::new(\"op\"); }\nfn g() { let _ = \"mvmctl\"; }\n",
+        );
+        run(tmp.path()).expect("statement-bounded");
     }
 
     #[test]

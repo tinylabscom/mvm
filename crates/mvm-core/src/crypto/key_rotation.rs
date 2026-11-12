@@ -45,7 +45,6 @@ use rand::Rng;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 
 use crate::domain::volume::{MasterKeyRef, MasterKeyState, OrgId, WrapAlgorithm, WrappedKey};
 use anyhow::{Context, Result};
@@ -349,21 +348,34 @@ pub fn rotate_luks_slot(device: &Path, old_pass: &[u8], new_pass: &[u8]) -> Resu
     let new_file = write_secret_tempfile(new_pass)?;
 
     // cryptsetup luksChangeKey <device> [<new key file>] --key-file <old>
-    let output = crate::env_hygiene::helper_command("cryptsetup")
-        .arg("luksChangeKey")
+    let mut cmd = crate::env_hygiene::helper_command("cryptsetup");
+    cmd.arg("luksChangeKey")
         .arg(device)
         .arg(new_file.path())
         .arg("--key-file")
-        .arg(old_file.path())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .with_context(|| format!("invoking cryptsetup on {}", device.display()))?;
+        .arg(old_file.path());
+    run_change_key(cmd, device, CHANGE_KEY_BOUNDS)
+}
+
+/// Wall-clock limit and capture caps for `luksChangeKey` (key derivation is
+/// the slow part).
+const CHANGE_KEY_BOUNDS: crate::bounded_run::RunBounds =
+    crate::bounded_run::RunBounds::new(std::time::Duration::from_secs(5 * 60), 64 * 1024);
+
+fn run_change_key(
+    cmd: std::process::Command,
+    device: &Path,
+    bounds: crate::bounded_run::RunBounds,
+) -> Result<()> {
+    let output = crate::bounded_run::run_bounded(cmd, bounds)
+        .map_err(|e| anyhow::anyhow!("invoking cryptsetup on {}: {e}", device.display()))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         return Err(RotationError::Cryptsetup {
-            message: format!("luksChangeKey exited {}: {}", output.status, stderr.trim()),
+            message: format!(
+                "luksChangeKey exited {}: {}",
+                output.status,
+                crate::bounded_run::excerpt(&output.stderr, 1000)
+            ),
         }
         .into());
     }
@@ -457,6 +469,43 @@ mod tests {
     use rand::{Rng, RngExt};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[cfg(unix)]
+    fn fake_cryptsetup(dir: &tempfile::TempDir, body: &str) -> std::process::Command {
+        let path = dir.path().join("fake-cryptsetup");
+        crate::bounded_run::test_support::write_executable_script(&path, body);
+        crate::env_hygiene::helper_command(path)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hung_change_key_is_a_typed_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let bounds =
+            crate::bounded_run::RunBounds::new(std::time::Duration::from_millis(200), 1024);
+        let err = run_change_key(
+            fake_cryptsetup(&dir, "exec sleep 30"),
+            Path::new("/dev/x"),
+            bounds,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("did not finish within"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_chatty_failing_change_key_yields_a_capped_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = fake_cryptsetup(&dir, "head -c 10485760 /dev/zero | tr '\\0' k >&2; exit 2");
+        let err = run_change_key(cmd, Path::new("/dev/x"), CHANGE_KEY_BOUNDS).unwrap_err();
+        let text = err.to_string();
+        assert!(matches!(
+            err.downcast_ref::<RotationError>(),
+            Some(RotationError::Cryptsetup { .. })
+        ));
+        assert!(text.len() < 4 * 1024, "{}", text.len());
+        assert!(text.contains(crate::bounded_run::TRUNCATED_MARK));
+    }
 
     fn random_master_key() -> [u8; MASTER_KEY_BYTES] {
         let mut k = [0u8; MASTER_KEY_BYTES];

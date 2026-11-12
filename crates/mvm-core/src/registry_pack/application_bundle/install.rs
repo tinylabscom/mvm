@@ -129,7 +129,7 @@ pub(super) fn install_with_loader(
     // Retain bundle exclusion through the reference commit, not just extraction.
     // Every cooperating installer and remover takes this same entry lease.
     let installed = registry.install_leased_file(candidate.archive_path(), trust, true)?;
-    sync_bundle_content(&registry, &installed.bundle, application)?;
+    sync_bundle_content(&registry, &installed.bundle)?;
     let descriptor_root = publish_descriptor(&store.descriptor_cache_root, application)?;
     authenticate(application, &lock, &load_policy()?, check_signature)?;
     check_revocations(application)?;
@@ -184,7 +184,6 @@ fn authenticate(
 fn sync_bundle_content(
     registry: &BundleRegistry,
     bundle: &InstalledBundle,
-    application: &VerifiedRegistryApplication,
 ) -> Result<(), ApplicationBundleError> {
     let mut directories = std::collections::BTreeSet::new();
     for artifact in &bundle.manifest.artifacts {
@@ -211,11 +210,9 @@ fn sync_bundle_content(
         super::super::local_input::sync_directory(directory)?;
     }
     super::super::local_input::sync_directory(&bundle.root)?;
-    super::super::local_input::open_sized_regular(
-        &registry.archive_path(&bundle.sha256),
-        application.manifest().application.bundle.archive_size,
-    )?
-    .sync_all()?;
+    let archive = registry.archive_path(&bundle.sha256);
+    let size = std::fs::symlink_metadata(&archive)?.len();
+    super::super::local_input::open_sized_regular(&archive, size)?.sync_all()?;
     crate::private_fs::sync_managed_directory_chain(registry.root(), registry.root())?;
     Ok(())
 }

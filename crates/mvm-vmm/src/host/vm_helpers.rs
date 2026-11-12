@@ -10,6 +10,9 @@
 
 use std::path::Path;
 
+/// Per-VM file recording the guest mailbox process's pid, inside the VM state dir.
+pub const MAILBOX_PID_FILE: &str = "mailbox.pid";
+
 /// Release every host-side helper recorded in `state_dir` for `vm_name`.
 ///
 /// Best-effort and idempotent: each helper that was never started, or has
@@ -20,6 +23,14 @@ pub fn reap_vm_host_helpers(state_dir: &Path, vm_name: &str) {
     super::gpu_endpoint_spawn::reap_gpu_endpoint(state_dir);
     super::broker_services_spawn::reap_broker_services(state_dir);
     super::host_agent_spawn::reap_host_agent_services_from_state(state_dir, vm_name);
+    super::gpu_endpoint_spawn::reap_pid_file(&state_dir.join(MAILBOX_PID_FILE));
+    // The mailbox's per-epoch secret goes with its process: after this, the
+    // sealed frames of this launch cannot be reopened from the host seed alone.
+    if let Err(error) =
+        mvm_core::atomic_io::shred_file(&mvm_core::config::vm_mailbox_secret_at(state_dir))
+    {
+        tracing::warn!(vm = %vm_name, %error, "shredding the mailbox epoch secret failed");
+    }
 }
 
 #[cfg(test)]
@@ -31,6 +42,36 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         reap_vm_host_helpers(dir.path(), "vm-plain");
         reap_vm_host_helpers(dir.path(), "vm-plain");
+    }
+
+    #[test]
+    fn the_mailbox_process_a_vm_started_is_stopped_and_forgotten() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut mailbox = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn a stand-in mailbox process");
+        let pid_file = dir.path().join(MAILBOX_PID_FILE);
+        std::fs::write(&pid_file, mailbox.id().to_string()).expect("record its pid");
+
+        reap_vm_host_helpers(dir.path(), "vm-with-mailbox");
+
+        assert!(!mailbox.wait().expect("reaped").success());
+        assert!(!pid_file.exists());
+    }
+
+    #[test]
+    fn the_mailbox_epoch_secret_is_shredded_when_the_vm_is_reaped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secret = mvm_core::config::vm_mailbox_secret_at(dir.path());
+        mvm_core::atomic_io::write_private(&secret, &[7; 32]).expect("write");
+        let alias = dir.path().join("alias");
+        std::fs::hard_link(&secret, &alias).expect("link");
+
+        reap_vm_host_helpers(dir.path(), "vm-with-secret");
+
+        assert!(!secret.exists());
+        assert_eq!(std::fs::read(&alias).expect("read"), vec![0u8; 32]);
     }
 
     #[test]

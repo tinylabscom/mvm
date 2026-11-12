@@ -16,8 +16,9 @@ use libkrun_sys::{BridgeRestartPolicy, KrunContext, SupervisorConfig};
 use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT};
 use mvm_core::config::{vm_libkrun_pid, vm_state_dir, vm_vsock_port_socket_at};
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
-    ResourceControls, SnapshotCapability, VmCapabilities, VmExitStatus, VmId, VmStatus,
+    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, HostDialRoute,
+    LayerCoverage, ResourceControls, SnapshotCapability, VmCapabilities, VmExitStatus, VmId,
+    VmStatus,
 };
 use mvm_net::channel::GuestService;
 
@@ -401,6 +402,12 @@ impl VmmDriver for LibkrunDriver {
         Ok(libkrun_sys::is_available())
     }
 
+    fn host_dial_route(&self, state_dir: &Path, port: u32) -> Option<HostDialRoute> {
+        Some(HostDialRoute::PortSocket(vm_vsock_port_socket_at(
+            state_dir, port,
+        )))
+    }
+
     fn capabilities(&self) -> VmCapabilities {
         // 255: libkrun's C API takes the count as a `u8`, and this driver
         // already clamps to that range before the call. Declaring it here means
@@ -434,6 +441,9 @@ impl VmmDriver for LibkrunDriver {
             // GPU remoting is a per-port vsock channel plus a host process;
             // libkrun terminates vsock exactly like the other VMM tiers.
             gpu: true,
+            // A host-dialed port is bound by libkrun at the flat per-port
+            // socket `host_dial_route` names, the mailbox port included.
+            guest_mailbox: true,
 
             tap_networking: false,
             // Stronger than the field name asks for: the guest has no NIC at
@@ -509,9 +519,14 @@ impl VmmDriver for LibkrunDriver {
     fn boot_custodied(
         &self,
         spec: &VmmSpec,
-        kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
-        disks: mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
+        files: mvm_vmm::driver::prepared_disks::PreparedBootFiles<'_>,
     ) -> Result<Box<dyn RunningVm>> {
+        files.require_no_data()?;
+        let mvm_vmm::driver::prepared_disks::PreparedBootFiles {
+            kernel,
+            writable: disks,
+            ..
+        } = files;
         anyhow::ensure!(
             kernel.is_none(),
             "libkrun does not support verified kernel descriptor handoff"
@@ -675,6 +690,7 @@ mod tests {
         assert!(!capabilities.standby_pool);
         assert!(capabilities.vsock);
         assert!(capabilities.gpu);
+        assert!(capabilities.guest_mailbox);
         assert!(!capabilities.tap_networking);
         assert!(capabilities.no_routable_guest_nic);
         assert!(capabilities.host_vsock_proxy);

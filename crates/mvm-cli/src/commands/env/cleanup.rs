@@ -426,9 +426,8 @@ fn selective_plan(data_root: &Path, cache_root: &Path, tier: Tier) -> CleanupPla
 /// The `--nuclear` plan: every entry under the mvm root, minus the
 /// identity material `--keep-identity` spares. The root directory
 /// itself survives so its 0700 mode cannot be re-established wrong by
-/// whichever command next writes under it. That used to name a helper
-/// which nothing called, so the re-establishment it described never
-/// happened; `mvm_core::config::create_private_dir` is what performs it
+/// whichever command next writes under it. Naming a helper nothing calls
+/// would leave the re-establishment undone; `mvm_core::config::create_private_dir` is what performs it
 /// now, on the whole chain, from any writer.
 ///
 /// This is deliberately defined by subtraction. The enumerated version
@@ -883,6 +882,21 @@ mod tests {
                 "`{marker}` must read as running",
             );
         }
+    }
+
+    /// The libkrun supervisor records its start time beside its pid.
+    #[test]
+    fn running_vm_guard_sees_a_marker_that_records_its_start_time() {
+        let vms = tempdir().unwrap();
+        let dir = vms.path().join("web");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("libkrun.pid"),
+            mvm_vmm::host::network_endpoint_spawn::EndpointPid::of_child(std::process::id())
+                .render(),
+        )
+        .unwrap();
+        assert_eq!(first_running_vm_at(vms.path()).as_deref(), Some("web"));
     }
 
     #[test]

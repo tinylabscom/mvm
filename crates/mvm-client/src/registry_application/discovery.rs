@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result, bail};
 use mvm_core::packs::Sha256Hex;
-use mvm_core::registry_pack::{PackReference, local_input};
+use mvm_core::registry_pack::{PackPin, PackReference, local_input};
 use serde::Deserialize;
 
 pub const PACK_REGISTRY_ENV: &str = "MVM_PACK_REGISTRY";
@@ -46,6 +46,32 @@ pub struct PackIndexEntry {
 pub struct PackIndexVersion {
     pub version: String,
     pub manifest_sha256: Sha256Hex,
+    /// Aliases for this exact version (`latest`). Display and ordering hints
+    /// only: a tag never selects a digest, the signed manifest does.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Guest architecture the version was built for, in `GuestArch` spelling.
+    #[serde(default)]
+    pub guest_arch: Option<String>,
+    /// Size in bytes of the version's bundle archive, as advertised.
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+}
+
+impl PackIndexVersion {
+    /// Advertised guest platform, e.g. `linux/aarch64`; `None` for an index
+    /// that predates the field.
+    pub fn platform(&self) -> Option<String> {
+        self.guest_arch.as_ref().map(|arch| format!("linux/{arch}"))
+    }
+
+    /// Whether the version can run on `host_arch`; an unadvertised
+    /// architecture is not a mismatch.
+    pub fn runs_on(&self, host_arch: &str) -> bool {
+        self.guest_arch
+            .as_deref()
+            .is_none_or(|arch| arch == host_arch)
+    }
 }
 
 impl PackIndexEntry {
@@ -91,12 +117,18 @@ fn parse_index(text: &str, url: &str) -> Result<Vec<PackIndexEntry>> {
             bail!("pack {coordinate} publishes no versions");
         }
         let mut versions = std::collections::BTreeSet::new();
+        let mut tags = std::collections::BTreeSet::new();
         for version in &entry.versions {
             let _: PackReference = format!("{coordinate}@{}", version.version)
                 .parse()
                 .context("invalid catalog version")?;
             if !versions.insert(&version.version) {
                 bail!("duplicate catalog version {coordinate}@{}", version.version);
+            }
+            for tag in &version.tags {
+                if !tags.insert(tag) {
+                    bail!("catalog tag {tag:?} of {coordinate} names more than one version");
+                }
             }
         }
     }
@@ -120,6 +152,69 @@ pub fn search_index<'a>(
 }
 
 pub fn resolve_version(entry: &PackIndexEntry, requested: &PackReference) -> Result<PackReference> {
+    resolve_matching(entry, requested, |_| true)
+}
+
+/// Like [`resolve_version`], but an unpinned request takes the highest version
+/// that runs on `host_arch`. When none does it falls back to the highest
+/// version overall so the caller can warn instead of failing to resolve.
+pub fn resolve_version_for_arch(
+    entry: &PackIndexEntry,
+    requested: &PackReference,
+    host_arch: &str,
+) -> Result<PackReference> {
+    resolve_matching(entry, requested, |version| version.runs_on(host_arch))
+        .or_else(|_| resolve_version(entry, requested))
+}
+
+/// Resolve a build-only runtime to an exact version and manifest digest for one guest arch.
+///
+/// Unlike display-oriented discovery, production resolution never falls back to
+/// another architecture or an entry whose architecture is absent. The signed
+/// manifest must independently confirm the returned pin and guest architecture.
+pub fn resolve_runtime_layer_pin(
+    entry: &PackIndexEntry,
+    requested: &PackReference,
+    guest_arch: &str,
+) -> Result<PackPin> {
+    if requested.namespace() != "runtime"
+        || !matches!(guest_arch, "x86_64" | "aarch64")
+        || entry.namespace != requested.namespace()
+        || entry.name != requested.name()
+    {
+        bail!("runtime layer coordinate or guest architecture is invalid");
+    }
+    let eligible: Vec<_> = entry
+        .versions
+        .iter()
+        .filter(|version| version.guest_arch.as_deref() == Some(guest_arch))
+        .cloned()
+        .collect();
+    if eligible.is_empty() {
+        bail!("no runtime layer for {guest_arch} is advertised");
+    }
+    let selected = PackIndexEntry {
+        namespace: entry.namespace.clone(),
+        name: entry.name.clone(),
+        description: entry.description.clone(),
+        versions: eligible,
+    };
+    let reference = resolve_version(&selected, requested)?;
+    let digest = selected
+        .versions
+        .iter()
+        .find(|version| Some(version.version.as_str()) == reference.version().map(|v| v.as_str()))
+        .context("resolved runtime layer has no manifest digest")?
+        .manifest_sha256
+        .clone();
+    PackPin::new(reference, digest).context("invalid pinned runtime layer")
+}
+
+fn resolve_matching(
+    entry: &PackIndexEntry,
+    requested: &PackReference,
+    eligible: impl Fn(&PackIndexVersion) -> bool,
+) -> Result<PackReference> {
     if entry.namespace != requested.namespace() || entry.name != requested.name() {
         bail!("catalog coordinate does not match requested pack {requested}");
     }
@@ -154,6 +249,7 @@ pub fn resolve_version(entry: &PackIndexEntry, requested: &PackReference) -> Res
         }
         None => versions
             .iter()
+            .filter(|published| eligible(published))
             .filter_map(|published| {
                 released(&published.version).map(|version| (version, &published.version))
             })
@@ -319,6 +415,92 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    fn with_versions(versions: serde_json::Value) -> serde_json::Value {
+        let mut value = catalog();
+        value["packs"][0]["versions"] = versions;
+        value
+    }
+
+    #[test]
+    fn tags_platform_and_size_parse_and_old_entries_default() {
+        let index = parse(&with_versions(serde_json::json!([
+            {"version":"1.2.3", "manifest_sha256":"a".repeat(64)},
+            {"version":"1.3.0", "manifest_sha256":"b".repeat(64),
+             "tags":["latest"], "guest_arch":"aarch64", "size_bytes": 7}
+        ])))
+        .unwrap();
+        let (old, new) = (&index[0].versions[0], &index[0].versions[1]);
+        assert!(old.tags.is_empty() && old.platform().is_none() && old.size_bytes.is_none());
+        assert!(old.runs_on("x86_64"));
+        assert_eq!(new.tags, ["latest"]);
+        assert_eq!(new.platform().as_deref(), Some("linux/aarch64"));
+        assert_eq!((new.size_bytes, new.runs_on("x86_64")), (Some(7), false));
+    }
+
+    #[test]
+    fn a_tag_naming_two_versions_is_refused() {
+        let value = with_versions(serde_json::json!([
+            {"version":"1.2.3", "manifest_sha256":"a".repeat(64), "tags":["latest"]},
+            {"version":"1.3.0", "manifest_sha256":"b".repeat(64), "tags":["latest"]}
+        ]));
+        assert!(parse(&value).is_err());
+    }
+
+    #[test]
+    fn unpinned_resolution_prefers_the_host_arch_and_ignores_tags() {
+        let index = parse(&with_versions(serde_json::json!([
+            {"version":"1.0.0", "manifest_sha256":"a".repeat(64), "guest_arch":"x86_64",
+             "tags":["latest"]},
+            {"version":"2.0.0", "manifest_sha256":"b".repeat(64), "guest_arch":"aarch64"}
+        ])))
+        .unwrap();
+        let request = "runtime/python".parse().unwrap();
+        let pick = |arch| resolve_version_for_arch(&index[0], &request, arch).unwrap();
+        assert_eq!(pick("x86_64").to_string(), "runtime/python@1.0.0");
+        assert_eq!(pick("aarch64").to_string(), "runtime/python@2.0.0");
+        // No version runs here: still resolves so the caller can warn.
+        assert_eq!(pick("riscv64").to_string(), "runtime/python@2.0.0");
+        // The index tag does not override the semantic ordering.
+        assert_eq!(
+            resolve_version(&index[0], &request).unwrap().to_string(),
+            "runtime/python@2.0.0"
+        );
+    }
+
+    #[test]
+    fn production_runtime_resolution_requires_exact_arch_and_digest() {
+        let index = parse(&with_versions(serde_json::json!([
+            {"version":"1.2.0", "manifest_sha256":"a".repeat(64), "guest_arch":"x86_64"},
+            {"version":"1.3.0", "manifest_sha256":"b".repeat(64), "guest_arch":"aarch64"},
+            {"version":"9.0.0", "manifest_sha256":"c".repeat(64)}
+        ])))
+        .unwrap();
+        let entry = &index[0];
+        let request = "runtime/python".parse().unwrap();
+        let pin = resolve_runtime_layer_pin(entry, &request, "x86_64").unwrap();
+        assert_eq!(pin.reference().to_string(), "runtime/python@1.2.0");
+        assert_eq!(pin.manifest_sha256().as_str(), "a".repeat(64));
+        let arm = resolve_runtime_layer_pin(entry, &request, "aarch64").unwrap();
+        assert_eq!(arm.reference().to_string(), "runtime/python@1.3.0");
+        assert_eq!(arm.manifest_sha256().as_str(), "b".repeat(64));
+        for (requested, arch) in [
+            ("runtime/python@1.3.0", "x86_64"),
+            ("runtime/python@9.0.0", "aarch64"),
+            ("agent/python", "aarch64"),
+            ("runtime/python", "riscv64"),
+        ] {
+            assert!(
+                resolve_runtime_layer_pin(entry, &requested.parse().unwrap(), arch).is_err(),
+                "{requested} must not select {arch}"
+            );
+        }
+        let mut missing = entry.clone();
+        missing
+            .versions
+            .retain(|version| version.guest_arch.as_deref() != Some("aarch64"));
+        assert!(resolve_runtime_layer_pin(&missing, &request, "aarch64").is_err());
     }
 
     #[test]

@@ -86,7 +86,7 @@ allowed to run inside those layers at all.
 | #   | Claim                                                                      | Defends layer            | How it's enforced                                                                                                                                        |
 | --- | -------------------------------------------------------------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1   | No host-fs access from a guest beyond explicit shares                      | L2 / L5                  | Per-service uid + the admitted seccomp tier on every workload process + setpriv bounding-set drop; user-volume allow-list defaulting to read-only        |
-| 2   | No guest binary can elevate to uid 0                                       | L2 / L4                  | `setpriv --no-new-privs` in launch path; `/etc/{passwd,group}` are read-only bind-mounts                                                                 |
+| 2   | No guest binary can elevate to uid 0                                       | L2 / L4                  | `setpriv --no-new-privs` in launch path; the rootfs is a read-only dm-verity mount; only the pre-drop provisioner writes passwd, and it appends a non-root entry                                                               |
 | 3   | A tampered rootfs ext4 fails to boot                                       | L3                       | dm-verity sidecar + roothash on cmdline + a verity-aware initramfs owning the boot pivot                                                                 |
 | 4   | A production-safe run cannot invoke DevOnly guest-agent verbs              | L4                       | Runtime profile + signed `VerbGrant` intersection; grant and conformance tests enforce the full DevOnly set                                              |
 | 5   | Vsock framing, supervisor-config JSON, and the datapath ingress are fuzzed | L2 / L4                  | `cargo-fuzz` targets over the host↔guest messages, the supervisor config parser, and the userspace datapath ingress; `deny_unknown_fields` on every type |
@@ -117,7 +117,7 @@ The plan now carries an `admission_profile`: a compact record of the workload's 
 
 - intent, for example `vm:boot`, `code:execute`, or `agent:web-research`
 - seccomp tier selected for the run
-- network, filesystem, egress, and tool policy refs
+- network, filesystem, and egress policy refs
 - secret-release posture (`none`, plan-bound, or attestation-bound)
 - audit taxonomy and required labels
 

@@ -29,7 +29,6 @@
 //!
 //! `host.cost.v1` and `broker.v1` remain unregistered.
 
-use std::io::Read;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -40,19 +39,9 @@ use mvm_hostd::broker::audit_client::AuditClient;
 use mvm_hostd::broker::config::{SubprocessConfig, parse as parse_config};
 use mvm_hostd::broker::handlers::host_audit_v1::HostAuditV1Handler;
 use mvm_hostd::broker::handlers::host_beacon_v1::HostBeaconV1Handler;
-use mvm_hostd::broker::handlers::host_tool_v1::HostToolV1Handler;
 use mvm_hostd::broker::handlers::register_bound_handlers;
 use mvm_hostd::broker::registry::Registry;
 use mvm_hostd::broker::server::serve_on_listener;
-
-fn read_stdin_blocking() -> Result<Vec<u8>> {
-    let mut buf = Vec::with_capacity(4096);
-    std::io::stdin()
-        .lock()
-        .read_to_end(&mut buf)
-        .context("mvm-broker stdin read failed")?;
-    Ok(buf)
-}
 
 fn main() -> Result<()> {
     // First statement in the process: a panic before this line would
@@ -72,7 +61,7 @@ fn main() -> Result<()> {
         .json()
         .init();
 
-    let raw = read_stdin_blocking()?;
+    let raw = mvm_hostd::read_launch_config("mvm-broker")?;
     let cfg: SubprocessConfig = parse_config(&raw).context("mvm-broker config parse failed")?;
     info!(
         workload_id = %cfg.workload_id,
@@ -128,7 +117,6 @@ fn main() -> Result<()> {
 fn register_handlers(registry: &mut Registry, cfg: &SubprocessConfig) {
     let _bound = register_bound_handlers(registry, &cfg.services_bindings);
     register_beacon(registry, cfg);
-    register_tool_decisions(registry, cfg);
     let host_audit = mvm_core::protocol::broker::ServiceId::parse("host.audit.v1")
         .expect("host.audit.v1 is a valid ServiceId");
     if !cfg.services_bindings.contains(&host_audit) {
@@ -153,39 +141,6 @@ fn register_handlers(registry: &mut Registry, cfg: &SubprocessConfig) {
             warn!(
                 "host.audit.v1 NOT registered: SubprocessConfig.audit_signer_uds_path missing; \
                  calls will return NotBound"
-            );
-        }
-    }
-}
-
-/// Register `host.tool.v1` when the plan binds it and the endpoint's
-/// connector socket is known.
-///
-/// The connector socket exists only when the per-VM network endpoint (with
-/// its decision gate and chain recorder) was spawned; when either side is
-/// absent the service stays unregistered and guest tool questions fail with
-/// `NotBound`, which the guest helper treats as a denial. Registration is
-/// also gated on the signed service binding, so an unadmitted plan cannot
-/// reach the endpoint's gate through this handler.
-fn register_tool_decisions(registry: &mut Registry, cfg: &SubprocessConfig) {
-    let host_tool = mvm_core::protocol::broker::ServiceId::parse(
-        mvm_core::protocol::host_tool::HOST_TOOL_SERVICE,
-    )
-    .expect("host.tool.v1 is a valid ServiceId");
-    if !cfg.services_bindings.contains(&host_tool) {
-        return;
-    }
-    match &cfg.tool_decision_socket {
-        Some(path) => {
-            registry.register(Arc::new(HostToolV1Handler::new(path.clone())));
-            info!(
-                tool_decision_socket = %path.display(),
-                "host.tool.v1 handler registered"
-            );
-        }
-        None => {
-            warn!(
-                "host.tool.v1 NOT registered: SubprocessConfig.tool_decision_socket                  missing; guest tool questions will return NotBound"
             );
         }
     }

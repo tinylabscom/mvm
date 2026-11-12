@@ -83,27 +83,24 @@ test("Claude Code client guide keeps the MCP and guest boundaries distinct", () 
   assert.match(guide, /mvmctl ops mcp stdio/);
   assert.match(guide, /CLAUDE_PROJECT_DIR/);
   assert.match(guide, /does \*\*not\*\* confine Claude Code's own/);
-  assert.match(guide, /Without any `\[tools\]`\s+section, the MCP adapter has no tool gate/);
-  assert.match(guide, /not a substitute for the chain-signed audit/);
+  assert.match(guide, /old project policy containing `\[tools\]` refuses MCP startup/);
+  assert.match(guide, /does not apply a per-tool policy/);
+  assert.match(guide, /chain-signed audit/);
 });
 
-// A profile takes its own policy under `[overrides]`; a top-level `[tools]`
-// table is the group form and does not parse there. A guide that shows the
-// group form for a file named by `[policy] profile` documents a server that
-// refuses to start.
 const readGuide = (name) =>
   readFileSync(path.join(repo, "public/src/content/docs/guides", name), "utf8");
 
 for (const name of ["claude-code-mcp.md", "opencode-agent.md", "goose-agent.md"]) {
-  test(`${name} writes the MCP tool policy in the profile form`, () => {
+  test(`${name} refuses retired tool policy without claiming an MCP tool gate`, () => {
     const guide = readGuide(name);
 
-    assert.match(guide, /\[overrides\.tools\]\nallow = \["mvm\.machine\.list"\]/);
+    assert.doesNotMatch(guide, /\[overrides\.tools\]/);
     assert.doesNotMatch(guide, /^\[tools\]$/m);
-    assert.match(guide, /profile = "\.\/policy\/mcp-readonly\.toml"/);
-    assert.match(guide, /mvmctl ops mcp stdio/);
-    assert.match(guide, /Without any `\[tools\]`\s+section, the MCP adapter has no tool gate/);
-    assert.match(guide, /not a substitute for the chain-signed audit/);
+    assert.match(guide, /mvmctl ops mcp stdio|"mvmctl", "ops", "mcp", "stdio"/);
+    assert.match(guide, /old project policy containing `\[tools\]` refuses MCP startup/i);
+    assert.match(guide, /chain-signed audit/);
+    assert.doesNotMatch(guide, /tool rule says `ask`|local tool-gate audit/);
   });
 }
 

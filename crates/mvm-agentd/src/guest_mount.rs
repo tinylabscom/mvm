@@ -17,32 +17,6 @@ use crate::vsock::{RootfsConfig, RuntimeOverlayConfig};
 pub const WORKLOAD_UID: u32 = 901;
 /// Fixed group used by the guest agent and workload command runner.
 pub const WORKLOAD_GID: u32 = 901;
-/// Group a host-bound tool invocation runs in.
-///
-/// The agent holds it as its saved gid and nothing else does: `execve` resets
-/// every workload process's saved gid to its effective gid, so no workload
-/// process can reach it. A tool invocation switches all three of its gids to
-/// it before exec. The kernel's ptrace access check requires the caller's gid
-/// to equal the target's real, effective and saved gids, so a workload
-/// process — same uid, different gid — cannot attach to the tool, read or
-/// write its memory through `process_vm_*` or `/proc/<pid>/mem`, or take its
-/// descriptors with `pidfd_getfd`.
-pub const TOOL_GID: u32 = 907;
-
-/// Fixed user a host-bound tool invocation runs as.
-///
-/// Chosen by the tool helper at spawn: the helper holds `CAP_SETUID` and
-/// `CAP_SETGID` for exactly this transition, and no workload process holds
-/// either. Where the group boundary ([`TOOL_GID`]) already refuses ptrace and
-/// descriptor theft, the distinct user additionally refuses signals from the
-/// workload (a same-uid `kill` is allowed; a cross-uid one is not) and keeps
-/// files the tool creates out of the workload's ownership. The guest agent
-/// cannot set this user — it is not root after the drop — so host-initiated
-/// `MediatedExec` children keep running as the workload user with only the
-/// tool group changed; both paths are recorded against the same attribution
-/// session either way.
-pub const TOOL_UID: u32 = 902;
-
 /// Home directory used by workload processes.
 ///
 /// The workload root is mounted read-only, so this is a *mount point*: image
@@ -57,18 +31,9 @@ pub const WORKLOAD_HOME_REL: &str = "home/mvm-worker";
 pub const WORKLOAD_HOME_FALLBACK: &str = "/tmp";
 
 pub const CAP_KILL: u32 = mvm_setpriv::CAP_KILL;
-/// Linux capability the tool helper needs to start a mediated tool invocation
-/// under [`TOOL_UID`].
-pub const CAP_SETUID: u32 = mvm_setpriv::CAP_SETUID;
-/// Linux capability the tool helper needs to start a mediated tool invocation
-/// under [`TOOL_GID`].
-pub const CAP_SETGID: u32 = mvm_setpriv::CAP_SETGID;
 /// Linux capability the egress client needs to serve the loopback DNS stub on
 /// port 53.
 pub const CAP_NET_BIND_SERVICE: u32 = mvm_setpriv::CAP_NET_BIND_SERVICE;
-/// Linux capability the tool helper needs to read a non-dumpable tool's
-/// `/proc/<pid>/fd` links (which answer only a `ptrace_may_access` holder).
-pub const CAP_SYS_PTRACE: u32 = mvm_setpriv::CAP_SYS_PTRACE;
 /// Linux capability used by the guest agent to correct a restored wall clock.
 pub const CAP_SYS_TIME: u32 = mvm_setpriv::CAP_SYS_TIME;
 /// Linux capability `PR_CAPBSET_DROP` itself requires. Never retained — which
@@ -106,8 +71,6 @@ pub use cgroup2::{
     mount_and_delegate_cgroup2,
 };
 pub use extensions::mount_extensions;
-#[cfg(any(target_os = "linux", test))]
-pub use service_identity::TOOL_HELPER_IDENTITY;
 pub use service_identity::{ADDON_DNS_IDENTITY, EGRESS_CLIENT_IDENTITY, ServiceIdentity};
 use volumes::validate_virtio_block_device;
 pub use volumes::{mount_volumes, validate_volume_mountpoint};
@@ -184,65 +147,90 @@ pub fn validate_roothash(roothash: &str, name: &str) -> Result<()> {
 /// and `mount` fails before the agent can report anything useful.
 pub fn mount_early_filesystems() -> Result<()> {
     #[cfg(target_os = "linux")]
-    {
-        ensure_dir("/proc")?;
+    for early in &EARLY_MOUNTS {
+        ensure_dir(early.target)?;
         mount(
-            "proc",
-            "/proc",
-            "proc",
-            libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV,
-            "",
+            early.source,
+            early.target,
+            early.fstype,
+            early.flags,
+            early.data,
         )?;
-        ensure_dir("/sys")?;
-        mount(
-            "sysfs",
-            "/sys",
-            "sysfs",
-            libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV,
-            "",
-        )?;
-        // devtmpfs supplies every device node the initramfs has no static
-        // table for — /dev/null, and the /dev/mapper/control that dm-verity
-        // needs to bring the sealed rootfs up at activation.
-        //
-        // Mounted unconditionally. The kernel creates a bare /dev/console in
-        // the initramfs rootfs so init has stdio, so a "is /dev/console
-        // already there?" guard reads as "devtmpfs is already mounted" when
-        // in fact nothing is — and then activation dies on a missing
-        // /dev/mapper/control. A shared-kernel container runtime, the one case
-        // where /dev really is pre-mounted, never reaches here: that path is
-        // branched off before the early mounts.
-        ensure_dir("/dev")?;
-        mount("devtmpfs", "/dev", "devtmpfs", libc::MS_NOSUID, "")?;
-
-        // The activated workload root is deliberately read-only. Runtime
-        // state and scratch files therefore need their own writable mounts,
-        // created before the pivot and carried across with the pseudofs
-        // mounts by `pivot_to_root`. OCI materialization guarantees both
-        // target directories exist in the sealed root.
-        ensure_dir("/run")?;
-        mount(
-            "tmpfs",
-            "/run",
-            "tmpfs",
-            libc::MS_NOSUID | libc::MS_NODEV,
-            "mode=0755",
-        )?;
-        ensure_dir("/tmp")?;
-        mount(
-            "tmpfs",
-            "/tmp",
-            "tmpfs",
-            libc::MS_NOSUID | libc::MS_NODEV,
-            "mode=1777",
-        )?;
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = ();
     }
     Ok(())
 }
+
+/// One early-boot mount, in the order PID 1 issues them.
+#[cfg(target_os = "linux")]
+struct EarlyMount {
+    source: &'static str,
+    target: &'static str,
+    fstype: &'static str,
+    flags: libc::c_ulong,
+    data: &'static str,
+}
+
+/// The early mounts, one per [`PIVOT_MOVED_MOUNTS`] entry and in its order.
+///
+/// devtmpfs supplies every device node the initramfs has no static table for:
+/// `/dev/null`, and the `/dev/mapper/control` dm-verity needs to bring the
+/// sealed rootfs up. It is mounted unconditionally. The kernel creates a bare
+/// `/dev/console` in the initramfs so init has stdio, so an "is `/dev/console`
+/// already there?" guard would read as "devtmpfs is already mounted" when
+/// nothing is, and activation would die on the missing control node. A
+/// shared-kernel container runtime, the one case where `/dev` really is
+/// pre-mounted, branches off before the early mounts.
+///
+/// The activated workload root is read-only, so `/run` and `/tmp` are their
+/// own tmpfs mounts, created before the pivot and carried across by
+/// [`pivot_to_root`].
+#[cfg(target_os = "linux")]
+const EARLY_MOUNTS: [EarlyMount; 5] = {
+    const PSEUDO: libc::c_ulong = libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV;
+    const SCRATCH: libc::c_ulong = libc::MS_NOSUID | libc::MS_NODEV;
+    [
+        EarlyMount {
+            source: "proc",
+            target: "/proc",
+            fstype: "proc",
+            flags: PSEUDO,
+            data: "",
+        },
+        EarlyMount {
+            source: "sysfs",
+            target: "/sys",
+            fstype: "sysfs",
+            flags: PSEUDO,
+            data: "",
+        },
+        EarlyMount {
+            source: "devtmpfs",
+            target: "/dev",
+            fstype: "devtmpfs",
+            flags: libc::MS_NOSUID,
+            data: "",
+        },
+        EarlyMount {
+            source: "tmpfs",
+            target: "/run",
+            fstype: "tmpfs",
+            flags: SCRATCH,
+            data: "mode=0755",
+        },
+        EarlyMount {
+            source: "tmpfs",
+            target: "/tmp",
+            fstype: "tmpfs",
+            flags: SCRATCH,
+            data: "mode=1777",
+        },
+    ]
+};
+
+/// Flags for every rootfs mount shape. Read-only is what keeps a guest
+/// process from rewriting `/etc/passwd` to mint a uid-0 entry.
+#[cfg(target_os = "linux")]
+const ROOTFS_MOUNT_FLAGS: libc::c_ulong = libc::MS_RDONLY;
 
 /// Mount the rootfs, returning the staging path (`/mnt/root`).
 ///
@@ -280,7 +268,7 @@ pub fn mount_rootfs(rootfs: &RootfsConfig) -> Result<PathBuf> {
     #[cfg(target_os = "linux")]
     {
         if let Some(tag) = &rootfs.virtiofs_tag {
-            mount(tag, ROOTFS_STAGING, "virtiofs", libc::MS_RDONLY, "")?;
+            mount(tag, ROOTFS_STAGING, "virtiofs", ROOTFS_MOUNT_FLAGS, "")?;
         } else if let Some(roothash) = &rootfs.roothash {
             validate_roothash(roothash, "rootfs.roothash")?;
             let hash_dev = rootfs.hash_dev.as_deref().ok_or_else(|| {
@@ -293,13 +281,13 @@ pub fn mount_rootfs(rootfs: &RootfsConfig) -> Result<PathBuf> {
             dm_version(fd)?;
             setup_verity_target(fd, "root", &rootfs.data_dev, hash_dev, roothash)?;
             let root_dm = resolved_dm_device("root")?;
-            mount(&root_dm, ROOTFS_STAGING, "ext4", libc::MS_RDONLY, "")?;
+            mount(&root_dm, ROOTFS_STAGING, "ext4", ROOTFS_MOUNT_FLAGS, "")?;
         } else {
             mount(
                 &rootfs.data_dev,
                 ROOTFS_STAGING,
                 "ext4",
-                libc::MS_RDONLY,
+                ROOTFS_MOUNT_FLAGS,
                 "",
             )?;
         }
@@ -670,27 +658,15 @@ pub fn drop_privilege_raw(uid: u32, gid: u32) -> std::io::Result<()> {
 /// bounding set is inherited across fork and exec and can only shrink, so
 /// applying it here binds the agent and everything under it just as firmly.
 ///
-/// The agent keeps [`TOOL_GID`] as its saved gid, which is what lets it start
-/// a bound tool invocation in that group without any capability.
 #[cfg(target_os = "linux")]
 pub fn drop_guest_agent_privilege_raw(uid: u32, gid: u32) -> std::io::Result<()> {
-    assume_identity_with_saved_gid(uid, gid, TOOL_GID, RESTORE_AGENT_CAPABILITIES)
+    assume_identity_retaining(uid, gid, RESTORE_AGENT_CAPABILITIES)
 }
 
 /// Become `uid`/`gid` from root, keeping exactly `keep`. Async-signal-safe, so
 /// usable from `pre_exec`.
 #[cfg(target_os = "linux")]
 pub(crate) fn assume_identity_retaining(uid: u32, gid: u32, keep: u64) -> std::io::Result<()> {
-    assume_identity_with_saved_gid(uid, gid, gid, keep)
-}
-
-#[cfg(target_os = "linux")]
-fn assume_identity_with_saved_gid(
-    uid: u32,
-    gid: u32,
-    saved_gid: u32,
-    keep: u64,
-) -> std::io::Result<()> {
     // SAFETY: prctl(PR_SET_KEEPCAPS) takes only integer arguments and touches no memory.
     if unsafe { libc::prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0) } != 0 {
         return Err(std::io::Error::last_os_error());
@@ -702,7 +678,7 @@ fn assume_identity_with_saved_gid(
         return Err(std::io::Error::last_os_error());
     }
     // SAFETY: setresgid takes only integer ids and touches no memory.
-    if unsafe { libc::setresgid(gid, gid, saved_gid) } != 0 {
+    if unsafe { libc::setresgid(gid, gid, gid) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
     // SAFETY: setuid takes an integer id and touches no memory.
@@ -1533,83 +1509,32 @@ mod tests {
         assert!(rendered.contains(&expected_source));
     }
 
-    /// Every early mount target must be created before it is mounted.
-    ///
-    /// The universal initramfs carries the init binary and nothing else, so
-    /// there is no `/proc`, `/sys` or `/dev` to mount onto unless PID 1 makes
-    /// one. Without that, `mount` fails with ENOENT, init exits, and the kernel
-    /// panics before the agent can report anything — which is what shipped.
-    ///
-    /// Asserted against the source because the real function issues syscalls
-    /// that no unit test can run: it needs PID 1 in a guest, and the host it is
-    /// compiled on may not even be Linux.
+    /// The early mounts are the ones the pivot carries across, and the two
+    /// writable ones are tmpfs: the activated root is read-only, so runtime
+    /// state and scratch files have nowhere else to go.
+    #[cfg(target_os = "linux")]
     #[test]
-    fn every_early_mount_target_is_created_before_it_is_mounted() {
-        let src = include_str!("guest_mount.rs");
-        let body = src
-            .split("pub fn mount_early_filesystems")
-            .nth(1)
-            .expect("mount_early_filesystems must exist");
-        let body = body
-            .split("\npub fn ")
-            .next()
-            .expect("function body is delimited by the next item");
-
-        for target in ["/proc", "/sys", "/dev", "/run", "/tmp"] {
-            let created = body
-                .find(&format!("ensure_dir(\"{target}\")"))
-                .unwrap_or_else(|| {
-                    panic!(
-                        "{target} is mounted but never created; the initramfs has no \
-                     directory to mount onto, so PID 1 dies on ENOENT"
-                    )
-                });
-            let mounted = body
-                .find(&format!("\"{target}\","))
-                .unwrap_or_else(|| panic!("{target} should still be mounted here"));
-            assert!(
-                created < mounted,
-                "{target}: ensure_dir must come before the mount, not after"
-            );
-        }
-    }
-
-    /// Runtime writes belong on tmpfs, and those mounts must survive the
-    /// switch from the universal initramfs to the sealed workload root.
-    #[test]
-    fn writable_runtime_mounts_are_tmpfs_and_move_into_the_workload_root() {
-        let src = include_str!("guest_mount.rs");
-        let early = src
-            .split("pub fn mount_early_filesystems")
-            .nth(1)
-            .expect("mount_early_filesystems must exist")
-            .split("\npub fn ")
-            .next()
-            .expect("function body is delimited by the next item");
-        let pivot = src
-            .split("pub fn pivot_to_root")
-            .nth(1)
-            .expect("pivot_to_root must exist")
-            .split("\npub fn ")
-            .next()
-            .expect("function body is delimited by the next item");
-        assert!(
-            pivot.contains("for sub in PIVOT_MOVED_MOUNTS"),
-            "pivot_to_root must move the mounts it declares"
-        );
+    fn early_mounts_match_the_pivot_and_runtime_writes_land_on_tmpfs() {
+        let targets: Vec<&str> = EARLY_MOUNTS.iter().map(|m| m.target).collect();
+        assert_eq!(targets, PIVOT_MOVED_MOUNTS);
 
         for target in ["/run", "/tmp"] {
-            assert!(
-                early.contains(&format!(
-                    "\"tmpfs\",\n            \"{target}\",\n            \"tmpfs\""
-                )),
-                "{target} must be mounted as tmpfs before the read-only root is activated"
-            );
-            assert!(
-                PIVOT_MOVED_MOUNTS.contains(&target),
-                "{target} must move into the activated workload root"
-            );
+            let early = EARLY_MOUNTS.iter().find(|m| m.target == target).unwrap();
+            assert_eq!(early.fstype, "tmpfs", "{target}");
+            assert_ne!(early.flags & libc::MS_NOSUID, 0, "{target}");
+            assert_eq!(early.flags & libc::MS_RDONLY, 0, "{target}");
         }
+        let tmp = EARLY_MOUNTS.iter().find(|m| m.target == "/tmp").unwrap();
+        assert_eq!(tmp.data, "mode=1777");
+    }
+
+    /// Without a devtmpfs mount there is no `/dev/mapper/control`, and
+    /// dm-verity cannot bring the sealed rootfs up.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn devtmpfs_is_among_the_unconditional_early_mounts() {
+        let dev = EARLY_MOUNTS.iter().find(|m| m.target == "/dev").unwrap();
+        assert_eq!((dev.source, dev.fstype), ("devtmpfs", "devtmpfs"));
     }
 
     /// A failed home mount must fall back, not hand the workload the
@@ -1811,54 +1736,34 @@ tmpfs /tmp tmpfs rw,nosuid,nodev,relatime 0 0
         assert!(optional_image_writes_allowed(false));
     }
 
-    /// devtmpfs must be mounted unconditionally, never gated on `/dev/console`.
-    ///
-    /// The kernel creates a bare `/dev/console` in the initramfs rootfs so init
-    /// has stdio — which is precisely why the agent's own output reaches the
-    /// serial console. A `if !Path::new("/dev/console").exists()` guard around
-    /// the devtmpfs mount therefore always skips it, `/dev` keeps that single
-    /// node, and activation dies on a missing `/dev/mapper/control` the moment
-    /// dm-verity tries to bring the sealed rootfs up. That shipped, and it reads
-    /// as a verity bug rather than a mount bug.
-    ///
-    /// The one case where `/dev` genuinely is pre-mounted — a shared-kernel
-    /// container runtime — branches off before the early mounts entirely, so it
-    /// needs no guard here.
-    ///
-    /// Asserted against the source for the same reason as the test above: the
-    /// real path needs to be PID 1 inside a guest.
-    #[test]
-    fn devtmpfs_is_not_gated_on_a_kernel_supplied_console_node() {
-        let src = include_str!("guest_mount.rs");
-        let body = src
-            .split("pub fn mount_early_filesystems")
-            .nth(1)
-            .expect("mount_early_filesystems must exist")
-            .split("\npub fn ")
-            .next()
-            .expect("function body is delimited by the next item");
-        // Comments explain the trap by naming the node, so judge the code only.
-        let code: String = body
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        assert!(
-            code.contains("\"devtmpfs\""),
-            "devtmpfs must still be mounted; without it there is no /dev/mapper/control"
-        );
-        assert!(
-            !code.contains("/dev/console"),
-            "devtmpfs must not be gated on /dev/console — the kernel always supplies \
-             that node, so the guard skips the mount every time and dm-verity then \
-             fails to open /dev/mapper/control"
-        );
-    }
-
     #[test]
     fn validate_roothash_accepts_64_lowercase_hex() {
         assert!(validate_roothash(FAKE_HASH, "test").is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_rootfs_is_always_mounted_read_only() {
+        assert_ne!(ROOTFS_MOUNT_FLAGS & libc::MS_RDONLY, 0);
+        assert_eq!(ROOTFS_MOUNT_FLAGS & libc::MS_REMOUNT, 0);
+    }
+
+    /// Every mount `mount_rootfs` issues takes its flags from the shared
+    /// constant, so a call site cannot quietly mount read-write.
+    #[test]
+    fn every_rootfs_mount_call_site_uses_the_read_only_flags() {
+        let source = include_str!("guest_mount.rs");
+        let start = source.find("pub fn mount_rootfs").unwrap();
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        let mounts = body.matches("mount(").count();
+        assert!(mounts >= 3, "expected the three mount shapes: {body}");
+        assert_eq!(mounts, body.matches("ROOTFS_MOUNT_FLAGS").count(), "{body}");
+    }
+
+    #[test]
+    fn the_workload_identity_is_never_root() {
+        assert_ne!(WORKLOAD_UID, 0);
+        assert_ne!(WORKLOAD_GID, 0);
     }
 
     #[test]
@@ -2485,66 +2390,9 @@ mod privilege_tests {
         );
         assert!(
             status.contains(&format!(
-                "Gid:\t{WORKLOAD_GID}\t{WORKLOAD_GID}\t{TOOL_GID}\t{WORKLOAD_GID}"
+                "Gid:\t{WORKLOAD_GID}\t{WORKLOAD_GID}\t{WORKLOAD_GID}\t{WORKLOAD_GID}"
             )),
-            "the agent must hold the tool group as its saved gid only; got:\n{status}"
-        );
-    }
-
-    /// Live witness that a workload process cannot take over a bound tool
-    /// invocation: same uid, but the tool runs in [`TOOL_GID`], so the
-    /// kernel's ptrace access check refuses the attach and `/proc/<pid>/mem`.
-    /// Irreversible and gated like the drop witnesses above.
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn a_workload_process_cannot_trace_a_bound_tool_invocation() {
-        if !privileged() {
-            return;
-        }
-        super::drop_guest_agent_privilege_raw(WORKLOAD_UID, WORKLOAD_GID)
-            .expect("the agent privilege drop must succeed as root");
-        let binding =
-            mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding::from_random(
-                [8; 16],
-            );
-        let mut command = std::process::Command::new("/bin/sleep");
-        command.arg("30");
-        let (mut tool, _registration) =
-            crate::tool_attribution::spawn_attributed(&mut command, &binding)
-                .expect("the agent starts a bound tool in the tool group");
-        let tool_pid = tool.id() as libc::pid_t;
-        let mem = std::ffi::CString::new(format!("/proc/{tool_pid}/mem")).expect("path");
-        // SAFETY: the child runs only async-signal-safe syscalls, then exits.
-        let child = unsafe { libc::fork() };
-        if child == 0 {
-            // A workload process: its saved gid is its effective gid.
-            let code = unsafe {
-                if libc::setresgid(WORKLOAD_GID, WORKLOAD_GID, WORKLOAD_GID) != 0 {
-                    2
-                } else if libc::ptrace(
-                    libc::PTRACE_ATTACH,
-                    tool_pid,
-                    std::ptr::null_mut::<libc::c_void>(),
-                    std::ptr::null_mut::<libc::c_void>(),
-                ) != -1
-                {
-                    3
-                } else if libc::open(mem.as_ptr(), libc::O_RDWR) != -1 {
-                    4
-                } else {
-                    0
-                }
-            };
-            unsafe { libc::_exit(code) };
-        }
-        let mut status = 0;
-        // SAFETY: waits for the child forked above.
-        unsafe { libc::waitpid(child, &mut status, 0) };
-        let _ = tool.kill();
-        let _ = crate::child_wait::wait(&mut tool);
-        assert!(
-            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
-            "a same-uid workload process reached the tool (status {status})"
+            "the agent must retain only the workload group; got:\n{status}"
         );
     }
 }

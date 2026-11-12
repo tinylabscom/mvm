@@ -25,6 +25,7 @@ pub(in crate::commands) fn resolve_launch_image_source(
     prod: bool,
     provenance: Option<&OciProvenanceSink>,
 ) -> Result<crate::exec::ImageSource> {
+    crate::release_guest_runtime::ensure_release_pieces_prepared()?;
     let Some(reference) = image_ref else {
         return resolve_default_image_source(prod);
     };
@@ -58,9 +59,8 @@ pub(in crate::commands) fn resolve_launch_image_source(
         cached.reference, cached.resolved_digest
     ));
     // Hand the provenance to the real admission rather than
-    // minting a plan here to hang it on. This used to synthesize a
-    // throwaway `ExecutionPlan` and emit `plan.admitted` for it,
-    // so one launch wrote two `plan.admitted` entries with
+    // minting a plan here to hang it on: a throwaway `ExecutionPlan`
+    // emitting `plan.admitted` would make one launch write two `plan.admitted` entries with
     // different plan ids — and the first authorized nothing, since
     // no VM ever booted under it. A reader of the chain could not
     // tell which of the two was the admission that mattered.

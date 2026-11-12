@@ -67,7 +67,7 @@ pub struct LocalBackend {
 
 /// vCPUs to give a guest when the caller does not say.
 ///
-/// A plain constant again. It was briefly resolved per backend, because HVF
+/// A plain constant, not resolved per backend. HVF
 /// accepted exactly one vCPU and refused anything else while being the macOS
 /// default — so the default configuration and the default backend were
 /// mutually exclusive there. HVF has real SMP now, which removes the ceiling
@@ -1509,8 +1509,8 @@ mod tests {
     }
 
     /// The host library injects the guest runtime the CLI's preparation
-    /// installed, from the OCI cache the CLI reads it from. It used to look one
-    /// level up, where nothing installs one, and refused every image a release
+    /// installed, from the OCI cache the CLI reads it from. Looking one
+    /// level up finds nothing, since nothing installs one there, and would refuse every image a release
     /// `mvmctl` could boot with "legacy rootfs guest-runtime injection is
     /// unavailable".
     #[test]
@@ -3113,7 +3113,6 @@ mod tests {
             manifest: None,
             runtime_pack: false,
             registry_pack_image: None,
-            tools: Default::default(),
             resolved_digest: None,
             net: false,
             allow_host: vec![],

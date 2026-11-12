@@ -80,8 +80,6 @@ pub struct PersistentImageStartParams<'a> {
     pub caller_commitment: Option<mvm_core::plan::CallerCommitment>,
     /// Publisher-verified image pack to bind on every start, if selected.
     pub registry_pack_image: Option<mvm_core::registry_pack::PackPin>,
-    /// Resolved per-tool rules persisted with the machine.
-    pub tools: mvm_contract::policy::tool_rules::ToolRules,
     /// True when the caller will run a trailing `-- argv` command after boot
     /// (i.e. the machine is booted only to exec an ad-hoc command). An ad-hoc
     /// command issues the DevOnly `Exec` verb, so the admitted plan must NOT
@@ -93,6 +91,7 @@ pub struct PersistentImageStartParams<'a> {
     /// [`network_policy`](Self::network_policy), which the caller derived from
     /// the same spec.
     pub grants: Option<mvm_contract::grants::Grants>,
+    pub mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
     /// GPU remoting plane from the persisted spec (`--gpu` at create/start).
     pub gpu: bool,
     /// Optional host GPU ordinal persisted with the machine.
@@ -214,54 +213,6 @@ struct PreparedPersistentBoot {
     built_runtime: Option<mvm_hostd::plan_admission::PreparedBuiltPackRuntime>,
 }
 
-/// A real owning receiver for an ordinary native boot. No registry, DTO or
-/// process-exit fallback is a durable handoff. The caller must retain this.
-pub fn start_persistent_oci_machine_owned(
-    params: PersistentImageStartParams<'_>,
-) -> Result<crate::entrypoint::boot::OwnedClientBoot> {
-    let prepared = prepare_persistent_boot(params)?;
-    let mut owner =
-        crate::boot::start_prepared_owned(crate::entrypoint::boot::ClientBootResources {
-            backend: prepared.backend,
-            config: prepared.start_config,
-            admission: prepared.admission,
-            _volumes: Some(prepared.prepared_volumes),
-            built_runtime: prepared.built_runtime,
-        })
-        .map_err(|mut failure| {
-            failure.emit_failed("backend-start");
-            anyhow::Error::new(failure)
-        })?;
-    if let Err(error) =
-        super::detached::require_serving_owned(&mut owner, std::time::Duration::from_secs(30))
-    {
-        let name = owner.resources().config.name.clone();
-        let mut failure = owner.failure(anyhow::Error::new(error));
-        failure.emit_failed("guest-readiness");
-        failure.observe_failure(|context, error| {
-            if let Some(error) = error.downcast_ref::<super::detached::DetachedReadinessError>() {
-                audit_detached_readiness_failure(context, &name, error);
-            }
-        });
-        return Err(anyhow::Error::new(failure));
-    }
-    if let Err(error) = super::grants_report::report_owned_grants(&mut owner) {
-        let mut failure = owner.failure(error);
-        failure.emit_failed("grants");
-        return Err(anyhow::Error::new(failure));
-    }
-    if let Err(error) = super::budget_charge::record_owned_charge(&mut owner) {
-        let mut failure = owner.failure(error);
-        failure.emit_failed("host-budget");
-        return Err(anyhow::Error::new(failure));
-    }
-    let resources = owner.resources();
-    emit_launched(&resources.admission, resources.backend.name(), true);
-    record_vm_readiness(&resources.config.name, InstanceReadiness::LaunchAccepted);
-    mvm_core::audit_emit!(VmStart, vm: &resources.config.name);
-    Ok(owner)
-}
-
 fn prepare_persistent_boot(
     params: PersistentImageStartParams<'_>,
 ) -> Result<PreparedPersistentBoot> {
@@ -282,9 +233,9 @@ fn prepare_persistent_boot(
         agent_verb,
         caller_commitment,
         registry_pack_image,
-        tools,
         has_ad_hoc_argv,
         grants,
+        mailbox,
         gpu,
         gpu_device,
         workload_dir,
@@ -381,6 +332,7 @@ fn prepare_persistent_boot(
                 .collect::<Vec<_>>();
             admit_plan_for_boot_configured_ingress(
                 AdmitPlanForBootParams {
+                    mailbox,
                     // What the backend will arm, so the admitted tier opens
                     // the GPU endpoint's vsock socket exactly when there is one.
                     gpu: config.gpu,
@@ -420,7 +372,6 @@ fn prepare_persistent_boot(
                         .map(crate::admission::AssetSpec::RegistryPack)
                         .collect(),
                     redaction: mvm_core::policy::RedactionPolicy::default(),
-                    tools,
                     network_policy: network_policy.clone(),
                     agent_verb_override: agent_verb.to_vec(),
                     // Persistent machines carrying a trailing argv run an ad-hoc Exec (DevOnly);
@@ -543,6 +494,7 @@ fn finish_legacy_persistent(
     let started = match (|| -> Result<_> {
         let mut images = prepared_volumes.take_writable_images();
         complete_writable_images(&start_config, &mut images)?;
+        mvm_hostd::mailbox_process::require_servable(&start_config, &backend)?;
         Ok(crate::boot::start_prepared_custodied(
             backend,
             &start_config,
@@ -565,6 +517,17 @@ fn finish_legacy_persistent(
             return Err(err);
         }
     };
+    // The guest asserts a mailbox exactly when the plan grants one, so the
+    // host side starts here or the launch is rolled back.
+    if let Err(error) =
+        mvm_hostd::mailbox_process::serve_started(started.backend(), started.vm_id(), &start_config)
+    {
+        emit_failed(&admission, "mailbox-process", &error);
+        if let Err(cleanup_error) = crate::local::remove_stopped_runtime_state(name) {
+            tracing::warn!(error = %cleanup_error, machine = name, "removing runtime state after a refused mailbox failed");
+        }
+        return Err(error);
+    }
     // A backend accepting a start only means its host process was spawned.
     // Detached callers must not observe success until the authenticated guest
     // control plane is actually serving; failure rolls the partial start back
@@ -633,61 +596,8 @@ fn audit_detached_readiness_failure(
 mod persistent_oci_boot_tests {
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    use crate::admission::admit_plan_tests::admitted_libkrun;
     use mvm_core::util::test_env::TestEnv;
-    use mvm_hostd::plan_admission::InMemoryNonceLedger;
-
-    use crate::admission::entrypoint_resolve::ResolvedEntrypoint;
-    use crate::admission::{AdmissionContext, AdmitPlanForBootParams, admit_plan_for_boot};
-
-    fn admitted(vm_name: &str) -> (AdmissionContext, tempfile::TempDir, tempfile::TempDir) {
-        let keys_dir = tempfile::tempdir().expect("keys dir");
-        let audit_dir = tempfile::tempdir().expect("audit dir");
-        let rootfs_dir = tempfile::tempdir().expect("rootfs dir");
-        let rootfs = rootfs_dir.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"rootfs bytes").expect("write rootfs");
-        let ledger = InMemoryNonceLedger::new();
-        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
-            gpu: false,
-            tools: Default::default(),
-            instructions: Default::default(),
-            outputs: Vec::new(),
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            tenant: "local",
-            vm_name,
-            backend_name: "libkrun",
-            configured_images_dir: None,
-            rootfs_path: &rootfs,
-            kernel_path: None,
-            precomputed_image_sha256: None,
-            boot_artifact_identity: None,
-            runtime_config: None,
-            cpus: 2,
-            mem_mib: 512,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            caller_commitment: None,
-            ledger: &ledger,
-            keys_dir: Some(keys_dir.path()),
-            audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            assets: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: true,
-            services: Vec::new(),
-            grants: None,
-            backend_kind: Some(mvm_core::protocol::vm_backend::BackendKind::Libkrun),
-            entrypoint: ResolvedEntrypoint::unresolved("this test resolves no entrypoint"),
-        })
-        .expect("admission succeeds");
-        (ctx, keys_dir, audit_dir)
-    }
 
     #[test]
     fn readiness_audit_seals_completed_abort_but_leaves_unresolved_abort_unsealed() {
@@ -696,7 +606,7 @@ mod persistent_oci_boot_tests {
         let mut env = TestEnv::new();
         env.isolate_mvm_home(home.path());
 
-        let (resolved, _resolved_keys, resolved_audit) = admitted("resolved-abort");
+        let (resolved, _resolved_keys, resolved_audit) = admitted_libkrun("resolved-abort", None);
         super::audit_detached_readiness_failure(
             &resolved,
             "resolved-abort",
@@ -721,7 +631,8 @@ mod persistent_oci_boot_tests {
             "{resolved_chain}"
         );
 
-        let (unresolved, _unresolved_keys, unresolved_audit) = admitted("unresolved-abort");
+        let (unresolved, _unresolved_keys, unresolved_audit) =
+            admitted_libkrun("unresolved-abort", None);
         super::audit_detached_readiness_failure(
             &unresolved,
             "unresolved-abort",

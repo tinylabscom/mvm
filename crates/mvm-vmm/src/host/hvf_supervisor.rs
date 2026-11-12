@@ -88,6 +88,15 @@ pub struct HvfWritableDiskFds {
     pub sidecar: i32,
 }
 
+/// Untrusted locator and content expectation for the single input DATA disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HvfReadOnlyDataDiskFd {
+    pub disk: usize,
+    pub fd: i32,
+    pub expected: crate::driver::readonly_data::DataDiskExpectation,
+}
+
 /// Syntactic claims only. The consumed caller must authenticate their bytes.
 pub struct BootImageClaims<'a> {
     cmdline: &'a str,
@@ -168,6 +177,35 @@ pub struct HvfShutdownTimingRecord {
     pub workload_exit_write_micros: u64,
 }
 
+/// Filename for the record of the teardown scrub of guest RAM.
+pub const RAM_SCRUB_FILE: &str = "ram-scrub.json";
+
+/// What the teardown scrub did to the host mapping of a guest's RAM, written
+/// before the supervisor publishes that it has finished. It attests to this
+/// process's own mapping only: it says nothing about a physical wipe, the
+/// guest's internal state, swap, or any copy the host made elsewhere. A
+/// supervisor that is killed rather than stopped writes no record at all.
+/// Contains counts, never workload bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HvfRamScrubRecord {
+    /// Wire schema for strict consumers.
+    pub schema_version: u32,
+    /// Length of the guest RAM mapping.
+    pub mapped_bytes: u64,
+    /// Host pages overwritten with zeros.
+    pub scrubbed_pages: u64,
+    /// Non-zero bytes found on re-reading exactly those pages afterwards.
+    pub nonzero_bytes_after: u64,
+    /// True when residency could not be read and the whole mapping was scrubbed.
+    pub whole_mapping: bool,
+}
+
+/// Resolve the RAM scrub record within one canonical VM state directory.
+pub fn ram_scrub_path(state_dir: &std::path::Path) -> PathBuf {
+    state_dir.join(RAM_SCRUB_FILE)
+}
+
 /// Resolve the timing record within one canonical VM state directory.
 pub fn shutdown_timing_path(state_dir: &std::path::Path) -> PathBuf {
     state_dir.join(SHUTDOWN_TIMING_FILE)
@@ -242,6 +280,9 @@ pub struct HvfSupervisorConfig {
     /// disk table remain diagnostic; the writer consumes these exact objects.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub writable_disk_fds: Vec<HvfWritableDiskFds>,
+    /// Private read-only DATA files, never boot-image roles or launch authority.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub readonly_data_disk_fds: Vec<HvfReadOnlyDataDiskFd>,
     /// Full kernel cmdline. `None` ⇒ the supervisor's built-in default (workload
     /// contract: `init=/init`). Set it to boot an image whose PID 1 differs — e.g.
     /// the builder rootfs, which boots the static `/sbin/mvm-host-vm-init`. The
@@ -476,6 +517,43 @@ impl std::fmt::Display for RestoreInputsError {
 impl std::error::Error for RestoreInputsError {}
 
 impl HvfSupervisorConfig {
+    /// Validate DATA roles without granting checked-cold or builder authority.
+    ///
+    /// # Errors
+    /// Refuses extra/duplicate slots, boot substitution, writable recipes, restore
+    /// and checked caller entry. Checked entrypoint recipes do not authorize DATA.
+    pub fn validate_readonly_data_disks(&self) -> Result<(), &'static str> {
+        if self.readonly_data_disk_fds.is_empty() {
+            return Ok(());
+        }
+        if self.readonly_data_disk_fds.len() != 1
+            || self.readonly_data_disk_fds[0].disk
+                != usize::from(crate::driver::readonly_data::INPUT_DATA_SLOT)
+        {
+            return Err("read-only DATA table requires exactly the input DATA slot");
+        }
+        let disk = self
+            .disks
+            .get(self.readonly_data_disk_fds[0].disk)
+            .ok_or("read-only DATA disk is absent")?;
+        if !disk.read_only || disk.ephemeral {
+            return Err("read-only DATA recipe must be read-only and file-served");
+        }
+        if self.caller_registration.is_some() || self.boot_image_fds.is_some() {
+            return Err("checked entrypoint authority does not allow DATA descriptors");
+        }
+        if self.restore_ram.is_some()
+            || self.restore_frame.is_some()
+            || self.restore_fds.is_some()
+            || self.handoff_socket.is_some()
+            || self.handoff_root.is_some()
+            || self.handoff_verify_key.is_some()
+        {
+            return Err("read-only DATA descriptors require a fresh original launch");
+        }
+        Ok(())
+    }
+
     /// Check fixed device placement and unambiguous literal command claims.
     /// This is not publisher authentication or caller admission.
     pub fn boot_image_claims(&self) -> Result<BootImageClaims<'_>, &'static str> {
@@ -543,6 +621,30 @@ impl HvfSupervisorConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_ram_scrub_record_round_trips_and_refuses_unknown_fields() {
+        let record = HvfRamScrubRecord {
+            schema_version: 1,
+            mapped_bytes: 1 << 30,
+            scrubbed_pages: 7,
+            nonzero_bytes_after: 0,
+            whole_mapping: false,
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        assert_eq!(
+            serde_json::from_str::<HvfRamScrubRecord>(&json).unwrap(),
+            record
+        );
+        let extra = json.replace('}', ",\"plaintext\":\"x\"}");
+        assert!(serde_json::from_str::<HvfRamScrubRecord>(&extra).is_err());
+    }
+
+    #[test]
+    fn the_ram_scrub_record_lives_in_the_vm_state_dir() {
+        let dir = std::path::Path::new("/var/mvm/vms/a");
+        assert_eq!(ram_scrub_path(dir), dir.join("ram-scrub.json"));
+    }
+
     use super::*;
 
     #[cfg(unix)]
@@ -605,6 +707,14 @@ mod tests {
             kernel_fd: None,
             boot_image_fds: None,
             writable_disk_fds: Vec::new(),
+            readonly_data_disk_fds: vec![HvfReadOnlyDataDiskFd {
+                disk: 2,
+                fd: 42,
+                expected: crate::driver::readonly_data::DataDiskExpectation {
+                    len: 512,
+                    sha256: "ab".repeat(32),
+                },
+            }],
             cmdline: Some("console=ttyAMA0 root=/dev/vda ro init=/sbin/mvm-host-vm-init".into()),
             memory_mib: 8192,
             vcpus: 1,
@@ -780,6 +890,7 @@ mod tests {
             kernel_fd: None,
             boot_image_fds: None,
             writable_disk_fds: Vec::new(),
+            readonly_data_disk_fds: Vec::new(),
             cmdline: None,
             memory_mib: 0,
             vcpus: 1,

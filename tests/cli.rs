@@ -714,7 +714,6 @@ fn why_help_lists_every_query_and_policy_source() {
         "--method",
         "--request-path",
         "--path",
-        "--tool",
         "--secret",
         "--profile",
         "--plan",
@@ -723,17 +722,21 @@ fn why_help_lists_every_query_and_policy_source() {
     ] {
         assert!(help.contains(flag), "why help is missing {flag}:\n{help}");
     }
+    assert!(
+        !help.contains("--tool"),
+        "why must not advertise tool policy: {help}"
+    );
 }
 
 #[test]
-fn machine_exec_help_lists_declared_tool_option() {
+fn machine_exec_help_omits_declared_tool_option() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
         .args(["machine", "exec", "--help"])
         .output()
         .expect("machine exec help");
     assert!(out.status.success());
     let help = String::from_utf8_lossy(&out.stdout);
-    assert!(help.contains("--tool"), "machine exec help: {help}");
+    assert!(!help.contains("--tool"), "machine exec help: {help}");
 }
 
 #[test]
@@ -832,7 +835,7 @@ fn why_routed_host_requires_request_context_and_reports_the_matching_rule() {
     );
 }
 
-/// `pack --help` advertises all five lifecycle subcommands.
+/// `pack --help` advertises every pack subcommand.
 #[test]
 fn pack_help_lists_all_subcommands() {
     #[allow(deprecated)]
@@ -848,14 +851,14 @@ fn pack_help_lists_all_subcommands() {
     );
     let help = String::from_utf8_lossy(&out.stdout);
     for verb in [
-        "ls", "rm", "system", "list", "rollback", "prune", "download", "update", "lock", "compile",
-        "build",
+        "ls", "new", "rm", "system", "update", "info", "verify", "lock", "compile", "search",
+        "pull", "registry",
     ] {
         assert!(help.contains(verb), "help is missing '{verb}':\n{help}");
     }
 }
 
-/// `pack list --json` parses and exits cleanly on a fresh/empty pack cache.
+/// `pack system list --json` parses and exits cleanly on a fresh/empty pack cache.
 #[test]
 fn pack_list_json_parses_cleanly() {
     let mvm_home = tempfile::tempdir().unwrap();
@@ -865,12 +868,12 @@ fn pack_list_json_parses_cleanly() {
         .env("MVM_HOME", mvm_home.path())
         .env("HOME", mvm_home.path())
         .env("MVM_NO_AUTO_DEV", "1")
-        .args(["pack", "list", "--json"])
+        .args(["pack", "system", "list", "--json"])
         .output()
         .unwrap();
     assert!(
         out.status.success(),
-        "pack list --json must exit 0, stderr: {}",
+        "pack system list --json must exit 0, stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -2267,18 +2270,9 @@ fn machine_console_rejects_conflicting_session_flags() {
     }
 }
 
-/// `ops mcp stdio` binds the resolved `[tools]` policy as its tool gate: a
-/// denied tool is refused before any backend work, an allowed tool passes.
+/// An old project tool policy must not silently turn into an ungated MCP server.
 #[test]
-fn ops_mcp_enforces_the_project_tool_policy() {
-    fn isolated(home: &std::path::Path) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_mvmctl"));
-        command
-            .env("MVM_HOME", home)
-            .env("HOME", home)
-            .env("MVM_NO_AUTO_DEV", "1");
-        command
-    }
+fn ops_mcp_refuses_the_project_tool_policy() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -2294,69 +2288,20 @@ fn ops_mcp_enforces_the_project_tool_policy() {
     )
     .unwrap();
 
-    let mut child = isolated(home.path())
+    let output = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", home.path())
+        .env("HOME", home.path())
+        .env("MVM_NO_AUTO_DEV", "1")
         .current_dir(project.path())
         .args(["ops", "mcp", "stdio"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn mvmctl ops mcp stdio");
-    let mut stdin = child.stdin.take().expect("stdin pipe");
-    let mut stdout = child.stdout.take().expect("stdout pipe");
-
-    let call = |id: u32, name: &str| {
-        format!(
-            r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{{}}}}}}"#
-        )
-    };
-    use std::io::Write as _;
-    writeln!(stdin, "{}", call(1, "mvm.machine.stop")).expect("write denied call");
-    writeln!(stdin, "{}", call(2, "mvm.machine.list")).expect("write allowed call");
-    writeln!(
-        stdin,
-        r#"{{"jsonrpc":"2.0","id":9,"method":"unknown/nope","params":{{}}}}"#
-    )
-    .expect("write terminator probe");
-    stdin.flush().expect("flush frames");
-
-    use std::io::BufRead as _;
-    let reader = std::io::BufReader::new(&mut stdout);
-    let mut denied_seen = false;
-    let mut allowed_seen = false;
-    for line in reader.lines() {
-        let line = line.expect("read a response line");
-        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        let method = parsed["method"].as_str().unwrap_or("");
-        if method == "unknown/nope" || parsed["id"] == 9 {
-            break;
-        }
-        let is_error = parsed["result"]["isError"].as_bool().unwrap_or(false);
-        let text = parsed["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-        match parsed["id"].as_u64() {
-            Some(1) => {
-                assert!(is_error, "denied tool must refuse: {line}");
-                assert!(text.contains("policy denies"), "{text}");
-                denied_seen = true;
-            }
-            Some(2) => {
-                assert!(!is_error, "allowed tool must reach the backend: {line}");
-                allowed_seen = true;
-            }
-            _ => {}
-        }
-        if denied_seen && allowed_seen {
-            break;
-        }
-    }
-    assert!(denied_seen, "the denied call produced no refusal");
-    assert!(allowed_seen, "the allowed call produced no result");
-    let _ = child.kill();
-    let _ = child.wait();
+        .output()
+        .expect("run mvmctl ops mcp stdio");
+    assert!(
+        !output.status.success(),
+        "legacy tool policy must refuse startup"
+    );
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("unknown field `tools`"), "{error}");
 }
 
 // ---------------------------------------------------------------------------
@@ -2417,7 +2362,7 @@ fn stage_pack_registry(root: &std::path::Path) {
     std::fs::write(root.join("index.json"), serde_json::to_vec(&index).unwrap()).unwrap();
     std::fs::write(
         pack.join("files/pack/profile.toml"),
-        b"[tools]\nallow = [\"git\"]\n",
+        b"description = \"registry pack fixture\"\n",
     )
     .unwrap();
 }
@@ -2515,22 +2460,6 @@ fn pack_info_and_verify_recheck_signed_installed_content() {
     std::fs::write(pack.join("files/pack/group.toml"), policy).expect("signed policy");
     let registry_url = format!("file://{}", registry.path().display());
 
-    // This historical fixture has the mvm-templates signature. The built-in
-    // exception has expired; opt in only within this test's isolated home.
-    let publisher = mvm_core::registry_pack::RegistryPackPublisher::new(
-        "runtime",
-        mvm_core::registry_pack::OFFICIAL_PACK_SIGNING_ISSUER,
-        vec![mvm_core::registry_pack::LEGACY_PACK_SIGNING_IDENTITY.to_string()],
-    )
-    .expect("legacy fixture publisher");
-    let trusted = mvm_core::registry_pack::RegistryPackPublisherPolicy::new(vec![publisher])
-        .expect("isolated publisher policy");
-    mvm_core::registry_pack_store::save_publisher_policy(
-        &home.path().join("registry/publishers.toml"),
-        &trusted,
-    )
-    .expect("explicitly trust the fixture signer");
-
     let pulled = mvmctl_isolated(home.path())
         .env("MVM_PACK_REGISTRY", &registry_url)
         .args(["pull", "runtime/go", "--json"])
@@ -2564,7 +2493,7 @@ fn pack_info_and_verify_recheck_signed_installed_content() {
     assert_eq!(details["manifest_sha256"], digest);
     assert_eq!(
         details["signer_identity"],
-        mvm_core::registry_pack::LEGACY_PACK_SIGNING_IDENTITY
+        mvm_core::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY
     );
     assert_eq!(
         details["signer_issuer"],
@@ -2600,7 +2529,7 @@ fn pack_info_and_verify_recheck_signed_installed_content() {
     assert_eq!(verification["manifest_sha256"], digest);
     assert_eq!(
         verification["signer_identity"],
-        mvm_core::registry_pack::LEGACY_PACK_SIGNING_IDENTITY
+        mvm_core::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY
     );
     assert_eq!(verification["official_status"], "not_established");
 
@@ -2802,27 +2731,6 @@ fn pack_registry_ls_starts_empty_and_rm_unpinned_is_a_no_op() {
 }
 
 #[test]
-fn system_pack_list_preserves_legacy_json_output() {
-    let home = tempfile::tempdir().unwrap();
-    let run = |command: &[&str]| {
-        let output = mvmctl_isolated(home.path())
-            .args(command)
-            .output()
-            .expect("run system pack list");
-        assert!(
-            output.status.success(),
-            "{command:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        serde_json::from_slice::<serde_json::Value>(&output.stdout).expect("system list JSON")
-    };
-    assert_eq!(
-        run(&["pack", "system", "list", "--json"]),
-        run(&["pack", "list", "--json"])
-    );
-}
-
-#[test]
 fn pack_update_dispatches_by_exact_target_shape() {
     let home = tempfile::tempdir().unwrap();
     let missing_registry = format!("file://{}", home.path().join("missing-registry").display());
@@ -2838,15 +2746,6 @@ fn pack_update_dispatches_by_exact_target_shape() {
     assert!(!workload.status.success());
     assert!(!legacy.status.success());
     assert_eq!(workload.stderr, legacy.stderr);
-
-    let system = run(&["pack", "update", "runtime"]);
-    assert!(!system.status.success());
-    assert!(
-        String::from_utf8_lossy(&system.stderr).contains("not yet fetchable"),
-        "{}",
-        String::from_utf8_lossy(&system.stderr)
-    );
-    assert_ne!(system.stderr, workload.stderr);
 }
 
 /// `machine run --manifest <app.mvmpkg> -- <cmd>` parses as a bundle-archive

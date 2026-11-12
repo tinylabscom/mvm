@@ -418,7 +418,7 @@ fn shell_word(word: &str) -> String {
     if plain {
         word.to_string()
     } else {
-        crate::exec::shell_quote(word)
+        mvm_vmm::host::shell::shell_quote(word)
     }
 }
 

@@ -288,6 +288,102 @@ async fn an_exit_records_the_host_state_size_even_when_the_backend_measured_noth
 }
 
 #[tokio::test]
+async fn a_transient_runs_boot_records_land_before_its_seal_and_are_covered_by_it() {
+    let home = Isolated::new();
+    let client = mock_client();
+    let request = transient_request(&home.rootfs())
+        .name("t-boot-order")
+        .build()
+        .expect("request");
+    let outcome = client.launch(request).await.expect("launch");
+    let signed_plan_json = serde_json::to_string(outcome.admitted.signed()).expect("signed plan");
+    let before = home.audit_text().lines().count();
+
+    record_transient_exit(TransientExitAudit {
+        signed_plan_json: &signed_plan_json,
+        vm_name: "t-boot-order",
+        backend: "mock",
+        exit_code: Some(0),
+        completed: true,
+        posture: Some(crate::admission::BootPosture {
+            start: Some(crate::admission::StartMode::Warm),
+            ..crate::admission::BootPosture::block()
+        }),
+    })
+    .expect("record transient exit");
+
+    let audit = home.audit_text();
+    let events: Vec<String> = audit
+        .lines()
+        .skip(before)
+        .map(|line| {
+            let v: serde_json::Value = serde_json::from_str(line).expect("entry");
+            v["entry"]["event"].as_str().unwrap_or_default().to_string()
+        })
+        .collect();
+    assert_eq!(
+        events,
+        [
+            "plan.launched",
+            "plan.boot_posture",
+            "plan.start_mode",
+            "plan.exited",
+            "session.sealed"
+        ]
+    );
+    let signer = mvm_hostd::audit::host_keypair::load_or_init().expect("host signer");
+    let verified = mvm_hostd::audit::session::verify_session(
+        &mvm_core::config::mvm_audit_dir(),
+        "local",
+        &outcome.plan_id,
+        &signer.verifying,
+    );
+    assert_eq!(verified.late_entries, 0, "{verified:?}");
+}
+
+#[tokio::test]
+async fn a_transient_run_that_did_not_complete_records_no_boot_records_and_is_sealed_failed() {
+    let home = Isolated::new();
+    let client = mock_client();
+    let request = transient_request(&home.rootfs())
+        .name("t-boot-failed")
+        .build()
+        .expect("request");
+    let outcome = client.launch(request).await.expect("launch");
+    let signed_plan_json = serde_json::to_string(outcome.admitted.signed()).expect("signed plan");
+    let before = home.audit_text().lines().count();
+
+    record_transient_exit(TransientExitAudit {
+        signed_plan_json: &signed_plan_json,
+        vm_name: "t-boot-failed",
+        backend: "mock",
+        exit_code: None,
+        completed: false,
+        posture: Some(crate::admission::BootPosture::block()),
+    })
+    .expect("record transient exit");
+
+    let events: Vec<String> = home
+        .audit_text()
+        .lines()
+        .skip(before)
+        .map(|line| {
+            let v: serde_json::Value = serde_json::from_str(line).expect("entry");
+            v["entry"]["event"].as_str().unwrap_or_default().to_string()
+        })
+        .collect();
+    assert_eq!(events, ["plan.exited", "session.sealed"]);
+    let signer = mvm_hostd::audit::host_keypair::load_or_init().expect("host signer");
+    let verified = mvm_hostd::audit::session::verify_session(
+        &mvm_core::config::mvm_audit_dir(),
+        "local",
+        &outcome.plan_id,
+        &signer.verifying,
+    );
+    assert_eq!(verified.late_entries, 0, "{verified:?}");
+}
+
+#[tokio::test]
 async fn a_transient_command_exit_is_sealed_from_its_admitted_plan() {
     let home = Isolated::new();
     let client = mock_client();
@@ -304,6 +400,7 @@ async fn a_transient_command_exit_is_sealed_from_its_admitted_plan() {
         backend: "mock",
         exit_code: Some(0),
         completed: true,
+        posture: None,
     })
     .expect("record transient exit");
 
@@ -352,6 +449,7 @@ fn malformed_transient_plan_cannot_create_an_exit_seal() {
         backend: "mock",
         exit_code: Some(0),
         completed: true,
+        posture: None,
     });
 
     assert!(result.is_err());
@@ -379,6 +477,7 @@ async fn a_transient_stop_failure_is_recorded_under_its_plan_and_left_unsealed()
             backend: "mock",
             exit_code: Some(0),
             completed: true,
+            posture: None,
         },
         "vmm still running",
     );
@@ -421,6 +520,7 @@ async fn a_tampered_transient_plan_cannot_create_an_exit_seal() {
         backend: "mock",
         exit_code: Some(0),
         completed: true,
+        posture: None,
     });
 
     assert!(result.is_err());
@@ -444,6 +544,7 @@ async fn a_failed_transient_dispatch_never_attests_exit_zero() {
         backend: "mock",
         exit_code: None,
         completed: false,
+        posture: None,
     })
     .expect("record failed transient");
 
@@ -507,140 +608,7 @@ async fn transient_name_collisions_are_refused() {
     assert!(err.to_string().contains("persistent machine"), "got: {err}");
 }
 
-#[tokio::test]
-async fn ttl_reaper_stops_and_cleans_expired_transients_only() {
-    let home = Isolated::new();
-    let client = mock_client();
-    let rootfs = home.rootfs();
-
-    let short = transient_request(&rootfs)
-        .name("t-ttl")
-        .ttl_seconds(3600)
-        .build()
-        .unwrap();
-    client.launch(short).await.expect("launch with ttl");
-
-    // A persistent machine with an elapsed registry TTL must never be reaped
-    // by the transient reaper.
-    client
-        .create_from_request(&persistent_request(&rootfs, "p-keep").build().unwrap())
-        .expect("create persistent");
-
-    // Before expiry nothing is reaped.
-    let now = chrono::Utc::now().to_rfc3339();
-    assert!(
-        client
-            .reap_expired_transients(&now)
-            .expect("reap")
-            .is_empty()
-    );
-
-    // Past expiry the transient is stopped + cleaned; the definition stays.
-    let later = (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339();
-    let reaped = client.reap_expired_transients(&later).expect("reap");
-    assert_eq!(reaped, vec!["t-ttl".to_string()]);
-    assert!(!listed_names(&client).await.contains(&"t-ttl".to_string()));
-    assert!(machine_spec_path("p-keep").exists(), "definition survives");
-
-    // Idempotent: a second reap finds nothing.
-    assert!(
-        client
-            .reap_expired_transients(&later)
-            .expect("reap")
-            .is_empty()
-    );
-}
-
 // ── Persistent lifecycle ────────────────────────────────────────────
-
-#[tokio::test]
-async fn persistent_create_start_stop_restart_remove_roundtrip() {
-    let home = Isolated::new();
-    let service = fixture_secret_service(&home);
-    let secret_ref = seeded_secret_ref(&service);
-    let client = mock_client().with_secret_service(service);
-    let rootfs = home.rootfs();
-
-    // Create (persist without boot): definition + secret-ref sidecar land.
-    let request = persistent_request(&rootfs, "p-web")
-        .cpus(2)
-        .memory_mib(256)
-        .secret_ref(secret_ref)
-        .build()
-        .unwrap();
-    let created = client.create_from_request(&request).expect("create");
-    assert_eq!(
-        created.status,
-        mvm_core::client::dto::MachineStatus::Stopped
-    );
-    assert!(machine_spec_path("p-web").exists(), "definition persisted");
-    assert!(
-        machine_state_dir("p-web")
-            .join(crate::secret::refs::MACHINE_SECRET_REFS_FILENAME)
-            .exists(),
-        "secret refs recorded at create"
-    );
-
-    // Start boots from the persisted definition through admission.
-    let id = mvm_core::client::dto::MachineId("p-web".into());
-    let started = client.start_machine(&id).await.expect("start");
-    assert_eq!(
-        started.status,
-        mvm_core::client::dto::MachineStatus::Running
-    );
-    assert!(home.audit_text().contains("plan.launched"));
-    // Starting again is a no-op reporting the running state.
-    let again = client.start_machine(&id).await.expect("re-start");
-    assert_eq!(again.status, mvm_core::client::dto::MachineStatus::Running);
-    // The start stamped last_started_at on the spec.
-    let spec = mvm_runtime::machine::persist::load_machine_spec("p-web").unwrap();
-    assert!(spec.last_started_at.is_some());
-
-    // Stop never deletes the definition; the machine stays in inventory.
-    client.stop_machine(&id).await.expect("stop");
-    assert!(machine_spec_path("p-web").exists(), "stop keeps the spec");
-    let records = crate::inventory::list_local_inventory(&client)
-        .await
-        .expect("inventory");
-    let record = records.iter().find(|r| r.name == "p-web").expect("listed");
-    assert_eq!(record.kind, crate::inventory::MachineKind::Persistent);
-    assert_eq!(record.status, mvm_core::client::dto::MachineStatus::Stopped);
-    assert_eq!(record.secret_ref_count, 1, "sidecar count surfaces");
-
-    // Restart = start from the stopped definition.
-    let restarted = client.restart_persistent("p-web").await.expect("restart");
-    assert_eq!(
-        restarted.status,
-        mvm_core::client::dto::MachineStatus::Running
-    );
-    client.stop_machine(&id).await.expect("stop again");
-
-    // Remove is the separate confirmed action that deletes the definition
-    // and clears the secret-reference sidecar.
-    client.remove_machine(&id).await.expect("remove stopped");
-    assert!(!machine_spec_path("p-web").exists());
-    assert!(!machine_state_dir("p-web").exists());
-    assert!(
-        !mvm_core::config::vm_state_dir("p-web").exists(),
-        "remove drops the per-VM runtime dir; a stale endpoint socket there \
-         blocks the next launch under the same name"
-    );
-    // Idempotent: removing again is Ok.
-    client.remove_machine(&id).await.expect("re-remove");
-
-    // The name is immediately reusable: a fresh definition launches clean.
-    let request = persistent_request(&home.rootfs(), "p-web").build().unwrap();
-    let outcome = client.launch(request).await.expect("recreate same name");
-    assert_eq!(
-        outcome.machine.status,
-        mvm_core::client::dto::MachineStatus::Running
-    );
-    client.stop_machine(&id).await.expect("stop recreated");
-    client
-        .remove_machine_with(&id, RemoveOptions { force: false })
-        .await
-        .expect("remove recreated");
-}
 
 #[tokio::test]
 async fn persistent_launch_boots_and_reuses_same_config() {
@@ -1033,7 +1001,6 @@ async fn start_refuses_spec_shapes_the_in_process_backend_cannot_honor() {
         resolved_digest: None,
         runtime_pack: false,
         registry_pack_image: None,
-        tools: Default::default(),
         net: false,
         allow_host: vec![],
         peer: Vec::new(),

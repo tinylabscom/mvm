@@ -38,7 +38,7 @@ pub use bundle::{PolicyBundle, PolicyId, SCHEMA_VERSION, TenantOverlay};
 pub use policies::{
     ArtifactPolicy, AuditPolicy, BundleNetworkPolicy, DEFAULT_BODY_CAP_BYTES, EgressPolicy,
     FlowByteLogDirections, FlowByteLogSpec, FsGrantSpec, KeyPolicy, L4RuleSpec, PiiPolicy,
-    ToolPolicy, WasiCapPolicy,
+    WasiCapPolicy,
 };
 pub use projection::{
     CanonicalEgress, CanonicalRule, ProjectionError, Proto, WasiEgress, WasiOutboundGrant,
@@ -54,7 +54,7 @@ pub use protected_paths::{
 pub use redaction::{
     EntropyMode, NameMode, RedactionAction, RedactionPolicy, RedactionProfile, SecretAction,
 };
-pub use resolver::{EffectivePolicy, EmergencyDeny, resolve};
+pub use resolver::{EffectivePolicy, resolve};
 pub use reversible_replacement::{
     OpaqueRewriteToken, ReversibleFallback, ReversibleReplacementAction,
     ReversibleReplacementPolicy, ReversibleReplacementProfile, RewriteFlowId, RewriteProofRecord,

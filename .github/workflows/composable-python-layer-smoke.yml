@@ -1,0 +1,250 @@
+name: Composable Python layer signing smoke
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/composable-python-layer-smoke.yml
+      - scripts/build-python-runtime-layer.py
+      - scripts/test_build_python_runtime_layer.py
+      - crates/mvm-build/src/runtime_layer.rs
+      - crates/mvm-cli/src/commands/vm/exec/**
+      - crates/mvm-hostd/src/plan_admission/composition.rs
+      - crates/mvm-contract/src/plan/bundle.rs
+      - crates/mvm-core/src/registry_pack/runtime_layer.rs
+      - crates/mvm-core/examples/verify-runtime-layer-fixture.rs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  signed-input:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: sigstore/cosign-installer@v3
+      - name: Reproduce and verify an unpublished Python runtime input
+        env:
+          MVM_EMBED: "0"
+          ARCH: ${{ matrix.arch }}
+          IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/composable-python-layer-smoke.yml@${{ github.ref }}
+        run: |
+          set -euo pipefail
+          python3 -m unittest scripts/test_build_python_runtime_layer.py
+          command -v zstd
+          tmp="$(mktemp -d)"
+          trap 'rm -rf -- "$tmp"' EXIT
+          case "$ARCH" in
+            x86_64)
+              source_url='https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.13.18%2B20261026-x86_64-unknown-linux-musl-lto%2Bstatic-full.tar.zst'
+              expected='9f5dfaf983a54a62212184f08f5dfc36d1474052d71a799cdfd3f1a53dc970d4'
+              size=63836160
+              ;;
+            aarch64)
+              source_url='https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.13.18%2B20261026-aarch64-unknown-linux-musl-lto%2Bstatic-full.tar.zst'
+              expected='2c65e1c400098a3a8141a58f2f2f66a3df667d5f947d86d982f3d115b023b0f2'
+              size=64798720
+              ;;
+          esac
+          curl -fLsS --retry 2 --max-time 120 \
+            "$source_url" \
+            -o "$tmp/source.tar.zst"
+          python3 scripts/build-python-runtime-layer.py --arch "$ARCH" "$tmp/source.tar.zst" "$tmp/layer.tar"
+          python3 scripts/build-python-runtime-layer.py --arch "$ARCH" "$tmp/source.tar.zst" "$tmp/again.tar"
+          cmp "$tmp/layer.tar" "$tmp/again.tar"
+          printf '%s  %s\n' "$expected" "$tmp/layer.tar" | sha256sum --check
+          test "$(stat -c %s "$tmp/layer.tar")" -eq "$size"
+
+          mkdir -p "$tmp/files/pack"
+          printf 'description = "Offline Python runtime"\nrequired = true\n[network]\nblock = true\n' \
+            > "$tmp/files/pack/group.toml"
+          LAYER_ROOT="$tmp" python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          root = Path(os.environ["LAYER_ROOT"])
+          archive = (root / "layer.tar").read_bytes()
+          group = (root / "files/pack/group.toml").read_bytes()
+          manifest = {
+              "schema_version": 3,
+              "kind": "runtime_layer",
+              "reference": "runtime/python@1.1.0",
+              "description": "Unpublished offline Python input test",
+              "runtime_layer": {
+                  "schema_version": 1,
+                  "guest_arch": os.environ["ARCH"],
+                  "dependencies": [],
+                  "archive": {
+                      "source": "https://example.invalid/unpublished/runtime/python/1.1.0/layer.tar",
+                      "archive_sha256": hashlib.sha256(archive).hexdigest(),
+                      "archive_size": len(archive),
+                  },
+              },
+              "files": [{
+                  "path": "pack/group.toml",
+                  "sha256": hashlib.sha256(group).hexdigest(),
+                  "size": len(group),
+              }],
+          }
+          (root / "manifest.json").write_bytes(
+              json.dumps(manifest, separators=(",", ":"), sort_keys=True).encode()
+          )
+          PY
+          cosign sign-blob --yes --new-bundle-format --bundle "$tmp/manifest.bundle" \
+            "$tmp/manifest.json"
+          cargo run --locked -p mvm-core --example verify-runtime-layer-fixture \
+            --features host-state,manifest-verify -- \
+            "$tmp/manifest.json" "$tmp/manifest.bundle" "$tmp/layer.tar" \
+            "$tmp/files" "$IDENTITY"
+          MVM_TEST_PYTHON_LAYER_TAR="$tmp/layer.tar" cargo test --locked -p mvm-build \
+            --lib runtime_layer::tests::pinned_python_layer_passes_the_real_runtime_tar_preflight \
+            -- --ignored --exact
+          cp "$tmp/layer.tar" "$tmp/tampered.tar"
+          printf x >> "$tmp/tampered.tar"
+          if cargo run --locked -p mvm-core --example verify-runtime-layer-fixture \
+            --features host-state,manifest-verify -- \
+            "$tmp/manifest.json" "$tmp/manifest.bundle" "$tmp/tampered.tar" \
+            "$tmp/files" "$IDENTITY"; then
+            echo "tampered signed input was accepted" >&2
+            exit 1
+          fi
+          printf '# changed after signing\n' >> "$tmp/files/pack/group.toml"
+          if cargo run --locked -p mvm-core --example verify-runtime-layer-fixture \
+            --features host-state,manifest-verify -- \
+            "$tmp/manifest.json" "$tmp/manifest.bundle" "$tmp/layer.tar" \
+            "$tmp/files" "$IDENTITY"; then
+            echo "tampered signed policy was accepted" >&2
+            exit 1
+          fi
+          printf 'description = "Offline Python runtime"\nrequired = true\n[network]\nblock = true\n' \
+            > "$tmp/files/pack/group.toml"
+          if cargo run --locked -p mvm-core --example verify-runtime-layer-fixture \
+            --features host-state,manifest-verify -- \
+            "$tmp/manifest.json" "$tmp/manifest.bundle" "$tmp/layer.tar" \
+            "$tmp/files" "https://example.invalid/untrusted-publisher"; then
+            echo "wrong publisher identity was accepted" >&2
+            exit 1
+          fi
+
+  signed-base:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: sigstore/cosign-installer@v3
+      - name: Authenticate a synthetic development base before materialization
+        env:
+          MVM_EMBED: "0"
+          IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/composable-python-layer-smoke.yml@${{ github.ref }}
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf -- "$tmp"' EXIT
+          MVM_TEST_SIGNED_BASE_DIR="$tmp/base" cargo test --locked -p mvm-build \
+            --features manifest-verify --lib \
+            runtime_layer::tests::signed_set_composition_fetches_and_checks_the_production_base \
+            -- --exact
+          cosign sign-blob --yes --new-bundle-format --bundle "$tmp/base/image-set.bundle" \
+            "$tmp/base/image-set.json"
+          MVM_TEST_SIGNED_BASE_DIR="$tmp/base" MVM_TEST_SIGNED_BASE_VERIFY=1 \
+            MVM_TEST_SIGNED_BASE_IDENTITY="$IDENTITY" cargo test --locked -p mvm-build \
+            --features manifest-verify --lib \
+            runtime_layer::tests::signed_set_composition_fetches_and_checks_the_production_base \
+            -- --exact
+          if MVM_TEST_SIGNED_BASE_DIR="$tmp/base" MVM_TEST_SIGNED_BASE_VERIFY=1 \
+            MVM_TEST_SIGNED_BASE_IDENTITY="https://example.invalid/untrusted-publisher" \
+            cargo test --locked -p mvm-build --features manifest-verify --lib \
+              runtime_layer::tests::signed_set_composition_fetches_and_checks_the_production_base \
+              -- --exact; then
+            echo "wrong synthetic base publisher was accepted" >&2
+            exit 1
+          fi
+          MVM_TEST_COMPOSITION_TAR="$tmp/base/rootfs.tar.gz" \
+            cargo test --locked -p mvm-build --features manifest-verify \
+            --lib runtime_layer::tests::nix_generated_base_tar_materializes_with_verity_when_provided \
+            -- --exact
+          printf x >> "$tmp/base/rootfs.tar.gz"
+          if MVM_TEST_SIGNED_BASE_DIR="$tmp/base" MVM_TEST_SIGNED_BASE_VERIFY=1 \
+            MVM_TEST_SIGNED_BASE_IDENTITY="$IDENTITY" cargo test --locked -p mvm-build \
+              --features manifest-verify --lib \
+              runtime_layer::tests::signed_set_composition_fetches_and_checks_the_production_base \
+              -- --exact; then
+            echo "changed synthetic base archive was accepted" >&2
+            exit 1
+          fi
+
+  composed-base-guest-read:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: signed-base
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - name: Select reviewed test-only Linux source
+        id: test-images-ref
+        run: echo "ref=$(cat tests/fixtures/composable-images-source.ref)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v6
+        with:
+          repository: tinylabscom/mvm-images
+          ref: ${{ steps.test-images-ref.outputs.ref }}
+          path: mvm-images
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: sigstore/cosign-installer@v3
+      - name: Read an authored value in a QEMU guest from a signed-input composition
+        env:
+          MVM_EMBED: "0"
+          IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/composable-python-layer-smoke.yml@${{ github.ref }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86
+          result="$(cd mvm-images && nix build '.#legacyPackages.x86_64-linux.default-tenant.default' --no-link --print-out-paths)"
+          test -s "$result/rootfs.tar.gz"
+          test -s "$result/vmlinux"
+          tmp="$(mktemp -d)"
+          trap 'rm -rf -- "$tmp"' EXIT
+          export MVM_TEST_SIGNED_BASE_DIR="$tmp/base"
+          export MVM_TEST_SIGNED_BASE_TAR="$result/rootfs.tar.gz"
+          export MVM_TEST_SIGNED_BASE_KERNEL="$result/vmlinux"
+          cargo test --locked -p mvm-build --features manifest-verify --lib \
+            runtime_layer::tests::signed_set_composition_fetches_and_checks_the_production_base \
+            -- --exact
+          cosign sign-blob --yes --new-bundle-format \
+            --bundle "$tmp/base/image-set.bundle" "$tmp/base/image-set.json"
+          MVM_TEST_SIGNED_BASE_VERIFY=1 MVM_TEST_SIGNED_BASE_IDENTITY="$IDENTITY" \
+            cargo test --locked -p mvm-build --features manifest-verify --lib \
+              runtime_layer::tests::signed_set_composition_fetches_and_checks_the_production_base \
+              -- --exact
+          test -s "$tmp/base/composed.ext4"
+          for run in first repeat; do
+            status=0
+            timeout 120s qemu-system-x86_64 -nodefaults -no-user-config \
+              -machine q35,accel=tcg -m 512 -smp 1 -display none \
+              -monitor none -serial stdio -no-reboot -kernel "$result/vmlinux" \
+              -drive "file=$tmp/base/composed.ext4,format=raw,if=none,id=rootfs,readonly=on" \
+              -device virtio-blk-pci,drive=rootfs \
+              -append 'console=ttyS0 root=/dev/vda ro rootfstype=ext4 rootwait init=/srv/app/probe.sh panic=1 loglevel=4' \
+              > "$tmp/$run.log" 2>&1 || status=$?
+            if [ "$status" -eq 124 ]; then
+              echo "$run guest timed out" >&2
+              exit 1
+            fi
+            python3 - "$tmp/$run.log" "$run" <<'PY'
+          import pathlib, sys
+          log = pathlib.Path(sys.argv[1]).read_text(errors="replace")
+          marker = "COMPOSED_GUEST_VALUE=print('ready')"
+          if marker not in log:
+              raise SystemExit(f"{sys.argv[2]} guest did not read the authored file:\n{log[-4000:]}")
+          print(f"{sys.argv[2]} guest read: {marker}")
+          PY
+          done

@@ -16,6 +16,7 @@ use mvm_core::launch_trace::PhaseTimingMode;
 use mvm_core::vm_backend::{SnapshotCapability, VmId, VmStartConfig, VmVolume};
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::vsock_transport;
+use mvm_vmm::host::shell::shell_quote;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -59,9 +60,8 @@ pub(crate) use oci_boot::{ImageNaming, LaunchNames, boots_oci_image, oci_proxy_e
 use session::wait_for_agent_timed;
 pub use session::{SessionVm, dispatch_in_session, wait_for_agent};
 use transient::{
-    BootAttempt, LeaveAt, boot_transient_vm, combine_run_and_flush,
-    flush_writable_disks_before_teardown, install_ctrlc_teardown, leave_standby_when,
-    standby_to_leave, start_mode,
+    BootAttempt, LeaveAt, arm_interrupt_teardown, boot_transient_vm, combine_run_and_flush,
+    flush_writable_disks_before_teardown, leave_standby_when, standby_to_leave, start_mode,
 };
 pub(crate) use transient::{TransientStopFailure, combine_run_and_stop, teardown_transient_vm};
 
@@ -357,24 +357,6 @@ fn quote_argv_for_exec(argv: &[String]) -> String {
     format!("exec {}", quoted.join(" "))
 }
 
-/// Quote a single argument for inclusion in a shell command line.
-///
-/// Wraps in single quotes and escapes embedded single quotes the
-/// portable POSIX way (`'` → `'\''`).
-pub fn shell_quote(arg: &str) -> String {
-    let mut out = String::with_capacity(arg.len() + 2);
-    out.push('\'');
-    for ch in arg.chars() {
-        if ch == '\'' {
-            out.push_str(r"'\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
-}
-
 /// Build the wrapper script that runs inside the guest:
 ///   1. exports launch-plan-derived env vars (when target is LaunchPlan)
 ///   2. exports CLI `--env` vars (CLI overrides launch-plan)
@@ -397,12 +379,11 @@ pub fn build_guest_wrapper(req: &ExecRequest) -> String {
     for (k, v) in &req.env {
         script.push_str(&format!("export {k}={}\n", shell_quote(v)));
     }
-    // After the caller's exports, and composed against `$PATH` in the guest, so
-    // the mediated tools win whatever the image or the caller sets. A NIC-less
-    // guest's `ping` is one of these: the image's own copy fails at `socket()`.
+    // After the caller's exports, so the network utility wins over the image's
+    // ping: a NIC-less guest's own copy fails at `socket()`.
     script.push_str(&format!(
         "export PATH={}:\"$PATH\"\n",
-        shell_quote(mvm_core::guest_netd::MEDIATED_TOOLS_BIN),
+        shell_quote(mvm_core::guest_netd::NETWORK_UTILITIES_BIN),
     ));
     if let ExecTarget::LaunchPlan { entrypoint } = &req.target
         && let Some(wd) = &entrypoint.working_dir
@@ -725,8 +706,13 @@ fn run_inner(
         None
     };
 
-    // Install Ctrl-C handler that tears the VM down.
-    let interrupted = install_ctrlc_teardown(&vm_name, backend.name());
+    // A signal stops and removes the VM before the process exits.
+    let interrupt_teardown = arm_interrupt_teardown(
+        &vm_name,
+        &requested_vm_name,
+        backend.name(),
+        start_config.plan_json.as_deref(),
+    );
 
     // Answer the endpoint's `ask` decisions for as long as the run is in the
     // foreground. The wasm tier has no network endpoint to ask.
@@ -785,6 +771,7 @@ fn run_inner(
             backend: backend.name(),
             exit_code: reported_exit_code,
             completed: workload_completed,
+            posture: posture.filter(|_| result.is_ok()).map(std::cell::Cell::get),
         }
     });
     let stopped = teardown_transient_vm(
@@ -794,6 +781,7 @@ fn run_inner(
         exit_audit,
         &mut sub_marks,
     );
+    drop(interrupt_teardown);
     if stopped.is_err() {
         return combine_run_and_stop(result, stopped);
     }
@@ -892,9 +880,6 @@ fn run_inner(
         output.phase_timing = Some(report);
     }
 
-    if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
-        anyhow::bail!("interrupted");
-    }
     if let Some(error) = warm_memory_error
         && result.is_ok()
     {
@@ -1685,7 +1670,6 @@ mod tests {
     fn select_exec_backend_none_with_no_env_falls_to_auto_detect() {
         let mut env = TestEnv::new();
         env.remove("MVM_HYPERVISOR");
-        env.remove("MVM_BACKEND");
         let deny_all = mvm_core::network_policy::NetworkPolicy::deny_all();
         let backend =
             select_exec_backend(false, &deny_all, None).expect("auto-detect always resolves");
@@ -1698,7 +1682,6 @@ mod tests {
     #[test]
     fn select_exec_backend_requested_flag_beats_conflicting_env() {
         let mut env = TestEnv::new();
-        env.remove("MVM_BACKEND");
         env.set("MVM_HYPERVISOR", "qemu");
         let deny_all = mvm_core::network_policy::NetworkPolicy::deny_all();
         let backend = select_exec_backend(false, &deny_all, Some("libkrun"))
@@ -1891,17 +1874,6 @@ mod tests {
     }
 
     #[test]
-    fn shell_quote_basic() {
-        assert_eq!(shell_quote("hello"), "'hello'");
-        assert_eq!(shell_quote("hello world"), "'hello world'");
-    }
-
-    #[test]
-    fn shell_quote_escapes_single_quotes() {
-        assert_eq!(shell_quote("it's"), r"'it'\''s'");
-    }
-
-    #[test]
     fn target_command_inline_quotes_each_arg() {
         let req = ExecRequest {
             name: None,
@@ -1966,15 +1938,15 @@ mod tests {
         assert!(script.starts_with("set -e\n"));
         assert!(script.contains("exec 'true'"));
         assert!(!script.contains("mount"));
-        // The mediated-tool PATH is always emitted; no caller export joins it.
+        // The network utility PATH is always emitted; no caller export joins it.
         assert_eq!(script.matches("export ").count(), 1);
-        assert!(script.contains(mvm_core::guest_netd::MEDIATED_TOOLS_BIN));
+        assert!(script.contains(mvm_core::guest_netd::NETWORK_UTILITIES_BIN));
     }
 
     /// The image's own `ping` fails at `socket()` in a NIC-less guest, so the
-    /// mediated stand-in has to win even when the caller sets `PATH` itself.
+    /// network utility has to win even when the caller sets `PATH` itself.
     #[test]
-    fn build_guest_wrapper_mediated_path_outranks_a_caller_supplied_path() {
+    fn build_guest_wrapper_network_path_outranks_a_caller_supplied_path() {
         let req = ExecRequest {
             name: None,
             warm_pool_size: 0,
@@ -2004,12 +1976,12 @@ mod tests {
         };
         let script = build_guest_wrapper(&req);
         let caller = script.find("export PATH='/usr/bin'").expect("caller PATH");
-        let mediated = script
-            .find(mvm_core::guest_netd::MEDIATED_TOOLS_BIN)
-            .expect("mediated PATH");
+        let utility = script
+            .find(mvm_core::guest_netd::NETWORK_UTILITIES_BIN)
+            .expect("network utility PATH");
         assert!(
-            mediated > caller,
-            "mediated PATH must come last to win; got:\n{script}"
+            utility > caller,
+            "network utility PATH must come last to win; got:\n{script}"
         );
         // Composed against $PATH rather than replacing it, so the caller's
         // entry survives behind ours.
@@ -2148,7 +2120,7 @@ mod tests {
         let script = build_guest_wrapper(&req);
         assert!(!script.contains("cd "));
         assert_eq!(script.matches("export ").count(), 1);
-        assert!(script.contains(mvm_core::guest_netd::MEDIATED_TOOLS_BIN));
+        assert!(script.contains(mvm_core::guest_netd::NETWORK_UTILITIES_BIN));
         assert!(script.contains("exec 'true'"));
     }
 

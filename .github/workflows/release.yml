@@ -263,6 +263,31 @@ jobs:
       # fails at "cargo zigbuild failed for mvm-host-vm-init".
       - uses: ./.github/actions/install-zigbuild
 
+      # Manual rehearsals only: a tag push builds everything from source, so a
+      # cache entry can never reach a signed release. Dependency units only;
+      # workspace crate outputs and cargo-installed binaries are not cached.
+      - name: Restore dependency build cache (rehearsal only)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: ./.github/actions/rust-cache
+        with:
+          key: release-${{ matrix.build_target }}
+          save: ${{ github.event_name == 'workflow_dispatch' }}
+          workspace-crates: "false"
+          cache-bin: "false"
+
+      # Manual rehearsals only. The embedded guest payload is cross-compiled
+      # into a content-addressed store; build.rs checks each entry against the
+      # SHA-256 recorded beside it and treats a missing or mismatched digest as
+      # a miss. Exact key only (no prefix fallback). The key names the target
+      # architecture, not the runner OS, so the two aarch64 jobs share an entry.
+      - name: Restore the embedded payload store (rehearsal only)
+        id: embed_cache
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: actions/cache/restore@v5
+        with:
+          path: ~/.cache/mvm/embed
+          key: embed-${{ startsWith(matrix.build_target, 'aarch64') && 'aarch64' || 'x86_64' }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'crates/**/Cargo.toml', 'crates/**/*.rs') }}
+
       - name: Build release binary
         env:
           BUILD_TARGET: ${{ matrix.build_target }}
@@ -276,6 +301,13 @@ jobs:
           else
             cargo build --profile release-min --target "${BUILD_TARGET}" --features "${MVMCTL_RELEASE_FEATURES}"
           fi
+
+      - name: Save the embedded payload store
+        if: ${{ github.event_name == 'workflow_dispatch' && steps.embed_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v5
+        with:
+          path: ~/.cache/mvm/embed
+          key: ${{ steps.embed_cache.outputs.cache-primary-key }}
 
       # The per-VM host processes mvmctl spawns at runtime (one process per
       # guest). They are SEPARATE bin targets in `mvm-hostd` — the root
@@ -325,6 +357,7 @@ jobs:
               --bin mvm-network-endpoint \
               --bin mvm-broker \
               --bin mvm-audit-signer \
+              --bin mvm-mailbox \
               --bin mvm-gpu-endpoint
             # The in-process SDK host library: the language SDKs load it by
             # the platform file name, and the release ships it beside
@@ -346,6 +379,7 @@ jobs:
               --bin mvm-network-endpoint \
               --bin mvm-broker \
               --bin mvm-audit-signer \
+              --bin mvm-mailbox \
               --bin mvm-gpu-endpoint
             cargo build --release --target "${BUILD_TARGET}" -p mvm-hostlib \
               --features mvm-client/release-channel
@@ -356,11 +390,36 @@ jobs:
         shell: bash
         run: brew install make llvm lld flex bison gnu-sed gnu-tar xz
 
+      # The kernel source tarball is checked against the SHA-256 pinned in the
+      # build script after it is restored, exactly like a download, so this
+      # cache is used by every run, tag pushes included.
+      - name: Restore the pinned kernel source tarball
+        id: kernel_cache
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ runner.temp }}/libkrunfw-kernel
+          key: libkrunfw-kernel-${{ hashFiles('scripts/release/build-libkrun-tier.sh') }}
+
+      # The built upstream tree (libkrun and libkrunfw) is restored only for a
+      # manual rehearsal. A tag push builds it from source: the integrity
+      # record lives inside the cache entry, so it cannot vouch against a
+      # poisoned entry, and a signed release must not depend on one.
+      - name: Restore the libkrun upstream tree (rehearsal only)
+        id: libkrun_cache
+        if: ${{ matrix.target == 'aarch64-apple-darwin' && github.event_name == 'workflow_dispatch' }}
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ runner.temp }}/libkrun-upstream
+          key: libkrun-upstream-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageVersion }}-${{ hashFiles('scripts/release/build-libkrun-tier.sh', 'scripts/release/libkrunfw-macos-host.patch') }}
+
       - name: Build libkrun release tier
         if: ${{ matrix.target == 'aarch64-apple-darwin' }}
         env:
           BUILD_TARGET: ${{ matrix.build_target }}
           MVM_GNU_MAKE: gmake
+          MVM_LIBKRUN_UPSTREAM_CACHE: ${{ github.event_name == 'workflow_dispatch' && format('{0}/libkrun-upstream', runner.temp) || '' }}
+          MVM_LIBKRUNFW_KERNEL_CACHE: ${{ runner.temp }}/libkrunfw-kernel
         shell: bash
         run: |
           llvm_prefix="$(brew --prefix llvm)"
@@ -372,6 +431,20 @@ jobs:
           export PATH="${llvm_prefix}/bin:${lld_prefix}/bin:${flex_prefix}/bin:${bison_prefix}/bin:${gnu_sed_prefix}/libexec/gnubin:${gnu_tar_prefix}/libexec/gnubin:${PATH}"
           scripts/release/build-libkrun-tier.sh \
             "target/${BUILD_TARGET}/release/libkrun-tier" "${BUILD_TARGET}"
+
+      - name: Save the pinned kernel source tarball
+        if: ${{ matrix.target == 'aarch64-apple-darwin' && github.event_name == 'workflow_dispatch' && steps.kernel_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ runner.temp }}/libkrunfw-kernel
+          key: ${{ steps.kernel_cache.outputs.cache-primary-key }}
+
+      - name: Save the libkrun upstream tree
+        if: ${{ matrix.target == 'aarch64-apple-darwin' && github.event_name == 'workflow_dispatch' && steps.libkrun_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ runner.temp }}/libkrun-upstream
+          key: ${{ steps.libkrun_cache.outputs.cache-primary-key }}
 
       # Attribution only: which packages the builds above compile more than once
       # and what differs (profile, features, target), so a long release is
@@ -399,7 +472,7 @@ jobs:
           fi
           cargo run --package xtask -- report-compile-units \
             --build "mvmctl (release-min)=build --profile release-min --target ${BUILD_TARGET} --features ${MVMCTL_RELEASE_FEATURES}" \
-            --build "daemons (release)=build --release --target ${BUILD_TARGET} -p mvm-hostd -p mvm-gpu --bin mvm-host-agent --bin mvm-signer-helper --bin mvm-network-endpoint --bin mvm-broker --bin mvm-audit-signer --bin mvm-gpu-endpoint" \
+            --build "daemons (release)=build --release --target ${BUILD_TARGET} -p mvm-hostd -p mvm-gpu --bin mvm-host-agent --bin mvm-signer-helper --bin mvm-network-endpoint --bin mvm-broker --bin mvm-audit-signer --bin mvm-mailbox --bin mvm-gpu-endpoint" \
             --build "mvm-hostlib (release)=build --release --target ${hostlib_target} -p mvm-hostlib --features mvm-client/release-channel" \
             "${hvf_build[@]}" \
             "${size_args[@]}" | tee -a "${GITHUB_STEP_SUMMARY}"
@@ -484,7 +557,7 @@ jobs:
           # Fail closed rather than copy-if-exists: a binary that failed to
           # build would otherwise be silently dropped from the tarball and
           # surface much later as a spawn failure on a user's machine.
-          REQUIRED_HOSTBINS="mvm-host-agent mvm-signer-helper mvm-network-endpoint mvm-broker mvm-audit-signer mvm-gpu-endpoint"
+          REQUIRED_HOSTBINS="mvm-host-agent mvm-signer-helper mvm-network-endpoint mvm-broker mvm-audit-signer mvm-mailbox mvm-gpu-endpoint"
           if [[ "${TARGET}" == *apple-darwin ]]; then
             REQUIRED_HOSTBINS="${REQUIRED_HOSTBINS} mvm-hvf-supervisor mvm-libkrun-supervisor"
           fi
@@ -518,6 +591,17 @@ jobs:
             cp -R "${LIBKRUN_TIER}/sources" "staging/${ARCHIVE_NAME}/"
             cp "${LIBKRUN_TIER}/SOURCE-OFFER.txt" \
               "${LIBKRUN_TIER}/SOURCE-PINS" "staging/${ARCHIVE_NAME}/"
+          fi
+          # The pinned Firecracker, beside mvmctl: a Linux first run boots with
+          # it, and a downloaded install has no other source. The script
+          # refuses any tarball or binary that is not the one
+          # crates/mvm-core/firecracker.lock pins, so the archive signature
+          # covers the bytes the pin names. A directory, not a top-level
+          # executable, so install never links it onto PATH.
+          if [[ "${TARGET}" == *-unknown-linux-gnu ]]; then
+            scripts/release/stage-firecracker.sh "${TARGET%%-*}" \
+              "staging/${ARCHIVE_NAME}/firecracker"
+            echo "bundled firecracker"
           fi
           # The SDK host library, beside mvmctl: the SDKs' third lookup is
           # the platform file name next to the resolved mvmctl, and a
@@ -653,6 +737,17 @@ jobs:
           path: |
             staging/*.tar.gz
             staging/*.sha256
+
+      # The cache save runs after the last step. The nested cross-compile
+      # target and the libkrun tier output hold workspace-built binaries that
+      # the dependency-only cache must not carry, so drop them first.
+      - name: Drop workspace-built outputs before the cache is saved
+        if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+        shell: bash
+        run: |
+          rm -rf target/*/build/mvm-cli-nested-target \
+            target/*/*/build/mvm-cli-nested-target \
+            target/*/release/libkrun-tier
 
   archive-install-smoke:
     needs: build

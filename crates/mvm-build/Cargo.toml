@@ -9,10 +9,6 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 
-[[bin]]
-name = "mvm-egress-proxy"
-path = "src/bin/mvm-egress-proxy.rs"
-
 [dependencies]
 # OCI layer unpack to a staging rootfs. `tar` and
 # `flate2` are workspace deps already (used by `mvm-sdk`'s addon
@@ -130,6 +126,8 @@ tempfile.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 xattr.workspace = true
+# The v2 source-to-archive integration test runs the Unix-only SDK/compiler.
+mvm-sdk = { workspace = true, features = ["compiler"] }
 
 [features]
 default = ["builder-libkrun"]

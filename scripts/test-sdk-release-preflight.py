@@ -30,20 +30,37 @@ class PreflightTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             preflight.validate_metadata(ROOT, "workflow_dispatch", "", False)
 
-    def test_incompatible_runtime_fails(self):
+    def test_an_explicit_runtime_override_is_refused(self):
         original = preflight.tomllib.loads
 
         def loads(text):
             data = original(text)
-            if "runtime_version" in data:
-                data["runtime_version"] = runtime_version
+            if "tag_prefix" in data:
+                data["runtime_version"] = "0.0.1"
             return data
 
-        for runtime_version in ("0.23.1", "0.0.1"):
+        with patch.object(preflight.tomllib, "loads", side_effect=loads):
+            with self.assertRaisesRegex(ValueError, "must come from the workspace"):
+                preflight.validate_metadata(ROOT, "workflow_dispatch", "", True)
+
+    def test_runtime_version_tracks_the_workspace_and_refuses_invalid_versions(self):
+        original = preflight.tomllib.loads
+
+        for runtime_version in ("0.27.0", "0.27.0-rc.5", "0.27.0-dev", "invalid"):
             with self.subTest(runtime_version=runtime_version):
+                def loads(text):
+                    data = original(text)
+                    if "workspace" in data:
+                        data["workspace"]["package"]["version"] = runtime_version
+                    return data
+
                 with patch.object(preflight.tomllib, "loads", side_effect=loads):
-                    with self.assertRaisesRegex(ValueError, "compiled hostlib"):
-                        preflight.validate_metadata(ROOT, "workflow_dispatch", "", True)
+                    if runtime_version in ("0.27.0-dev", "invalid"):
+                        with self.assertRaisesRegex(ValueError, "invalid runtime_version"):
+                            preflight.validate_metadata(ROOT, "workflow_dispatch", "", True)
+                    else:
+                        release = preflight.validate_metadata(ROOT, "workflow_dispatch", "", True)
+                        self.assertEqual(release["runtime_version"], runtime_version)
 
     def test_partial_publication_is_resumable(self):
         release = preflight.validate_metadata(ROOT, "workflow_dispatch", "", True)

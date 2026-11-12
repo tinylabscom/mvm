@@ -13,15 +13,6 @@ use super::artifacts::{
 };
 use super::slots::template_load_slot;
 
-/// Whether the slot's current revision has a Firecracker snapshot.
-pub fn template_has_snapshot_for_slot(slot_hash: &str) -> Result<bool> {
-    let rev = current_revision_id_for_slot(slot_hash)?;
-    let snap_dir = mvm_core::manifest::slot_snapshot_dir(slot_hash, &rev);
-    let vmstate = std::path::Path::new(&snap_dir).join("vmstate.bin");
-    let mem = std::path::Path::new(&snap_dir).join("mem.bin");
-    Ok(vmstate.exists() && mem.exists())
-}
-
 /// Load snapshot metadata for the slot's current revision.
 pub fn template_snapshot_info_for_slot(slot_hash: &str) -> Result<Option<SnapshotInfo>> {
     let rev = current_revision_id_for_slot(slot_hash)?;
@@ -177,7 +168,18 @@ fn installed_bundle(id_or_slot: &str) -> Result<Option<mvm_core::plan::bundle::I
     // A registry we cannot read must not silently skip the gate: propagate,
     // so an unparseable manifest refuses the boot rather than admitting it
     // unchecked.
-    registry.find(id_or_slot)
+    if let Some(installed) = registry.find(id_or_slot)? {
+        return Ok(Some(installed));
+    }
+    Ok(
+        installed_bundle_verified_manifest(id_or_slot)?.map(|manifest| {
+            mvm_core::plan::bundle::InstalledBundle {
+                sha256: id_or_slot.to_owned(),
+                root: registry.install_dir(id_or_slot),
+                manifest,
+            }
+        }),
+    )
 }
 
 /// Whether `id_or_slot` resolves to an installed bundle rather than a template
@@ -192,22 +194,33 @@ fn names_installed_bundle(id_or_slot: &str) -> bool {
 ///
 /// `None` when the key is a template slot or names no installed bundle. A
 /// manifest edited on disk after install refuses rather than reads.
-fn installed_bundle_verified_manifest(
+pub(super) fn installed_bundle_verified_manifest(
     id_or_slot: &str,
 ) -> Result<Option<mvm_core::plan::BundleManifest>> {
     if !names_installed_bundle(id_or_slot) {
         return Ok(None);
     }
     let registry = mvm_core::plan::bundle::BundleRegistry::default_path()?;
-    let trust = mvm_core::plan::FsTrustStore::default_path()?;
+    let trust = release_trust_for_installed_archive(&registry.archive_path(id_or_slot))?;
     registry
         .verified_launch_manifest(id_or_slot, trust, host_verifying_key()?)
         .map_err(|e| anyhow::anyhow!("installed bundle {id_or_slot}: {e}"))
 }
 
+pub(super) fn release_trust_for_installed_archive(
+    archive: &std::path::Path,
+) -> Result<mvm_core::registry_pack::BuiltinAuthorTrust<mvm_core::plan::FsTrustStore>> {
+    Ok(
+        mvm_core::registry_pack::application_bundle::trust_for_installed_archive(
+            mvm_core::plan::FsTrustStore::default_path()?,
+            archive,
+        ),
+    )
+}
+
 /// This host's bundle-signing public key, or `None` when no host key exists
 /// yet. Read-only: checking a bundle must not mint a host identity.
-fn host_verifying_key() -> Result<Option<ed25519_dalek::VerifyingKey>> {
+pub(super) fn host_verifying_key() -> Result<Option<ed25519_dalek::VerifyingKey>> {
     let path = mvm_core::config::mvm_keys_dir().join("host-signer.pub");
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
@@ -247,13 +260,6 @@ pub fn installed_bundle_environment(
         .and_then(|manifest| manifest.environment().cloned()))
 }
 
-/// The declared arch of an installed bundle, for the *export* path, which
-/// prefers a best-effort answer over a refusal — a bundle it cannot read is
-/// simply not a bundle whose arch it can carry through.
-pub fn installed_bundle_arch_for_export(id_or_slot: &str) -> Option<String> {
-    installed_bundle_arch(id_or_slot).ok().flatten()
-}
-
 /// Dispatched variant of [`super::crud::template_load`] / [`super::slots::template_load_slot`].
 /// Returns a [`TemplateSpec`] regardless of which key shape was used.
 ///
@@ -284,19 +290,6 @@ pub fn template_snapshot_info_dispatched(id_or_slot: &str) -> Result<Option<Snap
         template_snapshot_info_for_slot(id_or_slot)
     } else {
         Ok(None)
-    }
-}
-
-/// Dispatched variant of [`template_has_snapshot`] /
-/// [`template_has_snapshot_for_slot`]. Same bundle-fallthrough
-/// shape as `template_snapshot_info_dispatched`: bundles never
-/// have snapshots in v1.
-pub fn template_has_snapshot_dispatched(id_or_slot: &str) -> Result<bool> {
-    let slot_path = require_slot_key(id_or_slot)?;
-    if slot_path.exists() {
-        template_has_snapshot_for_slot(id_or_slot)
-    } else {
-        Ok(false)
     }
 }
 
@@ -424,36 +417,6 @@ mod tests {
         );
     }
 
-    /// A slot wins over an identically-named bundle, and a slot carries no
-    /// manifest — so the gate must not invent an architecture for it. Locks the
-    /// dispatch precedence into the gate's behaviour.
-    #[test]
-    fn template_artifacts_for_boot_ignores_arch_for_a_slot() {
-        let _lock = crate::vm::DATA_DIR_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let mut env = TestEnv::new();
-        env.set("MVM_HOME", tmp.path());
-
-        let sha = "0123456789abcdef".repeat(4);
-        // Both a slot and a foreign-arch bundle under the same name.
-        let slot = test_persisted_manifest(&sha);
-        slot.write_to_slot(std::path::Path::new(&slot_dir(&sha)))
-            .expect("write persisted slot");
-        install_bundle_manifest(&sha, other_arch());
-
-        assert_eq!(installed_bundle_arch_for_export(&sha), None);
-        let msg = match template_artifacts_for_boot(&sha) {
-            Ok(_) => String::new(),
-            Err(e) => format!("{e:#}"),
-        };
-        assert!(
-            !msg.contains("but this host is"),
-            "a slot must not be gated on a same-named bundle's arch: {msg}"
-        );
-    }
-
     /// A boot from an installed bundle is told where that bundle's archive is,
     /// so admission can pin it. A slot, even one sharing the bundle's name, and
     /// a key nothing is installed under are not bundles and yield no pin.
@@ -510,28 +473,6 @@ mod tests {
         assert!(
             !msg.contains("but this host is"),
             "export paths must not be gated on architecture: {msg}"
-        );
-    }
-
-    /// Archive export re-stamping the exporting host's arch onto a re-exported
-    /// foreign-arch bundle would produce a mislabelled `.mvmpkg` — and the label
-    /// is exactly what the boot gate above trusts.
-    #[test]
-    fn a_re_exported_bundle_keeps_its_own_arch() {
-        let _lock = crate::vm::DATA_DIR_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let mut env = TestEnv::new();
-        env.set("MVM_HOME", tmp.path());
-
-        let sha = "0f0f0f0f89abcdef".repeat(4);
-        install_bundle_manifest(&sha, other_arch());
-
-        assert_eq!(
-            installed_bundle_arch_for_export(&sha).as_deref(),
-            Some(other_arch()),
-            "export must carry the source bundle's arch, not this host's"
         );
     }
 
@@ -624,5 +565,20 @@ mod tests {
             Some(environment)
         );
         assert_eq!(installed_bundle_environment("not-a-key").unwrap(), None);
+
+        let registry = BundleRegistry::default_path().unwrap();
+        std::fs::remove_dir_all(&installed.root).unwrap();
+        assert_eq!(
+            installed_bundle_arch(&installed.sha256).unwrap(),
+            Some(manifest.arch)
+        );
+        assert_eq!(
+            installed_bundle_archive(&installed.sha256).unwrap(),
+            Some(registry.archive_path(&installed.sha256))
+        );
+        assert_eq!(
+            installed_bundle_posture(&installed.sha256).unwrap(),
+            Some(posture)
+        );
     }
 }

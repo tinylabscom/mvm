@@ -31,6 +31,11 @@ package() {
   ln -s mvmctl/libmvm_hostlib.so "$pkgdir/usr/lib/libmvm_hostlib.so"
   install -m644 "$srcdir/$_guest" "$srcdir/$_guest.sha256" \
     "$srcdir/$_guest.bundle" "$dest/guest-runtime/"
+  # The pinned Firecracker, beside mvmctl and not linked into /usr/bin, so a
+  # first run boots with it and it cannot shadow the user's own.
+  install -dm755 "$dest/firecracker"
+  install -m755 "$host/firecracker/firecracker" "$dest/firecracker/firecracker"
+  install -m644 "$host/firecracker/LICENSE" "$host/firecracker/NOTICE" "$dest/firecracker/"
   install -dm755 "$pkgdir/usr/share/mvmctl"
   printf 'aur\n' > "$pkgdir/usr/share/mvmctl/package-managed"
 }

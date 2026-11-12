@@ -27,6 +27,8 @@
 //! it was tagged because the image repository's `main` gained a manifest field
 //! this tree did not parse yet. There is no floating-ref canary exception:
 //! the image producer no longer copies runtime source from this repository.
+//! One PR-only synthetic guest fixture may use a separately reviewed exact
+//! commit; it cannot select any production image input.
 
 use anyhow::{Context, Result, bail};
 use std::path::Path;
@@ -55,6 +57,10 @@ const WORKFLOW_DIR: &str = ".github/workflows";
 /// The command whose output every source checkout of the image repository
 /// must take its ref from.
 const SOURCE_REF_RESOLVER: &str = "xtask -- image-source-ref";
+/// This one source pin is for an unpublished, synthetic CI boot only.
+const TEST_SOURCE_FIXTURE: &str = "tests/fixtures/composable-images-source.ref";
+const TEST_SOURCE_WORKFLOW: &str = ".github/workflows/composable-python-layer-smoke.yml";
+const TEST_SOURCE_REF: &str = "${{ steps.test-images-ref.outputs.ref }}";
 
 /// How one `image-set/v…` mention behaves.
 #[derive(Debug, PartialEq, Eq)]
@@ -90,6 +96,15 @@ impl Finding {
 }
 
 pub(crate) fn run(workspace: &Path) -> Result<()> {
+    let test_ref = std::fs::read_to_string(workspace.join(TEST_SOURCE_FIXTURE))?;
+    let test_ref = test_ref.trim();
+    if test_ref.len() != 40
+        || !test_ref
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("test-only Linux source must be one exact lowercase Git commit");
+    }
     let lock_path = workspace.join(LOCK_FILE);
     let lock_text = std::fs::read_to_string(&lock_path)
         .with_context(|| format!("reading {}", lock_path.display()))?;
@@ -230,6 +245,17 @@ fn checkout_findings(file: &str, text: &str, images_repository: &str) -> Vec<Fin
             ));
             continue;
         };
+        if file == TEST_SOURCE_WORKFLOW
+            && reference == TEST_SOURCE_REF
+            && lines.iter().enumerate().any(|(i, line)| {
+                yaml_value(line, "id") == Some("test-images-ref")
+                    && lines[step_bounds(&lines, i)]
+                        .iter()
+                        .any(|step_line| step_line.contains(TEST_SOURCE_FIXTURE))
+            })
+        {
+            continue;
+        }
         let Some(id) = resolver_step_id(reference) else {
             findings.push(finding(
                 index,
@@ -516,6 +542,30 @@ mod tests {
         let text = checkout_workflow(Some(&"a".repeat(40)), "xtask -- image-source-ref");
         assert_eq!(
             checkout_findings(".github/workflows/ci.yml", &text, IMAGES).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_synthetic_source_ref_is_scoped_to_one_reviewed_test_workflow() {
+        let text = format!(
+            "steps:\n  - id: test-images-ref\n    run: cat {TEST_SOURCE_FIXTURE}\n\
+             \x20 - uses: actions/checkout@v6\n    with:\n\
+             \x20     repository: {IMAGES}\n      ref: {TEST_SOURCE_REF}\n"
+        );
+        assert!(checkout_findings(TEST_SOURCE_WORKFLOW, &text, IMAGES).is_empty());
+        assert_eq!(
+            checkout_findings(".github/workflows/release.yml", &text, IMAGES).len(),
+            1
+        );
+        let unpinned = text.replace(TEST_SOURCE_FIXTURE, "README.md");
+        assert_eq!(
+            checkout_findings(TEST_SOURCE_WORKFLOW, &unpinned, IMAGES).len(),
+            1
+        );
+        let floating = text.replace(TEST_SOURCE_REF, "main");
+        assert_eq!(
+            checkout_findings(TEST_SOURCE_WORKFLOW, &floating, IMAGES).len(),
             1
         );
     }

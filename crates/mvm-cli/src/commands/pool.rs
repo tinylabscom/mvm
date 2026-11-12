@@ -364,8 +364,7 @@ pub(crate) struct WarmParams<'a> {
     ///
     /// Every other input to the parent's shape is derived from this one value:
     /// template, kernel, vCPUs, memory, image digest and egress enablement all
-    /// come out of [`compat_for_launch`]. They used to be separate fields, which
-    /// let a caller record a compat key describing something other than what
+    /// come out of [`compat_for_launch`]. Separate fields would let a caller record a compat key describing something other than what
     /// booted — a pool that fills and never drains, with no error anywhere.
     pub launch: &'a VmStartConfig,
 }
@@ -409,6 +408,7 @@ fn admit_standby_parent_plan(
     mem_mib: u32,
 ) -> Result<AdmittedPlan> {
     let input = SynthesisInput {
+        mailbox: None,
         outputs: Vec::new(),
         grants: None,
         kernel_sha256: None,
@@ -423,7 +423,6 @@ fn admit_standby_parent_plan(
         network_policy_ref: None,
         fs_policy_ref: None,
         egress_policy_ref: None,
-        tool_policy_ref: None,
         secret_release: SecretReleasePolicy::default(),
         secrets: Vec::new(),
         audit_event_prefix: None,
@@ -438,7 +437,6 @@ fn admit_standby_parent_plan(
         assets: Vec::new(),
         redaction: mvm_core::policy::RedactionPolicy::default(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-        tools: Default::default(),
         caller_commitment: None,
         audit_labels: Default::default(),
         agent_verbs: None,
@@ -1019,6 +1017,9 @@ fn warm_eligible_launch(cfg: &VmStartConfig, late_volume_slots: u8) -> bool {
     cfg.bundle_boot_assets.is_none()
         && late_volumes_attachable(cfg, late_volume_slots)
         && !mvm_vmm::host::egress_shared::launch_terminates_egress_tls(cfg)
+        // A standby parent boots without the `mvm.mailbox` token and its host
+        // process is per launch, so a granted launch cold-boots.
+        && mvm_vmm::host::egress_bridge::mailbox_cmdline_token(cfg).is_none()
 }
 
 /// Attempt a warm-pool claim for this launch: the claimed `VmId` (the standby

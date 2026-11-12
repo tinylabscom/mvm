@@ -96,12 +96,23 @@ impl InstanceMetricsRegistry {
         Self::default()
     }
 
+    /// Lock the map, recovering from poisoning. Every critical section is a
+    /// single `BTreeMap` insert, remove, get or an assignment of plain
+    /// counters, so a thread that panicked while holding the lock cannot have
+    /// left the map half-updated; refusing to serve metrics for every VM
+    /// because one handler panicked would be the worse failure.
+    fn entries(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Entry>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Add a VM to the registry. If `instance_id` was already
     /// registered, its labels are replaced and its values are
     /// reset to zero (matches the "fresh boot" intent).
     pub fn register(&self, labels: InstanceLabels) {
         let id = labels.instance_id.clone();
-        let mut map = self.entries.lock().expect("instance_metrics mutex");
+        let mut map = self.entries();
         map.insert(
             id,
             Entry {
@@ -113,14 +124,14 @@ impl InstanceMetricsRegistry {
 
     /// Drop a VM. Returns `true` if the instance was registered.
     pub fn unregister(&self, instance_id: &str) -> bool {
-        let mut map = self.entries.lock().expect("instance_metrics mutex");
+        let mut map = self.entries();
         map.remove(instance_id).is_some()
     }
 
     /// Replace a VM's values. Returns `false` if the instance is
     /// not registered (caller's update is dropped).
     pub fn update(&self, instance_id: &str, values: InstanceMetricsValues) -> bool {
-        let mut map = self.entries.lock().expect("instance_metrics mutex");
+        let mut map = self.entries();
         match map.get_mut(instance_id) {
             Some(entry) => {
                 entry.values = values;
@@ -144,7 +155,7 @@ impl InstanceMetricsRegistry {
         output_tokens: u64,
         total_tokens: u64,
     ) -> bool {
-        let mut map = self.entries.lock().expect("instance_metrics mutex");
+        let mut map = self.entries();
         match map.get_mut(instance_id) {
             Some(entry) => {
                 entry.values.ai_requests_total = requests;
@@ -159,14 +170,14 @@ impl InstanceMetricsRegistry {
 
     /// Look up one VM's labels + most recent sample.
     pub fn get(&self, instance_id: &str) -> Option<(InstanceLabels, InstanceMetricsValues)> {
-        let map = self.entries.lock().expect("instance_metrics mutex");
+        let map = self.entries();
         map.get(instance_id)
             .map(|e| (e.labels.clone(), e.values.clone()))
     }
 
     /// Snapshot every VM's labels + values in `instance_id` order.
     pub fn snapshot(&self) -> Vec<(InstanceLabels, InstanceMetricsValues)> {
-        let map = self.entries.lock().expect("instance_metrics mutex");
+        let map = self.entries();
         map.values()
             .map(|e| (e.labels.clone(), e.values.clone()))
             .collect()
@@ -174,14 +185,11 @@ impl InstanceMetricsRegistry {
 
     /// Number of registered VMs.
     pub fn len(&self) -> usize {
-        self.entries.lock().expect("instance_metrics mutex").len()
+        self.entries().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries
-            .lock()
-            .expect("instance_metrics mutex")
-            .is_empty()
+        self.entries().is_empty()
     }
 
     /// Render the per-VM metrics in Prometheus exposition format.
@@ -557,5 +565,26 @@ mod tests {
         assert_eq!(got.cpu_user_us, 7);
         // Clean up so this test doesn't pollute later snapshots.
         global().unregister("global-test-vm");
+    }
+
+    #[test]
+    fn a_panic_while_holding_the_lock_does_not_take_the_registry_down() {
+        let registry = std::sync::Arc::new(InstanceMetricsRegistry::new());
+        registry.register(labels("vm-1"));
+        let poisoner = std::sync::Arc::clone(&registry);
+        let joined = std::thread::spawn(move || {
+            let _held = poisoner.entries.lock().unwrap();
+            panic!("handler panicked while holding the metrics lock");
+        })
+        .join();
+        assert!(joined.is_err());
+        assert!(registry.entries.is_poisoned());
+
+        assert_eq!(registry.len(), 1);
+        registry.register(labels("vm-2"));
+        assert!(registry.update_ai_counters("vm-2", 1, 2, 3, 5));
+        assert_eq!(registry.snapshot().len(), 2);
+        assert!(registry.unregister("vm-1"));
+        assert!(!registry.is_empty());
     }
 }

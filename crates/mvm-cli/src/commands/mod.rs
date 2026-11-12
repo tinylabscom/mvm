@@ -20,7 +20,7 @@ mod image;
 mod machine;
 mod manifest;
 mod ops;
-mod pack;
+pub(crate) mod pack;
 mod plugin;
 mod policy;
 /// Supervisor warm-pool: the `mvmctl pool warm/status` command + the launch glue
@@ -171,7 +171,7 @@ pub(in crate::commands) enum Commands {
     /// Explain a run and its egress refusals from the chain-signed audit log
     #[command(display_order = 7)]
     Explain(vm::explain::Args),
-    /// Explain whether a resolved policy allows one host, path, tool, or secret
+    /// Explain whether a resolved policy allows one host, path, or secret
     #[command(display_order = 7)]
     Why(why::Args),
     /// Measure this host's launch latency against the published budgets
@@ -186,7 +186,7 @@ pub(in crate::commands) enum Commands {
     /// Rebuild a workload when its local inputs change
     #[command(display_order = 8)]
     Watch(watch::Args),
-    /// Manage versioned packs (list/rollback/prune/download/update)
+    /// Manage versioned packs (ls/rm/update/system)
     #[command(display_order = 9)]
     Pack(pack::Args),
     /// Run an image or a signed `.mvmpkg` (alias of `machine run`)
@@ -886,6 +886,7 @@ fn termination_handler(
         if signal == libc::SIGINT && IN_CONSOLE_MODE.load(std::sync::atomic::Ordering::SeqCst) {
             return;
         }
+        crate::signal::begin_cleanup();
         let stage0_active = env::builder_vm::stage0_active_in_process();
         let _ = writeln!(
             std::io::stderr(),

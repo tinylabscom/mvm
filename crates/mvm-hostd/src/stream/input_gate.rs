@@ -347,17 +347,6 @@ impl InputBinding {
         self
     }
 
-    /// The same for a whole set, which is how one arrives: the substitution
-    /// endpoint fingerprints every secret it resolved for this VM at once.
-    #[must_use]
-    pub fn with_fingerprints(
-        mut self,
-        fingerprints: impl IntoIterator<Item = SecretFingerprint>,
-    ) -> Self {
-        self.fingerprints.extend(fingerprints);
-        self
-    }
-
     /// Send this VM's input decisions to a specific chain.
     ///
     /// [`InputAudit`] and nothing else: the parameter is the concrete chain
@@ -1151,6 +1140,7 @@ mod tests {
         const FIXTURE_SHA: &str =
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         SynthesisInput {
+            mailbox: None,
             outputs: Vec::new(),
             grants: None,
             stream_edges: Vec::new(),
@@ -1166,7 +1156,6 @@ mod tests {
             network_policy_ref: None,
             fs_policy_ref: None,
             egress_policy_ref: None,
-            tool_policy_ref: None,
             secret_release: SecretReleasePolicy::None,
             secrets: Vec::new(),
             audit_event_prefix: None,
@@ -1181,7 +1170,6 @@ mod tests {
             assets: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-            tools: Default::default(),
             caller_commitment: None,
             audit_labels: Default::default(),
             agent_verbs: None,

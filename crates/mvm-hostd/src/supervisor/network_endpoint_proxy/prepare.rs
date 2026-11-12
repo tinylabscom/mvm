@@ -334,11 +334,7 @@ impl SubstitutionService {
     pub(super) async fn prepare_flow(
         &self,
         wire: WireRequest,
-        attribution: &super::tool_scope::FlowAttribution,
     ) -> Result<PreparedFlow, WireResponse> {
-        // Re-resolved per request: a keep-alive flow outlives the invocation
-        // it was opened for, and a released binding attributes nothing.
-        let attribution = &self.attribute(attribution.binding().cloned());
         let body = match B64.decode(wire.body_b64.as_bytes()) {
             Ok(b) => b,
             Err(e) => {
@@ -388,12 +384,6 @@ impl SubstitutionService {
                 // The forward leg connects to exactly these; see `pinned_dns`.
                 if let Some((host, port)) = url_host_and_port(&req.url) {
                     self.admitted.record(&host, port, ips);
-                    // A tool's route only for that tool's invocation.
-                    if let Err(reason) = self.enforce_tool_route(&host, port, attribution).await {
-                        return Err(WireResponse::Refused {
-                            message: format!("egress refused {host}:{port} ({reason})"),
-                        });
-                    }
                     // Then what the request may do there. The path is the
                     // URL's own, the one the forward leg will send.
                     let path = Url::parse(&req.url)
@@ -435,25 +425,6 @@ impl SubstitutionService {
             });
         }
         let placeholders = locate_placeholders(&req.url, &req.headers);
-        // A tool's secret only for that tool's invocation, decided before any
-        // approval is asked for it.
-        let carried_secrets: Vec<String> = placeholders
-            .iter()
-            .filter_map(|located| self.registry.resolve(&located.placeholder))
-            .map(|secret| secret.name.clone())
-            .collect();
-        if let Err(reason) = self
-            .enforce_tool_secrets(
-                &carried_secrets,
-                destination.as_deref().unwrap_or(UNPARSEABLE_DESTINATION),
-                attribution,
-            )
-            .await
-        {
-            return Err(WireResponse::Refused {
-                message: format!("use of a secret that belongs to a tool was refused ({reason})"),
-            });
-        }
         let substituted = collect_substituted_meta(&endpoint, &placeholders);
         // Resolve the per-destination redaction action; clone so it outlives
         // `req` (which `redact_outbound` then `prepare_request` consume).
@@ -748,7 +719,7 @@ mod server_tests {
     /// A destination the gate admits is forwarded — the gate lets an admitted
     /// `host:port` through to the substitution + forward path unchanged.
     #[tokio::test]
-    async fn gate_admitted_destination_is_forwarded() {
+    async fn vm_gate_allows_destination_bound_secret_without_tool_attribution() {
         // A public literal IP (loopback / private ranges are mandatory-deny at
         // decision time, so they can never stand in for an admitted destination).
         let (service, ph, forwarder, _dir) = service_with_gate(
@@ -764,9 +735,11 @@ mod server_tests {
         };
         let resp = service.process(wire).await;
         assert!(matches!(resp, WireResponse::Ok { .. }), "{resp:?}");
-        assert!(
-            forwarder.seen.lock().unwrap().is_some(),
-            "admitted destination should have been forwarded"
+        let seen = forwarder.seen.lock().unwrap();
+        let sent = seen.as_ref().expect("admitted destination forwarded");
+        assert_eq!(
+            sent.headers[0],
+            ("authorization".into(), "Bearer sk-live-zzz".into())
         );
     }
 
@@ -833,8 +806,8 @@ mod server_tests {
         );
     }
 
-    /// The peer refusal holds on every service. It used to sit behind an
-    /// optional gate, so a service built without one forwarded a peer name to
+    /// The peer refusal holds on every service. It does not sit behind an
+    /// optional gate, which would let a service built without one forward a peer name to
     /// the forward leg like any other host.
     #[tokio::test]
     async fn a_peer_destination_is_refused_by_every_service() {

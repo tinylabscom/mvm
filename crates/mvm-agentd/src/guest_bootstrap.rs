@@ -104,8 +104,9 @@ pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
     provision_pty_devices();
     provision_cgroup2();
     provision_workload_identity();
-    mount_mediated_tools();
+    mount_network_utilities();
     provision_verb_grant();
+    provision_mailbox_dir();
     // Before `provision_egress_ca`: the certificate it builds a trust bundle
     // from arrives on the identity drive this copies out.
     provision_flowmux_identity();
@@ -310,8 +311,7 @@ pub const NETINIT_OVERLAY: &str = "/mvm/runtime/netinit";
 
 pub const EGRESS_CLIENT_OVERLAY: &str = "/mvm/runtime/egress-client";
 
-/// Tools the image ships that cannot work in this guest, and the overlay
-/// binary that stands in for each.
+/// Network utilities whose image binaries cannot work in a NIC-less guest.
 ///
 /// A NIC-less guest has no route and no raw socket, so the image's own
 /// `ping` fails at `socket()` before a packet exists. The replacement is
@@ -320,7 +320,7 @@ pub const EGRESS_CLIENT_OVERLAY: &str = "/mvm/runtime/egress-client";
 /// provenance refers to), `/proc/mounts` records the substitution for anyone
 /// who wonders, and the original stays underneath. It also reaches a caller
 /// that runs `/bin/ping` outright, which no `PATH` order does.
-pub const MEDIATED_TOOLS: &[(&str, &str)] = &[("/mvm/runtime/ping", "/bin/ping")];
+pub const NETWORK_UTILITY_REPLACEMENTS: &[(&str, &str)] = &[("/mvm/runtime/ping", "/bin/ping")];
 
 pub fn ensure_runtime_dirs() {
     for path in [
@@ -357,19 +357,19 @@ pub fn ensure_runtime_dirs() {
 /// cannot delete another's files.
 const SCRATCH_DIR_MODE: u32 = 0o1777;
 
-/// Deliver each mediated tool, by both routes available.
+/// Deliver each guest network utility by both routes available.
 ///
 /// A launch shape with no runtime overlay has no replacement to offer, and
 /// that case is skipped silently — the image behaves as it would have without
 /// mvm, which is the honest outcome.
-pub fn mount_mediated_tools() {
-    for (source, target) in MEDIATED_TOOLS {
+pub fn mount_network_utilities() {
+    for (source, target) in NETWORK_UTILITY_REPLACEMENTS {
         if !Path::new(source).is_file() {
             continue;
         }
         // Always reachable by name, even when the image ships no copy to mount
         // over and even when the rootfs is sealed against the mount.
-        install_mediated_tool(source, target);
+        install_network_utility(source, target);
         if !Path::new(target).exists() {
             continue;
         }
@@ -466,21 +466,21 @@ pub(crate) fn substitute_in_place(source: &str, target: &str) -> Result<(), Stri
     bind_mount_file(source, target)
 }
 
-/// Link a stand-in into the mediated-tool directory so `PATH` finds it.
+/// Link a network utility into the guest bin directory so `PATH` finds it.
 ///
 /// The bind mount is the stronger delivery — it reaches a caller that runs
 /// `/bin/ping` outright, which no `PATH` order does — but it cannot apply to a
 /// symlink on a read-only rootfs. This route always applies: `/run` is a tmpfs
 /// the init just mounted.
-pub fn install_mediated_tool(source: &str, target: &str) {
-    install_mediated_tool_in(
-        Path::new(mvm_core::guest_netd::MEDIATED_TOOLS_BIN),
+pub fn install_network_utility(source: &str, target: &str) {
+    install_network_utility_in(
+        Path::new(mvm_core::guest_netd::NETWORK_UTILITIES_BIN),
         source,
         target,
     );
 }
 
-fn install_mediated_tool_in(dir: &Path, source: &str, target: &str) {
+fn install_network_utility_in(dir: &Path, source: &str, target: &str) {
     let Some(name) = Path::new(target).file_name() else {
         return;
     };
@@ -612,6 +612,26 @@ pub fn provision_verb_grant() {
     let _ = fs::create_dir_all("/run/mvm");
     if let Err(e) = fs::write("/run/mvm/verb-grant.json", grant) {
         eprintln!("mvm-guest-init: write verb grant: {e}");
+    }
+}
+
+/// Create the mailbox outbox directory for the workload identity, only on a
+/// boot whose cmdline asserts a mailbox. Runs as root, before the privilege
+/// drop, because the agent cannot create it under `/run/mvm` afterwards.
+fn provision_mailbox_dir() {
+    use crate::mailbox_outbox::{MAILBOX_CMDLINE_TOKEN, OUTBOX_PATH, provision_outbox_dir};
+    if !cmdline_has_flag(MAILBOX_CMDLINE_TOKEN) {
+        return;
+    }
+    let dir = Path::new(OUTBOX_PATH)
+        .parent()
+        .expect("outbox has a parent");
+    if let Err(e) = provision_outbox_dir(
+        dir,
+        crate::guest_mount::WORKLOAD_UID,
+        crate::guest_mount::WORKLOAD_GID,
+    ) {
+        eprintln!("mvm-guest-init: mailbox outbox directory: {e}");
     }
 }
 
@@ -1084,11 +1104,11 @@ mod tests {
     /// mediated-tool dir, which `PATH` finds even though the bind mount cannot
     /// apply to a symlink on a read-only filesystem.
     #[test]
-    fn install_mediated_tool_links_the_stand_in_under_its_target_name() {
+    fn install_network_utility_links_the_stand_in_under_its_target_name() {
         let root = tempfile::tempdir().unwrap();
         let bin = root.path().join("bin");
 
-        install_mediated_tool_in(&bin, "/mvm/runtime/ping", "/bin/ping");
+        install_network_utility_in(&bin, "/mvm/runtime/ping", "/bin/ping");
 
         // Named for the tool it stands in for, so `ping` on PATH finds it.
         let link = bin.join("ping");
@@ -1099,13 +1119,13 @@ mod tests {
     }
 
     #[test]
-    fn install_mediated_tool_replaces_a_stale_link_from_a_previous_boot() {
+    fn install_network_utility_replaces_a_stale_link_from_a_previous_boot() {
         let root = tempfile::tempdir().unwrap();
         let bin = root.path().join("bin");
         fs::create_dir_all(&bin).unwrap();
         std::os::unix::fs::symlink("/stale/ping", bin.join("ping")).unwrap();
 
-        install_mediated_tool_in(&bin, "/mvm/runtime/ping", "/bin/ping");
+        install_network_utility_in(&bin, "/mvm/runtime/ping", "/bin/ping");
 
         assert_eq!(
             fs::read_link(bin.join("ping")).unwrap(),
@@ -1142,12 +1162,12 @@ mod tests {
 
     #[test]
     fn mediated_tools_bin_is_an_absolute_guest_path() {
-        assert!(Path::new(mvm_core::guest_netd::MEDIATED_TOOLS_BIN).is_absolute());
+        assert!(Path::new(mvm_core::guest_netd::NETWORK_UTILITIES_BIN).is_absolute());
     }
 
     #[test]
     fn mediated_tools_name_the_target_binary() {
-        for (source, target) in MEDIATED_TOOLS {
+        for (source, target) in NETWORK_UTILITY_REPLACEMENTS {
             assert!(target.starts_with('/'), "{target} must be absolute");
             assert!(
                 source.starts_with("/mvm/runtime/"),

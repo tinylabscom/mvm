@@ -68,13 +68,6 @@ where
 /// Shared reference to the in-memory filesystem backing the mock.
 pub type SharedFs = Arc<Mutex<HashMap<String, String>>>;
 
-/// Build a mock backed by an in-memory filesystem.
-pub fn mock_fs() -> MockFsBuilder {
-    MockFsBuilder {
-        files: HashMap::new(),
-    }
-}
-
 pub struct MockFsBuilder {
     files: HashMap<String, String>,
 }
@@ -236,48 +229,4 @@ fn fs_handler(script: &str, fs: &SharedFs) -> MockResponse {
     // ── Default: succeed silently ───────────────────────────────────────
     // Covers: mkdir, kill, sudo ip, iptables, curl, readlink, etc.
     MockResponse::empty()
-}
-
-// ── Test fixture helpers ────────────────────────────────────────────────
-
-/// Generate a tenant config JSON string for use in tests.
-pub fn tenant_fixture(tenant_id: &str, net_id: u16, subnet: &str, gateway: &str) -> String {
-    let config = mvm_core::tenant::TenantConfig {
-        tenant_id: tenant_id.to_string(),
-        quotas: mvm_core::tenant::TenantQuota::default(),
-        net: mvm_core::tenant::TenantNet::new(net_id, subnet, gateway),
-        secrets_epoch: 0,
-        config_version: 1,
-        pinned: false,
-        audit_retention_days: 0,
-        created_at: "2025-01-01T00:00:00Z".to_string(),
-    };
-    serde_json::to_string_pretty(&config).unwrap()
-}
-
-/// Generate a pool spec JSON string for use in tests.
-pub fn pool_fixture(tenant_id: &str, pool_id: &str) -> String {
-    let spec = mvm_core::pool::PoolSpec {
-        pool_id: pool_id.to_string(),
-        tenant_id: tenant_id.to_string(),
-        flake_ref: ".".to_string(),
-        profile: "minimal".to_string(),
-        role: Default::default(),
-        instance_resources: mvm_core::pool::InstanceResources {
-            vcpus: 2,
-            mem_mib: 1024,
-            data_disk_mib: 0,
-        },
-        desired_counts: mvm_core::pool::DesiredCounts::default(),
-        runtime_policy: Default::default(),
-        metadata: mvm_core::pool::PoolMetadata::default(),
-        seccomp_policy: "baseline".to_string(),
-        snapshot_compression: "none".to_string(),
-        metadata_enabled: false,
-        pinned: false,
-        critical: false,
-        secret_scopes: vec![],
-        template_id: String::new(),
-    };
-    serde_json::to_string_pretty(&spec).unwrap()
 }

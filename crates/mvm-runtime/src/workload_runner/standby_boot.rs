@@ -370,6 +370,7 @@ fn factory_parent_spec_inner(
         broker: Some(&broker),
         display: None,
         gpu: None,
+        mailbox: None,
         console_data: Vec::new(),
     };
     VmmSpec {
@@ -485,6 +486,7 @@ mod tests {
                 broker: None,
                 display: None,
                 gpu: None,
+                mailbox: None,
                 console_data: Vec::new(),
             },
             cmdline: cmdline::runner_cmdline(launch, state_dir, fc_base),

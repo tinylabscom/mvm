@@ -69,13 +69,6 @@ impl OAuthLoginOptions {
         self
     }
 
-    /// Redeem the code through `client`.
-    #[must_use]
-    pub fn with_token_client(mut self, client: TokenEndpointClient) -> Self {
-        self.token_client = client;
-        self
-    }
-
     #[must_use]
     pub fn timeout(&self) -> Duration {
         self.timeout

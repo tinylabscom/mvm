@@ -17,9 +17,12 @@ here for where the overlay and sidecar are going.
 
 This records a decision. This repository's side has landed in source:
 `mvmctl` assembles the guest runtime from its own release asset and no longer
-reads it from the image set. What has not landed is mvm-images' side (it still
-builds and publishes the retired pieces) and release-publication and boot
-evidence for the new asset; "Where the code is today" below says exactly what
+reads it from the image set. What has not landed is publication. mvm-images' source
+now builds only the Linux layer, with no `mvm` input, and its base root
+filesystems declare the base-image contract; but the newest published image set,
+`image-set/v0.2.4`, predates that and still lists the retired pieces. Release
+evidence and installed-product boot evidence for the new asset are also still
+missing; "Where the code is today" below says exactly what
 runs now. The design detail lives in
 specs/plans/2026-10-05-image-boundary-linux-layer.md (retired; recover from tag specs-archive-2026-11-02).
 
@@ -201,6 +204,19 @@ and cite #4100 for the direction, never the reverse.
   that pointer; a release published before the archive existed is a
   different binary and keeps booting its own pinned set's copies.
   Fetch-when-unchanged is deleted with its module and environment variable.
+  Two layers are meant here. The launch layer in `mvm-client` acquires nothing
+  and refuses an unprepared runtime
+  (`launch_refuses_an_unprepared_published_runtime_without_acquiring_it`,
+  `required_overlay_cache_miss_names_explicit_bootstrap`,
+  `a_download_mode_host_refuses_an_unprepared_sidecar`). `mvmctl machine run
+  --image` prepares the overlay, initramfs and OCI guest runtime before it
+  dispatches (`resolve_launch_image_source`), announced on its own line, so
+  that path needs no `mvmctl bootstrap`. This statement does not cover a
+  launch with no image reference, which resolves its default image through a
+  separate path. What #4794 proposes and is not shipped is moving
+  preparation inside the launch layer itself; if it lands, preparation must
+  stay a separately reported lane that prepared-launch measurements exclude,
+  and those witnesses change deliberately.
   `mvmctl image dev ensure` without a selected checkout installs the pinned
   set's dev members, which are Linux layer.
 
@@ -234,7 +250,7 @@ and cite #4100 for the direction, never the reverse.
   every set up to `image-set/v0.2.4` — and is checked by that number rather
   than skipped; contract 1 is a base root filesystem with no mvm binary and no
   mvm `/init`, carrying the fixed guest identities. This CLI
-  boots 0 and 1. `mvm-images` declaring it is tinylabscom/mvm-images#64.
+  boots 0 and 1. `mvm-images` declares it in source (tinylabscom/mvm-images#64); no published set carries it yet.
 - mvm's CI stops building guest pieces through `mvm-images` (#4108).
 - `mvm-images` drops the `mvm` input and every read of mvm's source
   (tinylabscom/mvm-images#49) and attests build provenance for image sets
@@ -310,7 +326,8 @@ builder image sets (#4107), and the workload-author guide is updated with it.
 - A fix to the guest agent now needs a CLI release; there is no image-only
   path for it. Kernel and package fixes still ship as image sets without one.
 - During the transition the published image set still lists guest pieces
-  until mvm-images drops its `mvm` input; `mvmctl` parses them as retired
+  until a set built from mvm-images' current source (which has no `mvm` input) is
+  published; `mvmctl` parses them as retired
   roles and ignores them (#4105).
 
 ## Workstreams

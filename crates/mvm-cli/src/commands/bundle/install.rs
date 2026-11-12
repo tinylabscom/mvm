@@ -15,9 +15,9 @@
 //! `~/.mvm/bundles/<bundle_sha256>/` by
 //! [`mvm_core::plan::BundleRegistry::install_file`], each artifact hashed on
 //! its way in and the directory promoted only once all of them verified; the
-//! archive is also copied to `<bundle_sha256>.mvmpkg` so the
-//! `FsBundleResolver` admit-time path finds it too. Nothing reads the archive
-//! into memory whole.
+//! archive is also retained as `<bundle_sha256>.mvmpkg.gz` so the
+//! `FsBundleResolver` admit-time path can reverify its original signed bytes.
+//! Nothing reads the archive into memory whole during installation.
 
 use std::path::{Path, PathBuf};
 
@@ -100,6 +100,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         &registry,
     )?
     .bundle;
+    registry
+        .evict_extracted_if_unused(&installed.sha256)
+        .context("retaining only the installed bundle archive")?;
 
     println!(
         "Installed bundle {} ({} artifacts, publisher key_id={})",
@@ -107,7 +110,10 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         installed.manifest.artifacts.len(),
         installed.manifest.key_id.0,
     );
-    println!("  registry root: {}", installed.root.display());
+    println!(
+        "  registry root (materialized on launch): {}",
+        installed.root.display()
+    );
     if let Some(resolved) = &loaded.resolved {
         println!("  source:        {}", display_reference(resolved));
     }
@@ -179,8 +185,8 @@ fn install_archive(
             if request.on_existing == OnExisting::Reuse =>
         {
             let bundle = registry
-                .find(&bundle_sha256)?
-                .with_context(|| format!("bundle {bundle_sha256} vanished from the registry"))?;
+                .materialize_cached(&bundle_sha256, trust)
+                .with_context(|| format!("rematerializing installed bundle {bundle_sha256}"))?;
             return Ok(Installed {
                 bundle,
                 reused: true,
@@ -242,6 +248,10 @@ pub(in crate::commands) fn settle_manifest_archive(
     let verify_started = std::time::Instant::now();
     let verified = verify_bundle_file(loaded.path(), &trust)
         .with_context(|| format!("verifying bundle archive {arg}"))?;
+    mvm_core::plan::bundle::require_composable_local_enrollment(
+        &verified.manifest,
+        &FsTrustStore::default_path()?,
+    )?;
     let origin = bundle_origin(&verified.manifest, &host_key_id, trust.release());
     match origin {
         BundleOrigin::LocalBuild => {
@@ -389,6 +399,17 @@ mod tests {
                 home,
                 key,
             }
+        }
+
+        fn enroll_host_key(&self) {
+            let signer = HostBundleSigner::load().expect("host signer");
+            let trust = self.home.path().join("trusted-publishers");
+            std::fs::create_dir_all(&trust).expect("trust store");
+            std::fs::write(
+                trust.join(format!("{}.pub", signer.key_id().0)),
+                signer.verifying_key().to_bytes(),
+            )
+            .expect("enroll host key");
         }
 
         /// A signed kernel + rootfs bundle for this host's arch, written to
@@ -546,6 +567,37 @@ mod tests {
     }
 
     #[test]
+    fn bundle_install_command_retains_only_the_archive() {
+        let host = Host::new(true);
+        let (_dir, path, bytes) = host.archive();
+        mvm_hostd::audit::host_keypair::load_or_init().unwrap();
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "mvmctl",
+            "bundle",
+            "install",
+            path.to_str().unwrap(),
+        ])
+        .unwrap();
+        let args = Args {
+            source: path.display().to_string(),
+            trust_store: None,
+            registry: None,
+            allow_http: false,
+            prod: false,
+            force: false,
+        };
+        run(&cli, args.clone(), &MvmConfig::default()).unwrap();
+
+        let sha = bundle_sha256(&bytes);
+        assert!(!host.registry().install_dir(&sha).exists());
+        assert!(host.registry().archive_path(&sha).is_file());
+        assert_eq!(host.registry().list().unwrap(), vec![sha]);
+        let error = run(&cli, args, &MvmConfig::default())
+            .expect_err("archive-only install must still refuse a duplicate");
+        assert!(format!("{error:#}").contains("already installed"));
+    }
+
+    #[test]
     fn an_archive_already_installed_is_verified_again_and_reused() {
         let host = Host::new(true);
         let (_dir, path, bytes) = host.archive();
@@ -596,13 +648,18 @@ mod tests {
     }
 
     #[test]
-    fn a_local_build_signed_by_this_host_runs_without_publisher_enrollment() {
+    fn a_schema_eight_local_build_requires_explicit_host_enrollment() {
         let host = Host::new(false);
         let (_dir, path, bytes) = host.host_archive(true);
 
+        let (original, rejected) = settle(&path, false);
+        assert!(format!("{:#}", rejected.unwrap_err()).contains("trust store has no entry"));
+        assert_eq!(original, Some(path.display().to_string()));
+        assert!(host.installed().is_empty());
+        host.enroll_host_key();
         let (manifest, result) = settle(&path, false);
 
-        result.expect("this host's labeled local build is admissible for a development run");
+        result.expect("an explicitly enrolled host-signed local build admits in development");
         assert_eq!(manifest, Some(bundle_sha256(&bytes)));
         assert_eq!(host.installed().len(), 1);
     }
@@ -612,6 +669,7 @@ mod tests {
         let host = Host::new(false);
         let (_dir, path, _) = host.host_archive(true);
         let mut manifest = Some(path.display().to_string());
+        host.enroll_host_key();
 
         let error = settle_manifest_archive(&mut manifest, false, true)
             .expect_err("production must reject a local build");

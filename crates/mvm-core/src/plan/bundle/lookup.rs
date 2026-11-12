@@ -17,7 +17,7 @@ use super::KeyId;
 ///
 /// The supervisor calls this on every admission whose `ExecutionPlan`
 /// carries a `PlanArtifact`. Production impls read from
-/// `~/.mvm/bundles/<bundle_sha256>.mvmpkg`; tests inject in-memory
+/// `~/.mvm/bundles/<bundle_sha256>.mvmpkg.gz` (or legacy `.mvmpkg`); tests inject in-memory
 /// resolvers. The trait stays in `mvm_plan` rather than alongside
 /// `FsTrustStore` so the supervisor doesn't need a filesystem dep
 /// to consume admissions.
@@ -45,7 +45,7 @@ pub enum BundleResolveError {
 }
 
 /// Filesystem-backed resolver rooted at `~/.mvm/bundles/`.
-/// `<bundle_sha256>.mvmpkg` is the on-disk filename — content-
+/// `<bundle_sha256>.mvmpkg.gz` is the on-disk filename — content-
 /// addressed so two bundles with the same bytes share a cache
 /// entry. The cache is populated by `mvmctl bundle fetch` once
 /// the registry-replacement follow-up lands; until then,
@@ -74,8 +74,26 @@ impl FsBundleResolver {
 
 impl BundleResolver for FsBundleResolver {
     fn resolve(&self, bundle_sha256: &str) -> Result<Vec<u8>, BundleResolveError> {
-        let path = self.root.join(format!("{bundle_sha256}.mvmpkg"));
-        match std::fs::read(&path) {
+        let path = super::BundleRegistry::new(&self.root).archive_path(bundle_sha256);
+        if std::fs::symlink_metadata(&path)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            return Err(BundleResolveError::MissingBundle {
+                bundle_sha256: bundle_sha256.to_string(),
+            });
+        }
+        #[cfg(feature = "host-state")]
+        let read = super::stream::read_bundle_archive(&path)
+            .map_err(|error| std::io::Error::other(error.to_string()));
+        #[cfg(not(feature = "host-state"))]
+        let read = if path.extension().is_some_and(|ext| ext == "gz") {
+            Err(std::io::Error::other(
+                "compressed bundle resolution requires host-state",
+            ))
+        } else {
+            std::fs::read(&path)
+        };
+        match read {
             Ok(bytes) => Ok(bytes),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 Err(BundleResolveError::MissingBundle {
@@ -99,6 +117,29 @@ pub trait TrustStore {
     /// Return the verifying key for `key_id`, or `None` if the
     /// consumer has not enrolled this publisher.
     fn lookup(&self, key_id: &KeyId) -> Option<VerifyingKey>;
+}
+
+/// Read this host's existing public signing key without creating new trust.
+///
+/// # Errors
+///
+/// Refuses a malformed or linked public key instead of treating it as a publisher.
+#[cfg(feature = "host-state")]
+pub fn existing_local_build_key() -> anyhow::Result<Option<VerifyingKey>> {
+    let path = crate::config::mvm_keys_dir().join("host-signer.pub");
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(
+        metadata.file_type().is_file() && metadata.len() == 32,
+        "local build public key is not a regular 32-byte key"
+    );
+    let key: [u8; 32] = std::fs::read(path)?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("local build public key changed during read"))?;
+    Ok(Some(VerifyingKey::from_bytes(&key)?))
 }
 
 /// Release trust extended with exactly this host's signing key.

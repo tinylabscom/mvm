@@ -94,6 +94,7 @@ fn unique_vm(prefix: &str) -> String {
 fn admitted_with_grant(vm: &str) -> AdmittedPlan {
     const FIXTURE_SHA: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     let input = SynthesisInput {
+        mailbox: None,
         outputs: Vec::new(),
         grants: None,
         stream_edges: Vec::new(),
@@ -109,7 +110,6 @@ fn admitted_with_grant(vm: &str) -> AdmittedPlan {
         network_policy_ref: None,
         fs_policy_ref: None,
         egress_policy_ref: None,
-        tool_policy_ref: None,
         secret_release: SecretReleasePolicy::None,
         secrets: Vec::new(),
         audit_event_prefix: None,
@@ -124,7 +124,6 @@ fn admitted_with_grant(vm: &str) -> AdmittedPlan {
         assets: Vec::new(),
         redaction: RedactionPolicy::default(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-        tools: Default::default(),
         caller_commitment: None,
         audit_labels: Default::default(),
         agent_verbs: None,

@@ -14,6 +14,7 @@ pub(super) struct BootInputFiles<'a> {
     pub(super) kernel: Option<&'a mvm_vmm::host::restore_image::VerifiedRestoreFile>,
     pub(super) images: Option<&'a mvm_vmm::host::boot_images::FrozenBootImageBytes>,
     pub(super) writable: Option<&'a mvm_vmm::driver::prepared_disks::PreparedWritableDisks>,
+    pub(super) data: Option<&'a mvm_vmm::driver::readonly_data::PreparedReadOnlyDataDisk>,
 }
 
 impl BootInputFiles<'_> {
@@ -58,6 +59,17 @@ impl BootInputFiles<'_> {
                 })
                 .collect::<Result<Vec<_>>>()?;
         }
+        if let Some(data) = self.data {
+            data.validate_spec(spec)?;
+            cfg.readonly_data_disk_fds =
+                vec![mvm_vmm::host::hvf_supervisor::HvfReadOnlyDataDiskFd {
+                    disk: usize::from(mvm_vmm::driver::readonly_data::INPUT_DATA_SLOT),
+                    fd: data.file().as_raw_fd(),
+                    expected: data.expectation().clone(),
+                }];
+        }
+        cfg.validate_readonly_data_disks()
+            .map_err(anyhow::Error::msg)?;
         Ok(())
     }
 
@@ -69,6 +81,7 @@ impl BootInputFiles<'_> {
         for disk in &cfg.writable_disk_fds {
             inherited.extend([disk.backing, disk.sidecar]);
         }
+        inherited.extend(cfg.readonly_data_disk_fds.iter().map(|disk| disk.fd));
         anyhow::ensure!(
             inherited.iter().all(|fd| *fd > 2)
                 && inherited
@@ -78,8 +91,43 @@ impl BootInputFiles<'_> {
                     == inherited.len(),
             "native boot descriptors must be distinct original files"
         );
+        let mut objects = std::collections::BTreeSet::new();
+        for fd in &inherited {
+            // SAFETY: fstat only inspects a borrowed live descriptor.
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            anyhow::ensure!(
+                // SAFETY: stat is a valid exclusive output pointer.
+                unsafe { libc::fstat(*fd, &mut stat) } == 0
+                    && objects.insert((stat.st_dev, stat.st_ino)),
+                "native boot descriptors alias an underlying object"
+            );
+        }
         Ok(inherited)
     }
+}
+
+pub(super) fn boot_prepared(
+    spec: &VmmSpec,
+    files: mvm_vmm::driver::prepared_disks::PreparedBootFiles<'_>,
+) -> Result<Box<dyn mvm_vmm::driver::traits::RunningVm>> {
+    files.writable.validate_spec(spec)?;
+    if let Some(data) = &files.data {
+        data.validate_spec(spec)?;
+    }
+    boot_with_custody(
+        spec,
+        None,
+        None,
+        SupervisorLaunchPolicy::legacy(),
+        BootInputFiles {
+            kernel: files.kernel,
+            images: None,
+            writable: Some(&files.writable),
+            data: files.data.as_ref(),
+        },
+    )
+    .map(|vm| Box::new(vm) as Box<dyn mvm_vmm::driver::traits::RunningVm>)
+    .map_err(anyhow::Error::new)
 }
 
 pub(super) fn boot_with_custody(
@@ -166,6 +214,7 @@ pub(super) fn require_cold_config(config: &HvfSupervisorConfig) -> Result<()> {
             && !config.trusted_builder_egress
             && config.exclusive_image_lock.is_none()
             && config.writable_disk_fds.is_empty()
+            && config.readonly_data_disk_fds.is_empty()
             && config.builder_control_sockets.is_empty(),
         "cold HVF channel refuses restore, fork, handoff and builder configurations"
     );
@@ -672,6 +721,165 @@ mod tests {
     use super::super::{KernelImage, PID_FILE_NAME, relay_supervisor_config};
     use super::*;
     use std::io::Read;
+
+    #[test]
+    fn readonly_data_is_refused_by_every_unsupported_backend_before_recipe_dispatch() {
+        use mvm_vmm::driver::prepared_disks::{PreparedBootFiles, PreparedWritableDisks};
+        use mvm_vmm::driver::readonly_data::{DataDiskExpectation, PreparedReadOnlyDataDisk};
+        use mvm_vmm::driver::traits::VmmDriver;
+        let drivers: [Box<dyn VmmDriver>; 4] = [
+            Box::new(crate::driver::FcDriver::new()),
+            Box::new(crate::driver::QemuDriver::new()),
+            Box::new(crate::driver::LibkrunDriver::new()),
+            Box::new(crate::mock::MockDriver::default()),
+        ];
+        for driver in drivers {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("input.img");
+            let bytes = [17; 512];
+            std::fs::write(&path, bytes).unwrap();
+            let file = std::fs::File::open(&path).unwrap();
+            std::fs::remove_file(&path).unwrap();
+            let mut spec = spec_with(
+                KernelImage::Bundled,
+                vec![],
+                (0..3)
+                    .map(|slot| mvm_vmm::driver::spec::BlockDev {
+                        slot,
+                        source: path.clone(),
+                        read_only: true,
+                        ephemeral: false,
+                    })
+                    .collect(),
+            );
+            let data = PreparedReadOnlyDataDisk::bind(
+                &spec,
+                file,
+                DataDiskExpectation {
+                    len: 512,
+                    sha256: mvm_core::plan::bundle::sha256_hex(&bytes),
+                },
+            )
+            .unwrap();
+            // Also refuse on a bad writer recipe if a DATA guard regresses:
+            // this fixture must never reach any backend's native boot machinery.
+            spec.blocks[1].read_only = false;
+            let error = driver
+                .boot_custodied(
+                    &spec,
+                    PreparedBootFiles {
+                        kernel: None,
+                        writable: PreparedWritableDisks::empty(),
+                        data: Some(data),
+                    },
+                )
+                .err()
+                .expect("unsupported DATA handoff must refuse");
+            assert!(
+                error.to_string().contains("read-only DATA descriptor"),
+                "{} dispatched beyond its DATA guard: {error:#}",
+                driver.name(),
+            );
+        }
+    }
+
+    #[test]
+    fn readonly_data_projects_original_fd_inherits_only_selected_child_and_refuses_cold_owner() {
+        use mvm_vmm::driver::readonly_data::{DataDiskExpectation, PreparedReadOnlyDataDisk};
+        use std::os::fd::AsRawFd;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input.img");
+        let bytes = [17; 512];
+        std::fs::write(&path, bytes).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let fd = file.as_raw_fd();
+        let mut spec = spec_with(
+            KernelImage::Path("/unused-kernel".into()),
+            vec![],
+            (0..4)
+                .map(|slot| mvm_vmm::driver::spec::BlockDev {
+                    slot,
+                    source: path.clone(),
+                    read_only: true,
+                    ephemeral: false,
+                })
+                .collect(),
+        );
+        spec.cmdline = "init=/init mvm.hostname=w".into();
+        spec.blocks.reverse();
+        let data = PreparedReadOnlyDataDisk::bind(
+            &spec,
+            file,
+            DataDiskExpectation {
+                len: 512,
+                sha256: mvm_core::plan::bundle::sha256_hex(&bytes),
+            },
+        )
+        .unwrap();
+        let mut cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        BootInputFiles {
+            kernel: None,
+            images: None,
+            writable: None,
+            data: Some(&data),
+        }
+        .project(&spec, &mut cfg)
+        .unwrap();
+        assert_eq!(cfg.readonly_data_disk_fds[0].disk, 2);
+        assert_eq!(cfg.readonly_data_disk_fds[0].fd, fd);
+        assert!(
+            cfg.boot_image_fds.is_none(),
+            "DATA is not a fifth boot image"
+        );
+        let inherited = BootInputFiles::inheritance_vector(&cfg).unwrap();
+        assert_eq!(inherited, vec![fd]);
+        assert!(
+            require_cold_config(&cfg)
+                .unwrap_err()
+                .to_string()
+                .contains("builder")
+        );
+        let probe = format!("test -f /dev/fd/{fd}");
+        let mut selected = std::process::Command::new("/bin/sh");
+        selected.args(["-c", &probe]);
+        mvm_vmm::host::restore_image::inherit_descriptors(&mut selected, inherited);
+        assert!(selected.status().unwrap().success());
+        assert!(
+            !std::process::Command::new("/bin/sh")
+                .args(["-c", &probe])
+                .status()
+                .unwrap()
+                .success()
+        );
+        // SAFETY: inspecting only the live original parent descriptor.
+        assert_ne!(
+            unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
+        let alias = data.file().try_clone().unwrap();
+        for kernel in [fd, alias.as_raw_fd()] {
+            cfg.kernel_fd = Some(kernel);
+            assert!(
+                BootInputFiles::inheritance_vector(&cfg).is_err(),
+                "boot/DATA alias"
+            );
+        }
+        cfg.kernel_fd = None;
+        // SAFETY: change only descriptor flags on this owned synthetic fixture.
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, 0) }, 0);
+        assert!(
+            BootInputFiles {
+                kernel: None,
+                images: None,
+                writable: None,
+                data: Some(&data),
+            }
+            .project(&spec, &mut cfg)
+            .is_err(),
+            "projection must refuse DATA that lost parent close-on-exec protection"
+        );
+    }
 
     #[test]
     fn prelaunch_failure_releases_support_and_survives_legacy_anyhow_boundary() {

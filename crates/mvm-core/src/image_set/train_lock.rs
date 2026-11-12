@@ -149,11 +149,6 @@ impl ImageTrainLock {
         self.asset_url(&self.image_set.release_tag, &self.image_set.manifest_asset)
     }
 
-    /// URL of the detached Sigstore bundle over the locked root manifest.
-    pub fn manifest_bundle_url(&self) -> String {
-        format!("{}.bundle", self.manifest_url())
-    }
-
     /// The URL of the Stage 0 bootstrap kernel for `arch`.
     pub fn stage0_kernel_url(&self, arch: GuestArch) -> Result<String, ImageTrainLockError> {
         let artifact = self.stage0_kernel.for_arch(arch)?;

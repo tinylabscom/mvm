@@ -24,6 +24,35 @@ pub(crate) struct BundledKernelArtifact {
     pub(crate) format: KernelFormat,
 }
 
+/// Put `bytes` at `target_path` unless it already holds them. The write goes
+/// through a staging file no other process or thread shares, so a concurrent
+/// caller can never rename a file the other is still writing into place.
+#[cfg(any(feature = "libkrun-sys", test))]
+pub(crate) fn write_cached_kernel(
+    target_path: &std::path::Path,
+    bytes: &[u8],
+) -> Result<(), Error> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    if std::fs::read(target_path).is_ok_and(|cached| cached == bytes) {
+        return Ok(());
+    }
+    let staging = target_path.with_extension(format!(
+        "staging.{}.{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let io = |what: &str, path: &std::path::Path, e: std::io::Error| Error::Io {
+        context: format!("{what} {}: {e}", path.display()),
+    };
+    std::fs::write(&staging, bytes).map_err(|e| io("writing libkrunfw kernel to", &staging, e))?;
+    std::fs::rename(&staging, target_path).map_err(|e| {
+        let _ = std::fs::remove_file(&staging);
+        io("promoting libkrunfw kernel to", target_path, e)
+    })
+}
+
 #[cfg(feature = "libkrun-sys")]
 pub(crate) fn artifact_for_host(
     bytes: &[u8],
@@ -136,6 +165,25 @@ fn write_u64(bytes: &mut [u8], offset: usize, value: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_kernel_write_leaves_no_staging_debris_and_ignores_a_fixed_staging_name() {
+        let dir = std::env::temp_dir().join(format!("krunfw-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("vmlinux");
+        // A leftover at the old shared staging name must not matter.
+        std::fs::create_dir(target.with_extension("staging")).unwrap();
+        write_cached_kernel(&target, b"kernel-a").unwrap();
+        write_cached_kernel(&target, b"kernel-b").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"kernel-b");
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 2, "unexpected files: {names:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn read_u64(bytes: &[u8], offset: usize) -> u64 {
         u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())

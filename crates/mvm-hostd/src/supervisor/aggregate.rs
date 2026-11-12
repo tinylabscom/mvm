@@ -245,18 +245,6 @@ impl Supervisor {
         self
     }
 
-    /// Wire a prebuilt egress proxy slot.
-    pub fn with_egress_proxy(mut self, egress: Arc<dyn SupervisorEgressProxy>) -> Self {
-        self.egress = egress;
-        self
-    }
-
-    /// Wire a prebuilt keystore releaser slot.
-    pub fn with_keystore_releaser(mut self, keystore: Arc<dyn KeystoreReleaser>) -> Self {
-        self.keystore = keystore;
-        self
-    }
-
     /// Wire a prebuilt audit signer slot.
     pub fn with_audit_signer(mut self, audit: Arc<dyn AuditSigner>) -> Self {
         self.audit = audit;
@@ -1123,7 +1111,6 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use mvm_core::plan::*;
     use rand::Rng;
-    use std::collections::BTreeMap;
     use std::sync::Mutex;
 
     /// Test backend that records every call and lets the test pick
@@ -1272,6 +1259,8 @@ mod tests {
 
     fn sample_plan() -> ExecutionPlan {
         let mut plan = ExecutionPlan {
+            execution_epoch: 1,
+            mailbox: None,
             grants: None,
             environment: None,
             build_provenance: Default::default(),
@@ -1316,8 +1305,6 @@ mod tests {
             egress_policy: PolicyRef("agent-l7".to_string()),
             redaction: Default::default(),
             reversible_replacement: Default::default(),
-            tool_policy: PolicyRef("read-only".to_string()),
-            tools: Default::default(),
             artifact_policy: ArtifactPolicy {
                 capture_paths: vec!["/artifacts".to_string()],
                 retention_days: 30,
@@ -1334,10 +1321,7 @@ mod tests {
                 snapshot_on_idle: false,
                 idle_secs: 0,
             },
-            // Replay-protection fields. The
-            // supervisor's admission gate doesn't enforce these yet —
-            // that's a follow-up. Today they're populated so the
-            // wire format compiles and signing roundtrips work.
+            // Stable validity window and nonce for admission tests.
             valid_from: Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap(),
             valid_until: Utc.with_ymd_and_hms(2026, 5, 1, 1, 0, 0).unwrap(),
             nonce: Nonce::from_bytes([0xab; 16]),

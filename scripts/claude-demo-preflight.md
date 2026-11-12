@@ -18,7 +18,7 @@ required options with independently obtained nonsecret release assertions:
   trust/configuration and the already-enrolled identity for the final executable.
   Enrollment and host-held binding readiness are not proved by this preflight.
 - `--descriptor-sha256`, `--archive-sha256`, `--archive-size`, `--key-id`:
-  exact public `agent/claude@2.0.0` descriptor and independently trusted bundle
+  exact public `agent/claude@2.0.1` descriptor and independently trusted bundle
   assertions. No draft or local artifact is acceptable.
 - `--endpoint api.anthropic.com:443`: assertion only, not enforcement evidence.
 
@@ -40,7 +40,7 @@ working directory outside the source checkout:
 mvmctl --version
 mvmctl search agent/claude
 mvmctl pull agent/claude
-mvmctl pack verify agent/claude@2.0.0 --json
+mvmctl pack verify agent/claude@2.0.1 --json
 ```
 
 Downloading and independent signature trust remain in the canonical CLI. The

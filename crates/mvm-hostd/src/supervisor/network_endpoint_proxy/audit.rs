@@ -577,15 +577,12 @@ mod server_tests {
         );
 
         let mut response = service
-            .process_stream(
-                WireRequest {
-                    method: "POST".into(),
-                    url: "https://api.openai.com/v1".into(),
-                    headers: vec![("authorization".into(), format!("Bearer {ph}"))],
-                    body_b64: String::new(),
-                },
-                &Default::default(),
-            )
+            .process_stream(WireRequest {
+                method: "POST".into(),
+                url: "https://api.openai.com/v1".into(),
+                headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+                body_b64: String::new(),
+            })
             .await
             .expect("the response head arrived");
         // The relay task records the outcome before it drops its sender, so
@@ -618,15 +615,12 @@ mod server_tests {
         );
         Arc::get_mut(&mut service).expect("sole owner").proxy = proxy.map(Arc::new);
         let mut response = service
-            .process_stream(
-                WireRequest {
-                    method: "POST".into(),
-                    url: "https://api.openai.com/v1".into(),
-                    headers: vec![("authorization".into(), format!("Bearer {ph}"))],
-                    body_b64: String::new(),
-                },
-                &Default::default(),
-            )
+            .process_stream(WireRequest {
+                method: "POST".into(),
+                url: "https://api.openai.com/v1".into(),
+                headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+                body_b64: String::new(),
+            })
             .await
             .expect("the response head arrived");
         while response.body.recv().await.is_some() {}
@@ -845,7 +839,6 @@ mod server_tests {
                     body_len: body.len() as u64,
                 },
                 receiver,
-                &Default::default(),
             )
             .await;
         assert!(result.is_err(), "the request is refused");

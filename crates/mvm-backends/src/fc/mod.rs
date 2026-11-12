@@ -4,10 +4,12 @@
 //! Implementation detail of the Firecracker backend. Items are `pub` only
 //! where something outside this crate genuinely names them.
 
+pub mod binary;
 pub mod capabilities;
 pub mod control;
 pub mod daemon;
 pub mod fc_api;
+pub mod fetch;
 pub mod fork_devices;
 pub mod guards;
 pub mod host;

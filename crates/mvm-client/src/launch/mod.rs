@@ -109,6 +109,8 @@ pub struct TransientExitAudit<'a> {
     pub backend: &'a str,
     pub exit_code: Option<i32>,
     pub completed: bool,
+    /// How the run booted, recorded ahead of its exit and seal.
+    pub posture: Option<crate::admission::BootPosture>,
 }
 
 /// Options for [`LocalBackend::remove_machine_with`].
@@ -196,6 +198,7 @@ pub fn record_transient_exit(exit: TransientExitAudit<'_>) -> Result<()> {
             backend: exit.backend,
             exit_code: exit.exit_code,
             completed: exit.completed,
+            posture: exit.posture,
         },
     )
 }
@@ -237,6 +240,8 @@ pub(crate) struct TransientEnd<'a> {
     pub(crate) exit_code: Option<i32>,
     /// Whether the workload ran to an exit, as opposed to a failed dispatch.
     pub(crate) completed: bool,
+    /// How the run booted; recorded ahead of the exit record when it completed.
+    pub(crate) posture: Option<crate::admission::BootPosture>,
 }
 
 /// Close a transient run's session under its admitted `plan`: `plan.exited`
@@ -266,6 +271,9 @@ pub(crate) fn seal_transient_end(
     // one serial fsync per record on a path the caller waits on. A flush that
     // fails is a seal that failed, and is recorded as one.
     let closed = emitter.batched(|| {
+        if let Some(posture) = end.posture.filter(|_| end.completed) {
+            crate::admission::record_boot(emitter, plan, end.backend, posture);
+        }
         emitter.emit_exit_record(
             plan,
             ExitRecord {
@@ -472,6 +480,7 @@ pub(crate) struct BootParams {
     /// The request's permission set, carried into the signed plan and — for
     /// its egress dimension — into the policy the gate enforces.
     pub(crate) grants: Option<mvm_contract::grants::Grants>,
+    pub(crate) mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
     /// A fleet-issued signed plan to admit instead of synthesizing one.
     /// `Some` only when the launch request carried one; admission then
     /// verifies it against the operator-pinned `trusted_plan_signers` and the
@@ -555,6 +564,7 @@ impl LocalBackend {
             volumes: params.volumes,
             destroy_on_exit: params.transient,
             grants: params.grants.clone(),
+            mailbox: params.mailbox,
             secret_release: params.secrets.secret_release,
             secrets: params.secrets.secrets,
             signed_plan: params.signed_plan.clone(),
@@ -978,6 +988,7 @@ impl LocalBackend {
             machine_start::MachineStartParams {
                 hypervisor: &backend,
                 has_ad_hoc_argv,
+                mailbox: None,
             },
         )
         .map_err(|e| crate::local::backend_err(format!("{e:#}")))?;
@@ -1092,6 +1103,7 @@ impl LocalBackend {
                 volumes,
                 transient,
                 grants: request.grants.clone(),
+                mailbox: request.mailbox,
                 signed_plan: request.signed_plan.clone(),
                 assurance_campaign: request.assurance_campaign.clone(),
                 secrets,
@@ -1238,16 +1250,6 @@ impl LocalBackend {
             profile: Some(spec.profile.clone()),
             ..Default::default()
         })
-    }
-
-    /// Restart a persistent machine: stop it when running (spec kept), then
-    /// start it again from its persisted definition.
-    pub async fn restart_persistent(&self, name: &str) -> Result<MachineState> {
-        if self.machine_running(name) {
-            use mvm_core::client::MvmClient as _;
-            self.stop_machine(&MachineId(name.to_string())).await?;
-        }
-        self.start_persistent(name).await
     }
 
     /// Remove a machine. For a persistent definition this is the separate
@@ -1413,42 +1415,6 @@ impl LocalBackend {
             self.cleanup_transient(name)?;
         }
         Ok(ExitReport { exit_code })
-    }
-
-    /// Stop and clean every transient machine whose registry TTL has lapsed
-    /// at `now` (RFC 3339). Persistent definitions are never touched — their
-    /// TTL semantics stay with the idle reaper. Returns the reaped names.
-    pub fn reap_expired_transients(&self, now_rfc3339: &str) -> Result<Vec<String>> {
-        let Some(now) = mvm_core::util::time::parse_iso8601(now_rfc3339) else {
-            return Err(MvmError::InvalidSpec {
-                reason: format!("invalid RFC 3339 timestamp {now_rfc3339:?}"),
-            });
-        };
-        let registry = mvm_runtime::vm::name_registry::VmNameRegistry::load(
-            &mvm_runtime::vm::name_registry::registry_path(),
-        )
-        .unwrap_or_default();
-        let expired: Vec<String> = registry
-            .vms
-            .iter()
-            .filter(|(name, reg)| {
-                !machine_spec_path(name).exists()
-                    && matches!(
-                        reg.expires_at
-                            .as_deref()
-                            .and_then(mvm_core::util::time::parse_iso8601),
-                        Some(exp) if exp < now
-                    )
-            })
-            .map(|(name, _)| name.clone())
-            .collect();
-        let mut reaped = Vec::with_capacity(expired.len());
-        for name in expired {
-            self.cleanup_transient(&name)?;
-            reaped.push(name);
-        }
-        reaped.sort();
-        Ok(reaped)
     }
 }
 

@@ -24,8 +24,8 @@ use mvm_agentd::vsock::{
 use mvm_core::config::vm_state_dir;
 use mvm_core::launch_trace::LaunchTraceRecorder;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
-    ResourceControls, SnapshotCapability, StandbyError, StandbyHandle, StandbyState,
+    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, HostDialRoute,
+    LayerCoverage, ResourceControls, SnapshotCapability, StandbyError, StandbyHandle, StandbyState,
     VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
@@ -46,10 +46,12 @@ use mvm_vmm::host::boot_config::{
 };
 
 mod config;
+mod dial;
 mod kernel;
 mod stop;
 pub use config::FcApiPut;
 use config::fc_drive_puts;
+use dial::fc_guest_dial_socket;
 #[cfg(all(test, unix))]
 use kernel::fc_descriptor_recipe;
 use kernel::resolve_fc_kernel_path;
@@ -317,13 +319,6 @@ fn preload_spawn_error(action: &str, error: anyhow::Error) -> StandbyError {
     StandbyError::SpawnFailed(format!("{action}: {error:#}"))
 }
 
-/// The host UDS Firecracker connects *out* to when the guest dials
-/// `CID_HOST:<port>`: the sibling `<runtime_dir>/v.sock_<port>` of the vsock mux
-/// socket. The host must own a listener there before the guest dials.
-fn fc_guest_dial_socket(runtime_dir: &Path, port: u32) -> PathBuf {
-    runtime_dir.join(format!("v.sock_{port}"))
-}
-
 /// Wire every guest-dialed vsock port (except the workload-exit port, which the
 /// driver binds and captures itself) to the runner-owned host socket it relays
 /// to. Firecracker connects out to `<runtime_dir>/v.sock_<port>`, so a symlink
@@ -437,34 +432,15 @@ enum KillOutcome {
     StillRunning,
 }
 
-/// How a Linux stop signal reaches Firecracker. Root signals the captured PID
-/// directly; anyone else goes through `sudo kill`, the only way past an
-/// EPERM against a root-owned VMM.
-#[cfg(target_os = "linux")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FcSignalRoute {
-    Direct,
-    Sudo,
-}
-
-/// Pure decision boundary so the route is unit-testable without privileges.
-#[cfg(target_os = "linux")]
-fn fc_linux_signal_route(euid: libc::uid_t) -> FcSignalRoute {
-    if euid == 0 {
-        FcSignalRoute::Direct
-    } else {
-        FcSignalRoute::Sudo
-    }
-}
-
 #[cfg(target_os = "linux")]
 fn fc_linux_pid(pid: u32) -> Option<libc::pid_t> {
     let pid = libc::pid_t::try_from(pid).ok()?;
     (pid > 0).then_some(pid)
 }
 
-/// `kill(2)` the captured PID from a root process. Delivery failure is
-/// warn-only; the caller's liveness probe is the authority on the outcome.
+/// `kill(2)` the captured PID. Firecracker runs as the invoking user, so a
+/// direct signal reaches it. Delivery failure is warn-only; the caller's
+/// liveness probe is the authority on the outcome.
 #[cfg(target_os = "linux")]
 fn fc_direct_kill(pid: u32, signal: FcStopSignal) {
     let sig = match signal {
@@ -490,55 +466,15 @@ fn fc_direct_kill(pid: u32, signal: FcStopSignal) {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn fc_linux_signal_args(pid: u32, signal: FcStopSignal) -> Vec<String> {
-    let signal_arg = match signal {
-        FcStopSignal::Terminate => "-TERM",
-        FcStopSignal::ForceKill => "-KILL",
-    };
-    vec![
-        "-n".to_string(),
-        "kill".to_string(),
-        signal_arg.to_string(),
-        pid.to_string(),
-    ]
-}
-
 /// Deliver `signal` to an already-captured, identity-checked Firecracker PID.
-/// Firecracker is started under `sudo` and runs as **root**, so a
-/// non-root `mvmctl` cannot signal it directly — a plain `libc::kill` returns
-/// `EPERM` and silently no-ops; the signal therefore goes through `sudo kill`,
-/// the same mechanism the raw stop path uses. A root `mvmctl` signals the PID
-/// directly — hosts that run everything as root (containers, rescue shells)
-/// often have no `sudo` at all, and spawning it would drop the signal
-/// silently. Best-effort: a delivery failure is logged, and the caller's
-/// liveness probe is the authority on whether the process actually stopped
-/// (so a lost race with a self-exiting process is not mistaken for a failure).
-fn fc_sudo_signal(pid: u32, signal: FcStopSignal) {
+/// Firecracker runs as the invoking user, so the signal is a plain `kill`; no
+/// elevation is involved. Best-effort: a delivery failure is logged, and the
+/// caller's liveness probe is the authority on whether the process actually
+/// stopped (so a lost race with a self-exiting process is not mistaken for a
+/// failure).
+fn fc_signal(pid: u32, signal: FcStopSignal) {
     #[cfg(target_os = "linux")]
-    {
-        // SAFETY: `geteuid` has no preconditions and cannot fail.
-        let euid = unsafe { libc::geteuid() };
-        if fc_linux_signal_route(euid) == FcSignalRoute::Direct {
-            fc_direct_kill(pid, signal);
-        } else {
-            let args = fc_linux_signal_args(pid, signal);
-            match mvm_core::env_hygiene::helper_command("sudo")
-                .args(&args)
-                .output()
-            {
-                Ok(output) if output.status.success() => {}
-                Ok(_) => tracing::warn!(
-                    "Firecracker stop signal {signal:?} to pid {pid} did not report success \
-                     (the process may have already exited)"
-                ),
-                Err(error) => tracing::warn!(
-                    "Firecracker stop signal {signal:?} to pid {pid} was NOT delivered: \
-                     spawning sudo failed: {error} (install sudo, or run mvmctl as root)"
-                ),
-            }
-        }
-    }
+    fc_direct_kill(pid, signal);
 
     #[cfg(not(target_os = "linux"))]
     let flag = match signal {
@@ -547,7 +483,7 @@ fn fc_sudo_signal(pid: u32, signal: FcStopSignal) {
     };
     #[cfg(not(target_os = "linux"))]
     let script = format!(
-        r#"[ -f "/proc/{pid}/comm" ] && [ "$(cat /proc/{pid}/comm)" = "firecracker" ] && sudo kill{flag} {pid}"#
+        r#"[ -f "/proc/{pid}/comm" ] && [ "$(cat /proc/{pid}/comm)" = "firecracker" ] && kill{flag} {pid}"#
     );
     #[cfg(not(target_os = "linux"))]
     match mvm_vmm::host::shell::run_in_vm(&script) {
@@ -609,7 +545,7 @@ fn start_or_claim_firecracker(
     state_dir: &Path,
     socket: &str,
     idle_shape: Option<crate::fc::idle_pool::IdleShape>,
-    handoff: Option<&mvm_vmm::driver::prepared_disks::SudoWritableHandoff>,
+    handoff: Option<&mvm_vmm::driver::prepared_disks::LaunchWritableHandoff>,
 ) -> Result<(FirecrackerGuard, bool)> {
     let mut guard = FirecrackerGuard::pending();
     let claimed = match idle_shape {
@@ -684,7 +620,7 @@ pub(crate) fn terminate_firecracker_pid(name: &str, pid: u32, pid_file: &Path) -
     let outcome = if let Ok(observer) =
         mvm_vmm::host::process_exit::ProcessExitObserver::arm(pid as libc::pid_t)
     {
-        fc_sudo_signal(pid, FcStopSignal::Terminate);
+        fc_signal(pid, FcStopSignal::Terminate);
         let exited = mvm_vmm::host::process_exit::wait_for_pid_exit(
             pid as libc::pid_t,
             Instant::now() + crate::driver::libkrun_process::STOP_TIMEOUT,
@@ -693,7 +629,7 @@ pub(crate) fn terminate_firecracker_pid(name: &str, pid: u32, pid_file: &Path) -
         if exited {
             KillOutcome::Stopped
         } else {
-            fc_sudo_signal(pid, FcStopSignal::ForceKill);
+            fc_signal(pid, FcStopSignal::ForceKill);
             if mvm_vmm::host::process_exit::wait_for_pid_exit(
                 pid as libc::pid_t,
                 Instant::now() + Duration::from_millis(500),
@@ -709,7 +645,7 @@ pub(crate) fn terminate_firecracker_pid(name: &str, pid: u32, pid_file: &Path) -
             crate::driver::libkrun_process::STOP_TIMEOUT,
             mvm_core::poll_backoff::poll_delay,
             || crate::fc::is_firecracker_pid_running(pid),
-            |signal| fc_sudo_signal(pid, signal),
+            |signal| fc_signal(pid, signal),
             Instant::now,
             std::thread::sleep,
         )?
@@ -760,7 +696,7 @@ impl FcDriver {
     fn boot_with_handoff(
         &self,
         spec: &VmmSpec,
-        handoff: Option<mvm_vmm::driver::prepared_disks::SudoWritableHandoff>,
+        handoff: Option<mvm_vmm::driver::prepared_disks::LaunchWritableHandoff>,
     ) -> Result<Box<dyn RunningVm>> {
         if !spec.shares.is_empty() {
             bail!(
@@ -835,10 +771,8 @@ impl FcDriver {
             "fc boot: process spawn + API socket"
         );
 
-        // The launcher handed the API socket to the invoking user, so the
-        // config sequence below speaks to it in-process. Firecracker was
-        // launched through `sudo` and created the socket as root; without that
-        // hand-off every call would need its own `sudo curl`.
+        // Firecracker runs as the invoking user and created the socket, so the
+        // config sequence below speaks to it in-process.
 
         // Drive the NIC-less API config sequence, asking only for what the
         // Firecracker behind this socket supports. All PUTs share one
@@ -916,7 +850,7 @@ impl FcDriver {
             // Fail fast if Firecracker itself died on boot (kernel panic,
             // rejected config) rather than waiting out the full agent deadline.
             // The console log carries the actionable detail. Probed ownership-
-            // independently since a sudo-launched FC runs as root.
+            // independently of who owns the process.
             if !crate::fc::is_vm_running(&pid_file_str)? {
                 bail!(
                     "Firecracker process for '{}' exited before its guest agent came up; see {}/console.log",
@@ -1029,6 +963,9 @@ impl VmmDriver for FcDriver {
             // GPU remoting rides the multiplexed vsock device; the
             // guest-dial bridge lands the GPU port on its host UDS.
             gpu: true,
+            // The host reaches any guest port through the vsock mux's
+            // `CONNECT` handshake.
+            guest_mailbox: true,
             tap_networking: false,
             no_routable_guest_nic: true,
             host_vsock_proxy: true,
@@ -1318,9 +1255,14 @@ impl VmmDriver for FcDriver {
     fn boot_custodied(
         &self,
         spec: &VmmSpec,
-        kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
-        disks: mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
+        files: mvm_vmm::driver::prepared_disks::PreparedBootFiles<'_>,
     ) -> Result<Box<dyn RunningVm>> {
+        files.require_no_data()?;
+        let mvm_vmm::driver::prepared_disks::PreparedBootFiles {
+            kernel,
+            writable: disks,
+            ..
+        } = files;
         disks.validate_spec(spec)?;
         if disks.is_empty() {
             return match kernel {
@@ -1328,7 +1270,7 @@ impl VmmDriver for FcDriver {
                 None => self.boot_with_handoff(spec, None),
             };
         }
-        let handoff = disks.into_sudo_handoff(spec)?;
+        let handoff = disks.into_launch_handoff(spec)?;
         let projected = handoff.projected().clone();
         match kernel {
             Some(kernel) => kernel::boot_descriptor_custodied(self, &projected, kernel, handoff),
@@ -1367,6 +1309,10 @@ impl VmmDriver for FcDriver {
 
     fn guest_channel_info(&self, _id: &VmId) -> Result<GuestChannelInfo> {
         anyhow::bail!("firecracker does not provide guest channel info")
+    }
+
+    fn host_dial_route(&self, state_dir: &Path, _port: u32) -> Option<HostDialRoute> {
+        Some(dial::mux_route(state_dir))
     }
 }
 
@@ -1425,12 +1371,10 @@ impl RunningVm for FcRunningVm {
     }
 
     fn kill(&self) -> Result<()> {
-        // Firecracker is sudo-launched and runs as root, so the libkrun
-        // running-VM's plain `libc::kill` would return EPERM from a non-root
-        // mvmctl — neither stopping the VM nor reporting the failure. Signal
-        // through sudo (reaching the root process) and probe liveness
-        // ownership-independently via /proc/<pid>/comm; the escalation is
-        // SIGTERM → grace → SIGKILL, mirroring the raw stop path.
+        // Firecracker runs as the invoking user, so the signal is a plain
+        // kill; liveness is probed via /proc/<pid>/comm so a recycled pid is
+        // not mistaken for the VMM. The escalation is SIGTERM → grace →
+        // SIGKILL, mirroring the raw stop path.
         let Some(pid) = self.pid else {
             return Ok(());
         };
@@ -1465,10 +1409,8 @@ impl RunningVm for FcRunningVm {
     }
 
     fn status(&self) -> Result<VmStatus> {
-        // Firecracker is sudo-launched and runs as root, so the libkrun
-        // running-VM's `libc::kill(pid, 0)` probe returns EPERM from a non-root
-        // mvmctl and would misreport a live VM as Stopped. Probe ownership-
-        // independently via /proc/<pid>/comm, reusing FC's own liveness helper.
+        // Probe via /proc/<pid>/comm, reusing FC's own liveness helper, so a
+        // recycled pid is not mistaken for the VMM.
         firecracker_status_with(self.pid, crate::fc::is_firecracker_pid_running)
     }
 
@@ -1661,6 +1603,12 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path()).unwrap();
+        // A Firecracker that resolves, so the launch reaches the retirement it
+        // is testing instead of refusing earlier for want of a binary.
+        env.set(
+            crate::fc::binary::OVERRIDE_ENV,
+            std::env::current_exe().unwrap(),
+        );
         std::fs::write(scratch.path().join("fc.pid"), b"11111").unwrap();
         std::fs::create_dir(scratch.path().join(".fc-pid")).unwrap();
         let _handler = mvm_vmm::host::shell::mock::install_handler(|_| {
@@ -1688,6 +1636,8 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path()).unwrap();
+        let named = std::env::current_exe().unwrap();
+        env.set(crate::fc::binary::OVERRIDE_ENV, &named);
         for publish_new_marker in [false, true] {
             std::fs::write(scratch.path().join("fc.pid"), b"11111").unwrap();
             std::fs::write(scratch.path().join(".fc-pid"), b"22222").unwrap();
@@ -1732,8 +1682,16 @@ mod tests {
             );
             let scripts = scripts.lock().unwrap();
             assert_eq!(scripts.len(), 2, "launch followed by cleanup");
-            assert!(scripts[0].contains("exec firecracker"));
-            assert!(scripts[1].contains("sudo kill"));
+            assert!(
+                scripts[0].contains(&format!(
+                    "exec {}",
+                    mvm_vmm::host::shell::shell_quote(named.to_str().unwrap())
+                )),
+                "the launch must exec the Firecracker it resolved: {}",
+                scripts[0]
+            );
+            assert!(scripts[1].contains("kill "));
+            assert!(!scripts[1].contains("sudo"));
         }
     }
 
@@ -2354,9 +2312,9 @@ mod tests {
 
     #[test]
     fn status_uses_the_ownership_independent_probe_not_libc_kill() {
-        // A sudo-launched Firecracker runs as root, so libc::kill(pid, 0) from a
-        // non-root mvmctl returns EPERM and would misreport a live VM as Stopped.
-        // status must instead honour the /proc/<pid>/comm probe: "yes" ⇒ Running.
+        // A pid that has been recycled by an unrelated process still answers
+        // kill(pid, 0); status must honour the /proc/<pid>/comm probe instead:
+        // "yes" ⇒ Running.
         assert_eq!(
             firecracker_status_with(Some(4242), |pid| {
                 assert_eq!(pid, 4242);
@@ -2658,53 +2616,29 @@ mod tests {
 
     #[test]
     #[cfg(not(target_os = "linux"))]
-    fn fc_sudo_signal_routes_terminate_and_forcekill_through_sudo() {
+    fn fc_signal_distinguishes_terminate_from_forcekill_without_elevation() {
         use std::sync::{Arc, Mutex};
-        // Capture the emitted shell script to prove SIGTERM omits -9 and the
-        // force kill adds it — and that both go through sudo (root reach).
         let scripts: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = scripts.clone();
         let _guard = mvm_vmm::host::shell::mock::install_handler(move |s: &str| {
             sink.lock().unwrap().push(s.to_string());
             mvm_vmm::host::shell::mock::MockResponse::empty()
         });
-        fc_sudo_signal(4242, FcStopSignal::Terminate);
-        fc_sudo_signal(4242, FcStopSignal::ForceKill);
+        fc_signal(4242, FcStopSignal::Terminate);
+        fc_signal(4242, FcStopSignal::ForceKill);
         let captured = scripts.lock().unwrap();
-        assert!(
-            captured[0].contains("sudo kill "),
-            "SIGTERM: {}",
-            captured[0]
-        );
         assert!(captured[0].contains("/proc/4242/comm"));
-        assert!(captured[0].ends_with("sudo kill 4242"));
-        assert!(
-            !captured[0].contains("kill -9"),
-            "SIGTERM must not force: {}",
-            captured[0]
-        );
-        assert!(
-            captured[1].contains("sudo kill -9"),
-            "ForceKill: {}",
-            captured[1]
-        );
-        assert!(captured[1].ends_with("sudo kill -9 4242"));
+        assert!(captured[0].ends_with("kill 4242"), "{}", captured[0]);
+        assert!(!captured[0].contains("kill -9"), "{}", captured[0]);
+        assert!(captured[1].ends_with("kill -9 4242"), "{}", captured[1]);
+        for script in captured.iter() {
+            assert!(!script.contains("sudo"), "no elevation: {script}");
+        }
     }
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn root_signals_directly_and_anyone_else_routes_through_sudo() {
-        assert_eq!(
-            fc_linux_signal_route(0),
-            FcSignalRoute::Direct,
-            "root must not need sudo to signal a same-uid VMM"
-        );
-        assert_eq!(
-            fc_linux_signal_route(1000),
-            FcSignalRoute::Sudo,
-            "a non-root caller cannot kill a root-owned VMM without sudo"
-        );
-
+    fn a_signal_reaches_a_live_same_user_child_directly() {
         let max_pid = u32::try_from(libc::pid_t::MAX).expect("positive pid_t max fits u32");
         assert_eq!(fc_linux_pid(0), None, "pid zero targets a process group");
         assert_eq!(fc_linux_pid(max_pid), Some(libc::pid_t::MAX));
@@ -2714,36 +2648,14 @@ mod tests {
             "a wrapped negative pid_t could target an unrelated process group"
         );
 
-        // Exercise the direct route for real when the suite itself runs as
-        // root: the signal must actually terminate a live child, which is the
-        // behaviour a sudo-less root host (container, rescue shell) depends on.
-        // Non-root runners take the sudo path, already covered by the
-        // argument-shape test above and the escalation unit tests.
-        // SAFETY: `geteuid` has no preconditions and cannot fail.
-        if unsafe { libc::geteuid() } == 0 {
-            let mut child = std::process::Command::new("sleep")
-                .arg("60")
-                .spawn()
-                .expect("spawn sleep");
-            let pid = child.id();
-            fc_sudo_signal(pid, FcStopSignal::Terminate);
-            use std::os::unix::process::ExitStatusExt;
-            let status = child.wait().expect("reap signalled sleep");
-            assert!(status.success() || status.signal().is_some());
-        }
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn fc_signal_arguments_are_noninteractive_and_explicit() {
-        assert_eq!(
-            fc_linux_signal_args(4242, FcStopSignal::Terminate),
-            ["-n", "kill", "-TERM", "4242"]
-        );
-        assert_eq!(
-            fc_linux_signal_args(4242, FcStopSignal::ForceKill),
-            ["-n", "kill", "-KILL", "4242"]
-        );
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn sleep");
+        fc_signal(child.id(), FcStopSignal::Terminate);
+        use std::os::unix::process::ExitStatusExt;
+        let status = child.wait().expect("reap signalled sleep");
+        assert_eq!(status.signal(), Some(libc::SIGTERM));
     }
 
     #[test]
@@ -3081,8 +2993,7 @@ mod console_verbosity_tests {
             "console=ttyS0 quiet loglevel=3 reboot=k panic=1 pci=off net.ifnames=0 rootwait init=/init"
         );
         // The other shape is the verity/initramfs boot, where the initramfs
-        // PID 1 owns root/init selection. The virtiofs-root shape that used to
-        // be here is gone.
+        // PID 1 owns root/init selection; there is no virtiofs-root shape.
         assert_eq!(
             fc_base_bootargs(false),
             "console=ttyS0 quiet loglevel=3 reboot=k panic=1 pci=off net.ifnames=0"

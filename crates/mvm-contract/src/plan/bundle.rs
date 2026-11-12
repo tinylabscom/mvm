@@ -51,7 +51,8 @@ use crate::policy::security::AgentProfile;
 /// descriptor stays readable by version-4 readers.
 /// Version 6 separates the signed CLI runtime from the original Linux image set.
 /// Version 7 carries original canonical Linux publisher and revocation proofs.
-pub const BUNDLE_SCHEMA_VERSION: u32 = 7;
+/// Version 8 binds a host-local composition to its authenticated input inventory.
+pub const BUNDLE_SCHEMA_VERSION: u32 = 8;
 
 /// The first schema that may carry [`BundleMember::Environment`].
 pub const ENVIRONMENT_MEMBER_MIN_SCHEMA: u32 = 5;
@@ -64,6 +65,9 @@ pub const CLI_BOOT_ASSETS_MEMBER_MIN_SCHEMA: u32 = 6;
 
 /// The first schema that carries original canonical Linux proof references.
 pub const CANONICAL_LINUX_PROOF_MIN_SCHEMA: u32 = 7;
+
+/// The first schema that carries a host-local composition input inventory.
+pub const LOCAL_COMPOSITION_MIN_SCHEMA: u32 = 8;
 
 /// The first schema that may carry backend-neutral members.
 pub const BUNDLE_MEMBERS_MIN_SCHEMA: u32 = 3;
@@ -200,6 +204,9 @@ pub enum BundleMember {
     /// Original canonical Linux root and revocation proof inventory references.
     /// Data to reverify at admission, never a publisher-authored permission.
     CanonicalLinuxProof(CanonicalLinuxProof),
+    /// Development-only assembly inputs, not a publisher signature or a grant.
+    /// The bundle's rootfs and verity declarations bind the measured output.
+    LocalComposition(LocalComposition),
     /// The kernel command line the publisher built and tested the workload
     /// with. Advisory: the launcher derives the command line it boots with,
     /// so a bundle cannot use this to switch off dm-verity or redirect init.
@@ -227,6 +234,7 @@ impl BundleMember {
             Self::EmbeddedBootAssets { .. } => BOOT_ASSETS_MEMBER_MIN_SCHEMA,
             Self::EmbeddedCliBootAssets(_) => CLI_BOOT_ASSETS_MEMBER_MIN_SCHEMA,
             Self::CanonicalLinuxProof(_) => CANONICAL_LINUX_PROOF_MIN_SCHEMA,
+            Self::LocalComposition(_) => LOCAL_COMPOSITION_MIN_SCHEMA,
             Self::Environment(_) => ENVIRONMENT_MEMBER_MIN_SCHEMA,
             Self::EmbeddedImageSet { .. }
             | Self::KernelCmdline { .. }
@@ -267,6 +275,24 @@ pub struct CanonicalLinuxProof {
     pub signature_bundle_artifact: String,
     pub revocation_document_artifact: String,
     pub revocation_signature_bundle_artifact: String,
+}
+
+/// Signed artifact names for the exact source lock and original layer evidence.
+/// External layer archives are not republished.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalComposition {
+    pub lock_artifact: String,
+    pub layers: Vec<LocalCompositionLayer>,
+}
+
+/// Evidence for one runtime input in dependency-first lock order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalCompositionLayer {
+    pub manifest_artifact: String,
+    pub signature_artifact: String,
+    pub group_artifact: String,
 }
 
 /// The publisher's declared security posture for a bundled workload.
@@ -519,13 +545,35 @@ mod tests {
     }
 
     #[test]
-    fn bundle_schema_version_is_seven() {
+    fn bundle_schema_version_is_eight() {
         // Pin the current version constant — bumps are deliberate;
         // a silent rev should trip this test.
-        assert_eq!(BUNDLE_SCHEMA_VERSION, 7);
+        assert_eq!(BUNDLE_SCHEMA_VERSION, 8);
         assert_eq!(ENVIRONMENT_MEMBER_MIN_SCHEMA, 5);
         assert_eq!(CLI_BOOT_ASSETS_MEMBER_MIN_SCHEMA, 6);
         assert_eq!(CANONICAL_LINUX_PROOF_MIN_SCHEMA, 7);
+        assert_eq!(LOCAL_COMPOSITION_MIN_SCHEMA, 8);
+    }
+
+    #[test]
+    fn local_composition_is_closed_and_requires_schema_eight() {
+        let member = BundleMember::LocalComposition(LocalComposition {
+            lock_artifact: "composition-lock.json".into(),
+            layers: vec![LocalCompositionLayer {
+                manifest_artifact: "runtime-manifest.json".into(),
+                signature_artifact: "runtime-manifest.bundle".into(),
+                group_artifact: "runtime-group.toml".into(),
+            }],
+        });
+        assert_eq!(member.minimum_schema_version(), 8);
+        let encoded = serde_json::to_value(&member).unwrap();
+        assert_eq!(
+            serde_json::from_value::<BundleMember>(encoded.clone()).unwrap(),
+            member
+        );
+        let mut forged = encoded;
+        forged["publisher_verified"] = true.into();
+        assert!(serde_json::from_value::<BundleMember>(forged).is_err());
     }
 
     #[test]

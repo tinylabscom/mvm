@@ -61,7 +61,7 @@ pub(super) fn scan_and_record_base_image(
     prod: bool,
 ) -> Result<()> {
     // One OSV request per matched advisory, in sequence: an image with a large
-    // package set spends real time here, and it used to spend it silently.
+    // package set spends real time here, so the wait is announced.
     let phase =
         mvm_client::ui::activity::start("Scanning the base image for known vulnerabilities");
     let report = |detail: &str| phase.set_detail(detail);

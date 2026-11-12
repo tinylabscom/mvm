@@ -98,17 +98,6 @@ pub fn redaction_from_signed_json(
     Ok(plan.redaction)
 }
 
-/// Extract the reversible replacement policy from a signed plan's payload,
-/// without re-verifying the signature — same trust posture as
-/// [`redaction_from_signed_json`].
-pub fn reversible_replacement_from_signed_json(
-    plan_json: &str,
-) -> Result<crate::policy::ReversibleReplacementPolicy, serde_json::Error> {
-    let signed: SignedExecutionPlan = serde_json::from_str(plan_json)?;
-    let plan: ExecutionPlan = serde_json::from_slice(&signed.0.payload)?;
-    Ok(plan.reversible_replacement)
-}
-
 /// Extract the cumulative action budget from a signed plan's payload, without
 /// re-verifying the signature — same trust posture as
 /// [`redaction_from_signed_json`]. Returns `None` for plans that carry no
@@ -229,80 +218,29 @@ pub mod test_support {
     /// A minimal valid `ExecutionPlan` with a fixed validity window + nonce.
     /// Callers override `valid_from`/`valid_until`/`nonce` for their scenario.
     pub fn sample_plan() -> ExecutionPlan {
-        ExecutionPlan {
-            grants: None,
-            environment: None,
-            build_provenance: Default::default(),
-            snapshot_at: Default::default(),
-            network_mode: Default::default(),
-            stream_retention: Default::default(),
-            action_budget: None,
-            protected_paths: Default::default(),
-            ingress: Vec::new(),
-            network_limits: Default::default(),
-            schema_version: SCHEMA_VERSION,
-            plan_id: PlanId("01HXTESTPLAN000000000000".to_string()),
-            plan_version: 1,
-            tenant: TenantId("tenant-a".to_string()),
-            workload: WorkloadId("workload-1".to_string()),
-            runtime_profile: RuntimeProfileRef("firecracker".to_string()),
-            image: SignedImageRef {
-                name: "tenant-worker-aarch64".to_string(),
-                sha256: "a".repeat(64),
-                cosign_bundle: None,
-                entrypoint_present: true,
-            },
-            resources: Resources {
-                cpus: 2,
-                mem_mib: 1024,
-                disk_mib: 4096,
-                timeouts: TimeoutSpec {
-                    boot_secs: 30,
-                    exec_secs: 600,
-                },
-            },
-            admission_profile: AdmissionProfile::local_default(
-                "code:execute",
-                PlanSeccompTier::Standard,
-            ),
-            network_policy: PolicyRef("default-deny".to_string()),
-            fs_policy: FsPolicyRef("default".to_string()),
-            secrets: vec![],
-            egress_policy: PolicyRef("agent-l7".to_string()),
-            redaction: crate::policy::RedactionPolicy::default(),
-            reversible_replacement: crate::policy::ReversibleReplacementPolicy::default(),
-            tool_policy: PolicyRef("read-only-tools".to_string()),
-            tools: Default::default(),
-            artifact_policy: ArtifactPolicy {
-                capture_paths: vec!["/artifacts".to_string()],
-                retention_days: 30,
-            },
-            caller_commitment: None,
-            audit_labels: BTreeMap::from([("workflow".to_string(), "etl-1".to_string())]),
-            key_rotation: KeyRotationSpec { interval_days: 7 },
-            attestation: AttestationRequirement {
-                mode: AttestationMode::Noop,
-            },
-            release_pin: None,
-            post_run: PostRunLifecycle {
-                destroy_on_exit: true,
-                snapshot_on_idle: false,
-                idle_secs: 0,
-            },
-            valid_from: Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap(),
-            valid_until: Utc.with_ymd_and_hms(2026, 5, 1, 1, 0, 0).unwrap(),
-            nonce: Nonce::from_bytes([0xab; 16]),
-            agent_verbs: None,
-            bundle: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            asset_identities: Vec::new(),
-            outputs: Vec::new(),
-            services: Vec::new(),
-            extensions: Vec::new(),
-            stream_edges: Vec::new(),
-            sdk_uses_sidecar: true,
-        }
+        let from = Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap();
+        let mut plan = crate::plan::test_support::PlanFixture::new()
+            .plan_id("01HXTESTPLAN000000000000")
+            .tenant("tenant-a")
+            .workload("workload-1")
+            .nonce([0xab; 16])
+            .validity(from, from + chrono::Duration::hours(1))
+            .audit_labels(BTreeMap::from([("workflow".into(), "etl-1".into())]))
+            .build();
+        plan.image.name = "tenant-worker-aarch64".into();
+        plan.resources.cpus = 2;
+        plan.resources.mem_mib = 1024;
+        plan.resources.disk_mib = 4096;
+        plan.resources.timeouts.exec_secs = 600;
+        plan.admission_profile =
+            AdmissionProfile::local_default("code:execute", PlanSeccompTier::Standard);
+        plan.network_policy = PolicyRef("default-deny".into());
+        plan.fs_policy = FsPolicyRef("default".into());
+        plan.egress_policy = PolicyRef("agent-l7".into());
+        plan.artifact_policy.capture_paths = vec!["/artifacts".into()];
+        plan.artifact_policy.retention_days = 30;
+        plan.key_rotation.interval_days = 7;
+        plan
     }
 }
 
@@ -342,6 +280,57 @@ mod tests {
         let signed = sign_plan(&plan, &sk, "test-signer");
         let recovered = verify_plan(&signed, &[("test-signer", &vk)]).unwrap();
         assert_eq!(recovered, plan);
+    }
+
+    #[test]
+    fn signed_legacy_tool_policy_does_not_become_an_unrestricted_grant() {
+        let mut plan = sample_plan();
+        plan.agent_verbs = Some(vec![crate::plan::VerbId::new("run-entrypoint").unwrap()]);
+        let (sk, vk) = fresh_key();
+        let signed = sign_plan(&plan, &sk, "test-signer");
+        let round = verify_plan(&signed, &[("test-signer", &vk)]).expect("ordinary plan");
+        assert_eq!(round.agent_verbs, plan.agent_verbs);
+        assert_eq!(round.network_policy, plan.network_policy);
+        assert_eq!(round.fs_policy, plan.fs_policy);
+        assert_eq!(round.egress_policy, plan.egress_policy);
+        assert_eq!(round.secrets, plan.secrets);
+
+        for (field, value) in [
+            ("tools", serde_json::json!({"allow": ["shell"]})),
+            (
+                "tools",
+                serde_json::json!({"detail": {"shell": {"secrets": ["token"]}}}),
+            ),
+            ("tool_policy", serde_json::json!("read-only-tools")),
+        ] {
+            let mut legacy = serde_json::to_value(&plan).expect("plan serializes");
+            legacy[field] = value;
+            let mut signed = signed.clone();
+            signed.0.payload = serde_json::to_vec(&legacy).expect("legacy plan serializes");
+            signed.0.signature = sk.sign(&signed.0.payload).to_bytes().to_vec();
+            assert!(
+                matches!(
+                    verify_plan(&signed, &[("test-signer", &vk)]),
+                    Err(PlanVerifyError::Parse(_))
+                ),
+                "{field}"
+            );
+            let json = serde_json::to_string(&signed).expect("signed plan serializes");
+            assert!(plan_from_admitted_json(&json).is_err(), "{field}");
+            assert!(secrets_from_signed_json(&json).is_err(), "{field}");
+        }
+        let mut legacy = serde_json::to_value(&plan).expect("plan serializes");
+        legacy["admission_profile"]["tool_policy"] = serde_json::json!("read-only-tools");
+        let mut signed = signed;
+        signed.0.payload = serde_json::to_vec(&legacy).expect("legacy plan serializes");
+        signed.0.signature = sk.sign(&signed.0.payload).to_bytes().to_vec();
+        assert!(matches!(
+            verify_plan(&signed, &[("test-signer", &vk)]),
+            Err(PlanVerifyError::Parse(_))
+        ));
+        let json = serde_json::to_string(&signed).expect("signed plan serializes");
+        assert!(plan_from_admitted_json(&json).is_err());
+        assert!(secrets_from_signed_json(&json).is_err());
     }
 
     #[test]
@@ -506,6 +495,56 @@ mod tests {
             Err(PlanVerifyError::SignatureInvalid(_)) => {}
             other => panic!("expected SignatureInvalid, got {other:?}"),
         }
+    }
+
+    fn mailbox_grant() -> mvm_contract::protocol::mailbox::MailboxGrant {
+        use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxGrant, MailboxId};
+        MailboxGrant {
+            mailbox: MailboxId::from_bytes([7; 32]),
+            authority_key: [9; 32],
+            epoch: ExecutionEpoch::new(3).unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_mailbox_grant_is_signature_bound_and_absence_stays_absent() {
+        let (sk, vk) = fresh_key();
+        let absent = sign_plan(&sample_plan(), &sk, "test-signer");
+        assert!(!String::from_utf8_lossy(&absent.0.payload).contains("mailbox"));
+        assert_eq!(
+            verify_plan(&absent, &[("test-signer", &vk)])
+                .unwrap()
+                .mailbox,
+            None
+        );
+
+        let mut plan = sample_plan();
+        plan.mailbox = Some(mailbox_grant());
+        let mut signed = sign_plan(&plan, &sk, "test-signer");
+        assert_eq!(
+            verify_plan(&signed, &[("test-signer", &vk)])
+                .unwrap()
+                .mailbox,
+            Some(mailbox_grant())
+        );
+
+        // Widening the epoch, and adding a grant to a plan signed without
+        // one, both break the signature.
+        let mut payload: serde_json::Value = serde_json::from_slice(&signed.0.payload).unwrap();
+        payload["mailbox"]["epoch"] = serde_json::json!(4);
+        signed.0.payload = serde_json::to_vec(&payload).unwrap();
+        assert!(matches!(
+            verify_plan(&signed, &[("test-signer", &vk)]),
+            Err(PlanVerifyError::SignatureInvalid(_))
+        ));
+        let mut forged = absent.clone();
+        let mut payload: serde_json::Value = serde_json::from_slice(&forged.0.payload).unwrap();
+        payload["mailbox"] = serde_json::to_value(mailbox_grant()).unwrap();
+        forged.0.payload = serde_json::to_vec(&payload).unwrap();
+        assert!(matches!(
+            verify_plan(&forged, &[("test-signer", &vk)]),
+            Err(PlanVerifyError::SignatureInvalid(_))
+        ));
     }
 
     #[test]

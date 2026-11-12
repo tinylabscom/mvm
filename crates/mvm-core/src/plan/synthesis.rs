@@ -39,6 +39,7 @@
 //! | `*_policy` / `fs_policy` | `"local-default"` (resolver maps to Noops) |
 //! | `valid_from`/`valid_until` | now + 10 min window |
 //! | `nonce` | fresh 128 bits from `SysRng` per invocation |
+//! | `mailbox` | caller-supplied grant (`--mailbox` / workload declaration); `None` grants none |
 //! | `stream_retention` | caller-supplied; `Persist` unless a driver opts the run out of a durable transcript |
 //! | everything else | conservative defaults (no attestation, destroy-on-exit, etc.) |
 
@@ -116,7 +117,6 @@ pub struct SynthesisInput<'a> {
     pub network_policy_ref: Option<&'a str>,
     pub fs_policy_ref: Option<&'a str>,
     pub egress_policy_ref: Option<&'a str>,
-    pub tool_policy_ref: Option<&'a str>,
     /// Whether any secret can be released under this profile.
     pub secret_release: SecretReleasePolicy,
     /// Secret refs lowered into plan-visible bindings.
@@ -180,9 +180,6 @@ pub struct SynthesisInput<'a> {
     /// Per-destination reversible replacement. Default (disabled) preserves the
     /// current one-way-only behavior.
     pub reversible_replacement: crate::policy::ReversibleReplacementPolicy,
-    /// Resolved per-tool rules. Default (empty) keeps the tool dimension
-    /// unused: the endpoint admits every tool question.
-    pub tools: mvm_contract::policy::tool_rules::ToolRules,
     /// Caller-supplied audit labels merged into the synthesized plan's
     /// `audit_labels`. They serialize inside the signed payload and are
     /// inherited by every chain-signed audit entry. The profile-derived keys
@@ -216,6 +213,9 @@ pub struct SynthesisInput<'a> {
     /// live and keeps nothing. Admitted rather than flagged so an absent
     /// transcript is attributable to a signed decision.
     pub stream_retention: StreamRetention,
+    /// Mailbox this workload may send into, minted into the signed plan.
+    /// `None` (the default) grants none.
+    pub mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
     /// Runtime attestation required by the signed plan. Ordinary launch
     /// callers use `Noop`; assurance controllers may select a hardware mode
     /// only from operator-owned configuration.
@@ -247,7 +247,6 @@ pub struct SynthesisInputBuilder<'a> {
     network_policy_ref: Option<&'a str>,
     fs_policy_ref: Option<&'a str>,
     egress_policy_ref: Option<&'a str>,
-    tool_policy_ref: Option<&'a str>,
     secret_release: Option<SecretReleasePolicy>,
     secrets: Option<Vec<SecretBinding>>,
     audit_event_prefix: Option<&'a str>,
@@ -266,7 +265,6 @@ pub struct SynthesisInputBuilder<'a> {
     outputs: Option<Vec<crate::plan::OutputGrant>>,
     redaction: Option<crate::policy::RedactionPolicy>,
     reversible_replacement: Option<crate::policy::ReversibleReplacementPolicy>,
-    tools: Option<mvm_contract::policy::tool_rules::ToolRules>,
     audit_labels: Option<AuditLabels>,
     caller_commitment: Option<CallerCommitment>,
     agent_verbs: Option<Vec<crate::plan::VerbId>>,
@@ -274,6 +272,7 @@ pub struct SynthesisInputBuilder<'a> {
     extensions: Option<Vec<mvm_contract::protocol::extension_pack::ExtensionPlanBinding>>,
     stream_edges: Option<Vec<mvm_contract::stream::StreamEdge>>,
     stream_retention: Option<StreamRetention>,
+    mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
     attestation_mode: Option<AttestationMode>,
 }
 
@@ -295,7 +294,6 @@ impl<'a> SynthesisInputBuilder<'a> {
             network_policy_ref: None,
             fs_policy_ref: None,
             egress_policy_ref: None,
-            tool_policy_ref: None,
             secret_release: None,
             secrets: None,
             audit_event_prefix: None,
@@ -314,7 +312,6 @@ impl<'a> SynthesisInputBuilder<'a> {
             outputs: None,
             redaction: None,
             reversible_replacement: None,
-            tools: None,
             audit_labels: None,
             caller_commitment: None,
             agent_verbs: None,
@@ -322,6 +319,7 @@ impl<'a> SynthesisInputBuilder<'a> {
             extensions: None,
             stream_edges: None,
             stream_retention: None,
+            mailbox: None,
             attestation_mode: None,
         }
     }
@@ -407,13 +405,6 @@ impl<'a> SynthesisInputBuilder<'a> {
     #[must_use]
     pub fn egress_policy_ref(mut self, egress_policy_ref: impl Into<Option<&'a str>>) -> Self {
         self.egress_policy_ref = egress_policy_ref.into();
-        self
-    }
-
-    /// Set `tool_policy_ref`. Takes a value or an `Option`; unset means `None`.
-    #[must_use]
-    pub fn tool_policy_ref(mut self, tool_policy_ref: impl Into<Option<&'a str>>) -> Self {
-        self.tool_policy_ref = tool_policy_ref.into();
         self
     }
 
@@ -539,13 +530,6 @@ impl<'a> SynthesisInputBuilder<'a> {
         self
     }
 
-    /// Set the resolved per-tool rules carried inline in the plan.
-    #[must_use]
-    pub fn tools(mut self, tools: mvm_contract::policy::tool_rules::ToolRules) -> Self {
-        self.tools = Some(tools);
-        self
-    }
-
     /// Set `reversible_replacement`.
     #[must_use]
     pub fn reversible_replacement(
@@ -604,6 +588,13 @@ impl<'a> SynthesisInputBuilder<'a> {
         self
     }
 
+    /// Set the mailbox grant minted into the plan. Optional: unset means none.
+    #[must_use]
+    pub fn mailbox(mut self, grant: mvm_contract::protocol::mailbox::MailboxGrant) -> Self {
+        self.mailbox = Some(grant);
+        self
+    }
+
     /// Set `stream_retention`.
     #[must_use]
     pub fn stream_retention(mut self, stream_retention: StreamRetention) -> Self {
@@ -643,7 +634,6 @@ impl<'a> SynthesisInputBuilder<'a> {
             network_policy_ref: self.network_policy_ref,
             fs_policy_ref: self.fs_policy_ref,
             egress_policy_ref: self.egress_policy_ref,
-            tool_policy_ref: self.tool_policy_ref,
             secret_release: self
                 .secret_release
                 .ok_or(BuilderError::missing("SynthesisInput", "secret_release"))?,
@@ -685,7 +675,6 @@ impl<'a> SynthesisInputBuilder<'a> {
                 "SynthesisInput",
                 "reversible_replacement",
             ))?,
-            tools: self.tools.unwrap_or_default(),
             audit_labels: self
                 .audit_labels
                 .ok_or(BuilderError::missing("SynthesisInput", "audit_labels"))?,
@@ -701,6 +690,7 @@ impl<'a> SynthesisInputBuilder<'a> {
             stream_retention: self
                 .stream_retention
                 .ok_or(BuilderError::missing("SynthesisInput", "stream_retention"))?,
+            mailbox: self.mailbox,
             attestation_mode: self.attestation_mode.unwrap_or(AttestationMode::Noop),
         })
     }
@@ -761,7 +751,26 @@ pub fn workload_seccomp_tier(
 /// call site's `now()` and lasts `VALIDITY_WINDOW_MINUTES`. The caller
 /// signs the returned plan via [`crate::plan::sign_plan`] before passing
 /// it to the supervisor — the signature covers the derived id.
+/// The workload's current execution epoch on this host, from the local
+/// containment ledger. A fresh host, or a workload never replaced, is epoch 1.
+/// An unreadable ledger is an error: synthesizing at a guessed epoch could
+/// mint a plan the admission check then accepts for a contained workload.
+pub fn current_local_epoch(workload: &str) -> Result<u64> {
+    let home = std::path::PathBuf::from(crate::config::mvm_home());
+    let ledger = crate::host_interface::workload::WorkloadLedger::load_at(&home)
+        .map_err(|e| anyhow::anyhow!("reading the workload ledger: {e}"))?;
+    Ok(ledger.entry(workload).epoch.0)
+}
+
 pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
+    let execution_epoch = current_local_epoch(input.vm_name)?;
+    if let Some(grant) = &input.mailbox {
+        anyhow::ensure!(
+            grant.epoch.get() == execution_epoch,
+            "mailbox grant is for execution epoch {} but the workload runs at epoch {execution_epoch}",
+            grant.epoch.get()
+        );
+    }
     let nonce = fresh_nonce();
     let now = Utc::now();
 
@@ -794,15 +803,8 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
     let network_policy = policy_ref(input.network_policy_ref);
     let fs_policy = fs_policy_ref(input.fs_policy_ref);
     let egress_policy = policy_ref(input.egress_policy_ref);
-    let tool_policy = policy_ref(input.tool_policy_ref);
-    let admission_profile = admission_profile(
-        input,
-        intent,
-        &network_policy,
-        &fs_policy,
-        &egress_policy,
-        &tool_policy,
-    );
+    let admission_profile =
+        admission_profile(input, intent, &network_policy, &fs_policy, &egress_policy);
     let mut audit_labels = audit_labels_for_profile(&admission_profile);
     // Caller labels fill additional keys; profile-derived keys stay authoritative.
     for (k, v) in &input.audit_labels {
@@ -851,6 +853,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         network_limits: Default::default(),
         ingress: input.ingress.clone(),
         schema_version: SCHEMA_VERSION,
+        execution_epoch,
         // Placeholder — overwritten below with the content-address once every
         // load-bearing field is set. The derivation excludes `plan_id`, so this
         // seed value never influences the result.
@@ -869,8 +872,6 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         egress_policy,
         redaction: input.redaction.clone(),
         reversible_replacement: input.reversible_replacement.clone(),
-        tool_policy,
-        tools: input.tools.clone(),
         artifact_policy: ArtifactPolicy {
             capture_paths: Vec::new(),
             retention_days: 0,
@@ -901,6 +902,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         services: input.services.clone(),
         extensions: input.extensions.clone(),
         stream_edges: input.stream_edges.clone(),
+        mailbox: input.mailbox,
         stream_retention: input.stream_retention,
         action_budget: None,
         protected_paths: Default::default(),
@@ -990,7 +992,6 @@ fn admission_profile(
     network_policy: &PolicyRef,
     fs_policy: &FsPolicyRef,
     egress_policy: &PolicyRef,
-    tool_policy: &PolicyRef,
 ) -> AdmissionProfile {
     let profile_id = format!("{intent}:{}", input.seccomp_tier);
     let event_prefix = input
@@ -1004,7 +1005,6 @@ fn admission_profile(
         network_policy: network_policy.clone(),
         fs_policy: fs_policy.clone(),
         egress_policy: egress_policy.clone(),
-        tool_policy: tool_policy.clone(),
         secret_release: input.secret_release,
         audit: AuditTaxonomy {
             event_prefix,
@@ -1269,7 +1269,6 @@ mod tests {
             network_policy_ref: None,
             fs_policy_ref: None,
             egress_policy_ref: None,
-            tool_policy_ref: None,
             secret_release: SecretReleasePolicy::None,
             secrets: Vec::new(),
             audit_event_prefix: None,
@@ -1284,7 +1283,6 @@ mod tests {
             assets: Vec::new(),
             redaction: crate::policy::RedactionPolicy::default(),
             reversible_replacement: crate::policy::ReversibleReplacementPolicy::default(),
-            tools: Default::default(),
             caller_commitment: None,
             audit_labels: Default::default(),
             agent_verbs: None,
@@ -1292,8 +1290,21 @@ mod tests {
             extensions: Vec::new(),
             stream_edges: Vec::new(),
             stream_retention: Default::default(),
+            mailbox: None,
             attestation_mode: AttestationMode::Noop,
         }
+    }
+
+    #[test]
+    fn synthesis_keeps_system_grants_without_tool_policy() {
+        let mut inp = input("myvm");
+        inp.agent_verbs = Some(vec![crate::plan::VerbId::new("run-entrypoint").unwrap()]);
+        let plan = synthesize_plan(&inp).expect("ordinary verbs remain signed");
+        assert_eq!(plan.agent_verbs, inp.agent_verbs);
+        let json = serde_json::to_value(plan).expect("plan serializes");
+        assert!(json.get("tools").is_none());
+        assert!(json.get("tool_policy").is_none());
+        assert!(json["admission_profile"].get("tool_policy").is_none());
     }
 
     #[test]
@@ -1471,7 +1482,6 @@ mod tests {
         assert_eq!(plan.network_policy.0, DEFAULT_POLICY_REF);
         assert_eq!(plan.fs_policy.0, DEFAULT_POLICY_REF);
         assert_eq!(plan.egress_policy.0, DEFAULT_POLICY_REF);
-        assert_eq!(plan.tool_policy.0, DEFAULT_POLICY_REF);
     }
 
     #[test]
@@ -1485,7 +1495,6 @@ mod tests {
         assert_eq!(plan.admission_profile.network_policy, plan.network_policy);
         assert_eq!(plan.admission_profile.fs_policy, plan.fs_policy);
         assert_eq!(plan.admission_profile.egress_policy, plan.egress_policy);
-        assert_eq!(plan.admission_profile.tool_policy, plan.tool_policy);
         assert_eq!(
             plan.admission_profile.secret_release,
             SecretReleasePolicy::None
@@ -1510,7 +1519,6 @@ mod tests {
         inp.network_policy_ref = Some("acme:web-agent");
         inp.fs_policy_ref = Some("acme:web-agent");
         inp.egress_policy_ref = Some("acme:web-agent");
-        inp.tool_policy_ref = Some("acme:web-agent");
         inp.secret_release = SecretReleasePolicy::PlanBound;
 
         let plan = synthesize_plan(&inp).unwrap();
@@ -1613,6 +1621,27 @@ mod tests {
         let json = serde_json::to_string(&plan).expect("plan serializes");
         let parsed: ExecutionPlan = serde_json::from_str(&json).expect("plan parses");
         assert_eq!(parsed.deps_volume, Some(binding));
+    }
+
+    #[test]
+    fn a_mailbox_grant_is_minted_into_the_signed_plan_and_absence_stays_none() {
+        use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxGrant, MailboxId};
+        assert!(synthesize_plan(&input("vm")).unwrap().mailbox.is_none());
+
+        let grant = MailboxGrant {
+            mailbox: MailboxId::from_bytes([7; 32]),
+            authority_key: [9; 32],
+            epoch: ExecutionEpoch::new(1).unwrap(),
+        };
+        let mut inp = input("vm");
+        inp.mailbox = Some(grant);
+        let plan = synthesize_plan(&inp).unwrap();
+        assert_eq!(plan.mailbox, Some(grant));
+        assert_ne!(
+            plan.plan_id,
+            synthesize_plan(&input("vm")).unwrap().plan_id,
+            "the grant is part of the content address"
+        );
     }
 
     #[test]

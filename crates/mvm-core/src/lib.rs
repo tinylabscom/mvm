@@ -23,6 +23,9 @@ pub mod runtime_catalog;
 // The `MvmClient` machine-driving facade (trait + DTOs + mock + remote gateway).
 // Off by default so the runtime-free closure never pulls `async-trait`; enabled
 // by `mvm-client`, which adds the in-process `LocalBackend`.
+/// The denylist for environment variables that change what a process loads or
+/// runs, applied to guest env passthrough and to every host helper spawn.
+pub mod bounded_run;
 #[cfg(feature = "client")]
 pub mod client;
 pub mod cold_build;
@@ -38,19 +41,21 @@ pub(crate) mod digest_shape;
 /// Real on-disk footprint of a path — the one measurement behind every
 /// "how much would this reclaim" counter in the CLI.
 pub mod disk_usage;
-/// The denylist for environment variables that change what a process loads or
-/// runs, applied to guest env passthrough and to every host helper spawn.
 pub mod env_hygiene;
 /// Host-side egress secret substitution (destination-bound; closed by default).
 /// Secrets are substituted into outbound requests host-side and never enter the
 /// guest.
 pub mod exit_capture;
+/// Pure health-state reducer: fold probe results into a health state and
+/// decide restart/give-up actions. No I/O.
+/// The checked-in lock over the Firecracker VMM mvm ships and boots.
+/// Host-state only: only the host downloads or runs a Firecracker binary.
+#[cfg(feature = "host-state")]
+pub mod firecracker_lock;
 /// Shared guest loopback-egress helpers (proxy env-var injection for cooperative apps).
 pub mod guest_netd;
 /// The filename of the sidecar manifest that sits beside a built rootfs.
 pub mod guest_sidecar;
-/// Pure health-state reducer: fold probe results into a health state and
-/// decide restart/give-up actions. No I/O.
 pub mod health;
 /// Transport-independent host interface: contract, fail-closed preflight, local adapter.
 pub mod host_interface;

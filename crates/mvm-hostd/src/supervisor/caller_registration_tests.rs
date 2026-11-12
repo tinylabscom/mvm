@@ -6,6 +6,355 @@ use mvm_core::util::test_env::TestEnv;
 use crate::plan_admission::{InMemoryNonceLedger, RunPosture, admit_plan_for_run};
 use crate::stream::protected::{CaptureAuthority, CaptureOwner, CaptureParams};
 
+fn readonly_data_fixture() -> (tempfile::TempDir, std::fs::File) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("input.img");
+    std::fs::write(&path, [17; 512]).unwrap();
+    let file = std::fs::File::open(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    (dir, file)
+}
+
+fn readonly_data_config(fd: i32) -> mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig {
+    serde_json::from_value(serde_json::json!({
+        "console_capture":"encrypted", "vm_name":"data-fixture", "kernel":"/unused",
+        "timeout_secs":0,
+        "disks": [
+            {"path":"/unused-root", "read_only":true},
+            {"path":"/unused-store", "read_only":true},
+            {"path":"/unused-input", "read_only":true}
+        ],
+        "readonly_data_disk_fds": [{
+            "disk":2, "fd":fd,
+            "expected":{"len":512, "sha256":mvm_core::plan::bundle::sha256_hex(&[17; 512])}
+        }],
+        "console_log":"/unused", "pid_file":"/unused", "workload_exit":"/unused"
+    }))
+    .unwrap()
+}
+
+#[test]
+fn readonly_data_startup_consumes_original_unlinked_file_into_virtio_without_path_fallback() {
+    use mvm_vmm::vmm::virtio::DiskImage;
+    use std::os::fd::{AsRawFd, IntoRawFd};
+    use std::os::unix::fs::{FileExt, MetadataExt};
+
+    let (dir, file) = readonly_data_fixture();
+    let inode = file.metadata().unwrap().ino();
+    let path = dir.path().join("input.img");
+    std::fs::write(&path, [99; 512]).unwrap();
+    let mut cfg = readonly_data_config(file.as_raw_fd());
+    cfg.disks[2].path = path.clone();
+    let raw = serde_json::to_vec(&cfg).unwrap();
+    let cfg = serde_json::from_slice(&raw).unwrap();
+    // SAFETY: model exec's cleared flag on this synthetic transferred descriptor.
+    assert_eq!(
+        unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, 0) },
+        0
+    );
+    let fd = file.into_raw_fd();
+    let mut startup = adopt_startup_files(&cfg).unwrap();
+    // SAFETY: production adoption owns this fd; inspection does not adopt it.
+    assert_ne!(
+        unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
+        0
+    );
+    let mut data = startup.take_readonly_data();
+    assert!(startup.into_legacy_kernel().unwrap().is_none());
+    assert!(
+        data.take_disk(0).unwrap().is_none(),
+        "DATA must not occupy a boot role"
+    );
+    let backing = data.take_disk(2).unwrap().unwrap();
+    assert!(
+        data.take_disk(2).is_err(),
+        "a supplied slot must never reopen its path"
+    );
+    let image = DiskImage::readonly_file(backing).unwrap();
+    let DiskImage::File {
+        file,
+        read_only,
+        dirty,
+        ..
+    } = &image
+    else {
+        panic!("DATA must use the existing file-backed device, not a memory copy");
+    };
+    assert!(*read_only && !*dirty);
+    assert_eq!(file.as_raw_fd(), fd);
+    assert_eq!(file.metadata().unwrap().ino(), inode);
+    assert_eq!(file.metadata().unwrap().nlink(), 0);
+    assert_ne!(std::fs::metadata(path).unwrap().ino(), inode);
+    let mut bytes = [0; 512];
+    file.read_exact_at(&mut bytes, 0).unwrap();
+    assert_eq!(bytes, [17; 512]);
+}
+
+#[test]
+fn readonly_data_startup_refuses_bad_slots_recipes_aliases_and_restore_without_adoption() {
+    use std::os::fd::AsRawFd;
+    let (_dir, file) = readonly_data_fixture();
+    let cfg = readonly_data_config(file.as_raw_fd());
+    for slot in [0, 1, 3, usize::MAX] {
+        let mut wrong = cfg.clone();
+        wrong.readonly_data_disk_fds[0].disk = slot;
+        assert!(preflight_startup_files(&wrong).is_err());
+    }
+    for mutate in [
+        |cfg: &mut mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig| {
+            cfg.disks[2].read_only = false
+        },
+        |cfg: &mut mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig| {
+            cfg.disks[2].ephemeral = true
+        },
+        |cfg: &mut mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig| {
+            cfg.readonly_data_disk_fds
+                .push(cfg.readonly_data_disk_fds[0].clone());
+        },
+        |cfg: &mut mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig| {
+            cfg.restore_ram = Some("/unused-restore".into());
+        },
+        |cfg: &mut mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig| {
+            cfg.handoff_socket = Some("/unused-handoff".into());
+        },
+    ] {
+        let mut wrong = cfg.clone();
+        mutate(&mut wrong);
+        assert!(preflight_startup_files(&wrong).is_err());
+    }
+    for kernel in [&file, &file.try_clone().unwrap()] {
+        let mut alias = cfg.clone();
+        alias.kernel_fd = Some(kernel.as_raw_fd());
+        assert!(
+            preflight_startup_files(&alias).is_err(),
+            "cross-role fd/object alias"
+        );
+    }
+    assert_eq!(
+        file.metadata().unwrap().len(),
+        512,
+        "preflight must leave custody intact"
+    );
+}
+
+#[test]
+fn readonly_data_startup_rechecks_content_and_cleans_up_adopted_bad_files() {
+    use std::os::fd::IntoRawFd;
+    for mutate in [
+        |expected: &mut mvm_vmm::driver::readonly_data::DataDiskExpectation| expected.len = 513,
+        |expected: &mut mvm_vmm::driver::readonly_data::DataDiskExpectation| {
+            expected.sha256 = "00".repeat(32)
+        },
+    ] {
+        let (_dir, file) = readonly_data_fixture();
+        let fd = file.into_raw_fd();
+        let mut cfg = readonly_data_config(fd);
+        mutate(&mut cfg.readonly_data_disk_fds[0].expected);
+        assert!(adopt_startup_files(&cfg).is_err());
+        // SAFETY: inspection of the now-closed transferred locator only.
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+    }
+}
+
+#[test]
+fn readonly_data_startup_lock_failure_closes_the_complete_transferred_set() {
+    assert_startup_lock_failure_cleanup(false);
+}
+
+#[test]
+fn startup_lock_failure_closes_the_complete_set_including_later_restore_files() {
+    assert_startup_lock_failure_cleanup(true);
+}
+
+#[test]
+fn startup_restore_files_retain_original_custody_and_transfer_once() {
+    use std::os::fd::{AsRawFd, IntoRawFd};
+
+    let (_ram_dir, ram) = readonly_data_fixture();
+    let (_frame_dir, frame) = readonly_data_fixture();
+    let mut cfg = readonly_data_config(ram.as_raw_fd());
+    cfg.readonly_data_disk_fds.clear();
+    cfg.restore_ram = Some("/unused-ram".into());
+    cfg.restore_frame = Some("/unused-frame".into());
+    let raw = [ram.into_raw_fd(), frame.into_raw_fd()];
+    cfg.restore_fds = Some(mvm_vmm::host::hvf_supervisor::HvfRestoreFds {
+        ram: raw[0],
+        frame: raw[1],
+    });
+    let mut startup = adopt_startup_files(&cfg).unwrap();
+    let files = startup
+        .take_restore()
+        .expect("original owned restore files");
+    assert!(
+        startup.take_restore().is_none(),
+        "restore custody transfers once"
+    );
+    assert!(startup.into_legacy_kernel().unwrap().is_none());
+    for (file, fd) in files.iter().zip(raw) {
+        assert_eq!(
+            file.as_raw_fd(),
+            fd,
+            "never readopt or duplicate the locator"
+        );
+        // SAFETY: inspect the live file owned by the transfer result.
+        assert_ne!(
+            unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
+    }
+    drop(files);
+    for fd in raw {
+        // SAFETY: inspect the now-closed transferred locator without ownership.
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+    }
+}
+
+fn assert_startup_lock_failure_cleanup(restore: bool) {
+    use std::os::fd::{AsRawFd, IntoRawFd};
+
+    let (dir, data) = readonly_data_fixture();
+    let (_kernel_dir, kernel) = readonly_data_fixture();
+    let open_writable = |name: &str| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, [0; 512]).unwrap();
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap()
+    };
+    let backing = open_writable("store.img");
+    let sidecar = open_writable("store.lock");
+    let later_backing = open_writable("output.img");
+    let later_sidecar = open_writable("output.lock");
+    // A separate open description must keep its exclusion after failed adoption.
+    let lock_owner = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.path().join("store.lock"))
+        .unwrap();
+    lock_owner.try_lock().unwrap();
+    let mut cfg = readonly_data_config(data.as_raw_fd());
+    cfg.kernel_fd = Some(kernel.as_raw_fd());
+    cfg.disks[1].read_only = false;
+    cfg.disks.push(mvm_vmm::host::hvf_supervisor::HvfDisk {
+        path: dir.path().join("output.img"),
+        read_only: false,
+        ephemeral: false,
+    });
+    cfg.writable_disk_fds = vec![
+        mvm_vmm::host::hvf_supervisor::HvfWritableDiskFds {
+            disk: 1,
+            backing: backing.as_raw_fd(),
+            sidecar: sidecar.as_raw_fd(),
+        },
+        mvm_vmm::host::hvf_supervisor::HvfWritableDiskFds {
+            disk: 3,
+            backing: later_backing.as_raw_fd(),
+            sidecar: later_sidecar.as_raw_fd(),
+        },
+    ];
+    let mut files = vec![kernel, backing, sidecar, later_backing, later_sidecar, data];
+    let (_frame_dir, frame) = readonly_data_fixture();
+    if restore {
+        cfg.readonly_data_disk_fds.clear();
+        cfg.restore_ram = Some("/unused-ram".into());
+        cfg.restore_frame = Some("/unused-frame".into());
+        cfg.restore_fds = Some(mvm_vmm::host::hvf_supervisor::HvfRestoreFds {
+            ram: files.last().unwrap().as_raw_fd(),
+            frame: frame.as_raw_fd(),
+        });
+        files.push(frame);
+    }
+    preflight_startup_files(&cfg).unwrap();
+    let identities = files
+        .iter()
+        .map(|file| descriptor_identity(file.as_raw_fd()).expect("transferred file is open"))
+        .collect::<Vec<_>>();
+    let transferred = files
+        .into_iter()
+        .map(IntoRawFd::into_raw_fd)
+        .collect::<Vec<_>>();
+    let result = adopt_startup_files(&cfg);
+    let failed = result.is_err();
+    drop(result);
+    // A parallel test can reuse a closed fd number. Inspect the original
+    // inode rather than adopting and closing a number now owned elsewhere.
+    let closed = transferred
+        .iter()
+        .zip(identities)
+        .map(|(fd, identity)| descriptor_identity(*fd) != Some(identity))
+        .collect::<Vec<_>>();
+    assert!(failed, "the separately held sidecar must refuse adoption");
+    assert!(
+        closed.iter().all(|closed| *closed),
+        "all transferred files must close: {closed:?}"
+    );
+    assert!(
+        lock_owner.metadata().is_ok(),
+        "the independent owner remains live"
+    );
+    let contender = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.path().join("store.lock"))
+        .unwrap();
+    assert!(
+        contender.try_lock().is_err(),
+        "failed adoption must not unlock another description"
+    );
+    drop(lock_owner);
+    contender.try_lock().unwrap();
+}
+
+#[test]
+fn readonly_data_startup_refuses_linked_writable_and_append_descriptors() {
+    use std::os::fd::AsRawFd;
+    let (dir, private) = readonly_data_fixture();
+    let path = dir.path().join("linked");
+    std::fs::write(&path, [17; 512]).unwrap();
+    let linked = std::fs::File::open(&path).unwrap();
+    assert!(preflight_startup_files(&readonly_data_config(linked.as_raw_fd())).is_err());
+    let writable = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert!(preflight_startup_files(&readonly_data_config(writable.as_raw_fd())).is_err());
+    // SAFETY: change only status flags on the synthetic private fixture.
+    assert_eq!(
+        unsafe { libc::fcntl(private.as_raw_fd(), libc::F_SETFL, libc::O_APPEND) },
+        0
+    );
+    assert!(preflight_startup_files(&readonly_data_config(private.as_raw_fd())).is_err());
+    assert!(private.metadata().is_ok());
+}
+
+#[test]
+fn readonly_data_never_expands_checked_entrypoint_authority() {
+    use mvm_vmm::host::hvf_supervisor::BootImageFds;
+    use std::os::fd::AsRawFd;
+    let (_dir, file) = readonly_data_fixture();
+    let mut cfg = readonly_data_config(file.as_raw_fd());
+    cfg.boot_image_fds = Some(BootImageFds {
+        rootfs: 10,
+        verity: 11,
+        metadata: 12,
+        root_hash: 13,
+    });
+    let error = preflight_startup_files(&cfg).unwrap_err();
+    assert!(error.to_string().contains("entrypoint authority"));
+    assert!(
+        prepare_startup(&cfg)
+            .err()
+            .expect("checked DATA refusal")
+            .to_string()
+            .contains("entrypoint authority")
+    );
+    assert!(file.metadata().is_ok());
+}
+
 #[test]
 fn caller_image_reopen_requires_an_authenticated_registry_boot_identity() {
     let plan = PlanFixture::new().build();

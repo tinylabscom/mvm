@@ -5,9 +5,7 @@
 //! `PersistedManifest` is the slot-resident JSON record.
 
 use anyhow::{Context, Result};
-use mvm_core::manifest::{
-    PersistedManifest, is_slot_hash_dirname, slot_dir, slot_dir_for_manifest_path,
-};
+use mvm_core::manifest::{PersistedManifest, is_slot_hash_dirname, slot_dir};
 use tracing::instrument;
 
 /// One row produced by [`template_list_slots`]. Contains just the
@@ -39,15 +37,6 @@ pub fn template_load_slot(slot_hash: &str) -> Result<PersistedManifest> {
     PersistedManifest::read_from_slot(std::path::Path::new(&dir))
 }
 
-/// Convenience: load the slot record for a given manifest filesystem
-/// path. Computes `sha256(canonical_path)` then delegates to
-/// [`template_load_slot`].
-#[instrument(skip_all, fields(manifest_path = %path.display()))]
-pub fn template_load_slot_for_manifest_path(path: &std::path::Path) -> Result<PersistedManifest> {
-    let dir = slot_dir_for_manifest_path(path)?;
-    PersistedManifest::read_from_slot(std::path::Path::new(&dir))
-}
-
 /// Remove a slot directory by hash. With `force = true`, a missing
 /// slot is not an error (idempotent cleanup). Mirrors today's
 /// [`super::crud::template_delete`] behaviour for the slot-keyed world.
@@ -66,9 +55,7 @@ pub fn template_delete_slot(slot_hash: &str, force: bool) -> Result<()> {
 /// `~/.mvm/templates/`. Independent of the filesystem so it is
 /// straightforwardly unit-testable.
 ///
-/// Anything else in that directory is not a slot. It used to be sorted into a
-/// second "name-keyed" bucket that a lister exposed; there are no name-keyed
-/// slots any more, so a non-hash entry is simply skipped.
+/// Anything else in that directory is not a slot. There are no name-keyed slots, so a non-hash entry is simply skipped.
 fn slot_hash_dirnames<I>(entries: I) -> Vec<String>
 where
     I: IntoIterator<Item = String>,

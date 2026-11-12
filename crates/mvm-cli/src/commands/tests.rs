@@ -124,6 +124,19 @@ fn workload_pack_search_and_pull_aliases_parse() {
 }
 
 #[test]
+fn pack_new_scaffolding_command_parses() {
+    let parsed =
+        Cli::try_parse_from(["mvmctl", "pack", "new", "acme/example"]).expect("pack new parse");
+    assert!(matches!(
+        parsed.command,
+        Commands::Pack(pack::Args { action: pack::PackAction::New(pack::new::Args { reference }) })
+            if reference.coordinate_string() == "acme/example"
+    ));
+    assert!(Cli::try_parse_from(["mvmctl", "pack", "new"]).is_err());
+    assert!(Cli::try_parse_from(["mvmctl", "pack", "new", "../example"]).is_err());
+}
+
+#[test]
 fn workload_pack_management_and_system_commands_parse() {
     for argv in [
         ["mvmctl", "pack", "ls", "--json"].as_slice(),
@@ -133,13 +146,6 @@ fn workload_pack_management_and_system_commands_parse() {
         ["mvmctl", "pack", "system", "list", "--json"].as_slice(),
         ["mvmctl", "pack", "system", "rollback", "runtime"].as_slice(),
         ["mvmctl", "pack", "system", "prune", "--dry-run"].as_slice(),
-        ["mvmctl", "pack", "system", "download", "builder"].as_slice(),
-        ["mvmctl", "pack", "system", "update", "dev-image"].as_slice(),
-        ["mvmctl", "pack", "list", "--json"].as_slice(),
-        ["mvmctl", "pack", "rollback", "runtime"].as_slice(),
-        ["mvmctl", "pack", "prune", "--dry-run"].as_slice(),
-        ["mvmctl", "pack", "download", "builder"].as_slice(),
-        ["mvmctl", "pack", "update", "dev-image"].as_slice(),
         ["mvmctl", "pack", "registry", "ls", "--json"].as_slice(),
     ] {
         Cli::try_parse_from(argv).unwrap_or_else(|error| panic!("{argv:?}: {error}"));
@@ -149,7 +155,8 @@ fn workload_pack_management_and_system_commands_parse() {
         ["mvmctl", "pack", "update", "unknown"].as_slice(),
         ["mvmctl", "pack", "update", "runtime@1.0.0"].as_slice(),
         ["mvmctl", "pack", "update", "mvm/claude@invalid"].as_slice(),
-        ["mvmctl", "pack", "system", "update", "mvm/claude"].as_slice(),
+        ["mvmctl", "pack", "system", "update", "builder"].as_slice(),
+        ["mvmctl", "pack", "download", "builder"].as_slice(),
         ["mvmctl", "pack", "rm", "runtime"].as_slice(),
     ] {
         assert!(Cli::try_parse_from(argv).is_err(), "{argv:?}");
@@ -4827,6 +4834,43 @@ fn run_transient_launch_plan_keeps_manifest_image_selection() {
 }
 
 #[test]
+fn composed_run_parses_one_command_and_refuses_other_boot_sources() {
+    let parsed = Cli::try_parse_from(["mvmctl", "run", "--compose", "./pack.toml"]).unwrap();
+    let Commands::Run(exec::RunVerbArgs { machine, sdk }) = parsed.command else {
+        panic!("expected run command");
+    };
+    assert_eq!(
+        sdk.compose.as_deref(),
+        Some(std::path::Path::new("./pack.toml"))
+    );
+    exec::validate_composition_request(&machine).unwrap();
+    let parsed = Cli::try_parse_from([
+        "mvmctl",
+        "run",
+        "--compose",
+        "./pack.toml",
+        "--image",
+        "alpine:latest",
+    ])
+    .unwrap();
+    let Commands::Run(exec::RunVerbArgs { machine, .. }) = parsed.command else {
+        panic!("expected run command");
+    };
+    assert!(exec::validate_composition_request(&machine).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "mvmctl",
+            "run",
+            "--compose",
+            "./pack.toml",
+            "--mode",
+            "plan",
+        ])
+        .is_err()
+    );
+}
+
+#[test]
 fn run_transient_launch_plan_conflicts_with_argv() {
     let cli = Cli::try_parse_from([
         "mvmctl",
@@ -6167,9 +6211,7 @@ fn why_requires_exactly_one_subject_and_parses_policy_sources() {
     assert_eq!(args.method.as_deref(), Some("GET"));
     assert_eq!(args.request_path.as_deref(), Some("/public/status"));
     assert!(Cli::try_parse_from(["mvmctl", "why", "--host", "a.test", "--method", "GET"]).is_err());
-    assert!(
-        Cli::try_parse_from(["mvmctl", "why", "--tool", "read", "--request-path", "/x"]).is_err()
-    );
+    assert!(Cli::try_parse_from(["mvmctl", "why", "--tool", "read"]).is_err());
 
     assert!(Cli::try_parse_from(["mvmctl", "why"]).is_err());
     assert!(

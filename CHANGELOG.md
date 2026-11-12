@@ -2,6 +2,176 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.28.0-rc.1] — 2026-11-11
+
+### Added
+- **hostd**: Deliver mission-demo mailbox messages through a local mailbox service
+- **mailbox**: Reserve a dedicated vsock port and attach the mailbox service to it
+- **mailbox**: Share the one-frame mailbox exchange so a guest can speak to the host service
+- **mailbox**: A signed plan grant gates the guest mailbox port
+- **mailbox**: Build the guest mailbox's host trust from the host key directory and serve it off the launch path
+- **mailbox**: Add the workload-side outbox writer
+- **mailbox**: Launch admission mints a mailbox grant from --mailbox and the workload declaration
+- **mailbox**: The guest agent creates the outbox directory on a mailbox-asserting boot
+- **mailbox**: Start the granted guest mailbox from the per-VM endpoint process
+- **mailbox**: Serve a granted guest's mailbox from its own host process
+- **mailbox**: Mvmctl machine mailbox recv, a host read surface for the guest mailbox
+- **core**: Pin the Firecracker release in firecracker.lock and gate every copy of it
+- **mailbox**: Declare the guest mailbox as a backend capability and a host-dialed vsock port
+- **release**: Ship the pinned Firecracker in every Linux archive and package
+- **backends**: Resolve and verify the Firecracker binary a launch execs
+- **backends**: Launch Firecracker from the binary the release shipped
+- **pack**: Stage source-only composable package inputs
+- **backends**: Let a backend say where the host dials a guest vsock port
+- **pack**: Pin Python inputs for both architectures
+- **pack**: Draft local composition with signed input admission
+- **mailbox**: Every backend reaches the mailbox through its host dial route
+- **doctor**: Name the Firecracker a launch will exec and how it was vouched for
+- **mailbox**: Per-launch random secret and separate encryption root, shredded on every stop
+- **hvf**: Record what the teardown scrub did to guest RAM
+- **firecracker**: Fetch the pinned release on first use when none is shipped or cached
+- **blog**: Simplify post index and add topic filtering
+- **hvf**: Sign the guest-memory scrub into the supervisor's audit chain
+
+### Changed
+- **xtask**: Ratchet CLI-reaching spawn files and guard the capture shell job
+- Ignore .trail/ at any depth; record mailbox grant-source decision
+- **xtask**: Raise the Rust footprint ceilings to cover main and the two mailbox changes in flight
+- **hostd**: Remove a stray sed backup of the mission demo test
+- Delete unreferenced code to make room under the footprint ceilings
+- Drop the unused C ABI, formatter and verifier from the vendored ext4 test oracle
+
+### Documentation
+- **repo**: Complete root layout inventory
+- **demo**: State exactly what the mission demo and the guest-mailbox witnesses validate
+- Strengthen OpenSSH blog narrative and MVM explanation
+- **demo**: Record the HVF live witness of the guest mailbox and the limits of both witnesses
+- **demo**: State multi-message delivery, the single-file outbox rule and the re-witness status
+- Define encryption guarantees and witness mailbox restart
+
+### Fixed
+- **kernel**: Update libkrunfw Linux pin to 6.12.116
+- **security**: Accept trusted recovery after failed scheduled witness
+- **install**: Stage the guest runtime's checksum sidecar and signatures beside the archive
+- **mailbox**: Couple the guest's mailbox token to a host process on every launch path
+- Resolve installed bundles for persistent machine starts
+- **ci**: Recover zero-job merge queue stalls
+- **mailbox**: Reap the mailbox process on stop; let a workload address its own mailbox
+- **mailbox**: Keep dialing the guest's mailbox for as long as the VM lives
+- **toolchain**: Isolate pinned Zig from system Python
+- **machine**: Finish exec journal before returning guest exit
+- **template**: Require explicit opt-in for model-assisted scaffolding
+- **mailbox**: Serve every guest message for the VM's life
+- **firecracker**: Launch and manage the VMM as the invoking user, never through sudo
+- **bundle**: Evict idle extractions after confirmed VM exit
+- **mailbox**: Start the mailbox process with an empty environment
+- **security**: Honor explicitly empty agent verb grants
+- **firecracker**: Bootstrap fetches the pinned release into the user's cache, no sudo
+- **mailbox**: Block the accept loop on the listener and a wake fd instead of polling every 20 ms
+- **agentd**: Bound mailbox connection I/O and the outbox tests
+- **cli**: Prepare a release binary's guest runtime on first use
+- **mailbox**: Spool the guest outbox so back-to-back writes are all delivered
+- **pack**: Pin runtime layer to the requested guest architecture
+- **runtime**: Preserve historical signed overlay members
+- **mailbox**: A replacement runs under a new epoch with new keys
+- **hvf**: Keep a quiet agent connection and wait for a long workload to exit
+- **cli**: Prepare the workload kernel on first use for every launch path
+- Machine run -d returns, an interrupted transient run stops its VM, a full mailbox queue stops dropping
+- **cli**: Retain signed bundle policy on detached runs
+- **containment**: Quarantine and replace by name from the ledger and audit log
+- A pid marker that records its start time reads dead once the pid is recycled
+- **mailbox**: Answer only a peer that sent a frame
+
+### Other
+- Specify HVF entrypoint capture ownership and regression boundary
+
+### Refactored
+- Retire guest tool-specific policy
+
+### Testing
+- **conformance**: Run the three-node mission demo as a BDD scenario and record what it does not show
+- **mailbox**: Prove two-node delivery over a loopback TCP PeerTransport
+- **cli**: Cover release first-use preparation with fixture archives
+- **mailbox**: A live witness for a granted guest on an installed mvmctl
+- Add opt-in HVF and Firecracker density harness
+
+## [0.27.0] — 2026-11-07
+
+Final release of the 0.27.0 line. It carries everything in rc.3 and rc.4 plus the changes below.
+
+### Added
+- **packs**: The official bundle-author key is pinned in the client, so official application packs verify without `trust add`; the pinned keys apply at every installed-application launch and admission site
+- **packs**: The official revocation feed is refreshed on demand and applied to applications signed by the built-in publisher
+
+### Changed
+- **cli**: Pack bundle downloads follow at most five HTTPS redirects (no IP-literal, localhost, userinfo or port-changing targets, public-address-only resolution after the first hop, one deadline and byte budget across hops); the general client and other fetches still never redirect
+- **examples**: The Claude application candidate and its demo scripts move to agent/claude@2.0.1
+
+### Documentation
+- Drop the removed pack compatibility commands from the CLI reference, tier manifest and surface inventory
+
+## [0.27.0] — 2026-11-07
+
+Final release of the 0.27.0 line. It carries everything in rc.3 and rc.4 plus the changes below.
+
+### Added
+- **packs**: The official bundle-author key is pinned in the client, so official application packs verify without `trust add`; the pinned keys apply at every installed-application launch and admission site
+- **packs**: The official revocation feed is refreshed on demand and applied to applications signed by the built-in publisher
+
+### Changed
+- **cli**: Pack bundle downloads follow at most five HTTPS redirects (no IP-literal, localhost, userinfo or port-changing targets, public-address-only resolution after the first hop, one deadline and byte budget across hops); the general client and other fetches still never redirect
+- **examples**: The Claude application candidate and its demo scripts move to agent/claude@2.0.1
+
+### Documentation
+- Drop the removed pack compatibility commands from the CLI reference, tier manifest and surface inventory
+
+## [0.27.0-rc.4] — 2026-11-06
+
+### Changed
+- SDK runtime compatibility follows the workspace version
+- Remove dead configuration surface and gate documented env vars
+
+### Documentation
+- **adr-054**: State both layers of first-run runtime preparation
+
+### Fixed
+- **cli**: Pack rm accepts the :latest spelling pull, info and verify accept
+- **release**: Reconcile detached standby during smoke cleanup
+
+### Testing
+- **plan**: Reuse shared plan fixtures
+
+## [0.27.0-rc.3] — 2026-11-06
+
+v0.27.0-rc.1 and v0.27.0-rc.2 did not publish. rc.1 was stopped by the BDD gate, which caught a first-run cached-kernel regression. rc.2 was stopped in distro-packages, which rejected the hyphenated pre-release RPM version. rc.3 carries both fixes.
+
+### Added
+- **cli**: Pack index tags, platform and size, with a pre-download arch warning
+- **core**: Add signed offline leases, a command replay gate and a reconnect gate
+- **cli**: Scaffold registry policy packs with new-pack
+- **core**: Contain and replace a single workload under a fresh epoch
+
+### Documentation
+- **adr-001**: Audit claim witnesses and cite claim 14's provenance test
+
+### Fixed
+- **release**: Build .deb/.rpm for pre-release tags
+- **hostd**: Point the eBPF loader at the folded EgressEvent type
+- **mvm-fs**: Ext4 layout underflowed when the inode count, not the data, set the group count
+
+### Testing
+- Sign pack fixtures under the current publisher identity (unblocks CI)
+- **cli**: Remove obsolete publisher override
+- **cli**: Outcome tests in place of self-asserting and source-text tests
+- **hostd**: Script the three-node contain, terminate and rebuild demo
+- **hostd**: Time the host-interface preflight against the launch budgets
+- **cli**: Decide 'installed' by a marker, not a path guess, in the rollback test
+
+## [0.27.0-rc.2] — 2026-11-05
+
+### Fixed
+- **cli**: Preserve incompatible cached kernel on first run
+
 ## [0.27.0-rc.1] — 2026-11-05
 
 ### Added

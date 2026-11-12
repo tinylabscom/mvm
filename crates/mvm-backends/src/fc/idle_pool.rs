@@ -5,7 +5,7 @@
 //! the API socket: tens of milliseconds, and the D-Bus leg alone varies from 6
 //! to 30 on a loaded host. None of it depends on the guest. So after a launch
 //! boots, a replacement process is started in the background — same launch
-//! line, same `sudo`/`setsid` posture, already inside a scope carrying the
+//! line, same `setsid` posture, already inside a scope carrying the
 //! ceilings a launch of that shape would get — and the next launch of that
 //! shape claims it.
 //!
@@ -362,6 +362,11 @@ fn recover_incomplete_claims_in(root: &Path) {
             }
             continue;
         };
+        // A claim another launch is adopting right now carries the same journal
+        // as one whose claimant died; only the age tells them apart.
+        if !older_than(&claimed, INTERRUPTED_CLAIM_AFTER) {
+            continue;
+        }
         let origin = infer_origin_dir(root, name_str);
         tracing::info!(
             claimed = %claimed.display(),
@@ -664,6 +669,11 @@ fn refill(root: &Path, shape: IdleShape) -> Result<()> {
 /// be a refill that died partway (its `mvmctl` exited first, say).
 const ABANDONED_AFTER: Duration = Duration::from_secs(10);
 
+/// How long a journaled claim may go without a file moving before its claimant
+/// is taken to have died. Generous, because a live adoption on a loaded host
+/// is slow and recovering it would kill the process it is handing over.
+const INTERRUPTED_CLAIM_AFTER: Duration = Duration::from_secs(120);
+
 /// Remove entries whose process never came up, so they do not hold a shape's
 /// place in the pool until their reaper's timer runs out.
 fn discard_abandoned(root: &Path) {
@@ -709,7 +719,7 @@ fn entry_id() -> String {
 /// if the pool directory itself is gone, stops it regardless, because nothing
 /// is left that could claim or find it.
 fn reaper_script() -> &'static str {
-    r#"E=$1; T=$2; S=$3
+    r#"E=$1; T=$2
 st() { sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20; }
 i=0
 while [ ! -s "$E/fc.pid" ] && [ "$i" -lt 30 ]; do sleep 1; i=$((i+1)); done
@@ -725,23 +735,16 @@ if [ "$owned" = 1 ] && [ -n "$P" ] && [ -n "$P0" ] \
    && [ "$(st "$P")" = "$P0" ] \
    && [ "$(cat /proc/$P/comm 2>/dev/null)" = firecracker ] \
    && tr '\0' '\n' < /proc/$P/cmdline | grep -qxF "$E/fc.socket"; then
-  $S kill "$P"
+  kill "$P"
 fi
 rm -rf "$E.expired""#
 }
 
 fn start_reaper(dir: &Path) -> Result<()> {
-    let sudo = super::sudo_prefix_for_euid(effective_uid()).trim();
-    let sudo = if sudo.is_empty() {
-        String::new()
-    } else {
-        format!("{sudo} -n")
-    };
     let child = mvm_core::env_hygiene::helper_command("setsid")
         .args(["sh", "-c", reaper_script(), "mvm-fc-idle-reaper"])
         .arg(dir)
         .arg(idle_lifetime().as_secs().to_string())
-        .arg(sudo)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -884,7 +887,8 @@ mod tests {
         }
         let scripts = scripts.lock().unwrap();
         assert_eq!(scripts.len(), 1);
-        assert!(scripts[0].contains("sudo kill"));
+        assert!(scripts[0].contains("kill "));
+        assert!(!scripts[0].contains("sudo"));
     }
 
     #[test]
@@ -1326,6 +1330,15 @@ mod tests {
         .unwrap();
         assert!(claimed.exists());
 
+        // A claim another launch is adopting right now is left alone.
+        recover_incomplete_claims_in(root.path());
+        assert!(claimed.exists(), "a live claim must not be recovered");
+
+        let long_ago = std::time::SystemTime::now() - INTERRUPTED_CLAIM_AFTER * 2;
+        std::fs::File::open(&claimed)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
         recover_incomplete_claims_in(root.path());
 
         assert!(!claimed.exists(), "the incomplete claim must be removed");

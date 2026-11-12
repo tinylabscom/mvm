@@ -114,6 +114,10 @@ fn every_other_signer_is_refused_even_with_a_valid_signature() {
             "https://github.com/tinylabscom/mvm-images/.github/workflows/revocations.yml@refs/heads/main"
                 .to_string(),
         ]);
+    #[cfg(feature = "host-state")]
+    let others = others.chain([
+        crate::registry_pack_store::OFFICIAL_REGISTRY_PACK_REVOCATION_IDENTITY.to_string(),
+    ]);
     for identity in others {
         let err = verify(&bytes, &bundle_for(&identity), at(2), None)
             .expect_err("a foreign signer must be refused");
@@ -671,6 +675,30 @@ mod published {
         assert!(matches!(
             verify_image_set_revocations(&tampered, BUNDLE, inside_window(), None),
             Err(ImageSetRevocationError::SignatureInvalid(_))
+        ));
+    }
+
+    #[cfg(feature = "host-state")]
+    #[test]
+    fn the_published_bundle_is_not_the_official_registry_pack_authority() {
+        use crate::registry_pack_store::{
+            OFFICIAL_REGISTRY_PACK_REVOCATION_IDENTITY, OFFICIAL_REGISTRY_PACK_REVOCATION_ISSUER,
+        };
+        let official = crate::packs::KeylessTrust {
+            accepted_identities: vec![OFFICIAL_REGISTRY_PACK_REVOCATION_IDENTITY.to_string()],
+            issuer: OFFICIAL_REGISTRY_PACK_REVOCATION_ISSUER.to_string(),
+        };
+        let err = crate::registry_pack_revocation::verify_registry_pack_revocations(
+            DOCUMENT,
+            BUNDLE,
+            &official,
+            inside_window(),
+            None,
+        )
+        .expect_err("an image-set revocation signature is not the registry-pack authority");
+        assert!(matches!(
+            err,
+            crate::registry_pack_revocation::RegistryPackRevocationError::SignatureInvalid(_)
         ));
     }
 

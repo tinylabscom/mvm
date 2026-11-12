@@ -356,6 +356,7 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
     let ledger = mvm_client::admission::InMemoryNonceLedger::new();
     let admission = crate::commands::vm::up::admit_plan_for_boot(
         crate::commands::vm::up::AdmitPlanForBootParams {
+            mailbox: None,
             gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
@@ -397,7 +398,6 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
             shares: Vec::new(),
             assets: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: parent_agent_verbs.clone(),
             restrict_agent_verbs,

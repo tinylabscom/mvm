@@ -9,7 +9,8 @@ use mvm_core::plan::{EnvironmentDescriptor, FsTrustStore, PlanArtifact};
 use super::bundle_binding::{BundlePin, PinnedBundle};
 use super::policy::{InMemoryBundleResolver, bundle_pin_from_archive};
 
-pub(super) type BundleTrust = LocalBundleTrustStore<FsTrustStore>;
+pub(super) type BundleTrust =
+    LocalBundleTrustStore<mvm_core::registry_pack::BuiltinAuthorTrust<FsTrustStore>>;
 
 pub(super) struct PreparePinnedBundleParams<'a> {
     pub pin: BundlePin<'a>,
@@ -35,7 +36,7 @@ pub(super) fn prepare_pinned_bundle(
 ) -> Result<PreparedPinnedBundle<'_>> {
     let pin = params.pin;
     let path = pin.archive();
-    let bytes = std::fs::read(path)
+    let bytes = mvm_core::plan::bundle::read_bundle_archive(path)
         .with_context(|| format!("reading bundle archive at {}", path.display()))?;
     let release_trust = FsTrustStore::default_path()
         .context("resolving default trust-store path (~/.mvm/trusted-publishers/)")?;
@@ -45,9 +46,17 @@ pub(super) fn prepare_pinned_bundle(
     }
     .context("loading host signer for bundle admission")?;
     let host_key_id = mvm_core::plan::bundle::key_id_from_pubkey(&host_signer.verifying);
+    let release_trust = mvm_core::registry_pack::application_bundle::trust_for_installed_bundle(
+        release_trust,
+        &mvm_core::plan::bundle::sha256_hex(&bytes),
+    );
     let trust = BundleTrust::new(release_trust, host_key_id.clone(), host_signer.verifying);
     let verified = mvm_core::plan::read_and_verify_bundle(&bytes, &trust)
         .with_context(|| format!("verifying bundle at {}", path.display()))?;
+    mvm_core::plan::bundle::require_composable_local_enrollment(
+        &verified.manifest,
+        &FsTrustStore::default_path()?,
+    )?;
     let origin = bundle_origin(&verified.manifest, &host_key_id, trust.release());
     match origin {
         BundleOrigin::LocalBuild => anyhow::ensure!(

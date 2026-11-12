@@ -9,8 +9,8 @@
 //! a TTL (a transient failure, or a libkrun upgrade, re-probes the next day).
 //! An explicit `--builder libkrun` success clears it.
 
+use mvm_core::util::time::now_unix_secs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::builder_backend_select::BuilderBackendChoice;
 
@@ -24,13 +24,6 @@ fn marker_path() -> PathBuf {
     PathBuf::from(mvm_core::config::mvm_cache_dir())
         .join("builder-health")
         .join("libkrun-unavailable")
-}
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// Pure freshness check, lifted out so the TTL boundary is unit-testable
@@ -47,7 +40,7 @@ pub fn libkrun_marked_unavailable() -> bool {
         return false;
     };
     let recorded = contents.trim().parse::<u64>().unwrap_or(0);
-    if marker_is_fresh(recorded, now_secs()) {
+    if marker_is_fresh(recorded, now_unix_secs()) {
         true
     } else {
         let _ = std::fs::remove_file(&path);
@@ -62,7 +55,7 @@ fn record_libkrun_unavailable() {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(&path, now_secs().to_string());
+    let _ = std::fs::write(&path, now_unix_secs().to_string());
 }
 
 /// Clear the marker — libkrun built successfully, so it has recovered here (or

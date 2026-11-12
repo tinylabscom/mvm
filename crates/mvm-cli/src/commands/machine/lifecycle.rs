@@ -174,6 +174,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         mvm_client::launch::machine_start::MachineStartParams {
             hypervisor: &effective_hypervisor,
             has_ad_hoc_argv: args.has_ad_hoc_argv,
+            mailbox: args.mailbox,
         },
     )?;
     let boot_digest = started.resolved_digest;
@@ -239,12 +240,14 @@ impl CliStartHost {
 
 impl mvm_client::launch::machine_start::StartHost for CliStartHost {
     /// The CLI boots an explicit kernel on every backend: the pinned one, or a
-    /// workload kernel prepared by `mvmctl bootstrap`. Launch never acquires
-    /// one on a cache miss.
+    /// workload kernel, prepared on first use exactly as a transient run does. A
+    /// refusal means that preparation failed.
     fn workload_kernel(&self, _backend: &str) -> Result<Option<String>> {
         match up::resolve_kernel_pin_path(self.kernel_pinned)? {
             Some(kernel_path) => Ok(Some(kernel_path)),
-            None => crate::commands::env::builder_vm::ensure_workload_kernel().map(Some),
+            None => {
+                crate::commands::env::builder_vm::prepare_workload_kernel_for_launch().map(Some)
+            }
         }
     }
 
@@ -293,7 +296,7 @@ impl mvm_client::launch::machine_start::StartHost for CliStartHost {
 /// rather than on it having a persisted spec.
 ///
 /// Both verbs reach the guest over the per-VM vsock socket under
-/// `~/.mvm/vms/<name>/` and never read the spec they used to load — it was a
+/// `~/.mvm/vms/<name>/` and never read the spec: loading it would be a
 /// bare existence check. But `machine run` boots a transient VM that has a
 /// live console and no spec, so that check refused, with "does not exist", a
 /// machine `machine ps` was listing as running.
@@ -322,23 +325,42 @@ pub(super) fn require_console_target(name: &str) -> Result<()> {
     )
 }
 
-pub(in crate::commands) fn exec_machine(
+pub(super) fn run_exec_with_journal(
     cli: &Cli,
     args: MachineExecArgs,
     cfg: &MvmConfig,
 ) -> Result<()> {
-    require_console_target(&args.name)?;
-    if let Some(tool) = args.tool {
-        anyhow::ensure!(
-            !args.tty && !args.interactive,
-            "declared tools require a non-interactive command"
-        );
-        anyhow::ensure!(
-            !args.argv.is_empty(),
-            "declared tools require a command after --"
-        );
-        return console::run_declared_command(&args.name, &tool, args.argv, args.force);
+    let state_dir = config::machine_state_dir(&args.name);
+    let exit_code = {
+        let _journal_lock = input_journal::lock(&state_dir)?;
+        let pending = input_journal::begin_exec(&state_dir, &args.argv)?;
+        finish_machine_exec(&state_dir, pending, exec_machine(cli, args, cfg))?
+    };
+    if exit_code != 0 {
+        crate::observability::exit(exit_code);
     }
+    Ok(())
+}
+
+pub(super) fn finish_machine_exec(
+    state_dir: &Path,
+    pending: Option<input_journal::PendingExec>,
+    outcome: Result<i32>,
+) -> Result<i32> {
+    input_journal::finish_exec(
+        state_dir,
+        pending,
+        outcome.as_ref().is_ok_and(|code| *code == 0),
+    )?;
+    outcome
+}
+
+pub(in crate::commands) fn exec_machine(
+    cli: &Cli,
+    args: MachineExecArgs,
+    cfg: &MvmConfig,
+) -> Result<i32> {
+    require_console_target(&args.name)?;
     let command = if args.argv.is_empty() {
         None
     } else {
@@ -349,20 +371,13 @@ pub(in crate::commands) fn exec_machine(
         require_tty(std::io::stdin().is_terminal())?;
         console::enforce_accessible_gate(&args.name, args.force)?;
         return match command {
-            Some(cmd) => console::console_pty_command(&args.name, cmd, Vec::new()),
+            Some(cmd) => console::run_pty_command_for_exit(&args.name, cmd, Vec::new()),
             None => {
-                let exit_code = console::console_interactive(
-                    &args.name,
-                    console::ConsoleSessionOptions::default(),
-                )?;
-                if exit_code != 0 {
-                    crate::observability::exit(exit_code);
-                }
-                Ok(())
+                console::console_interactive(&args.name, console::ConsoleSessionOptions::default())
             }
         };
     }
-    console::run(
+    console::run_for_exit(
         cli,
         console::Args {
             name: args.name,
@@ -433,6 +448,49 @@ pub(super) fn stop_machine(cli: &Cli, args: MachineStopArgs, cfg: &MvmConfig) ->
     Ok(())
 }
 
+/// Record the quarantine first, so the workload cannot relaunch, then stop it.
+/// A failed stop still leaves the workload quarantined and says so.
+pub(super) fn quarantine_machine(
+    cli: &Cli,
+    args: super::MachineQuarantineArgs,
+    cfg: &MvmConfig,
+) -> Result<()> {
+    mvm_client::containment::quarantine(&args.name, &args.reason)?;
+    println!(
+        "quarantined {}: it will not launch again until replaced",
+        args.name
+    );
+    down::run(
+        cli,
+        down::Args {
+            name: Some(args.name.clone()),
+        },
+        cfg,
+    )
+    .with_context(|| format!("{} is quarantined but could not be stopped", args.name))
+}
+
+/// A replacement starts a new epoch; the VM still running under the old one
+/// must be gone first, so no process outlives the authority it was granted.
+fn ensure_not_running(name: &str, running: bool) -> Result<()> {
+    anyhow::ensure!(
+        !running,
+        "{name} is still running under its current execution epoch; stop it first \
+         (`mvmctl machine stop {name}`), then replace it"
+    );
+    Ok(())
+}
+
+pub(super) fn replace_machine(args: &super::MachineReplaceArgs) -> Result<()> {
+    ensure_not_running(&args.name, machine_is_running(&args.name))?;
+    let epoch = mvm_client::containment::replace(&args.name)?;
+    println!(
+        "{} may launch again under execution epoch {epoch}",
+        args.name
+    );
+    Ok(())
+}
+
 pub(super) fn confirm_stop(
     yes: bool,
     stdin_is_terminal: bool,
@@ -451,3 +509,15 @@ pub(super) fn confirm_stop(
 }
 
 pub(super) use mvm_client::launch::detached::{machine_is_running, stop_running_machine};
+
+#[cfg(test)]
+mod replace_tests {
+    use super::ensure_not_running;
+
+    #[test]
+    fn replacing_a_running_machine_is_refused_and_names_the_stop_verb() {
+        let err = ensure_not_running("web", true).unwrap_err().to_string();
+        assert!(err.contains("machine stop web"), "{err}");
+        assert!(ensure_not_running("web", false).is_ok());
+    }
+}

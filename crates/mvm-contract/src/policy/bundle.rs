@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::policy::policies::{
     ArtifactPolicy, AuditPolicy, BundleNetworkPolicy, EgressPolicy, KeyPolicy, PiiPolicy,
-    ToolPolicy, WasiCapPolicy,
+    WasiCapPolicy,
 };
 
 /// Wire-format version. Same fail-closed semantics as
@@ -39,7 +39,6 @@ pub struct PolicyBundle {
     pub network: BundleNetworkPolicy,
     pub egress: EgressPolicy,
     pub pii: PiiPolicy,
-    pub tool: ToolPolicy,
     pub artifact: ArtifactPolicy,
     pub keys: KeyPolicy,
     pub audit: AuditPolicy,
@@ -61,10 +60,44 @@ pub struct TenantOverlay {
     pub network: Option<BundleNetworkPolicy>,
     pub egress: Option<EgressPolicy>,
     pub pii: Option<PiiPolicy>,
-    pub tool: Option<ToolPolicy>,
     pub artifact: Option<ArtifactPolicy>,
     pub keys: Option<KeyPolicy>,
     pub audit: Option<AuditPolicy>,
     #[serde(default)]
     pub wasi: Option<WasiCapPolicy>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retired_tool_fields_are_rejected_in_wire_bundles() {
+        let base = serde_json::json!({
+            "schema_version": SCHEMA_VERSION,
+            "bundle_id": "tenant/workload",
+            "bundle_version": 1,
+            "network": {},
+            "egress": {},
+            "pii": {},
+            "artifact": {},
+            "keys": {},
+            "audit": {}
+        });
+        assert!(serde_json::from_value::<PolicyBundle>(base.clone()).is_ok());
+        for legacy in [
+            serde_json::json!({"tool": {"allowed": ["shell"]}}),
+            serde_json::json!({"tenant_overlays": {"tenant": {"tool": {"allowed": ["shell"]}}}}),
+        ] {
+            let mut value = base.clone();
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(legacy.as_object().unwrap().clone());
+            assert!(
+                serde_json::from_value::<PolicyBundle>(value).is_err(),
+                "legacy tool policy must not be silently dropped"
+            );
+        }
+    }
 }

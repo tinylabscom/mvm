@@ -37,6 +37,14 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// The fields here are the rubric — `enforce_*` in `mvm/src/enforce.rs`
 /// walks the plan field-by-field and rejects any plan that doesn't
 /// satisfy the corresponding enforcement row.
+fn first_epoch() -> u64 {
+    1
+}
+
+fn is_first_epoch(epoch: &u64) -> bool {
+    *epoch == 1
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionPlan {
@@ -45,6 +53,16 @@ pub struct ExecutionPlan {
 
     /// Stable plan identifier. Audit entries reference this verbatim.
     pub plan_id: PlanId,
+
+    /// Execution epoch of this workload under the issuing authority.
+    ///
+    /// A replacement of a contained workload is issued a strictly newer
+    /// epoch; a plan carrying an older one is refused at admission, so a stale
+    /// or replayed plan cannot restart what was replaced. Epoch 1 is the first
+    /// and is skipped on the wire, so plans signed before this field existed
+    /// keep their bytes and their `plan_id`.
+    #[serde(default = "first_epoch", skip_serializing_if = "is_first_epoch")]
+    pub execution_epoch: u64,
 
     /// Monotonic revision counter under the stable workload identity
     /// `(tenant, workload)`. `plan_id` is a per-execution content-address
@@ -167,21 +185,6 @@ pub struct ExecutionPlan {
     /// paths, and exact-token reinject on the paired owned response path.
     #[serde(default)]
     pub reversible_replacement: crate::policy::reversible_replacement::ReversibleReplacementPolicy,
-
-    /// Tool-call policy (which tools the model is allowed to invoke
-    /// over the supervisor's vsock RPC).
-    pub tool_policy: PolicyRef,
-
-    /// Resolved per-tool rules carried inline so the per-VM endpoint can
-    /// answer tool questions — the host-mediated registry, MCP surface, and
-    /// in-guest mediation all read this, never a bundle. The default is the
-    /// all-empty section: the dimension is opt-in, and an empty section
-    /// admits everything.
-    #[serde(
-        default,
-        skip_serializing_if = "crate::policy::tool_rules::ToolRules::is_empty"
-    )]
-    pub tools: crate::policy::tool_rules::ToolRules,
 
     pub artifact_policy: ArtifactPolicy,
 
@@ -311,6 +314,13 @@ pub struct ExecutionPlan {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stream_edges: Vec<crate::stream::StreamEdge>,
 
+    /// The mailbox this workload may send into. `None` (the default) admits
+    /// none: the host serves no mailbox port and the guest listens on none.
+    /// Skip-serialized when absent so plans that predate the field keep their
+    /// bytes and their content address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mailbox: Option<crate::protocol::mailbox::MailboxGrant>,
+
     /// Whether this workload's captured output is kept after the run.
     ///
     /// Always serialized, unlike the optional pins above: the point of
@@ -410,6 +420,7 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
 
     let valid_from = Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0).unwrap();
     ExecutionPlan {
+        execution_epoch: 1,
         environment: None,
         schema_version: SCHEMA_VERSION,
         plan_id: PlanId("fixture-plan".to_string()),
@@ -445,8 +456,6 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
         egress_policy: PolicyRef("local-default".to_string()),
         redaction: Default::default(),
         reversible_replacement: Default::default(),
-        tool_policy: PolicyRef("local-default".to_string()),
-        tools: Default::default(),
         artifact_policy: ArtifactPolicy {
             capture_paths: Vec::new(),
             retention_days: 0,
@@ -475,6 +484,7 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
         services: Vec::new(),
         extensions: Vec::new(),
         stream_edges: Vec::new(),
+        mailbox: None,
         stream_retention: StreamRetention::Persist,
         sdk_uses_sidecar: true,
         action_budget: None,
@@ -487,6 +497,40 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+
+    #[test]
+    fn legacy_tool_policy_fields_are_refused_without_widening_other_grants() {
+        let mut plan = minimal_plan();
+        plan.agent_verbs = Some(vec![crate::plan::VerbId::new("run-entrypoint").unwrap()]);
+        let mut json = serde_json::to_value(&plan).expect("serialize plan");
+        assert!(json.get("tools").is_none());
+        assert!(json.get("tool_policy").is_none());
+        assert!(json["admission_profile"].get("tool_policy").is_none());
+        let round: ExecutionPlan = serde_json::from_value(json.clone()).expect("new plan");
+        assert_eq!(round.agent_verbs, plan.agent_verbs);
+        assert_eq!(round.network_policy, plan.network_policy);
+        assert_eq!(round.fs_policy, plan.fs_policy);
+        assert_eq!(round.egress_policy, plan.egress_policy);
+        assert_eq!(round.secrets, plan.secrets);
+        for (field, value) in [
+            ("tools", serde_json::json!({"allow": ["shell"]})),
+            (
+                "tools",
+                serde_json::json!({"detail": {"shell": {"secrets": ["token"]}}}),
+            ),
+            ("tools", serde_json::json!({})),
+            ("tool_policy", serde_json::json!("local-default")),
+        ] {
+            let mut legacy = json.clone();
+            legacy[field] = value;
+            assert!(
+                serde_json::from_value::<ExecutionPlan>(legacy).is_err(),
+                "{field}"
+            );
+        }
+        json["admission_profile"]["tool_policy"] = serde_json::json!("local-default");
+        assert!(serde_json::from_value::<ExecutionPlan>(json).is_err());
+    }
 
     /// A plan written before `sdk_uses_sidecar` existed must deserialize as
     /// *requiring* the sidecar, not forbidding one.

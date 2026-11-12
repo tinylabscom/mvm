@@ -309,14 +309,6 @@ impl WorkloadEnvironmentBuilder {
         self
     }
 
-    /// Read the runtime overlay from `root` instead of
-    /// [`RUNTIME_OVERLAY_ROOT`]. Tests use it; the guest never moves it.
-    #[must_use]
-    pub fn runtime_overlay_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
-        self.overlay_root = Some(root.into());
-        self
-    }
-
     /// Answer whether the boot armed vsock egress instead of reading the
     /// kernel command line. Tests use it; the guest reads the command line.
     #[must_use]
@@ -630,46 +622,6 @@ mod tests {
         std::fs::create_dir(root.path().join("sdk-py")).unwrap();
         std::fs::create_dir(root.path().join("sdk-ts")).unwrap();
         root
-    }
-
-    #[test]
-    fn a_mounted_overlay_marks_the_workload_and_puts_its_sdks_first() {
-        let root = staged_overlay();
-        let image = ImageRuntimeConfig {
-            env: vec!["PYTHONPATH=/app/lib".to_string()],
-            ..Default::default()
-        };
-        let env = WorkloadEnvironment::builder()
-            .image(&image)
-            .runtime_overlay_root(root.path())
-            .build();
-        let sdk_py = root.path().join("sdk-py").display().to_string();
-        let sdk_ts = root.path().join("sdk-ts").display().to_string();
-        assert_eq!(value(&env, "MVM_RUNTIME_OVERLAY").as_deref(), Some("1"));
-        assert_eq!(
-            value(&env, "PYTHONPATH"),
-            Some(format!("{sdk_py}:/app/lib"))
-        );
-        assert_eq!(value(&env, "NODE_PATH"), Some(sdk_ts));
-    }
-
-    #[test]
-    fn no_overlay_leaves_the_environment_untouched() {
-        let empty = tempfile::tempdir().unwrap();
-        let env = WorkloadEnvironment::builder()
-            .runtime_overlay_root(empty.path())
-            .build();
-        assert!(value(&env, "MVM_RUNTIME_OVERLAY").is_none());
-        assert!(value(&env, "PYTHONPATH").is_none());
-        // An overlay that ships one SDK tree adds only that tree.
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("VERSION"), "1\n").unwrap();
-        std::fs::create_dir(root.path().join("sdk-py")).unwrap();
-        let env = WorkloadEnvironment::builder()
-            .runtime_overlay_root(root.path())
-            .build();
-        assert!(value(&env, "PYTHONPATH").is_some());
-        assert!(value(&env, "NODE_PATH").is_none());
     }
 
     /// The host-supplied environment of an entrypoint call gets the same

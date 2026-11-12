@@ -6,7 +6,7 @@
 //! manifest's `[policy]` table and `[network] allow_hosts`, then the flags on
 //! top, under the same fold. The spec then records the result.
 //!
-//! A spec records network, resource, and tool decisions. A policy that also
+//! A spec records network and resource decisions. A policy that also
 //! binds secrets, shares, env or endpoint routes is refused rather than half
 //! applied: a restart would lose what the spec cannot hold.
 
@@ -186,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn a_persistent_policy_retains_command_rules() {
+    fn a_persistent_policy_rejects_command_rules() {
         let home = tempfile::tempdir().expect("isolated home");
         let mut env = TestEnv::new();
         env.isolate_mvm_home(home.path());
@@ -196,15 +196,9 @@ mod tests {
             "[overrides.tools]\nallow = [\"git\"]\n[overrides.tools.detail.git]\nargv = [\"git status*\"]\n",
         )
         .expect("write tool policy");
-        let selected = machine_policy(inputs(&[profile.display().to_string()], None, &[]))
-            .expect("resolve command rules");
-        let tools = selected
-            .policy
-            .expect("resolved policy")
-            .tools
-            .to_tool_rules();
-        assert_eq!(tools.allow, ["git"]);
-        assert_eq!(tools.detail["git"].argv, ["git status*"]);
+        let error = machine_policy(inputs(&[profile.display().to_string()], None, &[]))
+            .expect_err("command rules must not be recorded");
+        assert!(error.to_string().contains("tools"), "{error:#}");
     }
 
     #[test]
@@ -270,11 +264,5 @@ mod tests {
             assert!(error.to_string().contains(section), "{error:#}");
         }
         assert!(refuse_unrecordable(&PolicyBody::default()).is_ok());
-        let tools: PolicyBody = toml::from_str(
-            "[tools]\nallow = [\"curl\"]\n[tools.detail.curl]\nargv = [\"curl *\"]\n\
-             routes = [\"example.com:443\"]\nsecrets = [\"token\"]\n",
-        )
-        .expect("tool policy parses");
-        assert!(refuse_unrecordable(&tools).is_ok());
     }
 }

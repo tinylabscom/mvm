@@ -870,6 +870,23 @@ verify_release_signature() {
   fi
 }
 
+# Download and verify the standalone checksum the release publishes for its
+# guest runtime, with its signature, and check that it names the archive just
+# verified. A release mvmctl authenticates the runtime from the archive, this
+# checksum and their signature bundles, so all four must be staged together.
+fetch_guest_runtime_sidecar() {
+  # POSIX sh has no locals and verify_release_signature assigns `asset`, so
+  # this function keeps its own names.
+  archive_name="$1"
+  sidecar="$archive_name.sha256"
+  curl -fsSL "$REL/$sidecar" -o "$TMP/$sidecar" 2>/dev/null \
+    || die "no checksum sidecar published for $sidecar"
+  verify_release_signature "$sidecar"
+  [ "$(grep " $archive_name\$" "$TMP/$sidecar" | awk '{print $1}' | head -n1)" = "$(sha256_of "$TMP/$archive_name")" ] \
+    || die "$sidecar does not describe $archive_name"
+  say "Checksum sidecar verified: $sidecar"
+}
+
 # Download, verify and stage the release's guest runtime beside mvmctl, so the
 # release directory holds the CLI and the guest runtime of the same version.
 # Only a 404 is tolerated, and only because releases before the asset existed
@@ -889,9 +906,12 @@ stage_guest_runtime() {
   fi
   verify_release_checksum "$runtime"
   verify_release_signature "$runtime"
+  fetch_guest_runtime_sidecar "$runtime"
   mkdir -p "$SRC/guest-runtime"
-  mv "$TMP/$runtime" "$SRC/guest-runtime/$runtime" \
-    || die "could not stage $runtime beside mvmctl"
+  for staged in "$runtime" "$runtime.bundle" "$runtime.sha256" "$runtime.sha256.bundle"; do
+    mv "$TMP/$staged" "$SRC/guest-runtime/$staged" \
+      || die "could not stage $staged beside mvmctl"
+  done
 }
 
 # --- Backend component selection ---------------------------------------------

@@ -62,7 +62,7 @@ backend-kind catalog entry backs a dispatch enum; resolving a backend by
 name goes through that catalog, not a scattered `match` on strings.
 Priority:
 
-1. An explicit `--hypervisor <name>` flag or `MVM_BACKEND` environment
+1. An explicit `--hypervisor <name>` flag or `MVM_HYPERVISOR` environment
    variable always wins.
 2. Otherwise, auto-detection walks a fixed platform ladder: native Linux
    KVM → Firecracker; macOS 26+ Apple Silicon → HVF; macOS 13–25 with the
@@ -185,7 +185,7 @@ launch witnesses again.
 
 `install.sh` accepts `--backend NAME`; the equivalent non-interactive setting
 is `MVM_INSTALL_BACKEND=NAME`. Supplying both with different values is an
-error. `MVM_BACKEND` remains a runtime override and does not mutate the
+error. `MVM_HYPERVISOR` remains a runtime override and does not mutate the
 installed component set.
 
 After authenticating and unpacking the release, the installer asks that

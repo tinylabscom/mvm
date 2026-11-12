@@ -11,6 +11,7 @@
 
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
+use mvm_vmm::host::shell::shell_quote;
 
 use mvm_client::entrypoint::verb_audit::audit_verb_refusal;
 use mvm_client::entrypoint::{EntrypointAdmission, EntrypointVm, SessionVmName, WorkloadSource};
@@ -661,22 +662,6 @@ fn run_in_session(
     Ok(())
 }
 
-/// Single-quote `s` so bash sees it as one literal token. Doubles up
-/// embedded `'` as `'\''` (close-quote, escaped-quote, re-open).
-fn shell_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for c in s.chars() {
-        if c == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(c);
-        }
-    }
-    out.push('\'');
-    out
-}
-
 fn rfc3339_now() -> String {
     use chrono::SecondsFormat;
     chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
@@ -1059,22 +1044,6 @@ mod tests {
             err.to_string().contains("at least one argv element"),
             "expected empty-argv error, got: {err}"
         );
-    }
-
-    #[test]
-    fn shell_quote_basic_token_wrapped_in_single_quotes() {
-        assert_eq!(shell_quote("hello"), "'hello'");
-    }
-
-    #[test]
-    fn shell_quote_handles_embedded_single_quote() {
-        // Bash escape sequence: close-quote, escaped-quote, re-open.
-        assert_eq!(shell_quote("it's"), "'it'\\''s'");
-    }
-
-    #[test]
-    fn shell_quote_preserves_spaces_and_special_chars() {
-        assert_eq!(shell_quote("a b $c|d"), "'a b $c|d'");
     }
 
     #[test]

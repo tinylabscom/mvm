@@ -1057,19 +1057,6 @@ fn detect_runner(build_dir: &str) -> Option<String> {
     is_executable.then(|| build_dir.to_string())
 }
 
-/// Return the Nix Linux system identifier for the current architecture.
-pub fn linux_system() -> &'static str {
-    nix_system()
-}
-
-fn nix_system() -> &'static str {
-    if cfg!(target_arch = "aarch64") {
-        "aarch64-linux"
-    } else {
-        "x86_64-linux"
-    }
-}
-
 #[cfg(test)]
 mod typed_export_tests {
     use super::*;
@@ -1077,7 +1064,7 @@ mod typed_export_tests {
     #[test]
     fn an_empty_export_is_an_error_rather_than_an_empty_success() {
         // The regression this guards: the copy loop over an empty directory
-        // does not run, so it used to return Ok and the caller went on to
+        // does not run, so without a check it returns Ok and the caller goes on to
         // report a complete build whose vmlinux and rootfs paths named files
         // that were never written.
         let scratch = tempfile::tempdir().unwrap();
@@ -1288,16 +1275,6 @@ mod tests {
             dir.ends_with("/dev/builds/abc123def456ghi789"),
             "got: {}",
             dir
-        );
-    }
-
-    #[test]
-    fn test_nix_system() {
-        let system = nix_system();
-        assert!(
-            system == "aarch64-linux" || system == "x86_64-linux",
-            "unexpected system: {}",
-            system
         );
     }
 

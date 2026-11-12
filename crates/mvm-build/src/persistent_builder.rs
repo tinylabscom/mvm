@@ -252,15 +252,6 @@ impl Default for WorkloadStartParamsBuilder {
     }
 }
 
-/// Outcome of a successful `WorkloadStart` dispatch:
-/// the host-minted id the guest echoed and the spawned VMM pid
-/// (inside the host VM) the host tracks for lifecycle.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkloadStartOutcome {
-    pub workload_id: WorkloadId,
-    pub pid: u32,
-}
-
 /// Typed error surface for [`PersistentBuilderSupervisor`].
 #[derive(Debug, Error)]
 pub enum PersistentBuilderError {
@@ -383,13 +374,6 @@ impl PersistentBuilderSupervisor {
         self
     }
 
-    /// Override the whole-dispatch timeout. Same caveat as
-    /// [`Self::with_frame_read_timeout`].
-    pub fn with_dispatch_timeout(mut self, timeout: Duration) -> Self {
-        self.dispatch_timeout = timeout;
-        self
-    }
-
     /// Dispatch one [`BuilderJob`] into the persistent VM and
     /// block until the guest sends back a terminating
     /// [`HostVmResponse::Result`]. Holds the dispatch mutex for
@@ -454,73 +438,6 @@ impl PersistentBuilderSupervisor {
                 }
                 Err(e)
             }
-        }
-    }
-
-    /// Dispatch a [`HostVmRequest::WorkloadStart`] to
-    /// the host VM, which spawns the workload microVM (Firecracker)
-    /// inside itself. Mints a fresh [`WorkloadId`], returns the
-    /// echoed id + spawned VMM pid on success, or
-    /// [`PersistentBuilderError::WorkloadFailed`] if the guest
-    /// refused. Workload requests get a single reply (no streaming),
-    /// so this uses `Self::dispatch_single_response` rather than the
-    /// build-job `Self::dispatch` streaming loop.
-    pub fn submit_workload_start(
-        &self,
-        params: WorkloadStartParams,
-    ) -> Result<WorkloadStartOutcome, PersistentBuilderError> {
-        let _guard = self
-            .dispatch_mutex
-            .lock()
-            .map_err(|_| PersistentBuilderError::MutexPoisoned)?;
-        let workload_id = WorkloadId::new();
-        let request = HostVmRequest::WorkloadStart {
-            workload_id,
-            kernel_path: params.kernel_path,
-            rootfs_path: params.rootfs_path,
-            vsock_socket_dir: params.vsock_socket_dir,
-            vcpus: params.vcpus,
-            memory_mib: params.memory_mib,
-            kernel_cmdline_extras: params.kernel_cmdline_extras,
-        };
-        match self.dispatch_single_response(&request)? {
-            HostVmResponse::WorkloadStarted {
-                workload_id: got,
-                pid,
-            } => Ok(WorkloadStartOutcome {
-                workload_id: got,
-                pid,
-            }),
-            HostVmResponse::WorkloadFailed { workload_id, error } => {
-                Err(PersistentBuilderError::WorkloadFailed { workload_id, error })
-            }
-            other => Err(PersistentBuilderError::UnexpectedResponse {
-                expected: "workload_started",
-                got: response_kind(&other),
-            }),
-        }
-    }
-
-    /// Dispatch a [`HostVmRequest::WorkloadStop`] and
-    /// confirm the guest tore the workload down.
-    pub fn submit_workload_stop(
-        &self,
-        workload_id: WorkloadId,
-    ) -> Result<(), PersistentBuilderError> {
-        let _guard = self
-            .dispatch_mutex
-            .lock()
-            .map_err(|_| PersistentBuilderError::MutexPoisoned)?;
-        let request = HostVmRequest::WorkloadStop { workload_id };
-        match self.dispatch_single_response(&request)? {
-            HostVmResponse::WorkloadStopped { .. } => Ok(()),
-            HostVmResponse::WorkloadFailed { workload_id, error } => {
-                Err(PersistentBuilderError::WorkloadFailed { workload_id, error })
-            }
-            other => Err(PersistentBuilderError::UnexpectedResponse {
-                expected: "workload_stopped",
-                got: response_kind(&other),
-            }),
         }
     }
 
@@ -1002,12 +919,22 @@ pub fn enforce_active_session_policy(
     Some(reason)
 }
 
+/// A recorded supervisor pid as a signal target, or `None` when it cannot name
+/// exactly one process. `kill` reads 0 as "my own process group" and a negative
+/// value as "a whole group", so a pid that is 0 (the pid file never appeared) or
+/// does not fit `pid_t` (a corrupt record) must never reach it.
+pub fn signalable_pid(pid: u32) -> Option<i32> {
+    i32::try_from(pid).ok().filter(|pid| *pid > 0)
+}
+
 fn terminate_supervisor(pid: u32) {
     #[cfg(unix)]
-    unsafe {
+    if let Some(pid) = signalable_pid(pid) {
         // SAFETY: `kill(SIGTERM)` targets the PID recorded in the session file.
         // It does not dereference pointers or share memory with Rust.
-        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        }
     }
     #[cfg(not(unix))]
     {
@@ -1795,6 +1722,14 @@ mod tests {
             result.is_none(),
             "dead PID {DEFINITELY_DEAD_PID} must be classified as not-alive"
         );
+    }
+
+    #[test]
+    fn signalable_pid_refuses_group_targets() {
+        assert_eq!(signalable_pid(0), None);
+        assert_eq!(signalable_pid(u32::MAX), None);
+        assert_eq!(signalable_pid(i32::MAX as u32 + 1), None);
+        assert_eq!(signalable_pid(4242), Some(4242));
     }
 
     #[test]

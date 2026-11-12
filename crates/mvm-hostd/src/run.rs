@@ -80,6 +80,9 @@ pub struct LocalRunRequest {
     /// `None` keeps the pre-grant baseline: no CPU cap, no wall-clock bound,
     /// deny-all egress.
     pub grants: Option<mvm_contract::grants::Grants>,
+    /// Mailbox this run may send into, minted into the synthesized plan.
+    /// `None` grants none. Ignored when `signed_plan` is set.
+    pub mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
     /// Metadata-only secret bindings resolved by the caller. Raw values stay
     /// behind the host substitution endpoint.
     pub secrets: Vec<SecretBinding>,
@@ -274,6 +277,7 @@ pub fn admit_and_boot_local(
     };
 
     let synthesis = SynthesisInput {
+        mailbox: req.mailbox,
         outputs: Vec::new(),
         grants: req.grants.clone(),
         stream_edges: Vec::new(),
@@ -298,7 +302,6 @@ pub fn admit_and_boot_local(
         network_policy_ref: None,
         fs_policy_ref: None,
         egress_policy_ref: None,
-        tool_policy_ref: None,
         secret_release: req.secret_release,
         secrets: req.secrets.clone(),
         audit_event_prefix: None,
@@ -325,7 +328,6 @@ pub fn admit_and_boot_local(
             .collect::<Result<Vec<_>, _>>()?,
         redaction: Default::default(),
         reversible_replacement: Default::default(),
-        tools: Default::default(),
         caller_commitment: None,
         audit_labels: Default::default(),
         agent_verbs: None,
@@ -498,6 +500,7 @@ mod tests {
             volumes: Vec::new(),
             destroy_on_exit: false,
             grants: None,
+            mailbox: None,
             secrets: vec![SecretBinding {
                 name: "API_KEY".into(),
                 source: mvm_core::plan::SecretSource::Keystore {
@@ -569,6 +572,7 @@ mod tests {
                 }],
                 destroy_on_exit: false,
                 grants: None,
+                mailbox: None,
                 secrets: Vec::new(),
                 secret_release: SecretReleasePolicy::PlanBound,
                 signed_plan: None,
@@ -677,6 +681,7 @@ mod tests {
             }],
             destroy_on_exit: true,
             grants: None,
+            mailbox: None,
             secrets: Vec::new(),
             secret_release: SecretReleasePolicy::None,
             signed_plan: None,
@@ -749,6 +754,7 @@ mod tests {
             }],
             destroy_on_exit: true,
             grants: None,
+            mailbox: None,
             secrets: Vec::new(),
             secret_release: SecretReleasePolicy::None,
             signed_plan: None,
@@ -948,6 +954,7 @@ mod tests {
             volumes: Vec::new(),
             destroy_on_exit: false,
             grants: None,
+            mailbox: None,
             secrets: Vec::new(),
             secret_release: SecretReleasePolicy::None,
             signed_plan: None,
@@ -1024,6 +1031,7 @@ mod signed_boot_tests {
             volumes: Vec::new(),
             destroy_on_exit: true,
             grants: None,
+            mailbox: None,
             secrets: Vec::new(),
             secret_release: SecretReleasePolicy::None,
             signed_plan: Some(mvm_core::plan::sign_plan(&plan, &fleet_key(), "fleet-prod")),

@@ -8,6 +8,7 @@
 //! contract, the fail-closed preflight and the state/epoch rules.
 
 pub mod error;
+pub mod lease;
 pub mod local;
 pub mod policy;
 pub mod preflight;
@@ -15,6 +16,7 @@ pub mod state;
 pub mod store;
 #[cfg(test)]
 mod tests;
+pub mod workload;
 
 pub use error::{Denial, HostInterfaceError};
 pub use policy::{

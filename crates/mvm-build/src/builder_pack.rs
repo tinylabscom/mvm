@@ -10,7 +10,6 @@
 //! deterministic. Wall-clock stamping belongs to the caller, not here.
 
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -887,21 +886,10 @@ pub fn closure_nar_path(arch_dir: &Path) -> Option<PathBuf> {
     nar.is_file().then_some(nar)
 }
 
-/// Stream a file through SHA-256 so an arbitrarily large rootfs is never held in
-/// memory. Returns the lowercase-hex digest as a validated [`Sha256Hex`].
+/// Hash a file by streaming it, so an arbitrarily large rootfs is never held in
+/// memory, as a validated [`Sha256Hex`].
 fn sha256_file(path: &Path) -> Result<Sha256Hex, BuilderPackError> {
-    use sha2::{Digest, Sha256};
-    let mut file = fs::File::open(path).map_err(io_at(path))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).map_err(io_at(path))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let hex = hex::encode(hasher.finalize());
+    let hex = mvm_core::crypto::image_verify::sha256_file(path).map_err(io_at(path))?;
     Ok(Sha256Hex::new(hex)?)
 }
 

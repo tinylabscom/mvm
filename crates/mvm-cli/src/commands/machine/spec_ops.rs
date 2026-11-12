@@ -269,6 +269,7 @@ pub(super) fn run_reconfigure(args: MachineReconfigureArgs) -> Result<()> {
             hypervisor: args.hypervisor.clone(),
             kernel_pin: None,
             has_ad_hoc_argv: false,
+            mailbox: None,
         })?;
     } else {
         println!(

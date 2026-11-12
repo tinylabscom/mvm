@@ -1,12 +1,11 @@
 //! `PolicyRef → validated policy bundle` resolver.
 //!
-//! `mvm-core::plan::ExecutionPlan` carries four policy refs that name (but
+//! `mvm-core::plan::ExecutionPlan` carries three policy refs that name (but
 //! do not contain) the policy bundle a workload runs under:
 //!
 //! - `network_policy: PolicyRef`
 //! - `fs_policy: FsPolicyRef`
 //! - `egress_policy: PolicyRef`
-//! - `tool_policy: PolicyRef`
 //!
 //! Each is a freeform string — `"local-default"` for the
 //! single-tenant local dev posture, or `"<tenant>:<workload>"` for a
@@ -81,8 +80,8 @@ pub enum ResolveError {
         detail: String,
     },
 
-    /// The plan's four policy refs disagree on which bundle to
-    /// load. The current schema requires all four to point at the
+    /// The plan's three policy refs disagree on which bundle to
+    /// load. The current schema requires all three to point at the
     /// same `<tenant>:<workload>` bundle so admission validates one
     /// coherent policy document.
     MixedRefs {
@@ -179,7 +178,7 @@ impl std::fmt::Display for ResolveError {
             } => write!(
                 f,
                 "policy refs disagree: one field requests {first:?} but {second_field} requests \
-                 {second:?}; all four refs must point at the same bundle"
+                 {second:?}; all three refs must point at the same bundle"
             ),
             Self::Unrecognized {
                 field,
@@ -268,20 +267,18 @@ fn default_policy_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("~/.mvm/policies"))
 }
 
-/// Per-field validation that all four refs share the same shape
+/// Per-field validation that all three refs share the same shape
 /// (all `LOCAL_DEFAULT`, or all the same `<tenant>:<workload>`).
 /// Returns the agreed-upon shape on success.
 fn classify_plan_refs<'a>(
     network: &'a str,
     fs: &'a str,
     egress: &'a str,
-    tool: &'a str,
 ) -> Result<RefShape<'a>, ResolveError> {
-    let fields: [(&'static str, &str); 4] = [
+    let fields: [(&'static str, &str); 3] = [
         ("network_policy", network),
         ("fs_policy", fs),
         ("egress_policy", egress),
-        ("tool_policy", tool),
     ];
     let first_value = fields[0].1;
     for (field, value) in fields.iter() {
@@ -303,7 +300,7 @@ fn classify_plan_refs<'a>(
     Ok(classify(first_value))
 }
 
-/// Validate a plan's four policy refs and return the bundle used by the
+/// Validate a plan's three policy refs and return the bundle used by the
 /// live host bridge. Local-default plans carry no bundle and therefore
 /// retain the bridge's mandatory-deny posture.
 ///
@@ -320,9 +317,8 @@ pub fn validate_policy_refs(
     let PolicyRef(network) = &plan.network_policy;
     let FsPolicyRef(fs) = &plan.fs_policy;
     let PolicyRef(egress) = &plan.egress_policy;
-    let PolicyRef(tool) = &plan.tool_policy;
 
-    match classify_plan_refs(network, fs, egress, tool)? {
+    match classify_plan_refs(network, fs, egress)? {
         RefShape::LocalDefault => Ok(ValidatedPolicy {
             kind: PolicyResolutionKind::LocalDefault,
             bundle: None,
@@ -423,89 +419,10 @@ fn load_tenant_workload(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_core::plan::{
-        AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, KeyRotationSpec,
-        Nonce, PlanId, PlanSeccompTier, PostRunLifecycle, Resources, RuntimeProfileRef,
-        SCHEMA_VERSION, SignedImageRef, TenantId, TimeoutSpec, WorkloadId,
-    };
-    use std::collections::BTreeMap;
+    use mvm_core::plan::test_support::PlanFixture;
 
     fn fixture_plan() -> ExecutionPlan {
-        let now = chrono::Utc::now();
-        ExecutionPlan {
-            grants: None,
-            environment: None,
-            build_provenance: Default::default(),
-            snapshot_at: Default::default(),
-            network_mode: Default::default(),
-            stream_retention: Default::default(),
-            action_budget: None,
-            protected_paths: Default::default(),
-            ingress: Vec::new(),
-            network_limits: Default::default(),
-            schema_version: SCHEMA_VERSION,
-            plan_id: PlanId("plan-test".to_string()),
-            plan_version: 1,
-            tenant: TenantId("local".to_string()),
-            workload: WorkloadId("vm-test".to_string()),
-            runtime_profile: RuntimeProfileRef("firecracker".to_string()),
-            image: SignedImageRef {
-                name: "vm-test".to_string(),
-                sha256: "a".repeat(64),
-                cosign_bundle: None,
-                entrypoint_present: true,
-            },
-            resources: Resources {
-                cpus: 1,
-                mem_mib: 128,
-                disk_mib: 0,
-                timeouts: TimeoutSpec {
-                    boot_secs: 30,
-                    exec_secs: 0,
-                },
-            },
-            admission_profile: AdmissionProfile::local_default(
-                "vm:boot",
-                PlanSeccompTier::Standard,
-            ),
-            network_policy: PolicyRef(LOCAL_DEFAULT.to_string()),
-            fs_policy: FsPolicyRef(LOCAL_DEFAULT.to_string()),
-            secrets: Vec::new(),
-            egress_policy: PolicyRef(LOCAL_DEFAULT.to_string()),
-            redaction: Default::default(),
-            reversible_replacement: Default::default(),
-            tool_policy: PolicyRef(LOCAL_DEFAULT.to_string()),
-            tools: Default::default(),
-            artifact_policy: ArtifactPolicy {
-                capture_paths: Vec::new(),
-                retention_days: 0,
-            },
-            caller_commitment: None,
-            audit_labels: BTreeMap::new(),
-            key_rotation: KeyRotationSpec { interval_days: 0 },
-            attestation: AttestationRequirement {
-                mode: AttestationMode::Noop,
-            },
-            release_pin: None,
-            post_run: PostRunLifecycle {
-                destroy_on_exit: true,
-                snapshot_on_idle: false,
-                idle_secs: 0,
-            },
-            valid_from: now,
-            valid_until: now + chrono::Duration::minutes(10),
-            nonce: Nonce::from_bytes([0u8; 16]),
-            bundle: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            asset_identities: Vec::new(),
-            outputs: Vec::new(),
-            agent_verbs: None,
-            services: Vec::new(),
-            extensions: Vec::new(),
-            stream_edges: Vec::new(),
-            sdk_uses_sidecar: true,
-        }
+        PlanFixture::new().plan_id("plan-test").build()
     }
 
     #[test]
@@ -516,14 +433,13 @@ mod tests {
         assert!(validated.bundle.is_none());
     }
 
-    /// Set all four PolicyRef fields on a plan to the same value.
-    /// The schema requires the four refs agree; tests that
+    /// Set all three policy refs on a plan to the same value.
+    /// The schema requires the three refs agree; tests that
     /// violate that on purpose set only one field.
     fn set_all_refs(plan: &mut ExecutionPlan, value: &str) {
         plan.network_policy = PolicyRef(value.to_string());
         plan.fs_policy = FsPolicyRef(value.to_string());
         plan.egress_policy = PolicyRef(value.to_string());
-        plan.tool_policy = PolicyRef(value.to_string());
     }
 
     #[test]
@@ -558,7 +474,7 @@ mod tests {
     fn policy_resolver_rejects_unrecognized_policy_ref() {
         // Anything that's neither "local-default" nor
         // "<tenant>:<workload>" must be refused. The MixedRefs
-        // check runs first, so make all four refs identical (and
+        // check runs first, so make all three refs identical (and
         // bogus) to land on the Unrecognized branch.
         let mut plan = fixture_plan();
         set_all_refs(&mut plan, "bogus");
@@ -580,11 +496,11 @@ mod tests {
 
     #[test]
     fn policy_resolver_rejects_mixed_refs() {
-        // All four refs must agree (same bundle). If only one
+        // All three refs must agree (same bundle). If only one
         // points at a tenant bundle while the others stay
         // local-default, the resolver refuses with MixedRefs.
         let mut plan = fixture_plan();
-        plan.tool_policy = PolicyRef("acme:tools-v1".to_string());
+        plan.egress_policy = PolicyRef("acme:egress-v1".to_string());
         let err = match validate_policy_refs(&plan, None) {
             Err(e) => e,
             Ok(_) => panic!("mixed refs must be refused"),
@@ -596,8 +512,8 @@ mod tests {
                 second,
             } => {
                 assert_eq!(first, "local-default");
-                assert_eq!(second_field, "tool_policy");
-                assert_eq!(second, "acme:tools-v1");
+                assert_eq!(second_field, "egress_policy");
+                assert_eq!(second, "acme:egress-v1");
             }
             other => panic!("expected MixedRefs, got {other:?}"),
         }
@@ -659,7 +575,6 @@ port_hi  = {port}
 
 [egress]
 [pii]
-[tool]
 [artifact]
 [keys]
 [audit]
@@ -755,7 +670,6 @@ allow_list = [["api.example.com", 443]]
 disabled_inspectors = [{list}]
 
 [pii]
-[tool]
 [artifact]
 [keys]
 [audit]
@@ -900,7 +814,6 @@ bundle_version = 1
 {mode_line}
 {cats_line}
 
-[tool]
 [artifact]
 [keys]
 [audit]
@@ -1023,7 +936,6 @@ bundle_version = 1
 [network]
 [egress]
 [pii]
-[tool]
 [artifact]
 [keys]
 

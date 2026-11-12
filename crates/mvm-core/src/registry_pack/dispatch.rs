@@ -1,6 +1,7 @@
 //! Authenticated manifest dispatch. Bundle metadata is not bundle admission.
 
 use super::application::{RegistryApplicationManifest, parse_application_manifest};
+use super::runtime_layer::{RegistryRuntimeLayerManifest, parse_runtime_layer_manifest};
 use super::*;
 
 /// Publisher-authenticated metadata only; no archive has been acquired.
@@ -30,9 +31,44 @@ impl VerifiedRegistryApplication {
 
     /// Require a current, independently authenticated revocation feed before use.
     ///
-    /// Official applications use the built-in MVM feed. Other applications
-    /// require operator-configured trust and a verified cached feed. This does
+    /// `mvm/` applications and applications signed by the built-in publisher
+    /// use the built-in MVM feed; an operator feed is additive. Other
+    /// applications require operator-configured trust and a verified cached feed. This does
     /// not acquire an archive or grant permission to execute it.
+    pub fn check_current_revocations(
+        &self,
+    ) -> Result<(), crate::registry_pack_store::RegistryPackStoreError> {
+        crate::registry_pack_store::check_application_revocations(self)
+    }
+}
+
+/// Publisher-authenticated runtime metadata, not an installed or trusted tar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedRegistryRuntimeLayer {
+    manifest: RegistryRuntimeLayerManifest,
+    manifest_bytes: Vec<u8>,
+    signature_bundle: Vec<u8>,
+    manifest_sha256: Sha256Hex,
+    signer: VerifiedSigner,
+}
+
+impl VerifiedRegistryRuntimeLayer {
+    /// The signed descriptor's strictly parsed data.
+    pub fn manifest(&self) -> &RegistryRuntimeLayerManifest {
+        &self.manifest
+    }
+
+    /// Preserve the exact signed bytes rather than reserializing the descriptor.
+    pub fn manifest_bytes(&self) -> &[u8] {
+        &self.manifest_bytes
+    }
+
+    /// Preserve the publisher's original detached signature evidence.
+    pub fn signature_bundle(&self) -> &[u8] {
+        &self.signature_bundle
+    }
+
+    /// Check current revocations without granting authority to unpack the tar.
     pub fn check_current_revocations(
         &self,
     ) -> Result<(), crate::registry_pack_store::RegistryPackStoreError> {
@@ -44,6 +80,7 @@ impl VerifiedRegistryApplication {
 pub enum VerifiedRegistryManifest {
     Legacy(VerifiedRegistryPack),
     Application(VerifiedRegistryApplication),
+    RuntimeLayer(VerifiedRegistryRuntimeLayer),
 }
 
 mod sealed {
@@ -90,12 +127,29 @@ impl AuthenticatedRegistryManifest for VerifiedRegistryApplication {
     }
 }
 
+impl sealed::Sealed for VerifiedRegistryRuntimeLayer {}
+impl AuthenticatedRegistryManifest for VerifiedRegistryRuntimeLayer {
+    fn reference(&self) -> &PackReference {
+        &self.manifest.reference
+    }
+    fn manifest_sha256(&self) -> &Sha256Hex {
+        &self.manifest_sha256
+    }
+    fn signer(&self) -> &VerifiedSigner {
+        &self.signer
+    }
+    fn requires_operator_revocations(&self) -> bool {
+        true
+    }
+}
+
 impl sealed::Sealed for VerifiedRegistryManifest {}
 impl AuthenticatedRegistryManifest for VerifiedRegistryManifest {
     fn reference(&self) -> &PackReference {
         match self {
             Self::Legacy(pack) => pack.reference(),
             Self::Application(application) => application.reference(),
+            Self::RuntimeLayer(layer) => layer.reference(),
         }
     }
 
@@ -103,6 +157,7 @@ impl AuthenticatedRegistryManifest for VerifiedRegistryManifest {
         match self {
             Self::Legacy(pack) => pack.manifest_sha256(),
             Self::Application(application) => application.manifest_sha256(),
+            Self::RuntimeLayer(layer) => layer.manifest_sha256(),
         }
     }
 
@@ -110,6 +165,7 @@ impl AuthenticatedRegistryManifest for VerifiedRegistryManifest {
         match self {
             Self::Legacy(pack) => pack.signer(),
             Self::Application(application) => application.signer(),
+            Self::RuntimeLayer(layer) => layer.signer(),
         }
     }
 
@@ -117,6 +173,7 @@ impl AuthenticatedRegistryManifest for VerifiedRegistryManifest {
         match self {
             Self::Legacy(pack) => pack.requires_operator_revocations(),
             Self::Application(application) => application.requires_operator_revocations(),
+            Self::RuntimeLayer(layer) => layer.requires_operator_revocations(),
         }
     }
 }
@@ -205,6 +262,37 @@ pub(super) fn adopt_with(
             )?;
             Ok(VerifiedRegistryManifest::Application(
                 VerifiedRegistryApplication {
+                    manifest,
+                    manifest_sha256,
+                    signer,
+                    manifest_bytes: request.manifest_bytes.to_vec(),
+                    signature_bundle: request.signature_bundle.to_vec(),
+                },
+            ))
+        }
+        (3, Some("runtime_layer")) => {
+            let manifest = parse_runtime_layer_manifest(request.manifest_bytes)?;
+            if manifest.reference.coordinate != request.requested.coordinate
+                || request
+                    .requested
+                    .version
+                    .as_ref()
+                    .is_some_and(|v| Some(v) != manifest.reference.version.as_ref())
+            {
+                return Err(RegistryPackVerificationError::ManifestReferenceMismatch {
+                    manifest: manifest.reference.to_string(),
+                    locked: request.requested.to_string(),
+                });
+            }
+            let manifest_sha256 = Sha256Hex::from_bytes(request.manifest_bytes);
+            historical::check_legacy_manifest_policy(
+                request.publisher_policy,
+                &signer.identity,
+                &manifest.reference,
+                &manifest_sha256,
+            )?;
+            Ok(VerifiedRegistryManifest::RuntimeLayer(
+                VerifiedRegistryRuntimeLayer {
                     manifest,
                     manifest_sha256,
                     signer,
@@ -346,6 +434,49 @@ mod tests {
             .unwrap(),
             VerifiedRegistryManifest::Application(_)
         ));
+    }
+
+    #[test]
+    fn an_image_set_signer_cannot_sign_an_application_descriptor() {
+        let policy = publisher_policy();
+        let reference = "runtime/python@1.2.3".parse().unwrap();
+        let bytes = application_bytes();
+        let signers = crate::release_trust::accepted_image_set_identities("0.1.0")
+            .into_iter()
+            .chain(crate::release_trust::accepted_release_identities("0.1.0"));
+        for identity in signers {
+            let result = adopt_with(
+                &PackAdoption {
+                    requested: &reference,
+                    manifest_bytes: &bytes,
+                    signature_bundle: identity.as_bytes(),
+                    publisher_policy: &policy,
+                },
+                |_, bundle, trust| {
+                    let identity = std::str::from_utf8(bundle).unwrap();
+                    trust
+                        .accepted_identities
+                        .iter()
+                        .any(|allowed| allowed == identity)
+                        .then(|| VerifiedSigner {
+                            identity: identity.to_string(),
+                            issuer: trust.issuer.clone(),
+                        })
+                        .ok_or_else(|| {
+                            RegistryPackVerificationError::SignatureInvalid(
+                                "not the namespace publisher".to_string(),
+                            )
+                        })
+                },
+            );
+            assert!(
+                matches!(
+                    result,
+                    Err(RegistryPackVerificationError::SignatureInvalid(_))
+                ),
+                "{identity}"
+            );
+        }
     }
 
     #[test]

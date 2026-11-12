@@ -23,6 +23,7 @@ pub(super) fn run(cache_root: &Path, reference: String, prod: bool) -> Result<Pu
                 super::source::ImageSource::RootfsDir(_) => PullVerification::Unverified,
                 _ => PullVerification::Verified,
             };
+            crate::release_guest_runtime::ensure_release_pieces_prepared()?;
             mvm_client::launch::runtime_overlay::prepare_oci_guest_runtime(cache_root)?;
             let resolved = match source {
                 super::source::ImageSource::OciArchive(path) => {

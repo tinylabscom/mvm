@@ -85,14 +85,6 @@ pub enum Opcode {
     IcmpReply = 0x61,
     /// host→guest: the echo was refused by policy.
     IcmpRefused = 0x62,
-
-    // ── tool mediation (session control) ────────────────────────────
-    /// guest→host: decide one declared command before it is spawned.
-    ToolCheck = 0x70,
-    /// host→guest: the audited decision allows the invocation.
-    ToolAllowed = 0x71,
-    /// host→guest: the invocation is refused.
-    ToolDenied = 0x72,
 }
 
 /// What kind of flow an opcode belongs to. Used by the state machine to
@@ -171,9 +163,6 @@ impl Opcode {
             0x60 => Self::IcmpEcho,
             0x61 => Self::IcmpReply,
             0x62 => Self::IcmpRefused,
-            0x70 => Self::ToolCheck,
-            0x71 => Self::ToolAllowed,
-            0x72 => Self::ToolDenied,
             _ => return None,
         })
     }
@@ -212,21 +201,13 @@ impl Opcode {
         Self::IcmpEcho,
         Self::IcmpReply,
         Self::IcmpRefused,
-        Self::ToolCheck,
-        Self::ToolAllowed,
-        Self::ToolDenied,
     ];
 
     /// The class this opcode belongs to.
     #[must_use]
     pub const fn class(self) -> FlowClass {
         match self {
-            Self::Hello
-            | Self::HelloAck
-            | Self::GoAway
-            | Self::ToolCheck
-            | Self::ToolAllowed
-            | Self::ToolDenied => FlowClass::Session,
+            Self::Hello | Self::HelloAck | Self::GoAway => FlowClass::Session,
             Self::OpenTcp => FlowClass::Tcp,
             Self::OpenUdp | Self::UdpOpened | Self::UdpSend | Self::UdpRecv | Self::CloseUdp => {
                 FlowClass::Udp
@@ -336,7 +317,6 @@ impl Opcode {
             | Self::HttpRequestHead
             | Self::HttpRequestBody
             | Self::IcmpEcho => Sender::GuestOnly,
-            Self::ToolCheck => Sender::GuestOnly,
             Self::HelloAck
             | Self::Opened
             | Self::Refused
@@ -350,9 +330,7 @@ impl Opcode {
             | Self::HttpResponseBody
             | Self::HttpComplete
             | Self::IcmpReply
-            | Self::IcmpRefused
-            | Self::ToolAllowed
-            | Self::ToolDenied => Sender::HostOnly,
+            | Self::IcmpRefused => Sender::HostOnly,
             Self::GoAway
             | Self::Data
             | Self::WindowUpdate
@@ -416,16 +394,9 @@ mod tests {
     }
 
     #[test]
-    fn tool_decision_is_guest_requested_and_host_answered_on_session_zero() {
-        assert_eq!(Opcode::ToolCheck.as_u8(), 0x70);
-        assert_eq!(Opcode::ToolAllowed.as_u8(), 0x71);
-        assert_eq!(Opcode::ToolDenied.as_u8(), 0x72);
-        assert_eq!(Opcode::ToolCheck.sender(), Sender::GuestOnly);
-        assert_eq!(Opcode::ToolAllowed.sender(), Sender::HostOnly);
-        assert_eq!(Opcode::ToolDenied.sender(), Sender::HostOnly);
-        for op in [Opcode::ToolCheck, Opcode::ToolAllowed, Opcode::ToolDenied] {
-            assert!(op.is_session());
-            assert_eq!(op.class(), FlowClass::Session);
+    fn retired_tool_opcodes_are_not_admitted() {
+        for retired in [0x70, 0x71, 0x72] {
+            assert_eq!(Opcode::from_u8(retired), None, "{retired:#x}");
         }
     }
 

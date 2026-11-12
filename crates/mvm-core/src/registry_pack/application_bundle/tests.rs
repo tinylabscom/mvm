@@ -1,5 +1,4 @@
 use super::*;
-#[cfg(unix)]
 use crate::plan::bundle::BundleRegistry;
 use crate::plan::bundle::{
     ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, FsTrustStore,
@@ -12,6 +11,8 @@ use crate::registry_pack::{
 use crate::registry_pack_store::application_test_feed;
 use ed25519_dalek::SigningKey;
 use serde_json::json;
+
+mod builtin_author;
 
 fn fixture() -> (tempfile::TempDir, Vec<u8>, FsTrustStore, String) {
     use rand::Rng;
@@ -154,6 +155,22 @@ fn size_digest_key_architecture_and_independent_trust_are_mandatory() {
     );
     std::fs::write(&source, &bytes[..bytes.len() / 2]).unwrap();
     assert!(verify_application_bundle(&application, &source, &trust).is_err());
+}
+
+#[test]
+fn a_flipped_archive_byte_of_the_same_size_is_a_digest_refusal() {
+    let (directory, bytes, trust, key_id) = fixture();
+    let application = descriptor(&bytes, &key_id, |_| {});
+    let mut tampered = bytes.clone();
+    let middle = tampered.len() / 2;
+    tampered[middle] ^= 1;
+    assert_eq!(tampered.len(), bytes.len());
+    let source = directory.path().join("input.mvmpkg");
+    std::fs::write(&source, &tampered).unwrap();
+    assert!(matches!(
+        verify_application_bundle(&application, &source, &trust),
+        Err(ApplicationBundleError::Digest)
+    ));
 }
 
 #[test]
@@ -398,7 +415,8 @@ fn repeated_install_rechecks_trust_and_repairs_poisoned_cache_without_digest_dri
     assert_eq!(first.bundle().sha256, second.bundle().sha256);
     assert_eq!(std::fs::read(rootfs).unwrap(), b"rootfs");
     assert_eq!(
-        std::fs::read(registry.archive_path(&first.bundle().sha256)).unwrap(),
+        crate::plan::bundle::read_bundle_archive(&registry.archive_path(&first.bundle().sha256))
+            .unwrap(),
         bytes
     );
     assert_eq!(
@@ -719,7 +737,7 @@ fn held_application_keeps_original_descriptor_and_snapshot_after_locator_changes
     let installed = installed();
     let archive =
         BundleRegistry::new(&installed.store.bundle_root).archive_path(&installed.bundle_sha256);
-    let original = std::fs::read(&archive).unwrap();
+    let original = crate::plan::bundle::read_bundle_archive(&archive).unwrap();
     let pin_before = std::fs::read(&installed.store.lock_path).unwrap();
     let held = resolve_held(&installed, "runtime/python").unwrap();
     let snapshot = held.archive_path().to_path_buf();
@@ -803,7 +821,9 @@ fn held_application_production_check_requires_current_independent_feed() {
     assert!(matches!(
         reopen(),
         Err(ApplicationLaunchError::Store(
-            crate::registry_pack_store::RegistryPackStoreError::MissingRevocationTrust { .. }
+            crate::registry_pack_store::RegistryPackStoreError::RevocationStore(
+                crate::registry_pack_revocation_store::RegistryPackRevocationStoreError::Missing
+            )
         ))
     ));
     application_test_feed::configure();
@@ -866,7 +886,7 @@ fn held_application_rechecks_pin_version_publisher_signature_and_revocation() {
 
 #[cfg(unix)]
 #[test]
-fn held_application_refuses_installed_metadata_tamper_and_unbounded_or_special_inputs() {
+fn held_application_refuses_installed_metadata_tamper_and_rematerializes_absence() {
     let installed = installed();
     let root =
         BundleRegistry::new(&installed.store.bundle_root).install_dir(&installed.bundle_sha256);
@@ -892,11 +912,9 @@ fn held_application_refuses_installed_metadata_tamper_and_unbounded_or_special_i
     assert!(resolve_held(&installed, "runtime/python").is_err());
     std::fs::write(signature, original_signature).unwrap();
     resolve_held(&installed, "runtime/python").unwrap();
-    std::fs::remove_dir_all(root).unwrap();
-    assert!(matches!(
-        resolve_held(&installed, "runtime/python"),
-        Err(ApplicationLaunchError::BundleMissing { .. })
-    ));
+    std::fs::remove_dir_all(&root).unwrap();
+    resolve_held(&installed, "runtime/python").unwrap();
+    assert!(root.join("manifest.json").is_file());
 }
 
 #[cfg(unix)]
@@ -906,9 +924,11 @@ fn held_application_rechecks_archive_and_independent_key_without_enrollment() {
     let archive =
         BundleRegistry::new(&installed.store.bundle_root).archive_path(&installed.bundle_sha256);
     let original = std::fs::read(&archive).unwrap();
-    let mut altered = original.clone();
+    let mut altered = crate::plan::bundle::read_bundle_archive(&archive).unwrap();
     altered[0] ^= 1;
-    std::fs::write(&archive, altered).unwrap();
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut encoder, &altered).unwrap();
+    std::fs::write(&archive, encoder.finish().unwrap()).unwrap();
     assert!(matches!(
         resolve_held(&installed, "runtime/python"),
         Err(ApplicationLaunchError::Bundle(
@@ -1056,7 +1076,9 @@ fn production_resolver_requires_operator_trust_and_cached_feed_before_bundle_use
     assert!(matches!(
         resolve(),
         Err(ApplicationLaunchError::Store(
-            crate::registry_pack_store::RegistryPackStoreError::MissingRevocationTrust { .. }
+            crate::registry_pack_store::RegistryPackStoreError::RevocationStore(
+                crate::registry_pack_revocation_store::RegistryPackRevocationStoreError::Missing
+            )
         ))
     ));
     application_test_feed::configure();
@@ -1097,7 +1119,9 @@ fn production_installer_refuses_absent_operator_trust_before_publishing_content(
     assert!(matches!(
         result,
         Err(ApplicationBundleError::Store(
-            crate::registry_pack_store::RegistryPackStoreError::MissingRevocationTrust { .. }
+            crate::registry_pack_store::RegistryPackStoreError::RevocationStore(
+                crate::registry_pack_revocation_store::RegistryPackRevocationStoreError::Missing
+            )
         ))
     ));
     assert!(!store.lock_path.exists());
@@ -1144,7 +1168,9 @@ fn production_revocation_recheck_refuses_withdrawn_trust_before_pin_commit() {
     assert!(matches!(
         result,
         Err(ApplicationBundleError::Store(
-            crate::registry_pack_store::RegistryPackStoreError::MissingRevocationTrust { .. }
+            crate::registry_pack_store::RegistryPackStoreError::RevocationStore(
+                crate::registry_pack_revocation_store::RegistryPackRevocationStoreError::Missing
+            )
         ))
     ));
     assert!(!store.lock_path.exists());
@@ -1203,11 +1229,17 @@ fn post_install_tampering_and_withdrawn_trust_refuse_at_launch() {
     std::fs::write(&archive, &original).unwrap();
     resolve(&installed, "runtime/python").unwrap();
 
-    std::fs::remove_dir_all(registry.install_dir(&installed.bundle_sha256)).unwrap();
+    let extraction = registry.install_dir(&installed.bundle_sha256);
+    std::fs::remove_dir_all(&extraction).unwrap();
+    std::fs::write(&archive, b"poisoned archive").unwrap();
     assert!(matches!(
         resolve(&installed, "runtime/python"),
-        Err(ApplicationLaunchError::BundleMissing { .. })
+        Err(ApplicationLaunchError::Bundle(_))
     ));
+    assert!(!extraction.exists());
+    std::fs::write(&archive, &original).unwrap();
+    resolve(&installed, "runtime/python").unwrap();
+    assert!(extraction.join("manifest.json").is_file());
 
     let descriptor = installed
         .store
@@ -1249,7 +1281,7 @@ fn the_resolved_bundle_is_the_archive_a_mvmpkg_run_would_install() {
     let installed = installed();
     let archive = crate::plan::bundle::BundleRegistry::new(&installed.store.bundle_root)
         .archive_path(&installed.bundle_sha256);
-    let bytes = std::fs::read(archive).unwrap();
+    let bytes = crate::plan::bundle::read_bundle_archive(&archive).unwrap();
     let resolved = resolve(&installed, "runtime/python").unwrap();
     assert_eq!(resolved.bundle_sha256, sha256_hex(&bytes));
 }

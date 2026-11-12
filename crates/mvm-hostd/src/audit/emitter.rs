@@ -75,9 +75,11 @@ pub use events::checkpoint_audit::CheckpointForkedAudit;
 use events::input_refused_labels;
 pub use events::instruction_audit::InstructionTrustEvent;
 pub use events::{
-    agent_prompt_audit, checkpoint_audit, display_audit, drive_audit, grants_audit, image_audit,
-    instruction_audit, stream_audit, wall_clock_audit,
+    agent_prompt_audit, checkpoint_audit, display_audit, drive_audit, grants_audit,
+    guest_memory_audit::{self, GuestMemoryScrub},
+    image_audit, instruction_audit, stream_audit, wall_clock_audit,
 };
+mod mailbox;
 mod workspace;
 pub use workspace::{WorkspaceMutationAudit, WorkspaceSnapshotAudit, workspace_audit};
 
@@ -213,9 +215,9 @@ pub struct AuditEmitter {
 impl Drop for AuditEmitter {
     /// Shut the cached runtime down without blocking.
     ///
-    /// Caching the runtime removed a per-entry construction, but it also moved
-    /// where the runtime is *dropped*: it used to die inside the synchronous
-    /// emit that built it, and now it dies with the emitter. An emitter
+    /// Caching the runtime removes a per-entry construction, but it also moves
+    /// where the runtime is *dropped*: with the emitter, not inside the
+    /// synchronous emit that built it. An emitter
     /// constructed from inside someone else's async context therefore drops
     /// its runtime there, and a blocking drop from async is a tokio panic by
     /// design —
@@ -412,6 +414,7 @@ impl AuditEmitter {
     /// nothing and settles the question from the chain alone.
     pub fn emit_admitted(&self, plan: &ExecutionPlan, signer_id: &str) -> Result<()> {
         let mut labels = vec![
+            ("workload".to_string(), plan.workload.0.clone()),
             ("signer_id".to_string(), signer_id.to_string()),
             ("authorizer_principal".to_string(), signer_id.to_string()),
             (
@@ -437,6 +440,7 @@ impl AuditEmitter {
             plan,
             "plan.admission_refused",
             [
+                ("workload".to_string(), plan.workload.0.clone()),
                 ("stage".to_string(), stage.to_string()),
                 ("reason".to_string(), reason.to_string()),
                 (
@@ -574,7 +578,10 @@ impl AuditEmitter {
         self.emit(
             plan,
             "plan.launched",
-            [("backend".to_string(), backend.to_string())],
+            [
+                ("workload".to_string(), plan.workload.0.clone()),
+                ("backend".to_string(), backend.to_string()),
+            ],
         )
     }
 
@@ -1132,7 +1139,7 @@ impl AuditEmitter {
         self.emit_entry(&entry)
     }
 
-    fn emit_entry(&self, entry: &PlanAuditEntry) -> Result<()> {
+    pub(crate) fn emit_entry(&self, entry: &PlanAuditEntry) -> Result<()> {
         // Callers may be synchronous (the CLI) or already inside an async
         // runtime (an in-process `MvmClient` consumer). Building + blocking
         // on a runtime from an async worker thread panics, so when a runtime
@@ -2225,6 +2232,47 @@ mod tests {
             content.contains("session_generation"),
             "the plan's own session labels must survive the merge: {content}"
         );
+        assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_guest_memory_scrub_is_chain_signed_as_counts_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-scrub");
+
+        emitter
+            .emit_guest_memory_scrubbed(
+                &plan,
+                &GuestMemoryScrub {
+                    backend: "hvf",
+                    mapped_bytes: 536_870_912,
+                    scrubbed_pages: 11_642,
+                    nonzero_bytes_after: 0,
+                    whole_mapping: false,
+                },
+            )
+            .unwrap();
+
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).expect("audit file exists");
+        assert!(content.contains("plan.guest_memory_scrubbed"), "{content}");
+        assert!(
+            content.contains("\"scrubbed_pages\":\"11642\""),
+            "{content}"
+        );
+        assert!(
+            content.contains("\"nonzero_bytes_after\":\"0\""),
+            "{content}"
+        );
+        assert!(content.contains("\"backend\":\"hvf\""), "{content}");
+        assert!(content.contains("\"plan-scrub\""), "{content}");
         assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
     }
 

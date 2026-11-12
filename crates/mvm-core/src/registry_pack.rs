@@ -26,6 +26,7 @@ pub const REGISTRY_PACK_MANIFEST_SCHEMA_VERSION: u32 = 1;
 /// Current publisher trust-policy schema.
 pub const REGISTRY_PACK_PUBLISHER_POLICY_SCHEMA_VERSION: u32 = 1;
 
+pub(super) const MAX_REGISTRY_DESCRIPTOR_BYTES: usize = 1024 * 1024;
 const REGISTRY_PAYLOAD_DIR_NAME: &str = "payload";
 const MAX_REGISTRY_PAYLOAD_FILES: usize = 4096;
 const MAX_REGISTRY_PAYLOAD_BYTES: u64 = 32 * 1024 * 1024 * 1024;
@@ -1044,10 +1045,17 @@ fn validate_registry_pack_manifest(
 
 pub mod application;
 pub mod application_bundle;
+mod builtin_author_keys;
+#[cfg(any(test, feature = "test-support"))]
+pub use builtin_author_keys::register_test_author_key;
+pub use builtin_author_keys::{
+    BuiltinAuthorTrust, OFFICIAL_BUNDLE_AUTHOR_KEYS, REVOKED_OFFICIAL_BUNDLE_AUTHOR_KEY_IDS,
+};
 mod dispatch;
+pub mod runtime_layer;
 pub use dispatch::{
     AuthenticatedRegistryManifest, VerifiedRegistryApplication, VerifiedRegistryManifest,
-    adopt_registry_manifest, verify_registry_manifest,
+    VerifiedRegistryRuntimeLayer, adopt_registry_manifest, verify_registry_manifest,
 };
 
 pub(crate) fn verify_registry_manifest_with(
@@ -2093,14 +2101,14 @@ mod tests {
             publisher_policy: &policy,
         };
         let verified = adopt_registry_pack(&adoption).unwrap();
-        assert_eq!(verified.signer().identity, LEGACY_PACK_SIGNING_IDENTITY);
+        assert_eq!(verified.signer().identity, OFFICIAL_PACK_SIGNING_IDENTITY);
         assert_eq!(verified.signer().issuer, OFFICIAL_PACK_SIGNING_ISSUER);
 
         let wrong_policy = RegistryPackPublisherPolicy::new(vec![
             RegistryPackPublisher::new(
                 "runtime",
                 OFFICIAL_PACK_SIGNING_ISSUER,
-                vec![OFFICIAL_PACK_SIGNING_IDENTITY.to_string()],
+                vec![LEGACY_PACK_SIGNING_IDENTITY.to_string()],
             )
             .unwrap(),
         ])

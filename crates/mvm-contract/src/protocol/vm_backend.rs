@@ -458,6 +458,13 @@ pub struct VmCapabilities {
     /// vsock for the shim to ride.
     #[serde(default)]
     pub gpu: bool,
+    /// Backend can reach a guest listener on the dedicated mailbox port from
+    /// a host process: either it bridges a host-dialed `Mailbox` port to the
+    /// per-port socket the launch names, or the host reaches it through the
+    /// VMM's own vsock mux. A launch whose plan grants a mailbox is refused,
+    /// before boot, on a backend that does not declare this.
+    #[serde(default)]
+    pub guest_mailbox: bool,
     /// Which resource dimensions this backend can actually bound. Declared
     /// separately from what a caller requests so a refusal can name the gap.
     #[serde(default)]
@@ -687,11 +694,6 @@ impl WarmLaunchMode {
     /// Whether this mode requires an authenticated warm claim.
     pub const fn requires_warm(self) -> bool {
         matches!(self, Self::Required)
-    }
-
-    /// Whether this mode permits a cold boot.
-    pub const fn permits_cold(self) -> bool {
-        !self.requires_warm()
     }
 }
 
@@ -1472,26 +1474,6 @@ mod tests {
             ]
             .as_slice()
         );
-    }
-
-    #[test]
-    fn warm_launch_mode_defaults_to_optional_and_round_trips() {
-        assert_eq!(WarmLaunchMode::default(), WarmLaunchMode::Optional);
-        assert!(WarmLaunchMode::Required.requires_warm());
-        assert!(!WarmLaunchMode::Optional.requires_warm());
-        assert!(!WarmLaunchMode::Required.permits_cold());
-        assert!(WarmLaunchMode::Cold.permits_cold());
-
-        for mode in [
-            WarmLaunchMode::Optional,
-            WarmLaunchMode::Required,
-            WarmLaunchMode::Cold,
-        ] {
-            let encoded = serde_json::to_string(&mode).expect("warm launch mode serializes");
-            let decoded: WarmLaunchMode =
-                serde_json::from_str(&encoded).expect("warm launch mode deserializes");
-            assert_eq!(decoded, mode);
-        }
     }
 
     #[test]

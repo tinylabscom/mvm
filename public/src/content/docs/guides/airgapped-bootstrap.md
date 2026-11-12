@@ -17,9 +17,7 @@ dev/workload microVM image, verified against a cosign-signed manifest —
 was removed with the legacy import flow. The current `mvmctl dev`
 namespace contains contributor build tools and does not restore that import.
 Its would-be successor (the `dev-image` pack class) has no publish/fetch path
-wired yet: `mvmctl pack download
-dev-image` refuses explicitly rather than pretending to work. (The pack
-kind is a positional argument; `--kind` is a filter on `pack list` only.)
+wired yet, and no `pack download` command exists.
 Signed bundles are the current sanctioned air-gapped path for shipping
 a prebuilt workload; this guide describes that flow.
 :::
@@ -75,12 +73,13 @@ ahead of time and boot by digest instead:
 
 ```bash
 mvmctl bundle install ./my-app.mvmpkg
-mvmctl manifest ls                        # find the installed slot (keyed by bundle sha256)
 mvmctl machine run --manifest <bundle-sha256> -- <cmd>
 ```
 
 `bundle install` re-runs the same verification as `fetch`, then
-atomically extracts the archive into `~/.mvm/bundles/<bundle_sha256>/`.
+retains the compressed archive under `~/.mvm/bundles/`. A launch verifies
+that archive and rematerializes `~/.mvm/bundles/<bundle_sha256>/` without
+contacting the registry.
 
 The bundle trust model above — a local `key_id`-pinned Ed25519 trust
 store — is self-contained and carries no revocation list of its own.

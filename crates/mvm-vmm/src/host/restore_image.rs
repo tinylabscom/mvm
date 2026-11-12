@@ -322,6 +322,34 @@ pub fn inherit_descriptors(cmd: &mut Command, fds: Vec<RawFd>) {
 /// map whatever happens to occupy that slot, and the supervisor never holds a
 /// handle that could write the bytes it maps.
 pub fn adopt_inherited(fd: RawFd) -> Result<File, RestoreImageError> {
+    validate_private_descriptor(fd)?;
+    // SAFETY: the launcher transferred this validated descriptor exclusively;
+    // the returned File becomes its only owner.
+    let file = unsafe { File::from_raw_fd(fd) };
+    protect_inherited_file(&file)?;
+    Ok(file)
+}
+
+/// Validate and protect an inherited private file already held by an RAII owner.
+///
+/// # Errors
+/// Refuses invalid private custody or failure to restore close-on-exec protection.
+pub fn protect_inherited_file(file: &File) -> Result<(), RestoreImageError> {
+    let fd = file.as_raw_fd();
+    validate_private_descriptor(fd)?;
+    // Close-on-exec again, so nothing this process spawns inherits it in turn.
+    // SAFETY: validation just confirmed the borrowed descriptor is live.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
+        return Err(RestoreImageError::NotPrivate(fd));
+    }
+    Ok(())
+}
+
+/// Inspect private read-only custody without adopting or changing the descriptor.
+///
+/// # Errors
+/// Refuses reserved, closed, linked, nonregular, writable or append descriptors.
+pub fn validate_private_descriptor(fd: RawFd) -> Result<(), RestoreImageError> {
     if fd <= libc::STDERR_FILENO {
         return Err(RestoreImageError::NotPrivate(fd));
     }
@@ -338,18 +366,50 @@ pub fn adopt_inherited(fd: RawFd) -> Result<File, RestoreImageError> {
     }
     // SAFETY: `fcntl(F_GETFL)` on a descriptor fstat just confirmed is open.
     let status = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if status == -1 || (status & libc::O_ACCMODE) != libc::O_RDONLY {
+    if status == -1 || (status & libc::O_ACCMODE) != libc::O_RDONLY || status & libc::O_APPEND != 0
+    {
         return Err(RestoreImageError::NotPrivate(fd));
     }
-    // Close-on-exec again, so nothing this process spawns inherits it in turn.
-    // SAFETY: `fcntl` on a descriptor fstat just confirmed is open.
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
-        return Err(RestoreImageError::NotPrivate(fd));
+    Ok(())
+}
+
+/// Verify exact private file bytes without reopening a path or moving its cursor.
+///
+/// This checks custody and content, not publisher authenticity or launch authority.
+/// # Errors
+/// Refuses invalid custody, size or digest, including malformed SHA-256 text.
+pub fn verify_private_file(
+    file: &File,
+    expected_len: u64,
+    expected_sha256: &str,
+) -> Result<(), RestoreImageError> {
+    validate_private_descriptor(file.as_raw_fd())?;
+    let diagnostic = PathBuf::from(format!("private-fd-{}", file.as_raw_fd()));
+    let metadata = file
+        .metadata()
+        .map_err(|e| io_err("stat", &diagnostic, e))?;
+    if metadata.len() != expected_len
+        || expected_sha256.len() != 64
+        || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(io_err(
+            "validate private file",
+            &diagnostic,
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid size or SHA-256 expectation",
+            ),
+        ));
     }
-    // SAFETY: the descriptor is open (fstat succeeded) and was inherited from
-    // the launching process for this purpose alone; nothing else in this
-    // process opened it, so the returned `File` becomes its only owner.
-    Ok(unsafe { File::from_raw_fd(fd) })
+    let actual = sha256_of(file, &diagnostic)?;
+    if !actual.eq_ignore_ascii_case(expected_sha256) {
+        return Err(RestoreImageError::DigestMismatch {
+            path: diagnostic,
+            expected: expected_sha256.to_ascii_lowercase(),
+            actual,
+        });
+    }
+    Ok(())
 }
 
 fn io_err(step: &'static str, path: &Path, source: io::Error) -> RestoreImageError {

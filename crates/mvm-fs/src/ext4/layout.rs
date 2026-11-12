@@ -63,7 +63,15 @@ impl Layout {
             // Trim the final group to exactly the data it holds so the image is
             // no larger than the tree needs (verity hashes every byte).
             let full_groups = (groups - 1) as u64;
-            let last_data = data_blocks_total - full_groups * data_per_group; // >= 1
+            // When the group count was forced up by the inode requirement, the
+            // earlier groups may already hold every data block, so the
+            // subtraction saturates. The final group still keeps one data block
+            // so it is never metadata-only (mke2fs refuses to emit such a tail
+            // and the kernel's resize paths assume a non-empty one). The extra
+            // block is simply free space; capacity >= data_blocks_total holds.
+            let last_data = data_blocks_total
+                .saturating_sub(full_groups * data_per_group)
+                .max(1);
             let total = full_groups * BLOCKS_PER_GROUP as u64 + prefix as u64 + last_data;
             if total > u32::MAX as u64 {
                 break;
@@ -176,5 +184,117 @@ impl RegionAllocator {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn data_capacity(l: &Layout) -> u64 {
+        l.data_regions().iter().map(|&(_, n)| u64::from(n)).sum()
+    }
+
+    fn check(inode_high: u32, data: u64, free_blocks: u32, free_inodes: u32) {
+        let l = Layout::plan(inode_high, data, free_blocks, free_inodes).expect("plan");
+        let want = data + u64::from(free_blocks);
+        // Every group keeps its metadata prefix inside the image.
+        let last_start = u64::from(l.group_start(l.groups - 1));
+        assert!(u64::from(l.total_blocks) >= last_start + u64::from(l.prefix));
+        assert!(data_capacity(&l) >= want, "capacity < data");
+        assert!(l.inode_slots >= inode_high.saturating_add(free_inodes));
+        assert!(l.free_data_blocks(l.groups - 1) <= l.group_end(l.groups - 1));
+    }
+
+    #[test]
+    fn inode_bound_tree_with_little_data_does_not_underflow() {
+        // ~3M inodes force ~90 groups; 1000 data blocks fit in the first.
+        check(3_000_000, 1000, 0, 0);
+    }
+
+    #[test]
+    fn inode_bound_tail_group_keeps_one_data_block() {
+        let l = Layout::plan(3_000_000, 1000, 0, 0).unwrap();
+        assert_eq!(l.total_blocks, l.data_start(l.groups - 1) + 1);
+    }
+
+    #[test]
+    fn edge_where_earlier_groups_exactly_fill() {
+        // Find a group count, then put data exactly at / just past the capacity
+        // of the groups before the last one.
+        let probe = Layout::plan(3_000_000, 1, 0, 0).unwrap();
+        let dpg = u64::from(BLOCKS_PER_GROUP - probe.prefix);
+        let full = u64::from(probe.groups - 1) * dpg;
+        for data in [full - 1, full, full + 1] {
+            check(3_000_000, data, 0, 0);
+        }
+    }
+
+    #[test]
+    fn layout_holds_over_a_range_of_shapes() {
+        for inode_high in [12, 5_000, 70_000, 400_000, 1_500_000, 3_000_000] {
+            for data in [0u64, 1, 500, 40_000, 400_000, 2_000_000] {
+                for free_blocks in [0, 777] {
+                    check(inode_high, data, free_blocks, 100);
+                }
+            }
+        }
+    }
+
+    /// The bytes the image must hold at minimum: every tree data block plus
+    /// one metadata prefix per group.
+    fn floor_blocks(l: &Layout, data: u64) -> u64 {
+        data + u64::from(l.groups) * u64::from(l.prefix)
+    }
+
+    #[test]
+    fn the_image_holds_content_and_metadata_and_trims_the_tail() {
+        for (inode_high, data) in [(12, 0u64), (12, 1), (2_731, 71_800), (400_000, 40_000)] {
+            let l = Layout::plan(inode_high, data, 0, 0).unwrap();
+            let last_data = u64::from(l.total_blocks)
+                - u64::from(l.group_start(l.groups - 1))
+                - u64::from(l.prefix);
+            assert!(
+                u64::from(l.total_blocks) >= floor_blocks(&l, data),
+                "{inode_high}/{data}: {} < floor",
+                l.total_blocks
+            );
+            assert!(last_data >= 1);
+            assert!(l.inode_slots >= inode_high);
+            assert_eq!(l.used_inodes, inode_high - 1);
+        }
+    }
+
+    #[test]
+    fn a_tiny_tree_fits_one_group() {
+        let l = Layout::plan(12, 0, 0, 0).unwrap();
+        assert_eq!(l.groups, 1);
+        assert_eq!(l.total_blocks, l.prefix + 1);
+    }
+
+    #[test]
+    fn a_large_tree_fills_whole_groups_and_trims_the_tail() {
+        // 64 GiB of data at 4 KiB blocks.
+        let data = 16 * 1024 * 1024u64;
+        let l = Layout::plan(100_000, data, 0, 0).unwrap();
+        assert!(data_capacity(&l) >= data);
+        assert!(u64::from(l.total_blocks) >= floor_blocks(&l, data));
+        // Slack is under one group's data region: the tail is trimmed.
+        assert!(data_capacity(&l) - data < u64::from(BLOCKS_PER_GROUP));
+    }
+
+    #[test]
+    fn planning_is_a_pure_function_of_its_inputs() {
+        let a = Layout::plan(400_000, 123_456, 77, 99).unwrap();
+        let b = Layout::plan(400_000, 123_456, 77, 99).unwrap();
+        assert_eq!(
+            (a.groups, a.inodes_per_group, a.total_blocks, a.inode_slots),
+            (b.groups, b.inodes_per_group, b.total_blocks, b.inode_slots)
+        );
+    }
+
+    #[test]
+    fn oversized_request_errors_cleanly() {
+        assert!(Layout::plan(12, u64::MAX / 2, 0, 0).is_err());
     }
 }

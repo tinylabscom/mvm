@@ -78,26 +78,6 @@ pub fn require_serving_guest(
     })
 }
 
-/// Validate the actual completed activation ACK and original native lifetime.
-/// No second socket/name probe is opened: readiness belongs to the retained
-/// protected session, not a newly authenticated connection.
-pub(crate) fn require_serving_owned(
-    owner: &mut crate::entrypoint::boot::OwnedClientBoot,
-    timeout: std::time::Duration,
-) -> std::result::Result<(), DetachedReadinessError> {
-    let original_name = owner.resources().config.name.clone();
-    owner
-        .with_original(|_, runtime| runtime.validate_live())
-        .map_err(|error| match error.downcast::<DetachedReadinessError>() {
-            Ok(error) => error,
-            Err(source) => DetachedReadinessError::AbortUnresolved {
-                name: original_name,
-                timeout_secs: timeout.as_secs(),
-                source,
-            },
-        })
-}
-
 fn require_serving_guest_result(
     name: &str,
     timeout: std::time::Duration,
@@ -170,7 +150,9 @@ pub fn resolve_spec(
     };
     let action = mp::reconcile_machine_spec(existing.as_ref(), &desired, force)?;
     let spec = match action {
-        SpecReconcile::Reuse => existing.expect("reuse implies an existing spec"),
+        SpecReconcile::Reuse => existing.ok_or_else(|| {
+            anyhow::anyhow!("machine {name:?} was marked for reuse but has no existing spec")
+        })?,
         SpecReconcile::Create | SpecReconcile::Recreate { .. } => desired,
     };
     Ok((spec, action))
@@ -337,7 +319,6 @@ mod tests {
             resolved_digest: None,
             runtime_pack: false,
             registry_pack_image: None,
-            tools: Default::default(),
             net: false,
             allow_host: Vec::new(),
             peer: Vec::new(),

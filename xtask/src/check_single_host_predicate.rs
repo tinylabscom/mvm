@@ -23,8 +23,8 @@
 //! first `#[cfg(test)]` attribute onward. A gate that fired on fixtures would
 //! be turned off rather than obeyed.
 //!
-//! Two files carry a same-named field that is a different concept, and are
-//! exempted by name rather than silently skipped — see [`EXEMPT`]. Each is
+//! One file carries a same-named field that is a different concept, and is
+//! exempted by name rather than silently skipped — see [`EXEMPT`]. It is
 //! checked to still exist, so an exemption cannot go stale unnoticed.
 //!
 //! Known and accepted limit: a re-implementation that first rebinds the set to
@@ -58,20 +58,13 @@ const ROOTS: [&str; 3] = ["crates", "src", "tests"];
 /// binding. Exempt by name, with the reason, because a text gate matches a
 /// field name and cannot see a type.
 ///
-/// Both are checked to still exist: an exemption for a deleted file is an
+/// The exemption is checked to still exist: an exemption for a deleted file is an
 /// exemption nobody reconsidered.
-const EXEMPT: [(&str, &str); 2] = [
-    (
-        "crates/mvm-client/src/secret.rs",
-        "validates an allow-list's shape at `secret set` time (rejects an empty \
-         entry); decides nothing about a destination",
-    ),
-    (
-        "crates/mvm-hostd/src/supervisor/tools/web_fetch.rs",
-        "`WebFetchTool`'s own per-tenant fetch allow-list — a different policy \
-         surface over exact hosts, not a secret's destination binding",
-    ),
-];
+const EXEMPT: [(&str, &str); 1] = [(
+    "crates/mvm-client/src/secret.rs",
+    "validates an allow-list's shape at `secret set` time (rejects an empty \
+     entry); decides nothing about a destination",
+)];
 
 pub(crate) fn run(workspace: &Path) -> Result<()> {
     let owner = workspace.join(OWNER_FILE);
@@ -199,7 +192,7 @@ mod tests {
     fn an_exempt_file_may_traverse_its_own_set() {
         let tmp = fixture("exempt", OWNER_BODY, "");
         std::fs::write(
-            tmp.join(EXEMPT[1].0),
+            tmp.join(EXEMPT[0].0),
             "pub fn f(&self, h: &str) -> bool { self.allowed_hosts.contains(h) }\n",
         )
         .unwrap();

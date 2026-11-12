@@ -24,7 +24,7 @@ mvmctl machine run --flake . \
 ```
 
 For security-sensitive examples, start from no egress and add only required destinations.
-For grant review, SDK declarations, and agent-tool policy, see [Network egress policy](/guides/network-egress-policy/).
+For grant review and SDK declarations, see [Network egress policy](/guides/network-egress-policy/).
 
 ## Port forwarding
 

@@ -8,7 +8,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use ed25519_dalek::Signer;
@@ -16,8 +16,9 @@ use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT, dev_console_data_po
 use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_state_dir};
 use mvm_core::protocol::hvf_control::HvfInstance;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
-    ResourceControls, StandbyError, StandbyHandle, VmCapabilities, VmExitStatus, VmId, VmStatus,
+    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, HostDialRoute,
+    LayerCoverage, ResourceControls, StandbyError, StandbyHandle, VmCapabilities, VmExitStatus,
+    VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
 use mvm_vmm::host::hvf_control_transport as stop_wire;
@@ -78,15 +79,6 @@ impl HvfDriver {
         Self
     }
 
-    /// Mint transport custody only through this concrete fresh launch path.
-    /// Failed launches retain the original child if safe rollback is uncertain.
-    pub fn boot_cold_owned(
-        &self,
-        spec: &VmmSpec,
-    ) -> std::result::Result<ColdHvfOwner, ColdHvfBootFailure> {
-        self.boot_cold_owned_verified(spec, None, None)
-    }
-
     pub fn boot_cold_owned_verified(
         &self,
         spec: &VmmSpec,
@@ -102,6 +94,7 @@ impl HvfDriver {
                 kernel,
                 images,
                 writable: None,
+                data: None,
             },
         )
         .map(ColdHvfOwner::from_fresh)
@@ -307,6 +300,7 @@ fn relay_supervisor_config_with_handoff(
         .filter(|p| {
             p.direction == mvm_vmm::driver::spec::VsockDirection::HostDials
                 && (p.service == GuestService::Telemetry
+                    || p.service == GuestService::Mailbox
                     || matches!(p.service, GuestService::ConsoleData { port } if dev_console_data_ports().any(|cp| cp == port)))
         })
         .map(|p| HostDialSocket {
@@ -343,6 +337,7 @@ fn relay_supervisor_config_with_handoff(
         kernel_fd: None,
         boot_image_fds: None,
         writable_disk_fds: Vec::new(),
+        readonly_data_disk_fds: Vec::new(),
         cmdline,
         memory_mib: spec.memory_mib,
         vcpus: spec.vcpus,
@@ -548,6 +543,7 @@ fn boot_with_handoff(
             kernel,
             images: None,
             writable: None,
+            data: None,
         },
     )
     .map(|vm| Box::new(vm) as Box<dyn RunningVm>)
@@ -601,7 +597,10 @@ fn boot_retaining_child(
         .map_err(|e| anyhow!("{}", supervisor_unavailable_message(&e)))?;
     // Diagnostics are optional evidence, never a launch or readiness gate.
     let mut diagnostics = StartupDiagnostics::new().ok();
-    let mut command = if cfg.kernel_fd.is_some() || !cfg.writable_disk_fds.is_empty() {
+    let mut command = if cfg.kernel_fd.is_some()
+        || !cfg.writable_disk_fds.is_empty()
+        || !cfg.readonly_data_disk_fds.is_empty()
+    {
         let mut command = mvm_core::env_hygiene::helper_command(&supervisor);
         (policy.configure_environment)(&mut command);
         StartupDiagnostics::configure(&mut command, diagnostics.as_ref());
@@ -751,6 +750,17 @@ fn boot_retaining_child(
     })
 }
 
+/// How long a waiter blocks on the supervisor's exit event. The wait returns
+/// the moment the supervisor exits, so this is an upper bound in name only: a
+/// workload that legitimately runs for hours must not be cut off at the fixed
+/// cap the file-polling backends use. The supervisor enforces the plan's wall
+/// clock itself.
+const SUPERVISOR_WAIT_BOUND: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+
+fn supervisor_wait_deadline(now: Instant) -> Instant {
+    now + SUPERVISOR_WAIT_BOUND
+}
+
 impl VmmDriver for HvfDriver {
     fn name(&self) -> &str {
         "hvf"
@@ -800,6 +810,9 @@ impl VmmDriver for HvfDriver {
             // GPU remoting rides the same per-port vsock relay as every
             // other guest-dialed channel; the host endpoint binds the UDS.
             gpu: true,
+            // A host-dialed `Mailbox` port is bridged to a per-port socket,
+            // like telemetry.
+            guest_mailbox: true,
 
             // The hvf VMM is vsock-only by design: no guest NIC, and egress rides
             // the host vsock proxy (the per-VM gating endpoint), not a guest NIC.
@@ -885,23 +898,9 @@ impl VmmDriver for HvfDriver {
     fn boot_custodied(
         &self,
         spec: &VmmSpec,
-        kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
-        disks: mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
+        files: mvm_vmm::driver::prepared_disks::PreparedBootFiles<'_>,
     ) -> Result<Box<dyn RunningVm>> {
-        disks.validate_spec(spec)?;
-        boot_with_custody(
-            spec,
-            None,
-            None,
-            SupervisorLaunchPolicy::legacy(),
-            BootInputFiles {
-                kernel,
-                images: None,
-                writable: Some(&disks),
-            },
-        )
-        .map(|vm| Box::new(vm) as Box<dyn RunningVm>)
-        .map_err(anyhow::Error::new)
+        cold_channel::boot_prepared(spec, files)
     }
 
     fn spawn_standby_parent(
@@ -1026,6 +1025,12 @@ impl VmmDriver for HvfDriver {
         // the agent bridge is a fixed vsock port wired by the runner, not a
         // channel the driver answers on demand.
         bail!("hvf does not provide guest channel info")
+    }
+
+    fn host_dial_route(&self, state_dir: &Path, port: u32) -> Option<HostDialRoute> {
+        Some(HostDialRoute::PortSocket(vm_hvf_vsock_port_socket_at(
+            state_dir, port,
+        )))
     }
 
     fn workload_base_bootargs(&self, has_disk: bool) -> String {
@@ -1402,7 +1407,7 @@ impl RunningVm for HvfRunningVm {
     }
 
     fn wait(&self) -> Result<VmExitStatus> {
-        let deadline = Instant::now() + mvm_vmm::host::workload_wait::WORKLOAD_WAIT_TIMEOUT;
+        let deadline = supervisor_wait_deadline(Instant::now());
         match &self.owned {
             Some(owned) => owned.wait(deadline)?,
             None => ConnectedInstance::connect_instance(self.instance.clone())?.wait(deadline)?,
@@ -1497,6 +1502,15 @@ impl RunningVm for HvfRunningVm {
 
 #[cfg(test)]
 mod tests {
+    /// A workload that runs past the 300 s cap the file-polling backends use
+    /// must still be waited for; the wait ends when the supervisor exits.
+    #[test]
+    fn the_supervisor_wait_outlasts_the_file_polling_cap() {
+        let now = Instant::now();
+        let waited = supervisor_wait_deadline(now) - now;
+        assert!(waited > mvm_vmm::host::workload_wait::WORKLOAD_WAIT_TIMEOUT * 100);
+    }
+
     #[test]
     fn readiness_deadline_is_the_pid_file_timeout_after_launch() {
         let t = Instant::now();
@@ -1553,6 +1567,7 @@ mod tests {
         assert!(capabilities.standby_pool);
         assert!(capabilities.vsock);
         assert!(capabilities.gpu);
+        assert!(capabilities.guest_mailbox);
         assert!(capabilities.no_routable_guest_nic);
         assert!(capabilities.host_vsock_proxy);
         assert!(capabilities.free_page_reporting);

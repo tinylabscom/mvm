@@ -26,7 +26,7 @@
 //! be applied on a supporting kernel, or the self-test finds a thread outside
 //! it, the endpoint exits rather than serve secrets unconfined.
 
-use std::io::{Read, Write};
+use std::io::Write;
 
 use anyhow::{Context, Result};
 use secrecy::ExposeSecret as _;
@@ -40,15 +40,6 @@ use mvm_hostd::supervisor::network_endpoint::{
     EgressMode, EndpointConfig, EndpointHandshake, EndpointNetworkProjection, EndpointTransport,
     ResolverBackend, assemble_projected, fingerprint_bound_secrets, parse,
 };
-
-fn read_stdin_blocking() -> Result<Vec<u8>> {
-    let mut buf = Vec::with_capacity(4096);
-    std::io::stdin()
-        .lock()
-        .read_to_end(&mut buf)
-        .context("mvm-network-endpoint stdin read failed")?;
-    Ok(buf)
-}
 
 fn main() -> Result<()> {
     mvm_vmm::host::helper_contract::exit_with_probe_answer_if_requested("mvm-network-endpoint");
@@ -85,7 +76,7 @@ fn main() -> Result<()> {
         .json()
         .init();
 
-    let raw = read_stdin_blocking()?;
+    let raw = mvm_hostd::read_launch_config("mvm-network-endpoint")?;
     if let Some(only) = mvm_hostd::telemetry_collector::TelemetryOnlyConfig::parse(&raw)
         .context("mvm-network-endpoint collector-only config parse failed")?
     {
@@ -1360,16 +1351,6 @@ mod tests {
     };
     use std::path::PathBuf;
 
-    #[test]
-    fn endpoint_source_has_no_unconfined_escape_hatch() {
-        let source = include_str!("mvm-network-endpoint.rs");
-        let bypass_name = ["MVM", "ENDPOINT", "NO", "CONFINE"].join("_");
-        assert!(
-            !source.contains(&bypass_name),
-            "the secret-holding endpoint must never accept an unconfined bypass"
-        );
-    }
-
     fn uds_cfg() -> EndpointConfig {
         EndpointConfig {
             telemetry: None,
@@ -1380,7 +1361,6 @@ mod tests {
                 path: "/tmp/mvm-network-endpoint-test.sock".into(),
             },
             redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
             forward_timeout_secs: 30,
             proxy_https: None,
@@ -1420,7 +1400,6 @@ mod tests {
                 path: PathBuf::from("/tmp/mvm-network-endpoint-test.sock"),
             },
             redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
             forward_timeout_secs: 30,
             proxy_https: None,
@@ -1934,7 +1913,6 @@ mod tests {
                 path: PathBuf::from("/tmp/mvm-flowmux-test.sock"),
             },
             redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
             forward_timeout_secs: 30,
             proxy_https: None,

@@ -1,0 +1,502 @@
+//! The guest mailbox as its own host process.
+//!
+//! A granted launch serves the guest's mailbox port from a separate process,
+//! not from the supervisor and not from the confined egress endpoint. That
+//! keeps mailbox material out of the egress endpoint, and it keeps the host
+//! signing seed out of this process: the launcher derives the keys for this one
+//! mailbox ([`derive_launch_keys`]) and hands over only those, as JSON on
+//! stdin. Nothing secret travels in argv or the environment.
+//!
+//! The process lives as long as its launcher or its VM does, the rule the
+//! per-VM egress endpoint's keeper applies, and it also stops when the VM's
+//! state directory is gone. The stop path reaps it by its pid file with the
+//! VM's other helpers.
+//!
+//! Whether a backend can serve one is the backend's own declaration
+//! (`VmCapabilities::guest_mailbox`). A granted plan puts a host-dialed
+//! `Mailbox` port in the workload's standing vsock channels; a backend that
+//! bridges it to a per-port socket, or reaches the guest through its vsock mux,
+//! declares the capability. A grant on one that does not refuses the launch
+//! rather than boot a guest that asserts a mailbox nobody serves.
+
+use std::io::{Error, ErrorKind, Result, Write as _};
+use std::os::unix::process::CommandExt as _;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+use mvm_contract::protocol::mailbox::{MAILBOX_PORT, MailboxGrant};
+use mvm_core::plan::ExecutionPlan;
+use mvm_core::vm_backend::{HostDialRoute, VmId, VmStartConfig};
+use mvm_runtime::backend::AnyBackend;
+use mvm_vmm::host::aux_bin::AuxBin;
+
+use crate::mailbox_launch::{
+    DerivedMailboxKeys, LAUNCH_LIMITS, ServePaths, derive_launch_keys, mint_epoch_secret,
+    serve_derived, shred_epoch_secret,
+};
+use crate::vm_lifetime::{endpoint_needed, launcher_is_alive};
+
+/// The helper binary this module spawns.
+pub const MAILBOX_BIN: &str = "mvm-mailbox";
+/// Path-override variable for the helper binary.
+pub const MAILBOX_BIN_ENV: &str = "MVM_MAILBOX_PATH";
+/// Where the process's pid is recorded, beside the VM.
+pub use mvm_vmm::host::vm_helpers::MAILBOX_PID_FILE;
+const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// What the process reads on stdin. `deny_unknown_fields`, so a field a newer
+/// launcher adds fails closed here.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxProcessConfig {
+    pub grant: MailboxGrant,
+    pub keys: DerivedMailboxKeys,
+    pub socket: PathBuf,
+    /// How the backend says the guest's mailbox port is dialed.
+    pub route: HostDialRoute,
+    /// The VM whose lifetime bounds this process.
+    pub vm_state_dir: PathBuf,
+}
+
+/// Parse the stdin config.
+pub fn parse(raw: &[u8]) -> serde_json::Result<MailboxProcessConfig> {
+    serde_json::from_slice(raw)
+}
+
+/// Serve until neither the launcher nor the VM is left; the exit code.
+pub fn serve(config: MailboxProcessConfig) -> i32 {
+    // SAFETY: `getppid` is async-signal-safe and infallible.
+    let launcher = unsafe { libc::getppid() };
+    let MailboxProcessConfig {
+        grant,
+        keys,
+        socket,
+        route,
+        vm_state_dir,
+    } = config;
+    let _serving = serve_derived(grant, keys, ServePaths { socket, route }, LAUNCH_LIMITS);
+    while vm_state_dir.exists()
+        && endpoint_needed(launcher_is_alive(launcher), vm_is_alive(&vm_state_dir))
+    {
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    0
+}
+
+fn vm_is_alive(state_dir: &Path) -> bool {
+    mvm_vmm::host::process_liveness::state_dir_has_live_process(state_dir)
+}
+
+/// The process config for `grant` on the VM at `state_dir`, with keys derived
+/// from the host key directory `keys_dir` and a fresh per-epoch secret minted
+/// into `state_dir`. A failure after the mint shreds the secret again.
+pub fn build_config(
+    keys_dir: &Path,
+    grant: &MailboxGrant,
+    state_dir: &Path,
+    route: HostDialRoute,
+) -> Result<MailboxProcessConfig> {
+    let secret = mint_epoch_secret(state_dir)?;
+    let keys = derive_launch_keys(keys_dir, grant, &secret).inspect_err(|_| {
+        let _ = shred_epoch_secret(state_dir);
+    })?;
+    Ok(MailboxProcessConfig {
+        grant: *grant,
+        keys,
+        socket: mvm_core::config::vm_mailbox_socket_at(state_dir),
+        route,
+        vm_state_dir: state_dir.to_path_buf(),
+    })
+}
+
+/// The command that starts the process: no arguments, an empty environment,
+/// its own process group, config over a pipe. The process parses guest bytes
+/// and holds derived keys, and reads no variable, so it is given none.
+fn command(bin: &Path) -> Command {
+    let mut cmd = mvm_core::env_hygiene::helper_command(bin);
+    cmd.env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+    cmd
+}
+
+/// Refuse a launch whose plan grants a mailbox on a backend that cannot reach
+/// the guest's mailbox port. The guest would be told to serve a port nobody
+/// dials, so the launch fails instead.
+fn require_wired(plan: &ExecutionPlan, backend: &AnyBackend) -> Result<()> {
+    if plan.mailbox.is_some() && !backend.capabilities().guest_mailbox {
+        return Err(Error::new(
+            ErrorKind::Unsupported,
+            format!(
+                "the plan grants a mailbox, which the {:?} backend cannot serve",
+                backend.kind()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The plan `config` boots under, when it grants a mailbox. Read the way the
+/// guest's `mvm.mailbox=1` cmdline token reads it, so the two cannot disagree.
+fn granted_plan(config: &VmStartConfig) -> Option<ExecutionPlan> {
+    mvm_core::plan::plan_from_admitted_json(config.plan_json.as_deref()?)
+        .ok()
+        .filter(|plan| plan.mailbox.is_some())
+}
+
+/// Refuse, before the VM boots, a config whose guest would be told to serve a
+/// mailbox this backend cannot.
+pub fn require_servable(config: &VmStartConfig, backend: &AnyBackend) -> anyhow::Result<()> {
+    match granted_plan(config) {
+        Some(plan) => Ok(require_wired(&plan, backend)?),
+        None => Ok(()),
+    }
+}
+
+/// Serve the mailbox `config` grants, now that its VM `id` is up on `backend`.
+/// The cmdline token and this process come from the same plan, so a guest
+/// asserts a mailbox exactly when one is served. A grant that cannot be served
+/// stops the VM and fails the launch.
+pub fn serve_started(
+    backend: &AnyBackend,
+    id: &VmId,
+    config: &VmStartConfig,
+) -> anyhow::Result<()> {
+    serve_started_with(backend, id, config, spawn_for_launch)
+}
+
+fn serve_started_with(
+    backend: &AnyBackend,
+    id: &VmId,
+    config: &VmStartConfig,
+    spawn: impl FnOnce(&ExecutionPlan, &AnyBackend, &str) -> Result<Option<u32>>,
+) -> anyhow::Result<()> {
+    let Some(plan) = granted_plan(config) else {
+        return Ok(());
+    };
+    if let Err(error) = spawn(&plan, backend, &id.0) {
+        if let Err(stop) = backend.stop(id) {
+            tracing::warn!(vm = %id.0, error = %stop, "stopping a VM whose mailbox could not be served failed");
+        }
+        return Err(
+            anyhow::Error::new(error).context("the granted guest mailbox could not be served")
+        );
+    }
+    Ok(())
+}
+
+/// Start the mailbox process for a launched VM when `plan` grants a mailbox
+/// and `backend` declares the capability; its pid, or `None` when nothing was started.
+pub fn spawn_for_launch(
+    plan: &ExecutionPlan,
+    backend: &AnyBackend,
+    vm_name: &str,
+) -> Result<Option<u32>> {
+    let Some(grant) = &plan.mailbox else {
+        return Ok(None);
+    };
+    require_wired(plan, backend)?;
+    let state_dir = mvm_core::config::vm_state_dir(vm_name);
+    let route = backend
+        .host_dial_route(&state_dir, MAILBOX_PORT)
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::Unsupported,
+                format!(
+                    "the {:?} backend names no route to the guest's mailbox port",
+                    backend.kind()
+                ),
+            )
+        })?;
+    let config = build_config(&mvm_core::config::mvm_keys_dir(), grant, &state_dir, route)?;
+    let started = spawn_serving(&config, &state_dir);
+    if started.is_err() {
+        let _ = shred_epoch_secret(&state_dir);
+    }
+    started
+}
+
+fn spawn_serving(config: &MailboxProcessConfig, state_dir: &Path) -> Result<Option<u32>> {
+    let bin = mvm_vmm::host::broker_services_spawn::resolve_subprocess_bin_to_spawn(&AuxBin::new(
+        MAILBOX_BIN,
+        MAILBOX_BIN_ENV,
+        "mvm-hostd",
+    ))
+    .map_err(|e| Error::new(ErrorKind::NotFound, format!("{e:#}")))?;
+    let mut child = command(&bin).spawn()?;
+    let written = child
+        .stdin
+        .take()
+        .ok_or_else(|| Error::other("mvm-mailbox stdin was not piped"))
+        .and_then(|mut stdin| stdin.write_all(&serde_json::to_vec(config)?));
+    if let Err(error) = written {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    std::fs::write(state_dir.join(MAILBOX_PID_FILE), child.id().to_string())?;
+    Ok(Some(child.id()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxId};
+
+    fn test_route() -> HostDialRoute {
+        HostDialRoute::PortSocket(PathBuf::from("/p"))
+    }
+
+    #[test]
+    fn the_config_round_trips_each_route() {
+        let dir = keys_dir();
+        let state = tempfile::tempdir().unwrap();
+        for route in [test_route(), HostDialRoute::Mux(PathBuf::from("/m"))] {
+            let config =
+                build_config(dir.path(), &grant(dir.path()), state.path(), route.clone()).unwrap();
+            let back = parse(&serde_json::to_vec(&config).unwrap()).unwrap();
+            assert_eq!(back.route, route);
+        }
+    }
+
+    #[test]
+    fn firecracker_and_hvf_name_the_routes_the_process_used_to_hardcode() {
+        let state = Path::new("/vm");
+        assert!(matches!(
+            backend_named("firecracker").host_dial_route(state, MAILBOX_PORT),
+            Some(HostDialRoute::Mux(_))
+        ));
+        assert_eq!(
+            backend_named("hvf").host_dial_route(state, MAILBOX_PORT),
+            Some(HostDialRoute::PortSocket(
+                mvm_core::config::vm_hvf_vsock_port_socket_at(state, MAILBOX_PORT)
+            ))
+        );
+    }
+
+    fn test_secret() -> mvm_core::crypto::aead::Key {
+        mvm_core::crypto::aead::Key::from_bytes([5; 32])
+    }
+
+    fn keys_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
+        dir
+    }
+
+    fn grant(dir: &Path) -> MailboxGrant {
+        let mailbox = MailboxId::from_bytes([4; 32]);
+        MailboxGrant {
+            mailbox,
+            authority_key: crate::mailbox_launch::authority_key_for(
+                dir,
+                &mailbox,
+                ExecutionEpoch::new(1).unwrap(),
+            )
+            .unwrap()
+            .to_bytes(),
+            epoch: ExecutionEpoch::new(1).unwrap(),
+        }
+    }
+
+    #[test]
+    fn an_ungranted_plan_spawns_nothing() {
+        let plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        assert!(plan.mailbox.is_none());
+        let started = spawn_for_launch(&plan, &backend_named("firecracker"), "no-such-vm").unwrap();
+        assert_eq!(started, None);
+    }
+
+    fn backend_named(name: &str) -> AnyBackend {
+        AnyBackend::from_hypervisor(name)
+    }
+
+    #[test]
+    fn a_granted_plan_on_an_unwired_backend_is_refused() {
+        let dir = keys_dir();
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.mailbox = Some(grant(dir.path()));
+        let error = spawn_for_launch(&plan, &backend_named("wasm"), "no-such-vm").unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+    }
+
+    #[test]
+    fn building_the_config_mints_the_secret_in_the_state_dir_and_never_puts_it_in_the_config() {
+        let dir = keys_dir();
+        let state = tempfile::tempdir().unwrap();
+        let path = mvm_core::config::vm_mailbox_secret_at(state.path());
+        let config =
+            build_config(dir.path(), &grant(dir.path()), state.path(), test_route()).unwrap();
+        let secret = std::fs::read(&path).unwrap();
+        assert_eq!(secret.len(), 32);
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(!json.contains(&hex::encode(&secret)));
+        assert!(
+            !json.contains(
+                serde_json::to_string(&secret)
+                    .unwrap()
+                    .trim_matches(['[', ']'])
+            )
+        );
+        // A launch that fails after the mint leaves no secret behind.
+        let mut foreign = grant(dir.path());
+        foreign.authority_key = [1; 32];
+        assert!(build_config(dir.path(), &foreign, state.path(), test_route()).is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn the_config_refuses_unknown_fields() {
+        let dir = keys_dir();
+        let state = tempfile::tempdir().unwrap();
+        let config =
+            build_config(dir.path(), &grant(dir.path()), state.path(), test_route()).unwrap();
+        let mut value = serde_json::to_value(&config).unwrap();
+        assert!(parse(value.to_string().as_bytes()).is_ok());
+        value["seed"] = serde_json::json!("00");
+        assert!(parse(value.to_string().as_bytes()).is_err());
+    }
+
+    #[test]
+    fn the_config_carries_no_seed_and_the_command_carries_no_argv_or_env_secret() {
+        let dir = keys_dir();
+        let seed = std::fs::read(dir.path().join("host-signer.ed25519")).unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let config =
+            build_config(dir.path(), &grant(dir.path()), state.path(), test_route()).unwrap();
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(!json.contains(&hex::encode(&seed)));
+        assert!(
+            !json.contains(
+                serde_json::to_string(&seed)
+                    .unwrap()
+                    .trim_matches(['[', ']'])
+            ),
+            "seed bytes in the config"
+        );
+        let cmd = command(Path::new("/bin/true"));
+        assert_eq!(cmd.get_args().count(), 0);
+        // Cleared, not filtered: whatever the parent holds is not inherited,
+        // and the builder sets nothing back.
+        assert_eq!(cmd.get_envs().count(), 0, "no variable is passed");
+        let out = command(Path::new("/usr/bin/env"))
+            .stdout(Stdio::piped())
+            .output()
+            .unwrap();
+        assert!(out.stdout.is_empty(), "the child's environ is empty");
+        for (_, value) in cmd.get_envs() {
+            let value = value
+                .map(|v| v.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            assert!(!value.contains(&hex::encode(&seed)));
+        }
+    }
+
+    fn config_for(grant: Option<MailboxGrant>) -> VmStartConfig {
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.mailbox = grant;
+        VmStartConfig {
+            name: "vm-under-test".into(),
+            plan_json: Some(serde_json::to_string(&plan).unwrap()),
+            ..Default::default()
+        }
+    }
+
+    type Spawns = std::cell::RefCell<Vec<String>>;
+
+    fn serve_with(
+        config: &VmStartConfig,
+        spawns: &Spawns,
+        outcome: Result<Option<u32>>,
+    ) -> anyhow::Result<()> {
+        let backend = AnyBackend::from_hypervisor("firecracker");
+        serve_started_with(
+            &backend,
+            &VmId("vm-under-test".into()),
+            config,
+            |_, _, name| {
+                spawns.borrow_mut().push(name.to_string());
+                outcome
+            },
+        )
+    }
+
+    /// The guest's token and the host process come from one plan: a granted
+    /// config has both, an ungranted one neither.
+    #[test]
+    fn the_token_and_the_host_process_come_together() {
+        let dir = keys_dir();
+        let token = |c: &VmStartConfig| mvm_vmm::host::egress_bridge::mailbox_cmdline_token(c);
+        let spawns = Spawns::default();
+
+        let granted = config_for(Some(grant(dir.path())));
+        assert!(token(&granted).is_some());
+        serve_with(&granted, &spawns, Ok(Some(7))).unwrap();
+        assert_eq!(*spawns.borrow(), ["vm-under-test"]);
+
+        let ungranted = config_for(None);
+        let none = Spawns::default();
+        assert!(token(&ungranted).is_none());
+        serve_with(&ungranted, &none, Ok(Some(7))).unwrap();
+        assert!(none.borrow().is_empty());
+        assert!(VmStartConfig::default().plan_json.is_none());
+        serve_with(&VmStartConfig::default(), &none, Ok(None)).unwrap();
+        assert!(none.borrow().is_empty());
+    }
+
+    /// An idle process with nothing dialing it still exits once its VM's state
+    /// directory is gone, however long the dial loop has been running.
+    #[test]
+    fn the_process_exits_when_the_state_dir_disappears() {
+        let dir = keys_dir();
+        let grant = grant(dir.path());
+        let state = tempfile::tempdir().unwrap();
+        let state_path = state.path().to_path_buf();
+        let config = MailboxProcessConfig {
+            keys: derive_launch_keys(dir.path(), &grant, &test_secret()).unwrap(),
+            grant,
+            socket: dir.path().join("mailbox.sock"),
+            route: HostDialRoute::PortSocket(dir.path().join("absent-port")),
+            vm_state_dir: state_path,
+        };
+        let serving = std::thread::spawn(move || serve(config));
+        drop(state);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !serving.is_finished() {
+            assert!(std::time::Instant::now() < deadline, "process did not exit");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(serving.join().unwrap(), 0);
+    }
+
+    #[test]
+    fn a_grant_that_cannot_be_served_fails_the_launch() {
+        let dir = keys_dir();
+        let granted = config_for(Some(grant(dir.path())));
+        let error = serve_with(
+            &granted,
+            &Spawns::default(),
+            Err(Error::other("no mvm-mailbox")),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("no mvm-mailbox"), "{error:#}");
+    }
+
+    #[test]
+    fn a_grant_on_an_unwired_backend_is_refused_before_boot() {
+        let dir = keys_dir();
+        let granted = config_for(Some(grant(dir.path())));
+        for name in ["firecracker", "hvf", "apple-container", "libkrun", "qemu"] {
+            let backend = backend_named(name);
+            assert!(backend.capabilities().guest_mailbox, "{name}");
+            assert!(require_servable(&granted, &backend).is_ok(), "{name}");
+        }
+        let backend = backend_named("wasm");
+        assert!(!backend.capabilities().guest_mailbox);
+        assert!(require_servable(&granted, &backend).is_err());
+        assert!(require_servable(&config_for(None), &backend).is_ok());
+    }
+}

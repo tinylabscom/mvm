@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use mvm_client::audit::chain::session::{
     EventFilter, LedgerCheck, SessionSummary, SessionVerification, TimeRange, Verdict,
-    list_sessions, resolve_session, session_events, verify_session_in_lines,
+    list_sessions, resolve_session, session_events, verify_session_in_lines, workload_events,
 };
 
 use super::{default_audit_dir, host_signer, print_chain_line, ui};
@@ -41,6 +41,20 @@ pub(in crate::commands) struct SessionsArgs {
     #[arg(long, value_parser = parse_time_bound)]
     pub until: Option<DateTime<Utc>>,
     /// Emit the sessions and the ledger check as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// `trust audit timeline <WORKLOAD>`.
+#[derive(clap::Args, Debug, Clone)]
+pub(in crate::commands) struct TimelineArgs {
+    /// Workload (machine) name. Shows its launch, refusal, quarantine and
+    /// replacement events across every session, in chain order.
+    pub workload: String,
+    /// Tenant whose chain to read. Defaults to `"local"`.
+    #[arg(long, default_value = "local")]
+    pub tenant: String,
+    /// Emit the events as JSON.
     #[arg(long)]
     pub json: bool,
 }
@@ -244,6 +258,33 @@ pub(in crate::commands) fn audit_show(query: &ShowArgs) -> Result<()> {
     if events.is_empty() {
         ui::info(&format!(
             "No entries for session {plan_id} in tenant '{tenant}' match those filters."
+        ));
+    }
+    for event in &events {
+        print_chain_line(&lines[event.seq as usize]);
+    }
+    Ok(())
+}
+
+/// `trust audit timeline`: one workload's evidence across replacements, from a
+/// chain that verifies.
+pub(in crate::commands) fn audit_timeline(query: &TimelineArgs) -> Result<()> {
+    let tenant = query.tenant.as_str();
+    let Some(lines) = verified_lines(tenant)? else {
+        if query.json {
+            return crate::json_out::emit_json(&Vec::<()>::new());
+        }
+        ui::info(&format!("No audit chain for tenant '{tenant}'."));
+        return Ok(());
+    };
+    let events = workload_events(&lines, &query.workload, &EventFilter::default())?;
+    if query.json {
+        return crate::json_out::emit_json(&events);
+    }
+    if events.is_empty() {
+        ui::info(&format!(
+            "No entries for workload '{}' in tenant '{tenant}'.",
+            query.workload
         ));
     }
     for event in &events {

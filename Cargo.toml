@@ -119,7 +119,7 @@ exclude = [
 resolver = "3"
 
 [workspace.package]
-version = "0.27.0-rc.1"
+version = "0.28.0-rc.1"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -130,6 +130,9 @@ authors = ["mvm contributors"]
 # Member crates inherit this policy via `lints.workspace = true`.
 [workspace.lints.clippy]
 too_many_arguments = "deny"
+# A guard held across an `.await` deadlocks the executor thread that polls it.
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
 
 [workspace.dependencies]
 # Async runtime.
@@ -300,29 +303,29 @@ tree-sitter-typescript = "0.23.2"
 # here because member crates can't override that on a workspace-inherited
 # dependency unless the workspace entry already carries it. The root binary
 # opts back into user-facing defaults through its own `[features]` block.
-mvm-contract = { path = "crates/mvm-contract", version = "0.27.0-rc.1", default-features = false, features = ["protocol"] }
-mvm-core = { path = "crates/mvm-core", version = "0.27.0-rc.1" }
-mvm-bundler = { path = "crates/mvm-bundler", version = "0.27.0-rc.1" }
-mvm-compiler = { path = "crates/mvm-compiler", version = "0.27.0-rc.1" }
-mvm-client ={ path = "crates/mvm-client", version = "0.27.0-rc.1" }
-mvm-agentd = { path = "crates/mvm-agentd", version = "0.27.0-rc.1" }
-mvm-setpriv = { path = "crates/mvm-setpriv", version = "0.27.0-rc.1" }
-mvm-builder-guest = { path = "crates/mvm-builder-guest", version = "0.27.0-rc.1" }
-mvm-host-services = { path = "crates/mvm-host-services", version = "0.27.0-rc.1" }
-mvm-build = { path = "crates/mvm-build", version = "0.27.0-rc.1", default-features = false }
-mvm-runtime = { path = "crates/mvm-runtime", version = "0.27.0-rc.1", default-features = false }
-mvm-vmm = { path = "crates/mvm-vmm", version = "0.27.0-rc.1" }
-mvm-backends = { path = "crates/mvm-backends", version = "0.27.0-rc.1" }
-mvm-fs = { path = "crates/mvm-fs", version = "0.27.0-rc.1" }
-mvm-http = { path = "crates/mvm-http", version = "0.27.0-rc.1" }
-mvm-net = { path = "crates/mvm-net", version = "0.27.0-rc.1" }
-mvm-cli = { path = "crates/mvm-cli", version = "0.27.0-rc.1", default-features = false }
-mvm-hostd = { path = "crates/mvm-hostd", version = "0.27.0-rc.1", default-features = false }
+mvm-contract = { path = "crates/mvm-contract", version = "0.28.0-rc.1", default-features = false, features = ["protocol"] }
+mvm-core = { path = "crates/mvm-core", version = "0.28.0-rc.1" }
+mvm-bundler = { path = "crates/mvm-bundler", version = "0.28.0-rc.1" }
+mvm-compiler = { path = "crates/mvm-compiler", version = "0.28.0-rc.1" }
+mvm-client ={ path = "crates/mvm-client", version = "0.28.0-rc.1" }
+mvm-agentd = { path = "crates/mvm-agentd", version = "0.28.0-rc.1" }
+mvm-setpriv = { path = "crates/mvm-setpriv", version = "0.28.0-rc.1" }
+mvm-builder-guest = { path = "crates/mvm-builder-guest", version = "0.28.0-rc.1" }
+mvm-host-services = { path = "crates/mvm-host-services", version = "0.28.0-rc.1" }
+mvm-build = { path = "crates/mvm-build", version = "0.28.0-rc.1", default-features = false }
+mvm-runtime = { path = "crates/mvm-runtime", version = "0.28.0-rc.1", default-features = false }
+mvm-vmm = { path = "crates/mvm-vmm", version = "0.28.0-rc.1" }
+mvm-backends = { path = "crates/mvm-backends", version = "0.28.0-rc.1" }
+mvm-fs = { path = "crates/mvm-fs", version = "0.28.0-rc.1" }
+mvm-http = { path = "crates/mvm-http", version = "0.28.0-rc.1" }
+mvm-net = { path = "crates/mvm-net", version = "0.28.0-rc.1" }
+mvm-cli = { path = "crates/mvm-cli", version = "0.28.0-rc.1", default-features = false }
+mvm-hostd = { path = "crates/mvm-hostd", version = "0.28.0-rc.1", default-features = false }
 
-mvm-sdk = { path = "crates/mvm-sdk", version = "0.27.0-rc.1" }
-mvm-capture = { path = "crates/mvm-capture", version = "0.27.0-rc.1" }
+mvm-sdk = { path = "crates/mvm-sdk", version = "0.28.0-rc.1" }
+mvm-capture = { path = "crates/mvm-capture", version = "0.28.0-rc.1" }
 # Keep bindgen/libclang opt-in; real FFI requires libkrun on the host.
-libkrun-sys = { path = "crates/deps/libkrun-sys", version = "0.27.0-rc.1" }
+libkrun-sys = { path = "crates/deps/libkrun-sys", version = "0.28.0-rc.1" }
 
 # Dev dependencies
 assert_cmd = "2"
@@ -378,6 +381,9 @@ assets = [
     ["target/distro-pkg/doc/README.md", "usr/share/doc/mvmctl/", "644"],
     ["target/distro-pkg/man/*", "usr/share/man/man1/", "644"],
     ["target/distro-pkg/guest-runtime/*", "usr/lib/mvmctl/guest-runtime/", "644"],
+    ["target/distro-pkg/firecracker/firecracker", "usr/lib/mvmctl/firecracker/", "755"],
+    ["target/distro-pkg/firecracker/LICENSE", "usr/lib/mvmctl/firecracker/", "644"],
+    ["target/distro-pkg/firecracker/NOTICE", "usr/lib/mvmctl/firecracker/", "644"],
     ["target/distro-pkg/package-managed/deb", "usr/share/mvmctl/package-managed", "644"],
 ]
 
@@ -390,6 +396,9 @@ assets = [
     { source = "target/distro-pkg/doc/README.md", dest = "/usr/share/doc/mvmctl/README.md", mode = "644", doc = true },
     { source = "target/distro-pkg/man/*", dest = "/usr/share/man/man1/", mode = "644", doc = true },
     { source = "target/distro-pkg/guest-runtime/*", dest = "/usr/lib/mvmctl/guest-runtime/", mode = "644" },
+    { source = "target/distro-pkg/firecracker/firecracker", dest = "/usr/lib/mvmctl/firecracker/firecracker", mode = "755" },
+    { source = "target/distro-pkg/firecracker/LICENSE", dest = "/usr/lib/mvmctl/firecracker/LICENSE", mode = "644" },
+    { source = "target/distro-pkg/firecracker/NOTICE", dest = "/usr/lib/mvmctl/firecracker/NOTICE", mode = "644" },
     { source = "target/distro-pkg/package-managed/rpm", dest = "/usr/share/mvmctl/package-managed", mode = "644" },
 ]
 
@@ -429,6 +438,7 @@ tar.workspace = true
 # `test-support` for the in-process registry `tests/audit_emissions_live.rs`
 # pushes bundles to.
 mvm-fs = { workspace = true, features = ["test-support"] }
+mvm-backends.workspace = true
 mvm-vmm.workspace = true
 # Plan 60 Phase 4 — `tests/audit_total_coverage.rs` walks the
 # `clap::Command` tree returned by `mvm_cli::commands::cli_command()`

@@ -1,6 +1,7 @@
 # mvm — Product Requirements
 
-Status: draft for owner review, 2026-11-02, against v0.26.0.
+Status: draft for owner review. The shipped-status snapshot is from
+2026-11-02 (v0.26.0); the direction discussed on 2026-11-11 is prospective.
 Replaces `specs/01-project.md`.
 
 Every capability below carries a status. **Shipped** means a test or CI gate
@@ -14,19 +15,30 @@ status, scope and dependencies (for example #3553 Windows, #4414 rootless
 Firecracker launch, #4839 cleanup). Where this file and the ledger or an issue
 disagree, they win and this file is stale.
 
+The November 11 discussion is recorded below. For implementation rules,
+use `AGENTS.md` and `.agents/skills/secure-execution-review/SKILL.md`; for
+current security claims, ADR-001; for distributed-host design, #5097.
+
 ## What mvm is
 
-**A microVM sandbox where you can verify what ran.**
+**Secure execution infrastructure where you can verify what ran.**
 
-mvm runs code you did not write, in its own kernel, on a laptop or a single
-host. Every launch is described by a signed plan, admitted before boot, and
-recorded in a tamper-evident audit log. The guest has no network device, no
-secrets and no shell in production. It starts in under 300 ms cold, admission
-included, and under 50 ms warm.
+Today mvm runs code you did not write in a microVM with its own kernel,
+on a laptop or a single host. A signed plan is admitted before boot, and
+the launch is recorded in a tamper-evident audit log. The production guest
+has no network device, no secrets and no shell. MicroVMs are where we start,
+not the limit of the product. Cold launch under 300 ms and warm activation
+under 50 ms, admission included, remain requirements rather than results
+we can claim on every backend.
 
 The CLI is `mvmctl`. Python, TypeScript and Rust libraries drive the same
-operations. Fleet orchestration, tenants and production launch live in
-[mvmd](https://github.com/tinylabscom/mvmd), not here.
+operations. Local execution must work without
+[mvmd](https://github.com/tinylabscom/mvmd); managed fleet coordination,
+cross-host delivery, tenants and hosted production launch are separate.
+Over time, we want the same workload experience on virtualized hosts,
+WebAssembly and smaller devices. The guarantees cannot be identical on
+every target: each one must say what it enforces and refuse a workload
+whose required guarantees it cannot meet.
 
 ## What is important always
 
@@ -36,26 +48,29 @@ In priority order. When two conflict, the higher one wins.
    not ship. Speed and DX are bought inside the security model, never by
    loosening it. Two invariants never bend: **no secret ever enters a
    microVM** (the guest holds placeholders; the host substitutes), and **no
-   workload runs without a signed, audited plan.** PII is detected and
-   redacted at the boundary. **Nothing requires root:** mvm never needs `sudo`
-   on the host, and the user inside every microVM is non-root.
+   workload runs without a signed, audited plan.** PII detection exists;
+   replacement remains a planned requirement. **No root required** is the
+   product requirement; the Linux/Firecracker host path still needs work
+   before it can be claimed. Guest services run non-root, while the
+   stronger never-root guest guarantee is still proposed.
 2. **Fast.** Cold launch under 300 ms (admission included) and warm startup
    under 50 ms are hard requirements, not goals. Security work (verification,
    decryption, auditing) must fit inside them. If it does not, we fix its cost;
-   we do not move the ceiling. A boot-time gate enforces them on every PR.
+   we do not move the ceiling. A boot-time gate must enforce them on every PR;
+   that gate is still planned.
 3. **Lightweight.** Small on disk and small in use: the `.mvmpkg` size, guest
    memory and per-VM host memory are budgeted. A minimal purpose-built guest
    kernel, no NIC, no SSH, no daemon, few dependencies. Every added crate or
    guest binary needs a reason.
-4. **Reproducible.** Same inputs, same image, on every host. Builds run in a VM
-   we launch; host tools never touch the result. We rebuild and replace, never
-   patch a running machine.
+4. **Reproducible.** Same declared inputs and target, same image bytes. Builds
+   run in a VM we launch; host tools never touch the result. We rebuild and
+   replace, never patch a running machine.
 5. **Composable.** Policy is built from small layers with fixed precedence, and
    composition can only narrow what a lower layer granted.
 6. **Observable.** Tracing everywhere: every launch phase, admission decision,
    host-service call and backend step emits a span, in the host and the
-   guest, so any latency or refusal can be explained from its trace. A gate
-   enforces coverage; "everywhere" is checked, not asserted.
+   guest, so any latency or refusal can be explained from its trace. A
+   coverage gate is required; "everywhere" is not yet a witnessed claim.
 7. **Many backends, one abstraction.** HVF, libkrun, Firecracker, QEMU and the
    claim-free tiers sit behind one backend trait. A backend may advertise less
    (a snapshot tier, a CPU quota); it may not silently do less than it
@@ -74,14 +89,112 @@ In priority order. When two conflict, the higher one wins.
 10. **Honest.** Every claim ships with its limit. If a property is policy and
     not absence, we say so.
 
+## Direction from the November 11 discussion
+
+These are **requirements for future work**, not shipped features. ADR-001
+and the linked issues describe what works today. A developer should be
+able to define a workload once, run it locally, and move it to an admitted
+host or smaller device without learning a second policy system. We will
+test that against three failures: a second source of authority, a silent
+loss of isolation, or cost and latency beyond the measured budgets.
+
+### One workload definition, packages for each target
+
+A first run should need one editable workload definition, not several
+policy files. Split out reusable policies when they earn their keep.
+Packs and applications request permissions; user, organization and host
+limits still decide what is allowed. Show the operator the effective
+permission and which layer decided it. A development signature is not
+an official publisher signature.
+
+One logical signed distribution should cover supported targets. Fetch
+only the complete, digest-pinned package for the chosen target; a small
+device should not download every platform's binaries. Do not hide
+downloads in the execution path. Preserve the meaning of published packs
+unless a reviewed, versioned migration changes it. Neither a successful
+build nor a catalogue entry means that a package has passed admission.
+
+### Keep the current workload running while we build the next one
+
+In an explicitly chosen development/watch session, an edit starts an
+immutable candidate build in the background. The current admitted
+workload remains usable through its mailbox. Report build, verification,
+admission, guest readiness and cutover separately. Cut over automatically
+only when the candidate passes them all. If it fails, show why and keep
+the old workload, unless its host can no longer enforce its boundary.
+Production rollout needs separate policy, approval, health checks and
+rollback; a watch-mode retry is not a rollout.
+
+The replacement must retain messages that were **durably accepted and
+are still authorized**, with their identities, order, expiry and
+acknowledgement status. It must not inherit the old workload's keys,
+permissions or private memory. A committed store receipt, delivery and
+application acknowledgement are different events. A device without
+durable local storage can use an admitted durable provider, but must
+not issue a durable receipt before that provider commits. The handoff
+and automatic cutover remain Planned; today's mailbox does not witness them.
+
+### What happens when a managed node loses contact
+
+Disconnection alone neither revokes authority nor wipes a device. While
+the host controller reconnects with bounded exponential backoff and
+jitter, the node may continue only operations covered by a locally
+verifiable, unexpired signed lease. By default, expiry denies effects
+and stops managed workloads. Explicit policy may instead permit isolated
+computation without mailbox or external effects, subject to organization
+ceilings. A retry cannot renew a lease. On reconnect, check current
+policy, revocation and execution generation before restoring authority.
+We have not chosen a lease duration or maximum; measure a real outage
+first. Local-only workloads do not need remote leases.
+
+### When assurance finds a vulnerability
+
+A finding from `mvm-assurance` calls for a reviewable response, not a
+runtime instruction. A fixed build is only a candidate until its
+provenance, admission, readiness and replacement are witnessed. Restrict
+the old workload's effects only if its host can still enforce that
+restriction; otherwise quarantine or stop. A disconnect or cleanup
+attempt is not evidence of remote erasure.
+
+Cross-host control and mailbox traffic must be authenticated and encrypted
+against a stated threat. If encryption ends at a trusted host service,
+that service can see plaintext; a compromised active host can too.
+Fleet routing must use the local-first mailbox contract, not become
+another admission authority.
+
+### Protection limits and host density
+
+These are different threats: a compromised workload on a trusted host,
+a captured powered-off device and a compromised **active** host. Destroying
+a key protects encrypted-at-rest data only if no usable plaintext or key
+copy survives. Scrubbing RAM cannot prove physical erasure or undo exposure
+to a malicious host. Hardware assurance stays optional unless the
+admitted policy requires it; software evidence is not a hardware witness.
+
+Design for **1,000 simultaneous workloads per suitably provisioned host**.
+Bound memory, idle CPU, threads, queues and backpressure per workload;
+adding more hosts does not meet the per-host target. Measure deterministic
+image construction, first-use preparation, cold launch, warm activation
+and safe replacement separately on named hardware. Required admission
+checks stay inside the reported <300 ms cold and <50 ms warm launch
+intervals. Prefer at most one million handwritten non-test production
+source lines per repository, excluding generated and vendored code.
+That ceiling never justifies obscure code or weaker security tests.
+
 ## Who it is for
 
 - **AI agents running generated code.** Every execution is untrusted. Network,
   secrets and filesystem are under policy.
 - **Code interpreters and agent products** that need a real, stateful
   environment without handing users your infrastructure.
-- **Regulated environments** that must prove isolation, show nothing persists
-  between runs, and hand over a signed audit trail.
+- **Developers maintaining a long-lived workload** who need verified
+  replacements without losing authorized pending work on candidate failure.
+- **Operators of managed or intermittently connected nodes** who need
+  bounded offline behavior, honest status, safe recovery and a reviewable
+  response to a security finding.
+- **Regulated environments** that must prove isolation, distinguish retained
+  authorized state from destroyed execution state, and hand over a signed
+  audit trail.
 - **CI and build isolation** for untrusted builds and third-party steps.
 
 ## The pillars
@@ -187,8 +300,8 @@ use a `/data/cache` convention rather than a new allowed root.
 
 - **In the guest.** What ships is the narrower guarantee: no guest binary can
   elevate to uid 0 (claim 2). Services run as their own unprivileged uids
-  through `mvm-setpriv --no-new-privs`, and the passwd, group and nsswitch
-  files are read-only bind mounts. The stronger requirement, that the runtime
+  through `mvm-setpriv --no-new-privs`, and the rootfs is a read-only
+  dm-verity mount, so passwd, group and nsswitch cannot be rewritten. The stronger requirement, that the runtime
   never runs as root and there is no usable root account, is ADR-026, still
   `Proposed`. It is a requirement here, not a claim; do not promote it until
   its build-time no-setuid check and runtime euid witness exist.
@@ -360,14 +473,15 @@ C ABI (requirement 14). A Kotlin tree for pack authoring exists in
 | Linux without KVM | QEMU/TCG, dev and test only | Tier 2, not an isolation target |
 | Browser | WebLinux, direct WASI | Claim-free: no numbered claim applies |
 | Windows x86-64 with WHP | libkrun on the Windows Hypervisor Platform (issue #3553) | Planned; blocked on a qualified Windows host for a boot witness |
+| Embedded node without a hypervisor | Capability-limited execution under the common workload contract | Planned; no microVM isolation claim, required unavailable guarantees refuse deployment |
 | WSL2 | QEMU, explicit dev/test only | Experimental |
 
-`apple-container` is opt-in only. The Docker tier is retired: hosts without a
-hypervisor fail closed.
+`apple-container` is opt-in only. The Docker tier is retired: current
+microVM launches on hosts without a supported hypervisor fail closed.
 
 ## How it compares
 
-By category, not by product.
+The current microVM product by category, not every future target.
 
 | | mvm | Containers | Hand-run VMM | VM-per-container runtimes |
 | --- | --- | --- | --- | --- |
@@ -385,10 +499,12 @@ others are sourced from a benchmark we ran.
 
 | Repo | Owns |
 | --- | --- |
-| mvm | CLI, host runtime, guest runtime, SDKs, `mkGuest`, claims ledger |
-| mvmd | Tenants, pools, fleet, **production launch authority** |
+| mvm | Canonical local workload, policy, signed admission, mailbox and host-service contracts; CLI, runtime, SDKs and claims ledger |
+| mvmd | Managed fleet coordination, cross-host routing, tenants, pools and hosted **production launch authority**; not a prerequisite for local execution |
 | mvm-images | Linux layer only: kernels, base rootfs, builder image, Stage 0 seeds |
-| mvm-packs | Signed packs, the image registry, the `mvm/` namespace |
+| mvm-packs | Official signed pack publication, registry, revocation and the `mvm/` namespace |
+| mvm-assurance | Findings, scanning and evidence; not runtime admission or fleet rollout |
+| mvm-studio | Local-first operator view of client-reported state; not a second execution authority |
 
 The guest runtime ships with each `mvmctl` release as one signed asset (claim
 20). `mvmctl` assembles overlay, initramfs and SDK sidecar from it at boot.
@@ -402,10 +518,14 @@ backend (Firecracker on Linux/KVM). HVF, libkrun and QEMU are Tier 2: for
 example verified boot is block+ext4 only there. The per-backend matrix in
 ADR-001 is the authority, and every pillar above is read through it.
 
-Out of scope, always: a malicious host and multi-tenant guests. Hardware
-attestation is in scope only as an opt-in TPM2 measurement source (ADR-001
-amendment, 2026-08-24); the host stays trusted. The hypervisor can read live
-guest memory; only hardware confidential computing closes that.
+Software-only execution trusts the active host. A malicious host can read
+the memory of a running guest. We need different evidence for a compromised
+workload on a trusted host, a captured powered-off device and a compromised
+active host. Hardware-backed assurance is optional unless admitted policy
+requires it; TPM2 measurement alone does not prove confidentiality from
+the active host. Stopping a workload, destroying a key or scrubbing memory
+does not prove physical erasure. ADR-001 sets the protection each backend
+can claim.
 
 ## Planned requirements from a field comparison
 
@@ -457,6 +577,21 @@ moves to Shipped only with an ADR and a witness.
   Scrubbed), not features. Until built, only detection ships, and the standing
   guarantee is the narrower one: a privileged action needs a signed binding in
   the plan.
+- **Automatic developer replacement with durable mailbox handoff — Planned.**
+  A built candidate still needs verification, admission and readiness.
+  Existing output and mailbox receipts do not establish safe cutover or
+  message continuity.
+- **Managed offline leases and reconnect — Planned.** A network disconnect
+  is neither revocation nor a wipe, and local-only execution does not rely
+  on a remote lease. The default stop-on-expiry direction is not an
+  implemented remote control or a measured duration.
+- **Embedded execution and Windows/WHP — Planned.** Use the same workload
+  experience where the target can enforce it. We have neither a microVM
+  isolation claim for small devices nor a Windows boot witness.
+- **Confidentiality from a compromised active host and physical erasure —
+  Not claimed.** Software-only execution trusts that host. Key loss may
+  protect correctly encrypted-at-rest data under stated custody
+  assumptions; best-effort scrubbing cannot undo prior exposure.
 - **S3, R2 or MinIO-backed volumes — Deferred.** Not to be scoped yet. The
   volume spec type parses `s3://`; no end-to-end witness exists.
 - **A local lifecycle journal — Deferred.** Counts and shapes only, local and
@@ -483,6 +618,12 @@ Each release, check the PRD against the tree:
 - No `sudo` spawn exists in `mvmctl`, and every guest service runs non-root.
 - Every backend's advertised capabilities match what `doctor` reports and what
   its tests exercise.
+- Candidate build, verification, admission, readiness and cutover are
+  reported separately, as are durable message acceptance, delivery and
+  application acknowledgement.
+- Image-build turnaround, first-use preparation, launch and safe replacement
+  have separate measurements, including the per-workload resident memory
+  and idle CPU needed to evaluate 1,000 active workloads per suitable host.
 - `cargo fmt`, clippy with warnings denied, nextest and doctests are green.
 - No new guest NIC, guest-side secret, shell or listening socket
   (`check-single-network-path`, `check-prod-agent-no-exec.sh`).
@@ -523,3 +664,11 @@ Settled in the same review, closing the last open items:
   build, scoped test, PR time-to-merge) — are added to that registry from the
   baseline, each pinned by a test. Until the baseline lands, those three
   numbers are measured, not invented.
+
+The November 11 direction is recorded above; #5381 tracks its reconciliation
+with this PRD. Still open: the signed offline-lease default and organization
+maximum, representative hardware and workload profile for the launch and
+1,000-per-host measurements, the smallest supported embedded-node profile,
+and native evidence for each future target. GitHub issues track delivery;
+ADR-001 governs shipped security claims. These open choices are not implied
+by the product direction.

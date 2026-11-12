@@ -21,6 +21,7 @@ pub use launch::{
     ApplicationLaunchError, PinnedRegistryKind, ResolvedApplication,
     classify_pinned_registry_reference, names_installed_application, names_installed_policy_pack,
     resolve_installed_application, resolve_installed_application_bundle,
+    trust_for_installed_archive, trust_for_installed_bundle,
 };
 
 /// Resource ceiling shared with the bundle OCI transport.
@@ -144,14 +145,27 @@ pub fn verify_application_bundle(
     if expected.bundle.archive_size > MAX_APPLICATION_ARCHIVE_BYTES {
         return Err(ApplicationBundleError::Size);
     }
-    let input = super::local_input::open_sized_regular(archive, expected.bundle.archive_size)
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::Other {
-                ApplicationBundleError::Size
-            } else {
-                ApplicationBundleError::Io(error)
-            }
-        })?;
+    let compressed = archive.extension().is_some_and(|ext| ext == "gz");
+    let stored_size = if compressed {
+        std::fs::symlink_metadata(archive)?.len()
+    } else {
+        expected.bundle.archive_size
+    };
+    if stored_size > MAX_APPLICATION_ARCHIVE_BYTES + 64 * 1024 * 1024 {
+        return Err(ApplicationBundleError::Size);
+    }
+    let input = super::local_input::open_sized_regular(archive, stored_size).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::Other {
+            ApplicationBundleError::Size
+        } else {
+            ApplicationBundleError::Io(error)
+        }
+    })?;
+    let input: Box<dyn std::io::Read> = if compressed {
+        Box::new(flate2::read::MultiGzDecoder::new(input))
+    } else {
+        Box::new(input)
+    };
     let mut snapshot = tempfile::NamedTempFile::new()?;
     let mut writer = HashingWriter::new(snapshot.as_file_mut());
     std::io::copy(

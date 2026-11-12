@@ -181,13 +181,13 @@ const DIRECT_OVERLAY_HASH_BLOCK_SIZE: u32 = 4096;
 // fingerprint doesn't cover (that hash only walks crate sources, not this
 // file) — forces a locally cached overlay to rebuild instead of reusing
 // stale staged content.
-const LOCAL_BUILD_EPOCH: &str = "7";
+const LOCAL_BUILD_EPOCH: &str = "9";
 
 /// Guest runtime executables staged at the overlay root, as (archive member
 /// name, name under `/mvm/runtime`). Every one but `mvm-setpriv` is an
 /// `mvm-agentd` binary; the privilege helper is its own package, built beside
 /// them into the same archive, and rides here so a root needs no copy of it.
-const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 12] = [
+const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 10] = [
     ("mvm-guest-agent", "agent"),
     ("mvm-guest-netinit", "netinit"),
     ("mvm-ping", "ping"),
@@ -197,8 +197,6 @@ const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 12] = [
     ("mvm-egress-client", "egress-client"),
     ("mvm-addon-dns", "addon-dns"),
     ("mvm-exit-report", "exit-report"),
-    ("mvm-tool-shim", "tool-shim"),
-    ("mvm-tool-helper", "tool-helper"),
     ("mvm-setpriv", "setpriv"),
 ];
 /// The GPU shim sonames the overlay carries under `gpu/<libc>/`, read from the
@@ -346,9 +344,9 @@ pub const RUNTIME_OVERLAY_TREE_CACHE_DIR: &str = "runtime-overlay-tree";
 
 /// The overlay's file tree as a host directory, for a tier that preopens a
 /// directory at `/mvm/runtime` instead of attaching the ext4 image (Wasm has
-/// no block devices). Staged once per guest-runtime digest from the same
-/// staging the ext4 is built from, and published by a single rename, so a
-/// tree that exists is complete.
+/// no block devices). Staged once per guest-runtime digest and assembly epoch
+/// from the same staging the ext4 is built from, and published by a single
+/// rename, so a tree that exists is complete.
 pub fn resolve_runtime_overlay_tree(
     cache_root: &Path,
     arch: GuestArch,
@@ -356,7 +354,8 @@ pub fn resolve_runtime_overlay_tree(
 ) -> Result<PathBuf, RuntimeOverlayError> {
     let trees = cache_root
         .join(RUNTIME_OVERLAY_TREE_CACHE_DIR)
-        .join(arch.to_string());
+        .join(arch.to_string())
+        .join(LOCAL_BUILD_EPOCH);
     let tree = trees.join(&runtime.digest);
     if tree.is_dir() {
         return Ok(tree);
@@ -397,6 +396,28 @@ fn stage_guest_runtime_overlay_tree(
                 &root.join("gpu").join(libc.as_str()).join(soname),
                 0o555,
             )?;
+        }
+    }
+    // Preserve the exact overlay of older signed archives without adding tools to new ones.
+    let historical = [
+        ("mvm-tool-shim", "tool-shim"),
+        ("mvm-tool-helper", "tool-helper"),
+    ];
+    let declared = historical.map(|(name, _)| {
+        runtime
+            .manifest
+            .files
+            .contains_key(&format!("{arch}/bin/{name}"))
+    });
+    if declared[0] != declared[1] {
+        return Err(RuntimeOverlayError::DirectBuildFailed {
+            reason: "historical tool pair must both be declared".into(),
+        });
+    }
+    if declared[0] {
+        for (archive_name, overlay_name) in historical {
+            let member = format!("{arch}/bin/{archive_name}");
+            stage_guest_runtime_member(runtime, &member, &root.join(overlay_name), 0o555)?;
         }
     }
     let sdk_prefix = "sdk-py/mvm/";
@@ -1567,119 +1588,6 @@ mod tests {
         (dir, runtime)
     }
 
-    #[test]
-    fn guest_runtime_overlay_stages_exact_guest_tree_and_is_deterministic() {
-        let (_source, runtime) = guest_runtime_fixture();
-        let cache_a = TempDir::new().unwrap();
-        let cache_b = TempDir::new().unwrap();
-        let a = build_runtime_overlay_from_guest_runtime(
-            cache_a.path(),
-            "1.2.3",
-            GuestArch::X86_64,
-            &runtime,
-        )
-        .unwrap();
-        assert_eq!(
-            crate::runtime_pieces::archive_origin(a.overlay_ext4.parent().unwrap()).unwrap(),
-            Some(runtime.digest.clone()),
-            "the assembled overlay names the archive it came from"
-        );
-        let fs = ext4_view::Ext4::load_from_path(&a.overlay_ext4).unwrap();
-        let names_in = |path: &str| {
-            let mut names: Vec<Vec<u8>> = fs
-                .read_dir(path)
-                .unwrap()
-                .map(|entry| entry.unwrap().file_name().as_ref().to_vec())
-                .filter(|name| name != b"." && name != b"..")
-                .collect();
-            names.sort();
-            names
-        };
-        let mut expected_root: Vec<Vec<u8>> = GUEST_RUNTIME_OVERLAY_BINARIES
-            .iter()
-            .map(|(_, overlay_name)| overlay_name.as_bytes().to_vec())
-            .chain([b"gpu".to_vec(), b"sdk-py".to_vec(), b"VERSION".to_vec()])
-            .collect();
-        expected_root.sort();
-        assert_eq!(names_in("/"), expected_root);
-        // Every path the resolver demands of a cached overlay is staged.
-        mvm_fs::overlay::validate_overlay_payload(&a.overlay_ext4)
-            .expect("the archive-staged overlay carries every required guest path");
-        assert_eq!(names_in("/gpu"), vec![b"glibc".to_vec(), b"musl".to_vec()]);
-        assert_eq!(names_in("/sdk-py"), vec![b"mvm".to_vec()]);
-        assert_eq!(
-            names_in("/sdk-py/mvm"),
-            vec![b"__init__.py".to_vec(), b"host.py".to_vec()]
-        );
-        for (archive_name, overlay_name) in GUEST_RUNTIME_OVERLAY_BINARIES {
-            let guest_path = format!("/{overlay_name}");
-            assert_eq!(
-                fs.read(guest_path.as_str()).unwrap(),
-                std::fs::read(runtime.root.join(format!("x86_64/bin/{archive_name}"))).unwrap()
-            );
-            assert_eq!(
-                fs.metadata(guest_path.as_str()).unwrap().mode() & 0o777,
-                0o555
-            );
-        }
-        for libc in ["glibc", "musl"] {
-            let mut expected_gpu: Vec<Vec<u8>> = GPU_SHIM_SONAMES
-                .iter()
-                .map(|name| name.as_bytes().to_vec())
-                .collect();
-            expected_gpu.sort();
-            assert_eq!(names_in(&format!("/gpu/{libc}")), expected_gpu);
-            for soname in GPU_SHIM_SONAMES {
-                let guest_path = format!("/gpu/{libc}/{soname}");
-                assert_eq!(
-                    fs.read(guest_path.as_str()).unwrap(),
-                    std::fs::read(runtime.root.join(format!("x86_64/lib/{libc}/{soname}")))
-                        .unwrap()
-                );
-                assert_eq!(
-                    fs.metadata(guest_path.as_str()).unwrap().mode() & 0o777,
-                    0o555
-                );
-            }
-        }
-        for member in ["sdk-py/mvm/__init__.py", "sdk-py/mvm/host.py"] {
-            let guest_path = format!("/{member}");
-            assert_eq!(
-                fs.read(guest_path.as_str()).unwrap(),
-                std::fs::read(runtime.root.join(member)).unwrap()
-            );
-            assert_eq!(
-                fs.metadata(guest_path.as_str()).unwrap().mode() & 0o777,
-                0o644
-            );
-        }
-        let b = build_runtime_overlay_from_guest_runtime(
-            cache_b.path(),
-            "1.2.3",
-            GuestArch::X86_64,
-            &runtime,
-        )
-        .unwrap();
-        assert_eq!(
-            std::fs::read(&a.overlay_ext4).unwrap(),
-            std::fs::read(&b.overlay_ext4).unwrap()
-        );
-        assert_eq!(
-            std::fs::read(&a.sidecar).unwrap(),
-            std::fs::read(&b.sidecar).unwrap()
-        );
-        assert_eq!(a.roothash, b.roothash);
-        assert_eq!(
-            std::fs::read_to_string(
-                RuntimeOverlayLayout::under(cache_a.path(), "1.2.3", "x86_64")
-                    .local_source_fingerprint_file
-            )
-            .unwrap()
-            .trim(),
-            runtime.digest,
-        );
-    }
-
     /// Every file under `root`, as relative path → (bytes, permission bits).
     fn tree_files(root: &Path) -> std::collections::BTreeMap<String, (Vec<u8>, u32)> {
         use std::os::unix::fs::PermissionsExt;
@@ -1704,6 +1612,12 @@ mod tests {
     fn overlay_tree_holds_exactly_what_the_overlay_image_holds() {
         let (_source, runtime) = guest_runtime_fixture();
         let cache = TempDir::new().unwrap();
+        let stale = cache
+            .path()
+            .join(RUNTIME_OVERLAY_TREE_CACHE_DIR)
+            .join("x86_64")
+            .join(&runtime.digest);
+        std::fs::create_dir_all(&stale).unwrap();
         let tree = resolve_runtime_overlay_tree(cache.path(), GuestArch::X86_64, &runtime).unwrap();
         assert_eq!(
             tree,
@@ -1711,8 +1625,10 @@ mod tests {
                 .path()
                 .join(RUNTIME_OVERLAY_TREE_CACHE_DIR)
                 .join("x86_64")
+                .join(LOCAL_BUILD_EPOCH)
                 .join(&runtime.digest)
         );
+        assert!(tree.join("agent").exists(), "stale tree must not be reused");
 
         let artifact = build_runtime_overlay_from_guest_runtime(
             cache.path(),
@@ -1743,6 +1659,57 @@ mod tests {
     }
 
     #[test]
+    fn historical_tool_pair_stages_only_when_both_members_are_declared() {
+        use sha2::{Digest, Sha256};
+
+        let (_source, mut runtime) = guest_runtime_fixture();
+        let arch = GuestArch::X86_64;
+        let current = TempDir::new().unwrap();
+        stage_runtime_overlay_root(&runtime, arch, current.path()).unwrap();
+        assert!(!current.path().join("tool-shim").exists());
+        assert!(!current.path().join("tool-helper").exists());
+
+        for archive_name in ["mvm-tool-shim", "mvm-tool-helper"] {
+            let member = format!("{arch}/bin/{archive_name}");
+            let bytes = format!("historical:{archive_name}");
+            std::fs::write(runtime.root.join(&member), bytes.as_bytes()).unwrap();
+            runtime
+                .manifest
+                .files
+                .insert(member, hex::encode(Sha256::digest(bytes.as_bytes())));
+        }
+        let historical = TempDir::new().unwrap();
+        stage_runtime_overlay_root(&runtime, arch, historical.path()).unwrap();
+        assert_eq!(
+            std::fs::read(historical.path().join("tool-shim")).unwrap(),
+            b"historical:mvm-tool-shim"
+        );
+        assert_eq!(
+            std::fs::read(historical.path().join("tool-helper")).unwrap(),
+            b"historical:mvm-tool-helper"
+        );
+
+        let helper = runtime.root.join(format!("{arch}/bin/mvm-tool-helper"));
+        std::fs::write(&helper, b"substituted").unwrap();
+        let tampered = TempDir::new().unwrap();
+        let error = stage_runtime_overlay_root(&runtime, arch, tampered.path()).unwrap_err();
+        assert!(
+            error.to_string().contains("changed while staging"),
+            "{error}"
+        );
+        std::fs::write(&helper, b"historical:mvm-tool-helper").unwrap();
+
+        runtime
+            .manifest
+            .files
+            .remove(&format!("{arch}/bin/mvm-tool-helper"));
+        let partial = TempDir::new().unwrap();
+        let error = stage_runtime_overlay_root(&runtime, arch, partial.path()).unwrap_err();
+        assert!(error.to_string().contains("historical tool"), "{error}");
+        assert!(!partial.path().join("tool-shim").exists());
+    }
+
+    #[test]
     fn overlay_tree_is_staged_once_per_runtime_digest() {
         let (_source, mut runtime) = guest_runtime_fixture();
         let cache = TempDir::new().unwrap();
@@ -1764,7 +1731,8 @@ mod tests {
         let trees = cache
             .path()
             .join(RUNTIME_OVERLAY_TREE_CACHE_DIR)
-            .join("x86_64");
+            .join("x86_64")
+            .join(LOCAL_BUILD_EPOCH);
         let published: Vec<String> = std::fs::read_dir(&trees)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())

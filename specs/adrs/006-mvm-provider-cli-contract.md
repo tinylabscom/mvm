@@ -30,7 +30,7 @@ under `mvm-cli/src/commands/` operates on this host's own microVMs.
 
 **Backend selection is `VmBackend` + a flag, never a provider registry.**
 Which hypervisor runs a workload is decided by the `VmBackend` trait and
-its catalog-driven dispatch (`--hypervisor`/`MVM_BACKEND`, auto-detect —
+its catalog-driven dispatch (`--hypervisor`/`MVM_HYPERVISOR`, auto-detect —
 see the `VmBackend` ADR). `mvm` does not layer a second "provider"
 abstraction with its own identity, capability list, and health model on
 top of that trait; one selection mechanism is the whole story.

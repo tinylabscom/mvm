@@ -35,6 +35,17 @@ pub use mvm_contract::protocol::vm_backend::{
     decode_host_epoch_cmdline, encode_user_volumes_cmdline, is_secret_env_name,
 };
 
+/// How the host reaches a vsock port the guest listens on, as the backend
+/// exposes it. The backend owns this; callers dial what it names instead of
+/// guessing a path per VMM.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HostDialRoute {
+    /// The VMM bridges the port to its own Unix socket; connect and talk.
+    PortSocket(std::path::PathBuf),
+    /// The VMM's vsock mux socket; announce the port with `CONNECT <port>`.
+    Mux(std::path::PathBuf),
+}
+
 // ---------------------------------------------------------------------------
 // VmStartConfig — backend-agnostic VM launch configuration
 // ---------------------------------------------------------------------------
@@ -667,6 +678,13 @@ pub trait VmBackend: Send + Sync {
         anyhow::bail!("{} does not provide guest channel info", self.name())
     }
 
+    /// Where the host dials guest vsock `port` for the VM whose state lives
+    /// at `state_dir`, or `None` when this backend does not expose host-dialed
+    /// guest ports.
+    fn host_dial_route(&self, _state_dir: &std::path::Path, _port: u32) -> Option<HostDialRoute> {
+        None
+    }
+
     /// Set the virtio-balloon inflation target (in MiB).
     ///
     /// `target_inflate_mib` is the number of MiB the guest should
@@ -945,7 +963,6 @@ mod tests {
             not_after: now + Duration::minutes(5),
             verbs: vec![VerbId::new("run-entrypoint").unwrap()],
             drive: None,
-            tool_mediation: None,
             application_terminal: None,
             sig: vec![],
         };
@@ -978,7 +995,6 @@ mod tests {
                 VerbId::new("ping").unwrap(),
             ],
             drive: None,
-            tool_mediation: None,
             application_terminal: None,
             sig: vec![],
         };

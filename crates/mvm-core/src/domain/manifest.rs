@@ -14,7 +14,7 @@
 //! # defaults to the flake "."). Setting both is a parse error.
 //! flake = "."             # OR: image = "alpine:3.20"
 //! profile = "default"
-//! vcpus = 2
+//! cpus = 2
 //! mem = "1024M"
 //! data_disk = "0"
 //! name = "openclaw"       # optional, display only
@@ -142,9 +142,8 @@ pub struct Manifest {
     #[serde(default = "default_profile")]
     pub profile: String,
 
-    /// Host-side CPU count. `vcpus` remains an accepted alias so
-    /// older manifests keep parsing.
-    #[serde(default = "default_vcpus", alias = "vcpus")]
+    /// Host-side CPU count.
+    #[serde(default = "default_vcpus")]
     pub cpus: u8,
 
     /// Human-readable memory size (`512M`, `1G`, `1024`, …). Acts as
@@ -391,11 +390,6 @@ impl Manifest {
     /// rather than a Nix flake or a wasm module.
     pub fn is_image_source(&self) -> bool {
         self.image.is_some()
-    }
-
-    /// True when this manifest selects a wasm module as its build source.
-    pub fn is_wasm_source(&self) -> bool {
-        self.wasm.is_some()
     }
 
     /// Typed machine-oriented view of the manifest. Only image-backed
@@ -1223,7 +1217,7 @@ mod tests {
         r#"
             flake = "."
             profile = "default"
-            vcpus = 2
+            cpus = 2
             mem = "1024M"
             data_disk = "0"
         "#
@@ -1355,7 +1349,7 @@ mod tests {
         let toml = r#"
             image = "oci:alpine"
             profile = "default"
-            vcpus = 2
+            cpus = 2
             mem = "1024M"
             data_disk = "0"
             [network]
@@ -1382,7 +1376,7 @@ mod tests {
         // newer-schema field, never silently ignored.
         let toml = r#"
             flake = "."
-            vcpus = 2
+            cpus = 2
             mem = "1024M"
             netwrok = "off"
         "#;
@@ -1399,7 +1393,7 @@ mod tests {
         let toml = r#"
             flake = "."
             image = "alpine:3.20"
-            vcpus = 2
+            cpus = 2
             mem = "1024M"
         "#;
         let err = Manifest::from_toml_str(toml).expect_err("rejects both source selectors");
@@ -1456,7 +1450,7 @@ mod tests {
         let toml = r#"
             flake = "."
             profile = "default"
-            vcpus = 2
+            cpus = 2
             mem = "1G"
             data_disk = "0"
             name = "openclaw"
@@ -1482,7 +1476,7 @@ mod tests {
                 schema_version = {}
                 flake = "."
                 profile = "default"
-                vcpus = 2
+                cpus = 2
                 mem = "1024M"
             "#,
             MANIFEST_SCHEMA_VERSION + 1
@@ -1498,7 +1492,7 @@ mod tests {
         let toml = r#"
             flake = ""
             profile = "default"
-            vcpus = 2
+            cpus = 2
             mem = "1024M"
         "#;
         let err = Manifest::from_toml_str(toml).expect_err("rejects empty flake");
@@ -1510,7 +1504,7 @@ mod tests {
         let toml = r#"
             flake = ". ; rm -rf /"
             profile = "default"
-            vcpus = 2
+            cpus = 2
             mem = "1024M"
         "#;
         let err = Manifest::from_toml_str(toml).expect_err("rejects shell meta");
@@ -1530,9 +1524,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_vcpus_alias_still_parses() {
-        let m = Manifest::from_toml_str(minimal_manifest_toml()).expect("parses");
-        assert_eq!(m.cpus, 2);
+    fn the_retired_vcpus_key_is_refused() {
+        let toml = minimal_manifest_toml().replace("cpus = 2", "vcpus = 2");
+        assert!(Manifest::from_toml_str(&toml).is_err());
     }
 
     #[test]
@@ -1749,7 +1743,7 @@ mod tests {
         let toml = r#"
             flake = "."
             profile = "default"
-            vcpus = 2
+            cpus = 2
             mem = "32M"
         "#;
         let err = Manifest::from_toml_str(toml).expect_err("rejects <64M mem");
@@ -1761,7 +1755,7 @@ mod tests {
         let toml = r#"
             flake = "."
             profile = "default"
-            vcpus = 2
+            cpus = 2
             mem = "potato"
         "#;
         let err = Manifest::from_toml_str(toml).expect_err("rejects junk mem");
@@ -1773,7 +1767,7 @@ mod tests {
         let toml = r#"
             flake = "."
             profile = "default"
-            vcpus = 2
+            cpus = 2
             mem = "1024M"
             name = "has/slash"
         "#;
@@ -1800,7 +1794,7 @@ mod tests {
         let toml = r#"
             flake = "."
             profile = "default"
-            vcpus = 2
+            cpus = 2
             mem = "1024M"
             mem_initial = "256M"
         "#;
@@ -1814,7 +1808,7 @@ mod tests {
         let toml = r#"
             flake = "."
             profile = "default"
-            vcpus = 2
+            cpus = 2
             mem = "1024M"
             mem_initial = "0"
         "#;
@@ -1829,7 +1823,7 @@ mod tests {
         let toml = r#"
             flake = "."
             profile = "default"
-            vcpus = 2
+            cpus = 2
             mem = "1024M"
             mem_initial = "1024M"
         "#;
@@ -1843,7 +1837,7 @@ mod tests {
         let toml = r#"
             flake = "."
             profile = "default"
-            vcpus = 2
+            cpus = 2
             mem = "1024M"
             mem_initial = "spuds"
         "#;
@@ -2005,7 +1999,7 @@ mod tests {
             "mvm.toml",
             r#"
                 flake = ""
-                vcpus = 2
+                cpus = 2
                 mem = "1024M"
             "#,
         );
@@ -2167,7 +2161,7 @@ mod tests {
         let toml = r#"
             flake = "."
             profile = "default"
-            vcpus = 2
+            cpus = 2
             mem = "1024M"
             mem_initial = "256M"
         "#;
@@ -2250,7 +2244,7 @@ mod tests {
         let toml = r#"
             flake = "."
             profile = "default"
-            vcpus = 2
+            cpus = 2
             mem = "1G"
             data_disk = "0"
             name = "openclaw"

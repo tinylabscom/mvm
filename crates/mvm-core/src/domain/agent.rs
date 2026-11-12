@@ -53,9 +53,6 @@ pub struct DesiredTenantNetwork {
     pub ipv4_subnet: String,
 }
 
-/// Maximum desired instances per pool per state.
-pub const MAX_DESIRED_PER_STATE: u32 = 100;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DesiredPool {

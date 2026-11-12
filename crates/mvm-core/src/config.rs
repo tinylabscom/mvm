@@ -387,11 +387,6 @@ pub fn remote_templates_dir() -> std::path::PathBuf {
         .join("remote")
 }
 
-/// Host tool staging root: `<mvm_home>/tool-staging`.
-pub fn tool_staging_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_home()).join("tool-staging")
-}
-
 /// Host attestation identity root: `<mvm_home>/attestation`.
 pub fn attestation_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_home()).join("attestation")
@@ -473,12 +468,6 @@ pub fn mvm_kv_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_home()).join("kv")
 }
 
-/// Snapshot store for copy-on-write warm-parent materialization:
-/// `<mvm_home>/snapshots`.
-pub fn mvm_snapshots_dir() -> String {
-    format!("{}/snapshots", mvm_home())
-}
-
 /// Custom volume specs from the `MVM_VOLUMES` env var: a comma-separated
 /// list of `--volume` specs (e.g. `~/src:/work:ro,data.img:/data:10G`).
 /// Whitespace around each entry is trimmed and empty entries dropped;
@@ -500,14 +489,6 @@ pub fn mvm_volumes_env() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Resolve `<deps_volumes_dir>/<volume_hash>` for a single deps
-/// volume. The caller is responsible for verifying the directory
-/// exists and matches its sealed manifest — see
-/// `mvm_core::deps_audit::verify_sealed_volume`.
-pub fn deps_volume_dir(volume_hash: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_deps_volumes_dir()).join(volume_hash)
-}
-
 /// Root directory for content-addressed attested packs promoted by
 /// `mvm_core::pack_cache`. Each immediate child is a `<pack_hash>/`
 /// directory holding the verified file set plus a serialized manifest;
@@ -515,15 +496,6 @@ pub fn deps_volume_dir(volume_hash: &str) -> std::path::PathBuf {
 /// area the atomic rename-promote moves out of.
 pub fn pack_cache_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_cache_dir()).join("packs")
-}
-
-/// Work directory `mvmctl build` compiles one locked pack spec into,
-/// keyed by the lock's workload digest. The flake built from it records this
-/// path, so rebuilding the same lock reuses the same template slot.
-pub fn pack_build_dir(workload_sha256: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_cache_dir())
-        .join("pack-builds")
-        .join(workload_sha256)
 }
 
 /// Resolve `<pack_cache_dir>/<pack_hash>` for a single promoted pack.
@@ -898,6 +870,17 @@ pub const VM_APPROVAL_SOCKET: &str = "approval.sock";
 /// connects to it when a decision is `ask`.
 pub fn vm_approval_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf {
     vm_socket_dir_at(state_dir).join(VM_APPROVAL_SOCKET)
+}
+
+/// Where a VM's launch-time mailbox service binds for host consumers.
+pub fn vm_mailbox_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf {
+    vm_socket_dir_at(state_dir).join("mailbox.sock")
+}
+
+/// Where a VM's per-epoch mailbox secret lives: in the state dir, never
+/// beside the host keys, so it dies with the VM.
+pub fn vm_mailbox_secret_at(state_dir: &std::path::Path) -> std::path::PathBuf {
+    state_dir.join("mailbox-epoch.secret")
 }
 
 /// [`vm_approval_socket_at`] for a named VM.
@@ -1908,10 +1891,6 @@ mod tests {
         assert_eq!(
             instances_root(),
             std::path::PathBuf::from("/custom/root/instances")
-        );
-        assert_eq!(
-            tool_staging_dir(),
-            std::path::PathBuf::from("/custom/root/tool-staging")
         );
         assert_eq!(
             oci_policy_path(),

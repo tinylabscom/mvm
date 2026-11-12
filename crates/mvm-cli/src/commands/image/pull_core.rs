@@ -74,6 +74,7 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
 ) -> Result<ResolvedOciRunImage> {
     ensure_prod_digest_pin(reference, prod)?;
     ensure_prod_registry_reference_policy(reference, prod)?;
+    crate::release_guest_runtime::ensure_release_pieces_prepared()?;
     mvm_client::launch::runtime_overlay::require_prepared_oci_guest_runtime(cache_root)?;
     resolve_run_image_with(
         cache_root,
@@ -93,6 +94,7 @@ pub(in crate::commands) fn acquire_run_image(
 ) -> Result<ResolvedOciRunImage> {
     ensure_prod_digest_pin(reference, prod)?;
     ensure_prod_registry_reference_policy(reference, prod)?;
+    crate::release_guest_runtime::ensure_release_pieces_prepared()?;
     mvm_client::launch::runtime_overlay::require_prepared_oci_guest_runtime(cache_root)?;
     resolve_run_image_with(
         cache_root,
@@ -508,12 +510,10 @@ pub(super) fn pull_image_with_trust(
     reference: &str,
     prod: bool,
 ) -> Result<(CachedOciImage, OciTrustDecision, String)> {
-    pull_image_with_trust_with_prepare(
-        cache_root,
-        reference,
-        prod,
-        mvm_client::launch::runtime_overlay::prepare_oci_guest_runtime,
-    )
+    pull_image_with_trust_with_prepare(cache_root, reference, prod, |root| {
+        crate::release_guest_runtime::ensure_release_pieces_prepared()?;
+        mvm_client::launch::runtime_overlay::prepare_oci_guest_runtime(root)
+    })
 }
 
 fn pull_image_with_trust_with_prepare(
@@ -825,8 +825,8 @@ struct PulledRootfs<'a> {
 ///
 /// A production pull is sealed and carries a signed provenance mark. The
 /// caller reaches here only after the trust policy has verified the image.
-/// This used to materialize the dev variant whatever the flag said, and a
-/// `--prod` run on a cold cache then booted it.
+/// Materializing the dev variant whatever the flag says would boot it on a
+/// `--prod` run with a cold cache.
 fn materialize_pulled_rootfs(
     pulled: PulledRootfs<'_>,
     materialize: RuntimeMaterializer,
@@ -1571,7 +1571,7 @@ certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
     }
 
     /// A fresh `--prod` pull materializes the sealed variant with its mark;
-    /// it used to hard-code the dev variant.
+    /// it never hard-codes the dev variant.
     #[test]
     fn a_fresh_prod_pull_materializes_the_sealed_variant() {
         let fixture = prod_fixture();

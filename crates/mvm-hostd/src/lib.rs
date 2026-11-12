@@ -33,8 +33,11 @@ pub mod assurance_provider;
 pub mod assurance_session;
 pub mod audit;
 pub mod audit_signer;
+/// Sync-to-async bridge that is safe to call from inside a tokio runtime.
+pub mod blocking;
 pub mod broker;
 pub mod caller_identity;
+pub mod containment;
 /// Attended display input on a running machine, rebuilt from the host's own record of the run.
 pub mod display;
 pub mod drive;
@@ -61,6 +64,9 @@ pub mod jailer;
 /// [`keyholder::SecretResolver`] trait + the single-host
 /// [`keyholder::LocalResolver`].
 pub mod keyholder;
+pub mod mailbox_launch;
+pub mod mailbox_process;
+pub mod mailbox_service;
 pub mod operator_admitted_trial_booter;
 /// Redacting panic hook for the daemon bins. A panic payload is the one
 /// string the no-`Display`-on-secret-types gate cannot reach.
@@ -89,3 +95,16 @@ mod test_fixtures;
 /// that outlive the `mvmctl` that started them.
 pub mod vm_lifetime;
 pub mod workload_env;
+
+/// Read a daemon bin's launch config: the supervisor writes it to stdin and
+/// closes it, so this blocks until EOF.
+pub fn read_launch_config(bin: &str) -> anyhow::Result<Vec<u8>> {
+    use anyhow::Context;
+    use std::io::Read;
+    let mut buf = Vec::with_capacity(4096);
+    std::io::stdin()
+        .lock()
+        .read_to_end(&mut buf)
+        .with_context(|| format!("{bin} stdin read failed"))?;
+    Ok(buf)
+}

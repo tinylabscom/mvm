@@ -1,8 +1,8 @@
 use crate::catalog;
 use anyhow::Result;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, SnapshotCapability, VmBackend, VmCapabilities, VmId,
-    VmInfo, VmStartConfig, VmStatus, WarmStartOutcome,
+    BackendKind, BackendSecurityProfile, HostDialRoute, SnapshotCapability, VmBackend,
+    VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus, WarmStartOutcome,
 };
 
 // Every backend variant + the FC support modules live in this crate.
@@ -65,7 +65,7 @@ pub(crate) fn libkrun_runner() -> LibkrunRunner {
 
 /// QEMU (Linux dev/test substrate; KVM where present, TCG fallback) driven
 /// through the same unified workload-runner role — qemu's sole workload launch
-/// path (`--hypervisor qemu` / `MVM_BACKEND=qemu`; `auto_select` never picks
+/// path (`--hypervisor qemu` / `MVM_HYPERVISOR=qemu`; `auto_select` never picks
 /// it). NIC-less: the converged boot attaches no slirp user-mode network, so
 /// egress routes to the per-VM gating endpoint over vsock only, through the
 /// per-VM AF_VSOCK↔UNIX bridge. The legacy direct `QemuBackend`
@@ -246,7 +246,7 @@ impl HostTiers {
 ///
 /// Only production-tier backends appear here. Every other backend —
 /// apple-container, qemu, wasm, mock — is opt-in, reachable only
-/// through an explicit `--hypervisor` / `MVM_BACKEND` selection, and must
+/// through an explicit `--hypervisor` / `MVM_HYPERVISOR` selection, and must
 /// never be reachable from this function. Adding a return site for one
 /// silently moves a workload onto a backend the caller did not ask for.
 fn select_kind(tiers: HostTiers) -> catalog::BackendKind {
@@ -289,7 +289,7 @@ pub enum AnyBackend {
     /// QEMU workload runtime — Linux dev/test substrate (KVM where
     /// present, TCG fallback), driven through the unified `WorkloadRunner`
     /// over the driver seam — qemu's sole workload path, selected by
-    /// `--hypervisor qemu` / `MVM_BACKEND=qemu`; `auto_select` never picks
+    /// `--hypervisor qemu` / `MVM_HYPERVISOR=qemu`; `auto_select` never picks
     /// it (Firecracker stays the production runtime). The boot attaches the
     /// universal initramfs and receives `ActivateEnvironment` over vsock
     /// (via the AF_VSOCK↔UNIX bridge), exactly like the other runner
@@ -307,14 +307,14 @@ pub enum AnyBackend {
     Mock(MockBackend),
     /// HVF (Hypervisor.framework on macOS / Apple silicon), driven through the
     /// unified `WorkloadRunner` over the driver seam — hvf's sole workload path,
-    /// selected by `--hypervisor hvf` / `MVM_BACKEND=hvf` and the macOS-26
+    /// selected by `--hypervisor hvf` / `MVM_HYPERVISOR=hvf` and the macOS-26
     /// auto-detect default. NIC-less: egress routes to the per-VM gating endpoint
     /// over vsock only (claim-10 + claims 12/13 at the endpoint); no routable
     /// guest NIC. The destination macOS backend.
     Hvf(HvfRunner),
     /// Host-`wasmtime` claim-free portability tier — see
     /// [`crate::wasm_backend`]. Selectable only via explicit
-    /// `--hypervisor wasm` / `MVM_BACKEND=wasm`; `auto_select` never falls
+    /// `--hypervisor wasm` / `MVM_HYPERVISOR=wasm`; `auto_select` never falls
     /// through here. Always constructible; the real engine only compiles in
     /// behind the `wasm-backend` feature, so a build without it fails
     /// closed with a typed error the first time the backend is actually
@@ -560,6 +560,11 @@ impl AnyBackend {
         self.inner().capabilities()
     }
 
+    /// Where the host dials guest vsock `port` for the VM at `state_dir`.
+    pub fn host_dial_route(&self, state_dir: &std::path::Path, port: u32) -> Option<HostDialRoute> {
+        self.inner().host_dial_route(state_dir, port)
+    }
+
     pub fn snapshot_capability(&self) -> SnapshotCapability {
         self.capabilities().snapshot_capability
     }
@@ -626,35 +631,6 @@ impl AnyBackend {
         claim: &mvm_core::vm_backend::StandbyClaim,
     ) -> std::result::Result<VmId, mvm_core::vm_backend::StandbyError> {
         self.inner().claim_standby(handle, claim)
-    }
-
-    /// Fill the warm pool through the backend's real spawn-and-capture path: boot
-    /// a clean factory parent, capture its whole live state into the caller's
-    /// checkpoint store, and release it, so a pool slot costs disk rather than a
-    /// resident VM. Routes exactly like
-    /// [`claim_standby_via_runner`](Self::claim_standby_via_runner) — the
-    /// runner-backed workload backends (Firecracker, libkrun, hvf) reach the
-    /// runner, the mock lifecycle double services it in memory, and non-workload
-    /// backends (qemu, wasm) fail closed. Refusing the same backends both halves
-    /// refuse is what keeps a pool from being filled for a backend that could
-    /// never claim from it.
-    pub fn spawn_standby_via_runner(
-        &self,
-        ctx: &crate::workload_runner::SpawnContext<'_>,
-        spec: &mvm_core::vm_backend::StandbySpec,
-    ) -> std::result::Result<mvm_core::vm_backend::StandbyHandle, mvm_core::vm_backend::StandbyError>
-    {
-        self.spawn_standby_via_runner_owned(ctx, spec)
-            .map_err(|error| {
-                match error.downcast::<mvm_core::vm_backend::StandbyError>() {
-                    Ok(error) => error,
-                    // An unconfirmed native error retains its original aggregate
-                    // on Drop. This compatibility string does not permit retry.
-                    Err(error) => {
-                        mvm_core::vm_backend::StandbyError::SpawnFailed(format!("{error:#}"))
-                    }
-                }
-            })
     }
 
     /// Host-only launch-error boundary. Concrete HVF launch failures retain
@@ -1212,6 +1188,82 @@ mod tests {
     }
 
     #[test]
+    fn only_backends_that_reach_the_mailbox_port_declare_it() {
+        for (name, declared) in [
+            ("firecracker", true),
+            ("hvf", true),
+            ("apple-container", true),
+            ("libkrun", true),
+            ("qemu", true),
+            ("wasm", false),
+        ] {
+            assert_eq!(
+                AnyBackend::from_hypervisor(name)
+                    .capabilities()
+                    .guest_mailbox,
+                declared,
+                "{name}"
+            );
+        }
+    }
+
+    /// A backend that declares the mailbox must also say where the host dials it.
+    #[test]
+    fn every_backend_that_declares_the_mailbox_names_a_dial_route() {
+        let state = std::path::Path::new("/var/mvm/vm-a");
+        for name in [
+            "firecracker",
+            "hvf",
+            "apple-container",
+            "libkrun",
+            "qemu",
+            "wasm",
+        ] {
+            let backend = AnyBackend::from_hypervisor(name);
+            let route = backend.host_dial_route(state, 5257);
+            if backend.capabilities().guest_mailbox {
+                assert!(route.is_some(), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn hvf_dials_a_per_port_socket_and_firecracker_the_mux() {
+        let state = std::path::Path::new("/var/mvm/vm-a");
+        assert_eq!(
+            AnyBackend::from_hypervisor("hvf").host_dial_route(state, 5257),
+            Some(HostDialRoute::PortSocket(
+                mvm_core::config::vm_hvf_vsock_port_socket_at(state, 5257)
+            ))
+        );
+        assert_eq!(
+            AnyBackend::from_hypervisor("firecracker").host_dial_route(state, 5257),
+            Some(HostDialRoute::Mux(std::path::PathBuf::from(
+                mvm_agentd::vsock::vsock_uds_path(&state.to_string_lossy())
+            )))
+        );
+    }
+
+    #[test]
+    fn libkrun_and_qemu_dial_the_flat_per_port_socket_and_apple_container_hvfs() {
+        let state = std::path::Path::new("/var/mvm/vm-a");
+        let flat = Some(HostDialRoute::PortSocket(
+            mvm_core::config::vm_vsock_port_socket_at(state, 5257),
+        ));
+        for name in ["libkrun", "qemu"] {
+            assert_eq!(
+                AnyBackend::from_hypervisor(name).host_dial_route(state, 5257),
+                flat,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            AnyBackend::from_hypervisor("apple-container").host_dial_route(state, 5257),
+            AnyBackend::from_hypervisor("hvf").host_dial_route(state, 5257)
+        );
+    }
+
+    #[test]
     fn test_firecracker_capabilities() {
         let backend = fc_runner();
         let caps = backend.capabilities();
@@ -1512,8 +1564,20 @@ mod tests {
             std::fs::create_dir_all(vms.join(name)).expect("mkdir vm dir");
             std::fs::write(vms.join(name).join(marker), "123").expect("write marker");
         }
+        // A libkrun marker that also records the start time classifies alike.
+        std::fs::create_dir_all(vms.join("l2")).expect("mkdir vm dir");
+        std::fs::write(
+            vms.join("l2").join("libkrun.pid"),
+            mvm_vmm::host::network_endpoint_spawn::EndpointPid::of_child(std::process::id())
+                .render(),
+        )
+        .expect("write marker");
         env.set("HOME", temp.path());
         env.set("MVM_HOME", temp.path());
+        assert!(matches!(
+            AnyBackend::for_started_vm("l2"),
+            Some(AnyBackend::Libkrun(_))
+        ));
 
         let q = AnyBackend::for_started_vm("q1");
         let l = AnyBackend::for_started_vm("l1");
@@ -1557,7 +1621,7 @@ mod tests {
     }
 
     /// `auto_select` must never return the wasm portability tier — it is
-    /// opt-in only (explicit `--hypervisor wasm` / `MVM_BACKEND=wasm`), never
+    /// opt-in only (explicit `--hypervisor wasm` / `MVM_HYPERVISOR=wasm`), never
     /// a platform-ladder fallback. `auto_select`'s implementation has exactly
     /// two return sites (Firecracker/Hvf) and neither
     /// construct `Self::Wasm`, so this holds on every platform the ladder
@@ -2263,49 +2327,6 @@ mod tests {
                 assert!(
                     matches!(err, StandbyError::Unsupported { .. }),
                     "{name} must fail closed: {err}"
-                );
-            }
-        }
-
-        /// The spawn half must refuse exactly the backends the claim half does,
-        /// or a pool could be filled for a backend that can never claim from it.
-        #[test]
-        fn spawn_fails_closed_for_the_same_non_workload_backends() {
-            use crate::workload_runner::SpawnContext;
-
-            let s = Scaffold::new();
-            let spec = mvm_core::vm_backend::StandbySpec {
-                id: "parent-a".into(),
-                template_id: None,
-                kernel_path: "/img/kernel".into(),
-                kernel_sha256: "a".repeat(64),
-                vcpus: 2,
-                mem_mib: 512,
-                signing_key_path: "/keys/host-signer.ed25519".into(),
-                signer_id: "host:test".into(),
-                binding_nonce: "b".repeat(64),
-                control_socket: "/tmp/does-not-exist.sock".into(),
-                vm_state_dir: "/tmp/does-not-exist".into(),
-                image_path: None,
-                image_sha256: None,
-                root_strategy: Default::default(),
-                vsock_egress: false,
-            };
-
-            for name in ["qemu", "wasm", "apple-container"] {
-                let backend = AnyBackend::from_hypervisor(name);
-                let err = backend
-                    .spawn_standby_via_runner(
-                        &SpawnContext {
-                            checkpoints: &s.checkpoints,
-                            launch: None,
-                        },
-                        &spec,
-                    )
-                    .expect_err("a non-workload backend has no warm pool to fill");
-                assert!(
-                    matches!(err, StandbyError::Unsupported { .. }),
-                    "{name} must fail closed on spawn: {err}"
                 );
             }
         }

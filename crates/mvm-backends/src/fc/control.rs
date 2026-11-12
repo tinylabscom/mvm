@@ -7,7 +7,6 @@ use mvm_vmm::host::shell::{run_in_vm, run_in_vm_stdout, shell_quote};
 use mvm_vmm::host::ui;
 
 use super::host;
-use super::observe::list_vms;
 use super::{abs_vms_dir, read_firecracker_pid};
 
 /// Pause the vCPUs of a running Firecracker VM.
@@ -32,7 +31,7 @@ pub fn pause_vm(name: &str) -> Result<()> {
 
     let q_socket = shell_quote(&socket);
     run_in_vm(&format!(
-        r#"sudo curl -fsS -X PATCH --unix-socket {q_socket} \
+        r#"curl -fsS -X PATCH --unix-socket {q_socket} \
             -H 'Content-Type: application/json' \
             -d '{{"state":"Paused"}}' \
             'http://localhost/vm'"#,
@@ -58,7 +57,7 @@ pub fn resume_vm(name: &str) -> Result<()> {
 
     let q_socket = shell_quote(&socket);
     run_in_vm(&format!(
-        r#"sudo curl -fsS -X PATCH --unix-socket {q_socket} \
+        r#"curl -fsS -X PATCH --unix-socket {q_socket} \
             -H 'Content-Type: application/json' \
             -d '{{"state":"Resumed"}}' \
             'http://localhost/vm'"#,
@@ -91,7 +90,7 @@ pub fn balloon_set_target(name: &str, target_inflate_mib: u32) -> Result<()> {
 
     let q_socket = shell_quote(&socket);
     run_in_vm(&format!(
-        r#"sudo curl -fsS -X PATCH --unix-socket {q_socket} \
+        r#"curl -fsS -X PATCH --unix-socket {q_socket} \
             -H 'Content-Type: application/json' \
             -d '{{"amount_mib":{target}}}' \
             'http://localhost/balloon'"#,
@@ -110,7 +109,7 @@ pub fn balloon_set_target(name: &str, target_inflate_mib: u32) -> Result<()> {
 ///
 /// Returns the inflation amount in MiB. `0` means the balloon is
 /// fully deflated (guest has all of `memory`). Combined with the
-/// VM's declared `memory` cap (e.g. from `list_vms()`), the host
+/// VM's declared `memory` cap, the host
 /// reclaim controller derives the effective commitment.
 pub fn balloon_state(name: &str) -> Result<u32> {
     let abs_vms = abs_vms_dir();
@@ -124,7 +123,7 @@ pub fn balloon_state(name: &str) -> Result<u32> {
 
     let q_socket = shell_quote(&socket);
     let body = run_in_vm_stdout(&format!(
-        r#"sudo curl -fsS --unix-socket {q_socket} 'http://localhost/balloon'"#,
+        r#"curl -fsS --unix-socket {q_socket} 'http://localhost/balloon'"#,
     ))
     .with_context(|| format!("GET /balloon for VM '{name}'"))?;
 
@@ -178,6 +177,15 @@ fn cleanup_stopped_vm_state(
     cleanup()
 }
 
+fn send_ctrl_alt_del_script(socket: &str) -> String {
+    let socket = shell_quote(socket);
+    format!(
+        r#"curl -s -X PUT --unix-socket {socket} \
+            --data '{{"action_type": "SendCtrlAltDel"}}' \
+            "http://localhost/actions" 2>/dev/null || true"#
+    )
+}
+
 pub fn stop_vm(name: &str) -> Result<()> {
     let abs_vms = abs_vms_dir();
     let abs_dir = format!("{}/{}", abs_vms, name);
@@ -214,12 +222,7 @@ pub fn stop_vm(name: &str) -> Result<()> {
     // power-button handler, so the former unconditional 2s sleep-then-kill made
     // every `down` cost two seconds for nothing — escalate to a hard kill the
     // moment the short graceful window lapses instead of always waiting it out.
-    if let Err(e) = run_in_vm(&format!(
-        r#"sudo curl -s -X PUT --unix-socket {socket} \
-            --data '{{"action_type": "SendCtrlAltDel"}}' \
-            "http://localhost/actions" 2>/dev/null || true"#,
-        socket = socket,
-    )) {
+    if let Err(e) = run_in_vm(&send_ctrl_alt_del_script(&socket)) {
         warn!("failed to send graceful shutdown to VM: {e}");
     }
 
@@ -253,26 +256,24 @@ pub fn stop_vm(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Stop all running VMs.
-#[instrument(skip_all)]
-pub fn stop_all_vms() -> Result<()> {
-    let vms = list_vms()?;
-    if vms.is_empty() {
-        ui::info("No VMs are running.");
-        return Ok(());
-    }
-
-    for info in &vms {
-        if let Some(ref name) = info.name {
-            stop_vm(name)?;
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_graceful_stop_script_keeps_a_hostile_socket_path_one_inert_word() {
+        for v in [
+            "/v/PWN a/fc.sock",
+            "/v/PWN'; touch /tmp/PWN; '/s",
+            "/v/PWN$(touch /tmp/PWN)/s",
+            "/v/PWN`touch /tmp/PWN`/s",
+            "/v/PWN\nrm -rf /s",
+        ] {
+            let script = send_ctrl_alt_del_script(v);
+            let quoted = shell_quote(v);
+            assert!(script.contains(&quoted), "{script}");
+            assert!(!script.replace(&quoted, "Q").contains("PWN"), "{script}");
         }
     }
 
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
     use super::*;
 
     // ---- await_graceful_exit (Firecracker `stop_vm` shutdown escalation) ----

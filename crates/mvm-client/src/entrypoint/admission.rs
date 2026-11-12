@@ -145,6 +145,7 @@ impl EntrypointAdmission {
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let materialized_mounts = crate::admission::instructions::materialized_mounts(volumes);
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             gpu: false,
             instructions: crate::admission::InstructionSources::for_workload(None)
                 .with_mount_roots(&[])
@@ -176,7 +177,6 @@ impl EntrypointAdmission {
             shares: mvm_hostd::run::shares_from_vm_volumes(volumes),
             assets: assets.iter().chain(&self.assets).cloned().collect(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
             network_policy: self.network_policy.clone(),
             agent_verb_override: self.agent_verb_override.clone(),
             // The entrypoint is driven over agent RPC: no PTY, no ad-hoc argv,

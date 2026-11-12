@@ -81,6 +81,11 @@ impl VerifiedRegistryPackRevocations {
         &self.checkpoint
     }
 
+    /// The instant after which this document no longer establishes trust.
+    pub fn not_after(&self) -> DateTime<Utc> {
+        self.document.not_after
+    }
+
     /// Refuse a revoked signing identity or exact manifest digest.
     ///
     /// The signer and digest come from the authenticated pack, never from
@@ -454,7 +459,13 @@ mod tests {
     }
 
     fn verified_pack(identity: &str) -> VerifiedRegistryPack {
-        let reference: PackReference = "runtime/example@1.0.0".parse().expect("valid reference");
+        verified_pack_version(identity, "1.0.0")
+    }
+
+    fn verified_pack_version(identity: &str, version: &str) -> VerifiedRegistryPack {
+        let reference: PackReference = format!("runtime/example@{version}")
+            .parse()
+            .expect("valid reference");
         let manifest_bytes = serde_json::to_vec(&RegistryPackManifest {
             schema_version: 1,
             reference: reference.clone(),
@@ -508,6 +519,30 @@ mod tests {
             verified.check_verified_pack_at(&good, at(31)),
             Err(RegistryPackRevocationError::Expired)
         );
+    }
+
+    #[test]
+    fn a_newer_published_version_does_not_retire_an_older_signed_one() {
+        let older = verified_pack_version("new identity", "1.0.0");
+        let newer = verified_pack_version("new identity", "2.0.0");
+        assert_ne!(older.manifest_sha256(), newer.manifest_sha256());
+        // Revoking only the newer manifest leaves the older, still-signed pack usable.
+        let mut revoke_newer = document(1);
+        revoke_newer.revoked_identities.clear();
+        revoke_newer.revoked_manifests = vec![newer.manifest_sha256().clone()];
+        let feed = signed(&revoke_newer, None).expect("valid signed document");
+        assert_eq!(feed.check_verified_pack_at(&older, at(7)), Ok(()));
+        assert!(matches!(
+            feed.check_verified_pack_at(&newer, at(7)),
+            Err(RegistryPackRevocationError::RevokedManifest { .. })
+        ));
+        // A feed that names neither revokes neither: publication is not retirement.
+        let mut empty = document(2);
+        empty.revoked_identities.clear();
+        empty.revoked_manifests.clear();
+        let feed = signed(&empty, None).expect("valid signed document");
+        assert_eq!(feed.check_verified_pack_at(&older, at(7)), Ok(()));
+        assert_eq!(feed.check_verified_pack_at(&newer, at(7)), Ok(()));
     }
 
     #[test]

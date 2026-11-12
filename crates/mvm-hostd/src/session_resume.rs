@@ -63,6 +63,7 @@ pub fn synthesis_for_resume<'a>(
     material: &'a ResumePlanMaterial,
 ) -> SynthesisInput<'a> {
     SynthesisInput {
+        mailbox: None,
         outputs: Vec::new(),
         // The session, not the parent sandbox. A resumed workload that ran
         // under the previous residency's name would attribute its actions to a
@@ -81,7 +82,6 @@ pub fn synthesis_for_resume<'a>(
         network_policy_ref: None,
         fs_policy_ref: None,
         egress_policy_ref: None,
-        tool_policy_ref: None,
         secret_release: SecretReleasePolicy::None,
         secrets: Vec::new(),
         audit_event_prefix: None,
@@ -109,7 +109,6 @@ pub fn synthesis_for_resume<'a>(
         assets: Vec::new(),
         redaction: Default::default(),
         reversible_replacement: Default::default(),
-        tools: Default::default(),
         caller_commitment: None,
         audit_labels: session_audit_labels(record),
         agent_verbs: None,

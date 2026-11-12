@@ -132,10 +132,8 @@ value.
 - The guest sees a normal env var name and an opaque token
   value.
 - The raw secret stays on the host side.
-- Request-time release is supported only on host-mediated outbound
-  surfaces such as the `mvm.web_fetch` and `mvm.web_search` broker verbs.
-  Those are host-side broker tool names, not functions exported by the
-  Python or TypeScript SDK.
+- Request-time release is controlled by the admitted destination and
+  the host network endpoint, not by the guest application's tool names.
 - Guest HTTPS CONNECT egress is not a managed-secret substitution
   path.
 

@@ -462,12 +462,6 @@ pub fn register_host_agent_services_if_admitted(
                     .into_owned(),
             ),
             audit_signer_uds_path: None,
-            tool_decision_socket: Some(
-                mvm_core::config::vm_socket_dir_at(state_dir)
-                    .join(crate::host::network_endpoint_spawn::SUBST_CONNECTOR_SOCKET)
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
             services_bindings: services.to_vec(),
             capability_bindings: capability_bindings.to_vec(),
             service_proxies: service_proxies.to_vec(),
@@ -560,7 +554,7 @@ impl Drop for HostAgentServicesGuard {
 
 /// Whether the host-agent daemon path is selected. **Default: enabled** — the
 /// per-tenant daemon is the default for an admitted libkrun/hvf workload, so
-/// `host.audit.v1` is available on a plain boot (no `MVM_GATEWAY_BRIDGE`).
+/// `host.audit.v1` is available on a plain boot.
 /// `MVM_HOST_AGENT_DAEMON=0` is the opt-out escape hatch back to the per-VM
 /// broker fork during the transition; the fork is removed once the daemon path
 /// has soaked. Any value other than `0` leaves the daemon on.
@@ -811,7 +805,6 @@ mod tests {
             audit_signer_uds_path: Some(
                 dir.join("audit-signer.sock").to_string_lossy().into_owned(),
             ),
-            tool_decision_socket: None,
             services_bindings: vec![],
             capability_bindings: vec![],
             assurance: None,
