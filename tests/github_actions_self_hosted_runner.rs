@@ -642,9 +642,25 @@ fn inventory_is_opt_in_and_leaves_reusable_and_default_dispatch_tests_unchanged(
     assert_read_only_inventory(inventory);
     let test = &found.iter().find(|(name, _)| name == "test").unwrap().1;
     assert!(
-        test.contains("if: github.event_name != 'workflow_dispatch' || !inputs.inventory_only")
+        test.contains(
+            "if: github.event_name != 'workflow_dispatch' || (!inputs.inventory_only && !inputs.live_boot)"
+        ),
+        "a recovery boot must not also run the workspace shard"
     );
     assert_eq!(missing_cleanup(test), None);
+    let boot = &found
+        .iter()
+        .find(|(name, _)| name == "debian-live-boot")
+        .expect("the recovery witness must have a dedicated job")
+        .1;
+    assert!(
+        boot.contains("runs-on: [self-hosted, Linux, X64, mvm, hetzner, kvm, debian-kvm-boot]")
+            && boot.contains("test \"$RUNNER_NAME\" = mvm-hetzner")
+            && boot.contains("MVM_RUNTIME_BOOT_READY: guest-agent")
+            && boot.contains("prebuilt_runtime_image_boots_within_budget"),
+        "the recovery witness must target Debian and boot a real guest"
+    );
+    assert_eq!(missing_cleanup(boot), None);
 }
 
 #[test]

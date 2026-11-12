@@ -52,6 +52,11 @@ on:
         required: false
         type: boolean
         default: false
+      live_boot:
+        description: One guest-agent-ready, NIC-less Firecracker boot on the recovered Debian runner
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -60,7 +65,7 @@ permissions:
 jobs:
   inventory:
     name: Read-only runner inventory
-    if: github.event_name == 'workflow_dispatch' && inputs.inventory_only
+    if: github.event_name == 'workflow_dispatch' && inputs.inventory_only && !inputs.live_boot
     permissions: {}
     # Invalid selectors fail on a hosted runner, never silently skip.
     runs-on: ${{ inputs.runner_kind == 'hetzner' && fromJSON('["self-hosted","Linux","X64","mvm","hetzner","kvm"]') || 'ubuntu-24.04' }}
@@ -118,7 +123,7 @@ jobs:
 
   test:
     name: Workspace shard ${{ inputs.shard }} (${{ inputs.runner_kind }})
-    if: github.event_name != 'workflow_dispatch' || !inputs.inventory_only
+    if: github.event_name != 'workflow_dispatch' || (!inputs.inventory_only && !inputs.live_boot)
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ${{ inputs.runner_kind == 'hetzner' && fromJSON('["self-hosted","Linux","X64","mvm","hetzner","kvm"]') || 'ubuntu-24.04' }}
     # Archive workers on one persistent host share the build-time source path.
@@ -292,3 +297,144 @@ jobs:
             export ARCHIVE_ROOT="$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
           fi
           bash nix/ops/hetzner/job-cleanup.sh "/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}"
+
+  debian-live-boot:
+    name: Debian KVM live Firecracker boot
+    if: github.event_name == 'workflow_dispatch' && inputs.live_boot
+    runs-on: [self-hosted, Linux, X64, mvm, hetzner, kvm, debian-kvm-boot]
+    timeout-minutes: 55
+    steps:
+      - name: Validate target and check out exact source
+        env:
+          RUNNER_KIND: ${{ inputs.runner_kind }}
+          INVENTORY_ONLY: ${{ inputs.inventory_only }}
+        run: |
+          set -euo pipefail
+          test "$RUNNER_KIND" = hetzner
+          test "$INVENTORY_ONLY" = false
+          test "$RUNNER_NAME" = mvm-hetzner
+          test -r /dev/kvm && test -w /dev/kvm
+          test "$(id -u)" -ne 0
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.commit_sha }}
+
+      - name: Isolate boot state
+        run: |
+          set -euo pipefail
+          base="$RUNNER_TEMP/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-1"
+          mkdir -m 700 -- "$base"
+          mkdir -m 700 -- "$base/home" "$base/tmp" "$base/images"
+          printf 'BOOT_DIR=%s\nHOME=%s\nMVM_HOME=%s\nTMPDIR=%s\n' \
+            "$base/images" "$base/home" "$base/home" "$base/tmp" >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s\nRUSTUP_HOME=%s\n' \
+            "${CARGO_HOME:-$HOME/.cargo}" "${RUSTUP_HOME:-$(rustup show home)}" >> "$GITHUB_ENV"
+
+      - name: Require an existing systemd user session
+        run: |
+          set -euo pipefail
+          uid="$(id -u)"
+          test -S "/run/user/${uid}/bus" || {
+            echo "::error::no existing systemd user bus; refusing to change linger or host services" >&2
+            exit 1
+          }
+          printf 'XDG_RUNTIME_DIR=/run/user/%s\nDBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%s/bus\n' \
+            "$uid" "$uid" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+
+      - uses: sigstore/cosign-installer@v3
+
+      - uses: ./.github/actions/install-firecracker
+
+      - name: Resolve the locked image set
+        run: |
+          set -euo pipefail
+          {
+            echo "IMAGE_TAG=$(./scripts/locked-image-tag.sh)"
+            echo "IMAGE_REPO=$(./scripts/locked-image-tag.sh image_set repository)"
+            echo "IMAGE_MANIFEST=$(./scripts/locked-image-tag.sh image_set manifest_asset)"
+            echo "IMAGE_MANIFEST_SHA256=$(./scripts/locked-image-tag.sh image_set manifest_sha256)"
+            echo "IMAGE_WORKFLOW=$(./scripts/locked-image-tag.sh image_set workflow)"
+            echo "IMAGE_TAG_REF=$(./scripts/locked-image-tag.sh image_set tag_ref)"
+            echo "IMAGE_BUILDER_CACHE_CONTRACT=$(./scripts/locked-image-tag.sh compatibility builder_cache_contract)"
+          } >> "$GITHUB_ENV"
+
+      - name: Fetch and verify the pinned bootable image
+        env:
+          COSIGN_OIDC_ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          set -euo pipefail
+          cd "$BOOT_DIR"
+          base="https://github.com/${IMAGE_REPO}/releases/download/${IMAGE_TAG}"
+          curl -fL --retry 3 -o image-set.json "$base/${IMAGE_MANIFEST}"
+          curl -fL --retry 3 -o image-set.json.bundle "$base/${IMAGE_MANIFEST}.bundle"
+          printf '%s  %s\n' "$IMAGE_MANIFEST_SHA256" image-set.json | sha256sum -c -
+          cosign verify-blob \
+            --bundle image-set.json.bundle \
+            --certificate-identity "https://github.com/${IMAGE_REPO}/${IMAGE_WORKFLOW}@${IMAGE_TAG_REF}" \
+            --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
+            image-set.json
+          jq -e --argjson contract "$IMAGE_BUILDER_CACHE_CONTRACT" '
+            (.compatibility.base_image_contract // 0) <= 1 and
+            .compatibility.builder_cache_contract == $contract
+          ' image-set.json >/dev/null
+          for f in default-microvm-vmlinux-x86_64 default-microvm-rootfs-x86_64.ext4; do
+            curl -fL --retry 3 -o "$f" "$base/$f"
+            jq -r --arg name "$f" '
+              .members[] | select(.target.arch? == "x86_64") | .artifacts[] |
+              select(.name == $name) | "\(.sha256)  \(.name)"
+            ' image-set.json > expected.txt
+            test -s expected.txt
+            sha256sum -c expected.txt
+          done
+          protocol="$(sed -n 's/^pub const PROTOCOL_VERSION: u32 = \([0-9][0-9]*\);$/\1/p' \
+            "$GITHUB_WORKSPACE/crates/mvm-agentd/src/vsock/mod.rs")"
+          test -n "$protocol"
+          jq -n --arg rev "$(jq -r .mvm_source_commit image-set.json)" \
+            --argjson protocol "$protocol" \
+            '{name:"mvm-default-microvm",accessible:false,sealed:true,entrypointKind:"command",entrypointArgv:[],initSystem:"busybox",expectedBootMs:300,agentBinary:"real",rootlessEntrypoint:true,hypervisor:"firecracker",overlayAware:true,runtimeLean:true,imageTag:"",source:"fetched",builtAt:"",protocolVersion:$protocol,generatorRev:$rev,libc:"unknown"}' \
+            > mvm-meta.json
+
+      - name: Assemble this tree's runtime overlay
+        env:
+          MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build
+        run: |
+          set -euo pipefail
+          cargo run -q --bin mvmctl -- dev runtime-overlay build --source build --arch x86_64
+          mapfile -t dirs < <(find "$MVM_HOME/cache/runtime-overlay" -mindepth 2 -maxdepth 2 -type d -name x86_64)
+          test "${#dirs[@]}" -eq 1
+          mkdir -m 700 "$BOOT_DIR/overlay"
+          for f in overlay.ext4 overlay.verity overlay.roothash; do
+            cp -L "${dirs[0]}/$f" "$BOOT_DIR/overlay/$f"
+          done
+          echo "MVM_RUNTIME_BOOT_RUNTIME_VERSION=$(basename "$(dirname "${dirs[0]}")")" >> "$GITHUB_ENV"
+
+      - name: Boot to guest-agent readiness and inspect the live NIC-less device model
+        env:
+          MVM_RUNTIME_BOOT_BENCH: "1"
+          MVM_RUNTIME_BOOT_BACKEND: firecracker
+          MVM_RUNTIME_BOOT_READY: guest-agent
+          MVM_RUNTIME_BOOT_GRANT: "1"
+          MVM_RUNTIME_BOOT_RUNS: "1"
+          MVM_RUNTIME_BOOT_CONCURRENT: "1"
+          MVM_RUNTIME_BOOT_BUDGET_MS: "60000"
+        run: |
+          set -euo pipefail
+          export MVM_RUNTIME_BOOT_KERNEL="$BOOT_DIR/default-microvm-vmlinux-x86_64"
+          export MVM_RUNTIME_BOOT_ROOTFS="$BOOT_DIR/default-microvm-rootfs-x86_64.ext4"
+          export MVM_RUNTIME_BOOT_OVERLAY="$BOOT_DIR/overlay/overlay.ext4"
+          export MVM_RUNTIME_BOOT_OVERLAY_VERITY="$BOOT_DIR/overlay/overlay.verity"
+          MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH="$(tr -d '[:space:]' < "$BOOT_DIR/overlay/overlay.roothash")"
+          export MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH
+          cargo test --test runtime_boot_bench \
+            prebuilt_runtime_image_boots_within_budget -- --exact --nocapture
+
+      - name: Clean isolated state
+        if: always()
+        run: |
+          bash nix/ops/hetzner/job-cleanup.sh \
+            "$RUNNER_TEMP/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-1"

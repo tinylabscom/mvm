@@ -10,3 +10,5 @@ self-hosted-runner:
     - mvm
     - hetzner
     - kvm
+    # Temporary, exact-target recovery witness for Debian runner ID 22.
+    - debian-kvm-boot
