@@ -630,7 +630,7 @@ mod tests {
         )
         .unwrap();
         assert!(volume.contains(
-            "@live @firecracker @workload_kernel\n  Scenario: restarting refreshes a registered host directory snapshot"
+            "@live @firecracker @workload_kernel\n  Scenario: a host directory snapshot changes only after explicit refresh"
         ));
         assert!(!volume.contains("@runtime_candidate"));
         for required in ["dir-volume-visible", "dir-volume-refreshed"] {

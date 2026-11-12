@@ -1016,6 +1016,15 @@ mod tests {
             after.host_snapshot.unwrap().fingerprint
         );
         assert_eq!(read_snapshot_marker(Path::new(&after.host_path)), "after!");
+        let audit = fs::read_to_string(mvm_core::policy::audit::default_audit_log()).unwrap();
+        assert!(
+            audit
+                .lines()
+                .any(|line| line.contains("\"kind\":\"volume_snapshot\"")
+                    && line.contains("operation=refresh")
+                    && line.contains("\"vm_name\":\"vm-1\"")),
+            "refresh must leave a volume-snapshot audit entry: {audit}"
+        );
     }
 
     #[test]

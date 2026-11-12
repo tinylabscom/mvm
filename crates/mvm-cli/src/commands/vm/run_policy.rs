@@ -553,6 +553,7 @@ mod tests {
         let path = home.path().join("readmit.toml");
         std::fs::write(&path, "[overrides.env]\nreadmit = [\"LD_PRELOAD\"]\n").unwrap();
         let mut args = RunArgs {
+            profile: crate::commands::RunProfile::Standard,
             policy: vec![path.display().to_string()],
             ..RunArgs::default()
         };
@@ -572,6 +573,7 @@ mod tests {
     fn sealed_run_refuses_flag_readmission_without_a_policy() {
         let (_env, _home) = isolated();
         let mut args = RunArgs {
+            profile: crate::commands::RunProfile::Standard,
             allow_env: vec!["LD_PRELOAD".into()],
             ..RunArgs::default()
         };

@@ -309,6 +309,14 @@ impl LocalVolumeService {
         let refreshed = entry.clone();
         registry.save(owner)?;
         ownership::advance_epoch(owner, &_lock)?;
+        // Refresh publishes a new host snapshot, not a new mount.
+        mvm_core::audit_emit!(
+            VolumeSnapshot,
+            vm: owner,
+            "source=host-directory operation=refresh volume={} guest={}",
+            refreshed.volume_name,
+            refreshed.guest_path
+        );
         Ok(attachment_record(owner, &refreshed))
     }
 
