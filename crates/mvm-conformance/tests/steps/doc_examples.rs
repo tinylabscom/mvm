@@ -592,6 +592,18 @@ fn instruction_trust_examples_run(
     );
 }
 
+/// A pack reference needs a verified install, and `pack-sources` lives in a
+/// separate checkout. Neither is present in the offline example fixture.
+fn needs_external_policy_source(path: &[String], example: &DocExample) -> bool {
+    matches!(
+        path.join(" ").as_str(),
+        "policy show" | "policy validate" | "why"
+    ) && example
+        .argv
+        .iter()
+        .any(|arg| arg.starts_with("agent/") || arg.starts_with("./pack-sources/"))
+}
+
 #[then(expr = "every side-effect-free documented example executes successfully")]
 fn every_exec_tier_example_runs(_world: &mut CliWorld) {
     let command = mvm_cli::commands::cli_command();
@@ -617,7 +629,10 @@ fn every_exec_tier_example_runs(_world: &mut CliWorld) {
         let Ok(path) = parse_example(&command, &example) else {
             continue;
         };
-        if policy.tier_for(&path) != Some(Tier::Exec) || !seen.insert(path.clone()) {
+        if policy.tier_for(&path) != Some(Tier::Exec)
+            || needs_external_policy_source(&path, &example)
+            || !seen.insert(path.clone())
+        {
             continue;
         }
 
@@ -664,6 +679,12 @@ fn every_exec_tier_example_runs(_world: &mut CliWorld) {
     }
 
     assert!(ran > 0, "no exec-tier examples were found to run");
+    for path in ["policy show", "policy validate", "why"] {
+        assert!(
+            seen.iter().any(|seen| seen.join(" ") == path),
+            "no offline policy example exercised {path}"
+        );
+    }
     assert!(
         failures.is_empty(),
         "{} exec-tier documented example(s) failed to run (ran {ran}):\n{}",

@@ -18,6 +18,7 @@ There are three layers:
 
 ```sh
 mvmctl policy show agent-apis                 # what a profile allows, layer by layer
+mvmctl policy validate agent-apis             # check a built-in policy before using it
 mvmctl run --policy agent-apis -- claude -p "summarize the repo"
 mvmctl policy resolve agent-apis -o agent.json
 mvmctl run --plan agent.json -- claude -p "summarize the repo"
