@@ -961,8 +961,10 @@ fn run() -> anyhow::Result<()> {
     diagnostics.stage(StartupStage::StatusPublish);
     CaptureStatus::Running.publish(state_dir)?;
     diagnostics.stage(StartupStage::PidPublish);
-    std::fs::write(&cfg.pid_file, std::process::id().to_string())
-        .context("publish protected supervisor PID")?;
+    // The start time rides with the pid so a pid recycled after this process
+    // dies cannot make a dead machine look alive.
+    let record = mvm_vmm::host::network_endpoint_spawn::EndpointPid::of_child(std::process::id());
+    std::fs::write(&cfg.pid_file, record.render()).context("publish protected supervisor PID")?;
     diagnostics.stage(StartupStage::PidPublished);
     drop(diagnostics);
     let kernel_boot = match held_kernel.as_ref() {
