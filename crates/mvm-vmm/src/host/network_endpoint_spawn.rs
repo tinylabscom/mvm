@@ -1288,8 +1288,7 @@ fn read_pid(path: &Path) -> Option<libc::pid_t> {
 }
 
 fn pid_alive(pid: libc::pid_t) -> bool {
-    // SAFETY: kill(pid, 0) only probes for existence and delivers no signal.
-    unsafe { libc::kill(pid, 0) == 0 }
+    super::process_liveness::pid_is_alive(pid)
 }
 
 fn kill(pid: libc::pid_t, sig: libc::c_int) {
@@ -2716,5 +2715,23 @@ mod substitution_spawn_params_builder_tests {
             err,
             BuilderError::missing("SubstitutionSpawnParams", "vm_name")
         );
+    }
+}
+
+#[cfg(test)]
+mod pid_file_guard_tests {
+    use super::*;
+
+    #[test]
+    fn read_pid_and_pid_alive_refuse_pids_that_must_never_be_signalled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("pid");
+        for text in ["0", "-1", "1", "2147483648", "garbage", ""] {
+            std::fs::write(&path, text).expect("write");
+            assert_eq!(read_pid(&path), None, "{text:?}");
+        }
+        for pid in [0, -1, libc::pid_t::MIN] {
+            assert!(!pid_alive(pid), "{pid}");
+        }
     }
 }

@@ -148,10 +148,10 @@ pub fn reap_gpu_endpoint(state_dir: &Path) {
 /// Stop the process whose pid `pid_path` records (SIGTERM, then SIGKILL after
 /// a short grace) and remove the file. Idempotent; a missing file is a no-op.
 pub fn reap_pid_file(pid_path: &Path) {
-    let Ok(raw) = std::fs::read_to_string(pid_path) else {
+    if !pid_path.exists() {
         return;
-    };
-    let Ok(pid) = raw.trim().parse::<i32>() else {
+    }
+    let Some(pid) = super::process_liveness::read_pid_file(pid_path) else {
         let _ = std::fs::remove_file(pid_path);
         return;
     };
@@ -197,6 +197,29 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         // No pid file → no panic, no error.
         reap_gpu_endpoint(dir.path());
+    }
+
+    #[test]
+    fn reaping_a_pid_file_naming_no_real_process_signals_nothing() {
+        // Before the guard, "0" signalled this test's own process group and
+        // "-1" every process the user owns; this test reaching its assert is
+        // the witness.
+        for text in [
+            "0",
+            "-1",
+            "1",
+            "2147483648",
+            "-2147483648",
+            "garbage",
+            "",
+            "  \n",
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let pid_file = dir.path().join(GPU_ENDPOINT_PID_FILE);
+            std::fs::write(&pid_file, text).expect("write");
+            reap_gpu_endpoint(dir.path());
+            assert!(!pid_file.exists(), "{text:?}");
+        }
     }
 
     #[test]

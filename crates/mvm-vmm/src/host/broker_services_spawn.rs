@@ -584,12 +584,11 @@ pub fn reap_broker(state_dir: &Path) {
 }
 
 pub(crate) fn read_pid(path: &Path) -> Option<libc::pid_t> {
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+    super::process_liveness::read_pid_file(path)
 }
 
 pub(crate) fn pid_alive(pid: libc::pid_t) -> bool {
-    // SAFETY: kill(pid, 0) only probes for existence and delivers no signal.
-    unsafe { libc::kill(pid, 0) == 0 }
+    super::process_liveness::pid_is_alive(pid)
 }
 
 pub(crate) fn kill(pid: libc::pid_t, sig: libc::c_int) {
@@ -1134,6 +1133,34 @@ mod tests {
 #[cfg(test)]
 mod broker_spawn_params_builder_tests {
     use super::*;
+
+    #[test]
+    fn read_pid_refuses_pids_that_must_never_be_signalled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("pid");
+        for text in [
+            "0",
+            "-1",
+            "1",
+            "2147483648",
+            "-2147483648",
+            "garbage",
+            "",
+            "  \n",
+        ] {
+            std::fs::write(&path, text).expect("write");
+            assert_eq!(read_pid(&path), None, "{text:?}");
+        }
+        std::fs::write(&path, "4242\n").expect("write");
+        assert_eq!(read_pid(&path), Some(4242));
+    }
+
+    #[test]
+    fn pid_alive_is_false_for_group_and_broadcast_pids() {
+        for pid in [0, -1, libc::pid_t::MIN] {
+            assert!(!pid_alive(pid), "{pid}");
+        }
+    }
 
     /// An empty builder must refuse to finish, naming the first
     /// required field it is missing — never substituting a default.
