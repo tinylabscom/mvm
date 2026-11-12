@@ -130,7 +130,7 @@ fn a_fresh_connection_identifies_both_actual_processes() {
     assert_eq!(reported_child, child.child.id());
     assert_eq!(kernel_peer, i32::try_from(reported_child).unwrap());
     assert_ne!(kernel_peer, i32::try_from(std::process::id()).unwrap());
-    assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+    assert_eq!(stream.read(&mut [0_u8; 1]).unwrap(), 0);
     assert!(child.child.try_wait().unwrap().is_some());
     if let Ok(retained_peer) = connected_peer_pid(&stream) {
         assert_eq!(retained_peer, kernel_peer, "identity is not a live handle");
@@ -225,12 +225,12 @@ fn a_socket_alias_delays_eof_but_shutdown_revokes_all_local_aliases() {
     drop(original);
     peer.set_nonblocking(true).unwrap();
     assert_eq!(
-        peer.read(&mut [0]).unwrap_err().kind(),
+        peer.read(&mut [0_u8; 1]).unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
     );
     alias.shutdown(std::net::Shutdown::Both).unwrap();
     peer.set_nonblocking(false).unwrap();
     peer.set_read_timeout(Some(DEADLINE)).unwrap();
-    assert_eq!(peer.read(&mut [0]).unwrap(), 0);
+    assert_eq!(peer.read(&mut [0_u8; 1]).unwrap(), 0);
     assert!(alias.write_all(b"retired").is_err());
 }
