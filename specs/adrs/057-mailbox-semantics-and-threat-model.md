@@ -323,6 +323,12 @@ window before admission; an absent policy does not imply an infinite default.
 The versioned optional `MailboxGrant.retention` preserves old signed-plan
 bytes when absent; a present duration is an explicit request bounded by host
 policy, and expiry-plus-retention arithmetic fails closed on overflow.
+The workload configures the requested window before the plan is signed; the
+host operator independently configures a maximum. Neither has a permissive
+default: without both, local-durable admission refuses, and a request above
+the host maximum refuses rather than being silently clamped. Changing the
+maximum affects new acceptance, not the recovery or retention deadline of
+messages already accepted under a verified signed plan and custody binding.
 Compaction first durably publishes an encrypted, destination-authenticated
 snapshot of still-live delivery state and dedup tombstones through each
 message's expiry plus that window, then advances the local chain head, and
