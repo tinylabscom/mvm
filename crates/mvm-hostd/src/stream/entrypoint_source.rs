@@ -205,7 +205,7 @@ mod tests {
         pub(super) _dir: TempDir,
     }
 
-    fn fixture_with(vm: &str, seam: StreamRedaction) -> Fixture {
+    pub(super) fn fixture_with(vm: &str, seam: StreamRedaction) -> Fixture {
         let dir = tempfile::tempdir().expect("tempdir");
         let config = stream_capture_config(StreamCaptureIdentity {
             capture_id: format!("capture-{vm}"),
@@ -347,7 +347,7 @@ mod tests {
 
     /// A seam that refuses to vouch for anything — the shape a detector with a
     /// timeout or a crashed subprocess presents.
-    struct FailingRedactor;
+    pub(super) struct FailingRedactor;
 
     impl StreamRedactor for FailingRedactor {
         fn redact(&self, _body: &[u8]) -> Result<Redacted, RedactionFailed> {

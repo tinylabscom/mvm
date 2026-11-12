@@ -110,9 +110,11 @@ The signed message is the domain followed by this fixed field order:
   UTF-8, each at most 512 bytes;
 - plan ID (decoded 32-byte content address), plan nonce decoded from its
   canonical lowercase hex into 16 bytes, and startup SHA-256 (32 bytes);
-- registration instance, run, producer, session and call UUIDs (16 bytes each);
-- native boot nonce (32 bytes) and protected capture run as a length-prefixed
-  UTF-8 value, at most 128 bytes;
+- the **complete canonical registration instance string**, a big-endian u16
+  byte length followed by 1..512 UTF-8 bytes, including its VM prefix and `/`;
+- registration run, producer, session and call UUIDs (16 bytes each);
+- native boot nonce (32 bytes) and protected capture run as a big-endian u16
+  byte length followed by 1..128 UTF-8 bytes;
 - kernel-observed producer and supervisor PIDs, unsigned big-endian u32;
 - a fresh receiver-generated 32-byte connection challenge;
 - receiver issuance and expiry seconds, unsigned big-endian u64.
@@ -124,6 +126,75 @@ registration validity interval; future issuance refuses. A separate monotonic
 exchange deadline cannot be extended by peer traffic or wall-clock movement.
 Consume the permit exactly once after successful authentication and before
 the first append. Failed authentication consumes no producer sequence.
+
+Validate the instance with the existing
+[`RegistrationBinding::instance_vm`](../../crates/mvm-core/src/crypto/entrypoint_delegation.rs#L81-L95)
+rule and require its VM component to equal the separately bound native VM name.
+Sign the entire original canonical `vm/uuid` string, not only its UUID suffix.
+Uppercase, unhyphenated, braced or otherwise alternate UUID spellings and nil
+instance UUIDs refuse; do not normalize them before signing or comparison.
+
+All UUID fields use the 16 bytes returned by `Uuid::as_bytes`, in network byte
+order, and must be nonnil. All integer fields above are unsigned big-endian.
+Length prefixes count UTF-8 **bytes**, not characters; tenant/native VM labels
+are nonempty and bounded by 512 bytes, with control characters refused.
+The native VM must also pass the existing instance VM-name rule. The plan ID
+must be `sha256:` followed by exactly 64 lowercase hex digits; only its decoded
+digest is encoded. The nonce likewise decodes exactly 32 lowercase hex digits.
+Capture-run text is nonempty, at most 128 bytes and control-free. PIDs must
+exceed one. The connection challenge and native boot nonce must be nonzero.
+Reject invalid/truncated UTF-8, oversized or inconsistent lengths, unknown
+versions/tags and trailing bytes without accepting a partial proof.
+
+Require `registration.not_before <= issued <= now < expires <=
+registration.not_after` and `0 < expires - issued <= 30`, using checked
+arithmetic. The registration validity interval comes from retained context,
+not additional producer-selected wire fields. The separate monotonic deadline
+still bounds the exchange. The signed message is exactly the NUL-terminated
+domain plus these fields; it excludes the outer frame length/tag and the
+signature itself. A Proof frame carries the fields followed by exactly 64
+signature bytes. Its declared length counts tag plus body, not its four-byte
+length prefix. Even at the field ceilings it is at most **2022 encoded bytes**,
+including framing, within the unchanged 4096-byte ceiling.
+
+### Deterministic encoding vectors
+
+The [complete golden messages and signatures](../../crates/mvm-hostd/src/stream/owned_capture_proof_vectors.json)
+are test data, not runtime credentials or receiver receipts. Concatenate each
+`message_hex` array in order; it includes the NUL-terminated domain and all
+signed fields, not outer framing. The private
+[reference codec and tests](../../crates/mvm-hostd/src/stream/owned_capture_proof_tests.rs#L1)
+use the public RFC 8032 test-vector key and the actual `RegistrationBinding`
+type/instance validator. An independent Python Ed25519 encoder generated the
+fixed expected bytes/signatures; the Rust tests must reproduce them exactly,
+not regenerate expected values from the encoder being tested.
+
+Common fixture inputs:
+
+- installation UUID `00112233-4455-6677-8899-aabbccddeeff`;
+  public key `d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a`;
+- native VM `vm-a`; complete instance
+  `vm-a/11223344-5566-7788-99aa-bbccddeeff00`;
+- plan digest 32 bytes `0x22`, plan nonce 16 bytes `0x33`,
+  startup digest 32 bytes `0x44`, native boot nonce 32 bytes `0x55`;
+- run/producer/session UUIDs `Uuid::from_u128(2)`, `Uuid::from_u128(3)` and
+  `Uuid::from_u128(4)`, respectively; capture run text `4242`,
+  producer/supervisor PIDs `1234/5678`;
+- issuance/expiry `110/120`; retained registration validity `100/200`;
+  verification time `111`.
+
+| Vector | Tenant | Call UUID | Challenge | Signed message bytes | SHA-256 of signed message |
+| --- | --- | --- | --- | --- | --- |
+| ASCII | `tenant-a` | `Uuid::from_u128(5)` | 32 bytes `0x66` | 382 | `e927e890e94ac9ecac6c1ea53955b339c6515d3db5f509179f29cf51ea6c8d8b` |
+| UTF-8 byte length | `tenant-é` | `Uuid::from_u128(6)` | 32 bytes `0x77` | 383 | `bb349c869d2500d1bc44ce6e26036b3514f9d20cbf524971939f846f3bca3784` |
+
+Negative cases reject alternate instance spelling, nil instance UUID, VM
+mismatch, zero/oversized/inconsistent/truncated lengths, malformed UTF-8,
+unknown tag/version, trailing bytes, changed binding/challenge and another
+signing domain. Invalid canonical instances are rejected even with a valid
+fixture-key signature over their unnormalized bytes. These are deterministic
+encoding/validation and signature-math checks only: they do not authorize
+installation, authenticate a real socket/peer or implement a credential call.
 
 ### One-call spend and retirement
 
@@ -291,8 +362,8 @@ and offered/local-loss counters. Retire the producer under the same owner
 serialization as accepted-frame draining. Return a final counts-only summary
 after all earlier fragments have dispositions. The final deadline cancels any
 longer frame-exchange wait; do not join an uninterruptible worker on the
-guest-callback thread. A lost final reply remains unconfirmed even if
-individual accepted frames were observed.
+guest-callback thread. A lost final reply leaves **final close unconfirmed**;
+it does not erase validated per-frame dispositions.
 
 At terminal, first close the local offer side and freeze the offered/queued
 accounting cut. Drain only that already-queued prefix within the **single**
@@ -304,6 +375,74 @@ last sequence and counts against retained state before reporting completion;
 a short, conflicting or lost summary cannot project success. Runtime tests
 must race terminal/cancellation with a full local queue and an in-flight
 owner append, and independently verify the protected readback.
+
+### Original-payload units and conservation
+
+An offered fragment is one nonempty stdout/stderr fragment after splitting at
+16 KiB, not one guest write/event. Every byte counter counts its original
+payload **before redaction**, excluding framing and receipt bytes. A masked
+copy or withheld marker may have a different stored length. Count a withheld
+fragment's original bytes as owner acceptance with a withheld disposition,
+not as an additional drop or as the marker's length.
+
+Freeze the set of offered fragments and its totals at terminal. Within the
+single 250 ms ceiling, settle each fragment in that frozen set **exactly once**:
+
+- `L`: provably unsent local drop, including queued fragments abandoned at the
+  deadline;
+- `D`: owner drop with a validated Dropped receipt;
+- `A`: owner acceptance with a validated Accepted disposition;
+- `U`: possibly sent without a validated disposition, therefore unconfirmed.
+
+For both fragment counts and original-payload byte totals, require:
+
+```text
+offered = L + D + A + U
+A = identical + masked + withheld
+```
+
+The accepted subcategories are mutually exclusive and exhaustive; they are
+not extra fragments/bytes to add to the first equation. During draining,
+queued/provably-unsent and in-flight slots are transitional bookkeeping,
+not permission to declare the four-way settlement complete. On cancellation
+or deadline, classify those slots as `L` or `U` respectively. Use checked
+addition, subtraction and counter advancement. Overflow, inconsistency or
+an unsettled slot refuses a confirming summary; never wrap or silently cap
+counts into a success result.
+
+Send Finish only after all queued fragments have validated dispositions.
+For a normal confirming Final, require all of the following:
+
+1. Finish was sent for this retained call/connection and its frozen cut;
+   compare Final's challenge against that exact connection's retained nonce.
+   The nonce maps to the independently retained run/call, not to a new
+   caller-supplied binding. An unsolicited, duplicate, late or conflicting
+   Final cannot confirm completion.
+2. Final's last processed sequence equals Finish's last queued sequence and
+   the checked sum of accepted plus owner-dropped **fragment** counts.
+   `U` is zero and no queued/in-flight slot remains.
+3. Final's accepted/dropped fragment and original-byte totals exactly match
+   the locally accumulated, validated per-frame dispositions.
+4. Final's masked/withheld fragment counts exactly match those dispositions.
+   Infer identical fragments by checked subtraction from accepted fragments;
+   their subcategory sum must equal accepted fragments. Retain the original
+   byte subcategories locally from the per-frame dispositions; Final does not
+   add new masked/withheld byte fields or attest to the client's local drops.
+5. The settled four-way partition and accepted-subcategory equation hold for
+   both fragments and original bytes. Client-offered and local-drop totals
+   remain client observations, not independently attested owner facts.
+
+If Final is lost after every frame disposition was validated, retain `A`,
+`D` and accepted subcategories as known. Set final-close confirmation to
+unconfirmed; **do not add their payload again to `U`**. A possibly sent
+fragment lacking its own validated disposition remains in `U`, even if the
+owner may have appended it. A later readback is separate evidence, not an
+invented lost receipt. A valid Final may confirm close with known drops;
+that still does not mean all output was accepted, retained or durable.
+
+The 250 ms budget is a ceiling, not a promise to drain 64 queued fragments or
+finish an exchange allowed up to two seconds. Exhaustion keeps conservative
+loss/final-close status. Recorder pressure never cancels guest execution.
 
 Proposed owned-path client result has independent fields for:
 
@@ -354,13 +493,21 @@ serialized spend/retirement, competing completed-verifier callbacks, sequence
 refusal, bounded frame/byte accounting, a frozen terminal cut, unsent versus
 unconfirmed copies, and validation/loss of final replies.
 
-Its binding values and connection IDs are **fixtures**, not the canonical
-proof encoding, enrolled identities, verified peers, original child handles
-or startup permits. It assumes the verifier's facts; it authenticates no
-one. The queue and receiver driver are a small deterministic reference
-model, not the production callback/IPC implementation. It does not qualify
-clock deadlines, counter overflow, append-versus-retirement concurrency,
-signature/session verification or the complete public divergence report.
+The receiver model's binding values and connection IDs are **fixtures**, not
+enrolled identities, verified peers, original child handles or startup
+permits. It assumes the verifier's facts; it authenticates no one. Separate
+private proof-vector tests exercise the canonical byte encoding and fixture
+signature verification, not a credential operation or real session.
+The [reconciliation cases](../../crates/mvm-hostd/src/stream/owned_capture_reconciliation_tests.rs#L1)
+check original fragment/byte conservation, checked overflow refusal, accepted
+subcategories, nonce/call/sequence/count conflicts, in-flight loss and lost
+Final without double-counting known dispositions. They include actual broker
+withholding where the marker's stored length differs from the input count.
+The queue/receiver driver is still a deterministic reference model, not the
+production callback/IPC implementation. These tests do not qualify runtime
+clock deadlines/overflow paths, actual permit establishment, signature/session
+peer authentication, append-versus-retirement concurrency, native FD custody
+or the complete public divergence report.
 
 Component cases pass queued synthetic bytes through the existing
 `EntrypointSink`/`StreamBroker`: returned bytes remain unchanged, the actual

@@ -34,12 +34,12 @@ use std::process::Command;
 
 use crate::rust_source::{CommentSyntax, blank_comments};
 
-// Include the test-only owned-capture reference model and native socket custody
-// checks. Keep all test code measured; ceilings match the CI merge candidate.
+// Include canonical proof and original-payload reconciliation qualification.
+// Keep all test code measured; ceilings match the current CI merge candidate.
 /// Ceiling on total SLOC, all categories.
-const MAX_TOTAL_SLOC: usize = 966_707;
+const MAX_TOTAL_SLOC: usize = 967_545;
 /// Ceiling on total physical lines, all categories.
-const MAX_TOTAL_PHYSICAL: usize = 1_232_085;
+const MAX_TOTAL_PHYSICAL: usize = 1_232_978;
 /// How far under a ceiling the tree may sit before the ceiling must drop.
 const SLACK: usize = 10_000;
 

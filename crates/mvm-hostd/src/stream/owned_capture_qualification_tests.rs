@@ -1,14 +1,20 @@
 //! Test-only executable reference model, not a capture receiver or credential API.
 //!
 //! Binding values and connection IDs are fixtures representing independently
-//! verified facts. No signature, actual peer, startup permit or HVF call is
-//! authenticated here. Broker tests use the existing real redaction/encrypted
-//! transcript seam, not a supervisor or public audited output-reader witness.
+//! verified facts. No actual peer, startup permit or HVF call is authenticated.
+//! The proof-vector child checks fixture signature math only. Broker tests use
+//! the existing real redaction/encrypted transcript seam, not a supervisor or
+//! public audited output-reader witness.
 
 use super::tests::{Fixture, fixture};
 use super::*;
 use std::collections::VecDeque;
 use std::sync::{Barrier, Mutex};
+
+#[path = "owned_capture_proof_tests.rs"]
+mod proof_vectors;
+#[path = "owned_capture_reconciliation_tests.rs"]
+mod reconciliation;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FixtureBinding {
@@ -27,6 +33,12 @@ fn binding() -> FixtureBinding {
     }
 }
 
+fn fixture_challenge(connection: u64) -> [u8; 32] {
+    let mut challenge = [0; 32];
+    challenge[..8].copy_from_slice(&connection.to_be_bytes());
+    challenge
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Refusal {
     Binding,
@@ -39,6 +51,7 @@ enum Refusal {
     Window,
     NotDrained,
     Receipt,
+    Overflow,
 }
 
 #[derive(Debug)]
@@ -84,6 +97,7 @@ impl ModelPermit {
         Ok(ModelConnection {
             permit: Arc::clone(self),
             id: connection,
+            challenge: fixture_challenge(connection),
         })
     }
 
@@ -95,6 +109,7 @@ impl ModelPermit {
 struct ModelConnection {
     permit: Arc<ModelPermit>,
     id: u64,
+    challenge: [u8; 32],
 }
 
 impl ModelConnection {
@@ -109,7 +124,11 @@ impl ModelConnection {
                     *slot = Slot::Retired;
                     return Err(Refusal::Sequence);
                 }
-                *next = next.checked_add(1).expect("bounded model sequences");
+                let Some(advanced) = next.checked_add(1) else {
+                    *slot = Slot::Retired;
+                    return Err(Refusal::Overflow);
+                };
+                *next = advanced;
                 Ok(())
             }
             Slot::Bound => Err(Refusal::Connection),
@@ -120,7 +139,9 @@ impl ModelConnection {
     fn close(&self, last: u64) -> Result<(), Refusal> {
         let mut slot = self.permit.slot.lock().unwrap();
         match *slot {
-            Slot::Spent { connection, next } if connection == self.id && last == next - 1 => {
+            Slot::Spent { connection, next }
+                if connection == self.id && last.checked_add(1) == Some(next) =>
+            {
                 *slot = Slot::Retired;
                 Ok(())
             }
@@ -137,9 +158,33 @@ struct Count {
 }
 
 impl Count {
-    fn add(&mut self, bytes: usize) {
-        self.frames += 1;
-        self.bytes += u64::try_from(bytes).unwrap();
+    fn one(bytes: usize) -> Result<Self, Refusal> {
+        Ok(Self {
+            frames: 1,
+            bytes: u64::try_from(bytes).map_err(|_| Refusal::Overflow)?,
+        })
+    }
+
+    fn plus(self, other: Self) -> Result<Self, Refusal> {
+        Ok(Self {
+            frames: self
+                .frames
+                .checked_add(other.frames)
+                .ok_or(Refusal::Overflow)?,
+            bytes: self
+                .bytes
+                .checked_add(other.bytes)
+                .ok_or(Refusal::Overflow)?,
+        })
+    }
+
+    fn add(&mut self, bytes: usize) -> Result<(), Refusal> {
+        *self = self.plus(Self::one(bytes)?)?;
+        Ok(())
+    }
+
+    fn sum(counts: impl IntoIterator<Item = Self>) -> Result<Self, Refusal> {
+        counts.into_iter().try_fold(Self::default(), Self::plus)
     }
 }
 
@@ -151,8 +196,10 @@ struct Fragment {
 
 struct ModelReceipt {
     connection: u64,
+    challenge: [u8; 32],
     sequence: u64,
     broker_sequence: Option<u64>,
+    dropped_bytes: Option<u32>,
     copy: RecordedCopy,
 }
 
@@ -160,9 +207,12 @@ struct ModelReceipt {
 struct ModelFinal {
     binding: FixtureBinding,
     connection: u64,
+    challenge: [u8; 32],
     through: u64,
     accepted: Count,
     owner_dropped: Count,
+    masked: u64,
+    withheld: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -189,6 +239,9 @@ struct ModelProducer {
     owner_dropped: Count,
     accepted: Count,
     unconfirmed: Count,
+    // Identical, masked, withheld: subcategories, never extra partition terms.
+    dispositions: [Count; 3],
+    accounting_invalid: bool,
 }
 
 impl ModelProducer {
@@ -210,6 +263,8 @@ impl ModelProducer {
             owner_dropped: Count::default(),
             accepted: Count::default(),
             unconfirmed: Count::default(),
+            dispositions: [Count::default(); 3],
+            accounting_invalid: false,
         }
     }
 
@@ -223,15 +278,25 @@ impl ModelProducer {
         if body.is_empty() {
             return Ok(None);
         }
-        self.offered.add(body.len());
-        if self.queue.len() == self.frame_limit || self.queued_bytes + body.len() > self.byte_limit
-        {
-            self.local_dropped.add(body.len());
+        if self.offered.add(body.len()).is_err() {
+            return Err(self.accounting_failure());
+        }
+        let Some(queued_bytes) = self.queued_bytes.checked_add(body.len()) else {
+            return Err(self.accounting_failure());
+        };
+        if self.queue.len() == self.frame_limit || queued_bytes > self.byte_limit {
+            if self.local_dropped.add(body.len()).is_err() {
+                return Err(self.accounting_failure());
+            }
             return Ok(None);
         }
         let sequence = self.next;
-        self.next += 1;
-        self.queued_bytes += body.len();
+        let Some(next) = self.next.checked_add(1) else {
+            let _ = self.local_dropped.add(body.len());
+            return Err(self.accounting_failure());
+        };
+        self.next = next;
+        self.queued_bytes = queued_bytes;
         self.queue.push_back(Fragment {
             sequence,
             kind,
@@ -250,9 +315,15 @@ impl ModelProducer {
         let Some(frame) = self.queue.pop_front() else {
             return Ok(None);
         };
-        self.queued_bytes -= frame.body.len();
+        let Some(queued_bytes) = self.queued_bytes.checked_sub(frame.body.len()) else {
+            let _ = self.local_dropped.add(frame.body.len());
+            return Err(self.accounting_failure());
+        };
+        self.queued_bytes = queued_bytes;
         if let Err(error) = self.connection.claim_fragment(frame.sequence) {
-            self.local_dropped.add(frame.body.len());
+            if self.local_dropped.add(frame.body.len()).is_err() {
+                return Err(self.accounting_failure());
+            }
             self.abort();
             return Err(error);
         }
@@ -262,12 +333,20 @@ impl ModelProducer {
 
     fn confirm(&mut self, receipt: ModelReceipt) -> Result<(), Refusal> {
         let Some((sequence, bytes)) = self.pending else {
+            self.abort();
             return Err(Refusal::Receipt);
         };
         let recorded = !matches!(receipt.copy, RecordedCopy::NotRecorded);
         if receipt.connection != self.connection.id
+            || receipt.challenge != self.connection.challenge
             || receipt.sequence != sequence
             || recorded != receipt.broker_sequence.is_some()
+            || (recorded && receipt.dropped_bytes.is_some())
+            || (!recorded
+                && receipt
+                    .dropped_bytes
+                    .and_then(|count| usize::try_from(count).ok())
+                    != Some(bytes))
             || receipt.broker_sequence.is_some_and(|seq| {
                 self.last_broker_sequence
                     .is_some_and(|previous| seq <= previous)
@@ -276,14 +355,32 @@ impl ModelProducer {
             self.abort();
             return Err(Refusal::Receipt);
         }
-        if recorded {
-            self.accepted.add(bytes);
-            self.last_broker_sequence = receipt.broker_sequence;
-        } else {
-            self.owner_dropped.add(bytes);
+        if self.apply_disposition(&receipt.copy, bytes).is_err() {
+            return Err(self.accounting_failure());
         }
+        self.last_broker_sequence = receipt.broker_sequence.or(self.last_broker_sequence);
         self.pending = None;
         Ok(())
+    }
+
+    fn apply_disposition(&mut self, copy: &RecordedCopy, bytes: usize) -> Result<(), Refusal> {
+        let index = match copy {
+            RecordedCopy::NotRecorded => return self.owner_dropped.add(bytes),
+            RecordedCopy::Identical => 0,
+            RecordedCopy::Masked { .. } => 1,
+            RecordedCopy::Withheld { .. } => 2,
+        };
+        let accepted = self.accepted.plus(Count::one(bytes)?)?;
+        let category = self.dispositions[index].plus(Count::one(bytes)?)?;
+        self.accepted = accepted;
+        self.dispositions[index] = category;
+        Ok(())
+    }
+
+    fn accounting_failure(&mut self) -> Refusal {
+        self.accounting_invalid = true;
+        self.abort();
+        Refusal::Overflow
     }
 
     fn abort(&mut self) {
@@ -292,11 +389,15 @@ impl ModelProducer {
         }
         self.phase = ProducerPhase::Aborted;
         self.connection.permit.retire();
-        if let Some((_, bytes)) = self.pending.take() {
-            self.unconfirmed.add(bytes);
+        if let Some((_, bytes)) = self.pending.take()
+            && self.unconfirmed.add(bytes).is_err()
+        {
+            self.accounting_invalid = true;
         }
         for frame in self.queue.drain(..) {
-            self.local_dropped.add(frame.body.len());
+            if self.local_dropped.add(frame.body.len()).is_err() {
+                self.accounting_invalid = true;
+            }
         }
         self.queued_bytes = 0;
     }
@@ -319,14 +420,25 @@ impl ModelProducer {
         if self.phase != ProducerPhase::Frozen || !self.queue.is_empty() || self.pending.is_some() {
             return Err(Refusal::NotDrained);
         }
-        self.connection.close(self.next - 1)?;
+        let through = self.next.checked_sub(1).ok_or(Refusal::Overflow)?;
+        if !self.partition_valid()
+            || self.accepted.plus(self.owner_dropped)?.frames != through
+            || self.unconfirmed != Count::default()
+        {
+            self.abort();
+            return Err(Refusal::Receipt);
+        }
+        self.connection.close(through)?;
         self.phase = ProducerPhase::FinishSent;
         Ok(ModelFinal {
             binding: self.connection.permit.expected.clone(),
             connection: self.connection.id,
-            through: self.next - 1,
+            challenge: self.connection.challenge,
+            through,
             accepted: self.accepted,
             owner_dropped: self.owner_dropped,
+            masked: self.dispositions[1].frames,
+            withheld: self.dispositions[2].frames,
         })
     }
 
@@ -336,9 +448,24 @@ impl ModelProducer {
             || !self.queue.is_empty()
             || reply.binding != self.connection.permit.expected
             || reply.connection != self.connection.id
-            || reply.through != self.next - 1
+            || reply.challenge != self.connection.challenge
+            || reply.through.checked_add(1) != Some(self.next)
             || reply.accepted != self.accepted
             || reply.owner_dropped != self.owner_dropped
+            || reply.masked != self.dispositions[1].frames
+            || reply.withheld != self.dispositions[2].frames
+            || reply
+                .accepted
+                .plus(reply.owner_dropped)
+                .map(|count| count.frames)
+                != Ok(reply.through)
+            || reply
+                .masked
+                .checked_add(reply.withheld)
+                .and_then(|count| reply.accepted.frames.checked_sub(count))
+                != Some(self.dispositions[0].frames)
+            || !self.partition_valid()
+            || self.unconfirmed != Count::default()
         {
             self.abort();
             return Err(Refusal::Receipt);
@@ -349,31 +476,35 @@ impl ModelProducer {
 
     fn complete(&self) -> bool {
         self.phase == ProducerPhase::Closed
+            && self.partition_valid()
             && self.accepted == self.offered
             && self.local_dropped == Count::default()
             && self.owner_dropped == Count::default()
             && self.unconfirmed == Count::default()
     }
 
-    fn accounted(&self) -> Count {
+    fn partition_valid(&self) -> bool {
+        !self.accounting_invalid
+            && self.accounted() == Ok(self.offered)
+            && Count::sum(self.dispositions) == Ok(self.accepted)
+    }
+
+    fn accounted(&self) -> Result<Count, Refusal> {
         let pending = self.pending.map_or(Count::default(), |(_, bytes)| Count {
             frames: 1,
             bytes: u64::try_from(bytes).unwrap(),
         });
-        Count {
-            frames: self.accepted.frames
-                + self.local_dropped.frames
-                + self.owner_dropped.frames
-                + self.unconfirmed.frames
-                + u64::try_from(self.queue.len()).unwrap()
-                + pending.frames,
-            bytes: self.accepted.bytes
-                + self.local_dropped.bytes
-                + self.owner_dropped.bytes
-                + self.unconfirmed.bytes
-                + u64::try_from(self.queued_bytes).unwrap()
-                + pending.bytes,
-        }
+        Count::sum([
+            self.accepted,
+            self.local_dropped,
+            self.owner_dropped,
+            self.unconfirmed,
+            Count {
+                frames: u64::try_from(self.queue.len()).map_err(|_| Refusal::Overflow)?,
+                bytes: u64::try_from(self.queued_bytes).map_err(|_| Refusal::Overflow)?,
+            },
+            pending,
+        ])
     }
 }
 
@@ -396,8 +527,12 @@ fn record(
     };
     let receipt = ModelReceipt {
         connection: producer.connection.id,
+        challenge: producer.connection.challenge,
         sequence: frame.sequence,
         broker_sequence,
+        dropped_bytes: broker_sequence
+            .is_none()
+            .then(|| u32::try_from(frame.body.len()).unwrap()),
         copy: shown.recorded.clone(),
     };
     (shown, receipt)
@@ -506,7 +641,11 @@ fn model_lost_ready_and_empty_output_never_refund_a_spent_permit() {
 fn model_foreign_connection_cannot_consume_the_winners_sequence() {
     let permit = ModelPermit::new(binding());
     let winner = permit.spend(&binding(), 10).unwrap();
-    let foreign = ModelConnection { permit, id: 11 };
+    let foreign = ModelConnection {
+        permit,
+        id: 11,
+        challenge: winner.challenge,
+    };
     assert_eq!(foreign.claim_fragment(1), Err(Refusal::Connection));
     assert_eq!(winner.claim_fragment(1), Ok(()));
     assert_eq!(winner.claim_fragment(1), Err(Refusal::Sequence));
@@ -529,9 +668,9 @@ fn model_pressure_is_accounted_in_frames_and_bytes() {
             bytes: 4
         }
     );
-    assert_eq!(producer.accounted(), producer.offered);
+    assert_eq!(producer.accounted(), Ok(producer.offered));
     producer.abort();
-    assert_eq!(producer.accounted(), producer.offered);
+    assert_eq!(producer.accounted(), Ok(producer.offered));
     assert!(!producer.complete());
 }
 
@@ -589,7 +728,7 @@ fn model_abort_distinguishes_unsent_from_possibly_sent() {
             bytes: 2
         }
     );
-    assert_eq!(producer.accounted(), producer.offered);
+    assert_eq!(producer.accounted(), Ok(producer.offered));
     assert!(!producer.complete());
 }
 
@@ -689,8 +828,10 @@ fn model_wrong_or_incomplete_receipt_does_not_clear_uncertainty() {
         assert_eq!(
             producer.confirm(ModelReceipt {
                 connection,
+                challenge: producer.connection.challenge,
                 sequence,
                 broker_sequence,
+                dropped_bytes: None,
                 copy: RecordedCopy::Identical,
             }),
             Err(Refusal::Receipt)
@@ -727,9 +868,12 @@ fn model_an_unsolicited_final_cannot_close_an_unfinished_call() {
     let unsolicited = ModelFinal {
         binding: binding(),
         connection: producer.connection.id,
+        challenge: producer.connection.challenge,
         through: 0,
         accepted: Count::default(),
         owner_dropped: Count::default(),
+        masked: 0,
+        withheld: 0,
     };
     assert_eq!(producer.confirm_final(&unsolicited), Err(Refusal::Receipt));
     assert!(!producer.complete());
