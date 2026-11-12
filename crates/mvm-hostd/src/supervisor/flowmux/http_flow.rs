@@ -293,24 +293,16 @@ pub(super) fn spawn_forward(task: ForwardTask) {
     runtime.spawn(async move {
         let request_url = head.url.clone();
         // A typed HTTP flow names no invocation, so it belongs to no tool.
-        let result = tokio::select! {
-            biased;
-            canceled = cancellation.changed() => {
-                let reason = if canceled.is_ok() {
-                    "guest_reset"
-                } else {
-                    "session_closed"
-                };
-                service.audit_http_stream_failure(&request_url, reason).await;
-                Ok(())
-            }
-            response = service.process_body_stream(head, body) => {
-                match response {
-                    Ok(response) => write_stream_response(&session, &writer, stream_id, response).await,
-                    Err(refusal) => write_response(&session, &writer, stream_id, refusal),
-                }
+        let forward = async {
+            match service.process_body_stream(head, body).await {
+                Ok(response) => write_stream_response(&session, &writer, stream_id, response).await,
+                Err(refusal) => write_response(&session, &writer, stream_id, refusal),
             }
         };
+        let result = run_until_canceled(&mut cancellation, forward, |reason| {
+            service.audit_http_stream_failure(&request_url, reason)
+        })
+        .await;
         cancellations
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -327,6 +319,37 @@ pub(super) fn spawn_forward(task: ForwardTask) {
             );
         }
     });
+}
+
+/// Run `work` until it finishes or the flow is canceled, whichever is first.
+///
+/// `work` has to be the whole forward, response framing included. A guest
+/// `Reset` retires the stream on the guest's validator, so a frame the host
+/// still sends for it afterwards is a protocol error that ends the session and
+/// every other flow on it; a cancellation that stops being watched once the
+/// response head is ready would let exactly that happen mid-body.
+async fn run_until_canceled<W, A>(
+    cancellation: &mut tokio::sync::watch::Receiver<bool>,
+    work: W,
+    audit_failure: impl FnOnce(&'static str) -> A,
+) -> Result<(), super::FlowMuxError>
+where
+    W: std::future::Future<Output = Result<(), super::FlowMuxError>>,
+    A: std::future::Future<Output = ()>,
+{
+    tokio::select! {
+        biased;
+        canceled = cancellation.changed() => {
+            let reason = if canceled.is_ok() {
+                "guest_reset"
+            } else {
+                "session_closed"
+            };
+            audit_failure(reason).await;
+            Ok(())
+        }
+        result = work => result,
+    }
 }
 
 /// Frame a bounded upstream stream without collecting its body in host
@@ -550,6 +573,37 @@ mod tests {
                 .is_empty()
         );
         assert!(!cancel_forwarding(&cancellations, 9));
+    }
+
+    #[tokio::test]
+    async fn a_reset_while_the_response_is_still_streaming_stops_the_forward() {
+        let (sender, mut receiver) = tokio::sync::watch::channel(false);
+        let (frames_tx, mut frames_rx) = tokio::sync::mpsc::unbounded_channel::<u8>();
+        // Stands in for response framing: one chunk goes out, then the task
+        // waits on the upstream for the next, which never arrives.
+        let streaming = async move {
+            frames_tx.send(1).unwrap();
+            std::future::pending::<()>().await;
+            frames_tx.send(2).unwrap();
+            Ok(())
+        };
+        let audited = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let audit_log = std::sync::Arc::clone(&audited);
+        let forward = tokio::spawn(async move {
+            run_until_canceled(&mut receiver, streaming, |reason| async move {
+                audit_log.lock().unwrap().push(reason);
+            })
+            .await
+        });
+        assert_eq!(frames_rx.recv().await, Some(1));
+        sender.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), forward)
+            .await
+            .expect("a canceled forward must not outlive its stream")
+            .unwrap()
+            .unwrap();
+        assert_eq!(*audited.lock().unwrap(), ["guest_reset"]);
+        assert_eq!(frames_rx.recv().await, None, "no frame follows the reset");
     }
 
     #[test]

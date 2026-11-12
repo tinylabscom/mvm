@@ -163,7 +163,6 @@ pub(super) fn run_udp_relay(params: UdpRelayParams) {
                 UDP_SOCKET => loop {
                     match socket.recv_from(&mut buf) {
                         Ok((len, source)) => {
-                            activity_this_iter = true;
                             let already_peer = peers.contains(&source);
                             if !inbound_admitted(
                                 peer_admission,
@@ -171,8 +170,13 @@ pub(super) fn run_udp_relay(params: UdpRelayParams) {
                                 peers.len(),
                                 max_peers,
                             ) {
+                                // Dropped traffic is not the guest's activity:
+                                // counting it would let anyone on the host's
+                                // network who finds the port hold the
+                                // association, and its slot, open forever.
                                 continue;
                             }
+                            activity_this_iter = true;
                             peers.insert(source);
                             let mut payload = encode_udp_addr(source.ip(), source.port());
                             payload.extend_from_slice(&buf[..len]);
