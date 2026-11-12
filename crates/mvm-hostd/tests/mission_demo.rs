@@ -1222,6 +1222,8 @@ fn local_mailbox_service_returns_exact_signed_v2_receipt_after_restart() {
             limits,
             &custody,
             &anchor,
+            mvm_contract::protocol::mailbox::MailboxRetentionPolicy::new(10_000)
+                .expect("test retention"),
         )
         .expect("recover local journal");
         DurableMailboxService::bind_local(
@@ -1375,6 +1377,8 @@ fn local_mailbox_service_returns_exact_signed_v2_receipt_after_restart() {
         limits,
         &custody,
         &foreign_anchor,
+        mvm_contract::protocol::mailbox::MailboxRetentionPolicy::new(10_000)
+            .expect("test retention"),
     )
     .expect("empty history under a different authority");
     assert!(

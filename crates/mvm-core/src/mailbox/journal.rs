@@ -18,9 +18,10 @@ use hmac::{Hmac, Mac, digest::KeyInit};
 use mvm_contract::protocol::mailbox::{
     ContentType, DELIVERY_ACK_SIGNATURE_DOMAIN, DeliveryLeaseNonce, DeliveryOutcome,
     DestinationReceipt, EncryptionAlgorithm, ExecutionEpoch, MailboxAddress, MailboxDeliveryLease,
-    MailboxEnvelope, MailboxGrant, MailboxGuestReaderScope, MailboxOperation, ProtocolVersion,
-    SignatureAlgorithm, SignedDestinationReceipt, SignedMailboxCapability,
-    SignedMailboxDeliveryAck, SignedMailboxDeliveryLease, SignedMailboxGuestReaderEnrollment,
+    MailboxEnvelope, MailboxGrant, MailboxGuestReaderScope, MailboxOperation,
+    MailboxRetentionPolicy, ProtocolVersion, SignatureAlgorithm, SignedDestinationReceipt,
+    SignedMailboxCapability, SignedMailboxDeliveryAck, SignedMailboxDeliveryLease,
+    SignedMailboxGuestReaderEnrollment,
 };
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -242,6 +243,7 @@ struct JournalKey {
     bytes: Zeroizing<[u8; 32]>,
     reference: Option<HistoryKeyRef>,
     tier: AcceptanceTier,
+    retention: Option<MailboxRetentionPolicy>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -256,6 +258,7 @@ impl JournalKey {
             bytes: Zeroizing::new(bytes),
             reference: None,
             tier: AcceptanceTier::Independent,
+            retention: None,
         }
     }
 }
@@ -331,6 +334,7 @@ pub struct MailboxJournal {
     key: Zeroizing<[u8; 32]>,
     history_key: Option<HistoryKeyRef>,
     tier: AcceptanceTier,
+    retention: Option<MailboxRetentionPolicy>,
     limits: JournalLimits,
     tip: JournalTip,
     bytes: u64,
@@ -742,6 +746,7 @@ impl MailboxJournal {
                 bytes: Zeroizing::new(*key.expose_bytes()),
                 reference: Some(reference),
                 tier: AcceptanceTier::Independent,
+                retention: None,
             },
             limits,
             anchor,
@@ -761,6 +766,7 @@ impl MailboxJournal {
         limits: JournalLimits,
         custody: &impl HistoryKeyCustody,
         anchor: &FileJournalAnchor,
+        retention: MailboxRetentionPolicy,
     ) -> Result<Self, JournalError> {
         reference.validate()?;
         if reference.address != anchor.address {
@@ -775,6 +781,7 @@ impl MailboxJournal {
                 bytes: Zeroizing::new(*key.expose_bytes()),
                 reference: Some(reference),
                 tier: AcceptanceTier::Local,
+                retention: Some(retention),
             },
             limits,
             anchor.tip(),
@@ -831,6 +838,7 @@ impl MailboxJournal {
             key: key.bytes,
             history_key: key.reference,
             tier: key.tier,
+            retention: key.retention,
             limits,
             tip: JournalTip::genesis(),
             bytes: 0,
@@ -937,6 +945,11 @@ impl MailboxJournal {
                         frame::decode_frame(&raw).map_err(|_| JournalError::Corrupt)?;
                     if receipt.delivery_id != envelope.routing.delivery_id
                         || receipt.ciphertext_commitment != envelope.ciphertext_commitment
+                        || journal.retention.is_some_and(|policy| {
+                            policy
+                                .retained_until(envelope.routing.expires_at_unix_ms)
+                                .is_err()
+                        })
                         || journal
                             .seen
                             .insert(
@@ -1183,6 +1196,12 @@ impl MailboxJournal {
                 || reference.execution_epoch != context.current_execution_epoch
         }) {
             return Err(JournalError::HistoryKeyMismatch);
+        }
+        if tier == AcceptanceTier::Local {
+            self.retention
+                .ok_or(JournalError::DurableAuthorityUnavailable)?
+                .retained_until(envelope.routing.expires_at_unix_ms)
+                .map_err(|_| JournalError::InvalidLimits)?;
         }
         let mut probe = Probe::default();
         let opened = open_authenticated_envelope(
@@ -1939,6 +1958,10 @@ mod anchor_tests {
         }
     }
 
+    fn local_retention() -> MailboxRetentionPolicy {
+        MailboxRetentionPolicy::new(10_000).expect("finite test retention")
+    }
+
     fn versioned_custody() -> (HistoryKeyRef, TestCustody) {
         let reference = HistoryKeyRef::new(
             address(),
@@ -2149,6 +2172,7 @@ mod anchor_tests {
             limits(),
             &custody,
             &anchor,
+            local_retention(),
         )
         .expect("empty local journal");
         let accepted = journal
@@ -2184,6 +2208,7 @@ mod anchor_tests {
             limits(),
             &custody,
             &anchor,
+            local_retention(),
         )
         .expect("recover retained ciphertext and dedup");
         context.now_unix_ms += 1;
@@ -2228,10 +2253,50 @@ mod anchor_tests {
                 signer.verifying_key(),
                 limits(),
                 &custody,
-                &anchor
+                &anchor,
+                local_retention(),
             ),
             Err(JournalError::Rollback)
         ));
+    }
+
+    #[test]
+    fn local_acceptance_refuses_retention_deadline_overflow_without_a_record() {
+        let dir = tempfile::tempdir().expect("journal root");
+        let root = dir.path().join("journal");
+        let anchor_path = dir.path().join("anchor").join("tip.json");
+        let (envelope, capability, context, payload_key, sender_key, signer) = message();
+        let (reference, custody) = versioned_custody();
+        let anchor =
+            FileJournalAnchor::open(&anchor_path, address(), [22; 32]).expect("local anchor");
+        let policy = mvm_contract::protocol::mailbox::MailboxRetentionPolicy::new(i64::MAX as u64)
+            .expect("finite but overflowing for this envelope");
+        let mut journal = MailboxJournal::open_local_with_custody(
+            &root,
+            reference,
+            signer.verifying_key(),
+            limits(),
+            &custody,
+            &anchor,
+            policy,
+        )
+        .expect("empty journal");
+        assert!(matches!(
+            journal.admit_local(
+                admission(
+                    &envelope,
+                    &capability,
+                    &context,
+                    &payload_key,
+                    &sender_key,
+                    &signer,
+                ),
+                &anchor,
+            ),
+            Err(JournalError::InvalidLimits)
+        ));
+        assert_eq!(journal.tip(), JournalTip::genesis());
+        assert_eq!(anchor.tip(), JournalTip::genesis());
     }
 
     #[test]
@@ -2250,6 +2315,7 @@ mod anchor_tests {
             limits(),
             &custody,
             &anchor,
+            local_retention(),
         )
         .expect("empty journal");
         journal
@@ -2298,6 +2364,7 @@ mod anchor_tests {
             limits(),
             &custody,
             &anchor,
+            local_retention(),
         )
         .expect("verify and reconcile terminal suffix");
         assert_eq!(anchor.tip().cursor, 2);
@@ -2360,6 +2427,7 @@ mod anchor_tests {
             limits(),
             &custody,
             &anchor,
+            local_retention(),
         )
         .expect("empty journal");
         journal
@@ -2421,6 +2489,7 @@ mod anchor_tests {
                 limits(),
                 &custody,
                 &anchor,
+                local_retention(),
             ),
             Err(JournalError::Corrupt)
         ));

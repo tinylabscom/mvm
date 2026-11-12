@@ -445,6 +445,8 @@ fn local_journal_expiry_recovers_after_interrupted_anchor_commit() {
         limits,
         &custody,
         &anchor,
+        mvm_contract::protocol::mailbox::MailboxRetentionPolicy::new(10_000)
+            .expect("test retention"),
     )
     .expect("empty local journal");
     let accepted = journal
@@ -484,6 +486,8 @@ fn local_journal_expiry_recovers_after_interrupted_anchor_commit() {
         limits,
         &custody,
         &anchor,
+        mvm_contract::protocol::mailbox::MailboxRetentionPolicy::new(10_000)
+            .expect("test retention"),
     )
     .expect("reconcile verified terminal state");
     let expired = journal

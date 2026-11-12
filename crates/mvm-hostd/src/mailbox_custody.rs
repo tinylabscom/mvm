@@ -12,7 +12,7 @@ use anyhow::{Context as _, Result, ensure};
 use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _};
 use mvm_contract::plan::{Nonce, PlanId};
 use mvm_contract::protocol::mailbox::{
-    BootId, EncryptionAlgorithm, ExecutionEpoch, MailboxAddress,
+    BootId, EncryptionAlgorithm, ExecutionEpoch, MailboxAddress, MailboxRetentionPolicy,
 };
 use mvm_core::crypto::aead::Key;
 use mvm_core::mailbox::journal::{HistoryKeyCustody, HistoryKeyRef, JournalError};
@@ -294,6 +294,11 @@ impl RetainedMailboxKeys {
 
     pub(crate) fn epoch(&self) -> ExecutionEpoch {
         self.binding.epoch
+    }
+
+    pub(crate) fn retention(&self) -> Result<MailboxRetentionPolicy> {
+        MailboxRetentionPolicy::new(self.binding.retention_ms)
+            .context("signed mailbox retention is invalid")
     }
 
     pub(crate) fn authority_key(&self) -> [u8; 32] {
@@ -578,6 +583,7 @@ mod tests {
             limits,
             &keys,
             &anchor,
+            keys.retention().expect("signed window"),
         )
         .expect("empty recipient journal");
         let accepted = journal
@@ -621,6 +627,7 @@ mod tests {
             limits,
             &keys,
             &anchor,
+            keys.retention().expect("signed window"),
         )
         .expect("decrypt and authenticate retained envelope");
         let retry = journal
