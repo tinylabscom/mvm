@@ -528,47 +528,16 @@ fn stage_fixture(name: &str, dir: &Path, home: &Path) {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-        // The client guides have the reader write a project tool policy and
-        // then check it with `policy validate`, `policy show` and `why`, all
-        // of which read the project in the working directory.
-        "mcp-tool-policy" => stage_mcp_tool_policy(dir),
+        // These commands read the project in the working directory.
+        "project-policy" => stage_project_policy(dir),
         other => panic!("unknown fixture {other:?} in the tier manifest"),
     }
 }
 
-/// The guide whose project tool policy the `mcp-tool-policy` fixture stages.
-const MCP_TOOL_POLICY_GUIDE: &str = "public/src/content/docs/guides/claude-code-mcp.md";
-
-/// Stage the project the client guides describe, from the guide's own text.
-///
-/// The two files are lifted out of the guide rather than restated here, so
-/// the commands run against exactly what a reader would paste. A snippet that
-/// stops parsing as policy then fails the example that names it, instead of
-/// shipping a page whose server refuses to start.
-fn stage_mcp_tool_policy(dir: &Path) {
-    let guide = std::fs::read_to_string(repo_root().join(MCP_TOOL_POLICY_GUIDE))
-        .unwrap_or_else(|error| panic!("read {MCP_TOOL_POLICY_GUIDE}: {error}"));
-    let toml_blocks: Vec<String> = code_blocks(MCP_TOOL_POLICY_GUIDE, &guide)
-        .into_iter()
-        .filter(|block| block.language == "toml")
-        .map(|block| block.body)
-        .collect();
-    let block_with = |marker: &str| {
-        toml_blocks
-            .iter()
-            .find(|body| body.contains(marker))
-            .unwrap_or_else(|| {
-                panic!("{MCP_TOOL_POLICY_GUIDE} no longer has a toml block containing {marker:?}")
-            })
-    };
-    let profile = block_with("[overrides.tools]");
-    let manifest = block_with("profile = \"./policy/mcp-readonly.toml\"");
-
-    let policy_dir = dir.join("policy");
-    std::fs::create_dir_all(&policy_dir).expect("create tool policy fixture directory");
-    std::fs::write(policy_dir.join("mcp-readonly.toml"), format!("{profile}\n"))
-        .expect("write tool policy fixture");
-    std::fs::write(dir.join("mvm.toml"), format!("{manifest}\n")).expect("write project fixture");
+/// Give side-effect-free policy commands an offline, built-in project profile.
+fn stage_project_policy(dir: &Path) {
+    std::fs::write(dir.join("mvm.toml"), "[policy]\nprofile = \"agent-apis\"\n")
+        .expect("write project policy fixture");
 }
 
 /// The `./my-agent` directory the instruction-provenance guide signs.

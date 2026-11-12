@@ -698,12 +698,12 @@ tier = "exec"
 [[command]]
 path = "policy show"
 tier = "exec"
-fixture = "mcp-tool-policy"
+fixture = "project-policy"
 
 [[command]]
 path = "policy validate"
 tier = "exec"
-fixture = "mcp-tool-policy"
+fixture = "project-policy"
 
 [[command]]
 path = "pull"
@@ -744,7 +744,7 @@ reason = "a long-lived watcher: it never exits on its own"
 [[command]]
 path = "why"
 tier = "exec"
-fixture = "mcp-tool-policy"
+fixture = "project-policy"
 
 [[planned]]
 path = "manifest push"
