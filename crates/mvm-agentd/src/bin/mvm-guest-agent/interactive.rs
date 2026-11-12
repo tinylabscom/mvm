@@ -66,12 +66,39 @@ const EXIT_REPORT_OVERLAY: &str = "/mvm/runtime/exit-report";
 /// runtime overlay's exit reporter, so the VM powers off when the workload finishes
 /// (docker `-d` semantics). The reaper never blocks the agent request loop.
 fn do_run_detached(argv: Vec<String>, env: Vec<(String, String)>) -> GuestResponse {
+    // A named local pack dispatches the sealed marker itself. Unlike an
+    // arbitrary Dev command, this path must not bypass the entrypoint's
+    // ownership, mode and filesystem checks just because it is detached.
+    if let Err(message) = validate_sealed_detached_marker(
+        &argv,
+        &mvm_agentd::entrypoint::EntrypointPolicy::sealed_script_marker(),
+    ) {
+        return GuestResponse::Error { message };
+    }
     do_run_detached_with(
         argv,
         crate::handlers::overlay_env(env),
         std::path::Path::new("/dev/console"),
         std::path::Path::new(EXIT_REPORT_OVERLAY),
     )
+}
+
+fn validate_sealed_detached_marker(
+    argv: &[String],
+    policy: &mvm_agentd::entrypoint::EntrypointPolicy,
+) -> Result<(), String> {
+    if argv
+        .first()
+        .is_some_and(|arg| std::path::Path::new(arg) == policy.marker_path)
+    {
+        if argv.len() != 1 {
+            return Err("sealed detached entrypoint cannot take ad-hoc arguments".to_string());
+        }
+        policy
+            .validate()
+            .map_err(|error| format!("sealed detached entrypoint invalid: {error}"))?;
+    }
+    Ok(())
 }
 
 /// Testable core of [`do_run_detached`]. `console` receives the workload's
@@ -639,6 +666,40 @@ mod tests {
             }
             other => panic!("expected Error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn sealed_detached_marker_requires_an_immutable_executable_without_argv_override() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let root = tempfile::tempdir().expect("marker root");
+        let marker_dir = root.path().join("etc/mvm");
+        std::fs::create_dir_all(&marker_dir).expect("marker directory");
+        let marker = marker_dir.join("entrypoint");
+        std::fs::write(&marker, "#!/bin/sh\nexit 0\n").expect("sealed script");
+        std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o555))
+            .expect("sealed mode");
+        let metadata = std::fs::metadata(&marker).expect("script owner");
+        let mut policy = mvm_agentd::entrypoint::EntrypointPolicy::sealed_script_marker();
+        policy.marker_path = marker.clone();
+        policy.allowed_prefix = marker_dir.clone();
+        policy.same_fs_as = Some(marker_dir);
+        policy.required_uid = metadata.uid();
+        policy.required_gid = metadata.gid();
+        let argv = vec![marker.to_string_lossy().into_owned()];
+
+        validate_sealed_detached_marker(&argv, &policy).expect("sealed marker");
+        assert!(
+            validate_sealed_detached_marker(&[argv[0].clone(), "override".into()], &policy)
+                .is_err(),
+            "the sealed entrypoint does not accept an argv override"
+        );
+        std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o755))
+            .expect("writable mode");
+        assert!(
+            validate_sealed_detached_marker(&argv, &policy).is_err(),
+            "writable entrypoint cannot be launched detached"
+        );
     }
 
     #[cfg(target_os = "linux")]

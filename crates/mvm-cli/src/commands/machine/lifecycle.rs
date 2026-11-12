@@ -93,6 +93,7 @@ pub(super) fn resolve_start_spec(args: &MachineStartArgs) -> Result<(MachineSpec
     let desired = build_machine_spec(MachineSpecInputs {
         name: &args.name,
         image: args.create_flags.image.as_deref(),
+        local_pack: None,
         net: args.create_flags.net,
         allow_host: &args.create_flags.allow_host,
         peer: &args.create_flags.peer,
@@ -168,16 +169,30 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
     enforce_persisted_volume_profile(&spec.profile, &spec.volumes)?;
     let effective_hypervisor = super::runtime::effective_hypervisor(args.hypervisor.as_deref());
     let receipt_input = machine_start_receipt_input(&spec, &effective_hypervisor)?;
-    let started = mvm_client::launch::machine_start::start_machine_spec(
-        &spec,
-        &CliStartHost::for_spec(&spec, args.kernel_pin.is_some()),
-        mvm_client::launch::machine_start::MachineStartParams {
-            hypervisor: &effective_hypervisor,
-            has_ad_hoc_argv: args.has_ad_hoc_argv,
-            mailbox: args.mailbox,
-        },
-    )?;
+    let started = if spec.local_pack.is_some() {
+        start_local_pack(&spec, &args, &effective_hypervisor)?
+    } else {
+        mvm_client::launch::machine_start::start_machine_spec(
+            &spec,
+            &CliStartHost::for_spec(&spec, args.kernel_pin.is_some()),
+            mvm_client::launch::machine_start::MachineStartParams {
+                hypervisor: &effective_hypervisor,
+                has_ad_hoc_argv: args.has_ad_hoc_argv,
+                mailbox: args.mailbox,
+            },
+        )?
+    };
     let boot_digest = started.resolved_digest;
+    if spec.local_pack.is_some()
+        && let Err(err) = mvm_client::guest::start_local_pack_entrypoint(&spec.name)
+            .with_context(|| format!("starting the sealed entrypoint for {:?}", spec.name))
+    {
+        return Err(stop_failed_local_pack_start(
+            &spec.name,
+            &effective_hypervisor,
+            err,
+        ));
+    }
     if !spec.init.is_empty()
         && let Err(err) = run_machine_init_commands(&spec.name, &spec.init)
     {
@@ -211,6 +226,85 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         println!("started machine {}", spec.name);
     }
     Ok(())
+}
+
+fn start_local_pack(
+    spec: &MachineSpec,
+    args: &MachineStartArgs,
+    hypervisor: &str,
+) -> Result<mvm_client::launch::machine_start::MachineStart> {
+    anyhow::ensure!(
+        args.kernel_pin.is_none() && !args.has_ad_hoc_argv && args.mailbox.is_none(),
+        "a named local pack cannot replace its signed kernel or add a command or mailbox"
+    );
+    let pin = spec
+        .local_pack
+        .as_ref()
+        .context("named machine has no local pack source")?;
+    pin.verify_recipe()?;
+    let archive = crate::commands::vm::prepare_local_pack_data(&pin.recipe)?;
+    anyhow::ensure!(
+        mvm_core::crypto::image_verify::sha256_file(&archive)? == pin.archive_sha256.as_str(),
+        "local pack composition changed since machine create; recreate it to select new bytes"
+    );
+    pin.verify_recipe()?;
+    mvm_client::launch::machine_start::prepare_named_pack_start(&spec.name, hypervisor)?;
+    let mut staged =
+        mvm_client::launch::transient_composition::TransientComposition::stage_for_machine(
+            &archive, &spec.name,
+        )?;
+    let (result, admitted) = {
+        let boot = staged.consume()?;
+        let result = mvm_client::launch::machine_start::start_local_pack_machine(
+            spec,
+            &boot,
+            &CliStartHost::for_spec(spec, false),
+            mvm_client::launch::machine_start::MachineStartParams {
+                hypervisor,
+                has_ad_hoc_argv: false,
+                mailbox: None,
+            },
+        );
+        (result, boot.was_admitted())
+    };
+    match result {
+        Ok(started) => {
+            if let Err(error) = staged.retain_for_running_machine() {
+                let retained = staged.retain_on_error();
+                return Err(stop_failed_local_pack_start(
+                    &spec.name,
+                    hypervisor,
+                    anyhow::anyhow!(
+                        "named composition booted but its source custody failed: {error:#}; retained={retained:?}"
+                    ),
+                ));
+            }
+            Ok(started)
+        }
+        Err(error) => {
+            if admitted && let Some(path) = staged.retain_on_error() {
+                eprintln!(
+                    "[mvm] retained named composition evidence at {} after failed admission or boot",
+                    path.display()
+                );
+            }
+            Err(error)
+        }
+    }
+}
+
+fn stop_failed_local_pack_start(
+    name: &str,
+    hypervisor: &str,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    match mvm_client::backend_stop_by_name(hypervisor, name) {
+        Ok(()) => error,
+        Err(stop_error) => error.context(format!(
+            "could not confirm stop of named composition {name:?}: {stop_error:#}; \
+             its private boot bytes remain retained for recovery"
+        )),
+    }
 }
 
 /// How the CLI supplies a machine start with what differs by process: it may

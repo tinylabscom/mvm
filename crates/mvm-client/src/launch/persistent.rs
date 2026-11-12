@@ -80,6 +80,8 @@ pub struct PersistentImageStartParams<'a> {
     pub caller_commitment: Option<mvm_core::plan::CallerCommitment>,
     /// Publisher-verified image pack to bind on every start, if selected.
     pub registry_pack_image: Option<mvm_core::registry_pack::PackPin>,
+    /// One-use private Dev composition, never a stored bundle reference.
+    pub transient: Option<&'a super::transient_composition::TransientBoot<'a>>,
     /// True when the caller will run a trailing `-- argv` command after boot
     /// (i.e. the machine is booted only to exec an ad-hoc command). An ad-hoc
     /// command issues the DevOnly `Exec` verb, so the admitted plan must NOT
@@ -184,6 +186,7 @@ fn register_vm_name(vm_name: &str, network_name: &str) {
 pub fn start_persistent_oci_machine(
     params: PersistentImageStartParams<'_>,
 ) -> Result<mvm_hostd::plan_admission::AdmittedPlan> {
+    let transient = params.transient;
     let PreparedPersistentBoot {
         backend,
         start_config,
@@ -202,6 +205,7 @@ pub fn start_persistent_oci_machine(
         prepared_volumes,
         name,
         backend_name,
+        transient,
     )
 }
 
@@ -233,6 +237,7 @@ fn prepare_persistent_boot(
         agent_verb,
         caller_commitment,
         registry_pack_image,
+        transient,
         has_ad_hoc_argv,
         grants,
         mailbox,
@@ -274,8 +279,18 @@ fn prepare_persistent_boot(
     register_vm_name(name, "default");
     let (verity_path, roothash) =
         mvm_runtime::microvm::probe_verity_sidecar(&rootfs_path.to_string_lossy());
-    let initrd_path = persistent_oci_effective_initrd(rootfs_path)?;
-    let bundle_archive = super::bundle_runtime::installed_archive_for_rootfs(rootfs_path)?;
+    let initrd_path = if let Some(source) = transient {
+        source
+            .initrd()
+            .map(|path| path.to_string_lossy().into_owned())
+    } else {
+        persistent_oci_effective_initrd(rootfs_path)?
+    };
+    let bundle_archive = if let Some(source) = transient {
+        Some(source.archive().to_path_buf())
+    } else {
+        super::bundle_runtime::installed_archive_for_rootfs(rootfs_path)?
+    };
 
     let mut start_config = VmStartParams::builder()
         .name(name.to_string())
@@ -313,8 +328,12 @@ fn prepare_persistent_boot(
     let admission = crate::launch::boot_order::admit_after_preparation(
         &mut start_config,
         |config| {
-            attach_runtime_overlay_if_cached(config, backend_name)?;
-            attach_universal_initramfs_if_cached(config, backend_name)
+            if let Some(source) = transient {
+                super::bundle_runtime::attach_transient_bundle(config, backend_name, source)
+            } else {
+                attach_runtime_overlay_if_cached(config, backend_name)?;
+                attach_universal_initramfs_if_cached(config, backend_name)
+            }
         },
         |config| {
             let admission_ledger = InMemoryNonceLedger::new();
@@ -361,9 +380,14 @@ fn prepare_persistent_boot(
                     keys_dir: None,
                     audit_dir: None,
                     policy_dir: None,
-                    bundle_pin: bundle_archive
-                        .as_deref()
-                        .map(crate::admission::BundlePin::boots),
+                    bundle_pin: transient.map_or_else(
+                        || {
+                            bundle_archive
+                                .as_deref()
+                                .map(crate::admission::BundlePin::boots)
+                        },
+                        |source| Some(crate::admission::BundlePin::transient(source)),
+                    ),
                     bundle_posture: None,
                     deps_volume: None,
                     shares: shares_from_volume_cfg(volumes),
@@ -445,6 +469,11 @@ fn prepare_persistent_boot(
             emit_failed(&admission, "registry-pack-runtime", error);
         })?;
     }
+    if let Some(source) = transient {
+        source.reverify().inspect_err(|error| {
+            emit_failed(&admission, "transient-source", error);
+        })?;
+    }
     Ok(PreparedPersistentBoot {
         backend,
         start_config,
@@ -487,7 +516,13 @@ fn finish_legacy_persistent(
     mut prepared_volumes: crate::volume::LaunchPreparation,
     name: &str,
     backend_name: &str,
+    transient: Option<&super::transient_composition::TransientBoot<'_>>,
 ) -> Result<mvm_hostd::plan_admission::AdmittedPlan> {
+    if let Some(source) = transient {
+        source.reverify().inspect_err(|error| {
+            emit_failed(&admission, "transient-source", error);
+        })?;
+    }
     // VMM selection + workload-support check + start move behind the facade; the
     // admission gate (above) and the launched/failed emits stay here.
     #[cfg(unix)]

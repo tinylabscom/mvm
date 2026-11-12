@@ -17,6 +17,7 @@ use mvm_core::plan::bundle::{
 #[derive(Debug)]
 pub struct TransientComposition {
     directory: Option<tempfile::TempDir>,
+    machine_name: Option<String>,
     installed: InstalledBundle,
     archive: PathBuf,
     archive_sha256: String,
@@ -32,6 +33,32 @@ impl TransientComposition {
     /// # Errors
     /// Refuses changed, foreign-signed, non-composed or non-regular input.
     pub fn stage(source: &Path) -> Result<Self> {
+        Self::stage_with(source, None, || {
+            tempfile::tempdir().context("creating private composition staging")
+        })
+    }
+
+    /// Stage a one-use boot under the named machine's instance lifecycle.
+    ///
+    /// # Errors
+    /// Refuses an unsafe machine name, untrusted archive or non-private state.
+    pub fn stage_for_machine(source: &Path, name: &str) -> Result<Self> {
+        mvm_core::naming::validate_vm_name(name)?;
+        Self::stage_with(source, Some(name), || {
+            let parent = mvm_core::config::vm_state_dir(name).join("local-pack");
+            mvm_core::config::create_private_dir(&parent)?;
+            tempfile::Builder::new()
+                .prefix("boot-")
+                .tempdir_in(parent)
+                .context("creating named composition staging")
+        })
+    }
+
+    fn stage_with(
+        source: &Path,
+        machine_name: Option<&str>,
+        make_directory: impl FnOnce() -> Result<tempfile::TempDir>,
+    ) -> Result<Self> {
         let metadata = std::fs::symlink_metadata(source)?;
         ensure!(
             metadata.file_type().is_file(),
@@ -59,7 +86,7 @@ impl TransientComposition {
             "transient boot requires this host's signed local composition"
         );
 
-        let directory = tempfile::tempdir().context("creating private composition staging")?;
+        let directory = make_directory()?;
         let registry = BundleRegistry::new(directory.path().join("bundles"));
         let installed = registry
             .install_file(source, &trust, false)
@@ -72,6 +99,7 @@ impl TransientComposition {
         let archive = registry.archive_path(&installed.sha256);
         let staged = Self {
             directory: Some(directory),
+            machine_name: machine_name.map(str::to_owned),
             archive,
             archive_sha256: installed.sha256.clone(),
             installed,
@@ -106,6 +134,34 @@ impl TransientComposition {
     /// Keep private evidence when an admitted VM may still need recovery.
     pub fn retain_on_error(&mut self) -> Option<PathBuf> {
         self.directory.take().map(tempfile::TempDir::keep)
+    }
+
+    /// Keep a verified named boot's bytes until its VM is confirmed stopped.
+    ///
+    /// # Errors
+    /// Refuses an unconsumed, changed or invocation-private source.
+    pub fn retain_for_running_machine(&mut self) -> Result<PathBuf> {
+        let name = self
+            .machine_name
+            .as_deref()
+            .context("composition was not staged for a named machine")?;
+        ensure!(self.consumed, "named composition was not consumed");
+        self.reverify()?;
+        let directory = self
+            .directory
+            .as_ref()
+            .context("composition already released")?;
+        ensure!(
+            directory
+                .path()
+                .starts_with(mvm_core::config::vm_state_dir(name)),
+            "named composition escaped its machine state directory"
+        );
+        Ok(self
+            .directory
+            .take()
+            .context("composition already released")?
+            .keep())
     }
 
     fn reverify(&self) -> Result<()> {
@@ -509,6 +565,7 @@ pub(crate) mod tests {
             process_id: std::process::id(),
             consumed: true,
             directory: Some(directory),
+            machine_name: None,
         };
         let boot = TransientBoot {
             staged: &staged,
@@ -546,5 +603,36 @@ pub(crate) mod tests {
             );
         }
         assert!(staged.consume().is_err());
+    }
+
+    #[test]
+    fn named_staging_is_owned_by_the_machine_until_its_confirmed_stop() {
+        let home = tempfile::tempdir().expect("mvm home");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let (archive, _) = signed_local_composition(home.path());
+        assert!(TransientComposition::stage_for_machine(&archive, "../escape").is_err());
+
+        let mut staged = TransientComposition::stage_for_machine(&archive, "packed")
+            .expect("private named staging");
+        let rootfs = {
+            let boot = staged.consume().expect("one-use boot");
+            boot.reverify().expect("held bytes");
+            boot.rootfs().expect("rootfs")
+        };
+        assert!(
+            rootfs.starts_with(mvm_core::config::vm_state_dir("packed")),
+            "named source must stay within the machine's owned state directory"
+        );
+        let held = staged
+            .retain_for_running_machine()
+            .expect("retain exact bytes");
+        drop(staged);
+        assert!(rootfs.is_file(), "boot bytes survive the CLI's preparation");
+        assert!(held.starts_with(mvm_core::config::vm_state_dir("packed")));
+        assert!(!BundleRegistry::default_path().unwrap().root().exists());
+        crate::local::remove_stopped_runtime_state("packed")
+            .expect("confirmed stop removes retained bytes");
+        assert!(!rootfs.exists());
     }
 }

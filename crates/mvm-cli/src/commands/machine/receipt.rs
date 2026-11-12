@@ -13,6 +13,8 @@ pub(super) struct MachineStartReceiptInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) deployment: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) local_pack_archive_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) resolved_digest: Option<String>,
     pub(super) cpus: u32,
     pub(super) memory: String,
@@ -184,6 +186,9 @@ pub(super) fn machine_start_receipt_input(
         shared::launch_uses_oci_image(spec.image.as_deref(), spec.manifest.as_deref())?,
         &network_policy,
     )?;
+    if let Some(source) = &spec.local_pack {
+        source.verify_recipe()?;
+    }
     let _ = validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
     let volumes = machine_start_volume_policy(spec)?;
     Ok(MachineStartReceiptInput {
@@ -191,6 +196,10 @@ pub(super) fn machine_start_receipt_input(
         image: spec.image.clone(),
         manifest: spec.manifest.clone(),
         deployment: spec.deployment.clone(),
+        local_pack_archive_sha256: spec
+            .local_pack
+            .as_ref()
+            .map(|source| source.archive_sha256.as_str().to_owned()),
         resolved_digest: spec.resolved_digest.clone(),
         cpus: spec.cpus,
         memory: spec.memory.clone(),
@@ -242,12 +251,17 @@ pub(super) fn machine_start_preflight_summary(
         will_execute: false,
         machine: MachineStartPreflightMachine {
             name: spec.name.clone(),
-            image_reference_sha256: sha256_hex(
-                spec.image
-                    .as_deref()
-                    .or(spec.manifest.as_deref())
-                    .unwrap_or("")
-                    .as_bytes(),
+            image_reference_sha256: spec.local_pack.as_ref().map_or_else(
+                || {
+                    sha256_hex(
+                        spec.image
+                            .as_deref()
+                            .or(spec.manifest.as_deref())
+                            .unwrap_or("")
+                            .as_bytes(),
+                    )
+                },
+                |source| source.recipe_sha256.as_str().to_owned(),
             ),
             resolved_digest: spec.resolved_digest.clone(),
         },
@@ -270,8 +284,13 @@ pub(super) fn machine_start_preflight_summary(
 pub(super) fn print_machine_start_preflight_human(summary: &MachineStartPreflightSummary) {
     println!("mvmctl machine start dry-run: no VM will be booted");
     println!("machine: {}", summary.machine.name);
+    let source = if summary.invocation.local_pack_archive_sha256.is_some() {
+        "local pack recipe"
+    } else {
+        "OCI reference"
+    };
     println!(
-        "image: OCI reference sha256={}{}",
+        "image: {source} sha256={}{}",
         summary.machine.image_reference_sha256,
         summary
             .machine

@@ -26,6 +26,9 @@ pub(in crate::commands) mod application_source;
 mod composition;
 mod composition_request;
 pub(in crate::commands) use composition_request::SdkTransportArgs;
+pub(in crate::commands) fn prepare_local_pack_data(path: &Path) -> Result<PathBuf> {
+    composition::prepare_archive(path, composition::Base::SignedDefault)
+}
 #[cfg(test)]
 pub(in crate::commands) use composition_request::validate_composition_request;
 pub(in crate::commands) mod detect;

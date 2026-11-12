@@ -768,6 +768,9 @@ pub(in crate::commands) struct MachineCreateArgs {
     /// OCI image reference to boot when the machine lifecycle starts.
     #[arg(long, value_name = "REF", conflicts_with = "manifest")]
     pub image: Option<String>,
+    /// Prepare a local pack as machine data without enrolling its host signer.
+    #[arg(long, value_name = "PACK.TOML", conflicts_with_all = ["image", "manifest"], hide = true)]
+    pub pack: Option<PathBuf>,
     /// Enable dev-tier outbound networking for this machine.
     #[arg(long)]
     pub net: bool,
@@ -1152,6 +1155,7 @@ pub(in crate::commands) struct MachineRestoreArgs {
 struct MachineSpecInputs<'a> {
     name: &'a str,
     image: Option<&'a str>,
+    local_pack: Option<&'a mvm_runtime::machine::persist::LocalPackSource>,
     net: bool,
     allow_host: &'a [String],
     peer: &'a [String],
@@ -1180,15 +1184,21 @@ struct MachineSpecInputs<'a> {
 fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
     validate_machine_name(inputs.name)?;
     let workflow = inputs.workflow;
-    let image = match (inputs.image, workflow) {
-        (Some(image), _) => image.to_string(),
-        (None, Some(workflow)) => workflow.image.clone(),
-        (None, None) => {
+    anyhow::ensure!(
+        inputs.local_pack.is_none() || (inputs.image.is_none() && workflow.is_none()),
+        "local pack cannot be combined with an image or manifest source"
+    );
+    let image = match (inputs.image, workflow, inputs.local_pack) {
+        (Some(image), _, None) => Some(image.to_string()),
+        (None, Some(workflow), None) => Some(workflow.image.clone()),
+        (None, None, Some(_)) => None,
+        (None, None, None) => {
             bail!(
-                "machine {} requires either --image <ref> or --manifest <path>",
+                "machine {} requires --image, --manifest or --pack",
                 inputs.name
             )
         }
+        _ => bail!("local pack cannot be combined with another machine source"),
     };
     let net = inputs.net || workflow.is_some_and(|workflow| workflow.net);
     let gpu_device = inputs
@@ -1252,19 +1262,23 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
     // explicitly opts into a stricter profile. The daemon is the only
     // producer that should supply a non-dev production profile by policy.
     let profile = inputs.profile.unwrap_or(RunProfile::Dev);
+    anyhow::ensure!(
+        inputs.local_pack.is_none() || profile == RunProfile::Dev,
+        "local pack machines require the dev profile"
+    );
     enforce_volume_profile(profile, inputs.volumes)?;
     let profile_name = run_profile_name(profile).to_string();
     enforce_dev_init_profile(&profile_name, inputs.init)?;
     Ok(MachineSpec {
         schema_version: MACHINE_SPEC_SCHEMA_VERSION,
         name: inputs.name.to_string(),
-        image: Some(image),
+        image,
         manifest: None,
         deployment: None,
         resolved_digest: None,
         runtime_pack: false,
         registry_pack_image: None,
-        local_pack: None,
+        local_pack: inputs.local_pack.cloned(),
         net,
         allow_host,
         peer: inputs.peer.to_vec(),
@@ -1291,6 +1305,10 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
 
 impl MachineCreateArgs {
     fn into_spec(self) -> Result<MachineSpec> {
+        self.into_spec_with(crate::commands::vm::prepare_local_pack_data)
+    }
+
+    fn into_spec_with(self, prepare: impl FnOnce(&Path) -> Result<PathBuf>) -> Result<MachineSpec> {
         // Auto-generate a name when `NAME` is omitted, mirroring `machine run
         // -d` (`create_machine` prints the chosen name).
         let name = match self.name {
@@ -1300,15 +1318,28 @@ impl MachineCreateArgs {
             }
             None => auto_machine_name(),
         };
-        let manifest_source = match (self.image.is_none(), self.manifest.as_deref()) {
-            (_, Some(arg)) => Some(load_machine_manifest_source(Path::new(arg))?),
-            (true, None) => Some(load_machine_manifest_source(Path::new(".")).with_context(
-                || {
-                    "machine create requires --image or an image-backed mvm.toml in the current directory"
-                },
-            )?),
-            (false, None) => None,
+        let manifest_source = if self.pack.is_some() {
+            None
+        } else {
+            match (self.image.is_none(), self.manifest.as_deref()) {
+                (_, Some(arg)) => Some(load_machine_manifest_source(Path::new(arg))?),
+                (true, None) => Some(load_machine_manifest_source(Path::new(".")).with_context(
+                    || "machine create requires --image, --pack or an image-backed mvm.toml in the current directory",
+                )?),
+                (false, None) => None,
+            }
         };
+        let local_pack = self
+            .pack
+            .as_deref()
+            .map(|recipe| -> Result<_> {
+                let archive = prepare(recipe)?;
+                let sha = mvm_core::packs::Sha256Hex::new(
+                    mvm_core::crypto::image_verify::sha256_file(&archive)?,
+                )?;
+                mvm_runtime::machine::persist::LocalPackSource::from_prepared(recipe, sha)
+            })
+            .transpose()?;
         let workflow = manifest_source.as_ref().map(|source| &source.workflow);
         let init = workflow
             .map(|workflow| workflow.init.clone())
@@ -1325,6 +1356,7 @@ impl MachineCreateArgs {
         build_machine_spec(MachineSpecInputs {
             name: &name,
             image: self.image.as_deref(),
+            local_pack: local_pack.as_ref(),
             net: self.net,
             allow_host: &self.allow_host,
             peer: &self.peer,

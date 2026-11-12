@@ -1714,6 +1714,7 @@ fn create_args_from_manifest(manifest: &Path, profile: Option<RunProfile>) -> Ma
         name: Some("web".to_string()),
         manifest: Some(manifest.display().to_string()),
         image: None,
+        pack: None,
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
@@ -2204,6 +2205,50 @@ fn create_parses_persistent_spec_flags() {
 }
 
 #[test]
+fn a_local_pack_create_records_only_source_data_and_conflicts_with_image_sources() {
+    let _state = IsolatedMachineState::new();
+    let directory = tempfile::tempdir().expect("pack source");
+    let recipe = directory.path().join("pack.toml");
+    let archive = directory.path().join("composed.mvmpkg");
+    std::fs::write(&recipe, b"source recipe").expect("recipe");
+    std::fs::write(&archive, b"verified archive fixture").expect("archive");
+    let action = parse(&[
+        "create",
+        "packed",
+        "--pack",
+        recipe.to_str().expect("recipe path"),
+    ])
+    .expect("pack create parses");
+    let MachineAction::Create(args) = action else {
+        panic!("pack create must route to the named machine lifecycle");
+    };
+    let spec = args
+        .into_spec_with(|_| Ok(archive.clone()))
+        .expect("pack source is prepared");
+    assert!(spec.image.is_none() && spec.manifest.is_none());
+    assert!(spec.registry_pack_image.is_none());
+    assert_eq!(spec.profile, "dev");
+    let source = spec.local_pack.expect("local pack source");
+    assert_eq!(
+        source.archive_sha256.as_str(),
+        mvm_core::packs::Sha256Hex::from_bytes(b"verified archive fixture").as_str()
+    );
+    source.verify_recipe().expect("recipe pinned at create");
+    assert!(
+        parse(&[
+            "create",
+            "packed",
+            "--pack",
+            "pack.toml",
+            "--image",
+            "alpine"
+        ])
+        .is_err()
+    );
+    assert!(parse(&["create", "packed", "--pack", "pack.toml", "--manifest", "."]).is_err());
+}
+
+#[test]
 fn readme_persistent_machine_workflow_parses() {
     let create = parse(&[
         "create", "web", "--image", "nginx", "--cpus", "2", "--memory", "512M",
@@ -2602,6 +2647,7 @@ fn create_persists_machine_spec_under_data_dir() {
         name: Some("web".to_string()),
         manifest: None,
         image: Some("alpine:latest".to_string()),
+        pack: None,
         net: true,
         allow_host: vec!["api.example.com".to_string()],
         peer: Vec::new(),
@@ -2637,6 +2683,7 @@ fn create_auto_generates_a_name_when_omitted() {
         name: None,
         manifest: None,
         image: Some("alpine:latest".to_string()),
+        pack: None,
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
@@ -2690,6 +2737,7 @@ volumes = ["./state.img:/data:1G:rw"]
         name: Some("web".to_string()),
         manifest: Some(dir.path().join("mvm.toml").display().to_string()),
         image: None,
+        pack: None,
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
@@ -2737,6 +2785,7 @@ fn create_rejects_flake_backed_manifest_for_machine_specs() {
         name: Some("web".to_string()),
         manifest: Some(dir.path().join("mvm.toml").display().to_string()),
         image: None,
+        pack: None,
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
@@ -2774,6 +2823,7 @@ fn create_defaults_to_dev_profile_when_manifest_declares_dev_init() {
         name: Some("web".to_string()),
         manifest: Some(dir.path().join("mvm.toml").display().to_string()),
         image: None,
+        pack: None,
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
@@ -2798,6 +2848,7 @@ fn create_defaults_to_dev_profile_when_manifest_declares_dev_init() {
         name: Some("web".to_string()),
         manifest: Some(dir.path().join("mvm.toml").display().to_string()),
         image: None,
+        pack: None,
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
@@ -2879,6 +2930,33 @@ fn machine_start_receipt_input_redacts_host_paths_and_surfaces_policy() {
 }
 
 #[test]
+fn named_pack_start_receipt_pins_archive_without_exposing_recipe_path() {
+    let _state = IsolatedMachineState::new();
+    let directory = tempfile::tempdir().expect("local source");
+    let recipe = directory.path().join("pack.toml");
+    std::fs::write(&recipe, b"recipe").expect("recipe");
+    let mut spec = spec_fixture("packed");
+    spec.image = None;
+    spec.profile = "dev".into();
+    spec.local_pack = Some(
+        mvm_runtime::machine::persist::LocalPackSource::from_prepared(
+            &recipe,
+            mvm_core::packs::Sha256Hex::from_bytes(b"archive"),
+        )
+        .expect("source pin"),
+    );
+    let receipt = machine_start_receipt_input(&spec, "firecracker").expect("receipt input");
+    let encoded = serde_json::to_string(&receipt).expect("receipt JSON");
+    assert!(encoded.contains("local_pack_archive_sha256"));
+    assert!(!encoded.contains(recipe.to_str().expect("recipe path")));
+    std::fs::write(&recipe, b"changed").expect("change recipe");
+    assert!(
+        machine_start_receipt_input(&spec, "firecracker").is_err(),
+        "changed recipe must refuse before reporting a start"
+    );
+}
+
+#[test]
 fn machine_start_receipt_is_signed_and_verifiable() {
     let _state = IsolatedMachineState::new();
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2888,6 +2966,7 @@ fn machine_start_receipt_is_signed_and_verifiable() {
         image: Some("ghcr.io/acme/web:latest".to_string()),
         manifest: None,
         deployment: None,
+        local_pack_archive_sha256: None,
         resolved_digest: Some("sha256:abc".to_string()),
         cpus: 2,
         memory: "512M".to_string(),
@@ -2974,6 +3053,7 @@ fn create_rejects_unsafe_machine_name() {
         name: Some("../web".to_string()),
         manifest: None,
         image: Some("alpine:latest".to_string()),
+        pack: None,
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),

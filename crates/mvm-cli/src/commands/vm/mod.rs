@@ -15,6 +15,7 @@ pub(in crate::commands) mod replay;
 pub(in crate::commands) mod workspace_apply;
 use mvm_client::admission::entrypoint_resolve;
 pub(super) mod exec;
+pub(in crate::commands) use exec::prepare_local_pack_data;
 pub(in crate::commands) mod explain;
 pub(super) mod forward;
 pub(super) mod fs;

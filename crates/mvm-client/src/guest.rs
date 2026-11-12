@@ -178,6 +178,35 @@ pub fn start_process(name: &str, start: ProcStart) -> Result<String> {
     }
 }
 
+const LOCAL_PACK_ENTRYPOINT: &str = "/etc/mvm/entrypoint";
+
+/// Start the sealed local-pack entrypoint without substituting an ad-hoc command.
+///
+/// The guest's detached worker sends its output to the VM console and reports
+/// its exit to the host. An acknowledged spawn is not proof that the workload
+/// produced output or stayed healthy.
+///
+/// # Errors
+/// Refuses an invalid name, an unservable guest, or a denied or failed spawn.
+pub fn start_local_pack_entrypoint(name: &str) -> Result<i32> {
+    validate(name)?;
+    let request = local_pack_entrypoint_request(name);
+    emit_vsock_rpc_audit(name, &request);
+    let GuestRequest::RunDetached { argv, env } = request else {
+        unreachable!("fixed local pack entrypoint request")
+    };
+    let pid = mvm_agentd::vsock::send_run_detached(&mut connect(name)?, argv, env)?;
+    mvm_core::audit_emit!(VmProcStart, vm: name, "argv0={LOCAL_PACK_ENTRYPOINT} pid={pid}");
+    Ok(pid)
+}
+
+fn local_pack_entrypoint_request(name: &str) -> GuestRequest {
+    GuestRequest::RunDetached {
+        argv: vec![LOCAL_PACK_ENTRYPOINT.to_string()],
+        env: mvm_hostd::workload_env::workload_egress_env(name),
+    }
+}
+
 /// The processes the guest agent is tracking.
 pub fn list_processes(name: &str) -> Result<Vec<ProcInfo>> {
     emit_vsock_rpc_audit(name, &GuestRequest::ProcList);
@@ -497,6 +526,28 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn named_pack_dispatch_uses_only_the_sealed_entrypoint_and_mediated_egress() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let path = mvm_core::config::vm_substitution_env_path("packed");
+        std::fs::create_dir_all(path.parent().expect("substitution directory"))
+            .expect("create state");
+        std::fs::write(&path, br#"[["API_KEY","mvm-secret://opaque-placeholder"]]"#)
+            .expect("placeholder, never a plaintext secret");
+
+        let GuestRequest::RunDetached { argv, env } = local_pack_entrypoint_request("packed")
+        else {
+            panic!("named pack must dispatch the detached sealed entrypoint");
+        };
+        assert_eq!(argv, ["/etc/mvm/entrypoint"]);
+        assert!(env.iter().any(|(key, _)| key == "HTTPS_PROXY"));
+        assert!(env.iter().any(|(key, value)| {
+            key == "API_KEY" && value == "mvm-secret://opaque-placeholder"
+        }));
+    }
 
     fn handshake_hangup() -> anyhow::Error {
         anyhow::Error::new(SessionError::Io(Error::from(ErrorKind::UnexpectedEof)))

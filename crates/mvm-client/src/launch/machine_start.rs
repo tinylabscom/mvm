@@ -88,6 +88,17 @@ pub struct MachineStart {
     pub admitted: mvm_hostd::plan_admission::AdmittedPlan,
 }
 
+/// Clear stopped runtime state before staging a named pack into that same state directory.
+///
+/// # Errors
+/// Refuses an invalid name or backend, or state still owned by an unresolved VM.
+pub fn prepare_named_pack_start(name: &str, hypervisor: &str) -> Result<()> {
+    mvm_core::naming::validate_vm_name(name)?;
+    AnyBackend::require_hypervisor_selectable(hypervisor)?;
+    super::discard_stopped_runtime_state(hypervisor, name)?;
+    Ok(())
+}
+
 /// A validated local deployment: its directory, the rootfs it boots, and that
 /// rootfs's recorded digest.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,13 +250,78 @@ pub fn start_machine_spec(
     host: &dyn StartHost,
     params: MachineStartParams<'_>,
 ) -> Result<MachineStart> {
+    start_machine_spec_from(spec, host, params, None)
+}
+
+/// Start a named Dev composition under a new one-use admission, not an installed bundle.
+///
+/// # Errors
+/// Refuses changed recipe or archive pins, a different machine, or failed admission/boot.
+pub fn start_local_pack_machine<'a>(
+    spec: &'a mp::MachineSpec,
+    source: &'a super::transient_composition::TransientBoot<'a>,
+    host: &dyn StartHost,
+    params: MachineStartParams<'_>,
+) -> Result<MachineStart> {
+    start_machine_spec_from(spec, host, params, Some(source))
+}
+
+fn start_machine_spec_from<'a>(
+    spec: &'a mp::MachineSpec,
+    host: &dyn StartHost,
+    params: MachineStartParams<'_>,
+    source: Option<&'a super::transient_composition::TransientBoot<'a>>,
+) -> Result<MachineStart> {
+    if let Some(source) = source {
+        let pin = spec
+            .local_pack
+            .as_ref()
+            .context("named composition has no recorded source")?;
+        anyhow::ensure!(
+            spec.profile == "dev"
+                && spec.image.is_none()
+                && spec.manifest.is_none()
+                && spec.deployment.is_none()
+                && !spec.runtime_pack
+                && spec.registry_pack_image.is_none()
+                && !params.has_ad_hoc_argv
+                && params.mailbox.is_none(),
+            "local pack requires an unambiguous Dev machine source and no other launch authority"
+        );
+        pin.verify_recipe()?;
+        source.reverify()?;
+        anyhow::ensure!(
+            source.sha256() == pin.archive_sha256.as_str()
+                && source
+                    .registry_root()
+                    .starts_with(mvm_core::config::vm_state_dir(&spec.name)),
+            "named composition differs from its recorded archive or machine"
+        );
+    } else {
+        validate_registry_pack_source(spec)?;
+    }
     AnyBackend::require_hypervisor_selectable(params.hypervisor)?;
-    super::discard_stopped_runtime_state(params.hypervisor, &spec.name)?;
-    validate_registry_pack_source(spec)?;
+    if source.is_none() {
+        super::discard_stopped_runtime_state(params.hypervisor, &spec.name)?;
+    }
     let network_policy = persisted_network_policy(spec)?;
     let (memory_mib, mem_initial_mib) =
         mp::validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
-    let boot = if let Some(pin) = spec
+    let boot = if let Some(source) = source {
+        BootSource {
+            kernel: Some(source.kernel()?.to_string_lossy().into_owned()),
+            label: format!("local-pack:{}", source.sha256()),
+            rootfs: source.rootfs()?,
+            digest: format!(
+                "sha256:{}",
+                source
+                    .manifest()
+                    .find_by_role(&mvm_core::plan::bundle::ArtifactRole::Rootfs)
+                    .context("named composition has no signed rootfs")?
+                    .sha256
+            ),
+        }
+    } else if let Some(pin) = spec
         .registry_pack_image
         .as_ref()
         .filter(|_| spec.manifest.is_none())
@@ -290,6 +366,7 @@ pub fn start_machine_spec(
         agent_verb: spec.agent_verb.clone(),
         caller_commitment: spec.caller_commitment.clone(),
         registry_pack_image: spec.registry_pack_image.clone(),
+        transient: source,
         has_ad_hoc_argv: params.has_ad_hoc_argv,
         grants: spec.grants.clone(),
         mailbox: params.mailbox,
@@ -591,6 +668,95 @@ mod tests {
         let error = validate_registry_pack_source(&machine)
             .expect_err("a local recipe needs its own freshly admitted start path");
         assert!(error.to_string().contains("local pack"), "{error:#}");
+    }
+
+    #[test]
+    fn named_local_start_refuses_wrong_archive_before_asking_the_host_to_boot() {
+        let home = tempfile::tempdir().expect("mvm home");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let (archive, _) =
+            crate::launch::transient_composition::tests::signed_local_composition(home.path());
+        let mut staged =
+            crate::launch::transient_composition::TransientComposition::stage_for_machine(
+                &archive, "packed",
+            )
+            .expect("private named source");
+        let source = staged.consume().expect("one-use source");
+        let recipe = home.path().join("pack.toml");
+        std::fs::write(&recipe, b"recipe").expect("recipe");
+        let mut machine = spec("packed");
+        machine.profile = "dev".into();
+        machine.local_pack = Some(
+            mp::LocalPackSource::from_prepared(
+                &recipe,
+                mvm_core::packs::Sha256Hex::from_bytes(b"another archive"),
+            )
+            .expect("recorded source"),
+        );
+        let host = image_host();
+        let params = MachineStartParams {
+            hypervisor: "firecracker",
+            has_ad_hoc_argv: false,
+            mailbox: None,
+        };
+        let error = start_local_pack_machine(&machine, &source, &host, params)
+            .expect_err("a changed cache entry never boots");
+        assert!(error.to_string().contains("recorded archive"), "{error:#}");
+        assert!(host.asked.borrow().is_empty(), "no OCI fallback");
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn named_local_start_refuses_a_mock_without_native_kernel_custody() {
+        let home = tempfile::tempdir().expect("mvm home");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let (archive, _) =
+            crate::launch::transient_composition::tests::signed_local_composition(home.path());
+        let recipe = home.path().join("pack.toml");
+        std::fs::write(&recipe, b"recipe").expect("recipe");
+        prepare_named_pack_start("packed", "mock").expect("clear old state");
+        let mut staged =
+            crate::launch::transient_composition::TransientComposition::stage_for_machine(
+                &archive, "packed",
+            )
+            .expect("private source");
+        let source = staged.consume().expect("one-use source");
+        let mut machine = spec("packed");
+        machine.profile = "dev".into();
+        machine.local_pack = Some(
+            mp::LocalPackSource::from_prepared(
+                &recipe,
+                mvm_core::packs::Sha256Hex::new(source.sha256()).expect("archive hash"),
+            )
+            .expect("source pin"),
+        );
+        let backend = AnyBackend::Mock(mvm_runtime::MockBackend::new());
+        let host = EmbedderStartHost::new(None, "dev").with_backend(&backend);
+        let error = start_local_pack_machine(
+            &machine,
+            &source,
+            &host,
+            MachineStartParams {
+                hypervisor: "mock",
+                has_ad_hoc_argv: false,
+                mailbox: None,
+            },
+        )
+        .expect_err("the mock cannot custody a local development kernel");
+        assert!(
+            error
+                .to_string()
+                .contains("requires native descriptor custody"),
+            "{error:#}"
+        );
+        assert!(
+            !mvm_core::plan::BundleRegistry::default_path()
+                .unwrap()
+                .root()
+                .exists()
+        );
     }
 
     #[test]
