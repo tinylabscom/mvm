@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use clap::Command as ClapCommand;
 use cucumber::then;
 use mvm_conformance::doc_examples::{
-    DocExample, ExampleSource, Tier, TierPolicy, code_blocks, doc_examples, documentation_files,
-    is_elided, live_scenario_commands, mk_guest_call_attributes, mk_guest_parameters,
+    DocExample, ExampleSource, Tier, TierPolicy, doc_examples, documentation_files, is_elided,
+    live_scenario_commands, mk_guest_call_attributes, mk_guest_parameters,
     mvmctl_lines_outside_fences,
 };
 
