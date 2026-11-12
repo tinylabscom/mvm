@@ -183,6 +183,7 @@ fn register_vm_name(vm_name: &str, network_name: &str) {
 
 /// Admit and start a persistent machine. Returns the admitted plan the
 /// machine booted under.
+#[tracing::instrument(level = "trace", skip_all)]
 pub fn start_persistent_oci_machine(
     params: PersistentImageStartParams<'_>,
 ) -> Result<mvm_hostd::plan_admission::AdmittedPlan> {
@@ -217,6 +218,7 @@ struct PreparedPersistentBoot {
     built_runtime: Option<mvm_hostd::plan_admission::PreparedBuiltPackRuntime>,
 }
 
+#[tracing::instrument(level = "trace", skip_all)]
 fn prepare_persistent_boot(
     params: PersistentImageStartParams<'_>,
 ) -> Result<PreparedPersistentBoot> {
@@ -509,6 +511,7 @@ fn complete_writable_images(
     Ok(())
 }
 
+#[tracing::instrument(level = "trace", skip_all)]
 fn finish_legacy_persistent(
     backend: mvm_runtime::backend::AnyBackend,
     start_config: mvm_core::vm_backend::VmStartConfig,

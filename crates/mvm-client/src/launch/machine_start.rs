@@ -266,6 +266,7 @@ pub fn start_local_pack_machine<'a>(
     start_machine_spec_from(spec, host, params, Some(source))
 }
 
+#[tracing::instrument(level = "trace", skip_all)]
 fn start_machine_spec_from<'a>(
     spec: &'a mp::MachineSpec,
     host: &dyn StartHost,

@@ -54,6 +54,7 @@ impl TransientComposition {
         })
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     fn stage_with(
         source: &Path,
         machine_name: Option<&str>,
@@ -116,6 +117,7 @@ impl TransientComposition {
     ///
     /// # Errors
     /// Refuses expiry, replay, changed artifacts or a different process.
+    #[tracing::instrument(level = "trace", skip_all)]
     pub fn consume(&mut self) -> Result<TransientBoot<'_>> {
         ensure!(!self.consumed, "transient composition already consumed");
         ensure!(
@@ -140,6 +142,7 @@ impl TransientComposition {
     ///
     /// # Errors
     /// Refuses an unconsumed, changed or invocation-private source.
+    #[tracing::instrument(level = "trace", skip_all)]
     pub fn retain_for_running_machine(&mut self) -> Result<PathBuf> {
         let name = self
             .machine_name

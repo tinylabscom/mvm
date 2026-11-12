@@ -83,6 +83,7 @@ pub(super) fn prepare(path: &Path, base: Base<'_>) -> Result<PreparedComposition
 }
 
 /// Verify and cache composition data without granting a boot capability.
+#[tracing::instrument(level = "trace", skip_all)]
 pub(super) fn prepare_archive(path: &Path, base: Base<'_>) -> Result<PathBuf> {
     let metadata = std::fs::symlink_metadata(path)?;
     ensure!(

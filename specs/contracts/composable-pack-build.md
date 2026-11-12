@@ -156,6 +156,67 @@ not an alias for local export.
 There is **no guest NIC, TAP/TUN, NAT, SSH, CNI, SLIRP or fallback**. Permitted
 networking uses only host-mediated, authenticated FlowMux/vsock.
 
+## Approved warm custody direction (implementation not evidenced)
+
+The existing persistent-machine start sets `warm_pool_size(0)`; the factory
+parent refuses both PR-test runtime proof and kernel descriptor custody.
+Neither changing that value nor trusting a signed cache index makes a named
+composition safe to claim. The current `TrustedSnapshotBackend` and
+`TrustedSnapshotService` already separate immutable publication from claim,
+but the default backend refuses, APFS is opt-in and needs a privileged helper,
+and `materialize` alone does not hand an immutable read view to the VMM.
+These are implementation boundaries, not a warm capability claim.
+
+The service now reserves each ID before staging, issues a fresh generation
+per sealed publication, and holds a per-ID claim lease through materialization
+so a concurrent removal cannot reclaim its backend read view. Failed staging
+or cleanup leaves the ID reserved rather than handing it to another publisher.
+After a failed removal, claims stay blocked and only the owning handle can
+retry cleanup.
+These in-process lifecycle guards do not themselves seal bytes, survive an
+owner crash, or authorize a VM to boot from a writable materialization.
+
+Extend that **one** publication/claim contract rather than add a composer
+authority or accept a mutable path as proof. Before any claim, a resident owner
+must authenticate and publish the exact selected kernel, rootfs, runtime and
+factory-parent bytes under a platform-enforced immutable read view, with
+their digest, provenance, backend boot shape and compatibility key bound to
+the parent. The parent holds no tenant plan, secrets, writable volumes or
+egress destinations. A Linux provider needs an evidenced sealed descriptor
+or equivalent kernel-backed immutability; macOS needs the authenticated APFS
+helper and live mount/tamper witnesses. Unsupported hosts refuse warm
+publication instead of quietly claiming from an unsealed pool.
+
+Each child still needs fresh revocation, policy, grant and one-use admission
+checks **before** the admitted plan and child-owned effects can reach the
+guest. A claim consumes a generation-checked parent only when its immutable
+closure matches that plan; restart, expired evidence, changed inputs and an
+unavailable owner refuse rather than treating a cache hit as authorization.
+The VMM must map the verified immutable read view, not a newly writable
+materialization that needs claim-time rehashing. Bound resident parents and
+leases by the existing host budget, reclaim them only after the last child
+releases custody, and test cancellation and owner crash recovery.
+
+The simpler alternatives do not meet this contract: per-start restaging and
+rehashing stay cold, while a host-signature/HMAC sidecar cannot seal the bytes
+it names. Before enabling either backend, review the owner/descriptor API and
+measure cold and warm *readiness including admission*, plus first-use
+construction separately. The required thresholds remain <300 ms cold and
+<50 ms warm; neither is evidenced by the current CLI timings.
+
+A diagnostic `MVM_SPAN_TIMINGS=json` run of the native arm64 HVF
+`release-witness` CLI measured 9.28 s for a named start after preparation:
+`prepare_archive` took 0.86 s even on an authenticated cache hit,
+invocation-private `stage_with` took 2.16 s, `consume` 0.44 s,
+`start_persistent_oci_machine` 4.63 s (including 0.45 s of plan admission),
+and retaining boot custody after launch 0.44 s. These are nested spans, not
+additive totals. They show that moving the cache lookup ahead of filesystem
+staging is useful but cannot by itself meet either launch threshold; private
+staging, persistent boot preparation and admission remain on the hot path. A
+second native arm64 HVF run measured 8.94 s including 3.62 s for persistent
+boot preparation (2.95 s self) and 0.99 s for legacy boot completion (0.93 s
+self). This is diagnostic timing, not an arm64 Linux/KVM witness.
+
 ## Acceptance and currently missing evidence
 
 The staged v2 candidate authenticates runtime descriptors/policies and a

@@ -228,6 +228,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
     Ok(())
 }
 
+#[tracing::instrument(level = "trace", skip_all)]
 fn start_local_pack(
     spec: &MachineSpec,
     args: &MachineStartArgs,
