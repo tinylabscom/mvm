@@ -1527,9 +1527,10 @@ enrolling a publisher. Hidden `--pack-base-manifest`, `--pack-base-kernel` and
 `--pack-base-tar` select a measured local base; PR-test-enabled builds also
 accept a signed test runtime with `--pack-pr-test-runtime-dir` and
 `--pack-pr-test-pull-request`. `machine start <name>` must recheck those inputs
-and freshly admit the exact bundle. This named-pack path has not yet passed a
-live guest-output or launch-speed witness; it does not grant production,
-installation, or publisher authority.
+and freshly admit the exact bundle. PR-only x86_64 Firecracker and native
+macOS arm64 HVF tests observed guest output on named cold starts and
+stop/restart cache hits. None met the launch-speed targets; this path does not
+grant production, installation, or publisher authority.
 
 A workload's grants — what it may consume and where it may reach — can be
 declared in four places, resolved **per dimension** from highest precedence to

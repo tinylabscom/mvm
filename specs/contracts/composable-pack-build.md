@@ -176,8 +176,20 @@ they are not CLI admission evidence. On PR #5326 at `4d9e5d21ad`, the
 Actions run `43172747569` produced that value through `mvmctl run --compose`
 on x86_64 Firecracker: 11.19 s on a cold composition, 8.52 s on an authenticated
 cache hit. Both exited zero without enrolling a publisher; neither meets the
-<300 ms cold or <50 ms warm launch target. The named `machine create --pack`
-path, aarch64, HVF and immutable warm custody still lack live witnesses.
+<300 ms cold or <50 ms warm launch target. At `4b95627ef9`, the same-head
+PR-only signed CLI, x86_64 base and guest runtime from Actions run
+`43284492364` also produced `COMPOSED_GUEST_VALUE=print('ready')` through
+`machine create packed-fixed --pack ...`, `machine start packed-fixed` and
+`machine logs packed-fixed` on Firecracker. Create took 4.70 s, the first start
+11.03 s and a stop/restart with an authenticated composition cache hit 8.77 s.
+These are named-machine guest-output witnesses, not speed acceptance; aarch64
+Linux/KVM and immutable warm custody still lack live witnesses. On macOS arm64
+HVF, a native `release-witness` CLI with the same PR-signed aarch64 base and
+guest runtime assembled a named composition in 3.51 s and produced
+`COMPOSED_GUEST_VALUE=ready` through a 9.74 s start and a 9.77 s
+stop/restart cache hit. Its CLI was built locally rather than attested by the
+PR workflow; this is a native HVF guest-output witness, not Linux arm64/KVM
+or launch-speed acceptance.
 
 Acceptance requires Linux **CLI** one-command default and selected-custom-base
 cold/repeat runs, a value actually read from the guest on both runs, a proven
