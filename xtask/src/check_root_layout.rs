@@ -20,6 +20,7 @@ const ALLOWED: &[&str] = &[
     ".github",
     ".gitignore",
     ".kiro",
+    ".trail",
     ".windsurf",
     "AGENTS.md",
     "AGENTS.md.sigstore.json",
