@@ -237,6 +237,7 @@ fn start_local_pack(
         args.kernel_pin.is_none() && !args.has_ad_hoc_argv && args.mailbox.is_none(),
         "a named local pack cannot replace its signed kernel or add a command or mailbox"
     );
+    eprintln!("[mvm] named pack warm acceleration unavailable; verifying inputs for a cold start");
     let pin = spec
         .local_pack
         .as_ref()

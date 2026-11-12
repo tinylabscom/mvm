@@ -5,6 +5,7 @@
 
 use mvm_agentd::vsock::GuestResponse;
 use std::io::Write;
+use std::sync::OnceLock;
 
 use crate::HandlerCtx;
 use crate::socket::write_response;
@@ -54,12 +55,43 @@ fn do_exec_streaming(
 /// every other helper it comes from the runtime overlay: neither mkGuest nor
 /// OCI injection bakes a copy into the image.
 const EXIT_REPORT_OVERLAY: &str = "/mvm/runtime/exit-report";
+const DETACHED_CONSOLE: &str = "/dev/console";
+static HELD_DETACHED_CONSOLE: OnceLock<std::fs::File> = OnceLock::new();
+
+/// Retain a write-only console before PID 1 drops the guest agent to UID 901.
+///
+/// A detached workload may write its output, but cannot inherit a root-opened
+/// read/write console descriptor or acquire device access after the drop.
+#[cfg(target_os = "linux")]
+pub(crate) fn retain_detached_console_before_drop() {
+    match open_detached_console(std::path::Path::new(DETACHED_CONSOLE)) {
+        Ok(file) => {
+            let _ = HELD_DETACHED_CONSOLE.set(file);
+        }
+        Err(error) => {
+            eprintln!("mvm-guest-agent: detached console unavailable: {error}");
+        }
+    }
+}
+
+fn open_detached_console(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().write(true).open(path)
+}
+
+fn detached_console_handles() -> std::io::Result<(std::fs::File, std::fs::File)> {
+    let stdout = match HELD_DETACHED_CONSOLE.get() {
+        Some(held) => held.try_clone()?,
+        None => open_detached_console(std::path::Path::new(DETACHED_CONSOLE))?,
+    };
+    let stderr = stdout.try_clone()?;
+    Ok((stdout, stderr))
+}
 
 /// Spawn `argv` as a detached workload and return its ack (DevOnly).
 ///
 /// Models the image `/init` entrypoint launch, but agent-driven and
 /// non-blocking: the child gets its own session (`setsid`), stdin from
-/// `/dev/null`, and stdout/stderr on `/dev/console` (which the host
+/// `/dev/null`, and stdout/stderr on write-only `/dev/console` handles (which the host
 /// backend captures to `console.log`). The call returns immediately with
 /// `DetachedStarted { pid }`; a detached reaper thread waits on the child
 /// and reports its exit code to the host's workload-exit port through the
@@ -75,10 +107,19 @@ fn do_run_detached(argv: Vec<String>, env: Vec<(String, String)>) -> GuestRespon
     ) {
         return GuestResponse::Error { message };
     }
+    let (stdout, stderr) = match detached_console_handles() {
+        Ok(handles) => handles,
+        Err(error) => {
+            return GuestResponse::Error {
+                message: format!("run-detached: open write-only console: {error}"),
+            };
+        }
+    };
     do_run_detached_with(
         argv,
         crate::handlers::overlay_env(env),
-        std::path::Path::new("/dev/console"),
+        stdout,
+        stderr,
         std::path::Path::new(EXIT_REPORT_OVERLAY),
     )
 }
@@ -101,16 +142,16 @@ fn validate_sealed_detached_marker(
     Ok(())
 }
 
-/// Testable core of [`do_run_detached`]. `console` receives the workload's
-/// stdout/stderr (production: `/dev/console`, captured by the backend to
-/// `console.log`); `exit_report_bin` is the reporter the reaper execs with the
-/// workload's exit code (production: the overlay's `/mvm/runtime/exit-report`). A test
-/// points both at a tempdir to observe the spawn, the console redirect, and the
-/// reported exit code without a live guest.
+/// Testable core of [`do_run_detached`]. The write-only console handles receive
+/// stdout/stderr (captured by the backend in `console.log`). `exit_report_bin`
+/// reports the workload's exit code (production: the overlay's
+/// `/mvm/runtime/exit-report`). A test uses a temporary file to observe the
+/// spawn, console redirect and reported exit code without a live guest.
 fn do_run_detached_with(
     argv: Vec<String>,
     env: Vec<(String, String)>,
-    console: &std::path::Path,
+    console_out: std::fs::File,
+    console_err: std::fs::File,
     exit_report_bin: &std::path::Path,
 ) -> GuestResponse {
     use std::os::unix::process::CommandExt;
@@ -130,25 +171,6 @@ fn do_run_detached_with(
             };
         }
     };
-    // Two independent write handles to the console so stdout and stderr
-    // each own their fd (no shared-offset surprises).
-    let console_out = match std::fs::OpenOptions::new().write(true).open(console) {
-        Ok(f) => f,
-        Err(e) => {
-            return GuestResponse::Error {
-                message: format!("run-detached: open console {}: {e}", console.display()),
-            };
-        }
-    };
-    let console_err = match std::fs::OpenOptions::new().write(true).open(console) {
-        Ok(f) => f,
-        Err(e) => {
-            return GuestResponse::Error {
-                message: format!("run-detached: open console {}: {e}", console.display()),
-            };
-        }
-    };
-
     // env_clear(), then a minimal safe base plus the caller's vars.
     // Drop malformed entries rather than let `Command::env` panic
     // (empty key, key containing '=' or NUL, value containing NUL).
@@ -591,9 +613,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let console = dir.path().join("console");
         let reported = dir.path().join("reported-code");
-        // The handler opens the console for writing (it exists in production as
-        // `/dev/console`); pre-create the stand-in so the open succeeds.
+        // Production retains a write-only descriptor before UID 901. The test
+        // opens two write-only handles to the stand-in console.
         std::fs::File::create(&console).unwrap();
+        let stdout = open_detached_console(&console).unwrap();
+        let stderr = open_detached_console(&console).unwrap();
 
         // Stand-in for `mvm-exit-report`: records its exit-code argument so the
         // reaper's report is observable.
@@ -612,7 +636,8 @@ mod tests {
                 "printf RAN-DETACHED; exit 7".into(),
             ],
             vec![],
-            &console,
+            stdout,
+            stderr,
             &reporter,
         );
         let pid = match resp {
@@ -655,10 +680,13 @@ mod tests {
 
     #[test]
     fn run_detached_refuses_empty_argv() {
+        let stdout = open_detached_console(std::path::Path::new("/dev/null")).unwrap();
+        let stderr = open_detached_console(std::path::Path::new("/dev/null")).unwrap();
         match do_run_detached_with(
             vec![],
             vec![],
-            std::path::Path::new("/dev/null"),
+            stdout,
+            stderr,
             std::path::Path::new("/bin/true"),
         ) {
             GuestResponse::Error { message } => {
@@ -666,6 +694,20 @@ mod tests {
             }
             other => panic!("expected Error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn retained_console_is_write_only_even_when_its_device_is_readable() {
+        use std::io::Read as _;
+
+        let directory = tempfile::tempdir().expect("console directory");
+        let path = directory.path().join("console");
+        std::fs::write(&path, b"private console input").expect("readable device stand-in");
+        let mut output = open_detached_console(&path).expect("open only for writing");
+        let error = output
+            .read(&mut [0_u8; 1])
+            .expect_err("workload output must not become a console input channel");
+        assert_eq!(error.raw_os_error(), Some(libc::EBADF));
     }
 
     #[test]
@@ -722,6 +764,8 @@ mod tests {
 
         let console = dir.path().join("console");
         std::fs::File::create(&console).expect("console stand-in");
+        let stdout = open_detached_console(&console).expect("stdout handle");
+        let stderr = open_detached_console(&console).expect("stderr handle");
         let reporter = dir.path().join("exit-report");
         std::fs::write(&reporter, "#!/bin/sh\nexit 0\n").expect("reporter script");
         use std::os::unix::fs::PermissionsExt as _;
@@ -735,7 +779,8 @@ mod tests {
                 "if [ -e /proc/self/fd/20 ]; then echo present; else echo closed; fi".into(),
             ],
             Vec::new(),
-            &console,
+            stdout,
+            stderr,
             &reporter,
         );
         assert!(matches!(response, GuestResponse::DetachedStarted { .. }));

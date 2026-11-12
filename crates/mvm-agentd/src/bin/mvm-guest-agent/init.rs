@@ -184,6 +184,11 @@ pub(crate) fn apply_activation(
     // The telemetry signing key is the egress client's, mode 0400; read it now
     // or the listener can never answer a session.
     crate::telemetry::capture_session_keys_before_privilege_drop();
+    // The guest console is root-owned. Retain only a write-only descriptor
+    // before dropping to the workload identity; detached children receive a
+    // duplicate for output, never the agent's inherited read/write stdio.
+    #[cfg(target_os = "linux")]
+    crate::interactive::retain_detached_console_before_drop();
     guest_mount::drop_guest_agent_privilege(guest_mount::WORKLOAD_UID, guest_mount::WORKLOAD_GID)?;
 
     boot_state.set_activation(ActivationState::Activated);
