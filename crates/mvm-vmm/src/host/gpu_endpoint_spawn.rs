@@ -148,9 +148,6 @@ pub fn reap_gpu_endpoint(state_dir: &Path) {
 /// Stop the process whose pid `pid_path` records (SIGTERM, then SIGKILL after
 /// a short grace) and remove the file. Idempotent; a missing file is a no-op.
 pub fn reap_pid_file(pid_path: &Path) {
-    if !pid_path.exists() {
-        return;
-    }
     let Some(pid) = super::process_liveness::read_pid_file(pid_path) else {
         let _ = std::fs::remove_file(pid_path);
         return;
@@ -163,9 +160,7 @@ pub fn reap_pid_file(pid_path: &Path) {
     }
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
-        // SAFETY: `kill(pid, 0)` probes existence only.
-        let alive = unsafe { libc::kill(pid, 0) } == 0;
-        if !alive {
+        if !super::process_liveness::pid_is_alive(pid) {
             break;
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -201,9 +196,7 @@ mod tests {
 
     #[test]
     fn reaping_a_pid_file_naming_no_real_process_signals_nothing() {
-        // Before the guard, "0" signalled this test's own process group and
-        // "-1" every process the user owns; this test reaching its assert is
-        // the witness.
+        // "0" used to signal this test's own process group, "-1" every process.
         for text in ["0", "-1", "1", "2147483648", "garbage", ""] {
             let dir = tempfile::tempdir().expect("tempdir");
             let pid_file = dir.path().join(GPU_ENDPOINT_PID_FILE);

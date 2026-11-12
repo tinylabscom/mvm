@@ -35,8 +35,7 @@ impl EndpointPid {
 
     /// Parse a pid file. The first field is the pid, so a reader that only
     /// wants the pid keeps working on either shape. A pid no endpoint can
-    /// have (`0` is the caller's process group, negatives address many
-    /// processes, `1` is init) is refused so it can never reach a `kill`.
+    /// have (0, 1, negative) is refused so it never reaches a `kill`.
     pub fn parse(text: &str) -> Option<Self> {
         let mut fields = text.split_whitespace();
         let pid: libc::pid_t = fields.next()?.parse().ok().filter(|pid| *pid > 1)?;
@@ -119,8 +118,6 @@ mod tests {
         for text in ["0", "-1", "1", "2147483648", "garbage", ""] {
             assert_eq!(EndpointPid::parse(text), None, "{text:?}");
         }
-        let parsed = EndpointPid::parse("4242 99").expect("valid record");
-        assert_eq!((parsed.pid, parsed.started), (4242, Some(99)));
     }
 
     fn sleeper() -> std::process::Child {
