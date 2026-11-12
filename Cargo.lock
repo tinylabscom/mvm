@@ -4333,6 +4333,7 @@ dependencies = [
  "flate2",
  "hex",
  "mvm-agentd",
+ "mvm-backends",
  "mvm-build",
  "mvm-cli",
  "mvm-client",
