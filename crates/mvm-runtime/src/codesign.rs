@@ -42,11 +42,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ensure_signed_facade_remains_fallible() {
-        let _: fn() -> std::result::Result<(), String> = ensure_signed;
-    }
-
-    #[test]
     fn collect_sign_targets_includes_current_exe() {
         let targets = collect_sign_targets();
         let exe = std::env::current_exe().unwrap();

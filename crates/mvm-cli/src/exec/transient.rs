@@ -583,15 +583,10 @@ pub(super) fn restore_via_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::test_env::TestEnv;
 
-    fn state_dirs(
-        home: &Path,
-    ) -> (
-        mvm_core::util::test_env::TestEnv,
-        std::path::PathBuf,
-        std::path::PathBuf,
-    ) {
-        let mut env = mvm_core::util::test_env::TestEnv::new();
+    fn state_dirs(home: &Path) -> (TestEnv, (std::path::PathBuf, std::path::PathBuf)) {
+        let mut env = TestEnv::new();
         env.isolate_mvm_home(home);
         env.remove("MVM_PRESERVE_TRANSIENT_STATE");
         let dirs = (
@@ -601,21 +596,21 @@ mod tests {
         for dir in [&dirs.0, &dirs.1] {
             std::fs::create_dir_all(dir).unwrap();
         }
-        (env, dirs.0, dirs.1)
+        (env, dirs)
     }
 
     #[test]
     fn state_dirs_releases_its_environment_lock() {
         let home = tempfile::tempdir().unwrap();
-        let (env, _, _) = state_dirs(home.path());
+        let (env, _) = state_dirs(home.path());
         drop(env);
-        let _next = mvm_core::util::test_env::TestEnv::new();
+        let _next = TestEnv::new();
     }
 
     #[test]
     fn an_interrupt_stops_the_transient_vm_once_and_removes_its_state() {
         let home = tempfile::tempdir().unwrap();
-        let (_env, effective, requested) = state_dirs(home.path());
+        let (_env, (effective, requested)) = state_dirs(home.path());
         let stops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counted = stops.clone();
         let _armed = arm_interrupt_teardown_with(
@@ -638,7 +633,7 @@ mod tests {
     #[test]
     fn a_withdrawn_interrupt_teardown_never_stops_the_vm() {
         let home = tempfile::tempdir().unwrap();
-        let (_env, effective, _) = state_dirs(home.path());
+        let (_env, (effective, _)) = state_dirs(home.path());
         let armed = arm_interrupt_teardown_with(
             "sig-vm",
             "sig-requested",
@@ -654,7 +649,7 @@ mod tests {
     #[test]
     fn a_failed_interrupt_stop_is_reported_and_keeps_the_state() {
         let home = tempfile::tempdir().unwrap();
-        let (_env, effective, requested) = state_dirs(home.path());
+        let (_env, (effective, requested)) = state_dirs(home.path());
         let error = stop_for_interrupt("sig-vm", "sig-requested", None, |_| {
             Err(anyhow::anyhow!("vmm would not die"))
         })

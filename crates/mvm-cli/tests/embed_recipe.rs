@@ -46,18 +46,6 @@ fn build_supervisors_recipe_exposes_the_pinned_rust_sysroot_too() {
 }
 
 #[test]
-fn macos_objcopy_env_seeds_the_loader_path_and_the_rustc_wrapper() {
-    let env = include_str!("../../../scripts/macos-objcopy-env.sh");
-    assert!(env.contains("rustc --print sysroot"), "{env}");
-    assert!(env.contains("DYLD_FALLBACK_LIBRARY_PATH"), "{env}");
-    assert!(env.contains("${_mvm_rust_sysroot}/lib"), "{env}");
-    assert!(env.contains("scripts/rustc-macos-loader.sh"), "{env}");
-    assert!(env.contains("RUSTC_WRAPPER"), "{env}");
-    // A no-op off Darwin, or every Linux contributor inherits a macOS repair.
-    assert!(env.contains(r#""$(uname -s)" != "Darwin""#), "{env}");
-}
-
-#[test]
 fn embed_recipe_builds_native_vm_helpers_in_the_requested_profile() {
     let recipe = recipe_body("embed *ARGS:", "embed-refresh:");
 
@@ -73,12 +61,152 @@ fn embed_recipe_builds_native_vm_helpers_in_the_requested_profile() {
     );
 }
 
+const OBJCOPY_ENV: &str = "scripts/macos-objcopy-env.sh";
+
+/// Writes an executable shell stub named `name` into `dir`.
+fn stub(dir: &std::path::Path, name: &str, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// This file is also compiled on its own with plain `rustc` from the repo
+/// root, so it uses only `std` and finds the checkout by walking up from the
+/// working directory to the `Justfile`.
+fn script(rel: &str) -> std::path::PathBuf {
+    std::env::current_dir()
+        .unwrap()
+        .ancestors()
+        .find(|dir| dir.join("Justfile").is_file())
+        .expect("repo root")
+        .join(rel)
+}
+
+/// A scratch directory removed on drop.
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "embed-recipe-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Sources the env script under a stubbed `uname` and `rustup`, then prints
+/// the two variables it is responsible for.
+fn sourced_env(uname: &str, inherited_loader_path: Option<&str>) -> String {
+    let tmp = Scratch::new();
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    stub(&bin, "uname", &format!("echo {uname}"));
+    stub(&bin, "rustup", "echo /fake/sysroot");
+    std::fs::write(
+        tmp.path().join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"nightly-test\"\n",
+    )
+    .unwrap();
+    let mut cmd = std::process::Command::new("bash");
+    cmd.arg("-c")
+        .arg(r#"[ -n "$3" ] && export DYLD_FALLBACK_LIBRARY_PATH="$3"; source "$1" "$2"; echo "loader=${DYLD_FALLBACK_LIBRARY_PATH:-}"; echo "wrapper=${RUSTC_WRAPPER:-}""#)
+        .arg("bash")
+        .arg(script(OBJCOPY_ENV))
+        .arg(tmp.path())
+        .arg(inherited_loader_path.unwrap_or(""))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env_remove("DYLD_FALLBACK_LIBRARY_PATH")
+        .env_remove("RUSTC_WRAPPER");
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    format!(
+        "{}\nroot={}",
+        String::from_utf8(out.stdout).unwrap(),
+        tmp.path().display()
+    )
+}
+
+#[test]
+fn macos_objcopy_env_seeds_the_loader_path_and_the_rustc_wrapper() {
+    let out = sourced_env("Darwin", None);
+    let root = out.rsplit("root=").next().unwrap();
+    assert!(out.contains("loader=/fake/sysroot/lib\n"), "{out}");
+    assert!(
+        out.contains(&format!("wrapper={root}/scripts/rustc-macos-loader.sh")),
+        "{out}"
+    );
+}
+
+#[test]
+fn macos_objcopy_env_keeps_an_inherited_loader_path_behind_the_sysroot() {
+    let out = sourced_env("Darwin", Some("/already/there"));
+    assert!(
+        out.contains("loader=/fake/sysroot/lib:/already/there\n"),
+        "{out}"
+    );
+}
+
+/// A no-op off Darwin, or every Linux contributor inherits a macOS repair.
+#[test]
+fn macos_objcopy_env_changes_nothing_off_darwin() {
+    let out = sourced_env("Linux", None);
+    assert!(out.contains("loader=\n"), "{out}");
+    assert!(out.contains("wrapper=\n"), "{out}");
+}
+
+/// SIP strips `DYLD_*` across the exec of the `/bin/sh` stub on macOS, so the
+/// exported value can only be observed from a child on other hosts.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn macos_rustc_wrapper_restores_the_sysroot_loader_path() {
-    let wrapper = include_str!("../../../scripts/rustc-macos-loader.sh");
-    assert!(wrapper.contains("--print sysroot"), "{wrapper}");
-    assert!(wrapper.contains("DYLD_FALLBACK_LIBRARY_PATH"), "{wrapper}");
-    assert!(wrapper.contains("$rust_sysroot/lib"), "{wrapper}");
-    assert!(wrapper.contains("$existing_loader_path"), "{wrapper}");
-    assert!(wrapper.contains("exec \"$rustc_bin\" \"$@\""), "{wrapper}");
+    const RUSTC_WRAPPER: &str = "scripts/rustc-macos-loader.sh";
+    let tmp = Scratch::new();
+    stub(
+        tmp.path(),
+        "fake-rustc",
+        r#"if [ "$1" = "--print" ]; then echo /fake/sysroot; else echo "args=$*"; echo "loader=$DYLD_FALLBACK_LIBRARY_PATH"; fi"#,
+    );
+    let run = |existing: Option<&str>| {
+        let mut cmd = std::process::Command::new(script(RUSTC_WRAPPER));
+        cmd.arg(tmp.path().join("fake-rustc"))
+            .args(["--crate-name", "x"])
+            .env_remove("DYLD_FALLBACK_LIBRARY_PATH");
+        if let Some(existing) = existing {
+            cmd.env("DYLD_FALLBACK_LIBRARY_PATH", existing);
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let fresh = run(None);
+    assert!(fresh.contains("args=--crate-name x\n"), "{fresh}");
+    assert!(fresh.contains("loader=/fake/sysroot/lib\n"), "{fresh}");
+    let kept = run(Some("/cargo/set"));
+    assert!(
+        kept.contains("loader=/fake/sysroot/lib:/cargo/set\n"),
+        "{kept}"
+    );
 }

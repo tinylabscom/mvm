@@ -884,6 +884,21 @@ mod tests {
         }
     }
 
+    /// The libkrun supervisor records its start time beside its pid.
+    #[test]
+    fn running_vm_guard_sees_a_marker_that_records_its_start_time() {
+        let vms = tempdir().unwrap();
+        let dir = vms.path().join("web");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("libkrun.pid"),
+            mvm_vmm::host::network_endpoint_spawn::EndpointPid::of_child(std::process::id())
+                .render(),
+        )
+        .unwrap();
+        assert_eq!(first_running_vm_at(vms.path()).as_deref(), Some("web"));
+    }
+
     #[test]
     fn running_vm_guard_ignores_a_dead_pid() {
         let vms = tempdir().unwrap();

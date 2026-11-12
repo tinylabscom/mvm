@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use super::network_endpoint_spawn::EndpointPid;
+
 /// Supervisor PID markers, one per workload backend plus the generic `pid`
 /// fallback. This is the single list every liveness probe reads — a backend
 /// missing here reads as stopped everywhere at once.
@@ -119,18 +121,26 @@ fn macos_process_is_zombie(pid: i32) -> bool {
 /// Parse a supervisor PID marker. `None` when the file is absent, unparseable,
 /// or names a PID no supervisor can have — `0` addresses the caller's whole
 /// process group and `1` is init, so neither may reach a `kill`.
+///
+/// The pid is the first field: a marker may also record the process start time
+/// after it (see [`pid_file_has_live_process`]).
 pub fn read_pid_file(path: &Path) -> Option<i32> {
-    std::fs::read_to_string(path)
-        .ok()?
-        .trim()
-        .parse::<i32>()
-        .ok()
-        .filter(|&p| p > 1)
+    recorded_pid(path).map(|record| record.pid)
+}
+
+fn recorded_pid(path: &Path) -> Option<EndpointPid> {
+    EndpointPid::parse(&std::fs::read_to_string(path).ok()?).filter(|record| record.pid > 1)
 }
 
 /// Whether one supervisor PID file identifies a live process.
+///
+/// A marker that records the start time also has to match the process now
+/// holding the pid, so a pid recycled after the supervisor died reads dead. A
+/// bare-pid marker (a backend that does not record one) keeps the plain
+/// liveness answer.
 pub fn pid_file_has_live_process(path: &Path) -> bool {
-    read_pid_file(path).is_some_and(pid_is_alive)
+    recorded_pid(path)
+        .is_some_and(|record| pid_is_alive(record.pid) && record.is_not_contradicted())
 }
 
 /// Resolve the first known supervisor PID file in `dir` that points at a live
@@ -984,5 +994,71 @@ mod tests {
             ));
             assert_eq!(calls.into_inner(), vec!["zombie", "signal"]);
         }
+    }
+
+    fn sleeper() -> std::process::Child {
+        std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap()
+    }
+
+    fn marker(body: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("libkrun.pid");
+        std::fs::write(&path, body).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn a_marker_with_the_right_start_time_reads_alive() {
+        let mut child = sleeper();
+        let started = EndpointPid::of_child(child.id())
+            .started
+            .expect("start time");
+        let (_dir, path) = marker(&format!("{} {started}\n", child.id()));
+        assert!(pid_file_has_live_process(&path));
+        assert_eq!(read_pid_file(&path), Some(child.id() as i32));
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn a_marker_whose_pid_was_recycled_reads_dead() {
+        let mut child = sleeper();
+        let started = EndpointPid::of_child(child.id())
+            .started
+            .expect("start time");
+        let (_dir, path) = marker(&format!("{} {}", child.id(), started + 1));
+        assert!(pid_is_alive(child.id() as i32), "the pid itself is live");
+        assert!(!pid_file_has_live_process(&path));
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn a_bare_pid_marker_keeps_the_plain_liveness_answer() {
+        let mut child = sleeper();
+        let (_dir, path) = marker(&child.id().to_string());
+        assert!(pid_file_has_live_process(&path));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!pid_file_has_live_process(&path));
+    }
+
+    #[test]
+    fn a_zombie_with_the_right_start_time_still_reads_dead() {
+        let child = std::process::Command::new("true").spawn().unwrap();
+        let started = EndpointPid::of_child(child.id()).started;
+        let (_dir, path) = marker(&match started {
+            Some(started) => format!("{} {started}", child.id()),
+            None => child.id().to_string(),
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while pid_file_has_live_process(&path) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!pid_file_has_live_process(&path));
+        drop(child);
     }
 }
