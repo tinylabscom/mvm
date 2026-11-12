@@ -26,8 +26,35 @@ pub(in crate::commands) mod application_source;
 mod composition;
 mod composition_request;
 pub(in crate::commands) use composition_request::SdkTransportArgs;
-pub(in crate::commands) fn prepare_local_pack_data(path: &Path) -> Result<PathBuf> {
-    composition::prepare_archive(path, composition::Base::SignedDefault)
+pub(in crate::commands) fn prepare_local_pack_data(
+    path: &Path,
+    selected: Option<&mvm_runtime::machine::persist::LocalPackBaseSource>,
+) -> Result<PathBuf> {
+    let base = if let Some(selected) = selected {
+        #[cfg(feature = "pr-test-guest-runtime")]
+        let pr_test = selected
+            .pr_runtime
+            .as_ref()
+            .map(|proof| composition::PrTestInput {
+                directory: proof.directory.as_path(),
+                pull_request: proof.pull_request,
+            });
+        #[cfg(not(feature = "pr-test-guest-runtime"))]
+        anyhow::ensure!(
+            selected.pr_runtime.is_none(),
+            "PR test runtime requires a fixture-enabled CLI"
+        );
+        composition::Base::Local {
+            manifest: &selected.manifest,
+            kernel: &selected.kernel,
+            tar: &selected.tar,
+            #[cfg(feature = "pr-test-guest-runtime")]
+            pr_test,
+        }
+    } else {
+        composition::Base::SignedDefault
+    };
+    composition::prepare_archive(path, base)
 }
 #[cfg(test)]
 pub(in crate::commands) use composition_request::validate_composition_request;

@@ -313,7 +313,10 @@ mod tests {
             .unwrap()
             .parse()
             .unwrap();
-        let arch = GuestArch::host();
+        let arch = std::env::var("MVM_PR_TEST_ARCH")
+            .unwrap_or_else(|_| GuestArch::host().to_string())
+            .parse::<GuestArch>()
+            .expect("selected PR base architecture");
         let base = PrTestSyntheticBase::new(&path, number).unwrap();
         let checked = base
             .verify(arch)

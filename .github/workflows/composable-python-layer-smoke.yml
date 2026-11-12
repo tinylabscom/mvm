@@ -150,6 +150,18 @@ jobs:
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            artifact_id: 13746141841
+            artifact_size: 503284622
+            artifact_digest: d12a6026d2858f1414f33a7692abf8693a4b158f547abe323fe19170eb301bfd
+          - arch: aarch64
+            artifact_id: 13745508933
+            artifact_size: 498828250
+            artifact_digest: fb0458726a70c67fc72e3948d4f9a7801549ab1d8002af0a398f84bbd9db9c5e
     permissions:
       contents: read
       actions: read
@@ -175,11 +187,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           MVM_PR_TEST_BASE_DIR: ${{ runner.temp }}/pr-bootable-base
           MVM_PR_TEST_SOURCE_DIR: ${{ runner.temp }}/pr-linux-source
-          MVM_PR_TEST_ZIP: ${{ runner.temp }}/linux-layer-x86_64.zip
+          MVM_PR_TEST_ZIP: ${{ runner.temp }}/linux-layer-${{ matrix.arch }}.zip
         run: |
           set -euo pipefail
           source_sha=$(cat tests/fixtures/composable-images-source.ref)
-          artifact_digest=d12a6026d2858f1414f33a7692abf8693a4b158f547abe323fe19170eb301bfd
+          arch=${{ matrix.arch }}
+          artifact_id=${{ matrix.artifact_id }}
+          artifact_size=${{ matrix.artifact_size }}
+          artifact_digest=${{ matrix.artifact_digest }}
           test "$(git -C mvm-images rev-parse HEAD)" = "$source_sha"
           gh api repos/tinylabscom/mvm-images/actions/runs/42778535622 |
             jq -e --arg sha "$source_sha" '
@@ -190,48 +205,54 @@ jobs:
               .path == ".github/workflows/build.yml" and .run_attempt == 1 and
               .head_sha == $sha and .status == "completed" and .conclusion == "success"
             ' >/dev/null
-          gh api repos/tinylabscom/mvm-images/actions/artifacts/13746141841 |
-            jq -e --arg sha "$source_sha" --arg digest "sha256:$artifact_digest" '
-              .id == 13746141841 and .name == "linux-layer-x86_64" and
-              .size_in_bytes == 503284622 and .digest == $digest and .expired == false and
+          gh api "repos/tinylabscom/mvm-images/actions/artifacts/$artifact_id" |
+            jq -e --arg sha "$source_sha" --arg digest "sha256:$artifact_digest" \
+              --arg arch "$arch" --argjson id "$artifact_id" --argjson size "$artifact_size" '
+              .id == $id and .name == ("linux-layer-" + $arch) and
+              .size_in_bytes == $size and .digest == $digest and .expired == false and
               .workflow_run.id == 42778535622 and .workflow_run.head_sha == $sha and
               .workflow_run.repository_id == 1376194514 and
               .workflow_run.head_repository_id == 1376194514
             ' >/dev/null
-          gh api repos/tinylabscom/mvm-images/actions/artifacts/13746141841/zip > "$MVM_PR_TEST_ZIP"
+          gh api "repos/tinylabscom/mvm-images/actions/artifacts/$artifact_id/zip" > "$MVM_PR_TEST_ZIP"
           printf '%s  %s\n' "$artifact_digest" "$MVM_PR_TEST_ZIP" | sha256sum --check
           mkdir -p "$MVM_PR_TEST_SOURCE_DIR"
           unzip -j "$MVM_PR_TEST_ZIP" \
-            default-microvm-vmlinux-x86_64 \
-            default-microvm-rootfs-x86_64.ext4 \
-            default-microvm-rootfs-x86_64.tar.gz \
+            "default-microvm-vmlinux-$arch" \
+            "default-microvm-rootfs-$arch.ext4" \
+            "default-microvm-rootfs-$arch.tar.gz" \
             -d "$MVM_PR_TEST_SOURCE_DIR"
-          for name in default-microvm-vmlinux-x86_64 \
-              default-microvm-rootfs-x86_64.ext4 default-microvm-rootfs-x86_64.tar.gz; do
+          for name in "default-microvm-vmlinux-$arch" \
+              "default-microvm-rootfs-$arch.ext4" "default-microvm-rootfs-$arch.tar.gz"; do
             test -s "$MVM_PR_TEST_SOURCE_DIR/$name" && test ! -L "$MVM_PR_TEST_SOURCE_DIR/$name"
             sha256sum "$MVM_PR_TEST_SOURCE_DIR/$name"
           done
-          readelf -h "$MVM_PR_TEST_SOURCE_DIR/default-microvm-vmlinux-x86_64" |
-            grep -q 'Machine:.*Advanced Micro Devices X86-64'
+          case "$arch" in
+            x86_64) expected_machine='Advanced Micro Devices X86-64' ;;
+            aarch64) expected_machine='AArch64' ;;
+          esac
+          readelf -h "$MVM_PR_TEST_SOURCE_DIR/default-microvm-vmlinux-$arch" |
+            grep -q "Machine:.*$expected_machine"
           python3 -m venv "$RUNNER_TEMP/local-manifest-venv"
           PURE=1 "$RUNNER_TEMP/local-manifest-venv/bin/pip" install \
             -r mvm-images/scripts/requirements-local-manifest.txt
           "$RUNNER_TEMP/local-manifest-venv/bin/python" mvm-images/scripts/emit-local-manifest.py \
-            --images-checkout mvm-images --arch x86_64 --builder-cache-contract 5 \
+            --images-checkout mvm-images --arch "$arch" --builder-cache-contract 5 \
             --out "$MVM_PR_TEST_BASE_DIR" \
             --artifact default_tenant_workload_kernel kernel:elf \
-              "$MVM_PR_TEST_SOURCE_DIR/default-microvm-vmlinux-x86_64" \
+              "$MVM_PR_TEST_SOURCE_DIR/default-microvm-vmlinux-$arch" \
             --capability default_tenant_workload_kernel virtio_vsock \
             --artifact default_tenant_workload_rootfs ext4 \
-              "$MVM_PR_TEST_SOURCE_DIR/default-microvm-rootfs-x86_64.ext4" \
+              "$MVM_PR_TEST_SOURCE_DIR/default-microvm-rootfs-$arch.ext4" \
             --artifact default_tenant_workload_rootfs tar_gz \
-              "$MVM_PR_TEST_SOURCE_DIR/default-microvm-rootfs-x86_64.tar.gz" \
+              "$MVM_PR_TEST_SOURCE_DIR/default-microvm-rootfs-$arch.tar.gz" \
             --capability default_tenant_workload_rootfs virtio_blk
       - name: Sign and verify the bootable PR-only base
         env:
           MVM_EMBED: "0"
           MVM_PR_TEST_BASE_DIR: ${{ runner.temp }}/pr-bootable-base
           MVM_PR_TEST_PULL_REQUEST: ${{ github.event.pull_request.number }}
+          MVM_PR_TEST_ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
           cosign sign-blob --yes --new-bundle-format \
@@ -243,7 +264,7 @@ jobs:
       - name: Retain the signed PR base for a builder-VM composition witness
         uses: actions/upload-artifact@v7
         with:
-          name: pr-test-bootable-base-${{ github.run_id }}-${{ github.run_attempt }}
+          name: pr-test-bootable-base-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/pr-bootable-base/
           if-no-files-found: error
           retention-days: 1

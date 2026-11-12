@@ -664,6 +664,7 @@ mod tests {
             recipe: std::path::PathBuf::from("/project/pack.toml"),
             recipe_sha256: mvm_core::packs::Sha256Hex::from_bytes(b"recipe"),
             archive_sha256: mvm_core::packs::Sha256Hex::from_bytes(b"archive"),
+            base: None,
         });
         let error = validate_registry_pack_source(&machine)
             .expect_err("a local recipe needs its own freshly admitted start path");

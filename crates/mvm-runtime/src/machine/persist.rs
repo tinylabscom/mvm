@@ -26,6 +26,69 @@ pub const MACHINE_SPEC_SCHEMA_VERSION: u32 = 1;
 
 const MAX_LOCAL_PACK_RECIPE_BYTES: u64 = 64 * 1024;
 
+/// Data-only selection of a local development base, never a publisher trust root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalPackBaseSource {
+    /// Signed local image-set manifest to reverify on each start.
+    pub manifest: PathBuf,
+    /// Kernel named by that manifest.
+    pub kernel: PathBuf,
+    /// Composition tar named by that manifest.
+    pub tar: PathBuf,
+    /// Optional PR-only guest runtime proof, unavailable to ordinary builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_runtime: Option<LocalPackPrRuntime>,
+}
+
+/// Test-only runtime selection stored as source data, not launch authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalPackPrRuntime {
+    /// Directory holding the signed runtime archive and its signed checksum.
+    pub directory: PathBuf,
+    /// Pull request whose workflow identity signed the proof.
+    pub pull_request: u64,
+}
+
+impl LocalPackBaseSource {
+    /// Record a local base and optional PR runtime as paths, not authority.
+    ///
+    /// # Errors
+    /// Refuses linked or non-regular base inputs and linked or missing runtime directories.
+    pub fn from_selected(
+        manifest: &Path,
+        kernel: &Path,
+        tar: &Path,
+        pr_runtime: Option<LocalPackPrRuntime>,
+    ) -> Result<Self> {
+        for path in [manifest, kernel, tar] {
+            ensure!(
+                fs::symlink_metadata(path)?.file_type().is_file(),
+                "local pack base input must be a regular file: {}",
+                path.display()
+            );
+        }
+        let pr_runtime = pr_runtime
+            .map(|mut proof| -> Result<_> {
+                ensure!(
+                    proof.pull_request > 0
+                        && fs::symlink_metadata(&proof.directory)?.file_type().is_dir(),
+                    "local pack PR runtime must be a real directory and name a pull request"
+                );
+                proof.directory = fs::canonicalize(&proof.directory)?;
+                Ok(proof)
+            })
+            .transpose()?;
+        Ok(Self {
+            manifest: fs::canonicalize(manifest)?,
+            kernel: fs::canonicalize(kernel)?,
+            tar: fs::canonicalize(tar)?,
+            pr_runtime,
+        })
+    }
+}
+
 /// Data-only identity of a locally composed pack; never an installed-bundle authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,6 +99,9 @@ pub struct LocalPackSource {
     pub recipe_sha256: mvm_core::packs::Sha256Hex,
     /// Verified, host-signed cache entry selected at creation.
     pub archive_sha256: mvm_core::packs::Sha256Hex,
+    /// Optional local base and PR proof selected at creation; reverified at start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<LocalPackBaseSource>,
 }
 
 impl LocalPackSource {
@@ -52,6 +118,7 @@ impl LocalPackSource {
             recipe: fs::canonicalize(recipe).context("resolving local pack recipe")?,
             recipe_sha256,
             archive_sha256,
+            base: None,
         })
     }
 
@@ -68,6 +135,20 @@ impl LocalPackSource {
             local_recipe_digest(&self.recipe)? == self.recipe_sha256,
             "local pack recipe differs from the recorded machine source"
         );
+        if let Some(base) = &self.base {
+            ensure!(
+                [&base.manifest, &base.kernel, &base.tar]
+                    .iter()
+                    .all(|path| path.is_absolute()),
+                "local pack base paths must be absolute"
+            );
+            if let Some(proof) = &base.pr_runtime {
+                ensure!(
+                    proof.directory.is_absolute() && proof.pull_request > 0,
+                    "local pack PR runtime source must be absolute and name a pull request"
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -629,6 +710,7 @@ mod tests {
             recipe: std::path::PathBuf::from("/project/pack.toml"),
             recipe_sha256: mvm_core::packs::Sha256Hex::from_bytes(b"recipe"),
             archive_sha256: mvm_core::packs::Sha256Hex::from_bytes(b"archive"),
+            base: None,
         });
         let stored = serde_json::to_vec(&current).expect("serialize local source");
         let round_trip: MachineSpec =
@@ -645,6 +727,54 @@ mod tests {
             .recipe_sha256 = mvm_core::packs::Sha256Hex::from_bytes(b"changed recipe");
         assert!(!machine_config_matches(&round_trip, &changed));
         assert_eq!(machine_config_diff(&round_trip, &changed), "source");
+
+        let mut selected = round_trip.clone();
+        selected.local_pack.as_mut().expect("source").base = Some(LocalPackBaseSource {
+            manifest: "/signed/image-set.json".into(),
+            kernel: "/signed/vmlinux".into(),
+            tar: "/signed/rootfs.tar.gz".into(),
+            pr_runtime: Some(LocalPackPrRuntime {
+                directory: "/signed/guest-runtime".into(),
+                pull_request: 5326,
+            }),
+        });
+        let stored = serde_json::to_vec(&selected).expect("serialize selected base");
+        let restored: MachineSpec = serde_json::from_slice(&stored).expect("restore selected base");
+        assert_eq!(restored, selected);
+        assert_eq!(machine_config_diff(&round_trip, &restored), "source");
+    }
+
+    #[test]
+    fn local_pack_base_refuses_linked_inputs_before_preparation() {
+        let directory = tempfile::tempdir().expect("base inputs");
+        let manifest = directory.path().join("image-set.json");
+        let kernel = directory.path().join("vmlinux");
+        let tar = directory.path().join("base.tar.gz");
+        let runtime = directory.path().join("runtime");
+        std::fs::create_dir(&runtime).expect("runtime directory");
+        for path in [&manifest, &kernel, &tar] {
+            std::fs::write(path, b"base").expect("base input");
+        }
+        let pr_runtime = Some(LocalPackPrRuntime {
+            directory: runtime.clone(),
+            pull_request: 5326,
+        });
+        let base = LocalPackBaseSource::from_selected(&manifest, &kernel, &tar, pr_runtime.clone())
+            .expect("regular files selected");
+        assert_eq!(base.manifest, std::fs::canonicalize(&manifest).unwrap());
+        assert_eq!(
+            base.pr_runtime.expect("runtime").directory,
+            std::fs::canonicalize(runtime).unwrap()
+        );
+        #[cfg(unix)]
+        {
+            let link = directory.path().join("linked-tar");
+            std::os::unix::fs::symlink(&tar, &link).expect("linked base");
+            assert!(
+                LocalPackBaseSource::from_selected(&manifest, &kernel, &link, pr_runtime).is_err(),
+                "a link cannot substitute a selected base input"
+            );
+        }
     }
 
     #[test]

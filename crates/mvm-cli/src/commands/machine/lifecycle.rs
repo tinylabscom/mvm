@@ -242,7 +242,7 @@ fn start_local_pack(
         .as_ref()
         .context("named machine has no local pack source")?;
     pin.verify_recipe()?;
-    let archive = crate::commands::vm::prepare_local_pack_data(&pin.recipe)?;
+    let archive = crate::commands::vm::prepare_local_pack_data(&pin.recipe, pin.base.as_ref())?;
     anyhow::ensure!(
         mvm_core::crypto::image_verify::sha256_file(&archive)? == pin.archive_sha256.as_str(),
         "local pack composition changed since machine create; recreate it to select new bytes"

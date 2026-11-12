@@ -754,6 +754,52 @@ fn machine_run_spec(
     })
 }
 
+#[derive(ClapArgs, Debug, Clone, Default)]
+pub(super) struct MachinePackBaseArgs {
+    /// Local signed image-set manifest for a development composition.
+    #[arg(id = "pack_base_manifest", long = "pack-base-manifest", value_name = "PATH", requires_all = ["pack", "pack_base_kernel", "pack_base_tar"], hide = true)]
+    pub manifest: Option<PathBuf>,
+    /// Kernel named by the local image-set manifest.
+    #[arg(id = "pack_base_kernel", long = "pack-base-kernel", value_name = "PATH", requires_all = ["pack", "pack_base_manifest", "pack_base_tar"], hide = true)]
+    pub kernel: Option<PathBuf>,
+    /// Composition tar named by the local image-set manifest.
+    #[arg(id = "pack_base_tar", long = "pack-base-tar", value_name = "PATH", requires_all = ["pack", "pack_base_manifest", "pack_base_kernel"], hide = true)]
+    pub tar: Option<PathBuf>,
+    /// PR-only runtime quartet, never a release input.
+    #[cfg(feature = "pr-test-guest-runtime")]
+    #[arg(id = "pack_pr_test_runtime_dir", long = "pack-pr-test-runtime-dir", value_name = "PATH", requires_all = ["pack_base_manifest", "pack_pr_test_pull_request"], hide = true)]
+    pub pr_runtime_dir: Option<PathBuf>,
+    /// Pull request whose workflow signed the test runtime.
+    #[cfg(feature = "pr-test-guest-runtime")]
+    #[arg(id = "pack_pr_test_pull_request", long = "pack-pr-test-pull-request", value_name = "NUMBER", requires_all = ["pack_base_manifest", "pack_pr_test_runtime_dir"], hide = true)]
+    pub pr_pull_request: Option<u64>,
+}
+
+impl MachinePackBaseArgs {
+    fn selected(&self) -> Result<Option<mvm_runtime::machine::persist::LocalPackBaseSource>> {
+        use mvm_runtime::machine::persist::{LocalPackBaseSource, LocalPackPrRuntime};
+
+        #[cfg(feature = "pr-test-guest-runtime")]
+        let pr_runtime = match (&self.pr_runtime_dir, self.pr_pull_request) {
+            (Some(directory), Some(pull_request)) => Some(LocalPackPrRuntime {
+                directory: directory.clone(),
+                pull_request,
+            }),
+            (None, None) => None,
+            _ => anyhow::bail!("PR test runtime requires its directory and pull request"),
+        };
+        #[cfg(not(feature = "pr-test-guest-runtime"))]
+        let pr_runtime: Option<LocalPackPrRuntime> = None;
+        match (&self.manifest, &self.kernel, &self.tar) {
+            (Some(manifest), Some(kernel), Some(tar)) => Ok(Some(
+                LocalPackBaseSource::from_selected(manifest, kernel, tar, pr_runtime)?,
+            )),
+            (None, None, None) if pr_runtime.is_none() => Ok(None),
+            _ => anyhow::bail!("local pack base requires a manifest, kernel and composition tar"),
+        }
+    }
+}
+
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct MachineCreateArgs {
     /// Persistent machine name (auto-generated and printed if omitted).
@@ -771,6 +817,8 @@ pub(in crate::commands) struct MachineCreateArgs {
     /// Prepare a local pack as machine data without enrolling its host signer.
     #[arg(long, value_name = "PACK.TOML", conflicts_with_all = ["image", "manifest"], hide = true)]
     pub pack: Option<PathBuf>,
+    #[command(flatten)]
+    pub pack_base: MachinePackBaseArgs,
     /// Enable dev-tier outbound networking for this machine.
     #[arg(long)]
     pub net: bool,
@@ -1308,7 +1356,13 @@ impl MachineCreateArgs {
         self.into_spec_with(crate::commands::vm::prepare_local_pack_data)
     }
 
-    fn into_spec_with(self, prepare: impl FnOnce(&Path) -> Result<PathBuf>) -> Result<MachineSpec> {
+    fn into_spec_with(
+        self,
+        prepare: impl FnOnce(
+            &Path,
+            Option<&mvm_runtime::machine::persist::LocalPackBaseSource>,
+        ) -> Result<PathBuf>,
+    ) -> Result<MachineSpec> {
         // Auto-generate a name when `NAME` is omitted, mirroring `machine run
         // -d` (`create_machine` prints the chosen name).
         let name = match self.name {
@@ -1318,6 +1372,11 @@ impl MachineCreateArgs {
             }
             None => auto_machine_name(),
         };
+        let pack_base = self.pack_base.selected()?;
+        anyhow::ensure!(
+            self.pack.is_some() || pack_base.is_none(),
+            "local base selection requires --pack"
+        );
         let manifest_source = if self.pack.is_some() {
             None
         } else {
@@ -1333,11 +1392,14 @@ impl MachineCreateArgs {
             .pack
             .as_deref()
             .map(|recipe| -> Result<_> {
-                let archive = prepare(recipe)?;
+                let archive = prepare(recipe, pack_base.as_ref())?;
                 let sha = mvm_core::packs::Sha256Hex::new(
                     mvm_core::crypto::image_verify::sha256_file(&archive)?,
                 )?;
-                mvm_runtime::machine::persist::LocalPackSource::from_prepared(recipe, sha)
+                let mut source =
+                    mvm_runtime::machine::persist::LocalPackSource::from_prepared(recipe, sha)?;
+                source.base = pack_base;
+                Ok(source)
             })
             .transpose()?;
         let workflow = manifest_source.as_ref().map(|source| &source.workflow);

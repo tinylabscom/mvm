@@ -1715,6 +1715,7 @@ fn create_args_from_manifest(manifest: &Path, profile: Option<RunProfile>) -> Ma
         manifest: Some(manifest.display().to_string()),
         image: None,
         pack: None,
+        pack_base: MachinePackBaseArgs::default(),
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
@@ -2223,7 +2224,13 @@ fn a_local_pack_create_records_only_source_data_and_conflicts_with_image_sources
         panic!("pack create must route to the named machine lifecycle");
     };
     let spec = args
-        .into_spec_with(|_| Ok(archive.clone()))
+        .into_spec_with(|_, base| {
+            assert!(
+                base.is_none(),
+                "default pack selects the signed default base"
+            );
+            Ok(archive.clone())
+        })
         .expect("pack source is prepared");
     assert!(spec.image.is_none() && spec.manifest.is_none());
     assert!(spec.registry_pack_image.is_none());
@@ -2246,6 +2253,60 @@ fn a_local_pack_create_records_only_source_data_and_conflicts_with_image_sources
         .is_err()
     );
     assert!(parse(&["create", "packed", "--pack", "pack.toml", "--manifest", "."]).is_err());
+}
+
+#[cfg(feature = "pr-test-guest-runtime")]
+#[test]
+fn a_named_pack_records_the_local_base_and_pr_runtime_as_data_for_fresh_start() {
+    let _state = IsolatedMachineState::new();
+    let directory = tempfile::tempdir().expect("pack inputs");
+    let recipe = directory.path().join("pack.toml");
+    let archive = directory.path().join("composed.mvmpkg");
+    let manifest = directory.path().join("image-set.json");
+    let kernel = directory.path().join("vmlinux");
+    let tar = directory.path().join("base.tar.gz");
+    let runtime = directory.path().join("signed-runtime");
+    std::fs::create_dir(&runtime).expect("runtime directory");
+    for file in [&recipe, &archive, &manifest, &kernel, &tar] {
+        std::fs::write(file, b"fixture bytes").expect("test input");
+    }
+    let args = [
+        "create",
+        "packed",
+        "--pack",
+        recipe.to_str().expect("recipe"),
+        "--pack-base-manifest",
+        manifest.to_str().expect("manifest"),
+        "--pack-base-kernel",
+        kernel.to_str().expect("kernel"),
+        "--pack-base-tar",
+        tar.to_str().expect("tar"),
+        "--pack-pr-test-runtime-dir",
+        runtime.to_str().expect("runtime"),
+        "--pack-pr-test-pull-request",
+        "5326",
+    ];
+    let MachineAction::Create(create) = parse(&args).expect("selected base parses") else {
+        panic!("named pack create action expected");
+    };
+    let spec = create
+        .into_spec_with(|_, selected| {
+            let selected = selected.expect("base reaches the preparer");
+            assert_eq!(selected.manifest, std::fs::canonicalize(&manifest).unwrap());
+            assert_eq!(
+                selected.pr_runtime.as_ref().map(|proof| proof.pull_request),
+                Some(5326)
+            );
+            Ok(archive.clone())
+        })
+        .expect("prepared local source");
+    let source = spec.local_pack.expect("source recorded");
+    assert_eq!(
+        source.base.as_ref().expect("base retained").kernel,
+        std::fs::canonicalize(&kernel).unwrap()
+    );
+    source.verify_recipe().expect("original source");
+    assert!(parse(&args[..5]).is_err(), "partial base must not parse");
 }
 
 #[test]
@@ -2648,6 +2709,7 @@ fn create_persists_machine_spec_under_data_dir() {
         manifest: None,
         image: Some("alpine:latest".to_string()),
         pack: None,
+        pack_base: MachinePackBaseArgs::default(),
         net: true,
         allow_host: vec!["api.example.com".to_string()],
         peer: Vec::new(),
@@ -2684,6 +2746,7 @@ fn create_auto_generates_a_name_when_omitted() {
         manifest: None,
         image: Some("alpine:latest".to_string()),
         pack: None,
+        pack_base: MachinePackBaseArgs::default(),
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
@@ -2738,6 +2801,7 @@ volumes = ["./state.img:/data:1G:rw"]
         manifest: Some(dir.path().join("mvm.toml").display().to_string()),
         image: None,
         pack: None,
+        pack_base: MachinePackBaseArgs::default(),
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
@@ -2786,6 +2850,7 @@ fn create_rejects_flake_backed_manifest_for_machine_specs() {
         manifest: Some(dir.path().join("mvm.toml").display().to_string()),
         image: None,
         pack: None,
+        pack_base: MachinePackBaseArgs::default(),
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
@@ -2824,6 +2889,7 @@ fn create_defaults_to_dev_profile_when_manifest_declares_dev_init() {
         manifest: Some(dir.path().join("mvm.toml").display().to_string()),
         image: None,
         pack: None,
+        pack_base: MachinePackBaseArgs::default(),
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
@@ -2849,6 +2915,7 @@ fn create_defaults_to_dev_profile_when_manifest_declares_dev_init() {
         manifest: Some(dir.path().join("mvm.toml").display().to_string()),
         image: None,
         pack: None,
+        pack_base: MachinePackBaseArgs::default(),
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
@@ -3054,6 +3121,7 @@ fn create_rejects_unsafe_machine_name() {
         manifest: None,
         image: Some("alpine:latest".to_string()),
         pack: None,
+        pack_base: MachinePackBaseArgs::default(),
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),

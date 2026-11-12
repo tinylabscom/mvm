@@ -170,10 +170,14 @@ lock, a separately signed base-descriptor verifier, and an authenticated
 policy-snapshot adapter exist. The filesystem lock grants no command or host
 authority; v3 is not wired into the CLI invocation, admission or production
 export.
-Direct-QEMU synthetic boots read `COMPOSED_GUEST_VALUE=print('ready')`; those
-are *not* `mvmctl run --compose` admission, guest-output or cache-hit evidence.
-The previously failing #5263 workspace test was fixed; passing it is not a
-substitute for the missing CLI cold/repeat Linux witness.
+Direct-QEMU synthetic boots read `COMPOSED_GUEST_VALUE=print('ready')`, but
+they are not CLI admission evidence. On PR #5326 at `4d9e5d21ad`, the
+`release-witness` CLI and same-head signed PR base/runtime artifacts from
+Actions run `43172747569` produced that value through `mvmctl run --compose`
+on x86_64 Firecracker: 11.19 s on a cold composition, 8.52 s on an authenticated
+cache hit. Both exited zero without enrolling a publisher; neither meets the
+<300 ms cold or <50 ms warm launch target. The named `machine create --pack`
+path, aarch64, HVF and immutable warm custody still lack live witnesses.
 
 Acceptance requires Linux **CLI** one-command default and selected-custom-base
 cold/repeat runs, a value actually read from the guest on both runs, a proven
