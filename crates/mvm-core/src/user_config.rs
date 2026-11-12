@@ -483,8 +483,10 @@ mod tests {
                 .contains("max_mailbox_retention_ms"),
             "the default config must not suggest local durability is enabled"
         );
-        let mut config = MvmConfig::default();
-        config.max_mailbox_retention_ms = Some(10_000);
+        let config = MvmConfig {
+            max_mailbox_retention_ms: Some(10_000),
+            ..MvmConfig::default()
+        };
         let encoded = toml::to_string(&config).expect("operator config");
         assert_eq!(
             toml::from_str::<MvmConfig>(&encoded)
