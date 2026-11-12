@@ -115,6 +115,7 @@ pub fn vm_console_log_path(vm_name: &str) -> Result<std::path::PathBuf> {
 /// Start a Firecracker daemon in a per-VM directory with its own socket.
 #[instrument(skip_all)]
 pub fn start_vm_firecracker(abs_dir: &str, abs_socket: &str) -> Result<()> {
+    require_unprivileged_firecracker(effective_user_id())?;
     ensure_api_socket_fits(abs_socket)?;
     secure_socket_dir(abs_dir)?;
     start_vm_firecracker_inner(abs_dir, abs_socket, "", None, None)
@@ -158,6 +159,7 @@ pub(crate) fn start_vm_firecracker_scoped_with_handoff(
     scope: &str,
     handoff: Option<&mvm_vmm::driver::prepared_disks::LaunchWritableHandoff>,
 ) -> Result<()> {
+    require_unprivileged_firecracker(effective_user_id())?;
     anyhow::ensure!(
         !scope.trim().is_empty(),
         "required Firecracker scope is missing"
@@ -190,6 +192,7 @@ pub(crate) fn validate_required_scope(
     machine_id: &str,
     bounds: &mvm_core::spawn_scope::SpawnBounds,
 ) -> Result<()> {
+    require_unprivileged_firecracker(effective_user_id())?;
     bounds.validate_required_inputs()?;
     mvm_core::spawn_scope::validate_scope_id(machine_id)?;
     if let Some(gap) = mvm_core::spawn_scope::mechanism_gap() {
@@ -202,7 +205,7 @@ pub(crate) fn validate_required_scope(
 /// launch can fail if the service manager never creates the scope.
 const SCOPE_LAUNCHER_PID_FILE: &str = "scope-launcher.pid";
 
-/// Make the VM's socket directory ours before a root Firecracker binds in it.
+/// Make the VM's socket directory ours before Firecracker binds in it.
 ///
 /// A deep state directory moves the sockets to a short `/tmp` name another
 /// local user can compute. The launch script `rm`s a socket there and later
@@ -346,8 +349,8 @@ fn await_started_firecracker(abs_dir: &str, abs_socket: &str, scope: &str) -> Re
 
     // A fixed-tick shell wait would put a 100 ms floor under every launch; the
     // socket normally appears in single-digit milliseconds. Waiting here
-    // lets it use the shared backoff, and keeps the shell to the one thing it
-    // is needed for: becoming root to exec Firecracker.
+    // lets it use the shared backoff; the shell only detaches and execs
+    // Firecracker as the invoking, non-root user.
     wait_for_api_socket(std::path::Path::new(abs_socket), API_SOCKET_TIMEOUT).map_err(|e| {
         with_firecracker_stderr(
             e,
@@ -428,6 +431,14 @@ pub(crate) fn effective_user_id() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+fn require_unprivileged_firecracker(euid: u32) -> Result<()> {
+    anyhow::ensure!(
+        euid != 0,
+        "refusing to launch Firecracker as root; run MVM as a non-root user with /dev/kvm access"
+    );
+    Ok(())
+}
+
 /// The Firecracker a launch execs, resolved and verified against the release's
 /// pin, as a path that is safe to write into the launch script.
 ///
@@ -436,6 +447,7 @@ pub(crate) fn effective_user_id() -> u32 {
 /// here, before any marker is retired or any script runs, means a host with no
 /// acceptable Firecracker fails before it has changed anything.
 fn launch_binary() -> Result<String> {
+    require_unprivileged_firecracker(effective_user_id())?;
     let resolved =
         super::fetch::resolve_or_fetch().context("locating the Firecracker to launch")?;
     script_safe_path(&resolved.path)
@@ -1690,8 +1702,20 @@ mod no_elevation_tests {
     use super::tests::{TEST_FIRECRACKER, firecracker_launch_script_as};
     use super::*;
 
-    /// Firecracker is never launched through `sudo`, whoever the caller is: the
-    /// launch needs only `/dev/kvm`, which the user opens themselves.
+    #[test]
+    fn firecracker_launch_refuses_root_and_accepts_non_root() {
+        let err = require_unprivileged_firecracker(0).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("refusing to launch Firecracker as root"),
+            "{message}"
+        );
+        assert!(message.contains("/dev/kvm"), "{message}");
+        assert!(require_unprivileged_firecracker(1000).is_ok());
+    }
+
+    /// The launch script never elevates; root callers are refused before
+    /// reaching it. Non-root callers open `/dev/kvm` themselves.
     #[test]
     fn a_launch_never_elevates_for_any_caller() {
         for euid in [0, 1000] {
