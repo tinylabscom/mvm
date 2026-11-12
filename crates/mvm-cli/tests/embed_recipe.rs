@@ -1,5 +1,10 @@
 //! Contributor embedding is an explicit workflow. Keep its macOS LLVM loader
 //! repair reachable from every recipe that links host binaries.
+//!
+//! CI also compiles this file by itself with plain `rustc`, outside Cargo, so
+//! it may use only `std` and no Cargo-provided environment variables or
+//! dev-dependencies. A passing `nextest` run does not prove it still compiles
+//! that way.
 
 const JUSTFILE: &str = include_str!("../../../Justfile");
 const EMBED_MOD: &str = include_str!("../../../just/payload/mod.just");
