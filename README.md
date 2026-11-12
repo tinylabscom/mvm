@@ -285,7 +285,7 @@ recorded reason it cannot run
 ([readme_examples.toml](features/suites/s8_readme_contract/readme_examples.toml)).
 PRs merge through the merge queue.
 
-### Releasing a patch version
+### Releasing a version
 
 Releases use the `release` module's recipes rather than a top-level recipe.
 You need `git-cliff`, `cargo-nextest`, an authenticated GitHub CLI (`gh`),
@@ -297,27 +297,27 @@ release from the checkout where you run release operations:
 ```bash
 git switch main
 git pull --ff-only
-# Example: if the current version is 0.24.0, prepare the next patch:
-just release::pr 0.24.1
+# Example: if the current version is 0.28.0, prepare the next release:
+just release::pr 0.29.0
 ```
 
-Use the next patch version explicitly, without a `v` prefix. Omitting the
-version (`just release::pr`) lets `git-cliff` choose the next version from
-conventional commits and does **not** guarantee a patch bump.
+Pass the version explicitly, without a `v` prefix. Omitting it
+(`just release::pr`) lets `git-cliff` choose the next version from
+conventional commits, which may not be the version you intend.
 
 The recipe runs formatting, Clippy fixes/checks, and workspace tests, creates
-`release/v0.24.1`, updates version pins, lockfiles, and the changelog, then
+`release/v0.29.0`, updates version pins, lockfiles, and the changelog, then
 reruns workspace tests against the bumped tree. It commits and pushes the
 branch and opens a release PR.
 
 Merge that PR through the merge queue, then publish the tag:
 
 ```bash
-just release::tag 0.24.1
+just release::tag 0.29.0
 ```
 
 The tag recipe fetches `origin/main` and refuses unless it carries the
-requested version. It tags that commit as `v0.24.1` and pushes the tag,
+requested version. It tags that commit as `v0.29.0` and pushes the tag,
 triggering the release build/publish pipeline. Use the same version for
 both commands; do not tag before the release PR merges.
 
