@@ -627,14 +627,13 @@ fn a_guest_flooding_the_mailbox_port_is_refused_at_its_own_queue() {
         }
         verdicts
     });
-    for _ in 0..=LIMITS.max_depth {
-        channel
-            .service
-            .serve_guest(
-                &mvm_core::vm_backend::HostDialRoute::Mux(mux.clone()),
-                &mut sealer,
-            )
-            .unwrap();
+    for served in 0..=LIMITS.max_depth {
+        let outcome = channel.service.serve_guest(
+            &mvm_core::vm_backend::HostDialRoute::Mux(mux.clone()),
+            &mut sealer,
+        );
+        // A refusal for capacity is no progress: the launch backs off.
+        assert_eq!(outcome.is_err(), served == LIMITS.max_depth);
     }
     let verdicts = guest.join().unwrap();
     assert!(verdicts[..LIMITS.max_depth].iter().all(Result::is_ok));
@@ -642,6 +641,66 @@ fn a_guest_flooding_the_mailbox_port_is_refused_at_its_own_queue() {
         verdicts[LIMITS.max_depth],
         Err(Refusal::QueueFull(LIMITS.max_depth))
     );
+}
+
+/// More messages than the host queue holds are all delivered, in order and
+/// once each, as the reader drains it: the guest keeps what the full queue
+/// refused instead of consuming it.
+#[test]
+fn a_full_host_queue_delays_the_guest_outbox_instead_of_dropping_it() {
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::net::UnixListener;
+
+    let (node, channel) = channel_with_one_node();
+    let mut sealer = sealer(
+        &channel,
+        &[MailboxOperation::Send, MailboxOperation::Receive],
+    );
+    let total = LIMITS.max_depth + 10;
+    let outbox = node.home.path().join("outbox");
+    std::fs::create_dir(&outbox).unwrap();
+    for i in 0..total {
+        let message = OutboxMessage {
+            body: format!("m{i}").into_bytes(),
+            ..outbox_message()
+        };
+        mvm_agentd::mailbox_outbox::write_outbox(&outbox, &message).unwrap();
+    }
+    let mux = node.home.path().join("fc.vsock");
+    let listener = UnixListener::bind(&mux).unwrap();
+    let guest_outbox = outbox.clone();
+    // Each dial is one guest connection; the guest side forwards the oldest
+    // spooled message, exactly as the agent's accept loop does.
+    let guest = std::thread::spawn(move || {
+        while std::fs::read_dir(&guest_outbox).unwrap().next().is_some() {
+            let (stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            (&stream).write_all(b"OK 1\n").unwrap();
+            let mut stream = stream;
+            let _ = mvm_agentd::mailbox_outbox::forward_outbox(&mut stream, &guest_outbox);
+        }
+    });
+    let route = mvm_core::vm_backend::HostDialRoute::Mux(mux);
+    let mut received = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while received.len() < total && std::time::Instant::now() < deadline {
+        let dialed = channel.service.serve_guest(&route, &mut sealer);
+        if dialed.is_err() {
+            // The queue is full: the reader drains it, then the dial resumes.
+            while let Some(message) = channel.service.receive() {
+                received.push(String::from_utf8(message).unwrap());
+            }
+        }
+    }
+    while let Some(message) = channel.service.receive() {
+        received.push(String::from_utf8(message).unwrap());
+    }
+    let want: Vec<String> = (0..total).map(|i| format!("m{i}")).collect();
+    assert_eq!(received, want);
+    guest.join().unwrap();
 }
 
 /// A guest whose workload has not written its outbox yet accepts the dial and
@@ -898,6 +957,10 @@ fn granted_plan(authority_key: [u8; 32]) -> ExecutionPlan {
     plan
 }
 
+fn test_secret() -> mvm_core::crypto::aead::Key {
+    mvm_core::crypto::aead::Key::from_bytes([5; 32])
+}
+
 /// The sealing keys are derived from the host key per mailbox: they differ
 /// between mailboxes and hosts, and none is the host signing key.
 #[test]
@@ -924,7 +987,7 @@ fn derived_mailbox_keys_differ_per_mailbox_and_are_not_the_host_key() {
     let mut plan = granted_plan(a1.to_bytes());
     plan.mailbox.as_mut().unwrap().mailbox = m1;
     let grant = plan.mailbox.unwrap();
-    let (policy, sealer) = host_trust(keys.path(), &grant).unwrap();
+    let (policy, sealer) = host_trust(keys.path(), &grant, &test_secret()).unwrap();
     assert_eq!(policy.authority_key, a1);
     assert_ne!(sealer.sender_key.to_bytes(), [5; 32]);
     assert_ne!(sealer.authority_key.to_bytes(), [5; 32]);
@@ -937,7 +1000,7 @@ fn derived_mailbox_keys_differ_per_mailbox_and_are_not_the_host_key() {
     foreign.authority_key = authority_key_for(keys.path(), &m2, MbEpoch::new(1).unwrap())
         .unwrap()
         .to_bytes();
-    assert!(host_trust(keys.path(), &foreign).is_err());
+    assert!(host_trust(keys.path(), &foreign, &test_secret()).is_err());
 }
 
 /// A granted plan's derived keys serve the guest port from their own thread
@@ -955,7 +1018,7 @@ fn derived_keys_serve_the_guest_port_and_queue_what_the_guest_sent() {
     let authority =
         authority_key_for(dir.path(), &address().mailbox, MbEpoch::new(1).unwrap()).unwrap();
     let grant = granted_plan(authority.to_bytes()).mailbox.unwrap();
-    let keys = derive_launch_keys(dir.path(), &grant).unwrap();
+    let keys = derive_launch_keys(dir.path(), &grant, &test_secret()).unwrap();
     let outbox = dir.path().join("outbox");
     std::fs::create_dir(&outbox).unwrap();
     mvm_agentd::mailbox_outbox::write_outbox(&outbox, &outbox_message()).unwrap();

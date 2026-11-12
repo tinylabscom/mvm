@@ -54,6 +54,10 @@ pub(super) fn prepare_pinned_bundle(
     let trust = BundleTrust::new(release_trust, host_key_id.clone(), host_signer.verifying);
     let verified = mvm_core::plan::read_and_verify_bundle(&bytes, &trust)
         .with_context(|| format!("verifying bundle at {}", path.display()))?;
+    mvm_core::plan::bundle::require_composable_local_enrollment(
+        &verified.manifest,
+        &FsTrustStore::default_path()?,
+    )?;
     let origin = bundle_origin(&verified.manifest, &host_key_id, trust.release());
     match origin {
         BundleOrigin::LocalBuild => anyhow::ensure!(

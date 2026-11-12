@@ -168,26 +168,22 @@ pub fn collect_run(
     }
 
     let distinct_plan_ids: BTreeSet<&str> = matches.iter().map(|e| e.plan_id.0.as_str()).collect();
-    if distinct_plan_ids.len() > 1 {
-        let candidates: Vec<&str> = distinct_plan_ids.into_iter().collect();
+    let candidates: Vec<&str> = distinct_plan_ids.into_iter().collect();
+    let [plan_id] = candidates.as_slice() else {
         bail!(
             "run id {run_id:?} matches multiple runs: {}; pass a more specific plan id",
             candidates.join(", ")
         );
-    }
-    let plan_id = (*distinct_plan_ids
-        .into_iter()
-        .next()
-        .expect("matches is non-empty, so distinct_plan_ids is non-empty"))
-    .to_string();
+    };
+    let plan_id = (*plan_id).to_string();
 
     let final_events: Vec<&PlanAuditEntry> = all_entries
         .iter()
         .filter(|e| e.plan_id.0 == plan_id)
         .collect();
-    let first = *final_events
-        .first()
-        .expect("plan_id was derived from at least one match");
+    let Some(&first) = final_events.first() else {
+        bail!("run {run_id:?} resolved to plan {plan_id:?}, which has no audit entries");
+    };
     let image_name = first.image_name.clone();
     let image_sha256 = first.image_sha256.clone();
 

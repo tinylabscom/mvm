@@ -59,6 +59,11 @@ impl WorkloadLedger {
         std::fs::rename(tmp, dir.join(FILE))
     }
 
+    /// Has containment ever recorded `workload`?
+    pub fn knows(&self, workload: &str) -> bool {
+        self.0.contains_key(workload)
+    }
+
     pub fn entry(&self, workload: &str) -> WorkloadEntry {
         self.0.get(workload).copied().unwrap_or_default()
     }

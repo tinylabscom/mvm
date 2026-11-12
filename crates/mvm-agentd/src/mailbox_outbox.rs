@@ -81,6 +81,46 @@ pub fn bound_socket_io(
     Ok(())
 }
 
+/// How long the agent holds a host connection open waiting for the workload to
+/// write a message, before answering with nothing so the host dials again.
+/// One long hold replaces a dial every couple of seconds on an idle guest.
+pub const MAILBOX_HOLD: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Wait up to `hold` for the spool to hold a message, checking every `tick`.
+/// Stops early, returning `false`, when `abandoned` says the host went away or
+/// the agent is shutting down; returns `true` as soon as a message is spooled.
+pub fn wait_for_outbox(
+    spool: &Path,
+    hold: std::time::Duration,
+    tick: std::time::Duration,
+    mut abandoned: impl FnMut() -> bool,
+) -> bool {
+    let deadline = std::time::Instant::now() + hold;
+    loop {
+        if spooled(spool).is_ok_and(|files| !files.is_empty()) {
+            return true;
+        }
+        if abandoned() || std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(tick);
+    }
+}
+
+/// Whether the peer of the connected socket `fd` has hung up or sent bytes.
+/// The host sends nothing before the agent answers, so either means the
+/// connection is no longer a live request.
+pub fn peer_gone(fd: std::os::fd::RawFd) -> bool {
+    let mut p = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: `p` is one valid pollfd and the count is 1; a zero timeout never blocks.
+    let rc = unsafe { libc::poll(&mut p, 1, 0) };
+    rc > 0 && p.revents != 0
+}
+
 /// The spooled message files, oldest first. Temp files are skipped.
 fn spooled(spool: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
     let mut files = Vec::new();
@@ -98,6 +138,11 @@ fn spooled(spool: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
 /// the verdict, so a bad frame cannot wedge the spool and the next dial sees
 /// the next message. An empty spool, or an oversized or malformed message, is
 /// refused here, before a byte is sent to the host.
+///
+/// The one verdict that keeps the message is [`Refusal::QueueFull`]: the host's
+/// queue has no room yet, so the message stays at the head of the spool for the
+/// next dial, in order, and nothing is lost. The writer meets the limit at the
+/// spool instead ([`write_outbox`]).
 pub fn forward_outbox<S: Read + Write>(stream: &mut S, spool: &Path) -> Result<(), Refusal> {
     let oldest = spooled(spool)
         .map_err(|_| Refusal::Malformed)?
@@ -107,9 +152,14 @@ pub fn forward_outbox<S: Read + Write>(stream: &mut S, spool: &Path) -> Result<(
     let mut bytes = Vec::new();
     let read = std::fs::File::open(&oldest)
         .and_then(|file| file.take(MAX_OUTBOX_BYTES + 1).read_to_end(&mut bytes));
-    let _ = std::fs::remove_file(&oldest);
-    read.map_err(|_| Refusal::Malformed)?;
-    send_outbox_message(stream, &OutboxMessage::decode(&bytes)?)
+    let verdict = read
+        .map_err(|_| Refusal::Malformed)
+        .and_then(|_| OutboxMessage::decode(&bytes))
+        .and_then(|message| send_outbox_message(stream, &message));
+    if !matches!(verdict, Err(Refusal::QueueFull(_))) {
+        let _ = std::fs::remove_file(&oldest);
+    }
+    verdict
 }
 
 /// Create the outbox directory and the spool inside it, both owned by
@@ -403,6 +453,73 @@ mod tests {
             Err(Refusal::QueueFull(MAX_SPOOLED_MESSAGES))
         );
         assert_eq!(drain(dir.path()).0.len(), MAX_SPOOLED_MESSAGES);
+    }
+
+    /// A host that answers `QueueFull` for the first `refusals` frames, then
+    /// accepts. Returns the bodies it accepted and how many dials it served.
+    fn serve_with_full_queue(spool: &Path, refusals: usize) -> (Vec<OutboxMessage>, usize) {
+        let (mut accepted, mut dials) = (Vec::new(), 0);
+        while std::fs::read_dir(spool).unwrap().next().is_some() {
+            let full = dials < refusals;
+            dials += 1;
+            let (mut ours, mut theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+            let host = std::thread::spawn(move || {
+                let mut len = [0u8; 4];
+                theirs.read_exact(&mut len).unwrap();
+                let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+                theirs.read_exact(&mut body).unwrap();
+                let verdict: Result<(), Refusal> = if full {
+                    Err(Refusal::QueueFull(64))
+                } else {
+                    Ok(())
+                };
+                theirs
+                    .write_all(&serde_json::to_vec(&verdict).unwrap())
+                    .unwrap();
+                body
+            });
+            let verdict = forward_outbox(&mut ours, spool);
+            drop(ours);
+            let body = host.join().unwrap();
+            assert_eq!(verdict.is_err(), full);
+            if !full {
+                accepted.push(OutboxMessage::decode(&body).unwrap());
+            }
+        }
+        (accepted, dials)
+    }
+
+    #[test]
+    fn a_frame_the_host_queue_refused_as_full_stays_spooled_and_arrives_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let want: Vec<_> = (0..5u32)
+            .map(|i| message(format!("m{i}").as_bytes()))
+            .collect();
+        for m in &want {
+            write_outbox(dir.path(), m).unwrap();
+        }
+        let (accepted, dials) = serve_with_full_queue(dir.path(), 3);
+        assert_eq!(accepted, want, "none lost, none duplicated, order kept");
+        assert_eq!(dials, 3 + want.len());
+    }
+
+    #[test]
+    fn a_permanent_refusal_still_consumes_the_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        write_outbox(dir.path(), &message(b"bad")).unwrap();
+        let (mut ours, mut theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        theirs
+            .write_all(
+                &serde_json::to_vec(&Err::<(), _>(Refusal::Mailbox("no send operation".into())))
+                    .unwrap(),
+            )
+            .unwrap();
+        drop(theirs);
+        assert!(matches!(
+            forward_outbox(&mut ours, dir.path()),
+            Err(Refusal::Mailbox(_))
+        ));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]

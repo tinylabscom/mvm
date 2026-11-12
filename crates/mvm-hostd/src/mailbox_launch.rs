@@ -6,6 +6,17 @@
 //! identities and capability they seal under default to values derived from the
 //! same key, and an operator template beside it overrides them. Encryption is host to host: the derived keys are this host's, so
 //! a peer host cannot open what they seal.
+//!
+//! The encryption key does not come from the signing seed at all: it derives
+//! from a separate random root in the same directory, created on first use, so
+//! the signing seed alone cannot open ciphertext and the encryption root alone
+//! cannot forge a signature. It also mixes in a random per-epoch secret held only in the
+//! VM's state directory and shredded when the VM stops or is replaced. Without
+//! it the host signing seed alone cannot re-derive the key, so a frame sealed
+//! under a terminated epoch stays sealed. The signing keys and identities do
+//! not take it: the authority key is named in a signed plan before any VM
+//! exists. The shred overwrites and unlinks the file; it is not a physical
+//! wipe, and a filesystem may keep the old blocks.
 
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
@@ -35,6 +46,9 @@ use crate::mailbox_service::{
 
 const SIGNER_SECRET: &str = "host-signer.ed25519";
 const SIGNER_PUBLIC: &str = "host-signer.pub";
+/// The host-held random root the encryption key derives from, beside the
+/// signing seed and never derived from it, so neither alone opens ciphertext.
+const ENCRYPTION_ROOT: &str = "mailbox-encryption.root";
 /// Optional operator override of the derived identities and capability,
 /// beside the host key.
 const TEMPLATE_FILE: &str = "mailbox-template.json";
@@ -86,11 +100,37 @@ fn derive(
     mailbox: &MailboxId,
     epoch: ExecutionEpoch,
 ) -> Zeroizing<[u8; 32]> {
+    derive_with(root, label, mailbox, epoch, &[])
+}
+
+/// [`derive`] with `extra` mixed into the HMAC input after the epoch.
+fn derive_with(
+    root: &[u8; 32],
+    label: &[u8],
+    mailbox: &MailboxId,
+    epoch: ExecutionEpoch,
+    extra: &[u8],
+) -> Zeroizing<[u8; 32]> {
     let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(root).expect("any key length");
     mac.update(label);
     mac.update(mailbox.as_bytes());
     mac.update(&epoch.get().to_be_bytes());
+    mac.update(extra);
     Zeroizing::new(mac.finalize().into_bytes().into())
+}
+
+/// Mint the random secret for a launch into `state_dir`, mode 0600. A file
+/// left by an earlier run is shredded first, never reused: a launch always
+/// seals under a secret nothing before it has seen.
+pub fn mint_epoch_secret(state_dir: &Path) -> Result<Key> {
+    shred_epoch_secret(state_dir)?;
+    Key::load_or_create(&mvm_core::config::vm_mailbox_secret_at(state_dir))
+}
+
+/// Erase the per-epoch secret in `state_dir`, if any: overwritten with zeros,
+/// flushed and unlinked.
+pub fn shred_epoch_secret(state_dir: &Path) -> Result<()> {
+    mvm_core::atomic_io::shred_file(&mvm_core::config::vm_mailbox_secret_at(state_dir))
 }
 
 fn now_unix_ms() -> i64 {
@@ -105,7 +145,6 @@ struct Derived {
     epoch: ExecutionEpoch,
     sender: SigningKey,
     authority: SigningKey,
-    encryption: Zeroizing<[u8; 32]>,
 }
 
 fn derived_keys(keys_dir: &Path, mailbox: &MailboxId, epoch: ExecutionEpoch) -> Result<Derived> {
@@ -122,7 +161,6 @@ fn derived_keys(keys_dir: &Path, mailbox: &MailboxId, epoch: ExecutionEpoch) -> 
         mailbox: *mailbox,
         epoch,
         authority: key(b"mvm-mailbox-authority-v1"),
-        encryption: derive(&root, b"mvm-mailbox-encryption-v1", mailbox, epoch),
     })
 }
 
@@ -215,9 +253,24 @@ impl DerivedMailboxKeys {
 /// `grant` needs.
 ///
 /// The grant's authority key must be the verifying half of the key this host
-/// derives for that mailbox; any other is refused.
-pub fn derive_launch_keys(keys_dir: &Path, grant: &MailboxGrant) -> Result<DerivedMailboxKeys> {
+/// derives for that mailbox; any other is refused. `secret` is the launch's
+/// per-epoch secret ([`mint_epoch_secret`]); the same seed with another secret
+/// derives a different encryption key.
+pub fn derive_launch_keys(
+    keys_dir: &Path,
+    grant: &MailboxGrant,
+    secret: &Key,
+) -> Result<DerivedMailboxKeys> {
     let derived = derived_keys(keys_dir, &grant.mailbox, grant.epoch)?;
+    // After the signing seed above, so a wrong directory never mints a root.
+    let encryption_root = Key::load_or_create(&keys_dir.join(ENCRYPTION_ROOT))?;
+    let encryption = derive_with(
+        encryption_root.expose_bytes(),
+        b"mvm-mailbox-encryption-v1",
+        &grant.mailbox,
+        grant.epoch,
+        secret.expose_bytes(),
+    );
     if derived.authority.verifying_key().to_bytes() != grant.authority_key {
         return Err(Error::new(
             ErrorKind::PermissionDenied,
@@ -228,14 +281,18 @@ pub fn derive_launch_keys(keys_dir: &Path, grant: &MailboxGrant) -> Result<Deriv
     Ok(DerivedMailboxKeys {
         sender: derived.sender.to_bytes(),
         authority: derived.authority.to_bytes(),
-        encryption: *derived.encryption,
+        encryption: *encryption,
         template,
     })
 }
 
 /// The host trust and sealer for `grant`, from the host key directory.
-pub fn host_trust(keys_dir: &Path, grant: &MailboxGrant) -> Result<(MailboxPolicy, GuestSealer)> {
-    Ok(derive_launch_keys(keys_dir, grant)?.trust())
+pub fn host_trust(
+    keys_dir: &Path,
+    grant: &MailboxGrant,
+    secret: &Key,
+) -> Result<(MailboxPolicy, GuestSealer)> {
+    Ok(derive_launch_keys(keys_dir, grant, secret)?.trust())
 }
 
 const VALID_FOR_MS: i64 = 60 * 60 * 1000;
@@ -423,7 +480,7 @@ fn serve_derived_with(
         while !thread_stop.load(Ordering::SeqCst) {
             // Ok means a frame arrived, delivered or refused; Err means the
             // guest had nothing yet (or was not up). Neither ends the loop.
-            match service.serve_guest(&paths.route, &mut sealer) {
+            match service.serve_guest_until(&paths.route, &mut sealer, &thread_stop) {
                 Ok(()) => {
                     attempt = 0;
                     sleep_unless_stopped(&thread_stop, POST_FRAME_PAUSE);
@@ -447,6 +504,10 @@ pub const LAUNCH_LIMITS: MailboxLimits = MailboxLimits {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_secret() -> mvm_core::crypto::aead::Key {
+        mvm_core::crypto::aead::Key::from_bytes([5; 32])
+    }
 
     fn keys_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
@@ -474,6 +535,89 @@ mod tests {
     }
 
     #[test]
+    fn the_epoch_secret_is_private_fresh_per_mint_and_shredded() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let state = tempfile::tempdir().unwrap();
+        let path = mvm_core::config::vm_mailbox_secret_at(state.path());
+        let first = mint_epoch_secret(state.path()).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let second = mint_epoch_secret(state.path()).unwrap();
+        assert_ne!(first.expose_bytes(), second.expose_bytes());
+        shred_epoch_secret(state.path()).unwrap();
+        assert!(!path.exists());
+        shred_epoch_secret(state.path()).unwrap();
+    }
+
+    fn encryption_of(dir: &Path, g: &MailboxGrant, secret: &Key) -> [u8; 32] {
+        derive_launch_keys(dir, g, secret).unwrap().encryption
+    }
+
+    #[test]
+    fn the_encryption_key_follows_the_secret_the_root_and_the_epoch() {
+        let dir = keys_dir();
+        let g = grant(dir.path(), [4; 32]);
+        let a = Key::from_bytes([1; 32]);
+        let b = Key::from_bytes([2; 32]);
+        assert_eq!(
+            encryption_of(dir.path(), &g, &a),
+            encryption_of(dir.path(), &g, &a)
+        );
+        assert_ne!(
+            encryption_of(dir.path(), &g, &a),
+            encryption_of(dir.path(), &g, &b)
+        );
+        let g2 = grant_at(dir.path(), [4; 32], 2);
+        assert_ne!(
+            encryption_of(dir.path(), &g, &a),
+            encryption_of(dir.path(), &g2, &a)
+        );
+        // Same signing seed, another encryption root.
+        let other = tempfile::tempdir().unwrap();
+        for f in [SIGNER_SECRET, SIGNER_PUBLIC] {
+            std::fs::copy(dir.path().join(f), other.path().join(f)).unwrap();
+        }
+        assert_ne!(
+            encryption_of(dir.path(), &g, &a),
+            encryption_of(other.path(), &g, &a)
+        );
+    }
+
+    #[test]
+    fn the_encryption_root_is_private_never_minted_without_a_signer_and_race_safe() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let empty = tempfile::tempdir().unwrap();
+        let g = grant(keys_dir().path(), [4; 32]);
+        assert!(derive_launch_keys(empty.path(), &g, &Key::random()).is_err());
+        assert!(!empty.path().join(ENCRYPTION_ROOT).exists());
+
+        let dir = keys_dir();
+        let g = grant(dir.path(), [4; 32]);
+        let secret = Key::from_bytes([3; 32]);
+        let results: Vec<_> = (0..8)
+            .map(|_| {
+                let (p, g, s) = (dir.path().to_path_buf(), g, Key::from_bytes([3; 32]));
+                std::thread::spawn(move || encryption_of(&p, &g, &s))
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect();
+        assert!(
+            results
+                .iter()
+                .all(|r| *r == encryption_of(dir.path(), &g, &secret))
+        );
+        let mode = std::fs::metadata(dir.path().join(ENCRYPTION_ROOT))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
     fn the_dial_schedule_is_fast_then_slow_and_bounded() {
         assert_eq!(dial_delay(0, 300), FAST_DIAL_INTERVAL);
         assert_eq!(dial_delay(299, 300), FAST_DIAL_INTERVAL);
@@ -493,7 +637,7 @@ mod tests {
         use std::os::unix::net::UnixListener;
         let dir = keys_dir();
         let grant = grant(dir.path(), [7; 32]);
-        let keys = derive_launch_keys(dir.path(), &grant).unwrap();
+        let keys = derive_launch_keys(dir.path(), &grant, &test_secret()).unwrap();
         // The guest port does not exist yet: every early dial fails, and with
         // a zero-length fast window all of them are on the slow schedule.
         let launch = serve_derived_with(grant, keys, serve_paths(dir.path()), LAUNCH_LIMITS, 0);
@@ -528,7 +672,7 @@ mod tests {
     fn dropping_the_launch_stops_an_idle_slow_dialer_promptly() {
         let dir = keys_dir();
         let grant = grant(dir.path(), [8; 32]);
-        let keys = derive_launch_keys(dir.path(), &grant).unwrap();
+        let keys = derive_launch_keys(dir.path(), &grant, &test_secret()).unwrap();
         let stop = {
             let launch = serve_derived_with(grant, keys, serve_paths(dir.path()), LAUNCH_LIMITS, 0);
             launch.stop.clone()
@@ -577,7 +721,7 @@ mod tests {
 
     fn launch_against(dir: &Path, limits: MailboxLimits) -> MailboxLaunch {
         let grant = grant(dir, [7; 32]);
-        let keys = derive_launch_keys(dir, &grant).unwrap();
+        let keys = derive_launch_keys(dir, &grant, &test_secret()).unwrap();
         serve_derived_with(grant, keys, serve_paths(dir), limits, 300)
     }
 
@@ -627,7 +771,8 @@ mod tests {
     fn without_a_template_file_the_derived_defaults_serve_a_matching_grant() {
         let dir = keys_dir();
         assert!(!dir.path().join(TEMPLATE_FILE).exists());
-        let (policy, sealer) = host_trust(dir.path(), &grant(dir.path(), [4; 32])).unwrap();
+        let (policy, sealer) =
+            host_trust(dir.path(), &grant(dir.path(), [4; 32]), &test_secret()).unwrap();
         assert_eq!(
             policy.authority_key,
             authority_key_for(dir.path(), &MailboxId::from_bytes([4; 32]), epoch(1)).unwrap()
@@ -642,8 +787,18 @@ mod tests {
         let at = |n| authority_key_for(dir.path(), &m, epoch(n)).unwrap();
         assert_eq!(at(1), at(1));
         assert_ne!(at(1), at(2));
-        let (p1, _) = host_trust(dir.path(), &grant_at(dir.path(), [4; 32], 1)).unwrap();
-        let (p2, _) = host_trust(dir.path(), &grant_at(dir.path(), [4; 32], 2)).unwrap();
+        let (p1, _) = host_trust(
+            dir.path(),
+            &grant_at(dir.path(), [4; 32], 1),
+            &test_secret(),
+        )
+        .unwrap();
+        let (p2, _) = host_trust(
+            dir.path(),
+            &grant_at(dir.path(), [4; 32], 2),
+            &test_secret(),
+        )
+        .unwrap();
         assert_ne!(p1.sender_key, p2.sender_key);
     }
 
@@ -652,7 +807,9 @@ mod tests {
         let dir = keys_dir();
         let mut g = grant_at(dir.path(), [4; 32], 2);
         g.authority_key = grant_at(dir.path(), [4; 32], 1).authority_key;
-        let err = host_trust(dir.path(), &g).err().expect("refused");
+        let err = host_trust(dir.path(), &g, &test_secret())
+            .err()
+            .expect("refused");
         assert_eq!(err.kind(), ErrorKind::PermissionDenied);
     }
 
@@ -661,7 +818,9 @@ mod tests {
         let dir = keys_dir();
         let mut g = grant(dir.path(), [4; 32]);
         g.authority_key = SigningKey::from_bytes(&[9; 32]).verifying_key().to_bytes();
-        let err = host_trust(dir.path(), &g).err().expect("refused");
+        let err = host_trust(dir.path(), &g, &test_secret())
+            .err()
+            .expect("refused");
         assert_eq!(err.kind(), ErrorKind::PermissionDenied);
     }
 
@@ -683,7 +842,7 @@ mod tests {
     fn a_template_file_overrides_the_defaults_and_a_malformed_one_is_refused() {
         let dir = keys_dir();
         std::fs::write(dir.path().join(TEMPLATE_FILE), b"{}").unwrap();
-        let err = host_trust(dir.path(), &grant(dir.path(), [4; 32]))
+        let err = host_trust(dir.path(), &grant(dir.path(), [4; 32]), &test_secret())
             .err()
             .expect("malformed template refused");
         assert_eq!(err.kind(), ErrorKind::InvalidData);
@@ -694,7 +853,7 @@ mod tests {
         let dir = keys_dir();
         let seed = std::fs::read(dir.path().join(SIGNER_SECRET)).unwrap();
         let g = grant(dir.path(), [4; 32]);
-        let keys = derive_launch_keys(dir.path(), &g).unwrap();
+        let keys = derive_launch_keys(dir.path(), &g, &test_secret()).unwrap();
         let wire = serde_json::to_vec(&keys).unwrap();
         let back: DerivedMailboxKeys = serde_json::from_slice(&wire).unwrap();
         let (policy, sealer) = back.trust();
@@ -718,7 +877,8 @@ mod tests {
     #[test]
     fn derived_keys_refuse_unknown_fields() {
         let dir = keys_dir();
-        let keys = derive_launch_keys(dir.path(), &grant(dir.path(), [4; 32])).unwrap();
+        let keys =
+            derive_launch_keys(dir.path(), &grant(dir.path(), [4; 32]), &test_secret()).unwrap();
         let mut value = serde_json::to_value(&keys).unwrap();
         value["root"] = serde_json::json!("00");
         assert!(serde_json::from_value::<DerivedMailboxKeys>(value).is_err());

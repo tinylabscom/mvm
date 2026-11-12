@@ -886,6 +886,7 @@ fn termination_handler(
         if signal == libc::SIGINT && IN_CONSOLE_MODE.load(std::sync::atomic::Ordering::SeqCst) {
             return;
         }
+        crate::signal::begin_cleanup();
         let stage0_active = env::builder_vm::stage0_active_in_process();
         let _ = writeln!(
             std::io::stderr(),

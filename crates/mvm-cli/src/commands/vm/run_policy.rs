@@ -384,6 +384,93 @@ mod tests {
         assert!(folded.allow_host.is_empty());
     }
 
+    #[test]
+    fn installed_bundle_address_folds_its_authenticated_environment() {
+        use mvm_core::plan::bundle::{
+            ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, BundleMember,
+            BundleRegistry, BundleSecurityPosture, FsTrustStore, key_id_from_pubkey, sha256_hex,
+            write_bundle,
+        };
+        use mvm_core::security::AgentProfile;
+
+        let (_env, home) = isolated();
+        let key = ed25519_dalek::SigningKey::from_bytes(&[5; 32]);
+        let key_id = key_id_from_pubkey(&key.verifying_key());
+        let trusted = home.path().join("trusted-publishers");
+        std::fs::create_dir_all(&trusted).unwrap();
+        std::fs::write(
+            trusted.join(format!("{}.pub", key_id.0)),
+            key.verifying_key().to_bytes(),
+        )
+        .unwrap();
+        let environment: mvm_core::plan::EnvironmentDescriptor =
+            serde_json::from_value(serde_json::json!({
+                "descriptor_version": 1,
+                "target": format!("{}-linux", mvm_core::arch::GuestArch::host()),
+                "entrypoint": { "argv": ["/usr/bin/agent"] },
+                "policy": {
+                    "allow_hosts": ["api.anthropic.com:443"],
+                    "request_budget": {
+                        "model": "claude-haiku-4-5-20251001",
+                        "max_requests": 1,
+                        "max_spend_microusd": 500000
+                    }
+                }
+            }))
+            .unwrap();
+        let kernel = b"kernel";
+        let manifest = BundleManifest {
+            schema_version: BUNDLE_SCHEMA_VERSION,
+            publisher: "test".into(),
+            key_id,
+            arch: mvm_core::arch::GuestArch::host().to_string(),
+            kernel_version: None,
+            profile: None,
+            workload_label: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            labels: Default::default(),
+            artifacts: vec![BundleArtifact {
+                name: "vmlinux".into(),
+                role: ArtifactRole::Kernel,
+                path: "artifacts/vmlinux".into(),
+                sha256: sha256_hex(kernel),
+                size_bytes: kernel.len() as u64,
+            }],
+            members: vec![
+                BundleMember::SecurityPosture(BundleSecurityPosture {
+                    profile: AgentProfile::Dev,
+                    verity_protected: false,
+                    requires_auth: true,
+                    allows_volumes: false,
+                    allows_egress: true,
+                }),
+                BundleMember::Environment(environment.clone()),
+            ],
+            verity: None,
+            resources: None,
+        };
+        let archive = write_bundle(
+            &manifest,
+            &key,
+            vec![("artifacts/vmlinux".into(), kernel.to_vec())],
+        )
+        .unwrap();
+        let installed = BundleRegistry::default_path()
+            .unwrap()
+            .install(&archive, &FsTrustStore::default_path().unwrap(), false)
+            .expect("install signed bundle");
+        let mut args = RunArgs {
+            manifest: Some(installed.sha256),
+            ..RunArgs::default()
+        };
+        apply_run_policy(&mut args).expect("fold signed environment");
+        assert_eq!(args.allow_host, ["api.anthropic.com:443"]);
+        assert_eq!(
+            args.applied_ai_policy.unwrap().request_budget,
+            environment.policy.unwrap().request_budget
+        );
+    }
+
     #[cfg(feature = "manifest-verify")]
     const PYTHON_MANIFEST: &[u8] =
         include_bytes!("../../../tests/fixtures/signed-registry-python/manifest.json");

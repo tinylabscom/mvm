@@ -60,9 +60,8 @@ pub(crate) use oci_boot::{ImageNaming, LaunchNames, boots_oci_image, oci_proxy_e
 use session::wait_for_agent_timed;
 pub use session::{SessionVm, dispatch_in_session, wait_for_agent};
 use transient::{
-    BootAttempt, LeaveAt, boot_transient_vm, combine_run_and_flush,
-    flush_writable_disks_before_teardown, install_ctrlc_teardown, leave_standby_when,
-    standby_to_leave, start_mode,
+    BootAttempt, LeaveAt, arm_interrupt_teardown, boot_transient_vm, combine_run_and_flush,
+    flush_writable_disks_before_teardown, leave_standby_when, standby_to_leave, start_mode,
 };
 pub(crate) use transient::{TransientStopFailure, combine_run_and_stop, teardown_transient_vm};
 
@@ -707,8 +706,13 @@ fn run_inner(
         None
     };
 
-    // Install Ctrl-C handler that tears the VM down.
-    let interrupted = install_ctrlc_teardown(&vm_name, backend.name());
+    // A signal stops and removes the VM before the process exits.
+    let interrupt_teardown = arm_interrupt_teardown(
+        &vm_name,
+        &requested_vm_name,
+        backend.name(),
+        start_config.plan_json.as_deref(),
+    );
 
     // Answer the endpoint's `ask` decisions for as long as the run is in the
     // foreground. The wasm tier has no network endpoint to ask.
@@ -777,6 +781,7 @@ fn run_inner(
         exit_audit,
         &mut sub_marks,
     );
+    drop(interrupt_teardown);
     if stopped.is_err() {
         return combine_run_and_stop(result, stopped);
     }
@@ -875,9 +880,6 @@ fn run_inner(
         output.phase_timing = Some(report);
     }
 
-    if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
-        anyhow::bail!("interrupted");
-    }
     if let Some(error) = warm_memory_error
         && result.is_ok()
     {

@@ -11,7 +11,8 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 
 use mvm_agentd::mailbox_outbox::{
-    MAILBOX_CMDLINE_TOKEN, MAILBOX_IO_TIMEOUT, OUTBOX_PATH, bound_socket_io, forward_outbox,
+    MAILBOX_CMDLINE_TOKEN, MAILBOX_HOLD, MAILBOX_IO_TIMEOUT, OUTBOX_PATH, bound_socket_io,
+    forward_outbox, peer_gone, wait_for_outbox,
 };
 use mvm_contract::protocol::mailbox::MAILBOX_PORT;
 
@@ -54,6 +55,16 @@ fn accept_loop(listener_fd: RawFd) {
         // SAFETY: `cfd` is the just-accepted connection fd, owned here and
         // closed on drop.
         let mut stream = unsafe { std::fs::File::from_raw_fd(cfd) };
+        // Hold an idle connection until a message is spooled, the host hangs
+        // up, or the hold ends, so an idle guest is dialed once per hold.
+        if !wait_for_outbox(
+            Path::new(OUTBOX_PATH),
+            MAILBOX_HOLD,
+            std::time::Duration::from_millis(50),
+            || peer_gone(cfd) || SHUTDOWN_REQUESTED.load(Ordering::Acquire),
+        ) {
+            continue;
+        }
         let _ = bound_socket_io(cfd, MAILBOX_IO_TIMEOUT);
         if let Err(refusal) = forward_outbox(&mut stream, Path::new(OUTBOX_PATH)) {
             if logs_refusal(refused) {

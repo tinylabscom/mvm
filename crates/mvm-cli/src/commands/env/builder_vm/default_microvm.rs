@@ -20,20 +20,50 @@ pub(crate) fn ensure_default_microvm_image(
     Ok(out)
 }
 
+/// Resolves an already-prepared kernel and refuses on a cache miss; launch
+/// paths call [`prepare_workload_kernel_for_launch`] instead.
 pub(crate) fn ensure_workload_kernel() -> Result<String> {
     ensure_workload_kernel_with(super::local_pair::pair_workload_kernel_fingerprint)
 }
 
-/// A first image run may fetch a missing kernel, but never replace a present
-/// entry whose verification or dm-verity capability failed.
+/// The one way every launch path (transient, persistent, warm, build) gets a
+/// workload kernel. A first use fetches a missing kernel, once and under the
+/// same digest and signature rules as `mvmctl bootstrap`; it never replaces a
+/// present entry whose verification or dm-verity capability failed. A refusal
+/// means preparation was tried and failed.
 pub(crate) fn prepare_workload_kernel_for_launch() -> Result<String> {
-    let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
-    let arch = builder_vm_host_arch();
-    let label = mvm_build::kernel_fetch::workload_kernel_label();
-    if mvm_build::kernel_fetch::kernel_cache_dir(&cache, arch, label).exists() {
-        ensure_workload_kernel()
-    } else {
+    let present = workload_kernel_is_cached();
+    launch_kernel_with(present, ensure_workload_kernel, || {
+        ui::notice("Preparing the workload kernel (first use only)...");
         prepare_workload_kernel()
+    })
+}
+
+/// True only for a kernel that resolves and verifies. A directory left by a
+/// failed first fetch, or an entry without its digest, is not prepared: the
+/// next launch prepares again instead of refusing.
+fn workload_kernel_is_cached() -> bool {
+    let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+    matches!(
+        mvm_build::kernel_fetch::resolve_kernel(
+            &cache,
+            builder_vm_host_arch(),
+            mvm_build::kernel_fetch::workload_kernel_label(),
+            super::images_built_from_source(),
+        ),
+        mvm_build::kernel_fetch::KernelResolution::Cached(_)
+    )
+}
+
+fn launch_kernel_with(
+    present: bool,
+    ensure: impl FnOnce() -> Result<String>,
+    prepare: impl FnOnce() -> Result<String>,
+) -> Result<String> {
+    if present {
+        ensure()
+    } else {
+        prepare().context("preparing the workload kernel on first use failed")
     }
 }
 
@@ -705,6 +735,73 @@ mod pair_default_image_tests {
             profile,
             &mut |target| pair.build(&pair.images, target),
         )
+    }
+
+    #[test]
+    fn first_use_prepares_once_then_resolves_the_cache() {
+        let calls = std::cell::Cell::new(0);
+        let prepare = || {
+            calls.set(calls.get() + 1);
+            Ok("/k".to_string())
+        };
+        assert_eq!(
+            launch_kernel_with(false, || panic!("cache is empty"), prepare).unwrap(),
+            "/k"
+        );
+        let second = launch_kernel_with(true, || Ok("/k".into()), || panic!("already prepared"));
+        assert_eq!(second.unwrap(), "/k");
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn a_failed_first_fetch_leaves_nothing_a_later_launch_accepts() {
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        env.remove(mvm_build::image_source::MVM_IMAGES_DIR_ENV);
+        let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+        let kernel = mvm_build::kernel_fetch::cached_kernel_path(
+            &cache,
+            builder_vm_host_arch(),
+            mvm_build::kernel_fetch::workload_kernel_label(),
+        );
+        // What a fetch that died after creating the directory and writing
+        // bytes leaves behind: no digest sidecar.
+        std::fs::create_dir_all(kernel.parent().unwrap()).unwrap();
+        assert!(!workload_kernel_is_cached(), "an empty entry directory");
+        std::fs::write(&kernel, b"partial kernel bytes").unwrap();
+        assert!(!workload_kernel_is_cached(), "bytes without a digest");
+        assert!(!kernel.exists(), "the unpinned bytes are evicted");
+        assert!(ensure_workload_kernel().is_err());
+    }
+
+    #[test]
+    fn a_digest_recorded_kernel_counts_as_prepared() {
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        env.remove(mvm_build::image_source::MVM_IMAGES_DIR_ENV);
+        let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+        let kernel = mvm_build::kernel_fetch::cached_kernel_path(
+            &cache,
+            builder_vm_host_arch(),
+            mvm_build::kernel_fetch::workload_kernel_label(),
+        );
+        std::fs::create_dir_all(kernel.parent().unwrap()).unwrap();
+        std::fs::write(&kernel, b"kernel bytes").unwrap();
+        mvm_build::kernel_fetch::record_kernel_digest(&kernel).unwrap();
+        assert!(workload_kernel_is_cached());
+    }
+
+    #[test]
+    fn a_failed_first_use_refuses_naming_the_cause() {
+        let error = launch_kernel_with(false, || panic!(), || anyhow::bail!("digest mismatch"))
+            .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("first use failed") && text.contains("digest mismatch"),
+            "{text}"
+        );
     }
 
     #[test]

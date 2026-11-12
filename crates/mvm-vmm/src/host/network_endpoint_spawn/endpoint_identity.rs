@@ -42,6 +42,15 @@ impl EndpointPid {
         Some(Self { pid, started })
     }
 
+    /// Whether the process now holding this pid could be the one recorded: a
+    /// record without a start time cannot say, so it is not contradicted; one
+    /// with a start time is contradicted by any other start time (a recycled
+    /// pid) or by a process that cannot be read.
+    pub fn is_not_contradicted(&self) -> bool {
+        self.started
+            .is_none_or(|started| process_start(self.pid) == Some(started))
+    }
+
     /// Whether the live process at this pid is the one recorded: same pid,
     /// same start time. A record without a start time, or a process whose
     /// start time cannot be read, is never confirmed.

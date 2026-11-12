@@ -63,16 +63,19 @@ pub(in crate::commands) fn require_held_entrypoint_request(args: &RunArgs) -> Re
     Ok(())
 }
 
-/// Read defaults only after the installed application resolver authenticated its bundle.
+/// Read the authenticated environment of an application or an installed bundle address.
 pub(in crate::commands) fn environment(
     args: &RunArgs,
 ) -> Result<Option<mvm_core::plan::EnvironmentDescriptor>> {
-    let Some(application) = &args.resolved_application else {
-        return Ok(None);
-    };
-    mvm_client::admission::bundle_environment::installed_bundle_environment(
-        &application.bundle_sha256,
-    )
+    let bundle = args
+        .resolved_application
+        .as_ref()
+        .map(|application| application.bundle_sha256.as_str())
+        .or(args.manifest.as_deref());
+    bundle
+        .map(mvm_client::admission::bundle_environment::installed_bundle_environment)
+        .transpose()
+        .map(Option::flatten)
 }
 
 /// Signed sizing must be applied before the operator policy resource fold.

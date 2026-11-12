@@ -150,7 +150,9 @@ pub fn resolve_spec(
     };
     let action = mp::reconcile_machine_spec(existing.as_ref(), &desired, force)?;
     let spec = match action {
-        SpecReconcile::Reuse => existing.expect("reuse implies an existing spec"),
+        SpecReconcile::Reuse => existing.ok_or_else(|| {
+            anyhow::anyhow!("machine {name:?} was marked for reuse but has no existing spec")
+        })?,
         SpecReconcile::Create | SpecReconcile::Recreate { .. } => desired,
     };
     Ok((spec, action))

@@ -559,7 +559,7 @@ pub(super) use mvm_client::launch::machine_start::{LocalDeployment, resolve_loca
 pub(super) fn local_deployment_image_source(
     deployment: &LocalDeployment,
 ) -> Result<crate::exec::ImageSource> {
-    let kernel_path = super::env::builder_vm::ensure_workload_kernel()
+    let kernel_path = super::env::builder_vm::prepare_workload_kernel_for_launch()
         .context("resolving workload kernel for local deployment")?;
     super::env::builder_vm::assert_workload_kernel_supports_verity(&kernel_path)?;
     Ok(crate::exec::ImageSource::Prebuilt {
@@ -687,7 +687,11 @@ fn machine_run_spec(
     let routes = crate::commands::vm::run_routes::launch_routes(&args.run)?;
     let allow_host = routes.with_allow_host(&args.run.allow_host);
     let config = mvm_core::user_config::load(None);
-    let ai = super::shared::resolve_ai_policy(args.run.ai_token_budget);
+    let ai = args
+        .run
+        .applied_ai_policy
+        .clone()
+        .or_else(|| super::shared::resolve_ai_policy(args.run.ai_token_budget));
     let resolved = super::shared::resolve_policy_run_grants(
         super::shared::GrantInputs {
             cpu_limit_millicores: args.run.cpu_limit,
