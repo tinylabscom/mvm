@@ -600,6 +600,14 @@ mod tests {
     }
 
     #[test]
+    fn state_dirs_releases_its_environment_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let (env, _) = state_dirs(home.path());
+        drop(env);
+        let _next = TestEnv::new();
+    }
+
+    #[test]
     fn an_interrupt_stops_the_transient_vm_once_and_removes_its_state() {
         let home = tempfile::tempdir().unwrap();
         let (_env, (effective, requested)) = state_dirs(home.path());

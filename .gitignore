@@ -11,6 +11,7 @@
 .codex/
 /.cursor/
 /.mcp.json
+/opencode.json
 # Trail: the built graph and hooks are local; the learnings are shared.
 .trail/*
 !.trail/learnings/
