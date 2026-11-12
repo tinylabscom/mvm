@@ -38,7 +38,7 @@ case "${1:-} ${2:-}" in
     case "$*" in
       true) ;;
       "cat /proc/cmdline") echo "ro mvm.mailbox=1 quiet" ;;
-      sh*wget*) exit 1 ;;
+      sh*wget*) [ "${FAKE_DENIAL:-}" = 1 ] && echo '{"event":"flow.egress.denied","labels":{"destination":"example.com"}}' >> "${audit}"; exit 1 ;;
       sh*) fill="${*: -2:1}"; body="${*: -1}"
            if [ "${fill}" = 000 ] || [ "${mode}" = queues-other ]; then echo "${body}" >> "${fake}/queue"; fi ;;
       *) echo "fake: unhandled exec: $*" >&2; exit 2 ;;
@@ -96,6 +96,11 @@ out="$(run ok HYPERVISOR=hvf EXPECT_SCRUB_AUDIT=1)" || fail "hvf with the scrub 
 grep -q 'plan.guest_memory_scrubbed' <<<"${out}" || fail "the scrub audit entry was not checked: ${out}"
 run ok HYPERVISOR=firecracker EXPECT_SCRUB_AUDIT=1 >/dev/null && fail "EXPECT_SCRUB_AUDIT passed on firecracker"
 run ok HYPERVISOR=qemu >/dev/null && fail "an unsupported hypervisor was accepted"
+out="$(run ok HYPERVISOR=firecracker FAKE_DENIAL=1 EXPECT_EGRESS_DENIAL_AUDIT=1)" || fail "a run with an audited denial failed under EXPECT_EGRESS_DENIAL_AUDIT: ${out}"
+grep -q 'audited egress denial naming example.com' <<<"${out}" || fail "the audited denial was not reported: ${out}"
+run ok HYPERVISOR=firecracker EXPECT_EGRESS_DENIAL_AUDIT=1 >/dev/null && fail "EXPECT_EGRESS_DENIAL_AUDIT passed with no denial entry"
+out="$(run ok HYPERVISOR=firecracker)" || fail "a run with no denial entry failed without the strict flag: ${out}"
+grep -q '^FINDING: the refused outbound attempt left no' <<<"${out}" || fail "the missing denial entry was not reported as a FINDING: ${out}"
 
 bad() { # <mode> <what must be caught>
   local o; o="$(run "$1" HYPERVISOR=firecracker)" && fail "$2: the run passed: ${o}"

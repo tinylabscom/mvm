@@ -24,6 +24,12 @@
 #                      the source: sets MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build
 #   EXPECT_SCRUB_AUDIT=1   (hvf only) also require the signed
 #                      plan.guest_memory_scrubbed audit entry
+#   EXPECT_EGRESS_DENIAL_AUDIT=1   also require that the guest's refused outbound
+#                      attempt left a flow.egress.denied or host.flow.denied
+#                      entry naming the destination. Without it a missing
+#                      entry is printed as a FINDING and does not fail the run:
+#                      the attempt failing and the host auditing the decision
+#                      are separate facts.
 #   MVM_FIRECRACKER_BIN, MVM_MAILBOX_PATH
 #                      read by mvmctl; leave unset to test an install
 #
@@ -110,8 +116,20 @@ wait_for "the message" got "$FIRST"; say "message read back exactly"
 echo "== 3. a planted compromise is denied"
 mailbox_write_frame "$NAME" "$OTHER" "$CONTAINED"; sleep 8
 [ -z "$(recv)" ] || fail "a message to another recipient was queued"; say "a message to another mailbox was refused"
+denials() { grep -rhE 'flow\.egress\.denied|host\.flow\.denied' "$audit_dir" 2>/dev/null | grep -cF example.com || true; }
+denied_before="$(denials)"
 if mvm machine exec "$NAME" -- sh -c 'wget -T 4 -q -O- http://example.com >/dev/null 2>&1'; then fail "the guest reached the network"; fi
 say "an outbound connection from the guest failed (this shows it fails, not why)"
+# Whether the host audited the refusal is a separate question from the attempt
+# failing; give the entry a few seconds to be written before judging.
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ "$(denials)" -gt "$denied_before" ] && break; sleep 1; done
+if [ "$(denials)" -gt "$denied_before" ]; then
+  say "the refused outbound attempt left an audited egress denial naming example.com"
+elif [ "${EXPECT_EGRESS_DENIAL_AUDIT:-0}" = 1 ]; then
+  fail "the refused outbound attempt left no flow.egress.denied or host.flow.denied entry naming example.com"
+else
+  echo "FINDING: the refused outbound attempt left no flow.egress.denied or host.flow.denied entry naming example.com; the failure is observed but the host's decision is not audited here."
+fi
 
 echo "== 4. a running workload cannot be replaced"
 out="$(mvm machine replace "$NAME" 2>&1)" && fail "replace succeeded on a running machine"
