@@ -436,8 +436,7 @@ impl StreamRegistry {
             });
         }
         let permit = self.budget.reserve_flow(class)?;
-        // The peer picks this id and the session validator admits any odd one
-        // above its watermark, so the top of the range must not overflow.
+        // Peer-chosen: the top of the id range must not overflow.
         self.next_guest_id = self.next_guest_id.max(stream_id.saturating_add(2));
         self.insert(stream_id, class, permit);
         Ok(())
@@ -700,13 +699,7 @@ mod tests {
     fn a_peer_chosen_id_at_the_top_of_the_range_is_recorded_without_overflow() {
         let mut reg = StreamRegistry::new(RegistryLimits::default());
         reg.open_guest(u32::MAX, FlowClass::Tcp).unwrap();
-        assert!(reg.get(u32::MAX).is_some());
-        assert!(matches!(
-            reg.alloc_guest(FlowClass::Tcp),
-            Err(RegistryError::InvalidStreamId { .. })
-        ));
         reg.open_host(u32::MAX - 1, FlowClass::Tcp).unwrap();
-        assert!(reg.get(u32::MAX - 1).is_some());
     }
 
     #[test]

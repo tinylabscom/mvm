@@ -67,11 +67,7 @@ pub(super) unsafe fn write_gp(vcpu: hv_vcpu_t, reg: u8, value: u64) -> Result<()
     Ok(())
 }
 
-/// The PC after the 4-byte instruction at `pc`.
-///
-/// The guest chooses its own PC, so an instruction in the last word of the
-/// address space must wrap rather than trap: a checked add here is a host
-/// panic that guest code can trigger at will.
+/// The PC after the 4-byte instruction at `pc`; wraps because the guest picks `pc`.
 pub(super) fn next_pc(pc: u64) -> u64 {
     pc.wrapping_add(4)
 }

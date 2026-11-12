@@ -170,10 +170,7 @@ pub(super) fn run_udp_relay(params: UdpRelayParams) {
                                 peers.len(),
                                 max_peers,
                             ) {
-                                // Dropped traffic is not the guest's activity:
-                                // counting it would let anyone on the host's
-                                // network who finds the port hold the
-                                // association, and its slot, open forever.
+                                // Dropped traffic is not the guest's activity.
                                 continue;
                             }
                             activity_this_iter = true;

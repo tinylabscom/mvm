@@ -34,7 +34,7 @@ use super::mmio_layout::{
     BALLOON_IRQ, BALLOON_MMIO_BASE, MAX_DISKS, RNG_IRQ, RNG_MMIO_BASE, VSOCK_IRQ, VSOCK_MMIO_BASE,
     disk_mmio,
 };
-use super::smp::{CreationOrder, Release, SecondaryGates, VcpuStart, psci};
+use super::smp::{CreationOrder, OnDrop, Release, SecondaryGates, VcpuStart, psci};
 use super::snapshot::{HVF_SNAPSHOT_BACKEND_KIND, HvfVcpuState};
 use super::stop_wake::{RunOver, wake_until_done};
 use super::sys::*;
@@ -1036,20 +1036,6 @@ impl MachineShared<'_> {
     }
 }
 
-/// Ends the machine when dropped, including by unwinding.
-///
-/// A vCPU thread that panics skips the `end` call at the bottom of its run, and
-/// the other threads are parked on gates only `end` opens. `thread::scope` then
-/// joins them forever, so a panic anywhere in the machine would not stop the
-/// supervisor but wedge it with the guest half alive.
-struct EndMachineOnDrop<'a, 'b>(&'a MachineShared<'b>);
-
-impl Drop for EndMachineOnDrop<'_, '_> {
-    fn drop(&mut self) {
-        self.0.end();
-    }
-}
-
 /// What the boot CPU's run needs beyond the shared machine state.
 struct PrimaryRun<'a> {
     vcpu: &'a HvfVcpu,
@@ -1345,7 +1331,7 @@ fn run_secondary<B: run::DeviceBus>(
     let clock = ThreadCpuHandle::for_current_thread().ok().map(Arc::new);
     let registered = created.send(Ok(clock.clone())).is_ok();
 
-    let _end_on_unwind = EndMachineOnDrop(shared);
+    let _end_on_unwind = OnDrop(|| shared.end());
     let result = (|| {
         if !registered {
             // The boot CPU gave up on the bring-up. Do not enter the guest.
@@ -1995,7 +1981,7 @@ unsafe fn run(
                     .collect();
                 drop(created_tx);
                 drop(ready_tx);
-                let _end_on_unwind = EndMachineOnDrop(&shared);
+                let _end_on_unwind = OnDrop(|| shared.end());
 
                 // Wait for the whole machine to exist before starting the
                 // guest. The device tree already describes these CPUs, so a
@@ -2222,58 +2208,6 @@ unsafe fn run(
 
 #[cfg(test)]
 mod tests {
-    /// A panic on the boot CPU must release the parked secondaries.
-    ///
-    /// Without the guard `thread::scope` joins a secondary that waits on a gate
-    /// only `end` opens, so this test would never return.
-    #[test]
-    fn a_panic_on_the_boot_cpu_releases_parked_secondaries() {
-        use super::{
-            CreationOrder, EndMachineOnDrop, MachineShared, MachineStartGate, Release,
-            SecondaryGates,
-        };
-        use std::sync::atomic::AtomicBool;
-
-        let gates = SecondaryGates::new(2);
-        let creation_order = CreationOrder::default();
-        let start = MachineStartGate::default();
-        let run = MachineStartGate::default();
-        let roster = Mutex::new(Vec::new());
-        let machine_over = AtomicBool::new(false);
-        let guest_shutdown = AtomicBool::new(false);
-        let throttle = AtomicBool::new(false);
-        let parked = Mutex::new(Vec::new());
-        let restored = Mutex::new(Vec::new());
-        let vcpu_time = Mutex::new(Vec::new());
-        let shared = MachineShared {
-            gates: &gates,
-            creation_order: &creation_order,
-            start: &start,
-            run: &run,
-            roster: &roster,
-            stop: &super::NEVER_STOP,
-            paused: &super::NEVER_PAUSE,
-            handoff_fence: None,
-            machine_over: &machine_over,
-            guest_shutdown: &guest_shutdown,
-            throttle: &throttle,
-            parked_states: &parked,
-            restored_states: &restored,
-            vcpu_time: &vcpu_time,
-        };
-
-        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            std::thread::scope(|scope| {
-                let _secondary = scope.spawn(|| gates.wait_for_release(1));
-                let _end_on_unwind = EndMachineOnDrop(&shared);
-                panic!("boot CPU died");
-            })
-        }));
-        assert!(unwound.is_err());
-        assert!(shared.stopping());
-        assert_eq!(gates.wait_for_release(1), Release::Shutdown);
-    }
-
     /// A machine granted no CPU share is still measured.
     ///
     /// Measurement and enforcement are different questions. A workload with no

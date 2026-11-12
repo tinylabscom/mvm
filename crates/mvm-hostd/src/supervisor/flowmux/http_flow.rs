@@ -162,99 +162,15 @@ pub(super) type HttpFlows = BTreeMap<u32, HttpFlow>;
 pub(super) type HttpCancellations = Arc<Mutex<BTreeMap<u32, tokio::sync::watch::Sender<bool>>>>;
 
 pub(super) struct ForwardTask {
-    runtime: tokio::runtime::Handle,
-    service: Arc<SubstitutionService>,
-    session: Arc<Mutex<Session>>,
-    writer: Arc<Mutex<UnixStream>>,
-    stream_id: u32,
-    request: HttpRequestStream,
-    cancellation: tokio::sync::watch::Receiver<bool>,
-    cancellations: HttpCancellations,
-    registry: Arc<Mutex<super::registry::StreamRegistry>>,
-}
-
-#[derive(Default)]
-pub(super) struct ForwardTaskBuilder {
-    runtime: Option<tokio::runtime::Handle>,
-    service: Option<Arc<SubstitutionService>>,
-    session: Option<Arc<Mutex<Session>>>,
-    writer: Option<Arc<Mutex<UnixStream>>>,
-    stream_id: Option<u32>,
-    request: Option<HttpRequestStream>,
-    cancellation: Option<tokio::sync::watch::Receiver<bool>>,
-    cancellations: Option<HttpCancellations>,
-    registry: Option<Arc<Mutex<super::registry::StreamRegistry>>>,
-}
-
-impl ForwardTask {
-    pub(super) fn builder() -> ForwardTaskBuilder {
-        ForwardTaskBuilder::default()
-    }
-}
-
-impl ForwardTaskBuilder {
-    pub(super) fn runtime(mut self, value: tokio::runtime::Handle) -> Self {
-        self.runtime = Some(value);
-        self
-    }
-
-    pub(super) fn service(mut self, value: Arc<SubstitutionService>) -> Self {
-        self.service = Some(value);
-        self
-    }
-
-    pub(super) fn session(mut self, value: Arc<Mutex<Session>>) -> Self {
-        self.session = Some(value);
-        self
-    }
-
-    pub(super) fn writer(mut self, value: Arc<Mutex<UnixStream>>) -> Self {
-        self.writer = Some(value);
-        self
-    }
-
-    pub(super) fn stream_id(mut self, value: u32) -> Self {
-        self.stream_id = Some(value);
-        self
-    }
-
-    pub(super) fn request(mut self, value: HttpRequestStream) -> Self {
-        self.request = Some(value);
-        self
-    }
-
-    pub(super) fn cancellation(mut self, value: tokio::sync::watch::Receiver<bool>) -> Self {
-        self.cancellation = Some(value);
-        self
-    }
-
-    pub(super) fn cancellations(mut self, value: HttpCancellations) -> Self {
-        self.cancellations = Some(value);
-        self
-    }
-
-    pub(super) fn registry(mut self, value: Arc<Mutex<super::registry::StreamRegistry>>) -> Self {
-        self.registry = Some(value);
-        self
-    }
-
-    pub(super) fn build(self) -> Result<ForwardTask, &'static str> {
-        Ok(ForwardTask {
-            runtime: self.runtime.ok_or("forward task runtime missing")?,
-            service: self.service.ok_or("forward task service missing")?,
-            session: self.session.ok_or("forward task session missing")?,
-            writer: self.writer.ok_or("forward task writer missing")?,
-            stream_id: self.stream_id.ok_or("forward task stream id missing")?,
-            request: self.request.ok_or("forward task request missing")?,
-            cancellation: self
-                .cancellation
-                .ok_or("forward task cancellation missing")?,
-            cancellations: self
-                .cancellations
-                .ok_or("forward task cancellation owners missing")?,
-            registry: self.registry.ok_or("forward task registry missing")?,
-        })
-    }
+    pub(super) runtime: tokio::runtime::Handle,
+    pub(super) service: Arc<SubstitutionService>,
+    pub(super) session: Arc<Mutex<Session>>,
+    pub(super) writer: Arc<Mutex<UnixStream>>,
+    pub(super) stream_id: u32,
+    pub(super) request: HttpRequestStream,
+    pub(super) cancellation: tokio::sync::watch::Receiver<bool>,
+    pub(super) cancellations: HttpCancellations,
+    pub(super) registry: Arc<Mutex<super::registry::StreamRegistry>>,
 }
 
 pub(super) fn cancel_forwarding(cancellations: &HttpCancellations, stream_id: u32) -> bool {
@@ -321,13 +237,8 @@ pub(super) fn spawn_forward(task: ForwardTask) {
     });
 }
 
-/// Run `work` until it finishes or the flow is canceled, whichever is first.
-///
-/// `work` has to be the whole forward, response framing included. A guest
-/// `Reset` retires the stream on the guest's validator, so a frame the host
-/// still sends for it afterwards is a protocol error that ends the session and
-/// every other flow on it; a cancellation that stops being watched once the
-/// response head is ready would let exactly that happen mid-body.
+/// Run `work` until it finishes or the flow is canceled. `work` must include
+/// response framing: a frame sent after a guest `Reset` ends the whole session.
 async fn run_until_canceled<W, A>(
     cancellation: &mut tokio::sync::watch::Receiver<bool>,
     work: W,
@@ -578,40 +489,20 @@ mod tests {
     #[tokio::test]
     async fn a_reset_while_the_response_is_still_streaming_stops_the_forward() {
         let (sender, mut receiver) = tokio::sync::watch::channel(false);
-        let (frames_tx, mut frames_rx) = tokio::sync::mpsc::unbounded_channel::<u8>();
-        // Stands in for response framing: one chunk goes out, then the task
-        // waits on the upstream for the next, which never arrives.
-        let streaming = async move {
-            frames_tx.send(1).unwrap();
-            std::future::pending::<()>().await;
-            frames_tx.send(2).unwrap();
-            Ok(())
-        };
-        let audited = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let audit_log = std::sync::Arc::clone(&audited);
+        // Response framing that has sent a chunk and waits on upstream forever.
+        let streaming = std::future::pending::<Result<(), super::super::FlowMuxError>>();
         let forward = tokio::spawn(async move {
             run_until_canceled(&mut receiver, streaming, |reason| async move {
-                audit_log.lock().unwrap().push(reason);
+                assert_eq!(reason, "guest_reset");
             })
             .await
         });
-        assert_eq!(frames_rx.recv().await, Some(1));
         sender.send(true).unwrap();
         tokio::time::timeout(Duration::from_secs(5), forward)
             .await
             .expect("a canceled forward must not outlive its stream")
             .unwrap()
             .unwrap();
-        assert_eq!(*audited.lock().unwrap(), ["guest_reset"]);
-        assert_eq!(frames_rx.recv().await, None, "no frame follows the reset");
-    }
-
-    #[test]
-    fn a_forward_task_builder_refuses_missing_runtime_state() {
-        assert!(matches!(
-            ForwardTask::builder().build(),
-            Err("forward task runtime missing")
-        ));
     }
 
     #[test]

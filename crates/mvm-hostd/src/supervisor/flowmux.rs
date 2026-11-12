@@ -564,6 +564,8 @@ impl FlowMuxSession {
                 Opcode::OpenUdp => {
                     if let Err(e) = self.handle_open_udp(stream_id) {
                         warn!(error = %e, stream_id, "FlowMux UDP open failed");
+                        // The guest is told `Refused`, so nothing else retires the entry.
+                        self.remove_udp_association(stream_id);
                         self.send_refused(stream_id, "host error")?;
                     }
                 }
@@ -734,27 +736,6 @@ impl FlowMuxSession {
             return Ok(());
         }
 
-        if let Err(error) = self.start_udp_relay(stream_id) {
-            // The guest is told `Refused` for this id, so nothing else will
-            // ever retire it: leaving the entry would hold a UDP slot of the
-            // VM-wide budget until the session ends.
-            let _ = lock_registry(&self.registry).retire(stream_id);
-            return Err(error);
-        }
-        self.send_udp_opened(stream_id)?;
-        self.emit_audit(
-            EventCategory::Host,
-            "host.flow.allowed",
-            BTreeMap::from([
-                ("stream_id".to_string(), stream_id.to_string()),
-                ("class".to_string(), "udp".to_string()),
-            ]),
-        );
-        Ok(())
-    }
-
-    /// Bind the association's socket and start the relay thread that owns it.
-    fn start_udp_relay(&mut self, stream_id: u32) -> Result<(), FlowMuxError> {
         let socket = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| {
             warn!(stream_id, error = %e, "FlowMux UDP bind failed");
             FlowMuxError::Transport(e)
@@ -788,6 +769,15 @@ impl FlowMuxSession {
         lock_udp_associations(&self.udp_associations).insert(
             stream_id,
             UdpAssociationHandle::new(tx, waker, UdpPeerAdmission::GuestMayIntroduce),
+        );
+        self.send_udp_opened(stream_id)?;
+        self.emit_audit(
+            EventCategory::Host,
+            "host.flow.allowed",
+            BTreeMap::from([
+                ("stream_id".to_string(), stream_id.to_string()),
+                ("class".to_string(), "udp".to_string()),
+            ]),
         );
         Ok(())
     }
@@ -1096,18 +1086,17 @@ impl FlowMuxSession {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(stream_id, cancel_sender);
-            let task = http_flow::ForwardTask::builder()
-                .runtime(handle.clone())
-                .service(Arc::clone(service))
-                .session(Arc::clone(&self.session))
-                .writer(Arc::clone(&self.writer))
-                .stream_id(stream_id)
-                .request(request)
-                .cancellation(cancel_receiver)
-                .cancellations(Arc::clone(&self.http_cancellations))
-                .registry(Arc::clone(&self.registry))
-                .build()
-                .map_err(|error| FlowMuxError::FrameRefused(error.to_string()))?;
+            let task = http_flow::ForwardTask {
+                runtime: handle.clone(),
+                service: Arc::clone(service),
+                session: Arc::clone(&self.session),
+                writer: Arc::clone(&self.writer),
+                stream_id,
+                request,
+                cancellation: cancel_receiver,
+                cancellations: Arc::clone(&self.http_cancellations),
+                registry: Arc::clone(&self.registry),
+            };
             http_flow::spawn_forward(task);
         } else {
             flow.accept_body(&payload)
@@ -2718,33 +2707,32 @@ mod tests {
         // Learns the association's port from the guest's one datagram, then
         // hammers it from a socket the guest never sent to.
         let noise = thread::spawn(move || {
-            let mut buf = [0u8; 64];
-            let (_, relay) = server.recv_from(&mut buf).unwrap();
+            let (_, relay) = server.recv_from(&mut [0u8; 64]).unwrap();
             let stranger = std::net::UdpSocket::bind(SocketAddr::new(ip, 0)).unwrap();
             while !stop.load(Ordering::Relaxed) {
                 let _ = stranger.send_to(b"noise", relay);
                 thread::sleep(Duration::from_millis(20));
             }
         });
-        let (mut guest, mut guest_session, host) = run_session_with(
+        let (mut guest, mut session, host) = run_session_with(
             gate_allowing_addr(server_addr.ip(), 0, Some(server_addr.port())),
             limits,
         );
         guest
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        write_frame(&mut guest, &mut guest_session, Opcode::OpenUdp, 1, b"");
-        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest, &mut guest_session);
-        assert_eq!(opcode, Opcode::UdpOpened);
+        write_frame(&mut guest, &mut session, Opcode::OpenUdp, 1, b"");
+        assert_eq!(
+            read_flowmux_frame(&mut guest, &mut session).0,
+            Opcode::UdpOpened
+        );
         let mut payload = encode_udp_addr(server_addr.ip(), server_addr.port());
         payload.extend_from_slice(b"hi");
-        write_frame(&mut guest, &mut guest_session, Opcode::UdpSend, 1, &payload);
-
-        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest, &mut guest_session);
+        write_frame(&mut guest, &mut session, Opcode::UdpSend, 1, &payload);
+        let closed = read_flowmux_frame(&mut guest, &mut session).0;
         done.store(true, Ordering::Relaxed);
         noise.join().unwrap();
-        assert_eq!(opcode, Opcode::CloseUdp);
-
+        assert_eq!(closed, Opcode::CloseUdp);
         drop(guest);
         host.join().unwrap().unwrap();
     }
