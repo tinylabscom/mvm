@@ -77,6 +77,13 @@ pub(super) struct PrTestInput<'a> {
 }
 
 pub(super) fn prepare(path: &Path, base: Base<'_>) -> Result<PreparedComposition> {
+    let archive = prepare_archive(path, base)?;
+    let private = mvm_client::launch::transient_composition::TransientComposition::stage(&archive)?;
+    Ok(PreparedComposition { archive, private })
+}
+
+/// Verify and cache composition data without granting a boot capability.
+pub(super) fn prepare_archive(path: &Path, base: Base<'_>) -> Result<PathBuf> {
     let metadata = std::fs::symlink_metadata(path)?;
     ensure!(
         metadata.file_type().is_file() && metadata.len() <= 64 * 1024,
@@ -335,12 +342,7 @@ pub(super) fn prepare(path: &Path, base: Base<'_>) -> Result<PreparedComposition
             "[mvm] authenticated cached composition {}",
             cache_sha.as_str()
         );
-        return Ok(PreparedComposition {
-            private: mvm_client::launch::transient_composition::TransientComposition::stage(
-                &target,
-            )?,
-            archive: target,
-        });
+        return Ok(target);
     }
     #[cfg(feature = "pr-test-guest-runtime")]
     let boot = if let Some(input) = pr_test {
@@ -530,10 +532,7 @@ pub(super) fn prepare(path: &Path, base: Base<'_>) -> Result<PreparedComposition
             cache_sha.as_str()
         );
     }
-    Ok(PreparedComposition {
-        private: mvm_client::launch::transient_composition::TransientComposition::stage(&target)?,
-        archive: target,
-    })
+    Ok(target)
 }
 
 fn verified_local_bundle(path: &Path) -> Result<mvm_core::plan::bundle::VerifiedBundleFile> {
@@ -798,6 +797,39 @@ fn retain_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_only_preparation_refuses_oversized_recipes_before_cache_access() {
+        let directory = tempfile::tempdir().expect("recipe directory");
+        let recipe = directory.path().join("pack.toml");
+        std::fs::write(&recipe, vec![b'x'; 64 * 1024 + 1]).expect("oversized recipe");
+        let error = prepare_archive(&recipe, Base::SignedDefault)
+            .expect_err("oversized recipe cannot become prepared data");
+        assert!(
+            error
+                .to_string()
+                .contains("regular file no larger than 64 KiB"),
+            "{error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn data_only_preparation_refuses_symlink_recipes() {
+        let directory = tempfile::tempdir().expect("recipe directory");
+        let target = directory.path().join("target.toml");
+        let recipe = directory.path().join("pack.toml");
+        std::fs::write(&target, b"not parsed").expect("target");
+        std::os::unix::fs::symlink(&target, &recipe).expect("linked recipe");
+        let error = prepare_archive(&recipe, Base::SignedDefault)
+            .expect_err("linked recipe cannot become prepared data");
+        assert!(
+            error
+                .to_string()
+                .contains("regular file no larger than 64 KiB"),
+            "{error:#}"
+        );
+    }
 
     #[test]
     fn filesystem_index_is_only_a_hint_not_an_archive_authority() {
