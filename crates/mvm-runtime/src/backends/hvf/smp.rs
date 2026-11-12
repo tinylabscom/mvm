@@ -152,17 +152,6 @@ impl Drop for TurnGuard<'_> {
     }
 }
 
-/// Runs its closure when dropped, including by unwinding. A vCPU thread that
-/// panics would otherwise skip ending the machine and leave every parked CPU
-/// for `thread::scope` to join forever.
-pub(crate) struct OnDrop<F: FnMut()>(pub(crate) F);
-
-impl<F: FnMut()> Drop for OnDrop<F> {
-    fn drop(&mut self) {
-        (self.0)();
-    }
-}
-
 /// Why a parked secondary woke up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Release {

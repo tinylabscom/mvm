@@ -67,11 +67,6 @@ pub(super) unsafe fn write_gp(vcpu: hv_vcpu_t, reg: u8, value: u64) -> Result<()
     Ok(())
 }
 
-/// The PC after the 4-byte instruction at `pc`; wraps because the guest picks `pc`.
-pub(super) fn next_pc(pc: u64) -> u64 {
-    pc.wrapping_add(4)
-}
-
 /// Advance PC past the faulting (4-byte) instruction.
 ///
 /// # Safety
@@ -83,7 +78,7 @@ pub(super) unsafe fn advance_pc(vcpu: hv_vcpu_t) -> Result<(), HvfError> {
         if hv_vcpu_get_reg(vcpu, HV_REG_PC, &mut pc) != HV_SUCCESS {
             return Err(HvfError::GetReg(0));
         }
-        if hv_vcpu_set_reg(vcpu, HV_REG_PC, next_pc(pc)) != HV_SUCCESS {
+        if hv_vcpu_set_reg(vcpu, HV_REG_PC, pc + 4) != HV_SUCCESS {
             return Err(HvfError::SetReg(0));
         }
     }

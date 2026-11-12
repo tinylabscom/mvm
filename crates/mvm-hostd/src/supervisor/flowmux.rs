@@ -1086,17 +1086,18 @@ impl FlowMuxSession {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(stream_id, cancel_sender);
-            let task = http_flow::ForwardTask {
-                runtime: handle.clone(),
-                service: Arc::clone(service),
-                session: Arc::clone(&self.session),
-                writer: Arc::clone(&self.writer),
-                stream_id,
-                request,
-                cancellation: cancel_receiver,
-                cancellations: Arc::clone(&self.http_cancellations),
-                registry: Arc::clone(&self.registry),
-            };
+            let task = http_flow::ForwardTask::builder()
+                .runtime(handle.clone())
+                .service(Arc::clone(service))
+                .session(Arc::clone(&self.session))
+                .writer(Arc::clone(&self.writer))
+                .stream_id(stream_id)
+                .request(request)
+                .cancellation(cancel_receiver)
+                .cancellations(Arc::clone(&self.http_cancellations))
+                .registry(Arc::clone(&self.registry))
+                .build()
+                .map_err(|error| FlowMuxError::FrameRefused(error.to_string()))?;
             http_flow::spawn_forward(task);
         } else {
             flow.accept_body(&payload)
