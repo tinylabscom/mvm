@@ -225,6 +225,16 @@ impl PreparedPortableBootAssets {
         &self.initrd
     }
 
+    /// Retained workload kernel selected from the authenticated image set.
+    pub fn kernel_path(&self) -> &Path {
+        &self.kernel
+    }
+
+    /// Guest binaries bound to this release, not ambient source-build cache entries.
+    pub fn guest_binaries(&self) -> &MvmRuntimeBinaries {
+        &self.binaries
+    }
+
     /// Private producer input directories, for retention diagnostics only.
     /// Their existence is not launch, health, or cleanup evidence.
     pub fn retention_paths(&self) -> [&Path; 2] {

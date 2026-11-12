@@ -92,9 +92,16 @@ The rules that follow from the table:
    included, starts from the universal initramfs; nothing mvm boots runs
    `mkGuest`'s `/init`. `mvm-setpriv` reaches a workload through the runtime
    overlay and the builder through its boot payload, at builder boot ABI 2.
-4. **Packs are the image registry.** A workload image that is not one of the
-   base images is a pack in `mvm-packs`, built in CI on the base set
-   `crates/mvm-core/images.lock` pins, reproduced, signed and attested.
+4. **Packs are the image registry.** A *published* workload image that is not
+   one of the base images is a pack in `mvm-packs`, built in CI on the base set
+   `crates/mvm-core/images.lock` pins, reproduced, signed and attested. Locally
+   authored workload packs may instead use a Nix flake or a pinned Yocto rootfs
+   archive as their producer. The `mvm` build path supplies the authenticated
+   workload kernel and CLI runtime, checks the imported bytes, seals the final
+   rootfs, health-boots it and signs a local archive. A host-signed local pack
+   and the producer's declared layer revisions are not a reproduced,
+   publisher-attested `mvm-packs` release. Neither producer adds a workload
+   role or source dependency to `mvm-images`.
 5. **`mkGuest` stays in mvm** as the workload-author library. It is the API a
    workload flake calls, and it co-changes with mvm's crates far more often
    than with anything in `mvm-images` (the 38-of-58 figure above).

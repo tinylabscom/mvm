@@ -457,6 +457,8 @@ pub enum InputKind {
     NixTemplate,
     /// A Nix flake output (`.#app`).
     NixFlake,
+    /// A Yocto-built workload root filesystem.
+    Yocto,
     /// A local repo/project with detected Nix metadata.
     LocalProject,
 }
@@ -1810,6 +1812,14 @@ mod build_provenance_tests {
         assert_eq!(
             serde_json::to_string(&InputKind::NixFlake).unwrap(),
             "\"nix_flake\""
+        );
+        assert_eq!(
+            serde_json::to_string(&InputKind::Yocto).unwrap(),
+            "\"yocto\""
+        );
+        assert_eq!(
+            serde_json::from_str::<InputKind>("\"yocto\"").unwrap(),
+            InputKind::Yocto
         );
         assert_eq!(
             serde_json::from_str::<InputKind>("\"local_project\"").unwrap(),

@@ -18,7 +18,7 @@
 //! capabilities and application services a launch of the bundle is held to.
 //! Every capability it requires must be permitted by `--posture`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, ValueEnum};
@@ -180,6 +180,8 @@ pub(in crate::commands) struct TemplateExport {
     pub provenance: Option<BuildProvenance>,
     /// The signed environment descriptor to seal beside the artifacts.
     pub environment: Option<EnvironmentDescriptor>,
+    /// Producer input documents retained as signed supplemental artifacts.
+    pub supplemental_artifacts: Vec<(String, PathBuf)>,
     /// Whether the host signer must mark this archive as local build output.
     pub local_build: bool,
     /// Owned verified producer closure, shared with the preceding health call.
@@ -197,6 +199,7 @@ impl TemplateExport {
             resources: None,
             provenance: None,
             environment: None,
+            supplemental_artifacts: Vec::new(),
             local_build: false,
             portable_boot_assets: None,
         }
@@ -300,6 +303,11 @@ pub(in crate::commands) fn stage_template(
         .transpose()?
         .or(initrd.as_deref());
     let signer = HostBundleSigner::load()?;
+    let supplemental_artifacts: Vec<(&str, &Path)> = export
+        .supplemental_artifacts
+        .iter()
+        .map(|(name, path)| (name.as_str(), path.as_path()))
+        .collect();
     let inputs = BundleExportInputs {
         vmlinux: &vmlinux,
         initrd: selected_initrd,
@@ -324,7 +332,7 @@ pub(in crate::commands) fn stage_template(
         boot_assets: None,
         cli_boot_assets: None,
         canonical_linux_proof: None,
-        supplemental_artifacts: &[],
+        supplemental_artifacts: &supplemental_artifacts,
         out: &export.out,
         debug_out: None,
     };

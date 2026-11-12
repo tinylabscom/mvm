@@ -121,6 +121,8 @@ fn build_help_advertises_every_workload_source_and_image_control() {
         "--production",
         "--debug-out",
         "--input-observation",
+        "--yocto-archive",
+        "--yocto-inputs",
     ] {
         assert!(help.contains(flag), "build help missing {flag}:\n{help}");
     }
@@ -306,6 +308,8 @@ fn build_help_advertises_source_detection_and_export_controls() {
         "--environment",
         "--health-timeout",
         "--input-observation",
+        "--yocto-archive",
+        "--yocto-inputs",
     ] {
         assert!(
             help.contains(expected),
@@ -2510,6 +2514,22 @@ fn pack_info_and_verify_recheck_signed_installed_content() {
         include_bytes!("../crates/mvm-cli/tests/fixtures/signed-registry-go/pack/group.toml");
     std::fs::write(pack.join("files/pack/group.toml"), policy).expect("signed policy");
     let registry_url = format!("file://{}", registry.path().display());
+
+    // This historical fixture has the mvm-templates signature. The built-in
+    // exception has expired; opt in only within this test's isolated home.
+    let publisher = mvm_core::registry_pack::RegistryPackPublisher::new(
+        "runtime",
+        mvm_core::registry_pack::OFFICIAL_PACK_SIGNING_ISSUER,
+        vec![mvm_core::registry_pack::LEGACY_PACK_SIGNING_IDENTITY.to_string()],
+    )
+    .expect("legacy fixture publisher");
+    let trusted = mvm_core::registry_pack::RegistryPackPublisherPolicy::new(vec![publisher])
+        .expect("isolated publisher policy");
+    mvm_core::registry_pack_store::save_publisher_policy(
+        &home.path().join("registry/publishers.toml"),
+        &trusted,
+    )
+    .expect("explicitly trust the fixture signer");
 
     let pulled = mvmctl_isolated(home.path())
         .env("MVM_PACK_REGISTRY", &registry_url)
