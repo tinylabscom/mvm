@@ -44,6 +44,7 @@ pub(crate) const LOCAL_TENANT: &str = "local";
 /// rootfs. The caller resolves the image to `rootfs_path` (and its optional
 /// dm-verity sidecars) before constructing this; everything security-relevant
 /// that the facade doesn't expose defaults to the most restrictive value.
+#[derive(Debug, Clone)]
 pub struct LocalRunRequest {
     /// Machine name — also the synthesized plan's `image_name` and the mock
     /// backend's per-VM directory key.
@@ -377,6 +378,129 @@ pub fn admit_and_boot_local(
     )
 }
 
+/// Admit a resolved authored policy only when every selected effect has a
+/// signed and enforceable projection through this local-run seam.
+///
+/// This internal entrypoint deliberately refuses sections the seam cannot
+/// enforce; it is not yet a public SDK policy launch API.
+///
+/// # Errors
+///
+/// Unsupported sections, bounds wider than the policy, an external signed
+/// plan, and any ordinary admission or boot refusal fail before a guest starts.
+pub fn admit_and_boot_local_with_policy(
+    backend: &AnyBackend,
+    req: &LocalRunRequest,
+    policy: &mvm_contract::policy::authored::PolicyBody,
+    ctx: LocalRunContext<'_>,
+) -> Result<StartedMachine> {
+    let effective = authored_local_request(req, policy)?;
+    admit_and_boot_local(backend, &effective, ctx)
+}
+
+fn authored_local_request(
+    req: &LocalRunRequest,
+    policy: &mvm_contract::policy::authored::PolicyBody,
+) -> Result<LocalRunRequest> {
+    use mvm_contract::grants::{CpuGrant, EgressGrant, WallClockGrant};
+    use mvm_core::policy::network_policy::HostPort;
+
+    anyhow::ensure!(
+        req.signed_plan.is_none(),
+        "authored policy cannot modify an externally signed execution plan"
+    );
+    for (section, present) in [
+        ("network.routes", !policy.network.routes.is_empty()),
+        ("network.deny", !policy.network.deny.is_empty()),
+        ("secrets", !policy.secrets.is_empty()),
+        ("shares", !policy.shares.is_empty()),
+        ("env", !policy.env.is_empty()),
+    ] {
+        anyhow::ensure!(
+            !present,
+            "authored policy {section} has no signed and enforced local-run projection"
+        );
+    }
+    let bounds = &policy.resources;
+    if let Some(max) = bounds.max_cpus {
+        anyhow::ensure!(req.cpus <= max, "authored policy limits cpus to {max}");
+    }
+    if let Some(max) = &bounds.max_memory {
+        let max_mib = mvm_core::util::parse_human_size(max)?;
+        anyhow::ensure!(
+            req.mem_mib <= max_mib,
+            "authored policy limits memory to {max}"
+        );
+    }
+
+    let mut effective = req.clone();
+    let mut grants = effective.grants.take().unwrap_or_default();
+    if policy.network.block == Some(true) {
+        anyhow::ensure!(
+            policy.network.allow.is_empty(),
+            "blocked authored network cannot also allow destinations"
+        );
+        grants.egress = Some(EgressGrant::default());
+    } else if !policy.network.allow.is_empty() {
+        // The resolver emits canonical HOST:PORT entries; also check here so
+        // an internal caller cannot turn malformed input into a wider grant.
+        let allowed = policy
+            .network
+            .allow
+            .iter()
+            .map(|entry| {
+                let (host, port) = entry
+                    .rsplit_once(':')
+                    .ok_or_else(|| anyhow::anyhow!("invalid authored network host {entry:?}"))?;
+                anyhow::ensure!(
+                    !host.is_empty()
+                        && host
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-')),
+                    "invalid authored network host {entry:?}"
+                );
+                let port = port.parse::<u16>()?;
+                anyhow::ensure!(port != 0, "invalid authored network port in {entry:?}");
+                Ok(HostPort::new(host, port))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        // An authored policy narrows an existing host grant; it cannot mint
+        // egress authority from a grant-less request.
+        let previous = grants.egress.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("authored network allow requires a host egress grant")
+        })?;
+        let allow = allowed
+            .into_iter()
+            .filter(|host| previous.allow.contains(host))
+            .collect();
+        grants.egress = Some(EgressGrant { allow });
+    }
+    if let Some(millicores) = bounds.cpu_millicores {
+        anyhow::ensure!(millicores > 0, "authored CPU share must be positive");
+        grants.cpu = Some(match grants.cpu {
+            Some(CpuGrant::Share {
+                millicores: previous,
+            }) => CpuGrant::Share {
+                millicores: previous.min(millicores),
+            },
+            Some(_) => anyhow::bail!("authored CPU share conflicts with an existing CPU grant"),
+            None => CpuGrant::Share { millicores },
+        });
+    }
+    if let Some(secs) = bounds.wall_clock_secs {
+        let secs = std::num::NonZeroU32::new(secs)
+            .ok_or_else(|| anyhow::anyhow!("authored wall-clock bound must be positive"))?;
+        grants.wall_clock = Some(match grants.wall_clock {
+            Some(WallClockGrant::Secs { secs: previous }) => WallClockGrant::Secs {
+                secs: previous.min(secs),
+            },
+            Some(WallClockGrant::Unbounded) | None => WallClockGrant::Secs { secs },
+        });
+    }
+    effective.grants = (grants != Default::default()).then_some(grants);
+    Ok(effective)
+}
+
 /// Admit an externally-signed plan through
 /// [`crate::plan_admission::admit_signed_plan_for_run`] and boot it on
 /// `backend` — the local-run tail for the fleet-issued seam.
@@ -471,7 +595,288 @@ fn admit_signed_and_boot_local(
 mod tests {
     use super::*;
     use crate::plan_admission::SystemClock;
+    use mvm_contract::policy::authored::{PolicyBody, SecretGrant, ShareGrant};
     use mvm_core::util::test_env::TestEnv;
+
+    fn authored_request() -> LocalRunRequest {
+        LocalRunRequest {
+            name: "authored-test".into(),
+            rootfs_path: "/unused/rootfs.ext4".into(),
+            kernel_path: None,
+            verity_path: None,
+            roothash: None,
+            cpus: 2,
+            mem_mib: 512,
+            backend_name: "mock".into(),
+            volumes: Vec::new(),
+            destroy_on_exit: false,
+            grants: None,
+            mailbox: None,
+            secrets: Vec::new(),
+            secret_release: SecretReleasePolicy::None,
+            signed_plan: None,
+            registry_pack_image: None,
+        }
+    }
+
+    #[test]
+    fn authored_local_projection_narrows_existing_egress_grant() {
+        use mvm_contract::grants::{CpuGrant, EgressGrant, Grants, WallClockGrant};
+        use mvm_core::policy::network_policy::HostPort;
+
+        let mut policy = PolicyBody::default();
+        policy.network.allow = vec!["api.test:443".into(), "other.test:8443".into()];
+        policy.resources.cpu_millicores = Some(500);
+        policy.resources.wall_clock_secs = Some(30);
+        policy.resources.max_cpus = Some(2);
+        policy.resources.max_memory = Some("512M".into());
+        let error = authored_local_request(&authored_request(), &policy)
+            .expect_err("authored policy cannot grant egress on its own");
+        assert!(error.to_string().contains("host egress grant"), "{error:#}");
+        let mut lower = authored_request();
+        lower.grants = Some(Grants {
+            egress: Some(EgressGrant {
+                allow: vec![
+                    HostPort::new("api.test", 443),
+                    HostPort::new("other.test", 8443),
+                ],
+            }),
+            ..Default::default()
+        });
+        let req = authored_local_request(&lower, &policy).expect("projection");
+        assert_eq!(
+            req.grants,
+            Some(Grants {
+                egress: Some(EgressGrant {
+                    allow: vec![
+                        HostPort::new("api.test", 443),
+                        HostPort::new("other.test", 8443),
+                    ]
+                }),
+                cpu: Some(CpuGrant::Share { millicores: 500 }),
+                wall_clock: Some(WallClockGrant::Secs {
+                    secs: 30.try_into().unwrap()
+                }),
+                ..Default::default()
+            })
+        );
+
+        // A second policy layer cannot widen a lower signed grant.
+        lower.grants = Some(Grants {
+            egress: Some(EgressGrant {
+                allow: vec![HostPort::new("api.test", 443)],
+            }),
+            cpu: Some(CpuGrant::Share { millicores: 250 }),
+            ..Default::default()
+        });
+        let narrowed = authored_local_request(&lower, &policy).expect("intersection");
+        let grants = narrowed.grants.unwrap();
+        assert_eq!(
+            grants.egress.unwrap().allow,
+            vec![HostPort::new("api.test", 443)]
+        );
+        assert_eq!(grants.cpu, Some(CpuGrant::Share { millicores: 250 }));
+    }
+
+    #[test]
+    fn authored_local_projection_refuses_unbound_dimensions_and_wider_bounds() {
+        use mvm_contract::policy::routes::{EgressRoute, RouteOutcome};
+
+        let req = authored_request();
+        let mut policy = PolicyBody::default();
+        policy.network.routes.push(EgressRoute {
+            id: "api".into(),
+            host: "api.test".into(),
+            port: 443,
+            rules: vec![],
+            otherwise: RouteOutcome::Deny,
+            intercept: true,
+        });
+        assert!(
+            authored_local_request(&req, &policy)
+                .unwrap_err()
+                .to_string()
+                .contains("network.routes")
+        );
+        policy.network.routes.clear();
+        policy.secrets.bind.push(SecretGrant {
+            name: "token".into(),
+            hosts: vec![],
+        });
+        assert!(
+            authored_local_request(&req, &policy)
+                .unwrap_err()
+                .to_string()
+                .contains("secrets")
+        );
+        policy.secrets.bind.clear();
+        policy.shares.mount.push(ShareGrant {
+            host: "/src".into(),
+            guest: "/work".into(),
+            writable: false,
+        });
+        assert!(
+            authored_local_request(&req, &policy)
+                .unwrap_err()
+                .to_string()
+                .contains("shares")
+        );
+        policy.shares.mount.clear();
+        policy.env.readmit.push("LD_PRELOAD".into());
+        assert!(
+            authored_local_request(&req, &policy)
+                .unwrap_err()
+                .to_string()
+                .contains("env")
+        );
+        let backend = AnyBackend::from_hypervisor("mock");
+        let ledger = InMemoryNonceLedger::new();
+        let error = admit_and_boot_local_with_policy(
+            &backend,
+            &req,
+            &policy,
+            LocalRunContext {
+                clock: &SystemClock,
+                ledger: &ledger,
+                host_signer_keys_dir: None,
+                emitter: None,
+                assurance: None,
+            },
+        )
+        .expect_err("unsupported env must refuse before reading the absent rootfs");
+        assert!(
+            error.to_string().contains("env"),
+            "admission must not reach rootfs I/O or boot: {error:#}"
+        );
+        policy.env.readmit.clear();
+        policy.network.deny.push("blocked.test".into());
+        assert!(
+            authored_local_request(&req, &policy)
+                .unwrap_err()
+                .to_string()
+                .contains("network.deny")
+        );
+        policy.network.deny.clear();
+        policy.resources.max_cpus = Some(1);
+        assert!(
+            authored_local_request(&req, &policy)
+                .unwrap_err()
+                .to_string()
+                .contains("cpus")
+        );
+        policy.resources.max_cpus = None;
+        policy.resources.max_memory = Some("256M".into());
+        assert!(
+            authored_local_request(&req, &policy)
+                .unwrap_err()
+                .to_string()
+                .contains("memory")
+        );
+        policy.resources.max_memory = None;
+        policy.network.allow.push("*.test:443".into());
+        assert!(
+            authored_local_request(&req, &policy)
+                .unwrap_err()
+                .to_string()
+                .contains("network host")
+        );
+        let mut signed = authored_request();
+        signed.signed_plan = Some(mvm_core::plan::sign_plan(
+            &mvm_core::plan::test_support::PlanFixture::new().build(),
+            &ed25519_dalek::SigningKey::from_bytes(&[77; 32]),
+            "fleet",
+        ));
+        assert!(
+            authored_local_request(&signed, &PolicyBody::default())
+                .unwrap_err()
+                .to_string()
+                .contains("externally signed")
+        );
+    }
+
+    #[test]
+    fn authored_network_block_is_bound_into_the_admitted_signed_plan() {
+        let data = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(data.path());
+        let rootfs = data.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"hashable rootfs").unwrap();
+        let mut req = authored_request();
+        req.rootfs_path = rootfs;
+        let mut policy = PolicyBody::default();
+        policy.network.block = Some(true);
+        let backend = AnyBackend::from_hypervisor("mock");
+        let ledger = InMemoryNonceLedger::new();
+        let started = admit_and_boot_local_with_policy(
+            &backend,
+            &req,
+            &policy,
+            LocalRunContext {
+                clock: &SystemClock,
+                ledger: &ledger,
+                host_signer_keys_dir: Some(data.path()),
+                emitter: None,
+                assurance: None,
+            },
+        )
+        .expect("signed deny-all plan admits");
+        assert!(
+            !started.admitted.signer_id().is_empty(),
+            "the host signed the plan"
+        );
+        assert_eq!(
+            started
+                .admitted
+                .plan()
+                .grants
+                .as_ref()
+                .and_then(|grant| grant.egress.as_ref())
+                .map(|egress| &egress.allow),
+            Some(&Vec::new()),
+            "deny-all is explicitly signed, not a discarded request field"
+        );
+
+        let mut allowed = req;
+        allowed.name = "authored-allow-test".into();
+        allowed.grants = Some(mvm_contract::grants::Grants {
+            egress: Some(mvm_contract::grants::EgressGrant {
+                allow: vec![mvm_core::policy::network_policy::HostPort::new(
+                    "api.test", 443,
+                )],
+            }),
+            ..Default::default()
+        });
+        policy.network.block = None;
+        policy.network.allow = vec!["api.test:443".into()];
+        let opened = admit_and_boot_local_with_policy(
+            &backend,
+            &allowed,
+            &policy,
+            LocalRunContext {
+                clock: &SystemClock,
+                ledger: &ledger,
+                host_signer_keys_dir: Some(data.path()),
+                emitter: None,
+                assurance: None,
+            },
+        )
+        .expect("signed allow-list plan admits");
+        assert_eq!(
+            opened
+                .admitted
+                .plan()
+                .grants
+                .as_ref()
+                .and_then(|grant| grant.egress.as_ref())
+                .map(|egress| egress.allow.as_slice()),
+            Some(
+                &[mvm_core::policy::network_policy::HostPort::new(
+                    "api.test", 443
+                )][..]
+            ),
+            "the egress gate derives from this signed grant"
+        );
+    }
 
     /// A local run over the mock backend admits a signed plan and boots — no
     /// subprocess, no CLI. Proves the seam the local backend calls is real.
