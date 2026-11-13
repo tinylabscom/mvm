@@ -55,9 +55,11 @@ def _build(fn, format: str = "json", name: str = "adder") -> mvm.RemoteFunction:
         name=name,
         source=mvm.local_path("."),
         image=mvm.nix_packages(["python312"]),
-        entrypoint=mvm.entrypoint_function(
-            language="python", module="adder", function="add", format=format
-        ),
+        entrypoints=[
+            mvm.entrypoint_function(
+                language="python", module="adder", function="add", format=format
+            )
+        ],
         resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
     )(fn)
     assert isinstance(decorated, mvm.RemoteFunction)
@@ -81,7 +83,7 @@ def test_app_with_command_entrypoint_returns_callable_unchanged() -> None:
         name="hello",
         source=mvm.local_path("."),
         image=mvm.nix_packages(["python312"]),
-        entrypoint=mvm.entrypoint(command=["python", "-m", "hello"]),
+        entrypoints=[mvm.entrypoint(command=["python", "-m", "hello"])],
         resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
     )
     def hello() -> str:

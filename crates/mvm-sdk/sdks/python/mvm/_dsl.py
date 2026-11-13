@@ -176,7 +176,6 @@ def app(
     name: str,
     source: _ir.Source1,
     image: _ir.Image1,
-    entrypoint: _ir.Entrypoint | None = None,
     entrypoints: list[_ir.Entrypoint] | None = None,
     resources: _ir.Resources,
     env: dict[str, Any] | None = None,
@@ -193,13 +192,13 @@ def app(
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Register an app in the current workload. Used as a decorator.
 
-    Single-entrypoint shape (legacy + most common case)::
+    Single-entrypoint shape (most common case)::
 
         @mvm.app(
             name="hello",
             source=mvm.local_path("."),
             image=mvm.nix_packages(["python312"]),
-            entrypoint=mvm.entrypoint(command=["python", "-m", "hello"]),
+            entrypoints=[mvm.entrypoint(command=["python", "-m", "hello"])],
             resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
         )
         def hello():
@@ -228,17 +227,11 @@ def app(
         @mvm.app(..., depends_on=[math])
         def my_app(): ...
     """
-    if entrypoint is not None and entrypoints is not None:
+    if entrypoints is None:
         raise ValueError(
-            "mv.app(): pass `entrypoint=` (single) OR `entrypoints=` (list); not both."
+            "mv.app(): `entrypoints=` is required (pass a list, even for one entrypoint)."
         )
-    if entrypoint is None and entrypoints is None:
-        raise ValueError(
-            "mv.app(): one of `entrypoint=` or `entrypoints=` is required."
-        )
-    resolved_entrypoints = (
-        list(entrypoints) if entrypoints is not None else [entrypoint]  # type: ignore[list-item]
-    )
+    resolved_entrypoints = list(entrypoints)
     resolved_network = _resolve_network_with_depends_on(network, depends_on)
     resolved_threat_tier: _ir.ThreatTier | None
     if isinstance(threat_tier, str):
@@ -900,7 +893,7 @@ def func(
       ``mv.python_deps(lockfile="uv.lock")`` for non-stdlib workloads.
 
     For multi-app workloads or finer-grained control, use the long form:
-    ``workload({id}) + app({...}, entrypoint=entrypoint_function(...))``.
+    ``workload({id}) + app({...}, entrypoints=[entrypoint_function(...)])``.
     """
 
     def _decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -1023,7 +1016,7 @@ def func(
             name=name,
             source=resolved_source,
             image=resolved_image,
-            entrypoint=ep,
+            entrypoints=[ep],
             resources=resolved_resources,
             env=env,
             mounts=mounts,
