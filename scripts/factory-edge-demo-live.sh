@@ -155,8 +155,9 @@ out="$(mvm run --image "$IMAGE" --hypervisor "$HYPERVISOR" --name "$REPLACEMENT"
 grep -q 'replacement-ready' <<<"$out" || fail "the replacement did not report ready: $out"
 suspect_plan="$(explain_field "$SUSPECT" "d['plan_id']")"
 replacement_plan="$(explain_field "$REPLACEMENT" "d['plan_id']")"
-[ -n "$suspect_plan" ] && [ -n "$replacement_plan" ] && [ "$suspect_plan" != "$replacement_plan" ] \
-  || fail "the replacement did not get a new plan ($suspect_plan vs $replacement_plan)"
+if [[ -z "$suspect_plan" || -z "$replacement_plan" || "$suspect_plan" == "$replacement_plan" ]]; then
+  fail "the replacement did not get a new plan ($suspect_plan vs $replacement_plan)"
+fi
 [ "$(denials_of "$REPLACEMENT")" = 0 ] || fail "the replacement inherited the suspect's denials"
 say "the replacement ran under a new plan and carries none of the suspect's denials"
 mvm trust audit verify >/dev/null 2>&1 </dev/null || fail "mvmctl trust audit verify failed after the relaunch"
