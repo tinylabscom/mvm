@@ -11,13 +11,19 @@
 //! A cycle is an error that names the loop; so is a chain deeper than
 //! [`MAX_EXTENDS_DEPTH`].
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use mvm_contract::protocol::vm_backend::BackendKind;
 
 use super::merge::{Layer, ResolvedPolicy, merge_layers};
 use super::model::{GroupFile, HostArch, HostOs, PolicyBody, ProfileFile, WhenBlock};
-use super::source::{DocFormat, LayerOrigin, Loaded, PolicyError, PolicyRef, PolicyStore};
+use super::source::{
+    DocFormat, Kind, LayerOrigin, Loaded, PolicyError, PolicyRef, PolicyStore, parse_document,
+    source_sha256,
+};
 
 /// The deepest `extends` chain accepted.
 pub const MAX_EXTENDS_DEPTH: usize = 10;
@@ -145,15 +151,7 @@ pub fn resolve(
     selection: &PolicySelection,
     platform: Platform,
 ) -> Result<ResolvedPolicy, PolicyError> {
-    let mut walker = Walker {
-        store,
-        platform,
-        stack: Vec::new(),
-        visited: Vec::new(),
-        groups: Vec::new(),
-        overrides: Vec::new(),
-        backend_conditioned: false,
-    };
+    let mut walker = Walker::new(store, platform);
     for reference in &selection.profiles {
         match store.load_profile(reference, None, LayerOrigin::User, "--policy") {
             Ok(root) => walker.walk(root, 0)?,
@@ -164,6 +162,7 @@ pub fn resolve(
             Err(profile_error) => {
                 match store.load_group(reference, None, LayerOrigin::User, "--policy") {
                     Ok(group) => {
+                        walker.record_source(&group)?;
                         if !walker.groups.iter().any(|g| g.identity == group.identity) {
                             walker.groups.push(SelectedGroup {
                                 identity: group.identity.clone(),
@@ -212,16 +211,13 @@ pub fn resolve(
                 label: format!("project {}", project.manifest.display()),
                 identity: format!("project:{}", project.manifest.display()),
                 origin: LayerOrigin::Project,
+                source_sha256: None,
+                reference_key: None,
             },
             0,
         )?;
     }
-    let backend_conditioned = walker.backend_conditioned;
-    let mut layers: Vec<Layer> = walker.groups.into_iter().map(|g| g.layer).collect();
-    layers.extend(walker.overrides);
-    let mut resolved = merge_layers(&layers)?;
-    resolved.backend_conditioned = backend_conditioned;
-    Ok(resolved)
+    walker.finish()
 }
 
 /// Resolve a single file that is a profile or, failing that, a group, as a
@@ -239,24 +235,45 @@ pub fn resolve_file(
     let text = std::fs::read_to_string(path).map_err(|error| {
         PolicyError::new(path.display().to_string(), format!("reading: {error}"))
     })?;
-    if DocFormat::for_path(path)
-        .parse::<ProfileFile>(&text)
-        .is_ok()
-    {
-        return resolve(
-            store,
-            &PolicySelection::profile(PolicyRef::Path(path.to_path_buf())),
-            platform,
-        );
+    resolve_file_text(store, path, platform, &text)
+}
+
+fn resolve_file_text(
+    store: &PolicyStore,
+    path: &Path,
+    platform: Platform,
+    text: &str,
+) -> Result<ResolvedPolicy, PolicyError> {
+    let identity = std::fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .display()
+        .to_string();
+    if let Ok(doc) = DocFormat::for_path(path).parse::<ProfileFile>(text) {
+        let mut walker = Walker::new(store, platform);
+        walker.walk(
+            Loaded {
+                doc,
+                file: Some(path.to_path_buf()),
+                label: format!("profile {}", path.display()),
+                identity,
+                origin: LayerOrigin::User,
+                source_sha256: Some(source_sha256(text)),
+                reference_key: None,
+            },
+            0,
+        )?;
+        return walker.finish();
     }
-    let group = store.load_group(
-        &PolicyRef::Path(path.to_path_buf()),
-        None,
-        LayerOrigin::User,
-        "file",
-    )?;
-    let layers = vec![group_layer(&group)];
-    merge_layers(&layers)
+    let doc = parse_document::<GroupFile>(text, path, Kind::Group)?;
+    merge_layers(&[group_layer(&Loaded {
+        doc,
+        file: Some(path.to_path_buf()),
+        label: format!("group {}", path.display()),
+        identity,
+        origin: LayerOrigin::User,
+        source_sha256: Some(source_sha256(text)),
+        reference_key: None,
+    })])
 }
 
 struct SelectedGroup {
@@ -271,6 +288,8 @@ struct Walker<'a> {
     platform: Platform,
     stack: Vec<(String, String)>,
     visited: Vec<String>,
+    seen_sources: BTreeMap<String, [u8; 32]>,
+    seen_lookups: BTreeMap<String, (String, [u8; 32])>,
     groups: Vec<SelectedGroup>,
     overrides: Vec<Layer>,
     backend_conditioned: bool,
@@ -289,8 +308,73 @@ fn base_dir(file: Option<&Path>) -> Option<&Path> {
     file.and_then(Path::parent)
 }
 
-impl Walker<'_> {
+impl<'a> Walker<'a> {
+    fn new(store: &'a PolicyStore, platform: Platform) -> Self {
+        Self {
+            store,
+            platform,
+            stack: Vec::new(),
+            visited: Vec::new(),
+            seen_sources: BTreeMap::new(),
+            seen_lookups: BTreeMap::new(),
+            groups: Vec::new(),
+            overrides: Vec::new(),
+            backend_conditioned: false,
+        }
+    }
+
+    fn finish(self) -> Result<ResolvedPolicy, PolicyError> {
+        let mut layers: Vec<Layer> = self.groups.into_iter().map(|g| g.layer).collect();
+        layers.extend(self.overrides);
+        let mut resolved = merge_layers(&layers)?;
+        resolved.backend_conditioned = self.backend_conditioned;
+        Ok(resolved)
+    }
+
+    fn record_source<T>(&mut self, loaded: &Loaded<T>) -> Result<(), PolicyError> {
+        let Some(digest) = loaded.source_sha256 else {
+            return Ok(());
+        };
+        if let Some(key) = &loaded.reference_key
+            && self
+                .seen_lookups
+                .get(key)
+                .is_some_and(|(identity, previous)| {
+                    identity != &loaded.identity || *previous != digest
+                })
+        {
+            return Err(
+                PolicyError::new(&loaded.label, "source changed while resolving policy")
+                    .in_file(loaded.file.as_deref()),
+            );
+        }
+        let identity = loaded.file.as_ref().map_or_else(
+            || loaded.identity.clone(),
+            |path| {
+                let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+                format!("file:{}", path.display())
+            },
+        );
+        if self
+            .seen_sources
+            .get(&identity)
+            .is_some_and(|previous| *previous != digest)
+        {
+            return Err(
+                PolicyError::new(&loaded.label, "source changed while resolving policy")
+                    .in_file(loaded.file.as_deref()),
+            );
+        }
+        self.seen_sources.insert(identity, digest);
+        if let Some(key) = &loaded.reference_key {
+            self.seen_lookups
+                .insert(key.clone(), (loaded.identity.clone(), digest));
+        }
+        Ok(())
+    }
+
     fn walk(&mut self, profile: Loaded<ProfileFile>, depth: usize) -> Result<(), PolicyError> {
+        self.record_source(&profile)?;
         if let Some(position) = self
             .stack
             .iter()
@@ -389,6 +473,7 @@ impl Walker<'_> {
         for raw in include {
             let group =
                 self.load_group(profile, raw, base.as_deref(), &format!("{key}.include"))?;
+            self.record_source(&group)?;
             if self.groups.iter().any(|g| g.identity == group.identity) {
                 continue;
             }
@@ -402,6 +487,7 @@ impl Walker<'_> {
         for raw in exclude {
             let group =
                 self.load_group(profile, raw, base.as_deref(), &format!("{key}.exclude"))?;
+            self.record_source(&group)?;
             let Some(position) = self
                 .groups
                 .iter()
