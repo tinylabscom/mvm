@@ -273,6 +273,30 @@ impl Drop for StopControl {
 }
 
 impl StopAuthority {
+    /// Only short synchronous binding checks run under the native control gate.
+    /// Transport, guest execution and recorder I/O must stay outside it.
+    #[cfg(feature = "experimental-owned-capture")]
+    pub(crate) fn with_capture_instance<T>(
+        &self,
+        vm: &str,
+        action: impl FnOnce(&HvfInstance) -> Result<T>,
+    ) -> Result<T> {
+        let state = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("stop gate poisoned"))?;
+        ensure!(
+            state.instance.vm_id == vm
+                && state.listeners.len() == 1
+                && state.phase == Phase::Active
+                && !self.0.stop.load(Ordering::Acquire)
+                && !self.0.closed.load(Ordering::Acquire),
+            "original native capture instance is no longer active"
+        );
+        action(&state.instance)
+    }
+
     /// Reserve transfer under the short control gate, perform owner work outside
     /// it, then commit exactly the reserved generation. Stops are refused while
     /// the owner prepares; no client or destructor waits on the callback or disk.

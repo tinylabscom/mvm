@@ -34,6 +34,9 @@ pub enum CaptureAuthority<'a> {
     Admitted(&'a ExecutionPlan),
     /// Verified and durably consumed before trusted cold-start setup.
     CallerRegistered(Box<crate::supervisor::caller_registration::ConsumedCallerLaunch>),
+    /// Original checked startup and native generation, not a producer request.
+    #[cfg(feature = "experimental-owned-capture")]
+    OwnedCold(Box<crate::supervisor::owned_capture::OwnedCaptureAuthority>),
     /// Only a validated builder/standby launch role may select this variant.
     OperationalLiveOnly,
 }
@@ -70,6 +73,8 @@ pub struct CaptureOwner {
     exited: mpsc::Receiver<()>,
     failed: Arc<AtomicBool>,
     caller: Option<crate::supervisor::caller_registration::RegisteredCaller>,
+    #[cfg(feature = "experimental-owned-capture")]
+    owned_permit: Option<crate::supervisor::owned_capture::OwnedCapturePermit>,
     #[cfg(test)]
     rotations: mpsc::Receiver<()>,
 }
@@ -89,11 +94,24 @@ impl CaptureOwner {
             authority,
             redaction,
         } = params;
+        #[cfg(feature = "experimental-owned-capture")]
+        let mut owned_permit = None;
         let (plan, retention, caller) = match authority {
             CaptureAuthority::Admitted(plan) => (Some(plan.clone()), plan.stream_retention, None),
             CaptureAuthority::CallerRegistered(launch) => {
                 let (plan, caller) = launch.into_owner(vm)?;
                 let retention = plan.stream_retention;
+                (Some(plan), retention, Some(caller))
+            }
+            #[cfg(feature = "experimental-owned-capture")]
+            CaptureAuthority::OwnedCold(owned) => {
+                let crate::supervisor::owned_capture::BoundCaptureOwnerParts {
+                    plan,
+                    caller,
+                    permit,
+                } = owned.into_parts_for_vm(vm)?;
+                let retention = plan.stream_retention;
+                owned_permit = Some(permit);
                 (Some(plan), retention, Some(caller))
             }
             CaptureAuthority::OperationalLiveOnly => (None, StreamRetention::Ephemeral, None),
@@ -210,6 +228,8 @@ impl CaptureOwner {
                 exited,
                 failed,
                 caller,
+                #[cfg(feature = "experimental-owned-capture")]
+                owned_permit,
                 #[cfg(test)]
                 rotations,
             },
@@ -225,6 +245,17 @@ impl CaptureOwner {
         self.caller.as_ref()
     }
 
+    /// Current startup binding data only, not authentication or append authority.
+    #[cfg(feature = "experimental-owned-capture")]
+    pub fn owned_capture_binding(
+        &mut self,
+    ) -> Result<Option<&mvm_core::crypto::owned_capture::CaptureBinding>> {
+        self.owned_permit
+            .as_mut()
+            .map(|permit| permit.current_binding())
+            .transpose()
+    }
+
     /// The producer must be dropped first, including the UART's final partial
     /// line. False explicitly means incomplete capture, never a plaintext retry.
     pub fn finish(mut self) -> bool {
@@ -232,6 +263,10 @@ impl CaptureOwner {
     }
 
     fn join(&mut self) -> bool {
+        #[cfg(feature = "experimental-owned-capture")]
+        if let Some(permit) = &mut self.owned_permit {
+            permit.retire();
+        }
         let Some(worker) = self.worker.take() else {
             return !self.failed.load(Ordering::Relaxed);
         };

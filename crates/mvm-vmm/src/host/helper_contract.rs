@@ -22,7 +22,8 @@
 /// Helpers compiled from the same tree answer the
 /// [`CONTRACT_PROBE_FLAG`] probe with this value; `mvmctl` refuses to spawn
 /// a helper that answers differently.
-pub const HOST_HELPER_CONTRACT_VERSION: u32 = 7;
+/// Owned startup adds input framing outside the unchanged legacy JSON shape.
+pub const HOST_HELPER_CONTRACT_VERSION: u32 = 8;
 
 /// CLI flag every host helper answers by printing its contract version and
 /// exiting 0. Binaries built before the probe existed exit non-zero instead,
@@ -35,7 +36,25 @@ pub fn probe_response(bin: &str) -> String {
     format!("{bin} {CONTRACT_PROBE_KEY}={HOST_HELPER_CONTRACT_VERSION}\n")
 }
 
+/// Only the native helper whose own build enables the startup implementation
+/// may use this response. Dependency feature unification is not that evidence.
+pub fn owned_capture_probe_response() -> String {
+    format!(
+        "{}owned-capture-startup=1\n",
+        probe_response("mvm-hvf-supervisor")
+    )
+}
+
 const CONTRACT_PROBE_KEY: &str = "contract-version";
+
+/// Compatibility observation only, not peer authentication or capture authority.
+/// A matching version without the exact feature advertisement is insufficient.
+pub fn owned_capture_startup_supported(stdout: &str) -> bool {
+    stdout
+        == format!(
+            "mvm-hvf-supervisor {CONTRACT_PROBE_KEY}={HOST_HELPER_CONTRACT_VERSION}\nowned-capture-startup=1\n"
+        )
+}
 
 /// Whether an argv (including argv\[0\]) requests the contract probe, so a
 /// helper's `main` can answer it before doing anything else.
@@ -105,6 +124,47 @@ mod tests {
             parse_probe_version(&response),
             Some(HOST_HELPER_CONTRACT_VERSION)
         );
+    }
+
+    #[test]
+    fn owned_startup_support_requires_an_exact_feature_enabled_hvf_answer() {
+        let answer = format!(
+            "mvm-hvf-supervisor contract-version={HOST_HELPER_CONTRACT_VERSION}\nowned-capture-startup=1\n"
+        );
+        assert!(owned_capture_startup_supported(&answer));
+        for malformed in [
+            format!("mvm-hvf-supervisor contract-version={HOST_HELPER_CONTRACT_VERSION}\n"),
+            answer.replace("startup=1", "startup=0"),
+            answer.replace("mvm-hvf-supervisor", "other-helper"),
+            answer.replace("startup=1", "startup=2"),
+            format!("{answer}owned-capture-startup=1\n"),
+            answer.replace("\n", "\r\n"),
+            answer.trim_end().to_string(),
+        ] {
+            assert!(
+                !owned_capture_startup_supported(&malformed),
+                "{malformed:?}"
+            );
+        }
+        assert!(!owned_capture_startup_supported(
+            "mvm-hvf-supervisor contract-version=0\nowned-capture-startup=1\n"
+        ));
+    }
+
+    #[test]
+    fn base_probe_never_infers_owned_startup_from_dependency_features() {
+        assert!(!owned_capture_startup_supported(&probe_response(
+            "mvm-hvf-supervisor"
+        )));
+        assert!(owned_capture_startup_supported(
+            &owned_capture_probe_response()
+        ));
+        assert!(!owned_capture_startup_supported(&probe_response(
+            "mvm-network-endpoint"
+        )));
+        const {
+            assert!(HOST_HELPER_CONTRACT_VERSION > 7);
+        }
     }
 
     #[test]

@@ -117,6 +117,8 @@ pub mod caller_registration;
 /// Arming a warm-claimed child's bounds in the standby supervisor it inherits.
 pub mod claimed_child;
 pub mod http_hardening;
+#[cfg(feature = "experimental-owned-capture")]
+pub mod owned_capture;
 pub mod protected_handoff;
 /// Verification of the plan a restored child's supervisor takes as authority.
 pub mod restored_plan;

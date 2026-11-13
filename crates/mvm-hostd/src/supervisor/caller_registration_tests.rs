@@ -6,6 +6,10 @@ use mvm_core::util::test_env::TestEnv;
 use crate::plan_admission::{InMemoryNonceLedger, RunPosture, admit_plan_for_run};
 use crate::stream::protected::{CaptureAuthority, CaptureOwner, CaptureParams};
 
+#[cfg(feature = "experimental-owned-capture")]
+#[path = "owned_capture_startup_tests.rs"]
+mod owned_startup;
+
 fn readonly_data_fixture() -> (tempfile::TempDir, std::fs::File) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("input.img");

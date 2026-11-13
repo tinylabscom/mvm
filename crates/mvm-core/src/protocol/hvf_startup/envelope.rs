@@ -1,7 +1,6 @@
 use super::*;
 use uuid::Uuid;
 
-const MAGIC: &[u8; 8] = b"MVMOCAP\0";
 const OVERHEAD: usize = 68;
 const PERMIT_BYTES: u16 = 53;
 pub const MAX_ENVELOPE_BYTES: usize = CONFIG_LIMIT + OVERHEAD;
@@ -52,7 +51,7 @@ impl StartupEnvelope {
             .checked_add(OVERHEAD)
             .ok_or(StartupInputError::Bounds)?;
         let mut bytes = Zeroizing::new(Vec::with_capacity(capacity));
-        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(OWNED_CAPTURE_MAGIC);
         bytes.push(1);
         bytes.extend_from_slice(
             &u32::try_from(config.len())
@@ -75,7 +74,7 @@ impl StartupEnvelope {
             return Err(StartupInputError::Bounds);
         }
         let mut cursor = Cursor(bytes);
-        if &cursor.take::<8>()? != MAGIC || cursor.take::<1>()? != [1] {
+        if &cursor.take::<8>()? != OWNED_CAPTURE_MAGIC || cursor.take::<1>()? != [1] {
             return Err(StartupInputError::Invalid);
         }
         let length = usize::try_from(u32::from_be_bytes(cursor.take()?))

@@ -54,7 +54,12 @@ pub struct ConsumedCallerLaunch {
     caller: RegisteredCaller,
     vm: String,
     consumed_at: chrono::DateTime<chrono::Utc>,
+    #[cfg(feature = "experimental-owned-capture")]
+    checked_boot_inputs: Option<CheckedCaptureBootInputs>,
 }
+
+#[cfg(feature = "experimental-owned-capture")]
+struct CheckedCaptureBootInputs;
 
 pub struct PreparedCallerStartup {
     pub launch: Box<ConsumedCallerLaunch>,
@@ -458,6 +463,8 @@ impl StartupFiles {
         cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
     ) -> Result<BoundCallerBoot> {
         use mvm_core::registry_pack_boot::BootImageAsset as Role;
+        #[cfg(feature = "experimental-owned-capture")]
+        let mut launch = launch;
         anyhow::ensure!(
             self.restore.is_none(),
             "checked images cannot consume restore files"
@@ -491,6 +498,10 @@ impl StartupFiles {
             (Role::RootHash, &root_hash),
         ] {
             facts.verify_reader(role, BootReader { file, offset: 0 })?;
+        }
+        #[cfg(feature = "experimental-owned-capture")]
+        {
+            launch.checked_boot_inputs = Some(CheckedCaptureBootInputs);
         }
         Ok(BoundCallerBoot {
             launch,
@@ -709,6 +720,21 @@ pub fn prepare_startup(
         );
         return Ok(None);
     };
+    require_cold_caller_mode(cfg)?;
+    let signed = serde_json::from_value(
+        cfg.plan
+            .clone()
+            .context("caller registration requires a signed plan")?,
+    )
+    .map_err(|_| anyhow::anyhow!("caller registration requires a signed plan"))?;
+    let launch = verify_cold_start(&cfg.vm_name, &signed, registration)?.consume(&cfg.vm_name)?;
+    let initramfs = load_boot_inputs(cfg)?;
+    Ok(Some(PreparedCallerStartup { launch, initramfs }))
+}
+
+pub(crate) fn require_cold_caller_mode(
+    cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
+) -> Result<()> {
     anyhow::ensure!(
         !cfg.trusted_builder_egress
             && cfg.handoff_socket.is_none()
@@ -722,15 +748,7 @@ pub fn prepare_startup(
         cfg.pid_file.parent() == Some(config::vm_state_dir(&cfg.vm_name).as_path()),
         "caller startup state does not match its instance"
     );
-    let signed = serde_json::from_value(
-        cfg.plan
-            .clone()
-            .context("caller registration requires a signed plan")?,
-    )
-    .map_err(|_| anyhow::anyhow!("caller registration requires a signed plan"))?;
-    let launch = verify_cold_start(&cfg.vm_name, &signed, registration)?.consume(&cfg.vm_name)?;
-    let initramfs = load_boot_inputs(cfg)?;
-    Ok(Some(PreparedCallerStartup { launch, initramfs }))
+    Ok(())
 }
 
 /// The actual supervisor input read, shared with opt-out startup at its existing
@@ -848,11 +866,22 @@ impl VerifiedCallerLaunch {
             caller: self.caller,
             vm: self.vm,
             consumed_at,
+            #[cfg(feature = "experimental-owned-capture")]
+            checked_boot_inputs: None,
         }))
     }
 }
 
 impl ConsumedCallerLaunch {
+    #[cfg(feature = "experimental-owned-capture")]
+    pub(crate) fn into_capture_owner(self, vm: &str) -> Result<(ExecutionPlan, RegisteredCaller)> {
+        anyhow::ensure!(
+            self.checked_boot_inputs.is_some(),
+            "owned capture requires the original verified boot inputs"
+        );
+        self.into_owner(vm)
+    }
+
     pub(crate) fn into_owner(self, vm: &str) -> Result<(ExecutionPlan, RegisteredCaller)> {
         self.into_owner_at(vm, chrono::Utc::now())
     }

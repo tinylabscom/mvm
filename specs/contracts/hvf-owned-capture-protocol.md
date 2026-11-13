@@ -1,11 +1,12 @@
 # Owned HVF capture: concrete protocol proposal
 
-Status: **Proposed for runtime/security review; not an enabled protocol.**
+Status: **Experimental implementation; capture transport is not enabled.**
 Scope: [#5265](https://github.com/tinylabscom/mvm/issues/5265), refining
 [the capture requirements](hvf-entrypoint-capture.md). Issue comments own
-approval and delivery status. The experimental library feature below implements
-the possession primitive only. No receiver, startup field, wire negotiation or
-public client report is activated.
+approval and delivery status. The off-by-default feature implements possession,
+startup decoding and checked owner-context binding. It does not implement an
+authenticated capture receiver, one-call spend, append transport or new public
+client report.
 
 Source baseline: `57b55a804ec60e2fba6f6ce5baef65a97546f0e6`.
 Studio's pin remains `592c0b8280d5b4d343269708ed70d237353fa4f9`.
@@ -13,13 +14,13 @@ The original guest call/channel and native completion/cleanup stay unchanged.
 Mailbox reporting, fd-3 control capture, warm handoff and name-resolved
 dispatch are not part of this slice.
 
-Existing seams to extend only after review:
+The implementation reuses:
 [original child and guest-channel custody](../../crates/mvm-backends/src/driver/hvf/cold_channel.rs#L367),
 [connected supervisor/lifetime checks](../../crates/mvm-vmm/src/host/hvf_stop.rs#L198),
 [kernel peer identity](../../crates/mvm-vmm/src/host/uds_peer.rs#L14),
 [independently retained enrollment](../../crates/mvm-hostd/src/supervisor/caller_registration.rs#L28),
-and [the sole protected recorder](../../crates/mvm-hostd/src/stream/protected.rs#L68).
-None currently connects the capture proof proposed below to execution.
+and [the sole protected recorder](../../crates/mvm-hostd/src/stream/protected.rs#L71).
+These seams do not yet supply an authenticated capture producer.
 
 ## Recommendation and alternatives
 
@@ -85,29 +86,31 @@ requirement is relaxed.
 
 ### Experimental startup envelope
 
-**Experimental implementation requirements; startup integration not enabled.**
+**Experimental startup support; producer/transport integration remains open.**
 The serialized-once and host–helper compatibility requirements below are
-mandatory before sending this format. The experimental possession library does
-not implement the native startup or helper negotiation path. The
+mandatory before sending this format. The
 [held configuration type and bounded envelope codec](../../crates/mvm-core/src/protocol/hvf_startup/mod.rs#L1)
-implement data handling only. The existing cold launcher now uses one held JSON
-serialization for its saved config and legacy startup input; retaining that
-object with the intended owned call remains integration work. The current
-[`read_config_input`](../../crates/mvm-hostd/src/bin/mvm-hvf-supervisor.rs#L142)
-accepts at most 8 MiB of raw UTF-8 configuration; the
-[`startup_mode`](../../crates/mvm-hostd/src/bin/mvm-hvf-supervisor.rs#L228)
-check requires kernel, image descriptors and registration together for checked
-startup. Keep those rules and the legacy format intact.
+preserve original bytes. The existing cold launcher uses one held JSON
+serialization for its saved config and legacy startup input. Retaining that
+object with the intended original client call and selecting the owned-startup
+resolver before emitting an envelope remain integration work; current ordinary
+launches still send legacy JSON.
+
+The native helper's experimental build decodes the envelope before descriptor
+adoption or other workload-startup effects. Its default build refuses that input.
+The [legacy replay reader](../../crates/mvm-hostd/src/bin/mvm-hvf-supervisor.rs#L183)
+retains its 8 MiB bound and cannot carry an owned envelope. The
+[checked-mode rule](../../crates/mvm-hostd/src/bin/mvm-hvf-supervisor.rs#L279)
+still requires kernel, image descriptors and registration together.
 
 The [configuration/envelope tests](../../crates/mvm-core/src/protocol/hvf_startup/tests.rs#L1)
 count serializer invocations, check shared immutable byte storage, preserve
 original whitespace/UTF-8, exercise exact limits and every truncation, and
 reject malformed fields, digest mismatches and invalid inner JSON even when its
 digest matches. A mock socket roundtrip exercises codec bytes, not authenticated
-startup or native FD custody. The actual helper still accepts only its legacy
-startup format and does not advertise envelope support. Its current version
-must not be taken as experimental-startup compatibility. The mandatory version
-bump and positive helper-support preflight remain required with that integration.
+startup or native FD custody. Binary-level tests additionally cover the actual
+helper's own build-feature advertisement and default/experimental decode paths.
+They do not boot a guest or establish authenticated capture.
 
 Recommend a versioned binary envelope on the **existing original startup
 input**, not a new inherited descriptor, environment variable, state file,
@@ -162,10 +165,10 @@ name-resolved dispatch cannot construct the retained invocation capability.
 Implementing this input format **requires a host–helper contract-version
 bump in the same change as the encoder, decoder and launcher preflight**.
 Advance the then-current
-[`HOST_HELPER_CONTRACT_VERSION`](../../crates/mvm-vmm/src/host/helper_contract.rs#L25)
+[`HOST_HELPER_CONTRACT_VERSION`](../../crates/mvm-vmm/src/host/helper_contract.rs#L26)
 rather than treating the envelope's own version byte or the unchanged JSON
-shape pin as sufficient. No bump or claim of envelope support is made by this
-document or by the possession-only feature.
+shape pin as sufficient. This startup implementation advances the contract
+from 7 to 8; a version match alone remains insufficient.
 
 Before launching the workload supervisor or sending any envelope bytes, the
 launcher must require the selected helper's exact bumped host–helper contract
@@ -181,6 +184,17 @@ Never send the envelope to an old/feature-disabled helper to discover support
 from its parse error. Receiver-side rejection remains defense in depth, not
 the compatibility negotiation. Do not silently retry as a legacy launch.
 
+The existing resolver's explicit
+[owned-startup mode](../../crates/mvm-vmm/src/host/aux_bin.rs#L181)
+requires the selected helper's ordinary version response followed by exactly
+`owned-capture-startup=1` and a newline. The native helper emits that second line
+only when its **own** experimental feature is enabled; a dependency feature
+enabled elsewhere through Cargo unification cannot enable the advertisement.
+Other helper binaries retain their ordinary one-line response. The resolver
+applies the same requirement after a permitted source rebuild, including the
+required build feature. This observes format support, not admission, guest
+readiness, authenticated capture or recorded output.
+
 Before any helper spawn, the child samples its actual parent and arms/rechecks
 the parent's lifetime observer. The record's PID must equal that sampled live
 parent; it must not choose which process to observe. Envelope parsing creates
@@ -189,6 +203,21 @@ startup and consumed caller admission, verified boot inputs, the actual native
 instance and the existing protected owner. Legacy, partial checked, builder,
 restore, replay/re-exec and handoff paths must not install this permit.
 Replaying serialized bytes cannot restore a spent or retired permit.
+
+The [startup binding factory](../../crates/mvm-hostd/src/supervisor/owned_capture.rs#L1)
+retains the original-parent observer and binds under the existing native
+control gate. Generic consumed registration is insufficient: the actual
+boot-file verifier must also have produced its private checked-input marker.
+The existing protected owner then retains the bound context and retires it
+before waiting on worker shutdown. Its current-binding accessor returns data,
+not a spent permit or append permission.
+
+The [binding component tests](../../crates/mvm-hostd/src/supervisor/owned_capture_startup_tests.rs#L1)
+explicitly assume the checked-input marker for their positive cases; they
+do not witness real boot-file verification or guest execution. Separate tests
+observe process exit and absorbing retirement, without claiming a complete
+native parent/reparenting or FD-custody witness. One-call authentication/spend
+and append/finalization qualification remain required before any capture Ready.
 
 Required compatibility/authority tests before activation:
 

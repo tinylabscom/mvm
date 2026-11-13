@@ -503,6 +503,8 @@ jobs:
         run: |
           ./scripts/cargo.sh test --locked -p mvm-core --features experimental-owned-capture --lib
           ./scripts/cargo.sh test --locked -p mvm-hostd --features experimental-owned-capture --lib caller_identity::tests
+          ./scripts/cargo.sh test --locked -p mvm-hostd --features experimental-owned-capture --lib owned_capture
+          ./scripts/cargo.sh test --locked -p mvm-hostd --features experimental-owned-capture --bin mvm-hvf-supervisor
 
   lint-policy:
     # This policy lane publishes the `Invariant` context. The architecture

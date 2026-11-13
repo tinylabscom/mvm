@@ -20,6 +20,9 @@ mod tests;
 /// Existing inner supervisor configuration ceiling.
 pub const CONFIG_LIMIT: usize = 8 * 1024 * 1024;
 
+/// Discriminator is visible even in builds that must refuse the experimental input.
+pub const OWNED_CAPTURE_MAGIC: &[u8; 8] = b"MVMOCAP\0";
+
 /// Immutable configuration bytes. Clones share the original held allocation.
 /// This is data, not a permit or proof of admission.
 #[derive(Clone)]

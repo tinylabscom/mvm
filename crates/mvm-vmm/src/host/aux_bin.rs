@@ -176,13 +176,47 @@ pub fn resolve_verified_for(spec: &AuxBin, host: &HostProcess) -> Result<PathBuf
     resolve_verified_in(spec, &lookup_for(spec, host)?, &VerifyEnv::for_host(host))
 }
 
+/// Require the selected helper's version and experimental startup advertisement.
+/// Resolving a compatible binary grants no launch or capture-write authority.
+pub fn resolve_owned_capture_startup(spec: &AuxBin) -> Result<PathBuf> {
+    anyhow::ensure!(
+        spec.bin == "mvm-hvf-supervisor"
+            && spec
+                .required_features
+                .contains(&"experimental-owned-capture"),
+        "owned capture startup requires the feature-enabled HVF helper specification"
+    );
+    let host = HostProcess::current();
+    resolve_verified_in_with(
+        spec,
+        &lookup_for(spec, &host)?,
+        &VerifyEnv::for_host(&host),
+        ProbeRequirement::OwnedCaptureStartup,
+    )
+}
+
 pub(crate) fn resolve_verified_in(
     spec: &AuxBin,
     lookup: &Lookup,
     env: &VerifyEnv,
 ) -> Result<PathBuf> {
+    resolve_verified_in_with(spec, lookup, env, ProbeRequirement::VersionOnly)
+}
+
+#[derive(Clone, Copy)]
+enum ProbeRequirement {
+    VersionOnly,
+    OwnedCaptureStartup,
+}
+
+fn resolve_verified_in_with(
+    spec: &AuxBin,
+    lookup: &Lookup,
+    env: &VerifyEnv,
+    requirement: ProbeRequirement,
+) -> Result<PathBuf> {
     if let Some(built) = build_if_needed(spec, lookup, env)? {
-        return match probe_built_helper(&built.path, env.probe_timeout) {
+        return match probe_built_helper(&built.path, env.probe_timeout, requirement) {
             ProbeOutcome::Answered(version)
                 if version == helper_contract::HOST_HELPER_CONTRACT_VERSION =>
             {
@@ -192,13 +226,13 @@ pub(crate) fn resolve_verified_in(
         };
     }
     let resolved = resolve_from(spec, lookup)?;
-    match probe_contract(&resolved, env.probe_timeout) {
+    match probe_contract(&resolved, env.probe_timeout, requirement) {
         ProbeOutcome::Answered(version)
             if version == helper_contract::HOST_HELPER_CONTRACT_VERSION =>
         {
             Ok(resolved)
         }
-        stale => recover_stale_helper(spec, lookup, env, &resolved, &stale),
+        stale => recover_stale_helper(spec, lookup, env, &resolved, &stale, requirement),
     }
 }
 
@@ -267,7 +301,7 @@ fn contract_probe_scrubs_replay_hint_even_when_not_unicode_without_execution() {
 }
 
 /// Run `helper --contract-version` and classify the answer.
-fn probe_contract(helper: &Path, timeout: Duration) -> ProbeOutcome {
+fn probe_contract(helper: &Path, timeout: Duration, requirement: ProbeRequirement) -> ProbeOutcome {
     let child = match contract_probe_command(mvm_core::env_hygiene::helper_command(helper)).spawn()
     {
         Ok(child) => child,
@@ -300,10 +334,28 @@ fn probe_contract(helper: &Path, timeout: Duration) -> ProbeOutcome {
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         match helper_contract::parse_probe_version(&stdout) {
+            Some(version)
+                if version == helper_contract::HOST_HELPER_CONTRACT_VERSION
+                    && matches!(requirement, ProbeRequirement::OwnedCaptureStartup)
+                    && !helper_contract::owned_capture_startup_supported(&stdout) =>
+            {
+                ProbeOutcome::Refused {
+                    detail: "helper does not advertise owned capture startup support".to_string(),
+                }
+            }
             Some(version) => ProbeOutcome::Answered(version),
+            None if matches!(requirement, ProbeRequirement::OwnedCaptureStartup) => {
+                ProbeOutcome::Refused {
+                    detail: "unrecognized owned capture startup probe answer".to_string(),
+                }
+            }
             None => ProbeOutcome::Refused {
                 detail: format!("unrecognized probe answer {stdout:?}"),
             },
+        }
+    } else if matches!(requirement, ProbeRequirement::OwnedCaptureStartup) {
+        ProbeOutcome::Refused {
+            detail: format!("owned capture startup probe exited with {}", output.status),
         }
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -424,6 +476,7 @@ fn recover_stale_helper(
     env: &VerifyEnv,
     resolved: &Path,
     stale: &ProbeOutcome,
+    requirement: ProbeRequirement,
 ) -> Result<PathBuf> {
     let Some(plan) = RebuildPlan::new(spec, resolved, env) else {
         let command = manual_rebuild_command(spec, env.exe_profile);
@@ -454,7 +507,7 @@ fn recover_stale_helper(
     ));
     plan.run(env, &format!("Rebuilding {}", spec.bin))?;
     let rebuilt = resolve_from(spec, lookup)?;
-    match probe_built_helper(&rebuilt, env.probe_timeout) {
+    match probe_built_helper(&rebuilt, env.probe_timeout, requirement) {
         ProbeOutcome::Answered(version)
             if version == helper_contract::HOST_HELPER_CONTRACT_VERSION =>
         {
@@ -476,9 +529,13 @@ fn recover_stale_helper(
 /// exec. Cargo already completed successfully, so only this post-build timeout
 /// gets one retry; malformed and wrong-version answers still fail closed
 /// without retrying.
-fn probe_built_helper(helper: &Path, timeout: Duration) -> ProbeOutcome {
-    match probe_contract(helper, timeout) {
-        ProbeOutcome::TimedOut => probe_contract(helper, timeout),
+fn probe_built_helper(
+    helper: &Path,
+    timeout: Duration,
+    requirement: ProbeRequirement,
+) -> ProbeOutcome {
+    match probe_contract(helper, timeout, requirement) {
+        ProbeOutcome::TimedOut => probe_contract(helper, timeout, requirement),
         answered => answered,
     }
 }
@@ -1094,6 +1151,138 @@ mod tests {
         )
         .unwrap();
         assert_eq!(got, bin);
+    }
+
+    #[test]
+    fn owned_startup_refuses_matching_version_without_feature_support_before_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("mvm-hvf-supervisor");
+        let effects = tmp.path().join("workload-or-input");
+        let body = format!(
+            "#!/bin/sh\nif [ \"$1\" != '--contract-version' ]; then touch '{}'; exit 9; fi\n\
+             if read line; then touch '{}'; exit 9; fi\nprintf '%s\\n' \
+             'mvm-hvf-supervisor contract-version={}'\n",
+            effects.display(),
+            effects.display(),
+            helper_contract::HOST_HELPER_CONTRACT_VERSION,
+        );
+        write_exe(&bin, &body);
+        let error = resolve_verified_in_with(
+            &hvf_spec().requiring_features(&["experimental-owned-capture"]),
+            &Lookup {
+                override_path: None,
+                dirs: vec![tmp.path().to_path_buf()],
+            },
+            &test_env(None),
+            ProbeRequirement::OwnedCaptureStartup,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("owned capture startup"),
+            "{error}"
+        );
+        assert!(!effects.exists());
+    }
+
+    #[test]
+    fn owned_startup_accepts_exact_support_and_refuses_stale_or_malformed_answers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("mvm-hvf-supervisor");
+        let current = helper_contract::HOST_HELPER_CONTRACT_VERSION;
+        for (version, suffix, accepted) in [
+            (current, "owned-capture-startup=1\\n", true),
+            (current - 1, "owned-capture-startup=1\\n", false),
+            (current, "owned-capture-startup=0\\n", false),
+            (current, "owned-capture-startup=1\\nextra\\n", false),
+        ] {
+            write_exe(
+                &bin,
+                &format!(
+                    "#!/bin/sh\nprintf 'mvm-hvf-supervisor contract-version={version}\\n{suffix}'\n"
+                ),
+            );
+            let result = resolve_verified_in_with(
+                &hvf_spec().requiring_features(&["experimental-owned-capture"]),
+                &Lookup {
+                    override_path: None,
+                    dirs: vec![tmp.path().to_path_buf()],
+                },
+                &test_env(None),
+                ProbeRequirement::OwnedCaptureStartup,
+            );
+            assert_eq!(result.is_ok(), accepted, "{version} {suffix}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn owned_startup_rechecks_support_and_feature_flags_after_rebuild() {
+        for advertised in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = scratch_checkout(tmp.path());
+            write_exe(
+                &root.join("target/debug/mvm-hvf-supervisor"),
+                &answering_helper("mvm-hvf-supervisor", 0),
+            );
+            let log = tmp.path().join("cargo-args");
+            let cargo = tmp.path().join("cargo");
+            let mut script = fixing_cargo("mvm-hvf-supervisor").replacen(
+                "#!/bin/sh\n",
+                &format!("#!/bin/sh\nprintf '%s\\n' \"$*\" > '{}'\n", log.display()),
+                1,
+            );
+            if advertised {
+                let header = format!(
+                    "printf '%s\\n' 'mvm-hvf-supervisor contract-version={}'",
+                    helper_contract::HOST_HELPER_CONTRACT_VERSION,
+                );
+                script = script.replace(&header, &format!("{header} 'owned-capture-startup=1'"));
+            }
+            write_exe(&cargo, &script);
+            let mut env = test_env(Some(root.clone()));
+            env.cargo = cargo;
+            let result = resolve_verified_in_with(
+                &hvf_spec().requiring_features(&["experimental-owned-capture"]),
+                &Lookup {
+                    override_path: None,
+                    dirs: vec![root.join("target/release"), root.join("target/debug")],
+                },
+                &env,
+                ProbeRequirement::OwnedCaptureStartup,
+            );
+            assert_eq!(result.is_ok(), advertised, "{result:?}");
+            let args = std::fs::read_to_string(log).unwrap();
+            assert!(
+                args.contains("--features experimental-owned-capture"),
+                "{args}"
+            );
+        }
+    }
+
+    #[test]
+    fn owned_startup_probe_refusals_do_not_repeat_helper_payloads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("mvm-hvf-supervisor");
+        for exit in [0, 9] {
+            write_exe(
+                &bin,
+                &format!(
+                    "#!/bin/sh\nprintf '%s\\n' 'private-probe-data'\n\
+                 printf '%s\\n' 'private-probe-data' >&2\nexit {exit}\n"
+                ),
+            );
+            let error = resolve_verified_in_with(
+                &hvf_spec().requiring_features(&["experimental-owned-capture"]),
+                &Lookup {
+                    override_path: None,
+                    dirs: vec![tmp.path().to_path_buf()],
+                },
+                &test_env(None),
+                ProbeRequirement::OwnedCaptureStartup,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(!error.contains("private-probe-data"), "{error}");
+        }
     }
 
     #[test]

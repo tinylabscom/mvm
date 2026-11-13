@@ -1,7 +1,7 @@
 //! `mvm-hvf-supervisor` — one process per raw-HVF guest.
 //!
-//! Reads an [`mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig`] JSON document on
-//! stdin (written by `mvm_runtime::backends::hvf`), self-signs the `hypervisor`
+//! Reads bounded startup input on stdin: legacy supervisor JSON or an explicitly
+//! enabled owned-capture envelope. It validates startup before the `hypervisor`
 //! entitlement, boots the guest via `mvm_runtime::backends::hvf::boot_kernel` (which drives
 //! the unified `vmm::run` loop), captures its console to the configured log, and
 //! writes/removes a PID file so the backend can confirm launch and stop/status
@@ -18,9 +18,50 @@ fn main() {
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const CONFIG_LIMIT: usize = 8 * 1024 * 1024;
+const CONFIG_LIMIT: usize = mvm_core::protocol::hvf_startup::CONFIG_LIMIT;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const REPLAY_HINT: &str = "MVM_HVF_LEGACY_CONFIG_REPLAY";
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn startup_probe_response() -> String {
+    if cfg!(feature = "experimental-owned-capture") {
+        mvm_vmm::host::helper_contract::owned_capture_probe_response()
+    } else {
+        mvm_vmm::host::helper_contract::probe_response("mvm-hvf-supervisor")
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+struct ParsedStartupInput {
+    config: mvm_core::protocol::hvf_startup::FrozenConfig,
+    #[cfg(feature = "experimental-owned-capture")]
+    envelope: Option<mvm_core::protocol::hvf_startup::StartupEnvelope>,
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn decode_startup_input(raw: Vec<u8>, replayed: bool) -> anyhow::Result<ParsedStartupInput> {
+    use mvm_core::protocol::hvf_startup::{FrozenConfig, OWNED_CAPTURE_MAGIC};
+    let mut raw = zeroize::Zeroizing::new(raw);
+    if raw.starts_with(OWNED_CAPTURE_MAGIC) {
+        anyhow::ensure!(!replayed, "owned capture startup cannot use legacy replay");
+        #[cfg(not(feature = "experimental-owned-capture"))]
+        anyhow::bail!("owned capture startup is not enabled in this helper");
+        #[cfg(feature = "experimental-owned-capture")]
+        {
+            let envelope = mvm_core::protocol::hvf_startup::StartupEnvelope::decode(&raw)?;
+            return Ok(ParsedStartupInput {
+                config: envelope.config().clone(),
+                envelope: Some(envelope),
+            });
+        }
+    }
+    let config = FrozenConfig::from_json(std::mem::take(&mut *raw))?;
+    Ok(ParsedStartupInput {
+        config,
+        #[cfg(feature = "experimental-owned-capture")]
+        envelope: None,
+    })
+}
 
 /// Mapping only; the descriptor remains independently owned.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -192,10 +233,20 @@ fn read_config_input(fd: i32, hint: Option<&std::ffi::OsStr>) -> anyhow::Result<
         return String::from_utf8(bytes.to_vec())
             .map_err(|_| anyhow::anyhow!("config replay is not UTF-8"));
     }
+    String::from_utf8(read_bounded_input(fd, CONFIG_LIMIT)?)
+        .map_err(|_| anyhow::anyhow!("supervisor config is not UTF-8"))
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn read_bounded_input(fd: i32, limit: usize) -> anyhow::Result<Vec<u8>> {
+    use anyhow::Context;
+    let allowance = limit
+        .checked_add(1)
+        .context("startup input bound overflow")?;
     let mut bytes = Vec::new();
     let mut buffer = [0u8; 65536];
     loop {
-        let available = (CONFIG_LIMIT + 1 - bytes.len()).min(buffer.len());
+        let available = (allowance - bytes.len()).min(buffer.len());
         // SAFETY: borrowed descriptor; output is a live, exclusive buffer.
         let count = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), available) };
         if count < 0 {
@@ -210,11 +261,11 @@ fn read_config_input(fd: i32, hint: Option<&std::ffi::OsStr>) -> anyhow::Result<
         }
         bytes.extend_from_slice(&buffer[..usize::try_from(count)?]);
         anyhow::ensure!(
-            bytes.len() <= CONFIG_LIMIT,
-            "supervisor config exceeds 8 MiB"
+            bytes.len() <= limit,
+            "supervisor startup input exceeds its byte bound"
         );
     }
-    String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("supervisor config is not UTF-8"))
+    Ok(bytes)
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -424,6 +475,54 @@ mod tests {
     use std::io::Write;
 
     #[test]
+    fn startup_probe_uses_the_helpers_own_feature_not_dependency_features() {
+        let response = super::startup_probe_response();
+        assert_eq!(
+            mvm_vmm::host::helper_contract::parse_probe_version(&response),
+            Some(mvm_vmm::host::helper_contract::HOST_HELPER_CONTRACT_VERSION)
+        );
+        assert_eq!(
+            mvm_vmm::host::helper_contract::owned_capture_startup_supported(&response),
+            cfg!(feature = "experimental-owned-capture")
+        );
+    }
+
+    #[test]
+    fn legacy_startup_keeps_exact_bytes_and_refuses_oversize() {
+        let bytes = " { \"vm_name\": \"é\" }\n".as_bytes().to_vec();
+        let parsed = super::decode_startup_input(bytes.clone(), false).unwrap();
+        assert_eq!(parsed.config.as_bytes(), bytes);
+        #[cfg(feature = "experimental-owned-capture")]
+        assert!(parsed.envelope.is_none());
+        assert!(super::decode_startup_input(vec![b' '; super::CONFIG_LIMIT + 1], false).is_err());
+        assert!(super::decode_startup_input(b"MVMOCAP\0".to_vec(), false).is_err());
+    }
+
+    #[cfg(feature = "experimental-owned-capture")]
+    #[test]
+    fn owned_startup_decodes_before_effects_and_never_replays_as_legacy() {
+        use mvm_core::protocol::hvf_startup::FrozenConfig;
+        let bytes = b" { \"vm_name\": \"fixture\" }\n".to_vec();
+        let envelope = FrozenConfig::from_json(bytes.clone())
+            .unwrap()
+            .for_call(uuid::Uuid::new_v4())
+            .unwrap();
+        let wire = envelope.encode().unwrap();
+        let parsed = super::decode_startup_input(wire.to_vec(), false).unwrap();
+        let retained = parsed.envelope.as_ref().unwrap();
+        assert_eq!(parsed.config.as_bytes(), bytes);
+        assert!(std::ptr::eq(
+            parsed.config.as_bytes(),
+            retained.config().as_bytes()
+        ));
+        assert!(super::decode_startup_input(wire.to_vec(), true).is_err());
+        let mut changed = wire.to_vec();
+        let end = changed.len();
+        changed[end - 5] ^= 1;
+        assert!(super::decode_startup_input(changed, false).is_err());
+    }
+
+    #[test]
     fn legacy_replay_maps_exact_bytes_readonly_without_touching_stdin() {
         use std::os::fd::AsRawFd;
         let raw = b" {\"nonnative\":\"fixture\"}\n";
@@ -604,20 +703,44 @@ fn run() -> anyhow::Result<()> {
     // No opens or descriptor ownership conversions precede bounded parsing.
     // A replay hint selects only input mechanics, NEVER startup authority.
     let replay_hint = std::env::var_os(REPLAY_HINT);
-    let raw = read_config_input(libc::STDIN_FILENO, replay_hint.as_deref())?;
-    if raw.is_empty() && replay_hint.is_none() {
-        mvm_vmm::host::helper_contract::exit_with_probe_answer_if_requested("mvm-hvf-supervisor");
+    let limit = {
+        #[cfg(feature = "experimental-owned-capture")]
+        {
+            mvm_core::protocol::hvf_startup::MAX_ENVELOPE_BYTES
+        }
+        #[cfg(not(feature = "experimental-owned-capture"))]
+        {
+            CONFIG_LIMIT
+        }
+    };
+    let mut raw = zeroize::Zeroizing::new(if replay_hint.is_some() {
+        read_config_input(libc::STDIN_FILENO, replay_hint.as_deref())?.into_bytes()
+    } else {
+        read_bounded_input(libc::STDIN_FILENO, limit)?
+    });
+    if raw.is_empty()
+        && replay_hint.is_none()
+        && mvm_vmm::host::helper_contract::probe_requested(std::env::args())
+    {
+        print!("{}", startup_probe_response());
+        return Ok(());
     }
     anyhow::ensure!(
         !mvm_vmm::host::helper_contract::probe_requested(std::env::args()),
         "a contract probe cannot carry boot configuration"
     );
-    let cfg: HvfSupervisorConfig =
-        serde_json::from_str(&raw).context("parse HvfSupervisorConfig JSON from stdin")?;
+    let parsed = decode_startup_input(std::mem::take(&mut *raw), replay_hint.is_some())?;
+    let cfg: HvfSupervisorConfig = serde_json::from_slice(parsed.config.as_bytes())
+        .map_err(|_| anyhow::anyhow!("parse HvfSupervisorConfig JSON from stdin"))?;
     let mode = startup_mode(&cfg)?;
     // The entire startup namespace is validated before diagnostics, replay,
     // signing re-exec, or any descriptor ownership conversion.
     mvm_hostd::supervisor::caller_registration::preflight_startup_files(&cfg)?;
+    #[cfg(feature = "experimental-owned-capture")]
+    let owned_startup = parsed
+        .envelope
+        .map(mvm_hostd::supervisor::owned_capture::PendingCaptureStartup::observe)
+        .transpose()?;
     let mut diagnostics;
     let mut files = match mode {
         StartupMode::Checked => {
@@ -631,7 +754,7 @@ fn run() -> anyhow::Result<()> {
         }
         StartupMode::Legacy => {
             if replay_hint.is_none() {
-                let replay = legacy_replay(raw.as_bytes())?;
+                let replay = legacy_replay(parsed.config.as_bytes())?;
                 // SAFETY: single-threaded startup replaces only standard input.
                 anyhow::ensure!(
                     unsafe { libc::dup2(replay.as_raw_fd(), libc::STDIN_FILENO) } >= 0,
@@ -641,7 +764,10 @@ fn run() -> anyhow::Result<()> {
                 // SAFETY: no worker threads or foreign runtime have started.
                 // The inherited value is a locator/length only, never a secret.
                 unsafe {
-                    std::env::set_var(REPLAY_HINT, format!("shm-v1:{}", raw.len()));
+                    std::env::set_var(
+                        REPLAY_HINT,
+                        format!("shm-v1:{}", parsed.config.as_bytes().len()),
+                    );
                 }
             }
             // SAFETY: unchanged legacy launcher diagnostics ownership contract.
@@ -932,6 +1058,19 @@ fn run() -> anyhow::Result<()> {
         .as_ref()
         .map(|plan| plan.redaction.clone())
         .unwrap_or_default();
+    #[cfg(feature = "experimental-owned-capture")]
+    let authority = match owned_startup {
+        Some(startup) => CaptureAuthority::OwnedCold(startup.bind_to_owner(
+            registered_launch.context("owned capture requires checked caller startup")?,
+            stop_control.authority(),
+        )?),
+        None => CaptureAuthority::select(
+            registered_launch,
+            admitted_plan.as_ref(),
+            cfg.trusted_builder_egress || cfg.handoff_socket.is_some(),
+        )?,
+    };
+    #[cfg(not(feature = "experimental-owned-capture"))]
     let authority = CaptureAuthority::select(
         registered_launch,
         admitted_plan.as_ref(),
