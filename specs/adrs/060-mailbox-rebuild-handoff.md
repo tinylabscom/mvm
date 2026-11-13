@@ -1,4 +1,4 @@
-# ADR-059 — Queue new dev tasks before signing a replacement-epoch message
+# ADR-060 — Queue new dev tasks before signing a replacement-epoch message
 
 Backing: preview
 Validation: none — this proposal needs a reviewed protocol decision and native witnesses
