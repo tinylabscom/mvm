@@ -387,36 +387,7 @@ capture_processes() {
   local raw="${dir}/processes-${phase}.txt"
   local tsv="${dir}/rss-${phase}.tsv"
   ps axww -o pid=,rss=,comm=,args= >"${raw}"
-  awk '
-    BEGIN {
-      print "component\tcount\trss_kib\trss_mib"
-      n = split("mvm-hvf-supervisor firecracker mvm-network-endpoint mvm-mailbox mvm-host-agent mvm-signer-helper mvm-host-signer mvm-audit-signer mvm-broker mvmctl", names, " ")
-    }
-    {
-      pid = $1
-      rss = $2
-      comm = $3
-      if (comm ~ /awk$/) next
-      # Name the program file alone. The wave directory is named for its backend
-      # and appears in the arguments of helpers, so matching the line would count
-      # every helper as that backend VMM.
-      program = $4
-      sub(/.*\//, "", program)
-      comp = ""
-      for (i = 1; i <= n; i++) {
-        if (program == names[i] || index(program, names[i] "-") == 1) { comp = names[i]; break }
-      }
-      if (comp != "") {
-        count[comp] += 1
-        rss_kib[comp] += rss
-      }
-    }
-    END {
-      for (comp in count) {
-        printf "%s\t%d\t%d\t%.1f\n", comp, count[comp], rss_kib[comp], rss_kib[comp] / 1024
-      }
-    }
-  ' "${raw}" >>"${tsv}"
+  awk -f "${ROOT}/scripts/density_rss.awk" "${raw}" >>"${tsv}"
 }
 
 capture_mailbox_threads() {
