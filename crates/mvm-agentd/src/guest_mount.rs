@@ -756,28 +756,6 @@ fn drop_capability_bounding_set_to(keep: u64) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Harden the OCI init before it spawns any workload-facing child.
-///
-/// The OCI boot path reaches the workload through a different route than the
-/// nix-built guest: there is no `mvm-setpriv` between init and the agent, so
-/// without this the agent and the workload beneath it inherit PID 1's full
-/// bounding set and `NoNewPrivs=0`.
-///
-/// Note what is retained. The bounding set is narrowed to
-/// [`RESTORE_AGENT_CAPABILITIES`] — `CAP_KILL` and `CAP_SYS_TIME`, which the
-/// agent genuinely needs to reap workload processes and to correct a restored
-/// wall clock — not to zero. The workload itself needs neither, and gets an
-/// empty bounding set from [`drop_workload_capability_bounding_set`] at spawn.
-#[cfg(target_os = "linux")]
-pub fn harden_init_process() -> std::io::Result<()> {
-    // `NoNewPrivs` first: it is the control that actually makes file
-    // capabilities and setuid bits inert on exec, it cannot fail for lack of
-    // privilege, and ordering it first means a bounding-set failure can never
-    // leave a descendant running without it.
-    set_no_new_privileges()?;
-    drop_capability_bounding_set_to(RESTORE_AGENT_CAPABILITIES)
-}
-
 /// Strip a workload process of every capability, immediately before exec.
 ///
 /// The agent keeps `CAP_KILL` and `CAP_SYS_TIME`, holding both as ambient
@@ -2255,30 +2233,6 @@ mod privilege_tests {
     /// Mirrors `CAPABILITY_SLOTS` so the test compiles off Linux, where the
     /// real constant is `cfg`-gated out along with the syscall loop.
     const CAPABILITY_SLOTS_FOR_TEST: std::ops::RangeInclusive<u32> = 0..=63;
-
-    /// Live witness. Mutates the calling process's privilege state
-    /// irreversibly, so it is gated behind an explicit environment variable
-    /// and root; ordinary CI and developer laptops skip it. The
-    /// backend-level witness is the adversarial probe run on a live host.
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn harden_init_process_narrows_bounding_set_and_sets_no_new_privs() {
-        if !privileged() {
-            return;
-        }
-        super::harden_init_process().expect("harden_init_process should succeed as root");
-        let status = std::fs::read_to_string("/proc/thread-self/status").expect("read status");
-        assert!(
-            status.contains("NoNewPrivs:\t1"),
-            "NoNewPrivs must be 1 after hardening; got:\n{status}"
-        );
-        // Narrowed to the agent's set, not emptied. The workload gets the
-        // empty set separately, at spawn.
-        assert!(
-            status.contains("CapBnd:\t0000000002000020"),
-            "CapBnd must be exactly CAP_KILL|CAP_SYS_TIME; got:\n{status}"
-        );
-    }
 
     /// Live witness for the reseed helper's drop from root. Irreversible and
     /// gated exactly like the agent-drop witness below.
