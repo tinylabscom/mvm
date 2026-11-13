@@ -406,24 +406,7 @@ pub fn extract_bundled_kernel(target_path: &Path) -> Result<BundledKernel, Error
         })?;
     }
 
-    let needs_write = std::fs::read(target_path)
-        .map(|cached| cached != artifact.bytes)
-        .unwrap_or(true);
-    if needs_write {
-        // Write atomically — staging file + rename so a concurrent
-        // mvmctl process can't observe a torn write.
-        let staging = target_path.with_extension("staging");
-        std::fs::write(&staging, &artifact.bytes).map_err(|e| Error::Io {
-            context: format!("writing libkrunfw kernel to {}: {e}", staging.display()),
-        })?;
-        std::fs::rename(&staging, target_path).map_err(|e| Error::Io {
-            context: format!(
-                "promoting {} -> {}: {e}",
-                staging.display(),
-                target_path.display()
-            ),
-        })?;
-    }
+    crate::bundled_kernel::write_cached_kernel(target_path, &artifact.bytes)?;
 
     Ok(BundledKernel {
         path: target_path.to_path_buf(),

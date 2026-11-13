@@ -26,6 +26,15 @@ changes still follow the repository's Rust-skill rule.
    each backend either enforces the advertised capability or refuses it
    before execution; do not introduce a second gate, guest NIC, SSH path,
    silent fallback, or cache-based authorization.
+   When platforms genuinely implement the same capability differently,
+   keep the caller on one existing trait or contract and put the implementations
+   under `platforms/`, selecting modules at their boundary rather than scattering
+   `cfg(unix)` through callers. Preserve unsupported-platform refusals; do not
+   invent a trait for a single-platform module, a test assertion, or one syscall,
+   or hide module declarations behind `include!`. Keep Windows/WHP as a future
+   target of the same contract, not a current enforcement claim: a Windows
+   adapter needs its own owner-only storage, isolation and refusal witnesses
+   before it can replace a fail-closed platform module.
 3. **Name the threat and evidence.** Say which actor may be compromised and
    whether protected data is at rest, in transit, in use, or retained after
    termination. Check issuer, digest, revocation freshness, epoch, replay,

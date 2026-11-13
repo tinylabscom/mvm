@@ -1288,8 +1288,7 @@ fn read_pid(path: &Path) -> Option<libc::pid_t> {
 }
 
 fn pid_alive(pid: libc::pid_t) -> bool {
-    // SAFETY: kill(pid, 0) only probes for existence and delivers no signal.
-    unsafe { libc::kill(pid, 0) == 0 }
+    super::process_liveness::pid_is_alive(pid)
 }
 
 fn kill(pid: libc::pid_t, sig: libc::c_int) {
