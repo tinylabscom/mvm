@@ -58,6 +58,8 @@ pub(in crate::commands) struct EntrypointCall {
     /// The `[secrets]` the run's project manifest declares, merged with
     /// `secret_flags` under the same narrowing rules.
     pub manifest_secrets: Vec<mvm_client::admission::run_secrets::RunSecretSpec>,
+    /// Mailbox grant and retention, resolved before boot and signed by admission.
+    pub mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
     /// Explicit ProdSafe agent-verb override to mint into the admitted grant
     /// for the transient entrypoint boot. Empty => use the computed default.
     pub agent_verb_override: Vec<String>,
@@ -308,6 +310,7 @@ fn boot_entrypoint_with_application(
         .cpus(call.cpus)
         .mem_mib(u64::from(call.memory_mib))
         .secrets(secrets)
+        .mailbox(call.mailbox)
         .agent_verb_override(call.agent_verb_override)
         .caller_commitment(call.caller_commitment)
         .dev(call.keep_alive_dev)
@@ -2120,6 +2123,7 @@ mod streamed_stdin_tests {
             from_workload_ir: None,
             secret_flags: Vec::new(),
             manifest_secrets: Vec::new(),
+            mailbox: None,
             agent_verb_override: Vec::new(),
             caller_commitment: None,
             machine_name: None,

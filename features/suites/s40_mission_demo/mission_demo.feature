@@ -7,11 +7,12 @@ Feature: The three-node mission demo contains, terminates and rebuilds
   What this does not show, and the demo says so itself: the three nodes are
   simulated nodes in one process, their VMs are gated and audited but none
   boots, and node-to-node delivery is a loopback TCP transport (not Iroh, #4633,
-  and not different physical hosts). A booted guest's mailbox was witnessed by
-  hand, separately, on a Firecracker host (many messages per VM) and on an HVF
-  host (macOS 26+ Apple Silicon; one message per VM, a re-witness is pending);
-  neither is a CI lane, and the "Demo status" section of
-  specs/contracts/host-interface-distributed-execution.md records both.
+  and not different physical hosts). The legacy guest mailbox was witnessed
+  manually on Firecracker and HVF; those manual runs are not CI lanes. The
+  tagged live scenario below instead boots Firecracker to witness the
+  trusted-host local-durable path. It is not a cross-host or HVF witness.
+  The "Demo status" section of
+  specs/contracts/host-interface-distributed-execution.md records the earlier runs.
   The production helper scenario below exercises the real local journal and
   guest wire over a loopback socket; it is not a booted-VM or host-blind witness.
 
@@ -33,3 +34,8 @@ Feature: The three-node mission demo contains, terminates and rebuilds
   Scenario: A production helper persists a local receipt and guest ACK
     When the production mailbox helper witness runs
     Then the production mailbox helper witness passes
+
+  @live @firecracker @ci_live
+  Scenario: a booted guest verifies local durability and acknowledges a delivery
+    When the booted local-durable mailbox witness runs
+    Then the booted local-durable mailbox witness passes

@@ -458,6 +458,7 @@ fn health_call(slot: &str, spec: &PackSpec, args: &BuildArgs) -> EntrypointCall 
         from_workload_ir: None,
         secret_flags: Vec::new(),
         manifest_secrets: Vec::new(),
+        mailbox: None,
         agent_verb_override: Vec::new(),
         caller_commitment: None,
         reset: false,

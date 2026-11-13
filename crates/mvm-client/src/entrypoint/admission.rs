@@ -11,6 +11,7 @@
 //! backend is the caller's, and a dev boot refuses an agent-verb restriction.
 
 use anyhow::{Context, Result};
+use mvm_contract::protocol::mailbox::MailboxGrant;
 use mvm_core::network_policy::NetworkPolicy;
 use mvm_core::plan::CallerCommitment;
 
@@ -42,6 +43,7 @@ pub struct EntrypointAdmission {
     cpus: u32,
     mem_mib: u64,
     secrets: ResolvedPlanSecrets,
+    mailbox: Option<MailboxGrant>,
     agent_verb_override: Vec<String>,
     caller_commitment: Option<CallerCommitment>,
     dev: bool,
@@ -72,6 +74,7 @@ impl EntrypointAdmission {
             cpus: 1,
             mem_mib: 256,
             secrets: ResolvedPlanSecrets::default(),
+            mailbox: None,
             agent_verb_override: Vec::new(),
             caller_commitment: None,
             dev: false,
@@ -145,7 +148,7 @@ impl EntrypointAdmission {
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let materialized_mounts = crate::admission::instructions::materialized_mounts(volumes);
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
-            mailbox: None,
+            mailbox: self.mailbox,
             gpu: false,
             instructions: crate::admission::InstructionSources::for_workload(None)
                 .with_mount_roots(&[])
@@ -326,6 +329,13 @@ impl EntrypointAdmissionBuilder {
     #[must_use]
     pub fn secrets(mut self, secrets: ResolvedPlanSecrets) -> Self {
         self.0.secrets = secrets;
+        self
+    }
+
+    /// Bind the requested mailbox and retention to this boot's signed plan.
+    #[must_use]
+    pub fn mailbox(mut self, mailbox: Option<MailboxGrant>) -> Self {
+        self.0.mailbox = mailbox;
         self
     }
 
@@ -566,6 +576,51 @@ mod tests {
         let policy: mvm_core::security::SecurityPolicy =
             serde_json::from_str(&policy_file.content).expect("parse security policy");
         assert_eq!(policy.profile, mvm_core::security::AgentProfile::SealedProd);
+    }
+
+    #[test]
+    fn entrypoint_mailbox_retention_is_signed_and_requires_the_host_ceiling() {
+        use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxId, MailboxRetentionPolicy};
+
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+        env.isolate_mvm_home(dir.path());
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"rootfs").expect("write rootfs");
+        GuestSidecar::for_oci_run("mailbox-entrypoint", true, true)
+            .write_to_dir(dir.path())
+            .expect("write image sidecar");
+        let mut mailbox = crate::admission::mailbox_grant::grant_for(
+            MailboxId::from_bytes([19; 32]),
+            &ed25519_dalek::SigningKey::from_bytes(&[20; 32]).verifying_key(),
+            ExecutionEpoch::new(1).expect("epoch"),
+        );
+        mailbox.retention = Some(MailboxRetentionPolicy::new(10_000).expect("retention"));
+        let admission = EntrypointAdmission::builder("firecracker")
+            .mailbox(Some(mailbox))
+            .build()
+            .expect("entrypoint admission");
+        let error = admission
+            .admit(inputs(&rootfs, "mailbox-entrypoint"))
+            .err()
+            .expect("missing host ceiling must refuse");
+        assert!(format!("{error:#}").contains("max_mailbox_retention_ms"));
+
+        let config = dir.path().join("config");
+        std::fs::create_dir_all(&config).expect("config directory");
+        std::fs::write(
+            config.join("config.toml"),
+            "max_mailbox_retention_ms = 10000\n",
+        )
+        .expect("host ceiling");
+        let admitted = admission
+            .admit(inputs(&rootfs, "mailbox-entrypoint"))
+            .expect("bounded mailbox admission");
+        assert_eq!(admitted.context.admitted.plan().mailbox, Some(mailbox));
+        assert!(
+            admitted.substrate.mailbox_posture.is_some(),
+            "the helper must receive only the verified launch posture"
+        );
     }
 
     #[test]

@@ -570,6 +570,7 @@ fn run_entrypoint_action(
     .with_routes(routes.routes);
     let stdin = resolve_entrypoint_stdin(args.stdin.as_deref())?;
     let exit_apply = exit_apply_request(&args);
+    let mailbox = resolve_entrypoint_mailbox(&args)?;
     let call = invoke::EntrypointCall {
         source,
         stdin,
@@ -579,6 +580,7 @@ fn run_entrypoint_action(
         from_workload_ir: args.run.from_workload_ir.clone(),
         secret_flags: args.run.secret.clone(),
         manifest_secrets: crate::commands::vm::run_secrets::project_secret_specs(&args.run)?,
+        mailbox,
         agent_verb_override: args.run.agent_verb.clone(),
         caller_commitment: args.run.caller_commitment.clone(),
         machine_name,
@@ -611,6 +613,25 @@ fn run_entrypoint_action(
         crate::observability::exit(exit_code);
     }
     Ok(())
+}
+
+fn resolve_entrypoint_mailbox(
+    args: &MachineRunArgs,
+) -> Result<Option<mvm_contract::protocol::mailbox::MailboxGrant>> {
+    anyhow::ensure!(
+        !args.attach || (args.run.mailbox.is_none() && args.run.mailbox_retention_ms.is_none()),
+        "a mailbox grant is set at boot, not on an attached entrypoint call"
+    );
+    let mailbox = mvm_client::admission::mailbox_grant::resolve(
+        args.run.mailbox.as_deref(),
+        args.run.mailbox_retention_ms,
+        args.run.from_workload_ir.as_deref(),
+    )?;
+    anyhow::ensure!(
+        !args.attach || mailbox.is_none(),
+        "a workload-declared mailbox grant is set at boot, not on an attached entrypoint call"
+    );
+    Ok(mailbox)
 }
 
 /// What the end of an attached run does with the machine's workspace changes.
@@ -955,6 +976,28 @@ mod entrypoint_stdin_tests {
         args.run.argv = vec!["echo".into()];
         assert!(select_application_action(&mut args).is_err());
         assert_eq!(args.run.argv, ["echo"]);
+    }
+
+    #[test]
+    fn entrypoint_mailbox_is_resolved_at_boot_and_cannot_be_added_on_attach() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().expect("isolated host home");
+        env.isolate_mvm_home(home.path());
+        let mut args = MachineRunArgs::default();
+        args.entrypoint = true;
+        args.run.mailbox = Some("ab".repeat(32));
+        args.run.mailbox_retention_ms = Some(10_000);
+        let grant = resolve_entrypoint_mailbox(&args)
+            .expect("resolved entrypoint mailbox")
+            .expect("mailbox grant");
+        assert_eq!(
+            grant.retention.expect("signed retention").retention_ms(),
+            10_000
+        );
+        args.attach = true;
+        let error = resolve_entrypoint_mailbox(&args)
+            .expect_err("an attached call cannot change the boot's mailbox grant");
+        assert!(error.to_string().contains("set at boot"), "{error}");
     }
 
     #[test]

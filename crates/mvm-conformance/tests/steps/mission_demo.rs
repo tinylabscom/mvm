@@ -56,6 +56,38 @@ fn production_mailbox_helper_passes(world: &mut CliWorld) {
     );
 }
 
+#[when("the booted local-durable mailbox witness runs")]
+fn run_booted_local_mailbox(world: &mut CliWorld) {
+    let root = crate::steps::cli::workspace_root();
+    let output = Command::new("bash")
+        .arg("scripts/mailbox-local-live-witness.sh")
+        .current_dir(root)
+        .env(
+            "MVMCTL",
+            std::env::var_os("CARGO_BIN_EXE_mvmctl")
+                .expect("the live lane built mvmctl before running scenarios"),
+        )
+        .output()
+        .expect("spawn the booted-guest mailbox witness");
+    world.last_run = Some(output);
+}
+
+#[then("the booted local-durable mailbox witness passes")]
+fn booted_local_mailbox_passes(world: &mut CliWorld) {
+    let run = world.last_run.as_ref().expect("the witness ran");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        run.status.success()
+            && stdout.contains("booted guest: verified V2 acceptance and signed Receive/ACK")
+            && stdout.contains("booted guest: missing retention refused before helper readiness")
+            && stdout.contains("booted guest: retained journal recovered on restart")
+            && stdout.contains("WITNESS_RESULT=pass"),
+        "booted mailbox witness failed:\n{}\n{}",
+        stdout,
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
 fn stdout(world: &CliWorld) -> String {
     let run = world.last_run.as_ref().expect("the demo ran");
     String::from_utf8_lossy(&run.stdout).into_owned()
