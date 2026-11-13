@@ -2305,7 +2305,7 @@ fn ops_mcp_refuses_the_project_tool_policy() {
 }
 
 // ---------------------------------------------------------------------------
-// Signed registry packs (PS-06): search / pull / pack registry
+// Signed registry packs: search / pull / pack registry
 // ---------------------------------------------------------------------------
 
 fn mvmctl_isolated(home: &std::path::Path) -> Command {
