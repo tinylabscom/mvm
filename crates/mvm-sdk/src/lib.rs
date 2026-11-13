@@ -84,12 +84,6 @@ pub mod addon;
 #[cfg(feature = "compiler")]
 pub mod compile;
 
-/// Static decorator parser — extracts `@mvm.app(...)` kwargs from a
-/// user's Python or TypeScript source file and lowers them to a
-/// `Workload` IR. Pure tree-sitter; never imports the user's code.
-/// Closed `mvm.*` helper allowlist; non-literal kwargs rejected.
-pub mod decorator;
-
 /// Deploy-bundle assembly and local attestation for mvmd-owned control-plane
 /// flows. Builds the single `.tar.gz` (compile output plus embedded
 /// `mvmd-spec.json`) and exposes the authenticated shipping seam.

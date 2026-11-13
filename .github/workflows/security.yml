@@ -787,11 +787,18 @@ jobs:
             fail=1
           fi
 
+          # authorized_keys, anywhere — a provisioned login key.
+          if sudo find "$mnt" -name authorized_keys -print -quit | grep -q .; then
+            echo "::error::authorized_keys present in the sealed image:" >&2
+            sudo find "$mnt" -name authorized_keys >&2 || true
+            fail=1
+          fi
+
           if [ "$fail" -ne 0 ]; then
             echo "::error::ADR-001 violated; sealed-prod images must not ship SSH artifacts." >&2
             exit 1
           fi
-          echo "ok: sealed image has no sshd / host keys / sshd_config"
+          echo "ok: sealed image has no sshd / host keys / sshd_config / authorized_keys"
 
   # ── Lane 7: Flake lockfile cleanliness (plan 36 §Layer 0) ──────────
   # Every flake.lock in the repo must be committed and in sync with

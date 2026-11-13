@@ -324,7 +324,7 @@ fn list_guest(vm: &str, path: &str) -> Result<Vec<mvm_agentd::vsock::FsEntry>> {
         path: path.to_string(),
         follow_symlinks: false,
     };
-    crate::commands::shared::emit_vsock_rpc_audit(vm, &request);
+    mvm_client::guest::emit_vsock_rpc_audit(vm, &request);
     match crate::commands::vm::fs::fs_request(vm, request)? {
         FsResult::List { entries, truncated } if !truncated => Ok(entries),
         FsResult::List {
@@ -344,7 +344,7 @@ fn stat_guest(vm: &str, path: &str) -> Result<mvm_agentd::vsock::FsStat> {
         path: path.to_string(),
         follow_symlinks: false,
     };
-    crate::commands::shared::emit_vsock_rpc_audit(vm, &request);
+    mvm_client::guest::emit_vsock_rpc_audit(vm, &request);
     match crate::commands::vm::fs::fs_request(vm, request)? {
         FsResult::Stat(stat) => Ok(stat),
         FsResult::Error { kind, message } => {

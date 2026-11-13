@@ -192,7 +192,7 @@ fn check_audit_chain(home: Option<&std::path::Path>) -> PostureCheck {
     // Verifying the chain requires the host signer's verifying
     // key. Load it lazily — if it fails, surface that.
     let keys_dir = mvm_core::config::mvm_keys_dir();
-    match crate::commands::vm::host_signer::load_or_init_at(&keys_dir) {
+    match mvm_client::host_keypair::load_or_init_at(&keys_dir) {
         Ok(signer) => {
             match mvm_client::audit::chain::supervisor::verify_audit_chain(&path, &signer.verifying)
             {

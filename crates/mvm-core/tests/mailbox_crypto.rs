@@ -1143,6 +1143,16 @@ fn stale_or_foreign_epochs_are_fenced_on_both_sides() {
         MailboxError::StaleExecutionEpoch
     );
 
+    // A capability spanning both epochs does not make a signed message from
+    // the old owner valid for a replacement. A not-yet-sent intent must be
+    // sealed afresh by its sender after the replacement is admitted.
+    let mut replacement = context();
+    replacement.current_execution_epoch = ExecutionEpoch::new(8).expect("epoch");
+    assert_eq!(
+        refuse(header(), grant(), replacement),
+        MailboxError::StaleExecutionEpoch
+    );
+
     // Header and owner agree, but the capability was minted for earlier epochs.
     let mut beyond_grant = header();
     beyond_grant.execution_epoch = ExecutionEpoch::new(10).expect("epoch");

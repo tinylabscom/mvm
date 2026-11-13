@@ -64,7 +64,7 @@ use anyhow::{Context, Result, bail};
 use mvm_agentd::vsock::{GuestRequest, GuestResponse};
 use mvm_core::vm_backend::VmStartConfig;
 use mvm_runtime::backend::AnyBackend;
-use mvm_runtime::vsock_transport::VsockTransport as _;
+use mvm_vmm::vsock_transport::VsockTransport as _;
 use serde::Deserialize;
 
 #[path = "runtime_boot_evidence/mod.rs"]
@@ -944,7 +944,7 @@ fn wait_for_guest_agent(backend: &str, name: &str) -> Result<()> {
 }
 
 fn wait_for_hvf_guest_agent(name: &str) -> Result<()> {
-    let transport = mvm_runtime::vsock_transport::HvfVsockTransport::for_vm(name);
+    let transport = mvm_vmm::vsock_transport::HvfVsockTransport::for_vm(name);
     let deadline = Instant::now() + READY_TIMEOUT;
     let mut last_err = None;
 

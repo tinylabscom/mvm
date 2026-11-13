@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use super::Cli;
-use super::host_signer::{host_signer_id, load_or_init};
+use mvm_client::host_keypair::{host_signer_id, load_or_init};
 
 pub(in crate::commands) mod application_source;
 mod composition;
@@ -859,7 +859,7 @@ pub(in crate::commands) fn run_secure_started(
         // Persist the bare plan so the pre-start moat / endpoint can read it
         // on the backends that consume it from disk (mirrors the invoke path).
         if super::up::persists_plan_before_start(&admit_backend) {
-            super::plan_persist::write_plan(vm_name, c.admitted.plan())
+            mvm_client::audit::chain::plan_persist::write_plan(vm_name, c.admitted.plan())
                 .context("persisting admitted plan for the transient run")?;
         }
         let guest_profile = super::up::guest_profile_for_boot(admit_is_dev, rootfs);

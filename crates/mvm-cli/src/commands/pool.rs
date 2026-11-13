@@ -36,10 +36,10 @@ use sha2::{Digest, Sha256};
 
 use super::Cli;
 use super::vm::checkpoint::{ClaimChainAnchor, SignedChainAnchor};
-use super::vm::host_signer;
 use mvm_client::admission::{
     AdmittedPlan, InMemoryNonceLedger, SystemClock, admit_for_run, stash_plan_and_mint_verb_grant,
 };
+use mvm_client::host_keypair;
 use mvm_contract::builder::BuilderError;
 use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput};
 
@@ -493,9 +493,9 @@ fn audit_captured_parent(
         handle.vcpus,
         handle.mem_mib,
     )?;
-    let signer = host_signer::load_or_init()
+    let signer = host_keypair::load_or_init()
         .context("loading the host signer to sign the parent's creation entry")?;
-    let emitter = super::vm::audit_chain::AuditEmitter::new(signer.signing)
+    let emitter = mvm_client::audit::chain::emitter::AuditEmitter::new(signer.signing)
         .context("opening the audit chain to record the parent's creation")?
         .with_receipts()
         .with_decisions()
@@ -3049,12 +3049,12 @@ fn run_warm(pool: &SupervisorStandbyPool, req: &WarmRequest) -> Result<()> {
         launch.backend.late_volume_slots(),
         || {
             // Ensure the host signer exists only for a parent a launch can claim.
-            let signer = host_signer::load_or_init()?;
+            let signer = host_keypair::load_or_init()?;
             warm_to_target(
                 pool,
                 &WarmParams {
                     backend: &launch.backend,
-                    signer_id: &host_signer::host_signer_id(),
+                    signer_id: &host_keypair::host_signer_id(),
                     signing_key_path: &signer.secret_path,
                     target,
                     launch: &launch.start_config,

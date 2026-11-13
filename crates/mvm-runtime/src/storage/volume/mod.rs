@@ -19,10 +19,7 @@
 //! concurrent put/get) against any [`VolumeBackend`] impl. mvmd
 //! re-uses it for `ObjectStoreBackend` and `EncryptedBackend<B>`.
 
-pub mod backend;
 pub mod content_addressed;
-pub mod contract;
-pub mod local;
 pub mod mount_provider;
 pub mod provider;
 
@@ -36,12 +33,12 @@ pub mod encrypted;
 #[path = "encrypted_linux.rs"]
 pub mod encrypted;
 
-pub use backend::{VolumeBackend, VolumeFuture};
 pub use content_addressed::{ContentAddressedStore, ContentDigest};
-pub use local::LocalBackend;
 pub use mount_provider::{
     HostPathFs, MountError, MountProvider, MountRegistry, Mountable, TmpfsFs, VolumeFs,
 };
+pub use mvm_contract::contract;
+pub use mvm_contract::{LocalBackend, VolumeBackend, VolumeFuture};
 pub use provider::{AttachedVolume, LocalStorage, StorageProvider, VolumeHandle, VolumeSpec};
 
 pub use encrypted::EncryptedStorage;
