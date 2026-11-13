@@ -9,13 +9,16 @@ use anyhow::{Context, Result, ensure};
 use mvm_core::crypto::entrypoint_delegation::RegistrationChallenge;
 use mvm_core::crypto::owned_capture::CaptureBinding;
 use mvm_core::plan::ExecutionPlan;
-use mvm_core::protocol::hvf_control::HvfInstance;
 use mvm_core::protocol::hvf_startup::StartupEnvelope;
 use mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig;
 use mvm_vmm::host::process_exit::{ProcessExitObserver, ProcessExitWait};
 
 use super::caller_registration::{self, ConsumedCallerLaunch, RegisteredCaller};
 use super::hvf_stop::StopAuthority;
+
+mod authorization;
+pub use authorization::AuthenticatedCapture;
+pub(crate) use authorization::OwnedCapturePermit;
 
 /// Non-cloneable pending input under observed original-parent custody.
 /// No permit is installed merely by constructing this value.
@@ -37,14 +40,6 @@ pub(crate) struct BoundCaptureOwnerParts {
     pub(crate) plan: ExecutionPlan,
     pub(crate) caller: RegisteredCaller,
     pub(crate) permit: OwnedCapturePermit,
-}
-
-pub(crate) struct OwnedCapturePermit {
-    binding: CaptureBinding,
-    instance: HvfInstance,
-    parent: OriginalParent,
-    native: StopAuthority,
-    retired: bool,
 }
 
 impl PendingCaptureStartup {
@@ -103,41 +98,9 @@ impl PendingCaptureStartup {
             Ok(Box::new(OwnedCaptureAuthority {
                 plan,
                 caller,
-                permit: OwnedCapturePermit {
-                    binding,
-                    instance: instance.clone(),
-                    parent,
-                    native,
-                    retired: false,
-                },
+                permit: OwnedCapturePermit::new(binding, instance.clone(), parent, native),
             }))
         })
-    }
-}
-
-impl OwnedCapturePermit {
-    /// Current binding data only. A later receiver must separately serialize
-    /// authentication, one-call spend and append against retirement.
-    pub(crate) fn current_binding(&mut self) -> Result<&CaptureBinding> {
-        ensure!(!self.retired, "owned capture permit is retired");
-        let result = self
-            .native
-            .with_capture_instance(&self.instance.vm_id, |instance| {
-                ensure!(
-                    instance == &self.instance,
-                    "owned capture generation changed"
-                );
-                self.parent.recheck()
-            });
-        if let Err(error) = result {
-            self.retire();
-            return Err(error);
-        }
-        Ok(&self.binding)
-    }
-
-    pub(crate) fn retire(&mut self) {
-        self.retired = true;
     }
 }
 
@@ -150,10 +113,7 @@ impl OwnedCaptureAuthority {
         mut self: Box<Self>,
         vm: &str,
     ) -> Result<BoundCaptureOwnerParts> {
-        ensure!(
-            self.permit.instance.vm_id == vm,
-            "owned capture owner differs"
-        );
+        ensure!(self.permit.vm() == vm, "owned capture owner differs");
         self.current_binding()?;
         Ok(BoundCaptureOwnerParts {
             plan: self.plan,

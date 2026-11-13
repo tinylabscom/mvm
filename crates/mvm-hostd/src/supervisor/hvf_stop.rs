@@ -286,6 +286,28 @@ impl StopAuthority {
             .state
             .lock()
             .map_err(|_| anyhow::anyhow!("stop gate poisoned"))?;
+        self.require_capture_instance(&state, vm)?;
+        action(&state.instance)
+    }
+
+    /// Authentication may refuse busy control, never wait behind native I/O.
+    #[cfg(feature = "experimental-owned-capture")]
+    pub(crate) fn try_capture_instance<T>(
+        &self,
+        vm: &str,
+        action: impl FnOnce(&HvfInstance) -> Result<T>,
+    ) -> Result<T> {
+        let state = self
+            .0
+            .state
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("native capture gate busy or poisoned"))?;
+        self.require_capture_instance(&state, vm)?;
+        action(&state.instance)
+    }
+
+    #[cfg(feature = "experimental-owned-capture")]
+    fn require_capture_instance(&self, state: &State, vm: &str) -> Result<()> {
         ensure!(
             state.instance.vm_id == vm
                 && state.listeners.len() == 1
@@ -294,7 +316,7 @@ impl StopAuthority {
                 && !self.0.closed.load(Ordering::Acquire),
             "original native capture instance is no longer active"
         );
-        action(&state.instance)
+        Ok(())
     }
 
     /// Reserve transfer under the short control gate, perform owner work outside

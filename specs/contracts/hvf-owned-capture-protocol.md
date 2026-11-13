@@ -1,12 +1,12 @@
 # Owned HVF capture: concrete protocol proposal
 
-Status: **Experimental implementation; capture transport is not enabled.**
+Status: **Experimental implementation; native capture ingress is not activated.**
 Scope: [#5265](https://github.com/tinylabscom/mvm/issues/5265), refining
 [the capture requirements](hvf-entrypoint-capture.md). Issue comments own
 approval and delivery status. The off-by-default feature implements possession,
-startup decoding and checked owner-context binding. It does not implement an
-authenticated capture receiver, one-call spend, append transport or new public
-client report.
+startup decoding, checked owner-context binding and a receiver authentication/
+spend component. It does not activate a native listener/client connector or
+implement append transport or a new public client report.
 
 Source baseline: `57b55a804ec60e2fba6f6ce5baef65a97546f0e6`.
 Studio's pin remains `592c0b8280d5b4d343269708ed70d237353fa4f9`.
@@ -231,8 +231,8 @@ The [binding component tests](../../crates/mvm-hostd/src/supervisor/owned_captur
 explicitly assume the checked-input marker for their positive cases; they
 do not witness real boot-file verification or guest execution. Separate tests
 observe process exit and absorbing retirement, without claiming a complete
-native parent/reparenting or FD-custody witness. One-call authentication/spend
-and append/finalization qualification remain required before any capture Ready.
+native parent/reparenting or FD-custody witness. Authentication/spend and
+append/finalization qualification remain required before native activation.
 
 Required compatibility/authority tests before activation:
 
@@ -408,6 +408,56 @@ or loss of Final never refunds a spent permit. A replacement or restarted
 owner cannot reconstruct it from serialized startup/receipt bytes; it needs
 fresh admission and distinct original native custody.
 
+### Experimental receiver component, not native activation
+
+The [actual owner's authentication component](../../crates/mvm-hostd/src/supervisor/owned_capture/authorization.rs#L1)
+implements Bound, Authorizing, Spent and absorbing Retired state. This is not
+the reference model. It accepts one supplied connected socket through the
+existing protected owner, but publishes no listener and adds no native client
+connector. Closing/Finish, data ingestion and receipt reconciliation remain
+unimplemented operations, not successful stubs.
+
+Before issuing a challenge it checks the actual connector against the retained
+original launcher PID, arms a fresh lifetime observer and reserves at most one
+attempt. It reuses the purpose-specific codec and native parent/generation gate.
+Signature verification and all transport stay outside the short control/state
+critical sections. Authentication refuses busy native control instead of
+waiting behind its I/O. The monotonic two-second budget starts before peer
+setup and is never reset by progress. At spend, the owner rechecks the exact
+reservation, verified possession, current peer/lifetime, parent/generation,
+wall-clock freshness and original deadline under the native/state gates.
+Sequence one and zero original-payload counters are initialized in that same
+transition, before any Ready bytes.
+
+An invalid proof releases only its own still-current transient reservation;
+the supplied connection is then closed. Transport failure, cancellation,
+retirement and a lost Ready cannot refund a spend. Readiness is rechecked
+before and after the bounded Ready write. A concurrent retirement can make
+already-sent Ready bytes stale; they are not a lease or append permission after
+retirement. Every future append must pass the same current-owner state gate.
+No append API or payload writer is supplied by this component.
+
+Its opaque connection guard exposes no socket, raw FD, cloning or serialization
+accessor. Drop revokes its state before shutdown/close, without relying on EOF.
+If owner retirement finds a live guard, close remains unconfirmed and the
+existing protected owner's finish reports incomplete capture. This does not
+claim automatic closure of an arbitrarily retained guard within five seconds.
+Creation-time close-on-exec, all aliases, fork/exec and lifecycle integration
+still need qualification before a listener/connector can be activated. A
+current flag check alone does not satisfy that gate.
+
+The [receiver component tests](../../crates/mvm-hostd/src/supervisor/owned_capture/authorization/tests.rs#L1)
+use real Unix connections and processes, the public RFC 8032 test key and
+synthetic enrollment/startup/native context. They exercise receiver-side peer
+identity, signatures, copied challenges, competing reservations, retirement/
+stop races, lost Ready, zero output and bounded malformed/partial controls.
+Their process-control channel is a fixture, not a workload transport or native
+boot witness. They do not establish producer-side original-child verification,
+native credential custody, admitted HVF startup, FD inheritance/fork safety,
+actual authenticated/refused payload writes or independently verified readback.
+Ready here confirms only the component's authentication/spend transition,
+never protected bytes, recording completeness or production approval.
+
 The trusted client must bind capture to the actual owned dispatch, not merely
 sign a caller-selected UUID. Create the call ID before native effects, retain
 it with that invocation's admission/frozen configuration and original guest
@@ -419,7 +469,7 @@ These constructor/dispatch constraints need runtime qualification alongside
 the receiver's atomic spend.
 
 Reuse the existing
-[`ColdHvfChannel::entrypoint` phase guard](../../crates/mvm-runtime/src/workload_runner/runner/cold_hvf_channel.rs#L318):
+[`ColdHvfChannel::entrypoint` phase guard](../../crates/mvm-runtime/src/workload_runner/runner/cold_hvf_channel.rs#L348):
 it requires Activated, enters Uncertain before the native request, and only
 then records Dispatched. Do not add a second guest-dispatch lifecycle or
 retry after uncertainty. That existing guard limits guest invocation; it

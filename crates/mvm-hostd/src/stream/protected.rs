@@ -256,16 +256,32 @@ impl CaptureOwner {
             .transpose()
     }
 
+    /// Experimental component seam, not a published listener or append service.
+    /// FD creation/alias/fork custody must be qualified before native activation.
+    #[cfg(feature = "experimental-owned-capture")]
+    pub fn authenticate_owned_capture(
+        &mut self,
+        stream: std::os::unix::net::UnixStream,
+    ) -> Result<crate::supervisor::owned_capture::AuthenticatedCapture> {
+        self.owned_permit
+            .as_ref()
+            .context("original owned capture permit missing")?
+            .authenticate(stream)
+    }
+
     /// The producer must be dropped first, including the UART's final partial
-    /// line. False explicitly means incomplete capture, never a plaintext retry.
+    /// line. Authenticated connection guards must also close before finishing.
+    /// False explicitly means incomplete capture, never a plaintext retry.
     pub fn finish(mut self) -> bool {
         self.join()
     }
 
     fn join(&mut self) -> bool {
         #[cfg(feature = "experimental-owned-capture")]
-        if let Some(permit) = &mut self.owned_permit {
-            permit.retire();
+        if let Some(permit) = &self.owned_permit
+            && !permit.retire()
+        {
+            self.failed.store(true, Ordering::Relaxed);
         }
         let Some(worker) = self.worker.take() else {
             return !self.failed.load(Ordering::Relaxed);

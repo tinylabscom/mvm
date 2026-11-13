@@ -208,6 +208,10 @@ impl CaptureChallenge {
         &self.binding
     }
 
+    pub fn nonce(&self) -> &[u8; 32] {
+        &self.nonce
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>> {
         self.validate(self.issued)?;
         wire::frame(1, self, &[])
@@ -226,7 +230,9 @@ impl CaptureChallenge {
         Ok(challenge)
     }
 
-    fn validate(&self, now: u64) -> Result<()> {
+    /// Recheck wall-clock freshness without repeating signature verification.
+    /// A receiver must separately enforce its original monotonic deadline.
+    pub fn validate(&self, now: u64) -> Result<()> {
         self.binding.validate()?;
         if self.nonce == [0; 32] {
             return Err(CaptureProofError::Invalid);
