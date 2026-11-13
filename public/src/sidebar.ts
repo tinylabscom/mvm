@@ -26,6 +26,7 @@ export const sidebar: SidebarGroup[] = [
     label: "Local CLI",
     items: [
       { label: "Machine workflows", slug: "guides/machine-use-cases" },
+      { label: "Configuration file", slug: "guides/configuration" },
       { label: "Run commands", slug: "working/commands" },
       { label: "Work with files", slug: "working/filesystem" },
       { label: "Network and ports", slug: "working/network" },
@@ -45,6 +46,7 @@ export const sidebar: SidebarGroup[] = [
     label: "Guides",
     items: [
       { label: "AI agent integration", slug: "guides/ai-agent-integration" },
+      { label: "Policies", slug: "guides/policies" },
       { label: "Network access", slug: "guides/network-egress-policy" },
       { label: "Secrets and credentials", slug: "guides/secrets-and-credentials" },
       { label: "Troubleshooting", slug: "guides/troubleshooting" },

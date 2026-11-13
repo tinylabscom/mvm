@@ -34,7 +34,7 @@ test("docs overview offers local CLI and SDK paths without restoring the full ca
   assert.deepEqual(entries.slice(0, 3), [
     "docs", "getting-started/installation", "getting-started/quickstart",
   ]);
-  assert.ok(entries.length >= 14 && entries.length <= 18, "Keep the navigation useful but curated");
+  assert.ok(entries.length >= 16 && entries.length <= 20, "Keep the navigation useful but curated");
   for (const heading of ["Local CLI", "SDK", "Boundaries and guides", "Where things run"]) {
     assert.ok(overview.includes(`## ${heading}`), `${heading}: overview section`);
   }
@@ -45,6 +45,7 @@ test("docs overview offers local CLI and SDK paths without restoring the full ca
     "guides/machine-use-cases", "reference/platform-support", "sdk",
     "getting-started/python-quickstart", "getting-started/nodejs-quickstart",
     "getting-started/rust-quickstart", "guides/ai-agent-integration",
+    "guides/configuration", "guides/policies",
     "guides/network-egress-policy", "guides/secrets-and-credentials",
     "guides/troubleshooting",
   ]) {
@@ -62,6 +63,20 @@ test("docs overview offers local CLI and SDK paths without restoring the full ca
       `${slug}: curated pages cover only mvm`,
     );
   }
+});
+
+test("policy and configuration guides show the supported composition boundaries", () => {
+  const policies = readFileSync(join(publicRoot, "src/content/docs/guides/policies.md"), "utf8");
+  const configuration = readFileSync(join(publicRoot, "src/content/docs/guides/configuration.md"), "utf8");
+
+  assert.match(policies, /--profile restrictive\\\|standard\\\|dev\\\|permissive/);
+  assert.match(policies, /--policy NAME\\\|PATH/);
+  assert.match(policies, /deny from any layer/);
+  assert.match(policies, /installed, pinned, verified/);
+  assert.match(configuration, /does\s+not merge arbitrary `mvm\.toml` files/);
+  assert.match(configuration, /image = "alpine:3\.20"/);
+  assert.match(configuration, /include = \["\.\/policy\/api-group\.toml"\]/);
+  assert.match(configuration, /default_policy` there\s+selects a fallback/);
 });
 
 test("blog omits the browse posts section and keeps a clear return link", () => {
