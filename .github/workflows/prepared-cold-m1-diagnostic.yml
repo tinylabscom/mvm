@@ -1,0 +1,117 @@
+name: M1 physical-cold diagnostic
+
+# Manual, trusted-main measurement only. One self-hosted runner accepts one
+# Actions job at a time; a shared Actions concurrency group would instead
+# replace pending jobs and silently drop coverage.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  prepared-cold-m1:
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, macOS, ARM64, m1]
+    timeout-minutes: 90
+    env:
+      MVM_RUNTIME_OVERLAY_SOURCE_ROOT: ${{ github.workspace }}
+      MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build
+      MVM_RESIDENCY: cold
+      MVM_BUILDER_BACKEND: hvf
+      MVM_BOOT_IMAGE: fetch
+      MVM_KERNEL_SOURCE: download
+      CARGO_BUILD_JOBS: "4"
+      CI: "1"
+      TERM: dumb
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/install-zigbuild
+
+      - name: Record the source and host
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          RESULTS_DIR="${RUNNER_TEMP}/mvm-physical-cold-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          MVM_HOME="${RUNNER_TEMP}/mvm-physical-cold-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -m 700 "$RESULTS_DIR" "$MVM_HOME"
+          printf 'RESULTS_DIR=%s\nMVM_HOME=%s\n' "$RESULTS_DIR" "$MVM_HOME" >> "$GITHUB_ENV"
+          {
+            printf 'source_commit='
+            git rev-parse HEAD
+            uname -a
+            sw_vers
+          } > "$RESULTS_DIR/provenance.txt"
+
+      - name: Build the release CLI and its actual HVF supervisor
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --bin mvmctl
+          cargo build --locked --release -p mvm-hostd --bins
+          shasum -a 256 target/release/mvmctl target/release/mvm-hvf-supervisor \
+            >> "$RESULTS_DIR/provenance.txt"
+
+      - name: Prepare the guest and selected Alpine image
+        run: |
+          set -euo pipefail
+          target/release/mvmctl image pull --builder hvf docker.io/library/alpine:latest
+          target/release/mvmctl bootstrap
+
+      - name: Preflight the exact launch outside the benchmark
+        run: |
+          set -euo pipefail
+          MVM_LAUNCH_SAMPLE_JSON="$RESULTS_DIR/preflight.json" \
+            target/release/mvmctl run --no-detect \
+              --image docker.io/library/alpine:latest --hypervisor hvf \
+              --no-build --fresh -- /bin/true
+
+      - name: Measure physical-cold launches
+        run: |
+          set -euo pipefail
+          # This catches a leftover build or VM process, not arbitrary host load.
+          # Do not call these results an exclusive-host reference measurement.
+          python3 - <<'PY'
+          import subprocess
+          import sys
+
+          processes = subprocess.check_output(["ps", "-axo", "pid=,comm="], text=True)
+          busy = []
+          for line in processes.splitlines():
+              pid, command = line.strip().split(maxsplit=1)
+              if command.rsplit("/", 1)[-1] in {
+                  "cargo", "rustc", "mvmctl", "mvm-hvf-supervisor"
+              }:
+                  busy.append((pid, command))
+          if busy:
+              print(f"competing build or VM process: {busy}", file=sys.stderr)
+              sys.exit(1)
+          PY
+          uptime >> "$RESULTS_DIR/provenance.txt"
+          status=0
+          target/release/mvmctl bench --lane prepared-cold --runs 20 --warmup 2 \
+            --json --out "$RESULTS_DIR/bench.json" -- \
+            run --no-detect --image docker.io/library/alpine:latest \
+              --hypervisor hvf --no-build --fresh -- /bin/true \
+            > "$RESULTS_DIR/bench.log" 2>&1 || status=$?
+          cat "$RESULTS_DIR/bench.log"
+          uptime >> "$RESULTS_DIR/provenance.txt"
+          exit "$status"
+
+      # A report-level failure leaves JSON; an early warm-up refusal may leave
+      # only the CLI transcript on the current main branch. Never call either
+      # one a passing sample.
+      - name: Upload available evidence on success or failure
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: physical-cold-m1-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/mvm-physical-cold-${{ github.run_id }}-${{ github.run_attempt }}/provenance.txt
+            ${{ runner.temp }}/mvm-physical-cold-${{ github.run_id }}-${{ github.run_attempt }}/preflight.json
+            ${{ runner.temp }}/mvm-physical-cold-${{ github.run_id }}-${{ github.run_attempt }}/bench.json
+            ${{ runner.temp }}/mvm-physical-cold-${{ github.run_id }}-${{ github.run_attempt }}/bench.log
+          if-no-files-found: warn
+          retention-days: 30

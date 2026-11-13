@@ -146,13 +146,30 @@ degradation, and recorded every prepared-cold work flag as false.
 ## Reproducing a measurement
 
 `mvmctl bench` is the shipped, visible verb for this. The lane is a **flag**, not
-a subcommand. Run it from a release build on a host with a prepared artifact
-cache:
+a subcommand. `mvmctl prepare` only **reports** default runtime-pack readiness;
+it does not populate the image-specific rootfs cache. On a release build,
+bootstrap the runtime and run the exact launch once outside the benchmark to
+populate that cache before measuring the built-in baseline:
 
 ```sh
-mvmctl prepare
-mvmctl bench --lane prepared-cold --runs 20 --warmup 2
+mvmctl bootstrap
+MVM_RESIDENCY=cold mvmctl run --no-detect -- /bin/true
+MVM_RESIDENCY=cold mvmctl bench --lane prepared-cold --runs 20 --warmup 2
 ```
+
+The preflight is not one of the two benchmark warm-ups. Those warm-ups must
+themselves satisfy the lane rules, including no artifact hashing; they cannot
+be used to hide first-use work. For a custom image, pull or build it ahead of
+time and preflight the **same** launch arguments that follow `bench --`.
+
+Maintainers can dispatch `prepared-cold-m1-diagnostic.yml` from `main` to queue
+the Alpine lane on the M1 Actions runner. It builds a release binary from that
+checkout and preflights outside the benchmark. It uploads the report JSON when
+one exists and the CLI transcript even when an early warm-up refusal leaves no
+report. This is a source-build diagnostic, **not** proof about a signed
+published release or exclusive use of the physical host by non-Actions processes.
+The run-specific `$MVM_HOME` remains on the persistent runner; remove it only
+after independently confirming that no VM still reads its retained generations.
 
 `--lane` defaults to `prepared-cold` and accepts `prepared-cold`,
 `prepared-cold-mount-hit`, `prepared-cold-artifact`, `mount-miss`,
