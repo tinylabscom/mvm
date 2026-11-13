@@ -208,6 +208,16 @@ fn stream_command_with_environment<F: FnMut(ExecEvent)>(
     crate::fd_hygiene::configure_close_fds(&mut builder, 3, None);
     #[cfg(unix)]
     builder.process_group(0);
+    // Every site that runs workload code applies the same strip: no_new_privs
+    // plus every capability set emptied. The closure is the shared
+    // `drop_workload_capability_bounding_set` — prctl/capset only,
+    // async-signal-safe.
+    // SAFETY: pre_exec runs between fork and exec; the called function
+    // allocates nothing and takes no locks.
+    #[cfg(unix)]
+    unsafe {
+        builder.pre_exec(crate::guest_mount::drop_workload_capability_bounding_set);
+    }
     crate::workload_seccomp::confine(&mut builder);
     let spawned = builder.spawn();
     let mut child = match spawned {
@@ -345,6 +355,38 @@ mod tests {
             })
             .flatten()
             .collect()
+    }
+
+    /// Live witness: an Exec-spawned workload holds no capabilities. Same
+    /// gate as the guest_mount privilege witnesses (root plus
+    /// `MVM_GUEST_PRIVILEGED_TESTS=1`): without the strip a root-spawned
+    /// child would carry the full capability set; with it every set is empty
+    /// and no_new_privs is set before exec.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_exec_spawned_workload_holds_no_capabilities() {
+        if !crate::guest_mount::privilege_tests::privileged() {
+            return;
+        }
+        let mut events = Vec::new();
+        let event = stream_exec(
+            "grep -E '^(NoNewPrivs|CapPrm|CapEff|CapInh|CapAmb):' /proc/self/status",
+            None,
+            None,
+            |event| events.push(event),
+        );
+        assert!(
+            matches!(event, ExecEvent::Exit { code: 0 }),
+            "probe must exit 0: {event:?}"
+        );
+        let status = String::from_utf8(stdout(&events)).expect("status is UTF-8");
+        for set in ["CapPrm", "CapEff", "CapInh", "CapAmb"] {
+            assert!(
+                status.contains(&format!("{set}:\t0000000000000000")),
+                "{set} must be empty after the workload strip; got:\n{status}"
+            );
+        }
+        assert!(status.contains("NoNewPrivs:\t1"), "got:\n{status}");
     }
 
     #[test]

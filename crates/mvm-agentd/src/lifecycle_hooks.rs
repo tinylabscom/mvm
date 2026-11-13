@@ -82,12 +82,29 @@ trait HookRunner {
 
 struct RealHookRunner;
 
+/// Hooks run image-defined scripts — the image is the same trust domain as
+/// the workload, so a hook gets the same strip every workload-code spawn
+/// applies: no_new_privs plus every capability set emptied before exec.
+#[cfg(unix)]
+fn harden_hook_command(command: &mut Command) {
+    use std::os::unix::process::CommandExt as _;
+    // SAFETY: pre_exec runs between fork and exec; the called function
+    // allocates nothing and takes no locks.
+    unsafe {
+        command.pre_exec(crate::guest_mount::drop_workload_capability_bounding_set);
+    }
+}
+
+#[cfg(not(unix))]
+fn harden_hook_command(_command: &mut Command) {}
+
 impl HookRunner for RealHookRunner {
     type Child = RealHookChild;
 
     fn status(&self, script_path: &Path) -> io::Result<HookExit> {
         let mut command = Command::new(script_path);
         crate::fd_hygiene::configure_close_fds(&mut command, 3, None);
+        harden_hook_command(&mut command);
         crate::workload_seccomp::confine(&mut command);
         command.status().map(HookExit::from)
     }
@@ -95,6 +112,7 @@ impl HookRunner for RealHookRunner {
     fn spawn(&self, script_path: &Path) -> io::Result<Self::Child> {
         let mut command = Command::new(script_path);
         crate::fd_hygiene::configure_close_fds(&mut command, 3, None);
+        harden_hook_command(&mut command);
         crate::workload_seccomp::confine(&mut command);
         command.spawn().map(|child| RealHookChild {
             _owned: crate::child_wait::OwnedChild::new(child.id()),
@@ -644,5 +662,43 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ShutdownError::ScriptMissing { .. }));
+    }
+
+    /// Live witness: a lifecycle-hook child holds no capabilities. Hooks run
+    /// image-defined scripts — the image is the workload's trust domain — so
+    /// the hook spawn applies the same capability strip as every other
+    /// workload-code spawn. Same gate as the guest_mount privilege witnesses
+    /// (root plus `MVM_GUEST_PRIVILEGED_TESTS=1`).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_hook_spawned_process_holds_no_capabilities() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        if !crate::guest_mount::privilege_tests::privileged() {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("hook scratch directory");
+        let status_path = dir.path().join("status");
+        let script = dir.path().join("hook.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ngrep -E '^(NoNewPrivs|CapPrm|CapEff|CapInh|CapAmb):' /proc/self/status > {}\n",
+                status_path.display()
+            ),
+        )
+        .expect("write hook script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("mark hook runnable");
+        let exit = RealHookRunner.status(&script).expect("run the hook");
+        assert!(exit.success, "hook must exit 0: {exit:?}");
+        let status = std::fs::read_to_string(&status_path).expect("read captured status");
+        for set in ["CapPrm", "CapEff", "CapInh", "CapAmb"] {
+            assert!(
+                status.contains(&format!("{set}:\t0000000000000000")),
+                "{set} must be empty after the workload strip; got:\n{status}"
+            );
+        }
+        assert!(status.contains("NoNewPrivs:\t1"), "got:\n{status}");
     }
 }

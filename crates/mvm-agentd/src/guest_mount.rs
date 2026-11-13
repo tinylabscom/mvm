@@ -1893,7 +1893,7 @@ tmpfs /tmp tmpfs rw,nosuid,nodev,relatime 0 0
 }
 
 #[cfg(test)]
-mod privilege_tests {
+pub(crate) mod privilege_tests {
     use super::*;
 
     /// Whether a privileged test asked for with `MVM_GUEST_PRIVILEGED_TESTS=1`
@@ -1914,7 +1914,7 @@ mod privilege_tests {
 
     /// Gate for the live privilege witnesses; panics on a request without root.
     #[cfg(target_os = "linux")]
-    pub(super) fn privileged() -> bool {
+    pub(crate) fn privileged() -> bool {
         let requested = std::env::var("MVM_GUEST_PRIVILEGED_TESTS").ok();
         // SAFETY: geteuid has no preconditions.
         let euid = unsafe { libc::geteuid() };
