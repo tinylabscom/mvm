@@ -34,8 +34,8 @@ use std::process::Command;
 
 use crate::rust_source::{CommentSyntax, blank_comments};
 
-// The Yocto pack import adds importer and bundle validation coverage. Leave
-// room for concurrent main changes while keeping every Rust file measured.
+// CI witness, overclaim, and Yocto importer tests remain measured. Leave room
+// for concurrent main changes rather than deleting coverage to fit the ratchet.
 /// Ceiling on total SLOC, all categories.
 const MAX_TOTAL_SLOC: usize = 970_000;
 /// Ceiling on total physical lines, all categories.

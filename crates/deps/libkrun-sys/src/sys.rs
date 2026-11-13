@@ -291,14 +291,6 @@ impl Context {
         check(unsafe { bindings::krun_set_console_output(self.ctx_id, path.as_ptr()) })
     }
 
-    /// Returns the shutdown eventfd. The caller is responsible for
-    /// closing it (libkrun documents that the fd is owned by the
-    /// caller once returned).
-    pub fn shutdown_eventfd(&self) -> Result<i32, Error> {
-        let rc = unsafe { bindings::krun_get_shutdown_eventfd(self.ctx_id) };
-        if rc < 0 { Err(Error::Krun(rc)) } else { Ok(rc) }
-    }
-
     /// Block the calling thread, starting the guest. libkrun's
     /// `krun_start_enter` calls `exit()` on success with the guest's
     /// status; on failure it returns a negative errno. This wrapper is

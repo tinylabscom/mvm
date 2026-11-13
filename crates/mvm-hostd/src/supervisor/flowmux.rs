@@ -564,6 +564,8 @@ impl FlowMuxSession {
                 Opcode::OpenUdp => {
                     if let Err(e) = self.handle_open_udp(stream_id) {
                         warn!(error = %e, stream_id, "FlowMux UDP open failed");
+                        // The guest is told `Refused`, so nothing else retires the entry.
+                        self.remove_udp_association(stream_id);
                         self.send_refused(stream_id, "host error")?;
                     }
                 }
@@ -2688,6 +2690,50 @@ mod tests {
         let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::CloseUdp);
 
+        drop(guest);
+        host.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn unsolicited_datagrams_do_not_keep_an_idle_association_open() {
+        let limits = RegistryLimits {
+            udp_idle_timeout: Duration::from_millis(300),
+            ..Default::default()
+        };
+        let ip = local_test_ip();
+        let server = std::net::UdpSocket::bind(SocketAddr::new(ip, 0)).unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&done);
+        // Learns the association's port from the guest's one datagram, then
+        // hammers it from a socket the guest never sent to.
+        let noise = thread::spawn(move || {
+            let (_, relay) = server.recv_from(&mut [0u8; 64]).unwrap();
+            let stranger = std::net::UdpSocket::bind(SocketAddr::new(ip, 0)).unwrap();
+            while !stop.load(Ordering::Relaxed) {
+                let _ = stranger.send_to(b"noise", relay);
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let (mut guest, mut session, host) = run_session_with(
+            gate_allowing_addr(server_addr.ip(), 0, Some(server_addr.port())),
+            limits,
+        );
+        guest
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        write_frame(&mut guest, &mut session, Opcode::OpenUdp, 1, b"");
+        assert_eq!(
+            read_flowmux_frame(&mut guest, &mut session).0,
+            Opcode::UdpOpened
+        );
+        let mut payload = encode_udp_addr(server_addr.ip(), server_addr.port());
+        payload.extend_from_slice(b"hi");
+        write_frame(&mut guest, &mut session, Opcode::UdpSend, 1, &payload);
+        let closed = read_flowmux_frame(&mut guest, &mut session).0;
+        done.store(true, Ordering::Relaxed);
+        noise.join().unwrap();
+        assert_eq!(closed, Opcode::CloseUdp);
         drop(guest);
         host.join().unwrap().unwrap();
     }

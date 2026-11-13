@@ -845,29 +845,16 @@ fn print_outcome(outcome: &DispatchOutcome) {
     }
 }
 
-/// `kill(pid, 0)` — checks that the process exists and we can
-/// signal it without actually signalling. Returns `false` on
-/// `ESRCH` / `EPERM`.
+/// Whether the recorded supervisor pid names a live process. A pid that cannot
+/// name exactly one process is never probed.
 fn supervisor_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        let Some(pid) = mvm_build::persistent_builder::signalable_pid(pid) else {
-            return false;
-        };
-        // SAFETY: kill(pid, 0) only probes for existence and delivers no signal.
-        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-        rc == 0
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
-    }
+    mvm_vmm::host::process_liveness::signalable_pid(pid)
+        .is_some_and(mvm_vmm::host::process_liveness::pid_is_alive)
 }
 
 fn send_sigterm(pid: u32) {
     #[cfg(unix)]
-    if let Some(pid) = mvm_build::persistent_builder::signalable_pid(pid) {
+    if let Some(pid) = mvm_vmm::host::process_liveness::signalable_pid(pid) {
         // SAFETY: kill takes integer arguments and touches no memory.
         unsafe {
             let _ = libc::kill(pid as libc::pid_t, libc::SIGTERM);

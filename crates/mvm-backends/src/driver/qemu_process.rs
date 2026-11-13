@@ -642,7 +642,7 @@ pub fn splice_bidirectional(a: std::os::unix::net::UnixStream, b: std::net::TcpS
 // ─── pid helpers (local copies — libkrun's are private) ─────────────
 
 pub(crate) fn read_pid(path: &Path) -> Option<libc::pid_t> {
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+    mvm_vmm::host::process_liveness::read_pid_file(path)
 }
 
 pub(crate) fn pid_alive(pid: libc::pid_t) -> bool {
