@@ -545,11 +545,36 @@ If an operation is unavailable, omit the live claim or show a clearly separate
 labelled preview. A lifecycle-only rehearsal is not acceptance of the full
 denial-and-evidence story. Beats 3 and 4 need an egress-capable request, not the
 mission runbook's BusyBox `wget`: a manual HVF curl-image run produced
-`host.flow.denied` and an `mvmctl explain --review` denial, but direct Studio
-readback through `mvm_client::explain::explain_local_run` has only a hermetic
-test. Label that client beat and the three concurrent workloads as previews
-until witnessed together on the demo Mac. No source or Studio pin change is
-authorized by this proposal.
+`host.flow.denied` and an `mvmctl explain --review` denial.
+
+A manual run on the demo Mac (in-house HVF VMM, the v0.28.0-rc.2 release
+binary, an isolated `MVM_HOME`, the `curlimages/curl:8.21.0` image) observed
+the following. Two inspection-style workloads with no egress grant ran to
+completion while a third workload, granted only `api.github.com:443`, requested
+`example.com:443`. The host recorded one `host.flow.denied` (`policy_denied`,
+"not in the allow-list") for the third workload and none for the other two.
+`mvmctl explain <name> --json`, which calls
+`mvm_client::explain::explain_local_run`, returned that refusal with its remedy,
+the chain verified, and `mvmctl trust audit verify` reported the combined chain
+intact. That is a CLI readback of the client function. It was a manual run, not
+a CI lane, and Studio's own readback was not exercised, so label Studio's
+readback as a preview.
+
+The run also fixes what the scripted request must be. A workload granted no
+egress at all never reaches the host endpoint: its lookup fails in the guest
+(`curl` exit 6), a literal address fails to connect (`curl` exit 7), and the
+host records no denial. Beat 3 therefore needs a workload with at least one
+approved destination, so that the refused destination is a recorded policy
+decision. A separate manual pass exercised beat 5 on the same binary: a
+detached workload granted only `api.github.com:443` was stopped with
+`machine stop`, its session sealed and no supervisor process remained, and a
+fresh `run` under a new name started a new plan and session that carried none
+of the stopped workload's denials. This was an explicit stop and relaunch, not
+hot replacement, and no state was handed over. The stopped workload's denial in
+that pass was recorded as a refused DNS lookup of `example.com` rather than a
+refused `example.com:443` connection, so a scripted request may surface either
+form. The run did not exercise the real maintenance and inspection tasks or
+Studio. No source or Studio pin change is authorized by this proposal.
 
 Returned stdout/stderr remain separate from a protected recorded copy.
 Owner acceptance, final close and independently verified readback are distinct.

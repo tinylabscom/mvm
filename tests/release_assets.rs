@@ -846,8 +846,8 @@ fn the_cli_release_ships_its_guest_runtime_signed_and_listed() {
     );
     assert!(
         release.contains("guest-runtime job one for its archive")
-            && release.contains("cat ./*.sha256 > checksums-sha256.txt"),
-        "the runtime's sidecar must join the combined checksum manifest"
+            && release.contains("cat ./*.sha256 | sed 's/~/./g' > checksums-sha256.txt"),
+        "the runtime's sidecar must join the manifest with published prerelease asset names"
     );
 
     let sign_loop = workflow

@@ -927,7 +927,10 @@ jobs:
           # guest-runtime job one for its archive, in the same format as the
           # build job's.
           # ./ prefix: a file named like an option must stay a filename.
-          cat ./*.sha256 > checksums-sha256.txt
+          # A prerelease package is named mvmctl_0.28.0~rc.2-1_amd64.deb, and
+          # GitHub stores an uploaded asset's "~" as ".". List the name a
+          # download has, or the manifest names files that cannot be fetched.
+          cat ./*.sha256 | sed 's/~/./g' > checksums-sha256.txt
           echo "Combined checksums:"
           cat checksums-sha256.txt
 
