@@ -96,6 +96,23 @@ Count: 78 boxes in `/tmp/boxes.txt` at the time of writing; box 158 appears in b
 
 Open issues referenced in the umbrella body were 40 at the first measurement (`gh issue view` on every `#NNNN`); re-run before relying on that.
 
+### 2.1 Duplicated helpers: what is left and why
+
+Measured at `b9731f0039`. `sha256_hex` of a byte slice now has one authority, `mvm_contract::hash::sha256_hex`; the copies in `mvm-runtime` (`artifacts.rs`) and the `mvm-build` fixture example call it. Command: `rg -n 'fn (sha256_hex|copy_tree)\b' crates`.
+
+- `sha256_hex` in `mvm-cli/build.rs` and `mvm-builder-guest/src/builder_boot/payload.rs`: neither crate has an `mvm-contract` edge by design (build script and builder-VM guest closure); kept.
+- `sha256_hex` in `mvm-compiler/src/pack/python/mod.rs`: not a hasher, it validates a `sha256:` string; a different function under the same name.
+- `sha256_hex_of` in `mvm-build/stage0_kernel.rs` and `sha256_hex` in `mvm-cli/.../image/cache.rs`: file hashing and digest-string parsing; different contracts.
+- `copy_tree` in `mvm-cli/.../image/materialize.rs`: recreates symlinks, silently skips devices and FIFOs (unpacked OCI tree); iterative.
+- `copy_tree` in `mvm-runtime/.../builder_runner/driver_builder.rs`: recreates symlinks, removes what an earlier build left, and refuses devices and FIFOs with an error (guest-written output).
+- `copy_tree` in `mvm-client/.../pack_scenario/fs.rs`: refuses symlinks, enforces depth and entry budgets and records file hashes; a bounded reader, not a plain copier.
+- `copy_tree` in `mvm-build/examples/mvm-app-deps-fixture-tool.rs`: skips symlinks and non-files; example only.
+- `copy_tree` in `mvm-builder-guest/src/bin/stage0-init.rs`: seed environment with no `mvm-fs` or `mvm-contract` edge; overwrites symlinks and copies every non-directory.
+- `copy_tree` in `mvm-build/src/shell_scripts.rs`: emits a `cp -a` shell string for the builder VM, not a Rust copy.
+- `read_manifest`: the definitions return different types and no two are identical, so none is merged.
+
+The host-side Rust copies differ in symlink, special-file and pre-existing-destination handling, so merging them would change behaviour; each stays as recorded.
+
 ## 3. Capability and flag inventory
 
 §3.1-§3.3 were first derived from the clap definitions (no built binary then). §3.3a below is generated from a built `mvmctl --help` walk and supersedes them for flags. Source method: `rg -c '^\s*#\[arg\('` -> 901 `#[arg]` attributes; `derive(...Subcommand)` -> 58 matches; `derive(...Args)` -> 213. A script then parsed every `Subcommand` enum for its variants.
