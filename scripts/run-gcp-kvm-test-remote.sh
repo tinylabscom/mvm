@@ -108,6 +108,17 @@ if ! command -v firecracker >/dev/null 2>&1 \
     "/tmp/$firecracker_dir/jailer-v${firecracker_version}-x86_64" \
     /usr/local/bin/jailer
 fi
+# Isolated live homes have no Firecracker cache yet. The capability probe does
+# not search PATH, so pass the installed root-owned binary explicitly, but only
+# after verifying its bytes against this checkout's release pin.
+firecracker_binary_sha256="$(awk '/^\[x86_64\]/{p=1; next}
+  /^\[/{p=0} p && $1 == "binary_sha256" {gsub(/"/, "", $3); print $3}' \
+  "$repo/crates/mvm-core/firecracker.lock")"
+if [[ ! "$firecracker_binary_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "error: missing x86_64 Firecracker binary pin" >&2
+  exit 1
+fi
+printf '%s  %s\n' "$firecracker_binary_sha256" /usr/local/bin/firecracker | sha256sum -c -
 
 cd "$repo"
 # Keep toolchains and build state in the tree so the unprivileged test user can
@@ -199,6 +210,7 @@ runuser -u mvm-test -- env \
   CARGO_HOME="$CARGO_HOME" \
   CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
   MVM_HOME="$MVM_HOME" \
+  MVM_FIRECRACKER_BIN=/usr/local/bin/firecracker \
   MVM_GCP_KVM_RESULTS_DIR="$results" \
   "${command_argv[@]}" 2>&1 | tee "$results/command.log"
 run_status=${PIPESTATUS[0]}
