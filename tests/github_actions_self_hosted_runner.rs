@@ -213,17 +213,16 @@ fn no_untrusted_event_can_place_a_job_on_the_self_hosted_runner() {
          physical machine:\n  {}",
         violations.join("\n  ")
     );
-}
-
-#[test]
-fn physical_cold_diagnostic_queues_on_the_trusted_m1_and_keeps_failed_evidence() {
-    let text = fs::read_to_string(".github/workflows/prepared-cold-m1-diagnostic.yml")
+    let diagnostic = all
+        .iter()
+        .find(|w| w.name == "prepared-cold-m1-diagnostic.yml")
         .expect("physical-cold workflow exists");
+    assert!(reaching.contains(&diagnostic.name));
     assert_eq!(
-        trigger_events(&text).unwrap(),
+        trigger_events(&diagnostic.text).unwrap(),
         BTreeSet::from(["workflow_dispatch".to_string()])
     );
-    let (_, job) = jobs(&text)
+    let (_, job) = jobs(&diagnostic.text)
         .into_iter()
         .find(|(name, _)| name == "prepared-cold-m1")
         .expect("physical-cold M1 job exists");
