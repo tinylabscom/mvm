@@ -34,6 +34,7 @@ use anyhow::{Result, anyhow, bail};
 use mvm_contract::builder::BuilderError;
 
 use crate::host::aux_bin::{self, AuxBin, HostProcess};
+use crate::host::process_liveness::pid_is_alive;
 
 /// Filename of the per-VM audit-signer UDS under the VM state dir (the broker
 /// connects here; the supervisor owns it).
@@ -294,7 +295,7 @@ pub(crate) fn wait_for_uds(what: &str, uds_path: &Path, pid: u32, timeout: Durat
 pub fn reap_audit_signer(state_dir: &Path) {
     let pid_file = state_dir.join(AUDIT_SIGNER_PID_FILE);
     if let Some(pid) = read_pid(&pid_file)
-        && pid_alive(pid)
+        && pid_is_alive(pid)
     {
         kill(pid, libc::SIGTERM);
     }
@@ -576,7 +577,7 @@ pub(crate) fn spawn_detached_with_config(
 pub fn reap_broker(state_dir: &Path) {
     let pid_file = state_dir.join(BROKER_PID_FILE);
     if let Some(pid) = read_pid(&pid_file)
-        && pid_alive(pid)
+        && pid_is_alive(pid)
     {
         kill(pid, libc::SIGTERM);
     }
@@ -585,10 +586,6 @@ pub fn reap_broker(state_dir: &Path) {
 
 pub(crate) fn read_pid(path: &Path) -> Option<libc::pid_t> {
     super::process_liveness::read_pid_file(path)
-}
-
-pub(crate) fn pid_alive(pid: libc::pid_t) -> bool {
-    super::process_liveness::pid_is_alive(pid)
 }
 
 pub(crate) fn kill(pid: libc::pid_t, sig: libc::c_int) {

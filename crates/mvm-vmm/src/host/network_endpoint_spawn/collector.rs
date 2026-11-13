@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow};
 
 use super::stderr_log::open_collector_stderr_log;
 use super::{
-    EndpointLifetime, kill, pid_alive, read_pid, resolve_network_endpoint_path, select_lifetime,
+    EndpointLifetime, kill, pid_is_alive, read_pid, resolve_network_endpoint_path, select_lifetime,
 };
 
 /// The collector's inputs for the VM at `state_dir`, without its records key.
@@ -137,7 +137,7 @@ pub fn spawn_telemetry_collector(
 pub fn reap_telemetry_collector(state_dir: &Path) {
     let pid_file = state_dir.join(TELEMETRY_COLLECTOR_PID_FILE);
     if let Some(pid) = read_pid(&pid_file)
-        && pid_alive(pid)
+        && pid_is_alive(pid)
     {
         kill(pid, libc::SIGTERM);
     }

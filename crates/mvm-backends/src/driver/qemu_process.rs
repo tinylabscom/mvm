@@ -16,6 +16,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use mvm_core::config::{vm_state_dir, vms_dir};
 use mvm_core::vm_backend::VmStartConfig;
+use mvm_vmm::host::process_liveness::{pid_is_alive, read_pid_file};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -182,7 +183,7 @@ pub fn used_cids() -> std::collections::HashSet<u32> {
     };
     for entry in entries.flatten() {
         let dir = entry.path();
-        let alive = read_pid(&dir.join(QEMU_PID_FILE)).is_some_and(pid_alive);
+        let alive = read_pid_file(&dir.join(QEMU_PID_FILE)).is_some_and(pid_is_alive);
         if !alive {
             continue;
         }
@@ -419,7 +420,7 @@ pub fn run_vsock_bridge(spec: &QemuBridgeSpec) -> Result<()> {
         let vm_gone = match std::fs::read_to_string(&spec.watch_pid_file) {
             Err(_) => true, // pidfile removed → VM torn down
             Ok(s) => match s.trim().parse::<libc::pid_t>() {
-                Ok(pid) => !pid_alive(pid),
+                Ok(pid) => !pid_is_alive(pid),
                 Err(_) => false, // transient empty/partial read → keep serving
             },
         };
@@ -640,14 +641,6 @@ pub fn splice_bidirectional(a: std::os::unix::net::UnixStream, b: std::net::TcpS
 }
 
 // ─── pid helpers (local copies — libkrun's are private) ─────────────
-
-pub(crate) fn read_pid(path: &Path) -> Option<libc::pid_t> {
-    mvm_vmm::host::process_liveness::read_pid_file(path)
-}
-
-pub(crate) fn pid_alive(pid: libc::pid_t) -> bool {
-    mvm_vmm::host::process_liveness::pid_is_alive(pid)
-}
 
 pub(crate) fn send_signal(pid: libc::pid_t, sig: libc::c_int) {
     // SAFETY: kill takes integer arguments and touches no memory.
