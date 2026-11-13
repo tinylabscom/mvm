@@ -87,6 +87,7 @@ fn main() -> Result<()> {
                 archive_sha256: Sha256Hex::from_bytes(&archive),
                 archive_size: u64::try_from(archive.len())?,
                 key_id: key_id.clone(),
+                transport: None,
             },
         },
     };

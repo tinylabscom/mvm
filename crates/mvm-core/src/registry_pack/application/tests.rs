@@ -440,6 +440,76 @@ fn arbitrary_bytes_never_panic_and_accepted_locators_are_plain_ascii() {
 }
 
 #[test]
+fn transport_entry_is_optional_and_absent_descriptors_stay_byte_identical() {
+    let manifest = parse_application_manifest(FIXTURE).unwrap();
+    assert!(manifest.application.bundle.transport.is_none());
+    let bytes = serde_json::to_vec(&manifest).unwrap();
+    assert!(!String::from_utf8(bytes).unwrap().contains("\"transport\""));
+    // Value equality is field-order independent; the parsed manifest must
+    // re-serialize to exactly the fixture's content with no added keys.
+    assert_eq!(serde_json::to_value(&manifest).unwrap(), document());
+}
+
+#[test]
+fn transport_round_trips_and_pins_the_compressed_asset() {
+    let mut value = document();
+    value["application"]["bundle"]["transport"] = json!({
+        "compression": "gzip",
+        "compressed_sha256": "c".repeat(64),
+        "compressed_size": 45,
+    });
+    let manifest = parse(&value).unwrap();
+    let transport = manifest
+        .application
+        .bundle
+        .transport
+        .as_ref()
+        .expect("transport parses");
+    assert_eq!(transport.compressed_size, 45);
+    assert_eq!(serde_json::to_value(&manifest).unwrap(), value);
+}
+
+#[test]
+fn transport_refuses_unknown_compression_noncanonical_digest_and_zero_size() {
+    for (field, bad) in [
+        ("compression", json!("deflate")),
+        ("compression", json!("GZIP")),
+        ("compression", json!(1)),
+        ("compressed_sha256", json!("C".repeat(64))),
+        ("compressed_sha256", json!("c".repeat(63))),
+        ("compressed_sha256", json!("cc")),
+        ("compressed_size", json!(0)),
+        ("compressed_size", json!(-1)),
+        ("compressed_size", json!(1.5)),
+        ("compressed_size", json!("45")),
+    ] {
+        let mut value = document();
+        value["application"]["bundle"]["transport"] = json!({
+            "compression": "gzip",
+            "compressed_sha256": "c".repeat(64),
+            "compressed_size": 45,
+        });
+        value["application"]["bundle"]["transport"][field] = bad;
+        assert!(parse(&value).is_err(), "{field}");
+    }
+}
+
+#[test]
+fn transport_refuses_unknown_fields_and_positional_arrays() {
+    let mut value = document();
+    value["application"]["bundle"]["transport"] = json!({
+        "compression": "gzip",
+        "compressed_sha256": "c".repeat(64),
+        "compressed_size": 45,
+        "fallback": true,
+    });
+    assert!(parse(&value).is_err());
+    let mut array = value.clone();
+    array["application"]["bundle"]["transport"] = json!(["gzip", "c".repeat(64), 45]);
+    assert!(parse(&array).is_err());
+}
+
+#[test]
 fn overlong_locators_refuse() {
     let source = format!(
         "https://bundles.example/{}",
