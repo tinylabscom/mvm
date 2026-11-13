@@ -58,6 +58,21 @@ run_case upload-failure 17 0 17 0 0 1
 run_case remote-failure 23 0 0 23 0 1
 run_case results-failure 1 0 0 0 29 1
 
+set +e
+PATH="$fake_bin:$PATH" MVM_CVE_FAKE_LOG="$scratch/auth.log" \
+  MVM_CVE_FAKE_AUTH_STATUS=12 \
+  bash "$repo_root/scripts/run-gcp-kvm-test.sh" --project test-project \
+    -- true >"$scratch/auth.out" 2>&1
+auth_status=$?
+set -e
+[[ "$auth_status" -eq 1 ]]
+grep -Fq "GCP credentials cannot refresh" "$scratch/auth.out"
+if grep -q '^compute instances create ' "$scratch/auth.log" ||
+   grep -q '^compute instances delete ' "$scratch/auth.log"; then
+  echo "auth failure must not create or delete a GCP instance" >&2
+  exit 1
+fi
+
 argv_log="$scratch/success/gcloud.log.argv"
 grep -Fxq 'printf' "$argv_log"
 grep -Fxq '%s\n' "$argv_log"

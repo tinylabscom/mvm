@@ -174,6 +174,14 @@ if ((dry_run)); then
   exit 0
 fi
 
+# `gcloud config get-value account` reports a selected account even when its
+# refresh token is expired. Refuse before an uncertain create could leave a
+# billable instance we cannot authenticate to delete. Never log the token.
+if ! CLOUDSDK_CORE_DISABLE_PROMPTS=1 gcloud auth print-access-token >/dev/null; then
+  echo "error: GCP credentials cannot refresh; run 'gcloud auth login' before creating a disposable instance" >&2
+  exit 1
+fi
+
 instance_created=0
 local_stage="$(mktemp -d "${TMPDIR:-/tmp}/mvm-gcp-kvm.XXXXXX")"
 
