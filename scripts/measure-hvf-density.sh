@@ -387,38 +387,7 @@ capture_processes() {
   local raw="${dir}/processes-${phase}.txt"
   local tsv="${dir}/rss-${phase}.tsv"
   ps axww -o pid=,rss=,comm=,args= >"${raw}"
-  awk '
-    BEGIN {
-      print "component\tcount\trss_kib\trss_mib"
-    }
-    {
-      pid = $1
-      rss = $2
-      comm = $3
-      args = $0
-      if (comm ~ /awk$/) next
-      comp = ""
-      if (args ~ /mvm-hvf-supervisor/) comp = "mvm-hvf-supervisor"
-      else if (args ~ /firecracker/) comp = "firecracker"
-      else if (args ~ /mvm-network-endpoint/) comp = "mvm-network-endpoint"
-      else if (args ~ /mvm-mailbox/) comp = "mvm-mailbox"
-      else if (args ~ /mvm-host-agent/) comp = "mvm-host-agent"
-      else if (args ~ /mvm-signer-helper/) comp = "mvm-signer-helper"
-      else if (args ~ /mvm-host-signer/) comp = "mvm-host-signer"
-      else if (args ~ /mvm-audit-signer/) comp = "mvm-audit-signer"
-      else if (args ~ /mvm-broker/) comp = "mvm-broker"
-      else if (args ~ /mvmctl/) comp = "mvmctl"
-      if (comp != "") {
-        count[comp] += 1
-        rss_kib[comp] += rss
-      }
-    }
-    END {
-      for (comp in count) {
-        printf "%s\t%d\t%d\t%.1f\n", comp, count[comp], rss_kib[comp], rss_kib[comp] / 1024
-      }
-    }
-  ' "${raw}" >>"${tsv}"
+  awk -f "${ROOT}/scripts/density_rss.awk" "${raw}" >>"${tsv}"
 }
 
 capture_mailbox_threads() {
