@@ -98,7 +98,8 @@ pub struct PolicyError {
 }
 
 impl PolicyError {
-    pub(crate) fn new(layer: impl Into<String>, message: impl Into<String>) -> Self {
+    /// Name the layer and reason a policy operation was refused.
+    pub fn new(layer: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             file: None,
             layer: layer.into(),
@@ -107,14 +108,16 @@ impl PolicyError {
         }
     }
 
+    /// Attach the source file when the error came from one.
     #[must_use]
-    pub(crate) fn in_file(mut self, file: Option<&Path>) -> Self {
+    pub fn in_file(mut self, file: Option<&Path>) -> Self {
         self.file = file.map(Path::to_path_buf);
         self
     }
 
+    /// Attach the policy key responsible for the refusal.
     #[must_use]
-    pub(crate) fn at_key(mut self, key: impl Into<String>) -> Self {
+    pub fn at_key(mut self, key: impl Into<String>) -> Self {
         self.key = Some(key.into());
         self
     }
