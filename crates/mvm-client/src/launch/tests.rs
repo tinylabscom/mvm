@@ -2060,7 +2060,7 @@ async fn persistent_request_mailbox_reaches_canonical_backend_admission() {
     let home = Isolated::new();
     let client = mock_client();
     let name = "p-mailbox-one-start";
-    let grant = crate::admission::mailbox_grant::resolve(Some(&"ab".repeat(32)), None)
+    let grant = crate::admission::mailbox_grant::resolve(Some(&"ab".repeat(32)), None, None)
         .expect("host-authorized grant")
         .expect("requested grant");
     let request = persistent_request(&home.rootfs(), name)
@@ -2091,7 +2091,7 @@ async fn persistent_definition_restart_does_not_inherit_request_mailbox() {
     let home = Isolated::new();
     let client = mock_client();
     let name = "p-mailbox-restart";
-    let grant = crate::admission::mailbox_grant::resolve(Some(&"cd".repeat(32)), None)
+    let grant = crate::admission::mailbox_grant::resolve(Some(&"cd".repeat(32)), None, None)
         .expect("host-authorized grant")
         .expect("requested grant");
     let request = persistent_request(&home.rootfs(), name)
