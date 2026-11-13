@@ -45,8 +45,8 @@ use mvm_net::channel::GuestService;
 
 use super::driver_builder::require_runtime_overlay_ext4;
 use super::spec::{PersistentBuilderSpecInputs, persistent_builder_spec};
+use crate::driver::RunningVm;
 use crate::driver::VmmDriver;
-use crate::driver::traits::RunningVm;
 use mvm_backends::driver::hvf::HvfDriver;
 
 /// Poll interval while waiting for the guest to publish its dispatch listener.

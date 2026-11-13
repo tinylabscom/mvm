@@ -463,7 +463,12 @@ pub use mvm_vmm::snapshot::{
 
 // Post-restore signal and primed-barrier primitives live in mvm-vmm so the
 // VmmDriver seam can use them without a runtime dependency cycle.
-pub use mvm_vmm::post_restore::*;
+pub use mvm_vmm::post_restore::{
+    ChildIdentity, POST_RESTORE_CLAIM_READY_TIMEOUT, POST_RESTORE_PROBE_INTERVAL,
+    POST_RESTORE_READY_TIMEOUT, PostRestoreOutcome, PostRestoreSignal, PrimedOutcome,
+    PrimedSignalSource, ReseedShortfall, VsockPostRestoreSignal, VsockPrimedSignalSource,
+    await_primed_barrier, describe_missing_reseed, signal_post_restore, wait_for_primed_polling,
+};
 
 /// Encrypt the freshly captured `vmstate.bin` and `mem.bin` in place under
 /// `key`. Both must exist: a capture that produced neither is not sealed.

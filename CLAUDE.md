@@ -240,7 +240,7 @@ Cargo workspace under `crates/` (including `crates/deps/`) (Bar-A consolidation 
 - `mvm-host-services` -- the in-guest host-services C ABI: one JSON-in/JSON-out entry point over the vsock broker, built as the `libmvm_host_services.so` cdylib every language SDK `dlopen`s. The package name is what makes cargo emit that filename directly. Its closure is deliberately tiny (no C, no async runtime) because it is compiled into every guest — `check-sdk-transport-free` holds that line, and the SDK sidecar's staleness fingerprint watches this crate and its dependencies rather than `mvm-sdk`.
 - `mvm-capture` -- project-environment capture frontend.
 - `mvm-builder-guest` -- what runs inside the builder VM and the contract it shares with the host that boots it: `mvm-host-vm-init`, `mvm-builderd` and `stage0-init`, plus the modules both sides read (`builder_boot`, job and protocol types). `mvm-build` re-exports its modules under their old paths.
-- `mvm-compiler` -- language-neutral workload compilation: source and dependency analysis, lowering, and deterministic build artifacts (flake generation, archives). It runs no builds, uses no network and signs nothing; `mvm-sdk::compile` re-exports it.
+- `mvm-compiler` -- language-neutral workload compilation: source and dependency analysis, lowering, and deterministic build artifacts (flake generation, archives). It runs no builds, uses no network and signs nothing.
 
 **Daemons, SDK, and FFI:**
 
@@ -582,7 +582,7 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     sealed volume at `~/.mvm/volumes/deps/<volume_hash>/` carrying
     `content/`, `sbom.cdx.json`, `fetch.log`, `cve.json`, and a
     hash-chained `meta.json`; `mvm-hostd`'s supervisor admission verifier
-    calls `mvm_sdk::compile::deps_audit::verify_sealed_volume` before
+    calls `mvm_core::deps_audit::verify_sealed_volume` before
     launch and refuses tampered volumes. The seal-time security lane applies
     `mvm_build::app_deps_gate::apply_install_gate` and fails closed on
     high/critical CVE findings or stub SBOM/CVE; production launch does not
