@@ -37,6 +37,7 @@
 //! config), no dependencies (Nix owns build deps; mvmd owns runtime
 //! deps).
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
@@ -83,6 +84,95 @@ fn default_mem() -> String {
 
 fn default_data_disk() -> String {
     "0".to_string()
+}
+
+const MAX_MANIFEST_INCLUDES: usize = 16;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LaunchDefaults {
+    #[serde(default)]
+    include: Vec<String>,
+    cpus: Option<u8>,
+    mem: Option<String>,
+}
+
+fn include_paths(table: &mut toml::Table, path: &Path) -> Result<Vec<String>> {
+    let Some(value) = table.remove("include") else {
+        return Ok(Vec::new());
+    };
+    value.try_into().with_context(|| {
+        format!(
+            "{}: `include` must be a list of relative TOML file paths",
+            path.display()
+        )
+    })
+}
+
+fn apply_launch_defaults(
+    path: &Path,
+    root: &Path,
+    active: &mut BTreeSet<PathBuf>,
+    seen: &mut BTreeSet<PathBuf>,
+    merged: &mut toml::Table,
+) -> Result<()> {
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("opening included defaults {}", path.display()))?;
+    anyhow::ensure!(
+        canonical.starts_with(root),
+        "included defaults {} escape the project directory {}",
+        path.display(),
+        root.display()
+    );
+    anyhow::ensure!(
+        active.insert(canonical.clone()),
+        "cycle in manifest includes at {}",
+        canonical.display()
+    );
+    anyhow::ensure!(
+        seen.insert(canonical.clone()),
+        "duplicate manifest include {}",
+        canonical.display()
+    );
+    anyhow::ensure!(
+        seen.len() <= MAX_MANIFEST_INCLUDES + 1,
+        "manifest includes exceed the limit of {MAX_MANIFEST_INCLUDES} files"
+    );
+    let text = std::fs::read_to_string(&canonical)
+        .with_context(|| format!("reading included defaults {}", canonical.display()))?;
+    let defaults: LaunchDefaults = toml::from_str(&text)
+        .with_context(|| format!("invalid included defaults {}", canonical.display()))?;
+    for include in &defaults.include {
+        anyhow::ensure!(
+            !include.is_empty() && !Path::new(include).is_absolute(),
+            "{}: includes must be nonempty relative file paths",
+            canonical.display()
+        );
+        apply_launch_defaults(
+            &canonical.parent().unwrap_or(root).join(include),
+            root,
+            active,
+            seen,
+            merged,
+        )?;
+    }
+    if let Some(cpus) = defaults.cpus {
+        anyhow::ensure!(cpus > 0, "{}: `cpus` must be >= 1", canonical.display());
+        merged.insert("cpus".into(), toml::Value::Integer(i64::from(cpus)));
+    }
+    if let Some(mem) = defaults.mem {
+        let size = parse_human_size(&mem)
+            .with_context(|| format!("invalid `mem` in {}", canonical.display()))?;
+        anyhow::ensure!(
+            size >= MIN_MEM_MIB,
+            "{}: `mem` must be >= {MIN_MEM_MIB} MiB",
+            canonical.display()
+        );
+        merged.insert("mem".into(), toml::Value::String(mem));
+    }
+    active.remove(&canonical);
+    Ok(())
 }
 
 /// Conservative validation for an `image` source selector. The full
@@ -241,7 +331,56 @@ impl Manifest {
     pub fn read_file(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read manifest at {}", path.display()))?;
-        let mut manifest: Self = toml::from_str(&text).context("Failed to parse manifest TOML")?;
+        Self::from_project_toml_str(&text, path)
+    }
+
+    /// Parse a project manifest, resolving its local launch defaults relative to `path`.
+    ///
+    /// This also validates proposed edits before they are written to disk.
+    ///
+    /// Signed pack manifests must use [`Self::from_toml_str`] instead; that
+    /// parser refuses local includes.
+    pub fn from_project_toml_str(text: &str, path: &Path) -> Result<Self> {
+        let mut table: toml::Table =
+            toml::from_str(text).context("Failed to parse manifest TOML")?;
+        let includes = include_paths(&mut table, path)?;
+        let mut merged = toml::Table::new();
+        if !includes.is_empty() {
+            anyhow::ensure!(
+                ["flake", "image", "wasm"]
+                    .iter()
+                    .any(|key| table.contains_key(*key)),
+                "{}: a manifest with includes must select its own `flake`, `image`, or `wasm` source",
+                path.display()
+            );
+            let root = path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .canonicalize()
+                .with_context(|| format!("resolving project directory for {}", path.display()))?;
+            let mut active = BTreeSet::new();
+            let mut seen = BTreeSet::new();
+            seen.insert(path.canonicalize()?);
+            for include in &includes {
+                anyhow::ensure!(
+                    !include.is_empty() && !Path::new(include).is_absolute(),
+                    "{}: includes must be nonempty relative file paths",
+                    path.display()
+                );
+                apply_launch_defaults(
+                    &root.join(include),
+                    &root,
+                    &mut active,
+                    &mut seen,
+                    &mut merged,
+                )?;
+            }
+        }
+        merged.extend(table);
+        let text = toml::to_string(&merged).context("serializing composed manifest")?;
+        check_secrets_carry_no_value(&text)?;
+        let mut manifest: Self = toml::from_str(&text)
+            .with_context(|| format!("invalid manifest {}", path.display()))?;
         if let Some(wasm) = manifest.wasm.take() {
             let wasm_path = std::path::Path::new(&wasm);
             let resolved = if wasm_path.is_absolute() {
@@ -2004,6 +2143,240 @@ mod tests {
             "#,
         );
         assert!(Manifest::read_file(&tmp.path().join("mvm.toml")).is_err());
+    }
+
+    #[test]
+    fn included_launch_defaults_compose_in_order_before_root_values() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("defaults")).expect("create defaults");
+        write(
+            tmp.path(),
+            "defaults/base.toml",
+            "cpus = 1\nmem = \"512M\"\n",
+        );
+        write(
+            tmp.path(),
+            "defaults/team.toml",
+            "include = [\"base.toml\"]\ncpus = 3\n",
+        );
+        write(
+            tmp.path(),
+            "mvm.toml",
+            "image = \"alpine:3.20\"\ninclude = [\"defaults/team.toml\"]\ncpus = 2\n",
+        );
+
+        let manifest = Manifest::read_file(&tmp.path().join("mvm.toml")).expect("compose");
+        assert_eq!(manifest.image.as_deref(), Some("alpine:3.20"));
+        assert_eq!(manifest.cpus, 2);
+        assert_eq!(manifest.mem, "512M");
+        assert_eq!(manifest.data_disk, "0");
+        assert!(!manifest.net);
+        assert!(manifest.policy.is_empty());
+    }
+
+    #[test]
+    fn later_includes_override_earlier_launch_defaults() {
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "first.toml", "cpus = 1\nmem = \"256M\"\n");
+        write(tmp.path(), "second.toml", "cpus = 3\n");
+        write(
+            tmp.path(),
+            "mvm.toml",
+            "image = \"alpine:3.20\"\ninclude = [\"first.toml\", \"second.toml\"]\n",
+        );
+        let manifest = Manifest::read_file(&tmp.path().join("mvm.toml")).expect("compose");
+        assert_eq!(manifest.cpus, 3);
+        assert_eq!(manifest.mem, "256M");
+    }
+
+    #[test]
+    fn included_defaults_cannot_supply_authority_or_a_source() {
+        for fragment in [
+            "image = \"alpine:3.20\"\n",
+            "net = true\n",
+            "[network]\nallow_hosts = [\"api.example.com:443\"]\n",
+            "[policy]\nprofile = \"agent-apis\"\n",
+            "[secrets]\napi = { hosts = [\"api.example.com\"] }\n",
+            "[grants]\nallow_hosts = [\"api.example.com:443\"]\n",
+            "gpu = true\n",
+            "data_disk = \"1G\"\n",
+            "[dev]\nvolumes = [\"./data.img:/data:1G:rw\"]\n",
+            "mem = 512\n",
+            "cpus = 0\n",
+        ] {
+            let tmp = TempDir::new().unwrap();
+            write(tmp.path(), "defaults.toml", fragment);
+            write(
+                tmp.path(),
+                "mvm.toml",
+                "image = \"alpine:3.20\"\ninclude = [\"defaults.toml\"]\n",
+            );
+            let error = Manifest::read_file(&tmp.path().join("mvm.toml"))
+                .expect_err("invalid defaults must refuse launch");
+            assert!(
+                format!("{error:#}").contains("defaults.toml"),
+                "{fragment:?}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_duplicate_and_cyclic_includes_are_refused() {
+        for (root, fragment) in [
+            ("include = [\"missing.toml\"]\n", None),
+            (
+                "include = [\"base.toml\", \"base.toml\"]\n",
+                Some("cpus = 1\n"),
+            ),
+            (
+                "include = [\"base.toml\"]\n",
+                Some("include = [\"mvm.toml\"]\n"),
+            ),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            if let Some(fragment) = fragment {
+                write(tmp.path(), "base.toml", fragment);
+            }
+            write(
+                tmp.path(),
+                "mvm.toml",
+                &format!("image = \"alpine:3.20\"\n{root}"),
+            );
+            assert!(
+                Manifest::read_file(&tmp.path().join("mvm.toml")).is_err(),
+                "{root:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn includes_cannot_escape_project_or_exceed_the_file_limit() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("project")).expect("project");
+        write(tmp.path(), "outside.toml", "cpus = 1\n");
+        let project = tmp.path().join("project");
+        write(
+            &project,
+            "mvm.toml",
+            "image = \"alpine:3.20\"\ninclude = [\"../outside.toml\"]\n",
+        );
+        let error = Manifest::read_file(&project.join("mvm.toml")).expect_err("escape refused");
+        assert!(format!("{error:#}").contains("escape"), "{error:#}");
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                tmp.path().join("outside.toml"),
+                project.join("linked.toml"),
+            )
+            .expect("symlink");
+            write(
+                &project,
+                "mvm.toml",
+                "image = \"alpine:3.20\"\ninclude = [\"linked.toml\"]\n",
+            );
+            let error =
+                Manifest::read_file(&project.join("mvm.toml")).expect_err("symlink escape refused");
+            assert!(format!("{error:#}").contains("escape"), "{error:#}");
+        }
+
+        for index in 0..MAX_MANIFEST_INCLUDES {
+            let next = if index + 1 == MAX_MANIFEST_INCLUDES {
+                String::new()
+            } else {
+                format!("include = [\"{next}.toml\"]\n", next = index + 1)
+            };
+            write(
+                &project,
+                &format!("{index}.toml"),
+                &format!("{next}cpus = 1\n"),
+            );
+        }
+        write(
+            &project,
+            "mvm.toml",
+            "image = \"alpine:3.20\"\ninclude = [\"0.toml\"]\n",
+        );
+        Manifest::read_file(&project.join("mvm.toml")).expect("bounded include chain");
+        write(
+            &project,
+            &format!("{}.toml", MAX_MANIFEST_INCLUDES - 1),
+            &format!("include = [\"{}.toml\"]\n", MAX_MANIFEST_INCLUDES),
+        );
+        write(
+            &project,
+            &format!("{}.toml", MAX_MANIFEST_INCLUDES),
+            "cpus = 1\n",
+        );
+        let error = Manifest::read_file(&project.join("mvm.toml")).expect_err("limit refused");
+        assert!(format!("{error:#}").contains("limit"), "{error:#}");
+    }
+
+    #[test]
+    fn root_must_select_source_when_including_defaults() {
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "defaults.toml", "cpus = 1\n");
+        write(tmp.path(), "mvm.toml", "include = [\"defaults.toml\"]\n");
+        let error = Manifest::read_file(&tmp.path().join("mvm.toml")).expect_err("source required");
+        assert!(format!("{error:#}").contains("must select"), "{error:#}");
+        assert!(Manifest::from_toml_str("include = [\"defaults.toml\"]\n").is_err());
+    }
+
+    #[test]
+    fn root_policy_and_secret_validation_still_run_after_defaults() {
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "defaults.toml", "mem = \"512M\"\n");
+        write(
+            tmp.path(),
+            "mvm.toml",
+            "image = \"alpine:3.20\"\ninclude = [\"defaults.toml\"]\n[secrets]\napi = { value = \"plaintext\" }\n",
+        );
+        assert!(Manifest::read_file(&tmp.path().join("mvm.toml")).is_err());
+        write(
+            tmp.path(),
+            "mvm.toml",
+            "image = \"alpine:3.20\"\ninclude = [\"defaults.toml\"]\n[policy]\nprofile = \"agent-apis\"\n",
+        );
+        let manifest = Manifest::read_file(&tmp.path().join("mvm.toml")).expect("compose");
+        assert_eq!(manifest.mem, "512M");
+        assert_eq!(manifest.policy.profile.as_deref(), Some("agent-apis"));
+    }
+
+    #[test]
+    fn edited_project_text_validates_includes_without_writing_it() {
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "defaults.toml", "mem = \"512M\"\n");
+        write(
+            tmp.path(),
+            "mvm.toml",
+            "image = \"alpine:3.20\"\ninclude = [\"defaults.toml\"]\n",
+        );
+        let proposed = "image = \"alpine:3.20\"\ninclude = [\"defaults.toml\"]\ncpus = 1\n";
+        let manifest = Manifest::from_project_toml_str(proposed, &tmp.path().join("mvm.toml"))
+            .expect("composed proposed edit");
+        assert_eq!(manifest.cpus, 1);
+        assert_eq!(manifest.mem, "512M");
+        let on_disk = Manifest::read_file(&tmp.path().join("mvm.toml")).expect("original");
+        assert_eq!(on_disk.cpus, 2);
+    }
+
+    #[test]
+    fn relative_wasm_is_resolved_before_validation_with_or_without_defaults() {
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "app.wasm", "module");
+        write(tmp.path(), "defaults.toml", "mem = \"512M\"\n");
+        let path = tmp.path().join("mvm.toml");
+        for source in [
+            "wasm = \"app.wasm\"\n",
+            "wasm = \"app.wasm\"\ninclude = [\"defaults.toml\"]\n",
+        ] {
+            write(tmp.path(), "mvm.toml", source);
+            let manifest = Manifest::read_file(&path).expect("relative module resolves");
+            assert_eq!(
+                manifest.wasm.as_deref(),
+                Some(tmp.path().join("app.wasm").to_str().unwrap())
+            );
+        }
     }
 
     // ----- Slot path helpers -----------------------------------------

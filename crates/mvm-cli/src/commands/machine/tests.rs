@@ -2703,6 +2703,46 @@ volumes = ["./state.img:/data:1G:rw"]
 }
 
 #[test]
+fn create_uses_composed_launch_defaults_without_widening_policy() {
+    let _state = IsolatedMachineState::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("sizing.toml"), "cpus = 1\nmem = \"512M\"\n").expect("defaults");
+    std::fs::write(
+        dir.path().join("mvm.toml"),
+        "image = \"alpine:3.20\"\ninclude = [\"sizing.toml\"]\n[network]\nallow_hosts = [\"api.example.com:443\"]\n",
+    )
+    .expect("manifest");
+
+    let spec = MachineCreateArgs {
+        name: Some("composed".to_string()),
+        manifest: Some(dir.path().join("mvm.toml").display().to_string()),
+        image: None,
+        net: false,
+        allow_host: Vec::new(),
+        peer: Vec::new(),
+        gpu: false,
+        gpu_device: None,
+        cpus: None,
+        cpu_limit: None,
+        timeout: None,
+        grants_file: None,
+        memory: None,
+        mem_initial: None,
+        profile: Some(RunProfile::Dev),
+        policy: Vec::new(),
+        force: false,
+        json: false,
+    }
+    .into_spec()
+    .expect("manifest-backed spec");
+
+    assert_eq!(spec.cpus, 1);
+    assert_eq!(spec.memory, "512M");
+    assert_eq!(spec.allow_host, ["api.example.com:443"]);
+    assert!(!spec.net);
+}
+
+#[test]
 fn create_rejects_flake_backed_manifest_for_machine_specs() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(dir.path().join("mvm.toml"), "flake = \".\"\n").expect("manifest");

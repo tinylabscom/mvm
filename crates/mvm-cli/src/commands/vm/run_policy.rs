@@ -79,8 +79,11 @@ pub(in crate::commands) fn select_pack_image(args: &mut RunArgs) -> Result<()> {
         let source = match image {
             mvm_core::registry_pack::RegistryPackImage::Source(image) => {
                 let manifest_path = installed.payload_root().join(&image.manifest);
-                let manifest = mvm_core::domain::manifest::Manifest::read_file(&manifest_path)
+                // A signed pack's manifest must stand alone, not include local files.
+                let text = std::fs::read_to_string(&manifest_path)
                     .context("reading verified pack image manifest")?;
+                let manifest = mvm_core::domain::manifest::Manifest::from_toml_str(&text)
+                    .context("parsing verified pack image manifest")?;
                 let flake_dir = manifest_path
                     .parent()
                     .context("pack image manifest has no parent directory")?;

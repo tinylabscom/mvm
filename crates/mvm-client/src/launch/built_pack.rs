@@ -82,7 +82,10 @@ fn validate_source_slot_identity(manifest: &std::path::Path, selected: &str) -> 
         resolve_flake_ref,
     };
 
-    let declared = Manifest::read_file(manifest)?;
+    let text = std::fs::read_to_string(manifest)
+        .with_context(|| format!("reading signed Source pack manifest {}", manifest.display()))?;
+    // Pack payloads have a signed file set; local includes must not enter it.
+    let declared = Manifest::from_toml_str(&text)?;
     let directory = manifest.parent().context("source manifest has no parent")?;
     let resolved = resolve_flake_ref(
         directory
@@ -120,6 +123,20 @@ mod tests {
         for profile in ["dev", "permissive", "unknown", ""] {
             assert!(validate_built_pack_profile(profile).is_err(), "{profile}");
         }
+    }
+
+    #[test]
+    fn signed_source_manifest_refuses_local_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("mvm.toml"),
+            "flake = \".\"\ninclude = [\"unsigned.toml\"]\n",
+        )
+        .expect("manifest");
+        std::fs::write(dir.path().join("unsigned.toml"), "cpus = 8\n").expect("defaults");
+        let error = validate_source_slot_identity(&dir.path().join("mvm.toml"), "unused")
+            .expect_err("signed source cannot read local defaults");
+        assert!(format!("{error:#}").contains("include"), "{error:#}");
     }
 
     #[test]
