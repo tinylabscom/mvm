@@ -13,6 +13,8 @@
 //!   this file is the PR-time check that their wiring (job order, signing
 //!   flags, what a publication waits for) still holds. A test is deleted with
 //!   the job it pins, never kept alone.
+//!   Each test states the contract it pins in its doc comment or an
+//!   `// Owned gate:` line.
 //! - Behavioural, not text: `image_contract_reader_agrees_with_the_checked_lock`
 //!   runs `scripts/locked-image-tag.sh`; the checksum helpers recompute SHA-256.
 
@@ -478,6 +480,7 @@ fn verify_checksum_manifest(directory: &Path) {
     }
 }
 
+// Owned gate: release.yml public CVE corpus publication.
 #[test]
 fn public_cve_corpus_is_integrity_checked_and_non_certifying() {
     let root = Path::new("public/public/security/cve-corpus");
@@ -551,6 +554,7 @@ fn every_signed_release_blob_uses_the_one_bundle_format() {
     }
 }
 
+// Owned gate: release.yml source-helper publication.
 #[test]
 fn source_helper_publication_is_commit_addressed_and_immutable() {
     let workflow = fs::read_to_string(".github/workflows/source-host-helpers.yml").unwrap();
@@ -570,6 +574,7 @@ fn source_helper_publication_is_commit_addressed_and_immutable() {
     assert!(ci.contains("python3 scripts/test_resolve_source_helper_commit.py"));
 }
 
+// Owned gate: the sign-blob scanner used by the bundle-format test (self-test of the parser).
 #[test]
 fn sign_blob_invocations_include_single_line_and_final_continuation_flags() {
     let workflow = "run: |\n  cosign sign-blob --yes --bundle a.bundle a\n  cosign sign-blob \\\n    --yes \\\n    --bundle b.bundle b --new-bundle-format\n  echo done\n";
@@ -942,6 +947,7 @@ fn the_archive_smoke_pairs_mvmctl_with_its_unpublished_guest_runtime() {
     );
 }
 
+// Owned gate: release.yml archive smoke jobs.
 #[test]
 fn every_release_archive_is_installed_and_its_hostlib_loaded_natively() {
     let workflow = release_workflow();
@@ -968,6 +974,7 @@ fn every_release_archive_is_installed_and_its_hostlib_loaded_natively() {
     );
 }
 
+// Owned gate: release.yml macOS signing order.
 #[test]
 fn macos_release_signing_precedes_archive_checksums() {
     let workflow = release_workflow();
@@ -996,6 +1003,7 @@ fn macos_release_signing_precedes_archive_checksums() {
     );
 }
 
+// Owned gate: release.yml Homebrew publication jobs.
 #[test]
 fn the_release_observes_homebrew_install_and_publication_results() {
     let workflow = release_workflow();
@@ -1073,6 +1081,7 @@ fn the_cli_release_fires_on_its_own_tag_alone() {
     );
 }
 
+// Owned gate: workers.yml demo build.
 #[test]
 fn workers_workflow_installs_every_wasm_target_used_by_the_demo() {
     let workflow = website_deploy_workflow();
@@ -1082,6 +1091,7 @@ fn workers_workflow_installs_every_wasm_target_used_by_the_demo() {
     );
 }
 
+// Owned gate: workers.yml deploy trigger.
 #[test]
 fn workers_deploys_website_updates_merged_to_main() {
     let workflow = website_deploy_workflow();
@@ -1102,6 +1112,7 @@ fn workers_deploys_website_updates_merged_to_main() {
     }
 }
 
+// Owned gate: workers.yml installer hash bake.
 #[test]
 fn workers_bakes_a_trusted_archive_hash_for_every_installer_target() {
     let workflow = website_deploy_workflow();
@@ -1147,6 +1158,7 @@ fn workers_bakes_a_trusted_archive_hash_for_every_installer_target() {
     }
 }
 
+// Owned gate: update-image-pin.yml CI dispatch.
 #[test]
 fn promoted_prebuilt_pin_pr_dispatches_ci_for_its_branch() {
     let workflow = release_workflow();
@@ -1218,6 +1230,7 @@ fn the_installer_default_is_written_only_by_the_pin_script() {
     );
 }
 
+// Owned gate: installer bootstrap verifier pins (release/workers).
 #[test]
 fn installer_pins_a_legacy_bootstrap_verifier_for_every_target() {
     let installer = fs::read_to_string("install.sh").expect("read install.sh");
@@ -1244,6 +1257,7 @@ fn installer_pins_a_legacy_bootstrap_verifier_for_every_target() {
     }
 }
 
+// Owned gate: website validation path filters.
 #[test]
 fn website_validation_covers_demo_guest_and_deploy_workflow_changes() {
     let workflow = website_workflow();
@@ -1312,6 +1326,7 @@ fn the_website_deployment_takes_its_runtime_pack_from_the_locked_tag() {
     );
 }
 
+// Owned gate: workers.yml deploy config.
 #[test]
 fn workers_deployment_uses_the_checked_in_wrangler_config() {
     let workflow = website_deploy_workflow();
@@ -1364,6 +1379,7 @@ fn workers_deployment_uses_the_checked_in_wrangler_config() {
     );
 }
 
+// Owned gate: workers.yml weblinux bundle check.
 #[test]
 fn workers_deployment_refuses_an_incomplete_weblinux_bundle() {
     let workflow = website_deploy_workflow();
@@ -1428,6 +1444,7 @@ fn qemu_wasm_site_pack_is_fetched_from_the_image_set_not_rebuilt() {
     );
 }
 
+// Owned gate: just/ qemu-wasm local tools recipes.
 #[test]
 fn qemu_wasm_local_tools_use_the_published_pack_and_maintained_harness() {
     let recipes = just_module("site");
@@ -1468,6 +1485,7 @@ fn qemu_wasm_local_tools_use_the_published_pack_and_maintained_harness() {
     );
 }
 
+// Owned gate: workers.yml Cloudflare asset size limit.
 #[test]
 fn weblinux_qemu_module_is_staged_below_the_cloudflare_asset_file_limit() {
     let build =
@@ -1805,6 +1823,7 @@ fn the_ci_boot_witness_resolves_the_locked_boot_image_tag() {
     );
 }
 
+// Owned gate: release/CI zigbuild installer pin.
 #[test]
 fn the_cross_compile_installers_share_a_cortex_flag_compatible_zigbuild() {
     let workspace = fs::read_to_string("Cargo.toml").expect("read workspace manifest");
@@ -1870,6 +1889,7 @@ fn workflows_minting_trusted_identities_are_gated_on_an_environment() {
     }
 }
 
+// Owned gate: update-image-pin.yml PR evidence.
 #[test]
 fn image_pin_updates_open_evidence_bearing_prs_without_merging_them() {
     let workflow = fs::read_to_string(".github/workflows/update-image-pin.yml")
@@ -1912,6 +1932,7 @@ fn image_pin_updates_rewrite_the_lock_through_the_checked_parser() {
     );
 }
 
+// Owned gate: scripts/locked-image-tag.sh against images.lock (behavioural).
 #[test]
 fn image_contract_reader_agrees_with_the_checked_lock() {
     let output = Command::new("./scripts/locked-image-tag.sh")
@@ -1936,6 +1957,7 @@ fn image_contract_reader_agrees_with_the_checked_lock() {
     assert!(!wrong_section.status.success());
 }
 
+// Owned gate: remote image-contract checks in workflows.
 #[test]
 fn remote_image_contract_checks_follow_the_locked_version() {
     let ci = fs::read_to_string(".github/workflows/ci-main.yml").expect("ci workflow");
@@ -1978,6 +2000,7 @@ fn remote_base_image_contract_checks_follow_the_cli_window() {
     }
 }
 
+// Owned gate: workflow consumers of the single image lock.
 #[test]
 fn remote_image_consumers_resolve_the_publisher_from_the_single_lock() {
     let ci = fs::read_to_string(".github/workflows/ci-main.yml").expect("ci workflow");
