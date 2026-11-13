@@ -59,6 +59,12 @@ impl OwnedClientBoot {
             if let Some(runtime) = &resources.built_runtime {
                 runtime.verify_config(&resources.config)?;
             }
+            let mailbox_posture = resources.admission.admitted.mailbox_posture();
+            mvm_hostd::mailbox_process::require_servable(
+                &resources.config,
+                &resources.backend,
+                mailbox_posture.as_ref(),
+            )?;
             // Store the prepared runtime BEFORE the first native side effect.
             let images = resources
                 .built_runtime
@@ -74,7 +80,20 @@ impl OwnedClientBoot {
             if let Some(built) = &resources.built_runtime {
                 built.verify_config(runtime.config()?)?;
             }
-            runtime.activate()
+            runtime.activate()?;
+            if resources.admission.admitted.plan().mailbox.is_some() {
+                let vm_id = runtime.vm_id()?.clone();
+                if let Err(error) = mvm_hostd::mailbox_process::spawn_for_launch(
+                    resources.admission.admitted.plan(),
+                    &resources.backend,
+                    &vm_id.0,
+                    mailbox_posture.as_ref(),
+                ) {
+                    runtime.stop().context("stopping an unserved mailbox VM")?;
+                    return Err(error.into());
+                }
+            }
+            Ok(())
         })();
         match result {
             Ok(()) => Ok(owner),
