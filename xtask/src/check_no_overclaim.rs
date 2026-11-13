@@ -22,8 +22,13 @@
 //!
 //! Default-skipped paths (independent of claim exempt_paths):
 //! `target/`, `.git/`, `.worktrees/`, `node_modules/`, `result/`,
-//! `result-*`, `.direnv/`, `.cargo/`. These are build outputs or
-//! sibling-worktree state, not authoring surface.
+//! `result-*`, `.direnv/`, `.cargo/`, and the agent-tool sandbox roots
+//! `.delta/`, `.qwen/`, `.claude/`, `.codex/`, `.gemini/`, `.kiro/`,
+//! `.cursor/`, `.windsurf/`, `.serena/`, `.superpowers/`. The first group
+//! is build outputs or sibling-worktree state; the second is where
+//! coding-agent sandboxes keep throwaway copies of the tree — stale
+//! copies there are not authoring surface, and scanning them reports
+//! false positives a clean checkout never produces.
 
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
@@ -399,6 +404,29 @@ fn visit_text_files(root: &Path, cb: &mut dyn FnMut(&Path, &Path) -> Result<()>)
     visit_inner(root, root, cb)
 }
 
+/// Directory names never scanned: build outputs, sibling-worktree state,
+/// and coding-agent sandbox roots (`.delta`, `.qwen`, `.claude`, …), whose
+/// stale copies of the tree are not authoring surface.
+const SKIPPED_DIRS: &[&str] = &[
+    "target",
+    ".git",
+    ".worktrees",
+    "node_modules",
+    "result",
+    ".direnv",
+    ".cargo",
+    ".claude",
+    ".delta",
+    ".qwen",
+    ".codex",
+    ".gemini",
+    ".kiro",
+    ".cursor",
+    ".windsurf",
+    ".serena",
+    ".superpowers",
+];
+
 fn visit_inner(
     root: &Path,
     dir: &Path,
@@ -413,18 +441,7 @@ fn visit_inner(
             .unwrap_or_default()
             .to_string();
         if path.is_dir() {
-            if matches!(
-                name.as_str(),
-                "target"
-                    | ".git"
-                    | ".worktrees"
-                    | ".claude/worktrees"
-                    | "node_modules"
-                    | "result"
-                    | ".direnv"
-                    | ".cargo"
-            ) || name.starts_with("result-")
-            {
+            if SKIPPED_DIRS.contains(&name.as_str()) || name.starts_with("result-") {
                 continue;
             }
             visit_inner(root, &path, cb)?;
@@ -623,6 +640,30 @@ exempt_paths:
         assert_eq!(claims.len(), 1);
         assert_eq!(claims[0].id, "fixture-example-claim");
         assert_eq!(claims[0].status, Status::Preview);
+    }
+
+    #[test]
+    fn agent_sandbox_roots_are_not_scanned() {
+        // Stale agent-sandbox copies of the tree (.delta/, .qwen/, .claude/)
+        // must not produce findings a clean checkout would not produce.
+        let tmp = tempfile::tempdir().unwrap();
+        for (dir, file) in [
+            (".delta/clone/deep", "copy.md"),
+            (".qwen/worktrees/x", "copy.rs"),
+            (".claude/worktrees/y", "copy.md"),
+            ("docs", "surface.md"),
+        ] {
+            let d = tmp.path().join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join(file), "gated text").unwrap();
+        }
+        let mut visited: Vec<PathBuf> = Vec::new();
+        visit_text_files(tmp.path(), &mut |rel, _abs| {
+            visited.push(rel.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(visited, vec![PathBuf::from("docs/surface.md")]);
     }
 
     #[test]
