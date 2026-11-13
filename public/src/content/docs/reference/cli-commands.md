@@ -15,6 +15,71 @@ tenant lifecycle and tenant policy authoring/review remain `mvmd`
 responsibilities. `mvmctl policy` covers only a workload's own authored
 policy, resolved on this host.
 
+### CLI option sources
+
+CLI **options** can be supplied by an explicit flag, an
+environment variable, or an ordered `--config-file PATH` (repeat the flag to
+load multiple files). This is an opt-in, invocation-scoped option file, **not**
+the project `mvm.toml` manifest or the persistent host
+`$MVM_HOME/config/config.toml`. It follows those files' TOML table convention;
+the same keys also work in JSON objects. `PATH` may be relative to the current
+working directory or absolute. No file is loaded automatically.
+Only the command written on the command line runs: a file cannot select a
+command. Tables for other commands are checked for valid keys but not applied.
+Path-valued options retain the CLI's ordinary path resolution; they are not
+rebased to the option file's directory.
+
+```toml
+# opts.toml
+[global]
+log-format = "json"
+verbose = 1
+
+[commands.machine.run]
+profile = "restrictive"
+allow-host = ["api.example.org:443"]
+net = false
+```
+
+```json
+{
+  "global": { "log-format": "json", "verbose": 1 },
+  "commands": { "machine": { "run": {
+    "profile": "restrictive",
+    "allow-host": ["api.example.org:443"],
+    "net": false
+  } } }
+}
+```
+
+For `machine run`, for example, `MVMCTL_MACHINE_RUN_PROFILE=restrictive` sets
+`--profile`; `MVMCTL_LOG_FORMAT=json` sets a global option. Replace hyphens
+with underscores and uppercase each command/option segment. An environment
+variable for a repeatable option holds one value or a JSON array of values
+(for example, `MVMCTL_MACHINE_RUN_ALLOW_HOST='["a.example","b.example"]'`).
+The `--config-file` bootstrap option itself is deliberately command-line only;
+files cannot recursively include other files. `--help` and `--version` are
+immediate display controls, not configurable runtime options.
+
+Scalars use **explicit flag > last configuration file naming that option >
+environment**. A boolean is a JSON/TOML boolean or `true`/`false` (`1`/`0`)
+in the environment; `false` cancels a lower-priority `true` without creating a
+negative spelling for a positive-only flag. A count option such as `--verbose`
+uses a nonnegative integer in a file/environment; counts **add** across
+sources, as do repeated explicit flags (Clap saturates counts at 255).
+Repeatable values use arrays in files
+and **append** environment values, then values from each file in order, then
+explicit flags. An empty array adds nothing; it does not erase prior entries.
+CLI flag aliases count as explicit uses of the canonical option, while files
+and environment use the canonical long name only (or the kebab-case option
+identifier for a short-only flag). Different options that Clap declares
+conflicting are rejected even when they come from different sources; precedence
+only replaces values of the **same** scalar option. Unknown keys, wrong types,
+unknown commands, and Clap-invalid values/conflicts are errors. A
+file does not grant authority: resolved requests still go through the same
+policy, signed-plan, and backend admission checks, where host ceilings and
+denials remain binding.
+
 **Command grouping (Plan 178).** The surface is organized into a small set
 of top-level daily-driver verbs plus noun groups; operations on a single
 running VM are flattened into `machine`, contributor build-time verbs under `dev`, observability

@@ -5,6 +5,16 @@
 //! signed image set `crates/mvm-core/images.lock` pins, published by
 //! mvm-images. These tests keep the release publishing exactly that, gated the
 //! way the installer and `mvmctl update` need it gated.
+//!
+//! Classification (each test reads a workflow, recipe or script as text):
+//! - Owned gate: `release.yml`, `first-run-smoke.yml`, `distro-packages.yml`,
+//!   `workers.yml`, `update-image-pin.yml` and `just/*/mod.just` run only on a
+//!   tag, a cron or a dispatch. Nothing executes them on a pull request, so
+//!   this file is the PR-time check that their wiring (job order, signing
+//!   flags, what a publication waits for) still holds. A test is deleted with
+//!   the job it pins, never kept alone.
+//! - Behavioural, not text: `image_contract_reader_agrees_with_the_checked_lock`
+//!   runs `scripts/locked-image-tag.sh`; the checksum helpers recompute SHA-256.
 
 use std::fs;
 use std::path::Path;

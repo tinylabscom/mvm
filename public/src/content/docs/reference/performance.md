@@ -69,6 +69,25 @@ A lane result is publishable only when it carries at least 20 measured samples t
 The table between those markers is generated from the same accessor the gate
 reads. Editing it by hand fails the doc-sync test rather than changing a budget.
 
+## Planned production composable witness
+
+No production composable launch or latency lane ships yet. Under
+[ADR-037](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/037-mvmd-only-production-launch.md), only an authenticated `mvmd` request may
+initiate production; a local `mvmctl` run is development evidence. The
+[composable-pack build contract](https://github.com/tinylabscom/mvm/blob/main/specs/contracts/composable-pack-build.md)
+requires the first production witness to time the host's authenticated request
+through fresh verification, admission, backend start or immutable claim, and
+guest readiness. It reports acquisition and first-use publication separately,
+without treating cached bytes as cached authorization.
+
+The existing `prepared_cold_artifact` lane reports `bundle_verify_ms` outside
+its gated dispatch window. That lane alone cannot establish the stricter
+production invocation-to-readiness target or an authenticated `mvmd` launch.
+When the production lane exists it must refuse attempts lacking required
+evidence or exceeding cold <300 ms / warm <50 ms with admission included,
+rather than relabel them as prepared or warm samples. Its supported backend
+and live witness remain to be established.
+
 ## What disqualifies a measurement
 
 A lane refuses a sample that did work the lane forbids, rather than reporting it

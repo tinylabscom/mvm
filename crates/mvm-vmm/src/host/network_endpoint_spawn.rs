@@ -2454,6 +2454,8 @@ mod tests {
         if let Ok(pid) = std::fs::read_to_string(&pid_capture)
             && let Ok(pid) = pid.trim().parse::<libc::pid_t>()
         {
+            // SAFETY: kill takes two integers and touches no memory; `pid` was written by the
+            //         helper process this test spawned.
             unsafe {
                 libc::kill(pid, libc::SIGKILL);
             }

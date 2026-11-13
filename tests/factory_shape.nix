@@ -5,13 +5,12 @@
 # Targets:
 #   factory_shape    Asserts `mvm.lib.<system>.mkFunctionService` returns
 #                    the `{ extraFiles, servicePackages, service }` triple
-#                    `mkGuest`'s composition layer consumes (plan 48 + 60
-#                    Slice E1; one row per language in the registry).
+#                    `mkGuest`'s composition layer consumes (one row per
+#                    language in the registry).
 #   workload_shape   Asserts `mvm.lib.<system>.mkFunctionWorkload` reads a
 #                    synthetic IR JSON, composes the factory with `mkGuest`,
 #                    and returns a derivation whose `passthru.mvm` records
-#                    the workload id + a sealed/command entrypoint shape
-#                    (plan 71).
+#                    the workload id + a sealed/command entrypoint shape.
 #
 # Run via:
 #
@@ -33,7 +32,7 @@ let
   mkFunctionService = flake.lib.${system}.mkFunctionService;
   mkFunctionWorkload = flake.lib.${system}.mkFunctionWorkload;
 
-  # ── factory_shape (plan 48 / 60 Slice E1) ─────────────────────────
+  # ── factory_shape ─────────────────────────
   testLanguage =
     language:
     let
@@ -74,7 +73,7 @@ let
     else
       "factory_shape: FAIL — ${lib.concatStringsSep "; " languageResults}";
 
-  # ── workload_shape (plan 71) ──────────────────────────────────────
+  # ── workload_shape ──────────────────────────────────────
   #
   # Build a synthetic IR JSON that matches what the Python SDK's
   # `mvm.emit_json()` would write for a single-function workload.

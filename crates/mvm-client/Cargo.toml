@@ -178,3 +178,6 @@ serde_json = { workspace = true }
 # Seeded property-style loops + fresh Ed25519 test keys for the verified
 # audit reader's fixture chains.
 rand = { workspace = true }
+
+[lints]
+workspace = true

@@ -1813,6 +1813,8 @@ mod isolate_home_tests {
         std::fs::create_dir_all(&real).expect("create fake RUSTUP_HOME");
         // Safety: single-threaded test process; the var is restored below.
         let previous = std::env::var_os("RUSTUP_HOME");
+        // SAFETY: nextest runs each test in its own process, so no other thread touches the
+        //         environment; the previous value is restored below.
         unsafe { std::env::set_var("RUSTUP_HOME", &real) };
 
         let mut command = std::process::Command::new("true");
@@ -1822,7 +1824,9 @@ mod isolate_home_tests {
             .any(|(k, v)| k == "RUSTUP_HOME" && v.map(|v| v == real.as_os_str()) == Some(true));
 
         match previous {
+            // SAFETY: same single-threaded test process as the set above.
             Some(value) => unsafe { std::env::set_var("RUSTUP_HOME", value) },
+            // SAFETY: same single-threaded test process as the set above.
             None => unsafe { std::env::remove_var("RUSTUP_HOME") },
         }
         assert!(passed, "an existing RUSTUP_HOME must reach the child");
@@ -1833,6 +1837,8 @@ mod isolate_home_tests {
     #[test]
     fn does_not_forward_a_missing_root() {
         let previous = std::env::var_os("RUSTUP_HOME");
+        // SAFETY: nextest runs each test in its own process, so no other thread touches the
+        //         environment; the previous value is restored below.
         unsafe { std::env::set_var("RUSTUP_HOME", "/definitely/not/a/real/rustup/root") };
 
         let mut command = std::process::Command::new("true");
@@ -1840,7 +1846,9 @@ mod isolate_home_tests {
         let forwarded = command.get_envs().any(|(k, _)| k == "RUSTUP_HOME");
 
         match previous {
+            // SAFETY: same single-threaded test process as the set above.
             Some(value) => unsafe { std::env::set_var("RUSTUP_HOME", value) },
+            // SAFETY: same single-threaded test process as the set above.
             None => unsafe { std::env::remove_var("RUSTUP_HOME") },
         }
         assert!(!forwarded, "a missing root must not be forwarded");

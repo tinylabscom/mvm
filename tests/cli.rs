@@ -4,6 +4,124 @@ use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;
 
 #[test]
+fn config_file_is_global_and_malformed_file_fails_before_command_dispatch() {
+    let home = tempfile::tempdir().expect("isolated CLI home");
+    let path = home.path().join("options.toml");
+    std::fs::write(&path, "[commands.doctor]\nunknown-option = true\n").unwrap();
+    let help = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["machine", "run", "--help"])
+        .output()
+        .expect("machine help");
+    assert!(
+        help.status.success(),
+        "{}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+    assert!(String::from_utf8_lossy(&help.stdout).contains("--config-file"));
+
+    let result = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", home.path())
+        .env("HOME", home.path())
+        .args(["doctor", "--config-file", path.to_str().unwrap()])
+        .output()
+        .expect("invalid config must be refused");
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("unknown option"));
+
+    let relative = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .current_dir(home.path())
+        .env("MVM_HOME", home.path())
+        .env("HOME", home.path())
+        .args(["doctor", "--config-file", "options.toml"])
+        .output()
+        .expect("read relative config path");
+    assert!(!relative.status.success());
+    assert!(String::from_utf8_lossy(&relative.stderr).contains("unknown option"));
+}
+
+#[test]
+fn dry_run_uses_ordered_option_sources_without_booting() {
+    let home = tempfile::tempdir().expect("isolated CLI home");
+    let first = home.path().join("first.toml");
+    let second = home.path().join("second.json");
+    std::fs::write(
+        &first,
+        "[commands.run]\nprofile = 'standard'\nallow-host = ['first.example:443']\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &second,
+        r#"{"commands":{"run":{"profile":"dev","allow-host":["second.example:443"]}}}"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", home.path())
+        .env("HOME", home.path())
+        .env("MVMCTL_RUN_PROFILE", "restrictive")
+        .env("MVMCTL_RUN_ALLOW_HOST", "env.example:443")
+        .args([
+            "--config-file",
+            first.to_str().unwrap(),
+            "--config-file",
+            second.to_str().unwrap(),
+            "run",
+            "--no-detect",
+            "--dry-run",
+            "--allow-host",
+            "flag.example:443",
+            "--",
+            "/bin/true",
+        ])
+        .output()
+        .expect("dry-run with layered options");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("no VM will be booted"), "{stdout}");
+    assert!(stdout.contains("profile: dev"), "{stdout}");
+    // NetworkPolicy renders its allow-list canonically, independently of the
+    // option sources' append order (which the parser tests assert directly).
+    assert!(
+        stdout.contains(
+            "network: allow-list:env.example:443,first.example:443,flag.example:443,second.example:443"
+        ),
+        "{stdout}"
+    );
+
+    let explicit = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", home.path())
+        .env("HOME", home.path())
+        .env("MVMCTL_RUN_PROFILE", "restrictive")
+        .args([
+            "--config-file",
+            second.to_str().unwrap(),
+            "run",
+            "--no-detect",
+            "--dry-run",
+            "--profile",
+            "standard",
+            "--",
+            "/bin/true",
+        ])
+        .output()
+        .expect("explicit profile wins over config");
+    assert!(
+        explicit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&explicit.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&explicit.stdout).contains("profile: standard"),
+        "{}",
+        String::from_utf8_lossy(&explicit.stdout)
+    );
+}
+
+#[test]
 fn ops_config_show_redacts_proxy_credentials_without_rewriting_config() {
     let home = tempfile::tempdir().unwrap();
     let config_dir = home.path().join("config");
@@ -1754,6 +1872,41 @@ fn run_refuses_a_denied_env_variable_by_name() {
 }
 
 #[test]
+fn composed_config_env_is_refused_by_the_existing_guest_env_gate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("options.toml");
+    std::fs::write(
+        &config,
+        "[commands.run]\nenv = ['LD_PRELOAD=/tmp/private-marker.so']\n",
+    )
+    .unwrap();
+    let out = isolated_mvmctl(tmp.path())
+        .args([
+            "--config-file",
+            config.to_str().unwrap(),
+            "run",
+            "--no-detect",
+            "--dry-run",
+            "--env",
+            "SAFE=ok",
+            "--",
+            "true",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "the config-supplied loader variable must refuse"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("LD_PRELOAD (loader)"), "{stderr}");
+    assert!(
+        !stderr.contains("private-marker"),
+        "the value must remain private: {stderr}"
+    );
+}
+
+#[test]
 fn run_allow_env_readmits_by_exact_name_only() {
     let tmp = tempfile::tempdir().unwrap();
     let out = isolated_mvmctl(tmp.path())
@@ -2305,7 +2458,7 @@ fn ops_mcp_refuses_the_project_tool_policy() {
 }
 
 // ---------------------------------------------------------------------------
-// Signed registry packs (PS-06): search / pull / pack registry
+// Signed registry packs: search / pull / pack registry
 // ---------------------------------------------------------------------------
 
 fn mvmctl_isolated(home: &std::path::Path) -> Command {

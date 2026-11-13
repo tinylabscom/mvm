@@ -852,8 +852,9 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        // SAFETY: inspecting only the live original parent descriptor.
         assert_ne!(
+            // SAFETY: fcntl(F_GETFD) only reads the flags of `fd`, the original parent descriptor,
+            //         which is still open here.
             unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
             0
         );

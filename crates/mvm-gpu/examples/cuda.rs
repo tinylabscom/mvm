@@ -123,8 +123,8 @@ unsafe fn image_len(ptr: *const c_void) -> Option<usize> {
     let head = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), 16) };
     if head[..4] == ELF_MAGIC && head[4] == 2 {
         // ELF64: e_shoff u64 @ 0x28, e_shentsize u16 @ 0x3a, e_shnum u16 @ 0x3c.
-        // SAFETY: same pointer contract.
         const ELF64_HEADER_LEN: usize = 0x40;
+        // SAFETY: same pointer contract.
         let header = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), ELF64_HEADER_LEN) };
         if header.len() < 0x3e {
             return None;
@@ -270,6 +270,8 @@ pub unsafe extern "C" fn cuDeviceGetName(
                 ordinal: ordinal as u32,
             }) {
                 GpuResponse::DeviceName { name: n } => {
+                    // SAFETY: `name` is non-null (checked above) and, per this fn's contract, a
+                    //         writable buffer of `len` bytes.
                     if unsafe { write_cstr(name, len as usize, &n) } {
                         SUCCESS
                     } else {
@@ -477,6 +479,7 @@ pub unsafe extern "C" fn cuMemcpyHtoD(dst: u64, src: *const c_void, bytes: usize
             if ctx == 0 {
                 return wire::CUDA_ERROR_INVALID_CONTEXT as CuResult;
             }
+            // SAFETY: `src` is readable for `bytes` per this fn's contract.
             let Some(data) = (unsafe { read_guest_bytes(src, bytes) }) else {
                 return wire::CUDA_ERROR_INVALID_VALUE as CuResult;
             };
@@ -543,6 +546,7 @@ pub unsafe extern "C" fn cuMemcpyHtoDAsync(
             if ctx == 0 {
                 return wire::CUDA_ERROR_INVALID_CONTEXT as CuResult;
             }
+            // SAFETY: `src` is readable for `bytes` per this fn's contract.
             let Some(data) = (unsafe { read_guest_bytes(src, bytes) }) else {
                 return wire::CUDA_ERROR_INVALID_VALUE as CuResult;
             };
@@ -608,6 +612,8 @@ pub unsafe extern "C" fn cuMemcpyHtoDAsync_v2(
     bytes: usize,
     stream: Handle,
 ) -> CuResult {
+    // SAFETY: forwards the caller's arguments unchanged, so the callee's documented contract is
+    //         the caller's.
     unsafe { cuMemcpyHtoDAsync(dst, src, bytes, stream) }
 }
 
@@ -620,6 +626,8 @@ pub unsafe extern "C" fn cuMemcpyDtoHAsync_v2(
     bytes: usize,
     stream: Handle,
 ) -> CuResult {
+    // SAFETY: forwards the caller's arguments unchanged, so the callee's documented contract is
+    //         the caller's.
     unsafe { cuMemcpyDtoHAsync(dst, src, bytes, stream) }
 }
 
@@ -659,9 +667,11 @@ pub unsafe extern "C" fn cuModuleLoadData(module: *mut Handle, image: *const c_v
             if module.is_null() {
                 return wire::CUDA_ERROR_INVALID_VALUE as CuResult;
             }
+            // SAFETY: `image` is readable per this fn's contract.
             let Some(len) = (unsafe { image_len(image) }) else {
                 return wire::CUDA_ERROR_INVALID_IMAGE as CuResult;
             };
+            // SAFETY: `image` is readable for `len`, the length `image_len` derived from it.
             let Some(image_bytes) = (unsafe { read_guest_bytes(image, len) }) else {
                 return wire::CUDA_ERROR_INVALID_IMAGE as CuResult;
             };
@@ -837,6 +847,7 @@ fn launch_kernel(args: LaunchArgs) -> CuResult {
             // of at least `sizes.len()` pointers; entry i names a
             // readable `size`-byte argument.
             let arg_ptr = unsafe { *kernel_params.add(i) };
+            // SAFETY: `arg_ptr` names a readable `size`-byte argument, per the contract above.
             let Some(blob) = (unsafe { read_guest_bytes(arg_ptr, *size) }) else {
                 return wire::CUDA_ERROR_INVALID_VALUE as CuResult;
             };
@@ -970,6 +981,8 @@ pub unsafe extern "C" fn cuStreamDestroy_v2(stream: Handle) -> CuResult {
 /// Same contract as [`cuStreamDestroy_v2`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuStreamDestroy(stream: Handle) -> CuResult {
+    // SAFETY: forwards the caller's arguments unchanged, so the callee's documented contract is
+    //         the caller's.
     unsafe { cuStreamDestroy_v2(stream) }
 }
 
@@ -1078,6 +1091,8 @@ pub unsafe extern "C" fn cuEventDestroy_v2(event: Handle) -> CuResult {
 /// Same contract as [`cuEventDestroy_v2`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuEventDestroy(event: Handle) -> CuResult {
+    // SAFETY: forwards the caller's arguments unchanged, so the callee's documented contract is
+    //         the caller's.
     unsafe { cuEventDestroy_v2(event) }
 }
 
@@ -1316,12 +1331,14 @@ pub unsafe extern "C" fn cuGetProcAddress(
     }
     // SAFETY: `func_ptr` names writable storage per the caller contract.
     unsafe { *func_ptr = std::ptr::null_mut() };
+    // SAFETY: `symbol` is non-null (checked above) and NUL-terminated per this fn's contract.
     let name = unsafe { std::ffi::CStr::from_ptr(symbol) }.to_bytes();
     for &(table_name, addr) in resolver_table() {
         if table_name.as_bytes() == name {
             // The table stores `usize` so it can live in a `static` (raw
             // pointers are not `Sync`); every address comes from a live
             // function and is never null.
+            // SAFETY: `func_ptr` is non-null (checked above) and writable per this fn's contract.
             unsafe { *func_ptr = addr as *mut c_void };
             return SUCCESS;
         }
@@ -1340,6 +1357,8 @@ pub unsafe extern "C" fn cuGetProcAddress_v2(
     cuda_version: c_uint,
     flags: c_ulonglong,
 ) -> CuResult {
+    // SAFETY: forwards the caller's arguments unchanged, so the callee's documented contract is
+    //         the caller's.
     unsafe { cuGetProcAddress(symbol, func_ptr, cuda_version, flags) }
 }
 

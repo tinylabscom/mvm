@@ -25,3 +25,4 @@ wait-timeout = "0.2.1"
 
 [lints.clippy]
 too_many_arguments = "deny"
+undocumented_unsafe_blocks = "deny"

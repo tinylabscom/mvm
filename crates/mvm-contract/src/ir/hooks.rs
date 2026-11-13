@@ -1,4 +1,4 @@
-//! Lifecycle hook IR (SDK port Phase 1a).
+//! Lifecycle hook IR (SDK).
 //!
 //! Four phases — `before_build`, `before_start`, `after_start`,
 //! `before_stop` — each a `Vec<HookCmd>`. Empty vec = no hook for that
@@ -7,8 +7,8 @@
 //! addon-attachment order followed by the app's commands. No special
 //! single-vs-sequence handling.
 //!
-//! Phase semantics (Phase 10 wires the consumers; Phase 1a only reserves
-//! the IR field shape):
+//! Phase semantics (the IR field shape is reserved; consumers wire it
+//! separately):
 //!
 //! - `before_build` — runs in the builder microVM after the dep install,
 //!   before the rootfs snapshot. Use for one-off build-time setup
@@ -81,7 +81,7 @@ pub enum HookCmd {
     /// Argv list, executed without a shell. Use when the command needs
     /// no shell interpretation (paths with spaces, untrusted args, no
     /// glob/var expansion). Empty argv is rejected by the validator
-    /// (Phase 10 — Phase 1a just reserves the shape).
+    /// (the shape is reserved; consumers wire it separately).
     Argv { argv: Vec<String> },
 }
 

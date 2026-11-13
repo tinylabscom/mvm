@@ -951,7 +951,7 @@ fn wait_for_hvf_guest_agent(name: &str) -> Result<()> {
     while Instant::now() < deadline {
         match transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT) {
             Ok(mut stream) => {
-                // ADR-019 / plan 74 W1: hard cutover requires hello
+                // Hard cutover: the guest requires hello
                 // before any operational request, so a raw `Ping`
                 // probe no longer works. Treat a successful hello
                 // negotiation (with the `Ping` capability acknowledged)

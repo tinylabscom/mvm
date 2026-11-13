@@ -1,4 +1,11 @@
 //! Regression checks for the scheduled documented-surface witnesses.
+//!
+//! Owned gate: `e2e-docs.yml` (and the `release.yml` job that waits for it).
+//! It is a scheduled, multi-hour, self-hosted lane; a broken edit surfaces a
+//! day later, so these tests pin its job wiring (shards, budgets, runner
+//! labels, image preparation) on every pull request. The `the_bounded_runner_*`
+//! tests and `both_live_harnesses_report_phase_timings` are behavioural: they
+//! execute the lane's own Python and bash helpers.
 
 use std::fs;
 #[cfg(unix)]
@@ -144,7 +151,7 @@ fn publication_gate_checks_ignore_other_jobs_and_reject_missing_success() {
 
 /// The release gate must be stated at the release call site, not inherited.
 ///
-/// No GitHub-hosted macOS runner can boot an mvm guest (issue #3011), so on
+/// No GitHub-hosted macOS runner can boot an mvm guest (a tracked platform gap), so on
 /// every hosted host the macOS lane is skipped and the release caller falls
 /// back to a committed evidence record instead. The danger in having an opt-out is
 /// that the release caller quietly acquires it. Then a tag cuts with no macOS evidence of any kind and
@@ -195,7 +202,7 @@ fn the_macos_host_gate_defaults_to_blocking() {
 /// The lane is skipped by the host check, never by a hardcoded runner label.
 ///
 /// Pointing `runs-on` at a self-hosted Apple Silicon runner has to be the whole
-/// of resolving #3011. If the skip were keyed to the label rather than to a
+/// of closing that gap. If the skip were keyed to the label rather than to a
 /// live `uname`, the lane would keep skipping on hardware that can run it, and
 /// the gap would close without anyone noticing the evidence never came back.
 #[test]
@@ -1685,7 +1692,7 @@ fn standard_supervisor_build_never_enables_libkrun() {
 ///
 /// With `MVM_E2E_HOME` unset the home falls back to the real `$HOME/.mvm`, and
 /// creating it under the caller's umask leaves it 0755 on a CI runner. That is
-/// a W1.5 violation the suite's own `doctor` scenario then reports as `data dir
+/// a home-directory-mode violation the suite's own `doctor` scenario then reports as `data dir
 /// mode: MISSING`, so the lane went red for a directory the harness made wrong
 /// before mvmctl ever saw it. Nothing repairs it either: the `ensure_home_dir`
 /// helper that would has no callers anywhere in the workspace.
