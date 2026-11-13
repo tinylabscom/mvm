@@ -176,7 +176,26 @@ describe("app() with all four hook phases", () => {
 });
 
 describe("env helpers", () => {
-  it("env accepts bare strings and wraps as literal", () => {
+  it("env refuses a bare string, naming the explicit forms, without echoing it", () => {
+    mvm.workload({ id: "env-app" });
+    const declare = () =>
+      mvm.app({
+        name: "env-app",
+        image: mvm.python_image(),
+        resources: mvm.resources({ cpu: 1 }),
+        entrypoints: [mvm.entrypoint({ command: ["python"] })],
+        env: { MODEL_PATH: "hunter2" } as never,
+      })(() => "x");
+    expect(declare).toThrow(/mvm\.literal.*mvm\.secret/);
+    try {
+      declare();
+    } catch (err) {
+      expect(String(err)).not.toContain("hunter2");
+    }
+    expect(() => mvm.entrypoint({ command: ["python"], env: { A: "b" } as never })).toThrow(/bare string/);
+  });
+
+  it("env accepts explicit literal and secret values", () => {
     mvm.workload({ id: "env-app" });
     mvm.app({
       name: "env-app",
@@ -184,7 +203,7 @@ describe("env helpers", () => {
       resources: mvm.resources({ cpu: 1 }),
       entrypoints: [mvm.entrypoint({ command: ["python"] })],
       env: {
-        MODEL_PATH: "/data/model.pt",
+        MODEL_PATH: mvm.literal("/data/model.pt"),
         API_KEY: mvm.secret("api-key", { type: "bearer", hosts: ["api.example.com"] }),
       },
     })(() => "x");

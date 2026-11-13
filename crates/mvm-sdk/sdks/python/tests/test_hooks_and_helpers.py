@@ -186,6 +186,23 @@ def test_env_with_literal_and_secret_helpers():
     assert env["API_KEY"]["ref"]["name"] == "api-key"
 
 
+def test_a_bare_string_env_value_is_refused():
+    _reset()
+    mvm.workload(id="bare-env")
+    with pytest.raises(TypeError, match=r"mvm\.literal.*mvm\.secret") as err:
+        mvm.app(
+            name="bare-env",
+            source=mvm.local_path("."),
+            image=mvm.python_image(),
+            resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
+            entrypoints=[mvm.entrypoint(command=["python"])],
+            env={"API_KEY": "hunter2"},
+        )
+    assert "hunter2" not in str(err.value)
+    with pytest.raises(TypeError, match="bare string"):
+        mvm.entrypoint(command=["python"], env={"A": "b"})
+
+
 def test_hook_list_of_mvm_hooks_passes_through():
     _reset()
     mvm.workload(id="hello-multi-hook")

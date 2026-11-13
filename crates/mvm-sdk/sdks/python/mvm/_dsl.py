@@ -261,7 +261,7 @@ def app(
         name=name,
         resources=resources,
         source=source,
-        env=env if env is not None else {},
+        env=check_env(env),
         mounts=mounts if mounts is not None else [],
         network=resolved_network,
         dependencies=dependencies,
@@ -380,11 +380,29 @@ def hook(cmd: str | list[str]) -> _ir.HookCmd:
     )
 
 
+def refuse_bare_env_value(key: Any) -> TypeError:
+    """The error for an env value written as a bare string.
+
+    The value is not echoed: a bare string is often a secret pasted in."""
+    return TypeError(
+        f"env {key!r} is a bare string; an env value must say what it is. "
+        f"Write mvm.literal(\"...\") for a literal value, or "
+        f"mvm.secret(\"name\", type=..., hosts=[...]) for a secret."
+    )
+
+
+def check_env(env: dict[str, Any] | None) -> dict[str, Any]:
+    """Return ``env`` (``{}`` for ``None``), refusing a bare string value."""
+    for key, value in (env or {}).items():
+        if isinstance(value, str):
+            raise refuse_bare_env_value(key)
+    return env if env is not None else {}
+
+
 def literal(value: str) -> _ir.EnvValue1:
-    """Wrap a string as an explicit literal env value. Equivalent to
-    passing the string directly in an ``env={...}`` mapping — the
-    wrapper exists for parity with :func:`secret` and for callers that
-    want to be unambiguous.
+    """Wrap a string as an explicit literal env value. A bare string in an
+    ``env={...}`` mapping is refused, so this is the one way to write a
+    literal; :func:`secret` is the way to reference a secret.
     """
     return _ir.EnvValue1(
         kind=_kind_value(_ir.EnvValue1, "literal"),
@@ -494,7 +512,7 @@ def entrypoint(
     return _ir.Entrypoint1(
         command=list(command),
         kind=_kind_value(_ir.Entrypoint1, "command"),
-        env=env if env is not None else {},
+        env=check_env(env),
         working_dir=working_dir,
     )
 
@@ -552,7 +570,7 @@ def entrypoint_function(
         kind=_kind_value(_ir.Entrypoint2, "function"),
         language=language,
         module=module,
-        env=env if env is not None else {},
+        env=check_env(env),
         working_dir=working_dir,
         extra_imports=list(extra_imports) if extra_imports else [],
         primary=primary,

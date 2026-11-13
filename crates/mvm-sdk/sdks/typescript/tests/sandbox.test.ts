@@ -73,11 +73,24 @@ describe("Sandbox.commands.start", () => {
     ]);
   });
 
+  it("refuses a bare string env value, naming the explicit forms, without echoing it", () => {
+    expect(() => mvm.Sandbox.create("python-3.12", { env: { MODE: "hunter2" } as never })).toThrow(
+      /mvm\.literal.*mvm\.secret/,
+    );
+    try {
+      mvm.Sandbox.create("python-3.12", { env: { MODE: "hunter2" } as never });
+    } catch (err) {
+      expect(String(err)).not.toContain("hunter2");
+    }
+    const sb = mvm.Sandbox.create("python-3.12");
+    expect(() => sb.commands.start(["python"], { env: { MODE: "prod" } as never })).toThrow(/bare string/);
+  });
+
   it("encodes env with secret refs", () => {
     const sb = mvm.Sandbox.create("python-3.12");
     sb.commands.start(["python", "run.py"], {
       env: {
-        MODE: "prod",
+        MODE: mvm.literal("prod"),
         API_KEY: mvm.secret("api-key", { type: "bearer", hosts: ["api.example.com"] }),
       },
     });
@@ -248,7 +261,7 @@ describe("create kwargs", () => {
 describe("emitRecordingJson", () => {
   it("produces a wire-compatible document", () => {
     const sb = mvm.Sandbox.create("python-3.12", { include: ["src"] });
-    sb.commands.start(["python", "run.py"], { env: { X: "1" } });
+    sb.commands.start(["python", "run.py"], { env: { X: mvm.literal("1") } });
     sb.files.write("/app/cfg", new TextEncoder().encode("data"));
     const parsed = JSON.parse(mvm.emitRecordingJson());
     expect(Object.keys(parsed).sort()).toEqual(["create", "ops", "workload_id"]);
