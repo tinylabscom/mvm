@@ -458,7 +458,7 @@ mod tests {
     use tempfile::TempDir;
 
     /// Connect a CONNECT-handshaked stream to a running mock agent —
-    /// the same shape `mvm::vsock_transport::for_vm(...).connect(...)`
+    /// the same shape `mvm_vmm::vsock_transport::for_vm(...).connect(...)`
     /// hands the backend-agnostic `*_on` helpers.
     fn connect_stream(dir: &TempDir) -> std::os::unix::net::UnixStream {
         connect_to(&vsock_uds_path(&dir.path().to_string_lossy()), 5).expect("connect mock stream")

@@ -21,10 +21,10 @@ use mvm_client::audit::{AuditSourceId, AuditSourceKind, LocalAuditReader};
 use mvm_contract::merkle::{InclusionProof, SignedAuditRoot, verify_membership};
 use mvm_core::user_config::MvmConfig;
 
-use super::super::vm::audit_chain::{AuditEmitter, audit_path_for_tenant, default_audit_dir};
-use super::super::vm::host_signer;
 use super::Cli;
 use mvm_client::audit::chain::decisions::DecisionStore;
+use mvm_client::audit::chain::emitter::{AuditEmitter, audit_path_for_tenant, default_audit_dir};
+use mvm_client::host_keypair;
 use mvm_contract::provenance::DecisionId;
 
 use inspect::audit_tail;
@@ -607,7 +607,7 @@ impl ExportArgs {
 }
 
 fn audit_receipts_export(args: &ExportArgs) -> Result<()> {
-    let signer = host_signer::load_or_init().context("loading host signer to export receipts")?;
+    let signer = host_keypair::load_or_init().context("loading host signer to export receipts")?;
     let dir = default_audit_dir().context("resolving audit directory")?;
 
     if let Some(path) = &args.archive {
@@ -927,7 +927,7 @@ fn verify_cert(
 /// Build, sign, and publish a Merkle root over the tenant's audit chain.
 fn audit_publish_root(tenant: &str) -> Result<()> {
     let signer =
-        host_signer::load_or_init().context("loading host signer to publish audit root")?;
+        host_keypair::load_or_init().context("loading host signer to publish audit root")?;
     let emitter = AuditEmitter::new(signer.signing).context("opening host audit emitter")?;
     let signed = emitter
         .publish_root(tenant)
@@ -948,7 +948,7 @@ fn audit_prove(tenant: &str, selector: &str, json: bool) -> Result<()> {
     use mvm_contract::merkle::build_inclusion_proof;
 
     let signer =
-        host_signer::load_or_init().context("loading host signer to build inclusion proof")?;
+        host_keypair::load_or_init().context("loading host signer to build inclusion proof")?;
     let dir = default_audit_dir()?;
     // Read the verified leaf set once; the selector resolves against exactly
     // the leaves the proof is built over, so indices can't drift.
@@ -1083,7 +1083,7 @@ fn audit_verify_inclusion(
     let vk = match pubkey_path {
         Some(p) => load_verifying_key(p)?,
         None => {
-            host_signer::load_or_init()
+            host_keypair::load_or_init()
                 .context("loading host signer public key")?
                 .verifying
         }
@@ -1371,7 +1371,7 @@ fn audit_verify(tenant: &str) -> Result<()> {
 
     // Both chain kinds are signed under the host key; load it once.
     let signer =
-        host_signer::load_or_init().context("loading host signer to verify audit chain")?;
+        host_keypair::load_or_init().context("loading host signer to verify audit chain")?;
 
     // The canonical verification seam: the same source discovery +
     // verification the verified-audit UI reader uses, so the CLI and UI
@@ -2340,7 +2340,7 @@ mod chain_summary_tests {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         env.set("MVM_HOME", tmp.path());
-        let signer = host_signer::load_or_init().unwrap();
+        let signer = host_keypair::load_or_init().unwrap();
         let dir = default_audit_dir().unwrap();
         let emitter = mvm_hostd::audit::emitter::AuditEmitter::new(signer.signing.clone()).unwrap();
         let plan = PlanFixture::new().tenant("local").plan_id("plan-a").build();
