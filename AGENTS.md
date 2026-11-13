@@ -326,6 +326,11 @@ No task is complete without all of:
    never a progress ledger. When implementation changes a durable decision,
    update or supersede the owning ADR. Legacy plans are frozen historical
    inputs and are not completion gates.
+7. **State the lifecycle for risky changes**: when a change touches ownership,
+   cancellation, cleanup or rollback, unsafe/FFI, or a panic path, the PR states
+   the state transitions and who owns each resource, and adds a test that fails
+   before the fix. The areas already reviewed, and those not, are recorded in
+   `specs/contracts/lifecycle-review-ledger.md`.
 
 ## Test expectations
 
