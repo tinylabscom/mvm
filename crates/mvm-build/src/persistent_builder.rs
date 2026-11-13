@@ -919,17 +919,9 @@ pub fn enforce_active_session_policy(
     Some(reason)
 }
 
-/// A recorded supervisor pid as a signal target, or `None` when it cannot name
-/// exactly one process. `kill` reads 0 as "my own process group" and a negative
-/// value as "a whole group", so a pid that is 0 (the pid file never appeared) or
-/// does not fit `pid_t` (a corrupt record) must never reach it.
-pub fn signalable_pid(pid: u32) -> Option<i32> {
-    i32::try_from(pid).ok().filter(|pid| *pid > 0)
-}
-
 fn terminate_supervisor(pid: u32) {
     #[cfg(unix)]
-    if let Some(pid) = signalable_pid(pid) {
+    if let Some(pid) = mvm_vmm::host::process_liveness::signalable_pid(pid) {
         // SAFETY: `kill(SIGTERM)` targets the PID recorded in the session file.
         // It does not dereference pointers or share memory with Rust.
         unsafe {
@@ -1722,14 +1714,6 @@ mod tests {
             result.is_none(),
             "dead PID {DEFINITELY_DEAD_PID} must be classified as not-alive"
         );
-    }
-
-    #[test]
-    fn signalable_pid_refuses_group_targets() {
-        assert_eq!(signalable_pid(0), None);
-        assert_eq!(signalable_pid(u32::MAX), None);
-        assert_eq!(signalable_pid(i32::MAX as u32 + 1), None);
-        assert_eq!(signalable_pid(4242), Some(4242));
     }
 
     #[test]
