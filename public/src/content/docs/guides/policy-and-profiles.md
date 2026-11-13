@@ -327,7 +327,7 @@ yours. It can tighten, but it cannot use an escape hatch.
 
 The pack registry source is the `mvm-packs` repository. Published legacy
 `agent/` and `runtime/` packs carry keyless (Sigstore) signatures from the
-legacy `mvm-templates` workflow identity. `mvmctl search`
+`mvm-packs` workflow identity. `mvmctl search`
 lists what the registry offers and `mvmctl pull ns/name[@version]` fetches a
 pack: the signature is verified against the publisher trust policy, the
 payload is checked file-by-file against the signed manifest, the pack is
@@ -381,10 +381,7 @@ carries are stripped with notes, never honoured.
 
 With no publisher policy file, the exact current `mvm-packs` publish workflow
 identity is trusted for `agent/` and `runtime/`. The former `mvm-templates`
-identity is accepted only for the nine exact historical versioned manifest
-reference/byte-digest pairs [listed in pack authoring](/guides/pack-authoring/#decide-who-may-publish),
-and only before 2026-11-06 00:00 UTC. Real Sigstore verification must identify
-the signer before that exception is checked. The reserved `mvm/` namespace
+identity is not trusted by the built-in policy. The reserved `mvm/` namespace
 trusts only the exact current workflow identity, never a wildcard; official
 packs also require the independently signed fresh MVM revocation feed.
 To make your own trust decision — pin other
