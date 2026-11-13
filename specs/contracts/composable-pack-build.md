@@ -217,6 +217,40 @@ second native arm64 HVF run measured 8.94 s including 3.62 s for persistent
 boot preparation (2.95 s self) and 0.99 s for legacy boot completion (0.93 s
 self). This is diagnostic timing, not an arm64 Linux/KVM witness.
 
+### Approved read-view direction (implementation not evidenced)
+
+The Pi's kernel does not advertise `CONFIG_FS_VERITY`, so a Linux
+fs-verity-only provider would fail closed there. A test-only direct-Firecracker
+probe copied the PR kernel (8.5 MB) and ext4 rootfs (71.3 MB) into separate
+`MFD_ALLOW_SEALING` memfds, applied the write, grow, shrink and further-seal
+prohibitions, confirmed a later write was refused, and passed
+the descriptors to pinned Firecracker as `/proc/self/fd/N` paths. Firecracker
+accepted both paths, started under KVM without a guest NIC, and its console
+showed the Linux kernel mount the root ext4 read-only and run `/bin/sh` as
+init. This was **only** an immutable-FD mechanism probe: it bypassed mvm
+admission, the scoped launcher, signer custody and the normal guest runtime.
+
+Use one typed publication and claim API, with sealed memfds for small Linux
+boot inputs and explicitly budgeted warm parents. A Linux host that supports
+fs-verity may instead hold inode-pinned read descriptors for large rootfs
+bytes, bound to the exact authenticated content and verity identity; the Pi
+cannot use that provider. Reflinks and permission bits are not immutable
+read views. Account memory, descriptor count and resident parent shapes
+before publication, and refuse a requested warm claim when neither provider
+can seal its exact closure within those budgets. A normal cold start remains
+separately admitted; it is never reported as a warm claim.
+
+The existing `TrustedSnapshotBackend` and `TrustedSnapshotService` must
+return an owned read lease, not a writable destination. Its generation and
+exact signed boot closure bind the kernel, rootfs, runtime and parent shape;
+the already-used Firecracker descriptor handoff must verify the VMM's
+actual objects and retain the lease until the last child exits. Each child
+still gets fresh revocation, policy and one-use plan admission. Owner restart
+loses memfds and must reconstruct from authenticated inputs before any new
+claim. APFS remains unsupported for this claim until a separately evidenced
+read-only mount lease exists. None of this is enabled by the direct-VMM probe
+or by the in-process snapshot service alone.
+
 ## Acceptance and currently missing evidence
 
 The staged v2 candidate authenticates runtime descriptors/policies and a
