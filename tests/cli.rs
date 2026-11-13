@@ -121,11 +121,41 @@ fn build_help_advertises_every_workload_source_and_image_control() {
         "--production",
         "--debug-out",
         "--input-observation",
-        "--yocto-archive",
-        "--yocto-inputs",
     ] {
         assert!(help.contains(flag), "build help missing {flag}:\n{help}");
     }
+    assert!(
+        !help.contains("--yocto-"),
+        "Yocto inputs belong in the pack spec"
+    );
+}
+
+#[test]
+fn yocto_pack_selects_its_producer_from_the_spec_before_reading_a_nix_lock() {
+    let home = tempfile::tempdir().unwrap();
+    let mut spec: serde_json::Value =
+        serde_json::from_str(include_str!("../examples/yocto/pack.json")).unwrap();
+    spec["target"] = serde_json::json!(if cfg!(target_arch = "aarch64") {
+        "aarch64-linux"
+    } else {
+        "x86_64-linux"
+    });
+    let path = home.path().join("pack.json");
+    std::fs::write(&path, serde_json::to_vec(&spec).unwrap()).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", home.path())
+        .env("HOME", home.path())
+        .arg("build")
+        .arg(&path)
+        .arg("--out")
+        .arg(home.path().join("hello.mvmpkg"))
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(error.contains("Yocto input manifest"), "{error}");
+    assert!(!error.contains("pack lock"), "{error}");
+    assert!(!home.path().join("hello.mvmpkg").exists());
 }
 
 #[test]
@@ -308,14 +338,16 @@ fn build_help_advertises_source_detection_and_export_controls() {
         "--environment",
         "--health-timeout",
         "--input-observation",
-        "--yocto-archive",
-        "--yocto-inputs",
     ] {
         assert!(
             help.contains(expected),
             "build help missing {expected}: {help}"
         );
     }
+    assert!(
+        !help.contains("--yocto-"),
+        "Yocto inputs belong in the pack spec"
+    );
 }
 
 #[test]

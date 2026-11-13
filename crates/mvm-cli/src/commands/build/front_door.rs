@@ -74,17 +74,6 @@ pub(in crate::commands) struct Args {
     /// Write bounded frozen-input diagnostics for a pack build.
     #[arg(long, value_name = "PATH")]
     pub input_observation: Option<PathBuf>,
-    /// Import a Yocto-produced rootfs archive into a sealed pack instead of using Nix.
-    #[arg(
-        long,
-        value_name = "FILE.tar.gz",
-        requires = "yocto_inputs",
-        conflicts_with = "input_observation"
-    )]
-    pub yocto_archive: Option<PathBuf>,
-    /// Pin the Yocto machine, layers and exact rootfs archive digest.
-    #[arg(long, value_name = "FILE.json", requires = "yocto_archive")]
-    pub yocto_inputs: Option<PathBuf>,
     /// Allow a local mvm-images builder-image build for this invocation.
     #[arg(long)]
     pub allow_local_builder_build: bool,
@@ -122,8 +111,6 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
                     health_timeout: args.health_timeout,
                     hypervisor: args.hypervisor,
                     input_observation: args.input_observation,
-                    yocto_archive: args.yocto_archive,
-                    yocto_inputs: args.yocto_inputs,
                 },
                 args.export,
             )
@@ -163,13 +150,8 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
 }
 
 fn reject_pack_only_flags(args: &Args) -> Result<()> {
-    if args.lock.is_some()
-        || args.hypervisor.is_some()
-        || args.input_observation.is_some()
-        || args.yocto_archive.is_some()
-        || args.yocto_inputs.is_some()
-    {
-        bail!("--lock, --hypervisor, --input-observation and --yocto-* apply only to pack sources");
+    if args.lock.is_some() || args.hypervisor.is_some() || args.input_observation.is_some() {
+        bail!("--lock, --hypervisor and --input-observation apply only to pack sources");
     }
     if args.health_timeout != 120 {
         bail!("--health-timeout applies only to pack sources");
@@ -623,27 +605,14 @@ mod tests {
     }
 
     #[test]
-    fn yocto_import_requires_both_inputs_and_a_pack_source() {
-        let parsed = Harness::try_parse_from([
-            "build",
-            "examples/yocto/pack.json",
-            "--yocto-archive",
-            "rootfs.tar.gz",
-            "--yocto-inputs",
-            "inputs.json",
-            "--out",
-            "hello.mvmpkg",
-        ])
-        .unwrap()
-        .args;
-        assert_eq!(parsed.yocto_archive, Some(PathBuf::from("rootfs.tar.gz")));
-        assert_eq!(parsed.yocto_inputs, Some(PathBuf::from("inputs.json")));
-        for incomplete in [
-            ["build", "--yocto-archive", "rootfs.tar.gz"],
-            ["build", "--yocto-inputs", "inputs.json"],
-        ] {
-            assert!(Harness::try_parse_from(incomplete).is_err());
-        }
+    fn yocto_uses_the_same_pack_source_argument_as_nix() {
+        let parsed =
+            Harness::try_parse_from(["build", "examples/yocto/pack.json", "--out", "hello.mvmpkg"])
+                .unwrap()
+                .args;
+        assert_eq!(parsed.source, PathBuf::from("examples/yocto/pack.json"));
+        assert!(Harness::try_parse_from(["build", "--yocto-archive", "rootfs.tar.gz"]).is_err());
+        assert!(Harness::try_parse_from(["build", "--yocto-inputs", "inputs.json"]).is_err());
     }
 
     #[test]

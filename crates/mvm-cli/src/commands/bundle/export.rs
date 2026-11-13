@@ -18,16 +18,14 @@
 //! capabilities and application services a launch of the bundle is held to.
 //! Every capability it requires must be permitted by `--posture`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, ValueEnum};
-use mvm_client::bundle::{
-    BundleExportInputs, HostBundleSigner, PostureInputs, StagedBundle, stage_bundle_with_signer,
-};
+use mvm_client::bundle::PostureInputs;
+pub(in crate::commands) use mvm_client::bundle::{TemplateExport, export_template, stage_template};
 
-use mvm_core::plan::types::{BuildProvenance, InputKind};
-use mvm_core::plan::{BundleResources, EnvironmentDescriptor};
+use mvm_core::plan::EnvironmentDescriptor;
 use mvm_core::security::AgentProfile;
 use mvm_core::user_config::MvmConfig;
 
@@ -147,65 +145,6 @@ impl ExportOptions {
     }
 }
 
-/// Provenance for a template built on this host: the flake it was built
-/// from. An installed bundle being re-exported records none, since this host
-/// did not build it; the exporter fills in the sealed artifacts' digests.
-fn template_provenance(flake_ref: &str, is_installed_bundle: bool) -> Option<BuildProvenance> {
-    if is_installed_bundle || flake_ref.trim().is_empty() {
-        return None;
-    }
-    Some(BuildProvenance {
-        input_kind: InputKind::NixFlake,
-        input_ref: flake_ref.to_string(),
-        lock_digest: None,
-        builder_id: None,
-        artifacts: Default::default(),
-    })
-}
-
-/// What one export of a built template records beyond its artifacts.
-pub(in crate::commands) struct TemplateExport {
-    /// Where the archive is written.
-    pub out: PathBuf,
-    /// Human-readable workload label.
-    pub label: Option<String>,
-    /// The kernel command line the workload was built and tested with.
-    pub cmdline: Option<String>,
-    /// The ceilings the publisher places on any launch.
-    pub posture: Option<PostureInputs>,
-    /// Sizing to record instead of the template's own.
-    pub resources: Option<BundleResources>,
-    /// Provenance to record instead of the template's flake reference. The
-    /// exporter still replaces its artifact digests with the sealed bytes'.
-    pub provenance: Option<BuildProvenance>,
-    /// The signed environment descriptor to seal beside the artifacts.
-    pub environment: Option<EnvironmentDescriptor>,
-    /// Producer input documents retained as signed supplemental artifacts.
-    pub supplemental_artifacts: Vec<(String, PathBuf)>,
-    /// Whether the host signer must mark this archive as local build output.
-    pub local_build: bool,
-    /// Owned verified producer closure, shared with the preceding health call.
-    pub portable_boot_assets:
-        Option<std::sync::Arc<mvm_client::portable_boot_assets::PreparedPortableBootAssets>>,
-}
-
-impl TemplateExport {
-    pub(in crate::commands) fn new(out: PathBuf) -> Self {
-        Self {
-            out,
-            label: None,
-            cmdline: None,
-            posture: None,
-            resources: None,
-            provenance: None,
-            environment: None,
-            supplemental_artifacts: Vec::new(),
-            local_build: false,
-            portable_boot_assets: None,
-        }
-    }
-}
-
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     let export = args.options.apply(TemplateExport::new(args.out))?;
     let exported = export_template(&args.template, export)?;
@@ -216,131 +155,6 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         exported.key_id.0,
     );
     Ok(())
-}
-
-/// Seal a built template (or an installed bundle) into a signed archive under
-/// the host signer.
-pub(in crate::commands) fn export_template(
-    template: &str,
-    export: TemplateExport,
-) -> Result<mvm_client::bundle::ExportedBundle> {
-    stage_template(template, export)?.publish()
-}
-
-pub(in crate::commands) fn stage_template(
-    template: &str,
-    export: TemplateExport,
-) -> Result<StagedBundle> {
-    // ---- 1. Resolve the template's artifact paths ----
-    let (spec, vmlinux, initrd, rootfs, _rev) = mvm_client::template_artifacts_dispatched(template)
-        .with_context(|| {
-            format!("loading template {template:?} — does it exist? Try `mvmctl manifest ls`")
-        })?;
-
-    // Carry a re-exported bundle's own architecture through rather than
-    // re-stamping this host's. `template_artifacts_dispatched` resolves an
-    // installed bundle as happily as a local slot, so an aarch64 bundle
-    // re-exported from an x86_64 host would otherwise be relabelled x86_64
-    // while still containing an aarch64 rootfs — and the label is what the
-    // boot-time gate trusts. A slot built here has no manifest, so it takes
-    // the host arch, which is correct for that case.
-    let installed_arch = match mvm_client::installed_bundle_archive(template)? {
-        Some(archive) => {
-            let verified = mvm_core::plan::bundle::verify_bundle_file(
-                &archive,
-                &mvm_core::plan::bundle::FsTrustStore::default_path()?,
-            )
-            .context("verifying the original bundle before re-export")?;
-            anyhow::ensure!(
-                !verified.manifest.members.iter().any(|member| matches!(
-                    member,
-                    mvm_core::plan::bundle::BundleMember::EmbeddedBootAssets { .. }
-                        | mvm_core::plan::bundle::BundleMember::EmbeddedCliBootAssets(_)
-                        | mvm_core::plan::bundle::BundleMember::CanonicalLinuxProof(_)
-                        | mvm_core::plan::bundle::BundleMember::EmbeddedImageSet { .. }
-                )),
-                "re-export of protected boot members requires original closure custody; refusing to drop publisher evidence"
-            );
-            Some(verified.manifest.arch)
-        }
-        None => None,
-    };
-    let installed_export = installed_arch.is_some();
-    let provenance = export
-        .provenance
-        .or_else(|| template_provenance(&spec.flake_ref, installed_arch.is_some()));
-    let source_arch =
-        installed_arch.unwrap_or_else(|| mvm_core::arch::GuestArch::host().to_string());
-
-    // Verity sidecar lives next to the rootfs by convention; the
-    // backend's probe is the source of truth.
-    let (verity_path, roothash) = mvm_client::probe_verity_sidecar(&rootfs);
-
-    let verity_bytes = match verity_path.as_deref() {
-        Some(p) => {
-            Some(std::fs::read(p).with_context(|| format!("reading verity sidecar at {p}"))?)
-        }
-        None => None,
-    };
-
-    if let Some(assets) = &export.portable_boot_assets {
-        anyhow::ensure!(
-            !installed_export,
-            "cannot replace an installed bundle's closure"
-        );
-        assets.verify_build_kernel(std::path::Path::new(&vmlinux))?;
-    }
-    // ---- 2. Seal, sign under the host key, and write the archive ----
-    let selected_initrd = export
-        .portable_boot_assets
-        .as_ref()
-        .map(|assets| {
-            assets
-                .initramfs_path()
-                .to_str()
-                .context("portable initramfs path is not UTF-8")
-        })
-        .transpose()?
-        .or(initrd.as_deref());
-    let signer = HostBundleSigner::load()?;
-    let supplemental_artifacts: Vec<(&str, &Path)> = export
-        .supplemental_artifacts
-        .iter()
-        .map(|(name, path)| (name.as_str(), path.as_path()))
-        .collect();
-    let inputs = BundleExportInputs {
-        vmlinux: &vmlinux,
-        initrd: selected_initrd,
-        rootfs: &rootfs,
-        verity_bytes: verity_bytes.as_deref(),
-        roothash: roothash.as_deref(),
-        profile: Some(&spec.profile),
-        // The template's declared resources travel with the bundle so a
-        // launch on another host starts from them without rediscovering
-        // them. `--cpus` / `--memory` still override at launch time.
-        resources: Some(export.resources.unwrap_or(BundleResources {
-            vcpus: u32::from(spec.vcpus),
-            mem_mib: spec.mem_mib,
-        })),
-        arch_label: &source_arch,
-        label: export.label,
-        cmdline: export.cmdline.as_deref(),
-        posture: export.posture,
-        provenance,
-        environment: export.environment,
-        local_build: export.local_build,
-        boot_assets: None,
-        cli_boot_assets: None,
-        canonical_linux_proof: None,
-        supplemental_artifacts: &supplemental_artifacts,
-        local_composition: None,
-        out: &export.out,
-        debug_out: None,
-    };
-    match &export.portable_boot_assets {
-        Some(assets) => assets.stage(&inputs, &signer),
-        None => stage_bundle_with_signer(&inputs, &signer),
-    }
 }
 
 #[cfg(test)]
@@ -436,14 +250,5 @@ mod tests {
         .unwrap();
         let err = read_environment(&empty).unwrap_err();
         assert!(format!("{err:#}").contains("argv"), "{err:#}");
-    }
-
-    #[test]
-    fn provenance_is_recorded_only_for_a_locally_built_template() {
-        let local = template_provenance("github:org/app#default", false).unwrap();
-        assert_eq!(local.input_kind, InputKind::NixFlake);
-        assert_eq!(local.input_ref, "github:org/app#default");
-        assert!(template_provenance("github:org/app#default", true).is_none());
-        assert!(template_provenance("  ", false).is_none());
     }
 }
