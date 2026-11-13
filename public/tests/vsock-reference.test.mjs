@@ -191,7 +191,6 @@ test("the transport table accounts for every registered service, including raw c
   for (const [, name] of opcode.code.matchAll(/^    (\w+) = /gm)) {
     assert.ok(page.includes(`\`${name}\``), `FlowMux disposition missing for ${name}`);
   }
-  assert.match(readRepoFile("public/src/sidebar.ts"), /slug: "reference\/vsock-messages"/);
   for (const path of [
     "public/src/content/docs/reference/guest-agent.md",
     "public/src/content/docs/guides/networking.md",

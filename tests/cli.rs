@@ -239,6 +239,8 @@ fn build_help_advertises_every_workload_source_and_image_control() {
         "--production",
         "--debug-out",
         "--input-observation",
+        "--yocto-archive",
+        "--yocto-inputs",
     ] {
         assert!(help.contains(flag), "build help missing {flag}:\n{help}");
     }
@@ -424,6 +426,8 @@ fn build_help_advertises_source_detection_and_export_controls() {
         "--environment",
         "--health-timeout",
         "--input-observation",
+        "--yocto-archive",
+        "--yocto-inputs",
     ] {
         assert!(
             help.contains(expected),

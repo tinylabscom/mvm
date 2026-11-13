@@ -34,8 +34,8 @@ use std::process::Command;
 
 use crate::rust_source::{CommentSyntax, blank_comments};
 
-// CI witness, overclaim, snapshot-owner, and CLI option-source tests remain
-// measured. Leave room for concurrent main changes rather than delete coverage.
+// CI witness, overclaim, snapshot-owner, Yocto importer, and CLI option-source
+// tests remain measured. Leave room for concurrent main changes.
 /// Ceiling on total SLOC, all categories.
 const MAX_TOTAL_SLOC: usize = 970_000;
 /// Ceiling on total physical lines, all categories.
