@@ -482,6 +482,13 @@ fn spawn_shell(
             // Start in $HOME.
             let _ = chdir(start_dir.as_ptr().cast());
 
+            // The same strip every workload-code spawn applies:
+            // no_new_privs plus every capability set emptied before exec.
+            // prctl/capset only, so async-signal-safe like the calls above.
+            if crate::guest_mount::drop_workload_capability_bounding_set().is_err() {
+                libc::_exit(126);
+            }
+
             // The workload's seccomp tier goes on last, after every call above
             // that a tier may refuse. A shell that cannot be confined does not
             // run.
@@ -1390,5 +1397,50 @@ mod tests {
             "replay: {received:?}"
         );
         assert!(hung_up);
+    }
+
+    /// Live witness: a console-spawned shell holds no capabilities. The
+    /// strip runs in the forked child before `execve`, so the shell that
+    /// materialises on the PTY is the workload posture, not the agent's.
+    /// Same gate as the guest_mount privilege witnesses (root plus
+    /// `MVM_GUEST_PRIVILEGED_TESTS=1`).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_console_spawned_shell_holds_no_capabilities() {
+        use std::io::Read as _;
+
+        if !crate::guest_mount::privilege_tests::privileged() {
+            return;
+        }
+        let request = OpenRequest {
+            cols: 80,
+            rows: 24,
+            argv: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "grep -E '^(NoNewPrivs|CapPrm|CapEff|CapInh|CapAmb):' /proc/self/status"
+                    .to_string(),
+            ],
+            ..OpenRequest::default()
+        };
+        let argv = build_console_argv(&request.argv).expect("argv");
+        let (child_pid, mut master) = spawn_shell(&request, &argv).expect("spawn shell on a pty");
+        let mut output = Vec::new();
+        master
+            .read_to_end(&mut output)
+            .expect("read the pty master");
+        // SAFETY: child_pid is a live child of this test process; waitpid
+        // reaps it and touches no memory.
+        unsafe {
+            libc::waitpid(child_pid, std::ptr::null_mut(), 0);
+        }
+        let status = String::from_utf8_lossy(&output);
+        for set in ["CapPrm", "CapEff", "CapInh", "CapAmb"] {
+            assert!(
+                status.contains(&format!("{set}:\t0000000000000000")),
+                "{set} must be empty after the workload strip; got:\n{status}"
+            );
+        }
+        assert!(status.contains("NoNewPrivs:\t1"), "got:\n{status}");
     }
 }
