@@ -649,9 +649,9 @@ mod tests {
     /// root is an error, not a skip.
     #[cfg(target_os = "linux")]
     fn privileged() -> bool {
-        match (std::env::var("MVM_GUEST_PRIVILEGED_TESTS").ok(), unsafe {
-            libc::geteuid()
-        }) {
+        // SAFETY: geteuid takes no pointers and reads only this process's effective UID.
+        let euid = unsafe { libc::geteuid() };
+        match (std::env::var("MVM_GUEST_PRIVILEGED_TESTS").ok(), euid) {
             (Some(value), 0) if value == "1" => true,
             (Some(value), euid) if value == "1" => {
                 panic!("MVM_GUEST_PRIVILEGED_TESTS=1 is set but this test runs as euid {euid}")
