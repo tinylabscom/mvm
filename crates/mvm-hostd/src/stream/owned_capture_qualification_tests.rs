@@ -2,17 +2,14 @@
 //!
 //! Binding values and connection IDs are fixtures representing independently
 //! verified facts. No actual peer, startup permit or HVF call is authenticated.
-//! The proof-vector child checks fixture signature math only. Broker tests use
-//! the existing real redaction/encrypted transcript seam, not a supervisor or
-//! public audited output-reader witness.
+//! Broker tests use the existing real redaction/encrypted transcript seam,
+//! not a supervisor or public audited output-reader witness.
 
 use super::tests::{Fixture, fixture};
 use super::*;
 use std::collections::VecDeque;
 use std::sync::{Barrier, Mutex};
 
-#[path = "owned_capture_proof_tests.rs"]
-mod proof_vectors;
 #[path = "owned_capture_reconciliation_tests.rs"]
 mod reconciliation;
 

@@ -36,6 +36,70 @@ fn enrolled(client: &IdentityClient) -> EnrolledIdentity {
         .identity()
 }
 
+#[cfg(feature = "experimental-owned-capture")]
+#[test]
+fn loaded_credential_signs_only_capture_for_its_exact_enrollment_and_current_process() {
+    use mvm_core::crypto::entrypoint_delegation::RegistrationBinding;
+    use mvm_core::crypto::owned_capture::{
+        CaptureBinding, CaptureChallenge, CaptureProof, CaptureProofError,
+    };
+
+    let client = IdentityClient::start(Box::new(MemoryStore::default())).unwrap();
+    let identity = enrolled(&client);
+    let credential = client.load(&identity, deadline()).unwrap().wait().unwrap();
+    let binding = |identity, producer| {
+        CaptureBinding::builder(
+            identity,
+            RegistrationBinding {
+                tenant: "test-tenant".into(),
+                instance: format!("test-vm/{}", Uuid::new_v4()),
+                plan_id: format!("sha256:{}", "22".repeat(32)),
+                plan_nonce: mvm_core::plan::Nonce::from_bytes([4; 16]),
+                run: Uuid::new_v4(),
+                producer: Uuid::new_v4(),
+                session: Uuid::new_v4(),
+                not_before: 100,
+                not_after: 200,
+            },
+            "test-vm",
+        )
+        .with_startup([1; 32])
+        .with_call(Uuid::new_v4())
+        .with_boot([2; 32])
+        .with_capture_run("test-run")
+        .with_peer_pids(producer, 5678)
+        .build()
+        .unwrap()
+    };
+    let challenge =
+        CaptureChallenge::fresh(binding(identity.clone(), std::process::id()), 110).unwrap();
+    let proof = credential.prove_capture(&challenge, 111).unwrap();
+    let decoded = CaptureProof::decode(&proof.encode().unwrap(), &challenge, 111).unwrap();
+    assert_eq!(
+        decoded.verify(&challenge, 111).unwrap().challenge(),
+        &challenge
+    );
+    assert_eq!(
+        credential.prove_capture(&challenge, 140),
+        Err(CaptureProofError::Expired)
+    );
+    let mut swapped = identity;
+    swapped.installation = Uuid::new_v4();
+    let other_enrollment =
+        CaptureChallenge::fresh(binding(swapped, std::process::id()), 110).unwrap();
+    assert_eq!(
+        credential.prove_capture(&other_enrollment, 111),
+        Err(CaptureProofError::Binding)
+    );
+    let other_pid = std::process::id().checked_add(1).unwrap();
+    let other_process =
+        CaptureChallenge::fresh(binding(credential.identity(), other_pid), 110).unwrap();
+    assert_eq!(
+        credential.prove_capture(&other_process, 111),
+        Err(CaptureProofError::Binding)
+    );
+}
+
 #[test]
 fn enrollment_loads_exact_pin_and_does_not_replace_an_existing_key() {
     let store = MemoryStore::default();

@@ -480,7 +480,7 @@ jobs:
           features="$features,mvm-sdk/schema,mvm-sdk/compiler,mvm-sdk/deploy-remote"
           features="$features,mvm-build/manifest-verify,mvm-build/release-channel,mvm-build/test-support"
           features="$features,mvm-cli/manifest-verify,mvm-cli/release-artifact-bootstrap,mvm-cli/test-support"
-          features="$features,mvm-hostd/manifest-verify,mvm-hostd/wasm-backend"
+          features="$features,mvm-hostd/manifest-verify,mvm-hostd/wasm-backend,mvm-hostd/experimental-owned-capture"
           features="$features,mvm-runtime/wasm-backend,mvm-runtime/test-support"
           features="$features,mvm-backends/test-support,mvm-vmm/test-support,mvm-fs/test-support"
           features="$features,mvm-agentd/addons"
@@ -498,6 +498,11 @@ jobs:
 
       - name: Clippy (mvm-sdk without default features)
         run: ./scripts/cargo.sh clippy --locked --all-targets -p mvm-sdk --no-default-features -- -D warnings
+
+      - name: Experimental capture possession (codec and credential, no VM)
+        run: |
+          ./scripts/cargo.sh test --locked -p mvm-core --features experimental-owned-capture --lib crypto::owned_capture::tests
+          ./scripts/cargo.sh test --locked -p mvm-hostd --features experimental-owned-capture --lib caller_identity::tests
 
   lint-policy:
     # This policy lane publishes the `Invariant` context. The architecture
@@ -832,7 +837,7 @@ jobs:
           cargo check --locked --target x86_64-pc-windows-gnu \
             -p mvm-contract -p mvm-core -p mvm-net -p mvm-bundler -p mvm-backends
           cargo check --locked --target x86_64-pc-windows-gnu \
-            -p mvm-core --features provenance,client,hostd-transport
+            -p mvm-core --features provenance,client,hostd-transport,experimental-owned-capture
 
   test-windows-identity:
     name: Windows repository identity runtime

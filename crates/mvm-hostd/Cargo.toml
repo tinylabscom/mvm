@@ -209,6 +209,8 @@ ctor = "0.2"
 
 [features]
 default = []
+# Closed capture-purpose credential operation only; no receiver activation.
+experimental-owned-capture = ["mvm-core/experimental-owned-capture"]
 # macOS-only protected caller opt-in; other platforms return Unsupported.
 native-caller-identity = ["dep:core-foundation", "dep:security-framework"]
 manifest-verify = ["mvm-core/manifest-verify"]

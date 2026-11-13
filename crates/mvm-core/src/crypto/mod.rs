@@ -19,6 +19,8 @@ pub mod key_rotation;
 // `validate_shell_id` name validator is compiled for guests — the plan
 // manifest validator shares it; every stateful provider is host-state.
 pub mod keystore;
+#[cfg(feature = "experimental-owned-capture")]
+pub mod owned_capture;
 pub mod policy;
 pub mod posture;
 pub mod rate_limiter;

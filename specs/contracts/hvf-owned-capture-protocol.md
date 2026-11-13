@@ -3,8 +3,9 @@
 Status: **Proposed for runtime/security review; not an enabled protocol.**
 Scope: [#5265](https://github.com/tinylabscom/mvm/issues/5265), refining
 [the capture requirements](hvf-entrypoint-capture.md). Issue comments own
-approval and delivery status. No receiver, signing operation, startup field,
-wire version or public client report is activated by this proposal.
+approval and delivery status. The experimental library feature below implements
+the possession primitive only. No receiver, startup field, wire negotiation or
+public client report is activated.
 
 Source baseline: `57b55a804ec60e2fba6f6ce5baef65a97546f0e6`.
 Studio's pin remains `592c0b8280d5b4d343269708ed70d237353fa4f9`.
@@ -18,7 +19,7 @@ Existing seams to extend only after review:
 [kernel peer identity](../../crates/mvm-vmm/src/host/uds_peer.rs#L14),
 [independently retained enrollment](../../crates/mvm-hostd/src/supervisor/caller_registration.rs#L28),
 and [the sole protected recorder](../../crates/mvm-hostd/src/stream/protected.rs#L68).
-None currently implements the capture proof proposed below.
+None currently connects the capture proof proposed below to execution.
 
 ## Recommendation and alternatives
 
@@ -81,6 +82,137 @@ not capture-write authority. The new permit and proof are separate. No
 caller-registration, recovery or stop proof bytes are accepted as this proof.
 No owner factory, keyless-lifecycle prerequisite or publisher verification
 requirement is relaxed.
+
+### Experimental startup envelope
+
+**Experimental implementation requirements; not implemented or enabled.**
+The serialized-once and host–helper compatibility requirements below are
+mandatory before sending this format. The experimental possession library does
+not implement either startup integration requirement. The current
+[`read_config_input`](../../crates/mvm-hostd/src/bin/mvm-hvf-supervisor.rs#L142)
+accepts at most 8 MiB of raw UTF-8 configuration; the
+[`startup_mode`](../../crates/mvm-hostd/src/bin/mvm-hvf-supervisor.rs#L228)
+check requires kernel, image descriptors and registration together for checked
+startup. Keep those rules and the legacy format intact.
+
+Recommend a versioned binary envelope on the **existing original startup
+input**, not a new inherited descriptor, environment variable, state file,
+registration field or producer handshake. Binary framing preserves the exact
+held configuration bytes without JSON escaping or reparsing/reserializing them.
+The alternative of adding a permit to `HvfSupervisorConfig` is not selected:
+it changes a widely constructed startup type and makes excluding that field
+from its own configuration hash an implicit serialization rule.
+
+The proposed complete input, in order, is:
+
+| Field | Exact encoding |
+| --- | --- |
+| Discriminator | Eight bytes `MVMOCAP\0` (`4d 56 4d 4f 43 41 50 00`). |
+| Envelope version | One unsigned byte, value `1`. |
+| Configuration length | Big-endian u32, 1..8388608 bytes. |
+| Configuration | That many original UTF-8 `HvfSupervisorConfig` JSON bytes, unchanged. |
+| Permit-record length | Big-endian u16, value `53` for this version. |
+| Permit version | One unsigned byte, value `1`. |
+| Intended call | Nonnil UUID, its 16 network-order bytes. |
+| Configuration digest | SHA-256 of only the preceding configuration bytes, 32 bytes. |
+| Original launcher PID | Big-endian u32, greater than one; a consistency check only. |
+
+The fixed overhead is 68 bytes; the whole envelope is at most 8388676 bytes.
+Use checked arithmetic. Reject declared lengths before allocating, short
+records, invalid UTF-8/JSON, unknown versions, wrong fixed permit length and
+trailing bytes before descriptor adoption, diagnostics publication, signing
+helpers or native execution. Retain the 8 MiB inner-config limit and the
+separate 4096-byte connected control-frame limit; neither is enlarged by this
+outer envelope. Once the discriminator is recognized, no parse/admission
+failure may retry the input as legacy JSON.
+
+The fixed permit record intentionally does not duplicate enrollment, tenant,
+plan or registration claims. Its configuration digest commits to their exact
+startup encoding. The child must independently derive and retain those claims
+from normal checked admission and the consumed caller launch, then combine
+them with the intended call and its own native instance/capture run. Neither
+matching a digest nor parsing this record establishes admission. The actual
+original startup custody supplies the separate permit-installation authority.
+
+Before native effects, the trusted owned invocation creates and retains the
+call ID and capture preparation. **Serialize the final supervisor config
+exactly once**, after all launch-time fields are fixed, into one held immutable
+byte string. Use that same byte string for the envelope's startup-config
+payload, the SHA-256 input and the retained invocation/call binding. Lengths
+also come from that held byte string. Do not independently serialize a copy
+for any of these purposes, even if it currently produces equal JSON or equal
+bytes. The child hashes the exact inner bytes it received, never its parsed
+config reserialization. A request DTO, generic plan, recovered handle or
+name-resolved dispatch cannot construct the retained invocation capability.
+
+Implementing this input format **requires a host–helper contract-version
+bump in the same change as the encoder, decoder and launcher preflight**.
+Advance the then-current
+[`HOST_HELPER_CONTRACT_VERSION`](../../crates/mvm-vmm/src/host/helper_contract.rs#L25)
+rather than treating the envelope's own version byte or the unchanged JSON
+shape pin as sufficient. No bump or claim of envelope support is made by this
+document or by the possession-only feature.
+
+Before launching the workload supervisor or sending any envelope bytes, the
+launcher must require the selected helper's exact bumped host–helper contract
+version through the existing
+[`resolve_verified`](../../crates/mvm-vmm/src/host/aux_bin.rs#L170)
+boundary **and positively establish that this actual helper build supports
+the experimental envelope version**. A version match alone cannot distinguish
+feature-enabled and feature-disabled binaries from the same source tree.
+Feature-disabled helpers must not advertise envelope support. Missing, stale,
+malformed or unsupported responses refuse envelope startup before native
+effects; an allowed source rebuild must pass these same checks afterward.
+Never send the envelope to an old/feature-disabled helper to discover support
+from its parse error. Receiver-side rejection remains defense in depth, not
+the compatibility negotiation. Do not silently retry as a legacy launch.
+
+Before any helper spawn, the child samples its actual parent and arms/rechecks
+the parent's lifetime observer. The record's PID must equal that sampled live
+parent; it must not choose which process to observe. Envelope parsing creates
+only untrusted data. Installation additionally requires successful checked
+startup and consumed caller admission, verified boot inputs, the actual native
+instance and the existing protected owner. Legacy, partial checked, builder,
+restore, replay/re-exec and handoff paths must not install this permit.
+Replaying serialized bytes cannot restore a spent or retired permit.
+
+Required compatibility/authority tests before activation:
+
+- Old raw JSON follows its unchanged path and never installs capture. Launcher
+  preflight refuses old, feature-disabled, wrong-version, unresponsive and
+  malformed-response helpers before workload spawn or any envelope write.
+  In particular, a feature-disabled helper with the correct bumped global
+  version is still refused. A failed support check never retries as legacy;
+  a rebuilt helper must pass preflight again.
+- A serialization-counting regression observes exactly one final config
+  serialization. Startup payload, digest input and retained call binding all
+  originate from the same held bytes. A serializer producing different output
+  on a second invocation must not be invoked twice. This checks construction
+  provenance, not just equality of independently serialized values.
+- A supporting experimental decoder preserves the exact inner bytes, including
+  whitespace and multibyte UTF-8. Equal JSON values with different bytes produce
+  different startup digests.
+- Every prefix truncation, forged length, unknown version, trailing byte,
+  nil call, invalid PID and configuration-digest mismatch refuses without
+  adopting/closing supplied descriptors or launching a guest.
+- A well-framed envelope containing an invalid/unadmitted registration,
+  mismatched plan, incomplete boot inputs or unsupported startup mode never
+  installs a permit or falls back.
+- Actual original-parent exit/reparenting between sampling, observer arming,
+  admission and installation refuses. A supplied PID, native-instance DTO or
+  possession proof cannot substitute for that custody chain.
+- The retained invocation consumes capture preparation only for its original
+  dispatch. Fatal startup failures still refuse boot. If capture preparation or
+  authentication fails after a valid launch and dispatch is allowed to proceed,
+  that call is explicitly unrecorded; no retry reconstructs complete capture
+  from serialized bytes.
+
+These requirements limit implementation and qualification to the experimental
+path. They are not production capture approval or evidence that startup,
+authenticated ingest or HVF recording works. The one-call spend, no-refund,
+FD-custody and real readback gates below remain unchanged. The original
+guest-dispatch lifecycle and sole protected writer remain the owners of their
+existing operations.
 
 ## Authenticate the actual connection in both directions
 
@@ -159,11 +291,11 @@ including framing, within the unchanged 4096-byte ceiling.
 
 ### Deterministic encoding vectors
 
-The [complete golden messages and signatures](../../crates/mvm-hostd/src/stream/owned_capture_proof_vectors.json)
+The [complete golden messages and signatures](../../crates/mvm-core/src/crypto/owned_capture/proof_vectors.json)
 are test data, not runtime credentials or receiver receipts. Concatenate each
 `message_hex` array in order; it includes the NUL-terminated domain and all
-signed fields, not outer framing. The private
-[reference codec and tests](../../crates/mvm-hostd/src/stream/owned_capture_proof_tests.rs#L1)
+signed fields, not outer framing. The experimental
+[library codec tests](../../crates/mvm-core/src/crypto/owned_capture/tests.rs#L1)
 use the public RFC 8032 test-vector key and the actual `RegistrationBinding`
 type/instance validator. An independent Python Ed25519 encoder generated the
 fixed expected bytes/signatures; the Rust tests must reproduce them exactly,
@@ -194,7 +326,7 @@ unknown tag/version, trailing bytes, changed binding/challenge and another
 signing domain. Invalid canonical instances are rejected even with a valid
 fixture-key signature over their unnormalized bytes. These are deterministic
 encoding/validation and signature-math checks only: they do not authorize
-installation, authenticate a real socket/peer or implement a credential call.
+installation or authenticate a real socket/peer.
 
 ### One-call spend and retirement
 
@@ -467,6 +599,47 @@ cannot inherit this permit or reconnect it to another recorder.
 
 ## Executable evidence and remaining activation gates
 
+### Experimental library boundary
+
+The off-by-default `experimental-owned-capture` feature exposes
+[`mvm-core::crypto::owned_capture`](../../crates/mvm-core/src/crypto/owned_capture/mod.rs#L1)
+and the closed
+[`CallerCredential::prove_capture`](../../crates/mvm-hostd/src/caller_identity/mod.rs#L53)
+operation. It adds no dependencies, native key store, generic signing API,
+listener or execution path. Load the credential through the existing identity
+worker; this operation uses that already loaded credential without another
+keychain request. It refuses a challenge for a different process PID or full
+enrollment. A PID check alone does not qualify fork safety or native custody.
+
+Bindings are immutable validated data, not permits. Challenge decoding requires
+independently retained launch/native/peer context; registration validity comes
+only from that context. Proof decoding requires the receiver's exact retained
+challenge, followed by strict Ed25519 verification under the separate purpose.
+Whole-frame length is bounded before field parsing; this slice accepts an
+already supplied byte slice, not a socket length prefix or allocation request.
+The future receiver must enforce bounds before reading/allocating the frame.
+Wall-clock validation is not the required monotonic transport deadline.
+
+The original independently generated golden corpus now checks the actual
+library codec rather than a second test-only implementation. Tests cover both
+Challenge and Proof roundtrips, exact bytes/signatures, canonical instances,
+binding/purpose substitution, malformed input, freshness, and mock socket I/O.
+The credential test uses the real identity worker with its private in-memory
+test store, not the macOS keychain. Re-verifying a proof does not consume it;
+only the future receiver's atomic one-call spend may authorize writes.
+
+Run the library and credential checks explicitly:
+
+```sh
+cargo test -p mvm-core --features experimental-owned-capture --lib crypto::owned_capture::tests
+cargo test -p mvm-hostd --features experimental-owned-capture --lib caller_identity::tests
+```
+
+This is experimental implementation, not production approval or evidence of
+authenticated transport, admission, concurrent spend/retirement, inherited-FD
+custody, recorder finalization or live HVF/readback. No code in this slice sets
+`capture.recorded = true`, changes Studio's pin or closes #5265.
+
 `mvm-vmm`'s `host::uds_peer::process_tests` exercises real owned subprocesses.
 A fresh connection identifies both actual processes; EOF and reaped child
 status remain separate from retained socket identity. Fixtures hold the
@@ -495,9 +668,9 @@ unconfirmed copies, and validation/loss of final replies.
 
 The receiver model's binding values and connection IDs are **fixtures**, not
 enrolled identities, verified peers, original child handles or startup
-permits. It assumes the verifier's facts; it authenticates no one. Separate
-private proof-vector tests exercise the canonical byte encoding and fixture
-signature verification, not a credential operation or real session.
+permits. It assumes the verifier's facts; it authenticates no one. The separate
+experimental library tests above exercise the actual possession primitive,
+not its use by a real receiver or authenticated session.
 The [reconciliation cases](../../crates/mvm-hostd/src/stream/owned_capture_reconciliation_tests.rs#L1)
 check original fragment/byte conservation, checked overflow refusal, accepted
 subcategories, nonce/call/sequence/count conflicts, in-flight loss and lost

@@ -50,6 +50,27 @@ impl CallerCredential {
         RegistrationProof::sign(&self.key, &self.identity(), challenge, now)
     }
 
+    /// Experimental capture possession only, using the already loaded key.
+    /// This neither establishes native custody nor spends a capture permit.
+    ///
+    /// # Errors
+    /// Refuses a different producer process, enrollment, malformed or stale claims.
+    #[cfg(feature = "experimental-owned-capture")]
+    pub fn prove_capture(
+        &self,
+        challenge: &mvm_core::crypto::owned_capture::CaptureChallenge,
+        now: u64,
+    ) -> std::result::Result<
+        mvm_core::crypto::owned_capture::CaptureProof,
+        mvm_core::crypto::owned_capture::CaptureProofError,
+    > {
+        use mvm_core::crypto::owned_capture::{CaptureProof, CaptureProofError};
+        if challenge.binding().producer_pid() != std::process::id() {
+            return Err(CaptureProofError::Binding);
+        }
+        CaptureProof::sign(&self.key, &self.identity(), challenge, now)
+    }
+
     /// Recovery possession only; no peer authentication or lifecycle authority.
     ///
     /// # Errors
