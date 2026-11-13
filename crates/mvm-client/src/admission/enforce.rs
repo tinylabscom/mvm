@@ -102,6 +102,8 @@ mod claim_shares_tests {
             read_only: true,
             encrypted: false,
             content_sha256: Some(mvm_core::crypto::image_verify::sha256_file(&image).unwrap()),
+            include: Vec::new(),
+            exclude: Vec::new(),
         }];
         let plan_json = serde_json::to_string(&plan).unwrap();
         enforce_shares_for_claim(&volumes, &plan_json).expect("unchanged bytes are attached");

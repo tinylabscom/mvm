@@ -1079,6 +1079,8 @@ impl LocalBackend {
                 read_only: volume.read_only,
                 kind: volume.kind,
                 encrypted: volume.encrypted,
+                share_include: Vec::new(),
+                share_exclude: Vec::new(),
             })
             .collect();
 

@@ -1021,6 +1021,8 @@ mod tests {
                 read_only,
                 kind: self,
                 encrypted: false,
+                share_include: Vec::new(),
+                share_exclude: Vec::new(),
             }
         }
     }

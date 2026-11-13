@@ -1711,6 +1711,8 @@ mod tests {
             host_dir: "/host/data".into(),
             guest_mount: "/data".into(),
             read_only: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
         let req = ExecRequest {
             name: Some("named-vm".into()),
@@ -2227,6 +2229,8 @@ mod tests {
                 host_dir: "/h".into(),
                 guest_mount: "/g".into(),
                 read_only: true,
+                include: Vec::new(),
+                exclude: Vec::new(),
             }],
             true,
             SnapshotCapability::LiveMemory

@@ -335,6 +335,8 @@ mod tests {
                 host_dir: "/host/src".into(),
                 guest_mount: "/work/src".into(),
                 read_only: true,
+                include: Vec::new(),
+                exclude: Vec::new(),
             }],
             disk_volumes: Vec::new(),
             env: vec![("NAME".into(), "ari".into())],

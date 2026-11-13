@@ -271,6 +271,8 @@ impl ResolvedVolumeAttachment {
             // This bit means in-guest block encryption. Managed local volumes
             // are encrypted by the host lifecycle instead.
             encrypted: false,
+            share_include: Vec::new(),
+            share_exclude: Vec::new(),
         }
     }
 }

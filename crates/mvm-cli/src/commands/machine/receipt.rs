@@ -154,6 +154,7 @@ pub(super) fn machine_start_volume_policy(
                 host_dir,
                 guest_mount,
                 read_only,
+                ..
             } => ("dir_share", host_dir, guest_mount, read_only),
             VolumeSpec::Disk {
                 host,

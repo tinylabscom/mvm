@@ -40,13 +40,28 @@ pub(crate) fn materialize_mount_volumes(
     }
     let cache = crate::mount_cache::MountImageCache::new()?;
     sub.start(SubPhase::MountFingerprint);
+    // The deny set each share materializes under: the built-in protected-path
+    // set minus the share's signed re-exposures plus its additional denies.
+    // Invalid combinations refuse here, before anything is built or signed.
+    let denies = shares
+        .iter()
+        .map(|share| {
+            mvm_contract::policy::protected_paths::effective_deny_set(
+                &share.include,
+                &share.exclude,
+            )
+            .map_err(|error| anyhow::anyhow!("mount '{}': {error}", share.host_dir))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let fingerprints = shares
         .iter()
+        .zip(&denies)
         .enumerate()
-        .map(|(index, share)| {
+        .map(|(index, (share, deny))| {
             cache.fingerprint(
                 std::path::Path::new(&share.host_dir),
                 &mount_volume_label(index),
+                deny.clone(),
             )
         })
         .collect::<Result<Vec<_>>>();
@@ -88,6 +103,10 @@ pub(crate) fn materialize_mount_volumes(
                 // Same authority the image was written with, so the guest
                 // mounts the label that is actually on the bytes.
                 volume_label: Some(mount_volume_label(index)),
+                // The deny set the image was filtered with, so the signed
+                // grant names exactly the tree the guest will see.
+                share_include: share.include.clone(),
+                share_exclude: share.exclude.clone(),
                 ..Default::default()
             })
         })
@@ -115,6 +134,8 @@ mod tests {
             host_dir: scratch.path().join("missing").display().to_string(),
             guest_mount: "/work".to_string(),
             read_only: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
         let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
         let err = materialize_mount_volumes(&[share], &mut sub).unwrap_err();
@@ -134,6 +155,8 @@ mod tests {
                 host_dir: source.display().to_string(),
                 guest_mount: "/work".to_string(),
                 read_only: requested_read_only,
+                include: Vec::new(),
+                exclude: Vec::new(),
             };
             let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
             let volumes = materialize_mount_volumes(&[share], &mut sub).unwrap();
@@ -155,6 +178,8 @@ mod tests {
             host_dir: source.display().to_string(),
             guest_mount: "/work".to_string(),
             read_only: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
 
         let mut miss_marks = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
