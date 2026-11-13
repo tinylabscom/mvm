@@ -35,8 +35,8 @@ libkrun_commit="b7e43f044d74b77abcfa51175055f72d7cfd6de0"
 libkrunfw_commit="f6a710faaa8cfe3b67a4bcdadb082c2183a914f1"
 libkrun_version="1.18.1"
 libkrunfw_abi="5"
-kernel_version="linux-6.12.116"
-kernel_sha256="cb3ed3dfdd47e6ade49dc933db334fd86e24cadee920da612c262b0e9b6a511b"
+kernel_version="linux-6.12.117"
+kernel_sha256="74e99aa5e60e242e0a165fed8cb2ea0d054bf7a401f01861d403d75733456613"
 deployment_target="13.0"
 # Exported at top level, not inside build_upstream: a restored upstream cache skips
 # that function, and the supervisor built below must still link at this target.

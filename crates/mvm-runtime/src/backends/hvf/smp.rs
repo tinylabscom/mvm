@@ -152,6 +152,17 @@ impl Drop for TurnGuard<'_> {
     }
 }
 
+/// Runs its closure when dropped, including by unwinding. A vCPU thread that
+/// panics would otherwise skip ending the machine and leave every parked CPU
+/// for `thread::scope` to join forever.
+pub(crate) struct OnDrop<F: FnMut()>(pub(crate) F);
+
+impl<F: FnMut()> Drop for OnDrop<F> {
+    fn drop(&mut self) {
+        (self.0)();
+    }
+}
+
 /// Why a parked secondary woke up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Release {
@@ -441,6 +452,25 @@ mod tests {
 
     /// Shutdown after a release still lets an already-started CPU be woken
     /// again — the second wait returns `Shutdown` rather than blocking.
+    #[test]
+    fn a_panic_while_a_cpu_is_parked_still_releases_it() {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let gates = SecondaryGates::new(2);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                std::thread::scope(|scope| {
+                    scope.spawn(|| gates.wait_for_release(1));
+                    let _end = OnDrop(|| gates.shutdown());
+                    panic!("boot CPU died");
+                })
+            }));
+            let _ = done.send(());
+        });
+        finished
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the thread scope must not wedge on a parked CPU");
+    }
+
     #[test]
     fn shutdown_is_idempotent_and_outlives_a_consumed_request() {
         let gates = SecondaryGates::new(2);
