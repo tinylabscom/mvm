@@ -72,7 +72,9 @@ pub fn stage_composable_application(
     spec_dir: &Path,
 ) -> Result<StagedComposableApplication, ComposableStageError> {
     spec.validate()?;
-    let PackSource::Local { path } = &spec.source;
+    let PackSource::Local { path } = &spec.source else {
+        return Err(PackError::YoctoSourceNotNix.into());
+    };
     let spec_root = spec_dir
         .canonicalize()
         .map_err(|source| PackError::SourceRoot {

@@ -144,6 +144,7 @@ impl PackBuildError {
                 PackSpecError::Identity => "identity",
                 PackSpecError::Package => "package",
                 PackSpecError::Path => "path",
+                PackSpecError::YoctoSource => "yocto_source",
                 PackSpecError::Entrypoint => "entrypoint",
                 PackSpecError::Resources => "resources",
                 PackSpecError::Serialization => "serialization",
