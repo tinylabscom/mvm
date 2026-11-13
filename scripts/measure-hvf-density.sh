@@ -390,24 +390,22 @@ capture_processes() {
   awk '
     BEGIN {
       print "component\tcount\trss_kib\trss_mib"
+      n = split("mvm-hvf-supervisor firecracker mvm-network-endpoint mvm-mailbox mvm-host-agent mvm-signer-helper mvm-host-signer mvm-audit-signer mvm-broker mvmctl", names, " ")
     }
     {
       pid = $1
       rss = $2
       comm = $3
-      args = $0
       if (comm ~ /awk$/) next
+      # Name the program file alone. The wave directory is named for its backend
+      # and appears in the arguments of helpers, so matching the line would count
+      # every helper as that backend VMM.
+      program = $4
+      sub(/.*\//, "", program)
       comp = ""
-      if (args ~ /mvm-hvf-supervisor/) comp = "mvm-hvf-supervisor"
-      else if (args ~ /firecracker/) comp = "firecracker"
-      else if (args ~ /mvm-network-endpoint/) comp = "mvm-network-endpoint"
-      else if (args ~ /mvm-mailbox/) comp = "mvm-mailbox"
-      else if (args ~ /mvm-host-agent/) comp = "mvm-host-agent"
-      else if (args ~ /mvm-signer-helper/) comp = "mvm-signer-helper"
-      else if (args ~ /mvm-host-signer/) comp = "mvm-host-signer"
-      else if (args ~ /mvm-audit-signer/) comp = "mvm-audit-signer"
-      else if (args ~ /mvm-broker/) comp = "mvm-broker"
-      else if (args ~ /mvmctl/) comp = "mvmctl"
+      for (i = 1; i <= n; i++) {
+        if (program == names[i] || index(program, names[i] "-") == 1) { comp = names[i]; break }
+      }
       if (comp != "") {
         count[comp] += 1
         rss_kib[comp] += rss
