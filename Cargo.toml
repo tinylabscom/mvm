@@ -119,7 +119,7 @@ exclude = [
 resolver = "3"
 
 [workspace.package]
-version = "0.28.0-rc.1"
+version = "0.28.0-rc.2"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -303,29 +303,29 @@ tree-sitter-typescript = "0.23.2"
 # here because member crates can't override that on a workspace-inherited
 # dependency unless the workspace entry already carries it. The root binary
 # opts back into user-facing defaults through its own `[features]` block.
-mvm-contract = { path = "crates/mvm-contract", version = "0.28.0-rc.1", default-features = false, features = ["protocol"] }
-mvm-core = { path = "crates/mvm-core", version = "0.28.0-rc.1" }
-mvm-bundler = { path = "crates/mvm-bundler", version = "0.28.0-rc.1" }
-mvm-compiler = { path = "crates/mvm-compiler", version = "0.28.0-rc.1" }
-mvm-client ={ path = "crates/mvm-client", version = "0.28.0-rc.1" }
-mvm-agentd = { path = "crates/mvm-agentd", version = "0.28.0-rc.1" }
-mvm-setpriv = { path = "crates/mvm-setpriv", version = "0.28.0-rc.1" }
-mvm-builder-guest = { path = "crates/mvm-builder-guest", version = "0.28.0-rc.1" }
-mvm-host-services = { path = "crates/mvm-host-services", version = "0.28.0-rc.1" }
-mvm-build = { path = "crates/mvm-build", version = "0.28.0-rc.1", default-features = false }
-mvm-runtime = { path = "crates/mvm-runtime", version = "0.28.0-rc.1", default-features = false }
-mvm-vmm = { path = "crates/mvm-vmm", version = "0.28.0-rc.1" }
-mvm-backends = { path = "crates/mvm-backends", version = "0.28.0-rc.1" }
-mvm-fs = { path = "crates/mvm-fs", version = "0.28.0-rc.1" }
-mvm-http = { path = "crates/mvm-http", version = "0.28.0-rc.1" }
-mvm-net = { path = "crates/mvm-net", version = "0.28.0-rc.1" }
-mvm-cli = { path = "crates/mvm-cli", version = "0.28.0-rc.1", default-features = false }
-mvm-hostd = { path = "crates/mvm-hostd", version = "0.28.0-rc.1", default-features = false }
+mvm-contract = { path = "crates/mvm-contract", version = "0.28.0-rc.2", default-features = false, features = ["protocol"] }
+mvm-core = { path = "crates/mvm-core", version = "0.28.0-rc.2" }
+mvm-bundler = { path = "crates/mvm-bundler", version = "0.28.0-rc.2" }
+mvm-compiler = { path = "crates/mvm-compiler", version = "0.28.0-rc.2" }
+mvm-client ={ path = "crates/mvm-client", version = "0.28.0-rc.2" }
+mvm-agentd = { path = "crates/mvm-agentd", version = "0.28.0-rc.2" }
+mvm-setpriv = { path = "crates/mvm-setpriv", version = "0.28.0-rc.2" }
+mvm-builder-guest = { path = "crates/mvm-builder-guest", version = "0.28.0-rc.2" }
+mvm-host-services = { path = "crates/mvm-host-services", version = "0.28.0-rc.2" }
+mvm-build = { path = "crates/mvm-build", version = "0.28.0-rc.2", default-features = false }
+mvm-runtime = { path = "crates/mvm-runtime", version = "0.28.0-rc.2", default-features = false }
+mvm-vmm = { path = "crates/mvm-vmm", version = "0.28.0-rc.2" }
+mvm-backends = { path = "crates/mvm-backends", version = "0.28.0-rc.2" }
+mvm-fs = { path = "crates/mvm-fs", version = "0.28.0-rc.2" }
+mvm-http = { path = "crates/mvm-http", version = "0.28.0-rc.2" }
+mvm-net = { path = "crates/mvm-net", version = "0.28.0-rc.2" }
+mvm-cli = { path = "crates/mvm-cli", version = "0.28.0-rc.2", default-features = false }
+mvm-hostd = { path = "crates/mvm-hostd", version = "0.28.0-rc.2", default-features = false }
 
-mvm-sdk = { path = "crates/mvm-sdk", version = "0.28.0-rc.1" }
-mvm-capture = { path = "crates/mvm-capture", version = "0.28.0-rc.1" }
+mvm-sdk = { path = "crates/mvm-sdk", version = "0.28.0-rc.2" }
+mvm-capture = { path = "crates/mvm-capture", version = "0.28.0-rc.2" }
 # Keep bindgen/libclang opt-in; real FFI requires libkrun on the host.
-libkrun-sys = { path = "crates/deps/libkrun-sys", version = "0.28.0-rc.1" }
+libkrun-sys = { path = "crates/deps/libkrun-sys", version = "0.28.0-rc.2" }
 
 # Dev dependencies
 assert_cmd = "2"
