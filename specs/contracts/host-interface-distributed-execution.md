@@ -543,8 +543,13 @@ compatibility. A catalogue entry remains discovery metadata, not launch authorit
 The tested client revision and backend determine which beats can be shown live.
 If an operation is unavailable, omit the live claim or show a clearly separate
 labelled preview. A lifecycle-only rehearsal is not acceptance of the full
-denial-and-evidence story. No source or Studio pin change is authorized by this
-proposal.
+denial-and-evidence story. Beats 3 and 4 need an egress-capable request, not the
+mission runbook's BusyBox `wget`: a manual HVF curl-image run produced
+`host.flow.denied` and an `mvmctl explain --review` denial, but direct Studio
+readback through `mvm_client::explain::explain_local_run` has only a hermetic
+test. Label that client beat and the three concurrent workloads as previews
+until witnessed together on the demo Mac. No source or Studio pin change is
+authorized by this proposal.
 
 Returned stdout/stderr remain separate from a protected recorded copy.
 Owner acceptance, final close and independently verified readback are distinct.
