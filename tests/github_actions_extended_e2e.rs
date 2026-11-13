@@ -1,4 +1,11 @@
 //! Regression checks for the scheduled documented-surface witnesses.
+//!
+//! Owned gate: `e2e-docs.yml` (and the `release.yml` job that waits for it).
+//! It is a scheduled, multi-hour, self-hosted lane; a broken edit surfaces a
+//! day later, so these tests pin its job wiring (shards, budgets, runner
+//! labels, image preparation) on every pull request. The `the_bounded_runner_*`
+//! tests and `both_live_harnesses_report_phase_timings` are behavioural: they
+//! execute the lane's own Python and bash helpers.
 
 use std::fs;
 #[cfg(unix)]

@@ -14,6 +14,17 @@
 //!   cd nix && nix flake check --no-build
 //!
 //! Documented in `specs/runbooks/cross-platform-install.md` (Phase 5).
+//!
+//! Classification:
+//! - Owned gate: the `nix/` flake, profiles and package recipes. Nix is not
+//!   installed on the PR runners, so the `nix flake check` outcome is not
+//!   available there; these text checks stand in for it, and the
+//!   `*_when_nix_available` tests evaluate for real where Nix exists. `ci.yml`'s
+//!   path filter lists `nix/` so a change there runs this file.
+//! - Not owned by a gate: `installation_docs_*`, `quickstart_docs_*` and
+//!   `happy_paths_*` pin documentation prose. They are kept only because
+//!   `check-machine-doc-guards` does not assert the same strings; the owner
+//!   should be that gate, and they are the first to move there.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1251,17 +1262,15 @@ fn flake_lock_pins_microvm_input_by_hash() {
         )
     });
 
-    // Pinned by hash means the lockfile carries a `rev` field for
-    // the microvm input. We don't pin a *specific* hash here (CI's
-    // `xtask audit-flake` does that on bump) — we just verify the
-    // microvm input is present in the lockfile.
+    // Parse it: a `"rev"` substring anywhere (another input, a comment-like
+    // string) would satisfy a text match while the microvm pin was a branch.
+    let lock: serde_json::Value = serde_json::from_str(&content).expect("flake.lock is JSON");
+    let rev = lock["nodes"]["microvm"]["locked"]["rev"]
+        .as_str()
+        .expect("the microvm input must be pinned by `rev`");
     assert!(
-        content.contains("\"microvm\""),
-        "flake.lock must contain the 'microvm' input pin"
-    );
-    assert!(
-        content.contains("\"rev\""),
-        "flake.lock must pin inputs by `rev` (commit hash)"
+        rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_hexdigit()),
+        "microvm must be pinned by a 40-hex commit, got {rev}"
     );
 }
 
