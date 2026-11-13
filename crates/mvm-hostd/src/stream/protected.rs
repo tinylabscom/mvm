@@ -540,6 +540,65 @@ mod tests {
     use mvm_vmm::vmm::device::{MmioDevice, Pl011};
 
     #[test]
+    fn a_vm_name_does_not_grant_entrypoint_ingest_into_a_protected_owner() {
+        use std::io::Write;
+
+        use super::super::entrypoint_source::RecordedCopy;
+        use mvm_core::stream_client::{OutputRequest, RecordOrigin, open_vm_output};
+        use mvm_runtime::workload_runner::ConsoleCapture;
+
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        host_keypair::load_or_init_at(&config::mvm_keys_dir()).unwrap();
+        let vm = "owner-not-name-authorized";
+        let plan = PlanFixture::new().build();
+        let (owner, mut producer) = CaptureOwner::start(CaptureParams {
+            vm,
+            authority: CaptureAuthority::Admitted(&plan),
+            redaction: &plan.redaction,
+        })
+        .unwrap();
+        assert!(config::vm_stream_socket(vm).exists());
+        let plane = super::super::StreamPlane::new();
+        let console = config::vm_console_log(vm);
+        plane
+            .attach(&ConsoleCapture {
+                vm_name: vm,
+                supervisor_owned: true,
+                console_log: &console,
+                display_socket: None,
+                redaction: &plan.redaction,
+                retention: plan.stream_retention,
+            })
+            .unwrap();
+        let mut sink = plane.entrypoint_sink(vm);
+        assert!(!sink.is_recorded());
+        for kind in [StreamKind::Stdout, StreamKind::Stderr] {
+            let shown = sink.ingest(kind, b"synthetic-caller-only");
+            assert_eq!(shown.kind, kind);
+            assert_eq!(shown.body, b"synthetic-caller-only");
+            assert_eq!(shown.recorded, RecordedCopy::NotRecorded);
+        }
+        assert!(!plane.is_attached(vm));
+        producer.write_all(b"synthetic-owner-console").unwrap();
+        drop(producer);
+        assert!(owner.finish());
+        assert_eq!(
+            sink.ingest(StreamKind::Stdout, b"synthetic-after-owner-exit")
+                .recorded,
+            RecordedCopy::NotRecorded
+        );
+        let mut reader = open_vm_output(vm, OutputRequest::default()).unwrap();
+        let record = reader.next_output().unwrap().unwrap();
+        assert_eq!(record.origin, RecordOrigin::Durable);
+        assert_eq!(record.kind, StreamKind::Stdout);
+        assert_eq!(record.payload, b"synthetic-owner-console");
+        assert!(reader.next_output().unwrap().is_none());
+        assert!(!console.exists());
+    }
+
+    #[test]
     fn supervisor_owner_captures_after_launcher_drop_without_plaintext_files() {
         let mut env = TestEnv::new();
         let home = tempfile::tempdir().unwrap();

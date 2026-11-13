@@ -34,11 +34,11 @@ use super::mmio_layout::{
     BALLOON_IRQ, BALLOON_MMIO_BASE, MAX_DISKS, RNG_IRQ, RNG_MMIO_BASE, VSOCK_IRQ, VSOCK_MMIO_BASE,
     disk_mmio,
 };
-use super::smp::{CreationOrder, Release, SecondaryGates, VcpuStart, psci};
+use super::smp::{CreationOrder, OnDrop, Release, SecondaryGates, VcpuStart, psci};
 use super::snapshot::{HVF_SNAPSHOT_BACKEND_KIND, HvfVcpuState};
 use super::stop_wake::{RunOver, wake_until_done};
 use super::sys::*;
-use super::vcpu::esr_ec;
+use super::vcpu::{esr_ec, next_pc};
 use super::{BootFault, default_bootargs};
 use crate::vmm::device::Pl011;
 use crate::vmm::device_state::SnapshotDeviceState;
@@ -186,7 +186,7 @@ fn handle_exception(
         }
         // Advance past the faulting instruction and keep going.
         let pc = vc.get_core(CoreReg::Pc)?;
-        vc.set_core(CoreReg::Pc, pc + 4)?;
+        vc.set_core(CoreReg::Pc, next_pc(pc))?;
         return Ok(RunControl::Continue);
     }
 
@@ -276,6 +276,9 @@ pub struct KernelBootResult {
     /// Internal supervisor shutdown spans. Present when the watchdog stopped a
     /// live run; absent for setup failures and ordinary guest exits.
     pub shutdown_timing: Option<KernelShutdownTiming>,
+    /// What the teardown scrub did to the guest RAM mapping. Present when the
+    /// run ended in an orderly teardown; a killed supervisor leaves none.
+    pub ram_scrub: Option<mvm_vmm::host::hvf_supervisor::HvfRamScrubRecord>,
     /// What the machine consumed, measured from inside the run.
     ///
     /// The vCPU CPU time can only be read while the vCPU threads are alive, so
@@ -728,9 +731,12 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
         }
         r
     };
-    // `guest_ram` unmaps here as it drops, after `hv_vm_destroy` above.
+    // Scrub now, after `hv_vm_destroy`, so the report exists before the
+    // supervisor says it has finished; `guest_ram` unmaps as it drops.
+    let ram_scrub = guest_ram.scrub();
     result.map(|mut boot_result| {
         boot_result.restore_mapping_micros = restore_mapping_micros;
+        boot_result.ram_scrub = Some(ram_scrub);
         boot_result
     })
 }
@@ -1325,6 +1331,7 @@ fn run_secondary<B: run::DeviceBus>(
     let clock = ThreadCpuHandle::for_current_thread().ok().map(Arc::new);
     let registered = created.send(Ok(clock.clone())).is_ok();
 
+    let _end_on_unwind = OnDrop(|| shared.end());
     let result = (|| {
         if !registered {
             // The boot CPU gave up on the bring-up. Do not enter the guest.
@@ -1974,6 +1981,7 @@ unsafe fn run(
                     .collect();
                 drop(created_tx);
                 drop(ready_tx);
+                let _end_on_unwind = OnDrop(|| shared.end());
 
                 // Wait for the whole machine to exist before starting the
                 // guest. The device tree already describes these CPUs, so a
@@ -2176,6 +2184,7 @@ unsafe fn run(
             other_ecs: diagnostics.other_ecs,
             final_pc,
             usage,
+            ram_scrub: None,
             shutdown_timing: stop_observed_at.map(|observed_at| KernelShutdownTiming {
                 watchdog_to_vcpu_exit: vcpu_exited_at.saturating_duration_since(observed_at),
                 watchdog_join,

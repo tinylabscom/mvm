@@ -60,11 +60,11 @@ import mvm
     image=mvm.nix_packages(["python312"]),
     resources=mvm.resources(cpu_cores=1, memory_mb=512, rootfs_size_mb=512),
     network=mvm.network(mode="none"),
-    entrypoint=mvm.entrypoint_function(
+    entrypoints=[mvm.entrypoint_function(
         module="app",
         function="main",
         primary=True,
-    ),
+    )],
 )
 def main() -> str:
     return "hello from mvm"

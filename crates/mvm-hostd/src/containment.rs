@@ -15,6 +15,34 @@ use mvm_core::host_interface::{ExecutionEpoch, workload::WorkloadLedger};
 use mvm_core::plan::ExecutionPlan;
 
 use crate::audit::emitter::AuditEmitter;
+use crate::supervisor::audit::PlanAuditEntry;
+
+/// Emit an operator event about a workload, bound to `plan` when one is at
+/// hand and otherwise to the workload's own labels alone (no plan or image).
+fn emit_operator_event(
+    emitter: &AuditEmitter,
+    plan: Option<&ExecutionPlan>,
+    tenant: &str,
+    event: &str,
+    extras: impl IntoIterator<Item = (String, String)>,
+) -> Result<()> {
+    if let Some(plan) = plan {
+        return emitter.emit(plan, event, extras);
+    }
+    emitter.emit_entry(&PlanAuditEntry {
+        timestamp: chrono::Utc::now(),
+        tenant: mvm_core::plan::TenantId(tenant.to_owned()),
+        plan_id: mvm_core::plan::PlanId(String::new()),
+        plan_version: 0,
+        bundle_id: None,
+        bundle_version: None,
+        image_name: String::new(),
+        image_sha256: String::new(),
+        event: event.to_owned(),
+        caller_commitment: None,
+        labels: extras.into_iter().collect(),
+    })
+}
 
 /// Longest operator reason recorded in the chain.
 const MAX_REASON_BYTES: usize = 256;
@@ -30,20 +58,13 @@ pub fn quarantine_workload(
     plan: &ExecutionPlan,
     reason: &str,
 ) -> Result<()> {
-    let mut ledger = WorkloadLedger::load_at(home)?;
-    ledger.quarantine(&plan.workload.0);
-    ledger.save_at(home).context("saving the workload ledger")?;
-    emitter.emit(
-        plan,
-        "workload.quarantined",
-        [
-            ("workload".to_string(), plan.workload.0.clone()),
-            (
-                "epoch".to_string(),
-                ledger.entry(&plan.workload.0).epoch.0.to_string(),
-            ),
-            ("reason".to_string(), bounded(reason)),
-        ],
+    quarantine_with(
+        home,
+        emitter,
+        Some(plan),
+        &plan.tenant.0,
+        &plan.workload.0,
+        reason,
     )
 }
 
@@ -53,19 +74,81 @@ pub fn replace_workload(
     emitter: &AuditEmitter,
     plan: &ExecutionPlan,
 ) -> Result<ExecutionEpoch> {
+    replace_with(home, emitter, Some(plan), &plan.tenant.0, &plan.workload.0)
+}
+
+/// Quarantine by workload name. The ledger and the audit log are the whole
+/// authority; a stopped machine's plan is not needed.
+pub fn quarantine_named(
+    home: &Path,
+    emitter: &AuditEmitter,
+    tenant: &str,
+    workload: &str,
+    reason: &str,
+) -> Result<()> {
+    quarantine_with(home, emitter, None, tenant, workload, reason)
+}
+
+fn quarantine_with(
+    home: &Path,
+    emitter: &AuditEmitter,
+    plan: Option<&ExecutionPlan>,
+    tenant: &str,
+    workload: &str,
+    reason: &str,
+) -> Result<()> {
     let mut ledger = WorkloadLedger::load_at(home)?;
-    let previous = ledger.entry(&plan.workload.0).epoch;
-    let next = previous.next();
-    emitter.emit(
+    ledger.quarantine(workload);
+    ledger.save_at(home).context("saving the workload ledger")?;
+    emit_operator_event(
+        emitter,
         plan,
+        tenant,
+        "workload.quarantined",
+        [
+            ("workload".to_string(), workload.to_owned()),
+            (
+                "epoch".to_string(),
+                ledger.entry(workload).epoch.0.to_string(),
+            ),
+            ("reason".to_string(), bounded(reason)),
+        ],
+    )
+}
+
+/// Replace by workload name. Every call advances the epoch again: each one is
+/// an audited authorization, and the previous epoch is already dead.
+pub fn replace_named(
+    home: &Path,
+    emitter: &AuditEmitter,
+    tenant: &str,
+    workload: &str,
+) -> Result<ExecutionEpoch> {
+    replace_with(home, emitter, None, tenant, workload)
+}
+
+fn replace_with(
+    home: &Path,
+    emitter: &AuditEmitter,
+    plan: Option<&ExecutionPlan>,
+    tenant: &str,
+    workload: &str,
+) -> Result<ExecutionEpoch> {
+    let mut ledger = WorkloadLedger::load_at(home)?;
+    let previous = ledger.entry(workload).epoch;
+    let next = previous.next();
+    emit_operator_event(
+        emitter,
+        plan,
+        tenant,
         "workload.replaced",
         [
-            ("workload".to_string(), plan.workload.0.clone()),
+            ("workload".to_string(), workload.to_owned()),
             ("previous_epoch".to_string(), previous.0.to_string()),
             ("epoch".to_string(), next.0.to_string()),
         ],
     )?;
-    let granted = ledger.replace(&plan.workload.0);
+    let granted = ledger.replace(workload);
     debug_assert_eq!(granted, next);
     ledger.save_at(home).context("saving the workload ledger")?;
     Ok(granted)

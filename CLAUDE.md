@@ -3,6 +3,10 @@
 Backing: shipped-source
 Validation: check-claim-catalog
 
+Read `AGENTS.md` before changing this repository. Its product and design
+boundaries govern new work; this file describes the current implementation,
+while ADR-001 and its witnessed backend matrix govern shipped security claims.
+
 ## Project Overview
 
 Rust CLI for building and running Firecracker microVMs on macOS and Linux. Handles the full dev lifecycle: bootstrapping, Nix-based image builds, single-VM management, and reusable template creation.
@@ -860,9 +864,12 @@ this row as enforced without it.
     before staging it beside `mvmctl`, and tolerates only a 404, for releases
     that predate the asset (tested in `tests/install_sh.rs`). A
     copy found beside `mvmctl` or in the cache is held to its own manifest,
-    not re-verified against the signature, and `MVM_SKIP_COSIGN_VERIFY` skips
-    the signature here as it does everywhere. No published release carries the
-    asset yet.
+    not re-verified against the signature when the runtime is assembled, and
+    `MVM_SKIP_COSIGN_VERIFY` skips the signature at download time as it does
+    everywhere. The Firecracker launch proof is stricter: it re-verifies the
+    archive's signed bundle at every launch and `MVM_SKIP_COSIGN_VERIFY` does
+    not waive it, so a locally built archive can be assembled from but never
+    launched under Firecracker. No published release carries the asset yet.
 
     The release job also attests build provenance for the binary tarballs
     (`actions/attest-build-provenance`, verifiable with `gh attestation

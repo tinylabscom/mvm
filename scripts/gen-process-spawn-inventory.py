@@ -305,6 +305,7 @@ A = {
     "mvm-cli/src/commands/pool/refill.rs": ("mvmctl self re-exec", "detached `mvmctl` pool refill helper"),
     "mvm-cli/src/commands/seccomp_audit.rs": ("fork + execvpe", "audit a program under a seccomp filter (filtered env)"),
     "mvm-cli/src/commands/vm/sdk_no_vm.rs": ("user script", "run an SDK wrapper script without a VM"),
+    "mvm-cli/src/doctor/mod.rs": ("host probe", "probe the explicit Firecracker override with --version"),
     "mvm-cli/src/doctor/security_checks.rs": ("host probe", "fdesetup / findmnt / lsblk posture checks"),
     "mvm-cli/src/doctor/toolchain.rs": ("host probe", "`<tool> --version` probes in doctor"),
     "mvm-cli/src/host_binaries/payload_build.rs": ("toolchain", "cargo zigbuild of the embedded host binaries (refusal is in host_binaries/source.rs)"),

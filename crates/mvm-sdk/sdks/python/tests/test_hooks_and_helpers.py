@@ -112,7 +112,7 @@ def test_app_with_all_four_hook_phases_emits_merged_hooks():
         source=mvm.local_path("."),
         image=mvm.python_image(),
         resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
-        entrypoint=mvm.entrypoint(command=["python", "-m", "hello"]),
+        entrypoints=[mvm.entrypoint(command=["python", "-m", "hello"])],
         before_build="python -m migrate",
         before_start=["export", "MODEL=/m"],
         after_start=mvm.hook(["curl", "-fsS", "/h"]),
@@ -149,7 +149,7 @@ def test_app_without_optional_rust_fields_omits_them():
         source=mvm.local_path("."),
         image=mvm.python_image(),
         resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
-        entrypoint=mvm.entrypoint(command=["python", "-m", "hello"]),
+        entrypoints=[mvm.entrypoint(command=["python", "-m", "hello"])],
     )
     def hello():
         pass
@@ -170,7 +170,7 @@ def test_env_with_literal_and_secret_helpers():
         source=mvm.local_path("."),
         image=mvm.python_image(),
         resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
-        entrypoint=mvm.entrypoint(command=["python", "-m", "hello"]),
+        entrypoints=[mvm.entrypoint(command=["python", "-m", "hello"])],
         env={
             "MODEL_PATH": mvm.literal("/data/model.pt"),
             "API_KEY": mvm.secret("api-key", type="bearer", hosts=["api.example.com"]),
@@ -195,7 +195,7 @@ def test_hook_list_of_mvm_hooks_passes_through():
         source=mvm.local_path("."),
         image=mvm.python_image(),
         resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
-        entrypoint=mvm.entrypoint(command=["python", "-m", "hello"]),
+        entrypoints=[mvm.entrypoint(command=["python", "-m", "hello"])],
         before_start=[
             mvm.hook("setup-1"),
             mvm.hook(["setup-2", "--flag"]),

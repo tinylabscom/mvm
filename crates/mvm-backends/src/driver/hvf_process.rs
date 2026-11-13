@@ -32,8 +32,9 @@ pub(crate) const PID_FILE_NAME: &str = "hvf.pid";
 pub(crate) const PID_FILE_TIMEOUT: Duration = Duration::from_secs(60);
 pub const PAUSE_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// The marker is the pid, then the process start time; a bare pid still reads.
 pub(crate) fn read_pid(path: &Path) -> Option<libc::pid_t> {
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+    mvm_vmm::host::process_liveness::read_pid_file(path)
 }
 
 pub(crate) fn pid_alive(pid: libc::pid_t) -> bool {
@@ -288,5 +289,31 @@ mod host_binary_dir_tests {
         std::fs::write(declared.path().join("mvm-hvf-supervisor"), b"bin").unwrap();
 
         assert!(supervisor_in_host_binary_dir(&host));
+    }
+}
+
+#[cfg(test)]
+mod pid_marker_tests {
+    use super::read_pid;
+    use mvm_vmm::host::network_endpoint_spawn::EndpointPid;
+    use mvm_vmm::host::process_liveness::pid_file_has_live_process;
+
+    fn marker(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(super::PID_FILE_NAME);
+        std::fs::write(&path, body).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn the_supervisor_record_reads_live_and_a_recycled_pid_reads_dead() {
+        let own = std::process::id();
+        let record = EndpointPid::of_child(own);
+        let started = record.started.expect("this host reports a start time");
+        let (_dir, path) = marker(&record.render());
+        assert_eq!(read_pid(&path), Some(own as i32));
+        assert!(pid_file_has_live_process(&path));
+        std::fs::write(&path, format!("{own} {}", started + 1)).unwrap();
+        assert!(!pid_file_has_live_process(&path));
     }
 }

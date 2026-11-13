@@ -130,8 +130,8 @@ fn libkrun_supervisor_spec() -> mvm_vmm::host::aux_bin::AuxBin<'static> {
 }
 
 pub(crate) fn read_pid(path: &Path) -> Option<libc::pid_t> {
-    let s = std::fs::read_to_string(path).ok()?;
-    s.trim().parse::<libc::pid_t>().ok()
+    // The marker is the pid, then the process start time.
+    mvm_vmm::host::process_liveness::read_pid_file(path)
 }
 
 pub(crate) fn pid_alive(pid: libc::pid_t) -> bool {
@@ -156,5 +156,20 @@ pub(crate) fn cleanup_vsock_sockets(state_dir: &Path) {
     {
         let socket = mvm_core::config::vm_vsock_port_socket_at(state_dir, port);
         let _ = std::fs::remove_file(socket);
+    }
+}
+
+#[cfg(test)]
+mod pid_marker_tests {
+    use super::read_pid;
+
+    #[test]
+    fn a_marker_recording_the_start_time_reads_as_its_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("libkrun.pid");
+        std::fs::write(&path, "4242 1791788104\n").unwrap();
+        assert_eq!(read_pid(&path), Some(4242));
+        std::fs::write(&path, "4242\n").unwrap();
+        assert_eq!(read_pid(&path), Some(4242));
     }
 }

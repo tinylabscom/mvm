@@ -15,9 +15,8 @@
 # /dev/kvm exposed) running Ubuntu 24.04 LTS. CAX (ARM) instances
 # work too — the runcmd block detects architecture at boot.
 #
-# Pinned Firecracker version follows `crates/mvm-core/src/config.rs::
-# FC_VERSION_DEFAULT`. Bump there first, then here, so the workspace
-# default and the Hetzner box stay in lockstep.
+# The Firecracker release is whatever `crates/mvm-core/firecracker.lock`
+# pins, checked against its digests when the box boots.
 #
 # Idempotency: cloud-init only runs runcmd on first boot. Re-running
 # is the operator's job; everything below is written so a manual
@@ -174,25 +173,6 @@ runcmd:
         >> /home/mvm/.bashrc
     fi
 
-  # Install Firecracker. Version pinned to match
-  # `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`. If you bump
-  # that constant, bump FC_VERSION here.
-  - |
-    FC_VERSION="v1.17.0"
-    ARCH=$(uname -m)   # x86_64 or aarch64
-    if ! command -v firecracker >/dev/null \
-       || ! firecracker --version 2>&1 | grep -q "$FC_VERSION"; then
-      cd /tmp
-      curl -fsSL "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-${ARCH}.tgz" -o fc.tgz
-      tar -xzf fc.tgz
-      install -m 0755 "release-${FC_VERSION}-${ARCH}/firecracker-${FC_VERSION}-${ARCH}" /usr/local/bin/firecracker
-      if [ -f "release-${FC_VERSION}-${ARCH}/jailer-${FC_VERSION}-${ARCH}" ]; then
-        install -m 0755 "release-${FC_VERSION}-${ARCH}/jailer-${FC_VERSION}-${ARCH}" /usr/local/bin/jailer
-      fi
-      rm -rf fc.tgz "release-${FC_VERSION}-${ARCH}"
-    fi
-    firecracker --version
-
   # Cargo tools used by the test suite. Pinned; install only if
   # missing so reruns are cheap.
   - |
@@ -212,6 +192,14 @@ runcmd:
     if [ ! -d /home/mvm/mvm ]; then
       sudo -u mvm git clone https://github.com/tinylabscom/mvm.git /home/mvm/mvm
     fi
+
+  # Firecracker: the release `crates/mvm-core/firecracker.lock` pins, checked
+  # against its pinned digests by the in-repo staging script, so it runs after
+  # the clone above rather than before it.
+  - |
+    bash /home/mvm/mvm/scripts/release/stage-firecracker.sh "$(uname -m)" /opt/firecracker
+    ln -sf /opt/firecracker/firecracker /usr/local/bin/firecracker
+    firecracker --version
 
   # Symlink the in-repo run-tests.sh into ~mvm so the MOTD path
   # works without copying the file (and updates flow with `git pull`).

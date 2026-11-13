@@ -117,9 +117,9 @@ import mvm
     image=mvm.nix_packages(["python3"]),
     resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
     dependencies=mvm.no_deps(),
-    entrypoint=mvm.entrypoint_function(
+    entrypoints=[mvm.entrypoint_function(
         module="app", function="greet", language="python", format="json"
-    ),
+    )],
 )
 def greet(name: str) -> str:
     return f"hello, {name}"
@@ -138,12 +138,12 @@ export const greet = mvm.app({
   image: mvm.nix_packages(["nodejs_22"]),
   resources: mvm.resources({ cpu_cores: 1, memory_mb: 256, rootfs_size_mb: 512 }),
   dependencies: mvm.no_deps(),
-  entrypoint: mvm.entrypoint_function({
+  entrypoints: [mvm.entrypoint_function({
     language: "typescript",
     module: "app",
     function: "greet",
     format: "json",
-  }),
+  })],
 })((name: string): string => `hello, ${name}`);
 ```
 
@@ -363,13 +363,13 @@ import mvm
     image=mvm.nix_packages(["python3"]),
     resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
     dependencies=mvm.no_deps(),
-    entrypoint=mvm.entrypoint_function(
+    entrypoints=[mvm.entrypoint_function(
         module="app",
         function="greet",
         language="python",
         format="json",
         primary=True,
-    ),
+    )],
 )
 def _spec(): pass
 ```
@@ -388,13 +388,13 @@ export const spec = mvm.app({
   image: mvm.nix_packages(["nodejs_22"]),
   resources: mvm.resources({ cpu_cores: 1, memory_mb: 256, rootfs_size_mb: 512 }),
   dependencies: mvm.no_deps(),
-  entrypoint: mvm.entrypoint_function({
+  entrypoints: [mvm.entrypoint_function({
     language: "typescript",
     module: "app",
     function: "greet",
     format: "json",
     primary: true,
-  }),
+  })],
 })(() => undefined);
 ```
 
