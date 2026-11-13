@@ -71,7 +71,7 @@ fn cache_prune_dry_run_does_not_emit() {
         .assert()
         .success();
 
-    // dry-run is a read-only verb — Plan 37 §6 explicitly excludes it.
+    // dry-run is a read-only verb, so the audit contract excludes it.
     assert!(
         !env.audit_log().exists(),
         "dry-run must not write the audit log"

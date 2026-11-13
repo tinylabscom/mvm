@@ -64,7 +64,7 @@
 //! variants. Note: serde does not support `deny_unknown_fields` on
 //! internally tagged enums, so — unlike the externally tagged
 //! host↔guest vsock types — unknown fields inside a variant are
-//! ignored rather than rejected. Revisit alongside the Phase 0
+//! ignored rather than rejected. Revisit alongside the
 //! encoding decision if strictness is required.
 
 // `anyhow` is used by both the sync codecs and the gated async helpers.
