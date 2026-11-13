@@ -223,8 +223,8 @@ fn run_boot_check(
     arch: &str,
 ) -> Result<()> {
     use crate::commands::env::builder_vm::KernelVariant;
-    use crate::commands::shared::wait_for_guest_agent;
     use crate::ui;
+    use mvm_client::readiness::wait_for_guest_agent;
 
     if !variants.iter().any(|(v, _)| *v == KernelVariant::Workload) {
         ui::warn(

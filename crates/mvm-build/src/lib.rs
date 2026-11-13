@@ -20,9 +20,6 @@ pub mod source_closure;
 mod source_copy;
 pub mod workspace_graph;
 
-#[cfg(all(test, unix))]
-mod test_support;
-
 /// Portable image-contract verification; acquisition requires a Unix host.
 #[cfg(not(unix))]
 pub mod published_image_set {
