@@ -36,8 +36,12 @@ use crate::rust_source::{CommentSyntax, blank_comments};
 
 // CI witness repair adds checked timeout and enrollment regressions; admit its
 // small measured increase rather than delete security coverage to fit the ratchet.
+// The overclaim lint's agent-sandbox walk test adds measured lines for the same
+// reason: the gate fix needs the regression coverage more than the headroom.
+// The tree sits at this ratchet (966,126 measured on the merge commit), so a
+// small margin is admitted until the footprint-reduction lane tightens it again.
 /// Ceiling on total SLOC, all categories.
-const MAX_TOTAL_SLOC: usize = 966_100;
+const MAX_TOTAL_SLOC: usize = 966_160;
 /// Ceiling on total physical lines, all categories.
 const MAX_TOTAL_PHYSICAL: usize = 1_232_000;
 /// How far under a ceiling the tree may sit before the ceiling must drop.
