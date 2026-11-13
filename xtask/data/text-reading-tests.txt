@@ -1,0 +1,20 @@
+# Test files that read workflow, recipe, script or nix text: path<TAB>max tests<TAB>owned gate.
+# Enforced by `xtask check-text-reading-tests`. Raising a count or adding a row is a reviewed decision.
+crates/mvm-cli/tests/embed_recipe.rs	7	Justfile embed recipes; CI also compiles it with plain rustc
+crates/mvm-conformance/tests/failure_diagnostics.rs	2	e2e-docs.yml failure-diagnostics step
+tests/ci_scope_classifier.rs	1	ci.yml scope job; runs the real grep pattern against synthetic diffs (behavioural)
+tests/cve_lab_staging_contract.rs	3	scripts/stage-cve-2026-80521-lab.sh CVE lab staging
+tests/github_actions_extended_e2e.rs	54	e2e-docs.yml and release.yml documented-surface gate
+tests/github_actions_fuzz_gate.rs	3	ci.yml fuzz-crate compile gate
+tests/github_actions_instruction_signing.rs	7	sign-instructions.yml and its composite action
+tests/github_actions_self_hosted_runner.rs	18	every workflow: untrusted events never reach the self-hosted runner
+tests/homebrew_render.rs	1	nix/packaging/homebrew/render-formula.sh; runs the script (behavioural)
+tests/install_sh.rs	82	install.sh and uninstall.sh; drives them against a fake release server (claim 20 fresh_install_* text scans stay here)
+tests/justfile_top_level.rs	7	root Justfile and just/ modules shape
+tests/nix_flake_structure.rs	45	nix/flake.nix and nix/profiles structure; no nix on the test host
+tests/pack_signing_smoke_workflow.rs	1	pack-signing-smoke.yml
+tests/pin_installer_default.rs	9	scripts/pin-installer-default.sh; runs it with stand-in gh and cosign (behavioural)
+tests/release_assets.rs	53	release.yml, first-run-smoke.yml, distro-packages.yml, workers.yml, update-image-pin.yml and just/*/mod.just
+tests/smoke_fresh_install.rs	39	scripts/smoke-fresh-install.sh release gate; runs it with a fake installer (behavioural)
+tests/windows_identity_inventory.rs	3	.github/scripts/run-windows-identity-tests.ps1 Windows identity lane
+tests/workspace_shard_isolation.rs	7	workspace-shard.yml and ci-main.yml shard isolation and partition
