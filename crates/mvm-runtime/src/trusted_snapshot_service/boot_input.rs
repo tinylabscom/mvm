@@ -427,9 +427,9 @@ fn seal_kernel(source: &File, len: u64, digest: &str) -> Result<File> {
     let mut file = unsafe { File::from_raw_fd(fd) };
     let copied = io::copy(&mut Positional(source, 0).take(len), &mut file)?;
     ensure!(copied == len, "canonical kernel changed during publication");
-    // SAFETY: no writable mapping is created and the only writable description
-    // is this owned memfd; sealing is checked before publication.
     let seals = libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
+    // SAFETY: file owns a valid memfd, no writable mapping exists, and the
+    // syscall reads only the descriptor and seal flags; its result is checked.
     if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) } < 0 {
         return Err(io::Error::last_os_error()).context("seal canonical kernel");
     }
