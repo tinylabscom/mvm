@@ -19,11 +19,11 @@ test("shared navigation makes the blog discoverable", () => {
   assert.match(header, /\{ label: "Blog", href: `\$\{b\}blog\/` \}/);
 });
 
-test("docs entry point is short and links to the curated navigation", () => {
+test("docs overview offers local CLI and SDK paths without restoring the full catalog", () => {
   const header = readFileSync(join(publicRoot, "src/overrides/Header.astro"), "utf8");
   const footer = readFileSync(join(publicRoot, "src/components/landing/Footer.tsx"), "utf8");
   const blog = readFileSync(join(publicRoot, "src/layouts/BlogLayout.astro"), "utf8");
-  const overview = readFileSync(join(publicRoot, "src/content/docs/docs.md"), "utf8");
+  const overview = readFileSync(join(publicRoot, "src/content/docs/docs.mdx"), "utf8");
   const sidebar = readFileSync(join(publicRoot, "src/sidebar.ts"), "utf8");
   const entries = [...sidebar.matchAll(/\{ label: "[^"]+", slug: "([^"]+)" \}/g)]
     .map(([, slug]) => slug);
@@ -34,7 +34,24 @@ test("docs entry point is short and links to the curated navigation", () => {
   assert.deepEqual(entries.slice(0, 3), [
     "docs", "getting-started/installation", "getting-started/quickstart",
   ]);
-  assert.ok(entries.length <= 10, "Keep the human-facing navigation focused");
+  assert.ok(entries.length >= 16 && entries.length <= 20, "Keep the navigation useful but curated");
+  for (const heading of ["Local CLI", "SDK", "Boundaries and guides", "Where things run"]) {
+    assert.ok(overview.includes(`## ${heading}`), `${heading}: overview section`);
+  }
+  assert.equal([...overview.matchAll(/<a href="\/[^"]+">/g)].length, 3, "Three clear entry paths");
+  assert.match(overview, /mvmctl machine run --image alpine -- uname -a/);
+  for (const slug of [
+    "getting-started/installation", "getting-started/quickstart",
+    "guides/machine-use-cases", "reference/platform-support", "sdk",
+    "getting-started/python-quickstart", "getting-started/nodejs-quickstart",
+    "getting-started/rust-quickstart", "guides/ai-agent-integration",
+    "guides/configuration", "guides/policies",
+    "guides/network-egress-policy", "guides/secrets-and-credentials",
+    "guides/troubleshooting",
+  ]) {
+    assert.ok(entries.includes(slug), `${slug}: in sidebar`);
+    assert.ok(overview.includes(`/${slug}/`), `${slug}: linked from overview`);
+  }
   for (const slug of entries) {
     const page = markdownFiles(join(publicRoot, "src/content/docs")).find(
       path => path.replace(/\.mdx?$/, "").endsWith(`/${slug}`),
@@ -45,10 +62,21 @@ test("docs entry point is short and links to the curated navigation", () => {
       /\bmvmd\b|\bmvm-(?:studio|deployment|assur\w*)\b/i,
       `${slug}: curated pages cover only mvm`,
     );
-    if (slug !== "docs") {
-      assert.ok(overview.includes(`/${slug}/`), `${slug}: linked from overview`);
-    }
   }
+});
+
+test("policy and configuration guides show the supported composition boundaries", () => {
+  const policies = readFileSync(join(publicRoot, "src/content/docs/guides/policies.md"), "utf8");
+  const configuration = readFileSync(join(publicRoot, "src/content/docs/guides/configuration.md"), "utf8");
+
+  assert.match(policies, /--profile restrictive\\\|standard\\\|dev\\\|permissive/);
+  assert.match(policies, /--policy NAME\\\|PATH/);
+  assert.match(policies, /deny from any layer/);
+  assert.match(policies, /installed, pinned, verified/);
+  assert.match(configuration, /does\s+not merge arbitrary `mvm\.toml` files/);
+  assert.match(configuration, /image = "alpine:3\.20"/);
+  assert.match(configuration, /include = \["\.\/policy\/api-group\.toml"\]/);
+  assert.match(configuration, /default_policy` there\s+selects a fallback/);
 });
 
 test("blog omits the browse posts section and keeps a clear return link", () => {
