@@ -823,6 +823,7 @@ fn boot_session_core(
     };
     require_native_owner(backend.kind(), context.is_some())?;
     let built_pack_check = substrate.built_pack_check.take();
+    let mailbox_posture = substrate.mailbox_posture.take();
     substrate.apply_to(&mut start_config);
     let _built_runtime = built_pack_check
         .map(|check| {
@@ -844,6 +845,11 @@ fn boot_session_core(
     if let Some(assets) = portable_boot_assets {
         assets.verify_health_config(&start_config)?;
     }
+    mvm_hostd::mailbox_process::require_servable(
+        &start_config,
+        &backend,
+        mailbox_posture.as_ref(),
+    )?;
 
     tracing::info!(vm = %vm_name, slot, "booting session VM");
     if let Some(admission) = context {
@@ -888,6 +894,12 @@ fn boot_session_core(
         }
         return Err(err).context("recording the session boot's admitted charge");
     }
+    mvm_hostd::mailbox_process::serve_started(
+        &backend,
+        &vm_id,
+        &start_config,
+        mailbox_posture.as_ref(),
+    )?;
     Ok(SessionBootResult::Legacy(SessionVm { vm_name }))
 }
 
