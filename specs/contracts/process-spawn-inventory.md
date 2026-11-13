@@ -134,7 +134,7 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-hostd | `src/mailbox_process.rs` | 1 | helper bin | launch path starts the per-VM mailbox process with derived keys on stdin | host daemon role | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-hostd | `src/supervisor/firewall/linux_nft.rs` | 1 | net (nft) | install host nftables rules | host daemon role | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-hostd | `src/supervisor/services/spawn.rs` | 1 | helper bin | ProcessSpawner: start a signed, integrity-checked host service binary | host daemon role | CH | - | `helper_command` env scrub | required-host-primitive |
-| mvm-runtime | `src/host_shell.rs` | 3 | shell script | bash -c for ShellEnvironment host commands | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | open-review |
+| mvm-runtime | `src/host_shell.rs` | 3 | shell script | bash -c for ShellEnvironment host commands | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub | open-review |
 | mvm-runtime | `src/storage/backend.rs` | 1 | storage tool | dmsetup thin-pool operations | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | bounded-fixed-argv-utility |
 | mvm-runtime | `src/storage/volume/encrypted_linux.rs` | 7 | storage tool | cryptsetup, mount, umount, mkfs.ext4 for an encrypted volume | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | bounded-fixed-argv-utility |
 | mvm-setpriv | `src/lib.rs` | 1 | guest helper | privilege-drop-and-exec of the target command | guest | CHS | - | RAW_SITES (guest) | guest-side |

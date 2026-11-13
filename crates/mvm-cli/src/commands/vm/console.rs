@@ -257,7 +257,7 @@ pub(in crate::commands) fn run_for_exit(_cli: &Cli, args: Args, _cfg: &MvmConfig
         let transport = pick_console_transport(name)?;
         let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
         // Inbound vsock RPC audit (verb=exec).
-        super::shared::emit_vsock_rpc_audit(
+        mvm_client::guest::emit_vsock_rpc_audit(
             name,
             &mvm_agentd::vsock::GuestRequest::Exec {
                 command: cmd.to_string(),
@@ -512,7 +512,7 @@ fn console_call(
     req: &mvm_agentd::vsock::GuestRequest,
 ) -> Result<mvm_agentd::vsock::GuestResponse> {
     let mut stream = console_control(transport)?;
-    super::shared::emit_vsock_rpc_audit(name, req);
+    mvm_client::guest::emit_vsock_rpc_audit(name, req);
     match mvm_agentd::vsock::call_unary(&mut stream, req)? {
         mvm_agentd::vsock::GuestResponse::Error { message } => anyhow::bail!("{message}"),
         other => Ok(other),

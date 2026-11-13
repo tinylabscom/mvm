@@ -145,7 +145,7 @@ impl RunProfile {
 mod tests {
     use super::*;
 
-    /// The preset table, asserted as a table. Phase 3's "preset-to-policy
+    /// The preset table, asserted as a table. The "preset-to-policy
     /// mapping" is exactly this: what each profile permits, written once and
     /// checked once, so a change to `grants()` has to be a deliberate edit to
     /// a row here rather than something that slips through four call sites.

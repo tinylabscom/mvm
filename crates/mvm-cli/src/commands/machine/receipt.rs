@@ -1,7 +1,7 @@
 use super::*;
 use crate::commands::shared::{self, VolumeSpec};
 #[cfg(test)]
-use crate::commands::vm::host_signer;
+use mvm_client::host_keypair;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct MachineStartReceiptInput {
@@ -426,7 +426,7 @@ pub(super) fn load_machine_start_receipt_pubkey(
 ) -> Result<VerifyingKey> {
     let path = match pubkey_path {
         Some(path) => path.to_path_buf(),
-        None => host_signer::default_keys_dir()?.join(PUBLIC_FILENAME),
+        None => host_keypair::default_keys_dir()?.join(PUBLIC_FILENAME),
     };
     let bytes = std::fs::read(&path)
         .with_context(|| format!("reading machine-start receipt pubkey {}", path.display()))?;

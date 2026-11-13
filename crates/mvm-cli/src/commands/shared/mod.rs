@@ -14,7 +14,6 @@ mod signed_input;
 mod snapshot_key;
 mod state;
 mod vcpu_default;
-mod vsock;
 
 pub(super) use build_mode::BuildModeFlags;
 pub(super) use event::PhaseEvent;
@@ -44,4 +43,3 @@ pub(in crate::commands) use signed_input::read_signed_input;
 pub(in crate::commands) use snapshot_key::ensure_snapshot_key;
 pub(super) use state::{CHILD_PIDS, IN_CONSOLE_MODE};
 pub(crate) use vcpu_default::default_vcpus;
-pub(super) use vsock::{emit_vsock_rpc_audit, wait_for_guest_agent};

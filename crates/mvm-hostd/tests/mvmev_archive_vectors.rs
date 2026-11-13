@@ -263,6 +263,67 @@ impl SwapBodies for Vec<(String, Vec<u8>)> {
     }
 }
 
+/// Edit the manifest and re-sign it under the vector key, so the archive stays
+/// authentically signed and only the property under test can object.
+fn resign(
+    members: &mut [(String, Vec<u8>)],
+    edit: impl FnOnce(&mut mvm_core::receipt_archive::EvidenceManifest),
+) {
+    let key = SigningKey::from_bytes(&VECTOR_KEY_SEED);
+    let at =
+        |members: &[(String, Vec<u8>)], n: &str| members.iter().position(|(m, _)| m == n).expect(n);
+    let manifest_idx = at(members, "manifest.json");
+    let signed: SignedEvidenceManifest =
+        serde_json::from_slice(&members[manifest_idx].1).expect("manifest json");
+    let mut manifest = signed.manifest;
+    edit(&mut manifest);
+    let resigned = SignedEvidenceManifest::sign(manifest, &key, signed.signed_at)
+        .expect("re-sign the repaired manifest");
+    members[manifest_idx].1 = serde_json::to_vec_pretty(&resigned).expect("serialize");
+    let sig_idx = at(members, "manifest.sig");
+    members[sig_idx].1 = resigned.signature.as_bytes().to_vec();
+}
+
+fn report_after(
+    edit: impl FnOnce(&mut mvm_core::receipt_archive::EvidenceManifest),
+) -> mvm_hostd::audit::receipt_archive_verify::VerifyReport {
+    let mut members = explode(&archive_bytes());
+    resign(&mut members, edit);
+    verify_archive(&implode(&members)).expect("parses")
+}
+
+#[test]
+fn a_leaf_listed_twice_fails_completeness_though_signed_and_provable() {
+    let report = report_after(|m| m.leaves.push(m.leaves[0].clone()));
+    assert!(report.integrity.passed() && report.inclusion.passed());
+    assert!(report.completeness.failed(), "{:?}", report.completeness);
+    assert_ne!(report.exit_code() & 4, 0, "completeness bit must be set");
+}
+
+#[test]
+fn a_dropped_leaf_fails_a_derivable_archive_completeness() {
+    let report = report_after(|m| {
+        m.leaves.remove(1);
+    });
+    assert!(report.integrity.passed() && report.inclusion.passed());
+    assert!(report.completeness.failed(), "{:?}", report.completeness);
+    assert_ne!(report.exit_code() & 4, 0, "completeness bit must be set");
+}
+
+#[test]
+fn a_signed_attested_archive_missing_a_leaf_is_reported_attested_never_derived() {
+    use mvm_core::receipt_archive::Completeness;
+    use mvm_hostd::audit::receipt_archive_verify::CompletenessResult;
+    let report = report_after(|m| {
+        m.leaves.remove(1);
+        m.completeness = Completeness::Attested;
+    });
+    // The omission is invisible to a verifier: that is the stated limit, and
+    // the result must say "asserted", not "derived".
+    assert_eq!(report.completeness, CompletenessResult::Attested);
+    assert_eq!(report.exit_code(), 0);
+}
+
 /// Apply one named mutation to the frozen archive.
 fn mutate(f: impl Fn(&mut Vec<(String, Vec<u8>)>)) -> Vec<u8> {
     let mut members = explode(&archive_bytes());
@@ -359,31 +420,18 @@ fn a_proof_moved_to_another_leaf_fails_inclusion_with_integrity_intact() {
     );
     let (a, b) = (idx[0], idx[1]);
     members.swap_bodies(a, b);
+    let members_snapshot = members.clone();
 
     // Repair the manifest so integrity has nothing to complain about.
-    let key = SigningKey::from_bytes(&VECTOR_KEY_SEED);
-    let manifest_idx = members
-        .iter()
-        .position(|(n, _)| n == "manifest.json")
-        .expect("manifest member");
-    let signed: SignedEvidenceManifest =
-        serde_json::from_slice(&members[manifest_idx].1).expect("manifest json");
-    let mut manifest = signed.manifest;
-    for i in [a, b] {
-        let (name, body) = &members[i];
-        manifest.members.insert(
-            name.clone(),
-            format!("sha256:{}", hex::encode(Sha256::digest(body))),
-        );
-    }
-    let resigned = SignedEvidenceManifest::sign(manifest, &key, signed.signed_at)
-        .expect("re-sign the repaired manifest");
-    members[manifest_idx].1 = serde_json::to_vec_pretty(&resigned).expect("serialize");
-    let sig_idx = members
-        .iter()
-        .position(|(n, _)| n == "manifest.sig")
-        .expect("signature member");
-    members[sig_idx].1 = resigned.signature.as_bytes().to_vec();
+    resign(&mut members, |m| {
+        for i in [a, b] {
+            let (name, body) = &members_snapshot[i];
+            m.members.insert(
+                name.clone(),
+                format!("sha256:{}", hex::encode(Sha256::digest(body))),
+            );
+        }
+    });
 
     let report = verify_archive(&implode(&members)).expect("parses");
     assert!(

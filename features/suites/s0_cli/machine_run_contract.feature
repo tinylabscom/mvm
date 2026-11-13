@@ -20,6 +20,11 @@ Feature: machine run request contract
     And the error output contains "--manifest"
     And the error output contains "--flake"
 
+  Scenario: an unreadable CLI option file refuses before machine admission
+    When I run mvmctl with "machine run --config-file absent-options.toml --image alpine" and an isolated mvm home
+    Then the command exits with code 2
+    And the error output contains "reading absent-options.toml"
+
   # The `run` alias carries the opposite contract: with no source named it
   # boots the bundled default image. The refusal above is `machine run`'s
   # alone, and a dry run proves the plan resolves without booting anything.
