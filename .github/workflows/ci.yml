@@ -499,9 +499,9 @@ jobs:
       - name: Clippy (mvm-sdk without default features)
         run: ./scripts/cargo.sh clippy --locked --all-targets -p mvm-sdk --no-default-features -- -D warnings
 
-      - name: Experimental capture possession (codec and credential, no VM)
+      - name: Experimental capture startup and possession (no VM)
         run: |
-          ./scripts/cargo.sh test --locked -p mvm-core --features experimental-owned-capture --lib crypto::owned_capture::tests
+          ./scripts/cargo.sh test --locked -p mvm-core --features experimental-owned-capture --lib
           ./scripts/cargo.sh test --locked -p mvm-hostd --features experimental-owned-capture --lib caller_identity::tests
 
   lint-policy:

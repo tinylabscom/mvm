@@ -3,6 +3,7 @@
 pub mod broker_control;
 pub mod handler;
 pub mod hvf_control;
+pub mod hvf_startup;
 #[allow(clippy::module_inception)]
 pub mod protocol;
 pub mod runtime_release;

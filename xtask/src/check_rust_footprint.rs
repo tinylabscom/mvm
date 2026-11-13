@@ -34,12 +34,12 @@ use std::process::Command;
 
 use crate::rust_source::{CommentSyntax, blank_comments};
 
-// Include the experimental possession codec and closed credential validation.
+// Include experimental capture possession and held startup configuration codecs.
 // Keep all test code measured; ceilings match the measured implementation tree.
 /// Ceiling on total SLOC, all categories.
-const MAX_TOTAL_SLOC: usize = 968_398;
+const MAX_TOTAL_SLOC: usize = 968_831;
 /// Ceiling on total physical lines, all categories.
-const MAX_TOTAL_PHYSICAL: usize = 1_233_943;
+const MAX_TOTAL_PHYSICAL: usize = 1_234_435;
 /// How far under a ceiling the tree may sit before the ceiling must drop.
 const SLACK: usize = 10_000;
 

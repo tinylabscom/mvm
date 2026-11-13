@@ -85,15 +85,29 @@ requirement is relaxed.
 
 ### Experimental startup envelope
 
-**Experimental implementation requirements; not implemented or enabled.**
+**Experimental implementation requirements; startup integration not enabled.**
 The serialized-once and host–helper compatibility requirements below are
 mandatory before sending this format. The experimental possession library does
-not implement either startup integration requirement. The current
+not implement the native startup or helper negotiation path. The
+[held configuration type and bounded envelope codec](../../crates/mvm-core/src/protocol/hvf_startup/mod.rs#L1)
+implement data handling only. The existing cold launcher now uses one held JSON
+serialization for its saved config and legacy startup input; retaining that
+object with the intended owned call remains integration work. The current
 [`read_config_input`](../../crates/mvm-hostd/src/bin/mvm-hvf-supervisor.rs#L142)
 accepts at most 8 MiB of raw UTF-8 configuration; the
 [`startup_mode`](../../crates/mvm-hostd/src/bin/mvm-hvf-supervisor.rs#L228)
 check requires kernel, image descriptors and registration together for checked
 startup. Keep those rules and the legacy format intact.
+
+The [configuration/envelope tests](../../crates/mvm-core/src/protocol/hvf_startup/tests.rs#L1)
+count serializer invocations, check shared immutable byte storage, preserve
+original whitespace/UTF-8, exercise exact limits and every truncation, and
+reject malformed fields, digest mismatches and invalid inner JSON even when its
+digest matches. A mock socket roundtrip exercises codec bytes, not authenticated
+startup or native FD custody. The actual helper still accepts only its legacy
+startup format and does not advertise envelope support. Its current version
+must not be taken as experimental-startup compatibility. The mandatory version
+bump and positive helper-support preflight remain required with that integration.
 
 Recommend a versioned binary envelope on the **existing original startup
 input**, not a new inherited descriptor, environment variable, state file,

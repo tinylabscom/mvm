@@ -585,14 +585,10 @@ fn boot_retaining_child(
         relay_supervisor_config_with_handoff(spec, &paths, handoff, exclusive_image_lock)?;
     files.project(spec, &mut cfg)?;
     (policy.validate_config)(&cfg)?;
+    let json = mvm_core::protocol::hvf_startup::FrozenConfig::serialize(&cfg)?;
     let config_path = paths.state_dir.join("supervisor.json");
-    mvm_core::atomic_io::atomic_write_new(
-        &config_path,
-        &serde_json::to_vec(&cfg).map_err(|e| anyhow!("serialize supervisor config: {e}"))?,
-    )
-    .map_err(|e| anyhow!("write supervisor config {}: {e}", config_path.display()))?;
-    let json =
-        serde_json::to_string(&cfg).map_err(|e| anyhow!("serialize HvfSupervisorConfig: {e}"))?;
+    mvm_core::atomic_io::atomic_write_new(&config_path, json.as_bytes())
+        .map_err(|e| anyhow!("write supervisor config {}: {e}", config_path.display()))?;
     let supervisor = resolve_supervisor_path_verified()
         .map_err(|e| anyhow!("{}", supervisor_unavailable_message(&e)))?;
     // Diagnostics are optional evidence, never a launch or readiness gate.
@@ -2191,6 +2187,8 @@ mod tests {
             r#""console_data_sockets":[],"builder_control_sockets":[],"exclusive_image_lock":null,"handoff_socket":null,"handoff_root":null,"handoff_verify_key":null,"cpu_millicores":null,"quota_record":null}"#,
         );
         assert_eq!(serde_json::to_string(&config).unwrap(), expected);
+        let frozen = mvm_core::protocol::hvf_startup::FrozenConfig::serialize(&config).unwrap();
+        assert_eq!(frozen.as_bytes(), expected.as_bytes());
     }
 
     #[test]
