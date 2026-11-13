@@ -18,10 +18,6 @@ use std::path::Path;
 use crate::clone::CloneStrategy;
 use crate::snapshot_store::SnapshotId;
 
-/// Linux-only sealed-file building block; it grants no launch authority.
-#[cfg(target_os = "linux")]
-pub mod sealed_boot_file;
-
 /// A snapshot provider whose sealed read view is immutable to the claim path.
 ///
 /// Implementations must complete all expensive hashing and publication work in

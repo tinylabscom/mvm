@@ -42,16 +42,15 @@ on read, so warm-pool state is addressed by content rather than mutable names.
 | `clone` | Reflink/copy-on-write cloning |
 | `hash` / `manifest` / `snapshot_store` | Content identity and durable snapshots; `manifest` is the chunked v2 form that lets a CoW-chain child reuse its parent's chunk digests where the kernel proves the bytes unchanged |
 | `extension_image` / `sdk_sidecar` | Auxiliary guest image assembly |
-| `trusted_snapshot` | Platform-backed snapshot support; Linux sealed-file construction is a budgeted building block, not an admitted warm claim |
+| `trusted_snapshot` | Platform-backed trusted snapshot support |
 
 ## Security boundaries
 
 Registry and archive input is untrusted. Paths are normalized before writes,
 digests are checked before content is trusted, allocations are capped, and
 special files or traversal attempts are rejected. The crate denies unsafe code
-except for small reviewed platform calls in cloning, extent-map, APFS snapshot
-and Linux memfd sealing modules. A sealed input's digest and budget do not
-authorize a launch; its owner must retain custody through VMM termination.
+except for small reviewed platform calls in the cloning and extent-map
+implementations.
 
 ## Developing
 

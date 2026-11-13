@@ -34,13 +34,12 @@ use std::process::Command;
 
 use crate::rust_source::{CommentSyntax, blank_comments};
 
-// The snapshot-owner race regressions and Linux sealed-file checks increase
-// measured lines on this branch; keep their evidence rather than trim it to
-// fit an older ratchet. The margin remains narrow for later reductions.
+// The snapshot-owner race regressions add measured lines on this branch;
+// retain the security coverage rather than trim it to fit an older ratchet.
 /// Ceiling on total SLOC, all categories.
-const MAX_TOTAL_SLOC: usize = 966_800;
+const MAX_TOTAL_SLOC: usize = 966_500;
 /// Ceiling on total physical lines, all categories.
-const MAX_TOTAL_PHYSICAL: usize = 1_232_200;
+const MAX_TOTAL_PHYSICAL: usize = 1_232_000;
 /// How far under a ceiling the tree may sit before the ceiling must drop.
 const SLACK: usize = 10_000;
 

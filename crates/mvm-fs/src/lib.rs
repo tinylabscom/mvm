@@ -27,9 +27,8 @@
 //! The crate-level lint is `deny(unsafe_code)` rather than `forbid` so that
 //! the [`clone`] module can use the small, platform-specific unsafe blocks
 //! required to invoke `clonefile(2)` and `FICLONE`, and so the crate-private
-//! `extent` module can issue the Linux `FIEMAP` ioctl. The Linux sealed boot
-//! file module also calls `memfd_create`, `fcntl`, and `sysconf`; elsewhere
-//! the crate remains unsafe-free.
+//! `extent` module can issue the Linux `FIEMAP` ioctl. Everywhere else in
+//! this crate remains unsafe-free.
 
 #[cfg(unix)]
 pub mod clone;
