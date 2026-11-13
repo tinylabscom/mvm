@@ -31,7 +31,7 @@ use mvm_core::transcript::{
     TranscriptWriterConfig,
 };
 
-use super::super::vm::host_signer::PUBLIC_FILENAME;
+use mvm_client::host_keypair::PUBLIC_FILENAME;
 
 const DEFAULT_TENANT: &str = "local";
 const DEFAULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
@@ -310,7 +310,7 @@ impl TranscriptCtx {
             transcript::recover_abandoned_at(&mut manifest, transcript::retention_now()?)?;
             write_manifest(&dir, &manifest)?;
         }
-        let signer = super::super::vm::host_signer::load_or_init_at(&self.keys_dir)
+        let signer = mvm_client::host_keypair::load_or_init_at(&self.keys_dir)
             .context("loading the host signer to anchor the sealed transcript")?;
         match self.matching_chain_anchors(tenant, capture_id, &manifest)? {
             0 => AuditEmitter::with_dir(signer.signing, &self.audit_dir)

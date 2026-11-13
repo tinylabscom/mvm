@@ -30,11 +30,11 @@ mvm.workload(id="hello-python")
     resources=mvm.resources(cpu_cores=1, memory_mb=512, rootfs_size_mb=1024),
     dependencies=mvm.python_deps(lockfile="uv.lock", tool="uv"),
     network=mvm.network(mode="none"),
-    entrypoint=mvm.entrypoint_function(
+    entrypoints=[mvm.entrypoint_function(
         module="src.tool",
         function="run",
         primary=True,
-    ),
+    )],
 )
 def run(prompt: str) -> str:
     return prompt.upper()
@@ -69,11 +69,11 @@ export const run = mvm.app({
   image: mvm.node_image({ node: "22", packages: ["pnpm"] }),
   resources: mvm.resources({ cpu_cores: 1, memory_mb: 512, rootfs_size_mb: 1024 }),
   network: mvm.network({ mode: "none" }),
-  entrypoint: mvm.entrypoint_function({
+  entrypoints: [mvm.entrypoint_function({
     module: "src/tool",
     function: "run",
     primary: true,
-  }),
+  })],
 })((prompt: string): string => prompt.toUpperCase());
 ```
 
@@ -103,7 +103,7 @@ of exposing a function-call entrypoint.
     resources=mvm.resources(cpu_cores=1, memory_mb=512, rootfs_size_mb=1024),
     dependencies=mvm.python_deps(lockfile="uv.lock"),
     network=mvm.network(mode="none"),
-    entrypoint=mvm.entrypoint(command=["python", "/app/worker.py"]),
+    entrypoints=[mvm.entrypoint(command=["python", "/app/worker.py"])],
 )
 def worker() -> None:
     pass
@@ -120,7 +120,7 @@ export const worker = mvm.app({
   resources: mvm.resources({ cpu_cores: 1, memory_mb: 512, rootfs_size_mb: 1024 }),
   dependencies: mvm.node_deps("pnpm-lock.yaml"),
   network: mvm.network({ mode: "none" }),
-  entrypoint: mvm.entrypoint({ command: ["node", "/app/worker.js"] }),
+  entrypoints: [mvm.entrypoint({ command: ["node", "/app/worker.js"] })],
 })(() => undefined);
 ```
 
@@ -212,7 +212,7 @@ Hooks are useful for deterministic setup that belongs in the workload contract.
     image=mvm.python_image(packages=["uv"]),
     resources=mvm.resources(cpu_cores=1, memory_mb=512, rootfs_size_mb=1024),
     network=mvm.network(mode="none"),
-    entrypoint=mvm.entrypoint(command=["python", "/app/server.py"]),
+    entrypoints=[mvm.entrypoint(command=["python", "/app/server.py"])],
     before_build=mvm.hook(["uv", "sync", "--frozen"]),
     before_start=mvm.hook("python /app/migrate.py"),
     after_start=mvm.hook(["python", "/app/healthcheck.py"]),
@@ -231,7 +231,7 @@ export const service = mvm.app({
   image: mvm.node_image({ packages: ["pnpm"] }),
   resources: mvm.resources({ cpu_cores: 1, memory_mb: 512, rootfs_size_mb: 1024 }),
   network: mvm.network({ mode: "none" }),
-  entrypoint: mvm.entrypoint({ command: ["node", "/app/server.js"] }),
+  entrypoints: [mvm.entrypoint({ command: ["node", "/app/server.js"] })],
   before_build: mvm.hook(["pnpm", "install", "--frozen-lockfile"]),
   before_start: mvm.hook(["node", "/app/migrate.js"]),
   after_start: mvm.hook(["node", "/app/healthcheck.js"]),

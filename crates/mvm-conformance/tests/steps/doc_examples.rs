@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use clap::Command as ClapCommand;
 use cucumber::then;
 use mvm_conformance::doc_examples::{
-    DocExample, ExampleSource, Tier, TierPolicy, code_blocks, doc_examples, documentation_files,
-    is_elided, live_scenario_commands, mk_guest_call_attributes, mk_guest_parameters,
+    DocExample, ExampleSource, Tier, TierPolicy, doc_examples, documentation_files, is_elided,
+    live_scenario_commands, mk_guest_call_attributes, mk_guest_parameters,
     mvmctl_lines_outside_fences,
 };
 
@@ -528,47 +528,16 @@ fn stage_fixture(name: &str, dir: &Path, home: &Path) {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-        // The client guides have the reader write a project tool policy and
-        // then check it with `policy validate`, `policy show` and `why`, all
-        // of which read the project in the working directory.
-        "mcp-tool-policy" => stage_mcp_tool_policy(dir),
+        // These commands read the project in the working directory.
+        "project-policy" => stage_project_policy(dir),
         other => panic!("unknown fixture {other:?} in the tier manifest"),
     }
 }
 
-/// The guide whose project tool policy the `mcp-tool-policy` fixture stages.
-const MCP_TOOL_POLICY_GUIDE: &str = "public/src/content/docs/guides/claude-code-mcp.md";
-
-/// Stage the project the client guides describe, from the guide's own text.
-///
-/// The two files are lifted out of the guide rather than restated here, so
-/// the commands run against exactly what a reader would paste. A snippet that
-/// stops parsing as policy then fails the example that names it, instead of
-/// shipping a page whose server refuses to start.
-fn stage_mcp_tool_policy(dir: &Path) {
-    let guide = std::fs::read_to_string(repo_root().join(MCP_TOOL_POLICY_GUIDE))
-        .unwrap_or_else(|error| panic!("read {MCP_TOOL_POLICY_GUIDE}: {error}"));
-    let toml_blocks: Vec<String> = code_blocks(MCP_TOOL_POLICY_GUIDE, &guide)
-        .into_iter()
-        .filter(|block| block.language == "toml")
-        .map(|block| block.body)
-        .collect();
-    let block_with = |marker: &str| {
-        toml_blocks
-            .iter()
-            .find(|body| body.contains(marker))
-            .unwrap_or_else(|| {
-                panic!("{MCP_TOOL_POLICY_GUIDE} no longer has a toml block containing {marker:?}")
-            })
-    };
-    let profile = block_with("[overrides.tools]");
-    let manifest = block_with("profile = \"./policy/mcp-readonly.toml\"");
-
-    let policy_dir = dir.join("policy");
-    std::fs::create_dir_all(&policy_dir).expect("create tool policy fixture directory");
-    std::fs::write(policy_dir.join("mcp-readonly.toml"), format!("{profile}\n"))
-        .expect("write tool policy fixture");
-    std::fs::write(dir.join("mvm.toml"), format!("{manifest}\n")).expect("write project fixture");
+/// Give side-effect-free policy commands an offline, built-in project profile.
+fn stage_project_policy(dir: &Path) {
+    std::fs::write(dir.join("mvm.toml"), "[policy]\nprofile = \"agent-apis\"\n")
+        .expect("write project policy fixture");
 }
 
 /// The `./my-agent` directory the instruction-provenance guide signs.
@@ -623,6 +592,16 @@ fn instruction_trust_examples_run(
     );
 }
 
+/// A pack reference needs a verified install, and `pack-sources` lives in a
+/// separate checkout. Neither is present in the offline example fixture.
+fn needs_external_policy_source(path: &[String], example: &DocExample) -> bool {
+    matches!(path.join(" ").as_str(), "policy show" | "why")
+        && example
+            .argv
+            .iter()
+            .any(|arg| arg.starts_with("agent/") || arg.starts_with("./pack-sources/"))
+}
+
 #[then(expr = "every side-effect-free documented example executes successfully")]
 fn every_exec_tier_example_runs(_world: &mut CliWorld) {
     let command = mvm_cli::commands::cli_command();
@@ -648,7 +627,10 @@ fn every_exec_tier_example_runs(_world: &mut CliWorld) {
         let Ok(path) = parse_example(&command, &example) else {
             continue;
         };
-        if policy.tier_for(&path) != Some(Tier::Exec) || !seen.insert(path.clone()) {
+        if policy.tier_for(&path) != Some(Tier::Exec)
+            || needs_external_policy_source(&path, &example)
+            || !seen.insert(path.clone())
+        {
             continue;
         }
 
@@ -695,6 +677,12 @@ fn every_exec_tier_example_runs(_world: &mut CliWorld) {
     }
 
     assert!(ran > 0, "no exec-tier examples were found to run");
+    for path in ["policy show", "why"] {
+        assert!(
+            seen.iter().any(|seen| seen.join(" ") == path),
+            "no offline policy example exercised {path}"
+        );
+    }
     assert!(
         failures.is_empty(),
         "{} exec-tier documented example(s) failed to run (ran {ran}):\n{}",

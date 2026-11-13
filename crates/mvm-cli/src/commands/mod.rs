@@ -9,6 +9,7 @@ mod capture;
 pub mod catalog;
 mod cmd_audit;
 mod completions;
+mod config_sources;
 mod dashboard;
 mod deploy;
 mod deployments;
@@ -78,6 +79,10 @@ const CLAP_RENDER_WIDTH: usize = 4096;
     term_width = 80
 )]
 pub(in crate::commands) struct Cli {
+    /// Load options from TOML/JSON files in order
+    #[arg(long, global = true, action = clap::ArgAction::Append)]
+    pub config_file: Vec<std::path::PathBuf>,
+
     /// Output format
     #[arg(long, global = true)]
     pub log_format: Option<String>,
@@ -376,8 +381,7 @@ fn record_explicit_run_resources(matches: &clap::ArgMatches, cli: &mut Cli) {
 
 fn run_command() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let parsed = cli_command()
-        .try_get_matches_from(std::env::args_os())
+    let parsed = config_sources::resolve(cli_command(), std::env::args_os())
         .and_then(|matches| Cli::from_arg_matches(&matches).map(|cli| (matches, cli)));
     let cli = match parsed {
         Ok((matches, mut cli)) => {
@@ -395,7 +399,13 @@ fn run_command() -> Result<()> {
         }
         Err(error) => {
             let exit_code = error.exit_code();
-            eprint!("{}", constrain_help_output(&error.to_string()));
+            // Preserve configuration diagnostics even when a long absolute
+            // filename would exceed the help page's width limit.
+            if error.kind() == ErrorKind::ValueValidation {
+                eprint!("{error}");
+            } else {
+                eprint!("{}", constrain_help_output(&error.to_string()));
+            }
             let args: Vec<String> = std::env::args().skip(1).collect();
             if let Some(tip) = separator_tip(error.kind(), &args) {
                 eprintln!("{tip}");

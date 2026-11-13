@@ -17,26 +17,27 @@ three #4839 checklist boxes named in §0; it does not touch #3731.
 
 ### 1.1 Graph coverage (what was and was not checked)
 
-- `list_projects` shows the `mvm` graph at branch `main`. `check_index_coverage` on five paths (`crates/mvm-cli/src/commands/mod.rs`, `mvm-hostd/src/bin/mvm-broker.rs`, `mvm-builder-guest/src/bin/mvm-host-vm-init.rs`, `mvm-agentd/src/bin/mvm-guest-agent/main.rs`, `crates/mvm-core/images.lock`) reports `indexed_at` 2026-10-08, `index_mode: fast`, and:
-  `mvm-hostd/src/bin` and `mvm-agentd/src/bin` are **excluded subtrees**; the other three have no recorded coverage and `metadata_changed`/`not_tracked` freshness.
-- On 2026-11-05 the `codebase-memory-mcp` server failed to connect (`CONNECT_TIMEOUT`), so no graph query or coverage check could be re-run; nothing in §1 rests on the graph.
-- Conclusion: the graph was three weeks stale and excludes the `src/bin` directories that hold most binaries, so it cannot verify the binary list. The lists below are derived from `cargo metadata`, `images.lock`, ADR-001 and CLAUDE.md instead. Re-running this with a fresh full-mode index is the open gap.
+Re-run on 2026-11-12 after a full-mode reindex of `main` at `aaf74fcb11` (`codebase-memory-mcp cli index_repository --mode full`, 106,437 nodes, 650,007 edges, `indexed_at` 2026-11-12T17:31:47Z, `generation_matches: true`). Before it, the graph was indexed 2026-10-08 in `fast` mode and excluded the `src/bin` directories of `mvm-hostd` and `mvm-agentd`, so it could not verify the binary list.
+
+- `check_index_coverage` on the binary entry points reports `metadata_match` and no recorded issue for `crates/mvm-cli/src/commands/mod.rs`, `crates/mvm-hostd/src/bin/{mvm-broker,mvm-host-signer,mvm-network-endpoint,mvm-mailbox}.rs`, `crates/mvm-builder-guest/src/bin/{mvm-host-vm-init,mvm-builderd}.rs`, `crates/mvm-agentd/src/bin/{mvm-guest-agent,mvm-runner}.rs`, `crates/mvm-setpriv/src/main.rs` and `src/main.rs`. The three `src/bin` scopes are no longer excluded.
+- Known gaps the tool still reports: `crates/mvm-cli/src/commands/build` and `crates/mvm-cli/src/commands/env` are excluded subtrees (by directory name), fuzz corpora, Python virtual environments and caches are excluded, and `Justfile`, `scripts/dev-env.sh`, `crates/mvm-runtime/examples/hvf-egress-guest/init.c`, `crates/mvm-sdk/sdks/typescript/src/protocol/protocol.ts` and `public/tailwind.css` parse partially. `crates/mvm-core/images.lock` is not a source file and is not tracked.
+- The coverage signal is best-effort: no recorded issue does not prove completeness. The lists below are still derived from `cargo metadata`, `images.lock`, ADR-001 and CLAUDE.md, with the graph used to confirm that each binary entry point is indexed. The guest agent's entry point is `crates/mvm-agentd/src/bin/mvm-guest-agent.rs` (`[[bin]]` in `crates/mvm-agentd/Cargo.toml`).
 
 ### 1.2 Packages and binaries
 
-- `cargo metadata --no-deps --format-version 1` -> **28 packages** (all workspace members; CLAUDE.md's "31 packages" is stale), **53 `bin` targets** in 14 packages, re-counted 2026-11-06 at `d6b4a29f84` (`mvm-egress-proxy` is gone; the rest are library-only).
+- `cargo metadata --no-deps --format-version 1` -> **28 packages** (all workspace members), **52 `bin` targets** in 14 packages, re-counted 2026-11-12 at `b9731f0039` (the rest are library-only).
 
 | Package | Bins | Binaries |
-|---|---|---|
+|---|---|---|---|
 | `mvm-agentd` | 18 | `audit-probe`, `emit_protocol_schema`, `fake-runner`, `mvm-addon-dns`, `mvm-addon-vsock-bridge`, `mvm-builder-agent`, `mvm-display-bridge`, `mvm-egress-client`, `mvm-entrypoint-test-wrapper`, `mvm-exit-report`, `mvm-guest-agent`, `mvm-guest-netinit`, `mvm-oci-entrypoint`, `mvm-ping`, `mvm-runner`, `mvm-seccomp-apply`, `mvm-setpriv-fixture`, `syscall-probe` |
-| `mvm-build` | 2 | `mvm-egress-proxy`, `mvm-test-image-lock-holder` |
+| `mvm-build` | 1 | `mvm-test-image-lock-holder` |
 | `mvm-builder-guest` | 3 | `mvm-builderd`, `mvm-host-vm-init`, `stage0-init` |
 | `mvm-client` | 2 | `emit_instruction_trust_schema`, `emit_policy_schema` |
 | `mvm-contract` | 2 | `emit_assurance_schema`, `emit_pack_spec_schema` |
 | `mvm-core` | 2 | `emit_broker_schema`, `mvm-extension-pack-verify` |
 | `mvm-fs` | 1 | `mvm-extension-image` |
 | `mvm-gpu` | 1 | `mvm-gpu-endpoint` |
-| `mvm-hostd` | 10 | `mvm-apfs-snapshot-helper`, `mvm-audit-signer`, `mvm-broker`, `mvm-extension-provider`, `mvm-host-agent`, `mvm-host-signer`, `mvm-hvf-supervisor`, `mvm-libkrun-supervisor`, `mvm-network-endpoint`, `mvm-signer-helper` |
+| `mvm-hostd` | 11 | `mvm-apfs-snapshot-helper`, `mvm-audit-signer`, `mvm-broker`, `mvm-extension-provider`, `mvm-host-agent`, `mvm-host-signer`, `mvm-hvf-supervisor`, `mvm-libkrun-supervisor`, `mvm-mailbox`, `mvm-network-endpoint`, `mvm-signer-helper` |
 | `mvm-hostlib` | 2 | `emit_host_abi_methods`, `emit_host_abi_schema` |
 | `mvm-sdk` | 6 | `emit_addon_schema`, `emit_runtime_schema`, `emit_sdk_ctors`, `emit_sdk_env`, `emit_sdk_errors`, `emit_workload_schema` |
 | `mvm-setpriv` | 1 | `mvm-setpriv` |
@@ -67,33 +68,50 @@ Roles (from CLAUDE.md, cross-checked against the table): host CLI `mvmctl`; host
 
 ## 2. Child workstreams
 
-Owners: `gh issue view 4839 --json assignees` returns none, so every owner is `unassigned` until a maintainer names one. Box numbers are the line of the checkbox in the #4839 body (`gh issue view 4839 --json body`); all 78 unchecked boxes are mapped. "Blocked" names what must land first. Status lives in the issues, not here.
+Owners: the issue has no assignees and the repository has no CODEOWNERS, so an owner here is the accountable role, not a person. `maintainer` is the repository maintainer, who decides scope and merges; it stands until a named person takes a workstream. `runtime owner`, `producer and consumer owners` and `PS-21 coordinator` are the roles the umbrella's own tracking comments already use for the native/release, final archive/public consumer and evidence-closure lanes. A named assignee replaces the role. Box numbers are the line of the checkbox in the #4839 body at the time of the original mapping and have drifted since; match by text. "Blocked" names what must land first. Status lives in the issues, not here.
 
-| WS | Boxes (body line) | Doable now? | Depends on / blocked by | Acceptance | Validation |
-|---|---|---|---|---|---|
-| W1 Baseline | 369, 370 | yes (this document) | none | §1-§2 re-verified against the current commit; every row cites a command | `cargo metadata --no-deps --format-version 1`; `cargo run -q -p xtask -- check-spec-hygiene` |
-| W2 Slop and duplication | 374, 375, 376, 377 | yes, per crate | W1 | no narration or history comments; one authority per helper; narrowed public APIs | `just lints::clippy`; `cargo nextest run --workspace` |
-| W3 Dependencies and crates | 386 | yes | W1; #4542 | each first-party crate and feature has a consumer or is removed end to end | `cargo metadata`; `just check::gated` |
-| W4 Release compilation | 394, 396 | needs a release build | W1; a quiet host | cache and rerun causes measured; fix shown in the real release workflow | `cargo build --release --timings`; release workflow run |
-| W5 Toolchain, dev, CI | 400, 405 | partly | #4840 (box 400) coordinated with #4657 and #4412; box 405 needs W3 | local validation matches the owning CI gates; platform, WASM, fuzz, eBPF, supply-chain coverage kept | `just ci`; workflow runs |
-| W6a Rust review | 412 | yes, per change | W2, W3 | ownership, cancellation, cleanup and panic paths reviewed for touched code | `cargo nextest run --workspace` |
-| W6b Tests | 413 | yes | W2 | existence/text tests replaced by outcome tests; BDD kept | `cargo nextest run --workspace`; `cargo test -p mvm-conformance --features bdd` |
-| W6c Docs | 415, 463 | after W2-W6b | all code workstreams | docs, CLI reference, recipes and CI match behaviour | `python3 scripts/gen-cli-surface-inventory.py --bin target/debug/mvmctl --check`; `check-doc-links` |
-| W7 Thin CLI over MvmClient | 219, 220, 221, 223, 224, 245, 247 | yes, library side first | #3730, #4412-#4416 | zero production CLI reaches; typed client plus hostlib/SDK parity; Studio runs without subprocess backfill | `check-thin-cli`; `check-no-cli-shellout`; client public-API tests |
-| W8 HVF recovery lifetime | 246, 254, 255, 256, 257 | box 254 needs the approved contract (`specs/contracts/hvf-entrypoint-owner.md`) | #4655; boxes 255-257 blocked by 254, then 257 by the landed product implementation | recovery receiver contract verified; failure-path evidence; Firecracker-only gates removed after landing | per-box focused tests; macOS HVF run |
-| W9 Secrets | 235 | yes | `specs/contracts/secret-store-kms-contract.md` | library-owned local provider seam with authorization, audit and secret-safe types | `cargo nextest run -p mvm-core -p mvm-client` |
-| W10 Demo critical path | 133, 140-151, 156, 157, 158, 427 | no | each blocked by its owning issue (#4764 release, #4655, #4511, #4510, #4509, #4508, #4507, #4391, mvm-packs#84/#77/#76/#31); 133 and 157 need a live HVF run, 158 needs all twelve | final-candidate HVF witness with correlated allow/deny audit | per issue |
-| W11 PS-06 Firecracker | 443, 444, 445, 446, 447, 448 | 443 yes; 448 is a design decision | 444-447 blocked by 448 (process-host design) and by a released Linux producer | persistent lifecycle, metadata preserved, genuine producer witnessed | Linux KVM host runs |
-| W12 Image and pack trust | 328, 329, 330, 331, 332, 333 | verification only | mvm-images#49/#64, #4100, #4764; 333 needs publication across architectures | image identity distinct from application identity; revocation authorities separate; atomic publication | `check-claim-catalog`; release verification workflow |
-| W13 Accepted contracts (ADR review) | 347, 348, 349, 350, 351, 353, 354, 355, 357 | yes, as doc-and-witness reconciliation | #3422-#3426, #4184 (347); #4788 (348); #4577 (357) | each ADR clause maps to a retained, fresh witness | `check-adr-coverage`; `check-witness-citations`; `check-asserted-absence` |
-| W14 Studio and MVMD | 338, 339 | coordination only | Studio PR 29; MVMD repository | adapter and contract boundaries preserved, nothing duplicated | cross-repository review |
-| W15 Protected goals and security posture | 301, 302, 321 | 321 yes; 302 needs a quiet host and a KVM or HVF machine | W1 (321); applicable backends (302) | claims mapped to enforcement and witnesses; cold and warm startup evidence recorded | `check-claim-catalog`; bench commands |
-| W16 Legacy retirement | 267, 268, 269 | yes, per interface | W1; consumer proof per item | each removed interface named with callers, docs, fixtures and CI updated together | `rg` of the removed name; `just ci` |
-| W17 Umbrella completion | 158, 210, 460, 461, 462 | no | all above | every child complete or linked to a disposition; final before/after evidence | `cargo fmt --all --check`; `cargo test --workspace`; `cargo clippy --workspace -- -D warnings`; `just check::gated` |
+| WS | Owner | Boxes (body line) | Doable now? | Depends on / blocked by | Acceptance | Validation |
+|---|---|---|---|---|---|---|
+| W1 Baseline | maintainer | 369, 370 | yes (this document) | none | §1-§2 re-verified against the current commit; every row cites a command | `cargo metadata --no-deps --format-version 1`; `cargo run -q -p xtask -- check-spec-hygiene` |
+| W2 Slop and duplication | maintainer | 374, 375, 376, 377 | yes, per crate | W1 | no narration or history comments; one authority per helper; narrowed public APIs | `just lints::clippy`; `cargo nextest run --workspace` |
+| W3 Dependencies and crates | maintainer | 386 | yes | W1; #4542 | each first-party crate and feature has a consumer or is removed end to end | `cargo metadata`; `just check::gated` |
+| W4 Release compilation | maintainer | 394, 396 | needs a release build | W1; a quiet host | cache and rerun causes measured; fix shown in the real release workflow | `cargo build --release --timings`; release workflow run |
+| W5 Toolchain, dev, CI | maintainer | 400, 405 | partly | #4840 (box 400) coordinated with #4657 and #4412; box 405 needs W3 | local validation matches the owning CI gates; platform, WASM, fuzz, eBPF, supply-chain coverage kept | `just ci`; workflow runs |
+| W6a Rust review | maintainer | 412 | yes, per change | W2, W3 | ownership, cancellation, cleanup and panic paths reviewed for touched code | `cargo nextest run --workspace` |
+| W6b Tests | maintainer | 413 | yes | W2 | existence/text tests replaced by outcome tests; BDD kept | `cargo nextest run --workspace`; `cargo test -p mvm-conformance --features bdd` |
+| W6c Docs | maintainer | 415, 463 | after W2-W6b | all code workstreams | docs, CLI reference, recipes and CI match behaviour | `python3 scripts/gen-cli-surface-inventory.py --bin target/debug/mvmctl --check`; `check-doc-links` |
+| W7 Thin CLI over MvmClient | PS-21 coordinator | 219, 220, 221, 223, 224, 245, 247 | yes, library side first | #3730, #4412-#4416 | zero production CLI reaches; typed client plus hostlib/SDK parity; Studio runs without subprocess backfill | `check-thin-cli`; `check-no-cli-shellout`; client public-API tests |
+| W8 HVF recovery lifetime | runtime owner | 246, 254, 255, 256, 257 | box 254 needs the approved contract (`specs/contracts/hvf-entrypoint-owner.md`) | #4655; boxes 255-257 blocked by 254, then 257 by the landed product implementation | recovery receiver contract verified; failure-path evidence; Firecracker-only gates removed after landing | per-box focused tests; macOS HVF run |
+| W9 Secrets | maintainer | 235 | yes | `specs/contracts/secret-store-kms-contract.md` | library-owned local provider seam with authorization, audit and secret-safe types | `cargo nextest run -p mvm-core -p mvm-client` |
+| W10 Demo critical path | runtime owner; producer and consumer owners | 133, 140-151, 156, 157, 158, 427 | no | each blocked by its owning issue (#4764 release, #4655, #4511, #4510, #4509, #4508, #4507, #4391, mvm-packs#84/#77/#76/#31); 133 and 157 need a live HVF run, 158 needs all twelve | final-candidate HVF witness with correlated allow/deny audit | per issue |
+| W11 PS-06 Firecracker | runtime owner | 443, 444, 445, 446, 447, 448 | 443 yes; 448 is a design decision | 444-447 blocked by 448 (process-host design) and by a released Linux producer | persistent lifecycle, metadata preserved, genuine producer witnessed | Linux KVM host runs |
+| W12 Image and pack trust | producer and consumer owners | 328, 329, 330, 331, 332, 333 | verification only | mvm-images#49/#64, #4100, #4764; 333 needs publication across architectures | image identity distinct from application identity; revocation authorities separate; atomic publication | `check-claim-catalog`; release verification workflow |
+| W13 Accepted contracts (ADR review) | maintainer | 347, 348, 349, 350, 351, 353, 354, 355, 357 | yes, as doc-and-witness reconciliation | #3422-#3426, #4184 (347); #4788 (348); #4577 (357) | each ADR clause maps to a retained, fresh witness | `check-adr-coverage`; `check-witness-citations`; `check-asserted-absence` |
+| W14 Studio and MVMD | maintainer | 338, 339 | coordination only | Studio PR 29; MVMD repository | adapter and contract boundaries preserved, nothing duplicated | cross-repository review |
+| W15 Protected goals and security posture | maintainer | 301, 302, 321 | 321 yes; 302 needs a quiet host and a KVM or HVF machine | W1 (321); applicable backends (302) | claims mapped to enforcement and witnesses; cold and warm startup evidence recorded | `check-claim-catalog`; bench commands |
+| W16 Legacy retirement | maintainer | 267, 268, 269 | yes, per interface | W1; consumer proof per item | each removed interface named with callers, docs, fixtures and CI updated together | `rg` of the removed name; `just ci` |
+| W17 Umbrella completion | maintainer | 158, 210, 460, 461, 462 | no | all above | every child complete or linked to a disposition; final before/after evidence | `cargo fmt --all --check`; `cargo test --workspace`; `cargo clippy --workspace -- -D warnings`; `just check::gated` |
 
 Count: 78 boxes in `/tmp/boxes.txt` at the time of writing; box 158 appears in both W10 and W17 by design.
 
 Open issues referenced in the umbrella body were 40 at the first measurement (`gh issue view` on every `#NNNN`); re-run before relying on that.
+
+### 2.1 Duplicated helpers: what is left and why
+
+Measured at `b9731f0039`. `sha256_hex` of a byte slice now has one authority, `mvm_contract::hash::sha256_hex`; the copies in `mvm-runtime` (`artifacts.rs`) and the `mvm-build` fixture example call it. Command: `rg -n 'fn (sha256_hex|copy_tree)\b' crates`.
+
+- `sha256_hex` in `mvm-cli/build.rs` and `mvm-builder-guest/src/builder_boot/payload.rs`: neither crate has an `mvm-contract` edge by design (build script and builder-VM guest closure); kept.
+- `sha256_hex` in `mvm-compiler/src/pack/python/mod.rs`: not a hasher, it validates a `sha256:` string; a different function under the same name.
+- `sha256_hex_of` in `mvm-build/stage0_kernel.rs` and `sha256_hex` in `mvm-cli/.../image/cache.rs`: file hashing and digest-string parsing; different contracts.
+- `copy_tree` in `mvm-cli/.../image/materialize.rs`: recreates symlinks, silently skips devices and FIFOs (unpacked OCI tree); iterative.
+- `copy_tree` in `mvm-runtime/.../builder_runner/driver_builder.rs`: recreates symlinks, removes what an earlier build left, and refuses devices and FIFOs with an error (guest-written output).
+- `copy_tree` in `mvm-client/.../pack_scenario/fs.rs`: refuses symlinks, enforces depth and entry budgets and records file hashes; a bounded reader, not a plain copier.
+- `copy_tree` in `mvm-build/examples/mvm-app-deps-fixture-tool.rs`: skips symlinks and non-files; example only.
+- `copy_tree` in `mvm-builder-guest/src/bin/stage0-init.rs`: seed environment with no `mvm-fs` or `mvm-contract` edge; overwrites symlinks and copies every non-directory.
+- `copy_tree` in `mvm-build/src/shell_scripts.rs`: emits a `cp -a` shell string for the builder VM, not a Rust copy.
+- `read_manifest`: the definitions return different types and no two are identical, so none is merged.
+
+The host-side Rust copies differ in symlink, special-file and pre-existing-destination handling, so merging them would change behaviour; each stays as recorded.
 
 ## 3. Capability and flag inventory
 
@@ -180,7 +198,7 @@ Built from `9168754adca89a00dbaf4bee109bd1966b2081bf` with `~/.cargo/bin/cargo b
 Verb paths walked: **262** (every `Commands` listed by `--help`, recursively); flag and positional entries in their `Options`/`Arguments` sections, excluding `-h`/`-V`: **849**. Root flags (propagated to every verb by clap) are listed once, under `(root)`. `--help` here is width-constrained (`constrain_help_output`, `crates/mvm-cli/src/commands/mod.rs`), so descriptions, defaults and deprecation markers are cut off and not recorded. Hidden verbs do not appear in `--help` and are not in this table; see the hidden-verb list in §3.2.
 
 | Verb path | Flags and arguments (`= default`, `(env X)`) |
-|---|---|
+|---|---|---|
 | `(root)` | `--log-format <LOG_FORMAT>`<br>`--fc-version <FC_VERSION>`<br>`--builder <BUILDER>`<br>`--kernel-source <KERNEL_SOURCE>`<br>`-v, --verbose...` |
 | `machine` | - |
 | `machine run` | `-m, --manifest <PATH>`<br>`--image <REF>`<br>`-a, --application <REF>`<br>`--flake <PATH>`<br>`--flake-profile <PROFILE>`<br>`--deployment <DIR>`<br>`--runtime-pack`<br>`--runtime <NAME>`<br>`--no-detect`<br>`--net`<br>`--network-preset <PRESET>`<br>`--allow-host <HOST[:PORT]>`<br>`--allow-endpoint <[METHOD ]URL>`<br>`--approval <BACKEND>`<br>`--approval-mode <MODE>`<br>`--ai-token-budget <TOKENS>`<br>`--peer <NAME:PORT=ADDR:PORT>`<br>`--cpus <CPUS>`<br>`--cpu-limit <MILLICORES>`<br>`--grants-file <PATH>`<br>`--memory <MEMORY>`<br>`--gpu`<br>`--gpu-device <ORDINAL>`<br>`--profile <PROFILE>`<br>`--mount <HOST:GUEST[:ro|SIZE]>`<br>`--asset <KIND:HOST_PATH>`<br>`--output <HOST_DIR:GUEST[:SIZE]>`<br>`-e, --env <ENV>`<br>`--allow-env <NAME>`<br>`--secret <NAME[:HOST,...]>`<br>`--timeout <TIMEOUT>`<br>`--receipt <PATH>`<br>`--caller-commitment <HEX>`<br>`--json`<br>`--dry-run`<br>`--launch-plan <PATH>`<br>`--from-workload-ir <PATH>`<br>`--prod`<br>`--agent-verb <VERB>`<br>`--host-service <SERVICE>`<br>`--hypervisor <HYPERVISOR>`<br>`--policy <NAME|PATH>`<br>`--plan <FILE>`<br>`--name <NAME>`<br>`-d, --detach`<br>`-p, --port <HOST_PORT:GUEST_PORT>`<br>`--up-json`<br>`--ttl <DURATION>`<br>`--healthcheck <CMD>`<br>`--health-interval <HEALTH_INTERVAL>`<br>`--health-timeout <HEALTH_TIMEOUT>`<br>`--health-retries <HEALTH_RETRIES>`<br>`--health-start-period <HEALTH_START_PERIOD>`<br>`-t, --tty`<br>`-i, --interactive`<br>`--force`<br>`--build`<br>`--no-build`<br>`--entrypoint`<br>`--fresh`<br>`--reset`<br>`--stdin <PATH>`<br>`--attach`<br>`--apply` |
@@ -452,7 +470,7 @@ Generated by `python3 scripts/gen-cli-surface-inventory.py` (block below; `--che
 Documented as removed or non-existent (checked against the generated block: none of these four has a `live-read` row):
 
 | Knob | Source of the statement | Status in code |
-|---|---|---|
+|---|---|---|---|
 | `MVM_NETWORKING`, `MVM_GATEWAY_BIN` | CLAUDE.md: gone with the gateway | no literal anywhere |
 | `MVM_ACK_UNRESTRICTED_NETWORK` | CLAUDE.md claim 10: never existed | no literal, and no public doc names it any more |
 | `MVM_NO_VM` | read by the SDKs (`__sdk-no-vm`) | not a Rust literal |
@@ -463,7 +481,7 @@ Distinct `MVM_*` literals in Rust (`crates`, `src`, tests included): **374**; li
 Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only` = only written to a child process, so the reader is outside Rust or in another process; `test-only` = test code only), first reader `file:line`, count of live-read sites, documented in `public/src/content/docs`, referenced by a script/nix/feature/test file.
 
 | Literal | Class | First site | Live sites | Documented | Non-Rust ref |
-|---|---|---|---|---|---|
+|---|---|---|---|---|---|---|
 | `MVM_ACK_PERMISSIVE_RUN` | live-read | `crates/mvm-cli/src/commands/vm/run_validation.rs:46` | 1 | yes | - |
 | `MVM_ACK_RAW_STREAM_EDGE` | live-read | `crates/mvm-contract/src/stream/edge.rs:38` | 1 | yes | - |
 | `MVM_ACTIVATION_FILE` | live-read | `crates/mvm-runtime/src/wasm_activation.rs:56` | 1 | yes | - |
@@ -831,7 +849,7 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 Documented names with no reader anywhere (docs-only):
 
 | Name | First doc site | Removal statement |
-|---|---|---|
+|---|---|---|---|
 | `MVM_EGRESS_BENCH` | `public/src/content/docs/guides/networking.md:201` | no removal statement |
 <!-- env:end -->
 
@@ -840,7 +858,7 @@ Documented names with no reader anywhere (docs-only):
 Selectors come from `BACKEND_DESCRIPTORS` in `crates/mvm-runtime/src/catalog.rs` (selector, aliases, tier); the platform column is `public/src/content/docs/reference/platform-support.md` plus CLAUDE.md's builder section. Eight `BackendKind`s exist (`crates/mvm-contract/src/protocol/vm_backend.rs:1276`).
 
 | `--hypervisor` selector (alias) | Tier | Workload host | Builder role | Auto-detected? | Cargo gate |
-|---|---|---|---|---|---|
+|---|---|---|---|---|---|---|
 | `firecracker` | 1 | Linux with `/dev/kvm`, x86_64 and aarch64 | default builder on Linux+KVM; persistent builder refuses it | yes (workload default) | none |
 | `hvf` (`hypervisor`) | 2 | macOS 26+ Apple Silicon | default builder on Apple Silicon macOS | yes on macOS 26+ | `hvf-live-validation` for the live lane only |
 | `libkrun` (`krun`) | 2 | macOS 13-25 Apple Silicon (preview); builds on Linux/KVM only via explicit `--builder libkrun` | explicit only, never auto-detected, never a fallback | no | `libkrun-sys`, `libkrun-live`, `builder-libkrun` (default in `mvm-build`) |
@@ -855,7 +873,7 @@ Builder selector (`--builder` / `MVM_BUILDER_BACKEND`): `hvf`, `firecracker`, `l
 Host/architecture lanes CI actually builds or smokes (from `strategy.matrix` in `.github/workflows`, parsed with PyYAML; re-derive with the one-liner in §4):
 
 | Workflow job | Lanes |
-|---|---|
+|---|---|---|
 | `release.yml` `build` | `aarch64-apple-darwin` (macos-latest); `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` (both ubuntu-24.04; the x86_64 one builds the musl target) |
 | `first-run-smoke.yml` | macOS+HVF (self-hosted M1), Linux+Firecracker (ubuntu-24.04) |
 | `ci-main.yml` `test-musl-confinement` | `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` |
@@ -866,12 +884,12 @@ Host/architecture lanes CI actually builds or smokes (from `strategy.matrix` in 
 
 Not covered by any matrix row: libkrun, QEMU, `apple-container`, `web-linux` and `wasm` as workload backends have no per-backend platform lane here; they run inside the generic workspace shards or feature-gated tests. Whether that is deliberate is not decided in this document.
 
-Cargo features: 90 non-default features across 17 of the 32 packages (`cargo metadata --no-deps --format-version 1 --offline`). Defaults: `mvm-contract` -> `protocol`; `mvm-build` -> `builder-libkrun`; `mvm-client` -> `manifest-verify`; `mvmctl` -> `mvm-cli/manifest-verify`. The root `mvmctl` package re-exposes `attestation-tpm2 dev embed-host-bins host hostd-transport hvf-live-validation libkrun-live libkrun-sys native-caller-identity release-artifact-bootstrap release-channel template-registry-s3 test-support trusted-apfs user`. Feature-conditional behaviour that changes a supported combination: `embed-host-bins` (release/CI builds always on), `manifest-verify` (without it self-update and image verification cannot run), `release-channel`, `contributor-bootstrap` (source-checkout bootstrap), `trusted-apfs`, `custom-dns`, `ebpf-telemetry`, `network-perf`.
+Cargo features: 90 non-default features across 17 of the 28 packages (`cargo metadata --no-deps --format-version 1 --offline`). Defaults: `mvm-contract` -> `protocol`; `mvm-build` -> `builder-libkrun`; `mvm-client` -> `manifest-verify`; `mvmctl` -> `mvm-cli/manifest-verify`. The root `mvmctl` package re-exposes `attestation-tpm2 dev embed-host-bins host hostd-transport hvf-live-validation libkrun-live libkrun-sys native-caller-identity release-artifact-bootstrap release-channel template-registry-s3 test-support trusted-apfs user`. Feature-conditional behaviour that changes a supported combination: `embed-host-bins` (release/CI builds always on), `manifest-verify` (without it self-update and image verification cannot run), `release-channel`, `contributor-bootstrap` (source-checkout bootstrap), `trusted-apfs`, `custom-dns`, `ebpf-telemetry`, `network-perf`.
 
 ### 3.6 Live compatibility layers
 
 | Layer | What is still accepted | Reader | Retirement condition |
-|---|---|---|---|
+|---|---|---|---|---|
 | Builder boot ABI 0 / 1 / 2 | `BuilderBootAbi::{LEGACY=0, PAYLOAD=1, NO_MVM_BINARY=2}` (`crates/mvm-core/src/image_set/boot_abi.rs:38-44`). With a boot payload source registered the range is 0..=2 (`WITH_PAYLOAD`, `:78`); without one only 0 (`LEGACY_ONLY`, `:71`) (`crates/mvm-builder-guest/src/builder_boot/abi.rs:15-23`). `images.lock` pins ABI 1. | `supported_image_abis`, `crates/mvm-build/src/builder_boot/stage.rs:45` | published builder image declares ABI 2 (mvm-images change, CLAUDE.md) |
 | Image-set retired roles | `ImageSetRole::RetiredGuestRuntime` (`crates/mvm-core/src/image_set.rs:446`): overlay, `{"sdk_sidecar": libc}`, initramfs members parsed, never selected or fetched; also skipped at `crates/mvm-bundler/tests/boot_assets.rs:290` | image-set parser | mvm-images drops the `mvm` input |
 | Portable `.mvmpkg` boot assets | `BOOT_ASSET_OVERLAY_ROLE`, `BOOT_ASSET_INITRAMFS_ROLE` (`crates/mvm-core/src/plan/bundle.rs:995,1000`), the one remaining reader of overlay/initramfs members | bundle export | replacement decided in #3928 |
@@ -883,6 +901,21 @@ Cargo features: 90 non-default features across 17 of the 32 packages (`cargo met
 | Subcommand aliases (retained) | `ls` (machine ps), `console` (machine attach), `checkpoint` (volume snapshot), `app`/`volume` (run flags `--application`/`--mount`), `--debug` for `-v`: each is named in `public/src/content/docs/reference/cli-commands.md`, guides or tests, so it has a consumer. Found by `rg 'visible_alias' crates/mvm-cli/src` | clap | a consumer-free alias is deleted, not retained |
 | Subcommand aliases (intentionally removed) | hidden aliases `list` (agent-session, manifest), `show`, `delete` (manifest), `new`/`ls`/`rm` (network), `ls`/`rm` (trust), `status` (caller identity): no docs, fixtures, CI or packaging named them; the canonical names (`ls`, `info`, `rm`, `create`, `list`, `remove`, `show`) are unchanged | removed | n/a |
 | Hidden verbs and flags (retained, not yet proven unreachable) | 34 `hide = true` sites. Internal re-exec verbs (`__builder-*`, `__qemu-vsock-bridge`, `__sdk-no-vm`) are spawned by mvmctl itself and are required; the `vm/group.rs` hidden verbs are classified dispatchable by `commands/tests.rs:584`. Each remaining one needs a per-verb caller proof before deletion | clap | per-verb proof |
+| Legacy pack signing identity and cutoff (compatibility, **expired**) | `LEGACY_PACK_SIGNING_IDENTITY` (the `mvm-templates` publish workflow) and `LEGACY_PACK_SIGNING_CUTOFF = 2026-11-06T00:00:00Z` (`crates/mvm-core/src/registry_pack.rs:578-582`), plus `registry_pack/historical.rs` (369 lines): the built-in `agent`/`runtime` publisher policy lists the old identity, `trust_for_namespace_at` strips it at or after the cutoff (`registry_pack.rs:555-563`), and `check_legacy_manifest_policy` limits it to nine exact manifest digests (`historical.rs:63-110`). Class: a trust-widening compatibility exception inside signed-pack verification, not a format boundary. Expired on 2026-11-06; the cutoff test near `historical.rs:314` asserts refusal at and after it. After the cutoff the digest check is reachable only on a host whose clock is earlier than the cutoff; an operator-authored policy is unaffected (`legacy_identity_expires_at` is `None`, provenance `Operator`) | `enforce_legacy_manifest_policy` at `registry_pack.rs:873,902` and `registry_pack/dispatch.rs:239`; `official_publisher_policy` at `registry_pack_store.rs:818,1321,2039`. Tests naming the identity: `registry_pack.rs:1610-1663,2091-2111`, `registry_pack_store.rs:1224`. Docs naming the date: `public/src/content/docs/guides/pack-authoring.md:230,432,514`, `policy-and-profiles.md:386`, ADR-055 line 74 | date reached; deletion proposed in §3.6a item 1 |
+| `legacy_portable_runtime.rs` (security boundary, **live**) | `VerifiedLegacyPortableRuntime` (858 lines) verifies an original schema-4 portable `.mvmpkg` with its overlay, verity and initramfs boot assets against the host trust store (`FsTrustStore`, `verify_plan_bundle`, `select_boot_asset_members`). Class: signed-bundle verification, not compatibility sugar. Not expired: it has a production producer, `LegacyPortableRuntimeProof` is built in `mvm-client/src/launch/bundle_runtime.rs:175` and attached at `:272` for an installed bundle whose boot assets carry no CLI runtime | `runtime_evidence.rs:148-162,380,540-542,781`; `checkpoint/runtime_binding.rs:61-71`; `mvm-vmm/src/host/runtime_meta.rs:440`; `mvm-backends/src/fc/runtime_artifacts.rs:177`; `mvm-runtime/src/universal_initramfs.rs:117`; `mvm-hostd/src/plan_admission/assurance_runtime.rs:56`; SDK host-ABI type `LegacyPortableRuntimeProof`; documented at `reference/cli-commands.md:176` | same condition as the portable `.mvmpkg` boot-asset row above: replacement decided in #3928, plus no persisted checkpoint still carrying `RuntimeLaunchBinding::LegacyPortable` |
+| `legacy_bundle_runtime.rs` (security boundary, **no in-tree producer found**) | `VerifiedLegacyBundleRuntime` (595 lines) verifies a pinned bundle for a legacy image whose runtime is baked into its rootfs (the builder-boot-ABI-0 shape) and re-checks the selected rootfs and initrd against signed artifact roles. Class: signed-bundle verification. No date-based expiry exists. A grep for non-test constructors of `LegacyBundleRuntimeProof` or `legacy_bundle_runtime = Some` finds only the `fixtures` module (`cfg(any(test, feature = "test-support"))`), tests and the binding's config-restoring match in `protocol/runtime_release.rs`; the live entry points are a deserialized operator input and persisted metadata, so a producer outside this tree or an old checkpoint cannot be ruled out by reading | `ProviderWorkloadConfig.legacy_bundle_runtime` (`mvm-hostd/src/operator_admitted_trial_booter.rs:151,703`, `Deserialize`); persisted `RuntimeLaunchBinding::LegacyBundle` read at restore (`checkpoint/runtime_binding.rs:96-117`, `mvm-vmm/src/host/runtime_meta.rs:427-433`, `mvm-backends/src/fc/runtime_artifacts.rs:176,196`); `runtime_evidence.rs:288-309,550-555`; `env/verify_runtime.rs:79-80,177-188` (refuses it); SDK host-ABI types in `host_abi.py`/`host_abi.ts` (hostlib ABI 1.7); `cli-commands.md:176` | no deserialized producer and no retained checkpoint carries a `legacy_bundle` binding, which needs a measurement this inventory did not take |
+| `runtime_evidence.rs` and `runtime_evidence/namespace.rs` (current boundary, **not legacy**) | `verify_runtime_for_launch`, `verify_release_runtime_for_launch`, `verify_runtime_binding`, the lifecycle lease and the owner-only namespace root authenticate the guest runtime a launch binds, for the current release, source and CLI-assembly paths. Only the `LegacyBundle` and `LegacyPortable` arms (`:36-37,148-162,288-380,540-555`) are legacy; the file is not a deletion candidate | callers in `mvm-client` (`launch/bundle_runtime.rs`, `launch/runtime_source.rs`, `portable_boot_assets.rs`), `mvm-cli` (`fork_vm_full.rs`), `mvm-hostd` and `mvm-conformance` | n/a; only its two legacy arms follow the rows above |
+| `mvmctl env verify-runtime` (`env/verify_runtime.rs`, current diagnostic, **not legacy**) | Offline release-only report; it refuses a config carrying either legacy proof (`:79-80`), so it is not a reader of the legacy layers. Registered in `env/group.rs:14` | clap | n/a |
+| `LEGACY_AGENT_UID = 990` (format compatibility, **live**, adjacent, not a signing identity) | `crates/mvm-builder-guest/src/builder_agent_uid.rs:19`: builder images built before mkGuest fixed its account set name the agent at 990 and have no 901; the image's own `/etc/passwd` decides (`agent_uid_for_image`). The published ABI 1 builder image is one of them | `agent_uid_for_image` at builder boot | a published builder image whose `/etc/passwd` names 901 replaces every pinned one (mvm-images change) |
+
+### 3.6a Proposed deletion list (not executed by this document)
+
+Nothing below is deleted by the PR that adds this section. Each item needs maintainer approval, and items touching signed-bundle verification need the secure-execution review before any code moves.
+
+1. **Legacy pack identity (candidate now).** Delete `registry_pack/historical.rs`, `LEGACY_PACK_SIGNING_IDENTITY`, `LEGACY_PACK_SIGNING_CUTOFF`, the `legacy_identity_expires_at` field and strip block, `PublisherPolicyProvenance` (read only by the legacy check), the error variant `LegacyManifestNotAllowed`, the two `enforce_legacy_manifest_policy` `and_then` calls and the `dispatch.rs:239` call, and the built-in policy's second identity (keep `official_publisher_policy` returning the official identity only). Update the tests named in the row and the three docs; ADR-055 is superseded or annotated, not rewritten. Behaviour on a host with a correct clock does not change, because the built-in policy already refuses the old identity at the cutoff. The trust effect is narrowing: a host whose clock sits before 2026-11-06 stops accepting nine historical manifests under the built-in policy. A pack signed only by the old identity that an operator still needs must be named in an operator policy, which carries the identity as a plain string and needs none of the deleted constants.
+2. **`legacy_bundle_runtime.rs` and the `LegacyBundle` arms (blocked on a measurement).** Candidate for deletion once it is shown that nothing outside this tree supplies `ProviderWorkloadConfig.legacy_bundle_runtime` and no retained checkpoint or VM metadata names `runtime: "legacy_bundle"`. Deleting it removes a type from the hostlib host ABI (1.7) and the Python and TypeScript host-ABI bindings, so it needs an ABI version decision first. Evidence to gather: `legacy_bundle` in persisted `runtime_meta` across supported hosts, and the operator-admitted trial booter's callers.
+3. **`legacy_portable_runtime.rs` and the `LegacyPortable` arms: do not delete.** It has a production producer and is the verifier for the portable boot-asset path; its retirement belongs to #3928.
+4. Leave `runtime_evidence.rs`, `runtime_evidence/namespace.rs` and `verify_runtime.rs` in place; only their legacy arms follow items 2 and 3.
 
 
 ## 4. Reproduce

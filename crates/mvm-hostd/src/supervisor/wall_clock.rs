@@ -318,6 +318,28 @@ pub(crate) fn supervisor_emitter(
     Ok(Arc::new(emitter))
 }
 
+/// Sign what a teardown scrub did to the guest's RAM into the chain the
+/// supervisor already audits into, as counts.
+///
+/// A supervisor with no admitted plan (Stage 0, the builder VM) has no chain
+/// entry to make, so it records nothing and succeeds. Callers treat a failure
+/// as best-effort: the scrub already happened, and an audit failure must never
+/// keep a machine from stopping.
+pub fn record_guest_memory_scrub(
+    inputs: &SupervisorTimerInputs<'_>,
+    scrub: &crate::audit::emitter::GuestMemoryScrub,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+
+    let Some(value) = inputs.plan_json else {
+        return Ok(());
+    };
+    let plan = decode_admitted_plan(value).context("decoding the admitted plan")?;
+    supervisor_emitter(inputs)?
+        .emit_guest_memory_scrubbed(&plan, scrub)
+        .context("signing the scrub entry")
+}
+
 /// Arm the wall-clock timer for a supervisor that is about to enter its VMM
 /// run loop, or return `None` when the plan declares no bound.
 ///
@@ -613,6 +635,92 @@ mod tests {
             "the kill must be recorded in the chain, or it is indistinguishable \
              from a crash; saw {lines:?}"
         );
+    }
+
+    fn scrub_inputs<'a>(
+        plan_json: Option<&'a serde_json::Value>,
+        audit: &'a std::path::Path,
+        key: &'a std::path::Path,
+        state: &'a std::path::Path,
+        pid: &'a std::path::Path,
+    ) -> SupervisorTimerInputs<'a> {
+        SupervisorTimerInputs {
+            plan_json,
+            audit_dir: Some(audit),
+            signing_key_path: Some(key),
+            vm_state_dir: state,
+            pid_file: pid,
+        }
+    }
+
+    fn a_scrub() -> crate::audit::emitter::GuestMemoryScrub {
+        crate::audit::emitter::GuestMemoryScrub {
+            backend: "hvf",
+            mapped_bytes: 1 << 29,
+            scrubbed_pages: 11_642,
+            nonzero_bytes_after: 0,
+            whole_mapping: false,
+        }
+    }
+
+    #[test]
+    fn a_supervisor_with_a_plan_signs_the_scrub_into_its_chain() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let audit = root.path().join("audit");
+        let keys = root.path().join("keys");
+        std::fs::create_dir_all(&audit).unwrap();
+        std::fs::create_dir_all(&keys).unwrap();
+        let key = keys.join("host-signer.ed25519");
+        let plan = plan_with_bound(0);
+        let json = serde_json::to_value(&*plan).unwrap();
+        let state = root.path().join("vm");
+        let pid = state.join("pid");
+
+        record_guest_memory_scrub(
+            &scrub_inputs(Some(&json), &audit, &key, &state, &pid),
+            &a_scrub(),
+        )
+        .expect("recorded");
+
+        let lines = chain_lines(&audit, &plan.tenant.0);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("plan.guest_memory_scrubbed") && l.contains("11642")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_supervisor_with_no_plan_records_nothing_and_succeeds() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let state = root.path().join("vm");
+        let pid = state.join("pid");
+        let inputs = SupervisorTimerInputs {
+            plan_json: None,
+            audit_dir: None,
+            signing_key_path: None,
+            vm_state_dir: &state,
+            pid_file: &pid,
+        };
+        record_guest_memory_scrub(&inputs, &a_scrub()).expect("nothing to record");
+    }
+
+    #[test]
+    fn a_plan_with_no_audit_substrate_fails_so_the_caller_can_warn() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let plan = plan_with_bound(0);
+        let json = serde_json::to_value(&*plan).unwrap();
+        let state = root.path().join("vm");
+        let pid = state.join("pid");
+        let inputs = SupervisorTimerInputs {
+            plan_json: Some(&json),
+            audit_dir: None,
+            signing_key_path: None,
+            vm_state_dir: &state,
+            pid_file: &pid,
+        };
+        assert!(record_guest_memory_scrub(&inputs, &a_scrub()).is_err());
     }
 
     #[test]

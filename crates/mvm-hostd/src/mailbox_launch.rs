@@ -480,7 +480,7 @@ fn serve_derived_with(
         while !thread_stop.load(Ordering::SeqCst) {
             // Ok means a frame arrived, delivered or refused; Err means the
             // guest had nothing yet (or was not up). Neither ends the loop.
-            match service.serve_guest(&paths.route, &mut sealer) {
+            match service.serve_guest_until(&paths.route, &mut sealer, &thread_stop) {
                 Ok(()) => {
                     attempt = 0;
                     sleep_unless_stopped(&thread_stop, POST_FRAME_PAUSE);

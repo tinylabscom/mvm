@@ -378,12 +378,10 @@ fn audit_one(
     })
 }
 
-fn read_manifest(volume_dir: &Path) -> Result<VolumeManifest> {
+pub(super) fn read_manifest(volume_dir: &Path) -> Result<VolumeManifest> {
     let path = volume_dir.join(FILE_MANIFEST);
     let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-    let manifest: VolumeManifest =
-        serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
-    Ok(manifest)
+    serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
 }
 
 fn recover_language(manifest: &VolumeManifest, volume_dir: &Path) -> Result<Language> {

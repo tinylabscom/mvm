@@ -4,7 +4,7 @@
 //! Both commands share a `fetch_readiness` helper that drives the
 //! protocol-hello prelude with
 //! `GuestCapability::Readiness` and dispatches a single
-//! `ReadinessStatus` request through `mvm_runtime::vsock_transport` (so
+//! `ReadinessStatus` request through `mvm_vmm::vsock_transport` (so
 //! Firecracker, libkrun, Apple Container, and Docker backends all
 //! work without per-backend code in the CLI).
 //!

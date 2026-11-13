@@ -578,9 +578,15 @@ pub fn run_supervisor(cfg: &SupervisorConfig) -> Result<std::convert::Infallible
     })?;
     let pid_path = cfg.pid_file();
     let pid = std::process::id().to_string();
-    std::fs::write(&pid_path, &pid).map_err(|e| Error::Io {
-        context: format!("write pid file {}: {e}", pid_path.display()),
-    })?;
+    // The supervisor binary may already have recorded this pid with its start
+    // time; rewriting it bare would drop that.
+    let already_recorded = std::fs::read_to_string(&pid_path)
+        .is_ok_and(|text| text.split_whitespace().next() == Some(pid.as_str()));
+    if !already_recorded {
+        std::fs::write(&pid_path, &pid).map_err(|e| Error::Io {
+            context: format!("write pid file {}: {e}", pid_path.display()),
+        })?;
+    }
 
     if !is_available() {
         return Err(Error::NotInstalled {

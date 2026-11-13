@@ -210,7 +210,7 @@ pub fn lower_to_workload(
         },
     };
 
-    // `addons` lowering deferred — Phase 4 ships with the IR field
+    // `addons` lowering deferred — the IR field is
     // populated only on the empty default. Decorator users who need
     // addons can still build via the imperative `mvm-sdk::builder`
     // surface until the follow-up wires them in.

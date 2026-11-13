@@ -11,9 +11,9 @@ so there is one copy and it cannot fall behind the pages it describes.
 
 **[/llms.txt](/llms.txt)** is the canonical machine-readable index. It is built
 from the content collection at build time and lists every documentation page —
-grouped under the same headings as the sidebar, in the same order — with the
-page's own one-line description. A page with no description fails the site
-build rather than landing in the index as a bare path.
+the short sidebar selection first, then other pages — with each page's own
+one-line description. A page with no description fails the site build rather
+than landing in the index as a bare path.
 
 ## Plain markdown
 

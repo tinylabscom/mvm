@@ -85,7 +85,7 @@ pub(super) fn run_in_guest(
     // Inbound vsock RPC audit. exec.rs is a top-level module that can't
     // reach the private `commands::shared` re-export, so inline the audit
     // emit here. The detail format matches
-    // `commands::shared::vsock::emit_vsock_rpc_audit`:
+    // `mvm_client::guest::emit_vsock_rpc_audit`:
     // `scope=rpc,direction=in,kind=vsock,verb=<kebab-name>`.
     mvm_core::audit_emit!(
         NetworkPolicyAllow,

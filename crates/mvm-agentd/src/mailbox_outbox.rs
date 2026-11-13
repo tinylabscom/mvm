@@ -59,8 +59,14 @@ pub fn bound_socket_io(
     fd: std::os::fd::RawFd,
     timeout: std::time::Duration,
 ) -> std::io::Result<()> {
+    let secs = timeout.as_secs().try_into().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "mailbox timeout exceeds socket timeval range",
+        )
+    })?;
     let tv = libc::timeval {
-        tv_sec: timeout.as_secs() as libc::time_t,
+        tv_sec: secs,
         tv_usec: 0,
     };
     for opt in [libc::SO_RCVTIMEO, libc::SO_SNDTIMEO] {
@@ -79,6 +85,46 @@ pub fn bound_socket_io(
         }
     }
     Ok(())
+}
+
+/// How long the agent holds a host connection open waiting for the workload to
+/// write a message, before answering with nothing so the host dials again.
+/// One long hold replaces a dial every couple of seconds on an idle guest.
+pub const MAILBOX_HOLD: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Wait up to `hold` for the spool to hold a message, checking every `tick`.
+/// Stops early, returning `false`, when `abandoned` says the host went away or
+/// the agent is shutting down; returns `true` as soon as a message is spooled.
+pub fn wait_for_outbox(
+    spool: &Path,
+    hold: std::time::Duration,
+    tick: std::time::Duration,
+    mut abandoned: impl FnMut() -> bool,
+) -> bool {
+    let deadline = std::time::Instant::now() + hold;
+    loop {
+        if spooled(spool).is_ok_and(|files| !files.is_empty()) {
+            return true;
+        }
+        if abandoned() || std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(tick);
+    }
+}
+
+/// Whether the peer of the connected socket `fd` has hung up or sent bytes.
+/// The host sends nothing before the agent answers, so either means the
+/// connection is no longer a live request.
+pub fn peer_gone(fd: std::os::fd::RawFd) -> bool {
+    let mut p = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: `p` is one valid pollfd and the count is 1; a zero timeout never blocks.
+    let rc = unsafe { libc::poll(&mut p, 1, 0) };
+    rc > 0 && p.revents != 0
 }
 
 /// The spooled message files, oldest first. Temp files are skipped.
@@ -220,6 +266,13 @@ mod tests {
         let start = std::time::Instant::now();
         assert_eq!(forward_outbox(&mut ours, outbox), Err(Refusal::Malformed));
         assert!(start.elapsed() < std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_timeout_outside_timeval_range_is_refused_before_touching_the_socket() {
+        let error = bound_socket_io(-1, std::time::Duration::from_secs(u64::MAX))
+            .expect_err("an overflowing timeout must not wrap or disable the bound");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]

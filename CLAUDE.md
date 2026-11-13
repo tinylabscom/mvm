@@ -3,6 +3,10 @@
 Backing: shipped-source
 Validation: check-claim-catalog
 
+Read `AGENTS.md` before changing this repository. Its product and design
+boundaries govern new work; this file describes the current implementation,
+while ADR-001 and its witnessed backend matrix govern shipped security claims.
+
 ## Project Overview
 
 Rust CLI for building and running Firecracker microVMs on macOS and Linux. Handles the full dev lifecycle: bootstrapping, Nix-based image builds, single-VM management, and reusable template creation.
@@ -217,7 +221,7 @@ Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, disting
 
 ### Workspace Structure
 
-28-crate Cargo workspace under `crates/` (including `crates/deps/`) (Bar-A consolidation took 32→16; `mvm-vmm`, `mvm-backends`, and `mvm-http` were split back out afterwards, `mvm-host-services` was split out of `mvm-sdk`, `mvm-hostlib` was added at the top of the graph, the four GPU API-remoting crates `mvm-gpu` and `mvm-gpu-*-shim` were added, `mvm-setpriv` was split out of `mvm-agentd` as a leaf, `mvm-bundler` was split out of `mvm-cli`, `mvm-builder-guest` was split out of `mvm-build`, and `mvm-compiler` was split out of `mvm-sdk`), plus the root `mvmctl` package, `xtask`, and `mvm-conformance` — 31 packages by `cargo metadata`. Root facade (`src/lib.rs`) re-exports the libraries.
+Cargo workspace under `crates/` (including `crates/deps/`) (Bar-A consolidation took 32→16; `mvm-vmm`, `mvm-backends`, and `mvm-http` were split back out afterwards, `mvm-host-services` was split out of `mvm-sdk`, `mvm-hostlib` was added at the top of the graph, the four GPU API-remoting crates `mvm-gpu` and `mvm-gpu-*-shim` were added, `mvm-setpriv` was split out of `mvm-agentd` as a leaf, `mvm-bundler` was split out of `mvm-cli`, `mvm-builder-guest` was split out of `mvm-build`, and `mvm-compiler` was split out of `mvm-sdk`), plus the root `mvmctl` package, `xtask`, and `mvm-conformance`. Root facade (`src/lib.rs`) re-exports the libraries.
 
 **Libraries, low → high:**
 

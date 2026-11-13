@@ -15,8 +15,8 @@ use anyhow::{Context, Result};
 use mvm_core::launch_trace::PhaseTimingMode;
 use mvm_core::vm_backend::{SnapshotCapability, VmId, VmStartConfig, VmVolume};
 use mvm_runtime::backend::AnyBackend;
-use mvm_runtime::vsock_transport;
 use mvm_vmm::host::shell::shell_quote;
+use mvm_vmm::vsock_transport;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -101,7 +101,7 @@ pub enum ExecTarget {
 ///   - `command` — argv to exec inside the guest.
 ///   - `working_dir` — optional `cd` target before exec.
 ///   - `env` — merged from `apps[].env` (lower precedence) and
-///     `apps[].entrypoint.env` (higher precedence), per mvmforge semantics.
+///     `apps[].entrypoints[].env` (higher precedence).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchEntrypoint {
     pub command: Vec<String>,

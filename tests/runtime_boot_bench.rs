@@ -64,7 +64,7 @@ use anyhow::{Context, Result, bail};
 use mvm_agentd::vsock::{GuestRequest, GuestResponse};
 use mvm_core::vm_backend::VmStartConfig;
 use mvm_runtime::backend::AnyBackend;
-use mvm_runtime::vsock_transport::VsockTransport as _;
+use mvm_vmm::vsock_transport::VsockTransport as _;
 use serde::Deserialize;
 
 #[path = "runtime_boot_evidence/mod.rs"]
@@ -873,6 +873,15 @@ fn measure_one(spec: &BenchSpec, name: String) -> Result<BootMeasurement> {
         .with_context(|| format!("starting benchmark VM {name} with backend {}", spec.backend))?;
     let ready_result = wait_until_ready(spec, &name);
     let elapsed = started.elapsed();
+    // Keep device-model inspection outside the boot timer, but before stop
+    // so CI checks what Firecracker actually booted, not only our API recipe.
+    let ready_result = ready_result.and_then(|()| {
+        if spec.backend == "firecracker" {
+            assert_live_firecracker_has_no_nic(&name)
+        } else {
+            Ok(())
+        }
+    });
     let stop_started = Instant::now();
     let stop_result = backend.stop(&id);
     let stop = match stop_result {
@@ -885,6 +894,21 @@ fn measure_one(spec: &BenchSpec, name: String) -> Result<BootMeasurement> {
     ready_result?;
 
     Ok(BootMeasurement { elapsed, stop })
+}
+
+fn assert_live_firecracker_has_no_nic(name: &str) -> Result<()> {
+    let state_dir = mvm_core::config::vm_state_dir(name);
+    let socket = mvm_backends::fc::fc_api_socket_path(&state_dir.to_string_lossy());
+    let body = mvm_backends::fc::fc_api::call(Path::new(&socket), "GET", "/vm/config", None)
+        .with_context(|| format!("reading live Firecracker device model for {name}"))?;
+    assert_no_nic_in_firecracker_config(&body)
+        .with_context(|| format!("checking live Firecracker device model for {name}"))
+}
+
+fn assert_no_nic_in_firecracker_config(body: &str) -> Result<()> {
+    let model: mvm_backends::fc::RestoredDeviceModel =
+        serde_json::from_str(body).context("parsing GET /vm/config response")?;
+    mvm_backends::fc::assert_vsock_only_device_model(model.network_interfaces.len())
 }
 
 fn wait_until_ready(spec: &BenchSpec, name: &str) -> Result<()> {
@@ -920,14 +944,14 @@ fn wait_for_guest_agent(backend: &str, name: &str) -> Result<()> {
 }
 
 fn wait_for_hvf_guest_agent(name: &str) -> Result<()> {
-    let transport = mvm_runtime::vsock_transport::HvfVsockTransport::for_vm(name);
+    let transport = mvm_vmm::vsock_transport::HvfVsockTransport::for_vm(name);
     let deadline = Instant::now() + READY_TIMEOUT;
     let mut last_err = None;
 
     while Instant::now() < deadline {
         match transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT) {
             Ok(mut stream) => {
-                // ADR-019 / plan 74 W1: hard cutover requires hello
+                // Hard cutover: the guest requires hello
                 // before any operational request, so a raw `Ping`
                 // probe no longer works. Treat a successful hello
                 // negotiation (with the `Ping` capability acknowledged)
@@ -1212,6 +1236,23 @@ fn unique_vm_name(label: &str) -> String {
         .map(|d| d.as_millis())
         .unwrap_or(0);
     format!("mvm-boot-bench-{label}-{}-{millis}", std::process::id())
+}
+
+#[test]
+fn live_firecracker_device_model_refuses_nics() {
+    assert!(assert_no_nic_in_firecracker_config(r#"{"network-interfaces":[]}"#).is_ok());
+    assert!(assert_no_nic_in_firecracker_config(r#"{"machine-config":{}}"#).is_ok());
+    for body in [
+        r#"{"network-interfaces":[{"iface_id":"eth0","host_dev_name":"tap0"}]}"#,
+        r#"{"network-interfaces":null}"#,
+        r#"{"network-interfaces":"none"}"#,
+        "not JSON",
+    ] {
+        assert!(
+            assert_no_nic_in_firecracker_config(body).is_err(),
+            "device-model check accepted {body}"
+        );
+    }
 }
 
 #[test]
