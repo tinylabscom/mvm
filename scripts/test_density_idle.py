@@ -1,5 +1,6 @@
 """Offline checks for the density wave's idle sampler, against a built procfs tree."""
 
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,8 @@ from scripts.density_idle import (
     cpu_ticks,
     render,
     sample,
+    sample_macos,
+    wakeups_from_rusage,
     summarize,
 )
 
@@ -114,6 +117,67 @@ class DensityIdleTests(unittest.TestCase):
             "wave_100_idle_mvm-mailbox_cpu_millicores\t6.2\n"
             "wave_100_idle_mvm-mailbox_wakeups_per_second\t150.0\n",
         )
+
+
+class FakeLibproc:
+    """Stands in for libproc: pid -> (program, counters or None when refused)."""
+
+    def __init__(self, table: dict) -> None:
+        self.table = table
+
+    def pids(self) -> list[int]:
+        return list(self.table)
+
+    def program(self, pid: int) -> str:
+        program = self.table[pid][0]
+        if program is None:
+            raise OSError("proc_pidpath")
+        return program
+
+    def counters(self, pid: int) -> tuple[int, int, int, int]:
+        counters = self.table[pid][1]
+        if counters is None:
+            raise OSError("proc_pidinfo")
+        return counters
+
+
+class DensityIdleMacosTests(unittest.TestCase):
+    def test_wakeups_are_idle_exits_plus_interrupts_after_the_uuid_and_times(self) -> None:
+        raw = bytes(16) + struct.pack("<QQQQQ", 11, 22, 3, 4, 99)
+        self.assertEqual(wakeups_from_rusage(raw), 7)
+
+    def test_a_component_is_classified_by_program_file_name_only(self) -> None:
+        reader = FakeLibproc(
+            {
+                10: ("/Users/x/mvm-hvf-density-1/bin/mvm-hvf-supervisor", (4, 12, 5, 6)),
+                11: ("/usr/bin/sleep", (1, 3, 0, 0)),
+                12: ("/tmp/mvm-hvf-density-9/bin/python3", (1, 3, 0, 0)),
+            }
+        )
+        self.assertEqual(
+            sample_macos(reader),
+            {10: ProcessSample("mvm-hvf-supervisor", 4, 12, 5, 6)},
+        )
+
+    def test_a_refused_process_and_the_samplers_own_pid_are_left_out(self) -> None:
+        reader = FakeLibproc(
+            {
+                1: (None, None),
+                2: ("/x/mvm-mailbox", None),
+                3: ("/x/mvm-mailbox", (2, 5, 7, 9)),
+                4: ("/x/mvm-mailbox", (2, 5, 7, 9)),
+            }
+        )
+        self.assertEqual(
+            sample_macos(reader, frozenset({4})),
+            {3: ProcessSample("mvm-mailbox", 2, 5, 7, 9)},
+        )
+
+    def test_nanosecond_cpu_becomes_millicores_over_the_window(self) -> None:
+        before = {1: ProcessSample("mvm-hvf-supervisor", 4, 10, 1_000_000_000, 100)}
+        after = {1: ProcessSample("mvm-hvf-supervisor", 4, 10, 1_050_000_000, 600)}
+        rows = summarize(before, after, 10.0, 1_000_000_000)
+        self.assertEqual(rows, [("mvm-hvf-supervisor", 1, 4, 10, 5.0, 50.0)])
 
 
 if __name__ == "__main__":

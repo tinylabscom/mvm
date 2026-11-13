@@ -34,7 +34,7 @@ Useful overrides:
   MVM_HVF_DENSITY_IMAGE=alpine              OCI image reference
   MVM_HVF_DENSITY_GUEST_SLEEP_SECONDS=240   in-guest sleep duration
   MVM_HVF_DENSITY_SETTLE_SECONDS=20         settle time before sampling
-  MVM_HVF_DENSITY_IDLE_SAMPLE_SECONDS=10    Linux idle CPU and wakeup window; 0 skips it
+  MVM_HVF_DENSITY_IDLE_SAMPLE_SECONDS=10    Idle CPU and wakeup window; 0 skips it
   MVM_HVF_DENSITY_MEMORY=512M               guest memory setting
   MVM_HVF_DENSITY_CPUS=2                    guest vCPU setting
   MVM_HVF_DENSITY_MAILBOX=1                  grant one distinct mailbox per VM
