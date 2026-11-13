@@ -2058,11 +2058,15 @@ async fn cleanup_keeps_secret_references_changed_after_the_session_wrote_them() 
 #[tokio::test]
 async fn persistent_request_mailbox_reaches_canonical_backend_admission() {
     let home = Isolated::new();
+    let mut config = mvm_core::user_config::load(None);
+    config.max_mailbox_retention_ms = Some(60_000);
+    mvm_core::user_config::save(&config, None).expect("authorize bounded mailbox retention");
     let client = mock_client();
     let name = "p-mailbox-one-start";
-    let grant = crate::admission::mailbox_grant::resolve(Some(&"ab".repeat(32)), None, None)
-        .expect("host-authorized grant")
-        .expect("requested grant");
+    let grant =
+        crate::admission::mailbox_grant::resolve(Some(&"ab".repeat(32)), Some(60_000), None)
+            .expect("host-authorized grant")
+            .expect("requested grant");
     let request = persistent_request(&home.rootfs(), name)
         .mailbox(grant)
         .build()
