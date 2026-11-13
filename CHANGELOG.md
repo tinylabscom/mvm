@@ -2,6 +2,53 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.28.0-rc.3] — 2026-11-13
+
+### Added
+- **pack**: Import pinned Yocto workload images alongside Nix
+- **cli**: Compose options from environment and config files
+- **pack**: Build Yocto packs through mvm-client from declared inputs
+- **runtime**: Stage bounded canonical kernel read custody
+- **packs**: Optional gzip transport verified after decompression
+- **mailbox**: Add trusted-host local durable journal and receipts
+
+### Changed
+- **kernel**: Bump libkrunfw pin to 6.12.117
+- Gate process labels in comments; drop stale package counts
+- **lints**: Deny clippy::undocumented_unsafe_blocks workspace-wide
+
+### Documentation
+- **contracts**: Telemetry and audit review of every merged #4839 PR
+- Simplify documentation entry point
+- **contracts**: Claims witness-adequacy matrix and legacy compatibility classification
+- Propose a factory-edge AI demo narrative
+- Propose fenced mailbox rebuild handoff
+- Define production composition admission and latency witness
+- Lifecycle review ledger and PR checklist item
+- **contracts**: Record why exchange is defined in three crates
+
+### Fixed
+- **hvf,hostd**: Guest PC wrap, vCPU-panic unwind guard, HTTP flow cancellation through response framing
+- **runtime**: Guard trusted snapshot publication lifecycle
+- **docs**: Record the yocto pack build command as covered in the docs ledger
+- **release**: Make the application inspection smoke find the gzip-retained archive
+- **release**: List prerelease packages in checksums-sha256.txt under the name a download has
+
+### Refactored
+- **sdk**: Retire the singular-entrypoint compatibility path
+- Fold sha256_hex copies onto mvm_contract::hash and record remaining duplicates
+- Delete pure-forwarding modules and point callers at the owning crate
+- Fold duplicated pid-liveness and file-hash helpers onto their owners
+- Drop the last forwarding files and glob re-exports; gate them
+- **agent**: Delete dead harden_init_process duplicate
+
+### Testing
+- **hostd**: Identify closed startup files despite fd reuse
+- **demo**: Audit the refused outbound attempt; opt-in egress allow/deny probe
+- **hostd**: Witness exactly-once and attested-vs-derived archive completeness
+- **ci**: Gate CI coverage classes; classify workflow-reading tests
+- **ci**: Ratchet tests that read gate text behind an allowlist; name each owned gate
+
 ## [0.28.0-rc.2] — 2026-11-12
 
 ### Documentation
