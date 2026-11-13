@@ -25,6 +25,9 @@
 //! ([`admit_restored`]), before the claim commits and so before any workload
 //! process starts. A cold boot from a host that predates the token is the one
 //! launch whose workloads still run unfiltered.
+//! A cold plan's exact `mvm.mailbox=1` assertion adds only AF_UNIX socket
+//! creation and stream I/O to the admitted tier, so its workload can use its
+//! own guest-local reader socket without gaining AF_INET or AF_VSOCK.
 
 use mvm_core::crypto::seccomp::SeccompTier;
 use std::sync::OnceLock;
@@ -62,6 +65,7 @@ pub fn tier_from_cmdline(cmdline: &str) -> Result<Option<SeccompTier>, String> {
 /// `None` for `unrestricted`, which installs nothing.
 struct Admitted {
     tier: SeccompTier,
+    local_mailbox: bool,
     #[cfg(target_os = "linux")]
     program: Option<seccompiler::BpfProgram>,
 }
@@ -80,28 +84,36 @@ static ADMITTED: OnceLock<Admitted> = OnceLock::new();
 /// filter is fixed for the life of the guest; a second activation may repeat
 /// the tier but not change it.
 pub fn admit(tier: SeccompTier) -> Result<(), String> {
+    admit_with_local_mailbox(tier, false)
+}
+
+fn admit_with_local_mailbox(tier: SeccompTier, local_mailbox: bool) -> Result<(), String> {
     if let Some(admitted) = ADMITTED.get() {
-        return if admitted.tier == tier {
+        return if admitted.tier == tier && admitted.local_mailbox == local_mailbox {
             Ok(())
         } else {
             Err(format!(
-                "workload seccomp tier is already {}; refusing {tier}",
-                admitted.tier
+                "workload seccomp tier is already {} (mailbox={}); refusing {tier} (mailbox={local_mailbox})",
+                admitted.tier, admitted.local_mailbox
             ))
         };
     }
     let admitted = Admitted {
         tier,
+        local_mailbox,
         #[cfg(target_os = "linux")]
-        program: compile(tier).map_err(|error| format!("compile seccomp tier {tier}: {error}"))?,
+        program: compile_with_local_mailbox(tier, local_mailbox)
+            .map_err(|error| format!("compile seccomp tier {tier}: {error}"))?,
     };
     // Activation is single-threaded; losing a race here would mean two
     // activations at once, which the boot state already refuses.
     let _ = ADMITTED.set(admitted);
     match ADMITTED.get() {
-        Some(admitted) if admitted.tier == tier => Ok(()),
+        Some(admitted) if admitted.tier == tier && admitted.local_mailbox == local_mailbox => {
+            Ok(())
+        }
         _ => Err(format!(
-            "workload seccomp tier changed while admitting {tier}"
+            "workload seccomp tier changed while admitting {tier} (mailbox={local_mailbox})"
         )),
     }
 }
@@ -115,8 +127,19 @@ pub fn admit_from_cmdline(cmdline: &str) -> Result<Option<SeccompTier>, String> 
     let Some(tier) = tier_from_cmdline(cmdline)? else {
         return Ok(None);
     };
-    admit(tier)?;
+    admit_with_local_mailbox(tier, local_mailbox_from_cmdline(cmdline)?)?;
     Ok(Some(tier))
+}
+
+fn local_mailbox_from_cmdline(cmdline: &str) -> Result<bool, String> {
+    let count = cmdline
+        .split_whitespace()
+        .filter(|token| *token == crate::mailbox_outbox::MAILBOX_CMDLINE_TOKEN)
+        .count();
+    if count > 1 {
+        return Err("mvm.mailbox=1 is named more than once".into());
+    }
+    Ok(count == 1)
 }
 
 /// Why a restored child cannot take `tier`, or `None` when it can.
@@ -225,7 +248,16 @@ pub fn confine(command: &mut std::process::Command) {
 /// The program fails to compile.
 #[cfg(target_os = "linux")]
 pub fn compile(tier: SeccompTier) -> Result<Option<seccompiler::BpfProgram>, seccompiler::Error> {
+    compile_with_local_mailbox(tier, false)
+}
+
+#[cfg(target_os = "linux")]
+fn compile_with_local_mailbox(
+    tier: SeccompTier,
+    local_mailbox: bool,
+) -> Result<Option<seccompiler::BpfProgram>, seccompiler::Error> {
     use mvm_core::crypto::seccomp::syscall_table::syscall_number;
+    use mvm_core::crypto::seccomp::{AF_VSOCK, ArgumentScopedSyscall};
     use seccompiler::{SeccompAction, SeccompFilter, SeccompRule};
 
     if tier.is_unrestricted() {
@@ -243,6 +275,34 @@ pub fn compile(tier: SeccompTier) -> Result<Option<seccompiler::BpfProgram>, sec
             continue;
         };
         rules.insert(nr, argument_rules(scoped)?);
+    }
+    if local_mailbox {
+        // The signed mailbox launch token grants this workload access to its
+        // own guest-local reader socket, not general networking. Standard
+        // still cannot create AF_INET or AF_VSOCK sockets; vsock retains only
+        // its explicitly admitted family alongside AF_UNIX.
+        if tier != SeccompTier::Network {
+            let allowed: &[u64] = if tier == SeccompTier::Vsock {
+                &[libc::AF_UNIX as u64, AF_VSOCK]
+            } else {
+                &[libc::AF_UNIX as u64]
+            };
+            if let Some(nr) = syscall_number("socket") {
+                rules.insert(
+                    nr,
+                    argument_rules(&ArgumentScopedSyscall {
+                        name: "socket",
+                        arg_index: 0,
+                        allowed,
+                    })?,
+                );
+            }
+        }
+        for syscall in ["connect", "sendto", "recvfrom"] {
+            if let Some(nr) = syscall_number(syscall) {
+                rules.entry(nr).or_default();
+            }
+        }
     }
     let filter = SeccompFilter::new(
         rules,
@@ -334,6 +394,15 @@ mod tests {
     #[test]
     fn a_longer_key_is_not_this_one() {
         assert_eq!(tier_from_cmdline("mvm.seccomp_debug=1"), Ok(None));
+    }
+
+    #[test]
+    fn only_one_exact_signed_mailbox_token_admits_local_socket_access() {
+        assert_eq!(local_mailbox_from_cmdline("mvm.mailbox=1"), Ok(true));
+        for cmdline in ["", "mvm.mailbox=0", "xmvm.mailbox=1"] {
+            assert_eq!(local_mailbox_from_cmdline(cmdline), Ok(false));
+        }
+        assert!(local_mailbox_from_cmdline("mvm.mailbox=1 mvm.mailbox=1").is_err());
     }
 
     /// The tier activation admits is the tier every later spawn reads, and a
@@ -441,6 +510,18 @@ mod tests {
         .try_into()
         .unwrap();
         assert!(program.len() > unscoped.len());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mailbox_grant_adds_only_local_socket_access_to_standard() {
+        let standard = compile(SeccompTier::Standard).unwrap().unwrap();
+        let mailbox = compile_with_local_mailbox(SeccompTier::Standard, true)
+            .unwrap()
+            .unwrap();
+        assert!(mailbox.len() > standard.len());
+        assert_eq!(libc::AF_UNIX, 1);
+        assert_ne!(libc::AF_VSOCK, libc::AF_UNIX);
     }
 
     #[cfg(target_os = "linux")]

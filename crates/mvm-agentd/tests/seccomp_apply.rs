@@ -63,6 +63,14 @@ fn run_groups_self_confined(tier: &str) -> Output {
         .expect("spawn syscall-probe")
 }
 
+fn run_self_confined(tier: &str, family: &str) -> Output {
+    Command::new(probe())
+        .arg(family)
+        .arg(tier)
+        .output()
+        .expect("spawn syscall-probe")
+}
+
 /// The filter let `socket` through. The probe exits 0 when the socket opened
 /// and with the errno otherwise; a kernel without the vsock transport loaded
 /// answers `AF_VSOCK` with `EAFNOSUPPORT`, which is the kernel speaking after
@@ -156,6 +164,24 @@ fn standard_tier_denies_an_af_vsock_socket_with_eperm() {
         &run_family_under("standard", "vsock"),
         "socket(AF_VSOCK) under standard",
     );
+}
+
+#[test]
+fn own_mailbox_grant_adds_af_unix_not_networking_to_standard() {
+    assert_denied_by_the_filter(
+        &run_self_confined("standard", "unix"),
+        "socket(AF_UNIX) without a mailbox grant",
+    );
+    assert_passed_the_filter(
+        &run_self_confined("standard+mailbox", "unix"),
+        "socket(AF_UNIX) with this workload's mailbox grant",
+    );
+    for family in ["inet", "vsock"] {
+        assert_denied_by_the_filter(
+            &run_self_confined("standard+mailbox", family),
+            "mailbox grant must not enable external socket families",
+        );
+    }
 }
 
 /// A GPU launch that also needs `network` keeps its vsock socket.

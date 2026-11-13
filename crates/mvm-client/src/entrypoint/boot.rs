@@ -438,6 +438,8 @@ pub struct SessionAuditSubstrate {
     pub tenant_id: String,
     /// The signed plan, serialized.
     pub plan_json: String,
+    /// Verified launch posture retained outside caller-authored plan JSON.
+    pub mailbox_posture: Option<mvm_hostd::plan_admission::MailboxLaunchPosture>,
     /// Trusted admission's optional caller registration, never a producer ACK.
     pub caller_registration: Option<mvm_core::vm_backend::caller_registration::CallerRegistration>,
     /// The tenant policy bundle the plan resolved, serialized, when it has one.
@@ -961,6 +963,7 @@ mod tests {
             let mut substrate = SessionAuditSubstrate {
                 tenant_id: "tenant".into(),
                 plan_json: "signed-plan".into(),
+                mailbox_posture: None,
                 caller_registration: None,
                 bundle_json: Some("policy-bundle".into()),
                 config_files: Vec::new(),

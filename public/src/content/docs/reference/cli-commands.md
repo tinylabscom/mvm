@@ -1641,6 +1641,22 @@ default of read-only mounts unless `:rw` is explicit. `--name` is optional: when
 omitted, `machine create` auto-generates a name and prints it (mirroring
 `machine run -d`).
 
+`mvmctl run` and `mvmctl machine run` accept `--mailbox <64-hex-id>` and an
+optional `--mailbox-retention-ms <positive-integer>`. The requested retention
+window is signed into the mailbox grant and requires a mailbox. The operator
+sets `max_mailbox_retention_ms` in `$MVM_HOME/config/config.toml`; a missing,
+invalid, or smaller ceiling refuses a retention request before plan signing,
+without silently clamping it. Both values are unset by default. In production,
+a mailbox also requires the signed retention window and a verified guest boot
+binding. The helper reopens retained keys and the anchored journal before it
+reports readiness; explicit guest `outbox-local` requests return a signed
+`accepted_local_durable` receipt after the agent verifies it, and Receive
+requires a boot-bound guest lease and signed ACK. The legacy guest `outbox`
+spool is not a local-durable request and cannot claim this receipt. This
+same-host tier does not detect rollback of the entire host and does not issue
+the stronger `accepted_durable` receipt. Developer launches retain the
+ephemeral Send queue.
+
 A host can also admit plans it did not synthesize. By default every plan booted
 locally is synthesized and self-signed under the host key at admission time;
 a fleet control plane can instead sign an `ExecutionPlan` itself and have a

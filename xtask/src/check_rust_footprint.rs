@@ -38,9 +38,9 @@ use crate::rust_source::{CommentSyntax, blank_comments};
 // tests remain measured; the library health/signing path adds regressions.
 // Leave room for main changes; physical lines have operator-approved headroom.
 /// Ceiling on total SLOC, all categories.
-const MAX_TOTAL_SLOC: usize = 970_000;
+const MAX_TOTAL_SLOC: usize = 991_000;
 /// Ceiling on total physical lines, all categories.
-const MAX_TOTAL_PHYSICAL: usize = 1_240_000;
+const MAX_TOTAL_PHYSICAL: usize = 1_259_000;
 /// How far under a ceiling the tree may sit before the ceiling must drop.
 const SLACK: usize = 10_000;
 
