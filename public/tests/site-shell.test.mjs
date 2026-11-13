@@ -19,6 +19,38 @@ test("shared navigation makes the blog discoverable", () => {
   assert.match(header, /\{ label: "Blog", href: `\$\{b\}blog\/` \}/);
 });
 
+test("docs entry point is short and links to the curated navigation", () => {
+  const header = readFileSync(join(publicRoot, "src/overrides/Header.astro"), "utf8");
+  const footer = readFileSync(join(publicRoot, "src/components/landing/Footer.tsx"), "utf8");
+  const blog = readFileSync(join(publicRoot, "src/layouts/BlogLayout.astro"), "utf8");
+  const overview = readFileSync(join(publicRoot, "src/content/docs/docs.md"), "utf8");
+  const sidebar = readFileSync(join(publicRoot, "src/sidebar.ts"), "utf8");
+  const entries = [...sidebar.matchAll(/\{ label: "[^"]+", slug: "([^"]+)" \}/g)]
+    .map(([, slug]) => slug);
+
+  assert.match(header, /\{ label: "Docs", href: `\$\{b\}docs\/` \}/);
+  assert.match(footer, /\{ label: "Docs", href: "\/docs\/"/);
+  assert.match(blog, /href="\/docs\/">Docs/);
+  assert.deepEqual(entries.slice(0, 3), [
+    "docs", "getting-started/installation", "getting-started/quickstart",
+  ]);
+  assert.ok(entries.length <= 10, "Keep the human-facing navigation focused");
+  for (const slug of entries) {
+    const page = markdownFiles(join(publicRoot, "src/content/docs")).find(
+      path => path.replace(/\.mdx?$/, "").endsWith(`/${slug}`),
+    );
+    assert.ok(page, `${slug}: page exists`);
+    assert.doesNotMatch(
+      readFileSync(page, "utf8"),
+      /\bmvmd\b|\bmvm-(?:studio|deployment|assur\w*)\b/i,
+      `${slug}: curated pages cover only mvm`,
+    );
+    if (slug !== "docs") {
+      assert.ok(overview.includes(`/${slug}/`), `${slug}: linked from overview`);
+    }
+  }
+});
+
 test("blog omits the browse posts section and keeps a clear return link", () => {
   const index = readFileSync(join(publicRoot, "src/pages/blog/index.astro"), "utf8");
   const article = readFileSync(join(publicRoot, "src/pages/blog/[...slug].astro"), "utf8");

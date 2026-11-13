@@ -1046,11 +1046,13 @@ fn validate_registry_pack_manifest(
 pub mod application;
 pub mod application_bundle;
 mod builtin_author_keys;
+mod transport;
 #[cfg(any(test, feature = "test-support"))]
 pub use builtin_author_keys::register_test_author_key;
 pub use builtin_author_keys::{
     BuiltinAuthorTrust, OFFICIAL_BUNDLE_AUTHOR_KEYS, REVOKED_OFFICIAL_BUNDLE_AUTHOR_KEY_IDS,
 };
+pub use transport::{RegistryTransportError, decompress_transport_archive};
 mod dispatch;
 pub mod runtime_layer;
 pub use dispatch::{

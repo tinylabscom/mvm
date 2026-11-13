@@ -70,6 +70,8 @@ pub mod grants;
 pub mod grants_resolve;
 pub mod guest;
 pub mod image_admin;
+/// Workload-image producers shared by Nix and Yocto pack builds.
+pub mod image_producer;
 pub mod input_journal;
 pub mod instruction_trust;
 pub mod inventory;
@@ -107,6 +109,8 @@ pub mod ui;
 pub mod volume;
 pub mod vsock_transport;
 pub mod workspace_apply;
+/// Import a pinned Yocto workload image through health boot to a local signed pack.
+pub mod yocto_pack;
 
 /// The workload authoring surface: builders, constructors, IR emission.
 pub use mvm_sdk as authoring;

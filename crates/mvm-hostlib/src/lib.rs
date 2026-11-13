@@ -849,6 +849,8 @@ mod tests {
         assert!(!out.data.is_null());
         // SAFETY: `out` came from `mvm_hostlib_call` and is freed once.
         let body = unsafe { slice::from_raw_parts(out.data, out.len) }.to_vec();
+        // SAFETY: `out` came from `mvm_hostlib_call` and is freed once; `body` already copied its
+        //         bytes.
         unsafe { mvm_hostlib_free(out) };
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(body["code"].is_string());

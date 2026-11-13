@@ -400,7 +400,7 @@ pub fn set_session_idle_timeout(raw_id: &str, secs: u64) -> Result<IdleTimeoutUp
 /// # Errors
 /// The agent unreachable, lacking the capability, or refusing the verb.
 pub fn update_idle_timeout(vm_name: &str, secs: u64) -> Result<(u64, u64)> {
-    let transport = mvm_runtime::vsock_transport::for_vm(vm_name)
+    let transport = mvm_vmm::vsock_transport::for_vm(vm_name)
         .with_context(|| format!("Picking transport for guest agent on {vm_name:?}"))?;
     let mut stream = transport
         .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)

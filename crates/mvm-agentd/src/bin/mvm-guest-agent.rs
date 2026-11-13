@@ -34,6 +34,8 @@ mod init;
 mod interactive;
 #[path = "mvm-guest-agent/mailbox.rs"]
 mod mailbox;
+#[path = "mvm-guest-agent/mailbox_reader.rs"]
+mod mailbox_reader;
 #[path = "mvm-guest-agent/monitoring.rs"]
 mod monitoring;
 #[path = "mvm-guest-agent/port_forward.rs"]
@@ -221,7 +223,7 @@ impl ColdContinuation {
 }
 
 fn complete_cold_response(
-    file: &mut std::fs::File,
+    file: &mut impl Write,
     session: &mut AuthenticatedSession,
     next: Option<ColdContinuation>,
     response: &GuestResponse,
@@ -1656,6 +1658,17 @@ mod tests {
 
     #[test]
     fn cold_ack_write_failure_cannot_enable_continuation() {
+        struct RejectWrite;
+        impl Write for RejectWrite {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
         let (mut host, mut guest) = UnixStream::pair().unwrap();
         host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         guest
@@ -1672,18 +1685,19 @@ mod tests {
         let (mut session, _) =
             AuthenticatedSession::host_retaining_peer(&mut host, "ack-failure", host_key).unwrap();
         peer.join().unwrap();
-        let descriptor: std::os::fd::OwnedFd = host.into();
-        let mut file = std::fs::File::from(descriptor);
         // This tests the real protected write seam, not activation or native
         // ownership. A candidate ACK alone cannot create a continuation.
+        let Err(error) = complete_cold_response(
+            &mut RejectWrite,
+            &mut session,
+            Some(ColdContinuation::Exec),
+            &GuestResponse::ActivateEnvironmentAck,
+        ) else {
+            panic!("the injected writer must fail before continuation");
+        };
         assert!(
-            complete_cold_response(
-                &mut file,
-                &mut session,
-                Some(ColdContinuation::Exec),
-                &GuestResponse::ActivateEnvironmentAck,
-            )
-            .is_err()
+            format!("{error:#}").contains("control frame write failed"),
+            "the injected writer must fail before continuation"
         );
     }
 

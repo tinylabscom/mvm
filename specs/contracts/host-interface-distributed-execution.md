@@ -451,6 +451,118 @@ cloud dependency. This is networked closed-loop operation, not a claim that
 physically air-gapped platforms can communicate without an approved transfer
 path.
 
+### Proposed factory-edge presentation
+
+For an enterprise or industrial audience, propose an alternative presentation:
+
+> Run useful AI beside sensitive production data without giving every task
+> the keys to the factory.
+
+The operational dilemma is deploying new models and third-party tools near
+production data without granting broad access to the site. The memorable moment
+is a maintenance task attempting an unauthorized operation, the host refusing it,
+and unrelated inspection tasks continuing their demonstrated work. Continuing
+these advisory tasks is not evidence that a physical production line, a
+safety-critical control system or an entire site remains available.
+
+An infrastructure partner supplies the operating environment and infrastructure
+management. MVM adds task-scoped execution controls and evidence for admitted,
+host-mediated operations; Studio presents those controls to the operator. This
+complements existing operating-system and infrastructure security, rather than
+claiming those layers provide no workload controls. It does not make Studio a
+second fleet manager or local execution authority.
+
+#### Scenario and workload cards
+
+One synthetic factory scenario has three advisory workloads:
+
+| Workload | Useful task | Intended boundary to demonstrate |
+| --- | --- | --- |
+| Line A inspection | Analyze synthetic inspection observations and flag defects. | Assigned inspection inputs and advisory results only. |
+| Line B inspection | Analyze a separate set of synthetic inspection observations. | Its own assigned inputs and permissions. |
+| Maintenance assistant | Summarize synthetic equipment alerts using an approved procedure. | Approved maintenance inputs and services; no machine-control authority. |
+
+These are intended demonstration boundaries, not declarations that every named
+permission is available on every backend. A policy card must display only
+permissions and deciding layers supplied by the canonical client and enforced
+by the tested backend. A machine-start result alone is not guest readiness.
+
+The first presentation uses three local workloads representing these roles.
+Label the deployment as local and the factory scenario/data as simulated.
+Do not label three local guests as three physical edge sites or demonstrate
+fixture dashboard cards as live machines. No workload controls physical
+actuators, and no safety certification is implied.
+
+#### Proposed 6–8 minute sequence
+
+1. **Useful work.** Open Studio with all three workloads visible. Run small,
+   understandable tasks over explicitly synthetic inputs. Show real results
+   from the tested execution path, or label fixture output separately.
+2. **Declared boundaries.** Explain each task's effective permissions using
+   client-reported policy information. Emphasize that installing or discovering
+   an application does not grant it access.
+3. **Deterministic unauthorized request.** Trigger a scripted maintenance-task
+   attempt to contact an unapproved destination. Use synthetic data and a
+   controlled test; do not depend on a live model deciding to follow a malicious
+   prompt. This tests one enforcement boundary, not general compromise detection.
+4. **Boundary holds; unrelated work continues.** Show the actual client-reported
+   denial and available audited decision while the inspection workloads keep
+   doing demonstrable work. A UI animation or preconfigured denial fixture is
+   not enforcement evidence.
+5. **Stop and fresh launch.** Stop the suspect workload and explicitly launch an
+   approved replacement using the client's supported lifecycle operations.
+   Distinguish candidate verification, admission, machine start and guest
+   readiness. Do not imply hot replacement, message handoff, remote quarantine
+   or automatic recovery from an ordinary stop/start demonstration.
+6. **Close with available evidence.** Show verified launch/audit information
+   and the observed denied operation where exposed. Describe it as evidence of
+   admitted execution and audited host-mediated effects, not proof of every
+   internal computation or the correctness of an AI-generated answer.
+
+Suggested closing line:
+
+> Deploy new AI tasks without giving each task broad access to the site.
+> Deny unauthorized actions, preserve the available evidence, and keep
+> unrelated work running.
+
+#### Scope and evidence requirements
+
+Keep the first presentation narrow: one tested host, synthetic data, a small
+reusable workload image where practical, and the existing local client path.
+Studio uses typed library operations through Tauri with `mvm-client` as its sole
+MVM boundary. No CLI subprocess, direct runtime-storage access or Studio-owned
+verifier, admission path, mailbox or recorder is introduced.
+
+Do not make this presentation depend on remote fleet enrollment, cross-host
+mailbox delivery, offline leases/reconnect, remote wipe, hardware attestation,
+accelerators or orchestration/catalog integration. A future Linux-host proof of
+concept must qualify the actual distribution, hardware, virtualization access
+and runtime artifacts; a distribution's upstream ancestry alone is not proof of
+compatibility. A catalogue entry remains discovery metadata, not launch authority.
+
+The tested client revision and backend determine which beats can be shown live.
+If an operation is unavailable, omit the live claim or show a clearly separate
+labelled preview. A lifecycle-only rehearsal is not acceptance of the full
+denial-and-evidence story. Beats 3 and 4 need an egress-capable request, not the
+mission runbook's BusyBox `wget`: a manual HVF curl-image run produced
+`host.flow.denied` and an `mvmctl explain --review` denial, but direct Studio
+readback through `mvm_client::explain::explain_local_run` has only a hermetic
+test. Label that client beat and the three concurrent workloads as previews
+until witnessed together on the demo Mac. No source or Studio pin change is
+authorized by this proposal.
+
+Returned stdout/stderr remain separate from a protected recorded copy.
+Owner acceptance, final close and independently verified readback are distinct.
+The [owned HVF capture qualification](https://github.com/tinylabscom/mvm/issues/5265)
+must pass its actual runtime/readback gates before the presentation claims that
+protected recording works. A verified audit chain is not proof that arbitrary
+returned bytes were recorded. Mailbox previews, destructive VM-lifetime reads
+and durable result inboxes likewise must not be conflated.
+
+The original mission sequence below remains a reference scenario. This
+factory-edge alternative changes the audience and presentation, not the
+underlying security boundaries or the validation status described later.
+
 ### 8–10 minute sequence
 
 1. **Establish the mission.** Each node runs an isolated advisory AI task over

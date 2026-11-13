@@ -109,8 +109,8 @@ fn legacy_replay(raw: &[u8]) -> anyhow::Result<std::fs::File> {
     anyhow::ensure!(readonly >= 0, "could not open read-only config replay");
     // SAFETY: successful shm_open transferred this descriptor exclusively.
     let readonly = unsafe { std::fs::File::from_raw_fd(readonly) };
-    // SAFETY: the name is ours; failure occurs BEFORE any secret bytes are written.
     anyhow::ensure!(
+        // SAFETY: the name is ours; failure occurs BEFORE any secret bytes are written.
         unsafe { libc::shm_unlink(name.0.as_ref().expect("owned empty name").as_ptr()) } == 0,
         "could not unlink empty config replay"
     );
@@ -130,8 +130,8 @@ fn legacy_replay(raw: &[u8]) -> anyhow::Result<std::fs::File> {
     drop(mapping);
     drop(writable);
     // POSIX shm descriptors start CLOEXEC; explicitly enforce it for this temporary.
-    // SAFETY: the read-only descriptor is live and owned.
     anyhow::ensure!(
+        // SAFETY: the read-only descriptor is live and owned.
         unsafe { libc::fcntl(readonly.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } == 0,
         "could not protect config replay descriptor"
     );
@@ -429,8 +429,8 @@ mod tests {
         let raw = b" {\"nonnative\":\"fixture\"}\n";
         let replay = super::legacy_replay(raw).unwrap();
         let fd = replay.as_raw_fd();
-        // SAFETY: inspect the private unit-owned descriptor, never global FD0.
         assert_ne!(
+            // SAFETY: inspect the private unit-owned descriptor, never global FD0.
             unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
             0
         );
@@ -632,8 +632,8 @@ fn run() -> anyhow::Result<()> {
         StartupMode::Legacy => {
             if replay_hint.is_none() {
                 let replay = legacy_replay(raw.as_bytes())?;
-                // SAFETY: single-threaded startup replaces only standard input.
                 anyhow::ensure!(
+                    // SAFETY: single-threaded startup replaces only standard input.
                     unsafe { libc::dup2(replay.as_raw_fd(), libc::STDIN_FILENO) } >= 0,
                     "could not install read-only config replay"
                 );

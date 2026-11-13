@@ -1,5 +1,5 @@
 //! Structural guard for `nix/flake.nix` and `nix/profiles/*.nix`
-//! (Phase 1 W4 — plan 60).
+//!
 //!
 //! These tests don't run `nix flake check` (that requires Nix on the
 //! test host and adds a network dep on github:microvm-nix/microvm.nix).
@@ -13,7 +13,20 @@
 //!
 //!   cd nix && nix flake check --no-build
 //!
-//! Documented in `specs/runbooks/cross-platform-install.md` (Phase 5).
+//! Documented in `specs/runbooks/cross-platform-install.md`.
+//!
+//! Classification:
+//! - Owned gate: the `nix/` flake, profiles and package recipes. Nix is not
+//!   installed on the PR runners, so the `nix flake check` outcome is not
+//!   available there; these text checks stand in for it, and the
+//!   `*_when_nix_available` tests evaluate for real where Nix exists. `ci.yml`'s
+//!   path filter lists `nix/` so a change there runs this file.
+//! - Not owned by a gate: `installation_docs_*` pin documentation prose. They
+//!   are kept only because `check-machine-doc-guards` does not assert the same
+//!   strings; the owner should be that gate, and they are the first to move
+//!   there. The quickstart and happy-path prose pins were deleted: the commands
+//!   they quote are executed by the `e2e-docs.yml` documented-surface lane, and
+//!   the heading order and audience count they pinned asserted wording only.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -204,7 +217,7 @@ fn flake_nix_exists_and_imports_microvm_nix() {
     let content =
         fs::read_to_string(&path).unwrap_or_else(|e| panic!("nix/flake.nix must be present: {e}"));
 
-    // ADR-004 invariant: the flake imports microvm.nix as the foundation.
+    // Invariant: the flake imports microvm.nix as the foundation.
     // Any future PR that drops this input violates the ADR.
     assert!(
         content.contains("microvm-nix/microvm.nix"),
@@ -686,68 +699,12 @@ fn installation_docs_keep_binary_install_primary() {
 }
 
 #[test]
-fn quickstart_docs_lead_with_image_backed_run() {
-    let path = repo_dir()
-        .join("public")
-        .join("src")
-        .join("content")
-        .join("docs")
-        .join("getting-started")
-        .join("quickstart.md");
-    let content =
-        fs::read_to_string(&path).unwrap_or_else(|e| panic!("quickstart must be present: {e}"));
-    let normalized = normalized_whitespace(&content);
-
-    let image_heading = content
-        .find("## 1. Run an OCI Image")
-        .expect("quickstart must lead with an OCI image run section");
-    let builder_heading = content
-        .find("## 2. Prepare the Builder VM")
-        .expect("quickstart must still document the builder VM after the image path");
-
-    assert!(
-        image_heading < builder_heading,
-        "quickstart must put the image-backed one-shot path before the builder/flake workflows"
-    );
-    assert!(
-        content.contains("mvmctl machine run --image alpine -- uname -a")
-            && normalized.contains("You do not need host Nix for this path"),
-        "quickstart must preserve the no-host-Nix image-backed command"
-    );
-}
-
-#[test]
-fn happy_paths_include_oci_image_audience() {
-    let path = repo_dir()
-        .join("public")
-        .join("src")
-        .join("content")
-        .join("docs")
-        .join("getting-started")
-        .join("happy-paths.md");
-    let content =
-        fs::read_to_string(&path).unwrap_or_else(|e| panic!("happy paths must be present: {e}"));
-    let normalized = normalized_whitespace(&content);
-
-    assert!(
-        content.contains("mvm has six primary audiences"),
-        "happy paths must count the OCI-image path as a first-class audience"
-    );
-    assert!(
-        content.contains("CLI user with an OCI image")
-            && content.contains("mvmctl run --image alpine -- uname -a")
-            && normalized.contains("Image-backed one-shot runs do not require host Nix"),
-        "happy paths must document the image-backed no-host-Nix audience"
-    );
-}
-
-#[test]
 fn minimal_profile_exists_and_has_required_settings() {
     let path = nix_dir().join("profiles").join("minimal.nix");
     let content = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("nix/profiles/minimal.nix must be present: {e}"));
 
-    // SSH disabled — load-bearing invariant from ADR-001 / CLAUDE.md
+    // SSH disabled — load-bearing invariant
     // ("No SSH in microVMs, ever"). Asserted as plain string match
     // because a NixOS module's effective `services.openssh.enable`
     // can only be checked by evaluating the flake; the source line
@@ -1240,8 +1197,7 @@ fn mk_guest_does_not_reimplement_runtime_egress_provisioning() {
 fn flake_lock_pins_microvm_input_by_hash() {
     // The flake.lock must exist and pin the microvm.nix input by
     // commit hash, not by tag or branch — that's the supply-chain
-    // gate from ADR-004 §"Threat model impact" / plan 60 §"Code
-    // review gate." A PR that removes flake.lock or drops the
+    // code-review gate. A PR that removes flake.lock or drops the
     // microvm pin breaks this assertion.
     let path = nix_dir().join("flake.lock");
     let content = fs::read_to_string(&path).unwrap_or_else(|e| {
@@ -1251,21 +1207,19 @@ fn flake_lock_pins_microvm_input_by_hash() {
         )
     });
 
-    // Pinned by hash means the lockfile carries a `rev` field for
-    // the microvm input. We don't pin a *specific* hash here (CI's
-    // `xtask audit-flake` does that on bump) — we just verify the
-    // microvm input is present in the lockfile.
+    // Parse it: a `"rev"` substring anywhere (another input, a comment-like
+    // string) would satisfy a text match while the microvm pin was a branch.
+    let lock: serde_json::Value = serde_json::from_str(&content).expect("flake.lock is JSON");
+    let rev = lock["nodes"]["microvm"]["locked"]["rev"]
+        .as_str()
+        .expect("the microvm input must be pinned by `rev`");
     assert!(
-        content.contains("\"microvm\""),
-        "flake.lock must contain the 'microvm' input pin"
-    );
-    assert!(
-        content.contains("\"rev\""),
-        "flake.lock must pin inputs by `rev` (commit hash)"
+        rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_hexdigit()),
+        "microvm must be pinned by a 40-hex commit, got {rev}"
     );
 }
 
-/// Plan 199 WS-B — the no-release-binary contract (ADR-007) must hold for
+/// The no-release-binary contract must hold for
 /// *every* host package under `nix/packages/`, not just `mvmctl.nix`. A new
 /// sidecar package that pulled a project release tarball or carried
 /// `binaryNativeCode` provenance would silently bypass the source-build
@@ -1274,8 +1228,7 @@ fn flake_lock_pins_microvm_input_by_hash() {
 ///
 /// Note the forbidden set is deliberately *project-release-specific*: a host
 /// package may legitimately `fetchurl` its own **upstream source** (the future
-/// source-built `libkrun` / `libkrunfw` recipes do exactly this — Plan 199 WS-B
-/// native-VMM recipes). Source-building from a pinned upstream tarball is the
+/// source-built `libkrun` / `libkrunfw` recipes do exactly this). Source-building from a pinned upstream tarball is the
 /// contract; pulling an mvm-published release binary or shipping prebuilt
 /// native code is what's banned. The stricter "no fetch at all" rule stays
 /// scoped to `mvmctl.nix` (which builds purely from `mvmSrc`).

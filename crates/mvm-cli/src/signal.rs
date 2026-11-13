@@ -128,6 +128,7 @@ mod tests {
     #[test]
     fn servicer_runs_handler_per_pipe_byte() {
         let mut fds = [0 as libc::c_int; 2];
+        // SAFETY: `fds` is a two-element c_int array, the buffer pipe(2) fills.
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
         let (read_fd, write_fd) = (fds[0], fds[1]);
         let hits = Arc::new(AtomicI32::new(0));
@@ -139,6 +140,8 @@ mod tests {
         for _ in 0..3 {
             let b = 1u8;
             assert_eq!(
+                // SAFETY: `write_fd` is the open write end of the pipe made above; the source is a
+                //         live one-byte local.
                 unsafe { libc::write(write_fd, std::ptr::addr_of!(b) as *const _, 1) },
                 1
             );
@@ -157,6 +160,7 @@ mod tests {
     #[test]
     fn servicer_passes_the_signal_number() {
         let mut fds = [0 as libc::c_int; 2];
+        // SAFETY: `fds` is a two-element c_int array, the buffer pipe(2) fills.
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
         let (read_fd, write_fd) = (fds[0], fds[1]);
         let seen = Arc::new(AtomicI32::new(0));
@@ -167,6 +171,8 @@ mod tests {
         .unwrap();
         let byte = libc::SIGTERM as u8;
         assert_eq!(
+            // SAFETY: `write_fd` is the open write end of the pipe made above; the source is a
+            //         live one-byte local.
             unsafe { libc::write(write_fd, std::ptr::addr_of!(byte) as *const _, 1) },
             1
         );
@@ -190,11 +196,16 @@ mod tests {
         assert!(pid >= 0, "fork: {}", io::Error::last_os_error());
         if pid == 0 {
             if install_dispositions().is_err() {
+                // SAFETY: _exit takes an integer and never returns; the forked child leaves
+                //         without running destructors.
                 unsafe { libc::_exit(1) };
             }
             begin_cleanup();
+            // SAFETY: raise takes a valid signal number; the handler installed above runs in this
+            //         forked child.
             unsafe { libc::raise(libc::SIGINT) };
             // Unreached when the handler exits; a wrong exit code reports it.
+            // SAFETY: _exit takes an integer and never returns.
             unsafe { libc::_exit(2) };
         }
         let mut status = 0;

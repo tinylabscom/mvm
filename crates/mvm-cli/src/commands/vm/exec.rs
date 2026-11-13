@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use super::Cli;
-use super::host_signer::{host_signer_id, load_or_init};
+use mvm_client::host_keypair::{host_signer_id, load_or_init};
 
 pub(in crate::commands) mod application_source;
 mod composition;
@@ -246,6 +246,9 @@ pub(in crate::commands) struct RunArgs {
     /// Grant a mailbox, named by a 64-character hex id.
     #[arg(long, value_name = "ID")]
     pub mailbox: Option<String>,
+    /// Retain local mailbox dedup IDs after expiry (milliseconds).
+    #[arg(long, value_name = "MILLISECONDS", value_parser = clap::value_parser!(u64).range(1..))]
+    pub mailbox_retention_ms: Option<u64>,
     /// Set memory (for example, 512M or 1G).
     #[arg(long, default_value = "512M")]
     pub memory: String,
@@ -677,6 +680,7 @@ pub(in crate::commands) fn run_secure_started(
     let admit_outputs = outputs.grants();
     let admit_mailbox = mvm_client::admission::mailbox_grant::resolve(
         args.mailbox.as_deref(),
+        args.mailbox_retention_ms,
         args.from_workload_ir.as_deref(),
     )?;
     let host_config = mvm_core::user_config::load(None);
@@ -855,7 +859,7 @@ pub(in crate::commands) fn run_secure_started(
         // Persist the bare plan so the pre-start moat / endpoint can read it
         // on the backends that consume it from disk (mirrors the invoke path).
         if super::up::persists_plan_before_start(&admit_backend) {
-            super::plan_persist::write_plan(vm_name, c.admitted.plan())
+            mvm_client::audit::chain::plan_persist::write_plan(vm_name, c.admitted.plan())
                 .context("persisting admitted plan for the transient run")?;
         }
         let guest_profile = super::up::guest_profile_for_boot(admit_is_dev, rootfs);
@@ -877,6 +881,7 @@ pub(in crate::commands) fn run_secure_started(
         let substrate = crate::exec::SessionAuditSubstrate {
             tenant_id: c.admitted.plan().tenant.0.clone(),
             plan_json,
+            mailbox_posture: c.admitted.mailbox_posture(),
             built_pack_check: c.admitted.built_pack_boot_check()?,
             caller_registration: None,
             bundle_json,
@@ -1935,6 +1940,10 @@ mod tests {
         assert_eq!(
             parsed.machine.run.cpu_limit, expected.machine.run.cpu_limit,
             "--cpu-limit default"
+        );
+        assert_eq!(
+            parsed.machine.run.mailbox_retention_ms, expected.machine.run.mailbox_retention_ms,
+            "--mailbox-retention-ms default"
         );
         assert_eq!(
             parsed.machine.run.allow_host, expected.machine.run.allow_host,

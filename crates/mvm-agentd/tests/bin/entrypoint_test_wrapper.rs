@@ -175,6 +175,8 @@ fn from_hex(c: u8) -> Option<u8> {
 fn write_fd3(bytes: &[u8]) {
     let mut written = 0usize;
     while written < bytes.len() {
+        // SAFETY: the source range `written..len` lies inside `bytes` because `written <
+        //         bytes.len()`; a bad fd 3 only yields EBADF.
         let n = unsafe {
             libc::write(
                 3,

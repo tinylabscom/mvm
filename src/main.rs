@@ -33,6 +33,8 @@ fn main_macos() -> anyhow::Result<()> {
     // main dispatch queue.
     loop {
         // Process RunLoop events (VM callbacks arrive here)
+        // SAFETY: this runs on the process main thread, and the autorelease pool is created and
+        //         dropped inside this block, so pools stay properly nested.
         let _running = unsafe {
             let pool = objc2_foundation::NSAutoreleasePool::new();
             let ran = objc2_foundation::NSRunLoop::mainRunLoop().runMode_beforeDate(

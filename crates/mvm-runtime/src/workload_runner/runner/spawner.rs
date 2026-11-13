@@ -39,6 +39,8 @@ pub struct NetworkEndpointSpawnRequest<'a> {
     pub network_limits: mvm_core::plan::NetworkLimits,
     /// Exact signed ingress mappings owned by this endpoint.
     pub ingress: &'a [mvm_core::plan::IngressMapping],
+    /// Verified cold plan for optional per-boot mailbox reader key delivery.
+    pub reader_plan: Option<&'a mvm_core::plan::ExecutionPlan>,
     /// Where the guest's half of the authenticated session comes from.
     pub identity: FlowMuxIdentitySource<'a>,
 }
@@ -191,6 +193,7 @@ pub(super) fn prepare_standby_identity(
             network_policy: &NetworkPolicy::deny_all(),
             network_limits: mvm_core::plan::NetworkLimits::default(),
             ingress: &[],
+            reader_plan: None,
             identity: FlowMuxIdentitySource::Mint,
         })
         .map_err(|error| {
@@ -286,20 +289,25 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
             FlowMuxIdentitySource::Mint => {
                 let material = FlowMuxIdentityMaterial::mint_from_host_signer(req.vm_name)
                     .context("minting this boot's FlowMux identity")?;
+                let reader_boot = mint_mailbox_reader_boot(req, material.guest_verifying_key())?;
                 let drive = req.state_dir.join(IDENTITY_DRIVE_FILE);
                 material.write_drive_with(
                     &drive,
                     &IdentityDriveContents {
                         ingress: req.ingress,
                         egress_ca_cert_pem: egress_ca.guest_cert_pem(),
+                        mailbox_ack_key: reader_boot.as_ref().map(|(key, _)| key),
+                        mailbox_reader_boot: reader_boot.as_ref().map(|(_, binding)| binding),
                     },
                 )?;
+                persist_mailbox_reader_boot(req, reader_boot.as_ref().map(|(_, binding)| binding))?;
                 // Persisted so a warm child claimed from this VM pins the key
                 // its restored guest actually holds.
                 material.persist_inheritable(req.state_dir)?;
                 (material.spawn_config().clone(), Some(drive))
             }
             FlowMuxIdentitySource::InheritFrom(parent_state_dir) => {
+                clear_mailbox_reader_boot(req.state_dir)?;
                 let inherited =
                     load_inheritable_identity(parent_state_dir)?.with_context(|| {
                         format!(
@@ -365,6 +373,52 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
     }
 }
 
+fn mint_mailbox_reader_boot(
+    req: &NetworkEndpointSpawnRequest<'_>,
+    guest_identity: ed25519_dalek::VerifyingKey,
+) -> Result<
+    Option<(
+        mvm_vmm::host::flowmux_identity::MailboxAckKeyMaterial,
+        mvm_vmm::host::flowmux_identity::MailboxReaderBootBinding,
+    )>,
+> {
+    req.reader_plan
+        .filter(|plan| plan.mailbox.is_some())
+        .map(|plan| {
+            let key = mvm_vmm::host::flowmux_identity::MailboxAckKeyMaterial::mint()?;
+            let binding = mvm_vmm::host::flowmux_identity::MailboxReaderBootBinding::mint(
+                plan,
+                guest_identity,
+                key.verifying_key().to_bytes(),
+            )?;
+            Ok((key, binding))
+        })
+        .transpose()
+}
+
+fn clear_mailbox_reader_boot(state_dir: &Path) -> Result<()> {
+    let path = state_dir.join(mvm_vmm::host::flowmux_identity::MAILBOX_READER_BOOT_FILE);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("retire {}", path.display())),
+    }
+}
+
+fn persist_mailbox_reader_boot(
+    req: &NetworkEndpointSpawnRequest<'_>,
+    binding: Option<&mvm_vmm::host::flowmux_identity::MailboxReaderBootBinding>,
+) -> Result<()> {
+    match (req.reader_plan, binding) {
+        (Some(plan), Some(binding)) => {
+            binding.check_plan(plan)?;
+            binding.persist(req.state_dir)
+        }
+        (None, None) => clear_mailbox_reader_boot(req.state_dir),
+        _ => anyhow::bail!("mailbox reader key projection disagrees with admitted plan"),
+    }
+}
+
 fn prepare_observation_identity(
     req: &NetworkEndpointSpawnRequest<'_>,
     anchor_path: &Path,
@@ -380,8 +434,17 @@ fn prepare_observation_identity(
             let anchor = mvm_agentd::vsock::load_host_signer_verifying_key(anchor_path)?
                 .context("guest observations require the host signer public anchor")?;
             let guest = GuestIdentityMaterial::mint(anchor)?;
+            let reader_boot = mint_mailbox_reader_boot(req, guest.verifying_key())?;
             let drive = req.state_dir.join(IDENTITY_DRIVE_FILE);
-            guest.write_drive_with(&drive, &IdentityDriveContents::default())?;
+            guest.write_drive_with(
+                &drive,
+                &IdentityDriveContents {
+                    mailbox_ack_key: reader_boot.as_ref().map(|(key, _)| key),
+                    mailbox_reader_boot: reader_boot.as_ref().map(|(_, binding)| binding),
+                    ..IdentityDriveContents::default()
+                },
+            )?;
+            persist_mailbox_reader_boot(req, reader_boot.as_ref().map(|(_, binding)| binding))?;
             (
                 InheritableIdentity {
                     session_id: req.vm_name.to_string(),
@@ -392,6 +455,7 @@ fn prepare_observation_identity(
             )
         }
         FlowMuxIdentitySource::InheritFrom(parent) => {
+            clear_mailbox_reader_boot(req.state_dir)?;
             let identity = load_inheritable_identity(parent)?
                 .context("restored guest has no registered observation identity")?;
             let bytes = base64::engine::general_purpose::STANDARD
@@ -624,6 +688,7 @@ mod tests {
                 network_policy: &NetworkPolicy::deny_all(),
                 network_limits: mvm_core::plan::NetworkLimits::default(),
                 ingress: &[],
+                reader_plan: None,
                 identity,
             },
             anchor,
@@ -687,6 +752,76 @@ mod tests {
                 .unwrap()
                 .guest_verifying_key_base64
         );
+    }
+
+    #[test]
+    fn cold_mailbox_boot_projects_a_distinct_ack_key_and_warm_child_refuses_inheritance() {
+        use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxGrant, MailboxId};
+        use mvm_vmm::host::flowmux_identity::{
+            MAILBOX_ACK_SIGNING_KEY_FILE, MAILBOX_READER_BOOT_FILE, MailboxReaderBootBinding,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let anchor = root.path().join("host-signer.pub");
+        let host = ed25519_dalek::SigningKey::from_bytes(&[37; 32]);
+        std::fs::write(&anchor, host.verifying_key().as_bytes()).unwrap();
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.mailbox = Some(MailboxGrant {
+            mailbox: MailboxId::from_bytes([9; 32]),
+            authority_key: host.verifying_key().to_bytes(),
+            epoch: ExecutionEpoch::new(3).unwrap(),
+            report: None,
+            retention: None,
+        });
+        plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
+        let redaction = RedactionPolicy::default();
+        let policy = NetworkPolicy::deny_all();
+        let parent = root.path().join("parent");
+        let request = NetworkEndpointSpawnRequest {
+            vm_name: "mailbox-parent",
+            state_dir: &parent,
+            tenant: "tenant",
+            secrets: &[],
+            redaction: &redaction,
+            network_policy: &policy,
+            network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: &[],
+            reader_plan: Some(&plan),
+            identity: FlowMuxIdentitySource::Mint,
+        };
+        let drive = prepare_observation_identity(&request, &anchor)
+            .unwrap()
+            .unwrap();
+        let binding = MailboxReaderBootBinding::load(&parent).unwrap();
+        binding.check_plan(&plan).unwrap();
+        let image = std::fs::read(&drive).unwrap();
+        assert!(
+            image
+                .windows(MAILBOX_ACK_SIGNING_KEY_FILE.len())
+                .any(|part| { part == MAILBOX_ACK_SIGNING_KEY_FILE.as_bytes() })
+        );
+        assert_ne!(binding.ack_public_key, binding.guest_identity_key);
+
+        let child = root.path().join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::copy(
+            parent.join(MAILBOX_READER_BOOT_FILE),
+            child.join(MAILBOX_READER_BOOT_FILE),
+        )
+        .unwrap();
+        assert!(
+            prepare_observation_identity(
+                &NetworkEndpointSpawnRequest {
+                    state_dir: &child,
+                    identity: FlowMuxIdentitySource::InheritFrom(&parent),
+                    reader_plan: None,
+                    ..request
+                },
+                &anchor,
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(!child.join(MAILBOX_READER_BOOT_FILE).exists());
     }
 
     #[test]

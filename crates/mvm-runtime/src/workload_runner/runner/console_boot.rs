@@ -1,5 +1,11 @@
 use anyhow::Result;
 
+/// Only the HVF supervisor owns console capture for the VM's whole life;
+/// other backends need the launcher's follower, not a competing writer.
+pub(super) fn supervisor_owns_console(kind: mvm_core::vm_backend::BackendKind) -> bool {
+    kind == mvm_core::vm_backend::BackendKind::Hvf
+}
+
 /// Boot the VMM while the best-effort console follower is being installed.
 pub(super) fn boot_while_starting_console<T>(
     boot: impl FnOnce() -> Result<T>,

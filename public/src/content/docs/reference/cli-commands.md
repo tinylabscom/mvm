@@ -15,6 +15,71 @@ tenant lifecycle and tenant policy authoring/review remain `mvmd`
 responsibilities. `mvmctl policy` covers only a workload's own authored
 policy, resolved on this host.
 
+### CLI option sources
+
+CLI **options** can be supplied by an explicit flag, an
+environment variable, or an ordered `--config-file PATH` (repeat the flag to
+load multiple files). This is an opt-in, invocation-scoped option file, **not**
+the project `mvm.toml` manifest or the persistent host
+`$MVM_HOME/config/config.toml`. It follows those files' TOML table convention;
+the same keys also work in JSON objects. `PATH` may be relative to the current
+working directory or absolute. No file is loaded automatically.
+Only the command written on the command line runs: a file cannot select a
+command. Tables for other commands are checked for valid keys but not applied.
+Path-valued options retain the CLI's ordinary path resolution; they are not
+rebased to the option file's directory.
+
+```toml
+# opts.toml
+[global]
+log-format = "json"
+verbose = 1
+
+[commands.machine.run]
+profile = "restrictive"
+allow-host = ["api.example.org:443"]
+net = false
+```
+
+```json
+{
+  "global": { "log-format": "json", "verbose": 1 },
+  "commands": { "machine": { "run": {
+    "profile": "restrictive",
+    "allow-host": ["api.example.org:443"],
+    "net": false
+  } } }
+}
+```
+
+For `machine run`, for example, `MVMCTL_MACHINE_RUN_PROFILE=restrictive` sets
+`--profile`; `MVMCTL_LOG_FORMAT=json` sets a global option. Replace hyphens
+with underscores and uppercase each command/option segment. An environment
+variable for a repeatable option holds one value or a JSON array of values
+(for example, `MVMCTL_MACHINE_RUN_ALLOW_HOST='["a.example","b.example"]'`).
+The `--config-file` bootstrap option itself is deliberately command-line only;
+files cannot recursively include other files. `--help` and `--version` are
+immediate display controls, not configurable runtime options.
+
+Scalars use **explicit flag > last configuration file naming that option >
+environment**. A boolean is a JSON/TOML boolean or `true`/`false` (`1`/`0`)
+in the environment; `false` cancels a lower-priority `true` without creating a
+negative spelling for a positive-only flag. A count option such as `--verbose`
+uses a nonnegative integer in a file/environment; counts **add** across
+sources, as do repeated explicit flags (Clap saturates counts at 255).
+Repeatable values use arrays in files
+and **append** environment values, then values from each file in order, then
+explicit flags. An empty array adds nothing; it does not erase prior entries.
+CLI flag aliases count as explicit uses of the canonical option, while files
+and environment use the canonical long name only (or the kebab-case option
+identifier for a short-only flag). Different options that Clap declares
+conflicting are rejected even when they come from different sources; precedence
+only replaces values of the **same** scalar option. Unknown keys, wrong types,
+unknown commands, and Clap-invalid values/conflicts are errors. A
+file does not grant authority: resolved requests still go through the same
+policy, signed-plan, and backend admission checks, where host ceilings and
+denials remain binding.
+
 **Command grouping (Plan 178).** The surface is organized into a small set
 of top-level daily-driver verbs plus noun groups; operations on a single
 running VM are flattened into `machine`, contributor build-time verbs under `dev`, observability
@@ -233,6 +298,7 @@ refused before any output is written.
 | `mvmctl build app.py --from sdk`                                    | Compile one statically declared SDK app, build its generated flake, and export the result as a local archive                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `mvmctl build ghcr.io/acme/app:v1 --from image`                     | Materialize an OCI image for this host architecture and export it as a local archive; `--arch`, `--production`, and `--debug-out FILE.json` are image-only controls, and production requires a digest-pinned reference                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `mvmctl build PACK.json --health-timeout SECONDS`                   | Build and health-check a locked pack spec before signing; `--lock`, `--hypervisor`, and `--input-observation` are pack-only controls                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `mvmctl build PACK.json --out FILE.mvmpkg` | Build a pack with the producer declared by `source.kind` in the spec. For `yocto`, `source.archive` and `source.inputs` are normalized paths relative to the spec; the separately pinned inputs document binds the machine, layers and archive SHA-256. Yocto sources have no packages, dependencies or copy operations; `--lock` and `--input-observation` apply only to Nix packs. MVM stages the archive, injects its verified guest runtime, seals the rootfs, health-boots the baked entrypoint and signs the unchanged result as a local build. |
 | `mvmctl build SOURCE --label L --posture P --environment FILE.json` | Record signed archive metadata for any source; `--allow-egress`, `--allow-volumes`, and `--allow-unauthenticated` require `--posture`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `mvmctl machine build <path>`                                       | Build the slot for a manifest directory. A `flake =` manifest builds through Nix in the builder VM; an `image =` manifest materializes the OCI reference through the same path `run --image` boots, then installs it as a slot revision                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `mvmctl kernel build`                                               | Build the custom microVM kernels into the local cache. `--which builder|workload|workload-k8s|rootless` (default `builder`) or `--all`; `--source compile|download|auto`. A compile builds from the selected `mvm-images` checkout's `kernel/` flake (`MVM_IMAGES_DIR`, else a sibling `../mvm-images`); with no checkout a compile is refused, because this repository carries no kernel flake. `workload-k8s` is defined in no flake, so a compile of it is always refused; `rootless` is defined only in `mvm-images`. Boot a built `workload-k8s` kernel on a dev-tier `machine run` with `MVM_WORKLOAD_KERNEL_VARIANT=workload-k8s`      |
@@ -1575,6 +1641,22 @@ default of read-only mounts unless `:rw` is explicit. `--name` is optional: when
 omitted, `machine create` auto-generates a name and prints it (mirroring
 `machine run -d`).
 
+`mvmctl run` and `mvmctl machine run` accept `--mailbox <64-hex-id>` and an
+optional `--mailbox-retention-ms <positive-integer>`. The requested retention
+window is signed into the mailbox grant and requires a mailbox. The operator
+sets `max_mailbox_retention_ms` in `$MVM_HOME/config/config.toml`; a missing,
+invalid, or smaller ceiling refuses a retention request before plan signing,
+without silently clamping it. Both values are unset by default. In production,
+a mailbox also requires the signed retention window and a verified guest boot
+binding. The helper reopens retained keys and the anchored journal before it
+reports readiness; explicit guest `outbox-local` requests return a signed
+`accepted_local_durable` receipt after the agent verifies it, and Receive
+requires a boot-bound guest lease and signed ACK. The legacy guest `outbox`
+spool is not a local-durable request and cannot claim this receipt. This
+same-host tier does not detect rollback of the entire host and does not issue
+the stronger `accepted_durable` receipt. Developer launches retain the
+ephemeral Send queue.
+
 A host can also admit plans it did not synthesize. By default every plan booted
 locally is synthesized and self-signed under the host key at admission time;
 a fleet control plane can instead sign an `ExecutionPlan` itself and have a
@@ -2610,6 +2692,24 @@ aliases. Temporary source and slot records are removed when the invocation ends;
 the archive records the exact pack lock as provenance, not a temporary source
 path. The sealed posture, health exit requirement and before/after artifact
 digests remain mandatory.
+
+The Yocto import is selected by `source.kind: "yocto"` in the same authored pack
+spec that `mvmctl build PACK.json` reads for a Nix pack; there are no separate
+producer flags. Its archive and input document paths resolve relative to the
+spec, so moving the three files together preserves their meaning. This is an
+alternative producer, not a second trust path. Its
+input document is included as a signed bundle artifact; the provenance record
+identifies the `yocto` producer and the input document's SHA-256. MVM verifies
+the archive against that document before materialization. The layer revisions
+are producer declarations, not independently reproduced or authenticated
+Yocto build attestations. A host-signed local build cannot be published through
+the registry's release path merely by changing that declaration. The
+representative producer and pack declaration live in `examples/yocto/`. The
+importer refuses setuid/setgid entries, extended attributes and OCI whiteouts
+rather than silently weakening an unsigned producer's filesystem semantics.
+The sample's native archive and importer have been checked, but a signed MVM
+pack health boot has not yet been witnessed: it requires a compatible published
+CLI and guest runtime. The sample is not release or boot-performance evidence.
 
 Concurrent invocations must use distinct `--out` destinations. Private build slots
 do not make archive promotion or rollback safe for a shared output path; that

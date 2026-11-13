@@ -151,7 +151,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
 
 fn reject_pack_only_flags(args: &Args) -> Result<()> {
     if args.lock.is_some() || args.hypervisor.is_some() || args.input_observation.is_some() {
-        bail!("--lock, --hypervisor, and --input-observation apply only to pack sources");
+        bail!("--lock, --hypervisor and --input-observation apply only to pack sources");
     }
     if args.health_timeout != 120 {
         bail!("--health-timeout applies only to pack sources");
@@ -602,6 +602,17 @@ mod tests {
         assert_eq!(image.arch, Some(GuestArch::Aarch64));
         assert!(image.production);
         assert_eq!(image.debug_out, Some(PathBuf::from("build.json")));
+    }
+
+    #[test]
+    fn yocto_uses_the_same_pack_source_argument_as_nix() {
+        let parsed =
+            Harness::try_parse_from(["build", "examples/yocto/pack.json", "--out", "hello.mvmpkg"])
+                .unwrap()
+                .args;
+        assert_eq!(parsed.source, PathBuf::from("examples/yocto/pack.json"));
+        assert!(Harness::try_parse_from(["build", "--yocto-archive", "rootfs.tar.gz"]).is_err());
+        assert!(Harness::try_parse_from(["build", "--yocto-inputs", "inputs.json"]).is_err());
     }
 
     #[test]

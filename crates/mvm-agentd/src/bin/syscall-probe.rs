@@ -3,7 +3,7 @@
 //! Test-only binary. Spawned by `tests/seccomp_apply.rs` under
 //! `mvm-seccomp-apply <tier> --` to verify that tier allowlists
 //! actually deny what they claim. The optional first argument names the
-//! probe: `inet` (the default), `vsock`, or `groups`.
+//! probe: `inet` (the default), `unix`, `vsock`, or `groups`.
 //!
 //! An optional second argument names a tier the probe installs on itself
 //! before probing (`syscall-probe groups essential`). Self-confinement is
@@ -48,9 +48,12 @@ fn main() {
     }
     let family = match probe_name.as_str() {
         "inet" => libc::AF_INET,
+        "unix" => libc::AF_UNIX,
         "vsock" => libc::AF_VSOCK,
         other => {
-            eprintln!("syscall-probe: unknown probe {other:?} (expected inet, vsock or groups)");
+            eprintln!(
+                "syscall-probe: unknown probe {other:?} (expected inet, unix, vsock or groups)"
+            );
             std::process::exit(64);
         }
     };
@@ -72,6 +75,18 @@ fn main() {
 /// and skips the confirmation.
 #[cfg(target_os = "linux")]
 fn confine_to(tier_name: &str) {
+    if tier_name == "standard+mailbox" {
+        if let Err(error) =
+            mvm_agentd::workload_seccomp::admit_from_cmdline("mvm.seccomp=standard mvm.mailbox=1")
+                .and_then(|_| {
+                    mvm_agentd::workload_seccomp::install_admitted().map_err(|e| e.to_string())
+                })
+        {
+            eprintln!("syscall-probe: install standard+mailbox: {error}");
+            std::process::exit(2);
+        }
+        return;
+    }
     let tier: mvm_core::crypto::seccomp::SeccompTier = match tier_name.parse() {
         Ok(tier) => tier,
         Err(error) => {

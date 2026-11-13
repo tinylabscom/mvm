@@ -82,7 +82,7 @@ pub use mvm_agentd as guest;
 /// Host daemon roles: the trusted supervisor library (substitution-endpoint
 /// `EndpointConfig`/`assemble`, egress proxy) and the secret keyholder
 /// (`SecretResolver`, `FileBindingStore`, the resolver wire protocol).
-/// mvmd's tenant-secrets vault (Phase 1 egress broker) uses this to write a
+/// mvmd's tenant-secrets vault (the egress broker) uses this to write a
 /// VM's `SecretBindingMeta` (`auth_type`/`allowed_hosts`) into the per-VM
 /// binding store the substitution endpoint reads at spawn, and to build the
 /// `EndpointConfig` handed to it on stdin.

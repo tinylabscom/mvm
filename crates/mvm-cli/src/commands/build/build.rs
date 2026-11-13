@@ -862,6 +862,8 @@ fn build_flake_slot(
     profile: Option<&str>,
     frozen: Option<&mvm_build::pipeline::frozen::FrozenInputs>,
 ) -> Result<(String, String)> {
+    use mvm_client::image_producer::{FrozenNixImage, WorkloadImageProducer};
+
     validate_flake_ref(flake_ref)
         .with_context(|| format!("Invalid flake reference: {:?}", flake_ref))?;
 
@@ -891,7 +893,7 @@ fn build_flake_slot(
 
     let slot_hash = persisted.manifest_hash.clone();
     let revision = match frozen {
-        Some(inputs) => tmpl::build_frozen_manifest(&persisted, inputs, mode),
+        Some(inputs) => FrozenNixImage::new(inputs, mode).build_slot(&persisted),
         None => tmpl::template_build_from_manifest(&persisted, false, false, mode),
     }
     .with_context(|| format!("building flake {resolved:?} into slot {slot_hash}"))?;

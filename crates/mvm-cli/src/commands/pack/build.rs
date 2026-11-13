@@ -17,14 +17,17 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use mvm_build::pipeline::frozen::{FrozenInputs, tree_digest};
+use mvm_client::bundle::{
+    PackArtifactDigests as SlotDigests, PostureInputs, pack_environment, seal_template_rootfs,
+    template_entrypoint,
+};
+use mvm_client::yocto_pack::{YoctoPackRequest, build_yocto_pack};
 use mvm_contract::pack_lock::PackLock;
-use mvm_contract::pack_spec::{PackSpec, PackTarget};
+use mvm_contract::pack_spec::{PackSource, PackSpec, PackTarget};
 use mvm_core::arch::GuestArch;
 use mvm_core::plan::BundleResources;
-use mvm_core::plan::bundle::{
-    ArtifactRole, BundleManifest, ENVIRONMENT_DESCRIPTOR_VERSION, EnvironmentDescriptor,
-    EnvironmentEntrypoint,
-};
+#[cfg(test)]
+use mvm_core::plan::bundle::{ArtifactRole, BundleManifest};
 use mvm_core::plan::types::{BuildProvenance, InputKind};
 use mvm_core::security::AgentProfile;
 use mvm_sdk::pack::compile_frozen;
@@ -33,9 +36,6 @@ use super::author::{LoadedSpec, locked_revision, read_lock};
 use crate::commands::bundle::export::{ExportOptions, TemplateExport, stage_template};
 use crate::commands::vm::denial_review::{NoManifest, ReviewSource};
 use crate::commands::vm::invoke::{EntrypointCall, EntrypointStdin, boot_entrypoint};
-use mvm_client::bundle::{
-    PostureInputs, seal_template_rootfs, template_artifact_digests, template_entrypoint,
-};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct BuildArgs {
@@ -83,6 +83,9 @@ fn run_inner(args: BuildArgs, options: ExportOptions) -> Result<()> {
         })
         .transpose()?;
     let loaded = LoadedSpec::read(&args.spec)?;
+    if matches!(loaded.spec.source, PackSource::Yocto { .. }) {
+        return run_yocto(&args, options, &loaded.spec, &loaded.dir);
+    }
     let lock_path = args
         .lock
         .clone()
@@ -128,111 +131,231 @@ fn run_inner(args: BuildArgs, options: ExportOptions) -> Result<()> {
     );
     let producer = HealthInputRetention::new(
         ProducerInputs {
-            build: owned,
+            build: PackSlot(owned),
             boot: portable,
         },
         label,
     );
-    let slot = producer.build.slot_hash();
-    // A pack ships sealed: its rootfs gets the dm-verity pair here, before the
-    // health boot, so the boot checks it and the archive carries it.
-    seal_template_rootfs(slot)?.context(
-        "the built pack's image does not declare itself sealed; a pack must boot from a \
-         dm-verity rootfs",
-    )?;
-    // The argv the image records for itself, which is what the health boot
-    // runs and what a launch of the archive is measured against.
-    let image_argv = template_entrypoint(slot)?;
-    let built = SlotDigests::read(slot)?;
-    let expected_export = built
-        .clone()
-        .selecting_initrd(producer.boot.initramfs_path())?;
-    if built.missing("verity") {
-        bail!("the built pack has no dm-verity hash tree beside its rootfs; nothing was signed");
-    }
-
-    // ---- 3. Health: boot the baked entrypoint, require a clean exit ----
-    eprintln!(
-        "health check: booting {} and running its entrypoint",
-        pack_ref(&lock)
-    );
-    producer.build.verify_revision()?;
-    let mut health = health_call(slot, &loaded.spec, &args);
-    health.portable_boot_assets = Some(std::sync::Arc::clone(&producer.boot));
-    // An error/panic does not prove no VM can still read these inputs.
-    // This API returns a workload status, not an opaque generation-exit proof;
-    // retain conservatively even after an acknowledged stop.
-    producer.retain();
-    let exit_code =
-        boot_entrypoint(health).context("booting the built pack for its health check")?;
-    if exit_code != 0 {
-        bail!("health check failed: the entrypoint exited {exit_code}; nothing was signed");
-    }
-
-    // ---- 4. Nothing may change between the health check and signing ----
-    producer.build.verify_revision()?;
-    producer.boot.verify_integrity()?;
-    let checked = SlotDigests::read(slot)?;
-    if checked != built {
-        bail!(
-            "built artifacts changed after the health check ({}); nothing was signed",
-            built.changed(&checked).join(", ")
-        );
-    }
-
-    // ---- 5. Seal and sign under the host key ----
-    producer.build.verify_revision()?;
-    let mut export = options.apply(pack_export(&args.out, &loaded.spec, &lock, image_argv)?)?;
-    export.local_build = true;
-    export.portable_boot_assets = Some(std::sync::Arc::clone(&producer.boot));
-    let mut staged = stage_template(slot, export)?;
-    // The exporter re-read the slot's files; what it sealed must be what the
-    // health check booted. Read and hash the same owned file before publication.
-    let validation = (|| -> Result<String> {
-        producer
-            .build
-            .verify_revision()
-            .context("private build revision changed during export; archive not published")?;
-        producer.boot.verify_integrity()?;
-        let sealed = SlotDigests::from_manifest(&staged.manifest()?);
-        if sealed != expected_export {
-            bail!(
-                "the sealed archive differs from the health-checked build ({}); \
-                 archive not published",
-                expected_export.changed(&sealed).join(", ")
-            );
-        }
-        let digest = staged.sha256()?;
-        producer
-            .build
-            .verify_revision()
-            .context("private build revision changed during validation; archive not published")?;
-        if let (Some(report), Some(destination)) = (observation, &args.input_observation) {
-            report
-                .persist_noclobber(destination)
-                .context("publishing input observation without overwriting")?;
-        }
-        Ok(digest)
-    })();
-    let digest = match validation {
-        Ok(digest) => digest,
-        Err(error) => return Err(staged.abort(error)),
+    let provenance = BuildProvenance {
+        input_kind: InputKind::NixFlake,
+        input_ref: format!("pack:{}", pack_ref(&lock)),
+        lock_digest: Some(lock_digest(&lock)?),
+        builder_id: None,
+        artifacts: Default::default(),
     };
-    let exported = staged.publish()?;
-    mvm_core::audit_emit!(
-        PackBuild,
-        "pack={},workload_sha256={},bundle_sha256={digest},key_id={}",
-        pack_ref(&lock),
-        lock.workload_sha256,
-        exported.key_id.0
+    PackCompletion {
+        args: &args,
+        spec: &loaded.spec,
+        options,
+        producer,
+        input_sha256: lock.workload_sha256,
+        provenance,
+        observation,
+        supplemental: None,
+    }
+    .run()
+}
+
+fn run_yocto(
+    args: &BuildArgs,
+    options: ExportOptions,
+    spec: &PackSpec,
+    spec_dir: &Path,
+) -> Result<()> {
+    anyhow::ensure!(
+        options.cmdline.is_none()
+            && options.environment.is_none()
+            && options.posture.is_none()
+            && !options.allow_egress
+            && !options.allow_volumes
+            && !options.allow_unauthenticated,
+        "Yocto pack build does not allow overriding its health-checked entrypoint or sealed posture"
     );
+    anyhow::ensure!(
+        args.lock.is_none(),
+        "Yocto inputs are declared by source.kind=yocto, not a Nix pack lock"
+    );
+    anyhow::ensure!(
+        args.input_observation.is_none(),
+        "--input-observation applies only to Nix pack builds"
+    );
+    let built = build_yocto_pack(YoctoPackRequest {
+        spec: spec.clone(),
+        spec_dir: spec_dir.to_path_buf(),
+        out: args.out.clone(),
+        label: options.label,
+        health_timeout_secs: args.health_timeout,
+        hypervisor: args.hypervisor.clone(),
+    })?;
     println!(
-        "Built pack {} -> {} (sha256={digest}, key_id={})",
-        pack_ref(&lock),
-        exported.path.display(),
-        exported.key_id.0
+        "Built pack {}@{} -> {} (sha256={}, key_id={})",
+        spec.identity.name,
+        spec.identity.version,
+        built.path.display(),
+        built.sha256,
+        built.key_id
     );
     Ok(())
+}
+
+struct PackCompletion<'a> {
+    args: &'a BuildArgs,
+    spec: &'a PackSpec,
+    options: ExportOptions,
+    producer: HealthInputRetention<ProducerInputs>,
+    input_sha256: String,
+    provenance: BuildProvenance,
+    observation: Option<tempfile::NamedTempFile>,
+    supplemental: Option<PathBuf>,
+}
+
+impl PackCompletion<'_> {
+    fn run(self) -> Result<()> {
+        let Self {
+            args,
+            spec,
+            options,
+            producer,
+            input_sha256,
+            provenance,
+            observation,
+            supplemental,
+        } = self;
+        let slot = producer.build.slot_hash();
+        let pack_name = format!("{}@{}", spec.identity.name, spec.identity.version);
+        // A pack ships sealed: its rootfs gets the dm-verity pair here, before the
+        // health boot, so the boot checks it and the archive carries it.
+        seal_template_rootfs(slot)?.context(
+            "the built pack's image does not declare itself sealed; a pack must boot from a \
+         dm-verity rootfs",
+        )?;
+        // The argv the image records for itself, which is what the health boot
+        // runs and what a launch of the archive is measured against.
+        let image_argv = template_entrypoint(slot)?;
+        let built = SlotDigests::read(slot)?;
+        let expected_export = built
+            .clone()
+            .selecting_initrd(producer.boot.initramfs_path())?;
+        if built.missing("verity") {
+            bail!(
+                "the built pack has no dm-verity hash tree beside its rootfs; nothing was signed"
+            );
+        }
+
+        // ---- 3. Health: boot the baked entrypoint, require a clean exit ----
+        eprintln!("health check: booting {pack_name} and running its entrypoint");
+        producer.build.verify_revision()?;
+        let mut health = health_call(slot, spec, args);
+        health.portable_boot_assets = Some(std::sync::Arc::clone(&producer.boot));
+        // An error/panic does not prove no VM can still read these inputs.
+        // This API returns a workload status, not an opaque generation-exit proof;
+        // retain conservatively even after an acknowledged stop.
+        producer.retain();
+        let exit_code =
+            boot_entrypoint(health).context("booting the built pack for its health check")?;
+        if exit_code != 0 {
+            bail!("health check failed: the entrypoint exited {exit_code}; nothing was signed");
+        }
+
+        // ---- 4. Nothing may change between the health check and signing ----
+        producer.build.verify_revision()?;
+        producer.boot.verify_integrity()?;
+        let checked = SlotDigests::read(slot)?;
+        if checked != built {
+            bail!(
+                "built artifacts changed after the health check ({}); nothing was signed",
+                built.changed(&checked).join(", ")
+            );
+        }
+
+        // ---- 5. Seal and sign under the host key ----
+        producer.build.verify_revision()?;
+        let supplemental_digest = supplemental
+            .as_ref()
+            .map(|path| mvm_core::crypto::image_verify::sha256_file(path))
+            .transpose()?;
+        if let Some(digest) = &supplemental_digest {
+            anyhow::ensure!(
+                provenance.lock_digest.as_deref() == Some(digest),
+                "Yocto input document changed before signing"
+            );
+        }
+        let source_audit = pack_input_audit(provenance.input_kind, &input_sha256)?;
+        let mut export = options.apply(pack_export(&args.out, spec, image_argv, provenance))?;
+        export.local_build = true;
+        export.portable_boot_assets = Some(std::sync::Arc::clone(&producer.boot));
+        if let Some(path) = &supplemental {
+            export
+                .supplemental_artifacts
+                .push(("yocto-inputs.json".into(), path.clone()));
+        }
+        let mut staged = stage_template(slot, export)?;
+        // The exporter re-read the slot's files; what it sealed must be what the
+        // health check booted. Read and hash the same owned file before publication.
+        let validation = (|| -> Result<String> {
+            producer
+                .build
+                .verify_revision()
+                .context("private build revision changed during export; archive not published")?;
+            producer.boot.verify_integrity()?;
+            let manifest = staged.manifest()?;
+            if let Some(digest) = &supplemental_digest {
+                let signed = manifest
+                    .find_by_name("yocto-inputs.json")
+                    .context("sealed archive omitted Yocto inputs")?;
+                anyhow::ensure!(
+                    signed.sha256 == *digest,
+                    "sealed Yocto inputs differ from the verified source document"
+                );
+            }
+            let sealed = SlotDigests::from_manifest(&manifest);
+            if sealed != expected_export {
+                bail!(
+                    "the sealed archive differs from the health-checked build ({}); \
+                 archive not published",
+                    expected_export.changed(&sealed).join(", ")
+                );
+            }
+            let digest = staged.sha256()?;
+            producer.build.verify_revision().context(
+                "private build revision changed during validation; archive not published",
+            )?;
+            if let (Some(report), Some(destination)) = (observation, &args.input_observation) {
+                report
+                    .persist_noclobber(destination)
+                    .context("publishing input observation without overwriting")?;
+            }
+            Ok(digest)
+        })();
+        let digest = match validation {
+            Ok(digest) => digest,
+            Err(error) => return Err(staged.abort(error)),
+        };
+        let exported = staged.publish()?;
+        mvm_core::audit_emit!(
+            PackBuild,
+            "pack={},{source_audit},bundle_sha256={digest},key_id={}",
+            pack_name,
+            exported.key_id.0
+        );
+        println!(
+            "Built pack {} -> {} (sha256={digest}, key_id={})",
+            pack_name,
+            exported.path.display(),
+            exported.key_id.0
+        );
+        Ok(())
+    }
+}
+
+fn pack_input_audit(kind: InputKind, digest: &str) -> Result<String> {
+    match kind {
+        InputKind::NixFlake => Ok(format!("workload_sha256={digest}")),
+        InputKind::Yocto => Ok(format!("yocto_archive_sha256={digest}")),
+        InputKind::Oci | InputKind::NixTemplate | InputKind::LocalProject => {
+            bail!("unsupported pack image producer for a health-checked build")
+        }
+    }
 }
 
 fn require_descriptor_health_backend(backend: &str) -> Result<()> {
@@ -244,8 +367,20 @@ fn require_descriptor_health_backend(backend: &str) -> Result<()> {
 }
 
 struct ProducerInputs {
-    build: crate::commands::build::build::FrozenFlakeSlot,
+    build: PackSlot,
     boot: std::sync::Arc<mvm_client::portable_boot_assets::PreparedPortableBootAssets>,
+}
+
+struct PackSlot(crate::commands::build::build::FrozenFlakeSlot);
+
+impl PackSlot {
+    fn slot_hash(&self) -> &str {
+        self.0.slot_hash()
+    }
+
+    fn verify_revision(&self) -> Result<()> {
+        self.0.verify_revision()
+    }
 }
 
 /// Retaining input bytes is a one-way resource decision, not VM/exit authority.
@@ -350,48 +485,19 @@ fn health_call(slot: &str, spec: &PackSpec, args: &BuildArgs) -> EntrypointCall 
 fn pack_export(
     out: &Path,
     spec: &PackSpec,
-    lock: &PackLock,
     image_argv: Vec<String>,
-) -> Result<TemplateExport> {
-    Ok(TemplateExport {
-        environment: Some(pack_environment(spec, lock, image_argv)),
-        label: Some(pack_ref(lock)),
+    provenance: BuildProvenance,
+) -> TemplateExport {
+    TemplateExport {
+        environment: Some(pack_environment(spec, image_argv)),
+        label: Some(format!("{}@{}", spec.identity.name, spec.identity.version)),
         resources: Some(BundleResources {
             vcpus: u32::from(spec.resources.cpu_cores),
             mem_mib: spec.resources.memory_mb,
         }),
         posture: Some(PostureInputs::new(AgentProfile::SealedProd)),
-        provenance: Some(BuildProvenance {
-            input_kind: InputKind::NixFlake,
-            input_ref: format!("pack:{}", pack_ref(lock)),
-            lock_digest: Some(lock_digest(lock)?),
-            builder_id: None,
-            artifacts: Default::default(),
-        }),
+        provenance: Some(provenance),
         ..TemplateExport::new(out.to_path_buf())
-    })
-}
-
-/// The environment a launch of the built pack is held to.
-fn pack_environment(
-    spec: &PackSpec,
-    lock: &PackLock,
-    image_argv: Vec<String>,
-) -> EnvironmentDescriptor {
-    EnvironmentDescriptor {
-        descriptor_version: ENVIRONMENT_DESCRIPTOR_VERSION,
-        pack: Some(lock.identity.clone()),
-        target: spec.target,
-        entrypoint: EnvironmentEntrypoint {
-            argv: image_argv,
-            working_dir: None,
-        },
-        resources: Some(spec.resources.clone()),
-        policy: None,
-        volumes: Vec::new(),
-        secret_slots: Vec::new(),
-        capabilities: Vec::new(),
-        services: Vec::new(),
     }
 }
 
@@ -401,85 +507,7 @@ fn lock_digest(lock: &PackLock) -> Result<String> {
     Ok(mvm_core::plan::bundle::sha256_hex(&bytes))
 }
 
-/// Digests of the artifacts a slot's current revision points at.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SlotDigests {
-    files: Vec<(&'static str, Option<String>)>,
-}
-
-impl SlotDigests {
-    /// Health selects the retained release initramfs, not an unused factory
-    /// stage-1 initrd. The unchanged build slot is checked separately.
-    fn selecting_initrd(mut self, path: &Path) -> Result<Self> {
-        let digest = file_sha256(path)?;
-        for (name, value) in &mut self.files {
-            if *name == "initrd" {
-                *value = Some(digest.clone());
-            }
-        }
-        Ok(self)
-    }
-
-    fn read(slot: &str) -> Result<Self> {
-        let digests = template_artifact_digests(slot)?;
-        Ok(Self::from_digests(
-            Some(digests.kernel),
-            digests.initrd,
-            Some(digests.rootfs),
-            digests.verity,
-        ))
-    }
-
-    /// The same digests, as the manifest of a sealed archive records them.
-    fn from_manifest(manifest: &BundleManifest) -> Self {
-        let digest = |role: ArtifactRole| {
-            manifest
-                .artifacts
-                .iter()
-                .find(|artifact| artifact.role == role)
-                .map(|artifact| artifact.sha256.clone())
-        };
-        Self::from_digests(
-            digest(ArtifactRole::Kernel),
-            digest(ArtifactRole::Initrd),
-            digest(ArtifactRole::Rootfs),
-            digest(ArtifactRole::VerityHashSidecar),
-        )
-    }
-
-    fn from_digests(
-        kernel: Option<String>,
-        initrd: Option<String>,
-        rootfs: Option<String>,
-        verity: Option<String>,
-    ) -> Self {
-        Self {
-            files: vec![
-                ("kernel", kernel),
-                ("initrd", initrd),
-                ("rootfs", rootfs),
-                ("verity", verity),
-            ],
-        }
-    }
-
-    /// Whether the artifact named `name` is absent.
-    fn missing(&self, name: &str) -> bool {
-        self.files
-            .iter()
-            .any(|(file, digest)| *file == name && digest.is_none())
-    }
-
-    fn changed(&self, other: &Self) -> Vec<&'static str> {
-        self.files
-            .iter()
-            .zip(&other.files)
-            .filter(|(a, b)| a != b)
-            .map(|((name, _), _)| *name)
-            .collect()
-    }
-}
-
+#[cfg(test)]
 fn file_sha256(path: &Path) -> Result<String> {
     mvm_core::crypto::image_verify::sha256_file(path)
         .with_context(|| format!("hashing {}", path.display()))
@@ -648,12 +676,8 @@ mod tests {
 
     #[test]
     fn changed_names_each_artifact_that_differs() {
-        let before = SlotDigests {
-            files: vec![("kernel", Some("k".into())), ("rootfs", Some("r".into()))],
-        };
-        let after = SlotDigests {
-            files: vec![("kernel", Some("k".into())), ("rootfs", Some("x".into()))],
-        };
+        let before = SlotDigests::from_digests(Some("k".into()), None, Some("r".into()), None);
+        let after = SlotDigests::from_digests(Some("k".into()), None, Some("x".into()), None);
         assert_eq!(before.changed(&after), vec!["rootfs"]);
         assert!(before.changed(&before).is_empty());
         let unsealed = SlotDigests::from_digests(Some("k".into()), None, Some("r".into()), None);
@@ -722,7 +746,18 @@ mod tests {
         ))
         .unwrap();
         let boot = vec!["/nix/store/x-hello-boot".to_string()];
-        let export = pack_export(Path::new("/tmp/x.mvmpkg"), &spec, &lock, boot.clone()).unwrap();
+        let export = pack_export(
+            Path::new("/tmp/x.mvmpkg"),
+            &spec,
+            boot.clone(),
+            BuildProvenance {
+                input_kind: InputKind::NixFlake,
+                input_ref: format!("pack:{}", pack_ref(&lock)),
+                lock_digest: Some(lock_digest(&lock).unwrap()),
+                builder_id: None,
+                artifacts: Default::default(),
+            },
+        );
         assert_eq!(export.label.as_deref(), Some("acme/hello@1.0.0"));
         assert_eq!(
             export.resources,
@@ -742,5 +777,19 @@ mod tests {
         assert_eq!(provenance.input_ref, "pack:acme/hello@1.0.0");
         assert_eq!(provenance.lock_digest.unwrap().len(), 64);
         assert!(export.posture.is_some());
+    }
+
+    #[test]
+    fn audit_names_the_real_pack_input_not_a_fabricated_workload_hash() {
+        let digest = "a".repeat(64);
+        assert_eq!(
+            pack_input_audit(InputKind::NixFlake, &digest).unwrap(),
+            format!("workload_sha256={digest}")
+        );
+        assert_eq!(
+            pack_input_audit(InputKind::Yocto, &digest).unwrap(),
+            format!("yocto_archive_sha256={digest}")
+        );
+        assert!(pack_input_audit(InputKind::Oci, &digest).is_err());
     }
 }

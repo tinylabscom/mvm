@@ -189,7 +189,9 @@ pub(super) fn record_python_environment(
 /// The tree the compiler reads: the authored source, or the tree assembled
 /// from copy operations, each of which must land inside [`APP_DIR`].
 fn source_path(spec: &PackSpec) -> Result<String, PackError> {
-    let PackSource::Local { path } = &spec.source;
+    let PackSource::Local { path } = &spec.source else {
+        return Err(PackError::YoctoSourceNotNix);
+    };
     if spec.copy.is_empty() {
         return Ok(path.clone());
     }
@@ -304,6 +306,19 @@ mod tests {
         let second = lower(&spec()).unwrap();
         assert_eq!(first, second);
         assert_eq!(ir_hash(&first).unwrap(), ir_hash(&second).unwrap());
+    }
+
+    #[test]
+    fn yocto_input_is_not_lowered_as_a_nix_source_tree() {
+        let mut input = spec();
+        input.packages.clear();
+        input.dependencies.clear();
+        input.copy.clear();
+        input.source = PackSource::Yocto {
+            archive: "rootfs.tar.gz".into(),
+            inputs: "inputs.json".into(),
+        };
+        assert!(matches!(lower(&input), Err(PackError::YoctoSourceNotNix)));
     }
 
     #[test]

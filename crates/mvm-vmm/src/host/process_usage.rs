@@ -40,6 +40,7 @@ fn peak_rss_bytes_self() -> Option<u64> {
     // this project deliberately avoids adding that dependency. The
     // deprecation is confined to this small macOS-only block.
     #[allow(deprecated)]
+    // SAFETY: mach_task_self takes no arguments and has no preconditions.
     let task = unsafe { libc::mach_task_self() };
     // SAFETY: `task_info` fills the provided buffer when it returns KERN_SUCCESS,
     // and `count` describes that buffer's size in natural_t units.

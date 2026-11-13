@@ -284,14 +284,11 @@ impl SubprocessSpawner for ProcessSpawner {
             .kill_on_drop(true);
 
         #[cfg(target_os = "linux")]
+        // SAFETY: pre_exec runs in the forked child between fork and execve, so the closure may
+        //         only make async-signal-safe calls; it makes one, `prctl`, which `libc::prctl`
+        //         forwards to directly, with no allocation, Rust runtime or tokio state.
         unsafe {
             // PR_SET_PDEATHSIG(SIGTERM): when the parent (us) dies, the
-            // kernel sends SIGTERM to the subprocess. Set in the
-            // pre_exec hook so the signal is armed before the subprocess
-            // starts executing its main().
-            //
-            // SAFETY: pre_exec runs in the forked child between fork and
-            // execve. Only async-signal-safe calls allowed — `prctl` is
             // on the POSIX async-signal-safe list and `libc::prctl`
             // forwards directly. No allocation, no Rust runtime, no
             // tokio state.

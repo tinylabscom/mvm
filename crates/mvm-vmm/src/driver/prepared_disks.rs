@@ -657,6 +657,8 @@ mod tests {
                 [expected_backing, expected_sidecar][index]
             );
             assert_ne!(
+                // SAFETY: `file` is a live descriptor owned by the prepared disk; F_GETFD only
+                //         reads its flags.
                 unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
                 0
             );
