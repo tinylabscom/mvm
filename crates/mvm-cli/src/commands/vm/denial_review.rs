@@ -536,7 +536,7 @@ impl ManifestEdit {
             }
         }
         let updated = document.to_string();
-        mvm_core::manifest::Manifest::from_toml_str(&updated)
+        mvm_core::manifest::Manifest::from_project_toml_str(&updated, path)
             .with_context(|| format!("validating the edited {}", path.display()))?;
         Ok(Self {
             path: path.to_path_buf(),
@@ -717,6 +717,29 @@ mod tests {
 
         let written = std::fs::read_to_string(&manifest).unwrap();
         let parsed = mvm_core::manifest::Manifest::from_toml_str(&written).unwrap();
+        assert_eq!(parsed.network.allow_hosts, ["api.example.com:443"]);
+    }
+
+    #[test]
+    fn a_composed_manifest_keeps_its_defaults_when_policy_is_edited() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("mvm.toml");
+        std::fs::write(dir.path().join("defaults.toml"), "cpus = 1\n").unwrap();
+        std::fs::write(
+            &manifest,
+            "image = \"alpine:3.20\"\ninclude = [\"defaults.toml\"]\n",
+        )
+        .unwrap();
+
+        ManifestEdit::prepare(&manifest, &["api.example.com:443".into()])
+            .unwrap()
+            .commit()
+            .unwrap();
+
+        let written = std::fs::read_to_string(&manifest).unwrap();
+        assert!(written.contains("include = [\"defaults.toml\"]"));
+        let parsed = mvm_core::manifest::Manifest::read_file(&manifest).unwrap();
+        assert_eq!(parsed.cpus, 1);
         assert_eq!(parsed.network.allow_hosts, ["api.example.com:443"]);
     }
 

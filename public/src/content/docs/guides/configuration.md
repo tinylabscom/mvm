@@ -7,10 +7,11 @@ description: Write a project mvm.toml and compose its source, sizing, network gr
 and records local machine defaults. Put it beside your project; mvm also
 accepts the name `Mvmfile.toml`, but refuses both names in one directory.
 
-Start with one file and add reusable policy files when permissions need to
-be shared. **Composition is explicit:** `[policy]` names a profile and
-includes groups, including groups from installed, verified packs. It does
-not merge arbitrary `mvm.toml` files.
+Start with one file. For repeated CPU and memory settings, `include` can
+apply small local launch-default files before the root file. For reusable
+permissions, `[policy]` names a profile and includes groups, including
+groups from installed, verified packs. **These are separate composition
+paths:** manifest includes never supply a source or permissions.
 
 ## A local image-backed machine
 
@@ -38,6 +39,7 @@ directory is not automatically mounted into the guest.
 | --- | --- |
 | `image` or `flake` | Choose one source: an OCI image or a Nix flake. If neither is set, the flake defaults to `.`. |
 | `cpus`, `mem` | Size the local machine. `mem` is the guest memory cap. |
+| `include` | Ordered relative TOML files containing only `include`, `cpus`, and `mem`. |
 | `net` | Request the built-in development network preset when `true`; `false` is the default. |
 | `[network].allow_hosts` | Name specific outbound destinations instead of relying on the preset. |
 | `[policy].profile`, `[policy].include` | Select an authored profile and compose reusable groups or verified pack policy. |
@@ -46,6 +48,33 @@ directory is not automatically mounted into the guest.
 The root `profile` key selects a **flake package**, not the `--profile`
 run security tier or the authored `[policy].profile`. Unknown keys are
 rejected instead of silently ignored.
+
+## Reuse launch defaults
+
+For a project with shared resource settings, write `defaults/small.toml`:
+
+```toml
+cpus = 1
+mem = "512M"
+```
+
+Then select it in the root `mvm.toml`:
+
+```toml
+image = "alpine:3.20"
+include = ["defaults/small.toml"]
+cpus = 2
+```
+
+Includes are processed in order, relative to the file naming them, before
+the root values. Here the effective size is two CPUs and 512 MiB. An included
+file can include another defaults file, but repeated files, cycles, missing
+files, and paths escaping the project directory are refused. The root must
+name its own `image`, `flake`, or `wasm` source when using includes. Only
+`cpus` and `mem` can be inherited: network, GPU, volumes, secrets, grants,
+policy selection, and other fields in a defaults file are rejected.
+Signed pack image manifests remain self-contained and cannot use local
+includes.
 
 To allow one destination and reuse a policy group across projects, add
 these sections to the file above after creating the

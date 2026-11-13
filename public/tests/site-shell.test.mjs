@@ -73,7 +73,8 @@ test("policy and configuration guides show the supported composition boundaries"
   assert.match(policies, /--policy NAME\\\|PATH/);
   assert.match(policies, /deny from any layer/);
   assert.match(policies, /installed, pinned, verified/);
-  assert.match(configuration, /does\s+not merge arbitrary `mvm\.toml` files/);
+  assert.match(configuration, /manifest includes never supply a source or permissions/);
+  assert.match(configuration, /Only\s+`cpus` and `mem` can be inherited/);
   assert.match(configuration, /image = "alpine:3\.20"/);
   assert.match(configuration, /include = \["\.\/policy\/api-group\.toml"\]/);
   assert.match(configuration, /default_policy` there\s+selects a fallback/);
