@@ -148,11 +148,19 @@ fn readonly_data_startup_rechecks_content_and_cleans_up_adopted_bad_files() {
     ] {
         let (_dir, file) = readonly_data_fixture();
         let fd = file.into_raw_fd();
+        let before = descriptor_identity(fd);
+        assert!(
+            before.is_some(),
+            "fixture fd {fd} must be open before adoption"
+        );
         let mut cfg = readonly_data_config(fd);
         mutate(&mut cfg.readonly_data_disk_fds[0].expected);
         assert!(adopt_startup_files(&cfg).is_err());
-        // SAFETY: inspection of the now-closed transferred locator only.
-        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+        assert_ne!(
+            descriptor_identity(fd),
+            before,
+            "adoption must close the original file even if another test reuses fd {fd}"
+        );
     }
 }
 
@@ -202,10 +210,14 @@ fn startup_restore_files_retain_original_custody_and_transfer_once() {
             0
         );
     }
+    let identities = raw.map(descriptor_identity);
     drop(files);
-    for fd in raw {
-        // SAFETY: inspect the now-closed transferred locator without ownership.
-        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+    for (fd, before) in raw.into_iter().zip(identities) {
+        assert_ne!(
+            descriptor_identity(fd),
+            before,
+            "restore custody must close the original file even if fd {fd} is reused"
+        );
     }
 }
 
