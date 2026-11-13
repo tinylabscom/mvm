@@ -192,7 +192,7 @@ def test_the_launch_command_carries_its_env_and_its_process_is_the_sandboxs(host
     sb = _boot(
         hostlib,
         command=["/app/serve"],
-        env={"MODE": "safe", "LEVEL": mvm.literal("3")},
+        env={"MODE": mvm.literal("safe"), "LEVEL": mvm.literal("3")},
     )
     request = hostlib.request("machine.run")
     assert request["command"] == ["/app/serve"]
@@ -209,6 +209,16 @@ def test_a_sandbox_without_a_launch_command_has_no_process(hostlib) -> None:
     assert sb.process is None
     assert "env" not in hostlib.request("machine.run")
     sb.kill()
+
+
+def test_a_bare_string_env_value_is_refused_before_any_host_call(hostlib) -> None:
+    with pytest.raises(TypeError, match="bare string"):
+        mvm.Sandbox.create(image="python:slim", command=["/app/serve"], env={"MODE": "safe"})
+    assert hostlib.calls == []
+    sb = _boot(hostlib)
+    with pytest.raises(TypeError, match=r"mvm\.literal"):
+        sb.commands.start(["python"], env={"MODE": "test"})
+    assert _guest_calls(hostlib) == []
 
 
 def test_a_secret_is_never_forwarded_as_launch_environment(hostlib) -> None:
@@ -324,7 +334,7 @@ def test_commands_start_sends_argv_and_literal_env(hostlib) -> None:
     hostlib.reply("guest.proc.start", {"token": "tok-9"})
 
     handle = sb.commands.start(
-        ["python", "run.py"], env={"MODE": "test", "LEVEL": mvm.literal("3")}
+        ["python", "run.py"], env={"MODE": mvm.literal("test"), "LEVEL": mvm.literal("3")}
     )
 
     assert handle.token == "tok-9"
@@ -492,7 +502,7 @@ def test_exec_starts_with_cwd_and_env_then_waits(hostlib) -> None:
     sb = _boot(hostlib, name="sb-exec")
     _script_process(hostlib, _done(0, _chunk("stdout", b"4\n"), _chunk("stderr", b"\xff")))
 
-    result = sb.exec("python", "-c", "print(2 + 2)", cwd="/app", env={"A": "1"}, timeout=5)
+    result = sb.exec("python", "-c", "print(2 + 2)", cwd="/app", env={"A": mvm.literal("1")}, timeout=5)
 
     assert result == mvm.ExecResult(exit_code=0, stdout="4\n", stderr="�")
     assert hostlib.request("guest.proc.start") == {

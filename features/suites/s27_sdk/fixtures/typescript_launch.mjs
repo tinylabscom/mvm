@@ -11,7 +11,7 @@ import * as mvm from "../../../../crates/mvm-sdk/sdks/typescript/dist/index.js";
 const sandbox = mvm.Sandbox.create("chromium", {
   workloadId: "bdd-launch",
   command: ["/serve", "--port", "9222"],
-  env: { MODE: "headless" },
+  env: { MODE: mvm.literal("headless") },
 });
 await sandbox.process.wait();
 sandbox.kill();
