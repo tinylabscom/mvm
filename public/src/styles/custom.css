@@ -436,37 +436,6 @@ nav[aria-label="Main"] .group-label .large {
   color: var(--color-label);
 }
 
-/* ── Sidebar group icons — one emoji per top-level group ──
- *
- *  Starlight's SidebarSublist.astro gives every group the same
- *  `.group-label` markup regardless of which group it is — no per-group
- *  class or data attribute to hook an icon off of. A `:nth-child` scheme
- *  keyed to position in astro.config.mjs's `sidebar` array was tried and
- *  dropped: reordering, adding, or removing a group silently shifts every
- *  icon after it onto the wrong heading, with nothing to catch it.
- *
- *  Instead, Sidebar.astro runs a small inline script that reads each
- *  group's *label text* (e.g. "Getting Started") against a fixed emoji
- *  map and inserts a `.sidebar-group-icon` span ahead of `.large` — a
- *  binding keyed to the label string itself, so a reorder is a no-op and
- *  only a renamed label needs a matching map update (a loud, visible
- *  change, unlike a silent position shift). This block only sizes and
- *  spaces whatever that script inserts; see Sidebar.astro for the map.
- */
-nav[aria-label="Main"] ul.top-level > li .group-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.65rem;
-}
-
-nav[aria-label="Main"] ul.top-level > li .group-label .sidebar-group-icon {
-  flex-shrink: 0;
-  font-size: 1.05rem;
-  line-height: 1;
-  font-style: normal;
-  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
-}
-
 /* Quiet indent rail on nested lists — Starlight already draws this line
    (SidebarSublist.astro's `ul ul li` rule); we only re-pin its color to
    the role token the rest of the redesign uses for hairlines. */

@@ -25,7 +25,7 @@ use super::super::Cli;
 pub(in crate::commands) struct Args {
     /// Path to a 32-byte Ed25519 public-key file. No PEM, no
     /// headers — raw bytes only. Bundles publish this format via
-    /// `~/.mvm/keys/host-signer.pub` after `host_signer::load_or_init`.
+    /// `~/.mvm/keys/host-signer.pub` after `host_keypair::load_or_init`.
     #[arg(value_name = "PUBKEY")]
     pub pubkey: PathBuf,
     /// Overwrite an existing entry with the same `key_id`.

@@ -483,7 +483,7 @@ impl VsockInput {
             &mut std::os::unix::net::UnixStream,
         ) -> Result<StreamInputResult, mvm_agentd::vsock::RpcError>,
     ) -> Result<()> {
-        let transport = mvm_runtime::vsock_transport::for_vm(&self.vm)
+        let transport = mvm_vmm::vsock_transport::for_vm(&self.vm)
             .with_context(|| format!("pick a transport for the guest agent on {:?}", self.vm))?;
         let mut stream = transport
             .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)

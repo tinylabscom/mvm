@@ -66,6 +66,47 @@ fn supplemental_files_are_signed_verified_and_tamper_evident() {
 }
 
 #[test]
+fn yocto_input_document_is_bound_to_the_signed_pack_provenance() {
+    let slot = Slot::new();
+    let (kernel, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let signer = TestSigner::new(7);
+    let document = br#"{"schema_version":1,"machine":"qemuarm64"}"#;
+    let path = slot.dir.path().join("yocto-inputs.json");
+    std::fs::write(&path, document).unwrap();
+    let extras = [("yocto-inputs.json", path.as_path())];
+    let source_digest = sha256_hex(document);
+    let mut inputs =
+        BundleExportInputs::new(&kernel, &rootfs, "aarch64", &out).provenance(BuildProvenance {
+            input_kind: InputKind::Yocto,
+            input_ref: "yocto:qemuarm64@sha256:abc".into(),
+            lock_digest: Some(source_digest.clone()),
+            builder_id: None,
+            artifacts: Default::default(),
+        });
+    inputs.supplemental_artifacts = &extras;
+    export(&inputs, &signer);
+
+    let bundle = verify(&out, &signer).unwrap();
+    let provenance = bundle.manifest.build_provenance().unwrap();
+    assert_eq!(provenance.input_kind, InputKind::Yocto);
+    assert_eq!(
+        provenance.lock_digest.as_deref(),
+        Some(source_digest.as_str())
+    );
+    let artifact = bundle.manifest.find_by_name("yocto-inputs.json").unwrap();
+    assert_eq!(artifact.sha256, source_digest);
+    assert_eq!(bundle.artifacts[&artifact.path], document);
+
+    let mut archive = std::fs::read(&out).unwrap();
+    let at = archive
+        .windows(document.len())
+        .position(|part| part == document)
+        .unwrap();
+    archive[at] ^= 1;
+    assert!(read_and_verify_bundle(&archive, &OneKey(signer.key.verifying_key())).is_err());
+}
+
+#[test]
 fn supplemental_names_refuse_unsafe_reserved_and_duplicate_inputs() {
     let slot = Slot::new();
     let (kernel, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());

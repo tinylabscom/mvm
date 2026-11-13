@@ -6,6 +6,11 @@ import test from "node:test";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
+function assertLinkedFromGuides(slug) {
+  const index = readFileSync(path.join(repo, "public/src/content/docs/guides/index.md"), "utf8");
+  assert.ok(index.includes(`/${slug}/`), `${slug} remains discoverable from the guides index`);
+}
+
 test("CLI reference documents local deploy without denying it", () => {
   const reference = readFileSync(
     path.join(repo, "public/src/content/docs/reference/cli-commands.md"),
@@ -30,9 +35,7 @@ test("lineage recovery has a navigable capability guide with its safety boundary
     path.join(repo, "public/src/content/docs/guides/lineage-recovery.md"),
     "utf8",
   );
-  const sidebar = readFileSync(path.join(repo, "public/src/sidebar.ts"), "utf8");
-
-  assert.match(sidebar, /slug: "guides\/lineage-recovery"/);
+  assertLinkedFromGuides("guides/lineage-recovery");
   for (const verb of ["timeline", "revert", "rewind", "advance"]) {
     assert.equal(guide.includes(`mvmctl machine ${verb}`), true, `${verb} is documented`);
   }
@@ -46,9 +49,7 @@ test("workload provenance guide distinguishes signed evidence from an export", (
     path.join(repo, "public/src/content/docs/guides/workload-provenance.md"),
     "utf8",
   );
-  const sidebar = readFileSync(path.join(repo, "public/src/sidebar.ts"), "utf8");
-
-  assert.match(sidebar, /slug: "guides\/workload-provenance"/);
+  assertLinkedFromGuides("guides/workload-provenance");
   assert.match(guide, /signed `ExecutionPlan`/);
   assert.match(guide, /mvmctl trust receipt verify/);
   assert.match(guide, /mvmctl trust audit verify/);
@@ -61,9 +62,7 @@ test("durable agent-session guide states admission and retention limits", () => 
     path.join(repo, "public/src/content/docs/guides/durable-agent-sessions.md"),
     "utf8",
   );
-  const sidebar = readFileSync(path.join(repo, "public/src/sidebar.ts"), "utf8");
-
-  assert.match(sidebar, /slug: "guides\/durable-agent-sessions"/);
+  assertLinkedFromGuides("guides/durable-agent-sessions");
   for (const verb of ["open", "park", "resume", "renew"]) {
     assert.equal(guide.includes(`mvmctl agent-session ${verb}`), true, `${verb} is documented`);
   }
@@ -77,9 +76,7 @@ test("Claude Code client guide keeps the MCP and guest boundaries distinct", () 
     path.join(repo, "public/src/content/docs/guides/claude-code-mcp.md"),
     "utf8",
   );
-  const sidebar = readFileSync(path.join(repo, "public/src/sidebar.ts"), "utf8");
-
-  assert.match(sidebar, /slug: "guides\/claude-code-mcp"/);
+  assertLinkedFromGuides("guides/claude-code-mcp");
   assert.match(guide, /mvmctl ops mcp stdio/);
   assert.match(guide, /CLAUDE_PROJECT_DIR/);
   assert.match(guide, /does \*\*not\*\* confine Claude Code's own/);
@@ -115,10 +112,9 @@ const agentPacks = [
 for (const { file, pack, secrets, needs } of agentPacks) {
   test(`${file} documents the ${pack} pack without promising an image`, () => {
     const guide = readGuide(file);
-    const sidebar = readFileSync(path.join(repo, "public/src/sidebar.ts"), "utf8");
     const slug = file.replace(/\.md$/, "");
 
-    assert.match(sidebar, new RegExp(`slug: "guides/${slug}"`));
+    assertLinkedFromGuides(`guides/${slug}`);
     assert.match(guide, new RegExp(`mvmctl pull ${pack}\\n`));
     assert.match(guide, new RegExp(`mvmctl run --policy ${pack} -- `));
     // `pull` fetches one pack; a profile that includes another names it.

@@ -797,8 +797,8 @@ pub fn hold_image_lock(lock_path: &Path, wait: LockWait) -> Result<HeldImageLock
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::isolated_lock_probe;
     use crate::volume_image::{VolumeImageLock, ensure_persistent_volume_image};
+    use mvm_core::util::test_env::isolated_lock_probe;
 
     // -----------------------------------------------------------------
     // The cache dir is a &Path argument, so each test passes a fresh TempDir

@@ -55,9 +55,6 @@ use super::Cli;
 use super::build::build;
 use super::vm::exec::{RunArgs, RunProfile, run_secure_started};
 use super::vm::group::VmCmd;
-#[cfg(test)]
-use super::vm::host_signer::PUBLIC_FILENAME;
-use super::vm::host_signer::{host_signer_id, load_or_init};
 use super::vm::{console, down};
 use crate::ui;
 use checkpoint::{ForkVmFullMachineInput, fork_vm_full_machine};
@@ -67,6 +64,9 @@ use lifecycle::{
 };
 use mailbox::{MachineMailboxAction, recv_mailbox};
 use manifest_source::{absolutize_manifest_volume_spec, load_machine_manifest_source};
+#[cfg(test)]
+use mvm_client::host_keypair::PUBLIC_FILENAME;
+use mvm_client::host_keypair::{host_signer_id, load_or_init};
 #[cfg(test)]
 use receipt::verify_machine_start_receipt;
 use receipt::{

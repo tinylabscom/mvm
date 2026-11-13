@@ -445,7 +445,7 @@ fn renew_audit_extras(record: &AgentSessionRecord) -> Vec<(String, String)> {
 /// exactly as a park is.
 fn record_renew_in_chain(
     record: &AgentSessionRecord,
-    emitter: &super::vm::audit_chain::AuditEmitter,
+    emitter: &mvm_client::audit::chain::emitter::AuditEmitter,
 ) -> Result<()> {
     let plan = member_plan(record)?;
     emitter.emit_session_renewed(&plan, renew_audit_extras(record))
@@ -588,7 +588,7 @@ fn park_audit_extras(record: &AgentSessionRecord) -> Vec<(String, String)> {
 /// reported rather than recorded under a plan it never ran.
 fn record_park_in_chain(
     record: &AgentSessionRecord,
-    emitter: &super::vm::audit_chain::AuditEmitter,
+    emitter: &mvm_client::audit::chain::emitter::AuditEmitter,
 ) -> Result<()> {
     let plan = member_plan(record)?;
     emitter.emit_session_parked(&plan, park_audit_extras(record))
@@ -607,10 +607,10 @@ fn member_plan(record: &AgentSessionRecord) -> Result<mvm_core::plan::ExecutionP
 }
 
 /// The host's chain-signed audit emitter, under the host signer.
-fn host_audit_emitter() -> Result<super::vm::audit_chain::AuditEmitter> {
-    let signer = super::vm::host_signer::load_or_init()
+fn host_audit_emitter() -> Result<mvm_client::audit::chain::emitter::AuditEmitter> {
+    let signer = mvm_client::host_keypair::load_or_init()
         .context("loading the host signer to sign the session entry")?;
-    super::vm::audit_chain::AuditEmitter::new(signer.signing)
+    mvm_client::audit::chain::emitter::AuditEmitter::new(signer.signing)
         .context("opening the audit chain to record the session transition")
 }
 
@@ -789,9 +789,9 @@ fn resume_boot_record(
     // The session's own state dir, named for the session, so the staged resume
     // point sits where every other per-VM artifact for that name does.
     let state_dir = mvm_core::config::vm_state_dir(inputs.id.as_str());
-    let signer = super::vm::host_signer::load_or_init()
+    let signer = mvm_client::host_keypair::load_or_init()
         .context("loading the host signer to sign the resume entry")?;
-    let emitter = super::vm::audit_chain::AuditEmitter::new(signer.signing)
+    let emitter = mvm_client::audit::chain::emitter::AuditEmitter::new(signer.signing)
         .context("opening the audit chain to record the resume")?;
     let resume = inputs.request();
     let request = ResumeBootLocalRequest::builder()
@@ -1896,7 +1896,7 @@ mod tests {
     struct ChainedHost {
         _env: mvm_core::util::test_env::TestEnv,
         home: tempfile::TempDir,
-        emitter: super::super::vm::audit_chain::AuditEmitter,
+        emitter: mvm_client::audit::chain::emitter::AuditEmitter,
     }
 
     impl ChainedHost {
@@ -1909,7 +1909,7 @@ mod tests {
                 &mvm_core::plan::signing::test_support::sample_plan(),
             )
             .unwrap();
-            let emitter = super::super::vm::audit_chain::AuditEmitter::with_dir(
+            let emitter = mvm_client::audit::chain::emitter::AuditEmitter::with_dir(
                 ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]),
                 &home.path().join("audit"),
             )

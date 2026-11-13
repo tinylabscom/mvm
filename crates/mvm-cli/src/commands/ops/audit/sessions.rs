@@ -11,7 +11,8 @@ use mvm_client::audit::chain::session::{
     list_sessions, resolve_session, session_events, verify_session_in_lines, workload_events,
 };
 
-use super::{default_audit_dir, host_signer, print_chain_line, ui};
+use super::{default_audit_dir, print_chain_line, ui};
+use mvm_client::host_keypair;
 
 /// `trust audit verify [SESSION]`.
 #[derive(clap::Args, Debug, Clone)]
@@ -131,7 +132,7 @@ pub(super) fn verified_lines(tenant: &str) -> Result<Option<Vec<String>>> {
         return Ok(None);
     }
     let signer =
-        host_signer::load_or_init().context("loading host signer to read the audit chain")?;
+        host_keypair::load_or_init().context("loading host signer to read the audit chain")?;
     mvm_client::audit::chain::merkle::read_leaves(&dir, tenant, &signer.verifying)
         .map(Some)
         .with_context(|| {
@@ -327,7 +328,7 @@ pub(in crate::commands) fn audit_verify_session(
     let dir = default_audit_dir()?;
     let report = if has_chain(&dir, tenant)? {
         let signer =
-            host_signer::load_or_init().context("loading host signer to verify the session")?;
+            host_keypair::load_or_init().context("loading host signer to verify the session")?;
         // One walk from genesis serves both the selector and the verdict.
         match mvm_client::audit::chain::session::read_lines_from_genesis(
             &dir,
