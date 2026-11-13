@@ -34,12 +34,12 @@ use std::process::Command;
 
 use crate::rust_source::{CommentSyntax, blank_comments};
 
-// CI witness repair adds checked timeout and enrollment regressions; admit its
-// small measured increase rather than delete security coverage to fit the ratchet.
+// The Yocto pack import adds importer and bundle validation coverage. Leave
+// room for concurrent main changes while keeping every Rust file measured.
 /// Ceiling on total SLOC, all categories.
-const MAX_TOTAL_SLOC: usize = 966_100;
+const MAX_TOTAL_SLOC: usize = 970_000;
 /// Ceiling on total physical lines, all categories.
-const MAX_TOTAL_PHYSICAL: usize = 1_232_000;
+const MAX_TOTAL_PHYSICAL: usize = 1_236_000;
 /// How far under a ceiling the tree may sit before the ceiling must drop.
 const SLACK: usize = 10_000;
 
