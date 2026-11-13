@@ -1,5 +1,8 @@
 # ADR-059: Immutable read leases for warm boot inputs
 
+Backing: preview
+Validation: none — this is an accepted design direction, not a shipped warm read lease
+
 ## Status
 
 Accepted direction. The owner approved one typed publication/claim API with
@@ -24,7 +27,7 @@ sealed an 8.5 MB kernel and 71.3 MB ext4 rootfs in memfds. A write after
 mounted the root ext4 read-only and ran `/bin/sh` as init. The probe had no
 admission, scoped launcher, runtime overlay or parent claim. The Pi kernel
 does not advertise fs-verity. The ordinary named start on that host still
-took 53 s, including fresh admission; the probe proves no speed target.
+took 53 s, including fresh admission; the probe is not evidence for a speed target.
 
 ## Decision
 

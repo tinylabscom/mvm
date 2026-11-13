@@ -36,6 +36,7 @@ enum PublicationState {
     Reserved,
     Published(TrustedSnapshotHandle),
     Removing(TrustedSnapshotHandle),
+    Removed,
 }
 
 /// Resident owner of trusted snapshot publications.
@@ -119,8 +120,8 @@ impl TrustedSnapshotService {
         if !matches!(&*published, PublicationState::Published(current) if current == handle) {
             bail!("trusted snapshot handle is not owned by this service");
         }
-        // Keep the read lease through the backend call so removal cannot
-        // reclaim the sealed read view while a claim is in progress.
+        // Hold the read lock through materialization so removal cannot
+        // reclaim backend state during this call. This is not a VMM read lease.
         self.backend
             .materialize(&handle.id, destination)
             .with_context(|| format!("materialize trusted snapshot {}", handle.id))
@@ -154,6 +155,9 @@ impl TrustedSnapshotService {
         self.backend
             .remove(&handle.id)
             .with_context(|| format!("remove trusted snapshot {}", handle.id))?;
+        // A concurrent remover may already hold this entry after looking it up
+        // in the registry. Retire it before allowing that waiter to proceed.
+        *state = PublicationState::Removed;
         self.publications
             .lock()
             .map_err(|_| anyhow!("trusted snapshot registry is poisoned"))?
@@ -444,6 +448,57 @@ mod tests {
         assert_eq!(backend.staged.load(Ordering::SeqCst), 1);
         assert_eq!(backend.removed.load(Ordering::SeqCst), 0);
         service.materialize(&first_handle, Path::new(".")).unwrap();
+    }
+
+    #[test]
+    fn concurrent_removers_cannot_reuse_a_retired_entry() {
+        let (entered_tx, _entered_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let backend = Arc::new(PausedPublisher {
+            entered: entered_tx,
+            resume: Mutex::new(resume_rx),
+            staged: AtomicUsize::new(0),
+            removed: AtomicUsize::new(0),
+        });
+        resume_tx.send(()).unwrap();
+        let service = Arc::new(TrustedSnapshotService::new(backend.clone()));
+        let handle = service
+            .publish(SnapshotId::new("retired"), Path::new("."))
+            .unwrap();
+        let entry = service
+            .publications
+            .lock()
+            .unwrap()
+            .get(handle.id.id())
+            .unwrap()
+            .clone();
+        let guard = entry.write().unwrap();
+        let removals: Vec<_> = (0..2)
+            .map(|_| {
+                let service = service.clone();
+                let handle = handle.clone();
+                std::thread::spawn(move || service.remove(&handle))
+            })
+            .collect();
+        // Both callers have fetched the same entry but cannot enter removal
+        // until this guard is released.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while Arc::strong_count(&entry) < 4 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            Arc::strong_count(&entry),
+            4,
+            "both removers must be waiting"
+        );
+        drop(guard);
+        let results: Vec<_> = removals
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(backend.removed.load(Ordering::SeqCst), 1);
+        assert_eq!(service.publication_count().unwrap(), 0);
     }
 
     struct PausedClaim {
