@@ -127,7 +127,12 @@ impl TrustedSnapshotService {
     }
 
     /// Remove a publication after all claims have released it.
-    pub fn remove(&self, handle: TrustedSnapshotHandle) -> Result<()> {
+    ///
+    /// # Errors
+    ///
+    /// Refuses a foreign handle or failed backend removal. The owner retains
+    /// its handle to retry after a backend failure; claims stay blocked.
+    pub fn remove(&self, handle: &TrustedSnapshotHandle) -> Result<()> {
         let entry = self
             .publications
             .lock()
@@ -141,7 +146,7 @@ impl TrustedSnapshotService {
         if !matches!(
             &*state,
             PublicationState::Published(current) | PublicationState::Removing(current)
-                if current == &handle
+                if current == handle
         ) {
             bail!("trusted snapshot handle is not owned by this service");
         }
@@ -254,7 +259,7 @@ mod tests {
             b"immutable-test-bytes"
         );
         assert_eq!(service.publication_count().unwrap(), 1);
-        service.remove(handle).unwrap();
+        service.remove(&handle).unwrap();
         assert_eq!(service.publication_count().unwrap(), 0);
     }
 
@@ -273,7 +278,7 @@ mod tests {
         assert!(service.publish(id.clone(), &source).is_err());
         assert_eq!(service.publication_count().unwrap(), 0);
         let handle = service.publish(id, &source).unwrap();
-        service.remove(handle).unwrap();
+        service.remove(&handle).unwrap();
     }
 
     #[test]
@@ -306,7 +311,7 @@ mod tests {
         let service = TrustedSnapshotService::new(backend);
         let id = SnapshotId::new("retry-removal");
         let handle = service.publish(id.clone(), &source).unwrap();
-        assert!(service.remove(handle.clone()).is_err());
+        assert!(service.remove(&handle).is_err());
         assert_eq!(service.publication_count().unwrap(), 0);
         assert!(
             service
@@ -314,7 +319,7 @@ mod tests {
                 .is_err()
         );
         assert!(service.publish(id, &source).is_err());
-        service.remove(handle).unwrap();
+        service.remove(&handle).unwrap();
         assert_eq!(service.publication_count().unwrap(), 0);
     }
 
@@ -331,7 +336,7 @@ mod tests {
         }));
         let id = SnapshotId::new("reused-id");
         let stale = service.publish(id.clone(), &source).unwrap();
-        service.remove(stale.clone()).unwrap();
+        service.remove(&stale).unwrap();
         std::fs::write(source.join("rootfs.ext4"), b"second").unwrap();
         let current = service.publish(id, &source).unwrap();
         let destination = tmp.path().join("destination");
@@ -342,7 +347,7 @@ mod tests {
         );
         assert!(service.materialize(&stale, &destination).is_err());
         assert!(!destination.exists(), "stale handle reached the backend");
-        assert!(service.remove(stale).is_err());
+        assert!(service.remove(&stale).is_err());
         assert_eq!(service.publication_count().unwrap(), 1);
         service.materialize(&current, &destination).unwrap();
         assert_eq!(
@@ -510,7 +515,7 @@ mod tests {
         let (removed_tx, removed_rx) = mpsc::channel();
         let removal = {
             let service = service.clone();
-            std::thread::spawn(move || removed_tx.send(service.remove(handle)).unwrap())
+            std::thread::spawn(move || removed_tx.send(service.remove(&handle)).unwrap())
         };
         assert!(
             removed_rx
