@@ -16,6 +16,9 @@ use mvm_fs::snapshot_store::SnapshotId;
 use mvm_fs::trusted_snapshot::TrustedSnapshotBackend;
 use uuid::Uuid;
 
+mod boot_input;
+pub use boot_input::{BootInputBudget, BootInputHandle, BootInputReadLease};
+
 /// Opaque service-issued reference to one sealed snapshot publication.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustedSnapshotHandle {
@@ -45,6 +48,7 @@ pub struct TrustedSnapshotService {
     // Reserved also quarantines an ID after failed staging or cleanup.
     // The per-ID lock holds claims open until materialization finishes.
     publications: Mutex<BTreeMap<String, Arc<RwLock<PublicationState>>>>,
+    boot_inputs: Option<Arc<boot_input::BootInputRegistry>>,
 }
 
 impl TrustedSnapshotService {
@@ -53,6 +57,21 @@ impl TrustedSnapshotService {
         Self {
             backend,
             publications: Mutex::new(BTreeMap::new()),
+            boot_inputs: None,
+        }
+    }
+
+    /// Create a resident service with an explicit sealed-boot-input budget.
+    ///
+    /// This does not enable a warm claim or change the ordinary launch path.
+    pub fn with_boot_input_budget(
+        backend: Arc<dyn TrustedSnapshotBackend>,
+        budget: BootInputBudget,
+    ) -> Self {
+        Self {
+            backend,
+            publications: Mutex::new(BTreeMap::new()),
+            boot_inputs: Some(Arc::new(boot_input::BootInputRegistry::new(budget))),
         }
     }
 
