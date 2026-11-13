@@ -46,7 +46,7 @@ const eyebrow =
 
 {eyebrow && Astro.url.pathname !== "/docs/" && <p class="docs-eyebrow">{eyebrow}</p>}
 <Default />
-{description && <p class="docs-description">{description}</p>}
+{description && Astro.url.pathname !== "/docs/" && <p class="docs-description">{description}</p>}
 
 <style>
   .docs-eyebrow {
