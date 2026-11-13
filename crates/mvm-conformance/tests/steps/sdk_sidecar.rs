@@ -233,6 +233,8 @@ fn read_only_directory_mount(world: &mut CliWorld, guest_path: String) {
         encrypted: false,
         materialized_image: Some("/state/wheels.ext4".to_string()),
         volume_label: None,
+        share_include: Vec::new(),
+        share_exclude: Vec::new(),
     });
 }
 
@@ -430,6 +432,8 @@ fn admission_refuses_sidecar(world: &mut CliWorld) {
         encrypted: false,
         materialized_image: None,
         volume_label: None,
+        share_include: Vec::new(),
+        share_exclude: Vec::new(),
     };
     let err = mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment(
         &[smuggled],

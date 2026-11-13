@@ -101,6 +101,7 @@ mod host_gates;
 mod mailbox_posture;
 mod nonce_ledger;
 mod registry_pack;
+mod shares;
 mod verb_grant_sidecar;
 
 use assurance_runtime::{AssuranceRuntimeBinding, verify_selected_runtime};
@@ -1265,18 +1266,10 @@ pub fn enforce_admitted_shares(
         } else {
             mvm_core::plan::ShareKind::Disk
         };
-        let admitted = plan.shares.iter().find(|g| {
-            g.host_path == v.host
-                && g.guest_path == v.guest
-                && g.kind == want_kind
-                && g.read_only == v.read_only
-                && g.encrypted == v.encrypted
-                // The deny set is part of what claim-time binding binds: a
-                // re-bind under a different include/exclude would hand the
-                // guest a different tree than the one the plan admitted.
-                && g.include == v.share_include
-                && g.exclude == v.share_exclude
-        });
+        let admitted = plan
+            .shares
+            .iter()
+            .find(|g| shares::matches_grant(g, v, want_kind));
         let Some(grant) = admitted else {
             anyhow::bail!(
                 "refusing to attach volume '{}' -> '{}' ({}): it is not named in the signed \
