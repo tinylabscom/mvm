@@ -30,6 +30,13 @@
 #                      entry is printed as a FINDING and does not fail the run:
 #                      the attempt failing and the host auditing the decision
 #                      are separate facts.
+#   EGRESS_PROBE=1     after the evidence step, run one allowed and one denied
+#                      outbound request through the egress channel (a curl
+#                      image with --allow-host example.com, so this needs the
+#                      network and a pull of that image) and require the
+#                      host's audited flow.allowed and flow.denied decisions
+#                      and `explain`'s denial summary. Off by default: it adds
+#                      two short transient guests and changes nothing before it.
 #   MVM_FIRECRACKER_BIN, MVM_MAILBOX_PATH
 #                      read by mvmctl; leave unset to test an install
 #
@@ -210,4 +217,27 @@ if [ "${EXPECT_SCRUB_AUDIT:-0}" = 1 ]; then
 fi
 ! grep -rqF -e "$FIRST" -e "$SECOND" -e "$CONTAINED" -e "$UNREAD" "$audit_dir" || fail "a message body is in the audit log"
 say "no message body appears in the audit log"
+if [ "${EGRESS_PROBE:-0}" = 1 ]; then
+  echo "== 10. a denied outbound request is audited and explained"
+  CURL_IMAGE="${CURL_IMAGE:-curlimages/curl:8.21.0}"
+  mvm image pull "$CURL_IMAGE" >/dev/null || fail "could not pull $CURL_IMAGE"
+  ALLOW="egress-allow-$$"; DENY="egress-deny-$$"
+  out="$(mvm machine run --name "$ALLOW" --image "$CURL_IMAGE" --allow-host example.com --timeout 180 -- curl -fsSL https://example.com 2>&1 </dev/null)" \
+    || fail "the allowed request failed: $out"
+  say "an allowed request through the egress channel succeeded"
+  out="$(mvm machine run --name "$DENY" --image "$CURL_IMAGE" --allow-host example.com --timeout 180 -- curl -fsSL https://blocked.example 2>&1 </dev/null)"; rc=$?
+  [ "$rc" -eq 22 ] || fail "the denied request exited $rc, expected 22: $out"
+  say "a denied request through the egress channel exited 22"
+  flow() { grep -rhF "$1" "$audit_dir" | grep -F "$2" | grep -cF "$3" || true; }
+  [ "$(flow host.flow.allowed "$ALLOW" example.com)" -ge 1 ] || fail "no host.flow.allowed entry for $ALLOW naming example.com"
+  say "audit has host.flow.allowed for $ALLOW naming example.com"
+  [ "$(flow host.flow.denied "$DENY" blocked.example)" -ge 1 ] || fail "no host.flow.denied entry for $DENY naming blocked.example"
+  say "audit has host.flow.denied for $DENY naming blocked.example"
+  run_id="$(grep -oE 'mvmctl explain [^ ]+ --review' <<<"$out" | head -1 | awk '{print $3}')"
+  [ -n "$run_id" ] || fail "the denied run named no explain command: $out"
+  eout="$(mvm explain "$run_id" --review 2>&1 </dev/null)" || fail "explain failed: $eout"
+  grep -qF "egress denied:" <<<"$eout" && grep -qF "blocked.example:443" <<<"$eout" || fail "explain did not report the denial: $eout"
+  say "explain reports the denied destination blocked.example:443"
+  mvm machine rm "$ALLOW" --yes >/dev/null 2>&1 || true; mvm machine rm "$DENY" --yes >/dev/null 2>&1 || true
+fi
 echo "DEMO_RESULT=pass"
