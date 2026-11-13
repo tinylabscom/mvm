@@ -580,22 +580,21 @@ mod tests {
 
     #[test]
     fn entrypoint_mailbox_retention_is_signed_and_requires_the_host_ceiling() {
-        use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxId, MailboxRetentionPolicy};
-
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().expect("tempdir");
         env.isolate_mvm_home(dir.path());
         let rootfs = dir.path().join("rootfs.ext4");
         std::fs::write(&rootfs, b"rootfs").expect("write rootfs");
-        GuestSidecar::for_oci_run("mailbox-entrypoint", true, true)
+        let mut sidecar = GuestSidecar::for_oci_run("mailbox-entrypoint", true, true);
+        sidecar.accessible = false;
+        sidecar.sealed = true;
+        sidecar
             .write_to_dir(dir.path())
             .expect("write image sidecar");
-        let mut mailbox = crate::admission::mailbox_grant::grant_for(
-            MailboxId::from_bytes([19; 32]),
-            &ed25519_dalek::SigningKey::from_bytes(&[20; 32]).verifying_key(),
-            ExecutionEpoch::new(1).expect("epoch"),
-        );
-        mailbox.retention = Some(MailboxRetentionPolicy::new(10_000).expect("retention"));
+        let mailbox =
+            crate::admission::mailbox_grant::resolve(Some(&"13".repeat(32)), Some(10_000), None)
+                .expect("host-issued mailbox grant")
+                .expect("mailbox requested");
         let admission = EntrypointAdmission::builder("firecracker")
             .mailbox(Some(mailbox))
             .build()
@@ -604,7 +603,10 @@ mod tests {
             .admit(inputs(&rootfs, "mailbox-entrypoint"))
             .err()
             .expect("missing host ceiling must refuse");
-        assert!(format!("{error:#}").contains("max_mailbox_retention_ms"));
+        assert!(
+            format!("{error:#}").contains("max_mailbox_retention_ms"),
+            "{error:#}"
+        );
 
         let config = dir.path().join("config");
         std::fs::create_dir_all(&config).expect("config directory");
