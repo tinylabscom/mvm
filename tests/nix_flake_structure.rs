@@ -1,5 +1,5 @@
 //! Structural guard for `nix/flake.nix` and `nix/profiles/*.nix`
-//! (Phase 1 W4 — plan 60).
+//!
 //!
 //! These tests don't run `nix flake check` (that requires Nix on the
 //! test host and adds a network dep on github:microvm-nix/microvm.nix).
@@ -13,7 +13,7 @@
 //!
 //!   cd nix && nix flake check --no-build
 //!
-//! Documented in `specs/runbooks/cross-platform-install.md` (Phase 5).
+//! Documented in `specs/runbooks/cross-platform-install.md`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -204,7 +204,7 @@ fn flake_nix_exists_and_imports_microvm_nix() {
     let content =
         fs::read_to_string(&path).unwrap_or_else(|e| panic!("nix/flake.nix must be present: {e}"));
 
-    // ADR-004 invariant: the flake imports microvm.nix as the foundation.
+    // Invariant: the flake imports microvm.nix as the foundation.
     // Any future PR that drops this input violates the ADR.
     assert!(
         content.contains("microvm-nix/microvm.nix"),
@@ -747,7 +747,7 @@ fn minimal_profile_exists_and_has_required_settings() {
     let content = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("nix/profiles/minimal.nix must be present: {e}"));
 
-    // SSH disabled — load-bearing invariant from ADR-001 / CLAUDE.md
+    // SSH disabled — load-bearing invariant
     // ("No SSH in microVMs, ever"). Asserted as plain string match
     // because a NixOS module's effective `services.openssh.enable`
     // can only be checked by evaluating the flake; the source line
@@ -1240,8 +1240,7 @@ fn mk_guest_does_not_reimplement_runtime_egress_provisioning() {
 fn flake_lock_pins_microvm_input_by_hash() {
     // The flake.lock must exist and pin the microvm.nix input by
     // commit hash, not by tag or branch — that's the supply-chain
-    // gate from ADR-004 §"Threat model impact" / plan 60 §"Code
-    // review gate." A PR that removes flake.lock or drops the
+    // code-review gate. A PR that removes flake.lock or drops the
     // microvm pin breaks this assertion.
     let path = nix_dir().join("flake.lock");
     let content = fs::read_to_string(&path).unwrap_or_else(|e| {
@@ -1265,7 +1264,7 @@ fn flake_lock_pins_microvm_input_by_hash() {
     );
 }
 
-/// Plan 199 WS-B — the no-release-binary contract (ADR-007) must hold for
+/// The no-release-binary contract must hold for
 /// *every* host package under `nix/packages/`, not just `mvmctl.nix`. A new
 /// sidecar package that pulled a project release tarball or carried
 /// `binaryNativeCode` provenance would silently bypass the source-build
@@ -1274,8 +1273,7 @@ fn flake_lock_pins_microvm_input_by_hash() {
 ///
 /// Note the forbidden set is deliberately *project-release-specific*: a host
 /// package may legitimately `fetchurl` its own **upstream source** (the future
-/// source-built `libkrun` / `libkrunfw` recipes do exactly this — Plan 199 WS-B
-/// native-VMM recipes). Source-building from a pinned upstream tarball is the
+/// source-built `libkrun` / `libkrunfw` recipes do exactly this). Source-building from a pinned upstream tarball is the
 /// contract; pulling an mvm-published release binary or shipping prebuilt
 /// native code is what's banned. The stricter "no fetch at all" rule stays
 /// scoped to `mvmctl.nix` (which builds purely from `mvmSrc`).

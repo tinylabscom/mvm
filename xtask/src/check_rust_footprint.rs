@@ -34,8 +34,8 @@ use std::process::Command;
 
 use crate::rust_source::{CommentSyntax, blank_comments};
 
-// CI witness, overclaim, snapshot-owner, and Yocto importer tests remain
-// measured. The library build path adds health/signing and regression coverage.
+// CI witness, overclaim, snapshot-owner, Yocto importer, and CLI option-source
+// tests remain measured; the library health/signing path adds regressions.
 // Leave room for main changes; physical lines have operator-approved headroom.
 /// Ceiling on total SLOC, all categories.
 const MAX_TOTAL_SLOC: usize = 970_000;

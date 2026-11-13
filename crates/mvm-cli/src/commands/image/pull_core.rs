@@ -306,7 +306,7 @@ fn resolve_run_image_with(
                 sweep_before_builder_vm();
                 let signer;
                 let evidence = if prod {
-                    signer = crate::commands::vm::host_signer::load_or_init()
+                    signer = mvm_client::host_keypair::load_or_init()
                         .context("load host signing key for the provenance mark")?;
                     Some(
                         mvm_build::provenance_mark::SealEvidence::builder(&signer.signing)
@@ -833,7 +833,7 @@ fn materialize_pulled_rootfs(
 ) -> Result<()> {
     let signer = pulled
         .prod
-        .then(crate::commands::vm::host_signer::load_or_init)
+        .then(mvm_client::host_keypair::load_or_init)
         .transpose()
         .context("load host signing key for the provenance mark")?;
     let evidence = signer.as_ref().map(|signer| {

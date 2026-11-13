@@ -438,7 +438,7 @@ fn dispatch_inner(
         timeout_secs,
         session_id: _,
     } = call;
-    let transport = mvm_runtime::vsock_transport::for_vm(vm_name)
+    let transport = mvm_vmm::vsock_transport::for_vm(vm_name)
         .with_context(|| format!("Picking transport for guest agent on '{vm_name}'"))?;
     let mut stream = transport
         .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)

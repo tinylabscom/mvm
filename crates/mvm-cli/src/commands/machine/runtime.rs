@@ -241,7 +241,7 @@ fn run_persistent_post_start(
     if !args.run.argv.is_empty() && !command_is_followed(args) {
         start_detached_argv(name, &args.run.argv)?;
     } else if !args.run.argv.is_empty() {
-        let outcome = if shared::wait_for_guest_agent(name, 30) {
+        let outcome = if mvm_client::readiness::wait_for_guest_agent(name, 30) {
             console::run_for_exit(
                 cli,
                 console::Args {
@@ -297,7 +297,7 @@ fn command_is_followed(args: &MachineRunArgs) -> bool {
 /// accepted it, rather than following its output.
 fn start_detached_argv(name: &str, argv: &[String]) -> Result<()> {
     anyhow::ensure!(
-        shared::wait_for_guest_agent(name, 30),
+        mvm_client::readiness::wait_for_guest_agent(name, 30),
         "guest agent for {name:?} not reachable to start the command"
     );
     mvm_client::guest::start_process(

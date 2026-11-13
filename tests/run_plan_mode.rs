@@ -1,4 +1,4 @@
-//! Followup H plan-mode end-to-end test (Plan 73).
+//! Plan-mode end-to-end test.
 //!
 //! Mirrors the `auto_exec_python_record.rs` pattern: spawns a
 //! stand-alone Python script that emits a wire-shape recording to

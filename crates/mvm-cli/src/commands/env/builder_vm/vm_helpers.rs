@@ -54,7 +54,7 @@ pub(in crate::commands) struct ReapOutcome {
 ///    sweep kills the live dev VM on every `cache prune` / `image pull`.
 /// 2. **Helper phase.** Any argv-scanned grandchildren whose argv
 ///    carries the dir's unique basename. A helper's fate follows its
-///    supervisor: if Phase 1 found the VM live every helper is spared;
+///    supervisor: if the VM sweep found it live every helper is spared;
 ///    once the supervisor is gone a still-running launchd-parented
 ///    helper is a leak and is SIGTERM'd.
 ///

@@ -1,4 +1,4 @@
-//! Plan 60 Phase 4 — live drive-and-assert tests for the
+//! Live drive-and-assert tests for the
 //! `AuditPosture::Emits` rows in `tests/audit_total_coverage.rs`.
 //!
 //! The classification scaffold in `audit_total_coverage.rs`
@@ -16,7 +16,7 @@
 //! - `mvmctl network create <name>` → `NetworkCreate`
 //! - `mvmctl network remove <name>` → `NetworkRemove`
 //! - `mvmctl manifest prune --orphans` (empty registry) → `SlotPrune`
-//!   (emitted with `count=0` — Plan 37 §6 invariant: every state-
+//!   (emitted with `count=0` — every state-
 //!   changing verb emits one record per attempt, even on no-op)
 //! - `mvmctl manifest prune --orphans --dry-run` → **no** audit entry
 //! - `mvmctl storage gc --apply --mock` (empty pool) → `StorageGc`
@@ -52,7 +52,7 @@
 //!   → `VmTtlSet` (chains off the machine-run-via-mock fixture; the verb
 //!   operates on the persistent name registry that `machine run` populates)
 //! - `mvmctl machine pause <vm> --hypervisor mock` (after `machine run`) →
-//!   `WorkloadSleep` (Plan 65: pause routes through the SnapshotIO
+//!   `WorkloadSleep` (pause routes through the SnapshotIO
 //!   trait; `--hypervisor mock` swaps in `CannedIO` so the seal
 //!   step writes deterministic 12-byte vmstate + 8-byte mem stubs
 //!   instead of talking to a real Firecracker UDS)
@@ -78,8 +78,7 @@
 //!   (SESSION ls and VOLUME ls leaves are both ReadOnly)
 //! - `mvmctl machine volume create <name> --root <encrypted-dir>` →
 //!   `VolumeCreate`
-//! - `mvmctl machine volume mount <vm> ...` → `VmVolumeAdd` (Plan 67:
-//!   the verb operates purely on the host-side
+//! - `mvmctl machine volume mount <vm> ...` → `VmVolumeAdd` (the verb operates purely on the host-side
 //!   `~/.mvm/instances/<vm>/volume_mounts.json` registry — no
 //!   virtio-fs daemon attach, no backend dispatch)
 //! - `mvmctl machine volume unmount <vm> <guest>` → `VmVolumeRemove`
@@ -88,7 +87,7 @@
 //!   `AUDIT_POSTURE` pinned against a future regression that
 //!   adds an emit to a read-only path)
 //! - `mvmctl update` (against a loopback HTTP server returning the
-//!   current version) → `UpdateInstall` (Plan 69: the
+//!   current version) → `UpdateInstall` (the
 //!   `MVM_UPDATE_API_URL` env-var redirects the
 //!   `https://api.github.com/.../releases/latest` query to a local
 //!   mock that returns the current binary's own version.
@@ -473,7 +472,7 @@ fn cache_prune_emits_cache_prune_audit_entry() {
 
     // Run `mvmctl cache prune` against an empty cache dir. The
     // command short-circuits with "Cache directory does not exist"
-    // but still emits the audit entry — Plan 37 §6 invariant: every
+    // but still emits the audit entry — every
     // state-changing CLI verb emits one record per attempt, success
     // or no-op.
     let output = sandbox
@@ -585,7 +584,7 @@ fn network_remove_emits_network_remove_audit_entry() {
 
 #[test]
 fn manifest_prune_orphans_emits_slot_prune_audit_entry() {
-    // Plan 37 §6 invariant: a state-changing verb emits one audit
+    // Invariant: a state-changing verb emits one audit
     // record per attempt, even when the body of work is a no-op.
     // Running `manifest prune --orphans` against an empty registry
     // walks zero slots but still emits one `slot_prune` entry.
@@ -613,7 +612,7 @@ fn manifest_prune_orphans_emits_slot_prune_audit_entry() {
 #[test]
 fn manifest_prune_orphans_dry_run_does_not_emit_audit_entry() {
     // Negative complement to `manifest_prune_orphans_emits_slot_prune…`.
-    // Plan 37 §6 says state-changing verbs emit on every attempt; the
+    // State-changing verbs emit on every attempt; the
     // dry-run path is read-only by contract and must NOT emit. The
     // implementation routes dry-run to `run_dry` (manifest/prune.rs)
     // which returns before reaching the `audit::emit` call — this
@@ -642,7 +641,7 @@ fn manifest_prune_orphans_dry_run_does_not_emit_audit_entry() {
 
 #[test]
 fn storage_gc_apply_emits_storage_gc_audit_entry_even_on_empty_pool() {
-    // Plan 37 §6 invariant: a state-changing verb emits one audit
+    // Invariant: a state-changing verb emits one audit
     // record per attempt, even when the body of work is a no-op.
     // Running `mvmctl storage gc --apply --mock` against a fresh
     // in-memory MockBackend lists zero volumes — but `--apply`
@@ -1094,7 +1093,7 @@ fn cleanup_emits_slot_prune_audit_entry_even_with_no_builds() {
     // against `~/.mvm/dev/builds/` directly; the VM-dependent
     // steps degrade to warnings, and the emit lands at the end
     // regardless. The test asserts the empty-cache case (zero
-    // build dirs to prune) — `count=0` is the Plan 37 §6
+    // build dirs to prune) — `count=0` is the
     // every-attempt-emits invariant in action.
     let sandbox = AuditSandbox::new();
     let output = sandbox
@@ -1366,9 +1365,9 @@ fn pause_without_a_snapshot_key_is_refused_before_capture() {
 #[test]
 #[cfg(feature = "test-support")]
 fn pause_emits_workload_sleep_audit_entry() {
-    // Plan 65 W3: `mvmctl pause --hypervisor mock` exercises the
+    // `mvmctl pause --hypervisor mock` exercises the
     // snapshot-and-seal path against `CannedIO` (deterministic
-    // 12-byte vmstate + 8-byte mem stubs). Pre-Plan-65 the verb
+    // 12-byte vmstate + 8-byte mem stubs). Previously the verb
     // would have bailed on `resolve_running_vm_dir` because the
     // mock VM has no Lima-shaped vm_dir; the `--hypervisor mock`
     // selector routes through `MockBackend::vm_dir(name)` instead.
@@ -1957,7 +1956,7 @@ fn volume_ls_does_not_emit_audit_entry() {
 
 #[test]
 fn volume_mount_emits_vm_volume_add_audit_entry() {
-    // Plan 67: `volume mount` operates purely on the host-side
+    // `volume mount` operates purely on the host-side
     // `~/.mvm/instances/<vm>/volume_mounts.json` registry — no
     // virtio-fs daemon attach, no Firecracker socket. The audit
     // emit fires after the registry write. Hermetic out of the box.
@@ -2162,7 +2161,7 @@ fn volume_storage_override_emits_an_audit_entry_and_refusal_does_not() {
 
 #[test]
 fn volume_unmount_emits_vm_volume_remove_audit_entry() {
-    // Plan 67: mount-then-unmount round-trip. Both emits land in
+    // Mount-then-unmount round-trip. Both emits land in
     // the LocalAudit stream; this test pins the remove half.
     let sandbox = AuditSandbox::new();
     let host_share = sandbox.home_path().join("share");
@@ -2510,7 +2509,7 @@ fn build_emits_template_build_audit_entry_against_stub_outdir() {
 }
 
 // ============================================================================
-// Plan 66 W4 — `mvmctl fs *` and `mvmctl proc *` live tests.
+// `mvmctl fs *` and `mvmctl proc *` live tests.
 //
 // Each test stands up a `MockGuestAgent` in the test process, then
 // drives the matching CLI subcommand as a subprocess. The CLI's
@@ -2650,8 +2649,8 @@ fn fs_ls_does_not_emit_mutation_audit_entry() {
     // Read-only: `fs ls` doesn't mutate state — must not emit
     // any *mutation-class* LocalAudit kind (`VmFsMutate`,
     // `SlotRemove`, …). It *does* emit a
-    // `network_policy_allow` record per Plan 74 W2 / Plan 51
-    // W6 (every host→guest vsock RPC is audited regardless of
+    // `network_policy_allow` record because
+    // every host→guest vsock RPC is audited regardless of
     // whether the CLI verb is read-only); the two invariants
     // are orthogonal.
     let sandbox = AuditSandbox::new();
@@ -2670,7 +2669,7 @@ fn fs_ls_does_not_emit_mutation_audit_entry() {
 
     let log = read_audit_log(&sandbox.audit_log_path());
     // No mutation-class records. The only audit entries
-    // allowed are the W2 vsock-RPC audit records.
+    // allowed are the vsock-RPC audit records.
     assert_eq!(
         count_entries_with_kind(&log, "vm_fs_mutate"),
         0,
@@ -2823,8 +2822,8 @@ fn proc_stdin_emits_vm_proc_stdin_audit_entry() {
 fn proc_ls_does_not_emit_mutation_audit_entry() {
     // Read-only: `proc ls` doesn't mutate process state — must
     // not emit any mutation-class LocalAudit kind. It *does*
-    // emit a `network_policy_allow` record per Plan 74 W2 /
-    // Plan 51 W6 (every host→guest vsock RPC is audited); the
+    // emit a `network_policy_allow` record
+    // (every host→guest vsock RPC is audited); the
     // two invariants are orthogonal.
     let sandbox = AuditSandbox::new();
     let _fixture = start_mock_vm_agent(&sandbox, "t-pls");

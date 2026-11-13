@@ -39,7 +39,7 @@ mvmctl machine run <image|flake|manifest>
   │     │     ├── sign_plan + verify_plan (roundtrip)
   │     │     ├── check_window (validity)
   │     │     └── nonce_store.check_and_insert (replay)
-  │     └── AuditEmitter::emit_admitted(...)        [crates/mvm-cli/src/commands/vm/audit_chain.rs]
+  │     └── AuditEmitter::emit_admitted(...)        [crates/mvm-hostd/src/audit/emitter.rs]
   │           appends a signed envelope to ~/.mvm/audit/<tenant>.jsonl
   │
   ├── backend.start(&start_config)                  [mvm-runtime::AnyBackend]
