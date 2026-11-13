@@ -901,6 +901,8 @@ fn termination_handler(
         }
         if let Ok(pids) = pids.lock() {
             for &pid in pids.iter() {
+                // SAFETY: kill takes two integers and touches no memory; the pids are child
+                //         processes this CLI registered.
                 unsafe {
                     libc::kill(pid as libc::pid_t, libc::SIGTERM);
                 }

@@ -2543,13 +2543,19 @@ mod tests {
         ram.copy_at(0, b"anon").unwrap();
         ram.map_private_file_at(HVF_PAGE_SIZE, &kernel, 8).unwrap();
 
+        // SAFETY: `ram` spans two pages and the 8 bytes one page in were just mapped from the
+        //         kernel file; no other reference to them exists.
         let mapped = unsafe { std::slice::from_raw_parts(ram.as_ptr().add(HVF_PAGE_SIZE), 8) };
         assert_eq!(mapped, b"abcdefgh");
 
+        // SAFETY: the second page is a private writable mapping (PROT_READ|PROT_WRITE,
+        //         MAP_PRIVATE), so the write stays in this process; no slice borrow is live.
         unsafe {
             *ram.as_ptr().add(HVF_PAGE_SIZE) = b'Z';
         }
         assert_eq!(std::fs::read(&kernel).unwrap(), b"abcdefgh");
+        // SAFETY: `ram` spans two pages and the 8 bytes one page in were just mapped from the
+        //         kernel file; no other reference to them exists.
         let mapped = unsafe { std::slice::from_raw_parts(ram.as_ptr().add(HVF_PAGE_SIZE), 8) };
         assert_eq!(mapped, b"Zbcdefgh");
     }

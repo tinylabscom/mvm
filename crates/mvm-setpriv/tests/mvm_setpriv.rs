@@ -11,6 +11,7 @@ fn run_helper(arguments: &[&str]) -> std::process::Output {
 
 #[test]
 fn drops_identity_groups_capabilities_and_enables_no_new_privs() {
+    // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } != 0 {
         eprintln!("skipping privileged helper test when not running as root");
         return;
@@ -36,6 +37,7 @@ fn drops_identity_groups_capabilities_and_enables_no_new_privs() {
 
 #[test]
 fn retains_only_net_bind_service_as_an_ambient_capability() {
+    // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } != 0 {
         eprintln!("skipping privileged helper test when not running as root");
         return;

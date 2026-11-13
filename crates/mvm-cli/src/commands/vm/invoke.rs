@@ -1755,8 +1755,8 @@ mod auto_stdin_tests {
         // outright; leaking a descriptor into every process the suite starts is
         // the part actually worth fixing.
         for fd in fds {
-            // SAFETY: `fd` is a live descriptor from the successful `pipe` above.
             assert_ne!(
+                // SAFETY: `fd` is a live descriptor from the successful `pipe` above.
                 unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
                 -1,
                 "set FD_CLOEXEC"

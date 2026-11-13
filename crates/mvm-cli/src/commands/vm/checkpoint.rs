@@ -2380,6 +2380,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         env.isolate_mvm_home(tmp.path());
 
+        // SAFETY: getpid has no preconditions.
         let pid = unsafe { libc::getpid() };
         let pid_str = pid.to_string();
 
@@ -2412,6 +2413,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         env.isolate_mvm_home(tmp.path());
 
+        // SAFETY: getpid has no preconditions.
         let pid = unsafe { libc::getpid() };
 
         // Write fc.pid (vm is running) but no fc.paused marker.
@@ -2440,6 +2442,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         env.isolate_mvm_home(tmp.path());
 
+        // SAFETY: getpid has no preconditions.
         let live_pid = unsafe { libc::getpid() };
         let stale_pid = live_pid.saturating_add(1);
 
@@ -2804,6 +2807,7 @@ mod tests {
         let vm_name = "live-fc-vm-quiesce-test";
         let fc_vms_dir = tmp.path().join("mvm").join("vms").join(vm_name);
         std::fs::create_dir_all(&fc_vms_dir).unwrap();
+        // SAFETY: getpid has no preconditions.
         let pid = unsafe { libc::getpid() };
         std::fs::write(fc_vms_dir.join("fc.pid"), pid.to_string()).unwrap();
 
@@ -2823,6 +2827,7 @@ mod tests {
         let vm_name = "live-fc-refuse-test";
         let fc_vms_dir = tmp.path().join("mvm").join("vms").join(vm_name);
         std::fs::create_dir_all(&fc_vms_dir).unwrap();
+        // SAFETY: getpid has no preconditions.
         let pid = unsafe { libc::getpid() };
         std::fs::write(fc_vms_dir.join("fc.pid"), pid.to_string()).unwrap();
 

@@ -536,8 +536,8 @@ mod tests {
     fn create() -> *mut MvmHostlibContext {
         let mut pointer = std::ptr::null_mut();
         let mut out = MvmHostlibBuf::empty();
-        // SAFETY: fresh writable slots, no concurrent access.
         assert_eq!(
+            // SAFETY: fresh writable slots, no concurrent access.
             unsafe { mvm_hostlib_context_create(1, 9, &mut pointer, &mut out) },
             0
         );
@@ -560,8 +560,8 @@ mod tests {
             crate::handle(false, b"unknown.method", b"{}", &crate::Local).status,
             9
         );
-        // SAFETY: live context and valid fixed input/output storage.
         assert_eq!(
+            // SAFETY: live context and valid fixed input/output storage.
             unsafe {
                 mvm_hostlib_context_call(
                     pointer,
@@ -580,15 +580,15 @@ mod tests {
         assert_eq!(unsafe { mvm_hostlib_context_checked_free(&mut pointer) }, 5);
         assert_eq!(pointer, original);
         let mut out = MvmHostlibBuf::empty();
-        // SAFETY: live context, fresh output. Invalid selector has no effects.
         assert_eq!(
+            // SAFETY: live context, fresh output. Invalid selector has no effects.
             unsafe { mvm_hostlib_context_inspect(pointer, 99, &mut out) },
             8
         );
         discard(out);
         let mut out = MvmHostlibBuf::empty();
-        // SAFETY: same live context and fresh output.
         assert_eq!(
+            // SAFETY: same live context and fresh output.
             unsafe { mvm_hostlib_context_inspect(pointer, 2, &mut out) },
             0
         );
@@ -642,8 +642,8 @@ mod tests {
         discard(out);
         assert_eq!(drops.load(Ordering::SeqCst), 0);
         let mut out = MvmHostlibBuf::empty();
-        // SAFETY: live retained context and fresh buffer.
         assert_eq!(
+            // SAFETY: live retained context and fresh buffer.
             unsafe { mvm_hostlib_context_inspect(pointer, 0, &mut out) },
             3
         );
@@ -674,8 +674,8 @@ mod tests {
         let mut pointer = create();
         let drops = Arc::new(AtomicUsize::new(0));
         let mut out = MvmHostlibBuf::empty();
-        // SAFETY: exclusively held valid allocation and writable buffer.
         assert_eq!(
+            // SAFETY: exclusively held valid allocation and writable buffer.
             unsafe {
                 access(pointer, &mut out, |state| {
                     state.phase = Phase::Occupied;
@@ -708,8 +708,8 @@ mod tests {
     fn reentrant_context_access_refuses_without_deadlock_or_effects() {
         let mut pointer = create();
         let mut out = MvmHostlibBuf::empty();
-        // SAFETY: stable allocation, nested operation does not free it.
         assert_eq!(
+            // SAFETY: stable allocation, nested operation does not free it.
             unsafe {
                 access(pointer, &mut out, |_| {
                     let mut nested = MvmHostlibBuf::empty();
@@ -730,9 +730,9 @@ mod tests {
         let mut pointer = create();
         let first = b"abcdefghijklmnopqrstuvwx";
         let mut out = MvmHostlibBuf::empty();
-        // SAFETY: original live allocation; adapter emits only ordinary
-        // metadata, creates no VM/Child and supplies no native proof.
         assert_eq!(
+            // SAFETY: original live allocation; adapter emits only ordinary metadata, creates no
+            //         VM/Child and supplies no native proof.
             unsafe {
                 access(pointer, &mut out, |state| {
                     state.call_using(b"session.start", b"{}", |_, _| {
@@ -765,11 +765,13 @@ mod tests {
         // SAFETY: no concurrent access; active original binding forbids close/free.
         assert_ne!(unsafe { mvm_hostlib_context_close(pointer, &mut out) }, 0);
         discard(out);
+        // SAFETY: `pointer` is the live context from `create()`; the call frees it only from a
+        //         terminal state and then nulls `pointer`.
         assert_eq!(unsafe { mvm_hostlib_context_checked_free(&mut pointer) }, 5);
         assert_eq!(pointer, original);
         let mut out = MvmHostlibBuf::empty();
-        // SAFETY: only the held exact id reaches this no-child operation adapter.
         assert_eq!(
+            // SAFETY: only the held exact id reaches this no-child operation adapter.
             unsafe {
                 access(pointer, &mut out, |state| {
                     state.call_using(
@@ -784,6 +786,8 @@ mod tests {
         discard(out);
         let mut out = MvmHostlibBuf::empty();
         assert_ne!(
+            // SAFETY: `pointer` is the live context from `create()`, not yet released, and `out`
+            //         is a fresh writable buffer; the test is single-threaded.
             unsafe {
                 access(pointer, &mut out, |state| {
                     state.call_using(b"session.start", b"{}", |_, _| {
@@ -795,8 +799,12 @@ mod tests {
         );
         discard(out);
         let mut out = MvmHostlibBuf::empty();
+        // SAFETY: `pointer` is the live context from `create()`, not yet released, and `out` is a
+        //         fresh writable buffer; the test is single-threaded.
         assert_eq!(unsafe { mvm_hostlib_context_close(pointer, &mut out) }, 0);
         discard(out);
+        // SAFETY: `pointer` is the live context from `create()`; the call frees it only from a
+        //         terminal state and then nulls `pointer`.
         assert_eq!(unsafe { mvm_hostlib_context_checked_free(&mut pointer) }, 0);
     }
 
@@ -818,14 +826,16 @@ mod tests {
         assert_ne!(status, 0);
         discard(out);
         let mut out = MvmHostlibBuf::empty();
-        // SAFETY: same allocation, exclusive access.
         assert_eq!(
+            // SAFETY: same allocation, exclusive access.
             unsafe { mvm_hostlib_context_inspect(pointer, 0, &mut out) },
             status
         );
         discard(out);
         let mut out = MvmHostlibBuf::empty();
         assert_eq!(
+            // SAFETY: `pointer` is the live context from `create()`, not yet released, and `out`
+            //         is a fresh writable buffer; the test is single-threaded.
             unsafe {
                 access(pointer, &mut out, |state| {
                     assert!(matches!(state.session, SessionLifetime::Finished));
@@ -838,8 +848,12 @@ mod tests {
         );
         discard(out);
         let mut out = MvmHostlibBuf::empty();
+        // SAFETY: `pointer` is the live context from `create()`, not yet released, and `out` is a
+        //         fresh writable buffer; the test is single-threaded.
         assert_eq!(unsafe { mvm_hostlib_context_close(pointer, &mut out) }, 0);
         discard(out);
+        // SAFETY: `pointer` is the live context from `create()`; the call frees it only from a
+        //         terminal state and then nulls `pointer`.
         assert_eq!(unsafe { mvm_hostlib_context_checked_free(&mut pointer) }, 0);
         assert!(pointer.is_null());
     }
@@ -848,8 +862,8 @@ mod tests {
     fn owned_start_unwind_keeps_unknown_custody_and_original_payload() {
         let mut pointer = create();
         let mut out = MvmHostlibBuf::empty();
-        // SAFETY: no-child callback panic passes through the real ABI catcher.
         assert_eq!(
+            // SAFETY: no-child callback panic passes through the real ABI catcher.
             unsafe {
                 access(pointer, &mut out, |state| {
                     state.call_start_using(b"{}", |_| panic!("original start unwind"))
@@ -859,10 +873,14 @@ mod tests {
         );
         discard(out);
         let mut out = MvmHostlibBuf::empty();
+        // SAFETY: `pointer` is the live context from `create()`, not yet released, and `out` is a
+        //         fresh writable buffer; the test is single-threaded.
         assert_ne!(unsafe { mvm_hostlib_context_close(pointer, &mut out) }, 0);
         discard(out);
         let mut out = MvmHostlibBuf::empty();
         assert_eq!(
+            // SAFETY: `pointer` is the live context from `create()`, not yet released, and `out`
+            //         is a fresh writable buffer; the test is single-threaded.
             unsafe {
                 access(pointer, &mut out, |state| {
                     assert!(matches!(state.session, SessionLifetime::UnknownStart));
@@ -876,6 +894,8 @@ mod tests {
             0
         );
         discard(out);
+        // SAFETY: `pointer` is the live context from `create()`; the call frees it only from a
+        //         terminal state and then nulls `pointer`.
         assert_ne!(unsafe { mvm_hostlib_context_checked_free(&mut pointer) }, 0);
         // Deliberately retain the ambiguous fixture, never manufacture exit.
     }
@@ -887,6 +907,8 @@ mod tests {
         // This adapter supplies no quiescence proof: a wire rejection alone
         // must remain ambiguous even when it has the native-refusal status.
         assert_eq!(
+            // SAFETY: `pointer` is the live context from `create()`, not yet released, and `out`
+            //         is a fresh writable buffer; the test is single-threaded.
             unsafe {
                 access(pointer, &mut out, |state| {
                     state.call_start_using(b"{}", |_| {
@@ -902,9 +924,13 @@ mod tests {
         );
         discard(out);
         let mut out = MvmHostlibBuf::empty();
+        // SAFETY: `pointer` is the live context from `create()`, not yet released, and `out` is a
+        //         fresh writable buffer; the test is single-threaded.
         assert_ne!(unsafe { mvm_hostlib_context_close(pointer, &mut out) }, 0);
         discard(out);
         let original = pointer;
+        // SAFETY: `pointer` is the live context from `create()`; the call frees it only from a
+        //         terminal state and then nulls `pointer`.
         assert_ne!(unsafe { mvm_hostlib_context_checked_free(&mut pointer) }, 0);
         assert_eq!(pointer, original);
         // Deliberately retain the ambiguous no-child fixture, not a native proof.
@@ -928,12 +954,16 @@ mod tests {
             }, 0);
             discard(out);
             let mut out = MvmHostlibBuf::empty();
+            // SAFETY: `pointer` is the live context from `create()`, not yet released, and `out`
+            //         is a fresh writable buffer; the test is single-threaded.
             assert_ne!(unsafe { mvm_hostlib_context_inspect(pointer, 0, &mut out) }, 0);
             // SAFETY: fresh ABI buffer is readable until its paired free.
             let body = unsafe { std::slice::from_raw_parts(out.data, out.len) };
             assert!(!String::from_utf8_lossy(body).contains("not-public"));
             discard(out);
             let mut out = MvmHostlibBuf::empty();
+            // SAFETY: `pointer` is the live context from `create()`, not yet released, and `out`
+            //         is a fresh writable buffer; the test is single-threaded.
             assert_eq!(unsafe {
                 access(pointer, &mut out, |state| {
                     assert!(matches!(state.session, SessionLifetime::UnknownStart));
@@ -945,10 +975,14 @@ mod tests {
             discard(out);
             for operation in [mvm_hostlib_context_retry_stop, mvm_hostlib_context_close] {
                 let mut out = MvmHostlibBuf::empty();
+                // SAFETY: `pointer` is the live context from `create()`, not yet released, and
+                //         `out` is a fresh writable buffer; the test is single-threaded.
                 assert_ne!(unsafe { operation(pointer, &mut out) }, 0);
                 discard(out);
             }
             let original = pointer;
+            // SAFETY: `pointer` is the live context from `create()`; the call frees it only from a
+            //         terminal state and then nulls `pointer`.
             assert_eq!(unsafe { mvm_hostlib_context_checked_free(&mut pointer) }, 5);
             assert_eq!(pointer, original);
             // Deliberately retain this no-child test allocation until process
@@ -960,8 +994,8 @@ mod tests {
     fn start_panic_retains_pending_context_and_blocks_further_dispatch() {
         let mut pointer = create();
         let mut out = MvmHostlibBuf::empty();
-        // SAFETY: callback cannot create a Child; access catches its real payload.
         assert_eq!(
+            // SAFETY: callback cannot create a Child; access catches its real payload.
             unsafe {
                 access(pointer, &mut out, |state| {
                     state.call_using(b"session.start", b"{}", |_, _| {
@@ -974,6 +1008,8 @@ mod tests {
         discard(out);
         let mut out = MvmHostlibBuf::empty();
         assert_ne!(
+            // SAFETY: `pointer` is the live context from `create()`, not yet released, and `out`
+            //         is a fresh writable buffer; the test is single-threaded.
             unsafe {
                 access(pointer, &mut out, |state| {
                     state.call_using(b"session.start", b"{}", |_, _| {
@@ -986,6 +1022,8 @@ mod tests {
         discard(out);
         let mut out = MvmHostlibBuf::empty();
         assert_eq!(
+            // SAFETY: `pointer` is the live context from `create()`, not yet released, and `out`
+            //         is a fresh writable buffer; the test is single-threaded.
             unsafe {
                 access(pointer, &mut out, |state| {
                     assert!(matches!(state.session, SessionLifetime::UnknownStart));
@@ -999,6 +1037,8 @@ mod tests {
             0
         );
         discard(out);
+        // SAFETY: `pointer` is the live context from `create()`; the call frees it only from a
+        //         terminal state and then nulls `pointer`.
         assert_eq!(unsafe { mvm_hostlib_context_checked_free(&mut pointer) }, 5);
         // No public fake proof or forced terminal state is used to free it.
     }

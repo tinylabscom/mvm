@@ -211,12 +211,15 @@ fn read_pid(path: &Path) -> Option<libc::pid_t> {
 }
 
 fn kill_pid(pid: libc::pid_t) {
+    // SAFETY: kill takes two integers and touches no memory; the pid is a child this test spawned.
     unsafe {
         libc::kill(pid, libc::SIGKILL);
     }
 }
 
 fn kill_process_group(pid: libc::pid_t) {
+    // SAFETY: kill takes two integers and touches no memory; the negative pid names the process
+    //         group of a child this test spawned.
     unsafe {
         libc::kill(-pid, libc::SIGKILL);
     }

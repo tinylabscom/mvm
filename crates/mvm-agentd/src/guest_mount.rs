@@ -2294,6 +2294,7 @@ mod privilege_tests {
             CRNG_RESEED_HELPER_CAPABILITIES,
         )
         .expect("the helper privilege drop must succeed as root");
+        // SAFETY: getuid has no preconditions.
         assert_eq!(unsafe { libc::getuid() }, CRNG_RESEED_HELPER_UID);
         let status = std::fs::read_to_string("/proc/thread-self/status").expect("read status");
         assert!(
@@ -2375,6 +2376,7 @@ mod privilege_tests {
         super::drop_guest_agent_privilege_raw(WORKLOAD_UID, WORKLOAD_GID)
             .expect("the agent privilege drop must succeed as root");
         assert_eq!(
+            // SAFETY: getuid has no preconditions.
             unsafe { libc::getuid() },
             WORKLOAD_UID,
             "the drop must land on the workload uid"

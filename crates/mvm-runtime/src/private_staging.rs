@@ -110,10 +110,12 @@ mod tests {
 
     #[test]
     fn staging_is_private_under_a_permissive_umask() {
-        // The umask is process-wide; nextest runs each test in its own process.
+        // SAFETY: umask only swaps the process-wide mask and touches no memory; nextest runs each
+        //         test in its own process.
         let previous = unsafe { libc::umask(0) };
         let parent = tempfile::tempdir().unwrap();
         let staged = create(parent.path(), ".restore-");
+        // SAFETY: restores the mask saved above; no memory is touched.
         unsafe { libc::umask(previous) };
         assert_eq!(mode(staged.unwrap().path()), 0o700);
     }
