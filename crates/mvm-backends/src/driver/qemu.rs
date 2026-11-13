@@ -14,6 +14,7 @@
 //! off the box is the gated vsock egress endpoint). QEMU's default
 //! user-mode network is explicitly disabled, matching the other runners.
 
+use mvm_vmm::host::process_liveness::{pid_is_alive, read_pid_file};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -635,9 +636,8 @@ struct QemuRunningVm {
 
 impl QemuRunningVm {
     fn stop_bridge(&self) {
-        if let Some(bridge_pid) =
-            qemu_process::read_pid(&self.state_dir.join(qemu_process::BRIDGE_PID_FILE))
-            && qemu_process::pid_alive(bridge_pid)
+        if let Some(bridge_pid) = read_pid_file(&self.state_dir.join(qemu_process::BRIDGE_PID_FILE))
+            && pid_is_alive(bridge_pid)
         {
             qemu_process::send_signal(bridge_pid, libc::SIGTERM);
         }
@@ -656,7 +656,7 @@ impl QemuRunningVm {
             .parse::<libc::pid_t>()
             .with_context(|| format!("parsing daemonized QEMU pid {}", self.pid_file.display()))?;
         anyhow::ensure!(pid > 0, "daemonized QEMU pid must be positive");
-        if qemu_process::pid_alive(pid) {
+        if pid_is_alive(pid) {
             terminate_qemu_pid(pid, &self.pid_file)?;
         }
         let _ = std::fs::remove_file(&self.pid_file);
@@ -701,8 +701,8 @@ impl RunningVm for QemuRunningVm {
 
     fn kill(&self) -> Result<()> {
         self.stop_bridge();
-        if let Some(pid) = qemu_process::read_pid(&self.pid_file)
-            && qemu_process::pid_alive(pid)
+        if let Some(pid) = read_pid_file(&self.pid_file)
+            && pid_is_alive(pid)
         {
             terminate_qemu_pid(pid, &self.pid_file)?;
         }
@@ -719,8 +719,8 @@ impl RunningVm for QemuRunningVm {
     }
 
     fn status(&self) -> Result<VmStatus> {
-        Ok(match qemu_process::read_pid(&self.pid_file) {
-            Some(pid) if qemu_process::pid_alive(pid) => VmStatus::Running,
+        Ok(match read_pid_file(&self.pid_file) {
+            Some(pid) if pid_is_alive(pid) => VmStatus::Running,
             _ => VmStatus::Stopped,
         })
     }

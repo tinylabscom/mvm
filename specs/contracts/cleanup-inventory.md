@@ -113,6 +113,46 @@ Measured at `b9731f0039`. `sha256_hex` of a byte slice now has one authority, `m
 
 The host-side Rust copies differ in symlink, special-file and pre-existing-destination handling, so merging them would change behaviour; each stays as recorded.
 
+### 2.1a Free functions defined in three or more crates
+
+Rule: no free function name is defined in three or more crates unless a reason is recorded here. Reproduce with the scan below (non-test code, column-0 `fn` only, so methods and trait-impl methods are excluded; `main`, `new` and `default` skipped). The current output is 92 names, each covered by a row. A second pass that hashed every body after whitespace removal found only three identical bodies across crates: `workspace_root_from_manifest_dir`, `default_vcpus` and `invalid`.
+
+```python
+import subprocess, re, collections
+defs = collections.defaultdict(set)
+pat = re.compile(r'^(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+(\w+)')
+for f in subprocess.check_output(['git', 'ls-files', 'crates/*.rs']).decode().split():
+    m = re.match(r'crates/(?:deps/)?([^/]+)/(.*)', f)
+    if re.search(r'(^|/)(tests|benches|examples|fuzz)/|tests?\.rs$', m.group(2)):
+        continue
+    lines = open(f).read().split('\n')
+    for i, l in enumerate(lines):
+        if l.startswith('#[cfg(test)]') and lines[i + 1].startswith('mod '):
+            break
+        d = pat.match(l)
+        if d and d.group(1) not in ('main', 'new', 'default', 'run'):
+            defs[d.group(1)].add(m.group(1))
+for n, c in sorted(defs.items()):
+    if len(c) >= 3:
+        print(n, ' '.join(sorted(c)))
+```
+
+Folded onto one authority (gone from three or more crates):
+
+- `pid_alive` (was `mvm-backends` x3, `mvm-hostd`, `mvm-vmm` x2): every caller now calls `mvm_vmm::host::process_liveness::pid_is_alive`, and the `read_pid` wrappers over `read_pid_file` are gone with them. The `mvm-host-agent` copies were a bare `kill(pid, 0) == 0` plus an unfiltered parse; the shared probe also refuses pid 0 and 1 and treats a zombie as gone, so a stale worker marker can no longer address the caller's own process group. Remaining `pid_alive`: `mvm-build` (`image_lock.rs`, `u32` owner record, raw `kill`, where EPERM must read as stale) and `mvm-runtime` (`standby_pool.rs`, a `u32` adapter over the same probe).
+- `sha256_file` (was `mvm-build`, `mvm-cli`, `mvm-core`): the `mvm-cli` wrapper is gone; `mvm-build`'s converts into `Sha256Hex` and its error type.
+- Streaming file hashing in `mvm-runtime` (two `hash_file` copies) now calls `mvm_core::crypto::image_verify::sha256_file`, and `mvm-build`'s `file_digest` is a one-line call to it.
+
+Kept, by reason. Each name below is defined in three or more crates and is not one function:
+
+- Per-crate macro: `workspace_root_from_manifest_dir` expands `env!("CARGO_MANIFEST_DIR")`, which names the crate that contains the call, so a shared copy would return the wrong directory.
+- One protocol, one frame and error type each (a shared reader would need a generic over them and would change error text): `read_frame`, `write_frame`, `encode_frame`, `encode_response`, `read_request`, `read_response`, `write_response`, `decode`, `parse`, `parse_args` (each binary's own flags), `parse_head`, `parse_number`, `read_u16`, `read_u32`, `read_u64` (different cursor types, endianness and error types), `hex_nibble` (`Option` vs `Result`, lower-only vs both cases), `is_sha256_hex` (lower-only vs either case; the `mvm-core` copy is crate-private).
+- Constructors into the crate's own error enum, so they cannot share a body: `io_at`, `io_error`, `invalid`, `error`, `refusal_message`, `refuse`, `refused`.
+- Filesystem helpers with different safety contracts (symlink, mode, `O_NOFOLLOW`, directory, size-limit or durability behaviour): `copy_file`, `copy_tree`, `copy_artifact`, `create_private_dir`, `private_directory`, `directory`, `write_private`, `remove_if_present`, `sync_dir`, `read_regular`, `read_record`, `read_manifest`, `record_path`, `manifest_path`, `load_index`, `load`, `validate_manifest`, `safe_join`, `walk`, `scan`, `path`, `read`, `non_empty`.
+- Digests of different things: `hash_file` (guest-agent source stamp, workspace graph, pack stream, chunked manifest, warm artifact with size and regular-file check), `file_digest` (`mvm-client` returns `Option` for a missing file; `mvm-fs` digests a chunk list), `digest`, `sha256_hex` (rows above), `canonical`, `seal`.
+- `default_vcpus`: `mvm-cli` delegates to `mvm_client::default_vcpus` for its clap defaults; `mvm-core`'s is a `u8` serde default.
+- Verb names for unrelated functions with different signatures and domains (service loops, request handlers, build steps, lifecycle calls): `accept_loop`, `admit`, `answer`, `append`, `assemble`, `call`, `check`, `classify`, `configure`, `connect`, `create`, `dispatch`, `emit`, `enabled`, `evaluate`, `execute`, `handle_connection`, `info`, `install`, `list_sessions`, `lock`, `offer`, `open`, `prepare`, `remove`, `render`, `report`, `resolve`, `run_build`, `serve`, `start`, `store`, `take`, `validate`, `verify`, `write`, `write_entry`.
+
 ## 3. Capability and flag inventory
 
 §3.1-§3.3 were first derived from the clap definitions (no built binary then). §3.3a below is generated from a built `mvmctl --help` walk and supersedes them for flags. Source method: `rg -c '^\s*#\[arg\('` -> 901 `#[arg]` attributes; `derive(...Subcommand)` -> 58 matches; `derive(...Args)` -> 213. A script then parsed every `Subcommand` enum for its variants.

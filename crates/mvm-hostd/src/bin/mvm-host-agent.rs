@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use mvm_vmm::host::process_liveness::{pid_is_alive, read_pid_file};
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, oneshot};
@@ -50,16 +51,6 @@ fn worker_pid_path(cfg: &HostAgentConfig) -> PathBuf {
     mvm_core::config::host_agent_worker_pid(&cfg.tenant_id)
 }
 
-fn read_pid(path: &Path) -> Option<libc::pid_t> {
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
-}
-
-fn pid_alive(pid: libc::pid_t) -> bool {
-    // SAFETY: kill(pid, 0) only probes process existence/permission and does
-    // not deliver a signal.
-    unsafe { libc::kill(pid, 0) == 0 }
-}
-
 fn kill_process_group(pgid: libc::pid_t, sig: libc::c_int) {
     // SAFETY: negative pid targets the process group created for the worker by
     // setsid() below. Errors are intentionally ignored by callers during cleanup.
@@ -69,8 +60,8 @@ fn kill_process_group(pgid: libc::pid_t, sig: libc::c_int) {
 }
 
 fn reap_stale_worker_group(pid_path: &Path) {
-    if let Some(pid) = read_pid(pid_path)
-        && pid_alive(pid)
+    if let Some(pid) = read_pid_file(pid_path)
+        && pid_is_alive(pid)
     {
         kill_process_group(pid, libc::SIGTERM);
         std::thread::sleep(Duration::from_millis(50));

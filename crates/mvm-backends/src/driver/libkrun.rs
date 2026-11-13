@@ -6,6 +6,7 @@
 //! socket; the driver only wires that port through as a guest-dialed relay — it
 //! carries no policy and never sees a `NetworkPolicy`.
 
+use mvm_vmm::host::process_liveness::{pid_is_alive, read_pid_file};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -573,8 +574,7 @@ impl RunningVm for LibkrunRunningVm {
     }
 
     fn host_process_id(&self) -> Option<u32> {
-        crate::driver::libkrun_process::read_pid(&self.pid_file)
-            .and_then(|pid| u32::try_from(pid).ok())
+        read_pid_file(&self.pid_file).and_then(|pid| u32::try_from(pid).ok())
     }
 
     fn wait(&self) -> Result<VmExitStatus> {
@@ -586,8 +586,8 @@ impl RunningVm for LibkrunRunningVm {
     fn kill(&self) -> Result<()> {
         // Arm before SIGTERM so a short-lived supervisor cannot exit between
         // signal delivery and observer registration.
-        if let Some(pid) = crate::driver::libkrun_process::read_pid(&self.pid_file)
-            && crate::driver::libkrun_process::pid_alive(pid)
+        if let Some(pid) = read_pid_file(&self.pid_file)
+            && pid_is_alive(pid)
         {
             let observer = mvm_vmm::host::process_exit::ProcessExitObserver::arm(pid).ok();
             // SIGTERM gives libkrun a chance to close its virtio-blk file
@@ -631,12 +631,10 @@ impl RunningVm for LibkrunRunningVm {
     }
 
     fn status(&self) -> Result<VmStatus> {
-        Ok(
-            match crate::driver::libkrun_process::read_pid(&self.pid_file) {
-                Some(pid) if crate::driver::libkrun_process::pid_alive(pid) => VmStatus::Running,
-                _ => VmStatus::Stopped,
-            },
-        )
+        Ok(match read_pid_file(&self.pid_file) {
+            Some(pid) if pid_is_alive(pid) => VmStatus::Running,
+            _ => VmStatus::Stopped,
+        })
     }
 
     fn vsock_connect(&self, guest_port: u32) -> Result<Box<dyn DuplexStream>> {
@@ -804,9 +802,7 @@ mod tests {
         vm.kill().expect("a SIGKILL-able supervisor is stopped");
         reaper.join().unwrap().ok();
         assert!(!vm.pid_file.exists());
-        assert!(!crate::driver::libkrun_process::pid_alive(
-            pid as libc::pid_t
-        ));
+        assert!(!pid_is_alive(pid as libc::pid_t));
     }
 
     fn relay(spec: &VmmSpec) -> SupervisorConfig {

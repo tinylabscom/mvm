@@ -10,6 +10,7 @@
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use clap::Args as ClapArgs;
+use mvm_core::crypto::image_verify::sha256_file;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -283,7 +284,8 @@ fn build_declaration(manifest: &VolumeManifest, lockfile: &Path) -> Result<Depen
     require_file(lockfile, "lockfile")?;
     let expected_sha256 = annotation(&manifest.annotations, "lockfile_sha256")?;
     validate_hash(expected_sha256, "lockfile SHA-256")?;
-    let actual_sha256 = sha256_file(lockfile)?;
+    let actual_sha256 =
+        sha256_file(lockfile).with_context(|| format!("reading {}", lockfile.display()))?;
     if actual_sha256 != expected_sha256 {
         bail!(
             "lockfile {} does not match sealed SHA-256: expected {}, got {}",
@@ -402,11 +404,6 @@ fn write_declaration(path: &Path, declaration: &Dependencies) -> Result<()> {
         let _ = std::fs::remove_file(&temporary);
     }
     result
-}
-
-fn sha256_file(path: &Path) -> Result<String> {
-    mvm_core::crypto::image_verify::sha256_file(path)
-        .with_context(|| format!("reading {}", path.display()))
 }
 
 fn scratch_dir(cache_root: &Path, prior_hash: &str) -> Result<PathBuf> {
