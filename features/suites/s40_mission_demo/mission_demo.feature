@@ -38,7 +38,7 @@ Feature: The three-node mission demo contains, terminates and rebuilds
     When the production mailbox helper witness runs
     Then the production mailbox helper witness passes
 
-  @live @firecracker @ci_live
+  @live @firecracker @ci_live @mailbox_live
   Scenario: a booted guest verifies local durability and acknowledges a delivery
     When the booted local-durable mailbox witness runs
     Then the booted local-durable mailbox witness passes
