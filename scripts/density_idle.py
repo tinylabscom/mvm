@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 """Sample idle CPU, wakeups, threads and descriptors of a density wave's host processes.
 
-Linux only: every figure is read from procfs. Wakeups are voluntary context
-switches summed over a process's threads, so a thread that blocks and is woken
-counts once per wake.
+Linux reads procfs; wakeups are voluntary context switches summed over a
+process's threads, so a thread that blocks and is woken counts once per wake.
+
+macOS reads libproc through ctypes (no subprocess, no third-party package) and
+sees only processes the caller may inspect, which includes the caller's own.
+CPU is user plus system time converted from mach ticks to nanoseconds. Wakeups
+are the kernel's own per-process count (`ri_pkg_idle_wkups` plus
+`ri_interrupt_wkups`), the nearest macOS analogue of a voluntary switch.
 """
+
+import ctypes
+import struct
 
 import os
 import sys
@@ -24,7 +32,15 @@ COMPONENTS = (
     "mvm-broker",
     "mvmctl",
 )
-UNAVAILABLE = "unavailable:linux_procfs_only"
+UNAVAILABLE = "unavailable:unsupported_platform"
+NANOSECONDS = 1_000_000_000
+
+PROC_PIDLISTFDS = 1
+PROC_PIDTASKINFO = 4
+RUSAGE_INFO_V4 = 4
+FD_INFO_BYTES = 8  # struct proc_fdinfo: int32 fd, uint32 type
+PATH_MAX_BYTES = 4096
+
 
 
 @dataclass(frozen=True)
@@ -77,6 +93,98 @@ def sample_process(directory: Path) -> ProcessSample | None:
             voluntary_switches((task / "status").read_text()) for task in tasks
         ),
     )
+
+
+class TaskInfo(ctypes.Structure):
+    """struct proc_taskinfo from <sys/proc_info.h>."""
+
+    _fields_ = [
+        (name, ctypes.c_uint64)
+        for name in ("virtual", "resident", "user", "system", "threads_user", "threads_system")
+    ] + [
+        (name, ctypes.c_int32)
+        for name in (
+            "policy", "faults", "pageins", "cow_faults", "messages_sent",
+            "messages_received", "syscalls_mach", "syscalls_unix", "switches",
+            "threads", "running", "priority",
+        )
+    ]
+
+
+class Libproc:
+    """The libproc reads a macOS sample needs; each raises OSError when refused."""
+
+    def __init__(self) -> None:
+        self.lib = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        self.nanoseconds_per_tick = self._tick_nanoseconds()
+
+    @staticmethod
+    def _tick_nanoseconds() -> float:
+        class Timebase(ctypes.Structure):
+            _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
+
+        base = Timebase()
+        ctypes.CDLL("/usr/lib/libSystem.dylib").mach_timebase_info(ctypes.byref(base))
+        if base.denom == 0:
+            raise OSError("mach_timebase_info returned a zero denominator")
+        return base.numer / base.denom
+
+    def pids(self) -> list[int]:
+        needed = self.lib.proc_listallpids(None, 0)
+        if needed <= 0:
+            raise OSError(ctypes.get_errno(), "proc_listallpids")
+        pids = (ctypes.c_int * (needed + 64))()
+        count = self.lib.proc_listallpids(pids, ctypes.sizeof(pids))
+        if count <= 0:
+            raise OSError(ctypes.get_errno(), "proc_listallpids")
+        return [pid for pid in pids[:count] if pid > 0]
+
+    def program(self, pid: int) -> str:
+        path = ctypes.create_string_buffer(PATH_MAX_BYTES)
+        if self.lib.proc_pidpath(pid, path, len(path)) <= 0:
+            raise OSError(ctypes.get_errno(), "proc_pidpath")
+        return path.value.decode(errors="replace")
+
+    def counters(self, pid: int) -> tuple[int, int, int, int]:
+        """(threads, descriptors, cpu nanoseconds, wakeups)."""
+        task = TaskInfo()
+        if self.lib.proc_pidinfo(pid, PROC_PIDTASKINFO, 0, ctypes.byref(task), ctypes.sizeof(task)) != ctypes.sizeof(task):
+            raise OSError(ctypes.get_errno(), "proc_pidinfo taskinfo")
+        fd_bytes = self.lib.proc_pidinfo(pid, PROC_PIDLISTFDS, 0, None, 0)
+        if fd_bytes < 0:
+            raise OSError(ctypes.get_errno(), "proc_pidinfo listfds")
+        usage = ctypes.create_string_buffer(1024)
+        if self.lib.proc_pid_rusage(pid, RUSAGE_INFO_V4, usage) != 0:
+            raise OSError(ctypes.get_errno(), "proc_pid_rusage")
+        return (
+            task.threads,
+            fd_bytes // FD_INFO_BYTES,
+            round((task.user + task.system) * self.nanoseconds_per_tick),
+            wakeups_from_rusage(usage.raw),
+        )
+
+
+def wakeups_from_rusage(raw: bytes) -> int:
+    """ri_pkg_idle_wkups + ri_interrupt_wkups: the two u64s after the uuid and two times."""
+    idle, interrupt = struct.unpack_from("<QQ", raw, 32)
+    return idle + interrupt
+
+
+def sample_macos(reader: Libproc, skip: frozenset[int] = frozenset()) -> dict[int, ProcessSample]:
+    """One pass over libproc, mirroring `sample`: a process that exits or refuses is left out."""
+    found = {}
+    for pid in reader.pids():
+        if pid in skip:
+            continue
+        try:
+            component = component_of(reader.program(pid))
+            if component is None:
+                continue
+            threads, descriptors, nanoseconds, wakeups = reader.counters(pid)
+        except OSError:
+            continue
+        found[pid] = ProcessSample(component, threads, descriptors, nanoseconds, wakeups)
+    return found
 
 
 def sample(proc_root: Path, skip: frozenset[int] = frozenset()) -> dict[int, ProcessSample]:
@@ -159,16 +267,21 @@ def main() -> int:
         if wave < 1:
             raise ValueError("wave count must be positive")
         proc_root = Path("/proc")
-        if not (proc_root / "self" / "stat").is_file():
+        own = frozenset({os.getpid()})
+        if (proc_root / "self" / "stat").is_file():
+            take, ticks_per_second = (lambda: sample(proc_root, own)), os.sysconf("SC_CLK_TCK")
+        elif sys.platform == "darwin":
+            reader = Libproc()
+            take, ticks_per_second = (lambda: sample_macos(reader, own)), NANOSECONDS
+        else:
             print(f"wave_{wave}_idle_sampler\t{UNAVAILABLE}")
             return 0
-        own = frozenset({os.getpid()})
         started = time.monotonic()
-        before = sample(proc_root, own)
+        before = take()
         time.sleep(seconds)
-        after = sample(proc_root, own)
+        after = take()
         elapsed = time.monotonic() - started
-        rows = summarize(before, after, elapsed, os.sysconf("SC_CLK_TCK"))
+        rows = summarize(before, after, elapsed, ticks_per_second)
         table, summary = render(rows, wave)
         (wave_dir / "idle-settled.tsv").write_text(table)
         print(f"wave_{wave}_idle_window_seconds\t{elapsed:.1f}\n{summary}", end="")
