@@ -59,9 +59,16 @@ fn production_mailbox_helper_passes(world: &mut CliWorld) {
 #[when("the booted local-durable mailbox witness runs")]
 fn run_booted_local_mailbox(world: &mut CliWorld) {
     let root = crate::steps::cli::workspace_root();
+    let home = tempfile::tempdir().expect("isolated live mailbox home");
+    crate::steps::live_home::prepare_live_home(home.path());
     let output = Command::new("bash")
         .arg("scripts/mailbox-local-live-witness.sh")
         .current_dir(root)
+        .env("MVM_HOME", home.path())
+        .env(
+            crate::steps::live_home::RUNTIME_ACQUIRE_MODE_ENV,
+            crate::steps::live_home::RUNTIME_ACQUIRE_MODE,
+        )
         .env(
             "MVMCTL",
             std::env::var_os("CARGO_BIN_EXE_mvmctl")

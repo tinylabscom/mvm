@@ -6,7 +6,12 @@ set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MVMCTL="${MVMCTL:-${CARGO_BIN_EXE_mvmctl:-${repo}/target/debug/mvmctl}}"
-home="$(mktemp -d)"
+own_home=0
+home="${MVM_HOME:-}"
+if [ -z "$home" ]; then
+  home="$(mktemp -d)"
+  own_home=1
+fi
 export MVM_HOME="$home"
 name="bdd-local-mailbox-$$"
 missing="bdd-no-retention-$$"
@@ -20,7 +25,7 @@ cleanup() {
   "$MVMCTL" machine rm "$name" --yes >/dev/null 2>&1 || true
   "$MVMCTL" machine stop "$missing" --yes >/dev/null 2>&1 || true
   "$MVMCTL" machine rm "$missing" --yes >/dev/null 2>&1 || true
-  rm -rf -- "$home"
+  if [ "$own_home" -eq 1 ]; then rm -rf -- "$home"; fi
   exit "$status"
 }
 trap cleanup EXIT
