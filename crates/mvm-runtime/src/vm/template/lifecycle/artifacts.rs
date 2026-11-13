@@ -551,13 +551,9 @@ pub fn current_revision_id(template_id: &str) -> Result<String> {
 
 /// Compute the SHA-256 hex digest of a file.
 pub fn sha256_hex(path: &std::path::Path) -> Result<String> {
-    use sha2::Digest;
-
     let bytes =
         std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(&bytes);
-    Ok(hex::encode(hasher.finalize()))
+    Ok(mvm_contract::hash::sha256_hex(&bytes))
 }
 
 #[cfg(test)]
