@@ -281,9 +281,10 @@ pub enum LocalAuditKind {
     /// against the local trust store to an image registry. Detail:
     /// `bundle_sha256=<64hex>,key_id=<32hex>,reference=oci://<ref>@<digest>`.
     BundlePush,
-    /// `mvmctl build` with a pack source — built a locked pack, passed its health boot, and
-    /// sealed it into an archive signed by the host key. Detail:
-    /// `pack=<ns/name@version>,workload_sha256=<64hex>,bundle_sha256=<64hex>,key_id=<id>`.
+    /// `mvmctl build` with a pack source — passed its health boot and sealed an archive
+    /// signed by the host key. Detail: `pack=<ns/name@version>,<digest-label>=<64hex>,
+    /// bundle_sha256=<64hex>,key_id=<id>`. The digest label is `workload_sha256`
+    /// for Nix's locked Workload IR or `yocto_archive_sha256` for a pinned Yocto archive.
     PackBuild,
     /// `mvmctl manifest export-oci <template> --out <path>` —
     /// copied a slot's OCI tarball (produced by `mkGuest`'s
