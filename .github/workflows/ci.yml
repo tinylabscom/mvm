@@ -476,7 +476,7 @@ jobs:
             features="${features:+$features,}mvmctl/$feature"
           done
           features="$features,mvm-core/hostd-transport,mvm-core/client-remote"
-          features="$features,mvm-client/tracing-bridge,mvm-client/manifest-verify,mvm-client/schema,mvm-client/test-support"
+          features="$features,mvm-client/tracing-bridge,mvm-client/manifest-verify,mvm-client/schema,mvm-client/test-support,mvm-client/experimental-owned-capture"
           features="$features,mvm-sdk/schema,mvm-sdk/compiler,mvm-sdk/deploy-remote"
           features="$features,mvm-build/manifest-verify,mvm-build/release-channel,mvm-build/test-support"
           features="$features,mvm-cli/manifest-verify,mvm-cli/release-artifact-bootstrap,mvm-cli/test-support"
@@ -505,6 +505,8 @@ jobs:
           ./scripts/cargo.sh test --locked -p mvm-hostd --features experimental-owned-capture --lib caller_identity::tests
           ./scripts/cargo.sh test --locked -p mvm-hostd --features experimental-owned-capture --lib owned_capture
           ./scripts/cargo.sh test --locked -p mvm-hostd --features experimental-owned-capture --bin mvm-hvf-supervisor
+          ./scripts/cargo.sh test --locked -p mvm-client --features experimental-owned-capture --lib entrypoint::owned_capture
+          ./scripts/cargo.sh test --locked -p mvm-backends --features experimental-owned-capture --lib startup_input
 
   lint-policy:
     # This policy lane publishes the `Invariant` context. The architecture

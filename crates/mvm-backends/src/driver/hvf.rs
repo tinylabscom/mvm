@@ -46,6 +46,7 @@ mod cold_channel;
 mod failure_diagnostics;
 mod handoff_client;
 mod standby;
+mod startup_input;
 mod stop_state;
 use cold_channel::{BootInputFiles, boot_with_custody, failed_owned_boot, require_cold_config};
 pub use cold_channel::{ColdHvfBootFailure, ColdHvfOwner, RetainedHvfLaunch};
@@ -57,6 +58,9 @@ use handoff_client::{
 use handoff_client::{link_child_state, request_live_handoff};
 #[cfg(test)]
 use standby::wait_for_standby_agent;
+#[cfg(feature = "experimental-owned-capture")]
+pub use startup_input::CaptureStartup;
+use startup_input::{SupervisorInput, SupervisorLaunchPolicy};
 
 /// How long a capture waits for the paused supervisor to publish both halves of
 /// its snapshot. Generous: the write is proportional to guest RAM.
@@ -438,36 +442,6 @@ fn bounded_supervisor_command(
     )
 }
 
-struct SupervisorLaunchPolicy {
-    validate_config: fn(&HvfSupervisorConfig) -> Result<()>,
-    configure_environment: fn(&mut std::process::Command),
-}
-
-impl SupervisorLaunchPolicy {
-    fn legacy() -> Self {
-        Self {
-            validate_config: |_| Ok(()),
-            configure_environment: |command| {
-                command.env_remove("MVM_HVF_LEGACY_CONFIG_REPLAY");
-            },
-        }
-    }
-
-    fn cold() -> Self {
-        Self {
-            validate_config: require_cold_config,
-            configure_environment: |command| {
-                // Bind projected boot arguments, not ambient debug overrides.
-                // Remove both from the actual child environment before scope
-                // binding seals the launch command.
-                command.env_remove("MVM_HVF_BOOTARGS");
-                command.env_remove("MVM_HVF_BOOTARGS_EXTRA");
-                command.env_remove("MVM_HVF_LEGACY_CONFIG_REPLAY");
-            },
-        }
-    }
-}
-
 fn claim_hvf_launch(state_dir: &Path) -> Result<std::fs::File> {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::OpenOptionsExt;
@@ -566,7 +540,7 @@ fn boot_retaining_child(
     exclusive_image_lock: Option<&Path>,
     pending_child: &mut Option<std::process::Child>,
     rollback: &mut Option<mvm_vmm::host::hvf_stop::ConfirmedExit>,
-    policy: &SupervisorLaunchPolicy,
+    policy: &mut SupervisorLaunchPolicy,
     files: BootInputFiles<'_>,
 ) -> Result<HvfRunningVm> {
     mvm_vmm::host::process_exit::require_owned_child_custody()?;
@@ -586,10 +560,20 @@ fn boot_retaining_child(
     files.project(spec, &mut cfg)?;
     (policy.validate_config)(&cfg)?;
     let json = mvm_core::protocol::hvf_startup::FrozenConfig::serialize(&cfg)?;
+    #[cfg(feature = "experimental-owned-capture")]
+    let input = match policy.capture_startup.take() {
+        Some(bind) => {
+            SupervisorInput::owned(hvf_backend::resolve_owned_capture_supervisor, || bind(json))?
+        }
+        None => SupervisorInput::legacy(json),
+    };
+    #[cfg(not(feature = "experimental-owned-capture"))]
+    let input = SupervisorInput::legacy(json);
     let config_path = paths.state_dir.join("supervisor.json");
-    mvm_core::atomic_io::atomic_write_new(&config_path, json.as_bytes())
+    mvm_core::atomic_io::atomic_write_new(&config_path, input.config().as_bytes())
         .map_err(|e| anyhow!("write supervisor config {}: {e}", config_path.display()))?;
-    let supervisor = resolve_supervisor_path_verified()
+    let supervisor = input
+        .supervisor()
         .map_err(|e| anyhow!("{}", supervisor_unavailable_message(&e)))?;
     // Diagnostics are optional evidence, never a launch or readiness gate.
     let mut diagnostics = StartupDiagnostics::new().ok();
@@ -641,7 +625,7 @@ fn boot_retaining_child(
             .stdin
             .take()
             .context("supervisor stdin was not piped")?
-            .write_all(json.as_bytes())
+            .write_all(input.bytes())
             .map_err(|error| {
                 // A single exit observation on transport failure, not another wait loop.
                 let status = child.try_wait().ok().flatten();

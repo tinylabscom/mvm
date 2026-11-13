@@ -111,6 +111,14 @@ pub fn resolve_supervisor_path_verified() -> Result<PathBuf> {
     mvm_vmm::host::aux_bin::resolve_verified(&hvf_supervisor_spec())
 }
 
+/// Require the actual helper's experimental format before any owned input write.
+#[cfg(feature = "experimental-owned-capture")]
+pub fn resolve_owned_capture_supervisor() -> Result<PathBuf> {
+    mvm_vmm::host::aux_bin::resolve_owned_capture_startup(
+        &hvf_supervisor_spec().requiring_features(&["experimental-owned-capture"]),
+    )
+}
+
 fn hvf_supervisor_spec() -> mvm_vmm::host::aux_bin::AuxBin<'static> {
     mvm_vmm::host::aux_bin::AuxBin::new(
         "mvm-hvf-supervisor",

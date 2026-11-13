@@ -134,7 +134,7 @@ pub(super) fn boot_with_custody(
     spec: &VmmSpec,
     handoff: Option<&HandoffConfig>,
     exclusive_image_lock: Option<&Path>,
-    policy: SupervisorLaunchPolicy,
+    mut policy: SupervisorLaunchPolicy,
     files: BootInputFiles<'_>,
 ) -> std::result::Result<HvfRunningVm, ColdHvfBootFailure> {
     let mut child = None;
@@ -145,7 +145,7 @@ pub(super) fn boot_with_custody(
         exclusive_image_lock,
         &mut child,
         &mut rollback,
-        &policy,
+        &mut policy,
         files,
     )
     .map_err(|error| {

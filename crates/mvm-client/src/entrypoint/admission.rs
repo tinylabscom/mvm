@@ -59,6 +59,8 @@ pub struct AdmittedEntrypoint {
     pub context: AdmissionContext,
     /// The plan-bearing start-config fields.
     pub substrate: SessionAuditSubstrate,
+    #[cfg(feature = "experimental-owned-capture")]
+    pub(crate) owned_capture: Option<super::owned_capture::CaptureInvocation>,
 }
 
 impl EntrypointAdmission {
@@ -225,6 +227,8 @@ impl EntrypointAdmission {
             .map(serde_json::to_string)
             .transpose()
             .context("serializing admitted policy bundle for the entrypoint VM")?;
+        #[cfg(feature = "experimental-owned-capture")]
+        let mut owned_capture = None;
         let caller_registration = producer
             .map(|(identity, client)| {
                 use mvm_core::vm_backend::caller_registration::CallerRegistration;
@@ -242,15 +246,27 @@ impl EntrypointAdmission {
                 let proof = credential
                     .prove_registration(&challenge, now)?
                     .verify(&challenge, now)?;
-                mvm_hostd::supervisor::caller_registration::admit_caller(
+                let registration = mvm_hostd::supervisor::caller_registration::admit_caller(
                     &ctx.admitted,
                     vm_name,
                     challenge,
                     proof,
-                )
+                )?;
+                #[cfg(feature = "experimental-owned-capture")]
+                {
+                    owned_capture = Some(super::owned_capture::CaptureInvocation::admitted(
+                        credential,
+                        &registration,
+                        &ctx.admitted,
+                        now,
+                    )?);
+                }
+                Ok::<_, anyhow::Error>(registration)
             })
             .transpose()?;
         Ok(AdmittedEntrypoint {
+            #[cfg(feature = "experimental-owned-capture")]
+            owned_capture,
             substrate: SessionAuditSubstrate {
                 tenant_id: ctx.admitted.plan().tenant.0.clone(),
                 plan_json,

@@ -91,10 +91,25 @@ The serialized-once and host–helper compatibility requirements below are
 mandatory before sending this format. The
 [held configuration type and bounded envelope codec](../../crates/mvm-core/src/protocol/hvf_startup/mod.rs#L1)
 preserve original bytes. The existing cold launcher uses one held JSON
-serialization for its saved config and legacy startup input. Retaining that
-object with the intended original client call and selecting the owned-startup
-resolver before emitting an envelope remain integration work; current ordinary
-launches still send legacy JSON.
+serialization for its saved config and startup input. With the explicit
+`mvm-client/experimental-owned-capture` feature, an original owned entrypoint
+admission that opts into caller registration retains its loaded credential and
+fresh intended call in a private client invocation. That invocation supplies a
+one-shot final-byte binding callback through the existing runtime/native owner.
+No credential enters the VMM. The callback retains the same immutable config
+allocation before workload spawn; startup input, digest and retained binding
+share it. Compatibility refusal precedes callback invocation and any envelope
+write. Default builds and registration-only/non-owning paths remain legacy.
+
+The [client invocation](../../crates/mvm-client/src/entrypoint/owned_capture.rs#L1)
+refuses a changed VM/registration, duplicate emitter or missing final binding.
+The [driver's startup input](../../crates/mvm-backends/src/driver/hvf/startup_input.rs#L1)
+requires the exact helper support before binding or encoding, then writes the
+held inner config to the ordinary saved-config file and the envelope to stdin.
+The existing runtime activation and single guest-dispatch transitions still own
+execution and uncertainty. These are startup plumbing and component checks, not
+an authenticated capture connection, spent permit or independently verified
+recording. Actual admitted native startup/cleanup still needs a live witness.
 
 The native helper's experimental build decodes the envelope before descriptor
 adoption or other workload-startup effects. Its default build refuses that input.

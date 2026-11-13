@@ -65,6 +65,8 @@ struct Custody {
     entrypoint_terminal: Option<mvm_agentd::vsock::EntrypointEvent>,
     phase: Phase,
     support: Vec<Box<dyn Send>>,
+    #[cfg(feature = "experimental-owned-capture")]
+    capture_startup: Option<mvm_backends::driver::hvf::CaptureStartup>,
 }
 
 impl Custody {
@@ -147,6 +149,8 @@ impl ColdHvfChannel {
                 entrypoint_terminal: None,
                 phase: Phase::Prepared,
                 support: Vec::new(),
+                #[cfg(feature = "experimental-owned-capture")]
+                capture_startup: None,
             }),
         }
     }
@@ -161,6 +165,23 @@ impl ColdHvfChannel {
     /// storage only, never a transfer to the VMM or a grant of admission.
     pub fn retain_support(&mut self, support: impl Send + 'static) -> Result<()> {
         self.custody()?.support.push(Box::new(support));
+        Ok(())
+    }
+
+    /// Bind final bytes once through original preparation, never a recovered name.
+    /// The callback contains no credential and grants no capture-write authority.
+    #[cfg(feature = "experimental-owned-capture")]
+    pub fn prepare_capture_startup(
+        &mut self,
+        bind: impl FnOnce(
+            mvm_core::protocol::hvf_startup::FrozenConfig,
+        ) -> Result<mvm_core::protocol::hvf_startup::StartupEnvelope>
+        + Send
+        + 'static,
+    ) -> Result<()> {
+        let custody = self.custody()?;
+        require_capture_preparation(custody.phase, custody.capture_startup.is_some())?;
+        custody.capture_startup = Some(Box::new(bind));
         Ok(())
     }
 
@@ -253,6 +274,15 @@ impl ColdHvfChannel {
         };
         let boot = console_boot::boot_while_starting_console(
             || {
+                #[cfg(feature = "experimental-owned-capture")]
+                if let Some(startup) = custody.capture_startup.take() {
+                    return Ok(HvfDriver::new().boot_cold_owned_with_capture(
+                        &preparation.prepared.spec,
+                        preparation.launch.verified_kernel(),
+                        &preparation.images,
+                        startup,
+                    ));
+                }
                 Ok(HvfDriver::new().boot_cold_owned_verified(
                     &preparation.prepared.spec,
                     preparation.launch.verified_kernel(),
@@ -674,6 +704,15 @@ fn release_terminal_custody<T>(custody: &mut Option<T>) {
     drop(custody.take());
 }
 
+#[cfg(feature = "experimental-owned-capture")]
+fn require_capture_preparation(phase: Phase, already_bound: bool) -> Result<()> {
+    anyhow::ensure!(
+        phase == Phase::Prepared && !already_bound,
+        "capture startup requires unused original preparation"
+    );
+    Ok(())
+}
+
 pub(super) fn require_cold_start_config(config: &VmStartConfig) -> Result<()> {
     anyhow::ensure!(
         config.warm_pool_size == 0,
@@ -690,6 +729,26 @@ pub(super) fn require_cold_start_config(config: &VmStartConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "experimental-owned-capture")]
+    #[test]
+    fn capture_startup_cannot_replace_preparation_or_follow_native_activation() {
+        for phase in [
+            Phase::Prepared,
+            Phase::Activated,
+            Phase::Uncertain,
+            Phase::Dispatched(DispatchLane::Exec),
+            Phase::Dispatched(DispatchLane::Entrypoint),
+            Phase::Finalized(CompletionBarrier::FilesystemsSynced),
+            Phase::Finalized(CompletionBarrier::EntrypointTerminalNoWriteback),
+        ] {
+            assert_eq!(
+                require_capture_preparation(phase, false).is_ok(),
+                phase == Phase::Prepared
+            );
+            assert!(require_capture_preparation(phase, true).is_err());
+        }
+    }
     use std::io::Read;
     use std::os::unix::net::UnixStream;
 

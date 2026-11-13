@@ -82,6 +82,17 @@ The default feature set is local-only. `remote` enables the gateway backend,
 `tracing-bridge` enables stream-to-tracing adaptation, and `test-support`
 exposes runtime fixtures.
 
+`experimental-owned-capture` is off by default. On an original owned HVF
+entrypoint admission with explicit caller registration, it retains the loaded
+credential and fresh call ID in the client, binds the exact final startup bytes
+once, and requires a version-8 helper that positively advertises envelope
+support before workload spawn or input write. Native credential custody still
+requires `native-caller-identity` on macOS and existing explicit enrollment.
+Registration-only/non-owning APIs do not acquire this invocation capability.
+This feature implements experimental startup plumbing, not authenticated
+stdout/stderr capture, a durable report inbox or a verified recording.
+It does not change `capture.recorded` or justify a Studio dependency update.
+
 ## Developing
 
 Run `cargo test -p mvm-client`. New operations need local, remote DTO, mock,

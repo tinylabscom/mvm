@@ -29,6 +29,8 @@ pub(crate) struct ClientBootResources {
     // and reseals attachments, so it must outlive every uncertain native use.
     pub _volumes: Option<crate::volume::LaunchPreparation>,
     pub built_runtime: Option<mvm_hostd::plan_admission::PreparedBuiltPackRuntime>,
+    #[cfg(feature = "experimental-owned-capture")]
+    pub owned_capture: Option<super::owned_capture::CaptureInvocation>,
 }
 
 struct ClientCustody {
@@ -73,6 +75,10 @@ impl OwnedClientBoot {
             let runtime = group.runtime.as_mut().expect("prepared runtime");
             if let Some(built) = &resources.built_runtime {
                 built.verify_config(runtime.config()?)?;
+            }
+            #[cfg(feature = "experimental-owned-capture")]
+            if let Some(capture) = &mut resources.owned_capture {
+                runtime.prepare_capture_startup(capture.take_emitter()?)?;
             }
             runtime.activate()
         })();
@@ -149,6 +155,10 @@ impl OwnedClientBoot {
             runtime
                 .validate_live()
                 .context("validate the original activated native channel")?;
+            #[cfg(feature = "experimental-owned-capture")]
+            if let Some(capture) = &resources.owned_capture {
+                capture.before_dispatch()?;
+            }
             let payload = match authorize_stdin(stdin, Some(&resources.admission.admitted))? {
                 DispatchStdin::OneShot(bytes) => bytes,
                 DispatchStdin::Streaming { .. } => {
@@ -793,10 +803,16 @@ fn boot_session_core(
         bundle_archive: bundle_archive.as_deref(),
         runtime_config: Some(&start_config),
     })?;
+    #[cfg(feature = "experimental-owned-capture")]
+    let mut owned_capture = None;
     let (mut substrate, context) = match admitted {
         BootAdmission::Legacy(substrate) => (*substrate, None),
         BootAdmission::Owned(admitted) => {
             let admitted = *admitted;
+            #[cfg(feature = "experimental-owned-capture")]
+            {
+                owned_capture = admitted.owned_capture;
+            }
             (admitted.substrate, Some(admitted.context))
         }
     };
@@ -832,6 +848,8 @@ fn boot_session_core(
             admission,
             _volumes: None,
             built_runtime: _built_runtime,
+            #[cfg(feature = "experimental-owned-capture")]
+            owned_capture,
         })
         .map_err(|mut failure| {
             failure.emit_failed("backend-start");
@@ -931,6 +949,8 @@ mod tests {
                     admission,
                     _volumes: None,
                     built_runtime: None,
+                    #[cfg(feature = "experimental-owned-capture")]
+                    owned_capture: None,
                 }),
                 runtime: None,
             })),

@@ -19,6 +19,8 @@ pub mod boot;
 pub mod call;
 pub mod dispatch;
 pub mod envelope;
+#[cfg(feature = "experimental-owned-capture")]
+mod owned_capture;
 pub mod session;
 pub mod stdin_stream;
 pub mod verb_audit;

@@ -3725,6 +3725,7 @@ dependencies = [
  "tempfile",
  "tracing",
  "which",
+ "zeroize",
 ]
 
 [[package]]

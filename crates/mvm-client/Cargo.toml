@@ -25,6 +25,11 @@ default = ["manifest-verify"]
 # Explicit macOS-native custody for opted-in caller registration only.
 # Other platforms refuse the opt-in; ordinary launches are unchanged.
 native-caller-identity = ["mvm-hostd/native-caller-identity"]
+# Experimental original-call startup only; does not enable capture transport.
+experimental-owned-capture = [
+    "mvm-hostd/experimental-owned-capture",
+    "mvm-runtime/experimental-owned-capture",
+]
 # Build as the release channel: the runtime overlay defaults to the published
 # artifact instead of a source-checkout build. Forwarded from mvm-cli's
 # feature of the same name.

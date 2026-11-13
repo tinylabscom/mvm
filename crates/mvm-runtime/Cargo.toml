@@ -108,6 +108,7 @@ nix = { version = "0.29", features = ["mount", "sched"] }
 
 [features]
 default = []
+experimental-owned-capture = ["mvm-backends/experimental-owned-capture"]
 manifest-verify = ["mvm-core/manifest-verify"]
 template-registry-s3 = ["dep:object_store"]
 # The claim-free host-wasmtime portability tier (`WasmBackend`). Off by
