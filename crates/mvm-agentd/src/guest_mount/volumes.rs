@@ -243,8 +243,8 @@ mod tests {
             .unwrap();
         std::fs::create_dir(root.join("data")).unwrap();
         let root_cstring = CString::new(root.as_os_str().as_encoded_bytes()).unwrap();
-        // SAFETY: the path names this test's tmpfs in its private namespace.
         assert_eq!(
+            // SAFETY: the path names this test's tmpfs in its private namespace.
             unsafe {
                 libc::mount(
                     std::ptr::null(),

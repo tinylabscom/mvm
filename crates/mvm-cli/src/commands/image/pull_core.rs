@@ -1291,6 +1291,8 @@ mod tests {
             if std::time::Instant::now() > deadline {
                 // A subreaper (user session manager) adopted it; the reaper
                 // only recognises init-parented orphans, so nothing to witness.
+                // SAFETY: kill takes two integers and touches no memory; `pid` is the child this
+                //         test spawned and still holds.
                 unsafe { libc::kill(pid, libc::SIGKILL) };
                 return;
             }
@@ -1316,6 +1318,8 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         };
         if !gone {
+            // SAFETY: kill takes two integers and touches no memory; `pid` is the child this test
+            //         spawned and still holds.
             unsafe { libc::kill(pid, libc::SIGKILL) };
         }
         assert!(gone, "the planted orphan survived the pre-spawn sweep");

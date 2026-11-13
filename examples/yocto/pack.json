@@ -6,8 +6,9 @@
   },
   "target": "aarch64-linux",
   "source": {
-    "kind": "local",
-    "path": "."
+    "kind": "yocto",
+    "archive": "mvm-workload-qemuarm64.rootfs.tar.gz",
+    "inputs": "yocto-inputs.json"
   },
   "packages": [],
   "dependencies": [],

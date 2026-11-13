@@ -11,6 +11,7 @@ its final self-outcome and resistance to an off-host rewrite are not attested.
 
 import argparse
 import base64
+import gzip
 import hashlib
 import json
 import os
@@ -448,6 +449,16 @@ class Smoke:
             })
 
 
+def installed_archive(recorded):
+    """The archive `bundle install` retained: gzip at rest, a plain one only on older installs.
+
+    The fixture records the path before the install, when only the plain name
+    can be derived, so look for the compressed file beside it at mutation time.
+    """
+    compressed = recorded.with_name(recorded.name + ".gz")
+    return compressed if compressed.exists() else recorded
+
+
 def mutate(home, fixture, case, wrong_signature):
     paths = {key: contained(home, value) for key, value in fixture["paths"].items()}
     descriptor = paths["registry_cache"] / fixture["manifest_sha256"] / "manifest.json"
@@ -483,11 +494,13 @@ def mutate(home, fixture, case, wrong_signature):
     elif case == "bundle-key":
         paths["bundle_key"].unlink()
     elif case == "archive":
-        data = bytearray(paths["archive"].read_bytes())
+        target = installed_archive(paths["archive"])
+        compressed = target.suffix == ".gz"
+        data = bytearray(gzip.decompress(target.read_bytes()) if compressed else target.read_bytes())
         data[len(data) // 2] ^= 1
-        paths["archive"].write_bytes(data)
+        target.write_bytes(gzip.compress(bytes(data)) if compressed else data)
     elif case == "missing-archive":
-        paths["archive"].unlink()
+        installed_archive(paths["archive"]).unlink()
     elif case == "malformed-revocation-trust":
         paths["revocation_trust"].parent.mkdir(parents=True, exist_ok=True)
         paths["revocation_trust"].parent.chmod(0o700)

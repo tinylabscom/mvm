@@ -92,6 +92,8 @@ pub enum ComposablePackError {
     Identity,
     #[error("unsafe local source or application copy path")]
     Path,
+    #[error("composable pack sources must be local application trees")]
+    UnsupportedSource,
     #[error("invalid, duplicate or excessive runtime reference")]
     Runtime,
     #[error("application entrypoint must start with one absolute executable")]
@@ -117,7 +119,9 @@ impl ComposablePackSpec {
         if self.identity.version.contains('+') {
             return Err(ComposablePackError::Identity);
         }
-        let PackSource::Local { path } = &self.source;
+        let PackSource::Local { path } = &self.source else {
+            return Err(ComposablePackError::UnsupportedSource);
+        };
         relative_path(path, true).map_err(|_| ComposablePackError::Path)?;
         if self.runtimes.len() > 16 {
             return Err(ComposablePackError::Runtime);

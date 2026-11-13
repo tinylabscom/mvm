@@ -35,12 +35,17 @@ use rand::TryRng;
 use super::network_endpoint_spawn::FlowMuxIdentitySpawnConfig;
 use mvm_core::atomic_io::write_private_ephemeral;
 
+/// A warm-restored guest must rekey before a new reader binding can be issued.
+pub use mvm_core::mailbox::reader::{
+    MAILBOX_READER_BOOT_FILE, MAX_MAILBOX_READER_BOOT_BYTES, MailboxReaderBootBinding,
+};
+
 // The drive's label and filenames are declared on the reading side, in
 // `mvm_agentd::flowmux_keys`, and used here. One declaration, so a rename
 // cannot leave the writer and the reader describing different drives.
 pub use mvm_agentd::flowmux_drive::{
     EGRESS_CA_CERT_FILE, GUEST_SIGNING_KEY_FILE, GuestIngressTarget, HOST_SIGNER_PUB_FILE,
-    IDENTITY_DRIVE_LABEL, INGRESS_TARGETS_FILE,
+    IDENTITY_DRIVE_LABEL, INGRESS_TARGETS_FILE, MAILBOX_ACK_SIGNING_KEY_FILE,
 };
 
 /// Mode the guest signing key is stored with. The drive is mounted read-only,
@@ -60,7 +65,7 @@ const EGRESS_CA_CERT_MODE: u16 = 0o444;
 /// optional-shaped, both are "material the host projects into the guest", and a
 /// third one is likelier than not. `Default` is the empty projection — the
 /// builder VM's own identity drive carries neither.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Default, Clone, Copy)]
 pub struct IdentityDriveContents<'a> {
     /// The signed plan's guest-loopback ingress targets.
     pub ingress: &'a [mvm_core::plan::IngressMapping],
@@ -68,6 +73,55 @@ pub struct IdentityDriveContents<'a> {
     /// so an unmodified TLS client accepts a host-terminated bound-host flow.
     /// `None` when the plan binds no destination, and never a key.
     pub egress_ca_cert_pem: Option<&'a str>,
+    /// Only project a distinct guest-held ACK key when a signed Receive
+    /// capability and current-boot enrollment will authorize its use.
+    pub mailbox_ack_key: Option<&'a MailboxAckKeyMaterial>,
+    /// Public plan/boot binding accompanying the root-only ACK key.
+    pub mailbox_reader_boot: Option<&'a MailboxReaderBootBinding>,
+}
+
+impl std::fmt::Debug for IdentityDriveContents<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdentityDriveContents")
+            .field("ingress", &self.ingress)
+            .field("egress_ca_cert_pem", &self.egress_ca_cert_pem)
+            .field(
+                "mailbox_ack_key",
+                &self.mailbox_ack_key.map(|_| "<redacted>"),
+            )
+            .field("mailbox_reader_boot", &self.mailbox_reader_boot)
+            .finish()
+    }
+}
+
+/// Independently minted guest mailbox ACK identity, never a FlowMux or host sealing key.
+pub struct MailboxAckKeyMaterial {
+    seed: zeroize::Zeroizing<[u8; 32]>,
+}
+
+impl std::fmt::Debug for MailboxAckKeyMaterial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MailboxAckKeyMaterial")
+            .field("seed", &"<redacted>")
+            .finish()
+    }
+}
+
+impl MailboxAckKeyMaterial {
+    /// Mint a new identity for one guest boot; enrollment and Receive authority
+    /// must be checked separately before accepting an ACK signed by this key.
+    pub fn mint() -> Result<Self> {
+        let mut seed = zeroize::Zeroizing::new([0u8; 32]);
+        rand::rngs::SysRng
+            .try_fill_bytes(seed.as_mut())
+            .context("drawing system entropy for the mailbox ACK key")?;
+        Ok(Self { seed })
+    }
+
+    /// Public key for binding the guest-held identity to an authorized boot.
+    pub fn verifying_key(&self) -> VerifyingKey {
+        SigningKey::from_bytes(&self.seed).verifying_key()
+    }
 }
 
 /// A minted per-boot identity: what the endpoint is told, and what the guest is
@@ -171,6 +225,11 @@ impl FlowMuxIdentityMaterial {
     /// Debug redaction does not zeroize or erase those copies.
     pub fn spawn_config(&self) -> &FlowMuxIdentitySpawnConfig {
         &self.spawn
+    }
+
+    /// Public guest identity pinned by this boot's host endpoint.
+    pub fn guest_verifying_key(&self) -> VerifyingKey {
+        self.guest.verifying_key()
     }
 
     /// The host-signer trust anchor the guest pins.
@@ -290,6 +349,33 @@ impl GuestIdentityMaterial {
                 path: format!("/{EGRESS_CA_CERT_FILE}"),
                 mode: EGRESS_CA_CERT_MODE,
                 data: cert_pem.as_bytes().to_vec(),
+                xattrs: Vec::new(),
+                owner: Owner::ROOT,
+            });
+        }
+        if contents.mailbox_ack_key.is_some() != contents.mailbox_reader_boot.is_some() {
+            bail!("mailbox reader boot binding and ACK key must be projected together");
+        }
+        if let Some(ack_key) = contents.mailbox_ack_key {
+            let binding = contents
+                .mailbox_reader_boot
+                .context("mailbox reader binding")?;
+            if binding.ack_public_key != ack_key.verifying_key().to_bytes()
+                || binding.guest_identity_key != self.verifying_key().to_bytes()
+            {
+                bail!("mailbox ACK key and boot binding do not match this identity drive");
+            }
+            nodes.push(Node::File {
+                path: format!("/{MAILBOX_ACK_SIGNING_KEY_FILE}"),
+                mode: GUEST_SIGNING_KEY_MODE,
+                data: ack_key.seed.to_vec(),
+                xattrs: Vec::new(),
+                owner: Owner::ROOT,
+            });
+            nodes.push(Node::File {
+                path: format!("/{MAILBOX_READER_BOOT_FILE}"),
+                mode: HOST_SIGNER_PUB_MODE,
+                data: serde_json::to_vec(binding).context("encode guest mailbox reader binding")?,
                 xattrs: Vec::new(),
                 owner: Owner::ROOT,
             });
@@ -431,6 +517,126 @@ mod tests {
     }
 
     #[test]
+    fn mailbox_ack_key_is_distinct_optional_and_redacted() {
+        use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxGrant, MailboxId};
+        let anchor = host_key().verifying_key();
+        let guest = GuestIdentityMaterial::mint(anchor).expect("guest key");
+        let ack = MailboxAckKeyMaterial::mint().expect("mailbox key");
+        let other = MailboxAckKeyMaterial::mint().expect("next boot");
+        assert_ne!(ack.verifying_key(), guest.verifying_key());
+        assert_ne!(ack.verifying_key(), other.verifying_key());
+        assert_ne!(ack.verifying_key(), host_key().verifying_key());
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let drive = dir.path().join(IDENTITY_DRIVE_FILE);
+        guest
+            .write_drive_with(&drive, &IdentityDriveContents::default())
+            .expect("ordinary identity drive");
+        let ordinary = std::fs::read(&drive).expect("ordinary drive");
+        assert!(
+            !ordinary
+                .windows(MAILBOX_ACK_SIGNING_KEY_FILE.len())
+                .any(|part| part == MAILBOX_ACK_SIGNING_KEY_FILE.as_bytes())
+        );
+
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.mailbox = Some(MailboxGrant {
+            mailbox: MailboxId::from_bytes([8; 32]),
+            authority_key: anchor.to_bytes(),
+            epoch: ExecutionEpoch::new(3).unwrap(),
+            report: None,
+            retention: None,
+        });
+        plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
+        let binding = MailboxReaderBootBinding::mint(
+            &plan,
+            guest.verifying_key(),
+            ack.verifying_key().to_bytes(),
+        )
+        .unwrap();
+        let contents = IdentityDriveContents {
+            mailbox_ack_key: Some(&ack),
+            mailbox_reader_boot: Some(&binding),
+            ..Default::default()
+        };
+        assert!(!format!("{ack:?}").contains(&hex::encode(ack.seed.as_slice())));
+        assert!(!format!("{contents:?}").contains(&hex::encode(ack.seed.as_slice())));
+        guest
+            .write_drive_with(&drive, &contents)
+            .expect("mailbox identity drive");
+        let enrolled = std::fs::read(&drive).expect("mailbox drive");
+        assert!(
+            enrolled
+                .windows(MAILBOX_ACK_SIGNING_KEY_FILE.len())
+                .any(|part| part == MAILBOX_ACK_SIGNING_KEY_FILE.as_bytes())
+        );
+        assert!(enrolled.windows(32).any(|part| part == ack.seed.as_slice()));
+        assert!(
+            enrolled
+                .windows(MAILBOX_READER_BOOT_FILE.len())
+                .any(|part| part == MAILBOX_READER_BOOT_FILE.as_bytes())
+        );
+        assert!(
+            !enrolled
+                .windows(32)
+                .any(|part| part == host_key().to_bytes())
+        );
+        let mismatched = IdentityDriveContents {
+            mailbox_ack_key: Some(&other),
+            mailbox_reader_boot: Some(&binding),
+            ..Default::default()
+        };
+        assert!(guest.write_drive_with(&drive, &mismatched).is_err());
+    }
+
+    #[test]
+    fn mailbox_reader_boot_binding_is_private_current_and_rejects_a_parent_or_symlink() {
+        use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxGrant, MailboxId};
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.mailbox = Some(MailboxGrant {
+            mailbox: MailboxId::from_bytes([8; 32]),
+            authority_key: host_key().verifying_key().to_bytes(),
+            epoch: ExecutionEpoch::new(3).unwrap(),
+            report: None,
+            retention: None,
+        });
+        plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
+        let dir = tempfile::tempdir().unwrap();
+        let guest = GuestIdentityMaterial::mint(host_key().verifying_key()).unwrap();
+        let ack = MailboxAckKeyMaterial::mint().unwrap();
+        let binding = MailboxReaderBootBinding::mint(
+            &plan,
+            guest.verifying_key(),
+            ack.verifying_key().to_bytes(),
+        )
+        .unwrap();
+        binding.persist(dir.path()).unwrap();
+        assert_eq!(MailboxReaderBootBinding::load(dir.path()).unwrap(), binding);
+        binding.check_plan(&plan).unwrap();
+        assert_eq!(binding.ack_public_key, ack.verifying_key().to_bytes());
+        assert_ne!(binding.guest_identity_key, binding.ack_public_key);
+        let mut stale = plan.clone();
+        stale.nonce = mvm_core::plan::Nonce::from_bytes([9; 16]);
+        assert!(binding.check_plan(&stale).is_err());
+        stale = plan.clone();
+        stale.mailbox.as_mut().unwrap().epoch = ExecutionEpoch::new(4).unwrap();
+        assert!(binding.check_plan(&stale).is_err());
+
+        let path = dir.path().join(MAILBOX_READER_BOOT_FILE);
+        std::fs::write(
+            &path,
+            vec![b'x'; MAX_MAILBOX_READER_BOOT_BYTES as usize + 1],
+        )
+        .unwrap();
+        assert!(MailboxReaderBootBinding::load(dir.path()).is_err());
+        std::fs::remove_file(&path).unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::write(&outside, serde_json::to_vec(&binding).unwrap()).unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        assert!(MailboxReaderBootBinding::load(dir.path()).is_err());
+    }
+
+    #[test]
     fn the_published_guest_key_is_the_one_on_the_drive() {
         let material = FlowMuxIdentityMaterial::mint("s1", &host_key()).expect("mint");
         assert_identity_is_self_consistent(&material).expect("halves must match");
@@ -449,6 +655,27 @@ mod tests {
 
     #[test]
     fn writing_an_identity_drive_is_not_artifact_hashing() {
+        // Acquisition is a process-global counter. Other tests hash artifacts
+        // concurrently, so measure this operation in its own test process.
+        if std::env::var_os("MVM_DRIVE_HASH_TEST_CHILD").is_none() {
+            let test_name = format!(
+                "{}::writing_an_identity_drive_is_not_artifact_hashing",
+                module_path!().trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::"))
+            );
+            let result = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .arg("--exact")
+                .arg(test_name)
+                .env("MVM_DRIVE_HASH_TEST_CHILD", "1")
+                .output()
+                .expect("run isolated drive test");
+            assert!(
+                result.status.success()
+                    && String::from_utf8_lossy(&result.stdout).contains("1 passed"),
+                "isolated identity-drive measurement failed: {}",
+                String::from_utf8_lossy(&result.stdout)
+            );
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(IDENTITY_DRIVE_FILE);
         let material = FlowMuxIdentityMaterial::mint("cold", &host_key()).unwrap();
@@ -569,6 +796,8 @@ mod tests {
                 &IdentityDriveContents {
                     ingress: &[],
                     egress_ca_cert_pem: Some(ca.cert_pem()),
+                    mailbox_ack_key: None,
+                    mailbox_reader_boot: None,
                 },
             )
             .expect("write drive");
@@ -604,6 +833,8 @@ mod tests {
                 &IdentityDriveContents {
                     ingress: &[],
                     egress_ca_cert_pem: Some(poisoned),
+                    mailbox_ack_key: None,
+                    mailbox_reader_boot: None,
                 },
             );
 

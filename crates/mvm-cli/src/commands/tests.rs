@@ -4337,6 +4337,59 @@ fn run_timeout_parses_to_some() {
 }
 
 #[test]
+fn mailbox_retention_flag_is_explicit_on_machine_runs() {
+    let mailbox = "ab".repeat(32);
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "run",
+        "--image",
+        "alpine",
+        "--mailbox",
+        &mailbox,
+        "--mailbox-retention-ms",
+        "10000",
+        "--",
+        "true",
+    ])
+    .expect("parse explicit mailbox window");
+    let Commands::Machine(group) = cli.command else {
+        panic!("expected machine command");
+    };
+    let machine::MachineAction::Run(args) = group.action else {
+        panic!("expected machine run");
+    };
+    assert_eq!(args.run.mailbox_retention_ms, Some(10_000));
+    let direct = Cli::try_parse_from([
+        "mvmctl",
+        "run",
+        "--mailbox",
+        &mailbox,
+        "--mailbox-retention-ms",
+        "10000",
+        "--",
+        "true",
+    ])
+    .expect("parse direct run retention");
+    let Commands::Run(run) = direct.command else {
+        panic!("expected direct run");
+    };
+    assert_eq!(run.machine.run.mailbox_retention_ms, Some(10_000));
+    assert!(
+        Cli::try_parse_from([
+            "mvmctl",
+            "machine",
+            "run",
+            "--mailbox-retention-ms",
+            "0",
+            "--",
+            "true",
+        ])
+        .is_err()
+    );
+}
+
+#[test]
 fn machine_run_interactive_image_shell_dx_parses() {
     let args = parse_machine_run(&["--net", "-it", "--image", "alpine", "--", "/bin/sh"])
         .expect("parse Docker-style interactive shell run");

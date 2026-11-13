@@ -18,8 +18,7 @@
 //!    joined length within the cmdline guard — otherwise the guest kernel
 //!    silently truncates or the VMM rejects the cmdline at boot).
 
-use sha2::{Digest, Sha256};
-use std::io::Read;
+use mvm_core::crypto::image_verify::sha256_file;
 
 use crate::artifacts::artifact::{MicrovmArtifact, ValidationCheck, ValidationReport};
 use crate::artifacts::traits::{ArtifactError, ArtifactValidator};
@@ -57,7 +56,7 @@ impl ArtifactValidator for StaticValidator {
 
         // ── check 2: SHA-256 hashes match ────────────────────────────────────
         let kernel_hash_ok = if kernel_exists {
-            match hash_file(&artifact.kernel.path) {
+            match sha256_file(&artifact.kernel.path) {
                 Ok(got) => {
                     if got == artifact.kernel.hash {
                         Ok(true)
@@ -72,7 +71,7 @@ impl ArtifactValidator for StaticValidator {
             Ok(true)
         };
         let rootfs_hash_ok = if rootfs_exists {
-            match hash_file(&artifact.rootfs.path) {
+            match sha256_file(&artifact.rootfs.path) {
                 Ok(got) => {
                     if got == artifact.rootfs.hash {
                         Ok(true)
@@ -280,21 +279,6 @@ fn boot_args_problems(boot_args: &[String]) -> Vec<String> {
     problems
 }
 
-/// Stream `path` through SHA-256 and return the lowercase hex digest.
-fn hash_file(path: &std::path::Path) -> std::io::Result<String> {
-    let mut f = std::fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 65536];
-    loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hex::encode(hasher.finalize()))
-}
-
 /// Open the rootfs as an ext4 image and assert `/sbin/init` exists.
 ///
 /// Returns `Ok(false)` when the image is valid ext4 but the path is absent;
@@ -315,6 +299,7 @@ mod tests {
     use crate::compat::{MicrovmBackend, RootfsFormat};
     use mvm_core::arch::GuestArch;
     use mvm_core::kernel_format::KernelFormat;
+    use sha2::{Digest, Sha256};
     use uuid::Uuid;
     /// Write `content` to a temp file and return the path + its SHA-256 hex.
     fn write_temp(

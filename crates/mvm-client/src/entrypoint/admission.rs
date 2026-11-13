@@ -254,6 +254,7 @@ impl EntrypointAdmission {
             substrate: SessionAuditSubstrate {
                 tenant_id: ctx.admitted.plan().tenant.0.clone(),
                 plan_json,
+                mailbox_posture: ctx.admitted.mailbox_posture(),
                 caller_registration,
                 bundle_json,
                 built_pack_check: ctx.admitted.built_pack_boot_check()?,

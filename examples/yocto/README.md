@@ -49,19 +49,41 @@ python3 examples/yocto/check_output.py \
 
 Only `mvm-hello` may be installed in this representative image. The checker
 reports the compressed archive and regular-file payload bytes. Then record the
-exact output bytes used for the import. The shown pack spec targets aarch64:
-run `mvmctl build` on an aarch64 host with a matching published signed MVM
-runtime, even if the Yocto rootfs was built on an x86_64 Linux host.
+exact output bytes used for the import. The pack spec names both inputs
+relative to itself; stage the spec and outputs together outside the checkout.
+The shown spec targets aarch64: run `mvmctl build` on an aarch64 Linux host
+with a matching published signed MVM runtime, even if Yocto built the rootfs
+on an x86_64 Linux host.
 
 ```sh
+mkdir -p /tmp/mvm-yocto-demo
+cp examples/yocto/pack.json /tmp/mvm-yocto-demo/pack.json
+cp "$BUILDDIR/tmp/deploy/images/qemuarm64/mvm-workload-qemuarm64.rootfs.tar.gz" \
+  /tmp/mvm-yocto-demo/mvm-workload-qemuarm64.rootfs.tar.gz
 python3 examples/yocto/write_inputs.py \
-  "$BUILDDIR/tmp/deploy/images/qemuarm64/mvm-workload-qemuarm64.rootfs.tar.gz" \
-  examples/yocto/meta-mvm /tmp/mvm-yocto-inputs.json
-mvmctl build examples/yocto/pack.json \
-  --yocto-archive "$BUILDDIR/tmp/deploy/images/qemuarm64/mvm-workload-qemuarm64.rootfs.tar.gz" \
-  --yocto-inputs /tmp/mvm-yocto-inputs.json \
-  --out /tmp/mvm-yocto-hello.mvmpkg
+  /tmp/mvm-yocto-demo/mvm-workload-qemuarm64.rootfs.tar.gz \
+  examples/yocto/meta-mvm /tmp/mvm-yocto-demo/yocto-inputs.json
+mvmctl build /tmp/mvm-yocto-demo/pack.json --out /tmp/mvm-yocto-hello.mvmpkg
 ```
+
+An in-process application can call the same import-to-pack operation without
+invoking `mvmctl`:
+
+```rust
+let mut request = mvm_client::yocto_pack::YoctoPackRequest::from_file(
+    std::path::Path::new("/tmp/mvm-yocto-demo/pack.json"),
+    "/tmp/mvm-yocto-hello.mvmpkg".into(),
+)?;
+request.hypervisor = Some("firecracker".into());
+let built = mvm_client::yocto_pack::build_yocto_pack(request)?;
+println!("{} {}", built.path.display(), built.sha256);
+```
+
+The library call needs an aarch64 Linux Firecracker host, a published verified
+image set and a matching signed guest runtime. It refuses a selected local
+image checkout rather than replacing its pair-stamped inputs with released
+ones. Native HVF pack health still needs owner-preserving custody; neither
+this API nor the example is evidence of an installed signed-pack boot.
 
 Without a matching signed MVM release, the opt-in importer test can still
 exercise the real archive through bounded unpack, ext4 materialization and
@@ -69,7 +91,7 @@ verity. It injects **test binaries**, so it is not an MVM boot witness:
 
 ```sh
 MVM_YOCTO_TEST_ARCHIVE="$BUILDDIR/tmp/deploy/images/qemuarm64/mvm-workload-qemuarm64.rootfs.tar.gz" \
-MVM_YOCTO_TEST_INPUTS=/tmp/mvm-yocto-inputs.json \
+MVM_YOCTO_TEST_INPUTS=/tmp/mvm-yocto-demo/yocto-inputs.json \
   cargo test -p mvm-build native_archive_materializes_without_a_builder_vm --lib -- --ignored --nocapture
 ```
 

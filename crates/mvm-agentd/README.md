@@ -34,9 +34,47 @@ Specialized binaries keep privilege and dependency boundaries small:
   `mvm-setpriv` crate, applies the final identity.
 
 The guest treats host replies as protocol input, while the host treats every
-guest request as untrusted. Secrets and authorization decisions remain
-host-side; the agent receives only the capabilities and values needed for the
-admitted execution.
+guest request as untrusted. Host sealing and destination signing material
+remain host-side; an opt-in mailbox reader additionally holds its own per-boot
+ACK signing key inside the guest agent, not in the workload.
+
+## Guest mailbox reader
+
+Only a signed plan granting this workload's own mailbox can enable Receive.
+The agent binds `/run/mvm/mailbox/receive.sock` when its separate boot ACK key
+was provisioned. Dev's ephemeral host helper refuses reader frames; a production
+mailbox with signed retention uses a locally anchored journal and boot-bound
+Receive authority. The local protocol
+is versioned, length-prefixed, and bounded; use `ApplicationReaderRequest` and
+`ReaderResponse` from `mvm_core::mailbox::reader_wire`. Once backed by that
+local destination, `Receive` returns a signed lease,
+content type, and payload. Process the payload **before** sending
+`Ack { lease }` on a new connection. An empty inbox and a refusal are not
+successful delivery; reading never automatically ACKs.
+
+For a guest application example, build:
+
+```sh
+cargo build -p mvm-agentd --example mailbox_reader_client --target aarch64-unknown-linux-musl
+```
+
+Run it without arguments to read without acknowledging; pass `--ack` only when
+writing and flushing its stdout counts as completed processing. The returned
+`Acknowledged { ack }` echoes the exact guest-signed operation after the local
+journal and anchor commit. This is a trusted-local confirmation, **not** a
+destination-signed, exportable ACK receipt. A lost delivery or ACK response is
+**unknown**, not success. Retry with the same lease and signed ACK identity
+while this boot's agent remains active, or reconcile against the durable
+journal; a different ACK for the same lease conflicts.
+
+`mailbox_writer_client <message>` stages into the Dev/legacy spool.
+`mailbox_writer_client --local <message>` uses the separate immutable
+`outbox-local` request for the production local-durable tier; the guest agent
+retains it until it verifies the boot-bound signed V2 receipt. A response it
+cannot verify is not acceptance. Both commands report **local staging only**,
+not a destination receipt; verify the host-side receipt or journal before
+claiming destination acceptance. Do not use the legacy spool for a production
+local-durable claim.
 
 ## Bounded entrypoint capture
 

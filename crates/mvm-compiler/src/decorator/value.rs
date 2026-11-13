@@ -780,7 +780,16 @@ fn helper_to_dependencies(v: Value, path: &Path, line: usize) -> Result<Dependen
 
 fn helper_to_env_value(v: Value, path: &Path, line: usize) -> Result<EnvValue, ParseError> {
     match v {
-        Value::Str(s) => Ok(EnvValue::Literal { value: s }),
+        // The value is not echoed: a bare string is often a secret pasted in.
+        Value::Str(_) => Err(ParseError::HelperBadKwarg {
+            path: path.to_path_buf(),
+            line,
+            helper: "mvm.app".to_string(),
+            kwarg: "env[]".to_string(),
+            detail: "a bare string is not an env value; write mvm.literal(\"...\") for a \
+                     literal or mvm.secret(\"name\", ...) for a secret"
+                .to_string(),
+        }),
         Value::Helper {
             name,
             mut kwargs,
@@ -859,9 +868,7 @@ fn helper_to_env_value(v: Value, path: &Path, line: usize) -> Result<EnvValue, P
             line,
             helper: "mvm.app".to_string(),
             kwarg: "env[]".to_string(),
-            detail: format!(
-                "expected string literal or mvm.literal(...)/mvm.secret(...), got {other:?}"
-            ),
+            detail: format!("expected mvm.literal(...) or mvm.secret(...), got {other:?}"),
         }),
     }
 }

@@ -116,3 +116,52 @@ fn preparing_the_guest_runtime_cold_never_runs_the_toolchain() {
     );
     assert!(!text.contains("No such file or directory"), "{text}");
 }
+
+#[test]
+fn exporting_an_unknown_template_refuses_before_creating_a_signer_or_bundle() {
+    let home = tempfile::tempdir().unwrap();
+    let mut env = TestEnv::new();
+    env.isolate_mvm_home(home.path());
+    library_process(&mut env, home.path());
+
+    let out = home.path().join("missing.mvmpkg");
+    let err = mvm_client::bundle::export_template(
+        "missing-template",
+        mvm_client::bundle::TemplateExport::new(out.clone()),
+    )
+    .expect_err("no template is available to export");
+    assert!(format!("{err:#}").contains("missing-template"), "{err:#}");
+    assert!(!out.exists(), "an unresolved template cannot be published");
+    assert!(
+        !home.path().join("keys").exists(),
+        "refusal must not mint a host signing identity"
+    );
+}
+
+#[test]
+fn the_yocto_pack_builder_refuses_a_foreign_target_without_invoking_the_cli() {
+    let home = tempfile::tempdir().unwrap();
+    let mut env = TestEnv::new();
+    env.isolate_mvm_home(home.path());
+    library_process(&mut env, home.path());
+
+    let mut spec: mvm_client::yocto_pack::PackSpec =
+        serde_json::from_str(include_str!("../../../examples/yocto/pack.json")).unwrap();
+    spec.target = if cfg!(target_arch = "aarch64") {
+        mvm_client::yocto_pack::PackTarget::X86_64Linux
+    } else {
+        mvm_client::yocto_pack::PackTarget::Aarch64Linux
+    };
+    let out = home.path().join("refused.mvmpkg");
+    let err = mvm_client::yocto_pack::build_yocto_pack(mvm_client::yocto_pack::YoctoPackRequest {
+        spec,
+        spec_dir: home.path().to_path_buf(),
+        out: out.clone(),
+        label: None,
+        health_timeout_secs: 120,
+        hypervisor: None,
+    })
+    .expect_err("a foreign target is refused");
+    assert!(format!("{err:#}").contains("targets"), "{err:#}");
+    assert!(!out.exists());
+}

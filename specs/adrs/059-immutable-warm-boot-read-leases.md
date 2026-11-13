@@ -7,8 +7,11 @@ Validation: none — this is an accepted design direction, not a shipped warm re
 
 Accepted direction. The owner approved one typed publication/claim API with
 bounded sealed memfds, inode-pinned fs-verity where supported, and fail-closed
-warm claims. No backend or launch path implements this ADR yet; enabling warm
-claims still requires an owner/descriptor API review and live witnesses.
+warm claims. A resident service can publish and claim a canonical signed
+kernel in a sealed, explicitly budgeted Linux memfd. Its claim exposes no
+descriptor and is not a complete boot closure or a VMM-lifetime lease. No
+backend or launch path consumes it; enabling warm claims still requires an
+owner/descriptor API review and live witnesses.
 
 ## Context
 

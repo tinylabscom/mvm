@@ -1,9 +1,7 @@
 //! Template lifecycle: legacy name-keyed CRUD, manifest-keyed slots,
 //! artifact resolution/installation, dev builds, vsock health polling,
 //! and registry push/pull/verify. Split by concern across the
-//! submodules below; every `pub` item in each submodule is re-exported
-//! here so `crate::vm::template::lifecycle::<name>` keeps resolving
-//! exactly as it did when this was a single file.
+//! submodules below; each submodule's `pub` items are re-exported by name.
 
 mod artifacts;
 mod build;
@@ -15,12 +13,23 @@ mod snapshot;
 #[cfg(test)]
 mod path_security_tests;
 
-pub use artifacts::*;
-pub use build::*;
-pub use build_image::*;
-pub use registry_sync::*;
-pub use slots::*;
-pub use snapshot::*;
+pub use artifacts::{
+    Checksums, current_revision_id, current_revision_id_for_slot, sha256_hex,
+    template_artifacts_for_slot, template_artifacts_for_slot_revision,
+    template_load_current_revision, template_verify_slot, validate_slot_revision,
+};
+pub use build::{build_frozen_manifest, template_build_from_manifest};
+pub use build_image::{ImageBuildSources, template_build_from_image};
+pub use registry_sync::{registry_download_revision, template_pull};
+pub use slots::{
+    SlotEntry, template_delete_slot, template_list_slot_hashes, template_list_slots,
+    template_load_slot, template_persist_slot, template_prune_orphan_slots,
+};
+pub use snapshot::{
+    installed_bundle_arch, installed_bundle_archive, installed_bundle_environment,
+    installed_bundle_posture, template_artifacts_dispatched, template_artifacts_for_boot,
+    template_load_dispatched, template_snapshot_info_dispatched, template_snapshot_info_for_slot,
+};
 
 // `clone_rootfs_for_instance` moved to `crate::base::cow`.
 // Re-exported here so existing

@@ -225,9 +225,7 @@ which builds the registry layout by:
 
 The repository rename changes that workflow's signing identity. The built-in
 policy accepts the current exact workflow identity for `agent/` and `runtime/`.
-The former identity is accepted only for the nine exact historical manifest
-reference/digest pairs [listed below](#decide-who-may-publish), and only before
-2026-11-06 00:00 UTC.
+The former identity is not accepted by the built-in policy.
 Publish newly signed bundles only after a client release with that policy is
 available; a repository URL change alone does not make a bundle trustworthy.
 Existing signed versions retain their old identity unless re-signed. Official
@@ -378,6 +376,33 @@ The same verification runs again on every load. A cached file changed after
 installation no longer matches the manifest, and the pack is reported as not
 installed until `mvmctl pull` restores it.
 
+### Application archive transport
+
+An application descriptor (manifest schema 2, kind `application`) pins its
+`bundle.source` archive by the SHA-256 and byte size of the **uncompressed**
+`.mvmpkg` tar; those signed fields keep their meaning under compression. The
+bundle may optionally carry a transport wrapper:
+
+```json
+"transport": {
+  "compression": "gzip",
+  "compressed_sha256": "…",
+  "compressed_size": 1234
+}
+```
+
+When `transport` is present, the source locator serves the compressed asset
+instead of the tar. `mvmctl pull` fetches it under a 4 GiB bound, pins the
+compressed bytes to `compressed_sha256` and `compressed_size`, then
+stream-decompresses under a hard cap of the signed `archive_size` (a
+decompression-bomb bound) and requires the decompressed bytes to hash to the
+signed `archive_sha256`. Only then does the ordinary bundle verification,
+install and host admission path run, unchanged. A missing, truncated,
+oversized, or hash-mismatched asset — compressed or decompressed — fails
+closed. Only `gzip` is recognized; unknown compression values and unknown
+transport fields refuse at descriptor parse. Descriptors without `transport`
+are fetched and verified byte-for-byte as before.
+
 ### Built-image release assets
 
 A signed schema-v2 `image` descriptor declares seven external release assets,
@@ -411,12 +436,43 @@ Downloads and verification are bounded: manifests and signature metadata are
 limited to 1 MiB, a built rootfs to 16 GiB, its verity tree to 1 GiB, and each
 remaining built-image asset to 1 MiB. The combined payload permits at most
 4096 files and 32 GiB. These ceilings apply in addition to signed exact sizes;
-large files are streamed, not buffered as a whole.
+large files are streamed, not buffered as a whole. An application archive is
+bounded to 4 GiB; with a signed `transport` wrapper, the compressed asset is
+bounded to the same 4 GiB and decompression stops one byte past the signed
+`archive_size`.
 
 Installation support does not enable booting built-image packs. Run paths
 still refuse them explicitly, with no source-build fallback. It also does not
 establish producer publishability or official release status; the producer
 publication guard and released pull/admission/boot evidence remain separate.
+
+### Application archive transport
+
+An application descriptor (schema version 2, `kind: "application"`) signs the
+uncompressed `.mvmpkg` tar: `bundle.archive_sha256`, `bundle.archive_size` and
+`bundle.key_id` always describe the tar itself, never a re-compressed copy.
+
+A descriptor may add an optional `bundle.transport` wrapper declaring that the
+`bundle.source` asset is compressed on the wire:
+
+```json
+"transport": {
+  "compression": "gzip",
+  "compressed_sha256": "…64 lowercase hex…",
+  "compressed_size": 123456
+}
+```
+
+`compression` is a closed enum: only `gzip` parses, and unknown values refuse
+at descriptor parse time — there is no fallback or sniffing. When transport is
+present, the client fetches the compressed asset bounded by the signed
+`compressed_size`, pins the compressed bytes to `compressed_sha256`, then
+stream-decompresses under a hard cap of `archive_size` bytes and requires the
+decompressed bytes to hash to `archive_sha256`. Only then does the ordinary
+bundle verification, atomic install and host admission path run, unchanged. A
+missing, truncated or size-drifting asset, a decompression bomb over the signed
+cap, or a decompressed digest mismatch fails closed. Descriptors without
+`transport` are fetched byte-for-byte exactly as before.
 
 ## Decide who may publish
 
@@ -428,30 +484,11 @@ https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/head
 ```
 
 under the issuer `https://token.actions.githubusercontent.com`. The former
-`mvm-templates` exact `publish.yml@refs/heads/main` workflow identity is
-accepted only before 2026-11-06 00:00 UTC and only for the following exact
-versioned manifest references and SHA-256 digests of their signed bytes:
-
-| Manifest reference | Manifest-byte SHA-256 |
-| --- | --- |
-| `agent/claude@1.0.1` | `c4be773ef57a0f4365730858e522207c5e609f9fda76f1499eab3d6b0c6293f5` |
-| `agent/codex@1.0.0` | `63f7c363966fe3bacb894e50be1e04e720ea6ac4e9a2d878fb2c811dc21bea7c` |
-| `agent/goose@1.0.0` | `043fe83720bd8dc25aa1c11c298993957a1b4ec23a71d0a7d2343b0b13024506` |
-| `agent/opencode@1.0.0` | `1304b068122bc84fbae7c795727d9d7ccf3bf852cbb8309ab2e9d4903fdf2a1a` |
-| `agent/pi@1.0.0` | `f4049d71e7f18fcb23cb90f01898fe7af06b66daf958920416010a9aa8438272` |
-| `runtime/go@1.0.0` | `ce1ac86f67e6a9df7a1b1a46d63384fa20a30848fdd7e5967d2293bfb5ceec50` |
-| `runtime/node@1.0.0` | `e10d2c7f070e00a1b5d8c713568c0aebe608cc4e346c091a4cb25057ffd25bd3` |
-| `runtime/python@1.0.0` | `80903c11a95708dcf493d673bf76a99f3828a41a4e640550e19b76fd8affa229` |
-| `runtime/rust@1.0.0` | `e9e27c4055186d2416af010804000410cbd54b86d530084aa706cb0bf79c344e` |
-
-The producer evidence is pinned to `tinylabscom/mvm-packs` commit
-`bef6dea6cea2b982596e3429dcb3c9c4c265588e`; its list is not evidence that
-older consumers enforced digest binding. The consumer checks this exception
-after real Sigstore verification identifies the signer. Changing signed
-manifest bytes, the version, or the namespace cannot extend the exception.
-At or after the cutoff, all former-identity bundles fail under built-in trust.
-Explicit operator publisher policy is separate: neither this historical
-digest restriction nor its built-in cutoff applies to that operator decision.
+`mvm-templates` workflow identity is no longer trusted by the built-in policy:
+a bundle signed only under it is refused. The nine historical manifests it once
+covered are published again under the current identity. To trust a pack that is
+still signed only under the former identity, name that identity in an explicit
+operator publisher policy; the decision is yours and nothing built in widens it.
 
 The `mvm/` namespace
 is reserved to the exact current workflow identity. An operator policy may
@@ -510,9 +547,8 @@ changes for existing installations:
   override the new defaults. A mirror may keep serving an old signed artifact.
 - Previously published Sigstore bundles remain bound to the
   `mvm-templates` workflow identity. Renaming the repository cannot rewrite
-  them. Built-in trust accepts only the nine exact historical manifest
-  reference/digest pairs above and only before 2026-11-06 00:00 UTC,
-  including when reopening an installed pack.
+  them. Built-in trust no longer accepts that identity; a bundle signed only
+  under it is refused, including when reopening an installed pack.
 - A bundle newly signed by the `mvm-packs` workflow has a different identity.
   The built-in policy accepts it for legacy `agent/` and `runtime/` packs, but
   the publisher must wait until that client policy is released before replacing

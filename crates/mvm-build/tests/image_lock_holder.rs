@@ -57,9 +57,13 @@ fn try_lock(path: &Path) -> bool {
         .open(path)
         .expect("open sidecar for try-lock");
     let fd = file.as_raw_fd();
+    // SAFETY: flock takes a descriptor and flags only; `fd` belongs to `file`, which is still
+    //         open.
     let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
     if rc == 0 {
         // Release immediately; we only wanted to test contention.
+        // SAFETY: flock takes a descriptor and flags only; `fd` belongs to `file`, which is still
+        //         open.
         let _ = unsafe { libc::flock(fd, libc::LOCK_UN) };
         true
     } else {

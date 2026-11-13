@@ -1,4 +1,12 @@
 //! Regression checks for the scheduled documented-surface witnesses.
+//!
+//! Owned gate: `e2e-docs.yml` (and the `release.yml` job that waits for it).
+//! It is a scheduled, multi-hour, self-hosted lane; a broken edit surfaces a
+//! day later, so these tests pin its job wiring (shards, budgets, runner
+//! labels, image preparation) on every pull request. The `the_bounded_runner_*`
+//! tests and `both_live_harnesses_report_phase_timings` are behavioural: they
+//! execute the lane's own Python and bash helpers. Each test states the
+//! contract it pins in its doc comment or an `// Owned gate:` line.
 
 use std::fs;
 #[cfg(unix)]
@@ -94,6 +102,7 @@ fn release_gate_problem(workflow: &str) -> Option<String> {
     None
 }
 
+// Owned gate: release.yml publication gate parser (mutates the workflow text).
 #[test]
 fn publication_gate_checks_ignore_other_jobs_and_reject_missing_success() {
     let workflow = fs::read_to_string(".github/workflows/release.yml").unwrap();
@@ -315,6 +324,7 @@ fn each_live_job_budget_exceeds_the_suite_deadline() {
     }
 }
 
+// Owned gate: e2e-docs.yml Linux shards.
 #[test]
 fn linux_documented_surface_requires_both_complete_inventory_shards() {
     let workflow = extended_ci();
@@ -337,6 +347,7 @@ fn linux_documented_surface_requires_both_complete_inventory_shards() {
     );
 }
 
+// Owned gate: e2e-docs.yml macOS shards.
 #[test]
 fn macos_documented_surface_uses_isolated_sequential_shards() {
     let workflow = extended_ci();
@@ -375,6 +386,7 @@ fn macos_documented_surface_uses_isolated_sequential_shards() {
     );
 }
 
+// Owned gate: e2e-docs.yml launch mode.
 #[test]
 fn documented_launches_are_cold_and_warm_scenarios_override_explicitly() {
     let workflow = extended_ci();
@@ -426,6 +438,7 @@ fn documented_launches_are_cold_and_warm_scenarios_override_explicitly() {
     );
 }
 
+// Owned gate: e2e-docs.yml Firecracker requirement.
 #[test]
 fn only_native_invocation_positives_require_firecracker() {
     fn tags_for<'a>(feature: &'a str, title: &str) -> std::collections::BTreeSet<&'a str> {
@@ -612,6 +625,7 @@ fn the_builder_lock_wait_cannot_outlast_the_suite_deadline() {
     );
 }
 
+// Owned gate: e2e-docs.yml suite timeout.
 #[test]
 fn the_suite_timeout_owns_the_entire_conformance_process_tree() {
     let script = documented_surface_script();
@@ -629,6 +643,7 @@ fn the_suite_timeout_owns_the_entire_conformance_process_tree() {
     );
 }
 
+// Owned gate: e2e-docs.yml bounded runner (behavioural).
 #[cfg(unix)]
 #[test]
 fn the_bounded_runner_terminates_descendants_that_hold_file_locks() {
@@ -689,6 +704,7 @@ fn the_bounded_runner_terminates_descendants_that_hold_file_locks() {
     }
 }
 
+// Owned gate: e2e-docs.yml bounded runner (behavioural).
 #[cfg(unix)]
 #[test]
 fn the_bounded_runner_streams_output_and_preserves_exit_status() {
@@ -763,6 +779,7 @@ fn the_bounded_runner_forwards_a_line_while_the_command_still_runs() {
     );
 }
 
+// Owned gate: e2e-docs.yml bounded runner cleanup.
 #[cfg(unix)]
 #[test]
 fn bounded_cleanup_only_ignores_permission_denial_after_the_child_exits() {
@@ -815,6 +832,7 @@ fn job_block<'a>(workflow: &'a str, job: &str) -> &'a str {
     &workflow[start..end]
 }
 
+// Owned gate: e2e-docs.yml mvmctl build.
 #[test]
 fn documented_surface_jobs_build_a_signature_verifying_mvmctl() {
     let workflow = extended_ci();
@@ -832,6 +850,7 @@ fn documented_surface_jobs_build_a_signature_verifying_mvmctl() {
     }
 }
 
+// Owned gate: e2e-docs.yml macOS kernel.
 #[test]
 fn macos_documented_surface_uses_the_published_workload_kernel() {
     let workflow = extended_ci();
@@ -847,6 +866,7 @@ fn macos_documented_surface_uses_the_published_workload_kernel() {
     );
 }
 
+// Owned gate: e2e-docs.yml local launch gate.
 #[test]
 fn local_launch_gate_uses_the_published_workload_kernel() {
     let script = fs::read_to_string("scripts/e2e-launch-modes.sh")
@@ -862,6 +882,7 @@ fn local_launch_gate_uses_the_published_workload_kernel() {
     );
 }
 
+// Owned gate: e2e-docs.yml local launch gate.
 #[test]
 fn local_launch_gate_runs_only_launch_features() {
     let script = fs::read_to_string("scripts/e2e-launch-modes.sh")
@@ -879,6 +900,7 @@ fn local_launch_gate_runs_only_launch_features() {
     );
 }
 
+// Owned gate: e2e-docs.yml perf budget scenario.
 #[test]
 fn perf_budget_scenario_prepares_its_parent_immediately_before_launch() {
     let feature = fs::read_to_string("features/suites/s31_launch_e2e/launch_budget.feature")
@@ -901,6 +923,7 @@ fn perf_budget_scenario_prepares_its_parent_immediately_before_launch() {
     );
 }
 
+// Owned gate: workflow runner labels.
 #[test]
 fn hosted_ubuntu_ci_uses_explicit_release_labels() {
     let ci = ["ci.yml", "ci-main.yml"]
@@ -934,6 +957,7 @@ fn hosted_ubuntu_ci_uses_explicit_release_labels() {
     }
 }
 
+// Owned gate: guest-binary producer lanes.
 #[test]
 fn guest_binary_producer_lanes_install_the_cross_toolchain_before_tests() {
     let ci = ["ci.yml", "ci-main.yml"]
@@ -1115,6 +1139,7 @@ fn the_source_bootstrap_witness_refuses_to_prove_nothing() {
     }
 }
 
+// Owned gate: e2e-docs.yml live harness timings (runs the helpers).
 #[test]
 fn both_live_harnesses_report_phase_timings() {
     let documented = documented_surface_script();
@@ -1148,6 +1173,7 @@ fn both_live_harnesses_report_phase_timings() {
     );
 }
 
+// Owned gate: e2e-docs.yml phase timing helper (runs it).
 #[cfg(unix)]
 #[test]
 fn phase_timings_report_each_phase_and_a_total() {
@@ -1192,6 +1218,7 @@ fn phase_timings_report_each_phase_and_a_total() {
     );
 }
 
+// Owned gate: e2e-docs.yml Linux egress witnesses.
 #[test]
 fn linux_documented_surface_does_not_depend_on_host_icmp() {
     let workflow = extended_ci();
@@ -1203,6 +1230,7 @@ fn linux_documented_surface_does_not_depend_on_host_icmp() {
     );
 }
 
+// Owned gate: e2e-docs.yml encrypted backing fixture.
 #[test]
 fn documented_surface_installs_a_deterministic_encrypted_backing_fixture() {
     let script = documented_surface_script();
@@ -1219,6 +1247,7 @@ fn documented_surface_installs_a_deterministic_encrypted_backing_fixture() {
     );
 }
 
+// Owned gate: e2e-docs.yml private e2e home.
 #[test]
 fn documented_surface_keeps_its_summary_log_in_the_private_e2e_home() {
     let script = documented_surface_script();
@@ -1229,6 +1258,7 @@ fn documented_surface_keeps_its_summary_log_in_the_private_e2e_home() {
     );
 }
 
+// Owned gate: e2e-docs.yml egress witnesses.
 #[test]
 fn positive_live_egress_witnesses_use_https_instead_of_external_icmp() {
     let launch = fs::read_to_string("features/suites/s31_launch_e2e/cli_launch_modes.feature")
@@ -1354,6 +1384,7 @@ fn the_zig_toolchain_action_runs_without_sudo_or_modern_python_once_provisioned(
     }
 }
 
+// Owned gate: e2e-docs.yml SDK codegen driver.
 #[test]
 fn documented_surface_builds_the_sdk_codegen_driver() {
     let script = documented_surface_script();
@@ -1364,6 +1395,7 @@ fn documented_surface_builds_the_sdk_codegen_driver() {
     );
 }
 
+// Owned gate: e2e-docs.yml HVF witness.
 #[test]
 fn hvf_witness_does_not_install_libkrun() {
     let workflow = extended_ci();
@@ -1375,6 +1407,7 @@ fn hvf_witness_does_not_install_libkrun() {
     );
 }
 
+// Owned gate: e2e-docs.yml HVF witness.
 #[test]
 fn hvf_witness_uses_hvf_for_steady_state_builder_jobs() {
     let workflow = extended_ci();
@@ -1390,6 +1423,7 @@ fn hvf_witness_uses_hvf_for_steady_state_builder_jobs() {
     );
 }
 
+// Owned gate: root Cargo.toml feature set read by the macOS lanes.
 #[test]
 fn root_manifest_keeps_libkrun_opt_in_on_macos() {
     let manifest = root_manifest();
@@ -1421,6 +1455,7 @@ fn root_manifest_keeps_libkrun_opt_in_on_macos() {
     );
 }
 
+// Owned gate: release.yml macOS libkrun tier.
 #[test]
 fn macos_release_build_carries_isolated_libkrun_tier() {
     let workflow =
@@ -1462,6 +1497,7 @@ fn macos_release_build_carries_isolated_libkrun_tier() {
     );
 }
 
+// Owned gate: e2e-docs.yml macOS toolchain.
 #[test]
 fn macos_documented_surface_job_installs_the_embedded_cross_toolchain() {
     let workflow = extended_ci();
@@ -1473,6 +1509,7 @@ fn macos_documented_surface_job_installs_the_embedded_cross_toolchain() {
     );
 }
 
+// Owned gate: e2e-docs.yml build features.
 #[test]
 fn documented_surface_build_preserves_requested_features_and_payload() {
     let script = documented_surface_script();
@@ -1544,6 +1581,7 @@ fn the_ceiling_enforcing_macos_lane_builds_every_binary_under_test_optimized() {
     }
 }
 
+// Owned gate: e2e-docs.yml SDK codegen runtime.
 #[test]
 fn documented_surface_jobs_install_the_sdk_codegen_runtime() {
     let workflow = extended_ci();
@@ -1618,6 +1656,7 @@ fn the_documented_surface_builds_no_guest_piece_through_mvm_images() {
     );
 }
 
+// Owned gate: e2e-docs.yml SDK sidecar.
 #[test]
 fn documented_surface_warms_the_source_matched_sdk_sidecar() {
     let script = documented_surface_script();
@@ -1628,6 +1667,7 @@ fn documented_surface_warms_the_source_matched_sdk_sidecar() {
     );
 }
 
+// Owned gate: e2e-docs.yml initramfs.
 #[test]
 fn documented_surface_revalidates_the_source_matched_initramfs() {
     let script = documented_surface_script();
@@ -1650,6 +1690,7 @@ fn documented_surface_revalidates_the_source_matched_initramfs() {
     );
 }
 
+// Owned gate: e2e-docs.yml / release.yml supervisor build features.
 #[test]
 fn standard_supervisor_build_never_enables_libkrun() {
     let just = fs::read_to_string("just/payload/mod.just").expect("read embed module");

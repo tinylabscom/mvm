@@ -121,6 +121,38 @@ impl PreparedCanonicalLinux {
         backend: BackendKind,
         host: &HostProtocolSupport,
     ) -> Result<()> {
+        self.check_native_binding(config, backend, host)?;
+        self.kernel_file()?;
+        Ok(())
+    }
+
+    /// Recheck canonical publisher/revocation and VM identity without reading
+    /// kernel payload bytes. A consumer must separately hold a sealed object
+    /// whose bytes matched this owner's declaration at publication.
+    #[cfg(feature = "host-state")]
+    pub fn verify_lease_authority(
+        self: &Arc<Self>,
+        config: &crate::vm_backend::VmStartConfig,
+        backend: BackendKind,
+        host: &HostProtocolSupport,
+    ) -> Result<()> {
+        self.check_native_binding(config, backend, host)?;
+        let policy = self.store.load(Utc::now())?;
+        ensure!(
+            select_canonical_kernel(&self.inputs, self.backend, &policy, &self.host_protocols)?
+                == self.declaration,
+            "canonical kernel selection changed"
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "host-state")]
+    fn check_native_binding(
+        self: &Arc<Self>,
+        config: &crate::vm_backend::VmStartConfig,
+        backend: BackendKind,
+        host: &HostProtocolSupport,
+    ) -> Result<()> {
         ensure!(
             config
                 .canonical_kernel
@@ -150,7 +182,6 @@ impl PreparedCanonicalLinux {
             config.kernel_path.as_deref() == self.kernel_path().to_str(),
             "launch substituted the selected kernel path"
         );
-        self.kernel_file()?;
         Ok(())
     }
 

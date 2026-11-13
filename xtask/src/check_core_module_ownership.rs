@@ -1,5 +1,8 @@
-//! Keep single-consumer code with its owner and retired `mvm-core` modules gone.
+//! Keep single-consumer code with its owner and retired `mvm-core` modules gone,
+//! and keep forwarding-only files and glob `pub use` out of everything but the
+//! embedder surface and the root facade.
 
+use crate::check_private_mvm_dirs::rust_files;
 use anyhow::{Result, bail};
 use std::path::Path;
 
@@ -29,6 +32,10 @@ const OWNED_MODULES: &[(&str, &str)] = &[
     ("socks5_udp", "crates/mvm-agentd/src/socks5_udp.rs"),
 ];
 
+/// The only places a re-export may stand in for an implementation: the
+/// `mvm-client` embedder surface and the root facade.
+const FORWARDING_ALLOWED: &[&str] = &["crates/mvm-client/", "src/lib.rs"];
+
 pub(crate) fn run(workspace: &Path) -> Result<()> {
     let core_src = workspace.join("crates/mvm-core/src");
     let core_lib = std::fs::read_to_string(core_src.join("lib.rs"))?;
@@ -45,6 +52,8 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
             );
         }
     }
+
+    reject_forwarding(workspace)?;
 
     eprintln!(
         "check-core-module-ownership: {} retired modules absent; {} single-consumer modules owned by their consumers",
@@ -64,6 +73,58 @@ fn reject_core_module(core_src: &Path, core_lib: &str, module: &str, reason: &st
         );
     }
     Ok(())
+}
+
+fn reject_forwarding(workspace: &Path) -> Result<()> {
+    for root in ["crates", "src"] {
+        let dir = workspace.join(root);
+        if !dir.is_dir() {
+            continue;
+        }
+        for path in rust_files(&dir)? {
+            let rel = path
+                .strip_prefix(workspace)?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if FORWARDING_ALLOWED
+                .iter()
+                .any(|allowed| rel.starts_with(allowed))
+            {
+                continue;
+            }
+            if let Some(what) = forwarding_violation(&std::fs::read_to_string(&path)?) {
+                bail!("{rel}: {what}; import from the owning crate instead");
+            }
+        }
+    }
+    Ok(())
+}
+
+const USE_PREFIXES: &[&str] = &["use ", "pub use ", "pub(crate) use ", "pub(super) use "];
+
+/// A glob `pub use`, or a file whose only content is `use` statements (a file
+/// that also declares a `mod` is a module root, not a forwarder).
+fn forwarding_violation(source: &str) -> Option<&'static str> {
+    let (mut uses, mut other, mut open) = (0, false, false);
+    for line in source.lines().map(str::trim) {
+        if line.is_empty()
+            || line.starts_with("//")
+            || line.starts_with("#[")
+            || line.starts_with("#![")
+        {
+            continue;
+        }
+        if line.starts_with("pub use ") && line.ends_with("::*;") {
+            return Some("glob `pub use`");
+        }
+        if open || USE_PREFIXES.iter().any(|prefix| line.starts_with(prefix)) {
+            uses += usize::from(!open);
+            open = !line.ends_with(';');
+        } else {
+            other = true;
+        }
+    }
+    (uses > 0 && !other).then_some("file only forwards `use` statements")
 }
 
 #[cfg(test)]
@@ -128,5 +189,39 @@ mod tests {
                 .to_string()
                 .contains("crates/mvm-agentd/src/socks5_udp.rs")
         );
+    }
+
+    #[test]
+    fn forwarding_files_and_globs_are_rejected_outside_the_allowlist() {
+        let workspace = compliant_workspace();
+        let forwarder = "pub use mvm_core::Thing;\n";
+        write(
+            &workspace.path().join("crates/mvm-client/src/a.rs"),
+            forwarder,
+        );
+        write(
+            &workspace.path().join("src/lib.rs"),
+            "pub use mvm_core::*;\n",
+        );
+        run(workspace.path()).expect("allowlisted forwarding passes");
+
+        write(&workspace.path().join("crates/mvm-cli/src/b.rs"), forwarder);
+        let error = run(workspace.path()).expect_err("forwarder must fail");
+        assert!(error.to_string().contains("mvm-cli/src/b.rs"));
+
+        write(
+            &workspace.path().join("crates/mvm-cli/src/b.rs"),
+            "mod x;\npub use mvm_core::*;\n",
+        );
+        assert!(
+            run(workspace.path()).is_err(),
+            "glob in a module root must fail"
+        );
+
+        write(
+            &workspace.path().join("crates/mvm-cli/src/b.rs"),
+            "mod x;\npub use x::{\n    A,\n};\n",
+        );
+        run(workspace.path()).expect("a module root with explicit exports passes");
     }
 }

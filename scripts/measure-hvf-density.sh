@@ -9,6 +9,7 @@ IMAGE_REF="${MVM_HVF_DENSITY_IMAGE:-docker.io/library/alpine:latest}"
 WAVES_TEXT="${MVM_HVF_DENSITY_WAVES:-1 5 10 25}"
 GUEST_SLEEP_SECONDS="${MVM_HVF_DENSITY_GUEST_SLEEP_SECONDS:-240}"
 SETTLE_SECONDS="${MVM_HVF_DENSITY_SETTLE_SECONDS:-20}"
+IDLE_SAMPLE_SECONDS="${MVM_HVF_DENSITY_IDLE_SAMPLE_SECONDS:-10}"
 LAUNCH_SPACING_SECONDS="${MVM_HVF_DENSITY_LAUNCH_SPACING_SECONDS:-1}"
 CLEANUP_GRACE_SECONDS="${MVM_HVF_DENSITY_CLEANUP_GRACE_SECONDS:-8}"
 MEMORY="${MVM_HVF_DENSITY_MEMORY:-512M}"
@@ -33,6 +34,7 @@ Useful overrides:
   MVM_HVF_DENSITY_IMAGE=alpine              OCI image reference
   MVM_HVF_DENSITY_GUEST_SLEEP_SECONDS=240   in-guest sleep duration
   MVM_HVF_DENSITY_SETTLE_SECONDS=20         settle time before sampling
+  MVM_HVF_DENSITY_IDLE_SAMPLE_SECONDS=10    Idle CPU and wakeup window; 0 skips it
   MVM_HVF_DENSITY_MEMORY=512M               guest memory setting
   MVM_HVF_DENSITY_CPUS=2                    guest vCPU setting
   MVM_HVF_DENSITY_MAILBOX=1                  grant one distinct mailbox per VM
@@ -172,17 +174,19 @@ if [[ "${requested_memory_mib}" -gt "$((host_memory_mib * 80 / 100))" ]]; then
   echo "refusing: ${MAX_WAVE} x ${MEMORY} exceeds 80% of host RAM (${host_memory_mib} MiB)" >&2
   exit 70
 fi
-for seconds in "${LAUNCH_SPACING_SECONDS}" "${SETTLE_SECONDS}" "${GUEST_SLEEP_SECONDS}"; do
+for seconds in "${LAUNCH_SPACING_SECONDS}" "${SETTLE_SECONDS}" "${GUEST_SLEEP_SECONDS}" \
+  "${IDLE_SAMPLE_SECONDS}"; do
   if ! [[ "${seconds}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-    echo "refusing: spacing, settle and guest sleep durations must be nonnegative numbers" >&2
+    echo "refusing: spacing, settle, idle sample and guest sleep durations must be nonnegative numbers" >&2
     exit 70
   fi
 done
 if [[ "${CUSTOM_WORKLOAD}" == "0" ]] && awk \
   -v wave="${MAX_WAVE}" -v spacing="${LAUNCH_SPACING_SECONDS}" \
   -v settle="${SETTLE_SECONDS}" -v guest="${GUEST_SLEEP_SECONDS}" \
-  'BEGIN { exit !(guest <= wave * spacing + settle + 60) }'; then
-  echo "refusing: guest sleep must outlast the launch wave, settling and 60s boot margin" >&2
+  -v idle="${IDLE_SAMPLE_SECONDS}" \
+  'BEGIN { exit !(guest <= wave * spacing + settle + idle + 60) }'; then
+  echo "refusing: guest sleep must outlast the launch wave, settling, idle sample and 60s boot margin" >&2
   exit 70
 fi
 
@@ -383,38 +387,7 @@ capture_processes() {
   local raw="${dir}/processes-${phase}.txt"
   local tsv="${dir}/rss-${phase}.tsv"
   ps axww -o pid=,rss=,comm=,args= >"${raw}"
-  awk '
-    BEGIN {
-      print "component\tcount\trss_kib\trss_mib"
-    }
-    {
-      pid = $1
-      rss = $2
-      comm = $3
-      args = $0
-      if (comm ~ /awk$/) next
-      comp = ""
-      if (args ~ /mvm-hvf-supervisor/) comp = "mvm-hvf-supervisor"
-      else if (args ~ /firecracker/) comp = "firecracker"
-      else if (args ~ /mvm-network-endpoint/) comp = "mvm-network-endpoint"
-      else if (args ~ /mvm-mailbox/) comp = "mvm-mailbox"
-      else if (args ~ /mvm-host-agent/) comp = "mvm-host-agent"
-      else if (args ~ /mvm-signer-helper/) comp = "mvm-signer-helper"
-      else if (args ~ /mvm-host-signer/) comp = "mvm-host-signer"
-      else if (args ~ /mvm-audit-signer/) comp = "mvm-audit-signer"
-      else if (args ~ /mvm-broker/) comp = "mvm-broker"
-      else if (args ~ /mvmctl/) comp = "mvmctl"
-      if (comp != "") {
-        count[comp] += 1
-        rss_kib[comp] += rss
-      }
-    }
-    END {
-      for (comp in count) {
-        printf "%s\t%d\t%d\t%.1f\n", comp, count[comp], rss_kib[comp], rss_kib[comp] / 1024
-      }
-    }
-  ' "${raw}" >>"${tsv}"
+  awk -f "${ROOT}/scripts/density_rss.awk" "${raw}" >>"${tsv}"
 }
 
 capture_mailbox_threads() {
@@ -427,9 +400,28 @@ capture_mailbox_threads() {
   while read -r pid; do
     [[ -n "${pid}" ]] || continue
     local threads
-    threads="$(ps -M -p "${pid}" 2>/dev/null | awk 'NR > 1 { n++ } END { print n+0 }')"
+    if [[ -r "/proc/${pid}/status" ]]; then
+      # Linux ps -M adds a security-label column and prints one row per process.
+      threads="$(awk '/^Threads:/ { n = $2 } END { print n+0 }' "/proc/${pid}/status" 2>/dev/null)"
+    else
+      threads="$(ps -M -p "${pid}" 2>/dev/null | awk 'NR > 1 { n++ } END { print n+0 }')"
+    fi
     printf '%s\t%s\n' "${pid}" "${threads}" >>"${result}"
   done <"${pids}"
+}
+
+capture_idle() {
+  local dir="$1"
+  local wave="$2"
+  if awk -v idle="${IDLE_SAMPLE_SECONDS}" 'BEGIN { exit !(idle == 0) }'; then
+    printf 'wave_%s_idle_sampler\tnot_requested\n' "${wave}" >>"${SUMMARY}"
+    return 0
+  fi
+  # A failed sample is recorded and never fails the wave it was observing.
+  if ! python3 "${ROOT}/scripts/density_idle.py" "${dir}" "${wave}" "${IDLE_SAMPLE_SECONDS}" \
+    >>"${SUMMARY}" 2>"${dir}/idle-sample.stderr"; then
+    printf 'wave_%s_idle_sampler\tunavailable:sample_failed\n' "${wave}" >>"${SUMMARY}"
+  fi
 }
 
 capture_storage() {
@@ -529,6 +521,7 @@ cleanup_wave() {
   echo -e "waves\t${WAVES_TEXT}"
   echo -e "guest_sleep_seconds\t${GUEST_SLEEP_SECONDS}"
   echo -e "settle_seconds\t${SETTLE_SECONDS}"
+  echo -e "idle_sample_seconds\t${IDLE_SAMPLE_SECONDS}"
   echo -e "memory\t${MEMORY}"
   echo -e "host_memory_mib\t${host_memory_mib}"
   echo -e "max_wave_guest_memory_mib\t${requested_memory_mib}"
@@ -592,6 +585,7 @@ for wave in "${WAVES[@]}"; do
   capture_mailbox_threads "settled" "${wave_dir}"
   capture_storage "settled" "${wave_dir}"
   capture_matching_processes "settled" "${wave_dir}"
+  capture_idle "${wave_dir}" "${wave}"
   read -r mailbox_count mailbox_rss_kib < <(
     awk -F '\t' '$1 == "mvm-mailbox" { count = $2; rss = $3 }
       END { print count+0, rss+0 }' "${wave_dir}/rss-settled.tsv"

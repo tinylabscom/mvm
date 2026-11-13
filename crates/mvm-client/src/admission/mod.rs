@@ -1508,6 +1508,7 @@ pub(crate) mod admit_plan_tests {
         let mut substrate = crate::entrypoint::SessionAuditSubstrate {
             tenant_id: admitted.admitted.plan().tenant.0.clone(),
             plan_json: serde_json::to_string(admitted.admitted.signed()).unwrap(),
+            mailbox_posture: admitted.admitted.mailbox_posture(),
             caller_registration: None,
             bundle_json: None,
             config_files: Vec::new(),

@@ -19,6 +19,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use crate::host::helper_exit::{HelperExit, await_child_exit, peek_child_exit};
+use crate::host::process_liveness::pid_is_alive;
 
 mod egress_tls;
 pub use egress_tls::{
@@ -375,7 +376,7 @@ fn endpoint_state(pid: libc::pid_t) -> EndpointState {
     if let Some(exit) = peek_child_exit(pid) {
         return EndpointState::Exited(Some(exit));
     }
-    if pid_alive(pid) {
+    if pid_is_alive(pid) {
         EndpointState::Running
     } else {
         EndpointState::Exited(None)
@@ -1131,7 +1132,7 @@ impl SpawnedEndpointGuard {
 impl Drop for SpawnedEndpointGuard {
     fn drop(&mut self) {
         if self.armed {
-            if pid_alive(self.pid) {
+            if pid_is_alive(self.pid) {
                 kill(self.pid, libc::SIGTERM);
             }
             if self.pid_written {
@@ -1285,10 +1286,6 @@ fn read_endpoint_pid(path: &Path) -> Option<EndpointPid> {
 
 fn read_pid(path: &Path) -> Option<libc::pid_t> {
     read_endpoint_pid(path).map(|recorded| recorded.pid)
-}
-
-fn pid_alive(pid: libc::pid_t) -> bool {
-    super::process_liveness::pid_is_alive(pid)
 }
 
 fn kill(pid: libc::pid_t, sig: libc::c_int) {
@@ -1693,7 +1690,7 @@ mod tests {
         guard.defuse();
         drop(guard);
 
-        assert!(pid_alive(child.id() as libc::pid_t));
+        assert!(pid_is_alive(child.id() as libc::pid_t));
         child.kill().unwrap();
         let _ = child.wait();
     }
@@ -2063,7 +2060,7 @@ mod tests {
             guard.defuse();
         }
 
-        assert!(pid_alive(child.id() as libc::pid_t));
+        assert!(pid_is_alive(child.id() as libc::pid_t));
         assert!(state_dir.join(SUBST_PID_FILE).exists());
         assert!(env_path.exists());
         child.kill().unwrap();
@@ -2454,6 +2451,8 @@ mod tests {
         if let Ok(pid) = std::fs::read_to_string(&pid_capture)
             && let Ok(pid) = pid.trim().parse::<libc::pid_t>()
         {
+            // SAFETY: kill takes two integers and touches no memory; `pid` was written by the
+            //         helper process this test spawned.
             unsafe {
                 libc::kill(pid, libc::SIGKILL);
             }

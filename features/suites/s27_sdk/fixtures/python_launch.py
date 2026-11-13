@@ -16,7 +16,7 @@ sandbox = mvm.Sandbox.create(
     "chromium",
     workload_id="bdd-launch",
     command=["/serve", "--port", "9222"],
-    env={"MODE": "headless"},
+    env={"MODE": mvm.literal("headless")},
 )
 sandbox.process.wait()
 sandbox.kill()

@@ -14,6 +14,7 @@ use std::io::Write as _;
 pub(super) struct BootAttempt<'a> {
     pub(super) backend: &'a AnyBackend,
     pub(super) start_config: &'a VmStartConfig,
+    pub(super) mailbox_posture: Option<&'a mvm_hostd::plan_admission::MailboxLaunchPosture>,
     pub(super) resolved: &'a ResolvedImage,
     /// The caller named this VM. A named run has an identity a shared standby
     /// cannot take on, so it keeps its cold path instead of requiring a claim.
@@ -165,7 +166,11 @@ pub(super) fn boot_transient_vm(
         };
 
     if !booted {
-        mvm_hostd::mailbox_process::require_servable(attempt.start_config, attempt.backend)?;
+        mvm_hostd::mailbox_process::require_servable(
+            attempt.start_config,
+            attempt.backend,
+            attempt.mailbox_posture,
+        )?;
         ui::info(&format!("Booting transient VM '{vm_name}'..."));
         if mvm_runtime::catalog::descriptor(attempt.backend.kind()).is_workload
             && let Err(error) =
@@ -195,6 +200,7 @@ pub(super) fn boot_transient_vm(
             attempt.backend,
             &VmId(vm_name.clone()),
             attempt.start_config,
+            attempt.mailbox_posture,
         ) {
             drop(phase);
             remove_transient_state_dir(&mvm_core::config::vm_state_dir(&vm_name).to_string_lossy());
@@ -830,6 +836,7 @@ mod tests {
             let mut attempt = BootAttempt {
                 backend: &backend,
                 start_config: &start_config,
+                mailbox_posture: None,
                 resolved: &resolved,
                 user_named: true,
                 writable_images: &mut images,
@@ -841,6 +848,8 @@ mod tests {
             mailbox: MailboxId::from_bytes([1; 32]),
             authority_key: [2; 32],
             epoch: ExecutionEpoch::new(1).unwrap(),
+            report: None,
+            retention: None,
         };
         let error = boot(Some(granted)).err().expect("the grant is refused");
         assert!(format!("{error:#}").contains("mailbox"), "{error:#}");
@@ -896,6 +905,7 @@ mod tests {
         let mut attempt = BootAttempt {
             backend: &backend,
             start_config: &start_config,
+            mailbox_posture: None,
             resolved: &resolved,
             user_named: true,
             writable_images: &mut images,
@@ -934,6 +944,7 @@ mod tests {
         let mut attempt = BootAttempt {
             backend: &backend,
             start_config: &start_config,
+            mailbox_posture: None,
             resolved: &resolved,
             user_named: false,
             writable_images: &mut images,
@@ -955,6 +966,7 @@ mod tests {
         let mut attempt = BootAttempt {
             backend: &backend,
             start_config: &start_config,
+            mailbox_posture: None,
             resolved: &resolved,
             user_named: false,
             writable_images: &mut images,
@@ -1054,6 +1066,7 @@ mod tests {
         let mut attempt = BootAttempt {
             backend: &backend,
             start_config: &start_config,
+            mailbox_posture: None,
             resolved: &resolved,
             user_named: false,
             writable_images: &mut images,

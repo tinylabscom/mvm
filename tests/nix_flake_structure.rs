@@ -14,6 +14,19 @@
 //!   cd nix && nix flake check --no-build
 //!
 //! Documented in `specs/runbooks/cross-platform-install.md`.
+//!
+//! Classification:
+//! - Owned gate: the `nix/` flake, profiles and package recipes. Nix is not
+//!   installed on the PR runners, so the `nix flake check` outcome is not
+//!   available there; these text checks stand in for it, and the
+//!   `*_when_nix_available` tests evaluate for real where Nix exists. `ci.yml`'s
+//!   path filter lists `nix/` so a change there runs this file.
+//! - Not owned by a gate: `installation_docs_*` pin documentation prose. They
+//!   are kept only because `check-machine-doc-guards` does not assert the same
+//!   strings; the owner should be that gate, and they are the first to move
+//!   there. The quickstart and happy-path prose pins were deleted: the commands
+//!   they quote are executed by the `e2e-docs.yml` documented-surface lane, and
+//!   the heading order and audience count they pinned asserted wording only.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -686,62 +699,6 @@ fn installation_docs_keep_binary_install_primary() {
 }
 
 #[test]
-fn quickstart_docs_lead_with_image_backed_run() {
-    let path = repo_dir()
-        .join("public")
-        .join("src")
-        .join("content")
-        .join("docs")
-        .join("getting-started")
-        .join("quickstart.md");
-    let content =
-        fs::read_to_string(&path).unwrap_or_else(|e| panic!("quickstart must be present: {e}"));
-    let normalized = normalized_whitespace(&content);
-
-    let image_heading = content
-        .find("## 1. Run an OCI Image")
-        .expect("quickstart must lead with an OCI image run section");
-    let builder_heading = content
-        .find("## 2. Prepare the Builder VM")
-        .expect("quickstart must still document the builder VM after the image path");
-
-    assert!(
-        image_heading < builder_heading,
-        "quickstart must put the image-backed one-shot path before the builder/flake workflows"
-    );
-    assert!(
-        content.contains("mvmctl machine run --image alpine -- uname -a")
-            && normalized.contains("You do not need host Nix for this path"),
-        "quickstart must preserve the no-host-Nix image-backed command"
-    );
-}
-
-#[test]
-fn happy_paths_include_oci_image_audience() {
-    let path = repo_dir()
-        .join("public")
-        .join("src")
-        .join("content")
-        .join("docs")
-        .join("getting-started")
-        .join("happy-paths.md");
-    let content =
-        fs::read_to_string(&path).unwrap_or_else(|e| panic!("happy paths must be present: {e}"));
-    let normalized = normalized_whitespace(&content);
-
-    assert!(
-        content.contains("mvm has six primary audiences"),
-        "happy paths must count the OCI-image path as a first-class audience"
-    );
-    assert!(
-        content.contains("CLI user with an OCI image")
-            && content.contains("mvmctl run --image alpine -- uname -a")
-            && normalized.contains("Image-backed one-shot runs do not require host Nix"),
-        "happy paths must document the image-backed no-host-Nix audience"
-    );
-}
-
-#[test]
 fn minimal_profile_exists_and_has_required_settings() {
     let path = nix_dir().join("profiles").join("minimal.nix");
     let content = fs::read_to_string(&path)
@@ -1250,17 +1207,15 @@ fn flake_lock_pins_microvm_input_by_hash() {
         )
     });
 
-    // Pinned by hash means the lockfile carries a `rev` field for
-    // the microvm input. We don't pin a *specific* hash here (CI's
-    // `xtask audit-flake` does that on bump) — we just verify the
-    // microvm input is present in the lockfile.
+    // Parse it: a `"rev"` substring anywhere (another input, a comment-like
+    // string) would satisfy a text match while the microvm pin was a branch.
+    let lock: serde_json::Value = serde_json::from_str(&content).expect("flake.lock is JSON");
+    let rev = lock["nodes"]["microvm"]["locked"]["rev"]
+        .as_str()
+        .expect("the microvm input must be pinned by `rev`");
     assert!(
-        content.contains("\"microvm\""),
-        "flake.lock must contain the 'microvm' input pin"
-    );
-    assert!(
-        content.contains("\"rev\""),
-        "flake.lock must pin inputs by `rev` (commit hash)"
+        rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_hexdigit()),
+        "microvm must be pinned by a 40-hex commit, got {rev}"
     );
 }
 

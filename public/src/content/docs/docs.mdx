@@ -1,0 +1,65 @@
+---
+title: Overview
+description: Start with the local CLI or use an SDK to run mvm workloads from an application.
+---
+
+mvm runs Linux workloads in local microVMs. `mvmctl` is the host CLI for
+preparing images, launching machines, and working with them. The SDKs let
+applications drive the same local runtime.
+
+Start with [installation](/getting-started/installation/) and the
+[quickstart](/getting-started/quickstart/), then choose the interface that fits
+your work:
+
+<div class="docs-paths">
+  <a href="/getting-started/quickstart/">
+    <strong>Local CLI</strong>
+    <span>Run a command in a microVM from your terminal.</span>
+  </a>
+  <a href="/sdk/">
+    <strong>SDK</strong>
+    <span>Create and control local sandboxes from application code.</span>
+  </a>
+  <a href="/guides/ai-agent-integration/">
+    <strong>Guides</strong>
+    <span>Connect an agent and set boundaries for its tools.</span>
+  </a>
+</div>
+
+## Local CLI
+
+`mvmctl machine run --image alpine -- uname -a` starts with an OCI image and
+tears down a transient machine when the command exits. Use a named machine if
+you need to start, inspect, and stop it across sessions. Image-backed runs
+do not need a Docker daemon or Nix on the host. See
+[machine workflows](/guides/machine-use-cases/)
+and [platform support](/reference/platform-support/) for the supported local
+paths and their limits.
+
+## SDK
+
+The [SDK overview](/sdk/) distinguishes runtime lifecycle calls from
+build-time workload declarations. Python and TypeScript runtime support is
+partial; the Rust `mvm-client` crate exposes a local lifecycle client. An SDK
+is optional for CLI use. Start with a
+[Python](/getting-started/python-quickstart/),
+[TypeScript](/getting-started/nodejs-quickstart/), or
+[Rust](/getting-started/rust-quickstart/) quickstart.
+
+## Boundaries and guides
+
+Workload guests have no network device. The host mediates authorized effects;
+network egress starts denied and must be granted explicitly. Start with one
+[configuration file](/guides/configuration/) and compose reusable
+[policies](/guides/policies/) when a workload needs them. Read the guides for
+[network access](/guides/network-egress-policy/),
+[secrets and credentials](/guides/secrets-and-credentials/), and
+[troubleshooting](/guides/troubleshooting/) when your workflow needs them.
+
+## Where things run
+
+| Part | Runs on | Use it for |
+| --- | --- | --- |
+| `mvmctl` | Your host | Install, prepare, launch, inspect, and stop local machines. |
+| SDK client | Your host application | Drive the local runtime from code. |
+| Workload | A Linux guest | Run the command or service admitted by the host. |

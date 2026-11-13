@@ -12,6 +12,7 @@
 covered = [
     "mvmctl agent-session ls",
     "mvmctl bootstrap",
+    "mvmctl build /tmp/mvm-yocto-demo/pack.json --out /tmp/mvm-yocto-hello.mvmpkg",
     "mvmctl build docker.io/library/alpine:3.20 --from image --out alpine.mvmpkg --debug-out alpine.bundle.json",
     "mvmctl bundle fetch ./alpine.mvmpkg",
     "mvmctl bundle fetch ./my-app.mvmpkg",

@@ -503,6 +503,8 @@ mod tests {
             mailbox: MailboxId::from_bytes([7; 32]),
             authority_key: [9; 32],
             epoch: ExecutionEpoch::new(3).unwrap(),
+            report: None,
+            retention: None,
         }
     }
 
@@ -540,6 +542,49 @@ mod tests {
         let mut forged = absent.clone();
         let mut payload: serde_json::Value = serde_json::from_slice(&forged.0.payload).unwrap();
         payload["mailbox"] = serde_json::to_value(mailbox_grant()).unwrap();
+        forged.0.payload = serde_json::to_vec(&payload).unwrap();
+        assert!(matches!(
+            verify_plan(&forged, &[("test-signer", &vk)]),
+            Err(PlanVerifyError::SignatureInvalid(_))
+        ));
+    }
+
+    #[test]
+    fn a_report_ceiling_cannot_be_added_or_widened_after_plan_signing() {
+        use mvm_contract::protocol::mailbox::MailboxReportSendPolicy;
+
+        let (sk, vk) = fresh_key();
+        let mut plan = sample_plan();
+        plan.mailbox = Some(mailbox_grant());
+        let signed_legacy = sign_plan(&plan, &sk, "test-signer");
+        let old: serde_json::Value = serde_json::from_slice(&signed_legacy.0.payload).unwrap();
+        assert!(old["mailbox"].get("report").is_none());
+
+        let mut forged = signed_legacy.clone();
+        let mut payload = old;
+        payload["mailbox"]["report"] = serde_json::json!({
+            "version": 1,
+            "max_payload_bytes": 16384
+        });
+        forged.0.payload = serde_json::to_vec(&payload).unwrap();
+        assert!(matches!(
+            verify_plan(&forged, &[("test-signer", &vk)]),
+            Err(PlanVerifyError::SignatureInvalid(_))
+        ));
+
+        let mut report_grant = mailbox_grant();
+        report_grant.report = Some(MailboxReportSendPolicy::new(16 * 1024).unwrap());
+        plan.mailbox = Some(report_grant);
+        let signed = sign_plan(&plan, &sk, "test-signer");
+        assert_eq!(
+            verify_plan(&signed, &[("test-signer", &vk)])
+                .unwrap()
+                .mailbox,
+            Some(report_grant)
+        );
+        let mut forged = signed;
+        let mut payload: serde_json::Value = serde_json::from_slice(&forged.0.payload).unwrap();
+        payload["mailbox"]["report"]["max_payload_bytes"] = serde_json::json!(32768);
         forged.0.payload = serde_json::to_vec(&payload).unwrap();
         assert!(matches!(
             verify_plan(&forged, &[("test-signer", &vk)]),
