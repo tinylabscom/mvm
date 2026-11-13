@@ -665,9 +665,13 @@ fn run_workload_origin_network_secret_live_witness(world: &mut CliWorld) {
 }
 
 fn workload_origin_network_secret_argv() -> Vec<String> {
+    // This @firecracker witness uses the released Firecracker kernel, which
+    // cannot boot under QEMU's PVH loader; never inherit a backend override.
     [
         "machine",
         "run",
+        "--hypervisor",
+        "firecracker",
         "--image",
         "python:3.12",
         "--policy",

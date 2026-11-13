@@ -179,8 +179,14 @@ fn lock_outbox_dir(dir: &Path) -> Result<std::fs::File, Refusal> {
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
         .open(dir)
-        .map_err(|_| Refusal::Unavailable)?;
-    file.try_lock().map_err(|_| Refusal::Unavailable)?;
+        .map_err(|error| {
+            eprintln!("mvm-guest-agent: outbox directory open failed: {error}");
+            Refusal::Unavailable
+        })?;
+    file.try_lock().map_err(|error| {
+        eprintln!("mvm-guest-agent: outbox directory lock failed: {error}");
+        Refusal::Unavailable
+    })?;
     Ok(file)
 }
 
@@ -399,10 +405,19 @@ fn write_single_outbox(outbox: &Path, message: &OutboxMessage) -> Result<(), Ref
         Ok(_) if existing == bytes => return Ok(()),
         Ok(_) => return Err(Refusal::QueueFull(1)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(Refusal::Unavailable),
+        Err(error) => {
+            eprintln!("mvm-guest-agent: outbox existing request read failed: {error}");
+            return Err(Refusal::Unavailable);
+        }
     }
-    atomic_write_new(outbox, &bytes).map_err(|_| Refusal::Unavailable)?;
-    sync_dir(dir).map_err(|_| Refusal::Unavailable)
+    atomic_write_new(outbox, &bytes).map_err(|error| {
+        eprintln!("mvm-guest-agent: outbox atomic write failed: {error:#}");
+        Refusal::Unavailable
+    })?;
+    sync_dir(dir).map_err(|error| {
+        eprintln!("mvm-guest-agent: outbox directory sync failed: {error:#}");
+        Refusal::Unavailable
+    })
 }
 
 fn write_spooled(spool: &Path, message: &OutboxMessage) -> Result<(), Refusal> {
