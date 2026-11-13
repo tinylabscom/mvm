@@ -1,10 +1,5 @@
-//! Runtime-overlay helpers and Firecracker API body builders.
-//!
-//! Backend-agnostic helpers now live in `mvm-vmm::host::boot_config` and are
-//! re-exported here while callers migrate. This module retains only the
-//! `FlakeRunConfig`-dependent helpers that still need `mvm-runtime` types.
-
-pub use mvm_vmm::host::boot_config::*;
+//! Runtime-overlay helper that needs `FlakeRunConfig`. The backend-agnostic
+//! boot-config helpers live in `mvm-vmm::host::boot_config`.
 
 use super::flake_run::FlakeRunConfig;
 

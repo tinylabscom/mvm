@@ -17,7 +17,7 @@ use mvm_agentd::vsock::{
 use mvm_core::plan::{ExecutionPlan, SignedExecutionPlan};
 use mvm_core::protocol::vm_backend::{VerbGrantEnvelope, VmStartConfig};
 
-use crate::driver::traits::RunningVm;
+use crate::driver::RunningVm;
 
 /// Fallback guest device nodes used when the block layout does not contain a
 /// matching source. The real devices are derived from [`workload_blocks`] so
@@ -26,8 +26,6 @@ const ROOTFS_DATA_DEV: &str = "/dev/vda";
 const ROOTFS_HASH_DEV: &str = "/dev/vdb";
 const RUNTIME_DATA_DEV: &str = "/dev/vdc";
 const RUNTIME_HASH_DEV: &str = "/dev/vdd";
-
-pub use mvm_vmm::host::boot_config::booted_with_universal_initramfs;
 
 /// How long activation waits for the guest agent to come up before failing.
 ///
@@ -440,6 +438,7 @@ mod tests {
     use mvm_contract::protocol::extension_pack::{
         ExtensionBudgets, ExtensionId, ExtensionPlacement, ExtensionPlanBinding, ExtensionVersion,
     };
+    use mvm_vmm::host::boot_config::booted_with_universal_initramfs;
 
     fn grant_until(not_after: chrono::DateTime<chrono::Utc>) -> VerbGrantEnvelope {
         VerbGrantEnvelope {

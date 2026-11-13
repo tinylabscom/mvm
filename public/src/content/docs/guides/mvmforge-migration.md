@@ -17,7 +17,7 @@ mvm release ships the substrate and the SDK in lockstep.
 | `mvmforge-ir` crate                | `crates/mvm-contract/src/ir/`                               |
 | `mvmforge-sdk` crate (Rust builder)| `crates/mvm-sdk` (`builder` module)                         |
 | `mvmforge-addon` crate             | `crates/mvm-sdk/src/addon/`                                 |
-| `mvmforge` host CLI compile path   | `crates/mvm-compiler/` (re-exported by `mvm-sdk::compile`) + `mvmctl dev compile` |
+| `mvmforge` host CLI compile path   | `crates/mvm-compiler/` + `mvmctl dev compile` |
 | `mvmforge-runtime` (in-guest)      | `crates/mvm-agentd` + `nix/lib/factories/mkFunctionService` |
 | Python SDK (`@mv.func`)            | `crates/mvm-sdk/sdks/python/mvm/` (`@mvm.app`)                             |
 | TypeScript SDK                     | `crates/mvm-sdk/sdks/typescript/`                                          |
@@ -45,9 +45,8 @@ surface.
   compile/build/run surface.
 - The Rust-side compile pipeline lives in `mvm-compiler`, so automation can
   call the same analysis and rendering primitives without going through
-  `mvmctl` or depending on the SDK. Existing `mvm_sdk::compile` imports
-  remain supported as re-exports of that single implementation when the
-  SDK's `compiler` feature is enabled (off by default).
+  `mvmctl` or depending on the SDK. The former `mvm_sdk::compile` facade is
+  gone; import from `mvm_compiler` directly.
   `mvm-contract` owns the workload IR; `mvm-sdk` retains authoring builders,
   language bridges, and guest-facing APIs. Compilation stages source and
   build artifacts but does not execute Nix builds or sign packages.

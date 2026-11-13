@@ -27,8 +27,11 @@ mod ring;
 #[cfg(unix)]
 pub mod secure_cleanup;
 mod segment;
-pub use retention::*;
-pub use ring::*;
+pub use retention::{
+    AtRestRetention, GenerationBudget, GenerationFamily, PayloadEncoding, recover_abandoned_at,
+    retention_now,
+};
+pub use ring::{Admission, Evicted, GapMarker, GapTally, RetentionPolicy, RingState};
 use segment::SegmentBounds;
 pub use segment::{SEGMENT_MAX_CHUNKS, SEGMENT_MAX_CIPHERTEXT_BYTES, check_safe_name};
 

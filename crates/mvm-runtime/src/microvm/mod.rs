@@ -9,18 +9,32 @@ mod boot_config;
 mod flake_run;
 mod snapshot;
 
-pub use activation::*;
-pub use boot_config::*;
-pub use mvm_backends::fc::control::*;
+pub use activation::{activate_over_stream, activate_workload, read_verb_grant_envelope};
+pub use boot_config::resolved_runtime_overlay;
+pub use mvm_backends::fc::control::{
+    balloon_set_target, balloon_state, pause_vm, resume_vm, stop_vm,
+};
+pub use mvm_vmm::host::boot_config::{
+    FcDrive, balloon_body, boot_source_body, booted_with_universal_initramfs,
+    builder_hostepoch_cmdline_token, logger_body, machine_config_body, non_verity_overlay_ext4,
+    probe_verity_sidecar, vsock_body,
+};
 // The Firecracker API client and VMM process lifecycle now live in
 // mvm-backends::fc; re-exported so `crate::microvm::<name>` keeps resolving.
-pub use flake_run::*;
-pub use mvm_backends::fc::daemon::*;
-pub use mvm_backends::fc::guards::*;
-pub use mvm_backends::fc::lifecycle::*;
-pub use mvm_backends::fc::observe::*;
-pub use mvm_backends::fc::snapshot::*;
-pub use snapshot::*;
+pub use flake_run::FlakeRunConfig;
+pub use mvm_backends::fc::daemon::{
+    adopt_api_socket, api_put_session, api_put_socket, api_session, read_firecracker_pid,
+    secure_restored_vsock_socket, secure_vsock_socket_for_caller, start_vm_firecracker,
+    start_vm_firecracker_bounded, vm_console_log_path,
+};
+pub use mvm_backends::fc::guards::{FirecrackerGuard, SlotReservationGuard};
+pub use mvm_backends::fc::lifecycle::{start, stop};
+pub use mvm_backends::fc::observe::allocate_slot;
+pub use mvm_backends::fc::snapshot::{
+    RestoredDeviceModel, assert_vsock_only_device_model, create_snapshot_files,
+    warm_restore_instance, warm_restore_instance_from_path,
+};
+pub use snapshot::restore_from_template_snapshot;
 
 // The per-VM path layout moved to mvm-backends::fc with the Firecracker
 // mechanics that read it. Re-exported so `crate::microvm::<name>` and the

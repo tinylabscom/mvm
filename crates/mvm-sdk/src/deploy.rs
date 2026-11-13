@@ -30,7 +30,7 @@ use crate::ir::{EnvValue, Workload};
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
 
-use crate::compile::{CompileError, archive_dir, compile};
+use mvm_compiler::{CompileError, archive_dir, compile};
 
 /// Schema version of the local deploy record.
 pub const DEPLOY_RECORD_SCHEMA_VERSION: u32 = 2;
@@ -554,14 +554,14 @@ fn validate_boot_artifact_identity(
 }
 
 fn read_dependency_volume(path: &Path) -> Result<DependencyVolumeRecord, DeployError> {
-    let volume_hash = crate::compile::deps_audit::verify_sealed_volume(path).map_err(|error| {
+    let volume_hash = mvm_core::deps_audit::verify_sealed_volume(path).map_err(|error| {
         DeployError::DependencyVolume {
             path: path.to_path_buf(),
             reason: error.to_string(),
         }
     })?;
-    let manifest_path = path.join(crate::compile::deps_audit::FILE_MANIFEST);
-    let manifest: crate::compile::deps_audit::VolumeManifest =
+    let manifest_path = path.join(mvm_core::deps_audit::FILE_MANIFEST);
+    let manifest: mvm_core::deps_audit::VolumeManifest =
         serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
     Ok(DependencyVolumeRecord {
         volume_hash,
@@ -1189,16 +1189,16 @@ mod tests {
     fn deploy_record_refuses_tampered_dependency_volume() {
         let tmp = tempfile::tempdir().unwrap();
         let volume = tmp.path().join("volume");
-        let content = volume.join(crate::compile::deps_audit::FILE_CONTENT_DIR);
+        let content = volume.join(mvm_core::deps_audit::FILE_CONTENT_DIR);
         std::fs::create_dir_all(&content).unwrap();
-        let sbom = volume.join(crate::compile::deps_audit::FILE_SBOM);
-        let fetch_log = volume.join(crate::compile::deps_audit::FILE_FETCH_LOG);
-        let cve = volume.join(crate::compile::deps_audit::FILE_CVE);
+        let sbom = volume.join(mvm_core::deps_audit::FILE_SBOM);
+        let fetch_log = volume.join(mvm_core::deps_audit::FILE_FETCH_LOG);
+        let cve = volume.join(mvm_core::deps_audit::FILE_CVE);
         std::fs::write(content.join("site.py"), b"print('ok')").unwrap();
         std::fs::write(&sbom, br#"{"bomFormat":"CycloneDX"}"#).unwrap();
         std::fs::write(&fetch_log, b"https://example.test\n").unwrap();
         std::fs::write(&cve, br#"{"vulnerabilities":[]}"#).unwrap();
-        let seal = crate::compile::deps_audit::seal_volume(
+        let seal = mvm_core::deps_audit::seal_volume(
             &content,
             &sbom,
             &fetch_log,
@@ -1208,7 +1208,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            volume.join(crate::compile::deps_audit::FILE_MANIFEST),
+            volume.join(mvm_core::deps_audit::FILE_MANIFEST),
             seal.manifest_bytes,
         )
         .unwrap();
