@@ -49,6 +49,7 @@ pub const NET_FLAG_DHCP_CLIENT: u32 = 1 << 1;
 /// `net::unixgram network proxy socket fd ...`) that don't appear
 /// via `krun_set_log_level` alone.
 pub fn init_log(target_fd: i32, level: LogLevel, style: u32, options: u32) -> Result<(), Error> {
+    // SAFETY: the arguments are plain integers and no pointer is passed.
     check(unsafe { bindings::krun_init_log(target_fd, level.as_u32(), style, options) })
 }
 
@@ -110,6 +111,7 @@ pub struct Context {
 impl Context {
     /// Allocate a new libkrun configuration context.
     pub fn new() -> Result<Self, Error> {
+        // SAFETY: the call takes no pointers.
         let rc = unsafe { bindings::krun_create_ctx() };
         if rc < 0 {
             return Err(Error::Krun(rc));
@@ -123,11 +125,15 @@ impl Context {
     }
 
     pub fn set_vm_config(&self, num_vcpus: u8, ram_mib: u32) -> Result<(), Error> {
+        // SAFETY: the arguments are plain integers (`ctx_id` names the live context created in
+        //         `new`, freed only in `drop`); no pointer is passed.
         check(unsafe { bindings::krun_set_vm_config(self.ctx_id, num_vcpus, ram_mib) })
     }
 
     pub fn set_root_disk(&self, disk_path: &Path) -> Result<(), Error> {
         let path = cstring(disk_path)?;
+        // SAFETY: `self.ctx_id` is the live context and `path` is a NUL-terminated CString that
+        //         outlives the call.
         check(unsafe { bindings::krun_set_root_disk(self.ctx_id, path.as_ptr()) })
     }
 
@@ -142,6 +148,8 @@ impl Context {
     /// here we just forward to the FFI.
     pub fn set_root(&self, root_path: &Path) -> Result<(), Error> {
         let path = cstring(root_path)?;
+        // SAFETY: `self.ctx_id` is the live context and `path` is a NUL-terminated CString that
+        //         outlives the call.
         check(unsafe { bindings::krun_set_root(self.ctx_id, path.as_ptr()) })
     }
 
@@ -173,6 +181,8 @@ impl Context {
         let mut envp_ptrs: Vec<*const std::os::raw::c_char> =
             envp_owned.iter().map(|c| c.as_ptr()).collect();
         envp_ptrs.push(std::ptr::null());
+        // SAFETY: `entry`, and every element of the NULL-terminated `argv_ptrs`/`envp_ptrs`, point
+        //         into CStrings that outlive the call.
         check(unsafe {
             bindings::krun_set_exec(
                 self.ctx_id,
@@ -202,6 +212,8 @@ impl Context {
         let initramfs_ptr = initramfs.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
         let cmdline_ptr = cmdline.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
         let format_u32 = to_krun_format(kernel_format)?;
+        // SAFETY: `kernel` is a NUL-terminated CString and `initramfs_ptr`/`cmdline_ptr` are null
+        //         or point at CStrings that outlive the call.
         check(unsafe {
             bindings::krun_set_kernel(
                 self.ctx_id,
@@ -214,6 +226,8 @@ impl Context {
     }
 
     pub fn add_vsock(&self, tsi_features: u32) -> Result<(), Error> {
+        // SAFETY: the arguments are plain integers (`ctx_id` names the live context created in
+        //         `new`, freed only in `drop`); no pointer is passed.
         check(unsafe { bindings::krun_add_vsock(self.ctx_id, tsi_features) })
     }
 
@@ -221,11 +235,15 @@ impl Context {
     /// context while keeping the explicit `add_vsock_port2(...)`
     /// control sockets usable. This is the no-NIC, no-TSI direct path.
     pub fn disable_implicit_vsock(&self) -> Result<(), Error> {
+        // SAFETY: the arguments are plain integers (`ctx_id` names the live context created in
+        //         `new`, freed only in `drop`); no pointer is passed.
         check(unsafe { bindings::krun_disable_implicit_vsock(self.ctx_id) })
     }
 
     pub fn add_vsock_port(&self, port: u32, host_path: &Path) -> Result<(), Error> {
         let path = cstring(host_path)?;
+        // SAFETY: `self.ctx_id` is the live context and `path` is a NUL-terminated CString that
+        //         outlives the call.
         check(unsafe { bindings::krun_add_vsock_port(self.ctx_id, port, path.as_ptr()) })
     }
 
@@ -241,18 +259,24 @@ impl Context {
     /// proxies guest-initiated connects to it.
     pub fn add_vsock_port2(&self, port: u32, host_path: &Path, listen: bool) -> Result<(), Error> {
         let path = cstring(host_path)?;
+        // SAFETY: `self.ctx_id` is the live context and `path` is a NUL-terminated CString that
+        //         outlives the call.
         check(unsafe { bindings::krun_add_vsock_port2(self.ctx_id, port, path.as_ptr(), listen) })
     }
 
     pub fn add_virtiofs(&self, tag: &str, host_path: &Path) -> Result<(), Error> {
         let tag = CString::new(tag).map_err(|_| Error::InvalidCString)?;
         let path = cstring(host_path)?;
+        // SAFETY: `self.ctx_id` is the live context; `tag`/`block` and `path` are NUL-terminated
+        //         CStrings that outlive the call.
         check(unsafe { bindings::krun_add_virtiofs(self.ctx_id, tag.as_ptr(), path.as_ptr()) })
     }
 
     pub fn add_virtiofs2(&self, tag: &str, host_path: &Path, shm_size: u64) -> Result<(), Error> {
         let tag = CString::new(tag).map_err(|_| Error::InvalidCString)?;
         let path = cstring(host_path)?;
+        // SAFETY: `self.ctx_id` is the live context; `tag`/`block` and `path` are NUL-terminated
+        //         CStrings that outlive the call.
         check(unsafe {
             bindings::krun_add_virtiofs2(self.ctx_id, tag.as_ptr(), path.as_ptr(), shm_size)
         })
@@ -267,6 +291,8 @@ impl Context {
     ) -> Result<(), Error> {
         let tag = CString::new(tag).map_err(|_| Error::InvalidCString)?;
         let path = cstring(host_path)?;
+        // SAFETY: `self.ctx_id` is the live context; `tag`/`block` and `path` are NUL-terminated
+        //         CStrings that outlive the call.
         check(unsafe {
             bindings::krun_add_virtiofs3(
                 self.ctx_id,
@@ -281,6 +307,8 @@ impl Context {
     pub fn add_disk(&self, block_id: &str, disk_path: &Path, read_only: bool) -> Result<(), Error> {
         let block = CString::new(block_id).map_err(|_| Error::InvalidCString)?;
         let path = cstring(disk_path)?;
+        // SAFETY: `self.ctx_id` is the live context; `tag`/`block` and `path` are NUL-terminated
+        //         CStrings that outlive the call.
         check(unsafe {
             bindings::krun_add_disk(self.ctx_id, block.as_ptr(), path.as_ptr(), read_only)
         })
@@ -288,6 +316,8 @@ impl Context {
 
     pub fn set_console_output(&self, host_path: &Path) -> Result<(), Error> {
         let path = cstring(host_path)?;
+        // SAFETY: `self.ctx_id` is the live context and `path` is a NUL-terminated CString that
+        //         outlives the call.
         check(unsafe { bindings::krun_set_console_output(self.ctx_id, path.as_ptr()) })
     }
 
@@ -297,6 +327,8 @@ impl Context {
     /// not called from `crate::start` — boot lives alongside the
     /// registry that owns the blocking thread.
     pub fn start_enter(&self) -> Result<std::convert::Infallible, Error> {
+        // SAFETY: the arguments are plain integers (`ctx_id` names the live context created in
+        //         `new`, freed only in `drop`); no pointer is passed.
         let rc = unsafe { bindings::krun_start_enter(self.ctx_id) };
         // On success the call does not return; if we observe one, it's
         // an error path.
@@ -306,6 +338,8 @@ impl Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
+        // SAFETY: the arguments are plain integers (`ctx_id` names the live context created in
+        //         `new`, freed only in `drop`); no pointer is passed.
         let rc = unsafe { bindings::krun_free_ctx(self.ctx_id) };
         if rc < 0 {
             tracing::warn!(
@@ -410,6 +444,7 @@ pub fn extract_bundled_kernel(target_path: &Path) -> Result<BundledKernel, Error
 }
 
 pub fn set_log_level(level: LogLevel) -> Result<(), Error> {
+    // SAFETY: the argument is a plain integer; no pointer is passed.
     check(unsafe { bindings::krun_set_log_level(level.as_u32()) })
 }
 

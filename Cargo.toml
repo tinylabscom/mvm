@@ -133,6 +133,8 @@ too_many_arguments = "deny"
 # A guard held across an `.await` deadlocks the executor thread that polls it.
 await_holding_lock = "deny"
 await_holding_refcell_ref = "deny"
+# An `unsafe` block states the invariant that makes it sound.
+undocumented_unsafe_blocks = "deny"
 
 [workspace.dependencies]
 # Async runtime.
@@ -364,6 +366,9 @@ authors.workspace = true
 # manager owns it, and which one, so `mvmctl env update` refuses to replace
 # files dpkg or rpm records rather than desync their database
 # (crates/mvm-cli/src/install_layout.rs reads it).
+[lints]
+workspace = true
+
 [package.metadata.deb]
 name = "mvmctl"
 maintainer = "mvm contributors <https://github.com/tinylabscom/mvm>"

@@ -67,8 +67,8 @@ pub fn query(state_dir: &Path, expected_pid: u32) -> Result<RuntimeArtifacts> {
     let stream = mvm_agentd::vsock::connect_unix_before(&socket_path(state_dir), end)
         .context("connect supervisor runtime artifact observer")?;
     let (pid, uid) = peer_identity(&stream)?;
-    // SAFETY: geteuid takes no pointers and has no preconditions.
     ensure!(
+        // SAFETY: geteuid takes no pointers and has no preconditions.
         pid == expected_pid && uid == unsafe { libc::geteuid() },
         "wrong supervisor peer"
     );
@@ -109,9 +109,9 @@ pub struct Observer {
 impl Observer {
     pub fn bind(state_dir: &Path, artifacts: Option<RuntimeArtifacts>) -> Result<Self> {
         let metadata = std::fs::symlink_metadata(state_dir)?;
-        // SAFETY: geteuid has no preconditions.
         ensure!(
             metadata.is_dir()
+                // SAFETY: geteuid has no preconditions.
                 && metadata.uid() == unsafe { libc::geteuid() }
                 && metadata.mode() & 0o022 == 0,
             "unsafe supervisor state directory"
@@ -210,8 +210,8 @@ impl Observer {
     fn answer<G>(&self, stream: UnixStream, all_paused: impl Fn() -> Option<G>) -> Result<()> {
         let end = Instant::now() + Duration::from_millis(50);
         let (_, uid) = peer_identity(&stream)?;
-        // SAFETY: geteuid has no preconditions.
         ensure!(
+            // SAFETY: geteuid has no preconditions.
             uid == unsafe { libc::geteuid() },
             "wrong observer client uid"
         );

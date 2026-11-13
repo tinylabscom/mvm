@@ -818,6 +818,8 @@ impl GpuBackend for NativeCudaBackend {
             (self.cuda.memcpy_dtoh_async)(out.as_mut_ptr().cast::<c_void>(), src, len, stream_ptr)
         };
         self.cuda.check(code, "cuMemcpyDtoHAsync")?;
+        // SAFETY: `stream_synchronize` was resolved from the driver at load and `stream_ptr` is a
+        //         stream this backend owns in the current context.
         let code = unsafe { (self.cuda.stream_synchronize)(stream_ptr) };
         self.cuda.check(code, "cuStreamSynchronize after DtoH")?;
         let completion = self.completion()?;
@@ -905,11 +907,11 @@ impl GpuBackend for NativeCudaBackend {
         let [gx, gy, gz] = config.grid;
         let [bx, by, bz] = config.block;
         let (_, function_ptr) = self.functions.get(context, function)?;
+        let stream = self.stream_ptr(context, config.stream.unwrap_or(0))?;
         // SAFETY: a context is current; `function_ptr` is a function from the
         // table of this context; each params entry points at a live buffer;
         // the stream is null for the legacy default or a validated stream;
         // `extra` is NULL.
-        let stream = self.stream_ptr(context, config.stream.unwrap_or(0))?;
         let code = unsafe {
             (self.cuda.launch_kernel)(
                 function_ptr,

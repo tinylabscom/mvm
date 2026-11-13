@@ -338,6 +338,8 @@ fn into_c_buf(bytes: Vec<u8>) -> MvmHsvcBuf {
 /// # Safety
 /// `out` must be a valid, writable `*mut MvmHsvcBuf`.
 unsafe fn write_outcome(out: *mut MvmHsvcBuf, outcome: Outcome) -> i32 {
+    // SAFETY: the caller of this unsafe fn guarantees `out` is valid and writable; the write
+    //         replaces a plain-data struct, so nothing is dropped.
     unsafe { *out = into_c_buf(outcome.body) };
     outcome.status
 }
@@ -452,6 +454,8 @@ unsafe fn borrow<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
     if ptr.is_null() || len == 0 {
         &[]
     } else {
+        // SAFETY: `ptr` is non-null and `len > 0` here; the caller guarantees `ptr` points to
+        //         `len` readable bytes.
         unsafe { slice::from_raw_parts(ptr, len) }
     }
 }
@@ -699,23 +703,30 @@ mod tests {
         // `out` with an owned C buffer, read it back as a C caller would, then
         // release it.
         let status =
+            // SAFETY: `client` and `out` are live locals; `out` is a valid, writable buffer.
             unsafe { call_with_stream(&mut client, "host.audit.emit", &request, &mut out) };
         handle.join().unwrap();
 
         assert_eq!(status, MVM_HSVC_OK);
         assert!(!out.data.is_null());
         assert!(out.len > 0);
+        // SAFETY: `out` was just filled by `call_with_stream` with a boxed slice of `out.len`
+        //         bytes that is not yet freed.
         let body = unsafe { slice::from_raw_parts(out.data, out.len) };
         let resp: serde_json::Value = serde_json::from_slice(body).unwrap();
         assert_eq!(resp["chain_head"], "head-free");
 
         // Free-after-use: a no-double-free, no-leak round trip. Miri/ASan in CI
         // would catch a mismatch between into_c_buf and mvm_hsvc_free here.
+        // SAFETY: `out` came from `call_with_stream` and is freed exactly once, here; `body` is no
+        //         longer used.
         unsafe { mvm_hsvc_free(out) };
     }
 
     #[test]
     fn free_is_a_no_op_on_zeroed_buffer() {
+        // SAFETY: a zeroed buffer has a null pointer, which `mvm_hsvc_free` returns on without
+        //         freeing.
         unsafe { mvm_hsvc_free(MvmHsvcBuf::empty()) };
     }
 

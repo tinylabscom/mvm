@@ -125,7 +125,10 @@ fn native_ownership_negotiation_and_errors() {
     // SAFETY: fixture exports this exact signature, monitor remains live.
     let frees =
         unsafe { monitor.get::<unsafe extern "C" fn() -> usize>(b"fixture_frees\0") }.unwrap();
+    // SAFETY: `frees` borrows `monitor`, which outlives every call of this closure, and the
+    //         fixture exports it as `fn() -> usize`.
     let count = || unsafe { frees() };
+    // SAFETY: `good` is a fixture this test compiled to the hostlib ABI.
     let host = unsafe { Hostlib::load(&good) }.unwrap();
     assert_eq!(host.abi_version(), (1 << 16) | 7);
     assert_eq!(
@@ -154,10 +157,14 @@ fn native_ownership_negotiation_and_errors() {
     }
     assert_eq!(count(), 6);
     assert!(matches!(
+        // SAFETY: the fixture is built by this test; load must refuse its ABI, and nothing but its
+        //         initializers runs.
         unsafe { Hostlib::load(build(&scratch.path, "bad_abi")) },
         Err(Error::Abi { .. })
     ));
     assert!(matches!(
+        // SAFETY: the fixture is built by this test; load must refuse its missing export, and
+        //         nothing but its initializers runs.
         unsafe { Hostlib::load(build(&scratch.path, "missing_free")) },
         Err(Error::Load)
     ));

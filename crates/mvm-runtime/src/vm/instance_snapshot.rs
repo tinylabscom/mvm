@@ -1537,10 +1537,12 @@ mod tests {
     #[test]
     fn capture_staging_is_private_under_a_permissive_umask() {
         let _g = DataDirGuard::new();
-        // The umask is process-wide; nextest runs each test in its own process.
+        // SAFETY: umask only swaps the process-wide mask and touches no memory; nextest runs each
+        //         test in its own process.
         let previous = unsafe { libc::umask(0) };
         let probe = CaptureProbe::new(false);
         let sealed = seal_under_host_key("vm-umask", &probe);
+        // SAFETY: restores the mask saved above; no memory is touched.
         unsafe { libc::umask(previous) };
         sealed.unwrap();
         assert_eq!(probe.seen.borrow().as_ref().unwrap().1, 0o700);
