@@ -213,6 +213,45 @@ fn no_untrusted_event_can_place_a_job_on_the_self_hosted_runner() {
          physical machine:\n  {}",
         violations.join("\n  ")
     );
+    let diagnostic = all
+        .iter()
+        .find(|w| w.name == "prepared-cold-m1-diagnostic.yml")
+        .expect("physical-cold workflow exists");
+    assert!(reaching.contains(&diagnostic.name));
+    assert_eq!(
+        trigger_events(&diagnostic.text).unwrap(),
+        BTreeSet::from(["workflow_dispatch".to_string()])
+    );
+    let (_, job) = jobs(&diagnostic.text)
+        .into_iter()
+        .find(|(name, _)| name == "prepared-cold-m1")
+        .expect("physical-cold M1 job exists");
+    for required in [
+        "if: github.ref == 'refs/heads/main'",
+        "runs-on: [self-hosted, macOS, ARM64, m1]",
+        "persist-credentials: false",
+        "MVM_RESIDENCY: cold",
+        "MVM_RUNTIME_OVERLAY_SOURCE_ROOT: ${{ github.workspace }}",
+        "cargo build --locked --release --bin mvmctl",
+        "cargo build --locked --release -p mvm-hostd --bins",
+        "target/release/mvmctl bootstrap",
+        "MVM_LAUNCH_SAMPLE_JSON=\"$RESULTS_DIR/preflight.json\"",
+        "bench --lane prepared-cold --runs 20 --warmup 2",
+        "--out \"$RESULTS_DIR/bench.json\"",
+        "if: always()",
+        "actions/upload-artifact@v7",
+        "${{ runner.temp }}/mvm-physical-cold-${{ github.run_id }}-${{ github.run_attempt }}/bench.json",
+        "${{ runner.temp }}/mvm-physical-cold-${{ github.run_id }}-${{ github.run_attempt }}/bench.log",
+    ] {
+        assert!(
+            job.contains(required),
+            "trusted M1 physical-cold job missing `{required}`"
+        );
+    }
+    assert!(
+        !job.contains("concurrency:"),
+        "a shared Actions group replaces pending M1 jobs rather than queuing them"
+    );
 }
 
 #[test]
