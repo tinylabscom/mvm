@@ -244,13 +244,27 @@ PR-only signed CLI, x86_64 base and guest runtime from Actions run
 `machine logs packed-fixed` on Firecracker. Create took 4.70 s, the first start
 11.03 s and a stop/restart with an authenticated composition cache hit 8.77 s.
 These are named-machine guest-output witnesses, not speed acceptance; aarch64
-Linux/KVM and immutable warm custody still lack live witnesses. On macOS arm64
-HVF, a native `release-witness` CLI with the same PR-signed aarch64 base and
-guest runtime assembled a named composition in 3.51 s and produced
-`COMPOSED_GUEST_VALUE=ready` through a 9.74 s start and a 9.77 s
+Linux/KVM and immutable warm custody had not yet been witnessed at that commit.
+On macOS arm64 HVF, a native `release-witness` CLI with the same PR-signed
+aarch64 base and guest runtime assembled a named composition in 3.51 s and
+produced `COMPOSED_GUEST_VALUE=ready` through a 9.74 s start and a 9.77 s
 stop/restart cache hit. Its CLI was built locally rather than attested by the
 PR workflow; this is a native HVF guest-output witness, not Linux arm64/KVM
 or launch-speed acceptance.
+
+At `02a5f6ee3c`, a locally cross-built arm64 Linux `release-witness` CLI and
+host helpers, hash-checked after transfer, used the same-head PR-signed
+aarch64 base and runtime from Actions run `43314770069` on a Raspberry Pi 4
+running Linux 6.18.50 with accessible `/dev/kvm` (KVM API version 12).
+The CLI created a named machine from the pack and local base in 20 s. Pinned
+Firecracker v1.17.0 booted it via `machine start arm-witness` with explicit
+`--hypervisor firecracker`; `machine logs` read `COMPOSED_GUEST_VALUE=ready`
+after 53 s. Stop and restart produced the same guest value in 53 s; the
+repeat Firecracker API log contained no `network-interfaces` request. The
+console log is not hash-chained; the CLI is locally built rather than
+release-attested. This demonstrates
+an arm64 Linux/KVM guest read, **not** immutable warm custody, launch-speed
+acceptance, or a production release.
 
 Acceptance requires Linux **CLI** one-command default and selected-custom-base
 cold/repeat runs, a value actually read from the guest on both runs, a proven
