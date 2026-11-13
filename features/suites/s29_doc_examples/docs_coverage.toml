@@ -533,6 +533,7 @@ uncovered = [
     """mvmctl run --image curlimages/curl:latest --secret anthropic --allow-host api.anthropic.com -- sh -c 'curl -sS https://api.anthropic.com/v1/models -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01"'""",
     "mvmctl run --json --receipt /tmp/run-receipt.json -- python task.py",
     "mvmctl run --manifest my-app --mount /tmp/my-config:/data/config:ro",
+    "mvmctl run --no-detect -- /bin/true",
     'mvmctl run --plan agent.json -- claude -p "summarize the repo"',
     "mvmctl run --policy ./org-base.toml --policy ./team.toml --policy ./mine.json -- make test",
     'mvmctl run --policy ./policy/pi.toml -- pi --provider anthropic -p "summarize the repo"',
