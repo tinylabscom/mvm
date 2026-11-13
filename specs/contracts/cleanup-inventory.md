@@ -25,19 +25,19 @@ Re-run on 2026-11-12 after a full-mode reindex of `main` at `aaf74fcb11` (`codeb
 
 ### 1.2 Packages and binaries
 
-- `cargo metadata --no-deps --format-version 1` -> **28 packages** (all workspace members; CLAUDE.md's "31 packages" is stale), **53 `bin` targets** in 14 packages, re-counted 2026-11-06 at `d6b4a29f84` (`mvm-egress-proxy` is gone; the rest are library-only).
+- `cargo metadata --no-deps --format-version 1` -> **28 packages** (all workspace members), **52 `bin` targets** in 14 packages, re-counted 2026-11-12 at `b9731f0039` (the rest are library-only).
 
 | Package | Bins | Binaries |
 |---|---|---|---|
 | `mvm-agentd` | 18 | `audit-probe`, `emit_protocol_schema`, `fake-runner`, `mvm-addon-dns`, `mvm-addon-vsock-bridge`, `mvm-builder-agent`, `mvm-display-bridge`, `mvm-egress-client`, `mvm-entrypoint-test-wrapper`, `mvm-exit-report`, `mvm-guest-agent`, `mvm-guest-netinit`, `mvm-oci-entrypoint`, `mvm-ping`, `mvm-runner`, `mvm-seccomp-apply`, `mvm-setpriv-fixture`, `syscall-probe` |
-| `mvm-build` | 2 | `mvm-egress-proxy`, `mvm-test-image-lock-holder` |
+| `mvm-build` | 1 | `mvm-test-image-lock-holder` |
 | `mvm-builder-guest` | 3 | `mvm-builderd`, `mvm-host-vm-init`, `stage0-init` |
 | `mvm-client` | 2 | `emit_instruction_trust_schema`, `emit_policy_schema` |
 | `mvm-contract` | 2 | `emit_assurance_schema`, `emit_pack_spec_schema` |
 | `mvm-core` | 2 | `emit_broker_schema`, `mvm-extension-pack-verify` |
 | `mvm-fs` | 1 | `mvm-extension-image` |
 | `mvm-gpu` | 1 | `mvm-gpu-endpoint` |
-| `mvm-hostd` | 10 | `mvm-apfs-snapshot-helper`, `mvm-audit-signer`, `mvm-broker`, `mvm-extension-provider`, `mvm-host-agent`, `mvm-host-signer`, `mvm-hvf-supervisor`, `mvm-libkrun-supervisor`, `mvm-network-endpoint`, `mvm-signer-helper` |
+| `mvm-hostd` | 11 | `mvm-apfs-snapshot-helper`, `mvm-audit-signer`, `mvm-broker`, `mvm-extension-provider`, `mvm-host-agent`, `mvm-host-signer`, `mvm-hvf-supervisor`, `mvm-libkrun-supervisor`, `mvm-mailbox`, `mvm-network-endpoint`, `mvm-signer-helper` |
 | `mvm-hostlib` | 2 | `emit_host_abi_methods`, `emit_host_abi_schema` |
 | `mvm-sdk` | 6 | `emit_addon_schema`, `emit_runtime_schema`, `emit_sdk_ctors`, `emit_sdk_env`, `emit_sdk_errors`, `emit_workload_schema` |
 | `mvm-setpriv` | 1 | `mvm-setpriv` |
@@ -867,7 +867,7 @@ Host/architecture lanes CI actually builds or smokes (from `strategy.matrix` in 
 
 Not covered by any matrix row: libkrun, QEMU, `apple-container`, `web-linux` and `wasm` as workload backends have no per-backend platform lane here; they run inside the generic workspace shards or feature-gated tests. Whether that is deliberate is not decided in this document.
 
-Cargo features: 90 non-default features across 17 of the 32 packages (`cargo metadata --no-deps --format-version 1 --offline`). Defaults: `mvm-contract` -> `protocol`; `mvm-build` -> `builder-libkrun`; `mvm-client` -> `manifest-verify`; `mvmctl` -> `mvm-cli/manifest-verify`. The root `mvmctl` package re-exposes `attestation-tpm2 dev embed-host-bins host hostd-transport hvf-live-validation libkrun-live libkrun-sys native-caller-identity release-artifact-bootstrap release-channel template-registry-s3 test-support trusted-apfs user`. Feature-conditional behaviour that changes a supported combination: `embed-host-bins` (release/CI builds always on), `manifest-verify` (without it self-update and image verification cannot run), `release-channel`, `contributor-bootstrap` (source-checkout bootstrap), `trusted-apfs`, `custom-dns`, `ebpf-telemetry`, `network-perf`.
+Cargo features: 90 non-default features across 17 of the 28 packages (`cargo metadata --no-deps --format-version 1 --offline`). Defaults: `mvm-contract` -> `protocol`; `mvm-build` -> `builder-libkrun`; `mvm-client` -> `manifest-verify`; `mvmctl` -> `mvm-cli/manifest-verify`. The root `mvmctl` package re-exposes `attestation-tpm2 dev embed-host-bins host hostd-transport hvf-live-validation libkrun-live libkrun-sys native-caller-identity release-artifact-bootstrap release-channel template-registry-s3 test-support trusted-apfs user`. Feature-conditional behaviour that changes a supported combination: `embed-host-bins` (release/CI builds always on), `manifest-verify` (without it self-update and image verification cannot run), `release-channel`, `contributor-bootstrap` (source-checkout bootstrap), `trusted-apfs`, `custom-dns`, `ebpf-telemetry`, `network-perf`.
 
 ### 3.6 Live compatibility layers
 

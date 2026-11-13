@@ -576,7 +576,7 @@ pub enum LocalAuditKind {
     ///   `tenant=<t> vm=<v> capture=<id> reason=<msg>`
     TranscriptRefused,
 
-    // --- Reviewed workspace apply (PS-08) ---
+    // --- Reviewed workspace apply ---
     /// `mvmctl machine apply` reviewed a machine's workspace changes back
     /// onto the host directory: every overwritten host byte was snapshotted
     /// content-addressed first, the apply is journaled, and the manifest's
@@ -591,7 +591,7 @@ pub enum LocalAuditKind {
     /// Detail: `action=workspace.redo volume=<v> redo=<id> target=<id>`
     WorkspaceRedo,
 
-    // --- Replay (PS-08) ---
+    // --- Replay ---
     /// `mvmctl machine replay` forked a checkpoint into a fresh,
     /// re-admitted VM and re-ran the recorded input journal on it,
     /// checkpointing each step. Detail:

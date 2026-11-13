@@ -66,7 +66,7 @@ pub fn ask_armed(
 
 /// Where the prompt is drawn, and how it interleaves with the run's own
 /// output. The default frames it on its own lines on the terminal. The
-/// live-denial lines (PS-04) are expected to share this seam so a prompt and
+/// live-denial lines are expected to share this seam so a prompt and
 /// a denial never tear each other.
 pub trait PromptRenderer: Send + Sync {
     fn render(&self, prompt: &ApprovalPrompt) -> String;

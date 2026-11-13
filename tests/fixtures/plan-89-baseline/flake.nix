@@ -3,7 +3,7 @@
 
   # Deliberately no inputs — we don't want to fetch nixpkgs or
   # microvm.nix. Any input adds cold-cache download time on the first
-  # run that has nothing to do with what W1 is measuring.
+  # run that has nothing to do with what the boot-timing baseline measures.
 
   outputs = _: {
     # Throw at evaluation time. nix-build inside the builder VM will
