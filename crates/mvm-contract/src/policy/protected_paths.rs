@@ -9,7 +9,8 @@
 //! signed one. Matching is case-sensitive and total — traversal and
 //! malformed input never match, never panic.
 
-use alloc::string::String;
+use alloc::format;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
@@ -61,7 +62,7 @@ pub enum ProtectedPathsMode {
 ///
 /// Matching is case-sensitive. Malformed patterns — empty segments after
 /// normalization, `.` or `..` segments — never match anything.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(transparent)]
 pub struct ProtectedPath(String);
@@ -125,6 +126,178 @@ impl ProtectedPathsPolicy {
     }
 }
 
+/// Built-in deny set excluded from every directory-share materialization
+/// unless a signed share grant explicitly re-exposes an entry. Each entry is
+/// a share pattern in the operator syntax accepted by [`parse_share_pattern`]:
+/// a pattern without `/` matches a file or directory name at any depth (a
+/// directory match prunes everything beneath it); a pattern with `/` matches
+/// the full relative path from the share root.
+pub const BUILT_IN_DENIED: &[&str] = &[
+    ".env",
+    ".env.*",
+    ".aws",
+    ".aws/*",
+    ".ssh",
+    ".ssh/*",
+    ".gnupg",
+    ".gnupg/*",
+    ".git-credentials",
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+    ".kube",
+    ".kube/*",
+    ".config/gcloud",
+    ".config/gcloud/*",
+    "id_rsa",
+    "id_rsa.*",
+    "*.pem",
+    "*.key",
+];
+
+/// The built-in deny set as matcher-ready patterns. Panics only if a
+/// built-in entry fails validation — the unit test on [`BUILT_IN_DENIED`]
+/// pins every entry, so this cannot happen in a tested build.
+pub fn built_in_deny_patterns() -> Vec<ProtectedPath> {
+    BUILT_IN_DENIED
+        .iter()
+        .map(|entry| parse_share_pattern(entry).expect("built-in deny entry must parse"))
+        .collect()
+}
+
+/// Why a share deny-set pattern was refused. Patterns are validated at the
+/// boundary that receives them (CLI parse, plan synthesis) so a malformed
+/// pattern is a typed refusal, never a silently non-matching one.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SharePatternError {
+    /// The pattern was empty.
+    #[error("share pattern must not be empty")]
+    Empty,
+    /// Patterns are relative to the share root; an absolute pattern would
+    /// escape the tree the matcher reads.
+    #[error("share pattern {pattern:?} must be relative (no leading '/')")]
+    Absolute { pattern: String },
+    /// A repeated, leading, or trailing separator produced an empty segment.
+    #[error("share pattern {pattern:?} has an empty path segment")]
+    EmptySegment { pattern: String },
+    /// `.` and `..` segments are traversal, not paths.
+    #[error("share pattern {pattern:?} contains a traversal segment {segment:?}")]
+    Traversal { pattern: String, segment: String },
+    /// `**` as a whole pattern would match the entire share; name a concrete
+    /// path or tree instead. Inside a pattern `**` is an ordinary full
+    /// segment whose matcher semantics are documented on [`ProtectedPath`].
+    #[error("share pattern {pattern:?} is a bare '**'; name a concrete path or tree")]
+    DoubleStar { pattern: String },
+    /// One `*` per segment: fnmatch-within-segment, never a cross-segment
+    /// glob. `**` is the only multi-segment wildcard and it is trailing-only.
+    #[error("share pattern {pattern:?} segment {segment:?} has more than one '*'")]
+    MultipleWildcards { pattern: String, segment: String },
+}
+
+/// Validate a share deny-set pattern and normalize it into matcher syntax.
+/// A pattern without `/` matches a name at any depth, so it is rewritten
+/// with a leading `**/`; a pattern with `/` is kept and matches the full
+/// relative path from the share root. Validation is strict so the pattern's
+/// meaning on the wire is exactly its meaning at the materializer.
+pub fn parse_share_pattern(pattern: &str) -> Result<ProtectedPath, SharePatternError> {
+    if pattern.is_empty() {
+        return Err(SharePatternError::Empty);
+    }
+    if pattern.starts_with('/') {
+        return Err(SharePatternError::Absolute {
+            pattern: pattern.into(),
+        });
+    }
+    if pattern == "**" {
+        return Err(SharePatternError::DoubleStar {
+            pattern: pattern.into(),
+        });
+    }
+    let segments: Vec<&str> = pattern.split('/').collect();
+    for segment in &segments {
+        if segment.is_empty() {
+            return Err(SharePatternError::EmptySegment {
+                pattern: pattern.into(),
+            });
+        }
+        if *segment == "." || *segment == ".." {
+            return Err(SharePatternError::Traversal {
+                pattern: pattern.into(),
+                segment: segment.to_string(),
+            });
+        }
+        if *segment != "**" && segment.matches('*').count() > 1 {
+            return Err(SharePatternError::MultipleWildcards {
+                pattern: pattern.into(),
+                segment: segment.to_string(),
+            });
+        }
+    }
+    if !pattern.contains('/') {
+        return Ok(ProtectedPath::new(format!("**/{pattern}")));
+    }
+    Ok(ProtectedPath::new(pattern))
+}
+
+/// Why a share grant's deny-set override was refused at admission.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ShareDenySetError {
+    /// An include/exclude entry was not a valid share pattern.
+    #[error("share deny-set entry: {0}")]
+    Pattern(#[from] SharePatternError),
+    /// Widening only applies to the built-in set: an include entry that is
+    /// not one of the built-in patterns would expose a path the base policy
+    /// never denied, which is a grant, not a re-exposure.
+    #[error(
+        "share include {pattern:?} is not in the built-in deny set; a share may only re-expose built-in-denied paths"
+    )]
+    NotBuiltIn { pattern: String },
+    /// A path cannot be simultaneously re-exposed and denied; the overlap
+    /// makes the effective set unexplainable.
+    #[error("share pattern {pattern:?} appears in both include and exclude")]
+    Overlap { pattern: String },
+}
+
+/// Validate a signed grant's deny-set override and compute the effective
+/// deny set the materializer applies: the built-in set minus the include
+/// re-exposures plus the exclude additions. Called at plan synthesis so an
+/// invalid override refuses before anything is signed, and re-validated
+/// wherever a deserialized grant is admitted.
+pub fn effective_deny_set(
+    include: &[ProtectedPath],
+    exclude: &[ProtectedPath],
+) -> Result<ProtectedPathSet, ShareDenySetError> {
+    let built_in = built_in_deny_patterns();
+    let include: Vec<ProtectedPath> = include
+        .iter()
+        .map(|path| parse_share_pattern(path.as_str()))
+        .collect::<Result<_, _>>()?;
+    let exclude: Vec<ProtectedPath> = exclude
+        .iter()
+        .map(|path| parse_share_pattern(path.as_str()))
+        .collect::<Result<_, _>>()?;
+    for path in &include {
+        if !built_in.contains(path) {
+            return Err(ShareDenySetError::NotBuiltIn {
+                pattern: path.as_str().into(),
+            });
+        }
+    }
+    for path in &include {
+        if exclude.contains(path) {
+            return Err(ShareDenySetError::Overlap {
+                pattern: path.as_str().into(),
+            });
+        }
+    }
+    let mut patterns: Vec<ProtectedPath> = built_in
+        .into_iter()
+        .filter(|pattern| !include.contains(pattern))
+        .collect();
+    patterns.extend(exclude);
+    Ok(ProtectedPathSet::new(&patterns))
+}
+
 /// A pure, ordered matcher over a set of protected path classes.
 ///
 /// The set is evaluated in declaration order so a refusal can name the
@@ -136,6 +309,13 @@ pub struct ProtectedPathSet {
 }
 
 impl ProtectedPathSet {
+    /// The patterns in declaration order. Exposed so a consumer can digest
+    /// the set canonically (a cache identity, an audit record) rather than
+    /// re-serialize guesses.
+    pub fn patterns(&self) -> &[ProtectedPath] {
+        &self.patterns
+    }
+
     /// Build a matcher over `paths`, preserving declaration order.
     pub fn new<'a>(paths: impl IntoIterator<Item = &'a ProtectedPath>) -> Self {
         Self {
@@ -394,6 +574,117 @@ mod tests {
             ..ProtectedPathsPolicy::default()
         };
         assert!(policy.matcher().is_none());
+    }
+
+    #[test]
+    fn built_in_deny_set_parses() {
+        for entry in BUILT_IN_DENIED {
+            assert!(
+                parse_share_pattern(entry).is_ok(),
+                "built-in deny entry {entry:?} must parse"
+            );
+        }
+        // Pin the exact shipped set so a typo cannot silently drop a class.
+        assert_eq!(BUILT_IN_DENIED.len(), 20);
+    }
+
+    #[test]
+    fn share_pattern_validation_accepts_operators_syntax() {
+        // No-slash patterns match at any depth and gain the `**/` prefix.
+        let parsed = parse_share_pattern(".env").expect(".env parses");
+        assert_eq!(parsed.as_str(), "**/.env");
+        let parsed = parse_share_pattern("*.pem").expect("*.pem parses");
+        assert_eq!(parsed.as_str(), "**/*.pem");
+        // Slash patterns stay verbatim and match from the share root.
+        let parsed = parse_share_pattern(".config/gcloud").expect("relative tree parses");
+        assert_eq!(parsed.as_str(), ".config/gcloud");
+        let parsed = parse_share_pattern("build/**").expect("trailing tree glob parses");
+        assert_eq!(parsed.as_str(), "build/**");
+    }
+
+    #[test]
+    fn share_pattern_validation_rejects_malformed_patterns() {
+        let cases: &[(&str, &str)] = &[
+            ("", "empty"),
+            ("/.env", "absolute"),
+            ("a//b", "empty segment"),
+            ("/a", "leading separator"),
+            ("a/", "trailing separator"),
+            ("..", "traversal"),
+            ("a/../b", "nested traversal"),
+            ("a/./b", "dot segment"),
+            ("**", "bare double-star"),
+            ("a*b*c", "two wildcards in one segment"),
+        ];
+        for (pattern, why) in cases {
+            assert!(
+                parse_share_pattern(pattern).is_err(),
+                "{pattern:?} must be refused ({why})"
+            );
+        }
+    }
+
+    #[test]
+    fn effective_deny_set_defaults_to_the_built_in_set() {
+        let set = effective_deny_set(&[], &[]).expect("empty overrides");
+        assert!(!set.is_empty());
+        assert!(set.contains(".env"));
+        assert!(set.contains(".config/gcloud/credentials.db"));
+        assert!(set.contains("keys/tls.pem"));
+        assert!(set.contains("id_rsa"));
+        assert!(!set.contains("src/main.rs"));
+        // The matcher answers the entry path; the walk prunes a matched
+        // directory's subtree, so `nested/.ssh/config` is unreachable even
+        // though only the directory entry matches the built-in set.
+        assert!(set.contains("nested/.ssh"));
+        assert!(!set.contains("nested/.ssh/config"));
+        assert!(set.contains(".ssh/config"));
+    }
+
+    #[test]
+    fn include_reexposes_only_built_in_paths() {
+        let include = vec![ProtectedPath::new(".env")];
+        let set = effective_deny_set(&include, &[]).expect(".env re-exposed");
+        assert!(!set.contains(".env"), "the included path is re-exposed");
+        assert!(set.contains(".ssh"), "the rest of the set still denies");
+    }
+
+    #[test]
+    fn include_of_a_non_built_in_path_is_refused() {
+        let include = vec![ProtectedPath::new("src/secret.txt")];
+        let error = effective_deny_set(&include, &[]).expect_err("widening is not a re-exposure");
+        assert!(matches!(error, ShareDenySetError::NotBuiltIn { .. }));
+    }
+
+    #[test]
+    fn include_exclude_overlap_is_refused() {
+        let include = vec![ProtectedPath::new(".env")];
+        let exclude = vec![ProtectedPath::new("**/.env")];
+        let error = effective_deny_set(&include, &exclude).expect_err("overlap refused");
+        assert!(matches!(error, ShareDenySetError::Overlap { .. }));
+    }
+
+    #[test]
+    fn malformed_wire_patterns_are_refused() {
+        let include = vec![ProtectedPath::new("../escape")];
+        let error = effective_deny_set(&include, &[]).expect_err("traversal refused");
+        assert!(matches!(error, ShareDenySetError::Pattern(_)));
+        let exclude = vec![ProtectedPath::new("a//b")];
+        let error = effective_deny_set(&[], &exclude).expect_err("empty segment refused");
+        assert!(matches!(error, ShareDenySetError::Pattern(_)));
+    }
+
+    #[test]
+    fn exclude_adds_beyond_the_built_in_set() {
+        let exclude = vec![ProtectedPath::new("target"), ProtectedPath::new("build/**")];
+        let set = effective_deny_set(&[], &exclude).expect("exclude extends the set");
+        // A matched directory prunes its subtree at the walk; the matcher
+        // itself answers the entry path.
+        assert!(set.contains("target"));
+        assert!(set.contains("deep/nested/target"));
+        assert!(set.contains("build"));
+        assert!(set.contains("build/output.bin"));
+        assert!(set.contains(".env"), "built-in entries still deny");
     }
 
     #[test]

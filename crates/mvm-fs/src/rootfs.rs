@@ -78,7 +78,7 @@ pub enum XattrPolicy {
 }
 
 /// Walk knobs for [`collect_nodes`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WalkOptions {
     /// Behavior on inode kinds the writer cannot represent.
     pub on_unsupported: UnsupportedNodePolicy,
@@ -89,6 +89,14 @@ pub struct WalkOptions {
     /// Whether a regular file's bytes are read during the walk or left on the
     /// host until the image is emitted.
     pub file_contents: FileContentPolicy,
+    /// Entries matching this deny set are omitted from the image — and,
+    /// because [`collect_nodes`] feeds [`fingerprint_ext4_source`], from the
+    /// source identity too, so a cache keyed on the fingerprint cannot serve
+    /// an image built under a different deny set. A matched directory is not
+    /// descended into: everything beneath it is excluded with it. The deny
+    /// set is part of the walk options (not a global) because different
+    /// callers materialize different trees under different policies.
+    pub deny: Option<mvm_contract::policy::protected_paths::ProtectedPathSet>,
 }
 
 /// When a regular file's bytes are read.
@@ -142,6 +150,16 @@ impl WalkOptions {
     /// Set when regular-file contents are read.
     pub fn with_file_content_policy(mut self, file_contents: FileContentPolicy) -> Self {
         self.file_contents = file_contents;
+        self
+    }
+
+    /// Set the deny set: entries matching it are omitted from the walk, and
+    /// a matched directory prunes its whole subtree.
+    pub fn with_deny_set(
+        mut self,
+        deny: mvm_contract::policy::protected_paths::ProtectedPathSet,
+    ) -> Self {
+        self.deny = Some(deny);
         self
     }
 }
@@ -255,7 +273,7 @@ fn should_skip_vanished(policy: VanishedNodePolicy, source: &std::io::Error) -> 
 
 fn read_walk_entry(
     entry: WalkEntry,
-    options: WalkOptions,
+    options: &WalkOptions,
 ) -> Result<Option<Node>, MaterializeError> {
     let WalkEntry {
         path,
@@ -379,8 +397,8 @@ fn host_file_sha256(path: &Path, expected_len: u64) -> std::io::Result<[u8; 32]>
 /// via rayon. The returned nodes are sorted by guest path so the output is
 /// deterministic regardless of filesystem read_dir order.
 pub fn collect_nodes(root: &Path, options: WalkOptions) -> Result<Vec<Node>, MaterializeError> {
-    let entries = collect_walk_entries(root, options)?;
-    let mut nodes: Vec<Node> = par_map(entries, |entry| read_walk_entry(entry, options))
+    let entries = collect_walk_entries(root, &options)?;
+    let mut nodes: Vec<Node> = par_map(entries, |entry| read_walk_entry(entry, &options))
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
@@ -393,7 +411,7 @@ pub fn collect_nodes(root: &Path, options: WalkOptions) -> Result<Vec<Node>, Mat
 
 fn collect_walk_entries(
     root: &Path,
-    options: WalkOptions,
+    options: &WalkOptions,
 ) -> Result<Vec<WalkEntry>, MaterializeError> {
     let mut entries = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -421,6 +439,16 @@ fn collect_walk_entries(
             };
             let path = entry.path();
             let guest_path = guest_path_of(root, &path);
+            // Deny-set filter: an excluded entry never reaches the image, and
+            // an excluded directory is not pushed on the walk stack, so its
+            // whole subtree is pruned with it. Checked before the file-type
+            // handling so a denied special file is omitted rather than
+            // rejected under `UnsupportedNodePolicy::Reject`.
+            if let Some(deny) = &options.deny
+                && deny.contains(&guest_path)
+            {
+                continue;
+            }
             let ft = match entry.file_type() {
                 Ok(file_type) => file_type,
                 Err(source) if should_skip_vanished(options.on_vanished, &source) => continue,
@@ -855,7 +883,7 @@ fn collect_image_nodes(
     options: &MaterializeOptions,
 ) -> Result<Vec<Node>, MaterializeError> {
     let mut nodes = merge_extra_nodes(
-        collect_nodes(root, options.walk)?,
+        collect_nodes(root, options.walk.clone())?,
         options.extra_nodes.clone(),
     );
     options.owners.apply(&mut nodes, &options.root_owned);
@@ -1350,7 +1378,7 @@ mod tests {
         };
         let options = WalkOptions::default().with_vanished_node_policy(VanishedNodePolicy::Skip);
 
-        assert_eq!(read_walk_entry(entry, options).unwrap(), None);
+        assert_eq!(read_walk_entry(entry, &options).unwrap(), None);
 
         let rejected = read_walk_entry(
             WalkEntry {
@@ -1358,7 +1386,7 @@ mod tests {
                 guest_path: "/gone".to_string(),
                 file_type,
             },
-            WalkOptions::default(),
+            &WalkOptions::default(),
         )
         .unwrap_err();
         assert!(matches!(rejected, MaterializeError::Walk { .. }));
@@ -1462,6 +1490,87 @@ mod tests {
         assert!(
             xattrs.is_empty(),
             "Ignore must capture nothing, got {xattrs:?}"
+        );
+    }
+
+    /// Seed a tree with a denied file at the root, a denied name at depth, a
+    /// denied directory with a child, and an ordinary file that must survive.
+    fn deny_fixture() -> tempfile::TempDir {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join(".env"), b"SECRET=1").unwrap();
+        std::fs::write(src.path().join("keep.txt"), b"fine").unwrap();
+        std::fs::create_dir_all(src.path().join("nested/.ssh")).unwrap();
+        std::fs::write(src.path().join("nested/.ssh/config"), b"host alias").unwrap();
+        std::fs::write(src.path().join("nested/ok.txt"), b"fine").unwrap();
+        std::fs::create_dir_all(src.path().join(".aws")).unwrap();
+        std::fs::write(src.path().join(".aws/credentials"), b"[default]").unwrap();
+        src
+    }
+
+    fn built_in_deny() -> mvm_contract::policy::protected_paths::ProtectedPathSet {
+        mvm_contract::policy::protected_paths::effective_deny_set(&[], &[])
+            .expect("empty overrides give the built-in set")
+    }
+
+    #[test]
+    fn deny_set_omits_matching_entries_and_prunes_matching_directories() {
+        let src = deny_fixture();
+        let nodes = collect_nodes(
+            src.path(),
+            WalkOptions::default().with_deny_set(built_in_deny()),
+        )
+        .expect("collect nodes");
+        let paths: Vec<&str> = nodes.iter().map(|node| node.path()).collect();
+        assert!(paths.contains(&"/keep.txt"), "{paths:?}");
+        assert!(paths.contains(&"/nested/ok.txt"), "{paths:?}");
+        assert!(
+            !paths.contains(&"/.env"),
+            "a denied file is omitted: {paths:?}"
+        );
+        assert!(
+            !paths.contains(&"/nested/.ssh") && !paths.contains(&"/nested/.ssh/config"),
+            "a denied directory prunes its subtree: {paths:?}"
+        );
+        assert!(
+            !paths.contains(&"/.aws") && !paths.contains(&"/.aws/credentials"),
+            "a denied directory prunes its subtree: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn deny_set_changes_the_source_fingerprint() {
+        let src = deny_fixture();
+        let unfiltered =
+            fingerprint_ext4_source(src.path(), WalkOptions::default()).expect("fingerprint");
+        let filtered = fingerprint_ext4_source(
+            src.path(),
+            WalkOptions::default().with_deny_set(built_in_deny()),
+        )
+        .expect("fingerprint");
+        assert_ne!(
+            unfiltered, filtered,
+            "materializations differing only in deny set must not share an identity"
+        );
+    }
+
+    #[test]
+    fn reexposing_a_denied_path_restores_it_in_the_walk() {
+        let src = deny_fixture();
+        let include = vec![mvm_contract::policy::protected_paths::ProtectedPath::new(
+            ".env",
+        )];
+        let set = mvm_contract::policy::protected_paths::effective_deny_set(&include, &[])
+            .expect(".env is a built-in path and re-exposes cleanly");
+        let nodes = collect_nodes(src.path(), WalkOptions::default().with_deny_set(set))
+            .expect("collect nodes");
+        let paths: Vec<&str> = nodes.iter().map(|node| node.path()).collect();
+        assert!(
+            paths.contains(&"/.env"),
+            "the included path is re-exposed: {paths:?}"
+        );
+        assert!(
+            !paths.contains(&"/.aws"),
+            "the rest of the built-in set still denies: {paths:?}"
         );
     }
 
@@ -1656,7 +1765,7 @@ mod tests {
         let original_mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
         let options = WalkOptions::new(UnsupportedNodePolicy::Reject);
 
-        let before = fingerprint_ext4_source(src.path(), options).unwrap();
+        let before = fingerprint_ext4_source(src.path(), options.clone()).unwrap();
         std::fs::write(&file, b"after!").unwrap();
         std::fs::File::options()
             .write(true)
@@ -1664,7 +1773,7 @@ mod tests {
             .unwrap()
             .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
             .unwrap();
-        let changed_bytes = fingerprint_ext4_source(src.path(), options).unwrap();
+        let changed_bytes = fingerprint_ext4_source(src.path(), options.clone()).unwrap();
         assert_ne!(
             before, changed_bytes,
             "equal mtimes must not hide new bytes"
@@ -1675,7 +1784,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
 
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let changed_mode = fingerprint_ext4_source(src.path(), options).unwrap();
+            let changed_mode = fingerprint_ext4_source(src.path(), options.clone()).unwrap();
             assert_ne!(
                 changed_bytes, changed_mode,
                 "a mode preserved in the ext4 image is part of its source identity"
@@ -1692,7 +1801,7 @@ mod tests {
             let src = tempfile::tempdir().unwrap();
             symlink("first", src.path().join("link")).unwrap();
             let options = WalkOptions::new(UnsupportedNodePolicy::Reject);
-            let before = fingerprint_ext4_source(src.path(), options).unwrap();
+            let before = fingerprint_ext4_source(src.path(), options.clone()).unwrap();
             std::fs::remove_file(src.path().join("link")).unwrap();
             symlink("second", src.path().join("link")).unwrap();
             let after = fingerprint_ext4_source(src.path(), options).unwrap();
@@ -1709,7 +1818,7 @@ mod tests {
             return;
         }
         let options = WalkOptions::new(UnsupportedNodePolicy::Reject);
-        let before = fingerprint_ext4_source(src.path(), options).unwrap();
+        let before = fingerprint_ext4_source(src.path(), options.clone()).unwrap();
         xattr::set(&file, "user.mvm.fingerprint", b"after").unwrap();
         let after = fingerprint_ext4_source(src.path(), options).unwrap();
         assert_ne!(before, after);
@@ -1837,7 +1946,7 @@ mod tests {
         };
         let options = MaterializeOptions::default().with_extra_nodes(vec![deferred.clone()]);
 
-        let walked = collect_nodes(&root, options.walk).unwrap();
+        let walked = collect_nodes(&root, options.walk.clone()).unwrap();
         assert!(
             !walked.iter().any(|n| n.path() == deferred.path()),
             "the walk cannot see a path the host tree does not hold"

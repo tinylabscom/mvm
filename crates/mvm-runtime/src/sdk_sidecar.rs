@@ -49,6 +49,8 @@ pub fn sdk_sidecar_attachment_for(
             read_only: true,
             encrypted: false,
             content_sha256: None,
+            include: Vec::new(),
+            exclude: Vec::new(),
         },
         volume: mvm_core::vm_backend::VmVolume {
             materialized_image: None,
@@ -59,6 +61,8 @@ pub fn sdk_sidecar_attachment_for(
             read_only: true,
             kind: mvm_core::vm_backend::VmVolumeKind::Disk,
             encrypted: false,
+            share_include: Vec::new(),
+            share_exclude: Vec::new(),
         },
         image_sha256: artifact.image_sha256.clone(),
         version: artifact.version.clone(),

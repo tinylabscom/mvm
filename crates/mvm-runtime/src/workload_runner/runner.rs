@@ -3432,6 +3432,8 @@ mod tests {
             read_only,
             kind: mvm_core::vm_backend::VmVolumeKind::Disk,
             encrypted: false,
+            share_include: Vec::new(),
+            share_exclude: Vec::new(),
         }
     }
 

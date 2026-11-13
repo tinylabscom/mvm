@@ -1351,6 +1351,21 @@ pub struct HostShareGrant {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(deserialize_with = "deserialize_optional_sha256_hex")]
     pub content_sha256: Option<String>,
+    /// DirShare only: built-in-denied paths this share explicitly re-exposes
+    /// (see `mvm_contract::policy::protected_paths::BUILT_IN_DENIED`).
+    /// Admission refuses an entry that is not in the built-in set — widening
+    /// only applies to paths the base policy already denies — and refuses an
+    /// overlap with `exclude`. Skip-serialized when empty so grants written
+    /// before the field existed stay byte-identical: the grant rides inside
+    /// the signed plan, and emitting `[]` would move every existing plan's
+    /// identity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<crate::policy::protected_paths::ProtectedPath>,
+    /// DirShare only: host paths this share denies beyond the built-in set.
+    /// Same byte-identity contract as `include`: absent must re-serialize
+    /// byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<crate::policy::protected_paths::ProtectedPath>,
 }
 
 /// Reject a non-absolute or empty guest path at deserialize time.
@@ -1380,6 +1395,8 @@ mod host_share_grant_tests {
             read_only: true,
             encrypted: false,
             content_sha256: None,
+            include: Vec::new(),
+            exclude: Vec::new(),
         }
     }
 
@@ -1391,6 +1408,36 @@ mod host_share_grant_tests {
         assert!(json.contains("\"dir_share\""), "{json}");
         let back: HostShareGrant = serde_json::from_str(&json).unwrap();
         assert_eq!(g, back);
+    }
+
+    #[test]
+    fn include_exclude_default_empty_when_absent() {
+        let json = r#"{"tag":"uvol0","host_path":"/h","guest_path":"/g","kind":"dir_share","read_only":true,"encrypted":false}"#;
+        let grant: HostShareGrant = serde_json::from_str(json).unwrap();
+        assert!(grant.include.is_empty());
+        assert!(grant.exclude.is_empty());
+    }
+
+    /// Byte-stability for grants signed before `include`/`exclude` existed:
+    /// the fields default to empty when absent and are omitted again on
+    /// re-serialization, so the signed bytes are unchanged.
+    #[test]
+    fn a_grant_without_include_exclude_reserializes_identically() {
+        let old = r#"{"tag":"uvol0","host_path":"/h","guest_path":"/g","kind":"dir_share","read_only":true,"encrypted":false}"#;
+        let decoded: HostShareGrant = serde_json::from_str(old).unwrap();
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), old);
+    }
+
+    #[test]
+    fn include_exclude_roundtrip_when_present() {
+        let mut grant = sample();
+        grant.include = vec![crate::policy::protected_paths::ProtectedPath::new(".env")];
+        grant.exclude = vec![crate::policy::protected_paths::ProtectedPath::new("target")];
+        let json = serde_json::to_string(&grant).unwrap();
+        assert!(json.contains("\"include\":[\".env\"]"), "{json}");
+        assert!(json.contains("\"exclude\":[\"target\"]"), "{json}");
+        let back: HostShareGrant = serde_json::from_str(&json).unwrap();
+        assert_eq!(grant, back);
     }
 
     #[test]

@@ -1314,8 +1314,15 @@ Interrupting (Ctrl-C, SIGTERM) a foreground transient run stops and removes its
 VM before `mvmctl` exits with status 130 (143 for SIGTERM); a second interrupt
 during that cleanup exits at once.
 `--volume` host shares work on every run mode. The syntax is
-`HOST:/GUEST[:MODE]` (`MODE` defaults to `ro`; `rw` needs `--profile dev` or
-`permissive`). Persistent machine specs canonicalize host paths to absolute
+`HOST:/GUEST[:MODE][:include=a,b][:exclude=c]` (`MODE` defaults to `ro`;
+`rw` needs `--profile dev` or `permissive`). Directory shares materialize
+into an ext4 snapshot at boot under a **default deny-by-default protected-path
+set** (`.env`, `.ssh`, `.aws`, `.gnupg`, `id_rsa*`, `*.pem`, `*.key`,
+`.npmrc`, `.netrc`, `.kube`, `.config/gcloud`, …): credential-carrying paths
+never enter the image. `:include=` re-exposes built-in-denied paths for that
+share; `:exclude=` denies additional relative paths. Both ride the signed
+ExecutionPlan and are bound at claim time, so a re-bind cannot weaken them.
+Persistent machine specs canonicalize host paths to absolute
 paths so later reconnects re-mount the same share regardless of your working
 directory; the host directory must exist at boot.
 

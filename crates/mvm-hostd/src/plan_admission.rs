@@ -1271,6 +1271,11 @@ pub fn enforce_admitted_shares(
                 && g.kind == want_kind
                 && g.read_only == v.read_only
                 && g.encrypted == v.encrypted
+                // The deny set is part of what claim-time binding binds: a
+                // re-bind under a different include/exclude would hand the
+                // guest a different tree than the one the plan admitted.
+                && g.include == v.share_include
+                && g.exclude == v.share_exclude
         });
         let Some(grant) = admitted else {
             anyhow::bail!(
@@ -3222,6 +3227,8 @@ mod tests {
             read_only: true,
             encrypted: false,
             content_sha256: None,
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
         let mut input = fixture_input("vm-materialized-share");
         input.shares = vec![grant];
@@ -3258,11 +3265,60 @@ mod tests {
             read_only: true,
             encrypted: false,
             content_sha256: None,
+            include: Vec::new(),
+            exclude: Vec::new(),
         }];
         let disk_plan = synthesize_plan(&disk_input).expect("synthesize disk plan");
         assert!(
             enforce_admitted_shares(std::slice::from_ref(&materialized), &disk_plan).is_err(),
             "a materialized directory must not satisfy a disk grant"
+        );
+    }
+
+    /// A re-bind under a different deny set refuses: claim-time binding
+    /// binds the include/exclude vectors, so a volume whose share grants it
+    /// a different effective tree than the plan admitted cannot attach —
+    /// the deny set cannot be weakened between admission and boot.
+    #[test]
+    fn a_rebind_with_a_different_deny_set_is_refused() {
+        let grant = mvm_core::plan::HostShareGrant {
+            tag: "uvol0".into(),
+            host_path: "/h/src".into(),
+            guest_path: "/data".into(),
+            kind: mvm_core::plan::ShareKind::DirShare,
+            read_only: true,
+            encrypted: false,
+            content_sha256: None,
+            include: Vec::new(),
+            exclude: vec![mvm_contract::policy::protected_paths::ProtectedPath::new(
+                "**/target",
+            )],
+        };
+        let mut input = fixture_input("vm-share-deny-rebind");
+        input.shares = vec![grant];
+        let plan = synthesize_plan(&input).unwrap();
+
+        let matching = mvm_core::vm_backend::VmVolume {
+            host: "/h/src".into(),
+            guest: "/data".into(),
+            read_only: true,
+            materialized_image: Some("/state/mount-0.ext4".into()),
+            share_include: Vec::new(),
+            share_exclude: vec![mvm_contract::policy::protected_paths::ProtectedPath::new(
+                "**/target",
+            )],
+            ..Default::default()
+        };
+        enforce_admitted_shares(std::slice::from_ref(&matching), &plan)
+            .expect("the admitted deny set attaches");
+
+        let weakened = mvm_core::vm_backend::VmVolume {
+            share_exclude: Vec::new(),
+            ..matching.clone()
+        };
+        assert!(
+            enforce_admitted_shares(std::slice::from_ref(&weakened), &plan).is_err(),
+            "a re-bind that drops the additional deny set must refuse"
         );
     }
 
@@ -3284,6 +3340,8 @@ mod tests {
             read_only: true,
             encrypted: false,
             content_sha256: Some(digest.clone()),
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
         let mut input = fixture_input("vm-share-digest-drift");
         input.shares = vec![grant];
@@ -3334,6 +3392,8 @@ mod tests {
             read_only: true,
             encrypted: false,
             content_sha256: None,
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
         let mut input = fixture_input("vm-shares");
         input.shares = vec![grant];

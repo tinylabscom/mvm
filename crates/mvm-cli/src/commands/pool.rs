@@ -1835,6 +1835,8 @@ mod tests {
             read_only: false,
             kind: VmVolumeKind::Disk,
             encrypted: false,
+            share_include: Vec::new(),
+            share_exclude: Vec::new(),
         }];
         assert_eq!(
             try_warm_claim(&b, &c, false).unwrap(),
@@ -1966,6 +1968,8 @@ mod tests {
                 read_only: false,
                 kind: VmVolumeKind::Disk,
                 encrypted: false,
+                share_include: Vec::new(),
+                share_exclude: Vec::new(),
             }];
             c
         })];

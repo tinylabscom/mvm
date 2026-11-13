@@ -60,6 +60,8 @@ fn share(host: &Path) -> mvm_core::plan::HostShareGrant {
         read_only: true,
         encrypted: false,
         content_sha256: None,
+        include: Vec::new(),
+        exclude: Vec::new(),
     }
 }
 

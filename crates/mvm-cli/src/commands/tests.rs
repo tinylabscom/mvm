@@ -1817,12 +1817,68 @@ fn test_parse_volume_spec_dir_share() {
             host_dir,
             guest_mount,
             read_only,
+            include,
+            exclude,
         } => {
+            assert!(include.is_empty());
+            assert!(exclude.is_empty());
             assert_eq!(host_dir, "/tmp/config");
             assert_eq!(guest_mount, "/mnt/config");
             assert!(read_only, "default is read-only");
         }
         _ => panic!("Expected DirShare"),
+    }
+}
+
+#[test]
+fn test_parse_volume_spec_share_deny_modifiers() {
+    use mvm_contract::policy::protected_paths::ProtectedPath;
+    let spec =
+        parse_volume_spec("/tmp/config:/mnt/config:rw:include=.env,*.pem:exclude=target").unwrap();
+    match spec {
+        VolumeSpec::DirShare {
+            read_only,
+            include,
+            exclude,
+            ..
+        } => {
+            assert!(!read_only);
+            assert_eq!(
+                include,
+                vec![
+                    ProtectedPath::new("**/.env"),
+                    ProtectedPath::new("**/*.pem")
+                ]
+            );
+            assert_eq!(exclude, vec![ProtectedPath::new("**/target")]);
+        }
+        _ => panic!("Expected DirShare"),
+    }
+
+    // Slash-patterns stay verbatim (full-relative-path match).
+    let spec = parse_volume_spec("/h:/g:exclude=.config/gcloud").unwrap();
+    match spec {
+        VolumeSpec::DirShare { exclude, .. } => {
+            assert_eq!(exclude, vec![ProtectedPath::new(".config/gcloud")]);
+        }
+        _ => panic!("Expected DirShare"),
+    }
+}
+
+#[test]
+fn test_parse_volume_spec_share_deny_modifier_refusals() {
+    for bad in [
+        "/h:/g:include=",
+        "/h:/g:include=/etc/passwd",
+        "/h:/g:include=a/../b",
+        "/h:/g:exclude=**",
+        "/h:/g:exclude=a*b*c",
+        "/h:/g:1G:include=.env",
+    ] {
+        assert!(
+            parse_volume_spec(bad).is_err(),
+            "must refuse '{bad}': empty, absolute, traversal, bare '**', multi-wildcard, or on a disk"
+        );
     }
 }
 

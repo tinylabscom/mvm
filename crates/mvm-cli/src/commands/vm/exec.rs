@@ -1371,6 +1371,7 @@ impl ReceiptInput {
                     host_dir,
                     guest_mount,
                     read_only,
+                    ..
                 } => (host_dir, guest_mount, read_only),
                 super::shared::VolumeSpec::Disk {
                     host,

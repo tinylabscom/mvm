@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const CACHE_SCHEMA_VERSION: u32 = 1;
+const CACHE_SCHEMA_VERSION: u32 = 2;
 const CACHE_DIR_NAME: &str = "mount-images";
 /// Free data space a writable image is built with. The blocks are never
 /// written, so the sparse image costs nothing on disk until the guest uses them.
@@ -27,6 +27,12 @@ pub(crate) struct MountFingerprint {
     source_sha256: String,
     cache_key: String,
     volume_label: String,
+    /// The share deny set the tree was filtered with. Part of the source
+    /// identity: the fingerprint hashes the filtered tree, so an image built
+    /// under one deny set can never satisfy a lookup under another. The set
+    /// is also recorded in the cache manifest so an entry describes the
+    /// policy it was built under, not only its bytes.
+    deny: mvm_contract::policy::protected_paths::ProtectedPathSet,
 }
 
 impl MountFingerprint {
@@ -93,13 +99,19 @@ impl CachedMountImage {
 /// The source's ext4 nodes, refused unless they still fingerprint to the tree
 /// `fingerprint` names — so an image built from them holds exactly that tree.
 fn collect_matching_nodes(fingerprint: &MountFingerprint) -> Result<Vec<mvm_fs::ext4::Node>> {
-    let nodes = mvm_fs::rootfs::collect_nodes(&fingerprint.source, mount_walk_options())
-        .with_context(|| {
-            format!(
-                "collecting mount source {} for materialization",
-                fingerprint.source.display()
-            )
-        })?;
+    // Re-collect under the same deny set the fingerprint hashed: collecting
+    // unfiltered would not reproduce the filtered tree and would refuse every
+    // launch as "source changed".
+    let nodes = mvm_fs::rootfs::collect_nodes(
+        &fingerprint.source,
+        mount_walk_options().with_deny_set(fingerprint.deny.clone()),
+    )
+    .with_context(|| {
+        format!(
+            "collecting mount source {} for materialization",
+            fingerprint.source.display()
+        )
+    })?;
     let collected = mvm_fs::rootfs::fingerprint_ext4_nodes(&nodes)
         .context("fingerprinting the collected mount nodes")?;
     if collected != fingerprint.source_sha256 {
@@ -172,6 +184,7 @@ impl MountCacheMiss {
             schema_version: CACHE_SCHEMA_VERSION,
             cache_key: self.fingerprint.cache_key.clone(),
             source_sha256: self.fingerprint.source_sha256.clone(),
+            deny_set_sha256: deny_set_digest(&self.fingerprint.deny),
             materializer_format_version: mvm_fs::rootfs::EXT4_MATERIALIZER_FORMAT_VERSION,
             volume_label: self.fingerprint.volume_label.clone(),
             image_sha256,
@@ -232,10 +245,19 @@ impl MountImageCache {
         Ok(&self.root)
     }
 
+    /// Build the share deny set this cache filters every tree with: the
+    /// built-in protected-path set, i.e. the default policy for a directory
+    /// share that declares no overrides.
+    pub(crate) fn default_deny_set() -> mvm_contract::policy::protected_paths::ProtectedPathSet {
+        mvm_contract::policy::protected_paths::effective_deny_set(&[], &[])
+            .expect("the built-in deny set is valid by construction and pinned by its test")
+    }
+
     pub(crate) fn fingerprint(
         &self,
         source: &Path,
         volume_label: &str,
+        deny: mvm_contract::policy::protected_paths::ProtectedPathSet,
     ) -> Result<MountFingerprint> {
         let source = std::fs::canonicalize(source).with_context(|| {
             format!(
@@ -246,13 +268,14 @@ impl MountImageCache {
         if !source.is_dir() {
             bail!("mount source is not a directory: {}", source.display());
         }
-        let source_sha256 = fingerprint_source(&source)?;
+        let source_sha256 = fingerprint_source(&source, &deny)?;
         let cache_key = cache_key(&source_sha256, volume_label);
         Ok(MountFingerprint {
             source,
             source_sha256,
             cache_key,
             volume_label: volume_label.to_string(),
+            deny,
         })
     }
 
@@ -347,6 +370,10 @@ struct MountCacheManifest {
     schema_version: u32,
     cache_key: String,
     source_sha256: String,
+    /// Digest of the share deny set the image was filtered with. An entry
+    /// only validates against a fingerprint carrying the same digest, so a
+    /// cache built under one policy is never served to another.
+    deny_set_sha256: String,
     materializer_format_version: u32,
     volume_label: String,
     image_sha256: String,
@@ -358,6 +385,7 @@ impl MountCacheManifest {
         self.schema_version == CACHE_SCHEMA_VERSION
             && self.cache_key == fingerprint.cache_key
             && self.source_sha256 == fingerprint.source_sha256
+            && self.deny_set_sha256 == deny_set_digest(&fingerprint.deny)
             && self.materializer_format_version == mvm_fs::rootfs::EXT4_MATERIALIZER_FORMAT_VERSION
             && self.volume_label == fingerprint.volume_label
             && self.image_sha256.len() == 64
@@ -368,15 +396,34 @@ impl MountCacheManifest {
     }
 }
 
+/// Digest of the deny set's canonical pattern list: declaration order, one
+/// pattern per line. Two sets with different meanings digest differently even
+/// when they would match the same concrete tree.
+fn deny_set_digest(deny: &mvm_contract::policy::protected_paths::ProtectedPathSet) -> String {
+    let canonical = deny
+        .patterns()
+        .iter()
+        .map(|pattern| pattern.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    hex::encode(Sha256::digest(canonical.as_bytes()))
+}
+
 fn mount_walk_options() -> mvm_fs::rootfs::WalkOptions {
     mvm_fs::rootfs::WalkOptions::new(mvm_fs::rootfs::UnsupportedNodePolicy::Reject)
         .with_vanished_node_policy(mvm_fs::rootfs::VanishedNodePolicy::Skip)
         .with_file_content_policy(mvm_fs::rootfs::FileContentPolicy::DeferToEmitVerified)
 }
 
-fn fingerprint_source(source: &Path) -> Result<String> {
-    mvm_fs::rootfs::fingerprint_ext4_source(source, mount_walk_options())
-        .with_context(|| format!("fingerprinting mount source {}", source.display()))
+fn fingerprint_source(
+    source: &Path,
+    deny: &mvm_contract::policy::protected_paths::ProtectedPathSet,
+) -> Result<String> {
+    mvm_fs::rootfs::fingerprint_ext4_source(
+        source,
+        mount_walk_options().with_deny_set(deny.clone()),
+    )
+    .with_context(|| format!("fingerprinting mount source {}", source.display()))
 }
 
 fn cache_key(source_sha256: &str, volume_label: &str) -> String {
@@ -449,18 +496,28 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let cache = MountImageCache::at(scratch.path().join("cache"));
         let source = source(scratch.path(), b"same");
-        let first = cache.fingerprint(&source, "mvmmnt0").unwrap();
+        let first = cache
+            .fingerprint(&source, "mvmmnt0", MountImageCache::default_deny_set())
+            .unwrap();
         let key = first.cache_key().to_string();
         assert!(cache.lookup(first).unwrap().is_miss());
         let image = cache
-            .lookup(cache.fingerprint(&source, "mvmmnt0").unwrap())
+            .lookup(
+                cache
+                    .fingerprint(&source, "mvmmnt0", MountImageCache::default_deny_set())
+                    .unwrap(),
+            )
             .unwrap()
             .resolve()
             .unwrap();
         assert_eq!(image.fingerprint().cache_key(), key);
 
         let second = cache
-            .lookup(cache.fingerprint(&source, "mvmmnt0").unwrap())
+            .lookup(
+                cache
+                    .fingerprint(&source, "mvmmnt0", MountImageCache::default_deny_set())
+                    .unwrap(),
+            )
             .unwrap();
         assert!(!second.is_miss());
         assert_eq!(second.resolve().unwrap().path(), image.path());
@@ -474,7 +531,11 @@ mod tests {
         let cache = MountImageCache::at(scratch.path().join("cache"));
         let source = source(scratch.path(), b"baseline");
         let image = cache
-            .lookup(cache.fingerprint(&source, "mvmmnt0").unwrap())
+            .lookup(
+                cache
+                    .fingerprint(&source, "mvmmnt0", MountImageCache::default_deny_set())
+                    .unwrap(),
+            )
             .unwrap()
             .resolve()
             .unwrap();
@@ -502,7 +563,9 @@ mod tests {
         let source = source(scratch.path(), b"before");
         let marker = source.join("marker");
         let original_mtime = std::fs::metadata(&marker).unwrap().modified().unwrap();
-        let before = cache.fingerprint(&source, "mvmmnt0").unwrap();
+        let before = cache
+            .fingerprint(&source, "mvmmnt0", MountImageCache::default_deny_set())
+            .unwrap();
 
         std::fs::write(&marker, b"after!").unwrap();
         std::fs::File::options()
@@ -511,8 +574,74 @@ mod tests {
             .unwrap()
             .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
             .unwrap();
-        let after = cache.fingerprint(&source, "mvmmnt0").unwrap();
+        let after = cache
+            .fingerprint(&source, "mvmmnt0", MountImageCache::default_deny_set())
+            .unwrap();
         assert_ne!(before.cache_key(), after.cache_key());
+    }
+
+    #[test]
+    fn a_deny_set_change_selects_a_new_cache_object() {
+        // Two fingerprints over the same source under different deny sets must
+        // never share a cache object: the filtered trees differ, and an image
+        // built under one policy must not be served to a lookup under another.
+        let scratch = tempfile::tempdir().unwrap();
+        let cache = MountImageCache::at(scratch.path().join("cache"));
+        let source = source(scratch.path(), b"marker");
+        std::fs::write(source.join(".env"), b"SECRET=1").unwrap();
+
+        let default = cache
+            .fingerprint(&source, "mvmmnt0", MountImageCache::default_deny_set())
+            .unwrap();
+        // Widening re-exposes the built-in-denied .env: a strictly different
+        // effective set (and therefore a different filtered tree identity).
+        let widened = mvm_contract::policy::protected_paths::effective_deny_set(
+            &[mvm_contract::policy::protected_paths::ProtectedPath::new(
+                "**/.env",
+            )],
+            &[],
+        )
+        .unwrap();
+        let wider = cache.fingerprint(&source, "mvmmnt0", widened).unwrap();
+        assert_ne!(default.cache_key(), wider.cache_key());
+        assert_ne!(default.source_sha256, wider.source_sha256);
+
+        // An entry published under one set does not validate against the other.
+        let image = cache.lookup(default).unwrap().resolve().unwrap();
+        let key = image.fingerprint().cache_key().to_string();
+        let rebuilt = cache
+            .lookup(
+                cache
+                    .fingerprint(&source, "mvmmnt0", MountImageCache::default_deny_set())
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(!rebuilt.is_miss(), "the same deny set must hit the entry");
+        let other = cache
+            .lookup(
+                cache
+                    .fingerprint(
+                        &source,
+                        "mvmmnt0",
+                        mvm_contract::policy::protected_paths::effective_deny_set(
+                            &[mvm_contract::policy::protected_paths::ProtectedPath::new(
+                                "**/.env",
+                            )],
+                            &[],
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(
+            other.is_miss(),
+            "a different deny set must not hit the entry"
+        );
+        assert_eq!(
+            cache.published_image(&key).unwrap().as_deref(),
+            Some(image.path())
+        );
     }
 
     #[test]
@@ -522,7 +651,11 @@ mod tests {
         let cache = MountImageCache::at(cache_root.clone());
         let source = source(scratch.path(), b"before");
         let lookup = cache
-            .lookup(cache.fingerprint(&source, "mvmmnt0").unwrap())
+            .lookup(
+                cache
+                    .fingerprint(&source, "mvmmnt0", MountImageCache::default_deny_set())
+                    .unwrap(),
+            )
             .unwrap();
         std::fs::write(source.join("marker"), b"after").unwrap();
 
@@ -549,7 +682,11 @@ mod tests {
         let cache = MountImageCache::at(scratch.path().join("cache"));
         let source = source(scratch.path(), b"trusted");
         let image = cache
-            .lookup(cache.fingerprint(&source, "mvmmnt0").unwrap())
+            .lookup(
+                cache
+                    .fingerprint(&source, "mvmmnt0", MountImageCache::default_deny_set())
+                    .unwrap(),
+            )
             .unwrap()
             .resolve()
             .unwrap();
@@ -563,13 +700,21 @@ mod tests {
         file.sync_all().unwrap();
 
         let lookup = cache
-            .lookup(cache.fingerprint(&source, "mvmmnt0").unwrap())
+            .lookup(
+                cache
+                    .fingerprint(&source, "mvmmnt0", MountImageCache::default_deny_set())
+                    .unwrap(),
+            )
             .unwrap();
         assert!(lookup.is_miss());
         lookup.resolve().unwrap();
         assert!(
             !cache
-                .lookup(cache.fingerprint(&source, "mvmmnt0").unwrap())
+                .lookup(
+                    cache
+                        .fingerprint(&source, "mvmmnt0", MountImageCache::default_deny_set())
+                        .unwrap()
+                )
                 .unwrap()
                 .is_miss()
         );
@@ -581,7 +726,11 @@ mod tests {
         let cache = MountImageCache::at(scratch.path().join("cache"));
         let source = source(scratch.path(), b"source");
         let cached = cache
-            .lookup(cache.fingerprint(&source, "mvmvolwork").unwrap())
+            .lookup(
+                cache
+                    .fingerprint(&source, "mvmvolwork", MountImageCache::default_deny_set())
+                    .unwrap(),
+            )
             .unwrap()
             .resolve()
             .unwrap();
@@ -618,7 +767,11 @@ mod tests {
         let cache = MountImageCache::at(scratch.path().join("cache"));
         let source = source(scratch.path(), b"source");
         let cached = cache
-            .lookup(cache.fingerprint(&source, "mvmvolwork").unwrap())
+            .lookup(
+                cache
+                    .fingerprint(&source, "mvmvolwork", MountImageCache::default_deny_set())
+                    .unwrap(),
+            )
             .unwrap()
             .resolve()
             .unwrap();
@@ -636,7 +789,11 @@ mod tests {
         let cache = MountImageCache::at(scratch.path().join("cache"));
         let source = source(scratch.path(), b"source");
         let cached = cache
-            .lookup(cache.fingerprint(&source, "mvmvolwork").unwrap())
+            .lookup(
+                cache
+                    .fingerprint(&source, "mvmvolwork", MountImageCache::default_deny_set())
+                    .unwrap(),
+            )
             .unwrap()
             .resolve()
             .unwrap();
@@ -664,8 +821,14 @@ mod tests {
         let cache = MountImageCache::at(scratch.path().join("cache"));
         let source = source(scratch.path(), b"same");
         assert_ne!(
-            cache.fingerprint(&source, "first").unwrap().cache_key(),
-            cache.fingerprint(&source, "second").unwrap().cache_key()
+            cache
+                .fingerprint(&source, "first", MountImageCache::default_deny_set())
+                .unwrap()
+                .cache_key(),
+            cache
+                .fingerprint(&source, "second", MountImageCache::default_deny_set())
+                .unwrap()
+                .cache_key()
         );
     }
 

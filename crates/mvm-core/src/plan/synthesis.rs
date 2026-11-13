@@ -1172,6 +1172,8 @@ mod tests {
             read_only: true,
             encrypted: false,
             content_sha256: Some(DIGEST64.into()),
+            include: Vec::new(),
+            exclude: Vec::new(),
         }];
         keyed.assets = vec![
             crate::plan::AssetIdentity::new(
@@ -1221,6 +1223,8 @@ mod tests {
             read_only: false,
             encrypted: false,
             content_sha256: None,
+            include: Vec::new(),
+            exclude: Vec::new(),
         }];
         let plan = synthesize_plan(&backed).expect("a backed grant synthesizes");
         assert_eq!(plan.outputs, vec![grant]);
