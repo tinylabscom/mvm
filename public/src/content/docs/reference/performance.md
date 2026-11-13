@@ -165,8 +165,12 @@ time and preflight the **same** launch arguments that follow `bench --`.
 Maintainers can dispatch `prepared-cold-m1-diagnostic.yml` from `main` to queue
 the Alpine lane on the M1 Actions runner. It builds a release binary from that
 checkout and preflights outside the benchmark. It uploads the report JSON when
-one exists and the CLI transcript even when an early warm-up refusal leaves no
-report. This is a source-build diagnostic, **not** proof about a signed
+one exists. If a warm-up or measured launch writes a sample but violates the
+lane rules, `bench.json` instead contains `status: "invalid_sample"` and the
+full raw launch sample, including phase timings. That JSON is **not** a passing
+report and never updates `bench-latest.json`. A launch that writes no sample
+leaves only the CLI transcript; it cannot supply valid timing evidence.
+This is a source-build diagnostic, **not** proof about a signed
 published release or exclusive use of the physical host by non-Actions processes.
 The run-specific `$MVM_HOME` remains on the persistent runner; remove it only
 after independently confirming that no VM still reads its retained generations.
