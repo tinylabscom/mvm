@@ -50,11 +50,11 @@ import mvm
         "MODEL_PATH": mvm.literal("/data/model.bin"),
         "API_KEY": mvm.secret("agent-api-key", type="bearer", hosts=["api.example.com"]),
     },
-    entrypoint=mvm.entrypoint_function(
+    entrypoints=[mvm.entrypoint_function(
         module="tool",
         function="run",
         primary=True,
-    ),
+    )],
 )
 def run(prompt: str) -> str:
     return prompt.upper()
@@ -81,11 +81,11 @@ export const run = mvm.app({
   image: mvm.nix_packages(["nodejs_22"]),
   resources: mvm.resources({ cpu_cores: 1, memory_mb: 512 }),
   network: mvm.network({ mode: "none" }),
-  entrypoint: mvm.entrypoint_function({
+  entrypoints: [mvm.entrypoint_function({
     module: "tool",
     function: "run",
     primary: true,
-  }),
+  })],
 })((prompt: string): string => prompt.toUpperCase());
 ```
 

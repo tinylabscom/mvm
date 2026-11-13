@@ -24,6 +24,15 @@ case "${1:-} ${2:-}" in
   "--version "*) echo "mvmctl fake" ;;
   "image pull") ;;
   "machine run")
+    if grep -q 'curlimages' <<<"$*"; then
+      cname="$(sed -n 's/.*--name \([^ ]*\).*/\1/p' <<<"$*")"
+      if grep -q 'blocked.example' <<<"$*"; then
+        [ "${FAKE_FLOW:-ok}" = no-audit ] || echo "{\"event\":\"host.flow.denied\",\"labels\":{\"target\":\"blocked.example:443\",\"vm_name\":\"${cname}\"}}" >> "${audit}"
+        echo "[mvm]   mvmctl explain sha256:abc123 --review" >&2; exit 22
+      fi
+      [ "${FAKE_FLOW:-ok}" = no-audit ] || echo "{\"event\":\"host.flow.allowed\",\"labels\":{\"target\":\"example.com:443\",\"vm_name\":\"${cname}\"}}" >> "${audit}"
+      exit 0
+    fi
     shift 2; name=""; hv=firecracker
     while [ $# -gt 0 ]; do case "$1" in --name) name="$2"; shift ;; --hypervisor) hv="$2"; shift ;; esac; shift; done
     if [ "${mode}" = needs-bootstrap ]; then echo "Error: runtime not prepared; run \`mvmctl bootstrap\` first" >&2; exit 1; fi
@@ -38,7 +47,7 @@ case "${1:-} ${2:-}" in
     case "$*" in
       true) ;;
       "cat /proc/cmdline") echo "ro mvm.mailbox=1 quiet" ;;
-      sh*wget*) exit 1 ;;
+      sh*wget*) [ "${FAKE_DENIAL:-}" = 1 ] && echo '{"event":"flow.egress.denied","labels":{"destination":"example.com"}}' >> "${audit}"; exit 1 ;;
       sh*) fill="${*: -2:1}"; body="${*: -1}"
            if [ "${fill}" = 000 ] || [ "${mode}" = queues-other ]; then echo "${body}" >> "${fake}/queue"; fi ;;
       *) echo "fake: unhandled exec: $*" >&2; exit 2 ;;
@@ -68,6 +77,7 @@ case "${1:-} ${2:-}" in
     echo "{\"event\":\"workload.quarantined\",\"labels\":{\"workload\":\"${name}\"}}" >> "${audit}"
     echo "quarantined ${name}: it will not launch again until replaced"
     exit 0 ;;
+  "explain "*) printf 'egress denied:\n  blocked.example:443  1x  not in the allow-list\n' ;;
   "trust audit") echo "VERIFIED chain: 7 entries, 1 session, 1 seals" ;;
   "machine stop" | "machine rm") ;;
   *) echo "fake: unhandled: $*" >&2; exit 2 ;;
@@ -96,6 +106,11 @@ out="$(run ok HYPERVISOR=hvf EXPECT_SCRUB_AUDIT=1)" || fail "hvf with the scrub 
 grep -q 'plan.guest_memory_scrubbed' <<<"${out}" || fail "the scrub audit entry was not checked: ${out}"
 run ok HYPERVISOR=firecracker EXPECT_SCRUB_AUDIT=1 >/dev/null && fail "EXPECT_SCRUB_AUDIT passed on firecracker"
 run ok HYPERVISOR=qemu >/dev/null && fail "an unsupported hypervisor was accepted"
+out="$(run ok HYPERVISOR=firecracker FAKE_DENIAL=1 EXPECT_EGRESS_DENIAL_AUDIT=1)" || fail "a run with an audited denial failed under EXPECT_EGRESS_DENIAL_AUDIT: ${out}"
+grep -q 'audited egress denial naming example.com' <<<"${out}" || fail "the audited denial was not reported: ${out}"
+run ok HYPERVISOR=firecracker EXPECT_EGRESS_DENIAL_AUDIT=1 >/dev/null && fail "EXPECT_EGRESS_DENIAL_AUDIT passed with no denial entry"
+out="$(run ok HYPERVISOR=firecracker)" || fail "a run with no denial entry failed without the strict flag: ${out}"
+grep -q '^FINDING: the refused outbound attempt left no' <<<"${out}" || fail "the missing denial entry was not reported as a FINDING: ${out}"
 
 bad() { # <mode> <what must be caught>
   local o; o="$(run "$1" HYPERVISOR=firecracker)" && fail "$2: the run passed: ${o}"
@@ -111,6 +126,14 @@ out="$(run needs-bootstrap HYPERVISOR=firecracker)" && fail "an install that nee
 grep -q "^FINDING: the install asked for 'mvmctl bootstrap'" <<<"${out}" || fail "no bootstrap finding: ${out}"
 out="$(run wedge HYPERVISOR=firecracker)" && fail "a wedged quarantine passed"
 grep -q 'WEDGE' <<<"${out}" || fail "a wedged quarantine was not reported: ${out}"
+
+# The optional egress probe: allowed and denied requests must both be audited
+# and explained; without the audit entries the run must fail.
+out="$(run ok HYPERVISOR=firecracker EGRESS_PROBE=1)" || fail "a correct run with EGRESS_PROBE failed: ${out}"
+grep -q 'audit has host.flow.denied for egress-deny-' <<<"${out}" || fail "the denial audit was not checked: ${out}"
+grep -q 'explain reports the denied destination' <<<"${out}" || fail "explain was not checked: ${out}"
+out="$(run ok HYPERVISOR=firecracker EGRESS_PROBE=1 FAKE_FLOW=no-audit)" && fail "EGRESS_PROBE passed with no flow audit entries: ${out}"
+grep -q '^DEMO_RESULT=pass$' <<<"${out}" && fail "EGRESS_PROBE printed a pass line without flow audit entries"
 
 # The audit checks must be about THIS run: an earlier run's entries must not
 # satisfy them. The fake writes nothing for a replace it refuses, so a missing

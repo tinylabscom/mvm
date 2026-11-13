@@ -33,11 +33,11 @@ import mvm
     env={
         "OPENAI_API_KEY": mvm.secret("openai-api-key", type="bearer", hosts=["api.openai.com"]),
     },
-    entrypoint=mvm.entrypoint_function(
+    entrypoints=[mvm.entrypoint_function(
         module="tool",
         function="run",
         primary=True,
-    ),
+    )],
 )
 def run(prompt: str) -> str:
     ...
@@ -60,11 +60,11 @@ export const run = mvm.app({
   env: {
     OPENAI_API_KEY: mvm.secret("openai-api-key", { type: "bearer", hosts: ["api.openai.com"] }),
   },
-  entrypoint: mvm.entrypoint_function({
+  entrypoints: [mvm.entrypoint_function({
     module: "tool",
     function: "run",
     primary: true,
-  }),
+  })],
 })((prompt: string): string => {
   return prompt;
 });

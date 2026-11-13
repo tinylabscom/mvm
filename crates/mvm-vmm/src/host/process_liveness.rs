@@ -129,7 +129,22 @@ pub fn read_pid_file(path: &Path) -> Option<i32> {
 }
 
 fn recorded_pid(path: &Path) -> Option<EndpointPid> {
-    EndpointPid::parse(&std::fs::read_to_string(path).ok()?).filter(|record| record.pid > 1)
+    EndpointPid::parse(&std::fs::read_to_string(path).ok()?)
+        .filter(|record| is_signalable(record.pid))
+}
+
+/// A recorded pid as a signal target, or `None` when it cannot name exactly one
+/// process a supervisor could be. `kill` reads 0 as the caller's own process
+/// group and a negative value as a whole group, and 1 is init, so a pid that is
+/// 0 (a pid file that never appeared), 1, or does not fit `pid_t` (a corrupt
+/// record) must never reach it. The one rule every pid-file reader and recorded
+/// session pid goes through.
+pub fn signalable_pid(pid: u32) -> Option<i32> {
+    i32::try_from(pid).ok().filter(|pid| is_signalable(*pid))
+}
+
+fn is_signalable(pid: i32) -> bool {
+    pid > 1
 }
 
 /// Whether one supervisor PID file identifies a live process.
@@ -554,6 +569,17 @@ fn inspect_then_kill(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 0 is the caller's own process group, 1 is init, and anything above
+    /// `i32::MAX` wraps to a negative group target: none may reach `kill`.
+    #[test]
+    fn a_pid_that_cannot_name_one_supervisor_is_not_signalable() {
+        for pid in [0, 1, u32::MAX, i32::MAX as u32 + 1] {
+            assert_eq!(signalable_pid(pid), None, "pid {pid}");
+        }
+        assert_eq!(signalable_pid(2), Some(2));
+        assert_eq!(signalable_pid(4242), Some(4242));
+    }
 
     /// A stopped supervisor whose parent has not reaped it still answers
     /// `kill(pid, 0)`. It is not a live process, and a pool or a state-dir

@@ -34,10 +34,10 @@ use std::process::Command;
 
 use crate::rust_source::{CommentSyntax, blank_comments};
 
-// The integrated mailbox tier and the newer main CI witnesses add bounded
-// recovery, timeout, and refusal coverage. The pre-repair merge candidate
-// measured 981,668 SLOC and 1,248,212 physical lines across all categories;
-// keep the ratchet near that baseline rather than deleting security checks.
+// The integrated mailbox journal and newer main CI witnesses add bounded
+// recovery, timeout, overclaim, and refusal coverage. The pre-merge mailbox
+// tree measured 981,855 SLOC; keep a small margin rather than delete security
+// checks to fit main's 966,160 SLOC ratchet.
 /// Ceiling on total SLOC, all categories.
 const MAX_TOTAL_SLOC: usize = 984_000;
 /// Ceiling on total physical lines, all categories.
