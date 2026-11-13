@@ -241,6 +241,19 @@ fn launch_flags(args: &RunArgs) -> Result<LaunchFlags> {
 /// A policy that does not resolve, or a flag that asks for something the
 /// policy denies, blocks, or bounds — named.
 pub(in crate::commands) fn apply_run_policy(args: &mut RunArgs) -> Result<()> {
+    let project = super::run_routes::read_project_manifest(args)?;
+    // Snapshot absence for any named project source, even when its directory
+    // does not exist yet. A later-created manifest must not add authority.
+    args.project_manifest = match project {
+        Some((path, manifest)) => Some(super::run_routes::ProjectManifestSnapshot::Present(
+            path,
+            Box::new(manifest),
+        )),
+        None if args.manifest.is_some() || args.flake.is_some() => {
+            Some(super::run_routes::ProjectManifestSnapshot::Absent)
+        }
+        None => None,
+    };
     let selected = select(args)?;
     let environment = super::exec::application_source::environment(args)?;
     apply_selected_policy(args, selected, environment)

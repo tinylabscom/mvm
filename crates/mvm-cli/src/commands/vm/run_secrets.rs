@@ -4,9 +4,7 @@
 //! the run surface's one call into it, plus the launch-shape consequence a
 //! secret-bearing run carries.
 
-use std::path::Path;
-
-use anyhow::{Context, Result};
+use anyhow::Result;
 use mvm_client::admission::run_secrets::{
     RunSecretSpec, manifest_secret_specs, merge_secret_specs, parse_run_secret_specs,
     resolve_launch_secrets,
@@ -39,21 +37,9 @@ pub(in crate::commands) fn admitted_run_secrets(args: &mut RunArgs) -> Result<Re
 /// directory. A registered manifest name or a remote flake has no local file
 /// to read, and declares none here.
 pub(in crate::commands) fn project_secret_specs(args: &RunArgs) -> Result<Vec<RunSecretSpec>> {
-    let path = match (args.manifest.as_deref(), args.flake.as_deref()) {
-        (Some(manifest), _) => {
-            mvm_core::manifest::resolve_manifest_config_path(Path::new(manifest)).ok()
-        }
-        (None, Some(flake)) if Path::new(flake).is_dir() => {
-            mvm_core::manifest::manifest_in_dir(Path::new(flake))?
-        }
-        _ => None,
-    };
-    let Some(path) = path else {
-        return Ok(Vec::new());
-    };
-    let manifest = mvm_core::manifest::Manifest::read_file(&path)
-        .with_context(|| format!("reading {} for its [secrets]", path.display()))?;
-    Ok(manifest_secret_specs(&manifest))
+    Ok(super::run_routes::project_manifest(args)?
+        .map(|(_, manifest)| manifest_secret_specs(&manifest))
+        .unwrap_or_default())
 }
 
 /// The run's project secrets merged with its `--secret` flags, for a launch
@@ -105,6 +91,48 @@ mod tests {
         args.secret = vec!["gitlab:evil.test".into()];
         let err = merged_secret_specs(&args).unwrap_err();
         assert!(format!("{err:#}").contains("widens"), "{err:#}");
+    }
+
+    #[test]
+    fn a_manifest_edit_after_policy_resolution_cannot_widen_secret_destinations() {
+        let project = tempfile::tempdir().unwrap();
+        let path = project.path().join("mvm.toml");
+        std::fs::write(
+            &path,
+            "flake = \".\"\n[secrets]\ngitlab = { hosts = [\"gitlab.com\"] }\n",
+        )
+        .unwrap();
+        let mut args = RunArgs {
+            flake: Some(project.path().display().to_string()),
+            ..RunArgs::default()
+        };
+        super::super::run_policy::apply_run_policy(&mut args).unwrap();
+
+        std::fs::write(
+            &path,
+            "flake = \".\"\n[secrets]\ngitlab = { hosts = [\"evil.test\"] }\n",
+        )
+        .unwrap();
+
+        let specs = merged_secret_specs(&args).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].destinations, ["gitlab.com"]);
+    }
+
+    #[test]
+    fn a_new_manifest_after_policy_resolution_cannot_declare_secrets() {
+        let project = tempfile::tempdir().unwrap();
+        let mut args = RunArgs {
+            flake: Some(project.path().display().to_string()),
+            ..RunArgs::default()
+        };
+        super::super::run_policy::apply_run_policy(&mut args).unwrap();
+        std::fs::write(
+            project.path().join("mvm.toml"),
+            "flake = \".\"\n[secrets]\ngitlab = { hosts = [\"gitlab.com\"] }\n",
+        )
+        .unwrap();
+        assert!(merged_secret_specs(&args).unwrap().is_empty());
     }
 
     #[test]

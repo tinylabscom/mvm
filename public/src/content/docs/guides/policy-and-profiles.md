@@ -92,6 +92,13 @@ resolved manifest, not a plan: the file is re-validated when it is read, and
 admission synthesizes and signs the plan itself. A file that carries an
 execution plan or a signature is refused.
 
+For a single `run` or `machine run`, the project's `mvm.toml` is parsed once
+for its authored policy, endpoint routes, approval backends, and secret
+declarations. Editing it after policy resolution starts does not change those
+choices partway through that launch. This is launch-time consistency, **not**
+an atomic policy apply: later launches still read authored files, and running
+workloads are not rolled over by an edit.
+
 ## Groups
 
 ```toml

@@ -395,6 +395,10 @@ pub(in crate::commands) struct RunArgs {
     /// surfaces cannot reopen something it denied.
     #[arg(skip)]
     pub applied_policy: Option<mvm_client::policy_profiles::PolicyBody>,
+    /// Internal: the project manifest selected when policy was resolved.
+    /// Later route and approval resolution must use the same parsed bytes.
+    #[arg(skip)]
+    pub(in crate::commands) project_manifest: Option<super::run_routes::ProjectManifestSnapshot>,
     /// Internal: effective AI limits retained from the ordinary policy fold.
     #[arg(skip)]
     pub applied_ai_policy: Option<mvm_core::network_policy::AiPolicy>,

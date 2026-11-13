@@ -517,6 +517,97 @@ fn a_root_reference_that_is_neither_profile_nor_group_reports_the_profile_error(
 }
 
 #[test]
+fn resolve_file_uses_the_profile_bytes_it_classified() {
+    let dir = Dir::new();
+    let path = dir.profile("candidate", "[overrides.network]\nallow = [\"old.test\"]\n");
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, "[overrides.network]\nallow = [\"new.test\"]\n").unwrap();
+
+    let resolved = resolve_file_text(&dir.store, &path, Platform::default(), &text).unwrap();
+    assert_eq!(allow(&resolved), ["old.test:443"]);
+}
+
+#[test]
+fn resolve_file_uses_the_group_bytes_it_classified() {
+    let dir = Dir::new();
+    let path = dir.store.groups_dir().join("candidate.toml");
+    std::fs::write(&path, "[network]\nallow = [\"old.test\"]\n").unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, "[network]\nallow = [\"new.test\"]\n").unwrap();
+
+    let resolved = resolve_file_text(&dir.store, &path, Platform::default(), &text).unwrap();
+    assert_eq!(allow(&resolved), ["old.test:443"]);
+}
+
+#[test]
+fn the_same_profile_cannot_change_between_reads_in_one_resolution() {
+    let dir = Dir::new();
+    let path = dir.profile("candidate", "[overrides.network]\nallow = [\"old.test\"]\n");
+    let reference = PolicyRef::Name("candidate".into());
+    let mut walker = Walker::new(&dir.store, Platform::default());
+    let first = dir
+        .store
+        .load_profile(&reference, None, LayerOrigin::User, "test")
+        .unwrap();
+    walker.walk(first, 0).unwrap();
+    std::fs::write(&path, "[overrides.network]\nallow = [\"new.test\"]\n").unwrap();
+    let second = dir
+        .store
+        .load_profile(&reference, None, LayerOrigin::User, "test")
+        .unwrap();
+    let err = walker.walk(second, 0).unwrap_err();
+    assert!(err.to_string().contains("changed while resolving"), "{err}");
+}
+
+#[test]
+fn an_excluded_group_cannot_change_between_reads_in_one_resolution() {
+    let dir = Dir::new();
+    let group = dir.store.groups_dir().join("candidate.toml");
+    std::fs::write(&group, "[network]\nallow = [\"old.test\"]\n").unwrap();
+    let profile = Loaded {
+        doc: ProfileFile::default(),
+        file: None,
+        label: "test profile".into(),
+        identity: "test profile".into(),
+        origin: LayerOrigin::User,
+        source_sha256: None,
+        reference_key: None,
+    };
+    let mut walker = Walker::new(&dir.store, Platform::default());
+    walker
+        .select(&profile, &["candidate".into()], &[], "groups")
+        .unwrap();
+    std::fs::write(
+        &group,
+        "required = true\n[network]\nallow = [\"new.test\"]\n",
+    )
+    .unwrap();
+    let err = walker
+        .select(&profile, &[], &["candidate".into()], "groups")
+        .unwrap_err();
+    assert!(err.to_string().contains("changed while resolving"), "{err}");
+}
+
+#[test]
+fn a_new_user_profile_cannot_shadow_a_built_in_during_resolution() {
+    let dir = Dir::new();
+    let reference = PolicyRef::Name("offline".into());
+    let mut walker = Walker::new(&dir.store, Platform::default());
+    let builtin = dir
+        .store
+        .load_profile(&reference, None, LayerOrigin::User, "test")
+        .unwrap();
+    walker.walk(builtin, 0).unwrap();
+    dir.profile("offline", "[overrides.network]\nallow = [\"new.test\"]\n");
+    let user = dir
+        .store
+        .load_profile(&reference, None, LayerOrigin::User, "test")
+        .unwrap();
+    let err = walker.walk(user, 0).unwrap_err();
+    assert!(err.to_string().contains("changed while resolving"), "{err}");
+}
+
+#[test]
 fn a_project_table_resolves_its_profile_and_groups_as_project_layers() {
     let dir = Dir::new();
     let dir_project = tempfile::tempdir().unwrap();

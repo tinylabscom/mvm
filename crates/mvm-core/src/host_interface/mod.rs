@@ -4,8 +4,8 @@
 //! The local adapter ([`local::LocalHostInterface`]) is the default and needs
 //! no central identity, `mvmd` or hardware attestation. A managed
 //! implementation of the same [`HostInterface`] trait lives with `mvmd`.
-//! Nothing here is wired into the launch path yet: this slice fixes the
-//! contract, the fail-closed preflight and the state/epoch rules.
+//! Local plan admission invokes this interface's preflight before a workload
+//! starts. It does not own the full launch or a running workload's lifecycle.
 
 pub mod error;
 pub mod lease;

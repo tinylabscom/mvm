@@ -13,6 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use super::builtin;
 use super::model::{GroupFile, ProfileFile};
@@ -220,6 +221,14 @@ pub struct Loaded<T> {
     /// A stable identity for cycle detection and de-duplication.
     pub identity: String,
     pub origin: LayerOrigin,
+    /// Digest of the exact document bytes parsed; absent for virtual layers.
+    pub(crate) source_sha256: Option<[u8; 32]>,
+    /// The lookup spelling, so a named source cannot switch to a different file.
+    pub(crate) reference_key: Option<String>,
+}
+
+pub(crate) fn source_sha256(text: &str) -> [u8; 32] {
+    Sha256::digest(text.as_bytes()).into()
 }
 
 /// The directories names resolve in.
@@ -398,6 +407,8 @@ impl PolicyStore {
                         verified.manifest_sha256().as_str()
                     ),
                     origin: LayerOrigin::Pack,
+                    source_sha256: Some(source_sha256(&text)),
+                    reference_key: Some(format!("{noun}:{spelling}")),
                 })
             }
             PolicyRef::Path(path) => {
@@ -415,13 +426,15 @@ impl PolicyStore {
                     .unwrap_or_else(|_| path.clone())
                     .display()
                     .to_string();
-                let doc = read_doc(&path, kind, referrer)?;
+                let (doc, digest) = read_doc(&path, kind, referrer)?;
                 Ok(Loaded {
                     doc,
                     label: format!("{} {}", kind.noun(), path.display()),
                     file: Some(path),
                     identity,
                     origin: path_origin,
+                    source_sha256: Some(digest),
+                    reference_key: None,
                 })
             }
             PolicyRef::Name(name) => {
@@ -438,13 +451,15 @@ impl PolicyStore {
                             ),
                         ));
                     }
-                    let doc = read_doc(&user_file, kind, referrer)?;
+                    let (doc, digest) = read_doc(&user_file, kind, referrer)?;
                     return Ok(Loaded {
                         doc,
                         label: format!("{} `{name}`", kind.noun()),
                         file: Some(user_file),
                         identity: format!("user:{}:{name}", kind.noun()),
                         origin: LayerOrigin::User,
+                        source_sha256: Some(digest),
+                        reference_key: Some(format!("{}:{name}", kind.noun())),
                     });
                 }
                 let text = builtin(name).ok_or_else(|| {
@@ -467,6 +482,8 @@ impl PolicyStore {
                     file: None,
                     identity: format!("builtin:{}:{name}", kind.noun()),
                     origin: LayerOrigin::Builtin,
+                    source_sha256: Some(source_sha256(text)),
+                    reference_key: Some(format!("{}:{name}", kind.noun())),
                 })
             }
         }
@@ -474,7 +491,7 @@ impl PolicyStore {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum Kind {
+pub(crate) enum Kind {
     Profile,
     Group,
 }
@@ -500,15 +517,23 @@ fn read_doc<T: serde::de::DeserializeOwned>(
     path: &Path,
     kind: Kind,
     referrer: &str,
-) -> Result<T, PolicyError> {
-    let format = DocFormat::for_path(path);
+) -> Result<(T, [u8; 32]), PolicyError> {
     let text = std::fs::read_to_string(path).map_err(|error| {
         PolicyError::new(
             referrer,
             format!("reading {} {}: {error}", kind.noun(), path.display()),
         )
     })?;
-    format.parse(&text).map_err(|message| {
+    Ok((parse_document(&text, path, kind)?, source_sha256(&text)))
+}
+
+pub(crate) fn parse_document<T: serde::de::DeserializeOwned>(
+    text: &str,
+    path: &Path,
+    kind: Kind,
+) -> Result<T, PolicyError> {
+    let format = DocFormat::for_path(path);
+    format.parse(text).map_err(|message| {
         let error = PolicyError::new(
             format!("{} {} ({})", kind.noun(), path.display(), format.noun()),
             message.clone(),
