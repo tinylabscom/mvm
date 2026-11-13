@@ -44,12 +44,6 @@ impl OfflineRevocationPolicy {
         Ok(Self { verified })
     }
 
-    /// Load from the host's default MVM_HOME store.
-    pub fn load_from_host() -> Result<Self, ImageSetRevocationStoreError> {
-        let store = ImageSetRevocationStore::in_mvm_home();
-        Self::load_at(&store, Utc::now())
-    }
-
     /// The authenticated signer identity of the loaded list.
     pub fn signer_identity(&self) -> &str {
         self.verified.signer_identity()

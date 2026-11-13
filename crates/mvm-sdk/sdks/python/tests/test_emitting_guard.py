@@ -33,9 +33,9 @@ def _build_adder() -> mvm.RemoteFunction:
         name="adder",
         source=mvm.local_path("."),
         image=mvm.nix_packages(["python312"]),
-        entrypoint=mvm.entrypoint_function(
-            language="python", module="adder", function="add"
-        ),
+        entrypoints=[
+            mvm.entrypoint_function(language="python", module="adder", function="add")
+        ],
         resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
         dependencies=mvm.no_deps(),
     )

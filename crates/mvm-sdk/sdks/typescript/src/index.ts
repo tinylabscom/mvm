@@ -537,7 +537,6 @@ export interface AppOptions {
   name?: string;
   source?: Source;
   image: Image;
-  entrypoint?: Entrypoint;
   entrypoints?: Entrypoint[];
   resources?: Resources;
   env?: Record<string, EnvValue | string>;
@@ -560,14 +559,7 @@ export interface AppOptions {
  *     export const greet = mvm.app({...})((name) => `hello ${name}`);
  */
 export function app(opts: AppOptions): <F extends (...args: never[]) => unknown>(fn: F) => F {
-  if (opts.entrypoint && opts.entrypoints) {
-    throw new Error(
-      "mvm.app({...}): pass `entrypoint` (single) OR `entrypoints` (list); not both.",
-    );
-  }
-  const resolvedEntrypoints =
-    opts.entrypoints ??
-    (opts.entrypoint ? [opts.entrypoint] : undefined);
+  const resolvedEntrypoints = opts.entrypoints;
 
   const name = opts.name ?? state.workloadId ?? "app";
 

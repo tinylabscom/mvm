@@ -34,10 +34,10 @@ use std::process::Command;
 
 use crate::rust_source::{CommentSyntax, blank_comments};
 
-// CI witness repair adds checked timeout and enrollment regressions; admit its
-// small measured increase rather than delete security coverage to fit the ratchet.
+// The snapshot-owner race regressions add measured lines on this branch;
+// retain the security coverage rather than trim it to fit an older ratchet.
 /// Ceiling on total SLOC, all categories.
-const MAX_TOTAL_SLOC: usize = 966_100;
+const MAX_TOTAL_SLOC: usize = 966_500;
 /// Ceiling on total physical lines, all categories.
 const MAX_TOTAL_PHYSICAL: usize = 1_232_000;
 /// How far under a ceiling the tree may sit before the ceiling must drop.
