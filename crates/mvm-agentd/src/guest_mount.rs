@@ -660,7 +660,15 @@ pub fn drop_privilege_raw(uid: u32, gid: u32) -> std::io::Result<()> {
 ///
 #[cfg(target_os = "linux")]
 pub fn drop_guest_agent_privilege_raw(uid: u32, gid: u32) -> std::io::Result<()> {
-    assume_identity_retaining(uid, gid, RESTORE_AGENT_CAPABILITIES)
+    assume_identity_retaining(uid, gid, RESTORE_AGENT_CAPABILITIES)?;
+    // The agent retains per-boot mailbox and telemetry signing keys after
+    // changing to the workload UID. Do this *after* setuid, which can reset
+    // dumpability, so a same-UID workload cannot ptrace/read agent memory.
+    // SAFETY: prctl takes only integer arguments and touches no memory.
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Become `uid`/`gid` from root, keeping exactly `keep`. Async-signal-safe, so
@@ -2395,6 +2403,21 @@ mod privilege_tests {
                 "Gid:\t{WORKLOAD_GID}\t{WORKLOAD_GID}\t{WORKLOAD_GID}\t{WORKLOAD_GID}"
             )),
             "the agent must retain only the workload group; got:\n{status}"
+        );
+        assert_eq!(
+            // SAFETY: PR_GET_DUMPABLE has no pointer arguments and reads only
+            // the current process's dumpability.
+            unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) },
+            0,
+            "the workload UID must not be able to inspect the agent's keys"
+        );
+        let output = std::process::Command::new("/bin/cat")
+            .arg(format!("/proc/{}/mem", std::process::id()))
+            .output()
+            .expect("spawn a same-UID process to probe the agent memory");
+        assert!(
+            !output.status.success(),
+            "a same-UID workload read the agent's process memory"
         );
     }
 }

@@ -1,4 +1,5 @@
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer, SigningKey};
+use mvm_contract::plan::{Nonce, PlanId};
 use mvm_contract::protocol::mailbox::{
     AuthorizationDomainId, AuthorizationDomainRouteLabel, BootId, CapabilityId,
     CapabilityOperations, CausationId, CiphertextPadding, ContentType, CorrelationId, DeliveryId,
@@ -7,6 +8,10 @@ use mvm_contract::protocol::mailbox::{
     MailboxId, MailboxMessageKind, MailboxOperation, MailboxRoutingFrame, MessageId, OrderingScope,
     PrincipalId, ProtocolVersion, ReplayNonce, ReplyRoute, RevocationId, SequenceNumber,
     SignatureAlgorithm, TenantId, TransportBindingId,
+};
+use mvm_contract::protocol::workload_report::{
+    ReportError, ReportIdentity, ReportKind, WORKLOAD_REPORT_CONTENT_TYPE, WORKLOAD_REPORT_VERSION,
+    WorkloadReport,
 };
 use mvm_core::crypto::aead::Key;
 use mvm_core::mailbox::{
@@ -388,6 +393,111 @@ fn identity_scope_epoch_expiry_and_content_type_are_checked() {
     }
 }
 
+#[cfg(all(feature = "test-support", unix))]
+#[test]
+fn local_journal_expiry_recovers_after_interrupted_anchor_commit() {
+    use mvm_core::mailbox::journal::{
+        FileJournalAnchor, HistoryKeyCustody, HistoryKeyRef, JournalAdmission, JournalError,
+        JournalLimits, MailboxJournal,
+    };
+
+    struct ExistingKey(HistoryKeyRef);
+    impl HistoryKeyCustody for ExistingKey {
+        fn load_existing(&self, reference: &HistoryKeyRef) -> Result<Key, JournalError> {
+            if reference != &self.0 {
+                return Err(JournalError::HistoryKeyMismatch);
+            }
+            Ok(Key::from_bytes([41; 32]))
+        }
+    }
+
+    let dir = tempfile::tempdir().expect("private journal fixture");
+    let root = dir.path().join("journal");
+    let anchor_path = dir.path().join("anchor").join("tip");
+    let signer = SigningKey::from_bytes(&[22; 32]);
+    let sender_key = SigningKey::from_bytes(&[21; 32]);
+    let payload_key = Key::from_bytes([23; 32]);
+    let capability = sign_capability(grant(), &signer).expect("send grant");
+    let envelope = seal_envelope(
+        SealRequest {
+            routing: routing(),
+            header: header(),
+            plaintext: b"hello",
+        },
+        &payload_key,
+        &sender_key,
+    )
+    .expect("canonical encrypted envelope");
+    let context = context();
+    let reference = HistoryKeyRef::new(address(), header().execution_epoch, [42; 32], 1)
+        .expect("history identity");
+    let custody = ExistingKey(reference);
+    let limits = JournalLimits {
+        max_records: 4,
+        max_bytes: 64 * 1024,
+    };
+    let anchor =
+        FileJournalAnchor::open(&anchor_path, address(), [43; 32]).expect("local anchor genesis");
+    let mut journal = MailboxJournal::open_local_with_custody(
+        &root,
+        reference,
+        signer.verifying_key(),
+        limits,
+        &custody,
+        &anchor,
+        mvm_contract::protocol::mailbox::MailboxRetentionPolicy::new(10_000)
+            .expect("test retention"),
+    )
+    .expect("empty local journal");
+    let accepted = journal
+        .admit_local(
+            JournalAdmission {
+                envelope: &envelope,
+                capability: &capability,
+                context: &context,
+                encryption_key: &payload_key,
+                sender_key: &sender_key.verifying_key(),
+                signer: &signer,
+            },
+            &anchor,
+        )
+        .expect("fsynced local acceptance");
+    assert_eq!(
+        accepted.receipt.outcome,
+        DeliveryOutcome::AcceptedLocalDurable
+    );
+    let identity = mvm_core::mailbox::ReplayIdentity::from_header(&header());
+    assert!(matches!(
+        journal.expire_next(routing().expires_at_unix_ms, &signer, |_| {
+            Err(JournalError::Rollback)
+        }),
+        Err(JournalError::Rollback)
+    ));
+    assert_eq!(anchor.tip().cursor, 1, "no terminal receipt before anchor");
+    drop(journal);
+    drop(anchor);
+
+    let anchor =
+        FileJournalAnchor::open(&anchor_path, address(), [43; 32]).expect("recover local anchor");
+    let journal = MailboxJournal::open_local_with_custody(
+        &root,
+        reference,
+        signer.verifying_key(),
+        limits,
+        &custody,
+        &anchor,
+        mvm_contract::protocol::mailbox::MailboxRetentionPolicy::new(10_000)
+            .expect("test retention"),
+    )
+    .expect("reconcile verified terminal state");
+    let expired = journal
+        .expired_receipt(identity, &signer)
+        .expect("signed terminal outcome after restart");
+    assert_eq!(expired.receipt.outcome, DeliveryOutcome::Expired);
+    verify_receipt(&expired, &signer.verifying_key()).expect("signed expiry");
+    assert_eq!(anchor.tip().cursor, 2);
+}
+
 #[test]
 fn destination_receipt_wire_roundtrip_and_signature_cover_outcome_and_identity() {
     let destination_key = SigningKey::from_bytes(&[31; 32]);
@@ -403,6 +513,12 @@ fn destination_receipt_wire_roundtrip_and_signature_cover_outcome_and_identity()
         ciphertext_commitment: [33; 32],
     };
     let mut signed = sign_receipt(receipt, &destination_key).expect("sign receipt");
+    let mut invalid = signed.receipt.clone();
+    invalid.outcome = DeliveryOutcome::AcceptedLocalDurable;
+    assert!(
+        sign_receipt(invalid, &destination_key).is_err(),
+        "a V1 signer must not label local acceptance as durable"
+    );
     let wire = serde_jcs::to_vec(&signed).expect("encode receipt");
     let decoded: mvm_contract::protocol::mailbox::SignedDestinationReceipt =
         serde_json::from_slice(&wire).expect("decode receipt");
@@ -413,6 +529,49 @@ fn destination_receipt_wire_roundtrip_and_signature_cover_outcome_and_identity()
         verify_receipt(&signed, &destination_key.verifying_key()),
         Err(MailboxError::ReceiptSignatureInvalid)
     ));
+}
+
+#[test]
+fn local_receipt_uses_only_its_v2_signature_domain() {
+    let destination_key = SigningKey::from_bytes(&[31; 32]);
+    let receipt = mvm_contract::protocol::mailbox::DestinationReceipt {
+        protocol_version: ProtocolVersion::V2,
+        signature_algorithm: SignatureAlgorithm::ED25519,
+        delivery_id: DeliveryId::from_bytes([32; 32]),
+        message_id: MessageId::from_bytes([6; 32]),
+        address: address(),
+        execution_epoch: ExecutionEpoch::new(7).expect("epoch"),
+        outcome: DeliveryOutcome::AcceptedLocalDurable,
+        observed_at_unix_ms: 1_600,
+        ciphertext_commitment: [33; 32],
+    };
+    let signed = sign_receipt(receipt.clone(), &destination_key).expect("sign V2 local receipt");
+    verify_receipt(&signed, &destination_key.verifying_key()).expect("verify V2 local receipt");
+    assert_eq!(
+        sign_receipt(receipt, &destination_key)
+            .expect("deterministic local signature")
+            .signature,
+        signed.signature
+    );
+
+    let mut wrong_domain = signed.clone();
+    let mut v1_bytes = b"mvm.mailbox.receipt.v1\0".to_vec();
+    v1_bytes.extend(serde_jcs::to_vec(&signed.receipt).expect("canonical receipt"));
+    wrong_domain.signature = destination_key.sign(&v1_bytes).to_bytes().to_vec();
+    assert_eq!(
+        verify_receipt(&wrong_domain, &destination_key.verifying_key()),
+        Err(MailboxError::ReceiptSignatureInvalid)
+    );
+    assert_eq!(
+        verify_receipt(&signed, &SigningKey::from_bytes(&[34; 32]).verifying_key()),
+        Err(MailboxError::ReceiptSignatureInvalid)
+    );
+    let mut old_outcome = signed.receipt.clone();
+    old_outcome.outcome = DeliveryOutcome::Duplicate;
+    assert!(sign_receipt(old_outcome, &destination_key).is_err());
+    let mut old_version = signed.receipt;
+    old_version.protocol_version = ProtocolVersion::V1;
+    assert!(sign_receipt(old_version, &destination_key).is_err());
 }
 
 #[test]
@@ -809,6 +968,97 @@ fn open_under(
 }
 
 #[test]
+fn verified_open_retains_authenticated_header_and_records_replay_once() {
+    #[derive(Default)]
+    struct CountingReplay(usize);
+
+    impl mvm_core::mailbox::ReplayProtector for CountingReplay {
+        fn check_and_record(&mut self, _: mvm_core::mailbox::ReplayIdentity) -> bool {
+            self.0 += 1;
+            self.0 == 1
+        }
+    }
+
+    let (sender_key, authority_key, encryption_key) = contract_keys();
+    let capability = sign_capability(grant(), &authority_key).expect("capability");
+    let expected = header();
+    let envelope = seal_with(expected.clone(), b"hello");
+    let mut replay = CountingReplay::default();
+    let opened = mvm_core::mailbox::open_verified_envelope(
+        &envelope,
+        &capability,
+        &context(),
+        &encryption_key,
+        &sender_key.verifying_key(),
+        &authority_key.verifying_key(),
+        &mut replay,
+    )
+    .expect("verified header and bytes");
+    assert_eq!(opened.header(), &expected);
+    assert_eq!(opened.payload(), b"hello");
+    assert_eq!(replay.0, 1);
+    assert_eq!(opened.into_payload(), b"hello");
+    assert_eq!(
+        open_envelope(
+            &envelope,
+            &capability,
+            &context(),
+            &encryption_key,
+            &sender_key.verifying_key(),
+            &authority_key.verifying_key(),
+            &mut replay,
+        )
+        .expect_err("legacy open shares replay authority"),
+        MailboxError::Replay
+    );
+    assert_eq!(replay.0, 2);
+}
+
+#[test]
+fn refused_verified_open_exposes_no_proof_and_preserves_replay_identity() {
+    let (sender_key, authority_key, encryption_key) = contract_keys();
+    let capability = sign_capability(grant(), &authority_key).expect("capability");
+    let envelope = seal_with(header(), b"hello");
+    let open = |current: &OpenContext, replay: &mut InMemoryReplayProtector| {
+        mvm_core::mailbox::open_verified_envelope(
+            &envelope,
+            &capability,
+            current,
+            &encryption_key,
+            &sender_key.verifying_key(),
+            &authority_key.verifying_key(),
+            replay,
+        )
+    };
+    let mut recipient = context();
+    recipient.expected_recipient = PrincipalId::from_bytes([41; 32]);
+    let mut epoch = context();
+    epoch.current_execution_epoch = ExecutionEpoch::new(8).expect("epoch");
+    let mut policy = context();
+    policy.current_policy_epoch += 1;
+    let mut revoked = context();
+    revoked.revoked_capabilities.push(grant().revocation_id);
+    let mut expired = context();
+    expired.now_unix_ms = 2_000;
+    for (refused, expected) in [
+        (recipient, MailboxError::WrongRecipient),
+        (epoch, MailboxError::StaleExecutionEpoch),
+        (policy, MailboxError::StalePolicyEpoch),
+        (revoked, MailboxError::CapabilityRevoked),
+        (expired, MailboxError::Expired),
+    ] {
+        let mut replay = InMemoryReplayProtector::default();
+        assert_eq!(open(&refused, &mut replay).expect_err("no proof"), expected);
+        let accepted = open(&context(), &mut replay).expect("refusal did not consume identity");
+        assert_eq!(accepted.header(), &header());
+        assert_eq!(accepted.payload(), b"hello");
+        let debug = format!("{accepted:?}");
+        assert!(!debug.contains("hello"));
+        assert!(!debug.contains("capability_id"));
+    }
+}
+
+#[test]
 fn a_refused_message_does_not_consume_its_dedup_identity() {
     let envelope = seal_with(header(), b"hello");
     let mut replay = InMemoryReplayProtector::default();
@@ -980,6 +1230,87 @@ fn cast_is_admitted_only_when_the_capability_names_it_and_bounds_it() {
 }
 
 #[test]
+fn typed_workload_report_uses_the_verified_canonical_cast() {
+    let report_type =
+        ContentType::parse(WORKLOAD_REPORT_CONTENT_TYPE, WORKLOAD_REPORT_VERSION).expect("type");
+    let mut cast = header();
+    cast.kind = MailboxMessageKind::Cast;
+    cast.reply_to = None;
+    cast.content_type = report_type.clone();
+    let identity = ReportIdentity {
+        plan_id: PlanId("sha256:".to_owned() + &"a".repeat(64)),
+        plan_nonce: Nonce::from_bytes([24; 16]),
+        message_id: cast.message_id,
+    };
+    let report = WorkloadReport::new(
+        identity.clone(),
+        ReportKind::Result,
+        ContentType::parse("application/json", 1).expect("application content type"),
+        b"{\"private\":\"result\"}".to_vec(),
+    )
+    .expect("report");
+    let bytes = report.encode().expect("bounded report");
+    cast.plaintext_len = u32::try_from(bytes.len()).expect("mailbox bound fits u32");
+    let envelope = seal_with(cast, &bytes);
+    let encoded = encode_envelope(&envelope).expect("canonical envelope");
+    assert!(
+        !String::from_utf8_lossy(&encoded).contains("private"),
+        "routing frame must not disclose report content"
+    );
+
+    let mut permitted = grant();
+    permitted.message_kinds.push(MailboxMessageKind::Cast);
+    let mut receiving = context();
+    receiving.accepted_content_types.push(report_type.clone());
+    assert_eq!(
+        open_under(
+            &envelope,
+            permitted.clone(),
+            &receiving,
+            &mut InMemoryReplayProtector::default()
+        )
+        .expect_err("the signed capability did not grant this report content type"),
+        MailboxError::ContentTypeNotAuthorized
+    );
+    permitted.content_types.push(report_type.clone());
+    assert_eq!(
+        report_type.name(),
+        WORKLOAD_REPORT_CONTENT_TYPE,
+        "the signed envelope must declare the typed report content"
+    );
+    let opened = open_under(
+        &envelope,
+        permitted.clone(),
+        &receiving,
+        &mut InMemoryReplayProtector::default(),
+    )
+    .expect("capability-authorized result");
+    let decoded = WorkloadReport::decode(&opened).expect("typed report");
+    assert_eq!(decoded, report);
+    decoded
+        .verify_identity(&identity)
+        .expect("report matches admitted run and signed message");
+    let mut wrong_run = identity;
+    wrong_run.plan_nonce = Nonce::from_bytes([25; 16]);
+    assert_eq!(
+        decoded.verify_identity(&wrong_run),
+        Err(ReportError::WrongIdentity)
+    );
+
+    permitted.max_payload_bytes = u32::try_from(bytes.len() - 1).expect("bounded report");
+    assert_eq!(
+        open_under(
+            &envelope,
+            permitted,
+            &receiving,
+            &mut InMemoryReplayProtector::default()
+        )
+        .expect_err("the signed grant must bound the whole encoded report"),
+        MailboxError::CapabilityPayloadExceeded
+    );
+}
+
+#[test]
 fn the_delivery_and_message_vocabularies_are_closed() {
     // The exhaustive matches stop compiling when a variant is added, so a new
     // outcome (a lossy cast, a "not executed" claim) needs a deliberate edit
@@ -988,6 +1319,7 @@ fn the_delivery_and_message_vocabularies_are_closed() {
         match outcome {
             DeliveryOutcome::AcceptedEphemeral => "accepted_ephemeral",
             DeliveryOutcome::AcceptedDurable => "accepted_durable",
+            DeliveryOutcome::AcceptedLocalDurable => "accepted_local_durable",
             DeliveryOutcome::Duplicate => "duplicate",
             DeliveryOutcome::Expired => "expired",
             DeliveryOutcome::Refused => "refused",
@@ -1007,6 +1339,7 @@ fn the_delivery_and_message_vocabularies_are_closed() {
     for outcome in [
         DeliveryOutcome::AcceptedEphemeral,
         DeliveryOutcome::AcceptedDurable,
+        DeliveryOutcome::AcceptedLocalDurable,
         DeliveryOutcome::Duplicate,
         DeliveryOutcome::Expired,
         DeliveryOutcome::Refused,
@@ -1107,4 +1440,237 @@ fn only_the_destination_authority_can_sign_acceptance() {
         verify_receipt(&forged, &destination_key.verifying_key()),
         Err(MailboxError::ReceiptSignatureInvalid)
     ));
+}
+
+#[test]
+fn verified_admission_retains_original_ciphertext_and_service_plaintext_allocations() {
+    use mvm_core::mailbox::{ReplayIdentity, ReplayProtector, open_verified_admission};
+    #[derive(Default)]
+    struct CountingReplay(usize);
+    impl ReplayProtector for CountingReplay {
+        fn check_and_record(&mut self, _: ReplayIdentity) -> bool {
+            self.0 += 1;
+            self.0 == 1
+        }
+    }
+    let (sender_key, authority_key, encryption_key) = contract_keys();
+    let capability = sign_capability(grant(), &authority_key).unwrap();
+    let expected = header();
+    let envelope = seal_with(expected.clone(), b"hello");
+    let ciphertext_ptr = envelope.ciphertext.as_ptr();
+    let ciphertext_capacity = envelope.ciphertext.capacity();
+    let mut replay = CountingReplay::default();
+    let admission = open_verified_admission(
+        envelope,
+        &capability,
+        &context(),
+        &encryption_key,
+        &sender_key.verifying_key(),
+        &authority_key.verifying_key(),
+        &mut replay,
+    )
+    .unwrap();
+    assert_eq!(replay.0, 1);
+    {
+        let view = admission.journal_view();
+        assert_eq!(view.envelope().ciphertext.as_ptr(), ciphertext_ptr);
+        assert_eq!(view.envelope().ciphertext.capacity(), ciphertext_capacity);
+        assert_eq!(view.header(), &expected);
+        assert_eq!(
+            view.replay_identity(),
+            ReplayIdentity::from_header(&expected)
+        );
+        assert_eq!(
+            view.ciphertext_commitment(),
+            &view.envelope().ciphertext_commitment
+        );
+        assert_eq!(
+            view.verified_scope().acting_principal(),
+            context().acting_principal
+        );
+        assert_eq!(
+            view.verified_scope().required_operation(),
+            context().required_operation
+        );
+        assert_eq!(
+            view.verified_scope().capability_issuer(),
+            context().expected_capability_issuer
+        );
+        assert_eq!(
+            view.verified_scope().current_execution_epoch(),
+            context().current_execution_epoch
+        );
+        assert_eq!(
+            view.verified_scope().current_policy_epoch(),
+            context().current_policy_epoch
+        );
+        assert_eq!(
+            view.verified_scope().verified_at_unix_ms(),
+            context().now_unix_ms
+        );
+    }
+    assert_eq!(admission.payload(), b"hello");
+    let plaintext_ptr = admission.payload().as_ptr();
+    let view = admission.journal_view();
+    assert_eq!(view.header(), &expected);
+    assert_eq!(replay.0, 1, "views must not verify or consume replay again");
+    let (envelope, opened) = admission.into_parts();
+    assert_eq!(envelope.ciphertext.as_ptr(), ciphertext_ptr);
+    assert_eq!(opened.payload().as_ptr(), plaintext_ptr);
+    assert_eq!(opened.header(), &expected);
+    assert_eq!(opened.into_payload(), b"hello");
+    assert_eq!(
+        open_envelope(
+            &envelope,
+            &capability,
+            &context(),
+            &encryption_key,
+            &sender_key.verifying_key(),
+            &authority_key.verifying_key(),
+            &mut replay
+        )
+        .unwrap_err(),
+        MailboxError::Replay
+    );
+    assert_eq!(replay.0, 2);
+}
+
+#[test]
+fn verified_admission_refusals_do_not_mint_capsule_or_record_replay() {
+    use mvm_core::mailbox::{ReplayIdentity, ReplayProtector, open_verified_admission};
+    #[derive(Default)]
+    struct CountingReplay(usize);
+    impl ReplayProtector for CountingReplay {
+        fn check_and_record(&mut self, _: ReplayIdentity) -> bool {
+            self.0 += 1;
+            true
+        }
+    }
+    let (sender_key, authority_key, encryption_key) = contract_keys();
+    let capability = sign_capability(grant(), &authority_key).unwrap();
+    for failure in [
+        "ciphertext",
+        "sender_key",
+        "authority_key",
+        "tenant",
+        "domain",
+        "recipient",
+        "acting_principal",
+        "operation",
+        "issuer",
+        "epoch",
+        "policy",
+        "expired",
+        "revoked",
+    ] {
+        let mut envelope = seal_with(header(), b"hello");
+        let mut current = context();
+        let mut sender_public = sender_key.verifying_key();
+        let mut authority_public = authority_key.verifying_key();
+        match failure {
+            "ciphertext" => envelope.ciphertext[0] ^= 1,
+            "sender_key" => sender_public = SigningKey::from_bytes(&[99; 32]).verifying_key(),
+            "authority_key" => authority_public = SigningKey::from_bytes(&[99; 32]).verifying_key(),
+            "tenant" => current.expected_tenant = TenantId::from_bytes([99; 32]),
+            "domain" => {
+                current.expected_authorization_domain = AuthorizationDomainId::from_bytes([99; 32])
+            }
+            "recipient" => current.expected_recipient = PrincipalId::from_bytes([99; 32]),
+            "acting_principal" => current.acting_principal = PrincipalId::from_bytes([99; 32]),
+            "operation" => current.required_operation = MailboxOperation::Monitor,
+            "issuer" => current.expected_capability_issuer = PrincipalId::from_bytes([99; 32]),
+            "epoch" => current.current_execution_epoch = ExecutionEpoch::new(8).unwrap(),
+            "policy" => current.current_policy_epoch += 1,
+            "expired" => current.now_unix_ms = 2_000,
+            _ => current.revoked_capabilities.push(grant().revocation_id),
+        }
+        let mut replay = CountingReplay::default();
+        assert!(
+            open_verified_admission(
+                envelope,
+                &capability,
+                &current,
+                &encryption_key,
+                &sender_public,
+                &authority_public,
+                &mut replay
+            )
+            .is_err(),
+            "{failure}"
+        );
+        assert_eq!(replay.0, 0, "{failure}");
+    }
+}
+
+#[test]
+fn verified_admission_debug_never_contains_payload_or_ciphertext() {
+    use mvm_core::mailbox::open_verified_admission;
+    let (sender_key, authority_key, encryption_key) = contract_keys();
+    let capability = sign_capability(grant(), &authority_key).unwrap();
+    let admission = open_verified_admission(
+        seal_with(header(), b"hello"),
+        &capability,
+        &context(),
+        &encryption_key,
+        &sender_key.verifying_key(),
+        &authority_key.verifying_key(),
+        &mut InMemoryReplayProtector::default(),
+    )
+    .unwrap();
+    assert_eq!(format!("{admission:?}"), "VerifiedMailboxAdmission { .. }");
+    assert_eq!(
+        format!("{:?}", admission.journal_view()),
+        "JournalAdmissionView { .. }"
+    );
+}
+
+#[test]
+fn verified_admission_scope_preserves_supplied_operation_and_historical_context() {
+    use mvm_core::mailbox::{VerifiedMailboxScope, open_verified_admission};
+    let (sender_key, authority_key, encryption_key) = contract_keys();
+    let capability = sign_capability(grant(), &authority_key).unwrap();
+    let mut current = context();
+    let admission = open_verified_admission(
+        seal_with(header(), b"hello"),
+        &capability,
+        &current,
+        &encryption_key,
+        &sender_key.verifying_key(),
+        &authority_key.verifying_key(),
+        &mut InMemoryReplayProtector::default(),
+    )
+    .unwrap();
+    current.now_unix_ms += 100;
+    current.current_policy_epoch += 1;
+    current.required_operation = MailboxOperation::Receive;
+    current.revoked_capabilities.push(grant().revocation_id);
+    let view = admission.journal_view();
+    let scope = view.verified_scope();
+    assert_eq!(
+        scope.required_operation(),
+        MailboxOperation::Send,
+        "verification cannot become receive authority"
+    );
+    assert_eq!(scope.verified_at_unix_ms(), 1_500);
+    assert_eq!(scope.current_policy_epoch(), 4);
+    assert_ne!(scope.current_policy_epoch(), current.current_policy_epoch);
+    assert_eq!(scope.tenant(), view.header().tenant);
+    assert_eq!(
+        scope.authorization_domain(),
+        view.header().authorization_domain
+    );
+    assert_eq!(scope.mailbox(), view.header().mailbox);
+    assert_eq!(scope.sender(), view.header().sender);
+    assert_eq!(scope.recipient(), view.header().recipient);
+    assert_eq!(scope.sender_boot(), view.header().sender_boot);
+    assert_eq!(scope.message_id(), view.header().message_id);
+    assert_eq!(scope.capability_id(), view.header().capability_id);
+    assert_eq!(scope.encryption_key_id(), view.header().encryption.key_id);
+    assert_eq!(scope.execution_epoch(), view.header().execution_epoch);
+    assert_eq!(scope.policy_epoch(), view.header().policy_epoch);
+    assert_eq!(scope.expires_at_unix_ms(), view.header().expires_at_unix_ms);
+    assert!(
+        !std::mem::needs_drop::<VerifiedMailboxScope>(),
+        "fixed scope must not retain owned context vectors"
+    );
 }

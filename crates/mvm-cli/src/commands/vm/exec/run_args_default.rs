@@ -48,6 +48,7 @@ impl Default for RunArgs {
             cpu_limit: None,
             grants_file: None,
             mailbox: None,
+            mailbox_retention_ms: None,
             memory: "512M".to_string(),
             explicit_resources: Default::default(),
             profile: RunProfile::Dev,

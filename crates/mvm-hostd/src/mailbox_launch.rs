@@ -40,9 +40,7 @@ use mvm_core::mailbox::OpenContext;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
-use crate::mailbox_service::{
-    GuestSealer, MailboxLimits, MailboxPolicy, MailboxService, bind_grant,
-};
+use crate::mailbox_service::{GuestSealer, MailboxLimits, MailboxPolicy, MailboxService};
 
 const SIGNER_SECRET: &str = "host-signer.ed25519";
 const SIGNER_PUBLIC: &str = "host-signer.pub";
@@ -188,6 +186,8 @@ pub struct DerivedMailboxKeys {
     sender: [u8; 32],
     authority: [u8; 32],
     encryption: [u8; 32],
+    journal_mac: [u8; 32],
+    anchor_mac: [u8; 32],
     template: MailboxTemplate,
 }
 
@@ -205,10 +205,58 @@ impl Drop for DerivedMailboxKeys {
         self.sender.zeroize();
         self.authority.zeroize();
         self.encryption.zeroize();
+        self.journal_mac.zeroize();
+        self.anchor_mac.zeroize();
     }
 }
 
 impl DerivedMailboxKeys {
+    /// Mailbox-scoped destination signer and separate journal/anchor MAC keys.
+    pub(crate) fn durable_material(&self) -> (SigningKey, [u8; 32], [u8; 32]) {
+        (
+            SigningKey::from_bytes(&self.authority),
+            self.journal_mac,
+            self.anchor_mac,
+        )
+    }
+
+    /// Bind the retained purpose keys to this host-derived mailbox identity.
+    pub(crate) fn with_retained(
+        mut self,
+        retained: &crate::mailbox_custody::RetainedMailboxKeys,
+    ) -> Result<Self> {
+        use mvm_core::mailbox::journal::HistoryKeyCustody as _;
+
+        let header = &self.template.header;
+        let address = MailboxAddress {
+            tenant: header.tenant,
+            authorization_domain: header.authorization_domain,
+            mailbox: header.mailbox,
+            recipient: header.recipient,
+        };
+        if address != retained.address()
+            || self.template.capability.address != address
+            || header.execution_epoch != retained.epoch()
+            || SigningKey::from_bytes(&self.authority)
+                .verifying_key()
+                .to_bytes()
+                != retained.authority_key()
+        {
+            return Err(Error::new(
+                ErrorKind::PermissionDenied,
+                "retained mailbox purpose keys do not match the admitted template",
+            ));
+        }
+        self.encryption = *retained.payload_key().expose_bytes();
+        self.template.header.encryption.key_id = retained.payload_key_id();
+        self.journal_mac = *retained
+            .load_existing(&retained.history_reference())
+            .map_err(Error::other)?
+            .expose_bytes();
+        self.anchor_mac = retained.anchor_key();
+        Ok(self)
+    }
+
     /// The host trust and sealer these keys stand for. Pure: no file is read,
     /// so it can be rebuilt on every dial attempt.
     pub fn trust(&self) -> (MailboxPolicy, GuestSealer) {
@@ -244,6 +292,7 @@ impl DerivedMailboxKeys {
             header: template.header,
             routing: template.routing,
             sent: 0,
+            intent_dir: None,
         };
         (policy, sealer)
     }
@@ -282,6 +331,18 @@ pub fn derive_launch_keys(
         sender: derived.sender.to_bytes(),
         authority: derived.authority.to_bytes(),
         encryption: *encryption,
+        journal_mac: *derive(
+            &derived.root,
+            b"mvm-mailbox-journal-v1",
+            &grant.mailbox,
+            grant.epoch,
+        ),
+        anchor_mac: *derive(
+            &derived.root,
+            b"mvm-mailbox-anchor-v1",
+            &grant.mailbox,
+            grant.epoch,
+        ),
         template,
     })
 }
@@ -433,14 +494,13 @@ impl Drop for MailboxLaunch {
 /// Where the guest's mailbox port is reached, and where the host serves.
 pub struct ServePaths {
     pub socket: PathBuf,
+    pub intent_dir: Option<PathBuf>,
     /// How the backend says the guest's mailbox port is dialed.
     pub route: mvm_core::vm_backend::HostDialRoute,
 }
 
-/// Bind the mailbox, then dial the guest's mailbox port from its own thread
-/// for as long as the launch lives, serving every connection into the one
-/// queue: every 100 ms for the first 30 s without a frame, every 2 s after,
-/// and again straight away after each frame. Returns at once.
+/// Bind the mailbox and dial for the VM lifetime: fast until a quiet window,
+/// slow while idle, and fast again after a guest frame. Returns immediately.
 pub fn serve_derived(
     grant: MailboxGrant,
     keys: DerivedMailboxKeys,
@@ -461,33 +521,30 @@ fn serve_derived_with(
     let service = Arc::new(OnceLock::new());
     let (thread_stop, thread_service) = (stop.clone(), service.clone());
     std::thread::spawn(move || {
-        let mut attempt = 0u32;
-        let (bound, mut sealer) = loop {
-            if thread_stop.load(Ordering::SeqCst) {
-                return;
-            }
-            let (trust, sealer) = keys.trust();
-            match bind_grant(&grant, trust, sealer, limits, &paths.socket) {
-                Ok(bound) => break bound,
-                Err(_) => {
-                    sleep_unless_stopped(&thread_stop, dial_delay(attempt, fast_attempts));
-                    attempt = attempt.saturating_add(1);
-                }
-            }
+        let (trust, mut sealer) = keys.trust();
+        sealer.intent_dir = paths.intent_dir;
+        let (Ok(trust), Ok(mut sealer)) = (trust.with_grant(&grant), sealer.with_grant(&grant))
+        else {
+            tracing::warn!("mailbox launch refused mismatched host-held grant");
+            return;
         };
-        let service = thread_service.get_or_init(|| bound);
-        attempt = 0;
+        let Ok(served) = MailboxService::bind_live(&paths.socket, limits, trust) else {
+            tracing::warn!("mailbox service could not bind");
+            return;
+        };
+        let served = thread_service.get_or_init(|| served);
+        let mut attempts = 0u32;
         while !thread_stop.load(Ordering::SeqCst) {
             // Ok means a frame arrived, delivered or refused; Err means the
             // guest had nothing yet (or was not up). Neither ends the loop.
-            match service.serve_guest_until(&paths.route, &mut sealer, &thread_stop) {
+            match served.serve_guest_until(&paths.route, &mut sealer, &thread_stop) {
                 Ok(()) => {
-                    attempt = 0;
+                    attempts = 0;
                     sleep_unless_stopped(&thread_stop, POST_FRAME_PAUSE);
                 }
                 Err(_) => {
-                    sleep_unless_stopped(&thread_stop, dial_delay(attempt, fast_attempts));
-                    attempt = attempt.saturating_add(1);
+                    sleep_unless_stopped(&thread_stop, dial_delay(attempts, fast_attempts));
+                    attempts = attempts.saturating_add(1);
                 }
             }
         }
@@ -504,13 +561,15 @@ pub const LAUNCH_LIMITS: MailboxLimits = MailboxLimits {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_contract::protocol::mailbox::{ExecutionEpoch, MessageId};
+    use mvm_core::mailbox::frame::OutboxMessage;
 
     fn test_secret() -> mvm_core::crypto::aead::Key {
         mvm_core::crypto::aead::Key::from_bytes([5; 32])
     }
 
     fn keys_dir() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
         crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
         dir
     }
@@ -527,6 +586,8 @@ mod tests {
                 .unwrap()
                 .to_bytes(),
             epoch: epoch(n),
+            report: None,
+            retention: None,
         }
     }
 
@@ -618,6 +679,47 @@ mod tests {
     }
 
     #[test]
+    fn a_retry_reuses_exact_sealed_intent_after_helper_restart() {
+        let dir = keys_dir();
+        let grant = grant(dir.path(), [4; 32]);
+        let keys = derive_launch_keys(dir.path(), &grant, &test_secret()).unwrap();
+        let intents = dir.path().join("intents");
+        let sealer = || {
+            let (_, mut sealer) = keys.trust();
+            sealer.intent_dir = Some(intents.clone());
+            sealer.with_grant(&grant).unwrap()
+        };
+        let message = OutboxMessage {
+            recipient: sealer().header.recipient,
+            message_id: MessageId::from_bytes([45; 32]),
+            body: b"first".to_vec(),
+        };
+        let first = sealer().seal(message.clone()).expect("first seal");
+        let retry = sealer().seal(message.clone()).expect("retry after restart");
+        assert_eq!(
+            first, retry,
+            "retry must reuse canonical ciphertext and delivery ID"
+        );
+        for _ in 2..8 {
+            assert_eq!(
+                sealer().seal(message.clone()).expect("bounded retry"),
+                first
+            );
+        }
+        assert_eq!(
+            sealer().seal(message.clone()),
+            Err(crate::mailbox_service::Refusal::RetriesExhausted),
+            "the attempt count survives a fresh helper using the same source intent"
+        );
+        let mut conflicting = message;
+        conflicting.body = b"different".to_vec();
+        assert!(matches!(
+            sealer().seal(conflicting),
+            Err(crate::mailbox_service::Refusal::Mailbox(_))
+        ));
+    }
+
+    #[test]
     fn the_dial_schedule_is_fast_then_slow_and_bounded() {
         assert_eq!(dial_delay(0, 300), FAST_DIAL_INTERVAL);
         assert_eq!(dial_delay(299, 300), FAST_DIAL_INTERVAL);
@@ -628,6 +730,7 @@ mod tests {
     fn serve_paths(dir: &Path) -> ServePaths {
         ServePaths {
             socket: dir.join("mailbox.sock"),
+            intent_dir: None,
             route: mvm_core::vm_backend::HostDialRoute::PortSocket(dir.join("port.sock")),
         }
     }
@@ -649,6 +752,7 @@ mod tests {
             &outbox,
             &mvm_core::mailbox::frame::OutboxMessage {
                 recipient: mvm_contract::protocol::mailbox::PrincipalId::from_bytes([7; 32]),
+                message_id: MessageId::from_bytes([45; 32]),
                 body: b"late".to_vec(),
             },
         )
@@ -694,7 +798,11 @@ mod tests {
         std::thread::spawn(move || {
             for mut stream in listener.incoming().flatten() {
                 let v = mvm_agentd::mailbox_outbox::forward_outbox(&mut stream, &path);
-                if v != Err(mvm_core::mailbox::frame::Refusal::Malformed) {
+                if !matches!(
+                    v,
+                    Err(mvm_core::mailbox::frame::Refusal::Malformed
+                        | mvm_core::mailbox::frame::Refusal::Unavailable)
+                ) {
                     let _ = tx.send(v);
                 }
             }
@@ -712,6 +820,7 @@ mod tests {
         let recipient = mvm_contract::protocol::mailbox::PrincipalId::from_bytes([to; 32]);
         let message = mvm_core::mailbox::frame::OutboxMessage {
             recipient,
+            message_id: MessageId::from_bytes(rand::random()),
             body: body.to_vec(),
         };
         mvm_agentd::mailbox_outbox::write_outbox(outbox, &message).unwrap();
@@ -734,7 +843,14 @@ mod tests {
             ..LAUNCH_LIMITS
         };
         let launch = launch_against(dir.path(), limits);
-        assert!(send_one(&outbox, &rx, 9, b"wrong recipient").is_err());
+        assert_eq!(
+            send_one(&outbox, &rx, 9, b"wrong recipient"),
+            Err(mvm_core::mailbox::frame::Refusal::NotAuthorized)
+        );
+        assert!(
+            std::fs::read_dir(&outbox).unwrap().next().is_none(),
+            "a terminal refusal must free the live spool entry"
+        );
         assert_eq!(send_one(&outbox, &rx, 7, b"first"), Ok(()));
         assert_eq!(send_one(&outbox, &rx, 7, b"second"), Ok(()));
         assert!(send_one(&outbox, &rx, 7, b"over the bound").is_err());

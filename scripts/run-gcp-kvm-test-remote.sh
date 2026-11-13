@@ -108,6 +108,25 @@ if ! command -v firecracker >/dev/null 2>&1 \
     "/tmp/$firecracker_dir/jailer-v${firecracker_version}-x86_64" \
     /usr/local/bin/jailer
 fi
+# Isolated live homes have no Firecracker cache yet. The capability probe does
+# not search PATH, so pass the installed root-owned binary explicitly, but only
+# after verifying its bytes against this checkout's release pin.
+firecracker_binary_sha256="$(awk '/^\[x86_64\]/{p=1; next}
+  /^\[/{p=0} p && $1 == "binary_sha256" {gsub(/"/, "", $3); print $3}' \
+  "$repo/crates/mvm-core/firecracker.lock")"
+if [[ ! "$firecracker_binary_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "error: missing x86_64 Firecracker binary pin" >&2
+  exit 1
+fi
+printf '%s  %s\n' "$firecracker_binary_sha256" /usr/local/bin/firecracker | sha256sum -c -
+
+cd "$repo"
+# Keep toolchains and build state in the tree so the unprivileged test user can
+# own them without granting access to root's home.
+# shellcheck source=/dev/null
+source scripts/dev-env.sh
+export RUSTUP_HOME="$repo/.mvm-test/rustup"
+export PATH="$CARGO_HOME/bin:$PATH"
 
 if ! command -v rustup >/dev/null 2>&1; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -115,7 +134,7 @@ if ! command -v rustup >/dev/null 2>&1; then
 fi
 # The file is installed by rustup immediately above.
 # shellcheck source=/dev/null
-. /root/.cargo/env
+. "$CARGO_HOME/env"
 
 guest_rust="$(awk '/^\[workspace\.metadata\.mvm\.toolchain\]/{p=1; next}
   /^\[/{p=0} p && $1 == "rust" {gsub(/"/, "", $3); print $3}' "$repo/Cargo.toml")"
@@ -151,15 +170,49 @@ if ((${#command_argv[@]} == 0)); then
   exit 1
 fi
 
-cd "$repo"
-# Repository-owned worktree isolation helper.
-# shellcheck source=/dev/null
-source scripts/dev-env.sh
+# Firecracker refuses a root caller even when nested KVM is available. Give the
+# test user only the device's group, not root or a privileged host service.
+kvm_group="$(stat -c %G /dev/kvm)"
+if [[ "$kvm_group" == UNKNOWN ]]; then
+  echo "error: /dev/kvm has no named access group" >&2
+  exit 1
+fi
+useradd -m -s /bin/bash -G "$kvm_group" mvm-test
+chown -R mvm-test:mvm-test "$repo" "$results"
+if ! runuser -u mvm-test -- test -r /dev/kvm -a -w /dev/kvm; then
+  echo "error: unprivileged test user cannot access /dev/kvm" >&2
+  exit 1
+fi
+# Firecracker's resource limits require a real user-manager bus and delegated
+# systemd scope. A bare runuser process has neither, even with /dev/kvm access.
+loginctl enable-linger mvm-test
+test_uid="$(id -u mvm-test)"
+systemctl start "user@${test_uid}.service"
+user_runtime_dir="/run/user/$test_uid"
+if [[ ! -S "$user_runtime_dir/bus" ]] \
+  || ! runuser -u mvm-test -- env \
+    XDG_RUNTIME_DIR="$user_runtime_dir" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=$user_runtime_dir/bus" \
+    systemctl --user is-active --quiet default.target; then
+  echo "error: unprivileged test user has no active systemd session bus" >&2
+  exit 1
+fi
 printf '>> running:'
 printf ' %q' "${command_argv[@]}"
 printf '\n'
 set +e
-"${command_argv[@]}" 2>&1 | tee "$results/command.log"
+runuser -u mvm-test -- env \
+  HOME=/home/mvm-test \
+  XDG_RUNTIME_DIR="$user_runtime_dir" \
+  DBUS_SESSION_BUS_ADDRESS="unix:path=$user_runtime_dir/bus" \
+  PATH="$CARGO_HOME/bin:/usr/local/bin:/usr/bin:/bin" \
+  RUSTUP_HOME="$RUSTUP_HOME" \
+  CARGO_HOME="$CARGO_HOME" \
+  CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+  MVM_HOME="$MVM_HOME" \
+  MVM_FIRECRACKER_BIN=/usr/local/bin/firecracker \
+  MVM_GCP_KVM_RESULTS_DIR="$results" \
+  "${command_argv[@]}" 2>&1 | tee "$results/command.log"
 run_status=${PIPESTATUS[0]}
 set -e
 exit "$run_status"

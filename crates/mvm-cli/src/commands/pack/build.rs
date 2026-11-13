@@ -18,17 +18,16 @@ use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use mvm_build::pipeline::frozen::{FrozenInputs, tree_digest};
 use mvm_client::bundle::{
-    PostureInputs, seal_template_rootfs, template_artifact_digests, template_entrypoint,
+    PackArtifactDigests as SlotDigests, PostureInputs, pack_environment, seal_template_rootfs,
+    template_entrypoint,
 };
-use mvm_client::image_producer::{WorkloadImageProducer, YoctoImage};
+use mvm_client::yocto_pack::{YoctoPackRequest, build_yocto_pack};
 use mvm_contract::pack_lock::PackLock;
 use mvm_contract::pack_spec::{PackSource, PackSpec, PackTarget};
 use mvm_core::arch::GuestArch;
 use mvm_core::plan::BundleResources;
-use mvm_core::plan::bundle::{
-    ArtifactRole, BundleManifest, ENVIRONMENT_DESCRIPTOR_VERSION, EnvironmentDescriptor,
-    EnvironmentEntrypoint,
-};
+#[cfg(test)]
+use mvm_core::plan::bundle::{ArtifactRole, BundleManifest};
 use mvm_core::plan::types::{BuildProvenance, InputKind};
 use mvm_core::security::AgentProfile;
 use mvm_sdk::pack::compile_frozen;
@@ -58,17 +57,6 @@ pub(in crate::commands) struct BuildArgs {
     /// Write bounded frozen Nix input diagnostics (not an admission credential)
     #[arg(long, value_name = "PATH")]
     pub input_observation: Option<PathBuf>,
-    /// Yocto-produced rootfs tar.gz (uses the pack spec as an identity and entrypoint declaration)
-    #[arg(
-        long,
-        value_name = "FILE.tar.gz",
-        requires = "yocto_inputs",
-        conflicts_with = "input_observation"
-    )]
-    pub yocto_archive: Option<PathBuf>,
-    /// Yocto machine, layer revisions and exact rootfs archive digest
-    #[arg(long, value_name = "FILE.json", requires = "yocto_archive")]
-    pub yocto_inputs: Option<PathBuf>,
 }
 
 pub(in crate::commands) fn run_for_front_door(
@@ -95,8 +83,8 @@ fn run_inner(args: BuildArgs, options: ExportOptions) -> Result<()> {
         })
         .transpose()?;
     let loaded = LoadedSpec::read(&args.spec)?;
-    if let (Some(archive), Some(inputs)) = (&args.yocto_archive, &args.yocto_inputs) {
-        return run_yocto(&args, options, &loaded.spec, archive, inputs);
+    if matches!(loaded.spec.source, PackSource::Yocto { .. }) {
+        return run_yocto(&args, options, &loaded.spec, &loaded.dir);
     }
     let lock_path = args
         .lock
@@ -143,7 +131,7 @@ fn run_inner(args: BuildArgs, options: ExportOptions) -> Result<()> {
     );
     let producer = HealthInputRetention::new(
         ProducerInputs {
-            build: PackSlot::Nix(owned),
+            build: PackSlot(owned),
             boot: portable,
         },
         label,
@@ -172,8 +160,7 @@ fn run_yocto(
     args: &BuildArgs,
     options: ExportOptions,
     spec: &PackSpec,
-    archive: &Path,
-    manifest: &Path,
+    spec_dir: &Path,
 ) -> Result<()> {
     anyhow::ensure!(
         options.cmdline.is_none()
@@ -186,85 +173,27 @@ fn run_yocto(
     );
     anyhow::ensure!(
         args.lock.is_none(),
-        "Yocto inputs use --yocto-inputs, not a Nix pack lock"
+        "Yocto inputs are declared by source.kind=yocto, not a Nix pack lock"
     );
-    validate_yocto_pack_spec(spec)?;
-    require_host_target(spec)?;
-    let work = tempfile::tempdir().context("stage Yocto pack inputs")?;
-    let input = mvm_build::yocto::YoctoInput::stage(manifest, archive, spec.target, work.path())?;
-    let health_backend = mvm_client::entrypoint::backend_name_for(args.hypervisor.as_deref())?;
-    require_descriptor_health_backend(&health_backend)?;
-    let portable = std::sync::Arc::new(
-        mvm_client::portable_boot_assets::PreparedPortableBootAssets::acquire(GuestArch::host())?,
-    );
-    let rootfs = work.path().join("rootfs.ext4");
-    let entrypoint = mvm_build::oci_runtime_inject::ImageRuntimeConfig {
-        argv: spec.entrypoint.clone(),
-        env: Vec::new(),
-        working_dir: Some("/srv/app".to_string()),
-    };
-    let mut persisted = mvm_core::manifest::PersistedManifest::from_flake_identity(
-        &format!("yocto:{}:{}", input.archive_digest(), uuid::Uuid::new_v4()),
-        None,
-        &health_backend,
-    );
-    persisted.vcpus = u8::try_from(spec.resources.cpu_cores)
-        .context("Yocto pack CPU cores exceed slot capacity")?;
-    persisted.mem_mib = spec.resources.memory_mb;
-    let revision =
-        YoctoImage::new(&input, &rootfs, &entrypoint, &portable).build_slot(&persisted)?;
-    let slot = PackSlot::Yocto {
-        slot_hash: persisted.manifest_hash,
-        revision_hash: revision.revision_hash,
-    };
-    let label = format!(
-        "{}; {}",
-        mvm_core::manifest::slot_dir(slot.slot_hash()),
-        portable
-            .retention_paths()
-            .map(|p| p.display().to_string())
-            .join("; "),
-    );
-    let producer = HealthInputRetention::new(
-        ProducerInputs {
-            build: slot,
-            boot: portable,
-        },
-        label,
-    );
-    PackCompletion {
-        args,
-        spec,
-        options,
-        producer,
-        input_sha256: input.archive_digest().to_string(),
-        provenance: BuildProvenance {
-            input_kind: InputKind::Yocto,
-            input_ref: format!(
-                "yocto:{}@sha256:{}",
-                input.machine(),
-                input.archive_digest()
-            ),
-            lock_digest: Some(input.manifest_digest().to_string()),
-            builder_id: None,
-            artifacts: Default::default(),
-        },
-        observation: None,
-        supplemental: Some(input.manifest_path().to_path_buf()),
-    }
-    .run()
-}
-
-fn validate_yocto_pack_spec(spec: &PackSpec) -> Result<()> {
-    spec.validate().context("validate Yocto pack declaration")?;
-    let PackSource::Local { path } = &spec.source;
     anyhow::ensure!(
-        path == "."
-            && spec.packages.is_empty()
-            && spec.dependencies.is_empty()
-            && spec.copy.is_empty(),
-        "Yocto rootfs already contains the application: source must be '.', and \
-         packages, dependencies and copy must be empty"
+        args.input_observation.is_none(),
+        "--input-observation applies only to Nix pack builds"
+    );
+    let built = build_yocto_pack(YoctoPackRequest {
+        spec: spec.clone(),
+        spec_dir: spec_dir.to_path_buf(),
+        out: args.out.clone(),
+        label: options.label,
+        health_timeout_secs: args.health_timeout,
+        hypervisor: args.hypervisor.clone(),
+    })?;
+    println!(
+        "Built pack {}@{} -> {} (sha256={}, key_id={})",
+        spec.identity.name,
+        spec.identity.version,
+        built.path.display(),
+        built.sha256,
+        built.key_id
     );
     Ok(())
 }
@@ -442,55 +371,15 @@ struct ProducerInputs {
     boot: std::sync::Arc<mvm_client::portable_boot_assets::PreparedPortableBootAssets>,
 }
 
-enum PackSlot {
-    Nix(crate::commands::build::build::FrozenFlakeSlot),
-    Yocto {
-        slot_hash: String,
-        revision_hash: String,
-    },
-}
+struct PackSlot(crate::commands::build::build::FrozenFlakeSlot);
 
 impl PackSlot {
     fn slot_hash(&self) -> &str {
-        match self {
-            Self::Nix(slot) => slot.slot_hash(),
-            Self::Yocto { slot_hash, .. } => slot_hash,
-        }
+        self.0.slot_hash()
     }
 
     fn verify_revision(&self) -> Result<()> {
-        match self {
-            Self::Nix(slot) => slot.verify_revision(),
-            Self::Yocto {
-                slot_hash,
-                revision_hash,
-            } => {
-                let current =
-                    fs::canonicalize(mvm_core::manifest::slot_current_symlink(slot_hash))?;
-                let expected = fs::canonicalize(mvm_core::manifest::slot_revision_dir(
-                    slot_hash,
-                    revision_hash,
-                ))?;
-                anyhow::ensure!(
-                    current == expected,
-                    "Yocto slot changed after materialization"
-                );
-                Ok(())
-            }
-        }
-    }
-}
-
-impl Drop for PackSlot {
-    fn drop(&mut self) {
-        if let Self::Yocto { slot_hash, .. } = self {
-            let path = mvm_core::manifest::slot_dir(slot_hash);
-            if let Err(error) = fs::remove_dir_all(&path)
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                tracing::warn!(%error, %path, "removing private Yocto build slot failed");
-            }
-        }
+        self.0.verify_revision()
     }
 }
 
@@ -612,110 +501,13 @@ fn pack_export(
     }
 }
 
-/// The environment a launch of the built pack is held to.
-fn pack_environment(spec: &PackSpec, image_argv: Vec<String>) -> EnvironmentDescriptor {
-    EnvironmentDescriptor {
-        descriptor_version: ENVIRONMENT_DESCRIPTOR_VERSION,
-        pack: Some(spec.identity.clone()),
-        target: spec.target,
-        entrypoint: EnvironmentEntrypoint {
-            argv: image_argv,
-            working_dir: None,
-        },
-        resources: Some(spec.resources.clone()),
-        policy: None,
-        volumes: Vec::new(),
-        secret_slots: Vec::new(),
-        capabilities: Vec::new(),
-        services: Vec::new(),
-    }
-}
-
 /// SHA-256 of the lock's compact JSON, the form the build consumed.
 fn lock_digest(lock: &PackLock) -> Result<String> {
     let bytes = serde_json::to_vec(lock).context("serializing pack lock")?;
     Ok(mvm_core::plan::bundle::sha256_hex(&bytes))
 }
 
-/// Digests of the artifacts a slot's current revision points at.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SlotDigests {
-    files: Vec<(&'static str, Option<String>)>,
-}
-
-impl SlotDigests {
-    /// Health selects the retained release initramfs, not an unused factory
-    /// stage-1 initrd. The unchanged build slot is checked separately.
-    fn selecting_initrd(mut self, path: &Path) -> Result<Self> {
-        let digest = file_sha256(path)?;
-        for (name, value) in &mut self.files {
-            if *name == "initrd" {
-                *value = Some(digest.clone());
-            }
-        }
-        Ok(self)
-    }
-
-    fn read(slot: &str) -> Result<Self> {
-        let digests = template_artifact_digests(slot)?;
-        Ok(Self::from_digests(
-            Some(digests.kernel),
-            digests.initrd,
-            Some(digests.rootfs),
-            digests.verity,
-        ))
-    }
-
-    /// The same digests, as the manifest of a sealed archive records them.
-    fn from_manifest(manifest: &BundleManifest) -> Self {
-        let digest = |role: ArtifactRole| {
-            manifest
-                .artifacts
-                .iter()
-                .find(|artifact| artifact.role == role)
-                .map(|artifact| artifact.sha256.clone())
-        };
-        Self::from_digests(
-            digest(ArtifactRole::Kernel),
-            digest(ArtifactRole::Initrd),
-            digest(ArtifactRole::Rootfs),
-            digest(ArtifactRole::VerityHashSidecar),
-        )
-    }
-
-    fn from_digests(
-        kernel: Option<String>,
-        initrd: Option<String>,
-        rootfs: Option<String>,
-        verity: Option<String>,
-    ) -> Self {
-        Self {
-            files: vec![
-                ("kernel", kernel),
-                ("initrd", initrd),
-                ("rootfs", rootfs),
-                ("verity", verity),
-            ],
-        }
-    }
-
-    /// Whether the artifact named `name` is absent.
-    fn missing(&self, name: &str) -> bool {
-        self.files
-            .iter()
-            .any(|(file, digest)| *file == name && digest.is_none())
-    }
-
-    fn changed(&self, other: &Self) -> Vec<&'static str> {
-        self.files
-            .iter()
-            .zip(&other.files)
-            .filter(|(a, b)| a != b)
-            .map(|((name, _), _)| *name)
-            .collect()
-    }
-}
-
+#[cfg(test)]
 fn file_sha256(path: &Path) -> Result<String> {
     mvm_core::crypto::image_verify::sha256_file(path)
         .with_context(|| format!("hashing {}", path.display()))
@@ -884,12 +676,8 @@ mod tests {
 
     #[test]
     fn changed_names_each_artifact_that_differs() {
-        let before = SlotDigests {
-            files: vec![("kernel", Some("k".into())), ("rootfs", Some("r".into()))],
-        };
-        let after = SlotDigests {
-            files: vec![("kernel", Some("k".into())), ("rootfs", Some("x".into()))],
-        };
+        let before = SlotDigests::from_digests(Some("k".into()), None, Some("r".into()), None);
+        let after = SlotDigests::from_digests(Some("k".into()), None, Some("x".into()), None);
         assert_eq!(before.changed(&after), vec!["rootfs"]);
         assert!(before.changed(&before).is_empty());
         let unsealed = SlotDigests::from_digests(Some("k".into()), None, Some("r".into()), None);
@@ -989,28 +777,6 @@ mod tests {
         assert_eq!(provenance.input_ref, "pack:acme/hello@1.0.0");
         assert_eq!(provenance.lock_digest.unwrap().len(), 64);
         assert!(export.posture.is_some());
-    }
-
-    #[test]
-    fn yocto_pack_declares_only_content_already_in_its_rootfs() {
-        let sample: PackSpec =
-            serde_json::from_str(include_str!("../../../../../examples/yocto/pack.json"))
-                .expect("representative Yocto pack spec parses");
-        validate_yocto_pack_spec(&sample).expect("representative spec is importable");
-
-        let mut with_nix_package = sample.clone();
-        with_nix_package
-            .packages
-            .push(mvm_contract::pack_spec::PackageRequest {
-                name: "python3".into(),
-                version: None,
-                scope: mvm_contract::pack_spec::PackageScope::Runtime,
-            });
-        assert!(validate_yocto_pack_spec(&with_nix_package).is_err());
-
-        let mut with_unconsumed_source = sample;
-        with_unconsumed_source.source = PackSource::Local { path: "src".into() };
-        assert!(validate_yocto_pack_spec(&with_unconsumed_source).is_err());
     }
 
     #[test]
