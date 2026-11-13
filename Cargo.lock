@@ -3895,6 +3895,7 @@ dependencies = [
  "mvm-fs",
  "mvm-hostd",
  "mvm-http",
+ "mvm-policy",
  "mvm-runtime",
  "mvm-sdk",
  "mvm-vmm",
@@ -4209,6 +4210,22 @@ dependencies = [
  "mvm-contract",
  "mvm-core",
  "serde_json",
+]
+
+[[package]]
+name = "mvm-policy"
+version = "0.28.0-rc.2"
+dependencies = [
+ "anyhow",
+ "mvm-contract",
+ "mvm-core",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml",
 ]
 
 [[package]]

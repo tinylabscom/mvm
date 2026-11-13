@@ -169,8 +169,8 @@ fn push_unique(items: &mut Vec<Sourced<String>>, value: String, from: &str) {
 
 /// Canonical `host:port` for an allow entry, through the one `--allow-host`
 /// parser so a policy and the flag agree on what an entry means.
-pub(crate) fn canonical_allow(entry: &str) -> Result<String, String> {
-    crate::admission::run_network::parse_allow_host(entry)
+pub fn canonical_allow(entry: &str) -> Result<String, String> {
+    crate::allow_host::parse_allow_host(entry)
         .map(|rule| rule.to_string())
         .map_err(|error| format!("{error:#}"))
 }
@@ -223,7 +223,7 @@ fn deny_host_identity(host: &str) -> String {
 }
 
 /// Whether deny pattern `deny` covers `host:port`.
-pub(crate) fn deny_covers(deny: &str, host: &str, port: u16) -> bool {
+pub fn deny_covers(deny: &str, host: &str, port: u16) -> bool {
     let Ok((pattern, deny_port)) = parse_deny(deny) else {
         return false;
     };
@@ -238,7 +238,7 @@ pub(crate) fn deny_covers(deny: &str, host: &str, port: u16) -> bool {
 }
 
 /// Split a canonical `host:port`.
-pub(crate) fn split_host_port(entry: &str) -> (&str, u16) {
+pub fn split_host_port(entry: &str) -> (&str, u16) {
     match entry.rsplit_once(':') {
         Some((host, port)) => (host, port.parse().unwrap_or(443)),
         None => (entry, 443),

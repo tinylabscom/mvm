@@ -1,11 +1,10 @@
 //! `--policy`, `--plan`, and the project's `[policy]`: folding an authored
 //! policy into a launch's own flags before anything else reads them.
 //!
-//! Resolution and the merge rules live in `mvm_client::policy_profiles`. What this
-//! does is pick the source (`--plan`; otherwise `--policy` and the project
-//! manifest the run names — its `[policy]` table and `[network] allow_hosts`),
-//! resolve it on this host and the backend the run will use, and write the
-//! result back into `RunArgs`. Every later step —
+//! Source selection and resolution live in `mvm_client::policy_profiles`. This
+//! adapter snapshots the project's `[policy]` and `[network] allow_hosts`,
+//! supplies the launch inputs to the client, and writes the folded result into
+//! `RunArgs`. Every later step —
 //! grant resolution, route resolution, secret binding, the mount and env
 //! checks, plan synthesis, signing, admission — then runs on those flags
 //! exactly as if they had been typed, which is what makes a profile and the
@@ -13,8 +12,7 @@
 
 use anyhow::{Context, Result};
 use mvm_client::policy_profiles::{
-    LaunchFlags, Platform, PolicyRef, PolicyStore, ProjectPolicy, ResolvedManifest, ResolvedPolicy,
-    fold, resolve,
+    LaunchFlags, Platform, PolicyRef, ProjectPolicy, ResolvedPolicy, SelectedPolicy, fold,
 };
 
 use super::exec::RunArgs;
@@ -110,40 +108,19 @@ pub(in crate::commands) fn select_pack_image(args: &mut RunArgs) -> Result<()> {
     Ok(())
 }
 
-/// The authored policy a launch runs under, if it names one.
-struct Selected {
-    label: String,
-    resolved: ResolvedPolicy,
-}
-
-fn select(args: &RunArgs) -> Result<Option<Selected>> {
-    let config = mvm_core::user_config::load_strict(None)?;
-    if let Some(path) = &args.plan {
-        let manifest = ResolvedManifest::read(path)?;
-        return Ok(Some(Selected {
-            label: format!("resolved manifest {}", path.display()),
-            resolved: manifest.into_resolved("resolved manifest", Some(path))?,
-        }));
-    }
-    let project = super::run_routes::project_manifest(args)?
-        .map(|(path, manifest)| ProjectPolicy::from_manifest(&path, &manifest));
-    let Some(selection) = crate::commands::shared::select_launch_policy(
+fn select(args: &RunArgs) -> Result<Option<SelectedPolicy>> {
+    let project = if args.plan.is_some() {
+        None
+    } else {
+        super::run_routes::project_manifest(args)?
+            .map(|(path, manifest)| ProjectPolicy::from_manifest(&path, &manifest))
+    };
+    mvm_client::policy_profiles::select_for_launch(
+        args.plan.as_deref(),
         &args.policy,
         project,
-        &config.default_policy,
-    )?
-    else {
-        return Ok(None);
-    };
-    let label = if !args.policy.is_empty() {
-        format!("policy {}", args.policy.join(", "))
-    } else if let Some(project) = &selection.project {
-        format!("the project policy in {}", project.manifest.display())
-    } else {
-        "policy".to_string()
-    };
-    let resolved = resolve(&PolicyStore::from_config(), &selection, run_platform(args))?;
-    Ok(Some(Selected { label, resolved }))
+        run_platform(args),
+    )
 }
 
 /// This host, and the backend the run asks for or the host would pick.
@@ -261,13 +238,13 @@ pub(in crate::commands) fn apply_run_policy(args: &mut RunArgs) -> Result<()> {
 
 fn apply_selected_policy(
     args: &mut RunArgs,
-    selected: Option<Selected>,
+    selected: Option<SelectedPolicy>,
     environment: Option<mvm_core::plan::EnvironmentDescriptor>,
 ) -> Result<()> {
     if selected.is_none() && environment.as_ref().is_none_or(|env| env.policy.is_none()) {
         return Ok(());
     }
-    let mut selected = selected.unwrap_or_else(|| Selected {
+    let mut selected = selected.unwrap_or_else(|| SelectedPolicy {
         label: "signed application environment".into(),
         resolved: ResolvedPolicy::empty(),
     });
@@ -310,6 +287,7 @@ fn apply_selected_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_client::policy_profiles::ResolvedManifest;
     use mvm_core::util::test_env::TestEnv;
 
     #[test]

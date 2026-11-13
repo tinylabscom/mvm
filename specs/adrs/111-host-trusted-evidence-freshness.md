@@ -168,6 +168,12 @@ belong to the implementing contract.
 The selected owner is the existing **local host-service boundary**:
 move lifecycle policy admission and cutover coordination behind
 `mvm-hostd`, exposed to CLI and SDK through the existing client contract.
+The authored workload-policy parser and composition rules belong in one
+shared `mvm-policy` library, below both `mvm-client` and `mvm-hostd`.
+`mvm-client` owns caller-facing policy selection and launch folding;
+`mvm-hostd` must independently validate the immutable committed closure
+with those same rules. Moving the resolver alone does not commit policy
+or move authority out of the current CLI launch path.
 Keep backend-specific prepare, stop and handoff under their existing
 backend contracts. A one-shot CLI process with a file lock cannot fence
 an already-running endpoint or recover an interrupted handoff after it

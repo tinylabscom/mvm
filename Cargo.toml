@@ -41,6 +41,7 @@ members = [
     "crates/mvm-host-services",
     "crates/mvm-cli",
     "crates/mvm-hostd",
+    "crates/mvm-policy",
     "crates/mvm-client",
     "crates/runmvm-client",
     # The host library the language SDKs load in-process instead of running
@@ -305,6 +306,7 @@ tree-sitter-typescript = "0.23.2"
 # opts back into user-facing defaults through its own `[features]` block.
 mvm-contract = { path = "crates/mvm-contract", version = "0.28.0-rc.2", default-features = false, features = ["protocol"] }
 mvm-core = { path = "crates/mvm-core", version = "0.28.0-rc.2" }
+mvm-policy = { path = "crates/mvm-policy", version = "0.28.0-rc.2" }
 mvm-bundler = { path = "crates/mvm-bundler", version = "0.28.0-rc.2" }
 mvm-compiler = { path = "crates/mvm-compiler", version = "0.28.0-rc.2" }
 mvm-client ={ path = "crates/mvm-client", version = "0.28.0-rc.2" }

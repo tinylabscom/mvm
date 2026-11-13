@@ -1,30 +1,10 @@
 //! Environment-aware resolution helpers (running VMs, flake refs, network policy).
 
-use anyhow::{Context, Result};
-use mvm_client::policy_profiles::{PolicySelection, ProjectPolicy};
+use anyhow::Result;
 
 pub(crate) use mvm_client::launch::manifest_ref::{ManifestArgRef, resolve_manifest_arg};
 
-/// Select launch policy with operator-configured fallbacks.
-///
-/// # Errors
-///
-/// A selected policy reference is malformed.
-pub(in crate::commands) fn select_launch_policy(
-    cli: &[String],
-    project: Option<ProjectPolicy>,
-    defaults: &[String],
-) -> Result<Option<PolicySelection>> {
-    let project_selects = project
-        .as_ref()
-        .is_some_and(|policy| policy.profile.is_some() || !policy.include.is_empty());
-    if cli.is_empty() && !project_selects {
-        PolicySelection::for_launch(defaults, project)
-            .context("selecting configured default_policy")
-    } else {
-        PolicySelection::for_launch(cli, project).map_err(Into::into)
-    }
-}
+pub(in crate::commands) use mvm_client::policy_profiles::select_launch_policy;
 
 /// True when the launch source selectors resolve to an OCI image boot, whether
 /// the image was named directly (`--image`) or indirectly through `--manifest`.
@@ -84,7 +64,7 @@ pub(crate) fn egress_enforcement_label(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_client::policy_profiles::{Platform, PolicyRef, PolicyStore, resolve};
+    use mvm_client::policy_profiles::{Platform, PolicyRef, PolicyStore, ProjectPolicy, resolve};
     use mvm_core::network_policy::{HostPort, NetworkPolicy};
 
     fn project(profile: Option<&str>, include: &[&str], hosts: &[&str]) -> ProjectPolicy {
