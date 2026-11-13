@@ -21,10 +21,12 @@
 //!   available there; these text checks stand in for it, and the
 //!   `*_when_nix_available` tests evaluate for real where Nix exists. `ci.yml`'s
 //!   path filter lists `nix/` so a change there runs this file.
-//! - Not owned by a gate: `installation_docs_*`, `quickstart_docs_*` and
-//!   `happy_paths_*` pin documentation prose. They are kept only because
-//!   `check-machine-doc-guards` does not assert the same strings; the owner
-//!   should be that gate, and they are the first to move there.
+//! - Not owned by a gate: `installation_docs_*` pin documentation prose. They
+//!   are kept only because `check-machine-doc-guards` does not assert the same
+//!   strings; the owner should be that gate, and they are the first to move
+//!   there. The quickstart and happy-path prose pins were deleted: the commands
+//!   they quote are executed by the `e2e-docs.yml` documented-surface lane, and
+//!   the heading order and audience count they pinned asserted wording only.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -693,62 +695,6 @@ fn installation_docs_keep_binary_install_primary() {
         normalized.contains("The pin is bumped by hand and can trail the latest release")
             && !normalized.contains("updated by a pull request after a release"),
         "installation docs must not claim the prebuilt pin updates itself"
-    );
-}
-
-#[test]
-fn quickstart_docs_lead_with_image_backed_run() {
-    let path = repo_dir()
-        .join("public")
-        .join("src")
-        .join("content")
-        .join("docs")
-        .join("getting-started")
-        .join("quickstart.md");
-    let content =
-        fs::read_to_string(&path).unwrap_or_else(|e| panic!("quickstart must be present: {e}"));
-    let normalized = normalized_whitespace(&content);
-
-    let image_heading = content
-        .find("## 1. Run an OCI Image")
-        .expect("quickstart must lead with an OCI image run section");
-    let builder_heading = content
-        .find("## 2. Prepare the Builder VM")
-        .expect("quickstart must still document the builder VM after the image path");
-
-    assert!(
-        image_heading < builder_heading,
-        "quickstart must put the image-backed one-shot path before the builder/flake workflows"
-    );
-    assert!(
-        content.contains("mvmctl machine run --image alpine -- uname -a")
-            && normalized.contains("You do not need host Nix for this path"),
-        "quickstart must preserve the no-host-Nix image-backed command"
-    );
-}
-
-#[test]
-fn happy_paths_include_oci_image_audience() {
-    let path = repo_dir()
-        .join("public")
-        .join("src")
-        .join("content")
-        .join("docs")
-        .join("getting-started")
-        .join("happy-paths.md");
-    let content =
-        fs::read_to_string(&path).unwrap_or_else(|e| panic!("happy paths must be present: {e}"));
-    let normalized = normalized_whitespace(&content);
-
-    assert!(
-        content.contains("mvm has six primary audiences"),
-        "happy paths must count the OCI-image path as a first-class audience"
-    );
-    assert!(
-        content.contains("CLI user with an OCI image")
-            && content.contains("mvmctl run --image alpine -- uname -a")
-            && normalized.contains("Image-backed one-shot runs do not require host Nix"),
-        "happy paths must document the image-backed no-host-Nix audience"
     );
 }
 
