@@ -323,6 +323,17 @@ fn wait_for_operation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::mailbox::frame::OutboxMessage;
+
+    fn stage_pending_outbox(path: &Path, message: &OutboxMessage) {
+        // These tests exercise the guest port, not a concurrent workload
+        // writer. Stage immutable bytes without competing for the writer's
+        // directory lock during the forwarding assertion.
+        mvm_core::util::atomic_io::atomic_write_new(path, &message.encode())
+            .expect("stage pending mailbox request");
+        mvm_core::util::atomic_io::sync_dir(path.parent().expect("outbox parent"))
+            .expect("sync pending mailbox request");
+    }
 
     #[test]
     fn an_idle_guest_logs_a_bounded_number_of_refusals() {
@@ -373,20 +384,17 @@ mod tests {
     #[test]
     fn a_pending_send_still_uses_the_existing_port_when_receive_is_enabled() {
         use mvm_contract::protocol::mailbox::PrincipalId;
-        use mvm_core::mailbox::frame::OutboxMessage;
         let dir = tempfile::tempdir().unwrap();
         let outbox = dir.path().join("outbox");
         let local_outbox = dir.path().join("outbox-local");
-        mvm_agentd::mailbox_outbox::write_outbox(
+        stage_pending_outbox(
             &outbox,
             &OutboxMessage::new(PrincipalId::from_bytes([0; 32]), b"hello".to_vec()),
-        )
-        .unwrap();
-        mvm_agentd::mailbox_outbox::write_outbox(
+        );
+        stage_pending_outbox(
             &local_outbox,
             &OutboxMessage::new(PrincipalId::from_bytes([0; 32]), b"local".to_vec()),
-        )
-        .unwrap();
+        );
         let (mut guest, mut host) = std::os::unix::net::UnixStream::pair().unwrap();
         let (_sender, reader) = std::sync::mpsc::sync_channel(1);
         let peer = std::thread::spawn(move || {
@@ -416,14 +424,13 @@ mod tests {
             ExecutionEpoch, MailboxAddress, MailboxId, PrincipalId, ProtocolVersion,
             SignatureAlgorithm, TenantId,
         };
-        use mvm_core::mailbox::frame::OutboxMessage;
         use mvm_core::mailbox::sign_receipt;
 
         let dir = tempfile::tempdir().expect("outbox root");
         let local = dir.path().join("outbox-local");
         let legacy = dir.path().join("outbox");
         let operation = OutboxMessage::new(PrincipalId::from_bytes([0; 32]), b"report".to_vec());
-        mvm_agentd::mailbox_outbox::write_outbox(&local, &operation).expect("pending report");
+        stage_pending_outbox(&local, &operation);
         let (mut guest, _host) = std::os::unix::net::UnixStream::pair().expect("socket");
         assert_eq!(
             wait_for_operation(&mut guest, None, None, &local, &legacy),
