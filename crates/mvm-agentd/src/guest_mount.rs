@@ -2404,9 +2404,9 @@ mod privilege_tests {
             )),
             "the agent must retain only the workload group; got:\n{status}"
         );
-        // SAFETY: PR_GET_DUMPABLE has no pointer arguments and reads only
-        // the current process's dumpability.
         assert_eq!(
+            // SAFETY: PR_GET_DUMPABLE has no pointer arguments and reads only
+            // the current process's dumpability.
             unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) },
             0,
             "the workload UID must not be able to inspect the agent's keys"
