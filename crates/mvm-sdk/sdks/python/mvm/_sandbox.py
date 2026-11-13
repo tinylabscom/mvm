@@ -64,7 +64,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from mvm import _hostlib, _ir
-from mvm._dsl import literal as _literal_value
+from mvm._dsl import refuse_bare_env_value
 # Owned by the Rust registry (crates/mvm-sdk/src/env.rs), generated into
 # `_env/vars.py`. Re-exported from this module for existing importers.
 from mvm._env.vars import (
@@ -412,19 +412,19 @@ def _parse_ttl(ttl: str | int | None) -> int | None:
 # ────────────────────────────────────────────────────────────────────
 
 
-def _encode_env_value(value: Any) -> dict[str, Any]:
+def _encode_env_value(key: str, value: Any) -> dict[str, Any]:
     """Coerce an env-mapping value into the Rust ``EnvValue`` wire
-    shape. Bare ``str`` is wrapped via :func:`mvm.literal`; the SDK
-    helpers (``mvm.literal``, ``mvm.secret``) are passed through
-    after a dataclass→dict normalization step."""
+    shape. The SDK helpers (``mvm.literal``, ``mvm.secret``) are passed
+    through after a dataclass→dict normalization step; a bare ``str``
+    is refused."""
     if isinstance(value, str):
-        return _dataclass_to_dict(_literal_value(value))
+        raise refuse_bare_env_value(key)
     if dataclasses.is_dataclass(value):
         return _dataclass_to_dict(value)
     if isinstance(value, dict):
         return value
     raise TypeError(
-        f"env value must be str, mvm.literal/secret, or dict; got "
+        f"env value must be mvm.literal/secret or dict; got "
         f"{type(value).__name__}"
     )
 
@@ -436,7 +436,7 @@ def _encode_env_map(env: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     for k, v in env.items():
         if not isinstance(k, str):
             raise TypeError(f"env keys must be str; got {type(k).__name__}")
-        out[k] = _encode_env_value(v)
+        out[k] = _encode_env_value(k, v)
     return out
 
 
@@ -623,7 +623,8 @@ def _run_profile() -> str | None:
 
 
 def _literal_env(env: dict[str, Any] | None, operation: str) -> dict[str, str]:
-    """Reduce ``env`` to plain strings, refusing anything that is not a literal.
+    """Reduce ``env`` to plain strings, refusing anything that is not an
+    ``mvm.literal`` (a bare string included).
 
     A secret reference has to be resolved by the host's substitution endpoint;
     forwarding it here would either leak the reference as a value or put the
@@ -633,8 +634,7 @@ def _literal_env(env: dict[str, Any] | None, operation: str) -> dict[str, str]:
         if not isinstance(key, str) or not key:
             raise TypeError(f"`{operation}` env keys must be non-empty str")
         if isinstance(value, str):
-            out[key] = value
-            continue
+            raise refuse_bare_env_value(key)
         if dataclasses.is_dataclass(value) and not isinstance(value, type):
             value = _dataclass_to_dict(value)
         if (

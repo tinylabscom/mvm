@@ -118,7 +118,7 @@ Live mode is intentionally narrower than the target SDK contract:
 | Source | `image=` (an OCI reference, a rootfs path, or `flake:<ref>#<attr>`), or a `template` built on this host under that name, boots a named machine started the way `mvmctl machine run -d` starts one; `kill()` stops and removes it. A template nobody built is refused with how to build it. Nothing is built on a launch. |
 | Boot command | `command=` starts once the machine is up, with `env=` as its environment, and `sandbox.process` is its handle. Starting it is a DevOnly guest operation, so a sealed image refuses it, and a machine whose command did not start is stopped. |
 | Cleanup | Python `with`, TypeScript `using`, or explicit `kill()` stops the machine. |
-| Secrets | Live command env forwarding accepts literal values only. Secret refs must use host-managed injection paths. |
+| Secrets | Live command env forwarding accepts `mvm.literal(...)` values only; a bare string is refused. Secret refs must use host-managed injection paths. |
 
 `commands.start(...)` is a developer-oriented command surface. Production-style
 guest images can refuse it; the SDK raises a typed live error before sending a

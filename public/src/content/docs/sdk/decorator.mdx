@@ -95,7 +95,7 @@ Record-mode and live-mode runtime scripts exist for the imperative `Sandbox.crea
 | `image` | Nix package set or OCI source. | Nix is preferred; OCI refs should be immutable for production. |
 | `resources` | CPU, memory, rootfs sizing. | Bounds prevent accidental host pressure. |
 | `network` | Egress and port policy. | Default should be deny unless explicitly opened. |
-| `env` | Literal values and secret references. | Use `mvm.secret`, not plaintext credentials. |
+| `env` | `mvm.literal(...)` values and `mvm.secret(...)` references. A bare string is refused. | Use `mvm.secret`, not plaintext credentials. |
 | `entrypoint` | Function or command dispatch. | Dispatch runs in the guest microVM. |
 | hooks | Build/start/readiness/stop hooks. | Hooks must not bypass policy or fetch unpinned code. |
 

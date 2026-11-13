@@ -30,6 +30,7 @@
  * a follow-up alongside the runtime record-mode (Phase 7).
  */
 
+import { checkEnv } from "./_env_value.js";
 import type {
   AddonUse,
   App,
@@ -366,10 +367,9 @@ export function network(opts: {
 // Env value helpers
 // ────────────────────────────────────────────────────────────────────
 
-/** Wrap a string as an explicit literal env value. Equivalent to
- *  passing the string directly in `env: {...}` — the wrapper exists
- *  for parity with `secret()` and for callers who want to be
- *  unambiguous. */
+/** Wrap a string as an explicit literal env value. A bare string in
+ *  `env: {...}` is refused, so this is the one way to write a literal;
+ *  `secret()` is the way to reference a secret. */
 export function literal(value: string): EnvValue {
   return { kind: "literal", value };
 }
@@ -487,7 +487,7 @@ export function entrypoint(opts: {
     kind: "command",
     command: [...opts.command],
     working_dir: opts.working_dir ?? "/app",
-    env: opts.env ?? {},
+    env: checkEnv(opts.env),
   };
 }
 
@@ -521,7 +521,7 @@ export function entrypoint_function(opts: {
     function: opts.function,
     format: opts.format ?? "json",
     working_dir: opts.working_dir ?? "/app",
-    env: opts.env ?? {},
+    env: checkEnv(opts.env),
     primary: opts.primary ?? false,
     extra_imports: [],
     ...(opts.args_schema !== undefined ? { args_schema: opts.args_schema } : {}),
@@ -539,7 +539,7 @@ export interface AppOptions {
   image: Image;
   entrypoints?: Entrypoint[];
   resources?: Resources;
-  env?: Record<string, EnvValue | string>;
+  env?: Record<string, EnvValue>;
   mounts?: Mount[];
   network?: Network;
   dependencies?: Dependencies;
@@ -563,10 +563,7 @@ export function app(opts: AppOptions): <F extends (...args: never[]) => unknown>
 
   const name = opts.name ?? state.workloadId ?? "app";
 
-  const resolvedEnv: Record<string, EnvValue> = {};
-  for (const [k, v] of Object.entries(opts.env ?? {})) {
-    resolvedEnv[k] = typeof v === "string" ? literal(v) : v;
-  }
+  const resolvedEnv = checkEnv(opts.env);
 
   const bb = resolveHookKwarg(opts.before_build, "before_build");
   const bs = resolveHookKwarg(opts.before_start, "before_start");

@@ -86,7 +86,7 @@ def test_commands_start_carries_env() -> None:
     sb.commands.start(
         ["python", "run.py"],
         env={
-            "MODE": "prod",
+            "MODE": mvm.literal("prod"),
             "API_KEY": mvm.secret("api-key", type="bearer", hosts=["api.example.com"]),
         },
     )
@@ -95,6 +95,15 @@ def test_commands_start_carries_env() -> None:
     assert env["MODE"] == {"kind": "literal", "value": "prod"}
     assert env["API_KEY"]["kind"] == "secret_ref"
     assert env["API_KEY"]["ref"]["name"] == "api-key"
+
+
+def test_a_bare_string_env_value_is_refused_naming_the_explicit_forms() -> None:
+    with pytest.raises(TypeError, match=r"mvm\.literal.*mvm\.secret") as err:
+        mvm.Sandbox.create("python-3.12", env={"MODE": "hunter2"})
+    assert "hunter2" not in str(err.value)
+    sb = mvm.Sandbox.create("python-3.12")
+    with pytest.raises(TypeError, match="bare string"):
+        sb.commands.start(["python"], env={"MODE": "prod"})
 
 
 def test_commands_start_rejects_non_list_argv() -> None:
@@ -254,7 +263,7 @@ def test_create_includes_flow_through() -> None:
 
 def test_emit_recording_json_is_wire_compatible() -> None:
     sb = mvm.Sandbox.create("python-3.12", include=["src"])
-    sb.commands.start(["python", "run.py"], env={"X": "1"})
+    sb.commands.start(["python", "run.py"], env={"X": mvm.literal("1")})
     sb.files.write("/app/cfg", b"data")
     raw = mvm.emit_recording_json()
     parsed = json.loads(raw)

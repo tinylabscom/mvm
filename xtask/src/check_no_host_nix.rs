@@ -35,20 +35,41 @@ const HOST_NIX_NEEDLES: &[&str] = &[
 ];
 const ALLOW_MARKER: &str = "// allow(host-nix):";
 
+/// Double-keyed exemptions. A call in one of these files survives only when
+/// it also carries the inline [`ALLOW_MARKER`]; the marker without an entry
+/// here fails the gate. The list only shrinks: entries are validated every
+/// run — a deleted file or a file with no remaining marked call is an error,
+/// so an exemption can never outlive the call it excuses.
+const EXEMPT: &[(&str, &str)] = &[];
+
 pub(crate) fn run(workspace: &Path) -> Result<()> {
+    run_with(workspace, EXEMPT)
+}
+
+fn run_with(workspace: &Path, exempt: &[(&str, &str)]) -> Result<()> {
     let crates_dir = workspace.join("crates");
     if !crates_dir.is_dir() {
         bail!("expected workspace crates dir at {}", crates_dir.display());
     }
     let mut findings: Vec<String> = Vec::new();
-    visit_rust_files(&crates_dir, &mut |path| -> Result<()> {
+    // Files that carried at least one marker-annotated call this run; every
+    // one of them must be enumerated in `exempt`.
+    let mut marked: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    visit_rust_files(&crates_dir, &mut |path: &Path| -> Result<()> {
         let src =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let lines: Vec<&str> = src.lines().collect();
         for (i, line) in lines.iter().enumerate() {
             if HOST_NIX_NEEDLES.iter().any(|n| line.contains(n)) {
                 let allowed = i > 0 && lines[i - 1].trim_start().starts_with(ALLOW_MARKER);
-                if !allowed {
+                if allowed {
+                    marked.insert(
+                        path.strip_prefix(workspace)
+                            .unwrap_or(path)
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                } else {
                     findings.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
                 }
             }
@@ -56,25 +77,58 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
         Ok(())
     })?;
 
+    for key in &marked {
+        if !exempt.iter().any(|(p, _)| p == key) {
+            findings.push(format!(
+                "{key}: marked call without an enumerated EXEMPT entry — the marker alone permits \
+                 nothing"
+            ));
+        }
+    }
+    for (path, reason) in exempt {
+        if reason.trim().is_empty() {
+            bail!(
+                "check-no-host-nix: EXEMPT entry {path} has no reason — exemptions are \
+                   enumerated with one"
+            );
+        }
+        let full = workspace.join(path);
+        if !full.is_file() {
+            bail!(
+                "check-no-host-nix: EXEMPT entry {path} names a deleted file — a relief valve for \
+                 a file that is gone permits nothing and hides the list's real size; remove the \
+                 entry"
+            );
+        }
+        if !marked.contains(*path) {
+            bail!(
+                "check-no-host-nix: EXEMPT entry {path} has no marked call left — the list only \
+                 shrinks; remove the entry"
+            );
+        }
+    }
+
     if findings.is_empty() {
         eprintln!(
-            "check-no-host-nix: clean (no host-nix Command outside an explicit allow(host-nix) probe)"
+            "check-no-host-nix: clean (no host-nix Command outside a double-keyed exemption)"
         );
         return Ok(());
     }
     eprintln!(
         "check-no-host-nix: {} host-nix Command call site(s) — mvmctl must never shell out to a \
          host nix binary. Route nix through the builder VM (`ShellEnvironment::shell_exec*`, which \
-         runs in-guest) or the resident `mvm-builderd` daemon. If this is a genuine debug/legacy \
-         probe, annotate with `// allow(host-nix): <reason>`:",
+         runs in-guest) or the resident `mvm-builderd` daemon. An exemption is double-keyed: the \
+         `// allow(host-nix): <reason>` marker plus an entry in EXEMPT naming the file and a \
+         reason:",
         findings.len()
     );
     for f in &findings {
         eprintln!("  {f}");
     }
     bail!(
-        "check-no-host-nix: {} unannotated host-nix invocation(s)",
-        findings.len()
+        "check-no-host-nix: {} unexempted host-nix invocation(s): {}",
+        findings.len(),
+        findings.join("; ")
     );
 }
 
@@ -115,14 +169,50 @@ mod tests {
     }
 
     #[test]
-    fn allow_marker_on_the_line_above_exempts_it() {
+    fn a_marker_without_an_enumerated_exemption_is_rejected() {
+        // Double-key (WS7): the inline marker alone permits nothing — the
+        // file must also be enumerated in EXEMPT.
         let tmp = tempfile::tempdir().unwrap();
         write(
             tmp.path(),
             "probe.rs",
             "fn f() {\n    // allow(host-nix): debug-only host probe\n    std::process::Command::new(\"nix\").status();\n}\n",
         );
-        assert!(run(tmp.path()).is_ok());
+        let err = run(tmp.path()).unwrap_err().to_string();
+        assert!(
+            err.contains("without an enumerated EXEMPT entry"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_marker_plus_an_enumerated_exemption_passes() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            tmp.path(),
+            "probe.rs",
+            "fn f() {\n    // allow(host-nix): debug-only host probe\n    std::process::Command::new(\"nix\").status();\n}\n",
+        );
+        let exempt = [("crates/x/src/probe.rs", "debug probe, never a build path")];
+        assert!(run_with(tmp.path(), &exempt).is_ok());
+    }
+
+    #[test]
+    fn an_exemption_naming_a_deleted_file_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "ok.rs", "fn f() {}\n");
+        let exempt = [("crates/x/src/gone.rs", "call removed with the file")];
+        let err = run_with(tmp.path(), &exempt).unwrap_err().to_string();
+        assert!(err.contains("names a deleted file"), "got: {err}");
+    }
+
+    #[test]
+    fn an_exemption_for_a_file_without_a_marked_call_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "ok.rs", "fn f() {}\n");
+        let exempt = [("crates/x/src/ok.rs", "nothing marked here anymore")];
+        let err = run_with(tmp.path(), &exempt).unwrap_err().to_string();
+        assert!(err.contains("no marked call left"), "got: {err}");
     }
 
     #[test]

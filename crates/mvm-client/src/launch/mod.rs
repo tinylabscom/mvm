@@ -908,7 +908,8 @@ impl LocalBackend {
     /// authority: the `Reuse` arm keeps an earlier definition, so the spec
     /// is re-checked for in-process bootability and the sidecar's recorded
     /// secret references are re-validated fail-closed even when this
-    /// request carries none.
+    /// request carries none. The request's mailbox is separate one-start
+    /// authority, passed into admission without persisting it in the definition.
     async fn boot_persistent(&self, name: &str, request: &LaunchRequest) -> Result<LaunchOutcome> {
         if self.machine_running(name) {
             return Err(MvmError::Conflict {
@@ -924,6 +925,7 @@ impl LocalBackend {
                 &mut spec,
                 request.backend.as_deref(),
                 !request.command.is_empty(),
+                request.mailbox,
             )
             .await?;
         if let Some(ttl) = request.ttl_seconds {
@@ -964,6 +966,7 @@ impl LocalBackend {
         spec: &mut mp::MachineSpec,
         backend_override: Option<&str>,
         has_ad_hoc_argv: bool,
+        mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
     ) -> Result<(machine_start::MachineStart, String)> {
         let backend = backend_override
             .map(str::to_string)
@@ -988,7 +991,7 @@ impl LocalBackend {
             machine_start::MachineStartParams {
                 hypervisor: &backend,
                 has_ad_hoc_argv,
-                mailbox: None,
+                mailbox,
             },
         )
         .map_err(|e| crate::local::backend_err(format!("{e:#}")))?;
@@ -1240,7 +1243,7 @@ impl LocalBackend {
         ensure_spec_bootable_in_process(&spec)?;
         self.validate_sidecar_refs(name)?;
         let mut spec = spec;
-        let (_, backend) = self.boot_spec(&mut spec, None, false).await?;
+        let (_, backend) = self.boot_spec(&mut spec, None, false, None).await?;
         let memory_mib = mvm_core::util::parse_human_size(&spec.memory).unwrap_or_default();
         Ok(MachineState {
             id: MachineId(name.to_string()),

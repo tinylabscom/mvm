@@ -55,7 +55,7 @@ case "$HYPERVISOR" in hvf | firecracker) ;; *) echo "FAIL unsupported HYPERVISOR
 [ "${SOURCE_BUILD:-0}" != 1 ] || export MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build
 bld=(); [ -z "${BUILDER:-}" ] || bld=(--builder "$BUILDER")
 
-LINE_A="fe-line-a-$$"; LINE_B="fe-line-b-$$"; MAINT="fe-maint-$$"
+LINE_A="fe-line-a-$$"; LINE_B="fe-line-b-$$"; MAINT="fe-maint-$$"; WARM="fe-warm-$$"
 SUSPECT="fe-suspect-$$"; REPLACEMENT="fe-replacement-$$"
 
 own_home=""
@@ -75,7 +75,7 @@ cleanup() {
   if [ "$status" -ne 0 ] && grep -q 'mvmctl bootstrap' "$errlog"; then
     echo "FINDING: the install asked for 'mvmctl bootstrap'. A release must run with no bootstrap step." >&2
   fi
-  for m in "$LINE_A" "$LINE_B" "$MAINT" "$SUSPECT" "$REPLACEMENT"; do
+  for m in "$WARM" "$LINE_A" "$LINE_B" "$MAINT" "$SUSPECT" "$REPLACEMENT"; do
     mvm machine stop "$m" --yes >/dev/null 2>&1 || true
     mvm machine rm "$m" --yes >/dev/null 2>&1 || true
   done
@@ -98,6 +98,11 @@ denials_of() { explain_field "$1" "len(d['egress_denials'])"; }
 
 echo "== 0. preparing (mvmctl: $(mvm --version), $HYPERVISOR)"
 mvm image pull "$IMAGE" >/dev/null || fail "could not pull $IMAGE"
+# The first launch on a home prepares the workload kernel and runtime. Two
+# guests starting together on a cold home raced that preparation and one failed
+# to start ("safe HVF rollback unconfirmed"), so prepare once, alone, first.
+mvm run --image "$IMAGE" --hypervisor "$HYPERVISOR" --name "$WARM" -- true >/dev/null 2>&1 </dev/null \
+  || fail "the warm-up launch failed, so the concurrent step would start on an unprepared home"
 
 echo "== 1. two inspection workloads run while a maintenance workload asks for an unapproved destination"
 for n in "$LINE_A" "$LINE_B"; do
