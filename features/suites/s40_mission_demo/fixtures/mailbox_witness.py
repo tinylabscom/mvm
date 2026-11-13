@@ -5,6 +5,7 @@ import json
 import os
 import socket
 import struct
+import sys
 import time
 
 
@@ -71,7 +72,22 @@ def main():
 
     wait_for(stage, "guest mailbox outbox")
     print("mailbox-local-pending", flush=True)
-    wait_for(lambda: True if not os.path.exists(outbox) else None, "signed V2 receipt")
+    try:
+        wait_for(
+            lambda: True if not os.path.exists(outbox) else None,
+            "signed V2 receipt",
+            seconds=45,
+        )
+    except RuntimeError:
+        with open("/proc/cmdline", encoding="utf-8") as cmdline:
+            asserted = cmdline.read().split().count("mvm.mailbox=1") == 1
+        print(
+            f"mailbox-local-diagnostic: token={asserted} "
+            f"reader_socket={os.path.exists('/run/mvm/mailbox/receive.sock')} "
+            f"pending={os.path.exists(outbox)}",
+            file=sys.stderr,
+        )
+        raise
     print("mailbox-local-receipt-verified", flush=True)
 
     def receive():

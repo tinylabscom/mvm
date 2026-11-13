@@ -40,6 +40,24 @@ launch=(
 )
 "$MVMCTL" "${launch[@]}" >"$home/launch.log" 2>&1 || {
   cat "$home/launch.log" >&2
+  pidfile="$home/vms/$name/mailbox.pid"
+  if [ -s "$pidfile" ]; then
+    pid="$(cat "$pidfile")"
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "mailbox-live-diagnostic: helper running" >&2
+    else
+      echo "mailbox-live-diagnostic: helper pid not running" >&2
+    fi
+  else
+    echo "mailbox-live-diagnostic: no helper pid" >&2
+  fi
+  if [ -S "$home/vms/$name/mailbox.sock" ]; then
+    echo "mailbox-live-diagnostic: helper socket exists" >&2
+  else
+    echo "mailbox-live-diagnostic: no helper socket" >&2
+  fi
+  "$MVMCTL" machine logs "$name" >"$home/guest.log" 2>&1 || true
+  grep -E 'mailbox|mvm-guest-agent' "$home/guest.log" >&2 || true
   exit 1
 }
 for marker in mailbox-local-pending mailbox-local-receipt-verified mailbox-local-ack-committed; do
