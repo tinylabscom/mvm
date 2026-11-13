@@ -378,6 +378,33 @@ The same verification runs again on every load. A cached file changed after
 installation no longer matches the manifest, and the pack is reported as not
 installed until `mvmctl pull` restores it.
 
+### Application archive transport
+
+An application descriptor (manifest schema 2, kind `application`) pins its
+`bundle.source` archive by the SHA-256 and byte size of the **uncompressed**
+`.mvmpkg` tar; those signed fields keep their meaning under compression. The
+bundle may optionally carry a transport wrapper:
+
+```json
+"transport": {
+  "compression": "gzip",
+  "compressed_sha256": "…",
+  "compressed_size": 1234
+}
+```
+
+When `transport` is present, the source locator serves the compressed asset
+instead of the tar. `mvmctl pull` fetches it under a 4 GiB bound, pins the
+compressed bytes to `compressed_sha256` and `compressed_size`, then
+stream-decompresses under a hard cap of the signed `archive_size` (a
+decompression-bomb bound) and requires the decompressed bytes to hash to the
+signed `archive_sha256`. Only then does the ordinary bundle verification,
+install and host admission path run, unchanged. A missing, truncated,
+oversized, or hash-mismatched asset — compressed or decompressed — fails
+closed. Only `gzip` is recognized; unknown compression values and unknown
+transport fields refuse at descriptor parse. Descriptors without `transport`
+are fetched and verified byte-for-byte as before.
+
 ### Built-image release assets
 
 A signed schema-v2 `image` descriptor declares seven external release assets,
@@ -411,12 +438,43 @@ Downloads and verification are bounded: manifests and signature metadata are
 limited to 1 MiB, a built rootfs to 16 GiB, its verity tree to 1 GiB, and each
 remaining built-image asset to 1 MiB. The combined payload permits at most
 4096 files and 32 GiB. These ceilings apply in addition to signed exact sizes;
-large files are streamed, not buffered as a whole.
+large files are streamed, not buffered as a whole. An application archive is
+bounded to 4 GiB; with a signed `transport` wrapper, the compressed asset is
+bounded to the same 4 GiB and decompression stops one byte past the signed
+`archive_size`.
 
 Installation support does not enable booting built-image packs. Run paths
 still refuse them explicitly, with no source-build fallback. It also does not
 establish producer publishability or official release status; the producer
 publication guard and released pull/admission/boot evidence remain separate.
+
+### Application archive transport
+
+An application descriptor (schema version 2, `kind: "application"`) signs the
+uncompressed `.mvmpkg` tar: `bundle.archive_sha256`, `bundle.archive_size` and
+`bundle.key_id` always describe the tar itself, never a re-compressed copy.
+
+A descriptor may add an optional `bundle.transport` wrapper declaring that the
+`bundle.source` asset is compressed on the wire:
+
+```json
+"transport": {
+  "compression": "gzip",
+  "compressed_sha256": "…64 lowercase hex…",
+  "compressed_size": 123456
+}
+```
+
+`compression` is a closed enum: only `gzip` parses, and unknown values refuse
+at descriptor parse time — there is no fallback or sniffing. When transport is
+present, the client fetches the compressed asset bounded by the signed
+`compressed_size`, pins the compressed bytes to `compressed_sha256`, then
+stream-decompresses under a hard cap of `archive_size` bytes and requires the
+decompressed bytes to hash to `archive_sha256`. Only then does the ordinary
+bundle verification, atomic install and host admission path run, unchanged. A
+missing, truncated or size-drifting asset, a decompression bomb over the signed
+cap, or a decompressed digest mismatch fails closed. Descriptors without
+`transport` are fetched byte-for-byte exactly as before.
 
 ## Decide who may publish
 

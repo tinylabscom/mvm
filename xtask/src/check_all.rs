@@ -240,6 +240,10 @@ pub(crate) const GATES: &[Gate] = &[
         crate::check_guest_entropy_seed::run,
     ),
     ("check-ci-coverage", crate::check_ci_coverage::run),
+    (
+        "check-text-reading-tests",
+        crate::check_text_reading_tests::run,
+    ),
     ("check-file-size", crate::check_file_size::run),
     ("check-rust-footprint", crate::check_rust_footprint::run),
     ("check-stubs", stubs_match_schemas),

@@ -274,6 +274,69 @@ fn bound_firecracker_launch(
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "requires the actual pinned public kernel in MVM_TEST_CANONICAL_KERNEL; boots no VM"]
+fn canonical_kernel_publication_requires_live_owner_and_retires_claims() {
+    use crate::trusted_snapshot_service::{BootInputBudget, TrustedSnapshotService};
+    use mvm_fs::snapshot_store::SnapshotId;
+    use mvm_fs::trusted_snapshot::UnsupportedTrustedSnapshotBackend;
+
+    let home = tempfile::tempdir().unwrap();
+    let mut env = TestEnv::new();
+    env.isolate_mvm_home(home.path());
+    let owner = prepared_owner(BackendKind::Firecracker);
+    let mut config = VmStartConfig {
+        name: "sealed-kernel-unit".into(),
+        ..Default::default()
+    };
+    owner.bind_to_config(&mut config).unwrap();
+    let size = owner.kernel_declaration().size;
+    let backend = Arc::new(UnsupportedTrustedSnapshotBackend);
+    let service = TrustedSnapshotService::with_boot_input_budget(
+        backend.clone(),
+        BootInputBudget::new(size, 1).unwrap(),
+    );
+    let id = SnapshotId::new("signed-kernel");
+    let handle = service
+        .publish_canonical_kernel(id.clone(), &config)
+        .unwrap();
+    assert!(
+        service
+            .publish_canonical_kernel(id.clone(), &config)
+            .is_err()
+    );
+    assert!(
+        service
+            .publish_canonical_kernel(SnapshotId::new("over-budget"), &config)
+            .is_err()
+    );
+    let mut wrong = config.clone();
+    wrong.name = "another-vm".into();
+    assert!(service.claim_boot_input(&handle, &wrong).is_err());
+    let other = TrustedSnapshotService::with_boot_input_budget(
+        backend,
+        BootInputBudget::new(size, 1).unwrap(),
+    );
+    assert!(other.claim_boot_input(&handle, &config).is_err());
+    let lease = service.claim_boot_input(&handle, &config).unwrap();
+    let mut first_byte = [0];
+    lease.read_exact_at(&mut first_byte, 0).unwrap();
+    let original = owner.kernel_file().unwrap();
+    let mut expected = [0];
+    std::os::unix::fs::FileExt::read_exact_at(&original, &mut expected, 0).unwrap();
+    assert_eq!(first_byte, expected);
+    assert!(lease.read_exact_at(&mut first_byte, size).is_err());
+    assert!(service.remove_boot_input(&handle).is_err());
+    assert!(service.claim_boot_input(&handle, &config).is_err());
+    drop(lease);
+    service.remove_boot_input(&handle).unwrap();
+    let new_handle = service.publish_canonical_kernel(id, &config).unwrap();
+    assert_ne!(handle, new_handle);
+    assert!(service.claim_boot_input(&handle, &config).is_err());
+    service.remove_boot_input(&new_handle).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires the actual pinned public kernel in MVM_TEST_CANONICAL_KERNEL; boots no VM"]
 fn observe_booted_binds_the_firecracker_process_witness_not_an_hvf_instance() {
     let home = tempfile::tempdir().unwrap();
     let mut env = TestEnv::new();
