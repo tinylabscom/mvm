@@ -61,7 +61,8 @@ def main():
         if not os.path.isdir(directory):
             return None
         temporary = os.path.join(directory, f".local-witness-{os.getpid()}")
-        with open(temporary, "xb") as file:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as file:
             file.write(bytes(32) + message_id + payload)
             file.flush()
             os.fsync(file.fileno())
@@ -76,7 +77,7 @@ def main():
     def receive():
         result = request({"operation": "receive"})
         if result["outcome"] == "empty":
-            return {"already_acknowledged": True}
+            return None
         if result["outcome"] == "refused" and result["reason"] == "Unavailable":
             return None
         if result["outcome"] != "delivery":
@@ -86,13 +87,10 @@ def main():
         return result["lease"]
 
     lease = wait_for(receive, "boot-bound delivery")
-    if lease.get("already_acknowledged"):
-        print("mailbox-local-already-acknowledged", flush=True)
-    else:
-        reply = request({"operation": "ack", "lease": lease})
-        if reply["outcome"] != "acknowledged" or reply["ack"]["ack"]["lease"] != lease:
-            raise RuntimeError("signed ACK was not committed for the leased message")
-        print("mailbox-local-ack-committed", flush=True)
+    reply = request({"operation": "ack", "lease": lease})
+    if reply["outcome"] != "acknowledged" or reply["ack"]["ack"]["lease"] != lease:
+        raise RuntimeError("signed ACK was not committed for the leased message")
+    print("mailbox-local-ack-committed", flush=True)
     if request({"operation": "receive"})["outcome"] != "empty":
         raise RuntimeError("acknowledged delivery was replayed")
 

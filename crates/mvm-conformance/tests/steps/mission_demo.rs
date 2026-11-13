@@ -80,12 +80,18 @@ fn booted_local_mailbox_passes(world: &mut CliWorld) {
         run.status.success()
             && stdout.contains("booted guest: verified V2 acceptance and signed Receive/ACK")
             && stdout.contains("booted guest: missing retention refused before helper readiness")
-            && stdout.contains("booted guest: retained journal recovered on restart")
+            && stdout.contains("booted guest: retained journal survived the VM stop")
             && stdout.contains("WITNESS_RESULT=pass"),
         "booted mailbox witness failed:\n{}\n{}",
         stdout,
         String::from_utf8_lossy(&run.stderr)
     );
+}
+
+#[then("the production helper recovers the signed ACK and same-ID retry")]
+fn production_helper_recovers_ack(world: &mut CliWorld) {
+    run_production_mailbox_helper(world);
+    production_mailbox_helper_passes(world);
 }
 
 fn stdout(world: &CliWorld) -> String {

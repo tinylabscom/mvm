@@ -15,6 +15,9 @@ Feature: The three-node mission demo contains, terminates and rebuilds
   specs/contracts/host-interface-distributed-execution.md records the earlier runs.
   The production helper scenario below exercises the real local journal and
   guest wire over a loopback socket; it is not a booted-VM or host-blind witness.
+  The live scenario checks a real guest's Send and Receive/ACK, then runs that
+  separate host-process restart test. It does not restart the helper while the
+  booted guest is still running.
 
   Scenario: The compromised workload is contained and replaced in the audit timeline
     When the scripted mission demo runs
@@ -39,3 +42,4 @@ Feature: The three-node mission demo contains, terminates and rebuilds
   Scenario: a booted guest verifies local durability and acknowledges a delivery
     When the booted local-durable mailbox witness runs
     Then the booted local-durable mailbox witness passes
+    And the production helper recovers the signed ACK and same-ID retry
