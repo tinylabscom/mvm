@@ -983,10 +983,15 @@ mod entrypoint_stdin_tests {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let home = tempfile::tempdir().expect("isolated host home");
         env.isolate_mvm_home(home.path());
-        let mut args = MachineRunArgs::default();
-        args.entrypoint = true;
-        args.run.mailbox = Some("ab".repeat(32));
-        args.run.mailbox_retention_ms = Some(10_000);
+        let mut args = MachineRunArgs {
+            entrypoint: true,
+            run: RunArgs {
+                mailbox: Some("ab".repeat(32)),
+                mailbox_retention_ms: Some(10_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let grant = resolve_entrypoint_mailbox(&args)
             .expect("resolved entrypoint mailbox")
             .expect("mailbox grant");
