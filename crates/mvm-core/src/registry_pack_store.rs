@@ -1216,13 +1216,9 @@ mod tests {
                 crate::registry_pack::OFFICIAL_PACK_SIGNING_ISSUER
             );
             assert_eq!(
-                trust.accepted_identities.first().map(String::as_str),
-                Some(crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY)
+                trust.accepted_identities,
+                [crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY]
             );
-            assert!(trust.accepted_identities.iter().all(|identity| {
-                identity == crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY
-                    || identity == crate::registry_pack::LEGACY_PACK_SIGNING_IDENTITY
-            }));
         }
         let mvm = loaded.policy.trust_for_namespace("mvm").unwrap();
         assert_eq!(

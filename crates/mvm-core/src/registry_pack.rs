@@ -11,7 +11,6 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
@@ -486,16 +485,6 @@ impl<'de> Deserialize<'de> for RegistryPackPublisher {
 pub struct RegistryPackPublisherPolicy {
     schema_version: u32,
     publishers: Vec<RegistryPackPublisher>,
-    #[serde(skip)]
-    legacy_identity_expires_at: Option<DateTime<Utc>>,
-    #[serde(skip)]
-    provenance: PublisherPolicyProvenance,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PublisherPolicyProvenance {
-    Operator,
-    BuiltinDefault,
 }
 
 impl RegistryPackPublisherPolicy {
@@ -513,8 +502,6 @@ impl RegistryPackPublisherPolicy {
         Ok(Self {
             schema_version: REGISTRY_PACK_PUBLISHER_POLICY_SCHEMA_VERSION,
             publishers,
-            legacy_identity_expires_at: None,
-            provenance: PublisherPolicyProvenance::Operator,
         })
     }
 
@@ -528,14 +515,6 @@ impl RegistryPackPublisherPolicy {
         &self,
         namespace: &str,
     ) -> Result<KeylessTrust, RegistryPackVerificationError> {
-        self.trust_for_namespace_at(namespace, Utc::now())
-    }
-
-    fn trust_for_namespace_at(
-        &self,
-        namespace: &str,
-        now: DateTime<Utc>,
-    ) -> Result<KeylessTrust, RegistryPackVerificationError> {
         let exact = self.publishers.iter().find(|p| p.namespace == namespace);
         // `mvm` is reserved: no wildcard covers it, and only the exact
         // official release identity may sign it.
@@ -547,21 +526,11 @@ impl RegistryPackPublisherPolicy {
         } else {
             exact.or_else(|| self.publishers.iter().find(|p| p.namespace == "*"))
         };
-        let mut trust = publisher
+        publisher
             .map(RegistryPackPublisher::keyless_trust)
             .ok_or_else(|| RegistryPackVerificationError::UntrustedNamespace {
                 namespace: namespace.to_string(),
-            })?;
-        if self
-            .legacy_identity_expires_at
-            .as_ref()
-            .is_some_and(|cutoff| &now >= cutoff)
-        {
-            trust
-                .accepted_identities
-                .retain(|identity| identity != LEGACY_PACK_SIGNING_IDENTITY);
-        }
-        Ok(trust)
+            })
     }
 }
 
@@ -573,20 +542,28 @@ impl RegistryPackPublisherPolicy {
 pub const OFFICIAL_PACK_SIGNING_IDENTITY: &str =
     "https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/heads/main";
 
-/// Previous publish identity accepted temporarily for `agent` and `runtime`
-/// packs that were signed before the repository rename.
-pub const LEGACY_PACK_SIGNING_IDENTITY: &str =
-    "https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/main";
-
-/// UTC instant when the built-in policy stops accepting the previous identity.
-pub const LEGACY_PACK_SIGNING_CUTOFF: &str = "2026-11-06T00:00:00Z";
-
 /// OIDC issuer that vouches for [`OFFICIAL_PACK_SIGNING_IDENTITY`].
 pub const OFFICIAL_PACK_SIGNING_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
-mod historical;
-use historical::enforce_legacy_manifest_policy;
-pub use historical::official_publisher_policy;
+/// The publisher trust policy that applies when the operator has made no
+/// trust decision of their own: `agent`, `runtime` and the reserved `mvm`
+/// namespace, each trusting only [`OFFICIAL_PACK_SIGNING_IDENTITY`]. An
+/// operator policy may exclude `mvm` but cannot assign it a different signer.
+pub fn official_publisher_policy() -> RegistryPackPublisherPolicy {
+    let publishers = ["agent", "runtime", "mvm"]
+        .into_iter()
+        .map(|namespace| {
+            RegistryPackPublisher::new(
+                namespace,
+                OFFICIAL_PACK_SIGNING_ISSUER,
+                vec![OFFICIAL_PACK_SIGNING_IDENTITY.to_string()],
+            )
+            .expect("the built-in publisher policy is built from valid constants")
+        })
+        .collect();
+    RegistryPackPublisherPolicy::new(publishers)
+        .expect("the built-in publisher policy has unique namespaces")
+}
 
 impl<'de> Deserialize<'de> for RegistryPackPublisherPolicy {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -756,10 +733,6 @@ pub enum RegistryPackVerificationError {
     UntrustedNamespace { namespace: String },
     #[error("registry-pack signature is invalid: {0}")]
     SignatureInvalid(String),
-    #[error(
-        "built-in publisher policy refuses this legacy manifest: no exact historical reference and byte digest exception applies"
-    )]
-    LegacyManifestNotAllowed,
     #[error("registry-pack manifest is not valid JSON: {0}")]
     ManifestParse(String),
     #[error("unsupported registry-pack manifest schema version {got}; expected {expected}")]
@@ -851,17 +824,9 @@ pub(crate) fn adopt_registry_pack_with(
     request: &PackAdoption<'_>,
     check_signature: RegistryPackSignatureChecker,
 ) -> Result<VerifiedRegistryPack, RegistryPackVerificationError> {
-    adopt_registry_pack_with_at(request, check_signature, Utc::now())
-}
-
-fn adopt_registry_pack_with_at(
-    request: &PackAdoption<'_>,
-    check_signature: RegistryPackSignatureChecker,
-    now: DateTime<Utc>,
-) -> Result<VerifiedRegistryPack, RegistryPackVerificationError> {
     let trust = request
         .publisher_policy
-        .trust_for_namespace_at(request.requested.namespace(), now)?;
+        .trust_for_namespace(request.requested.namespace())?;
     let signer = check_signature(request.manifest_bytes, request.signature_bundle, &trust)?;
     finish_registry_pack_verification(
         request.requested,
@@ -870,27 +835,18 @@ fn adopt_registry_pack_with_at(
         signer,
         None,
     )
-    .and_then(|verified| enforce_legacy_manifest_policy(request.publisher_policy, verified))
 }
 
 pub(crate) fn verify_registry_pack_with(
     request: &RegistryPackVerification<'_>,
     check_signature: RegistryPackSignatureChecker,
 ) -> Result<VerifiedRegistryPack, RegistryPackVerificationError> {
-    verify_registry_pack_with_at(request, check_signature, Utc::now())
-}
-
-fn verify_registry_pack_with_at(
-    request: &RegistryPackVerification<'_>,
-    check_signature: RegistryPackSignatureChecker,
-    now: DateTime<Utc>,
-) -> Result<VerifiedRegistryPack, RegistryPackVerificationError> {
     let pin = request
         .lock
         .verify_manifest(request.requested, request.manifest_bytes)?;
     let trust = request
         .publisher_policy
-        .trust_for_namespace_at(pin.reference().namespace(), now)?;
+        .trust_for_namespace(pin.reference().namespace())?;
     let signer = check_signature(request.manifest_bytes, request.signature_bundle, &trust)?;
     finish_registry_pack_verification(
         request.requested,
@@ -899,7 +855,6 @@ fn verify_registry_pack_with_at(
         signer,
         Some(pin),
     )
-    .and_then(|verified| enforce_legacy_manifest_policy(request.publisher_policy, verified))
 }
 
 fn finish_registry_pack_verification(
@@ -1492,6 +1447,9 @@ mod tests {
     use super::*;
     use crate::util::test_env::TestEnv;
 
+    /// The pre-rename publish workflow identity, kept only to prove it is refused.
+    const FORMER_PUBLISH_IDENTITY: &str = "https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/main";
+
     const MANIFEST: &[u8] = br#"{"schema_version":1,"name":"python"}"#;
 
     pub(super) fn reference(value: &str) -> PackReference {
@@ -1596,32 +1554,31 @@ mod tests {
     #[test]
     fn the_official_default_policy_matches_its_constants() {
         let policy = official_publisher_policy();
-        let before_cutoff = chrono::DateTime::parse_from_rfc3339("2026-11-05T23:59:59Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        let at_cutoff = chrono::DateTime::parse_from_rfc3339("2026-11-06T00:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        for namespace in ["agent", "runtime"] {
-            let trust = policy
-                .trust_for_namespace_at(namespace, before_cutoff)
-                .unwrap();
+        for namespace in ["agent", "runtime", "mvm"] {
+            let trust = policy.trust_for_namespace(namespace).unwrap();
             assert_eq!(trust.issuer, OFFICIAL_PACK_SIGNING_ISSUER);
-            assert_eq!(
-                trust.accepted_identities,
-                [OFFICIAL_PACK_SIGNING_IDENTITY, LEGACY_PACK_SIGNING_IDENTITY]
-            );
-            let trust = policy.trust_for_namespace_at(namespace, at_cutoff).unwrap();
             assert_eq!(trust.accepted_identities, [OFFICIAL_PACK_SIGNING_IDENTITY]);
         }
-        let mvm = policy.trust_for_namespace("mvm").unwrap();
-        assert_eq!(mvm.issuer, OFFICIAL_PACK_SIGNING_ISSUER);
-        assert_eq!(mvm.accepted_identities, [OFFICIAL_PACK_SIGNING_IDENTITY]);
         assert!(policy.trust_for_namespace("community").is_err());
         assert_eq!(
             OFFICIAL_PACK_SIGNING_IDENTITY,
             "https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/heads/main"
         );
+    }
+
+    #[test]
+    fn the_built_in_policy_does_not_trust_the_former_publish_identity() {
+        let policy = official_publisher_policy();
+        for namespace in ["agent", "runtime", "mvm"] {
+            let trust = policy.trust_for_namespace(namespace).unwrap();
+            assert!(
+                !trust
+                    .accepted_identities
+                    .iter()
+                    .any(|i| i == FORMER_PUBLISH_IDENTITY),
+                "{namespace}"
+            );
+        }
     }
 
     #[test]
@@ -1641,29 +1598,6 @@ mod tests {
         ])
         .unwrap();
         assert!(explicit_spoof.trust_for_namespace("mvm").is_err());
-    }
-
-    #[test]
-    fn operator_publisher_policy_is_unaffected_by_legacy_cutoff() {
-        let policy = RegistryPackPublisherPolicy::new(vec![
-            RegistryPackPublisher::new(
-                "agent",
-                OFFICIAL_PACK_SIGNING_ISSUER,
-                vec![LEGACY_PACK_SIGNING_IDENTITY.to_string()],
-            )
-            .unwrap(),
-        ])
-        .unwrap();
-        let after_cutoff = chrono::DateTime::parse_from_rfc3339("2026-11-06T00:00:01Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        assert_eq!(
-            policy
-                .trust_for_namespace_at("agent", after_cutoff)
-                .unwrap()
-                .accepted_identities,
-            [LEGACY_PACK_SIGNING_IDENTITY]
-        );
     }
 
     #[test]
@@ -2090,7 +2024,7 @@ mod tests {
                 OFFICIAL_PACK_SIGNING_ISSUER,
                 vec![
                     OFFICIAL_PACK_SIGNING_IDENTITY.to_string(),
-                    LEGACY_PACK_SIGNING_IDENTITY.to_string(),
+                    FORMER_PUBLISH_IDENTITY.to_string(),
                 ],
             )
             .unwrap(),
@@ -2110,7 +2044,7 @@ mod tests {
             RegistryPackPublisher::new(
                 "runtime",
                 OFFICIAL_PACK_SIGNING_ISSUER,
-                vec![LEGACY_PACK_SIGNING_IDENTITY.to_string()],
+                vec![FORMER_PUBLISH_IDENTITY.to_string()],
             )
             .unwrap(),
         ])
@@ -2123,6 +2057,57 @@ mod tests {
             adopt_registry_pack(&wrong_adoption),
             Err(RegistryPackVerificationError::SignatureInvalid(_))
         ));
+    }
+
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn a_pack_signed_only_under_the_former_identity_is_refused_by_the_built_in_policy() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mvm-cli/tests/fixtures");
+        let manifest = std::fs::read(fixtures.join("signed-registry-go/manifest.json")).unwrap();
+        let bundle =
+            std::fs::read(fixtures.join("signed-registry-go-legacy/manifest.sigstore.json"))
+                .unwrap();
+        let requested = reference("runtime/go@1.0.0");
+        let builtin = official_publisher_policy();
+        let adoption = PackAdoption {
+            requested: &requested,
+            manifest_bytes: &manifest,
+            signature_bundle: &bundle,
+            publisher_policy: &builtin,
+        };
+        assert!(matches!(
+            adopt_registry_pack(&adoption),
+            Err(RegistryPackVerificationError::SignatureInvalid(_))
+        ));
+        let lock = PackLockfile::new(vec![pin("runtime/go@1.0.0", &manifest)]).unwrap();
+        let locked = RegistryPackVerification::new(&requested, &manifest, &bundle, &lock, &builtin);
+        assert!(matches!(
+            verify_registry_pack(&locked),
+            Err(RegistryPackVerificationError::SignatureInvalid(_))
+        ));
+        assert!(matches!(
+            adopt_registry_manifest(&adoption),
+            Err(RegistryPackVerificationError::SignatureInvalid(_))
+        ));
+
+        // Positive control: the same bundle verifies once an operator names
+        // the former identity as a plain string, so the refusal above is the
+        // built-in policy's and not a broken fixture.
+        let operator = RegistryPackPublisherPolicy::new(vec![
+            RegistryPackPublisher::new(
+                "runtime",
+                OFFICIAL_PACK_SIGNING_ISSUER,
+                vec![FORMER_PUBLISH_IDENTITY.to_string()],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let verified = adopt_registry_pack(&PackAdoption {
+            publisher_policy: &operator,
+            ..adoption
+        })
+        .unwrap();
+        assert_eq!(verified.signer().identity, FORMER_PUBLISH_IDENTITY);
     }
 
     #[cfg(not(feature = "manifest-verify"))]
