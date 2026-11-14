@@ -902,7 +902,7 @@ mod tests {
             "docs: ${{ steps.validate.outputs.docs }}",
             "DOCS: ${{ steps.decide.outputs.docs }}",
             "validate docs \"$DOCS\"",
-            "for output in code architecture docs; do",
+            "for output in code architecture docs docs_ledger; do",
         ] {
             assert!(scope.contains(wiring));
         }
@@ -920,6 +920,23 @@ mod tests {
         assert_eq!(job_if(job_block(&main, "bdd-conformance")), "");
     }
 
+    #[test]
+    fn docs_ledger_runs_only_the_ledger_scenario_and_is_required() {
+        let ci = ci_workflow();
+        let lane = job_block(&ci, "docs-ledger");
+        assert!(lane.contains("needs: [scope]"));
+        assert_eq!(
+            job_if(lane),
+            "needs.scope.outputs.docs_ledger == 'true' && github.event_name != 'merge_group'"
+        );
+        let run = step_run(lane, "Run the docs coverage ledger scenario");
+        assert!(run.contains("--name 'documented website commands do not lose their coverage'"));
+        assert!(!run.contains("embed-host-bins"));
+        let aggregate = job_block(&ci, "test");
+        assert!(aggregate.contains("LEDGER_RESULT: ${{ needs.docs-ledger.result }}"));
+        assert!(aggregate.contains("LEDGER: ${{ needs.scope.outputs.docs_ledger }}"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn docs_scope_validation_rejects_missing_and_invalid_outputs() {
@@ -933,6 +950,7 @@ mod tests {
                 .env("CODE", "false")
                 .env("ARCHITECTURE", "false")
                 .env("DOCS", docs)
+                .env("DOCS_LEDGER", "false")
                 .env("GITHUB_OUTPUT", temp.path())
                 .output()
                 .unwrap();
@@ -969,6 +987,8 @@ mod tests {
                             .env("BAD", bad.to_string())
                             .env("DOCS", docs)
                             .env("DOCS_RESULT", lane)
+                            .env("LEDGER", "false")
+                            .env("LEDGER_RESULT", "skipped")
                             .output()
                             .unwrap();
                         let expected = !bad
@@ -1066,6 +1086,16 @@ mod tests {
                     );
                     assert!(
                         outputs.contains(&format!("code={}", all || code)),
+                        "{event}/{failure}/{path}: {outputs}"
+                    );
+                    let ledger = matches!(
+                        path,
+                        "README.md"
+                            | "examples/new/config.toml"
+                            | "public/src/content/docs/guides/new.mdx"
+                    ) || path.contains("with newline");
+                    assert!(
+                        outputs.contains(&format!("docs_ledger={}", all || ledger)),
                         "{event}/{failure}/{path}: {outputs}"
                     );
                     if all {
@@ -1210,8 +1240,8 @@ mod tests {
             "the aggregate must publish the required context without another full runner"
         );
         assert!(test.contains(
-            "needs: [scope, runners, docs-static, lint-core, lint-policy, lint-feature-clippy, \
-             lint-windows, test-windows-identity, test-workspace-build, test-workspace]"
+            "needs: [scope, runners, docs-static, docs-ledger, lint-core, lint-policy, \
+             lint-feature-clippy, lint-windows, test-windows-identity, test-workspace-build, test-workspace]"
         ));
         let test_main = job_block(&main, "test-main");
         assert!(test_main.contains("name: Test (main)"));
