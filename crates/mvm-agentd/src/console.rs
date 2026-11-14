@@ -1426,9 +1426,18 @@ mod tests {
         let argv = build_console_argv(&request.argv).expect("argv");
         let (child_pid, mut master) = spawn_shell(&request, &argv).expect("spawn shell on a pty");
         let mut output = Vec::new();
-        master
-            .read_to_end(&mut output)
-            .expect("read the pty master");
+        // EIO is how a pty master reports that every holder of the slave side
+        // has closed it; it ends the stream exactly like EOF (same contract
+        // as `pump_output`), so a fast-exiting shell must not fail the read.
+        loop {
+            let mut buf = [0u8; 4096];
+            match master.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => output.extend_from_slice(&buf[..n]),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
         // SAFETY: child_pid is a live child of this test process; waitpid
         // reaps it and touches no memory.
         unsafe {
