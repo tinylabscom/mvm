@@ -94,6 +94,15 @@ pub fn acquire_runtime_overlay(
     })
 }
 
+/// The digest of a prepared overlay file, logged with where it came from: a
+/// remembered or sealed digest reads nothing, a hashed one reads the file.
+fn verified_sha256(path: &Path, what: &str) -> Result<String> {
+    let (digest, source) =
+        mvm_core::crypto::verified_digest::sha256_file_verified_report_source(path)?;
+    tracing::debug!(what, ?source, "attach overlay: digest");
+    Ok(digest)
+}
+
 /// The selected overlay and evidence for the archive that produced its bytes.
 pub struct AcquiredRuntimeOverlay {
     pub artifact: RuntimeOverlayArtifact,
@@ -108,37 +117,48 @@ pub fn acquire_runtime_overlay_for_launch(
     resolver: &mvm_fs::overlay::RuntimeOverlayResolver,
     arch: GuestArch,
 ) -> Result<AcquiredRuntimeOverlay> {
+    use mvm_core::launch_trace::lap;
+    lap("attach_overlay.selection");
     let version = resolver.expected_version();
     let proof = mvm_build::guest_runtime::cached_runtime_release_proof(
         resolver.cache_root(),
         version,
         arch,
     )?;
+    lap("attach_overlay.release_proof_lookup");
     let (declaration, source_archive_sha256) = if let Some(proof) = &proof {
-        (
+        let declared = (
             mvm_build::guest_runtime::evidence::verify_runtime_release_proof(proof, version, arch)?
                 .declaration(arch)?
                 .clone(),
             None,
-        )
+        );
+        lap("attach_overlay.release_proof_verify");
+        declared
     } else {
         let checked = mvm_build::guest_runtime::source::check_source_runtime(
             resolver.cache_root(),
             version,
             arch,
         )?;
-        (
+        let declared = (
             checked.declaration(arch)?.clone(),
             Some(checked.archive_sha256().to_owned()),
-        )
+        );
+        lap("attach_overlay.source_runtime_check");
+        declared
     };
     let artifact = mvm_build::runtime_overlay::resolve_or_seed_from_default_cache(resolver, arch)?;
+    lap("attach_overlay.resolve_overlay");
+    let overlay_matches = artifact.roothash == declaration.overlay_roothash
+        && verified_sha256(&artifact.overlay_ext4, "overlay")? == declaration.overlay_sha256;
+    lap("attach_overlay.overlay_sha256");
+    let sidecar_matches = overlay_matches
+        && verified_sha256(&artifact.sidecar, "verity sidecar")?
+            == declaration.overlay_verity_sha256;
+    lap("attach_overlay.verity_sidecar_sha256");
     anyhow::ensure!(
-        artifact.roothash == declaration.overlay_roothash
-            && mvm_core::crypto::verified_digest::sha256_file_verified(&artifact.overlay_ext4)?
-                == declaration.overlay_sha256
-            && mvm_core::crypto::verified_digest::sha256_file_verified(&artifact.sidecar)?
-                == declaration.overlay_verity_sha256,
+        sidecar_matches,
         "prepared runtime overlay differs from the selected archive"
     );
     Ok(AcquiredRuntimeOverlay {

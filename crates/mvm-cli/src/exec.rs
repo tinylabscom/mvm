@@ -692,10 +692,15 @@ fn run_inner(
     let backend_trace = timing
         .then(|| mvm_core::launch_trace::read_trace(&mvm_core::config::vm_state_dir(&vm_name)))
         .flatten();
+    // The launch's own laps (admission and overlay attach) sit beside the
+    // backend's phases: both are qualified names inside a runner phase.
     let backend_phases = backend_trace
         .as_ref()
         .map(|trace| trace.phases.clone())
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .chain(mvm_core::launch_trace::recorded_laps())
+        .collect::<Vec<_>>();
     let degraded = backend_trace
         .map(|trace| trace.degraded)
         .unwrap_or_default();
@@ -1312,6 +1317,7 @@ pub fn resolve_launch(
     // the boot needs (see `mvm_client::launch::boot_order`).
     let t_overlay = std::time::Instant::now();
     sub.start(SubPhase::AttachOverlay);
+    mvm_core::launch_trace::lap_reset(None);
     crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
         crate::commands::vm::up::attach_runtime_overlay_if_cached_version(
             &mut start_config,
@@ -1320,6 +1326,7 @@ pub fn resolve_launch(
             pair,
         )
     })?;
+    mvm_core::launch_trace::lap("attach_overlay.tail");
     sub.finish(SubPhase::AttachOverlay);
     tracing::debug!(
         ms = t_overlay.elapsed().as_secs_f64() * 1000.0,
@@ -1328,10 +1335,12 @@ pub fn resolve_launch(
 
     let t_initramfs = std::time::Instant::now();
     sub.start(SubPhase::AttachInitramfs);
+    mvm_core::launch_trace::lap_reset(None);
     crate::commands::vm::up::attach_universal_initramfs_if_cached(
         &mut start_config,
         backend.name(),
     )?;
+    mvm_core::launch_trace::lap("attach_initramfs.tail");
     sub.finish(SubPhase::AttachInitramfs);
     tracing::debug!(
         ms = t_initramfs.elapsed().as_secs_f64() * 1000.0,
@@ -1344,6 +1353,7 @@ pub fn resolve_launch(
     // snapshot restore is unavailable for workload admission.
     let t_admission = std::time::Instant::now();
     sub.start(SubPhase::AdmitPlan);
+    mvm_core::launch_trace::lap_reset(None);
     // A run resolved from an installed bundle boots its extracted files;
     // admission pins the bundle and checks those files against what was signed.
     let bundle_archive = image
@@ -1390,6 +1400,7 @@ pub fn resolve_launch(
             start_config.plan_json.as_deref(),
         )?;
     }
+    mvm_core::launch_trace::lap("admit_plan.apply_and_sidecar_check");
     sub.finish(SubPhase::AdmitPlan);
     tracing::debug!(
         ms = t_admission.elapsed().as_secs_f64() * 1000.0,

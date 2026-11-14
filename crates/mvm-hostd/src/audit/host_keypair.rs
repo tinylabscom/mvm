@@ -94,6 +94,7 @@ pub fn load_or_init_at(keys_dir: &Path) -> Result<HostSigner> {
     let secret_path = keys_dir.join(SECRET_FILENAME);
     let public_path = keys_dir.join(PUBLIC_FILENAME);
     let (signing, verifying) = ed25519_keypair::load_or_init(&secret_path, &public_path)?;
+    mvm_core::launch_trace::lap("admit_plan.host_signing_key_load");
     Ok(HostSigner {
         signing,
         verifying,

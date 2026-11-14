@@ -484,7 +484,9 @@ fn admit(
         })
         .transpose()?;
     let t_admit_start = std::time::Instant::now();
+    mvm_core::launch_trace::lap("admit_plan.setup_and_boot_artifact_identity");
     let sha = resolve_image_sha256(p.rootfs_path, p.precomputed_image_sha256.or(attested_sha))?;
+    mvm_core::launch_trace::lap("admit_plan.image_sha256");
     let t_sha = std::time::Instant::now();
     tracing::debug!(
         ms = (t_sha - t_admit_start).as_secs_f64() * 1000.0,
@@ -543,6 +545,7 @@ fn admit(
     // same way `image_sha256` above is derived — a pin that re-read the whole
     // kernel would put a multi-MB read back on every launch to reproduce a
     // value the kernel's own cache check just computed from the same bytes.
+    mvm_core::launch_trace::lap("admit_plan.bundle_prepare");
     let kernel_sha256 = p
         .kernel_path
         .map(|kernel| {
@@ -561,6 +564,7 @@ fn admit(
         .with_context(|| format!("backend {} cannot boot this kernel", kind.as_str()))?;
     }
 
+    mvm_core::launch_trace::lap("admit_plan.kernel_sha256_and_loadable");
     let generated_network_policy_bundle =
         generated_policy_bundle_for_network_policy(p.tenant, p.vm_name, &p.network_policy)?;
     let generated_policy_ref = generated_network_policy_bundle
@@ -605,6 +609,7 @@ fn admit(
         }
     }
 
+    mvm_core::launch_trace::lap("admit_plan.share_hash");
     // Caller-declared files and selected signed packs are verified here,
     // before their identities enter the signed plan.
     let mut caller_assets = Vec::with_capacity(p.assets.len());
@@ -663,6 +668,7 @@ fn admit(
     let instruction_report =
         instructions::evaluate_and_harden(&mut shares, &p.assets, p.instructions)?;
 
+    mvm_core::launch_trace::lap("admit_plan.asset_hash_and_instructions");
     // The resolved network policy's identity: the plan pins policies by
     // reference name, so the caller adds the resolved bytes' hash — an
     // operator comparing identities sees which exact policy content was
@@ -779,6 +785,7 @@ fn admit(
     // refusal above is scoped to — so a sealed boot refuses a grant nothing
     // can enforce, and a dev boot is told about it and proceeds.
     let variant = admission_variant(p.restrict_agent_verbs);
+    mvm_core::launch_trace::lap("admit_plan.synthesis_inputs");
     let t_pre_sign = std::time::Instant::now();
     tracing::debug!(
         ms = (t_pre_sign - t_sha).as_secs_f64() * 1000.0,
@@ -808,6 +815,7 @@ fn admit(
         Err(err)
     })?;
     let t_signed = std::time::Instant::now();
+    mvm_core::launch_trace::lap("admit_plan.replay_bundle_reverify_and_admit_tail");
     tracing::debug!(
         ms = (t_signed - t_pre_sign).as_secs_f64() * 1000.0,
         "admit: sign+verify"
@@ -887,6 +895,7 @@ fn admit(
         }
     }
     let t_signer = std::time::Instant::now();
+    mvm_core::launch_trace::lap("admit_plan.session_note_and_signer_reload");
     tracing::debug!(
         ms = (t_signer - t_signed).as_secs_f64() * 1000.0,
         "admit: load host signer"
@@ -956,6 +965,7 @@ fn admit(
     // only moment this is catchable is right here. `restrict_agent_verbs` is
     // the same sealed-tier signal the shell-entrypoint refusal above keys on.
     let t_emitter = std::time::Instant::now();
+    mvm_core::launch_trace::lap("admit_plan.policy_and_emitter");
     tracing::debug!(
         ms = (t_emitter - t_signer).as_secs_f64() * 1000.0,
         "admit: policy + emitter build"
@@ -1024,6 +1034,7 @@ fn admit(
         }
         durability::AdmissionSync::BesideBoot => emitter.batched_sync_detached(record)?.1,
     };
+    mvm_core::launch_trace::lap("admit_plan.audit_record");
     tracing::debug!(
         ms = t_emitter.elapsed().as_secs_f64() * 1000.0,
         ?sync,

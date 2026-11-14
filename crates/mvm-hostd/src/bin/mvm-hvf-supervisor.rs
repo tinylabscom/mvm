@@ -614,6 +614,7 @@ fn run() -> anyhow::Result<()> {
     );
     let cfg: HvfSupervisorConfig =
         serde_json::from_str(&raw).context("parse HvfSupervisorConfig JSON from stdin")?;
+    mvm_core::launch_trace::lap_reset(cfg.pid_file.parent());
     let mode = startup_mode(&cfg)?;
     // The entire startup namespace is validated before diagnostics, replay,
     // signing re-exec, or any descriptor ownership conversion.
@@ -671,6 +672,7 @@ fn run() -> anyhow::Result<()> {
 
     diagnostics.stage(StartupStage::ConfigRead);
     diagnostics.stage(StartupStage::ConfigParse);
+    mvm_core::launch_trace::lap("adopt_and_sign");
     let registered_startup = mvm_hostd::supervisor::caller_registration::prepare_startup(&cfg)?;
     // Declared before the disk devices so reverse drop order flushes and destroys
     // every disk before either lock description can be released.
@@ -705,6 +707,7 @@ fn run() -> anyhow::Result<()> {
         .parent()
         .context("supervisor state directory missing")?;
     mvm_core::naming::validate_vm_name(&cfg.vm_name)?;
+    mvm_core::launch_trace::lap("caller_registration");
     anyhow::ensure!(
         state_dir == mvm_core::config::vm_state_dir(&cfg.vm_name),
         "supervisor instance does not match its managed state directory"
@@ -733,6 +736,7 @@ fn run() -> anyhow::Result<()> {
         let _ = std::fs::remove_file(path);
     }
 
+    mvm_core::launch_trace::lap("stop_control_and_status");
     let (registered_launch, initramfs) = match registered_startup {
         Some(startup) => (Some(startup.launch), startup.initramfs),
         None => (
@@ -740,6 +744,7 @@ fn run() -> anyhow::Result<()> {
             mvm_hostd::supervisor::caller_registration::load_boot_inputs(&cfg)?,
         ),
     };
+    mvm_core::launch_trace::lap("boot_inputs_load");
     // A VM that outlives its launcher owns its egress endpoint *here*, because
     // the endpoint self-reaps when orphaned and this process is the only one
     // whose life is the VM's. It has to run before the disks below: the
@@ -808,6 +813,7 @@ fn run() -> anyhow::Result<()> {
         }
         disks.push(img);
     }
+    mvm_core::launch_trace::lap("endpoint_and_disks_open");
     // The loader replaces initramfs/cmdline evidence on restore using only
     // the authenticated inherited frame, after checking selected identity.
     let runtime_artifacts = Some(mvm_vmm::runtime_artifacts::RuntimeArtifacts {
@@ -851,6 +857,7 @@ fn run() -> anyhow::Result<()> {
         ),
     };
 
+    mvm_core::launch_trace::lap("runtime_observer_and_image_lock");
     // timeout_secs == 0 ⇒ persistent: run until stopped (SIGTERM). A multi-year
     // cap backstops a stuck guest. Otherwise it's a bounded run.
     let timeout = if cfg.timeout_secs == 0 {
@@ -921,6 +928,7 @@ fn run() -> anyhow::Result<()> {
     // Egress over vsock is a pure relay to the per-VM endpoint, which owns the
     // whole egress decision (claim-10 default-deny + secret substitution). The
     // supervisor only wires the relay socket paths through.
+    mvm_core::launch_trace::lap("wall_clock_arm");
     diagnostics.stage(StartupStage::CapturePolicy);
     use mvm_hostd::stream::protected::{CaptureAuthority, CaptureParams};
     let admitted_plan = armed_plan
@@ -967,6 +975,7 @@ fn run() -> anyhow::Result<()> {
     std::fs::write(&cfg.pid_file, record.render()).context("publish protected supervisor PID")?;
     diagnostics.stage(StartupStage::PidPublished);
     drop(diagnostics);
+    mvm_core::launch_trace::lap("capture_setup_and_pid_publish");
     let kernel_boot = match held_kernel.as_ref() {
         Some(kernel) => mvm_runtime::backends::hvf::KernelBootUntilParams::builder_descriptor(
             kernel,

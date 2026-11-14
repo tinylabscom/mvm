@@ -1528,6 +1528,7 @@ unsafe fn run(
         if rc != HV_SUCCESS {
             return Err(HvfError::VcpuCreate(rc));
         }
+        mvm_core::launch_trace::lap("artifact_measure_vm_create_gic_map_vcpu0");
         // Wrap the raw vCPU in the seam type and drive it through the unified run
         // loop (crate::vmm::run) — the same body the KVM backend uses.
         let vcpu = HvfVcpu::from_raw(vcpu_id, exit);
@@ -2049,6 +2050,7 @@ unsafe fn run(
                 if bring_up.is_err() {
                     shared.end();
                 }
+                mvm_core::launch_trace::lap_and_flush("secondary_vcpus_and_run_setup");
                 shared.run.release();
 
                 // Bound the machine only once every vCPU exists and has
