@@ -584,6 +584,131 @@ protected recording works. A verified audit chain is not proof that arbitrary
 returned bytes were recorded. Mailbox previews, destructive VM-lifetime reads
 and durable result inboxes likewise must not be conflated.
 
+#### Running and verifying the factory-edge demo
+
+Two scripts and a hermetic test carry the demo. They drive the CLI of one
+installed release on one real host; Studio will drive the same operations
+through `mvm-client`, and these scripts are the reference that integration is
+checked against.
+
+| File | Purpose |
+| --- | --- |
+| `scripts/factory-edge-stage.sh` | Starts the three workloads in the background ahead of the presentation. `--down` removes them. |
+| `scripts/factory-edge-demo-live.sh` | The demo: observes the staged workloads and asserts each beat. |
+| `scripts/factory-edge-demo-live.test.sh` | Runs both scripts against a fake `mvmctl` and requires each to fail, for the named reason, for about two dozen ways the product could misbehave. It proves the scripts, not the product. |
+
+**Preparation, once, outside the demo.** The demo assumes an installed `mvmctl`
+and a prepared home and installs nothing. A missing prerequisite stops a script
+before it starts, and any first-use preparation during a run is reported as a
+`FINDING` and fails it.
+
+1. Install the release with the repository installer, pinned to the tag the demo
+   uses (`MVM_VERSION=v0.28.0-rc.2 sh install.sh`). It verifies the release
+   checksums and signatures and codesigns the binaries.
+2. Use a dedicated persistent demo home (`MVM_HOME=$HOME/.mvm-demo`), not a
+   temporary directory, so a reboot does not discard it.
+3. With that home set, run `mvmctl image pull curlimages/curl:8.21.0` and one
+   throwaway `mvmctl run` of that image, which builds the workload runtime.
+
+**Running.** `scripts/factory-edge-stage.sh`, then
+`scripts/factory-edge-demo-live.sh`, then `scripts/factory-edge-stage.sh --down`.
+Staging replaces any earlier staging, and each staging uses its own machine
+names because `mvmctl explain <name>` is ambiguous when a name has been reused.
+On a live run against `v0.28.0-rc.2` on HVF staging took about 15 s and the demo
+about 30 s while other builds held the host at a load average near 40. The
+maintenance workload makes its first request `ATTEMPT_AFTER` seconds (default
+30) after it starts, so stage far enough ahead.
+
+**What the demo asserts.** The three workloads are running. The host records each
+inspection workload's lookups of its own granted destination. The host records a
+refusal for the maintenance workload's request for an ungranted destination, and
+`mvmctl explain` reads it back as `policy_denied`. The inspection workloads have
+no refusal and keep working after the refusal's recorded time. The maintenance
+workload is stopped, its session is sealed and its refusal stays on record. A
+replacement launched under a new plan carries none of those refusals. The audit
+chain verifies before and after. No install-time preparation ran.
+
+**What it observes, and how.** A detached machine's own output is not readable
+from the host: `mvmctl machine logs` shows the guest console, and the recorded
+workload output is sealed. The inspection workloads' work is therefore observed
+as the host's `dns.resolved` records for their granted destination, and the
+refusal is a `dns.refused` record that `explain` reports as `DNS lookup of
+<host>`. Nothing is run inside a workload from the host, so the dev-only `exec`
+verb is never used. The workloads' behaviour is scripted (small `curl` loops),
+so the demo does not depend on a model choosing to misbehave.
+
+**What it does not show.** Studio's own readback, the real maintenance and
+inspection tasks, hot replacement, a production-profile run, and anything on a
+physical line.
+
+**Measured launch cost.** The product's launch gates are a 300 ms ceiling for a
+cold launch and a 50 ms warm-claim target (the published warm-claim budgets are
+tracked in [#4648](https://github.com/tinylabscom/mvm/issues/4648)). For the
+demo the owner's ceiling is that a launch the audience watches reaches the guest
+in under one second. On `v0.28.0-rc.2` through the CLI, on macOS with HVF,
+neither gate is met, and the demo therefore stages its workloads instead of
+launching them live. Measured with `MVM_PHASE_TIMING=1` over five cold launches
+of a cached 36 MB image, with other sessions' builds holding the load average
+near 33, so the absolute numbers are inflated; on a quiet host a whole cold run
+took about 2.7 s and a warm claim about 3.0 s:
+
+| Phase | Range |
+| --- | --- |
+| `admit_plan` (inside `admit`) | 2.1 to 4.3 s |
+| `attach_overlay` | 2.0 to 3.3 s |
+| `attach_initramfs` | 0.7 to 1.4 s |
+| `vmm_create` (the whole backend start) | 1.4 to 2.5 s |
+| `guest ready` | 2.7 ms |
+| `command` | 11 ms |
+| `teardown` | 0.24 to 0.46 s |
+
+The guest is not the cost, and a warm claim is not faster through the CLI: its
+`warm_claim` phase was 0.8 ms and the time is the same admission, overlay and
+initramfs work. The product's own warm-claim bench reported a sample reaching the
+guest 3973.8 ms after invocation against the 300 ms ceiling, and its
+`prepared-cold` lane refuses an OCI `--image` launch because the launch performs
+an `artifact_hash` step. Ruled out by measurement: hashing the image (about 0.1
+s in total), the size of the audit chain (admission took the same time on homes
+with 177 and 1,518 entries), file writes (a launch writes about seven temporary
+files of about 20 MB, but a 20 MB copy took under 5 ms even at load 60) and
+helper processes (only two are spawned, at the very end). A launch spends about
+four CPU-seconds in user space, inside the `mvmctl` process, before any child
+process starts. Which function inside `admit_plan_for_run` and the overlay attach
+spends them is not established: the release binary has no symbols and the host
+was loaded. The measurements, the reproduction and the open questions are in
+[#5487](https://github.com/tinylabscom/mvm/issues/5487).
+
+**Path to the launch gates** (a proposal, none of it verified). First, build the
+same release tag with line-level symbols and profile one launch on an idle host,
+which names the functions. Second, add timing spans inside admission and the
+overlay attach. Third, remove the repeated work the profile names; by reading,
+the attach re-verifies the runtime release proof and re-hashes the overlay and
+its verity sidecar on every launch, and caching that result by artifact identity
+is the candidate fix, but hashing measured cheap, so the proof verification is
+the more likely cost. Fourth, re-measure against the 300 ms gate with the
+product's own bench, which needs a launch the `prepared-cold` lane accepts.
+
+**Other findings from building the demo.**
+
+- A warm-claimed run's refusals are recorded under the standby's machine name, so
+  `explain` returns none for it even though the chain holds the entry, and a run
+  that holds an egress grant claims only a standby warmed with `pool warm
+  --egress`. The demo therefore boots cold on purpose
+  ([#5482](https://github.com/tinylabscom/mvm/issues/5482)). This matters for
+  Studio, which will read refusals through `explain_local_run`.
+- `mvmctl explain` and `mvmctl trust audit verify` verify the whole chain on every
+  call (about 3 s and 10 s on a 2.9 MB chain at load near 40), and every lookup a
+  workload makes is a signed chain entry, so the staged inspection workloads look
+  up every five seconds and the demo fetches `explain` once per run.
+- Two guests launched together on an empty home can race the first-use
+  preparation and one fails to start; a failed start also left its supervisor
+  process running with `machine ls` showing nothing
+  ([#5471](https://github.com/tinylabscom/mvm/issues/5471)). Prepare the home
+  before the demo.
+- Standbys are released after 20 minutes idle, and the home's host snapshot key
+  (`keys/local.key`) is created on first use; standbys cannot be resumed without
+  it, so keep the demo home and do not recreate its keys.
+
 The original mission sequence below remains a reference scenario. This
 factory-edge alternative changes the audience and presentation, not the
 underlying security boundaries or the validation status described later.
