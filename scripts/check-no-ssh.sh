@@ -42,6 +42,11 @@ ALLOWED_FILES=(
   # Host-share parser test: proves the user's SSH credential directory and a
   # private-key-shaped child path are refused as guest mount sources.
   "crates/mvm-cli/src/commands/shared/parse.rs"
+  # Directory-share built-in deny set: `id_rsa`/`id_rsa.*` name SSH private
+  # keys so materializing a share prunes them, alongside `.ssh/*` and
+  # `*.pem`. Deny-pattern data that removes keys from shares, never SSH
+  # capability; its unit test asserts the same.
+  "crates/mvm-contract/src/policy/protected_paths.rs"
   # Secrets scanner: a one-line comment naming "OpenSSH" as one of the PEM
   # private-key formats its generic BEGIN-block regex redacts.
   "crates/mvm-hostd/src/supervisor/secrets_scanner.rs"
