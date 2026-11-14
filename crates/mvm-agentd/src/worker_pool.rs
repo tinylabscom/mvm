@@ -890,6 +890,45 @@ mod tests {
         assert!(rss > 0);
     }
 
+    /// A warm worker that is an interpreter script, as the function-entrypoint
+    /// wrappers are (`#!/usr/bin/env python3`, `#!/usr/bin/env node`), is
+    /// started through `/proc/self/fd/<n>`. The kernel re-execs the interpreter
+    /// on that path, so the descriptor has to survive the exec: if it does not,
+    /// the interpreter cannot reopen the script and the worker never starts.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_script_worker_started_through_the_descriptor_path_runs() {
+        use std::io::Read as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("worker scratch directory");
+        let worker = dir.path().join("worker.sh");
+        std::fs::write(&worker, "#!/bin/sh\necho ready\n").expect("write worker script");
+        std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755))
+            .expect("mark worker runnable");
+        let resolved = std::fs::canonicalize(&worker).expect("canonicalize worker script");
+        let entrypoint = Arc::new(crate::entrypoint::ValidatedEntrypoint {
+            file: std::fs::File::open(&resolved).expect("open worker script"),
+            resolved,
+            use_resolved_path: false,
+        });
+        let worker_env = vec![(
+            "PATH".to_string(),
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+        )];
+        let mut handle = spawn_worker(&entrypoint, &worker_env).expect("spawn worker");
+        let mut output = String::new();
+        handle
+            .stdout
+            .read_to_string(&mut output)
+            .expect("read worker output");
+        assert_eq!(
+            output.trim(),
+            "ready",
+            "the script worker did not start; its stderr went to the agent's stderr"
+        );
+    }
+
     /// Live witness: a warm-pool worker holds no capabilities. Workers serve
     /// `RunEntrypoint` calls, so the worker spawn applies the same capability
     /// strip as every other workload-code spawn. Same gate as the guest_mount
