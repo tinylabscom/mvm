@@ -293,16 +293,21 @@ and entry budget. A digest-bound application archive can be added under
 `/srv/app` and emitted as an ext4+verity candidate. Its resolved input record
 is not a cache install or a runnable bundle: source custody, symlink closure,
 policy, release proof and health boot still require final checks.
-The proposed bundle schema 8 is reserved for one signed composable-application
-member that binds runtime manifest pins for transitive revocation checks.
-Coordinate this floor with `mvm-packs` ADR 004 before landing the public
-format; its later policy-only kind, builder-version and in-file keyless
-signature/provenance changes have no assigned floors yet. New composable
-exports use schema 8 only: no legacy-output option, version downgrade or
-fallback that drops composition evidence. Existing Nix/v1 builds and older
-bundle readers remain unchanged; removing them is a separate migration, not
-a prerequisite for this format. Carry one typed composition member, not
-reuse the v7 `other` role as an implicit grant. Its Ed25519-signed manifest
+Schema 8 already carries the host-local Dev `LocalComposition` inventory;
+it is not a production format or publisher enrollment. The first protected
+production composition uses a distinct schema-9 member. That first floor
+admits one application with its actual selected entrypoint, ordered
+authenticated runtime inputs and one signed selected base. Multiple
+applications, tool graphs, production command precedence and in-file keyless
+provenance require a later reviewed version, not optional fields in this one.
+Do not raise the reader's maximum schema or emit schema 9 until its closed
+member encoding, protected producer and recipient checks are implemented
+together. Then production exports use schema 9 only: no legacy-output option,
+version downgrade or fallback that drops composition evidence. Existing
+schema-8 local builds, Nix/v1 builds and older bundle readers retain their
+meanings. Reject a bundle mixing local and production composition members.
+Carry one typed production member, not reuse the v7 `other` role as an
+implicit grant. Its Ed25519-signed manifest
 binds the authored spec/source/producer lock, selected signed Linux root,
 ordered runtime manifest pins, policy digests, output artifact hashes and
 health-tested entrypoint. Embed each
@@ -318,8 +323,8 @@ contract, not a completed exporter or consumer.
 The CLI must not interpret any new source, mode or layer field as optional
 and silently fall back to Nix. A local production-mode build is not an
 official published release merely because it is sealed and host-signed.
-Both local and official schema-8 packages use the same verifier and archive
-format. Every schema-8 install or run requires a trusted bundle signing key:
+Every installed schema-8 local or future schema-9 production package requires
+a trusted bundle signing key:
 local keys require explicit operator enrollment, even on their build host;
 an official key must be enrolled or part of authenticated built-in trust.
 A direct non-packaged development build need not install a package.
@@ -327,7 +332,7 @@ Official release admission additionally authenticates the publisher identity
 and exact distribution pin. Local admission remains operator-approved; it
 never claims release verification just because the host signed or enrolled
 a key. The current local-build development auto-trust and production refusal cannot
-authorize schema-8 packages without a distinct admission rule. Keep current
+authorize schema-9 packages without a distinct admission rule. Keep current
 signed revocation evidence independent of the archive's self-contained boot
 bytes; missing or stale trust state refuses offline admission. Reuse one
 composition and verifier path rather than adding a legacy compatibility layer.
