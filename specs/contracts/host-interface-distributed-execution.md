@@ -671,22 +671,36 @@ an `artifact_hash` step. Ruled out by measurement: hashing the image (about 0.1
 s in total), the size of the audit chain (admission took the same time on homes
 with 177 and 1,518 entries), file writes (a launch writes about seven temporary
 files of about 20 MB, but a 20 MB copy took under 5 ms even at load 60) and
-helper processes (only two are spawned, at the very end). A launch spends about
-four CPU-seconds in user space, inside the `mvmctl` process, before any child
-process starts. Which function inside `admit_plan_for_run` and the overlay attach
-spends them is not established: the release binary has no symbols and the host
-was loaded. The measurements, the reproduction and the open questions are in
+helper processes (only two are spawned, at the very end). Two further checks
+point away from the obvious suspects: the product's own offline release verifier
+(`mvmctl env verify-release`, the signature and checksum check of the runtime
+archive) took 0.20 to 0.29 s including process start, and CPU contention does not
+explain the numbers, because a fixed 0.3 CPU-second task took 0.33 s of wall time
+at a load average of 90 on 16 cores. Which function inside `admit_plan_for_run`
+and the overlay attach spends the seconds is not established: the release binary
+has no symbols. The measurements, the reproduction and the open questions are in
 [#5487](https://github.com/tinylabscom/mvm/issues/5487).
 
-**Path to the launch gates** (a proposal, none of it verified). First, build the
-same release tag with line-level symbols and profile one launch on an idle host,
-which names the functions. Second, add timing spans inside admission and the
-overlay attach. Third, remove the repeated work the profile names; by reading,
-the attach re-verifies the runtime release proof and re-hashes the overlay and
-its verity sidecar on every launch, and caching that result by artifact identity
-is the candidate fix, but hashing measured cheap, so the proof verification is
-the more likely cost. Fourth, re-measure against the 300 ms gate with the
-product's own bench, which needs a launch the `prepared-cold` lane accepts.
+A separate measurement on the physical M1 CI runner, recorded in the learning of
+the `fix/bootstrap-warms-source-declaration` branch, found `attach_overlay` at
+1.3 ms and a whole startup of about 305 to 340 ms once the source runtime
+declaration was cached, against 228 ms and 528 ms without it, with the remaining
+steady-state cost in `vmm_create` (about 260 ms). That was a source build, not
+the signed release, so it does not show that the release path is fast; the gap
+between it and the 1.5 to 3.3 s `attach_overlay` measured here on the release is
+the thing to explain.
+
+**Path to the launch gates** (a proposal, none of it verified). First, find out
+whether the gap is the release path: run the same measurement with a source
+build and with the signed release on the same idle host. Second, build the same
+release tag with line-level symbols and profile one launch there, which names
+the functions. Third, remove the repeated work the profile names; by reading,
+the attach calls `verify_runtime_release_proof` and re-hashes the overlay and its
+verity sidecar on every launch with no cache on the release path, and a cache
+keyed by artifact identity is the candidate fix, but the signature check and the
+hashing both measured cheap, so neither is the likely cost. Fourth, re-measure
+against the 300 ms gate with the product's own bench, which needs a launch the
+`prepared-cold` lane accepts.
 
 **Other findings from building the demo.**
 
