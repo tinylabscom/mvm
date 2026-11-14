@@ -97,7 +97,7 @@ def main():
         if result["outcome"] == "refused" and result["reason"] == "Unavailable":
             return None
         if result["outcome"] != "delivery":
-            raise RuntimeError(f"reader refused delivery: {result['outcome']}")
+            raise RuntimeError(f"reader refused delivery: {result}")
         if base64.b64decode(result["payload"], validate=True) != payload:
             raise RuntimeError("reader delivered the wrong plaintext")
         return result["lease"]
