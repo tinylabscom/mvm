@@ -347,6 +347,7 @@ fn set_readable(_path: &Path) -> Result<(), GuestBinsError> {
 /// list, a member path outside the layout, a listed member that is absent, a
 /// member the manifest does not list, a non-regular or duplicated entry, or
 /// any member whose bytes do not hash to the recorded digest.
+#[tracing::instrument(skip_all)]
 pub fn verify_guest_bins_archive(path: &Path) -> Result<GuestBinsManifest, GuestBinsError> {
     let file = std::fs::File::open(path)?;
     let mut archive = tar::Archive::new(GzDecoder::new(file));

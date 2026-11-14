@@ -132,6 +132,7 @@ impl RunPosture<'_> {
     }
 }
 
+#[tracing::instrument(skip_all)]
 pub(super) fn verify_selected_runtime(config: &VmStartConfig) -> Result<()> {
     mvm_runtime::runtime_evidence::verify_runtime_for_launch(
         config,
