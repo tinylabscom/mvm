@@ -726,6 +726,23 @@ def greet(): pass
     }
 
     #[test]
+    fn a_bare_string_env_value_is_refused_without_echoing_it() {
+        let src = r#"
+import mvm
+
+@mvm.app(
+    image=mvm.python_image(python="3.12"),
+    env={"TOKEN": "hunter2-not-for-logs"},
+)
+def greet(): pass
+"#;
+        let msg = parse_str(src).unwrap_err().to_string();
+        assert!(msg.contains("mvm.literal"), "{msg}");
+        assert!(msg.contains("mvm.secret"), "{msg}");
+        assert!(!msg.contains("hunter2"), "{msg}");
+    }
+
+    #[test]
     fn env_with_literal_and_secret() {
         let src = r#"
 import mvm
@@ -733,7 +750,7 @@ import mvm
 @mvm.app(
     image=mvm.python_image(python="3.12"),
     env={
-        "MODEL_PATH": "/data/model.pt",
+        "MODEL_PATH": mvm.literal("/data/model.pt"),
         "API_KEY": mvm.secret("api-key", type="bearer", hosts=["api.openai.com"]),
     },
 )

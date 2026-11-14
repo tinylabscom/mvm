@@ -631,7 +631,7 @@ pub fn dispatch_ai_session(
         }
     }
 
-    let transport = mvm_runtime::vsock_transport::for_vm(vm)
+    let transport = mvm_vmm::vsock_transport::for_vm(vm)
         .with_context(|| format!("selecting extension transport for {vm}"))?;
     let mut stream = transport
         .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
@@ -754,7 +754,7 @@ pub fn cancel_ai_session(
         grant_digest: binding.grant.grant_digest.clone(),
         nonce: binding.grant.nonce.clone(),
     };
-    let transport = mvm_runtime::vsock_transport::for_vm(vm)
+    let transport = mvm_vmm::vsock_transport::for_vm(vm)
         .with_context(|| format!("selecting extension transport for {vm}"))?;
     let mut stream = transport
         .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)

@@ -10,6 +10,8 @@ directly — it does **not** wrap it in the Firecracker jailer, and it passes no
 than a mvm-supplied "strict" tier. Do not infer a snapshot-clone latency
 guarantee either: recovery tiers are backend-specific and are reported by
 `mvmctl doctor`.
+The non-root VMM and NIC-less guest reduce exposure; neither replaces host
+kernel security updates.
 
 For the full host/backend matrix, see [Platform support](/reference/platform-support/).
 
@@ -24,6 +26,8 @@ You'll need:
   ```
 
   If `/dev/kvm` exists but is `root`-only, add yourself to the `kvm` group: `sudo usermod -aG kvm "$USER"` (re-login required).
+  Run `mvmctl` as that non-root user: Firecracker launch refuses an effective
+  UID of 0. Do not use `sudo mvmctl` to work around `/dev/kvm` permissions.
 - **Rust 1.85+** if you build `mvmctl` from source.
 
 You **do not need Nix on your host**. You run `mvmctl machine build` from the host, and mvm runs Nix evaluation and `nix build` through the project builder VM before extracting the resulting rootfs back to your host. See [Builder VM](/guides/builder-vm/) for the design.
@@ -101,6 +105,8 @@ See [Building MicroVM Images](/guides/building-microvm-images) for the user-faci
 ## Troubleshooting
 
 **"`/dev/kvm`: permission denied"** — your user isn't in the `kvm` group. `sudo usermod -aG kvm "$USER"` and start a new shell.
+
+**"refusing to launch Firecracker as root"** — run `mvmctl` as a non-root user with `/dev/kvm` access. Grant that user device access as described in Prerequisites; do not launch Firecracker with `sudo`.
 
 **"`/dev/kvm` exists but the run fails anyway"** — auto-select keys on `/dev/kvm` *existing*, not on your user being able to open it, so a `root`-only device still selects Firecracker and then fails at launch. There is no libkrun fallback on Linux: libkrun is selectable there only when you ask for it with `--hypervisor libkrun`, and it needs `/dev/kvm` too. Fix the group membership as above; `mvmctl doctor` reports what it resolved.
 

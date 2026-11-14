@@ -215,6 +215,8 @@ mod linux {
         // file is created 0660 and the previous mask is restored.
         let previous = unsafe { libc::umask(0o117) };
         let listener = UnixListener::bind(path);
+        // SAFETY: umask takes and returns a mode and cannot fail; this restores the mask saved
+        //         above.
         unsafe { libc::umask(previous) };
         listener
     }

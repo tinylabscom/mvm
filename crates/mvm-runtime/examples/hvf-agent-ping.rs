@@ -22,6 +22,8 @@ fn main() {
         let sock = std::env::var("MVM_HVF_AGENT_SOCKET")
             .unwrap_or_else(|_| "/tmp/hvf-agent.sock".to_string());
         // The detached supervisor inherits our env, so kernel_boot binds this path.
+        // SAFETY: set before the backend or any other thread exists, so nothing reads the
+        //         environment concurrently.
         unsafe { std::env::set_var("MVM_HVF_AGENT_SOCKET", &sock) };
         let _ = std::fs::remove_file(&sock);
 

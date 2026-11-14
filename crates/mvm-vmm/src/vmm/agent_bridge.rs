@@ -374,12 +374,19 @@ impl AgentBridge {
         self.host_closed.clear();
     }
 
+    /// Reclaim a stream that never completed its handshake and has gone quiet.
+    ///
+    /// An established stream is exempt: it carries a request and its reply, and
+    /// is silent for exactly as long as the guest command it serves runs. A
+    /// client that has actually gone is reclaimed by the EOF arm in
+    /// [`Self::drain_host`], so silence alone is the wrong signal.
     fn evict_idle_at(&mut self, now: Instant) {
         let expired: Vec<u32> = self
             .conns
             .iter()
             .filter(|(_, conn)| {
-                now.saturating_duration_since(conn.last_activity) >= CONNECTION_IDLE_TIMEOUT
+                !conn.established
+                    && now.saturating_duration_since(conn.last_activity) >= CONNECTION_IDLE_TIMEOUT
             })
             .map(|(&conn_id, _)| conn_id)
             .collect();
@@ -690,27 +697,60 @@ mod tests {
         assert_eq!(after_established.len(), 2, "listener plus established conn");
     }
 
+    fn idle_conn(stream: UnixStream, established: bool) -> AgentConn {
+        // The bridge reads accepted streams without blocking.
+        stream.set_nonblocking(true).unwrap();
+        AgentConn {
+            stream,
+            established,
+            ready_deadline: Instant::now(),
+            retry_at: None,
+            retry_delay: Duration::from_millis(25),
+            last_activity: Instant::now() - CONNECTION_IDLE_TIMEOUT - Duration::from_secs(1),
+            backlog: HostWriteBacklog::default(),
+        }
+    }
+
+    /// A client that has hung up is still reclaimed and the guest is reset,
+    /// however long ago it last spoke.
     #[test]
-    fn idle_agent_stream_is_surfaced_for_guest_reset() {
+    fn a_hung_up_agent_stream_is_surfaced_for_guest_reset() {
         let mut bridge = AgentBridge::new();
-        let (stream, _peer) = UnixStream::pair().unwrap();
+        let (stream, peer) = UnixStream::pair().unwrap();
         let conn_id = FIRST_HOST_PORT;
-        bridge.conns.insert(
-            conn_id,
-            AgentConn {
-                stream,
-                established: true,
-                ready_deadline: Instant::now(),
-                retry_at: None,
-                retry_delay: Duration::from_millis(25),
-                last_activity: Instant::now() - CONNECTION_IDLE_TIMEOUT - Duration::from_secs(1),
-                backlog: HostWriteBacklog::default(),
-            },
-        );
+        bridge.conns.insert(conn_id, idle_conn(stream, true));
+        drop(peer);
 
         bridge.drain_host();
 
         assert_eq!(bridge.take_host_closed(), vec![conn_id]);
         assert!(!bridge.is_agent_stream(conn_id));
+    }
+
+    /// A live client waiting on a long guest command is silent for as long as
+    /// the command runs. It must outlast the idle timeout.
+    #[test]
+    fn a_quiet_established_agent_stream_with_a_live_client_is_kept() {
+        let mut bridge = AgentBridge::new();
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let conn_id = FIRST_HOST_PORT;
+        bridge.conns.insert(conn_id, idle_conn(stream, true));
+
+        bridge.drain_host();
+
+        assert!(bridge.take_host_closed().is_empty());
+        assert!(bridge.is_agent_stream(conn_id));
+    }
+
+    #[test]
+    fn a_stream_that_never_became_established_is_still_reclaimed_when_quiet() {
+        let mut bridge = AgentBridge::new();
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let conn_id = FIRST_HOST_PORT;
+        bridge.conns.insert(conn_id, idle_conn(stream, false));
+
+        bridge.drain_host();
+
+        assert_eq!(bridge.take_host_closed(), vec![conn_id]);
     }
 }

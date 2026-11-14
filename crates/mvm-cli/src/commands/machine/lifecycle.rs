@@ -240,12 +240,14 @@ impl CliStartHost {
 
 impl mvm_client::launch::machine_start::StartHost for CliStartHost {
     /// The CLI boots an explicit kernel on every backend: the pinned one, or a
-    /// workload kernel prepared by `mvmctl bootstrap`. Launch never acquires
-    /// one on a cache miss.
+    /// workload kernel, prepared on first use exactly as a transient run does. A
+    /// refusal means that preparation failed.
     fn workload_kernel(&self, _backend: &str) -> Result<Option<String>> {
         match up::resolve_kernel_pin_path(self.kernel_pinned)? {
             Some(kernel_path) => Ok(Some(kernel_path)),
-            None => crate::commands::env::builder_vm::ensure_workload_kernel().map(Some),
+            None => {
+                crate::commands::env::builder_vm::prepare_workload_kernel_for_launch().map(Some)
+            }
         }
     }
 

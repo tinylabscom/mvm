@@ -228,17 +228,14 @@ pub(super) fn adopt_with(
     let header: Header = serde_json::from_slice(request.manifest_bytes)
         .map_err(|error| RegistryPackVerificationError::ManifestParse(error.to_string()))?;
     match (header.schema_version, header.kind.as_deref()) {
-        (1, None) => {
-            let verified = finish_registry_pack_verification(
-                request.requested,
-                request.manifest_bytes,
-                request.signature_bundle,
-                signer,
-                None,
-            )?;
-            enforce_legacy_manifest_policy(request.publisher_policy, verified)
-                .map(VerifiedRegistryManifest::Legacy)
-        }
+        (1, None) => finish_registry_pack_verification(
+            request.requested,
+            request.manifest_bytes,
+            request.signature_bundle,
+            signer,
+            None,
+        )
+        .map(VerifiedRegistryManifest::Legacy),
         (2, Some("application")) => {
             let manifest = parse_application_manifest(request.manifest_bytes)?;
             if manifest.reference.coordinate != request.requested.coordinate
@@ -254,12 +251,6 @@ pub(super) fn adopt_with(
                 });
             }
             let manifest_sha256 = Sha256Hex::from_bytes(request.manifest_bytes);
-            historical::check_legacy_manifest_policy(
-                request.publisher_policy,
-                &signer.identity,
-                &manifest.reference,
-                &manifest_sha256,
-            )?;
             Ok(VerifiedRegistryManifest::Application(
                 VerifiedRegistryApplication {
                     manifest,
@@ -285,12 +276,6 @@ pub(super) fn adopt_with(
                 });
             }
             let manifest_sha256 = Sha256Hex::from_bytes(request.manifest_bytes);
-            historical::check_legacy_manifest_policy(
-                request.publisher_policy,
-                &signer.identity,
-                &manifest.reference,
-                &manifest_sha256,
-            )?;
             Ok(VerifiedRegistryManifest::RuntimeLayer(
                 VerifiedRegistryRuntimeLayer {
                     manifest,
@@ -311,6 +296,7 @@ pub(super) fn adopt_with(
 mod tests {
     use super::*;
     use crate::registry_pack::tests::{accept_signature, publisher_policy, reject_signature};
+    use chrono::Utc;
 
     const APPLICATION: &[u8] = include_bytes!("application_manifest_v2.json");
 

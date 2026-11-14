@@ -176,7 +176,7 @@ impl DriveAuthority {
     {
         let call = self.prepare_open(cwd)?;
         let transport =
-            mvm_runtime::vsock_transport::for_vm(&self.vm).map_err(DriveSessionError::Rpc)?;
+            mvm_vmm::vsock_transport::for_vm(&self.vm).map_err(DriveSessionError::Rpc)?;
         let mut stream = transport
             .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
             .map_err(DriveSessionError::Rpc)?;
@@ -188,7 +188,7 @@ impl DriveAuthority {
     pub fn file(&self, operation: DriveFileOperation) -> Result<FsResult, DriveSessionError> {
         let operation = self.prepare_file(operation)?;
         let transport =
-            mvm_runtime::vsock_transport::for_vm(&self.vm).map_err(DriveSessionError::Rpc)?;
+            mvm_vmm::vsock_transport::for_vm(&self.vm).map_err(DriveSessionError::Rpc)?;
         let mut stream = transport
             .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
             .map_err(DriveSessionError::Rpc)?;

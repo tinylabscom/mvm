@@ -74,6 +74,7 @@ pub(super) fn absolutize_manifest_volume_spec(spec: &str, base_dir: &Path) -> Re
             host_dir,
             guest_mount,
             read_only,
+            ..
         } => Ok(format!(
             "{}:{guest_mount}:{}",
             absolute_host(&host_dir),

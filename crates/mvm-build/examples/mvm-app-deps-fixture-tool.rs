@@ -41,6 +41,7 @@ use std::process::ExitCode;
 
 use mvm_build::app_deps::{GateLevel, InstallResult};
 use mvm_build::app_deps_gate::apply_install_gate;
+use mvm_contract::hash::sha256_hex;
 use mvm_core::deps_audit::{
     FILE_CONTENT_DIR, FILE_CVE, FILE_FETCH_LOG, FILE_MANIFEST, FILE_SBOM, seal_volume,
 };
@@ -275,14 +276,6 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(bytes);
-    let digest = h.finalize();
-    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 struct SealOutcome {

@@ -1320,8 +1320,8 @@ mod tests {
 
         copy_into(&src, &source, &dir, &name, &private).unwrap();
         let copy = openat_readonly(&dir, &name).unwrap();
-        // SAFETY: test-only; `dir` and `name` are valid for the call.
         assert_eq!(
+            // SAFETY: test-only; `dir` and `name` are valid for the call.
             unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) },
             0
         );

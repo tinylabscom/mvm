@@ -108,6 +108,8 @@ mod tests {
             read_only,
             encrypted: false,
             content_sha256: None,
+            include: Vec::new(),
+            exclude: Vec::new(),
         }
     }
 

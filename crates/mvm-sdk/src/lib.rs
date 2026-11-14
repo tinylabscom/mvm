@@ -73,23 +73,6 @@ pub use mvm_contract::protocol::agent_session;
 /// `AddonRef`, `AddonTier`, `ThreatTier`) for one-stop authoring.
 pub mod addon;
 
-/// Compile pipeline — Workload IR to staged build artifacts. Exposes
-/// the source-bundling primitives (`archive_dir`, `copy_source`,
-/// `rehash`, `discover_python_reachable`, `discover_node_reachable`,
-/// `detect_language`) plus `deps_audit` — the sealed-volume primitives
-/// behind the application-dependency audit pipeline.
-///
-/// Requires the `compiler` feature. New host tools can depend directly on
-/// `mvm-compiler` instead of enabling this compatibility facade.
-#[cfg(feature = "compiler")]
-pub mod compile;
-
-/// Static decorator parser — extracts `@mvm.app(...)` kwargs from a
-/// user's Python or TypeScript source file and lowers them to a
-/// `Workload` IR. Pure tree-sitter; never imports the user's code.
-/// Closed `mvm.*` helper allowlist; non-literal kwargs rejected.
-pub mod decorator;
-
 /// Deploy-bundle assembly and local attestation for mvmd-owned control-plane
 /// flows. Builds the single `.tar.gz` (compile output plus embedded
 /// `mvmd-spec.json`) and exposes the authenticated shipping seam.

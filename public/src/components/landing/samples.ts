@@ -30,7 +30,7 @@ def greet(name: str) -> str:
     code: `@mvm.app(
     image=mvm.python_image(python="3.12"),
     resources=mvm.resources(cpu=1, memory_mb=256),
-    env={"NAME": "danny"},
+    env={"NAME": mvm.literal("danny")},
     before_start="export FOO=1",
 )
 def main() -> None:

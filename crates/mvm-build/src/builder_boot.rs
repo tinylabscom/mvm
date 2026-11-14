@@ -25,7 +25,19 @@
 //! - which images the payload boots — [`abi`], against the image's
 //!   [`IMAGE_ABI_MARKER`].
 
-pub use mvm_builder_guest::builder_boot::*;
+pub use mvm_builder_guest::builder_boot::{
+    BootAbiError, IMAGE_ABI_MARKER, PAYLOAD_CMDLINE_KEY, PAYLOAD_DIR_IN_INITRAMFS,
+    PAYLOAD_MANIFEST_NAME, RUNTIME_HOST_BIN_DIR, STAGE_ENV, STAGE1_MEMBER, STAGE2, abi,
+    baked_only_abis, check_image_abi, guest_host_binary, guest_host_binary_sh,
+    parse_image_abi_marker, payload_supported_abis,
+};
+#[cfg(unix)]
+pub use mvm_builder_guest::builder_boot::{
+    BootPayloadError, BuilderBoot, BuilderBootPayload, BuilderBootPayloadBuilder,
+    LIBKRUN_BUILDER_CONSOLE_BASE, PayloadDigest, PayloadManifest, Stage1Cmdline,
+    Stage1CmdlineError, builder_boot_cmdline, cmdline, install_payload, parse_stage1_cmdline,
+    payload, verify_unpacked_payload,
+};
 
 #[cfg(unix)]
 pub mod stage;

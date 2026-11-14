@@ -67,6 +67,45 @@ The test is whether cargo resolves the crate through `[patch.crates-io]`
 (`third_party/`) or as a workspace member (`crates/deps/`). Do not move either
 without checking the workflows that name those paths.
 
+Every entry, with what it keeps and why it exists:
+
+| Entry | Obligations retained | Reason / exit |
+| --- | --- | --- |
+| `am-fs-ext4` | `LICENSE` (MIT), `MVM-PROVENANCE.md` | Test-only ext4 reader for `mvm-fs`; one change (unused modules removed). Exit: an upstream release carrying the portability fix. |
+| `arrayref` | `LICENSE`, `ORIGIN.toml` (revision and file digests) | Registry releases yanked; pins reviewed 0.3.9 for BLAKE3. Exit: registry package restored. |
+| `gix-0.87.1`, `gix-object-0.64.1` | `LICENSE-MIT`, `LICENSE-APACHE`, `gitoxide-cache-patches.md` (archive digests, upstream revisions) | Drops two performance-only caches without losing attributes, excludes, SHA-1 or signing. |
+| `notify-8.2.0`, `io-extras-0.19.0` | Original license files (CC0 / `COPYRIGHT` and MIT/Apache), `windows-sys-range-patches.md` (digests, revisions) | Admit the already-locked `windows-sys` without replacing either crate. Exit: upstream range bump. |
+
+Consumers outside `Cargo.toml` that name these paths and so must change
+together with any move: `nix/lib/workspace-filter.nix`,
+`tests/supply_chain_dependency_pin.rs`, `xtask` (`check-forbidden-deps`,
+`check-workflow-paths`, `check-rust-footprint`, `check-root-layout`), the
+fuzz manifests under `crates/*/fuzz*/`, and the inventory generators in
+`scripts/`. For `crates/deps/`: `xtask` (`check-single-home`,
+`check-workspace-dep-inheritance`, `check-no-virtio-fs`), `tests/release_assets.rs`,
+`just/release/mod.just` and the SDK packaging scripts. Nothing in either
+directory is unused, so nothing is removed.
+
+## `specs/`, `schema/`, `assets/`, `model/`
+
+Each has one owner and stays at the root, because tools address it by
+path rather than by search:
+
+- `specs/` is durable decisions and contracts only (policy in
+  `specs/README.md`); work status lives in GitHub issues. Read by
+  `check-adr-coverage`, `check-spec-hygiene`, `check-claim-catalog` and
+  `check-witness-citations`.
+- `schema/` is the checked-in output and input of the SDK-surface and stub
+  generators (`xtask/src/gen_sdk_surface.rs`, `gen_stubs.rs`), read by the
+  `mvm-conformance` steps and `nix/lib/workspace-filter.nix`, so Nix source
+  filtering would break if it moved.
+- `model/` is the conformance register, read by `check-conformance` and
+  `check-claim-catalog`; `CONFORMANCE.md` is generated from it.
+- `assets/` holds only the two entitlement plists, embedded by `build.rs`
+  and read by `install.sh`, `tests/install_sh.rs` and
+  `scripts/installer-compat/`. Installer and release paths are pinned, so it
+  is not folded into `scripts/`.
+
 ## `nix/` by role
 
 The Linux image layer (kernels, base root filesystems, builder image, Stage 0
@@ -83,6 +122,19 @@ still being decided it is listed as such.
 | Host operations | `ops/` (bootstrap, systemd, Hetzner runners, permissions) | Scripts that mutate host state live here by rule; referenced by `workspace-shard.yml`. |
 | Examples | `examples/` | Referenced by docs and example tests. |
 | Flake entry | `flake.nix`, `flake.lock` | The library flake that workload flakes import. |
+
+`packages/` by file, each verified to have a consumer (none is unreferenced,
+so none is removed): `mvmctl.nix` and the three `mvm-core-tpm2*.nix` files
+are the host and TPM2 variants exported by `nix/flake.nix`; `libkrun.nix`,
+`libkrunfw.nix` and `embedded-rust-toolchain.nix` are wired from
+`packages/default.nix` and pinned by `xtask check-kernel-pin-freshness` and
+`scripts/check-cargo-toolchain.sh`; `guest.nix` assembles the guest-side set
+(`mvm-guest-agent*.nix`, `mvm-runner.nix`, `mvm-setpriv.nix`,
+`mvm-gpu-shims.nix`, `mvm-sdk-cdylib.nix`, `mvm-egress-client.nix`,
+`mvm-addon-dns.nix`, `mvm-exit-report.nix`) using `workspace-unpack.nix`;
+`mvm-audit-probe.nix` is called directly by `lib/mk-guest.nix`. The guest set is the part that feeds mvm-images'
+`mvm` input until its side of the boundary lands, so it moves only with that
+change.
 
 ## Where things are checked
 

@@ -459,3 +459,100 @@ protected payload is absent from plaintext managed artifacts and audit labels,
 that permitted operational metadata remains usable, and that loss and intentional
 removal cannot be mistaken for complete capture. Permission-only tests cannot
 stand in for encryption or retention tests.
+
+## Telemetry and audit review of the cleanup campaign
+
+Review of every merged pull request whose title carries `#4839` (86 as of 2026-11-13), asked the same question each time: did the change delete or refactor tracing, telemetry, redaction, correlation, bounded-resource or shutdown behavior, or a signed-audit guarantee, and if so is the behavior retained. The earlier pass over the first 33 pull requests (its witnesses live in git tag `specs-archive-2026-11-02` and PR 4977) was redone here from the diffs, not copied.
+
+Method: `gh pr diff` per pull request; code lines (comments excluded) filtered for `tracing::`, span, OTLP, observability, audit, redact, emit, log macros and `eprintln!`; every pull request that adds or removes such a line, or moves a file that holds them, was read in full. Added and removed telemetry-bearing lines were compared as multisets so a pure move reads as zero net change. Every witness named below was checked with `rg 'fn <name>'`.
+
+Result: no pull request removed a bounded queue, a redaction step, a correlation identifier, a shutdown path or a signed-audit emission. Two changes are not pure retentions and are stated in their rows: 4935 (third-party `log` records no longer forwarded, accepted at the time) and 4964 (the literal `DEFAULT_FILTER` value is no longer pinned by a test). 4968 relaxes a boot admission check and touches no emitter. The runtime telemetry gaps tracked by the open issues and the telemetry binaries inventory are unchanged by any of these pull requests. A pull request that mentions `#4839` only in its body is outside this set.
+
+| PR | Telemetry or audit surface touched | Verdict | Witness |
+|---|---|---|---|
+| 4884 | none | Retained | - |
+| 4888 | none | Retained | - |
+| 4919 | none | Retained | - |
+| 4925 | none | Retained | - |
+| 4932 | none | Retained | - |
+| 4934 | none | Retained | - |
+| 4936 | Generator script for the spawn inventory; no runtime code | Retained | - |
+| 4937 | Local sha256/hex helpers replaced by `mvm_contract::hash::sha256_hex` and `hex::encode`, including digests feeding signed or audited values | Retained: same lowercase two-digit hex of the same bytes | `sha256_hex_matches_the_standard_encoding` |
+| 4935 | `tracing-subscriber` built without default `tracing-log` | Changed, accepted and documented: third-party `log::` records (rustls, mio) no longer reach the subscriber. No first-party `log::` use remains; spans, OTLP export, correlation and redaction are `tracing`-only and untouched | `a_full_queue_drops_the_span_and_counts_it_without_blocking` |
+| 4939 | none | Retained | - |
+| 4945 | none | Retained | - |
+| 4946 | none | Retained | - |
+| 4947 | none | Retained | - |
+| 4948 | none | Retained | - |
+| 4950 | Comment-only edits in mvm-cli | Retained | - |
+| 4952 | Comment-only edits in mvm-agentd | Retained | - |
+| 4953 | Comment-only edits in mvm-sdk | Retained | - |
+| 4954 | Comment-only edits in `audit/merkle.rs`, `supervisor/audit_file.rs` and other hostd files | Retained | - |
+| 4955 | Comment-only edits in mvm-runtime | Retained | - |
+| 4956 | Comment-only edits in mvm-vmm | Retained | - |
+| 4958 | none | Retained | - |
+| 4959 | none | Retained | - |
+| 4963 | Audit evidence completeness requires each leaf exactly once | Retained, tightened (mandatory signed-audit guarantee strengthened) | `a_leaf_listed_twice_in_place_of_another_fails_completeness_despite_equal_count` |
+| 4964 | Deleted constant-restating tests, including `default_filter_keeps_mvm_at_info` (pinned the literal `mvm=info,warn`), `filter_default_covers_mvm_targets_at_trace`, `default_capacity_constant_is_documented_value` and a source-text scan in `input_gate.rs` | Retained at runtime. Changed in coverage: no test now pins the literal value of the CLI `DEFAULT_FILTER`; `observability_config_uses_the_workspace_filter_by_default` compares the config to the constant itself, so an edit of the literal would pass. Minor, listed for honesty. The deleted scan guarded a plaintext secret type that no longer exists; the fingerprint path is compiler-enforced | `observability_config_uses_the_workspace_filter_by_default` |
+| 4944 | Generator script for the CLI surface inventory | Retained | - |
+| 4965 | Claims ledger citations only (`model/claims.toml`) | Retained | - |
+| 4968 | HVF startup admission: a kernel descriptor alone (no frozen images, no caller registration) is now a legacy canonical-kernel boot instead of an error | Changed, not a telemetry or audit emitter: no emission was removed. Frozen-image boots still require a consumed caller registration; a kernel-only boot runs the pre-existing legacy startup, which carries no protected-capture registration (as for any legacy boot) | `frozen_images_cannot_substitute_for_consumed_caller_admission` |
+| 4970 | Claims ledger citations for claim 8 admission | Retained | - |
+| 4972 | `images.lock` unread pin removal | Retained | - |
+| 4974 | Claim 7 statement narrowed to nightly and release-tag audits | Changed: claim text corrected to what the workflow runs; this is a dependency audit, not the audit log | - |
+| 4973 | Unrecognised `--hypervisor` refused; aliases removed | Retained | `require_hypervisor_selectable_refuses_an_unrecognised_name` |
+| 4966 | Removed hidden CLI aliases; one caller-identity test narrowed from show+status to show | Retained | `caller_identity_show_does_not_create_state` |
+| 4975 | BDD suite fixture and docs ledger | Retained | - |
+| 4976 | none | Retained | - |
+| 4977 | The earlier telemetry review itself (ledger doc only) | Retained | - |
+| 4981 | Test of unprepared-initramfs refusal | Retained | `a_launch_with_an_unprepared_initramfs_refuses_naming_bootstrap_without_a_connection` |
+| 4979 | xtask footprint measurement | Retained | - |
+| 4985 | Chrono feature narrowing (build-only) | Retained | - |
+| 4988 | none | Retained | - |
+| 4987 | Visibility narrowing; `audit.rs` emit and build helpers `pub` to `pub(super)`; no body changes | Retained | - |
+| 4989 | Cleanup failures that were silently discarded now log `tracing::warn!` (paused Firecracker restore teardown, idle-pool claim rollback, transient-VM Ctrl-C stop, builder teardown) | Retained, strengthened: more failure messages, none removed | - |
+| 4990 | CI wiring for the spawn inventory | Retained | - |
+| 4991 | libkrun/QEMU boot refuses when a stale pid file cannot be removed | Retained: new refusal, no telemetry removed | `a_marker_that_cannot_be_removed_refuses_the_boot` |
+| 4992 | Five production `unwrap` invariants moved into types | Retained | - |
+| 4996 | none | Retained | - |
+| 4995 | none | Retained | - |
+| 4993 | Safety comments on unsafe blocks | Retained | - |
+| 5008 | Visibility narrowing (agentd, fs, hostlib, vmm) | Retained | - |
+| 5015 | Visibility narrowing; `protected_inventory`, `protected_retention` and `UnauditedAnchor` become `pub(crate)`; signatures unchanged | Retained | - |
+| 5040 | Removed the `broker::control` forwarding module | Retained | - |
+| 5041 | none | Retained | - |
+| 5043 | Visibility narrowing (xtask, conformance, stragglers) | Retained | - |
+| 5044 | none | Retained | - |
+| 5045 | hostd consolidation: audit emitter event modules folded into `events.rs`; `supervisor::audit_set` and `audit_segment` forwarding shims deleted in favor of `mvm_core::audit_verify`; telemetry-handshake signing moved inline into `helper_client.rs`. Add/remove line multisets match apart from paths and `mod` lines | Retained: bodies moved intact, including the nonzero-and-at-most-30-second deadline on `sign_telemetry_handshake` | `naively_dropping_old_entries_fails_verification_at_line_zero` (import paths only changed) |
+| 5046 | Removed the `driver::spec` forwarding module | Retained | - |
+| 5049 | One host-authority CI gate script | Retained | - |
+| 5147 | Replaced self-asserting and source-text tests with outcome tests | Retained | `the_python_wrapper_honours_its_config_and_reports_failures_as_envelopes` |
+| 5143 | Claims ledger witness audit | Retained | - |
+| 5165 | none | Retained | - |
+| 5169 | Deleted the retired guest-side `mvm-egress-proxy` binary and library module, including its stderr ALLOW/DENY lines, and its `non-runtime` entry in the telemetry binaries inventory | Retained: no host-side emitter lost. The egress decision point and its audit are the host `EgressGate`; the deleted proxy was already recorded as launched by nothing, and its stderr lines were never signed audit | xtask `check-single-network-path` (a gate, not a test) |
+| 5164 | xtask history-comment gate; comment-only edits across crates | Retained | - |
+| 5168 | Secret audit emit now runs through `block_on_anywhere` instead of building a private runtime; failure `tracing::warn!` kept for both failure modes. Lock `expect`s replaced by poison-tolerant `lock` | Retained, strengthened: the emit used to panic when reached from inside a runtime | `recorder_dual_emit_works_from_inside_a_current_thread_runtime`, `recorder_dual_emit_works_from_inside_a_multi_thread_runtime` |
+| 5174 | Tests that witness preserved properties: data-plane saturation still admits control, hello grants, audit receipt archive and export | Retained | `a_saturated_data_plane_refuses_data_requests_and_still_admits_control`, `a_hello_ack_grants_only_what_was_asked_for` |
+| 5198 | none | Retained | - |
+| 5203 | Deleted unreferenced Firecracker `diagnose_vm`, `list_vms`, `stop_all_vms`, `read_reserved_slot` and `build_verity_cmdline_args`, with three `warn!` calls on PID and machine-config parse failures inside them | Retained: no reference to any deleted name remains in `crates/`, so no emission path existed | - |
+| 5202 | Dropped two tests that guarded nothing; early-mount and Stage 0 drive checks rewritten as data | Retained | - |
+| 5204 | Deleted pub items with no caller (no telemetry or audit symbols) | Retained | - |
+| 5205 | One shell-quote helper and one unix-seconds helper (`mvm_core::util::time::now_unix_secs`) | Retained: identical saturate-to-zero semantics, including the hostd `health_probe` and `stream/plane` callers | - |
+| 5208 | Dropped a caller-less hvf `vms_root` wrapper | Retained | - |
+| 5163 | Spawn disposition classification; secret source CLI reads moved to `mvm_core::bounded_run::run_bounded` with the same stdout cap (`MAX_SOURCE_BYTES + 1`), 4096-byte stderr cap and timeout, plus continued draining | Retained: bounded output and kill-on-timeout preserved | `a_tool_that_outlives_the_bound_is_killed_with_a_typed_error`, `ten_megabytes_of_output_is_kept_only_up_to_the_cap` |
+| 5209 | Dropped the `MVM_BACKEND` env alias | Retained | - |
+| 5210 | Dropped `vcpus` and `lima_status` aliases | Retained | - |
+| 5240 | none | Retained | - |
+| 5349 | One launch-config stdin reader for the daemon bins, including `mvm-audit-signer`; error text still reads `<bin> stdin read failed` | Retained: same message text per binary | - |
+| 5351 | none | Retained | - |
+| 5352 | Unproven `expect`/`unwrap` replaced by typed errors; instruction-trust `Verdict::Unsigned` is the typed fallback; explain refuses a plan with no audit entries | Retained: the unreachable fallbacks fail closed (`Unsigned` is not `Verified`) and the instruction-trust audit mapping is unchanged | `a_file_with_no_sidecar_is_unsigned` |
+| 5359 | One `sha256_file` and one deps `read_manifest` | Retained | - |
+| 5347 | none | Retained | - |
+| 5355 | Outcome tests for macOS loader-path scripts | Retained | - |
+| 5364 | Comment only | Retained | - |
+| 5362 | Removed root `build.rs` that set an unread env var | Retained | - |
+| 5383 | none | Retained | - |
+| 5385 | Persistent-builder pid and kernel cache fixes | Retained | `a_zero_supervisor_pid_is_not_alive` |
+| 5388 | Refuse unsignalable pids read from pid files | Retained | `parse_refuses_pids_that_must_never_be_signalled` |
+| 5390 | FlowMux: UDP open slot released on refusal, unsolicited datagrams no longer count as guest activity, stream-id arithmetic saturates, dead credit helper removed. Existing `warn!` on UDP open failure kept | Retained, strengthened: tighter bounded-resource and idle accounting, no loss or audit path removed | `unsolicited_datagrams_do_not_keep_an_idle_association_open`, `a_peer_chosen_id_at_the_top_of_the_range_is_recorded_without_overflow` |
+| 5395 | One signalable-pid rule shared by pid-file readers and recorded session pids | Retained | `a_pid_that_cannot_name_one_supervisor_is_not_signalable` |

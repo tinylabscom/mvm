@@ -1,7 +1,8 @@
 //! `xtask check-no-spec-refs-in-comments`
 //!
 //! Implementation-process references — a plan, PR, sprint, ADR, or
-//! workstream by number — are scaffolding from the build process. They
+//! workstream by number (including `PS-NN`, `W<n>` and `Phase <n>` labels,
+//! but not a `Phase 1:` step label) — are scaffolding from the build process. They
 //! belong in `specs/`, commit messages, and PR descriptions, never in
 //! shipped source comments, where they age into noise the moment the
 //! plan merges. This lint keeps them out: it extracts COMMENT text only
@@ -26,7 +27,7 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
     let token = canonical_regex();
     let mut hits: Vec<String> = Vec::new();
 
-    for root in ["crates", "xtask", "nix", "src", "scripts"] {
+    for root in ["crates", "xtask", "nix", "src", "scripts", "tests"] {
         crate::fs_walk::walk_files(&workspace.join(root), &mut |path| {
             scan_file(workspace, path, &token, &mut hits);
         })?;
@@ -58,7 +59,7 @@ fn canonical_regex() -> Regex {
         | \bW\d+\.[A-Z0-9]
         | \b[Ss]print\ \d+
         | \bPR\ \#?\d+
-        | \#\d{2,}
+        | \#\d{2,} | \bPS-\d+ | \bW\d+\b | \b[Pp]hase\ \d+[a-z]?(?:[^:\w]|$)
         ",
     )
     .expect("canonical token regex is valid")

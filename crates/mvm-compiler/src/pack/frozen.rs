@@ -101,7 +101,9 @@ struct Resolved {
 /// independent of what the copies select.
 fn resolve(input: &PackInput<'_>, staging: &Path) -> Result<Resolved, PackError> {
     let mut workload = lower(input.spec)?;
-    let PackSource::Local { path } = &input.spec.source;
+    let PackSource::Local { path } = &input.spec.source else {
+        return Err(PackError::YoctoSourceNotNix);
+    };
     let root = contained_source_root(input.spec_dir, path)?;
     let snapshot_dir = staging.join("snapshot");
     std::fs::create_dir_all(&snapshot_dir).map_err(PackError::Staging)?;

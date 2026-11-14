@@ -20,9 +20,6 @@ pub mod source_closure;
 mod source_copy;
 pub mod workspace_graph;
 
-#[cfg(all(test, unix))]
-mod test_support;
-
 /// Portable image-contract verification; acquisition requires a Unix host.
 #[cfg(not(unix))]
 pub mod published_image_set {
@@ -297,6 +294,9 @@ pub mod sdk_sidecar;
 /// verifications, keyed on the exact filesystem state they describe.
 #[cfg(unix)]
 mod source_stamp;
+/// Pinned Yocto workload image inputs and safe rootfs archive staging.
+#[cfg(unix)]
+pub mod yocto;
 
 // Legacy re-exports — preserve `mvm_build::build::*`, `mvm_build::scripts::*`, etc.
 #[cfg(unix)]

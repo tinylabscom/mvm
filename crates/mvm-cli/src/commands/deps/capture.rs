@@ -10,8 +10,8 @@
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use clap::Args as ClapArgs;
+use mvm_core::crypto::image_verify::sha256_file;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 use mvm_build::app_deps::{GateLevel, Language, derive_lockfile_hash};
@@ -21,7 +21,7 @@ use mvm_core::deps_audit::{
 };
 use mvm_sdk::ir::{Dependencies, NodeTool, PythonTool};
 
-use super::audit::{copy_dir_recursive, refresh_index_pointer};
+use super::audit::{copy_dir_recursive, read_manifest, refresh_index_pointer};
 
 /// Arguments for importing a dependency tree captured from a development
 /// sandbox. The sidecars must come from the same capture as the content.
@@ -284,7 +284,8 @@ fn build_declaration(manifest: &VolumeManifest, lockfile: &Path) -> Result<Depen
     require_file(lockfile, "lockfile")?;
     let expected_sha256 = annotation(&manifest.annotations, "lockfile_sha256")?;
     validate_hash(expected_sha256, "lockfile SHA-256")?;
-    let actual_sha256 = sha256_file(lockfile)?;
+    let actual_sha256 =
+        sha256_file(lockfile).with_context(|| format!("reading {}", lockfile.display()))?;
     if actual_sha256 != expected_sha256 {
         bail!(
             "lockfile {} does not match sealed SHA-256: expected {}, got {}",
@@ -403,17 +404,6 @@ fn write_declaration(path: &Path, declaration: &Dependencies) -> Result<()> {
         let _ = std::fs::remove_file(&temporary);
     }
     result
-}
-
-fn sha256_file(path: &Path) -> Result<String> {
-    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    Ok(hex::encode(Sha256::digest(bytes)))
-}
-
-fn read_manifest(volume_dir: &Path) -> Result<VolumeManifest> {
-    let path = volume_dir.join(FILE_MANIFEST);
-    let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-    serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
 }
 
 fn scratch_dir(cache_root: &Path, prior_hash: &str) -> Result<PathBuf> {

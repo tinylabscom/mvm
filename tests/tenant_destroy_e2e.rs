@@ -1,4 +1,4 @@
-//! Plan 60 Phase 7a end-to-end: the operator/auditor pipeline.
+//! End-to-end: the operator/auditor pipeline.
 //!
 //! Drives the full Slice A + D shape as one cohesive test:
 //!

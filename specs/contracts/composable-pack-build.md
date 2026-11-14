@@ -211,6 +211,17 @@ consumer cannot verify them, it must refuse production.
   only narrow. Check the signed application ceiling and intersect the request
   with host-authorized grants at admission; a pack's request never grants itself
   access. The host remains the authority for actual grants and secret values.
+  Fold the authenticated component and application policies as **requests and
+  limits**: union their requested allows and denies, keep a true block binding,
+  take the narrowest ceiling, and intersect secret destinations. An invocation
+  can request additional effects, but cannot undo those signed constraints.
+  Resolve host-owner grants separately, using their existing per-dimension
+  source precedence only to choose a grant source, never to discard a signed
+  deny or ceiling. The effective permission is the requested effect intersected
+  with host-authorized grants and every signed limit, minus every deny.
+  Preserve layer provenance in the signed plan and refuse an ungranted request
+  at admission, including on a cache hit. This is the production composition
+  requirement, not a guarantee that the cross-component merge is shipped.
 - Neither development nor production has a guest NIC, SSH, port forwarding,
   guest NAT or a network fallback. Any permitted egress uses the authenticated
   host-mediated FlowMux path. Development may request a user-authorized
@@ -222,6 +233,32 @@ consumer cannot verify them, it must refuse production.
   bytes. A registry descriptor separately pins that exact archive. Runtime
   layers can be cached and reused while building, but the recipient need not
   have those layers in its cache to run the final archive.
+
+## Production launch and latency acceptance
+
+This is an owner-approved **requirement**, not a shipped composable production
+launch or a measured speed claim. Under [ADR-037](../adrs/037-mvmd-only-production-launch.md),
+only an authenticated `mvmd` request can initiate production. Local `mvmctl`
+builds and previews remain development operations, including when they inspect
+a production-shaped archive.
+
+For the first x86_64 Linux/KVM/Firecracker production witness, time from
+receipt of the authenticated launch request at the host through fresh bundle,
+component, base and revocation verification, effective-policy and signed-plan
+admission, backend start or immutable claim, and guest readiness for the
+admitted entrypoint. Report coordinator/API transit separately. Pre-acquisition
+and first-use publication/assembly have their own measured phases; separating
+them does not move per-attempt authorization out of the launch window. A cache
+hit reuses verified bytes, never authorization. A failed warm claim is a refusal
+or a cold sample, not a successful warm sample.
+
+The production acceptance targets remain cold <300 ms and warm <50 ms,
+including admission, with the existing sample floor and per-sample startup
+checks in the [performance reference](../../public/src/content/docs/reference/performance.md).
+That page's current `prepared_cold_artifact` dispatch lane reports full bundle
+verification separately and does not by itself witness this stricter production
+invocation-to-readiness contract. A new measured production lane and
+backend-specific live evidence are required before claiming either target.
 
 ## Missing pieces
 
@@ -373,9 +410,10 @@ release from source-only tests.
   Linux execution boundary. The emulated x86_64 build needed Nix's inner
   syscall filter disabled for local validation; neither Docker build is
   release reproduction or boot evidence.
-- Requested egress composition and host grant semantics have conflicting
-  descriptions in the pack ADR, PRD and merge guide. The effective policy
-  needs one tested, signed, fail-closed rule before production composition.
+- The owner-approved request/grant rule above still needs cross-repository
+  contract alignment and layer-to-layer tests. The pack ADR, PRD and policy
+  merge guide must not be treated as a shipped cross-component guarantee until
+  one signed, fail-closed implementation passes those vectors at admission.
 - The spike determines whether a pinned, signature-verified OCI Python
   userspace is both faster and smaller enough than the current Nix closure.
   Native Claude payload redistribution is a separate permission and

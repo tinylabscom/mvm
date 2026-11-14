@@ -21,18 +21,33 @@ pub mod runtime_artifacts;
 pub mod snapshot;
 pub mod snapshot_decode;
 
-pub use capabilities::*;
-pub use control::*;
-pub use daemon::*;
-pub use fc_api::*;
-pub use fork_devices::*;
-pub use guards::*;
-pub use host::*;
-pub use io::*;
-pub use lifecycle::*;
-pub use observe::*;
+pub use capabilities::{FcCapabilities, running_version};
+pub use control::{balloon_set_target, balloon_state, pause_vm, resume_vm, stop_vm};
+pub use daemon::{
+    adopt_api_socket, api_put_session, api_put_socket, api_session, read_firecracker_pid,
+    secure_restored_vsock_socket, secure_vsock_socket_for_caller, start_vm_firecracker,
+    start_vm_firecracker_bounded, vm_console_log_path,
+};
+pub(crate) use daemon::{
+    spawn_scope_prefix, start_idle_firecracker, start_vm_firecracker_scoped_with_handoff,
+    validate_required_scope,
+};
+pub use fc_api::{FcResponse, FcSession, call};
+pub use fork_devices::ForkDevices;
+pub use guards::{FirecrackerGuard, SlotReservationGuard};
+pub use host::{
+    FC_VMSTATE_FILENAME, FcForkRestorer, FcVmFullControl, download_assets, has_base_assets,
+    has_kernel, has_squashfs, install, is_firecracker_for_socket, is_firecracker_pid_running,
+    is_installed, is_running, is_vm_running, prepare_rootfs, validate_rootfs_squashfs, write_state,
+};
+pub use io::{FirecrackerIO, RestoreBound};
+pub use lifecycle::{start, stop};
+pub use observe::allocate_slot;
 pub use runtime_artifacts::ForkRuntimeEvidence;
-pub use snapshot::*;
+pub use snapshot::{
+    RestoredDeviceModel, assert_vsock_only_device_model, create_snapshot_files,
+    warm_restore_instance, warm_restore_instance_from_path,
+};
 pub use snapshot_decode::UndecodableSnapshot;
 
 use std::path::{Path, PathBuf};

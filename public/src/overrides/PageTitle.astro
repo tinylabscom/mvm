@@ -44,9 +44,9 @@ const eyebrow =
   Astro.url.pathname.replace(/^\/+|\/+$/g, "").split("/")[0];
 ---
 
-{eyebrow && <p class="docs-eyebrow">{eyebrow}</p>}
+{eyebrow && Astro.url.pathname !== "/docs/" && <p class="docs-eyebrow">{eyebrow}</p>}
 <Default />
-{description && <p class="docs-description">{description}</p>}
+{description && Astro.url.pathname !== "/docs/" && <p class="docs-description">{description}</p>}
 
 <style>
   .docs-eyebrow {

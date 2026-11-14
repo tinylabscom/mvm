@@ -62,7 +62,7 @@ pub trait EgressEnforcer: Send + Sync {
     /// is the admitted egress policy (its `Default` is `deny_all()`); the
     /// firewall layer installs a fixed default-deny regardless, so the
     /// policy's allow-rules are the L4/L7 layer's job — `policy` is
-    /// threaded now so that widening doesn't change the signature.
+    /// threaded through so that widening does not change the signature.
     fn enforce(
         &self,
         wiring: &EgressWiring,

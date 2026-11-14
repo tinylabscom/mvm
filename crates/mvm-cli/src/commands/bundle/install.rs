@@ -248,6 +248,10 @@ pub(in crate::commands) fn settle_manifest_archive(
     let verify_started = std::time::Instant::now();
     let verified = verify_bundle_file(loaded.path(), &trust)
         .with_context(|| format!("verifying bundle archive {arg}"))?;
+    mvm_core::plan::bundle::require_composable_local_enrollment(
+        &verified.manifest,
+        &FsTrustStore::default_path()?,
+    )?;
     let origin = bundle_origin(&verified.manifest, &host_key_id, trust.release());
     match origin {
         BundleOrigin::LocalBuild => {
@@ -395,6 +399,17 @@ mod tests {
                 home,
                 key,
             }
+        }
+
+        fn enroll_host_key(&self) {
+            let signer = HostBundleSigner::load().expect("host signer");
+            let trust = self.home.path().join("trusted-publishers");
+            std::fs::create_dir_all(&trust).expect("trust store");
+            std::fs::write(
+                trust.join(format!("{}.pub", signer.key_id().0)),
+                signer.verifying_key().to_bytes(),
+            )
+            .expect("enroll host key");
         }
 
         /// A signed kernel + rootfs bundle for this host's arch, written to
@@ -633,13 +648,18 @@ mod tests {
     }
 
     #[test]
-    fn a_local_build_signed_by_this_host_runs_without_publisher_enrollment() {
+    fn a_schema_eight_local_build_requires_explicit_host_enrollment() {
         let host = Host::new(false);
         let (_dir, path, bytes) = host.host_archive(true);
 
+        let (original, rejected) = settle(&path, false);
+        assert!(format!("{:#}", rejected.unwrap_err()).contains("trust store has no entry"));
+        assert_eq!(original, Some(path.display().to_string()));
+        assert!(host.installed().is_empty());
+        host.enroll_host_key();
         let (manifest, result) = settle(&path, false);
 
-        result.expect("this host's labeled local build is admissible for a development run");
+        result.expect("an explicitly enrolled host-signed local build admits in development");
         assert_eq!(manifest, Some(bundle_sha256(&bytes)));
         assert_eq!(host.installed().len(), 1);
     }
@@ -649,6 +669,7 @@ mod tests {
         let host = Host::new(false);
         let (_dir, path, _) = host.host_archive(true);
         let mut manifest = Some(path.display().to_string());
+        host.enroll_host_key();
 
         let error = settle_manifest_archive(&mut manifest, false, true)
             .expect_err("production must reject a local build");

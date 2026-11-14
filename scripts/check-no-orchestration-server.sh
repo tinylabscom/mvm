@@ -94,7 +94,6 @@ candidates=$(rg \
   --glob '!**/examples/**' \
   --glob '!**/fuzz/**' \
   --glob '!crates/mvm-build/src/egress_proxy/**' \
-  --glob '!crates/mvm-cli/src/commands/shared/vsock.rs' \
   --glob '!crates/mvm-cli/src/commands/vm/forward.rs' \
   --glob '!crates/mvm-cli/src/commands/vm/display.rs' \
   --glob '!crates/mvm-cli/src/metrics_server.rs' \

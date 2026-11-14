@@ -15,6 +15,71 @@ tenant lifecycle and tenant policy authoring/review remain `mvmd`
 responsibilities. `mvmctl policy` covers only a workload's own authored
 policy, resolved on this host.
 
+### CLI option sources
+
+CLI **options** can be supplied by an explicit flag, an
+environment variable, or an ordered `--config-file PATH` (repeat the flag to
+load multiple files). This is an opt-in, invocation-scoped option file, **not**
+the project `mvm.toml` manifest or the persistent host
+`$MVM_HOME/config/config.toml`. It follows those files' TOML table convention;
+the same keys also work in JSON objects. `PATH` may be relative to the current
+working directory or absolute. No file is loaded automatically.
+Only the command written on the command line runs: a file cannot select a
+command. Tables for other commands are checked for valid keys but not applied.
+Path-valued options retain the CLI's ordinary path resolution; they are not
+rebased to the option file's directory.
+
+```toml
+# opts.toml
+[global]
+log-format = "json"
+verbose = 1
+
+[commands.machine.run]
+profile = "restrictive"
+allow-host = ["api.example.org:443"]
+net = false
+```
+
+```json
+{
+  "global": { "log-format": "json", "verbose": 1 },
+  "commands": { "machine": { "run": {
+    "profile": "restrictive",
+    "allow-host": ["api.example.org:443"],
+    "net": false
+  } } }
+}
+```
+
+For `machine run`, for example, `MVMCTL_MACHINE_RUN_PROFILE=restrictive` sets
+`--profile`; `MVMCTL_LOG_FORMAT=json` sets a global option. Replace hyphens
+with underscores and uppercase each command/option segment. An environment
+variable for a repeatable option holds one value or a JSON array of values
+(for example, `MVMCTL_MACHINE_RUN_ALLOW_HOST='["a.example","b.example"]'`).
+The `--config-file` bootstrap option itself is deliberately command-line only;
+files cannot recursively include other files. `--help` and `--version` are
+immediate display controls, not configurable runtime options.
+
+Scalars use **explicit flag > last configuration file naming that option >
+environment**. A boolean is a JSON/TOML boolean or `true`/`false` (`1`/`0`)
+in the environment; `false` cancels a lower-priority `true` without creating a
+negative spelling for a positive-only flag. A count option such as `--verbose`
+uses a nonnegative integer in a file/environment; counts **add** across
+sources, as do repeated explicit flags (Clap saturates counts at 255).
+Repeatable values use arrays in files
+and **append** environment values, then values from each file in order, then
+explicit flags. An empty array adds nothing; it does not erase prior entries.
+CLI flag aliases count as explicit uses of the canonical option, while files
+and environment use the canonical long name only (or the kebab-case option
+identifier for a short-only flag). Different options that Clap declares
+conflicting are rejected even when they come from different sources; precedence
+only replaces values of the **same** scalar option. Unknown keys, wrong types,
+unknown commands, and Clap-invalid values/conflicts are errors. A
+file does not grant authority: resolved requests still go through the same
+policy, signed-plan, and backend admission checks, where host ceilings and
+denials remain binding.
+
 **Command grouping (Plan 178).** The surface is organized into a small set
 of top-level daily-driver verbs plus noun groups; operations on a single
 running VM are flattened into `machine`, contributor build-time verbs under `dev`, observability
@@ -85,7 +150,7 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine stop [name...]`                                                                                         | Stop one or more VMs by name, or `--all`. Stopping a machine that is already stopped reports it and exits 0                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `mvmctl machine exec <name> -- <cmd>...` | Run a command on a running machine and return its exit code. A nonzero guest exit is recorded as a completed, failed input, so later execs and checkpoints remain available. If the client dies before receiving a result, the original machine remains blocked: do not retry an operation whose effects are unknown. Restore a `vm_full` checkpoint captured before that input into a **fresh** machine with `mvmctl machine restore`; without one, there is no safe continuation of the old machine. |
 | `mvmctl machine quarantine <name> [--reason <text>]` | Contain a suspect workload: record the quarantine first so it cannot launch again, then stop it. Only that workload is affected; the reason is written to the chain-signed audit log as `workload.quarantined`. If the stop fails the workload stays quarantined and the error says so |
-| `mvmctl machine replace <name>` | Authorize a quarantined workload's replacement under a strictly newer execution epoch, recorded as `workload.replaced`. The old epoch stays dead; start the machine again with `machine start` afterwards |
+| `mvmctl machine replace <name>` | Authorize a quarantined workload's replacement under a strictly newer execution epoch, recorded as `workload.replaced`. Refused while the machine runs; works after `machine stop` or `quarantine`, from the ledger alone. The old epoch stays dead; start the machine again with `machine start` afterwards |
 | `mvmctl machine mailbox recv <name>` | Print the oldest message the granted guest sent to its mailbox, to stdout, and remove it from the queue; an empty queue prints nothing and exits 0. Reads the per-VM mailbox socket, which only the owning user can reach. Each message taken is recorded as a chain-signed `mailbox.read` entry carrying the machine name, the message's byte length and the queue's accepted and read counts, never the message; a read whose entry cannot be written is refused. Deliveries are audited when read, not as they arrive. Firecracker machines with a mailbox grant only |
 | `mvmctl machine ps`                                                                                                     | List every microVM: persistent machines and running transients (alias: `ls`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `mvmctl machine ps -a`                                                                                                  | Also show transient machines that are no longer running                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
@@ -233,6 +298,7 @@ refused before any output is written.
 | `mvmctl build app.py --from sdk`                                    | Compile one statically declared SDK app, build its generated flake, and export the result as a local archive                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `mvmctl build ghcr.io/acme/app:v1 --from image`                     | Materialize an OCI image for this host architecture and export it as a local archive; `--arch`, `--production`, and `--debug-out FILE.json` are image-only controls, and production requires a digest-pinned reference                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `mvmctl build PACK.json --health-timeout SECONDS`                   | Build and health-check a locked pack spec before signing; `--lock`, `--hypervisor`, and `--input-observation` are pack-only controls                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `mvmctl build PACK.json --out FILE.mvmpkg` | Build a pack with the producer declared by `source.kind` in the spec. For `yocto`, `source.archive` and `source.inputs` are normalized paths relative to the spec; the separately pinned inputs document binds the machine, layers and archive SHA-256. Yocto sources have no packages, dependencies or copy operations; `--lock` and `--input-observation` apply only to Nix packs. MVM stages the archive, injects its verified guest runtime, seals the rootfs, health-boots the baked entrypoint and signs the unchanged result as a local build. |
 | `mvmctl build SOURCE --label L --posture P --environment FILE.json` | Record signed archive metadata for any source; `--allow-egress`, `--allow-volumes`, and `--allow-unauthenticated` require `--posture`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `mvmctl machine build <path>`                                       | Build the slot for a manifest directory. A `flake =` manifest builds through Nix in the builder VM; an `image =` manifest materializes the OCI reference through the same path `run --image` boots, then installs it as a slot revision                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `mvmctl kernel build`                                               | Build the custom microVM kernels into the local cache. `--which builder|workload|workload-k8s|rootless` (default `builder`) or `--all`; `--source compile|download|auto`. A compile builds from the selected `mvm-images` checkout's `kernel/` flake (`MVM_IMAGES_DIR`, else a sibling `../mvm-images`); with no checkout a compile is refused, because this repository carries no kernel flake. `workload-k8s` is defined in no flake, so a compile of it is always refused; `rootless` is defined only in `mvm-images`. Boot a built `workload-k8s` kernel on a dev-tier `machine run` with `MVM_WORKLOAD_KERNEL_VARIANT=workload-k8s`      |
@@ -1241,9 +1307,22 @@ cleanup can still refuse. Other backends retain their existing expiry cleanup.
 Identity and lifetime are separate: `--name <N>` names a foreground transient
 run but does not make it persistent. `-d`/`--detach`, `--up-json`, or the
 explicit `machine create`/`start` lifecycle make a long-lived machine.
+With `-d` and a command after `--`, the command is started in the guest and
+`machine run` returns once the guest agent has accepted it; the command keeps
+running and `machine logs`, `machine exec` and `machine stop` work afterwards.
+Interrupting (Ctrl-C, SIGTERM) a foreground transient run stops and removes its
+VM before `mvmctl` exits with status 130 (143 for SIGTERM); a second interrupt
+during that cleanup exits at once.
 `--volume` host shares work on every run mode. The syntax is
-`HOST:/GUEST[:MODE]` (`MODE` defaults to `ro`; `rw` needs `--profile dev` or
-`permissive`). Persistent machine specs canonicalize host paths to absolute
+`HOST:/GUEST[:MODE][:include=a,b][:exclude=c]` (`MODE` defaults to `ro`;
+`rw` needs `--profile dev` or `permissive`). Directory shares materialize
+into an ext4 snapshot at boot under a **default deny-by-default protected-path
+set** (`.env`, `.ssh`, `.aws`, `.gnupg`, `id_rsa*`, `*.pem`, `*.key`,
+`.npmrc`, `.netrc`, `.kube`, `.config/gcloud`, …): credential-carrying paths
+never enter the image. `:include=` re-exposes built-in-denied paths for that
+share; `:exclude=` denies additional relative paths. Both ride the signed
+ExecutionPlan and are bound at claim time, so a re-bind cannot weaken them.
+Persistent machine specs canonicalize host paths to absolute
 paths so later reconnects re-mount the same share regardless of your working
 directory; the host directory must exist at boot.
 
@@ -1271,7 +1350,7 @@ guest, on any tier.
 | `mvmctl machine run -it --image <ref> -- <cmd>`                                                | Run `<cmd>` attached to a PTY, return its exit code, tear down                                                                                                                                                                                                                                                                       |
 | `mvmctl machine run -it --name <name> --image <ref> -- <cmd>`                                  | Same, with a stable transient VM name while it runs                                                                                                                                                                                                                                                                                  |
 | `mvmctl machine create <name> --image <ref>`                                                   | Persist a named OCI-backed machine spec without booting it                                                                                                                                                                                                                                                                           |
-| `mvmctl machine create <name> --manifest <path>`                                               | Persist a named machine spec from an image-backed `mvm.toml` / `Mvmfile.toml`                                                                                                                                                                                                                                                        |
+| `mvmctl machine create <name> --manifest <path>`                                               | Persist a named machine spec from an image-backed `mvm.toml` / `Mvmfile.toml`; the root may include ordered local CPU/memory defaults, but included files cannot supply a source or permissions                                                                                                                                             |
 | `mvmctl machine create <name> --manifest <path> --policy NAME\|PATH`                          | Persist a spec under an authored policy profile, resolved with the manifest's `[policy]` and `[network] allow_hosts` exactly as `run` resolves them; network and resource bounds are re-admitted on each start. Existing specs with tool-specific rules refuse to start. Also on `machine start --image/--manifest` |
 | `mvmctl machine create <name> --image <ref> --net --allow-host <host[:port]>`                  | Persist a named spec with opt-in egress settings for future lifecycle starts                                                                                                                                                                                                                                                         |
 | `mvmctl machine create <name> --manifest <path>`                                               | Persist an image-backed `mvm.toml` / `Mvmfile.toml` as a named machine spec                                                                                                                                                                                                                                                          |
@@ -1569,6 +1648,22 @@ default of read-only mounts unless `:rw` is explicit. `--name` is optional: when
 omitted, `machine create` auto-generates a name and prints it (mirroring
 `machine run -d`).
 
+`mvmctl run` and `mvmctl machine run` accept `--mailbox <64-hex-id>` and an
+optional `--mailbox-retention-ms <positive-integer>`. The requested retention
+window is signed into the mailbox grant and requires a mailbox. The operator
+sets `max_mailbox_retention_ms` in `$MVM_HOME/config/config.toml`; a missing,
+invalid, or smaller ceiling refuses a retention request before plan signing,
+without silently clamping it. Both values are unset by default. In production,
+a mailbox also requires the signed retention window and a verified guest boot
+binding. The helper reopens retained keys and the anchored journal before it
+reports readiness; explicit guest `outbox-local` requests return a signed
+`accepted_local_durable` receipt after the agent verifies it, and Receive
+requires a boot-bound guest lease and signed ACK. The legacy guest `outbox`
+spool is not a local-durable request and cannot claim this receipt. This
+same-host tier does not detect rollback of the entire host and does not issue
+the stronger `accepted_durable` receipt. Developer launches retain the
+ephemeral Send queue.
+
 A host can also admit plans it did not synthesize. By default every plan booted
 locally is synthesized and self-signed under the host key at admission time;
 a fleet control plane can instead sign an `ExecutionPlan` itself and have a
@@ -1818,6 +1913,11 @@ At launch of an installed bundle:
 - the descriptor's resources become the defaults for whichever of `--cpus` and
   `--memory` the command line did not name; the host's memory ceiling and
   admission budget still apply and refuse rather than clamp;
+- a signed `policy.allow_hosts` and `policy.request_budget` are folded into the
+  launch's network policy. This also applies to a positional `.mvmpkg` or its
+  installed bundle digest on a persistent `machine run -d`: the request ceiling
+  is retained in the machine spec for later starts. A wider operator policy or
+  host list is refused rather than replacing the signed ceiling;
 - a required secret slot with no `--secret` binding refuses the launch; the
   value stays on the host and is substituted at the endpoint, as for any
   binding;
@@ -2432,7 +2532,7 @@ reviewed pull request; this command does not sign or publish anything.
 | `mvmctl pack registry update ns/name[@version]`           | Compatibility spelling of `pack update ns/name[@version]`                                                                                                         |
 | `mvmctl pack registry revocations update --document PATH --bundle PATH [--official]` | Verify and cache a signed revocation feed. Without `--official`, use the operator-configured release identity with at most 48-hour validity. With `--official`, require the dedicated `tinylabscom/mvm-packs` `registry-pack-revocations.yml` identity with at most 30-day validity. Both paths reject expired feeds and advance a rollback-resistant checkpoint. |
 | `mvmctl search [QUERY]`                                   | Search the signed pack registry, marking installed packs (`--json`)                                                                                               |
-| `mvmctl pull ns/name[@version]`                           | Fetch, verify against the publisher trust policy, install, and pin a signed registry pack and every pack its signed profile references. A built-image pack also downloads its fixed-name immutable release assets, checks their descriptor-pinned lengths and digests, and verifies rootfs and provenance signatures before installation; admission rechecks the installed bytes. A schema-v2 application descriptor is authenticated under the same publisher policy, revocation feed and pins, then its archive is acquired within the signed size bound, independently bundle-verified, installed and pinned. Text output reads `installed ns/name@version (manifest DIGEST, bundle SHA256)`, and `--json` prints `reference`, `manifest_sha256`, `bundle_sha256`, `key_id`, `status: "installed"` and `installed: true`. `pack update` prints the same text line for an application. Without `$MVM_HOME/registry/publishers.toml`, the built-in policy accepts the exact renamed `mvm-packs` workflow identity for `agent/` and `runtime/`. The former identity is accepted only for the nine exact historical versioned manifest reference/byte-digest pairs listed in [pack authoring](/guides/pack-authoring/#decide-who-may-publish), and only before 2026-11-06 00:00 UTC; the exception is checked after real Sigstore verification identifies the signer. Explicit operator publisher policy is not constrained by that built-in digest exception or cutoff. The reserved `mvm/` namespace accepts only the current exact workflow identity; operator policy may deny but never replace it. A fresh feed under the separate built-in MVM release identity is required for `mvm/` installation and execution; built-image packs outside `mvm/` require independent operator-configured revocation trust. |
+| `mvmctl pull ns/name[@version]`                           | Fetch, verify against the publisher trust policy, install, and pin a signed registry pack and every pack its signed profile references. A built-image pack also downloads its fixed-name immutable release assets, checks their descriptor-pinned lengths and digests, and verifies rootfs and provenance signatures before installation; admission rechecks the installed bytes. A schema-v2 application descriptor is authenticated under the same publisher policy, revocation feed and pins, then its archive is acquired within the signed size bound, independently bundle-verified, installed and pinned. Text output reads `installed ns/name@version (manifest DIGEST, bundle SHA256)`, and `--json` prints `reference`, `manifest_sha256`, `bundle_sha256`, `key_id`, `status: "installed"` and `installed: true`. `pack update` prints the same text line for an application. Without `$MVM_HOME/registry/publishers.toml`, the built-in policy accepts the exact renamed `mvm-packs` workflow identity for `agent/` and `runtime/`. The former `mvm-templates` identity is not trusted by the built-in policy; an explicit operator publisher policy may name it. The reserved `mvm/` namespace accepts only the current exact workflow identity; operator policy may deny but never replace it. A fresh feed under the separate built-in MVM release identity is required for `mvm/` installation and execution; built-image packs outside `mvm/` require independent operator-configured revocation trust. |
 | `mvmctl bundle fetch`                                     | Verify a `.mvmpkg` from a path, an `https://` URL, or an `oci://` registry reference against the local trust store                                                |
 | `mvmctl bundle install`                                   | Verify and atomically install a `.mvmpkg` (from any `fetch` source) under `~/.mvm/bundles/`, streaming each artifact through its hash check; retain the signed archive and rematerialize the extracted `<sha>/` tree for launches                                                                  |
 | `mvmctl bundle push <file> <ref>`                         | Verify a `.mvmpkg` against the local trust store, publish it to an image registry, and print its `oci://…@sha256:` reference                                      |
@@ -2599,6 +2699,24 @@ aliases. Temporary source and slot records are removed when the invocation ends;
 the archive records the exact pack lock as provenance, not a temporary source
 path. The sealed posture, health exit requirement and before/after artifact
 digests remain mandatory.
+
+The Yocto import is selected by `source.kind: "yocto"` in the same authored pack
+spec that `mvmctl build PACK.json` reads for a Nix pack; there are no separate
+producer flags. Its archive and input document paths resolve relative to the
+spec, so moving the three files together preserves their meaning. This is an
+alternative producer, not a second trust path. Its
+input document is included as a signed bundle artifact; the provenance record
+identifies the `yocto` producer and the input document's SHA-256. MVM verifies
+the archive against that document before materialization. The layer revisions
+are producer declarations, not independently reproduced or authenticated
+Yocto build attestations. A host-signed local build cannot be published through
+the registry's release path merely by changing that declaration. The
+representative producer and pack declaration live in `examples/yocto/`. The
+importer refuses setuid/setgid entries, extended attributes and OCI whiteouts
+rather than silently weakening an unsigned producer's filesystem semantics.
+The sample's native archive and importer have been checked, but a signed MVM
+pack health boot has not yet been witnessed: it requires a compatible published
+CLI and guest runtime. The sample is not release or boot-performance evidence.
 
 Concurrent invocations must use distinct `--out` destinations. Private build slots
 do not make archive promotion or rollback safe for a shared output path; that

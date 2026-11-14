@@ -37,7 +37,7 @@ Linux project and selected commands
                 ↓
        existing MVM environment IR   (mvm_contract::ir)
                 ↓
-         existing Nix renderer       (mvm_sdk::compile)
+         existing Nix renderer       (mvm_compiler)
                 ↓
  clean build, boot, and command verification
 ```

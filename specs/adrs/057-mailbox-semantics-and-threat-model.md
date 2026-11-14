@@ -193,6 +193,18 @@ revocation state before payload disclosure or queue allocation. A sender field
 inside the envelope never authorizes itself. Delegation may only remove
 authority or tighten bounds.
 
+Guest Receive and ACK use a separate, signed Receive capability and a distinct
+per-boot guest-held mailbox ACK signing key, not the FlowMux egress identity or
+the host's mailbox sealing key. The destination authority enrolls its public
+key against the signed plan ID/nonce, recipient, current authenticated guest
+boot and reader session, execution/policy epoch, capability ID, and validity
+window. The guest must demonstrate possession over a fresh challenge before delivery;
+the destination signs a lease binding that session, delivery, ciphertext
+commitment, and deadline. ACKs are signed by the enrolled guest key over the
+exact lease and are replay-checked and journaled before a terminal disposition.
+A transport connection, inherited warm-parent key, or structurally valid
+enrollment without signature and current-boot verification authorizes nothing.
+
 ### 5. `call`, `cast`, reply, cancellation, and admission
 
 Version 1 has three application message kinds:
@@ -232,6 +244,7 @@ Receipts distinguish:
 
 ```text
 accepted_ephemeral
+accepted_local_durable
 accepted_durable
 duplicate
 expired
@@ -250,13 +263,39 @@ epoch, and ordering scope. Gaps block only that scope until the missing
 sequence arrives, expires, or receives a terminal disposition. There is no
 order across senders, mailboxes, or epochs and no global total order.
 
-`accepted_durable` means the encrypted envelope and deduplication identity are
-durably committed before the receipt is signed. `accepted_ephemeral` means the
-message is owned by the named live mailbox epoch. If that epoch terminates,
-the signed epoch-terminal observation closes the volatile queue; senders that
-need recovery use stable IDs and retry into a newly authorized epoch. A
-partitioned observer may remain uncertain until reconciliation; the protocol
-does not invent a terminal fact it cannot observe.
+`accepted_local_durable` is a distinct version-two destination receipt: the
+encrypted envelope, deduplication identity, and required delivery state are
+fsynced outside the source VM's lifetime before signing. Its locally fsynced
+chain head permits ordinary process-crash recovery but does not detect a whole
+host rollback or survive destruction of all host storage. It is available to
+standalone MVM without a fleet service or hardware dependency. The existing
+version-one `accepted_durable` remains reserved for independently witnessed
+rollback protection; an old receipt must never be relabeled as local durability,
+and version-one readers reject the new outcome. Neither receipt implies that an
+application processed or ACKed the message.
+
+An exact same-ID, same-ciphertext retry of locally accepted history returns the
+original signed version-two local receipt, including its original observation
+time, after current authority and committed-state checks. Re-signing that body
+must reproduce the original bytes; an unprovable acceptance is unknown, not a
+new version-one `duplicate` that loses the acceptance tier. Different bytes
+under the same ID conflict. Version-one `duplicate` behavior is unchanged.
+
+The guest's local-durable outbox request is sender-owned pending work, not an
+acceptance receipt. Its host retains the canonical sealed bytes and records a
+bounded dispatch attempt before destination I/O. The guest removes the
+pending request only after checking a version-two destination signature bound
+to its boot-pinned mailbox authority, execution epoch, and message ID. An
+older unit success cannot satisfy this path; wrong-key, stale-epoch, or
+unverifiable replies keep the operation pending or yield a typed terminal
+refusal. An already-dispatched envelope is not rewritten for a replacement
+epoch, and this rule does not authorize transfer of an accepted message.
+
+`accepted_ephemeral` means the message is owned by the named live mailbox
+epoch. If that epoch terminates, the signed epoch-terminal observation closes
+the volatile queue; senders that need recovery use stable IDs and retry into a
+newly authorized epoch. A partitioned observer may remain uncertain until
+reconciliation; the protocol does not invent a terminal fact it cannot observe.
 
 ### 7. Durability, retry, poison messages, and dead letters
 
@@ -278,6 +317,45 @@ dead letters, and tombstones per mailbox and tenant. Disk full, rollback,
 corruption, wrong key, and quota exhaustion fail closed. Crash recovery is an
 idempotent reconciliation of durable state, not a sleep-polled foreground
 path.
+
+For the standalone local tier, a signed plan must declare a finite retention
+window before admission; an absent policy does not imply an infinite default.
+The versioned optional `MailboxGrant.retention` preserves old signed-plan
+bytes when absent; a present duration is an explicit request bounded by host
+policy, and expiry-plus-retention arithmetic fails closed on overflow.
+The workload configures the requested window before the plan is signed; the
+host operator independently configures a maximum. Neither has a permissive
+default: without both, local-durable admission refuses, and a request above
+the host maximum refuses rather than being silently clamped. Changing the
+maximum affects new acceptance, not the recovery or retention deadline of
+messages already accepted under a verified signed plan and custody binding.
+Compaction first durably publishes an encrypted, destination-authenticated
+snapshot of still-live delivery state and dedup tombstones through each
+message's expiry plus that window, then advances the local chain head, and
+only then prunes superseded records. Recovery verifies the appropriate old
+prefix or committed snapshot after interruption; it never guesses a new
+genesis from a gap. If the snapshot or retained tombstones cannot fit the
+finite quota, new acceptance refuses rather than discarding replay evidence.
+This host-local sequence does not detect rollback of the entire host.
+
+The checkpoint is an immutable journal generation, not a second acceptance
+authority. It binds the previous committed tip, the next monotonic cursor,
+the history-key version, the exact signed retention window, and a content
+commitment over the retained ciphertext, receipt bodies, leases, signed guest
+ACKs, terminal dispositions, and dedup state. The destination signs this
+commitment before encrypting and fsyncing the checkpoint. The local anchor
+then advances to the checkpoint tip before any earlier record is removed.
+Only terminal messages strictly past expiry plus their signed retention
+window, and challenges owned by those messages, may leave that snapshot;
+pending messages and their replay evidence remain until terminal settlement.
+Recovery of a pre-anchor interruption requires the complete old prefix;
+recovery of a post-anchor interruption requires the checkpoint and its
+matching tip even when old files are still present or partly pruned. A
+missing, divergent, oversized, or unverifiable checkpoint refuses rather
+than falling back to a shorter history. Snapshotting cannot turn a leased
+message into an unsigned host ACK or reset the original signed acceptance
+time. The same bounded writer lock excludes concurrent admission, lease,
+ACK, and compaction while this transition is in flight.
 
 ### 8. Selective receive is bounded and fair
 
@@ -345,6 +423,14 @@ that migration is implemented.
 | Isolated production on ordinary virtualization | Sender and recipient guests; transport and stores hold ciphertext, but the hypervisor owner can inspect guest memory. | Relay- and service-process-blind payloads, not malicious-host confidentiality. |
 | Host-blind sealed execution | Only measured sender/recipient confidential guests after attestation-bound key release; ordinary host and `mvmd` processes never receive decryption material. | Host-blind payload confidentiality after hardware, attestation, rollback, and key-release witnesses pass. |
 
+The trusted-host local-durable receipt is an acceptance class, not an assurance
+tier upgrade: the same host remains trusted for key custody and rollback. A
+missing or rotated history/payload key must refuse recovery rather than mint a
+replacement. Standalone MVM may keep versioned, purpose-separated keys in its
+existing protected host key directory; an independently operated checkpoint
+and optional confidential hardware remain upgrades, never implicit dependencies
+of a local mailbox launch.
+
 Encryption at rest, TLS, a microVM boundary, Keychain, TPM storage, or an
 honest host does not by itself establish host-blind execution. A platform
 without confidential-computing memory protection must refuse a requested
@@ -376,11 +462,13 @@ Overlay resolution conveys no send authority. Transport authentication conveys
 no mailbox authority. The encoded canonical envelope crosses the byte
 transport unchanged.
 
-Iroh is the first planned cross-host transport behind `PeerTransport`. Direct
-and customer-configured relay paths are the default; public relay use requires
-explicit configuration and cannot be a silent fallback. HeatNet/UOR and a
-future virtual NIC are evaluated separately and cannot smuggle packet
-forwarding into mailbox authority.
+`mvm` defines the mailbox contract, authorization gates, and transport-neutral
+interfaces; it does not implement a cross-host network. `mvmd` owns concrete
+cross-host transport and orchestration, including the planned Iroh adapter
+behind `PeerTransport`. Direct and customer-configured relay paths are the
+default; public relay use requires explicit configuration and cannot be a
+silent fallback. HeatNet/UOR and a future virtual NIC are evaluated separately
+and cannot smuggle packet forwarding into mailbox authority.
 
 `mvmd` may enroll principals, place workloads, distribute signed route hints,
 and store or forward opaque ciphertext. It cannot define a second envelope,
@@ -389,9 +477,10 @@ an ordinary coordinator; or become required for local delivery.
 
 The MVM interfaces reuse operational lessons from the earlier `mvmd`
 `AgentTransport` work without importing an `mvmd` crate or runtime dependency.
-Optional coordinator metadata enters through a narrow route-hint adapter that
-selects an already authorized path; it cannot edit, decrypt, or re-sign the
-canonical envelope.
+`mvmd` implements cross-host adapters for the interfaces and may adapt its
+coordinator metadata into authorized route hints; it cannot edit, decrypt, or
+re-sign the canonical envelope. Local mailbox delivery remains usable without
+`mvmd`.
 
 ### 14. Prototype `mvmd` type migration
 

@@ -119,7 +119,7 @@ describe("app() with all four hook phases", () => {
       name: "hello-hooks",
       image: mvm.python_image(),
       resources: mvm.resources({ cpu: 1, memory_mb: 256 }),
-      entrypoint: mvm.entrypoint({ command: ["python", "-m", "hello"] }),
+      entrypoints: [mvm.entrypoint({ command: ["python", "-m", "hello"] })],
       before_build: "python -m migrate",
       before_start: ["export", "MODEL=/m"],
       after_start: mvm.hook(["curl", "-fsS", "/h"]),
@@ -150,7 +150,7 @@ describe("app() with all four hook phases", () => {
       name: "hello",
       image: mvm.python_image(),
       resources: mvm.resources({ cpu: 1 }),
-      entrypoint: mvm.entrypoint({ command: ["python"] }),
+      entrypoints: [mvm.entrypoint({ command: ["python"] })],
     })(() => "x");
 
     const payload = JSON.parse(mvm.emitJson());
@@ -163,7 +163,7 @@ describe("app() with all four hook phases", () => {
       name: "multi",
       image: mvm.python_image(),
       resources: mvm.resources({ cpu: 1 }),
-      entrypoint: mvm.entrypoint({ command: ["python"] }),
+      entrypoints: [mvm.entrypoint({ command: ["python"] })],
       before_start: [mvm.hook("setup-1"), mvm.hook(["setup-2", "--flag"])],
     })(() => "x");
 
@@ -176,15 +176,34 @@ describe("app() with all four hook phases", () => {
 });
 
 describe("env helpers", () => {
-  it("env accepts bare strings and wraps as literal", () => {
+  it("env refuses a bare string, naming the explicit forms, without echoing it", () => {
+    mvm.workload({ id: "env-app" });
+    const declare = () =>
+      mvm.app({
+        name: "env-app",
+        image: mvm.python_image(),
+        resources: mvm.resources({ cpu: 1 }),
+        entrypoints: [mvm.entrypoint({ command: ["python"] })],
+        env: { MODEL_PATH: "hunter2" } as never,
+      })(() => "x");
+    expect(declare).toThrow(/mvm\.literal.*mvm\.secret/);
+    try {
+      declare();
+    } catch (err) {
+      expect(String(err)).not.toContain("hunter2");
+    }
+    expect(() => mvm.entrypoint({ command: ["python"], env: { A: "b" } as never })).toThrow(/bare string/);
+  });
+
+  it("env accepts explicit literal and secret values", () => {
     mvm.workload({ id: "env-app" });
     mvm.app({
       name: "env-app",
       image: mvm.python_image(),
       resources: mvm.resources({ cpu: 1 }),
-      entrypoint: mvm.entrypoint({ command: ["python"] }),
+      entrypoints: [mvm.entrypoint({ command: ["python"] })],
       env: {
-        MODEL_PATH: "/data/model.pt",
+        MODEL_PATH: mvm.literal("/data/model.pt"),
         API_KEY: mvm.secret("api-key", { type: "bearer", hosts: ["api.example.com"] }),
       },
     })(() => "x");
@@ -268,7 +287,7 @@ describe("emitJson() canonicalization", () => {
       name: "canon",
       image: mvm.python_image(),
       resources: mvm.resources({ cpu: 1 }),
-      entrypoint: mvm.entrypoint({ command: ["python"] }),
+      entrypoints: [mvm.entrypoint({ command: ["python"] })],
     })(() => "x");
     const json = mvm.emitJson();
     const parsed = JSON.parse(json);
@@ -283,7 +302,7 @@ describe("emitJson() canonicalization", () => {
       name: "stable",
       image: mvm.python_image(),
       resources: mvm.resources({ cpu: 1 }),
-      entrypoint: mvm.entrypoint({ command: ["python"] }),
+      entrypoints: [mvm.entrypoint({ command: ["python"] })],
     })(() => "x");
     const a = mvm.emitJson();
     const b = mvm.emitJson();

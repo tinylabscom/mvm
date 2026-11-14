@@ -47,7 +47,7 @@ The fastest path is `mvmctl init`, which writes both a `mvm.toml` (sizing/profil
 ```bash
 mvmctl init hello                    # creates ./hello/
 cd hello
-$EDITOR mvm.toml                      # tweak vcpus / mem if you like
+$EDITOR mvm.toml                      # tweak cpus / mem if you like
 $EDITOR flake.nix                     # add your services
 ```
 

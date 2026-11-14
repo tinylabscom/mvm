@@ -82,13 +82,15 @@ def test_derive_schema_round_trips_into_entrypoint_function(monkeypatch) -> None
         name="adder",
         source=mvm.local_path("."),
         image=mvm.nix_packages(["python312"]),
-        entrypoint=mvm.entrypoint_function(
-            language="python",
-            module="adder",
-            function="add",
-            args_schema=schema,
-            return_schema=mvm.derive_schema(add, return_only=True),
-        ),
+        entrypoints=[
+            mvm.entrypoint_function(
+                language="python",
+                module="adder",
+                function="add",
+                args_schema=schema,
+                return_schema=mvm.derive_schema(add, return_only=True),
+            )
+        ],
         resources=mvm.resources(cpu_cores=1, memory_mb=128, rootfs_size_mb=256),
         dependencies=mvm.no_deps(),
     )

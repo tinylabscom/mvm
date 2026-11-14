@@ -12,6 +12,7 @@
 covered = [
     "mvmctl agent-session ls",
     "mvmctl bootstrap",
+    "mvmctl build /tmp/mvm-yocto-demo/pack.json --out /tmp/mvm-yocto-hello.mvmpkg",
     "mvmctl build docker.io/library/alpine:3.20 --from image --out alpine.mvmpkg --debug-out alpine.bundle.json",
     "mvmctl bundle fetch ./alpine.mvmpkg",
     "mvmctl bundle fetch ./my-app.mvmpkg",
@@ -260,6 +261,7 @@ covered = [
     "mvmctl run --mount ./fixtures:/work:ro -- python /work/test.py",
     "mvmctl run --mount .:/work:ro -- ls /work",
     "mvmctl run --mount HOST:GUEST:ro -- command",
+    "mvmctl run --no-detect -- /bin/true",
     "mvmctl run --peer db.mvm.peer:5432=127.0.0.1:34567 -- ./my-service",
     "mvmctl run --timeout 10 -- python -c 'print(2 + 2)'",
     """mvmctl run --timeout 20 -- python -c 'print("bounded tool call")'""",
@@ -515,6 +517,7 @@ uncovered = [
     "mvmctl policy validate",
     "mvmctl policy validate ./pack-sources/agent/codex/pack/profile.toml",
     "mvmctl policy validate ./pack-sources/runtime/node/pack/group.toml",
+    "mvmctl policy validate ./policy/api-group.toml",
     "mvmctl pool warm --flake ./flake.nix",
     "mvmctl prepare",
     "mvmctl pull agent/claude",

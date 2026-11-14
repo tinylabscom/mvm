@@ -28,11 +28,11 @@ import mvm
     source=mvm.local_path("."),
     image=mvm.python_image(python="3.12"),
     resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
-    entrypoint=mvm.entrypoint_function(
+    entrypoints=[mvm.entrypoint_function(
         module="app",
         function="greet",
         primary=True,
-    ),
+    )],
     env={
         "MODEL_PATH": mvm.literal("/data/model.pt"),
         "API_KEY": mvm.secret("api-key", type="bearer", hosts=["api.example.com"]),
@@ -62,11 +62,11 @@ export const greet = mvm.app({
   source: mvm.localPath("."),
   image: mvm.python_image({ python: "3.12" }),
   resources: mvm.resources({ cpu: 1, memory_mb: 256 }),
-  entrypoint: mvm.entrypoint_function({
+  entrypoints: [mvm.entrypoint_function({
     module: "app",
     function: "greet",
     primary: true,
-  }),
+  })],
   before_start: "export HELLO_BANNER='hi'",
 })((name: string): string => `hello ${name}`);
 ```

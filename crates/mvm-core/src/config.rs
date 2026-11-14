@@ -877,6 +877,12 @@ pub fn vm_mailbox_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf {
     vm_socket_dir_at(state_dir).join("mailbox.sock")
 }
 
+/// Where a VM's per-epoch mailbox secret lives: in the state dir, never
+/// beside the host keys, so it dies with the VM.
+pub fn vm_mailbox_secret_at(state_dir: &std::path::Path) -> std::path::PathBuf {
+    state_dir.join("mailbox-epoch.secret")
+}
+
 /// [`vm_approval_socket_at`] for a named VM.
 pub fn vm_approval_socket(name: &str) -> std::path::PathBuf {
     vm_approval_socket_at(&vm_state_dir(name))

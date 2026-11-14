@@ -12,7 +12,7 @@
 # rest of the boot-telemetry work is not worth shipping. Run this on both platforms
 # and check the summary in.
 #
-# Why the default flake is the W1 fixture, not a real image build:
+# Why the default flake is the fixture flake, not a real image build:
 # `mvm-host-vm-init` writes boot-timings.json BEFORE exec'ing
 # cmd.sh — so the boot fan-out we want to measure
 # (init_start_ms → job_start_ms) is captured regardless of whether
@@ -96,7 +96,7 @@ ls -1 "${JOBS_DIR}" 2>/dev/null | sort >"${JOBS_BEFORE}" || true
 for i in $(seq 1 "${RUNS}"); do
   echo "--- run ${i}/${RUNS} ---" >&2
   BEFORE="$(date +%s)"
-  # We deliberately tolerate non-zero exit: with the W1 fixture flake
+  # We deliberately tolerate non-zero exit: with the fixture flake
   # the inner `nix build` is expected to fail (throw at eval), and
   # boot-timings.json is written by builder-init BEFORE cmd.sh runs.
   # The only "real failure" we care about is missing timings.

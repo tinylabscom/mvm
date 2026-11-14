@@ -34,7 +34,7 @@ and update the current revision for that slot.
 ## What makes a good template
 
 - Pin Nix inputs in `flake.lock`.
-- Keep `mvm.toml` small: `flake`, `profile`, `vcpus`, `mem`, `data_disk`, and optional `name`.
+- Keep `mvm.toml` small: `flake`, `profile`, `cpus`, `mem`, `data_disk`, and optional `name`.
 - Put guest packages and services in the flake, not in ad-hoc host scripts.
 - Treat network, secrets, and state retention as explicit runtime policy.
 - Avoid mutable OCI tags for production examples; resolve to immutable digests.

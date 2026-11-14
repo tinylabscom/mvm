@@ -70,6 +70,8 @@ pub enum PackError {
     Spec(#[from] PackSpecError),
     #[error("invalid pack lock: {0}")]
     Lock(#[from] PackLockError),
+    #[error("Yocto sources are imported as pinned archives, not compiled as Nix flakes")]
+    YoctoSourceNotNix,
     #[error(
         "package {package:?} requests version {version:?}; exact package versions cannot be resolved yet"
     )]

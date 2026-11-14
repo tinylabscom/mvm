@@ -440,20 +440,6 @@ impl EgressGate {
         }
     }
 
-    /// Decide a TCP connect to an already-resolved address.
-    ///
-    /// When the address belongs to a pinned host, the verdict carries that
-    /// host's whole admitted address set (IPv4 first), not just the single
-    /// address requested. A guest that resolved a dual-stack host locally and
-    /// dialed the numeric IPv6 (macOS `getaddrinfo` returns IPv6 first) then
-    /// falls over to the pinned IPv4 sibling when the IPv6 route is unreachable
-    /// instead of stranding the connect — the same happy-eyeballs behaviour the
-    /// hostname path already gets. Every offered address is independently
-    /// policy-checked, so widening the set never admits an unpinned target.
-    pub fn decide_addr(&self, ip: IpAddr, port: u16) -> EgressVerdict {
-        self.decide_addr_for_proto(Proto::Tcp, ip, port)
-    }
-
     /// Decide a guest connect request — either a numeric `"<ip>:<port>"` or a
     /// `"<hostname>:<port>"` (DNS-over-vsock: the `socks5h` client sends a name and
     /// the host resolves it here against the pin registry, never the guest). A

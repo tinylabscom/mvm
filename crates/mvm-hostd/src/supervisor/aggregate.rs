@@ -251,12 +251,6 @@ impl Supervisor {
         self
     }
 
-    /// Wire a prebuilt artifact collector slot.
-    pub fn with_artifact_collector(mut self, artifact: Arc<dyn ArtifactCollector>) -> Self {
-        self.artifact = artifact;
-        self
-    }
-
     /// Wire the platform firewall enforcer slot. The default
     /// [`NoopFirewallEnforcer`] fails closed until a real enforcer is
     /// supplied.

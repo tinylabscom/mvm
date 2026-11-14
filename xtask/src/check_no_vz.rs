@@ -34,10 +34,18 @@
 //! registration can spell the word without ceremony while any other
 //! mention on the same line still trips.
 //!
-//! Opt-out: `// allow(no-vz): <reason>` on the line directly above the
-//! mention (one per line). Reserved for historical design notes — never a
-//! dependency, an API use, or a build input. Reasons land in the lint
-//! output so any bypass stays visible.
+//! Opt-out is **double-keyed**: a mention survives only with both
+//!   1. `// allow(no-vz): <reason>` on the line directly above the mention
+//!      (one per line), and
+//!   2. an entry for the file in [`EXEMPT`] below, naming the workspace-relative
+//!      path and an enumerated reason.
+//!
+//! The marker alone permits nothing: without the enumeration the gate still
+//! fails. The list only shrinks — an entry naming a deleted file, or a file
+//! whose marked mentions are all gone, fails the gate, so an exemption can
+//! never linger once the mention it excuses is removed. Reserved for
+//! historical design notes — never a dependency, an API use, or a build
+//! input. Reasons land in the lint output so any bypass stays visible.
 
 use anyhow::{Context, Result, bail};
 use std::path::Path;
@@ -57,6 +65,21 @@ const NO_VZ_NEEDLES: &[&str] = &[
     "swift-tools-version",
 ];
 const ALLOW_MARKER: &str = "// allow(no-vz):";
+
+/// Double-keyed exemptions. A mention in one of these files survives only
+/// when it also carries the inline [`ALLOW_MARKER`]; the marker without an
+/// entry here fails the gate. Entry reason must be concrete: what the
+/// mention is, and why it is not a use. The list only shrinks: entries are
+/// validated every run — a deleted file or a file with no remaining marked
+/// mention is an error, so an exemption can never outlive the mention it
+/// excuses.
+const EXEMPT: &[(&str, &str)] = &[];
+
+/// Relativize a scanned path against the workspace root for [`EXEMPT`]
+/// lookup.
+fn rel_key<'a>(path: &'a Path, workspace: &Path) -> &'a Path {
+    path.strip_prefix(workspace).unwrap_or(path)
+}
 
 /// Bare `vz` / `Vz` / `VZ` as a whole word. The symbol needles above only
 /// stop the framework being *used*; this stops the retired backend being
@@ -83,11 +106,18 @@ fn is_swift_surface(path: &Path) -> bool {
 }
 
 pub(crate) fn run(workspace: &Path) -> Result<()> {
+    run_with(workspace, EXEMPT)
+}
+
+fn run_with(workspace: &Path, exempt: &[(&str, &str)]) -> Result<()> {
     let crates_dir = workspace.join("crates");
     if !crates_dir.is_dir() {
         bail!("expected workspace crates dir at {}", crates_dir.display());
     }
     let mut findings: Vec<String> = Vec::new();
+    // Files that carried at least one marker-annotated hit this run; every
+    // one of them must be enumerated in `exempt`.
+    let mut marked: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     // Rust sources we own, checked for usage needles *and* bare `vz` names.
     // `xtask/` is included so a gate cannot quietly reintroduce the word,
@@ -101,16 +131,48 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
             if path.ends_with("xtask/src/check_no_vz.rs") {
                 return Ok(());
             }
-            scan_idents(path, &mut findings)
+            scan_idents(path, workspace, &mut marked, &mut findings)
         })?;
     }
     // SwiftPM manifests and Swift sources anywhere under the root.
-    visit_swift_surface(workspace, &mut |path| scan(path, &mut findings))?;
+    visit_swift_surface(workspace, &mut |path| {
+        scan(path, workspace, &mut marked, &mut findings)
+    })?;
+
+    for key in &marked {
+        if !exempt.iter().any(|(p, _)| p == key) {
+            findings.push(format!(
+                "{key}: marked mention without an enumerated EXEMPT entry — the marker alone \
+                 permits nothing"
+            ));
+        }
+    }
+    for (path, reason) in exempt {
+        if reason.trim().is_empty() {
+            bail!(
+                "check-no-vz: EXEMPT entry {path} has no reason — exemptions are enumerated \
+                   with one"
+            );
+        }
+        let full = workspace.join(path);
+        if !full.is_file() {
+            bail!(
+                "check-no-vz: EXEMPT entry {path} names a deleted file — a relief valve for a \
+                 file that is gone permits nothing and hides the list's real size; remove the entry"
+            );
+        }
+        if !marked.contains(*path) {
+            bail!(
+                "check-no-vz: EXEMPT entry {path} has no marked mention left — the list only \
+                 shrinks; remove the entry"
+            );
+        }
+    }
 
     if findings.is_empty() {
         eprintln!(
-            "check-no-vz: clean (no Virtualization.framework / Containerization usage outside an \
-             explicit allow(no-vz) note)"
+            "check-no-vz: clean (no Virtualization.framework / Containerization usage outside a \
+             double-keyed exemption)"
         );
         return Ok(());
     }
@@ -120,27 +182,42 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
          the universal initramfs on the in-house HVF VMM. Virtualization.framework, SwiftPM, and \
          the Containerization package (including vminitd) are banned from the tree, and so is \
          naming the retired backend in an identifier, a pid-marker string, a test fixture, or \
-         user-facing text. If this is a genuine historical design note, annotate with \
-         `// allow(no-vz): <reason>`:",
+         user-facing text. An exemption is double-keyed: the `// allow(no-vz): <reason>` marker \
+         plus an entry in EXEMPT naming the file and a reason:",
         findings.len()
     );
     for f in &findings {
         eprintln!("  {f}");
     }
-    bail!("check-no-vz: {} unannotated mention(s)", findings.len());
+    bail!(
+        "check-no-vz: {} unexempted mention(s): {}",
+        findings.len(),
+        findings.join("; ")
+    );
 }
 
 /// Scan one file line-by-line for the needles, honoring the per-line
-/// opt-out marker on the line directly above.
-fn scan(path: &Path, findings: &mut Vec<String>) -> Result<()> {
-    scan_with(path, findings, false)
+/// opt-out marker on the line directly above. Files with a marker-annotated
+/// hit are recorded in `marked` for the double-key check against `EXEMPT`.
+fn scan(
+    path: &Path,
+    workspace: &Path,
+    marked: &mut std::collections::BTreeSet<String>,
+    findings: &mut Vec<String>,
+) -> Result<()> {
+    scan_with(path, workspace, marked, findings, false)
 }
 
 /// As [`scan`], plus the bare-identifier rule. Split out because the
 /// identifier rule applies to Rust/Nix/Markdown sources we own, while the
 /// Swift-surface sweep only ever needs the usage needles.
-fn scan_idents(path: &Path, findings: &mut Vec<String>) -> Result<()> {
-    scan_with(path, findings, true)
+fn scan_idents(
+    path: &Path,
+    workspace: &Path,
+    marked: &mut std::collections::BTreeSet<String>,
+    findings: &mut Vec<String>,
+) -> Result<()> {
+    scan_with(path, workspace, marked, findings, true)
 }
 
 /// This lint's own names, which necessarily contain the banned word. Elided
@@ -149,7 +226,13 @@ fn scan_idents(path: &Path, findings: &mut Vec<String>) -> Result<()> {
 /// every *other* mention on the same line still trips.
 const SELF_NAMES: &[&str] = &["check-no-vz", "check_no_vz", "allow(no-vz)", "NO_VZ"];
 
-fn scan_with(path: &Path, findings: &mut Vec<String>, idents: bool) -> Result<()> {
+fn scan_with(
+    path: &Path,
+    workspace: &Path,
+    marked: &mut std::collections::BTreeSet<String>,
+    findings: &mut Vec<String>,
+    idents: bool,
+) -> Result<()> {
     let src =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let ident = regex::Regex::new(NO_VZ_IDENT).expect("NO_VZ_IDENT is a valid regex");
@@ -162,7 +245,9 @@ fn scan_with(path: &Path, findings: &mut Vec<String>, idents: bool) -> Result<()
             || (idents && ident.is_match(&without_self_names));
         if hit {
             let allowed = i > 0 && lines[i - 1].trim_start().starts_with(ALLOW_MARKER);
-            if !allowed {
+            if allowed {
+                marked.insert(rel_key(path, workspace).to_string_lossy().into_owned());
+            } else {
                 findings.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
             }
         }
@@ -228,14 +313,65 @@ mod tests {
     }
 
     #[test]
-    fn allow_marker_on_the_line_above_exempts_it() {
+    fn a_marker_without_an_enumerated_exemption_is_rejected() {
+        // Double-key (WS7): the inline marker alone permits nothing — the
+        // file must also be enumerated in EXEMPT.
         let tmp = tempfile::tempdir().unwrap();
         write_rust(
             tmp.path(),
             "note.rs",
             "fn f() {\n    // allow(no-vz): historical design-note reference, not a dependency\n    let _ = \"VZDiskImage\";\n}\n",
         );
-        assert!(run(tmp.path()).is_ok());
+        let err = run(tmp.path()).unwrap_err().to_string();
+        assert!(
+            err.contains("without an enumerated EXEMPT entry"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_marker_plus_an_enumerated_exemption_passes() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_rust(
+            tmp.path(),
+            "note.rs",
+            "fn f() {\n    // allow(no-vz): historical design-note reference, not a dependency\n    let _ = \"VZDiskImage\";\n}\n",
+        );
+        let exempt = [("crates/x/src/note.rs", "design note only, not a use")];
+        assert!(run_with(tmp.path(), &exempt).is_ok());
+    }
+
+    #[test]
+    fn an_exemption_naming_a_deleted_file_is_rejected() {
+        // The list only shrinks: a relief valve for a file that is gone
+        // permits nothing and hides the list's real size.
+        let tmp = tempfile::tempdir().unwrap();
+        write_rust(tmp.path(), "ok.rs", "fn f() {}\n");
+        let exempt = [("crates/x/src/gone.rs", "mention removed with the file")];
+        let err = run_with(tmp.path(), &exempt).unwrap_err().to_string();
+        assert!(err.contains("names a deleted file"), "got: {err}");
+    }
+
+    #[test]
+    fn an_exemption_for_a_file_without_a_marked_mention_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_rust(tmp.path(), "ok.rs", "fn f() {}\n");
+        let exempt = [("crates/x/src/ok.rs", "nothing marked here anymore")];
+        let err = run_with(tmp.path(), &exempt).unwrap_err().to_string();
+        assert!(err.contains("no marked mention left"), "got: {err}");
+    }
+
+    #[test]
+    fn an_exemption_without_a_reason_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_rust(
+            tmp.path(),
+            "note.rs",
+            "// allow(no-vz): historical design note\n/// The removed Vz backend locked the image.\nfn f() {}\n",
+        );
+        let exempt = [("crates/x/src/note.rs", "")];
+        let err = run_with(tmp.path(), &exempt).unwrap_err().to_string();
+        assert!(err.contains("has no reason"), "got: {err}");
     }
 
     #[test]
@@ -307,14 +443,15 @@ mod tests {
     }
 
     #[test]
-    fn an_annotated_vz_mention_is_allowed() {
+    fn an_annotated_vz_mention_without_enumeration_is_rejected() {
+        // Marker-only exemption no longer suffices under the double-key rule.
         let tmp = tempfile::tempdir().unwrap();
         write_rust(
             tmp.path(),
             "ok.rs",
             "// allow(no-vz): historical design note\n/// The removed Vz backend locked the image.\nfn f() {}\n",
         );
-        assert!(run(tmp.path()).is_ok());
+        assert!(run(tmp.path()).is_err());
     }
 
     #[test]

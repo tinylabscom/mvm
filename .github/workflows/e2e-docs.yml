@@ -105,10 +105,6 @@ jobs:
       # Stop this shard on the first failed scenario; don't burn the remaining
       # budget once the docs lane is already red.
       MVM_BDD_FAIL_FAST: "1"
-      # Must track `FC_VERSION_DEFAULT` in mvm-core. The workload launch path
-      # passes flags older Firecracker releases reject before opening the API
-      # socket, which otherwise surfaces as an unhelpful socket timeout.
-      FC_VERSION: v1.17.0
       # The published builder/default-image paths fail closed unless the
       # source-built binary can verify their signed checksum manifests.
       MVM_E2E_FEATURES: user,release-artifact-bootstrap
@@ -166,16 +162,8 @@ jobs:
         with:
           version: "0.12.5"
 
-      - name: Install firecracker
-        run: |
-          set -euo pipefail
-          curl -fL -o firecracker.tgz \
-            "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz"
-          tar -xzf firecracker.tgz
-          sudo install -m 0755 \
-            "release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" \
-            /usr/bin/firecracker
-          /usr/bin/firecracker --version
+      - name: Install the locked firecracker
+        uses: ./.github/actions/install-firecracker
 
       - name: Grant /dev/kvm access for the job
         run: |

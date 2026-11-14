@@ -159,6 +159,8 @@ pub unsafe extern "C" fn nvmlSystemGetDriverVersion(
             }
             match call(&mvm_contract::protocol::gpu::GpuRequest::NvmlSystemGetDriverVersion) {
                 GpuResponse::NvmlDriverVersion { version: v } => {
+                    // SAFETY: `version` is non-null (checked above) and, per this fn's contract, a
+                    //         writable buffer of `length` bytes.
                     if unsafe { write_cstr(version, length as usize, &v) } {
                         SUCCESS
                     } else {
@@ -258,6 +260,8 @@ pub unsafe extern "C" fn nvmlDeviceGetName(
                 },
             ) {
                 GpuResponse::DeviceName { name: n } => {
+                    // SAFETY: `name` is non-null (checked above) and, per this fn's contract, a
+                    //         writable buffer of `length` bytes.
                     if unsafe { write_cstr(name, length as usize, &n) } {
                         SUCCESS
                     } else {

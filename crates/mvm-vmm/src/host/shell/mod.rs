@@ -7,4 +7,9 @@
 pub mod exec;
 pub mod mock;
 
-pub use exec::*;
+#[cfg(unix)]
+pub use exec::replace_process;
+pub use exec::{
+    run_host, run_host_visible, run_in_vm, run_in_vm_capture, run_in_vm_stdout, run_in_vm_visible,
+    run_on_vm, run_on_vm_capture, run_on_vm_visible, shell_quote,
+};

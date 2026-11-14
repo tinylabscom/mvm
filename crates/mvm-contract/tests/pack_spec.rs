@@ -29,6 +29,29 @@ fn golden_documents_round_trip_without_installation_or_python_inference() {
 }
 
 #[test]
+fn yocto_source_binds_relative_archive_and_inputs_without_a_nix_source() {
+    let input: Value =
+        serde_json::from_str(include_str!("../../../examples/yocto/pack.json")).unwrap();
+    let spec: PackSpec = serde_json::from_value(input.clone()).unwrap();
+    let round_trip: PackSpec = serde_json::from_slice(&spec.canonical_json().unwrap()).unwrap();
+    assert_eq!(spec, round_trip);
+    for replacement in [
+        json!({"kind": "yocto", "archive": "../escape.tar.gz", "inputs": "inputs.json"}),
+        json!({"kind": "yocto", "archive": "/tmp/archive.tar.gz", "inputs": "inputs.json"}),
+        json!({"kind": "yocto", "archive": "archive.tar.gz", "inputs": "."}),
+        json!({"kind": "yocto", "archive": "archive.tar.gz"}),
+        json!({"kind": "yocto", "archive": "archive.tar.gz", "inputs": "inputs.json", "path": "."}),
+    ] {
+        let mut invalid = input.clone();
+        invalid["source"] = replacement;
+        assert!(serde_json::from_value::<PackSpec>(invalid).is_err());
+    }
+    let mut mixed = input;
+    mixed["packages"] = json!([{"name": "busybox", "scope": "runtime"}]);
+    assert!(serde_json::from_value::<PackSpec>(mixed).is_err());
+}
+
+#[test]
 fn canonical_bytes_are_language_neutral_and_preserve_semantic_order() {
     let spec: PackSpec = serde_json::from_str(MINIMAL).unwrap();
     assert_eq!(

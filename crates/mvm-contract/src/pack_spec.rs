@@ -28,8 +28,8 @@ pub enum PackTarget {
     Aarch64Linux,
 }
 
-/// Local input tree, relative to the document directory. No executable source
-/// expressions, host paths, OCI pulling, or source discovery in this version.
+/// Producer inputs relative to the document directory. No executable source
+/// expressions, host paths, OCI pulling, or implicit producer discovery.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -43,6 +43,25 @@ pub enum PackSource {
             )
         )]
         path: String,
+    },
+    /// A Yocto-built archive and its separately pinned producer document.
+    Yocto {
+        #[cfg_attr(
+            feature = "schema",
+            schemars(
+                length(min = 1, max = 4096),
+                regex(pattern = r"^[^/\\:\x00-\x1f\x7f]+(/[^/\\:\x00-\x1f\x7f]+)*$")
+            )
+        )]
+        archive: String,
+        #[cfg_attr(
+            feature = "schema",
+            schemars(
+                length(min = 1, max = 4096),
+                regex(pattern = r"^[^/\\:\x00-\x1f\x7f]+(/[^/\\:\x00-\x1f\x7f]+)*$")
+            )
+        )]
+        inputs: String,
     },
 }
 
@@ -244,6 +263,10 @@ pub enum PackSpecError {
     Package,
     #[error("unsafe path: expected normalized portable path without traversal")]
     Path,
+    #[error(
+        "Yocto source already contains its application; packages, dependencies and copy must be empty"
+    )]
+    YoctoSource,
     #[error("entrypoint must have a nonempty executable and no NUL bytes")]
     Entrypoint,
     #[error("CPU cores and memory MiB must be positive")]
@@ -256,8 +279,19 @@ impl PackSpec {
     /// Validate both deserialized and directly constructed authored input.
     pub fn validate(&self) -> Result<(), PackSpecError> {
         self.identity.validate()?;
-        let PackSource::Local { path } = &self.source;
-        relative_path(path, true)?;
+        match &self.source {
+            PackSource::Local { path } => relative_path(path, true)?,
+            PackSource::Yocto { archive, inputs } => {
+                relative_path(archive, false)?;
+                relative_path(inputs, false)?;
+                if !self.packages.is_empty()
+                    || !self.dependencies.is_empty()
+                    || !self.copy.is_empty()
+                {
+                    return Err(PackSpecError::YoctoSource);
+                }
+            }
+        }
         for package in &self.packages {
             if !token(&package.name) || package.version.as_deref().is_some_and(|v| !token(v)) {
                 return Err(PackSpecError::Package);

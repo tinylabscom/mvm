@@ -96,13 +96,18 @@ mod canonical_kernel;
 mod composition;
 mod display_grants;
 mod final_gates;
+mod grant_validation;
 mod host_gates;
+mod mailbox_posture;
 mod nonce_ledger;
 mod registry_pack;
+mod shares;
 mod verb_grant_sidecar;
 
 use assurance_runtime::{AssuranceRuntimeBinding, verify_selected_runtime};
+use grant_validation::{enforce_mailbox_retention, enforce_wall_clock_projection};
 use host_gates::{admit_host_interface, admit_within_host_budget};
+pub use mailbox_posture::{MailboxLaunchPosture, MailboxPostureHandoff};
 pub use nonce_ledger::InMemoryNonceLedger;
 use registry_pack::verify_registry_pack_assets;
 use verb_grant_sidecar::mint_verb_grant_sidecar;
@@ -154,6 +159,7 @@ pub use registry_pack::{BuiltPackBootCheck, PreparedBuiltPackRuntime, prepare_bu
 pub struct AdmittedPlan {
     plan: ExecutionPlan,
     plan_id: PlanId,
+    variant: Variant,
     signer_id: String,
     signed: SignedExecutionPlan,
     extensions: Vec<AdmittedExtension>,
@@ -185,6 +191,18 @@ impl AdmittedPlan {
     #[must_use]
     pub fn plan_id(&self) -> &PlanId {
         &self.plan_id
+    }
+
+    /// Retain this host admission's mailbox posture for the exact VM it admitted.
+    #[must_use]
+    pub fn mailbox_posture(&self) -> Option<MailboxLaunchPosture> {
+        self.plan.mailbox.map(|grant| MailboxLaunchPosture {
+            variant: self.variant,
+            plan_id: self.plan_id.clone(),
+            plan_nonce: self.plan.nonce.clone(),
+            vm_name: self.plan.image.name.clone(),
+            grant,
+        })
     }
 
     /// The signer whose key the plan verified under — this host's own signer
@@ -224,6 +242,7 @@ impl AdmittedPlan {
     ) -> Self {
         Self {
             plan_id: plan.plan_id.clone(),
+            variant: Variant::Dev,
             signer_id,
             plan,
             signed,
@@ -370,6 +389,10 @@ pub fn admit_plan_for_run(
     // signed admitted one to anything downstream that only checks the
     // signature.
     admit_grants(plan, &host_grant_ceiling(), posture)?;
+    enforce_mailbox_retention(
+        plan.mailbox.as_ref(),
+        mvm_core::user_config::load(None).max_mailbox_retention_ms,
+    )?;
 
     // The ceiling above bounds this one workload; the budget bounds the sum of
     // every live one. Both sit in the pre-keystore window for the same reason,
@@ -454,6 +477,10 @@ pub fn admit_signed_plan_for_run(
     let extensions = verify_extension_packs(&verified, None)?;
     verify_registry_pack_assets(&verified)?;
     admit_grants(&verified, &host_grant_ceiling(), posture)?;
+    enforce_mailbox_retention(
+        verified.mailbox.as_ref(),
+        mvm_core::user_config::load(None).max_mailbox_retention_ms,
+    )?;
     admit_within_host_budget(&verified)?;
     admit_host_interface(&verified)?;
 
@@ -615,6 +642,7 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
 
     Ok(AdmittedPlan {
         plan_id: verified.plan_id.clone(),
+        variant: posture.variant(),
         signer_id,
         plan: verified,
         signed,
@@ -896,31 +924,6 @@ fn admit_grants(plan: &ExecutionPlan, ceiling: &GrantCeiling, posture: RunPostur
 
     display_grants::admit_display_input(grants, posture.variant)?;
     enforceability_gate(grants, plan, posture)
-}
-
-/// Refuse a plan whose two encodings of one wall-clock bound disagree.
-///
-/// `resources.timeouts.exec_secs` is the projection of `grants.wall_clock`, and
-/// synthesis is the only thing that writes it. A signed plan reaching admission
-/// with the two out of step was not produced by that path, and there is no
-/// right answer to pick between them: enforcing the grant ignores a signed
-/// field, enforcing the field ignores what the ceiling was applied to. Refusing
-/// is the only choice that cannot silently run a workload under a bound nobody
-/// authored.
-///
-/// The comparison runs against the projection, never against the grant
-/// directly, because the projection is lossy: an absent grant and an explicit
-/// `Unbounded` both encode as `0`, and only the ceiling distinguishes them.
-fn enforce_wall_clock_projection(plan: &ExecutionPlan, grants: &Grants) -> Result<()> {
-    let projected = mvm_contract::grants::projection::exec_secs_from_grants(grants);
-    let carried = plan.resources.timeouts.exec_secs;
-    if projected != carried {
-        anyhow::bail!(
-            "plan carries exec_secs {carried} but its wall-clock grant projects to \
-             {projected}; refusing to choose between two encodings of one bound"
-        );
-    }
-    Ok(())
 }
 
 /// Refuse (prod) or warn (dev) when the backend this run boots on has no
@@ -1263,13 +1266,10 @@ pub fn enforce_admitted_shares(
         } else {
             mvm_core::plan::ShareKind::Disk
         };
-        let admitted = plan.shares.iter().find(|g| {
-            g.host_path == v.host
-                && g.guest_path == v.guest
-                && g.kind == want_kind
-                && g.read_only == v.read_only
-                && g.encrypted == v.encrypted
-        });
+        let admitted = plan
+            .shares
+            .iter()
+            .find(|g| shares::matches_grant(g, v, want_kind));
         let Some(grant) = admitted else {
             anyhow::bail!(
                 "refusing to attach volume '{}' -> '{}' ({}): it is not named in the signed \
@@ -2102,6 +2102,7 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
 
     let backend_name = backend.name().to_string();
     let vm_name = config.name.clone();
+    let mailbox_posture = admitted.mailbox_posture();
     registry_pack::verify_runtime_at_dispatch(
         _built_runtime.as_ref(),
         &config,
@@ -2110,7 +2111,7 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
     )?;
     // Before the boot, so a grant this backend cannot serve never reaches a
     // guest that would assert it.
-    crate::mailbox_process::require_servable(&config, backend)?;
+    crate::mailbox_process::require_servable(&config, backend, mailbox_posture.as_ref())?;
     // Spent before the backend starts, so an admission that reached dispatch
     // can never authorize another launch, whatever the start's outcome.
     admitted.dispatched = true;
@@ -2170,9 +2171,12 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
             // Last, so no earlier rollback leaves a mailbox process behind.
             // A grant that cannot be served is refused rather than booting a
             // guest whose mailbox port nobody answers.
-            if let Err(err) =
-                crate::mailbox_process::spawn_for_launch(admitted.plan(), backend, &vm_name)
-            {
+            if let Err(err) = crate::mailbox_process::spawn_for_launch(
+                admitted.plan(),
+                backend,
+                &vm_name,
+                mailbox_posture.as_ref(),
+            ) {
                 return Err(undo_launch(UndoLaunch {
                     backend,
                     vm_id: &vm_id,
@@ -2342,10 +2346,32 @@ mod admitted_environment_tests {
 mod tests {
     use super::*;
     use chrono::{DateTime, TimeZone, Utc};
+    use mvm_contract::protocol::mailbox::{
+        ExecutionEpoch, MailboxGrant, MailboxId, MailboxRetentionPolicy,
+    };
     use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy};
     use rand::Rng;
 
     const FIXTURE_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[test]
+    fn local_retention_requires_a_configured_host_ceiling() {
+        let mut grant = MailboxGrant {
+            mailbox: MailboxId::from_bytes([1; 32]),
+            authority_key: [2; 32],
+            epoch: ExecutionEpoch::new(1).expect("epoch"),
+            report: None,
+            retention: None,
+        };
+        assert!(enforce_mailbox_retention(Some(&grant), None).is_ok());
+        grant.retention = Some(MailboxRetentionPolicy::new(10_000).expect("window"));
+        assert!(enforce_mailbox_retention(Some(&grant), None).is_err());
+        assert!(enforce_mailbox_retention(Some(&grant), Some(0)).is_err());
+        assert!(enforce_mailbox_retention(Some(&grant), Some(u64::MAX)).is_err());
+        assert!(enforce_mailbox_retention(Some(&grant), Some(9_999)).is_err());
+        assert!(enforce_mailbox_retention(Some(&grant), Some(10_000)).is_ok());
+        assert!(enforce_mailbox_retention(Some(&grant), Some(20_000)).is_ok());
+    }
 
     #[cfg(feature = "manifest-verify")]
     const PYTHON_MANIFEST: &[u8] =
@@ -3194,6 +3220,8 @@ mod tests {
             read_only: true,
             encrypted: false,
             content_sha256: None,
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
         let mut input = fixture_input("vm-materialized-share");
         input.shares = vec![grant];
@@ -3230,11 +3258,60 @@ mod tests {
             read_only: true,
             encrypted: false,
             content_sha256: None,
+            include: Vec::new(),
+            exclude: Vec::new(),
         }];
         let disk_plan = synthesize_plan(&disk_input).expect("synthesize disk plan");
         assert!(
             enforce_admitted_shares(std::slice::from_ref(&materialized), &disk_plan).is_err(),
             "a materialized directory must not satisfy a disk grant"
+        );
+    }
+
+    /// A re-bind under a different deny set refuses: claim-time binding
+    /// binds the include/exclude vectors, so a volume whose share grants it
+    /// a different effective tree than the plan admitted cannot attach —
+    /// the deny set cannot be weakened between admission and boot.
+    #[test]
+    fn a_rebind_with_a_different_deny_set_is_refused() {
+        let grant = mvm_core::plan::HostShareGrant {
+            tag: "uvol0".into(),
+            host_path: "/h/src".into(),
+            guest_path: "/data".into(),
+            kind: mvm_core::plan::ShareKind::DirShare,
+            read_only: true,
+            encrypted: false,
+            content_sha256: None,
+            include: Vec::new(),
+            exclude: vec![mvm_contract::policy::protected_paths::ProtectedPath::new(
+                "**/target",
+            )],
+        };
+        let mut input = fixture_input("vm-share-deny-rebind");
+        input.shares = vec![grant];
+        let plan = synthesize_plan(&input).unwrap();
+
+        let matching = mvm_core::vm_backend::VmVolume {
+            host: "/h/src".into(),
+            guest: "/data".into(),
+            read_only: true,
+            materialized_image: Some("/state/mount-0.ext4".into()),
+            share_include: Vec::new(),
+            share_exclude: vec![mvm_contract::policy::protected_paths::ProtectedPath::new(
+                "**/target",
+            )],
+            ..Default::default()
+        };
+        enforce_admitted_shares(std::slice::from_ref(&matching), &plan)
+            .expect("the admitted deny set attaches");
+
+        let weakened = mvm_core::vm_backend::VmVolume {
+            share_exclude: Vec::new(),
+            ..matching.clone()
+        };
+        assert!(
+            enforce_admitted_shares(std::slice::from_ref(&weakened), &plan).is_err(),
+            "a re-bind that drops the additional deny set must refuse"
         );
     }
 
@@ -3256,6 +3333,8 @@ mod tests {
             read_only: true,
             encrypted: false,
             content_sha256: Some(digest.clone()),
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
         let mut input = fixture_input("vm-share-digest-drift");
         input.shares = vec![grant];
@@ -3306,6 +3385,8 @@ mod tests {
             read_only: true,
             encrypted: false,
             content_sha256: None,
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
         let mut input = fixture_input("vm-shares");
         input.shares = vec![grant];
@@ -3891,6 +3972,48 @@ mod tests {
             RunPosture::without_backend(Variant::Dev),
         )
         .expect("a grant inside the ceiling admits");
+    }
+
+    #[test]
+    fn mailbox_retention_above_or_without_host_ceiling_refuses_before_signing() {
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let keys = tempfile::tempdir().expect("keystore");
+        let mut input = fixture_input("vm-retention");
+        input.mailbox = Some(MailboxGrant {
+            mailbox: MailboxId::from_bytes([1; 32]),
+            authority_key: [2; 32],
+            epoch: ExecutionEpoch::new(1).expect("epoch"),
+            report: None,
+            retention: Some(MailboxRetentionPolicy::new(10_000).expect("window")),
+        });
+        let attempt = || {
+            admit_for_run(
+                &input,
+                &SystemClock,
+                &InMemoryNonceLedger::new(),
+                Some(keys.path()),
+                None,
+                RunPosture::without_backend(Variant::Dev),
+            )
+        };
+        let missing = attempt().expect_err("missing operator ceiling must refuse");
+        assert!(
+            missing.to_string().contains("max_mailbox_retention_ms"),
+            "{missing:#}"
+        );
+        assert!(
+            !keys.path().join("host-signer.ed25519").exists(),
+            "a refused grant must not reach the keystore"
+        );
+        let mut config = mvm_core::user_config::load(None);
+        config.max_mailbox_retention_ms = Some(9_999);
+        mvm_core::user_config::save(&config, None).expect("set host ceiling");
+        let over = attempt().expect_err("request above host ceiling must refuse");
+        assert!(over.to_string().contains("ceiling"), "{over:#}");
+        assert!(
+            !keys.path().join("host-signer.ed25519").exists(),
+            "an over-ceiling grant must not be signed"
+        );
     }
 
     #[test]

@@ -1,0 +1,21 @@
+{
+  "schema": "mvm.pack-spec/v1",
+  "identity": {
+    "name": "example/yocto-hello",
+    "version": "1.0.0"
+  },
+  "target": "aarch64-linux",
+  "source": {
+    "kind": "yocto",
+    "archive": "mvm-workload-qemuarm64.rootfs.tar.gz",
+    "inputs": "yocto-inputs.json"
+  },
+  "packages": [],
+  "dependencies": [],
+  "copy": [],
+  "entrypoint": ["/srv/app/hello"],
+  "resources": {
+    "cpu_cores": 1,
+    "memory_mb": 256
+  }
+}

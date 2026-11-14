@@ -357,7 +357,7 @@ pub fn query_fs_diff_at(vsock_uds_path: &str) -> Result<Vec<FsChange>> {
 
 /// Query filesystem diff on an already-connected stream. Backend-agnostic
 /// entry point for `mvmctl diff` — the stream comes from
-/// `mvm_runtime::vsock_transport::for_vm(name)` so the verb works against any VMM.
+/// `mvm_vmm::vsock_transport::for_vm(name)` so the verb works against any VMM.
 /// `FsDiff` is part of the filesystem RPC surface, so this drives
 /// the hello prelude requiring `FilesystemRpc` exactly like
 /// [`send_fs_request_on`] — the dir-based wrappers used to skip the hello,
@@ -409,7 +409,7 @@ pub fn send_proc_request(instance_dir: &str, req: GuestRequest) -> Result<ProcRe
 
 /// Dispatch a non-streaming process-control verb on an already-connected
 /// stream and return the `ProcResult`. The backend-agnostic entry point:
-/// the host CLI obtains the stream from `mvm_runtime::vsock_transport::for_vm(name)`
+/// the host CLI obtains the stream from `mvm_vmm::vsock_transport::for_vm(name)`
 /// so `mvmctl proc` works regardless of which VMM launched the VM.
 /// `send_proc_request` is the dir-based wrapper over this.
 pub fn send_proc_request_on(stream: &mut UnixStream, req: GuestRequest) -> Result<ProcResult> {
@@ -449,7 +449,7 @@ pub fn send_proc_wait<F: FnMut(&ProcWaitEvent)>(
 
 /// Stream `ProcWait` events on an already-connected stream. Backend-agnostic
 /// entry point for `mvmctl proc wait` — the stream comes from
-/// `mvm_runtime::vsock_transport::for_vm(name)` so the verb works against any VMM.
+/// `mvm_vmm::vsock_transport::for_vm(name)` so the verb works against any VMM.
 /// Mirrors the host shape of [`send_run_entrypoint`].
 pub fn send_proc_wait_on<F: FnMut(&ProcWaitEvent)>(
     stream: &mut UnixStream,
@@ -502,7 +502,7 @@ pub fn send_fs_request(instance_dir: &str, req: GuestRequest) -> Result<FsResult
 
 /// Dispatch a single FS RPC on an already-connected stream and return the
 /// `FsResult`. The backend-agnostic entry point: the host CLI obtains the
-/// stream from `mvm_runtime::vsock_transport::for_vm(name)` (which resolves the
+/// stream from `mvm_vmm::vsock_transport::for_vm(name)` (which resolves the
 /// right socket per backend — Firecracker's `v.sock`, or the per-port UNIX
 /// socket libkrun/QEMU expose), so `fs`/`cp` work regardless of which VMM
 /// launched the VM. `send_fs_request` is the dir-based wrapper

@@ -292,7 +292,7 @@ level = "build"
 witness_kinds = ["fn", "ci"]
 suite = "prod_console"
 statement = "A sealed production microVM has no shell, no do_exec, and no PTY"
-# Scoped to what the three witnesses check. The host→guest input plane's
+# Scoped to what these witnesses check. The host→guest input plane's
 # properties are policy rather than absence and have no production caller;
 # they are claimed separately, as Preview MVM-SEC-17, with their limits.
 witnesses = [
@@ -300,6 +300,8 @@ witnesses = [
     "fn:following_the_console_never_writes_to_it",
     "fn:prod_safe_grant_refuses_all_dev_only_requests",
     "ci:guest-agent-runtime-boundary",
+    "ci:no-ssh-forwarding",
+    "ci:sealed-prod-no-ssh",
 ]
 
 [[claim]]

@@ -14,7 +14,7 @@ Edit `flake.nix`, source files, or `mvm.toml`, then run:
 mvmctl machine build
 ```
 
-Resource changes such as `vcpus`, `mem`, and `data_disk` update the slot
+Resource changes such as `cpus`, `mem`, and `data_disk` update the slot
 record. Identity-shaping changes such as `flake` and `profile` can trigger
 drift detection; pass `--force` only when overwriting the existing slot is
 intentional.

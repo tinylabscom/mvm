@@ -42,7 +42,7 @@ const linkGroups = [
 const socialLinks = [
   { label: "GitHub", href: "https://github.com/tinylabscom/mvm", icon: Github },
   { label: "Blog", href: "/blog/", icon: Newspaper },
-  { label: "Docs", href: "/getting-started/installation/", icon: BookOpen },
+  { label: "Docs", href: "/docs/", icon: BookOpen },
   {
     label: "MicroVMs weekly",
     href: "https://this-week-in-microvms.com",

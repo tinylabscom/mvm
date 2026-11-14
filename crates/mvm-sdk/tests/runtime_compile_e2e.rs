@@ -7,7 +7,7 @@
 
 use std::fs;
 
-use mvm_sdk::compile::compile;
+use mvm_compiler::compile;
 use mvm_sdk::runtime::{RuntimeRecording, compile_recording};
 
 fn write_python_file(dir: &std::path::Path, name: &str, body: &str) {

@@ -109,8 +109,8 @@ fn legacy_replay(raw: &[u8]) -> anyhow::Result<std::fs::File> {
     anyhow::ensure!(readonly >= 0, "could not open read-only config replay");
     // SAFETY: successful shm_open transferred this descriptor exclusively.
     let readonly = unsafe { std::fs::File::from_raw_fd(readonly) };
-    // SAFETY: the name is ours; failure occurs BEFORE any secret bytes are written.
     anyhow::ensure!(
+        // SAFETY: the name is ours; failure occurs BEFORE any secret bytes are written.
         unsafe { libc::shm_unlink(name.0.as_ref().expect("owned empty name").as_ptr()) } == 0,
         "could not unlink empty config replay"
     );
@@ -130,8 +130,8 @@ fn legacy_replay(raw: &[u8]) -> anyhow::Result<std::fs::File> {
     drop(mapping);
     drop(writable);
     // POSIX shm descriptors start CLOEXEC; explicitly enforce it for this temporary.
-    // SAFETY: the read-only descriptor is live and owned.
     anyhow::ensure!(
+        // SAFETY: the read-only descriptor is live and owned.
         unsafe { libc::fcntl(readonly.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } == 0,
         "could not protect config replay descriptor"
     );
@@ -429,8 +429,8 @@ mod tests {
         let raw = b" {\"nonnative\":\"fixture\"}\n";
         let replay = super::legacy_replay(raw).unwrap();
         let fd = replay.as_raw_fd();
-        // SAFETY: inspect the private unit-owned descriptor, never global FD0.
         assert_ne!(
+            // SAFETY: inspect the private unit-owned descriptor, never global FD0.
             unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
             0
         );
@@ -632,8 +632,8 @@ fn run() -> anyhow::Result<()> {
         StartupMode::Legacy => {
             if replay_hint.is_none() {
                 let replay = legacy_replay(raw.as_bytes())?;
-                // SAFETY: single-threaded startup replaces only standard input.
                 anyhow::ensure!(
+                    // SAFETY: single-threaded startup replaces only standard input.
                     unsafe { libc::dup2(replay.as_raw_fd(), libc::STDIN_FILENO) } >= 0,
                     "could not install read-only config replay"
                 );
@@ -961,8 +961,10 @@ fn run() -> anyhow::Result<()> {
     diagnostics.stage(StartupStage::StatusPublish);
     CaptureStatus::Running.publish(state_dir)?;
     diagnostics.stage(StartupStage::PidPublish);
-    std::fs::write(&cfg.pid_file, std::process::id().to_string())
-        .context("publish protected supervisor PID")?;
+    // The start time rides with the pid so a pid recycled after this process
+    // dies cannot make a dead machine look alive.
+    let record = mvm_vmm::host::network_endpoint_spawn::EndpointPid::of_child(std::process::id());
+    std::fs::write(&cfg.pid_file, record.render()).context("publish protected supervisor PID")?;
     diagnostics.stage(StartupStage::PidPublished);
     drop(diagnostics);
     let kernel_boot = match held_kernel.as_ref() {
@@ -1092,6 +1094,42 @@ fn run() -> anyhow::Result<()> {
         if let Ok(json) = serde_json::to_vec(&record) {
             let path = mvm_vmm::host::hvf_supervisor::shutdown_timing_path(state_dir);
             let _ = std::fs::write(path, json);
+        }
+    }
+    // The scrub record is evidence that teardown ran. A failed write must not
+    // stop the supervisor from finishing (that would leave a machine that
+    // cannot be stopped), and a missing record already reads as "no scrub", so
+    // the failure is reported on stderr and the stop proceeds.
+    if let (Some(scrub), Some(state_dir)) = (r.ram_scrub, cfg.pid_file.parent()) {
+        let write = || -> anyhow::Result<()> {
+            mvm_core::atomic_io::atomic_write_durable(
+                &mvm_vmm::host::hvf_supervisor::ram_scrub_path(state_dir),
+                &serde_json::to_vec(&scrub)?,
+            )
+        };
+        if let Err(error) = write() {
+            eprintln!("mvm-hvf-supervisor: the RAM scrub record was not written: {error:#}");
+        }
+        // The file above goes with the state directory; the chain entry is the
+        // durable record. Best-effort for the same reason as the file.
+        let inputs = mvm_hostd::supervisor::wall_clock::SupervisorTimerInputs {
+            plan_json: armed_plan.as_ref(),
+            audit_dir: cfg.audit_dir.as_deref(),
+            signing_key_path: cfg.signing_key_path.as_deref(),
+            vm_state_dir: state_dir,
+            pid_file: &cfg.pid_file,
+        };
+        let facts = mvm_hostd::audit::emitter::GuestMemoryScrub {
+            backend: "hvf",
+            mapped_bytes: scrub.mapped_bytes,
+            scrubbed_pages: scrub.scrubbed_pages,
+            nonzero_bytes_after: scrub.nonzero_bytes_after,
+            whole_mapping: scrub.whole_mapping,
+        };
+        if let Err(error) =
+            mvm_hostd::supervisor::wall_clock::record_guest_memory_scrub(&inputs, &facts)
+        {
+            eprintln!("mvm-hvf-supervisor: the RAM scrub was not audited: {error:#}");
         }
     }
     match stop_control.publish_finalized()? {

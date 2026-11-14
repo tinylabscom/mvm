@@ -120,12 +120,6 @@ mod tests {
         assert!(json.contains("invalid Mach-O"));
     }
 
-    #[test]
-    fn signer_entrypoints_keep_compatibility_and_fallibility_distinct() {
-        let _: fn() = ensure_signed;
-        let _: fn() -> std::result::Result<(), String> = try_ensure_signed;
-    }
-
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn signing_is_noop_off_macos() {

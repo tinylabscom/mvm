@@ -41,7 +41,7 @@ def build(case: dict) -> dict:
         name="constraints",
         source=mvm.local_path("."),
         image=mvm.nix_packages(["python312"]),
-        entrypoint=mvm.entrypoint(command=["true"]),
+        entrypoints=[mvm.entrypoint(command=["true"])],
         resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
         network=net,
     )

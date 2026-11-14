@@ -31,8 +31,8 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use mvm_core::crypto::image_verify::sha256_file;
 use mvm_core::kernel_format::KernelFormat;
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use mvm_build::builder_vm::{BuilderArtifacts, BuilderJob, BuilderMounts, BuilderVm};
@@ -134,8 +134,8 @@ impl MicrovmArtifactBuilder for NixMicrovmBuilder<'_> {
         })?;
 
         // ── Step 3: hash + format inference ──────────────────────────────────
-        let kernel_hash = hash_file(&kernel_path)?;
-        let rootfs_hash = hash_file(&rootfs_path)?;
+        let kernel_hash = sha256_file(&kernel_path)?;
+        let rootfs_hash = sha256_file(&rootfs_path)?;
 
         let kernel_format = sniff_kernel_format(&kernel_path);
         let rootfs_size_bytes = std::fs::metadata(&rootfs_path)?.len();
@@ -264,21 +264,6 @@ fn sniff_kernel_format(path: &Path) -> KernelFormat {
 
     // Fallback — most Nix-built kernels that reach this path are ELF vmlinux.
     KernelFormat::Elf
-}
-
-/// Stream `path` through SHA-256 and return the lowercase hex digest.
-fn hash_file(path: &Path) -> Result<String, ArtifactError> {
-    let mut f = std::fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 65536];
-    loop {
-        let n = f.read(&mut buf).map_err(ArtifactError::Io)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hex::encode(hasher.finalize()))
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────

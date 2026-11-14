@@ -63,8 +63,8 @@ pub fn fetch_live_readiness(vm_name: &str) -> anyhow::Result<ReadinessReport> {
         GUEST_AGENT_PORT, GuestCapability, GuestRequest, GuestResponse, call_unary,
         negotiate_protocol,
     };
-    let transport: Box<dyn mvm_runtime::vsock_transport::VsockTransport> =
-        mvm_runtime::vsock_transport::for_vm(vm_name)?;
+    let transport: Box<dyn mvm_vmm::vsock_transport::VsockTransport> =
+        mvm_vmm::vsock_transport::for_vm(vm_name)?;
     let mut stream = transport.connect(GUEST_AGENT_PORT)?;
     let _ = negotiate_protocol(&mut stream, vec![GuestCapability::Readiness])?;
     match call_unary(&mut stream, &GuestRequest::ReadinessStatus)? {
@@ -89,7 +89,7 @@ pub fn wait_for_guest_agent(vm_id: &str, timeout_secs: u64) -> bool {
 /// Duration-based form used by launch policy and tests.
 pub fn wait_for_guest_agent_for(vm_id: &str, timeout: std::time::Duration) -> bool {
     wait_with_probe(timeout, |deadline, _remaining| {
-        let Ok(mut stream) = mvm_runtime::vsock_transport::connect_for_vm_before(
+        let Ok(mut stream) = mvm_vmm::vsock_transport::connect_for_vm_before(
             vm_id,
             mvm_agentd::vsock::GUEST_AGENT_PORT,
             deadline,

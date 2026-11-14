@@ -560,6 +560,8 @@ mod tests {
                     read_only: false,
                     kind: VmVolumeKind::Disk,
                     encrypted: false,
+                    share_include: Vec::new(),
+                    share_exclude: Vec::new(),
                 },
                 VmVolume {
                     materialized_image: Some("/state/ro.ext4".to_string()),
@@ -570,6 +572,8 @@ mod tests {
                     read_only: true,
                     kind: VmVolumeKind::Disk,
                     encrypted: false,
+                    share_include: Vec::new(),
+                    share_exclude: Vec::new(),
                 },
             ],
             ..base()
@@ -658,6 +662,8 @@ mod tests {
             read_only,
             kind: VmVolumeKind::Disk,
             encrypted: false,
+            share_include: Vec::new(),
+            share_exclude: Vec::new(),
         }
     }
 

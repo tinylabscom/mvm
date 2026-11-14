@@ -1,3 +1,9 @@
+//! Owned gate: `workspace-shard.yml` and `ci-main.yml` (the per-worker test
+//! state isolation and the shard partition). Only the isolation script test
+//! executes the workflow's own `Isolate test state` step under bash; the rest
+//! pin partition and environment shape that no pull-request run exercises
+//! until a shard is already mis-partitioned.
+
 use std::fs;
 
 #[test]

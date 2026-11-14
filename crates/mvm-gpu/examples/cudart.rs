@@ -500,6 +500,8 @@ pub unsafe extern "C" fn cudaDeviceSynchronize() -> CudaError {
 /// `stream` must name writable storage for one runtime stream handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cudaStreamCreate(stream: *mut *mut c_void) -> CudaError {
+    // SAFETY: forwards the caller's arguments unchanged, so the callee's documented contract is
+    //         the caller's.
     unsafe { cudaStreamCreateWithFlags(stream, 0) }
 }
 
@@ -604,6 +606,8 @@ pub unsafe extern "C" fn cudaStreamWaitEvent(
 /// `event` must name writable storage for one runtime event handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cudaEventCreate(event: *mut *mut c_void) -> CudaError {
+    // SAFETY: forwards the caller's arguments unchanged, so the callee's documented contract is
+    //         the caller's.
     unsafe { cudaEventCreateWithFlags(event, 0) }
 }
 

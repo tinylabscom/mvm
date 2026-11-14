@@ -4,6 +4,8 @@ use std::time::{Duration, Instant};
 use virtio_queue::{Queue as SplitQueue, QueueOwnedT, QueueT};
 use virtio_vsock::packet::{PKT_HEADER_SIZE, VsockPacket};
 
+use mvm_agentd::vsock::GUEST_AGENT_PORT;
+
 use super::guest_mem::GuestMem;
 
 pub(crate) const VIRTIO_MAGIC: u32 = 0x7472_6976;
@@ -364,7 +366,8 @@ impl VsockTransportCore {
         let mut expired: Vec<_> = latest_activity
             .into_iter()
             .filter_map(|(key, activity)| {
-                (!self.long_lived.contains(&key.guest_port)
+                (key.guest_port != GUEST_AGENT_PORT
+                    && !self.long_lived.contains(&key.guest_port)
                     && !self.long_lived_host_ports.contains(&key.host_port)
                     && now.saturating_duration_since(activity) >= CONNECTION_IDLE_TIMEOUT)
                     .then_some(key)
@@ -1127,6 +1130,27 @@ mod tests {
             core.evict_idle_connections_at(now).is_empty(),
             "a long-lived control port must not be reset for being quiet"
         );
+    }
+
+    /// The agent stream is a request/response channel that is silent for as
+    /// long as the guest command it carries runs, so this layer must not reset
+    /// it for being quiet either.
+    #[test]
+    fn the_guest_agent_port_is_not_evicted_for_being_idle() {
+        let mut core = transport();
+        let now = Instant::now();
+        let header = VsockHdr {
+            dst_port: 9000,
+            src_port: GUEST_AGENT_PORT,
+            buf_alloc: 64,
+            ..Default::default()
+        };
+        assert!(core.record_tx_credit_at(
+            &header,
+            now - CONNECTION_IDLE_TIMEOUT - Duration::from_secs(1)
+        ));
+
+        assert!(core.evict_idle_connections_at(now).is_empty());
     }
 
     #[test]

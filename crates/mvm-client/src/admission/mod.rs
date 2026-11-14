@@ -1508,6 +1508,7 @@ pub(crate) mod admit_plan_tests {
         let mut substrate = crate::entrypoint::SessionAuditSubstrate {
             tenant_id: admitted.admitted.plan().tenant.0.clone(),
             plan_json: serde_json::to_string(admitted.admitted.signed()).unwrap(),
+            mailbox_posture: admitted.admitted.mailbox_posture(),
             caller_registration: None,
             bundle_json: None,
             config_files: Vec::new(),
@@ -2204,6 +2205,8 @@ pub(crate) mod admit_plan_tests {
                     read_only: true,
                     encrypted: false,
                     content_sha256: None,
+                    include: Vec::new(),
+                    exclude: Vec::new(),
                 },
                 mvm_core::plan::HostShareGrant {
                     tag: "diskvol".into(),
@@ -2213,6 +2216,8 @@ pub(crate) mod admit_plan_tests {
                     read_only: true,
                     encrypted: false,
                     content_sha256: None,
+                    include: Vec::new(),
+                    exclude: Vec::new(),
                 },
             ],
             ..pinning_params(&rootfs, &ledger)
@@ -2268,6 +2273,8 @@ pub(crate) mod admit_plan_tests {
                 read_only: true,
                 encrypted: false,
                 content_sha256: None,
+                include: Vec::new(),
+                exclude: Vec::new(),
             }],
             assets: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
@@ -2900,6 +2907,8 @@ allow_hosts = ["localhost:8443"]
                 read_only: false,
                 encrypted: false,
                 content_sha256: digest.map(str::to_string),
+                include: Vec::new(),
+                exclude: Vec::new(),
             }
         };
 

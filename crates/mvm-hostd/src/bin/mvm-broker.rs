@@ -29,7 +29,6 @@
 //!
 //! `host.cost.v1` and `broker.v1` remain unregistered.
 
-use std::io::Read;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -43,15 +42,6 @@ use mvm_hostd::broker::handlers::host_beacon_v1::HostBeaconV1Handler;
 use mvm_hostd::broker::handlers::register_bound_handlers;
 use mvm_hostd::broker::registry::Registry;
 use mvm_hostd::broker::server::serve_on_listener;
-
-fn read_stdin_blocking() -> Result<Vec<u8>> {
-    let mut buf = Vec::with_capacity(4096);
-    std::io::stdin()
-        .lock()
-        .read_to_end(&mut buf)
-        .context("mvm-broker stdin read failed")?;
-    Ok(buf)
-}
 
 fn main() -> Result<()> {
     // First statement in the process: a panic before this line would
@@ -71,7 +61,7 @@ fn main() -> Result<()> {
         .json()
         .init();
 
-    let raw = read_stdin_blocking()?;
+    let raw = mvm_hostd::read_launch_config("mvm-broker")?;
     let cfg: SubprocessConfig = parse_config(&raw).context("mvm-broker config parse failed")?;
     info!(
         workload_id = %cfg.workload_id,

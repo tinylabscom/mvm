@@ -291,7 +291,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::test_support::isolated_lock_probe;
+    use mvm_core::util::test_env::isolated_lock_probe;
 
     const SIZE: u64 = 16 * 1024 * 1024;
 

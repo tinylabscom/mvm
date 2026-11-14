@@ -8,11 +8,10 @@
 //! generated next would otherwise differ across runs and defeat the per-digest
 //! verity cache.
 //!
-//! The default path now uses the in-process `mvm-ext4` writer, which is
+//! The default path uses the in-process [`crate::ext4`] writer, which is
 //! deterministic by construction and avoids `mke2fs` timestamp drift on newer
-//! e2fsprogs releases. Option combinations the pure writer does not model yet
-//! still fall back to `mke2fs` on Linux, keeping the existing escape hatch for
-//! non-default formatting requests.
+//! e2fsprogs releases. Option combinations the pure writer does not model
+//! fall back to `mke2fs` on Linux.
 //!
 //! The tree walk + streamed emission live in [`crate::rootfs`] — this module
 //! is the OCI-flavored adapter on top of it: typed staging input, error

@@ -4,8 +4,7 @@
 //! authoring surfaces.
 //!
 //! Owns source and dependency analysis, workload lowering, and deterministic
-//! build artifacts. `mvm-sdk::compile` re-exports this crate for compatibility.
-//! Compilation does not execute builds, access the network, or sign artifacts.
+//! build artifacts. Compilation does not execute builds, access the network, or sign artifacts.
 
 pub mod archive;
 mod data;

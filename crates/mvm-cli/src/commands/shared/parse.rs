@@ -58,10 +58,17 @@ pub(crate) fn clap_port_spec(s: &str) -> Result<String, String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum VolumeSpec {
     /// Host-directory snapshot materialized as a read-only ext4 block image.
+    /// The built-in protected-path deny set is applied at materialization
+    /// (default-deny); `include` re-exposes built-in-denied paths, `exclude`
+    /// denies additional ones.
     DirShare {
         host_dir: String,
         guest_mount: String,
         read_only: bool,
+        /// `:include=` — built-in-denied paths this share re-exposes (signed).
+        include: Vec<mvm_contract::policy::protected_paths::ProtectedPath>,
+        /// `:exclude=` — additional denied paths beyond the built-in set (signed).
+        exclude: Vec<mvm_contract::policy::protected_paths::ProtectedPath>,
     },
     /// Persistent ext4 disk image attached as virtio-blk.
     Disk {
@@ -84,13 +91,40 @@ pub struct DirShareSpec {
     pub guest_mount: String,
     /// Whether the guest must see the share read-only.
     pub read_only: bool,
+    /// Built-in-denied paths this share re-exposes (see
+    /// [`mvm_contract::policy::protected_paths::BUILT_IN_DENIED`]).
+    pub include: Vec<mvm_contract::policy::protected_paths::ProtectedPath>,
+    /// Additional denied paths beyond the built-in set.
+    pub exclude: Vec<mvm_contract::policy::protected_paths::ProtectedPath>,
 }
 
-const VOLUME_GRAMMAR_HINT: &str = "expected host:/guest[:ro|rw] (dir share) \
+const VOLUME_GRAMMAR_HINT: &str = "expected host:/guest[:ro|rw][:include=a,b][:exclude=c] (dir share) \
      or host:/guest:SIZE[:ro|rw][:enc] (disk image)";
 
 fn is_volume_keyword(tok: &str) -> bool {
-    matches!(tok.to_ascii_lowercase().as_str(), "ro" | "rw" | "enc")
+    let lower = tok.to_ascii_lowercase();
+    matches!(lower.as_str(), "ro" | "rw" | "enc")
+        || lower.starts_with("include=")
+        || lower.starts_with("exclude=")
+}
+
+/// Parse one `:include=`/`:exclude=` modifier body (comma-separated share
+/// patterns) into validated matcher syntax. A malformed pattern is a typed
+/// refusal here, at the CLI boundary, never a silently non-matching one.
+fn parse_share_patterns(
+    spec: &str,
+    keyword: &str,
+    body: &str,
+) -> Result<Vec<mvm_contract::policy::protected_paths::ProtectedPath>> {
+    if body.is_empty() {
+        anyhow::bail!("invalid volume '{spec}' — '{keyword}' needs at least one path");
+    }
+    body.split(',')
+        .map(|entry| {
+            mvm_contract::policy::protected_paths::parse_share_pattern(entry.trim())
+                .map_err(|error| anyhow::anyhow!("invalid volume '{spec}': {error}"))
+        })
+        .collect()
 }
 
 pub(crate) use mvm_client::admission::AssetSpec;
@@ -266,8 +300,19 @@ pub(crate) fn parse_volume_spec(spec: &str) -> Result<VolumeSpec> {
     let mut read_only = true;
     let mut mode_seen = false;
     let mut encrypted = false;
+    let mut include: Vec<mvm_contract::policy::protected_paths::ProtectedPath> = Vec::new();
+    let mut exclude: Vec<mvm_contract::policy::protected_paths::ProtectedPath> = Vec::new();
     for m in modifiers {
-        match m.to_ascii_lowercase().as_str() {
+        let lower = m.to_ascii_lowercase();
+        if let Some(body) = lower.strip_prefix("include=") {
+            include.extend(parse_share_patterns(spec, "include", body)?);
+            continue;
+        }
+        if let Some(body) = lower.strip_prefix("exclude=") {
+            exclude.extend(parse_share_patterns(spec, "exclude", body)?);
+            continue;
+        }
+        match lower.as_str() {
             "ro" | "rw" => {
                 if mode_seen {
                     anyhow::bail!("invalid volume '{spec}' — mode (ro/rw) given more than once");
@@ -290,13 +335,21 @@ pub(crate) fn parse_volume_spec(spec: &str) -> Result<VolumeSpec> {
     }
 
     match size {
-        Some(size) => Ok(VolumeSpec::Disk {
-            host: host.to_string(),
-            guest: guest.to_string(),
-            size: size.to_string(),
-            read_only,
-            encrypted,
-        }),
+        Some(size) => {
+            if !include.is_empty() || !exclude.is_empty() {
+                anyhow::bail!(
+                    "invalid volume '{spec}' — include/exclude only apply to directory shares \
+                     (omit the SIZE: host:/guest:include=a)"
+                );
+            }
+            Ok(VolumeSpec::Disk {
+                host: host.to_string(),
+                guest: guest.to_string(),
+                size: size.to_string(),
+                read_only,
+                encrypted,
+            })
+        }
         None => {
             if encrypted {
                 anyhow::bail!(
@@ -309,6 +362,8 @@ pub(crate) fn parse_volume_spec(spec: &str) -> Result<VolumeSpec> {
                 host_dir: host.to_string(),
                 guest_mount: guest.to_string(),
                 read_only,
+                include,
+                exclude,
             })
         }
     }
@@ -321,6 +376,8 @@ pub(crate) fn parse_dir_share_spec(spec: &str) -> Result<DirShareSpec> {
             host_dir,
             guest_mount,
             read_only,
+            include,
+            exclude,
         } => {
             validate_guest_mount(&guest_mount)
                 .map_err(|error| anyhow::anyhow!("invalid mount '{spec}': {error}"))?;
@@ -328,6 +385,8 @@ pub(crate) fn parse_dir_share_spec(spec: &str) -> Result<DirShareSpec> {
                 host_dir,
                 guest_mount,
                 read_only,
+                include,
+                exclude,
             })
         }
         VolumeSpec::Disk { .. } => anyhow::bail!(
@@ -344,6 +403,8 @@ pub(crate) fn volume_spec_to_vm_volume(spec: &VolumeSpec) -> VmVolume {
             host_dir,
             guest_mount,
             read_only,
+            include,
+            exclude,
         } => VmVolume {
             materialized_image: None,
             volume_label: None,
@@ -353,6 +414,8 @@ pub(crate) fn volume_spec_to_vm_volume(spec: &VolumeSpec) -> VmVolume {
             read_only: *read_only,
             kind: VmVolumeKind::Disk,
             encrypted: false,
+            share_include: include.clone(),
+            share_exclude: exclude.clone(),
         },
         VolumeSpec::Disk {
             host,
@@ -369,6 +432,8 @@ pub(crate) fn volume_spec_to_vm_volume(spec: &VolumeSpec) -> VmVolume {
             read_only: *read_only,
             kind: VmVolumeKind::Disk,
             encrypted: *encrypted,
+            share_include: Vec::new(),
+            share_exclude: Vec::new(),
         },
     }
 }
@@ -676,6 +741,7 @@ mod volume_spec_tests {
                 host_dir,
                 guest_mount,
                 read_only,
+                ..
             } => {
                 assert_eq!(host_dir, "/h/src");
                 assert_eq!(guest_mount, "/work");
@@ -995,6 +1061,8 @@ mod volume_spec_tests {
             read_only,
             kind: VmVolumeKind::Disk,
             encrypted: false,
+            share_include: Vec::new(),
+            share_exclude: Vec::new(),
         }
     }
 
@@ -1081,6 +1149,8 @@ mod volume_spec_tests {
             read_only: false,
             kind: VmVolumeKind::Disk,
             encrypted: false,
+            share_include: Vec::new(),
+            share_exclude: Vec::new(),
         };
 
         materialize_disk_volume(&volume).expect("materialising a disk volume");
@@ -1112,6 +1182,8 @@ mod volume_spec_tests {
             read_only: true,
             kind: VmVolumeKind::Disk,
             encrypted: false,
+            share_include: Vec::new(),
+            share_exclude: Vec::new(),
         };
 
         let err = materialize_disk_volume(&volume).expect_err("missing read-only image");

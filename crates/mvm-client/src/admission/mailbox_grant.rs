@@ -5,7 +5,9 @@
 
 use anyhow::{Context, Result, ensure};
 use ed25519_dalek::VerifyingKey;
-use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxGrant, MailboxId};
+use mvm_contract::protocol::mailbox::{
+    ExecutionEpoch, MailboxGrant, MailboxId, MailboxRetentionPolicy,
+};
 
 /// Parse a 64-character hex mailbox id.
 pub fn parse_mailbox_id(raw: &str) -> Result<MailboxId> {
@@ -30,6 +32,8 @@ pub fn grant_for(
         mailbox,
         authority_key: authority.to_bytes(),
         epoch,
+        report: None,
+        retention: None,
     }
 }
 
@@ -46,7 +50,10 @@ pub fn at_workload_epoch(grant: MailboxGrant, workload: &str) -> Result<MailboxG
         epoch,
     )
     .context("deriving the mailbox authority")?;
-    Ok(grant_for(grant.mailbox, &authority, epoch))
+    let mut current = grant_for(grant.mailbox, &authority, epoch);
+    current.report = grant.report;
+    current.retention = grant.retention;
+    Ok(current)
 }
 
 /// Key in a Workload IR's `extensions` map that declares a mailbox:
@@ -81,11 +88,28 @@ pub fn combine(flag: Option<MailboxId>, declared: Option<MailboxId>) -> Result<O
     }
 }
 
+fn retention_request(
+    requested_ms: Option<u64>,
+    mailbox: Option<MailboxId>,
+) -> Result<Option<MailboxRetentionPolicy>> {
+    let Some(requested_ms) = requested_ms else {
+        return Ok(None);
+    };
+    ensure!(
+        mailbox.is_some(),
+        "--mailbox-retention-ms requires a mailbox grant"
+    );
+    MailboxRetentionPolicy::new(requested_ms)
+        .context("--mailbox-retention-ms must be a finite, nonzero duration")
+        .map(Some)
+}
+
 /// Resolve both sources against the host signer. Neither means no grant and no
 /// key is loaded. The grant is at the first epoch; admission re-mints it for
 /// the workload's own epoch with [`at_workload_epoch`].
 pub fn resolve(
     flag: Option<&str>,
+    retention_ms: Option<u64>,
     workload_ir: Option<&std::path::Path>,
 ) -> Result<Option<MailboxGrant>> {
     let flag = flag.map(parse_mailbox_id).transpose()?;
@@ -94,7 +118,9 @@ pub fn resolve(
         .map(declared_in)
         .transpose()?
         .flatten();
-    let Some(id) = combine(flag, declared)? else {
+    let id = combine(flag, declared)?;
+    let retention = retention_request(retention_ms, id)?;
+    let Some(id) = id else {
         return Ok(None);
     };
     let keys_dir = mvm_core::config::mvm_keys_dir();
@@ -104,7 +130,9 @@ pub fn resolve(
     let first = ExecutionEpoch::new(1).expect("epoch 1 is nonzero");
     let authority = mvm_hostd::mailbox_launch::authority_key_for(&keys_dir, &id, first)
         .context("deriving the mailbox authority")?;
-    Ok(Some(grant_for(id, &authority, first)))
+    let mut grant = grant_for(id, &authority, first);
+    grant.retention = retention;
+    Ok(Some(grant))
 }
 
 #[cfg(test)]
@@ -136,7 +164,9 @@ mod tests {
         env.isolate_mvm_home(home.path());
         mvm_hostd::audit::host_keypair::load_or_init_at(&mvm_core::config::mvm_keys_dir()).unwrap();
         let id = MailboxId::from_bytes([8; 32]);
-        let first = resolve(Some(&hex::encode([8; 32])), None).unwrap().unwrap();
+        let first = resolve(Some(&hex::encode([8; 32])), None, None)
+            .unwrap()
+            .unwrap();
         let at1 = at_workload_epoch(first, "w").unwrap();
         assert_eq!((at1.mailbox, at1.epoch.get()), (id, 1));
 
@@ -152,7 +182,7 @@ mod tests {
 
     #[test]
     fn no_flag_grants_nothing() {
-        assert!(resolve(None, None).unwrap().is_none());
+        assert!(resolve(None, None, None).unwrap().is_none());
     }
 
     fn workload_with(ext: serde_json::Value) -> mvm_contract::ir::Workload {
@@ -186,5 +216,55 @@ mod tests {
         assert_eq!(combine(Some(a), Some(a)).unwrap(), Some(a));
         assert!(combine(Some(a), Some(b)).is_err());
         assert_eq!(combine(None, None).unwrap(), None);
+    }
+
+    #[test]
+    fn requested_retention_needs_a_mailbox_and_is_signed_into_its_grant() {
+        let id = MailboxId::from_bytes([1; 32]);
+        assert!(retention_request(Some(10_000), None).is_err());
+        assert!(retention_request(Some(0), Some(id)).is_err());
+        assert!(retention_request(Some(u64::MAX), Some(id)).is_err());
+        assert_eq!(retention_request(None, Some(id)).unwrap(), None);
+        let requested = retention_request(Some(10_000), Some(id))
+            .unwrap()
+            .expect("finite window");
+        let mut grant = grant_for(
+            id,
+            &ed25519_dalek::SigningKey::from_bytes(&[5; 32]).verifying_key(),
+            ExecutionEpoch::new(1).unwrap(),
+        );
+        grant.retention = Some(requested);
+        assert_eq!(
+            serde_json::to_value(grant).unwrap()["retention"]["retention_ms"],
+            10_000
+        );
+
+        let home = tempfile::tempdir().expect("isolated host home");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let flag = "ab".repeat(32);
+        assert!(resolve(Some(&flag), Some(0), None).is_err());
+        assert!(
+            !mvm_core::config::mvm_keys_dir()
+                .join("host-signer.ed25519")
+                .exists(),
+            "invalid retention must not mint the host signer"
+        );
+        let resolved = resolve(Some(&flag), Some(10_000), None)
+            .expect("host-derived grant")
+            .expect("mailbox grant");
+        assert_eq!(resolved.retention, Some(requested));
+        assert_eq!(
+            at_workload_epoch(resolved, "other").unwrap().retention,
+            Some(requested),
+            "re-minting at the workload epoch cannot drop signed retention"
+        );
+        let legacy = resolve(Some(&flag), None, None)
+            .expect("legacy grant")
+            .expect("mailbox grant");
+        assert_eq!(
+            legacy.retention, None,
+            "an absent flag cannot mint a window"
+        );
     }
 }

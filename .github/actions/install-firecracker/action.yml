@@ -1,0 +1,19 @@
+name: Install the locked Firecracker
+description: >-
+  Install the Firecracker release that `crates/mvm-core/firecracker.lock` pins,
+  checked against its pinned digests, into RUNNER_TEMP. It puts the binary first
+  on PATH and names it in MVM_FIRECRACKER_BIN, which is how a source-built
+  mvmctl finds a Firecracker that is not shipped beside it. No elevation.
+runs:
+  using: composite
+  steps:
+    - name: Fetch, verify and install
+      shell: bash
+      run: |
+        set -euo pipefail
+        dir="${RUNNER_TEMP}/firecracker"
+        rm -rf "$dir"
+        bash "${GITHUB_ACTION_PATH}/../../../scripts/release/stage-firecracker.sh" "$(uname -m)" "$dir"
+        echo "$dir" >> "$GITHUB_PATH"
+        echo "MVM_FIRECRACKER_BIN=$dir/firecracker" >> "$GITHUB_ENV"
+        "$dir/firecracker" --version

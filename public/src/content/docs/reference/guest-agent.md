@@ -116,8 +116,12 @@ claim of successful collection.
 
 All-source subscriber wiring, source/host redaction policy, VM-generation
 registration, active guest service binding, lifetime collection, bounded
-retention, and detached retrieval remain under implementation. Structural
-validation alone does not make workload text safe to retain.
+retention, and detached retrieval are shipped; `mvmctl machine telemetry`
+reads a detached machine's collected records. What remains open is recorded
+plainly above (no span producer yet; the pre-agent interval is reported as
+unavailable) and in the telemetry certification ledger, not silently implied
+covered. Structural validation alone does not make workload text safe to
+retain.
 
 The control agent uses **JSON payloads inside authenticated, encrypted binary
 frames**. Other vsock services have their own codecs; they are not all JSON.

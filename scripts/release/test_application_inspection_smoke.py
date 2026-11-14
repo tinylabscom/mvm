@@ -1,5 +1,6 @@
 """Offline harness controls, not a substitute for real CLI signature verification."""
 
+import gzip
 import importlib.util
 import json
 import os
@@ -505,6 +506,28 @@ class InspectionSmokeTests(unittest.TestCase):
                 self.assertNotEqual(before, smoke.snapshot(root))
                 if case == "archive":
                     self.assertEqual((root / fixture["paths"]["archive"]).stat().st_size, 13)
+
+    def test_the_archive_cases_reach_a_gzip_retained_archive(self):
+        for case in ("archive", "missing-archive"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                recorded = root / "bundles" / "input.mvmpkg"
+                recorded.parent.mkdir()
+                retained = recorded.with_name("input.mvmpkg.gz")
+                retained.write_bytes(gzip.compress(b"fixture bytes"))
+                fixture = {"manifest_sha256": "a" * 64, "paths": {
+                    "lock": "registry/lock", "policy": "registry/policy",
+                    "registry_cache": "cache/descriptors", "bundle_key": "trust/key.pub",
+                    "archive": "bundles/input.mvmpkg", "revocation_trust": "revoke/trust",
+                }}
+                smoke.mutate(root, fixture, case, root / "unused")
+                if case == "missing-archive":
+                    self.assertFalse(retained.exists())
+                else:
+                    changed = gzip.decompress(retained.read_bytes())
+                    self.assertEqual(len(changed), len(b"fixture bytes"))
+                    self.assertNotEqual(changed, b"fixture bytes")
+                self.assertFalse(recorded.exists())
 
     def test_refusal_with_state_mutation_is_failure(self):
         with tempfile.TemporaryDirectory() as tmp:

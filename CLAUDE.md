@@ -3,6 +3,10 @@
 Backing: shipped-source
 Validation: check-claim-catalog
 
+Read `AGENTS.md` before changing this repository. Its product and design
+boundaries govern new work; this file describes the current implementation,
+while ADR-001 and its witnessed backend matrix govern shipped security claims.
+
 ## Project Overview
 
 Rust CLI for building and running Firecracker microVMs on macOS and Linux. Handles the full dev lifecycle: bootstrapping, Nix-based image builds, single-VM management, and reusable template creation.
@@ -217,7 +221,7 @@ Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, disting
 
 ### Workspace Structure
 
-28-crate Cargo workspace under `crates/` (including `crates/deps/`) (Bar-A consolidation took 32→16; `mvm-vmm`, `mvm-backends`, and `mvm-http` were split back out afterwards, `mvm-host-services` was split out of `mvm-sdk`, `mvm-hostlib` was added at the top of the graph, the four GPU API-remoting crates `mvm-gpu` and `mvm-gpu-*-shim` were added, `mvm-setpriv` was split out of `mvm-agentd` as a leaf, `mvm-bundler` was split out of `mvm-cli`, `mvm-builder-guest` was split out of `mvm-build`, and `mvm-compiler` was split out of `mvm-sdk`), plus the root `mvmctl` package, `xtask`, and `mvm-conformance` — 31 packages by `cargo metadata`. Root facade (`src/lib.rs`) re-exports the libraries.
+Cargo workspace under `crates/` (including `crates/deps/`) (Bar-A consolidation took 32→16; `mvm-vmm`, `mvm-backends`, and `mvm-http` were split back out afterwards, `mvm-host-services` was split out of `mvm-sdk`, `mvm-hostlib` was added at the top of the graph, the four GPU API-remoting crates `mvm-gpu` and `mvm-gpu-*-shim` were added, `mvm-setpriv` was split out of `mvm-agentd` as a leaf, `mvm-bundler` was split out of `mvm-cli`, `mvm-builder-guest` was split out of `mvm-build`, and `mvm-compiler` was split out of `mvm-sdk`), plus the root `mvmctl` package, `xtask`, and `mvm-conformance`. Root facade (`src/lib.rs`) re-exports the libraries.
 
 **Libraries, low → high:**
 
@@ -236,7 +240,7 @@ Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, disting
 - `mvm-host-services` -- the in-guest host-services C ABI: one JSON-in/JSON-out entry point over the vsock broker, built as the `libmvm_host_services.so` cdylib every language SDK `dlopen`s. The package name is what makes cargo emit that filename directly. Its closure is deliberately tiny (no C, no async runtime) because it is compiled into every guest — `check-sdk-transport-free` holds that line, and the SDK sidecar's staleness fingerprint watches this crate and its dependencies rather than `mvm-sdk`.
 - `mvm-capture` -- project-environment capture frontend.
 - `mvm-builder-guest` -- what runs inside the builder VM and the contract it shares with the host that boots it: `mvm-host-vm-init`, `mvm-builderd` and `stage0-init`, plus the modules both sides read (`builder_boot`, job and protocol types). `mvm-build` re-exports its modules under their old paths.
-- `mvm-compiler` -- language-neutral workload compilation: source and dependency analysis, lowering, and deterministic build artifacts (flake generation, archives). It runs no builds, uses no network and signs nothing; `mvm-sdk::compile` re-exports it.
+- `mvm-compiler` -- language-neutral workload compilation: source and dependency analysis, lowering, and deterministic build artifacts (flake generation, archives). It runs no builds, uses no network and signs nothing.
 
 **Daemons, SDK, and FFI:**
 
@@ -578,7 +582,7 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     sealed volume at `~/.mvm/volumes/deps/<volume_hash>/` carrying
     `content/`, `sbom.cdx.json`, `fetch.log`, `cve.json`, and a
     hash-chained `meta.json`; `mvm-hostd`'s supervisor admission verifier
-    calls `mvm_sdk::compile::deps_audit::verify_sealed_volume` before
+    calls `mvm_core::deps_audit::verify_sealed_volume` before
     launch and refuses tampered volumes. The seal-time security lane applies
     `mvm_build::app_deps_gate::apply_install_gate` and fails closed on
     high/critical CVE findings or stub SBOM/CVE; production launch does not
@@ -860,9 +864,12 @@ this row as enforced without it.
     before staging it beside `mvmctl`, and tolerates only a 404, for releases
     that predate the asset (tested in `tests/install_sh.rs`). A
     copy found beside `mvmctl` or in the cache is held to its own manifest,
-    not re-verified against the signature, and `MVM_SKIP_COSIGN_VERIFY` skips
-    the signature here as it does everywhere. No published release carries the
-    asset yet.
+    not re-verified against the signature when the runtime is assembled, and
+    `MVM_SKIP_COSIGN_VERIFY` skips the signature at download time as it does
+    everywhere. The Firecracker launch proof is stricter: it re-verifies the
+    archive's signed bundle at every launch and `MVM_SKIP_COSIGN_VERIFY` does
+    not waive it, so a locally built archive can be assembled from but never
+    launched under Firecracker. No published release carries the asset yet.
 
     The release job also attests build provenance for the binary tarballs
     (`actions/attest-build-provenance`, verifiable with `gh attestation

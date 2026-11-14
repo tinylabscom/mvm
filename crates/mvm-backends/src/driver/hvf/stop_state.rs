@@ -2,8 +2,9 @@
 //! running.
 
 use mvm_vmm::driver::traits::RunningVm;
+use mvm_vmm::host::process_liveness::pid_is_alive;
 
-use super::{HvfRunningVm, hvf_backend};
+use super::HvfRunningVm;
 
 impl HvfRunningVm {
     /// A stop that could not reach the control socket found nothing to stop
@@ -15,7 +16,7 @@ impl HvfRunningVm {
             && self
                 .host_process_id()
                 .and_then(|pid| libc::pid_t::try_from(pid).ok())
-                .is_some_and(|pid| !hvf_backend::pid_alive(pid))
+                .is_some_and(|pid| !pid_is_alive(pid))
     }
 }
 

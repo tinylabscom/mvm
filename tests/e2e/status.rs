@@ -21,7 +21,7 @@ fn status_on_clean_system_produces_meaningful_output() {
     );
 }
 
-/// Plan 40 dropped the `ps`/`status` aliases on `ls`.
+/// The CLI dropped the `ps`/`status` aliases on `ls`.
 #[test]
 fn ps_alias_is_unrecognized() {
     mvmctl().args(["ps", "--help"]).assert().failure().code(2);

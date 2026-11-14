@@ -921,10 +921,12 @@ pub fn enforce_active_session_policy(
 
 fn terminate_supervisor(pid: u32) {
     #[cfg(unix)]
-    unsafe {
+    if let Some(pid) = mvm_vmm::host::process_liveness::signalable_pid(pid) {
         // SAFETY: `kill(SIGTERM)` targets the PID recorded in the session file.
         // It does not dereference pointers or share memory with Rust.
-        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        }
     }
     #[cfg(not(unix))]
     {

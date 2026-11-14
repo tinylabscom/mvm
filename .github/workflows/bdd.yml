@@ -93,7 +93,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      FC_VERSION: v1.17.0
       MVM_KERNEL_SOURCE: download
       MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build
       MVM_BDD_GUEST_BIN_DIR: ${{ github.workspace }}/dist/staged
@@ -113,16 +112,8 @@ jobs:
       - uses: ./.github/actions/rust-cache
         with:
           key: bdd-live-ps11
-      - name: Install firecracker
-        run: |
-          set -euo pipefail
-          curl -fL -o firecracker.tgz \
-            "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz"
-          tar -xzf firecracker.tgz
-          sudo install -m 0755 \
-            "release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" \
-            /usr/bin/firecracker
-          /usr/bin/firecracker --version
+      - name: Install the locked firecracker
+        uses: ./.github/actions/install-firecracker
       - name: Grant /dev/kvm access for the job
         run: |
           set -euo pipefail

@@ -1318,6 +1318,8 @@ mod tests {
                 read_only: true,
                 kind: mvm_core::vm_backend::VmVolumeKind::Disk,
                 encrypted: false,
+                share_include: Vec::new(),
+                share_exclude: Vec::new(),
             }],
             ..Default::default()
         };
@@ -1564,8 +1566,20 @@ mod tests {
             std::fs::create_dir_all(vms.join(name)).expect("mkdir vm dir");
             std::fs::write(vms.join(name).join(marker), "123").expect("write marker");
         }
+        // A libkrun marker that also records the start time classifies alike.
+        std::fs::create_dir_all(vms.join("l2")).expect("mkdir vm dir");
+        std::fs::write(
+            vms.join("l2").join("libkrun.pid"),
+            mvm_vmm::host::network_endpoint_spawn::EndpointPid::of_child(std::process::id())
+                .render(),
+        )
+        .expect("write marker");
         env.set("HOME", temp.path());
         env.set("MVM_HOME", temp.path());
+        assert!(matches!(
+            AnyBackend::for_started_vm("l2"),
+            Some(AnyBackend::Libkrun(_))
+        ));
 
         let q = AnyBackend::for_started_vm("q1");
         let l = AnyBackend::for_started_vm("l1");

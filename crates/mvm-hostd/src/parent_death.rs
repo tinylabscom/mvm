@@ -206,6 +206,7 @@ mod tests {
         // (Linux prctl path / non-Linux watcher-thread spawn) without reaping
         // the test process. Reaching the assert proves it did not _exit.
         super::exit_when_orphaned();
+        // SAFETY: getppid has no preconditions.
         assert!(!orphaned(unsafe { libc::getppid() }));
     }
 

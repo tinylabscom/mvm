@@ -566,15 +566,6 @@ impl BoundCommand {
         &mut self.command
     }
 
-    /// Shorten the creation deadline, so the timeout path is testable without
-    /// a ten-second wait.
-    #[cfg(any(test, feature = "test-support"))]
-    #[must_use]
-    pub fn with_creation_timeout(mut self, timeout: Duration) -> Self {
-        self.creation_timeout = timeout;
-        self
-    }
-
     /// Start the launch and, for a scoped one, wait until the payload is
     /// running inside its scope.
     ///

@@ -291,6 +291,7 @@ mod server_tests {
             // placeholder, read the framed WireResponse. `None` = transport
             // unavailable → skip rather than assert.
             let client = tokio::task::spawn_blocking(move || -> Option<WireResponse> {
+                // SAFETY: socket takes constants only; the result is checked before any use.
                 let fd = unsafe { libc::socket(AF_VSOCK, libc::SOCK_STREAM, 0) };
                 if fd < 0 {
                     return None;
@@ -303,6 +304,8 @@ mod server_tests {
                     svm_flags: 0,
                     svm_zero: [0; 3],
                 };
+                // SAFETY: `fd` is the open socket from above and `addr` is a live, fully
+                //         initialised SockaddrVm of the stated size.
                 let rc = unsafe {
                     libc::connect(
                         fd,
@@ -311,9 +314,13 @@ mod server_tests {
                     )
                 };
                 if rc < 0 {
+                    // SAFETY: `fd` is the open socket from above, closed once on this failure
+                    //         path.
                     unsafe { libc::close(fd) };
                     return None;
                 }
+                // SAFETY: `fd` is the open socket from above and moves into the stream, which is
+                //         then its only owner.
                 let mut s = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
                 // Bound the round-trip so a regression fails fast instead of hanging.
                 s.set_read_timeout(Some(std::time::Duration::from_secs(15)))

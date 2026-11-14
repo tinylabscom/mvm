@@ -230,6 +230,11 @@ impl PreparedPortableBootAssets {
         &self.kernel
     }
 
+    /// Guest binaries bound to this release, not ambient source-build cache entries.
+    pub fn guest_binaries(&self) -> &MvmRuntimeBinaries {
+        &self.binaries
+    }
+
     /// Original signed Linux root selected for the portable boot closure.
     pub fn image_set_manifest_sha256(&self) -> &mvm_core::packs::Sha256Hex {
         self.publisher.root().root().manifest_sha256()

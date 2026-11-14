@@ -204,6 +204,8 @@ pub struct EndpointSpawnInputs<'a> {
     pub network_limits: mvm_core::plan::NetworkLimits,
     /// Exact signed ingress mappings owned by this endpoint.
     pub ingress: &'a [mvm_core::plan::IngressMapping],
+    /// The admitted plan for a cold boot that grants a guest mailbox.
+    pub reader_plan: Option<&'a mvm_core::plan::ExecutionPlan>,
     /// Where this boot's FlowMux identity comes from. A cold boot mints one; a
     /// warm claim inherits its parent's, because the restored child already
     /// holds the parent's signing key in memory.
@@ -311,6 +313,7 @@ impl<'a> ClaimGuards<'a> {
             network_policy: inputs.network_policy,
             network_limits: inputs.network_limits,
             ingress: inputs.ingress,
+            reader_plan: inputs.reader_plan,
             identity: inputs.identity,
         };
         if inputs.secrets.is_empty()
@@ -519,6 +522,7 @@ mod tests {
             network_policy: policy,
             network_limits: mvm_core::plan::NetworkLimits::default(),
             ingress: &[],
+            reader_plan: None,
         }
     }
 

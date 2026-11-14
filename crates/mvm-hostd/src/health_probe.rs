@@ -64,7 +64,7 @@ pub struct AgentExec;
 
 impl GuestExec for AgentExec {
     fn exec(&self, vm_name: &str, cmd: &str, timeout_secs: u64) -> ExecOutcome {
-        let transport = match mvm_runtime::vsock_transport::for_vm(vm_name) {
+        let transport = match mvm_vmm::vsock_transport::for_vm(vm_name) {
             Ok(t) => t,
             Err(_) => return ExecOutcome::Unreachable,
         };

@@ -281,9 +281,10 @@ pub enum LocalAuditKind {
     /// against the local trust store to an image registry. Detail:
     /// `bundle_sha256=<64hex>,key_id=<32hex>,reference=oci://<ref>@<digest>`.
     BundlePush,
-    /// `mvmctl build` with a pack source — built a locked pack, passed its health boot, and
-    /// sealed it into an archive signed by the host key. Detail:
-    /// `pack=<ns/name@version>,workload_sha256=<64hex>,bundle_sha256=<64hex>,key_id=<id>`.
+    /// `mvmctl build` with a pack source — passed its health boot and sealed an archive
+    /// signed by the host key. Detail: `pack=<ns/name@version>,<digest-label>=<64hex>,
+    /// bundle_sha256=<64hex>,key_id=<id>`. The digest label is `workload_sha256`
+    /// for Nix's locked Workload IR or `yocto_archive_sha256` for a pinned Yocto archive.
     PackBuild,
     /// `mvmctl manifest export-oci <template> --out <path>` —
     /// copied a slot's OCI tarball (produced by `mkGuest`'s
@@ -576,7 +577,7 @@ pub enum LocalAuditKind {
     ///   `tenant=<t> vm=<v> capture=<id> reason=<msg>`
     TranscriptRefused,
 
-    // --- Reviewed workspace apply (PS-08) ---
+    // --- Reviewed workspace apply ---
     /// `mvmctl machine apply` reviewed a machine's workspace changes back
     /// onto the host directory: every overwritten host byte was snapshotted
     /// content-addressed first, the apply is journaled, and the manifest's
@@ -591,7 +592,7 @@ pub enum LocalAuditKind {
     /// Detail: `action=workspace.redo volume=<v> redo=<id> target=<id>`
     WorkspaceRedo,
 
-    // --- Replay (PS-08) ---
+    // --- Replay ---
     /// `mvmctl machine replay` forked a checkpoint into a fresh,
     /// re-admitted VM and re-ran the recorded input journal on it,
     /// checkpointing each step. Detail:

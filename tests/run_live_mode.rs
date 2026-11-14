@@ -59,7 +59,7 @@ const USER_SCRIPT_DEV: &str = r#"
 import mvm
 
 sb = mvm.Sandbox.create(image="docker.io/library/python:3.12-slim", workload_id="livehello")
-sb.commands.start(["echo", "hi"], env={"MODE": "test"})
+sb.commands.start(["echo", "hi"], env={"MODE": mvm.literal("test")})
 sb.files.write("/app/data.bin", b"hello")
 sb.kill()
 "#;

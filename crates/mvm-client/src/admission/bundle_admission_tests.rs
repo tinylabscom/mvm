@@ -87,6 +87,16 @@ fn a_host_signed_local_build_is_audited_with_its_origin_and_digest() {
     params.audit_dir = Some(&audit_dir);
     params.bundle_pin = Some(BundlePin::boots(&bundle_path));
 
+    let mut unenrolled = pinning_params(&rootfs, &ledger);
+    unenrolled.keys_dir = Some(&keys_dir);
+    unenrolled.bundle_pin = Some(BundlePin::boots(&bundle_path));
+    let rejected = admit_plan_for_boot(unenrolled)
+        .expect_err("an unenrolled local signer cannot authorize schema-8 admission");
+    assert!(
+        format!("{rejected:#}").contains("trust store has no entry"),
+        "{rejected:#}"
+    );
+    trust_publisher(home.path(), &host.signing);
     let ctx = admit_plan_for_boot(params).expect("this host's local build admits in development");
 
     assert_eq!(ctx.admitted.plan().audit_labels["origin"], "local-build");
@@ -113,6 +123,7 @@ fn a_host_signed_local_build_is_refused_by_production_admission() {
     let mut params = pinning_params(&rootfs, &ledger);
     params.keys_dir = Some(&keys_dir);
     params.bundle_pin = Some(BundlePin::boots_for_production(&bundle_path));
+    trust_publisher(home.path(), &host.signing);
 
     let error = admit_plan_for_boot(params).expect_err("production admission rejects local builds");
 

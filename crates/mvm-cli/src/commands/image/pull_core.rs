@@ -306,7 +306,7 @@ fn resolve_run_image_with(
                 sweep_before_builder_vm();
                 let signer;
                 let evidence = if prod {
-                    signer = crate::commands::vm::host_signer::load_or_init()
+                    signer = mvm_client::host_keypair::load_or_init()
                         .context("load host signing key for the provenance mark")?;
                     Some(
                         mvm_build::provenance_mark::SealEvidence::builder(&signer.signing)
@@ -833,7 +833,7 @@ fn materialize_pulled_rootfs(
 ) -> Result<()> {
     let signer = pulled
         .prod
-        .then(crate::commands::vm::host_signer::load_or_init)
+        .then(mvm_client::host_keypair::load_or_init)
         .transpose()
         .context("load host signing key for the provenance mark")?;
     let evidence = signer.as_ref().map(|signer| {
@@ -1291,6 +1291,8 @@ mod tests {
             if std::time::Instant::now() > deadline {
                 // A subreaper (user session manager) adopted it; the reaper
                 // only recognises init-parented orphans, so nothing to witness.
+                // SAFETY: kill takes two integers and touches no memory; `pid` is the child this
+                //         test spawned and still holds.
                 unsafe { libc::kill(pid, libc::SIGKILL) };
                 return;
             }
@@ -1316,6 +1318,8 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         };
         if !gone {
+            // SAFETY: kill takes two integers and touches no memory; `pid` is the child this test
+            //         spawned and still holds.
             unsafe { libc::kill(pid, libc::SIGKILL) };
         }
         assert!(gone, "the planted orphan survived the pre-spawn sweep");

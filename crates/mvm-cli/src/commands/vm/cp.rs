@@ -253,7 +253,7 @@ fn guest_exists(vm: &str, path: &str) -> Result<bool> {
         follow_symlinks: false,
     };
     // Inbound vsock RPC audit.
-    super::shared::emit_vsock_rpc_audit(vm, &req);
+    mvm_client::guest::emit_vsock_rpc_audit(vm, &req);
     match super::fs::fs_request(vm, req)? {
         FsResult::Stat(_) => Ok(true),
         FsResult::Error {
@@ -271,7 +271,7 @@ fn guest_stat(vm: &str, path: &str) -> Result<mvm_agentd::vsock::FsStat> {
         follow_symlinks: true,
     };
     // Inbound vsock RPC audit.
-    super::shared::emit_vsock_rpc_audit(vm, &req);
+    mvm_client::guest::emit_vsock_rpc_audit(vm, &req);
     match unwrap_fs(super::fs::fs_request(vm, req)?)? {
         FsResult::Stat(stat) => Ok(stat),
         other => bail!("Unexpected FsResult variant for Stat: {:?}", other),

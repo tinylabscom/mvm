@@ -1,8 +1,8 @@
 //! Runtime approvals: where an `ask` goes to be answered.
 //!
 //! A decision can be `ask` instead of allow or deny: an egress route rule, the
-//! first use of a secret bound with `approve = "ask"`, or (once PS-13 gives
-//! tool rules a live caller) a tool call. The flow is held **here, in the
+//! first use of a secret bound with `approve = "ask"`, or (once tool
+//! rules have a live caller) a tool call. The flow is held **here, in the
 //! host endpoint** — never in the guest — while an approval backend answers.
 //!
 //! [`RuntimeApprover`] is the seam every such decision goes through.

@@ -53,7 +53,7 @@ with mvm.Sandbox.create(
     sandbox.files.write("/app/main.py", "print('hello from mvm')")
     sandbox.commands.start(
         ["python", "/app/main.py"],
-        env={"MODE": "dev", "API_KEY": mvm.secret("api-key", type="bearer", hosts=["api.example.com"])},
+        env={"MODE": mvm.literal("dev"), "API_KEY": mvm.secret("api-key", type="bearer", hosts=["api.example.com"])},
     )
 ```
 
@@ -76,7 +76,7 @@ mvmctl run --mode live ./sandbox.py
 <TabItem label="TypeScript">
 
 ```ts
-import { Sandbox, network, resources, secret } from "@runmvm/mvm";
+import { Sandbox, literal, network, resources, secret } from "@runmvm/mvm";
 
 using sandbox = Sandbox.create("node-22", {
   workloadId: "agent-tool",
@@ -89,7 +89,7 @@ using sandbox = Sandbox.create("node-22", {
 sandbox.files.write("/app/main.js", "console.log('hello from mvm')");
 sandbox.commands.start(["node", "/app/main.js"], {
   env: {
-    MODE: "dev",
+    MODE: literal("dev"),
     API_KEY: secret("api-key", { type: "bearer", hosts: ["api.example.com"] }),
   },
 });

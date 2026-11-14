@@ -172,7 +172,7 @@ echo "==> building mvmctl + host helpers"
 cargo build --bin mvmctl --features user,embed-host-bins
 ./scripts/cargo.sh build -p xtask
 
-# Build the library-seam test targets here too, not when phase 2 reaches them.
+# Build the library-seam test targets here too, not when the later scenarios reach them.
 # `cargo build --bin mvmctl` does not build another crate's test targets, so
 # they were compiling *after* 23 scenarios had already booted guests — a minute
 # of build output in the middle of a run, and a compile error there arriving

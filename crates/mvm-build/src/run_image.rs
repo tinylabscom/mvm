@@ -1096,7 +1096,7 @@ pub fn resolve_guest_runtime_identity(cache_root: &Path) -> Result<String> {
 mod tests {
     use super::*;
     #[cfg(unix)]
-    use crate::test_support::isolated_lock_probe;
+    use mvm_core::util::test_env::isolated_lock_probe;
 
     #[test]
     fn pure_sealed_materialization_keeps_its_content_bound_seal() {

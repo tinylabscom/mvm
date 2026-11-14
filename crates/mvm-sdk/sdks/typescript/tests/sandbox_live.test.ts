@@ -267,7 +267,7 @@ describe("Sandbox.create (live mode)", () => {
   });
 
   it("carries the launch command's env and exposes its process", async () => {
-    const sb = boot("dev", "vm", { command: ["/app/serve"], env: { MODE: "safe", LEVEL: mvm.literal("3") } });
+    const sb = boot("dev", "vm", { command: ["/app/serve"], env: { MODE: mvm.literal("safe"), LEVEL: mvm.literal("3") } });
     const request = host.requests("machine.run")[0];
     expect(request.command).toEqual(["/app/serve"]);
     expect(request.env).toEqual({ MODE: "safe", LEVEL: "3" });
@@ -304,7 +304,7 @@ describe("Sandbox.create (live mode)", () => {
 
   it("refuses env without a command and unrepresentable options before any call", () => {
     process.env.MVM_SDK_MODE = "live";
-    expect(() => mvm.Sandbox.create({ image: IMAGE }, { env: { MODE: "safe" } })).toThrow(/pass `command`/);
+    expect(() => mvm.Sandbox.create({ image: IMAGE }, { env: { MODE: mvm.literal("safe") } })).toThrow(/pass `command`/);
     expect(() =>
       mvm.Sandbox.create({ image: IMAGE }, { resources: { cpu_cores: 1, memory_mb: 256, rootfs_size_mb: 512 } }),
     ).toThrow(/resources/);
@@ -351,12 +351,23 @@ describe("Sandbox.commands.start (live mode)", () => {
     const sb = boot("dev", "sb-dev-vm");
     host.on("guest.proc.start", { token: "tok-9" });
     const handle = sb.commands.start(["python", "-c", "print(1)"], {
-      env: { A: "1", B: mvm.literal("2") },
+      env: { A: mvm.literal("1"), B: mvm.literal("2") },
     });
     expect(handle!.token).toBe("tok-9");
     expect(host.requests("guest.proc.start")).toEqual([
       { id: "sb-dev-vm", argv: ["python", "-c", "print(1)"], env: { A: "1", B: "2" } },
     ]);
+  });
+
+  it("refuses a bare string env value before any host call", () => {
+    process.env.MVM_SDK_MODE = "live";
+    expect(() =>
+      mvm.Sandbox.create({ image: IMAGE }, { command: ["/app/serve"], env: { MODE: "safe" } as never }),
+    ).toThrow(/bare string/);
+    expect(host.methods()).toEqual([]);
+    const sb = boot("dev");
+    expect(() => sb.commands.start(["true"], { env: { A: "1" } as never })).toThrow(/mvm\.literal/);
+    expect(host.methods()).toEqual(["machine.run"]);
   });
 
   it("omits env when none is given", () => {
@@ -502,7 +513,7 @@ describe("Sandbox.exec (live mode)", () => {
   it("starts with cwd and env, then collects through the stream", () => {
     const sb = boot("dev", "vm");
     streamReplies(batch([["stdout", "out\n"], ["stderr", "err\n"]], { kind: "exited", code: 0 }));
-    const result = sb.exec(["sh", "-c", "run"], { cwd: "/work", env: { K: "v" }, timeout: 30 });
+    const result = sb.exec(["sh", "-c", "run"], { cwd: "/work", env: { K: mvm.literal("v") }, timeout: 30 });
     expect(result).toEqual({ exitCode: 0, stdout: "out\n", stderr: "err\n" });
     expect(host.methods()).toEqual([
       "machine.run",

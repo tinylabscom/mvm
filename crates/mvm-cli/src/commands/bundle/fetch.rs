@@ -158,20 +158,51 @@ pub(in crate::commands) fn load_bundle(source: &str, options: LoadOptions) -> Re
 }
 
 /// Acquire a descriptor's signed byte budget through production transports.
+///
+/// Without a `transport` entry the signed archive bytes are fetched exactly as
+/// declared. With one, the source serves the compressed asset: the download is
+/// bounded by the signed compressed size, the compressed bytes are pinned to
+/// their signed digest, and the recovered tar must decompress under the signed
+/// `archive_size` cap into bytes hashing to `archive_sha256`. Every mismatch
+/// fails closed before the ordinary bundle verification path runs.
 pub(crate) fn load_application_bundle(
     application: &mvm_core::registry_pack::VerifiedRegistryApplication,
 ) -> Result<LoadedBundle> {
     let source = application_source(application)?;
     let bundle = &application.manifest().application.bundle;
+    let (max_bytes, transport) = match &bundle.transport {
+        Some(transport) => {
+            anyhow::ensure!(
+                transport.compressed_size <= super::registry::MAX_BUNDLE_LAYER_BYTES,
+                "application transport exceeds the supported 4 GiB transport bound"
+            );
+            (transport.compressed_size, Some(transport))
+        }
+        None => (bundle.archive_size, None),
+    };
     let loaded = load_archive_bounded(
         &source,
         LoadOptions {
             allow_http: false,
             prod: true,
         },
-        Some(bundle.archive_size),
+        Some(max_bytes),
         |reference| RegistryTransport::for_reference(reference, false),
     )?;
+    let archive = match transport {
+        None => loaded.archive,
+        Some(transport) => {
+            ArchiveFile::Temporary(mvm_core::registry_pack::decompress_transport_archive(
+                loaded.path(),
+                transport,
+                bundle,
+            )?)
+        }
+    };
+    let loaded = LoadedBundle {
+        archive,
+        resolved: loaded.resolved,
+    };
     refuse_application_local_build(loaded.path())?;
     Ok(loaded)
 }

@@ -11,9 +11,7 @@ build artifacts. The compiler stages source, generates `flake.nix`,
   framework stripping, lockfile checks, dependency-volume audit data, hook
   merging, launch/flake rendering, secret-reference stripping, and compilation
   orchestration.
-- `mvm_sdk::compile` re-exports the same modules, functions, and error types
-  when the SDK's opt-in `compiler` feature is enabled. SDK builders and
-  language bridges remain in the base `mvm-sdk`.
+- SDK builders and language bridges remain in the base `mvm-sdk`.
 - Concrete builds run through `mvm-build` in the builder VM. Runnable package
   assembly belongs to `mvm-bundler`; signing stays outside the compiler.
   Compiler tar archives are build inputs, not runnable `.mvmpkg` packages.

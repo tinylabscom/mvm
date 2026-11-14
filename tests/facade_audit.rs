@@ -1,4 +1,4 @@
-//! Plan 31 Track A facade audit — pin the `mvmctl::*` paths the `mvmd`
+//! Facade audit — pin the `mvmctl::*` paths the `mvmd`
 //! consumer contract relies on.
 //!
 //! Architectural invariant #2 (cross-repo plan

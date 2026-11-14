@@ -551,6 +551,8 @@ mod tests {
             mailbox: MailboxId::from_bytes([1; 32]),
             authority_key: [2; 32],
             epoch: ExecutionEpoch::new(1).unwrap(),
+            report: None,
+            retention: None,
         }));
         let absent = build(None);
         let tokens = |c: &str| c.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
@@ -743,6 +745,8 @@ mod tests {
             read_only: true,
             kind: mvm_core::vm_backend::VmVolumeKind::Disk,
             encrypted: false,
+            share_include: Vec::new(),
+            share_exclude: Vec::new(),
         }
     }
 

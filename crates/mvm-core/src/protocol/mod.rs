@@ -22,5 +22,6 @@ pub use mvm_contract::protocol::{
     hvf_owner, routing, signing,
 };
 
-// Flatten protocol.rs contents up to `mvm_core::protocol::*`.
-pub use self::protocol::*;
+pub use self::protocol::{HostdRequest, HostdResponse, PROTOCOL_VERSION};
+#[cfg(feature = "hostd-transport")]
+pub use self::protocol::{read_frame, recv_request, send_request, send_response, write_frame};

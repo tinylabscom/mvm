@@ -13,7 +13,29 @@ struct SiblingPair {
     extended: String,
 }
 
-const EXCEPTIONS: &[(&str, &str, &str, &str)] = &[];
+// The journal deliberately distinguishes volatile opening/admission from
+// externally anchored and retained-key custody variants. Conflating their
+// names would hide the authority boundary at call sites.
+const EXCEPTIONS: &[(&str, &str, &str, &str)] = &[
+    (
+        "crates/mvm-core/src/mailbox/journal.rs",
+        "impl MailboxJournal",
+        "admit",
+        "admit_with_anchor",
+    ),
+    (
+        "crates/mvm-core/src/mailbox/journal.rs",
+        "impl MailboxJournal",
+        "open",
+        "open_with_anchor",
+    ),
+    (
+        "crates/mvm-core/src/mailbox/journal.rs",
+        "impl MailboxJournal",
+        "open",
+        "open_with_custody",
+    ),
+];
 const EXPECTED_UNEXPLAINED_PAIRS: usize = 0;
 
 pub(crate) fn run(workspace: &Path) -> Result<()> {

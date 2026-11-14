@@ -98,10 +98,8 @@ impl<'a> super::fs_ops::Rooted<'a> {
 ///
 /// Returns `Ok(())` on success, or a [`RefusalReason`] for caller-
 /// recorded per-entry failures. Hard I/O errors propagate via
-/// `Err(RefusalReason::MalformedHeader)` for now — a future
-/// sub-phase may grow a distinct `IoError` variant if the
-/// granularity matters for audit, but A.1's caller treats all
-/// per-entry failures equivalently.
+/// `Err(RefusalReason::MalformedHeader)`; the caller treats all per-entry
+/// failures equivalently.
 ///
 /// Non-Linux fallback only — on Linux writes route through
 /// [`super::fs_ops::Rooted::write_regular_file`] (openat2-resolved).

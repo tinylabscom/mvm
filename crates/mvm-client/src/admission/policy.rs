@@ -108,6 +108,8 @@ fn same_attachment(a: &mvm_core::plan::HostShareGrant, b: &mvm_core::plan::HostS
         && a.kind == b.kind
         && a.read_only == b.read_only
         && a.encrypted == b.encrypted
+        && a.include == b.include
+        && a.exclude == b.exclude
 }
 
 pub fn shares_from_volume_cfg(
@@ -127,6 +129,8 @@ pub fn shares_from_volume_cfg(
             read_only: v.read_only,
             encrypted: v.encrypted,
             content_sha256: None,
+            include: Vec::new(),
+            exclude: Vec::new(),
         })
         .collect()
 }
@@ -424,6 +428,8 @@ mod admitted_share_tests {
             encrypted: false,
             materialized_image: None,
             volume_label: None,
+            share_include: Vec::new(),
+            share_exclude: Vec::new(),
         }
     }
 
@@ -437,6 +443,8 @@ mod admitted_share_tests {
                 read_only: true,
                 encrypted: false,
                 content_sha256: None,
+                include: Vec::new(),
+                exclude: Vec::new(),
             },
             volume: disk_volume(host, guest, true),
             image_sha256: "0".repeat(64),

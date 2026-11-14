@@ -73,6 +73,8 @@ the identity in existing signature bundles. On 2026-10-07 the owner approved
 built-in trust in both exact workflow identities for legacy `agent/` and
 `runtime/` references. The former identity expires at 2026-11-06 00:00 UTC;
 verification after that instant accepts only the renamed workflow identity.
+The built-in exception and its cutoff have since been removed from the client;
+the built-in policy trusts the renamed identity alone.
 An operator policy file still replaces built-in trust wholesale. The client
 release also pins the official bundle-author Ed25519 public keys
 (`OFFICIAL_BUNDLE_AUTHOR_KEYS` in `mvm-core`). Under the built-in publisher

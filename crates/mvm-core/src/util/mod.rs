@@ -13,5 +13,4 @@ pub mod util;
 #[cfg(unix)]
 pub mod writable_image;
 
-// Flatten util.rs contents up to `mvm_core::util::*` (e.g. `parse_human_size`).
-pub use self::util::*;
+pub use self::util::parse_human_size;

@@ -328,6 +328,21 @@ mod tests {
     }
 
     #[test]
+    fn a_marker_that_records_its_start_time_still_counts_the_live_machine() {
+        let (_env, home) = crate::test_fixtures::isolated_mvm_home();
+        machine(home.path(), "recorded", charge(1024), false);
+        let marker = mvm_core::config::vm_state_dir_at(home.path(), "recorded").join("libkrun.pid");
+        std::fs::write(
+            &marker,
+            mvm_vmm::host::network_endpoint_spawn::EndpointPid::of_child(std::process::id())
+                .render(),
+        )
+        .expect("writing the pid marker");
+
+        assert_eq!(committed_at(home.path()).memory_mib, 1024);
+    }
+
+    #[test]
     fn a_live_machine_with_no_charge_record_is_not_counted() {
         let (_env, home) = crate::test_fixtures::isolated_mvm_home();
         let dir = mvm_core::config::vm_state_dir_at(home.path(), "no-record");

@@ -56,9 +56,6 @@ fn dial_host_endpoint() -> i32 {
         println!("CONNECT_ERROR errno={} (socket)", errno());
         return EXIT_CONNECT_ERROR;
     }
-    // SAFETY: `addr` is a fully initialized sockaddr_vm matching the
-    // linux/vm_sockets.h layout (libc's repr(C) mirror); connect reads it
-    // for exactly sizeof(sockaddr_vm) bytes per the AF_VSOCK contract.
     let addr = sockaddr_vm {
         svm_family: AF_VSOCK as libc::sa_family_t,
         svm_reserved1: 0,
@@ -66,6 +63,9 @@ fn dial_host_endpoint() -> i32 {
         svm_cid: VMADDR_CID_HOST,
         svm_zero: [0; 4],
     };
+    // SAFETY: `addr` is a fully initialized sockaddr_vm matching the linux/vm_sockets.h layout
+    //         (libc's repr(C) mirror); connect reads it for exactly sizeof(sockaddr_vm) bytes per
+    //         the AF_VSOCK contract.
     let rc = unsafe {
         libc::connect(
             fd,
@@ -135,8 +135,11 @@ unsafe fn dlsym(handle: *mut c_void, name: &str) -> Result<*mut c_void, String> 
     // Clear any stale error, then read it back when dlsym returns null.
     // SAFETY: standalone calls per the dlsym contract.
     unsafe { libc::dlerror() };
+    // SAFETY: `handle` comes from dlopen and `c_name` is a live NUL-terminated string.
     let sym = unsafe { libc::dlsym(handle, c_name.as_ptr()) };
     if sym.is_null() {
+        // SAFETY: dlerror takes no arguments and is read straight after the failed dlsym on this
+        //         thread.
         let err = unsafe { libc::dlerror() };
         if err.is_null() {
             return Err(format!("{name}: symbol not found"));
@@ -153,7 +156,10 @@ unsafe fn dlsym(handle: *mut c_void, name: &str) -> Result<*mut c_void, String> 
 /// through; print and fail the probe on a missing symbol.
 macro_rules! resolve {
     ($handle:expr, $name:literal, $sig:ty) => {
+        // SAFETY: every call site passes a handle from dlopen and a symbol the shim exports.
         match unsafe { dlsym($handle, $name) } {
+            // SAFETY: `sym` is non-null (dlsym succeeded) and `$sig` is the C signature the call
+            //         site declares for this symbol.
             Ok(sym) => unsafe { std::mem::transmute::<*mut c_void, $sig>(sym) },
             Err(e) => {
                 println!("DLSYM_FAILED {e}");
@@ -199,18 +205,21 @@ fn calls(shim_dir: &Path) -> i32 {
         return EXIT_CALL_FAILED;
     }
     let mut version = 0;
+    // SAFETY: `version` is a live c_int out-slot, as the CUDA Driver API requires.
     let rc = unsafe { cu_driver_get_version(&mut version) };
     if rc != 0 {
         println!("CUDA_DRIVER_FAILED cuDriverGetVersion rc={rc}");
         return EXIT_CALL_FAILED;
     }
     let mut device = 0;
+    // SAFETY: `device` is a live c_int out-slot, as the CUDA Driver API requires.
     let rc = unsafe { cu_device_get(&mut device, 0) };
     if rc != 0 {
         println!("CUDA_DRIVER_FAILED cuDeviceGet rc={rc}");
         return EXIT_CALL_FAILED;
     }
     let mut name = [0 as c_char; 128];
+    // SAFETY: `name` is a 128-byte buffer and its length is passed alongside it.
     let rc = unsafe { cu_device_get_name(name.as_mut_ptr(), name.len() as c_int, device) };
     if rc != 0 {
         println!("CUDA_DRIVER_FAILED cuDeviceGetName rc={rc}");
@@ -251,12 +260,15 @@ fn calls(shim_dir: &Path) -> i32 {
         return EXIT_CALL_FAILED;
     }
     let mut device: *mut c_void = std::ptr::null_mut();
+    // SAFETY: `device` is a live out-slot for one handle, as the NVML ABI requires.
     let rc = unsafe { nvml_device_get_handle_by_index_v2(0, &mut device) };
     if rc != 0 {
         println!("NVML_FAILED nvmlDeviceGetHandleByIndex_v2 rc={rc}");
         return EXIT_CALL_FAILED;
     }
     let mut name = [0 as c_char; 128];
+    // SAFETY: `device` is the handle just returned and `name` is a 128-byte buffer whose length is
+    //         passed.
     let rc = unsafe { nvml_device_get_name(device, name.as_mut_ptr(), name.len() as c_uint) };
     if rc != 0 {
         println!("NVML_FAILED nvmlDeviceGetName rc={rc}");

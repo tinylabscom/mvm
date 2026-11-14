@@ -2183,6 +2183,7 @@ mod linux {
     /// for both the dispatch port (21471) and the
     /// workload-forward port (21472).
     fn open_vsock_listener_fd(port: u32, accept_timeout_secs: Option<i64>) -> Option<i32> {
+        // SAFETY: socket takes constants only; the result is checked before any use.
         let listen_fd = unsafe { socket(AF_VSOCK, SOCK_STREAM, 0) };
         if listen_fd < 0 {
             eprintln!("mvm-host-vm-init: vsock: socket() failed");
@@ -2196,6 +2197,8 @@ mod linux {
             svm_flags: 0,
             svm_zero: [0; 3],
         };
+        // SAFETY: `listen_fd` is the open socket and `addr` is a live, fully initialised
+        //         SockAddrVm of the stated size.
         let rc = unsafe {
             bind(
                 listen_fd,
@@ -2205,12 +2208,17 @@ mod linux {
         };
         if rc < 0 {
             eprintln!("mvm-host-vm-init: vsock: bind() failed on port {port}");
+            // SAFETY: `listen_fd` is the socket opened above, still open, and is closed once on
+            //         this failure path.
             unsafe { close(listen_fd) };
             return None;
         }
+        // SAFETY: `listen_fd` is the open socket bound above.
         let rc = unsafe { listen(listen_fd, 1) };
         if rc < 0 {
             eprintln!("mvm-host-vm-init: vsock: listen() failed");
+            // SAFETY: `listen_fd` is the socket opened above, still open, and is closed once on
+            //         this failure path.
             unsafe { close(listen_fd) };
             return None;
         }
@@ -2219,6 +2227,8 @@ mod linux {
                 tv_sec: secs,
                 tv_usec: 0,
             };
+            // SAFETY: `listen_fd` is the open socket and `tv` is a live timeval of the stated
+            //         size.
             let rc = unsafe {
                 setsockopt(
                     listen_fd,
@@ -2239,6 +2249,8 @@ mod linux {
     /// connection fd or `None` on accept failure (e.g.
     /// `SO_RCVTIMEO` elapsed).
     fn accept_one(listen_fd: i32) -> Option<i32> {
+        // SAFETY: `listen_fd` is a listening socket from `open_vsock_listener_fd`; accept allows
+        //         null address out-pointers.
         let conn_fd = unsafe { accept(listen_fd, std::ptr::null_mut(), std::ptr::null_mut()) };
         if conn_fd < 0 { None } else { Some(conn_fd) }
     }
@@ -2249,6 +2261,8 @@ mod linux {
     /// the returned File; it closes on drop.
     fn adopt_conn_fd(conn_fd: i32) -> std::fs::File {
         use std::os::fd::FromRawFd;
+        // SAFETY: `conn_fd` is an open descriptor from `accept_one` whose ownership moves here, so
+        //         the File is its only closer.
         unsafe { std::fs::File::from_raw_fd(conn_fd) }
     }
 
@@ -2310,6 +2324,8 @@ mod linux {
                     "mvm-host-vm-init: forward listener: at {} concurrent streams, dropping connection",
                     crate::workload_proxy::MAX_CONCURRENT_FORWARDS
                 );
+                // SAFETY: `conn_fd` was just accepted and is not adopted anywhere else, so this is
+                //         its only close.
                 unsafe { close(conn_fd) };
                 continue;
             };
@@ -2317,9 +2333,9 @@ mod linux {
                 // Hold the permit for the connection's lifetime; it
                 // releases the slot when this thread ends.
                 let _permit = permit;
-                // The accepted fd is an AF_VSOCK SOCK_STREAM socket;
-                // UnixStream only touches its read/write/clone, so
-                // wrapping it is sound (address family is irrelevant).
+                // SAFETY: `conn_fd` was just accepted and moves into this thread, so the stream is
+                //         its only owner; it is an AF_VSOCK SOCK_STREAM socket and UnixStream only
+                //         uses read, write and clone, so the address family is irrelevant.
                 let inbound = unsafe { UnixStream::from_raw_fd(conn_fd) };
                 if let Err(e) = crate::workload_proxy::handle_forward_conn(
                     inbound,
@@ -2380,6 +2396,8 @@ mod linux {
                 "mvm-host-vm-init: vsock send: no host connection within {ACCEPT_TIMEOUT_SECS}s \
                  (single-shot path; W2 part 4 wired the host receiver)"
             );
+            // SAFETY: `listen_fd` is the listener opened above; this function owns it and closes
+            //         it once, here.
             unsafe { close(listen_fd) };
             return;
         };
@@ -2389,6 +2407,8 @@ mod linux {
             eprintln!("mvm-host-vm-init: vsock send: write failed mid-frame");
         }
         drop(conn);
+        // SAFETY: `listen_fd` is the listener opened above; this function owns it and closes it
+        //         once, here.
         unsafe { close(listen_fd) };
     }
 
@@ -2618,6 +2638,8 @@ mod linux {
             // Conn drops at end of iteration; the host's read on
             // its end completes (either Frame or EmptyEof).
         }
+        // SAFETY: `listen_fd` is the listener opened above; this function owns it and closes it
+        //         once, here.
         unsafe { close(listen_fd) };
         0
     }
@@ -2676,6 +2698,7 @@ mod linux {
                 let c_path = std::ffi::CString::new(path.as_str()).map_err(|e| {
                     std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
                 })?;
+                // SAFETY: `c_path` is a live NUL-terminated CString.
                 let rc = unsafe { libc::chown(c_path.as_ptr(), uid, gid) };
                 if rc != 0 {
                     return Err(std::io::Error::last_os_error());
@@ -4738,7 +4761,9 @@ mod linux {
             let base = tempfile::tempdir().expect("tempdir");
             let base_str = base.path().to_str().unwrap();
             let job_id = "feedface";
+            // SAFETY: getuid has no preconditions.
             let uid = unsafe { libc::getuid() };
+            // SAFETY: getgid has no preconditions.
             let gid = unsafe { libc::getgid() };
             let _scratch =
                 JobScratch::create(base_str, job_id, Some((uid, gid))).expect("chown to self");

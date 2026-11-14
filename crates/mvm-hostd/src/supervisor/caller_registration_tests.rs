@@ -47,15 +47,15 @@ fn readonly_data_startup_consumes_original_unlinked_file_into_virtio_without_pat
     cfg.disks[2].path = path.clone();
     let raw = serde_json::to_vec(&cfg).unwrap();
     let cfg = serde_json::from_slice(&raw).unwrap();
-    // SAFETY: model exec's cleared flag on this synthetic transferred descriptor.
     assert_eq!(
+        // SAFETY: model exec's cleared flag on this synthetic transferred descriptor.
         unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, 0) },
         0
     );
     let fd = file.into_raw_fd();
     let mut startup = adopt_startup_files(&cfg).unwrap();
-    // SAFETY: production adoption owns this fd; inspection does not adopt it.
     assert_ne!(
+        // SAFETY: production adoption owns this fd; inspection does not adopt it.
         unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
         0
     );
@@ -148,11 +148,19 @@ fn readonly_data_startup_rechecks_content_and_cleans_up_adopted_bad_files() {
     ] {
         let (_dir, file) = readonly_data_fixture();
         let fd = file.into_raw_fd();
+        let before = descriptor_identity(fd);
+        assert!(
+            before.is_some(),
+            "fixture fd {fd} must be open before adoption"
+        );
         let mut cfg = readonly_data_config(fd);
         mutate(&mut cfg.readonly_data_disk_fds[0].expected);
         assert!(adopt_startup_files(&cfg).is_err());
-        // SAFETY: inspection of the now-closed transferred locator only.
-        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+        assert_ne!(
+            descriptor_identity(fd),
+            before,
+            "adoption must close the original file even if another test reuses fd {fd}"
+        );
     }
 }
 
@@ -196,21 +204,25 @@ fn startup_restore_files_retain_original_custody_and_transfer_once() {
             fd,
             "never readopt or duplicate the locator"
         );
-        // SAFETY: inspect the live file owned by the transfer result.
         assert_ne!(
+            // SAFETY: inspect the live file owned by the transfer result.
             unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
             0
         );
     }
+    let identities = raw.map(descriptor_identity);
     drop(files);
-    for fd in raw {
-        // SAFETY: inspect the now-closed transferred locator without ownership.
-        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+    for (fd, before) in raw.into_iter().zip(identities) {
+        assert_ne!(
+            descriptor_identity(fd),
+            before,
+            "restore custody must close the original file even if fd {fd} is reused"
+        );
     }
 }
 
 fn assert_startup_lock_failure_cleanup(restore: bool) {
-    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+    use std::os::fd::{AsRawFd, IntoRawFd};
 
     let (dir, data) = readonly_data_fixture();
     let (_kernel_dir, kernel) = readonly_data_fixture();
@@ -267,6 +279,10 @@ fn assert_startup_lock_failure_cleanup(restore: bool) {
         files.push(frame);
     }
     preflight_startup_files(&cfg).unwrap();
+    let identities = files
+        .iter()
+        .map(|file| descriptor_identity(file.as_raw_fd()).expect("transferred file is open"))
+        .collect::<Vec<_>>();
     let transferred = files
         .into_iter()
         .map(IntoRawFd::into_raw_fd)
@@ -274,19 +290,13 @@ fn assert_startup_lock_failure_cleanup(restore: bool) {
     let result = adopt_startup_files(&cfg);
     let failed = result.is_err();
     drop(result);
+    // A parallel test can reuse a closed fd number. Inspect the original
+    // inode rather than adopting and closing a number now owned elsewhere.
     let closed = transferred
         .iter()
-        .map(|fd| {
-            // SAFETY: inspect a transferred locator without adopting it.
-            (unsafe { libc::fcntl(*fd, libc::F_GETFD) }) == -1
-        })
+        .zip(identities)
+        .map(|(fd, identity)| descriptor_identity(*fd) != Some(identity))
         .collect::<Vec<_>>();
-    for (fd, closed) in transferred.into_iter().zip(&closed) {
-        if !*closed {
-            // SAFETY: on regression, reclaim only a transferred fd still unowned.
-            drop(unsafe { std::fs::File::from_raw_fd(fd) });
-        }
-    }
     assert!(failed, "the separately held sidecar must refuse adoption");
     assert!(
         closed.iter().all(|closed| *closed),
@@ -324,8 +334,8 @@ fn readonly_data_startup_refuses_linked_writable_and_append_descriptors() {
         .unwrap();
     std::fs::remove_file(path).unwrap();
     assert!(preflight_startup_files(&readonly_data_config(writable.as_raw_fd())).is_err());
-    // SAFETY: change only status flags on the synthetic private fixture.
     assert_eq!(
+        // SAFETY: change only status flags on the synthetic private fixture.
         unsafe { libc::fcntl(private.as_raw_fd(), libc::F_SETFL, libc::O_APPEND) },
         0
     );
@@ -468,8 +478,8 @@ fn writable_startup_adopts_the_original_locked_object_and_retains_its_sidecar() 
 
     let mut adopted = adopt_startup_files(&cfg).unwrap();
     for fd in [backing_fd, sidecar_fd] {
-        // SAFETY: descriptor flags are inspected after the production adoption.
         assert_ne!(
+            // SAFETY: descriptor flags are inspected after the production adoption.
             unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
             0
         );
@@ -667,8 +677,8 @@ fn startup_adopts_distinct_untrusted_files_once_with_cloexec() {
     let adopted = adopt_startup_files(&cfg).unwrap();
     assert_eq!(adopted.kernel.as_ref().unwrap().as_raw_fd(), fds[0]);
     for fd in &fds {
-        // SAFETY: descriptors are now exclusively held by the untrusted group.
         assert_ne!(
+            // SAFETY: descriptors are now exclusively held by the untrusted group.
             unsafe { libc::fcntl(*fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
             0
         );

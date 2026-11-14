@@ -6,9 +6,10 @@
 //! driver only wires that socket through as the supervisor's egress relay — it
 //! carries no policy and never sees a `NetworkPolicy`.
 
+use mvm_vmm::host::process_liveness::read_pid_file;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use ed25519_dalek::Signer;
@@ -750,6 +751,17 @@ fn boot_retaining_child(
     })
 }
 
+/// How long a waiter blocks on the supervisor's exit event. The wait returns
+/// the moment the supervisor exits, so this is an upper bound in name only: a
+/// workload that legitimately runs for hours must not be cut off at the fixed
+/// cap the file-polling backends use. The supervisor enforces the plan's wall
+/// clock itself.
+const SUPERVISOR_WAIT_BOUND: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+
+fn supervisor_wait_deadline(now: Instant) -> Instant {
+    now + SUPERVISOR_WAIT_BOUND
+}
+
 impl VmmDriver for HvfDriver {
     fn name(&self) -> &str {
         "hvf"
@@ -941,7 +953,7 @@ impl VmmDriver for HvfDriver {
         })?;
         let parent_dir = vm_state_dir(parent_name);
         let parent_pid_path = parent_dir.join(PID_FILE_NAME);
-        let parent_pid = hvf_backend::read_pid(&parent_pid_path).ok_or_else(|| {
+        let parent_pid = read_pid_file(&parent_pid_path).ok_or_else(|| {
             StandbyError::ClaimFailed(format!(
                 "HVF standby parent '{}' is no longer live",
                 parent_name
@@ -1193,7 +1205,7 @@ impl HvfVmFullControl {
 
 impl VmFullControl for HvfVmFullControl {
     fn runtime_artifacts(&self) -> Result<mvm_vmm::runtime_artifacts::RuntimeArtifacts> {
-        let pid = hvf_backend::read_pid(&self.state_dir.join(PID_FILE_NAME))
+        let pid = read_pid_file(&self.state_dir.join(PID_FILE_NAME))
             .context("HVF runtime observation requires a live supervisor identity")?;
         let pid = u32::try_from(pid).context("invalid HVF supervisor PID")?;
         mvm_vmm::runtime_artifacts::query(&self.state_dir, pid)
@@ -1392,11 +1404,11 @@ impl RunningVm for HvfRunningVm {
     }
 
     fn host_process_id(&self) -> Option<u32> {
-        hvf_backend::read_pid(&self.pid_file).and_then(|pid| u32::try_from(pid).ok())
+        read_pid_file(&self.pid_file).and_then(|pid| u32::try_from(pid).ok())
     }
 
     fn wait(&self) -> Result<VmExitStatus> {
-        let deadline = Instant::now() + mvm_vmm::host::workload_wait::WORKLOAD_WAIT_TIMEOUT;
+        let deadline = supervisor_wait_deadline(Instant::now());
         match &self.owned {
             Some(owned) => owned.wait(deadline)?,
             None => ConnectedInstance::connect_instance(self.instance.clone())?.wait(deadline)?,
@@ -1491,6 +1503,15 @@ impl RunningVm for HvfRunningVm {
 
 #[cfg(test)]
 mod tests {
+    /// A workload that runs past the 300 s cap the file-polling backends use
+    /// must still be waited for; the wait ends when the supervisor exits.
+    #[test]
+    fn the_supervisor_wait_outlasts_the_file_polling_cap() {
+        let now = Instant::now();
+        let waited = supervisor_wait_deadline(now) - now;
+        assert!(waited > mvm_vmm::host::workload_wait::WORKLOAD_WAIT_TIMEOUT * 100);
+    }
+
     #[test]
     fn readiness_deadline_is_the_pid_file_timeout_after_launch() {
         let t = Instant::now();

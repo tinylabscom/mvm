@@ -488,13 +488,18 @@ fn finish_legacy_persistent(
     name: &str,
     backend_name: &str,
 ) -> Result<mvm_hostd::plan_admission::AdmittedPlan> {
+    let mailbox_posture = admission.admitted.mailbox_posture();
     // VMM selection + workload-support check + start move behind the facade; the
     // admission gate (above) and the launched/failed emits stay here.
     #[cfg(unix)]
     let started = match (|| -> Result<_> {
         let mut images = prepared_volumes.take_writable_images();
         complete_writable_images(&start_config, &mut images)?;
-        mvm_hostd::mailbox_process::require_servable(&start_config, &backend)?;
+        mvm_hostd::mailbox_process::require_servable(
+            &start_config,
+            &backend,
+            mailbox_posture.as_ref(),
+        )?;
         Ok(crate::boot::start_prepared_custodied(
             backend,
             &start_config,
@@ -519,9 +524,12 @@ fn finish_legacy_persistent(
     };
     // The guest asserts a mailbox exactly when the plan grants one, so the
     // host side starts here or the launch is rolled back.
-    if let Err(error) =
-        mvm_hostd::mailbox_process::serve_started(started.backend(), started.vm_id(), &start_config)
-    {
+    if let Err(error) = mvm_hostd::mailbox_process::serve_started(
+        started.backend(),
+        started.vm_id(),
+        &start_config,
+        mailbox_posture.as_ref(),
+    ) {
         emit_failed(&admission, "mailbox-process", &error);
         if let Err(cleanup_error) = crate::local::remove_stopped_runtime_state(name) {
             tracing::warn!(error = %cleanup_error, machine = name, "removing runtime state after a refused mailbox failed");

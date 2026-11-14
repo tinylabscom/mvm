@@ -85,17 +85,6 @@ pub fn configure_command(command: &mut Command) {
     configure_with_env(command, std::env::vars_os());
 }
 
-/// Sanitize a fully assembled explicit environment, without importing any
-/// additional variables from the parent. Apply after combining image and
-/// request variables for a trusted mediated launch.
-pub fn configure_explicit_command(command: &mut Command) {
-    let env: Vec<_> = command
-        .get_envs()
-        .filter_map(|(key, value)| Some((key.to_owned(), value?.to_owned())))
-        .collect();
-    configure_with_env(command, env);
-}
-
 fn configure_with_env(
     command: &mut Command,
     env: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,

@@ -25,6 +25,8 @@ struct Counting;
 static IN_USE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
 
+// SAFETY: every method forwards unchanged to `System`, which already upholds the GlobalAlloc
+//         contract; the counters are atomics.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // SAFETY: forwarded unchanged to the system allocator.

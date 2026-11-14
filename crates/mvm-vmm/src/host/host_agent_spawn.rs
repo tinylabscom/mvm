@@ -28,9 +28,10 @@ use mvm_core::protocol::broker_control::{
 
 use crate::host::aux_bin::AuxBin;
 use crate::host::broker_services_spawn::{
-    AUDIT_SIGNER_HEAD_FILE, HOST_SIGNER_KEY, HOST_SIGNER_PUB, pid_alive, read_pid,
+    AUDIT_SIGNER_HEAD_FILE, HOST_SIGNER_KEY, HOST_SIGNER_PUB, read_pid,
     resolve_subprocess_bin_to_spawn, spawn_detached_with_config,
 };
+use crate::host::process_liveness::pid_is_alive;
 
 /// PID file for the per-tenant host-agent daemon, under `host_agent_dir`.
 pub const DAEMON_PID_FILE: &str = "daemon.pid";
@@ -101,7 +102,7 @@ fn wait_for_control_socket(control_socket: &Path, pid: u32, timeout: Duration) -
         if control_socket_is_ready(control_socket) {
             return Ok(());
         }
-        if !pid_alive(pid as libc::pid_t) {
+        if !pid_is_alive(pid as libc::pid_t) {
             bail!(
                 "mvm-host-agent exited before binding {}",
                 control_socket.display()
@@ -157,7 +158,7 @@ pub fn ensure_host_agent_daemon(tenant: &str) -> Result<PathBuf> {
     // Already up? (live pid + connectable socket).
     let pid_file = dir.join(DAEMON_PID_FILE);
     if let Some(pid) = read_pid(&pid_file)
-        && pid_alive(pid)
+        && pid_is_alive(pid)
     {
         warm_claim_debug("pid_live");
         if control_socket_is_ready(&control_socket) {

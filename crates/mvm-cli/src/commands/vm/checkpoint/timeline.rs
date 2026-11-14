@@ -428,7 +428,7 @@ mod tests {
     // ── seed helpers: a store record + its host-signed creation entry ─────────
 
     fn emitter() -> (AuditEmitter, mvm_core::plan::ExecutionPlan) {
-        let signer = crate::commands::vm::host_signer::load_or_init().unwrap();
+        let signer = mvm_client::host_keypair::load_or_init().unwrap();
         let em = AuditEmitter::new(signer.signing).unwrap();
         let plan = PlanFixture::new()
             .tenant("local")

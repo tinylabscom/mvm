@@ -169,7 +169,7 @@ Both tools answer "where does this live and who calls it", but at different
 granularity. Reach for each where it is strongest instead of duplicating the
 question in both.
 
-- **Trail** (`.trail/cache/`, built locally with `trail build`; gitignored) is the repository orientation
+- **Trail** (`.trail/cache/`, built locally with `trail build`; gitignored, while `.trail/learnings/` is tracked and shared) is the repository orientation
   graph: prose nodes with exact `file:line` spans plus a who-calls-what wiring
   graph. Use it first for cross-cutting questions — "how does X work", "what
   breaks if I change Y", "where does behavior Z live". Its tools are ranked

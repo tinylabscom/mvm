@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use super::Cli;
-use super::host_signer::{host_signer_id, load_or_init};
+use mvm_client::host_keypair::{host_signer_id, load_or_init};
 
 pub(in crate::commands) mod application_source;
 pub(crate) mod composition;
@@ -246,6 +246,9 @@ pub(in crate::commands) struct RunArgs {
     /// Grant a mailbox, named by a 64-character hex id.
     #[arg(long, value_name = "ID")]
     pub mailbox: Option<String>,
+    /// Retain local mailbox dedup IDs after expiry (milliseconds).
+    #[arg(long, value_name = "MILLISECONDS", value_parser = clap::value_parser!(u64).range(1..))]
+    pub mailbox_retention_ms: Option<u64>,
     /// Set memory (for example, 512M or 1G).
     #[arg(long, default_value = "512M")]
     pub memory: String,
@@ -677,6 +680,7 @@ pub(in crate::commands) fn run_secure_started(
     let admit_outputs = outputs.grants();
     let admit_mailbox = mvm_client::admission::mailbox_grant::resolve(
         args.mailbox.as_deref(),
+        args.mailbox_retention_ms,
         args.from_workload_ir.as_deref(),
     )?;
     let host_config = mvm_core::user_config::load(None);
@@ -780,6 +784,7 @@ pub(in crate::commands) fn run_secure_started(
         let crate::exec::AdmitInputs {
             rootfs,
             kernel,
+            backend_kind,
             vm_name,
             sdk_sidecar,
             assets,
@@ -787,10 +792,14 @@ pub(in crate::commands) fn run_secure_started(
             bundle_archive,
             runtime_config,
         } = inputs;
+        anyhow::ensure!(
+            backend_kind == admit_backend_kind,
+            "launch backend changed after transient admission preflight"
+        );
         denials_for_admit.arm(vm_name);
         let ledger = mvm_client::admission::InMemoryNonceLedger::default();
         let instruction_mounts =
-            crate::exec::admitted_instruction_mounts(admit_backend_kind, volumes)?;
+            crate::exec::admitted_instruction_mounts(backend_kind, volumes)?;
         // Every refusal is made before this returns; the audit sync is left
         // running beside the VMM boot, and activation waits for it.
         let configured_images_dir = mvm_build::image_source::configured_images_dir();
@@ -844,7 +853,7 @@ pub(in crate::commands) fn run_secure_started(
             ),
             services: admit_host_services.clone(),
             grants: admit_grants.clone(),
-            backend_kind: Some(admit_backend_kind),
+            backend_kind: Some(backend_kind),
             entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::for_launch(
                 rootfs,
                 admit_has_argv,
@@ -855,7 +864,7 @@ pub(in crate::commands) fn run_secure_started(
         // Persist the bare plan so the pre-start moat / endpoint can read it
         // on the backends that consume it from disk (mirrors the invoke path).
         if super::up::persists_plan_before_start(&admit_backend) {
-            super::plan_persist::write_plan(vm_name, c.admitted.plan())
+            mvm_client::audit::chain::plan_persist::write_plan(vm_name, c.admitted.plan())
                 .context("persisting admitted plan for the transient run")?;
         }
         let guest_profile = super::up::guest_profile_for_boot(admit_is_dev, rootfs);
@@ -877,6 +886,7 @@ pub(in crate::commands) fn run_secure_started(
         let substrate = crate::exec::SessionAuditSubstrate {
             tenant_id: c.admitted.plan().tenant.0.clone(),
             plan_json,
+            mailbox_posture: c.admitted.mailbox_posture(),
             built_pack_check: c.admitted.built_pack_boot_check()?,
             caller_registration: None,
             bundle_json,
@@ -1366,6 +1376,7 @@ impl ReceiptInput {
                     host_dir,
                     guest_mount,
                     read_only,
+                    ..
                 } => (host_dir, guest_mount, read_only),
                 super::shared::VolumeSpec::Disk {
                     host,
@@ -1935,6 +1946,10 @@ mod tests {
         assert_eq!(
             parsed.machine.run.cpu_limit, expected.machine.run.cpu_limit,
             "--cpu-limit default"
+        );
+        assert_eq!(
+            parsed.machine.run.mailbox_retention_ms, expected.machine.run.mailbox_retention_ms,
+            "--mailbox-retention-ms default"
         );
         assert_eq!(
             parsed.machine.run.allow_host, expected.machine.run.allow_host,

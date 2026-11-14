@@ -43,6 +43,7 @@ fn terminal_pair() -> io::Result<(File, File)> {
         .open("/dev/ptmx")?;
     // SAFETY: master owns a live PTY descriptor throughout both libc calls.
     if unsafe { nix::libc::grantpt(master.as_raw_fd()) } < 0
+        // SAFETY: master owns a live PTY descriptor throughout both libc calls.
         || unsafe { nix::libc::unlockpt(master.as_raw_fd()) } < 0
     {
         return Err(io::Error::last_os_error());

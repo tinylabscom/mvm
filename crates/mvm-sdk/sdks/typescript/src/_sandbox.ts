@@ -34,6 +34,7 @@ import {
   type ReplyFailure,
 } from "./_guest.js";
 import { call } from "./_hostlib.js";
+import { checkEnv, refuseBareEnvValue } from "./_env_value.js";
 import {
   GUEST_CP,
   GUEST_FS_LIST,
@@ -337,20 +338,8 @@ function parseTtl(ttl: string | number | null | undefined): number | null {
 // Wire-shape encoders.
 // ────────────────────────────────────────────────────────────────────
 
-function encodeEnvValue(value: EnvValue | string): EnvValue {
-  if (typeof value === "string") {
-    return { kind: "literal", value };
-  }
-  return value;
-}
-
-function encodeEnvMap(env: Record<string, EnvValue | string> | undefined): Record<string, EnvValue> {
-  if (!env) return {};
-  const out: Record<string, EnvValue> = {};
-  for (const [k, v] of Object.entries(env)) {
-    out[k] = encodeEnvValue(v);
-  }
-  return out;
+function encodeEnvMap(env: Record<string, EnvValue> | undefined): Record<string, EnvValue> {
+  return { ...checkEnv(env) };
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -373,7 +362,7 @@ function bytesToBase64(bytes: Uint8Array): string {
 
 export interface SandboxCreateOptions {
   workloadId?: string;
-  env?: Record<string, EnvValue | string>;
+  env?: Record<string, EnvValue>;
   include?: string[];
   tags?: Record<string, string>;
   ttl?: string | number | null;
@@ -489,12 +478,12 @@ function lowerLiveOptions(options: SandboxCreateOptions): LiveOptions {
 }
 
 export interface SandboxCommandsStartOptions {
-  env?: Record<string, EnvValue | string>;
+  env?: Record<string, EnvValue>;
 }
 
 /** Options for the one-shot {@link Sandbox.exec}. */
 export interface SandboxExecOptions {
-  env?: Record<string, EnvValue | string>;
+  env?: Record<string, EnvValue>;
   /** Wall-clock timeout in seconds; the agent kills the process on overrun. */
   timeout?: number;
   /** Working directory for the spawned process. */
@@ -637,7 +626,7 @@ export class LiveTransport {
     }
   }
 
-  commandsStart(argv: string[], env: Record<string, EnvValue | string> | undefined): ProcessHandle {
+  commandsStart(argv: string[], env: Record<string, EnvValue> | undefined): ProcessHandle {
     this.requireDev("commands.start");
     const token = startGuestProcess(this.vmId, argv, { env: literalEnv(env) }, this.fail);
     return new ProcessHandle(this, token);
@@ -780,12 +769,12 @@ export class LiveTransport {
 /** Forward only literal env values; a secret must be bound on the host, and
  *  handing its reference to a guest process would leak nothing useful and
  *  hide the mistake. */
-function literalEnv(env: Record<string, EnvValue | string> | undefined): Record<string, string> {
+function literalEnv(env: Record<string, EnvValue> | undefined): Record<string, string> {
   const out: Record<string, string> = {};
   if (!env) return out;
   for (const [key, value] of Object.entries(env)) {
     if (typeof value === "string") {
-      out[key] = value;
+      throw refuseBareEnvValue(key);
     } else if (
       typeof value === "object" &&
       value !== null &&

@@ -617,6 +617,30 @@ pub fn write_private_new(path: &Path, data: &[u8]) -> std::io::Result<NewFile> {
     write_new_with_mode(path, data, PRIVATE_FILE_MODE)
 }
 
+/// Overwrite `path` with zeros, flush, and unlink it. A missing file is
+/// success, so a caller need not know whether one was ever written.
+///
+/// This is key erasure, not a forensic wipe: a journaling or copy-on-write
+/// filesystem, or a flash translation layer, may keep the old blocks.
+pub fn shred_file(path: &Path) -> std::io::Result<()> {
+    let len = match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => meta.len(),
+        Ok(_) => return fs::remove_file(path),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    let overwritten = fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|mut f| {
+            f.write_all(&vec![0u8; len as usize])?;
+            f.sync_all()
+        });
+    // Unlink even when the overwrite failed: a key that cannot be zeroed must still go.
+    let removed = fs::remove_file(path);
+    overwritten.and(removed)
+}
+
 /// Load the private file at `path`, minting it first if it does not exist.
 ///
 /// This is the load-or-init shape every host key uses, made safe against a
@@ -1294,6 +1318,20 @@ mod tests {
         assert!(!fs::symlink_metadata(&path).expect("stat").is_symlink());
         assert_eq!(fs::read(&path).expect("read"), b"newer");
         assert_eq!(mode_of(&path), 0o600);
+    }
+
+    #[test]
+    fn shred_file_zeroes_then_removes_and_tolerates_absence() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("secret");
+        write_private(&path, b"0123456789abcdef").expect("write");
+        // A second name keeps the overwritten bytes observable.
+        let alias = dir.path().join("alias");
+        fs::hard_link(&path, &alias).expect("link");
+        shred_file(&path).expect("shred");
+        assert!(!path.exists());
+        assert_eq!(fs::read(&alias).expect("read"), vec![0u8; 16]);
+        shred_file(&path).expect("absent is success");
     }
 
     #[test]

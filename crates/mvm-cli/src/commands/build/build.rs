@@ -354,7 +354,7 @@ fn build_manifest_from_image(
     let persisted =
         PersistedManifest::from_manifest(manifest, canonical, &backend, Provenance::current())?;
 
-    let kernel = super::super::env::builder_vm::ensure_workload_kernel()
+    let kernel = super::super::env::builder_vm::prepare_workload_kernel_for_launch()
         .context("resolving the workload kernel for an image-backed build")?;
 
     // Keyed by the slot, not by a machine name: the artifact belongs to the
@@ -862,6 +862,8 @@ fn build_flake_slot(
     profile: Option<&str>,
     frozen: Option<&mvm_build::pipeline::frozen::FrozenInputs>,
 ) -> Result<(String, String)> {
+    use mvm_client::image_producer::{FrozenNixImage, WorkloadImageProducer};
+
     validate_flake_ref(flake_ref)
         .with_context(|| format!("Invalid flake reference: {:?}", flake_ref))?;
 
@@ -876,7 +878,7 @@ fn build_flake_slot(
     // Populate the verified workload-kernel cache before slot installation so
     // it cannot fall back to the builder kernel, which lacks device-mapper.
     if !build_stub_outdir_set() {
-        crate::commands::env::builder_vm::ensure_workload_kernel()
+        crate::commands::env::builder_vm::prepare_workload_kernel_for_launch()
             .context("resolving the dm-verity-capable workload kernel for flake slot")?;
     }
     let backend = mvm_client::AnyBackend::auto_select().name().to_string();
@@ -891,7 +893,7 @@ fn build_flake_slot(
 
     let slot_hash = persisted.manifest_hash.clone();
     let revision = match frozen {
-        Some(inputs) => tmpl::build_frozen_manifest(&persisted, inputs, mode),
+        Some(inputs) => FrozenNixImage::new(inputs, mode).build_slot(&persisted),
         None => tmpl::template_build_from_manifest(&persisted, false, false, mode),
     }
     .with_context(|| format!("building flake {resolved:?} into slot {slot_hash}"))?;

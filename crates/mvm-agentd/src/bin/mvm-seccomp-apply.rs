@@ -165,8 +165,9 @@ mod tests {
 
         // Idempotent, as the doc comment claims.
         set_no_new_privs().expect("setting an already-set bit is a no-op");
-        // SAFETY: as above.
         assert_eq!(
+            // SAFETY: prctl(PR_GET_NO_NEW_PRIVS, ...) takes only scalar args, reads process state
+            //         and has no preconditions.
             unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) },
             1
         );

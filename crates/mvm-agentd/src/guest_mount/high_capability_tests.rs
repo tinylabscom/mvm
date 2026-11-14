@@ -23,6 +23,7 @@ fn high_capability_identity_survives_self_exec() {
     if std::env::var_os(CHILD).is_some() {
         // SAFETY: getuid and getgid have no preconditions.
         assert_eq!(unsafe { libc::getuid() }, 989);
+        // SAFETY: getgid has no preconditions.
         assert_eq!(unsafe { libc::getgid() }, 989);
         for set in ["CapEff", "CapPrm", "CapInh", "CapAmb", "CapBnd"] {
             assert_eq!(capability_set(set), mask, "{set} after self exec");

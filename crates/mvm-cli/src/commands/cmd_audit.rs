@@ -17,7 +17,7 @@
 //! half), the wrap logs a `tracing::warn` and the command runs
 //! without cmd-level audit. Audit emits themselves are also
 //! best-effort — a chain-signer failure does NOT fail the command,
-//! same posture as `mvm_cli::commands::vm::audit_chain::AuditEmitter`
+//! same posture as `mvm_client::audit::chain::emitter::AuditEmitter`
 //! and the secret command's audit wiring.
 //!
 //! ## Why a separate module
@@ -35,8 +35,8 @@ use mvm_core::plan::TenantId;
 
 use super::Commands;
 use super::machine;
-use super::vm::audit_chain::default_audit_dir;
-use super::vm::host_signer;
+use mvm_client::audit::chain::emitter::default_audit_dir;
+use mvm_client::host_keypair;
 
 /// Owns the command recorder and keeps its concrete file signer available to
 /// launch audit emitters for the duration of dispatch.
@@ -62,7 +62,7 @@ impl CommandAudit {
 /// `EventCategory::Cmd` for both `cmd.<verb>` and `cmd.tool.<verb>`
 /// events), so one builder serves every consumer.
 pub(crate) fn build_cmd_recorder() -> Option<CommandAudit> {
-    let signer = match host_signer::load_or_init() {
+    let signer = match host_keypair::load_or_init() {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(

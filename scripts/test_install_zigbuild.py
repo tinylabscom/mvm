@@ -116,8 +116,8 @@ class ZigBootstrapTests(unittest.TestCase):
                 self.assertEqual(curl[-1], f"https://ziglang.org/download/0.13.0/{archive}")
                 for flag, value in (
                     ("--retry", "3"), ("--retry-delay", "2"),
-                    ("--connect-timeout", "10"), ("--max-time", "120"),
-                    ("--retry-max-time", "300"),
+                    ("--connect-timeout", "10"), ("--max-time", "300"),
+                    ("--retry-max-time", "900"), ("-C", "-"),
                 ):
                     self.assertEqual(curl[curl.index(flag) + 1], value)
                 self.assertIn("-fL", curl)

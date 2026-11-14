@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use flate2::read::GzDecoder;
@@ -1240,17 +1240,7 @@ fn collect_tree_members(
 }
 
 fn file_digest(path: &Path) -> Result<String, GuestRuntimeError> {
-    let mut reader = File::open(path)?;
-    let mut hash = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let read = reader.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hash.update(&buffer[..read]);
-    }
-    Ok(hex::encode(hash.finalize()))
+    Ok(mvm_core::crypto::image_verify::sha256_file(path)?)
 }
 
 /// A CLI release's guest runtime as `release.yml` publishes it: every member

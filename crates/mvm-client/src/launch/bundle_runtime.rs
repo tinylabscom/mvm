@@ -82,6 +82,10 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
             );
             (verified, Box::new(release))
         };
+    mvm_core::plan::bundle::require_composable_local_enrollment(
+        &verified.manifest,
+        &FsTrustStore::default_path()?,
+    )?;
     let canonical = verified.manifest.members.iter().any(|member| {
         matches!(
             member,
@@ -569,6 +573,16 @@ mod tests {
             ),
             ..Default::default()
         };
+        let error = attach_if_installed_bundle(&mut config, "qemu")
+            .expect_err("schema-8 local bundle requires operator enrollment");
+        assert!(format!("{error:#}").contains("trust store has no entry"));
+        let trusted = home.path().join("trusted-publishers");
+        std::fs::create_dir_all(&trusted).unwrap();
+        std::fs::write(
+            trusted.join(format!("{}.pub", key_id_from_pubkey(&host.verifying).0)),
+            host.verifying.to_bytes(),
+        )
+        .unwrap();
         assert!(!attach_if_installed_bundle(&mut config, "qemu").unwrap());
         assert_eq!(std::fs::read(rootfs_path).unwrap(), rootfs);
 

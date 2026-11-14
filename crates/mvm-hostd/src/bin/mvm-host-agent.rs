@@ -19,13 +19,13 @@
 //! signer-helper child. The moat (keyless parser / key-holding signer) is
 //! preserved; this is the keyless half.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use mvm_vmm::host::process_liveness::{pid_is_alive, read_pid_file};
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, oneshot};
@@ -41,15 +41,6 @@ const SIGNER_HELPER_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const WORKER_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const WORKER_RESTART_BACKOFF: Duration = Duration::from_millis(250);
 
-fn read_stdin_blocking() -> Result<Vec<u8>> {
-    let mut buf = Vec::with_capacity(1024);
-    std::io::stdin()
-        .lock()
-        .read_to_end(&mut buf)
-        .context("mvm-host-agent stdin read failed")?;
-    Ok(buf)
-}
-
 fn is_worker_mode() -> bool {
     std::env::var(HOST_AGENT_WORKER_ENV)
         .map(|value| value == "1")
@@ -58,16 +49,6 @@ fn is_worker_mode() -> bool {
 
 fn worker_pid_path(cfg: &HostAgentConfig) -> PathBuf {
     mvm_core::config::host_agent_worker_pid(&cfg.tenant_id)
-}
-
-fn read_pid(path: &Path) -> Option<libc::pid_t> {
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
-}
-
-fn pid_alive(pid: libc::pid_t) -> bool {
-    // SAFETY: kill(pid, 0) only probes process existence/permission and does
-    // not deliver a signal.
-    unsafe { libc::kill(pid, 0) == 0 }
 }
 
 fn kill_process_group(pgid: libc::pid_t, sig: libc::c_int) {
@@ -79,8 +60,8 @@ fn kill_process_group(pgid: libc::pid_t, sig: libc::c_int) {
 }
 
 fn reap_stale_worker_group(pid_path: &Path) {
-    if let Some(pid) = read_pid(pid_path)
-        && pid_alive(pid)
+    if let Some(pid) = read_pid_file(pid_path)
+        && pid_is_alive(pid)
     {
         kill_process_group(pid, libc::SIGTERM);
         std::thread::sleep(Duration::from_millis(50));
@@ -413,7 +394,7 @@ fn main() -> Result<()> {
         .json()
         .init();
 
-    let raw = read_stdin_blocking()?;
+    let raw = mvm_hostd::read_launch_config("mvm-host-agent")?;
     let cfg: HostAgentConfig =
         serde_json::from_slice(&raw).context("mvm-host-agent config parse failed")?;
     let runtime = tokio::runtime::Builder::new_multi_thread()

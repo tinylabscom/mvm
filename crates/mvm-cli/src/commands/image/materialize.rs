@@ -275,7 +275,7 @@ pub(super) fn rematerialize_cached_image(
     if !reusable_rootfs(&rootfs_abs, prod)? {
         let signer;
         let evidence = if prod {
-            signer = crate::commands::vm::host_signer::load_or_init()
+            signer = mvm_client::host_keypair::load_or_init()
                 .context("load host signing key for the provenance mark")?;
             Some(
                 mvm_build::provenance_mark::SealEvidence::builder(&signer.signing)

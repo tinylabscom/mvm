@@ -95,6 +95,17 @@ pub struct VmVolume {
     /// label travels with the bytes. `None` for an image the host did not
     /// label, which still mounts by node.
     pub volume_label: Option<String>,
+    /// DirShare admission metadata (backends ignore it): built-in-denied
+    /// paths this share explicitly re-exposes, and additional denied paths
+    /// beyond the built-in set. The signed `HostShareGrant` carries these so
+    /// admission and the claim-time binding cover the effective deny set the
+    /// materializer applied. Empty for disk volumes and for shares that
+    /// accept the built-in set unchanged.
+    pub share_include: Vec<crate::policy::protected_paths::ProtectedPath>,
+    /// DirShare admission metadata (backends ignore it): additional host
+    /// paths this share denies beyond the built-in set. See
+    /// [`VmVolume::share_include`].
+    pub share_exclude: Vec<crate::policy::protected_paths::ProtectedPath>,
 }
 
 impl VmVolume {

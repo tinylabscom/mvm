@@ -1341,6 +1341,38 @@ fn run_spec_persists_agent_rules_and_ai_budget() {
 }
 
 #[test]
+fn run_spec_retains_the_folded_signed_request_ceiling() {
+    use mvm_contract::policy::network_policy::{AiBudgetModel, AiRequestBudget};
+
+    let _state = IsolatedMachineState::new();
+    let mut args = parse_run(&[
+        "run",
+        "--manifest",
+        "a".repeat(64).as_str(),
+        "--name",
+        "signed-agent",
+        "--allow-host",
+        "api.anthropic.com:443",
+        "--ai-token-budget",
+        "12000",
+    ])
+    .expect("parse");
+    let ceiling = AiRequestBudget {
+        max_requests: 1,
+        max_spend_microusd: 500_000,
+        model: AiBudgetModel::ClaudeHaiku45,
+    };
+    let mut folded =
+        super::super::shared::resolve_ai_policy(args.run.ai_token_budget).expect("token budget");
+    folded.request_budget = Some(ceiling);
+    args.run.applied_ai_policy = Some(folded.clone());
+
+    let spec = machine_run_spec(&args, "signed-agent".to_string(), None).expect("spec");
+    assert_eq!(spec.ai, Some(folded));
+    assert_eq!(spec.ai.unwrap().request_budget, Some(ceiling));
+}
+
+#[test]
 fn deployment_source_is_verified_and_persisted_as_canonical_directory() {
     let _state = IsolatedMachineState::new();
     let dir = tempfile::tempdir().expect("deployment dir");
@@ -2668,6 +2700,46 @@ volumes = ["./state.img:/data:1G:rw"]
             dir.path().join("state.img").display()
         )]
     );
+}
+
+#[test]
+fn create_uses_composed_launch_defaults_without_widening_policy() {
+    let _state = IsolatedMachineState::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("sizing.toml"), "cpus = 1\nmem = \"512M\"\n").expect("defaults");
+    std::fs::write(
+        dir.path().join("mvm.toml"),
+        "image = \"alpine:3.20\"\ninclude = [\"sizing.toml\"]\n[network]\nallow_hosts = [\"api.example.com:443\"]\n",
+    )
+    .expect("manifest");
+
+    let spec = MachineCreateArgs {
+        name: Some("composed".to_string()),
+        manifest: Some(dir.path().join("mvm.toml").display().to_string()),
+        image: None,
+        net: false,
+        allow_host: Vec::new(),
+        peer: Vec::new(),
+        gpu: false,
+        gpu_device: None,
+        cpus: None,
+        cpu_limit: None,
+        timeout: None,
+        grants_file: None,
+        memory: None,
+        mem_initial: None,
+        profile: Some(RunProfile::Dev),
+        policy: Vec::new(),
+        force: false,
+        json: false,
+    }
+    .into_spec()
+    .expect("manifest-backed spec");
+
+    assert_eq!(spec.cpus, 1);
+    assert_eq!(spec.memory, "512M");
+    assert_eq!(spec.allow_host, ["api.example.com:443"]);
+    assert!(!spec.net);
 }
 
 #[test]

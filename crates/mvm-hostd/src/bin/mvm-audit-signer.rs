@@ -16,7 +16,6 @@
 //! 6. Process exits when the supervisor dies (parent-death signal —
 //!    deferred).
 
-use std::io::Read;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -27,15 +26,6 @@ use tracing::{error, info};
 use mvm_hostd::audit_signer::chain::Chain;
 use mvm_hostd::audit_signer::config::{SubprocessConfig, parse as parse_config};
 use mvm_hostd::audit_signer::server::{default_max_frame_bytes, serve_on_listener};
-
-fn read_stdin_blocking() -> Result<Vec<u8>> {
-    let mut buf = Vec::with_capacity(4096);
-    std::io::stdin()
-        .lock()
-        .read_to_end(&mut buf)
-        .context("mvm-audit-signer stdin read failed")?;
-    Ok(buf)
-}
 
 fn main() -> Result<()> {
     // First statement in the process: a panic before this line would
@@ -53,7 +43,7 @@ fn main() -> Result<()> {
         .json()
         .init();
 
-    let raw = read_stdin_blocking()?;
+    let raw = mvm_hostd::read_launch_config("mvm-audit-signer")?;
     let cfg: SubprocessConfig =
         parse_config(&raw).context("mvm-audit-signer config parse failed")?;
     info!(

@@ -496,7 +496,7 @@ fn seal_machine_input_cursor(
 }
 
 pub(crate) fn bind_checkpoint_created(name: &str, meta: &mvm_core::checkpoint::CheckpointMeta) {
-    let plan = match super::plan_persist::read_plan(name) {
+    let plan = match mvm_client::audit::chain::plan_persist::read_plan(name) {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(error = %e, vm = name,
@@ -504,14 +504,14 @@ pub(crate) fn bind_checkpoint_created(name: &str, meta: &mvm_core::checkpoint::C
             return;
         }
     };
-    let signer = match super::host_signer::load_or_init() {
+    let signer = match mvm_client::host_keypair::load_or_init() {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "host signer unavailable; chain entry skipped");
             return;
         }
     };
-    let emitter = match super::audit_chain::AuditEmitter::new(signer.signing)
+    let emitter = match mvm_client::audit::chain::emitter::AuditEmitter::new(signer.signing)
         .map(|e| e.with_receipts().with_decisions())
     {
         Ok(Ok(e)) => e,
@@ -1165,7 +1165,7 @@ fn parent_agent_verb_override(
     let Ok(parent_meta) = store.read_meta(parent_checkpoint) else {
         return Vec::new();
     };
-    let Ok(plan) = super::plan_persist::read_plan(&parent_meta.vm_name) else {
+    let Ok(plan) = mvm_client::audit::chain::plan_persist::read_plan(&parent_meta.vm_name) else {
         return Vec::new();
     };
     plan.agent_verbs
@@ -1195,7 +1195,7 @@ fn parent_network_mode(
     let Ok(parent_meta) = store.read_meta(parent_checkpoint) else {
         return fallback;
     };
-    let Ok(plan) = super::plan_persist::read_plan(&parent_meta.vm_name) else {
+    let Ok(plan) = mvm_client::audit::chain::plan_persist::read_plan(&parent_meta.vm_name) else {
         return fallback;
     };
     plan.network_mode
@@ -1217,7 +1217,7 @@ fn parent_secret_names(parent_checkpoint: &CheckpointId, store: &CheckpointStore
     let Ok(parent_meta) = store.read_meta(parent_checkpoint) else {
         return Vec::new();
     };
-    let Ok(plan) = super::plan_persist::read_plan(&parent_meta.vm_name) else {
+    let Ok(plan) = mvm_client::audit::chain::plan_persist::read_plan(&parent_meta.vm_name) else {
         return Vec::new();
     };
     plan.secrets.into_iter().map(|b| b.name).collect()
@@ -1323,7 +1323,7 @@ fn parent_plan_resources(
         Ok(m) => m,
         Err(_) => return (None, None),
     };
-    let plan = match super::plan_persist::read_plan(&parent_meta.vm_name) {
+    let plan = match mvm_client::audit::chain::plan_persist::read_plan(&parent_meta.vm_name) {
         Ok(p) => p,
         Err(_) => return (None, None),
     };
@@ -1345,9 +1345,9 @@ pub(crate) fn bind_checkpoint_forked(
     // lineage entry binds to the admitted identity the fork branched from.
     let parent_vm_name = store.read_meta(parent).ok().map(|m| m.vm_name);
     let plan =
-        match super::plan_persist::read_plan(&child.vm_name).or_else(|_| {
+        match mvm_client::audit::chain::plan_persist::read_plan(&child.vm_name).or_else(|_| {
             match parent_vm_name.as_deref() {
-                Some(name) => super::plan_persist::read_plan(name),
+                Some(name) => mvm_client::audit::chain::plan_persist::read_plan(name),
                 None => Err(anyhow::anyhow!("parent checkpoint has no recorded vm_name")),
             }
         }) {
@@ -1358,14 +1358,14 @@ pub(crate) fn bind_checkpoint_forked(
                 return Ok(());
             }
         };
-    let signer = match super::host_signer::load_or_init() {
+    let signer = match mvm_client::host_keypair::load_or_init() {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "host signer unavailable; chain entry skipped");
             return Ok(());
         }
     };
-    let emitter = super::audit_chain::AuditEmitter::new(signer.signing)
+    let emitter = mvm_client::audit::chain::emitter::AuditEmitter::new(signer.signing)
         .map(|e| e.with_receipts())
         .context("refusing an unaudited fork: audit emitter unavailable")?;
     let binding_store = mvm_client::checkpoint::FileBindingStore::default_location()
@@ -2380,6 +2380,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         env.isolate_mvm_home(tmp.path());
 
+        // SAFETY: getpid has no preconditions.
         let pid = unsafe { libc::getpid() };
         let pid_str = pid.to_string();
 
@@ -2412,6 +2413,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         env.isolate_mvm_home(tmp.path());
 
+        // SAFETY: getpid has no preconditions.
         let pid = unsafe { libc::getpid() };
 
         // Write fc.pid (vm is running) but no fc.paused marker.
@@ -2440,6 +2442,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         env.isolate_mvm_home(tmp.path());
 
+        // SAFETY: getpid has no preconditions.
         let live_pid = unsafe { libc::getpid() };
         let stale_pid = live_pid.saturating_add(1);
 
@@ -2804,6 +2807,7 @@ mod tests {
         let vm_name = "live-fc-vm-quiesce-test";
         let fc_vms_dir = tmp.path().join("mvm").join("vms").join(vm_name);
         std::fs::create_dir_all(&fc_vms_dir).unwrap();
+        // SAFETY: getpid has no preconditions.
         let pid = unsafe { libc::getpid() };
         std::fs::write(fc_vms_dir.join("fc.pid"), pid.to_string()).unwrap();
 
@@ -2823,6 +2827,7 @@ mod tests {
         let vm_name = "live-fc-refuse-test";
         let fc_vms_dir = tmp.path().join("mvm").join("vms").join(vm_name);
         std::fs::create_dir_all(&fc_vms_dir).unwrap();
+        // SAFETY: getpid has no preconditions.
         let pid = unsafe { libc::getpid() };
         std::fs::write(fc_vms_dir.join("fc.pid"), pid.to_string()).unwrap();
 
@@ -2898,8 +2903,8 @@ mod tests {
             .build();
         store.write_meta(&meta).unwrap();
 
-        let signer = super::super::host_signer::load_or_init().unwrap();
-        let emitter = super::super::audit_chain::AuditEmitter::new(signer.signing).unwrap();
+        let signer = mvm_client::host_keypair::load_or_init().unwrap();
+        let emitter = mvm_client::audit::chain::emitter::AuditEmitter::new(signer.signing).unwrap();
         let plan = mvm_core::plan::test_support::PlanFixture::new()
             .tenant("local")
             .plan_id("plan-verify")
@@ -2963,8 +2968,8 @@ mod tests {
         .build();
         let store = CheckpointStore::open();
         store.write_meta(&meta).unwrap();
-        let signer = super::super::host_signer::load_or_init().unwrap();
-        let emitter = super::super::audit_chain::AuditEmitter::new(signer.signing).unwrap();
+        let signer = mvm_client::host_keypair::load_or_init().unwrap();
+        let emitter = mvm_client::audit::chain::emitter::AuditEmitter::new(signer.signing).unwrap();
         let plan = mvm_core::plan::test_support::PlanFixture::new()
             .tenant("local")
             .plan_id("plan-snapshot-lineage")
@@ -3084,8 +3089,8 @@ mod tests {
     /// will. Returns nothing; the store + chain are the observable state.
     fn seed_audited_image_node(store: &ImageStore, node: &ImageNode) {
         store.save(node).unwrap();
-        let signer = super::super::host_signer::load_or_init().unwrap();
-        let emitter = super::super::audit_chain::AuditEmitter::new(signer.signing).unwrap();
+        let signer = mvm_client::host_keypair::load_or_init().unwrap();
+        let emitter = mvm_client::audit::chain::emitter::AuditEmitter::new(signer.signing).unwrap();
         let plan = mvm_core::plan::test_support::PlanFixture::new()
             .tenant("local")
             .plan_id("plan-image-verify")
@@ -3156,8 +3161,8 @@ mod tests {
         env.isolate_mvm_home(tmp.path());
 
         let store = ImageStore::open();
-        let signer = super::super::host_signer::load_or_init().unwrap();
-        let emitter = super::super::audit_chain::AuditEmitter::new(signer.signing).unwrap();
+        let signer = mvm_client::host_keypair::load_or_init().unwrap();
+        let emitter = mvm_client::audit::chain::emitter::AuditEmitter::new(signer.signing).unwrap();
         let plan = mvm_core::plan::test_support::PlanFixture::new()
             .tenant("local")
             .plan_id("plan-build-path")
@@ -3258,8 +3263,8 @@ mod tests {
         env.isolate_mvm_home(tmp.path());
 
         let store = ImageStore::open();
-        let signer = super::super::host_signer::load_or_init().unwrap();
-        let emitter = super::super::audit_chain::AuditEmitter::new(signer.signing).unwrap();
+        let signer = mvm_client::host_keypair::load_or_init().unwrap();
+        let emitter = mvm_client::audit::chain::emitter::AuditEmitter::new(signer.signing).unwrap();
         let plan = mvm_core::plan::test_support::PlanFixture::new()
             .tenant("local")
             .plan_id("plan-oci-pull")

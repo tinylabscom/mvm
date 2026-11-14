@@ -23,6 +23,16 @@ static WRITE_FD: AtomicI32 = AtomicI32::new(-1);
 /// Enforces the single-handler contract (second install returns `AlreadyExists`).
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
+/// Set once the handler has started cleaning up before an exit. A further
+/// signal then leaves at once rather than queueing behind the cleanup.
+static CLEANING_UP: AtomicBool = AtomicBool::new(false);
+
+/// Mark the cleanup before exit as running, so a second signal ends the
+/// process immediately.
+pub fn begin_cleanup() {
+    CLEANING_UP.store(true, Ordering::SeqCst);
+}
+
 /// The signals routed through the handler.
 pub const HANDLED_SIGNALS: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
 
@@ -30,6 +40,10 @@ pub const HANDLED_SIGNALS: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc
 /// the self-pipe. Everything here must be async-signal-safe — `write` is;
 /// nothing else runs.
 extern "C" fn on_signal(signal: libc::c_int) {
+    if CLEANING_UP.load(Ordering::Relaxed) {
+        // SAFETY: `_exit` is async-signal-safe and runs no destructors.
+        unsafe { libc::_exit(128 + signal) };
+    }
     let fd = WRITE_FD.load(Ordering::Relaxed);
     if fd >= 0 {
         // Every handled signal number fits in a byte.
@@ -114,6 +128,7 @@ mod tests {
     #[test]
     fn servicer_runs_handler_per_pipe_byte() {
         let mut fds = [0 as libc::c_int; 2];
+        // SAFETY: `fds` is a two-element c_int array, the buffer pipe(2) fills.
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
         let (read_fd, write_fd) = (fds[0], fds[1]);
         let hits = Arc::new(AtomicI32::new(0));
@@ -125,6 +140,8 @@ mod tests {
         for _ in 0..3 {
             let b = 1u8;
             assert_eq!(
+                // SAFETY: `write_fd` is the open write end of the pipe made above; the source is a
+                //         live one-byte local.
                 unsafe { libc::write(write_fd, std::ptr::addr_of!(b) as *const _, 1) },
                 1
             );
@@ -143,6 +160,7 @@ mod tests {
     #[test]
     fn servicer_passes_the_signal_number() {
         let mut fds = [0 as libc::c_int; 2];
+        // SAFETY: `fds` is a two-element c_int array, the buffer pipe(2) fills.
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
         let (read_fd, write_fd) = (fds[0], fds[1]);
         let seen = Arc::new(AtomicI32::new(0));
@@ -153,6 +171,8 @@ mod tests {
         .unwrap();
         let byte = libc::SIGTERM as u8;
         assert_eq!(
+            // SAFETY: `write_fd` is the open write end of the pipe made above; the source is a
+            //         live one-byte local.
             unsafe { libc::write(write_fd, std::ptr::addr_of!(byte) as *const _, 1) },
             1
         );
@@ -163,6 +183,36 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(seen.load(Ordering::SeqCst), libc::SIGTERM);
+    }
+
+    /// A signal that arrives while the first one's cleanup runs ends the
+    /// process at once with its own status. Forked so the test process keeps
+    /// its dispositions.
+    #[test]
+    fn a_second_signal_during_cleanup_exits_immediately() {
+        // SAFETY: the child only raises a signal at itself and leaves with
+        // `_exit`; it never returns into the test harness.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork: {}", io::Error::last_os_error());
+        if pid == 0 {
+            if install_dispositions().is_err() {
+                // SAFETY: _exit takes an integer and never returns; the forked child leaves
+                //         without running destructors.
+                unsafe { libc::_exit(1) };
+            }
+            begin_cleanup();
+            // SAFETY: raise takes a valid signal number; the handler installed above runs in this
+            //         forked child.
+            unsafe { libc::raise(libc::SIGINT) };
+            // Unreached when the handler exits; a wrong exit code reports it.
+            // SAFETY: _exit takes an integer and never returns.
+            unsafe { libc::_exit(2) };
+        }
+        let mut status = 0;
+        // SAFETY: waits for the child forked above.
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(libc::WIFEXITED(status));
+        assert_eq!(libc::WEXITSTATUS(status), 130);
     }
 
     /// SIGTERM and SIGHUP are routed through the same handler as SIGINT. Run

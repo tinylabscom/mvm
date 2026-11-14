@@ -101,7 +101,7 @@ anchor = "tracing::subscriber::set_global_default"
 scope = "global"
 role = "workload-guest"
 owner = "sealed agent capture install (telemetry-asserted boots)"
-gap = "Captures the agent's own diagnostics into the bounded outbox and serves them per session; delivery to a VM-lifetime host collector is witnessed at component level only, not on a booted guest."
+gap = "Captures the agent's own diagnostics into the bounded outbox and serves them per session; delivery to a VM-lifetime host collector is live on cold and detached boots on Firecracker and HVF (2026-10-12, certification.md), with the collector exiting on machine stop. A restore boot has no live witness yet — epoch rotation is unit-witnessed only."
 required_witness = "Authenticated host collector receives agent diagnostics from a real telemetry-asserted boot across cold start, restore and exit."
 
 [[subscriber_init]]

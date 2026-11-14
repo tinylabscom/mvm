@@ -7,7 +7,6 @@
 
 #[cfg(test)]
 mod fc_orchestration_tests;
-pub mod traits;
 
 pub use mvm_backends::driver::FcDriver;
 pub use mvm_backends::driver::{HvfDriver, LibkrunDriver, QemuDriver};
@@ -18,7 +17,7 @@ pub use mvm_backends::driver::{fc, hvf, libkrun, qemu};
 pub use mvm_vmm::driver::spec::{
     BlockDev, ConsoleCapture, KernelImage, VirtioFsShare, VmmSpec, VsockDirection, VsockPort,
 };
-pub use traits::{
+pub use mvm_vmm::driver::traits::{
     ChildForkRequest, DuplexStream, LateVolumeAttach, PreloadChildRequest, PreloadedChild,
     RunningVm, RunningVmStopTiming, StandbyParentSpawn, VmmDriver,
 };

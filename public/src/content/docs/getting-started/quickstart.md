@@ -14,7 +14,7 @@ your audience actually has.
 
 ## 1. Run an OCI Image
 
-Start with the [native local demo](/getting-started/native-demo/): no `mvmd`,
+Start with the [native local demo](/getting-started/native-demo/): no
 remote credentials, persistent volumes, or source build. Launch directly:
 
 ```bash

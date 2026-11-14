@@ -405,7 +405,14 @@ fn mount_with_service(
                 bail!("--host path must be absolute, got {:?}", host.display());
             }
             let cache = crate::mount_cache::MountImageCache::new()?;
-            let fingerprint = cache.fingerprint(host, &host_snapshot_volume_label(volume_name))?;
+            // Registered host snapshots materialize under the same default
+            // deny-by-default policy as transient mounts: the built-in
+            // protected-path set, with no widening surface here.
+            let fingerprint = cache.fingerprint(
+                host,
+                &host_snapshot_volume_label(volume_name),
+                crate::mount_cache::MountImageCache::default_deny_set(),
+            )?;
             volume_service.require_host_encryption(fingerprint.source())?;
             let image = cache.lookup(fingerprint)?.resolve()?;
             let attachment_image = if rw {
@@ -593,6 +600,7 @@ fn refresh_registered_host_snapshots_using(
             .fingerprint(
                 Path::new(&snapshot.source_path),
                 &host_snapshot_volume_label(&attachment.volume),
+                crate::mount_cache::MountImageCache::default_deny_set(),
             )
             .with_context(|| {
                 format!(

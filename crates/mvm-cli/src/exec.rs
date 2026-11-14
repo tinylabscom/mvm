@@ -15,8 +15,8 @@ use anyhow::{Context, Result};
 use mvm_core::launch_trace::PhaseTimingMode;
 use mvm_core::vm_backend::{SnapshotCapability, VmId, VmStartConfig, VmVolume};
 use mvm_runtime::backend::AnyBackend;
-use mvm_runtime::vsock_transport;
 use mvm_vmm::host::shell::shell_quote;
+use mvm_vmm::vsock_transport;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -60,9 +60,8 @@ pub(crate) use oci_boot::{ImageNaming, LaunchNames, boots_oci_image, oci_proxy_e
 use session::wait_for_agent_timed;
 pub use session::{SessionVm, dispatch_in_session, wait_for_agent};
 use transient::{
-    BootAttempt, LeaveAt, boot_transient_vm, combine_run_and_flush,
-    flush_writable_disks_before_teardown, install_ctrlc_teardown, leave_standby_when,
-    standby_to_leave, start_mode,
+    BootAttempt, LeaveAt, arm_interrupt_teardown, boot_transient_vm, combine_run_and_flush,
+    flush_writable_disks_before_teardown, leave_standby_when, standby_to_leave, start_mode,
 };
 pub(crate) use transient::{TransientStopFailure, combine_run_and_stop, teardown_transient_vm};
 
@@ -102,7 +101,7 @@ pub enum ExecTarget {
 ///   - `command` — argv to exec inside the guest.
 ///   - `working_dir` — optional `cd` target before exec.
 ///   - `env` — merged from `apps[].env` (lower precedence) and
-///     `apps[].entrypoint.env` (higher precedence), per mvmforge semantics.
+///     `apps[].entrypoints[].env` (higher precedence).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchEntrypoint {
     pub command: Vec<String>,
@@ -623,6 +622,7 @@ fn run_inner(
     let ResolvedLaunch {
         backend,
         start_config,
+        mailbox_posture,
         use_snapshot,
         root_strategy,
         image: resolved,
@@ -656,6 +656,7 @@ fn run_inner(
     let mut boot_attempt = BootAttempt {
         backend: &backend,
         start_config: &start_config,
+        mailbox_posture: mailbox_posture.as_ref(),
         resolved: &resolved,
         user_named: req.name.is_some(),
         writable_images: &mut disk_images,
@@ -707,8 +708,13 @@ fn run_inner(
         None
     };
 
-    // Install Ctrl-C handler that tears the VM down.
-    let interrupted = install_ctrlc_teardown(&vm_name, backend.name());
+    // A signal stops and removes the VM before the process exits.
+    let interrupt_teardown = arm_interrupt_teardown(
+        &vm_name,
+        &requested_vm_name,
+        backend.name(),
+        start_config.plan_json.as_deref(),
+    );
 
     // Answer the endpoint's `ask` decisions for as long as the run is in the
     // foreground. The wasm tier has no network endpoint to ask.
@@ -777,6 +783,7 @@ fn run_inner(
         exit_audit,
         &mut sub_marks,
     );
+    drop(interrupt_teardown);
     if stopped.is_err() {
         return combine_run_and_stop(result, stopped);
     }
@@ -875,9 +882,6 @@ fn run_inner(
         output.phase_timing = Some(report);
     }
 
-    if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
-        anyhow::bail!("interrupted");
-    }
     if let Some(error) = warm_memory_error
         && result.is_ok()
     {
@@ -1203,6 +1207,8 @@ pub struct ResolvedLaunch {
     /// which backend's capabilities shaped the config.
     pub backend: AnyBackend,
     pub start_config: VmStartConfig,
+    /// Only admission may supply Dev posture for an opted-in mailbox.
+    pub mailbox_posture: Option<mvm_hostd::plan_admission::MailboxLaunchPosture>,
     /// Whether snapshot restore survives admission (an admitted workload
     /// always cold-boots).
     pub use_snapshot: bool,
@@ -1298,6 +1304,7 @@ pub fn resolve_launch(
     );
     let mut use_snapshot = boot.use_snapshot;
     let mut built_pack_check = None;
+    let mut mailbox_posture = None;
 
     // Attach everything the boot waits on before admitting. Admission starts
     // the plan's validity window and the verb grant minted from it expires
@@ -1352,6 +1359,7 @@ pub fn resolve_launch(
                 .kernel_path
                 .as_deref()
                 .map(std::path::Path::new),
+            backend_kind: backend.kind(),
             vm_name: &vm_name,
             sdk_sidecar: sdk_sidecar.as_ref(),
             assets: shape.assets,
@@ -1362,6 +1370,7 @@ pub fn resolve_launch(
     {
         let mut sub = sub;
         built_pack_check = sub.built_pack_check.take();
+        mailbox_posture = sub.mailbox_posture.take();
         let read_only_materialized_images = sub.apply_to(&mut start_config);
         for volume in &mut start_config.volumes {
             if read_only_materialized_images.contains(&volume.host)
@@ -1430,6 +1439,7 @@ pub fn resolve_launch(
     Ok(ResolvedLaunch {
         backend,
         start_config,
+        mailbox_posture,
         use_snapshot,
         root_strategy: boot.root_strategy,
         image,
@@ -1702,6 +1712,8 @@ mod tests {
             host_dir: "/host/data".into(),
             guest_mount: "/data".into(),
             read_only: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
         let req = ExecRequest {
             name: Some("named-vm".into()),
@@ -2218,6 +2230,8 @@ mod tests {
                 host_dir: "/h".into(),
                 guest_mount: "/g".into(),
                 read_only: true,
+                include: Vec::new(),
+                exclude: Vec::new(),
             }],
             true,
             SnapshotCapability::LiveMemory

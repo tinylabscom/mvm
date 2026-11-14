@@ -1,7 +1,7 @@
-//! Plan 60 Phase 4 — every CLI subcommand must declare its audit
+//! Every CLI subcommand must declare its audit
 //! posture, at every level of the clap tree.
 //!
-//! Plan 60 §"Phase 4 — Persistent observability" exit test
+//! The persistent-observability exit test
 //! `every_command_emits_audit_entry` is the eventual goal: drive
 //! every `mvmctl` subcommand end-to-end and assert ≥1 audit entry
 //! per. That end-to-end coverage needs hermetic test fixtures for
@@ -108,7 +108,7 @@ const BACKEND_SUB: &[(&str, AuditPosture)] = &[
     ("detect", AuditPosture::ReadOnly),
 ];
 
-// Plan 178 (D5) — environment/install lifecycle grouped under `env <sub>`.
+// Environment/install lifecycle grouped under `env <sub>`.
 const ENV_SUB: &[(&str, AuditPosture)] = &[
     ("bootstrap", AuditPosture::InteractiveOrControl),
     (
@@ -127,7 +127,7 @@ const ENV_SUB: &[(&str, AuditPosture)] = &[
     ("sign", AuditPosture::ReadOnly),
 ];
 
-// Plan 178 — operational verbs grouped under `ops <sub>`. Postures unchanged.
+// Operational verbs grouped under `ops <sub>`. Postures unchanged.
 const OPS_SUB: &[(&str, AuditPosture)] = &[
     ("metrics", AuditPosture::ReadOnly),
     ("config", AuditPosture::Emits("ConfigChange")),
@@ -191,13 +191,13 @@ const CACHE_SUB: &[(&str, AuditPosture)] = &[
     ("info", AuditPosture::ReadOnly),
     ("status", AuditPosture::ReadOnly),
     ("prune", AuditPosture::Emits("CachePrune")),
-    // #640 — clears a degraded builder store; emits CachePrune on the real run
+    // Clears a degraded builder store; emits CachePrune on the real run
     // (op=builder_store_repair). A `--dry-run` is read-only, but the posture
     // tracks the acting path.
     ("repair", AuditPosture::Emits("CachePrune")),
 ];
 
-// Plan 118 WS-1 1b — `mvmctl pool`.
+// `mvmctl pool`.
 const POOL_SUB: &[(&str, AuditPosture)] = &[
     ("warm", AuditPosture::Emits("PoolWarm")),
     ("status", AuditPosture::ReadOnly),
@@ -540,7 +540,7 @@ const BUNDLE_SUB: &[(&str, AuditPosture)] = &[
 
 // trust add/remove mutate `~/.mvm/trusted-publishers/` and emit
 // `LocalAuditKind::{TrustAdd, TrustRemove}` via
-// `mvm_core::audit::emit`. Sprint 52 W2 phase-3 close-out
+// `mvm_core::audit::emit`. These were
 // promoted these from `InteractiveOrControl` to `Emits(...)`.
 // `trust audit transcript <sub>` — opt-in forensic capture lifecycle. arm /
 // disarm / export emit chain-visible lifecycle kinds; list is read-only. (The
@@ -637,13 +637,13 @@ const TRUST_SUB: &[(&str, AuditPosture)] = &[
         "instructions",
         AuditPosture::DelegatesToSub(INSTRUCTIONS_SUB),
     ),
-    // Plan 178 — provenance verbs folded into `trust <sub>`.
+    // Provenance verbs folded into `trust <sub>`.
     ("attest", AuditPosture::DelegatesToSub(ATTEST_SUB)),
     ("receipt", AuditPosture::ReadOnly),
     ("audit", AuditPosture::DelegatesToSub(AUDIT_SUB)),
 ];
 
-// Plan 73 Followup C — sealed deps-volume cache. `deps inspect` is
+// Sealed deps-volume cache. `deps inspect` is
 // read-only (pretty-prints meta.json + sidecars without mutating
 // the volume). `deps audit` re-runs the CVE scan, rewrites
 // `cve.json`, bumps `meta.json.last_audit_at`, and atomically
@@ -669,7 +669,7 @@ const CAPTURE_SUB: &[(&str, AuditPosture)] = &[
 /// `crates/mvm-cli/src/commands/mod.rs`. Adding a new command? Add
 /// an entry here — the test below fails until you do.
 const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
-    // Environment / installer surfaces. Plan 178 (D5) — bootstrap/cleanup/
+    // Environment / installer surfaces: bootstrap/cleanup/
     // uninstall/update/sign grouped under `env <sub>`.
     ("env", AuditPosture::DelegatesToSub(ENV_SUB)),
     // Top-level `mvmctl bootstrap` — installer surface (host tooling + builder
@@ -733,14 +733,14 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("manifest", AuditPosture::DelegatesToSub(MANIFEST_SUB)),
     ("storage", AuditPosture::DelegatesToSub(STORAGE_SUB)),
     ("persistent-builder", AuditPosture::InteractiveOrControl),
-    // Plan 166 Phase 2 — hidden internal helper: a long-running host-side
+    // Hidden internal helper: a long-running host-side
     // AF_VSOCK<->UNIX bridge for the QEMU workload backend. Pure transport
     // plumbing spawned by `mvm_runtime::qemu`; never emits audit events.
     ("__qemu-vsock-bridge", AuditPosture::InteractiveOrControl),
     ("catalog", AuditPosture::ReadOnly),
     ("image", AuditPosture::DelegatesToSub(IMAGE_SUB)),
     ("pack", AuditPosture::DelegatesToSub(PACK_SUB)),
-    // Plan 200 — beginner microVM workflows.
+    // Beginner microVM workflows.
     ("machine", AuditPosture::DelegatesToSub(MACHINE_SUB)),
     // Operational surfaces.
     // metrics/config grouped under `ops <sub>`.
@@ -748,11 +748,11 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("network", AuditPosture::DelegatesToSub(NETWORK_SUB)),
     ("cache", AuditPosture::DelegatesToSub(CACHE_SUB)),
     ("pool", AuditPosture::DelegatesToSub(POOL_SUB)),
-    // Plan 170 WS-A — reconcile-on-entry convergence. The non-dry-run
+    // Reconcile-on-entry convergence. The non-dry-run
     // path emits one `RegistryReconcile` per healed drift item.
     ("reconcile", AuditPosture::Emits("RegistryReconcile")),
     ("secret", AuditPosture::DelegatesToSub(SECRET_SUB)),
-    // Sprint 52 W2 — bundles + trust store.
+    // Bundles + trust store.
     ("bundle", AuditPosture::DelegatesToSub(BUNDLE_SUB)),
     ("trust", AuditPosture::DelegatesToSub(TRUST_SUB)),
     // Authored workload policy: resolving, showing, validating, diffing and
@@ -767,7 +767,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
         "agent-session",
         AuditPosture::DelegatesToSub(AGENT_SESSION_SUB),
     ),
-    // Plan 73 Followup C — sealed deps-volume cache verbs.
+    // Sealed deps-volume cache verbs.
     ("deps", AuditPosture::DelegatesToSub(DEPS_SUB)),
     ("capture", AuditPosture::DelegatesToSub(CAPTURE_SUB)),
     // Artifact-model commands.

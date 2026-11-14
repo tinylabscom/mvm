@@ -208,8 +208,11 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 echo ">> creating the Spot instance"
-gcloud "${create_args[@]}"
+# The API may create the instance before gcloud returns an error (for example,
+# a client-side updater crash). Treat even an uncertain create as ours to
+# delete; otherwise the EXIT trap could leave a billable VM behind.
 instance_created=1
+gcloud "${create_args[@]}"
 
 # Compute RUNNING does not mean the independently owned guest sshd is ready.
 # Google exposes no sshd-ready event, so reconcile it at most five times with

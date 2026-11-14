@@ -25,6 +25,7 @@
 //!   claim binds one. That is the same deny-all posture a workload boot gets
 //!   when its plan admits no egress.
 
+use mvm_vmm::host::process_liveness::read_pid_file;
 use std::io::Write;
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
@@ -38,7 +39,7 @@ use mvm_core::checkpoint::{
 use mvm_vmm::host::hvf_supervisor::{HvfDisk, HvfRestoreFds, HvfSupervisorConfig};
 use mvm_vmm::host::restore_image::{PrivateCopy, VerifiedRestoreFile, inherit_descriptors};
 
-use crate::driver::hvf_process::{PID_FILE_NAME, read_pid, resolve_supervisor_path_verified};
+use crate::driver::hvf_process::{PID_FILE_NAME, resolve_supervisor_path_verified};
 
 /// A materialized HVF checkpoint about to be booted under a fresh identity.
 ///
@@ -540,7 +541,7 @@ fn await_restored(
     let deadline = Instant::now() + timeout;
     loop {
         if marker.is_file()
-            && let Some(pid) = read_pid(&cfg.pid_file)
+            && let Some(pid) = read_pid_file(&cfg.pid_file)
         {
             let pid = u32::try_from(pid).map_err(|_| {
                 anyhow!("restored HVF VM '{}' published a negative pid", req.vm_name)

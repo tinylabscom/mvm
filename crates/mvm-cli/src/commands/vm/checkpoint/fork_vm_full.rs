@@ -483,7 +483,7 @@ fn fork_restrict_agent_verbs(p: &AdmitForkedChildParams<'_>) -> Result<bool> {
             let recorded_plan_id = anchor
                 .checkpoint_plan_id(p.parent_meta)?
                 .context("replay source checkpoint has no signed plan identity")?;
-            let source = super::super::plan_persist::read_plan(&p.parent_meta.vm_name)
+            let source = mvm_client::audit::chain::plan_persist::read_plan(&p.parent_meta.vm_name)
                 .context("reading replay source plan")?;
             mvm_core::plan::verify_plan_id(&source)
                 .context("verifying replay source plan content id")?;
@@ -1081,8 +1081,8 @@ mod tests {
             .unwrap();
         let meta = mvm_runtime::checkpoint::capture_vm_full(store, params, &CapturedParent(rootfs))
             .unwrap();
-        let signer = crate::commands::vm::host_signer::load_or_init().unwrap();
-        let emitter = crate::commands::vm::audit_chain::AuditEmitter::new(signer.signing).unwrap();
+        let signer = mvm_client::host_keypair::load_or_init().unwrap();
+        let emitter = mvm_client::audit::chain::emitter::AuditEmitter::new(signer.signing).unwrap();
         let plan = mvm_core::plan::test_support::PlanFixture::new()
             .tenant("local")
             .plan_id("plan-fork-parent")
@@ -1454,7 +1454,8 @@ mod tests {
             .expect("a parent with no plan forks unpinned");
         let mut parent_plan = unpinned.admission.admitted.plan().clone();
         assert!(parent_plan.bundle.is_none());
-        crate::commands::vm::plan_persist::write_plan(&parent_meta.vm_name, &parent_plan).unwrap();
+        mvm_client::audit::chain::plan_persist::write_plan(&parent_meta.vm_name, &parent_plan)
+            .unwrap();
         fork_child_of(&store, id, &parent_meta, "plain-child-2")
             .expect("a parent whose plan names no bundle forks as before");
 
@@ -1464,7 +1465,8 @@ mod tests {
             &[0; 64],
             mvm_core::plan::bundle::KeyId("publisher".into()),
         ));
-        crate::commands::vm::plan_persist::write_plan(&parent_meta.vm_name, &parent_plan).unwrap();
+        mvm_client::audit::chain::plan_persist::write_plan(&parent_meta.vm_name, &parent_plan)
+            .unwrap();
 
         let err = match fork_child_of(&store, id, &parent_meta, "bundle-child") {
             Ok(_) => panic!("a child of an uninstalled bundle must not be admitted"),

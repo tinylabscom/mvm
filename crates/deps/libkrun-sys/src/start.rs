@@ -302,6 +302,7 @@ pub(super) fn install_shutdown_handler(_krun: &sys::Context) -> Result<(), Error
         // Status 143 = 128 + SIGTERM, the shell convention for "killed by
         // SIGTERM". `_exit` is async-signal-safe (signal-safety(7)).
         // There is no child process to reap: the guest has no NIC.
+        // SAFETY: _exit takes an integer, is async-signal-safe, and never returns.
         unsafe {
             libc::_exit(143);
         }

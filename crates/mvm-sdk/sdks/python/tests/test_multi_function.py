@@ -92,9 +92,11 @@ def test_first_decoration_carries_app_level_config() -> None:
     assert len(payload["apps"][0]["entrypoints"]) == 2
 
 
-def test_app_rejects_both_entrypoint_and_entrypoints() -> None:
+def test_app_rejects_removed_singular_entrypoint_kwarg() -> None:
     mvm.workload(id="x")
-    with pytest.raises(ValueError, match="not both"):
+    # The singular `entrypoint=` kwarg was retired with the compatibility
+    # path; a stray call must fail as an unknown argument, not be accepted.
+    with pytest.raises(TypeError, match="entrypoint"):
 
         @mvm.app(
             name="x",
@@ -102,7 +104,6 @@ def test_app_rejects_both_entrypoint_and_entrypoints() -> None:
             image=mvm.nix_packages(["python312"]),
             resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
             entrypoint=mvm.entrypoint(command=["true"]),
-            entrypoints=[mvm.entrypoint(command=["true"])],
         )
         def _():
             pass

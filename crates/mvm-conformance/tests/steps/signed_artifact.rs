@@ -113,6 +113,13 @@ fn local_build_artifact(world: &mut CliWorld, name: String) {
     std::fs::write(scratch(world).join(name), bytes).expect("write the local build");
 }
 
+#[given("the isolated home explicitly enrolls its host key")]
+fn enroll_local_build_signer(world: &mut CliWorld) {
+    let signer = mvm_hostd::audit::host_keypair::load_or_init_at(&home(world).join("keys"))
+        .expect("load the isolated host signer");
+    enrol(world, &signer.signing, signer.verifying.to_bytes());
+}
+
 #[given(expr = "the artifact {string} has its rootfs altered after signing")]
 fn tamper_artifact(world: &mut CliWorld, name: String) {
     let path = scratch(world).join(name);

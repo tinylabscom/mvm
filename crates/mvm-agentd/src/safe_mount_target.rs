@@ -133,9 +133,9 @@ mod linux {
                 libc::syscall(libc::SYS_fsmount, context.as_raw_fd(), 1, attributes)
             })?;
             if let Some((uid, gid)) = owner {
-                // SAFETY: AT_EMPTY_PATH operates on the detached mount root,
-                // not on a pathname that the workload can redirect.
                 checked(
+                    // SAFETY: AT_EMPTY_PATH operates on the detached mount root, not on a pathname
+                    //         that the workload can redirect.
                     unsafe {
                         libc::fchownat(
                             mounted.as_raw_fd(),
@@ -202,15 +202,15 @@ pub(crate) mod tests {
     use std::os::unix::fs::symlink;
 
     pub(crate) fn private_mount_namespace() {
-        // SAFETY: the ignored test owns its thread's new mount namespace.
         assert_eq!(
+            // SAFETY: the ignored test owns its thread's new mount namespace.
             unsafe { libc::unshare(libc::CLONE_NEWNS) },
             0,
             "requires CAP_SYS_ADMIN: {}",
             std::io::Error::last_os_error()
         );
-        // SAFETY: make inherited mounts private before any test mount.
         assert_eq!(
+            // SAFETY: make inherited mounts private before any test mount.
             unsafe {
                 libc::mount(
                     std::ptr::null(),
@@ -373,8 +373,8 @@ pub(crate) mod tests {
         assert!(device.path.starts_with("/dev/loop"));
         let block = std::fs::File::open(&device.path).unwrap();
         let mut read_only: libc::c_int = 0;
-        // SAFETY: BLKROGET writes one integer into the provided live pointer.
         assert_eq!(
+            // SAFETY: BLKROGET writes one integer into the provided live pointer.
             unsafe { libc::ioctl(block.as_raw_fd(), 0x125e, std::ptr::addr_of_mut!(read_only)) },
             0
         );

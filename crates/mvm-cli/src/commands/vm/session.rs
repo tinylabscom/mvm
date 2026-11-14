@@ -566,7 +566,7 @@ fn dispatch_run_code(
     let request_code = code.clone();
     let req = mvm_agentd::vsock::GuestRequest::RunCode { code, timeout_secs };
     // Inbound vsock RPC audit.
-    super::shared::emit_vsock_rpc_audit(&record.vm_name, &req);
+    mvm_client::guest::emit_vsock_rpc_audit(&record.vm_name, &req);
     let terminal = mvm_agentd::vsock::send_run_code_streaming(
         &mut stream,
         &request_code,

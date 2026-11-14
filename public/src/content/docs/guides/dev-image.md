@@ -66,7 +66,7 @@ Point `mvm.toml` at the dev output:
 ```toml
 flake     = "."
 profile   = "dev"
-cpus      = 2          # `vcpus` is an accepted alias
+cpus      = 2
 mem       = "1024M"
 ```
 

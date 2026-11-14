@@ -7,9 +7,9 @@ the host never imports or executes this script. `mvmctl machine run --flake
 function-entrypoint protocol; the env mapping is baked into the workload, so
 the run prints the value below.
 
-A bare string in `env={...}` is an explicit literal — `mvm.literal(...)` is
-the equivalent spelled-out form (see `examples/python/hello-app/` for that
-variant, and `mvm.secret(...)` for values that must never enter the guest).
+An env value is always explicit: `mvm.literal(...)` for a literal (a bare
+string is refused), and `mvm.secret(...)` for values that must never enter
+the guest (see `examples/python/hello-app/` for both forms).
 """
 
 import os
@@ -20,7 +20,7 @@ import mvm
 @mvm.app(
     image=mvm.python_image(python="3.12"),
     resources=mvm.resources(cpu=1, memory_mb=256),
-    env={"NAME": "danny"},
+    env={"NAME": mvm.literal("danny")},
     before_start="export FOO=1",
 )
 def main() -> None:

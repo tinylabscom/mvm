@@ -309,7 +309,7 @@ fn update_fod_hash(flake_ref: &str) -> Result<()> {
     shell::run_in_vm(&set_fod_hash_script(flake_ref, ""))?;
 
     // Run nix build and capture all output. It will fail with hash mismatch,
-    // printing the correct hash. Phase 2/3 never execute; only the FOD runs.
+    // printing the correct hash. Later phases never execute; only the FOD runs.
     ui::info("Running nix build to compute hash (this downloads the package)...");
     let build_output = shell::run_in_vm_stdout(&nix_build_script(flake_ref))?;
 

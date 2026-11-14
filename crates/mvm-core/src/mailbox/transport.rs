@@ -14,8 +14,8 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use mvm_contract::protocol::mailbox::{
     AuthorizationDomainRouteLabel, DestinationRouteToken, ED25519_SIGNATURE_BYTES, ExecutionEpoch,
     MAILBOX_PROTOCOL_VERSION, MAX_ENCODED_ENVELOPE_BYTES, MailboxAddress, MailboxEnvelope,
-    MailboxEnvelopeHeader, MailboxOperation, PrincipalId, ProtocolVersion, SignatureAlgorithm,
-    SignedMailboxCapability, TransportBindingId,
+    MailboxEnvelopeHeader, MailboxMessageKind, MailboxOperation, PrincipalId, ProtocolVersion,
+    SignatureAlgorithm, SignedMailboxCapability, TransportBindingId,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -546,14 +546,17 @@ pub fn prepare_mailbox_envelope(
     Ok(PreparedMailboxEnvelope { envelope, header })
 }
 
-/// Canonically encoded ciphertext admitted by mailbox authority. Its bytes are
-/// private so a transport cannot be used as an arbitrary packet-forwarding API.
+/// Canonically encoded ciphertext and the exact signed capability admitted by
+/// mailbox authority. The bytes are private so a transport cannot be used as
+/// an arbitrary packet-forwarding API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorizedMailboxFrame {
     bytes: Vec<u8>,
+    capability: SignedMailboxCapability,
 }
 
 impl AuthorizedMailboxFrame {
+    /// Canonical envelope length, excluding the separately carried capability.
     #[must_use]
     pub fn encoded_len(&self) -> usize {
         self.bytes.len()
@@ -564,6 +567,12 @@ impl AuthorizedMailboxFrame {
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }
+
+    /// The signed send capability verified with this exact envelope.
+    #[must_use]
+    pub fn capability(&self) -> &SignedMailboxCapability {
+        &self.capability
+    }
 }
 
 /// Verify capability, lifecycle, and route binding before exposing a frame to
@@ -571,11 +580,21 @@ impl AuthorizedMailboxFrame {
 pub fn authorize_outbound(
     request: OutboundAuthorization<'_>,
 ) -> Result<AuthorizedMailboxFrame, OutboundAuthorizationError> {
-    if request.context.required_operation != MailboxOperation::Send {
-        return Err(OutboundAuthorizationError::SendOperationRequired);
-    }
     let envelope = &request.prepared.envelope;
     let header = &request.prepared.header;
+    match header.kind {
+        MailboxMessageKind::Call | MailboxMessageKind::Cast
+            if request.context.required_operation != MailboxOperation::Send =>
+        {
+            return Err(OutboundAuthorizationError::SendOperationRequired);
+        }
+        MailboxMessageKind::Reply
+            if request.context.required_operation != MailboxOperation::Reply =>
+        {
+            return Err(OutboundAuthorizationError::ReplyOperationRequired);
+        }
+        MailboxMessageKind::Call | MailboxMessageKind::Cast | MailboxMessageKind::Reply => {}
+    }
     envelope.validate_bounds().map_err(MailboxError::from)?;
     validate_outer_versions(envelope)?;
     validate_inner_versions(header)?;
@@ -590,7 +609,7 @@ pub fn authorize_outbound(
     }
     verify_identity_and_time(header, request.context)?;
     verify_capability_signature(request.capability, request.capability_authority_key)?;
-    verify_capability_scope(header, request.capability, request.context)?;
+    verify_capability_scope(header, request.capability, request.context, true)?;
     let claims = &request.route.claims;
     if claims.address.tenant != header.tenant
         || claims.address.authorization_domain != header.authorization_domain
@@ -606,6 +625,7 @@ pub fn authorize_outbound(
     }
     Ok(AuthorizedMailboxFrame {
         bytes: encode_envelope(envelope)?,
+        capability: request.capability.clone(),
     })
 }
 
@@ -615,6 +635,8 @@ pub enum OutboundAuthorizationError {
     Mailbox(#[from] MailboxError),
     #[error("outbound transport authorization requires the send operation")]
     SendOperationRequired,
+    #[error("outbound reply authorization requires the reply operation")]
+    ReplyOperationRequired,
     #[error("mailbox envelope and supplied signed header do not match")]
     EnvelopeHeaderMismatch,
     #[error("mailbox envelope does not match the authorized transport route")]
@@ -845,5 +867,5 @@ pub fn connect_with_fallback(
 mod limits;
 pub use limits::{ResourceLedger, ResourceLimitError, ResourceLimits, ResourceLimitsBuilder};
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

@@ -59,8 +59,8 @@ tempfile = { workspace = true }
 
 [features]
 default = []
-# Compatibility facade. mvm-compiler is now a required dependency (decorator
-# parser lives there); this feature gates only the compile-pipeline re-exports.
+# mvm-compiler is a required dependency (decorator parser lives there); this
+# feature gates the pack composer and deployment assembly that need the pipeline.
 compiler = []
 # Deployment assembly and records stay outside the language-neutral compiler.
 deploy = ["compiler", "dep:blake3"]
@@ -109,10 +109,6 @@ path = "src/bin/emit_sdk_errors.rs"
 [[bin]]
 name = "emit_sdk_ctors"
 path = "src/bin/emit_sdk_ctors.rs"
-
-[[test]]
-name = "compiler_facade"
-required-features = ["compiler"]
 
 [[test]]
 name = "runtime_compile_e2e"

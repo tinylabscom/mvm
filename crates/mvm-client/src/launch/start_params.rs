@@ -359,6 +359,8 @@ impl VmStartParams<'_> {
                     read_only: v.read_only,
                     kind: v.kind,
                     encrypted: v.encrypted,
+                    share_include: Vec::new(),
+                    share_exclude: Vec::new(),
                 })
                 .collect(),
             config_files: self

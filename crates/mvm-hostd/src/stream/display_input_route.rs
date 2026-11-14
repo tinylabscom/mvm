@@ -43,7 +43,7 @@ impl VsockDisplayInput {
 
 impl DisplayInputTransport for VsockDisplayInput {
     fn deliver(&mut self, frame: &DisplayInputFrame) -> Result<DisplayInputResult> {
-        let transport = mvm_runtime::vsock_transport::for_vm(&self.vm)
+        let transport = mvm_vmm::vsock_transport::for_vm(&self.vm)
             .with_context(|| format!("pick a transport for the guest agent on {:?}", self.vm))?;
         let mut stream = transport
             .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)

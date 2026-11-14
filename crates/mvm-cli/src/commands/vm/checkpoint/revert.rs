@@ -455,14 +455,14 @@ const IMAGE_REVERT_INTENT: &str = "image:revert";
 /// as capture does); a present signer whose emit fails is fatal, so an
 /// un-auditable restore refuses before it re-runs.
 fn emit_image_revert_audit(node: &ImageNode, via: RevertVia, reference: &str) -> Result<()> {
-    let signer = match crate::commands::vm::host_signer::load_or_init() {
+    let signer = match mvm_client::host_keypair::load_or_init() {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "host signer unavailable; image.reverted chain entry skipped");
             return Ok(());
         }
     };
-    let emitter = crate::commands::vm::audit_chain::AuditEmitter::new(signer.signing)
+    let emitter = mvm_client::audit::chain::emitter::AuditEmitter::new(signer.signing)
         .map(|e| e.with_receipts())
         .context("refusing an unaudited image restore: audit emitter unavailable")?;
     // The node's content-address is always a valid 64-hex digest — bind the
@@ -635,7 +635,7 @@ fn emit_revert_audit(
     target: &CheckpointMeta,
     via: RevertVia,
 ) -> Result<()> {
-    let plan = match crate::commands::vm::plan_persist::read_plan(restored_vm_name) {
+    let plan = match mvm_client::audit::chain::plan_persist::read_plan(restored_vm_name) {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(error = %e, vm = restored_vm_name,
@@ -643,14 +643,14 @@ fn emit_revert_audit(
             return Ok(());
         }
     };
-    let signer = match crate::commands::vm::host_signer::load_or_init() {
+    let signer = match mvm_client::host_keypair::load_or_init() {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "host signer unavailable; restore chain entry skipped");
             return Ok(());
         }
     };
-    let emitter = crate::commands::vm::audit_chain::AuditEmitter::new(signer.signing)
+    let emitter = mvm_client::audit::chain::emitter::AuditEmitter::new(signer.signing)
         .map(|e| e.with_receipts())
         .context("refusing an unaudited restore: audit emitter unavailable")?;
     bind_checkpoint_restored(&emitter, &plan, target, restored_vm_name, via.as_str())
@@ -673,7 +673,7 @@ mod tests {
     // ── seed helpers: a store record + its host-signed creation entry ─────────
 
     fn emitter() -> (AuditEmitter, mvm_core::plan::ExecutionPlan) {
-        let signer = crate::commands::vm::host_signer::load_or_init().unwrap();
+        let signer = mvm_client::host_keypair::load_or_init().unwrap();
         let em = AuditEmitter::new(signer.signing).unwrap();
         let plan = PlanFixture::new()
             .tenant("local")
@@ -993,7 +993,7 @@ mod tests {
 
         // The revert is distinctly audited BEFORE handoff: image.created (seed) +
         // image.reverted (revert), both chain-signed and verifiable.
-        let signer = crate::commands::vm::host_signer::load_or_init().unwrap();
+        let signer = mvm_client::host_keypair::load_or_init().unwrap();
         let path = mvm_hostd::audit::emitter::default_audit_dir()
             .unwrap()
             .join("local.jsonl");
@@ -1161,7 +1161,7 @@ mod tests {
             .tenant("local")
             .plan_id("plan-restored")
             .build();
-        crate::commands::vm::plan_persist::write_plan(restored_vm, &plan).unwrap();
+        mvm_client::audit::chain::plan_persist::write_plan(restored_vm, &plan).unwrap();
 
         let target = CheckpointMeta::builder(
             CheckpointId::new("target"),
@@ -1178,7 +1178,7 @@ mod tests {
 
         emit_revert_audit(restored_vm, &target, RevertVia::Rewind).unwrap();
 
-        let signer = crate::commands::vm::host_signer::load_or_init().unwrap();
+        let signer = mvm_client::host_keypair::load_or_init().unwrap();
         let path = mvm_hostd::audit::emitter::default_audit_dir()
             .unwrap()
             .join("local.jsonl");

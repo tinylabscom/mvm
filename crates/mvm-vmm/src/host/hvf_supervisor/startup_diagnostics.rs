@@ -216,9 +216,9 @@ impl StartupReporter {
         // SAFETY: query the inherited descriptor without dereferencing it.
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
         let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
-        // SAFETY: fstat initializes stat on success.
         if flags < 0
             || flags & libc::O_ACCMODE != libc::O_WRONLY
+            // SAFETY: fstat initializes stat on success.
             || unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0
         {
             return None;
@@ -314,8 +314,8 @@ mod tests {
             // SAFETY: the held-child fixture transfers a separate socket end
             // exclusively to this exec, with no other owner in this process.
             let mut sync = unsafe { UnixStream::from_raw_fd(sync_fd) };
-            // SAFETY: sync owns this live descriptor; keep unrelated execs out.
             assert_eq!(
+                // SAFETY: sync owns this live descriptor; keep unrelated execs out.
                 unsafe { libc::fcntl(sync_fd, libc::F_SETFD, libc::FD_CLOEXEC) },
                 0
             );
@@ -463,8 +463,8 @@ mod tests {
     fn descriptor_validation_rejects_invalid_read_only_read_write_and_non_fifo() {
         use std::os::fd::IntoRawFd;
 
-        // SAFETY: these are invalid or reserved descriptors and cannot be adopted.
         for fd in [-1, 0, 1, 2, libc::c_int::MAX] {
+            // SAFETY: these are invalid or reserved descriptors and cannot be adopted.
             assert!(unsafe { StartupReporter::adopt(fd) }.is_none());
         }
         let (reader, writer) = io::pipe().unwrap();

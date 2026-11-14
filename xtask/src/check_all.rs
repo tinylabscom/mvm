@@ -239,6 +239,11 @@ pub(crate) const GATES: &[Gate] = &[
         "check-guest-entropy-seed",
         crate::check_guest_entropy_seed::run,
     ),
+    ("check-ci-coverage", crate::check_ci_coverage::run),
+    (
+        "check-text-reading-tests",
+        crate::check_text_reading_tests::run,
+    ),
     ("check-file-size", crate::check_file_size::run),
     ("check-rust-footprint", crate::check_rust_footprint::run),
     ("check-stubs", stubs_match_schemas),
@@ -265,6 +270,47 @@ pub(crate) const GATES: &[Gate] = &[
     (
         "check-single-grants-projection",
         crate::check_single_grants_projection::run,
+    ),
+];
+
+/// Gates deliberately outside `check-all`, each with the reason.
+///
+/// The list is exhaustive and asserted against `main.rs` below, so a
+/// new gate cannot be added as a subcommand and quietly run nowhere —
+/// which is exactly what had happened to three of the entries above.
+pub(crate) const NOT_IN_LINT_LANE: &[(&str, &str)] = &[
+    ("check-all", "this driver"),
+    (
+        "check-agent-notes",
+        "validates `.agent-memory/notes/`, which is gitignored and local to \
+         a checkout; in CI the directory does not exist and the gate has \
+         nothing to check. Run it yourself when you write a note",
+    ),
+    (
+        "check-binary-size",
+        "needs a release binary; runs in release.yml",
+    ),
+    (
+        "check-claim-witness-freshness",
+        "asks whether scheduled lanes ran; has its own workflow",
+    ),
+    (
+        "check-declared-backing",
+        "runs --self-test alongside itself, so it stays a step of its own",
+    ),
+    (
+        "check-kernel-pin-freshness",
+        "queries upstream over the network; has its own scheduled workflow",
+    ),
+    (
+        "check-nextest-groups",
+        "needs cargo-nextest and the compiled suite; runs in CI's merge-queue workspace extras",
+    ),
+    (
+        "check-release-evidence",
+        "asks whether a two-hour documented-surface run covered this exact \
+         tree, which is a release-time question and false for every PR by \
+         construction; runs in e2e-docs.yml's evidence job",
     ),
 ];
 
@@ -308,47 +354,6 @@ pub(crate) fn run_all(workspace: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Gates deliberately outside `check-all`, each with the reason.
-    ///
-    /// The list is exhaustive and asserted against `main.rs` below, so a
-    /// new gate cannot be added as a subcommand and quietly run nowhere —
-    /// which is exactly what had happened to three of the entries above.
-    const NOT_IN_LINT_LANE: &[(&str, &str)] = &[
-        ("check-all", "this driver"),
-        (
-            "check-agent-notes",
-            "validates `.agent-memory/notes/`, which is gitignored and local to \
-             a checkout; in CI the directory does not exist and the gate has \
-             nothing to check. Run it yourself when you write a note",
-        ),
-        (
-            "check-binary-size",
-            "needs a release binary; runs in release.yml",
-        ),
-        (
-            "check-claim-witness-freshness",
-            "asks whether scheduled lanes ran; has its own workflow",
-        ),
-        (
-            "check-declared-backing",
-            "runs --self-test alongside itself, so it stays a step of its own",
-        ),
-        (
-            "check-kernel-pin-freshness",
-            "queries upstream over the network; has its own scheduled workflow",
-        ),
-        (
-            "check-nextest-groups",
-            "needs cargo-nextest and the compiled suite; runs in CI's merge-queue workspace extras",
-        ),
-        (
-            "check-release-evidence",
-            "asks whether a two-hour documented-surface run covered this exact \
-             tree, which is a release-time question and false for every PR by \
-             construction; runs in e2e-docs.yml's evidence job",
-        ),
-    ];
 
     fn dispatched_gates() -> Vec<String> {
         let src = include_str!("main.rs");

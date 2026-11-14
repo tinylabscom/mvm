@@ -27,6 +27,10 @@ fn toml_and_json_are_one_closed_neutral_contract() {
     let mut legacy_schema = document();
     legacy_schema["schema"] = json!("mvm.pack-spec/v1");
     assert!(serde_json::from_value::<ComposablePackSpec>(legacy_schema).is_err());
+    let mut foreign_source = document();
+    foreign_source["source"] =
+        json!({"kind": "yocto", "archive": "rootfs.tar.gz", "inputs": "inputs.json"});
+    assert!(serde_json::from_value::<ComposablePackSpec>(foreign_source).is_err());
 
     let toml = r#"
 schema = "mvm.pack-spec/v2"

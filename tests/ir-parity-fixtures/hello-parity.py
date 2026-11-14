@@ -20,7 +20,7 @@ mvm.workload(id="hello-parity")
     name="greeter",
     source=mvm.local_path("."),
     image=mvm.nix_packages(["python312"]),
-    entrypoint=mvm.entrypoint(command=["python", "-m", "greeter"]),
+    entrypoints=[mvm.entrypoint(command=["python", "-m", "greeter"])],
     resources=mvm.resources(cpu_cores=2, memory_mb=512, rootfs_size_mb=1024),
     env={"GREETING": mvm.literal("hello")},
 )

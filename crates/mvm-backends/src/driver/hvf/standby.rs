@@ -1,6 +1,7 @@
 //! The warm-standby parent spawn for the HVF driver: boot the parent through
 //! the handoff path, wait for its guest agent, and describe it as a standby.
 
+use mvm_vmm::host::process_liveness::read_pid_file;
 use std::path::Path;
 use std::time::Instant;
 
@@ -10,14 +11,13 @@ use mvm_core::vm_backend::{StandbyHandle, StandbyState};
 
 use super::{
     HandoffConfig, PID_FILE_NAME, StandbyParentSpawn, boot_with_handoff, hvf_agent_socket,
-    hvf_backend,
 };
 
 pub(super) fn spawn_standby_parent(req: &StandbyParentSpawn<'_>) -> Result<StandbyHandle> {
     let handoff = handoff_config(&req.spec.id).context("prepare HVF handoff")?;
     let vm = boot_with_handoff(req.boot, Some(&handoff), None, None).context("boot HVF standby")?;
     let state_dir = vm_state_dir(&req.spec.id);
-    let Some(pid) = hvf_backend::read_pid(&state_dir.join(PID_FILE_NAME)) else {
+    let Some(pid) = read_pid_file(&state_dir.join(PID_FILE_NAME)) else {
         let _ = vm.kill();
         bail!("HVF standby '{}' did not publish a pid", req.spec.id);
     };

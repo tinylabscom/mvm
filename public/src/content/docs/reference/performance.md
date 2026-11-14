@@ -69,6 +69,25 @@ A lane result is publishable only when it carries at least 20 measured samples t
 The table between those markers is generated from the same accessor the gate
 reads. Editing it by hand fails the doc-sync test rather than changing a budget.
 
+## Planned production composable witness
+
+No production composable launch or latency lane ships yet. Under
+[ADR-037](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/037-mvmd-only-production-launch.md), only an authenticated `mvmd` request may
+initiate production; a local `mvmctl` run is development evidence. The
+[composable-pack build contract](https://github.com/tinylabscom/mvm/blob/main/specs/contracts/composable-pack-build.md)
+requires the first production witness to time the host's authenticated request
+through fresh verification, admission, backend start or immutable claim, and
+guest readiness. It reports acquisition and first-use publication separately,
+without treating cached bytes as cached authorization.
+
+The existing `prepared_cold_artifact` lane reports `bundle_verify_ms` outside
+its gated dispatch window. That lane alone cannot establish the stricter
+production invocation-to-readiness target or an authenticated `mvmd` launch.
+When the production lane exists it must refuse attempts lacking required
+evidence or exceeding cold <300 ms / warm <50 ms with admission included,
+rather than relabel them as prepared or warm samples. Its supported backend
+and live witness remain to be established.
+
 ## What disqualifies a measurement
 
 A lane refuses a sample that did work the lane forbids, rather than reporting it
@@ -127,13 +146,30 @@ degradation, and recorded every prepared-cold work flag as false.
 ## Reproducing a measurement
 
 `mvmctl bench` is the shipped, visible verb for this. The lane is a **flag**, not
-a subcommand. Run it from a release build on a host with a prepared artifact
-cache:
+a subcommand. `mvmctl prepare` only **reports** default runtime-pack readiness;
+it does not populate the image-specific rootfs cache. On a release build,
+bootstrap the runtime and run the exact launch once outside the benchmark to
+populate that cache before measuring the built-in baseline:
 
 ```sh
-mvmctl prepare
-mvmctl bench --lane prepared-cold --runs 20 --warmup 2
+mvmctl bootstrap
+MVM_RESIDENCY=cold mvmctl run --no-detect -- /bin/true
+MVM_RESIDENCY=cold mvmctl bench --lane prepared-cold --runs 20 --warmup 2
 ```
+
+The preflight is not one of the two benchmark warm-ups. Those warm-ups must
+themselves satisfy the lane rules, including no artifact hashing; they cannot
+be used to hide first-use work. For a custom image, pull or build it ahead of
+time and preflight the **same** launch arguments that follow `bench --`.
+
+Maintainers can dispatch `prepared-cold-m1-diagnostic.yml` from `main` to queue
+the Alpine lane on the M1 Actions runner. It builds a release binary from that
+checkout and preflights outside the benchmark. It uploads the report JSON when
+one exists and the CLI transcript even when an early warm-up refusal leaves no
+report. This is a source-build diagnostic, **not** proof about a signed
+published release or exclusive use of the physical host by non-Actions processes.
+The run-specific `$MVM_HOME` remains on the persistent runner; remove it only
+after independently confirming that no VM still reads its retained generations.
 
 `--lane` defaults to `prepared-cold` and accepts `prepared-cold`,
 `prepared-cold-mount-hit`, `prepared-cold-artifact`, `mount-miss`,

@@ -481,6 +481,10 @@ fn build_command(
             if libc::setrlimit(libc::RLIMIT_CORE, &lim) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
+            // The same strip every workload-code spawn applies: no_new_privs
+            // plus every capability set emptied before exec.
+            #[cfg(target_os = "linux")]
+            crate::guest_mount::drop_workload_capability_bounding_set()?;
             Ok(())
         });
     }
@@ -1047,6 +1051,29 @@ mod tests {
     #[test]
     fn production_stdin_cap_fits_a_data_plane_chunk() {
         assert_eq!(Caps::production().max_stdin_per_call, MAX_DATA_CHUNK_SIZE);
+    }
+
+    /// Live witness: a ProcStart-spawned workload holds no capabilities.
+    /// Same gate as the guest_mount privilege witnesses (root plus
+    /// `MVM_GUEST_PRIVILEGED_TESTS=1`).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_proc_start_spawned_workload_holds_no_capabilities() {
+        if !crate::guest_mount::privilege_tests::privileged() {
+            return;
+        }
+        let argv = vec!["/bin/cat".to_string(), "/proc/self/status".to_string()];
+        let mut command = build_command(&argv, &BTreeMap::new(), None).expect("build_command");
+        let output = command.output().expect("spawn the built command");
+        assert!(output.status.success(), "{output:?}");
+        let status = String::from_utf8(output.stdout).expect("status is UTF-8");
+        for set in ["CapPrm", "CapEff", "CapInh", "CapAmb"] {
+            assert!(
+                status.contains(&format!("{set}:\t0000000000000000")),
+                "{set} must be empty after the workload strip; got:\n{status}"
+            );
+        }
+        assert!(status.contains("NoNewPrivs:\t1"), "got:\n{status}");
     }
 
     #[test]

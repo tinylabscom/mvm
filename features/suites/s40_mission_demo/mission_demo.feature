@@ -12,6 +12,8 @@ Feature: The three-node mission demo contains, terminates and rebuilds
   host (macOS 26+ Apple Silicon; one message per VM, a re-witness is pending);
   neither is a CI lane, and the "Demo status" section of
   specs/contracts/host-interface-distributed-execution.md records both.
+  The production helper scenario below exercises the real local journal and
+  guest wire over a loopback socket; it is not a booted-VM or host-blind witness.
 
   Scenario: The compromised workload is contained and replaced in the audit timeline
     When the scripted mission demo runs
@@ -27,3 +29,7 @@ Feature: The three-node mission demo contains, terminates and rebuilds
     When the scripted mission demo runs
     Then the demo passes
     And the cross-node delivery test ran and passed
+
+  Scenario: A production helper persists a local receipt and guest ACK
+    When the production mailbox helper witness runs
+    Then the production mailbox helper witness passes

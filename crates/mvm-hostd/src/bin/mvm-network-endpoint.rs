@@ -26,7 +26,7 @@
 //! be applied on a supporting kernel, or the self-test finds a thread outside
 //! it, the endpoint exits rather than serve secrets unconfined.
 
-use std::io::{Read, Write};
+use std::io::Write;
 
 use anyhow::{Context, Result};
 use secrecy::ExposeSecret as _;
@@ -40,15 +40,6 @@ use mvm_hostd::supervisor::network_endpoint::{
     EgressMode, EndpointConfig, EndpointHandshake, EndpointNetworkProjection, EndpointTransport,
     ResolverBackend, assemble_projected, fingerprint_bound_secrets, parse,
 };
-
-fn read_stdin_blocking() -> Result<Vec<u8>> {
-    let mut buf = Vec::with_capacity(4096);
-    std::io::stdin()
-        .lock()
-        .read_to_end(&mut buf)
-        .context("mvm-network-endpoint stdin read failed")?;
-    Ok(buf)
-}
 
 fn main() -> Result<()> {
     mvm_vmm::host::helper_contract::exit_with_probe_answer_if_requested("mvm-network-endpoint");
@@ -85,7 +76,7 @@ fn main() -> Result<()> {
         .json()
         .init();
 
-    let raw = read_stdin_blocking()?;
+    let raw = mvm_hostd::read_launch_config("mvm-network-endpoint")?;
     if let Some(only) = mvm_hostd::telemetry_collector::TelemetryOnlyConfig::parse(&raw)
         .context("mvm-network-endpoint collector-only config parse failed")?
     {

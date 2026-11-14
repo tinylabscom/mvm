@@ -198,11 +198,10 @@ fn verdict_for(
             Err(failure) => failures.push(failure),
         }
     }
-    let worst = failures
-        .into_iter()
-        .max_by_key(Failure::severity)
-        .expect("at least one sidecar was present and failed");
-    Verdict::Failed(worst)
+    match failures.into_iter().max_by_key(Failure::severity) {
+        Some(worst) => Verdict::Failed(worst),
+        None => Verdict::Unsigned,
+    }
 }
 
 /// Read a sidecar: `None` when absent, `Some(Err)` when present but unreadable.
@@ -317,7 +316,9 @@ fn check_keyless(
             }
         }
     }
-    Err(failure.expect("at least one issuer was tried"))
+    Err(failure.unwrap_or(Failure::PublisherMismatch {
+        signer: "a keyless signer (no issuer was tried)".to_string(),
+    }))
 }
 
 fn check_keyed(

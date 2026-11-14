@@ -58,6 +58,44 @@ pub struct RegistryApplicationBundle {
     pub archive_size: u64,
     /// Must independently match a bundle verified under the recipient's trust.
     pub key_id: KeyId,
+    /// Optional transport wrapper. When present, `source` serves the
+    /// compressed asset and the signed uncompressed tar is recovered by
+    /// verifying the compressed bytes, decompressing under `archive_size`,
+    /// and checking the result against `archive_sha256`.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_object",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub transport: Option<RegistryBundleTransport>,
+}
+
+/// A signed transport wrapper around the uncompressed application archive.
+///
+/// The signed object stays the uncompressed tar: `archive_sha256`,
+/// `archive_size` and `key_id` keep their meaning. Compression is verified
+/// only after decompression, so a tampered or truncated compressed asset
+/// fails closed before any bundle verification runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct RegistryBundleTransport {
+    /// Compression applied to the asset bytes named by `source`. Unknown
+    /// values refuse at parse time; there is no fallback compression.
+    pub compression: RegistryTransportCompression,
+    /// SHA-256 of the exact compressed asset bytes named by `source`.
+    pub compressed_sha256: Sha256Hex,
+    /// Exact compressed asset length in bytes.
+    pub compressed_size: u64,
+}
+
+/// Compression algorithms recognized for the transport wrapper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum RegistryTransportCompression {
+    /// RFC 1952 gzip, verified with a plain single-member decoder.
+    Gzip,
 }
 
 /// Parse bounded original bytes without a legacy, hybrid or default-role path.
@@ -106,6 +144,15 @@ pub fn parse_application_manifest(
             "application requires a positive archive size and a canonical bundle key ID",
         ));
     }
+    if bundle
+        .transport
+        .as_ref()
+        .is_some_and(|transport| transport.compressed_size == 0)
+    {
+        return Err(invalid(
+            "application transport requires a positive compressed size",
+        ));
+    }
     validate_application_source(&bundle.source)?;
     Ok(manifest)
 }
@@ -130,6 +177,16 @@ where
     }
 
     deserializer.deserialize_map(ObjectVisitor(std::marker::PhantomData))
+}
+
+/// Like [`deserialize_object`] for an optional member: present values must be
+/// a closed object; absent members stay `None`.
+pub(super) fn deserialize_optional_object<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    deserialize_object(deserializer).map(Some)
 }
 
 /// Validate a locator without resolving it or granting permission to fetch it.

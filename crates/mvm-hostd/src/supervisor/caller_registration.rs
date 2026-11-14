@@ -322,8 +322,8 @@ fn validate_descriptor_namespace(fds: &[i32]) -> Result<()> {
         );
         // SAFETY: fstat initializes this plain data; it is read only on success.
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-        // SAFETY: only descriptor metadata is inspected, without taking ownership.
         anyhow::ensure!(
+            // SAFETY: only descriptor metadata is inspected, without taking ownership.
             unsafe { libc::fstat(*fd, &mut stat) } == 0
                 && inodes.insert((stat.st_dev, stat.st_ino)),
             "startup descriptors alias an underlying object"

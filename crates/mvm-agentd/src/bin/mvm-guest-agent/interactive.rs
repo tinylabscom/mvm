@@ -143,16 +143,18 @@ fn do_run_detached_with(
 
     mvm_agentd::fd_hygiene::configure_close_fds(&mut cmd, 3, None);
 
-    // SAFETY: runs in the post-fork pre-exec child. `setsid(2)` is
-    // async-signal-safe and is the only work done here — it detaches the
-    // workload into its own session so it outlives this request's
-    // connection and isn't tied to the agent's controlling terminal.
+    // SAFETY: runs in the post-fork pre-exec child. `setsid(2)` and the
+    // capability strip (prctl/capset only) are async-signal-safe and are the
+    // only work done here — setsid detaches the workload into its own session
+    // so it outlives this request's connection, and the strip empties every
+    // capability set with no_new_privs before exec, the same control every
+    // workload-code spawn applies.
     unsafe {
         cmd.pre_exec(|| {
             if libc::setsid() < 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            Ok(())
+            mvm_agentd::guest_mount::drop_workload_capability_bounding_set()
         });
     }
     mvm_agentd::workload_seccomp::confine(&mut cmd);
@@ -639,6 +641,80 @@ mod tests {
             }
             other => panic!("expected Error, got {other:?}"),
         }
+    }
+
+    /// The bin target links the library without `cfg(test)`, so the library's
+    /// `guest_mount::privilege_tests` gate is not reachable from here. Same
+    /// contract: `MVM_GUEST_PRIVILEGED_TESTS=1` plus root, and asking without
+    /// root is an error, not a skip.
+    #[cfg(target_os = "linux")]
+    fn privileged() -> bool {
+        // SAFETY: geteuid takes no pointers and reads only this process's effective UID.
+        let euid = unsafe { libc::geteuid() };
+        match (std::env::var("MVM_GUEST_PRIVILEGED_TESTS").ok(), euid) {
+            (Some(value), 0) if value == "1" => true,
+            (Some(value), euid) if value == "1" => {
+                panic!("MVM_GUEST_PRIVILEGED_TESTS=1 is set but this test runs as euid {euid}")
+            }
+            _ => false,
+        }
+    }
+
+    /// Live witness: a detached workload holds no capabilities — the same
+    /// strip every workload-code spawn applies, witnessed through the real
+    /// detached spawn with a stand-in console. Same gate as the guest_mount
+    /// privilege witnesses (root plus `MVM_GUEST_PRIVILEGED_TESTS=1`).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_detached_workload_holds_no_capabilities() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        if !privileged() {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("detached scratch directory");
+        let console = dir.path().join("console");
+        std::fs::File::create(&console).expect("create console stand-in");
+        let reporter = dir.path().join("exit-report.sh");
+        std::fs::write(&reporter, "#!/bin/sh\nexit 0\n").expect("write exit-report stand-in");
+        std::fs::set_permissions(&reporter, std::fs::Permissions::from_mode(0o755))
+            .expect("mark exit-report runnable");
+
+        let response = do_run_detached_with(
+            vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "grep -E '^(NoNewPrivs|CapPrm|CapEff|CapInh|CapAmb):' /proc/self/status".into(),
+            ],
+            vec![],
+            &console,
+            &reporter,
+        );
+        assert!(
+            matches!(response, GuestResponse::DetachedStarted { .. }),
+            "expected DetachedStarted, got {response:?}"
+        );
+        // The spawn is asynchronous; poll the console stand-in until the
+        // workload's report lands (the bounded pattern of the sibling test).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let status = loop {
+            let body = std::fs::read_to_string(&console).unwrap_or_default();
+            if body.contains("NoNewPrivs:") {
+                break body;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "detached workload did not report: {body:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        };
+        for set in ["CapPrm", "CapEff", "CapInh", "CapAmb"] {
+            assert!(
+                status.contains(&format!("{set}:\t0000000000000000")),
+                "{set} must be empty after the workload strip; got:\n{status}"
+            );
+        }
+        assert!(status.contains("NoNewPrivs:\t1"), "got:\n{status}");
     }
 
     #[cfg(target_os = "linux")]

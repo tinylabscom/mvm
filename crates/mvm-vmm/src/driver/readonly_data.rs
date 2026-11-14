@@ -239,15 +239,15 @@ mod tests {
             );
         }
         let append = private_file();
-        // SAFETY: modifying only the status flags of this synthetic owned fixture.
         assert_eq!(
+            // SAFETY: modifying only the status flags of this synthetic owned fixture.
             unsafe { libc::fcntl(append.as_raw_fd(), libc::F_SETFL, libc::O_APPEND) },
             0
         );
         assert!(PreparedReadOnlyDataDisk::bind(&spec(), append, expected()).is_err());
         let inheritable = private_file();
-        // SAFETY: modifying only descriptor flags of this synthetic owned fixture.
         assert_eq!(
+            // SAFETY: modifying only descriptor flags of this synthetic owned fixture.
             unsafe { libc::fcntl(inheritable.as_raw_fd(), libc::F_SETFD, 0) },
             0
         );
@@ -257,8 +257,8 @@ mod tests {
     #[test]
     fn readonly_data_revalidation_refuses_cloexec_cleared_after_binding() {
         let data = PreparedReadOnlyDataDisk::bind(&spec(), private_file(), expected()).unwrap();
-        // SAFETY: change only descriptor flags on this owned synthetic fixture.
         assert_eq!(
+            // SAFETY: change only descriptor flags on this owned synthetic fixture.
             unsafe { libc::fcntl(data.file().as_raw_fd(), libc::F_SETFD, 0) },
             0
         );

@@ -21,6 +21,41 @@ fn run_demo(world: &mut CliWorld) {
     world.last_run = Some(output);
 }
 
+#[when("the production mailbox helper witness runs")]
+fn run_production_mailbox_helper(world: &mut CliWorld) {
+    let output = Command::new("cargo")
+        .args([
+            "test",
+            "-p",
+            "mvm-hostd",
+            "--lib",
+            "mailbox_process::tests::production_helper_requires_retained_custody_and_returns_signed_local_receipt",
+            "--",
+            "--exact",
+        ])
+        .current_dir(crate::steps::cli::workspace_root())
+        .env_remove("RUSTFLAGS")
+        .output()
+        .expect("spawn the production mailbox helper test");
+    world.last_run = Some(output);
+}
+
+#[then("the production mailbox helper witness passes")]
+fn production_mailbox_helper_passes(world: &mut CliWorld) {
+    let run = world.last_run.as_ref().expect("the witness ran");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        run.status.success()
+            && stdout.contains(
+                "production_helper_requires_retained_custody_and_returns_signed_local_receipt"
+            )
+            && stdout.contains("1 passed; 0 failed"),
+        "production mailbox helper witness failed:\n{}\n{}",
+        stdout,
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
 fn stdout(world: &CliWorld) -> String {
     let run = world.last_run.as_ref().expect("the demo ran");
     String::from_utf8_lossy(&run.stdout).into_owned()

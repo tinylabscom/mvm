@@ -13,6 +13,11 @@ and how should it be sized." It can sit next to a `flake.nix` for source-built
 microVM images, or it can name an OCI image for a durable `mvmctl machine`
 spec.
 
+The root manifest may include ordered, local launch defaults containing only
+`cpus`, `mem`, and further `include` paths. The root selects its own source;
+permission composition remains in `[policy]` and signed pack documents, not
+in arbitrary merged manifests. See [Configuration file](/guides/configuration/#reuse-launch-defaults).
+
 ```
 my-service/
 ├── mvm.toml       # source selector + sizing (this file)

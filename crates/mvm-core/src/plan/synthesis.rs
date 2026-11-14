@@ -1172,6 +1172,8 @@ mod tests {
             read_only: true,
             encrypted: false,
             content_sha256: Some(DIGEST64.into()),
+            include: Vec::new(),
+            exclude: Vec::new(),
         }];
         keyed.assets = vec![
             crate::plan::AssetIdentity::new(
@@ -1221,6 +1223,8 @@ mod tests {
             read_only: false,
             encrypted: false,
             content_sha256: None,
+            include: Vec::new(),
+            exclude: Vec::new(),
         }];
         let plan = synthesize_plan(&backed).expect("a backed grant synthesizes");
         assert_eq!(plan.outputs, vec![grant]);
@@ -1625,13 +1629,17 @@ mod tests {
 
     #[test]
     fn a_mailbox_grant_is_minted_into_the_signed_plan_and_absence_stays_none() {
-        use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxGrant, MailboxId};
+        use mvm_contract::protocol::mailbox::{
+            ExecutionEpoch, MailboxGrant, MailboxId, MailboxReportSendPolicy,
+        };
         assert!(synthesize_plan(&input("vm")).unwrap().mailbox.is_none());
 
         let grant = MailboxGrant {
             mailbox: MailboxId::from_bytes([7; 32]),
             authority_key: [9; 32],
             epoch: ExecutionEpoch::new(1).unwrap(),
+            report: None,
+            retention: None,
         };
         let mut inp = input("vm");
         inp.mailbox = Some(grant);
@@ -1641,6 +1649,15 @@ mod tests {
             plan.plan_id,
             synthesize_plan(&input("vm")).unwrap().plan_id,
             "the grant is part of the content address"
+        );
+        let mut report = grant;
+        report.report = Some(MailboxReportSendPolicy::new(16 * 1024).unwrap());
+        inp.mailbox = Some(report);
+        let with_report = synthesize_plan(&inp).unwrap();
+        assert_eq!(with_report.mailbox, Some(report));
+        assert_ne!(
+            with_report.plan_id, plan.plan_id,
+            "a changed report authority must move the signed plan identity"
         );
     }
 

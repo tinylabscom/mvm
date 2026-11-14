@@ -38,9 +38,8 @@ only the one dependency.
 Optional features keep secondary surfaces out of the base closure:
 
 - `schema` enables schema emission.
-- `compiler` enables the `mvm_sdk::compile` compatibility facade over
-  `mvm-compiler`. Existing Rust callers using that module must enable this
-  feature; new host tools should depend on `mvm-compiler` directly.
+- `compiler` enables the pack composer, which needs the `mvm-compiler`
+  pipeline. Host tools that only compile depend on `mvm-compiler` directly.
 - `deploy` enables local deployment assembly, records, and verification.
   It also enables `compiler`, but does not enable HTTP transport.
 - `deploy-remote` enables `deploy` and its HTTP shipping transport.

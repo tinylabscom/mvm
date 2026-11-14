@@ -438,6 +438,8 @@ pub struct SessionAuditSubstrate {
     pub tenant_id: String,
     /// The signed plan, serialized.
     pub plan_json: String,
+    /// Verified launch posture retained outside caller-authored plan JSON.
+    pub mailbox_posture: Option<mvm_hostd::plan_admission::MailboxLaunchPosture>,
     /// Trusted admission's optional caller registration, never a producer ACK.
     pub caller_registration: Option<mvm_core::vm_backend::caller_registration::CallerRegistration>,
     /// The tenant policy bundle the plan resolved, serialized, when it has one.
@@ -492,6 +494,8 @@ pub struct AdmitInputs<'a> {
     pub rootfs: &'a std::path::Path,
     /// The kernel confining it, when the tier has one.
     pub kernel: Option<&'a std::path::Path>,
+    /// The backend object selected for this boot, not a plan or profile label.
+    pub backend_kind: mvm_core::vm_backend::BackendKind,
     /// The name this VM will be started under.
     pub vm_name: &'a str,
     /// The SDK sidecar this boot will attach, or `None`.
@@ -783,6 +787,7 @@ fn boot_session_core(
             .kernel_path
             .as_deref()
             .map(std::path::Path::new),
+        backend_kind: backend.kind(),
         vm_name: &vm_name,
         // An entrypoint VM binds no SDK host service.
         sdk_sidecar: None,
@@ -961,6 +966,7 @@ mod tests {
             let mut substrate = SessionAuditSubstrate {
                 tenant_id: "tenant".into(),
                 plan_json: "signed-plan".into(),
+                mailbox_posture: None,
                 caller_registration: None,
                 bundle_json: Some("policy-bundle".into()),
                 config_files: Vec::new(),

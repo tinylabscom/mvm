@@ -1081,6 +1081,17 @@ mod tests {
             // failed one licenses a second writer or a plaintext follower.
             plane.attach(&capture).unwrap();
             plane.attach(&capture).unwrap();
+            let mut sink = plane.entrypoint_sink("supervisor-owned");
+            assert!(!sink.is_recorded());
+            for kind in [StreamKind::Stdout, StreamKind::Stderr] {
+                let shown = sink.ingest(kind, b"synthetic-caller-only");
+                assert_eq!(shown.kind, kind);
+                assert_eq!(shown.body, b"synthetic-caller-only");
+                assert_eq!(
+                    shown.recorded,
+                    super::super::entrypoint_source::RecordedCopy::NotRecorded
+                );
+            }
             assert!(!plane.is_attached("supervisor-owned"));
             assert!(!config::vm_stream_transcript_dir("supervisor-owned").exists());
             assert!(!config::vm_stream_socket("supervisor-owned").exists());

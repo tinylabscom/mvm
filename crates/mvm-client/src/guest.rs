@@ -55,7 +55,7 @@ fn mock_agent_dir(name: &str) -> Option<String> {
 }
 
 fn connect(name: &str) -> Result<std::os::unix::net::UnixStream> {
-    mvm_runtime::vsock_transport::for_vm(name)?.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
+    mvm_vmm::vsock_transport::for_vm(name)?.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
 }
 
 /// Flush the guest only when the local machine is currently running.

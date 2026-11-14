@@ -47,7 +47,7 @@ import mvm
         ports=[{"guest": 8080, "host": 8080, "proto": "tcp"}],
     ),
     env={
-        "MODEL_PATH": "/data/model.pt",
+        "MODEL_PATH": mvm.literal("/data/model.pt"),
         "API_KEY": mvm.secret("api-key", type="bearer", hosts=["api.openai.com"]),
     },
 )
@@ -68,7 +68,7 @@ export const greet = mvm.app({
     ports: [{ guest: 8080, host: 8080, proto: "tcp" }],
   }),
   env: {
-    "MODEL_PATH": "/data/model.pt",
+    "MODEL_PATH": mvm.literal("/data/model.pt"),
     "API_KEY": mvm.secret("api-key", { type: "bearer", hosts: ["api.openai.com"] }),
   },
 })((name: string): string => `hello ${name}`);

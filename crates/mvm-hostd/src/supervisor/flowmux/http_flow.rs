@@ -293,24 +293,16 @@ pub(super) fn spawn_forward(task: ForwardTask) {
     runtime.spawn(async move {
         let request_url = head.url.clone();
         // A typed HTTP flow names no invocation, so it belongs to no tool.
-        let result = tokio::select! {
-            biased;
-            canceled = cancellation.changed() => {
-                let reason = if canceled.is_ok() {
-                    "guest_reset"
-                } else {
-                    "session_closed"
-                };
-                service.audit_http_stream_failure(&request_url, reason).await;
-                Ok(())
-            }
-            response = service.process_body_stream(head, body) => {
-                match response {
-                    Ok(response) => write_stream_response(&session, &writer, stream_id, response).await,
-                    Err(refusal) => write_response(&session, &writer, stream_id, refusal),
-                }
+        let forward = async {
+            match service.process_body_stream(head, body).await {
+                Ok(response) => write_stream_response(&session, &writer, stream_id, response).await,
+                Err(refusal) => write_response(&session, &writer, stream_id, refusal),
             }
         };
+        let result = run_until_canceled(&mut cancellation, forward, |reason| {
+            service.audit_http_stream_failure(&request_url, reason)
+        })
+        .await;
         cancellations
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -327,6 +319,32 @@ pub(super) fn spawn_forward(task: ForwardTask) {
             );
         }
     });
+}
+
+/// Run `work` until it finishes or the flow is canceled. `work` must include
+/// response framing: a frame sent after a guest `Reset` ends the whole session.
+async fn run_until_canceled<W, A>(
+    cancellation: &mut tokio::sync::watch::Receiver<bool>,
+    work: W,
+    audit_failure: impl FnOnce(&'static str) -> A,
+) -> Result<(), super::FlowMuxError>
+where
+    W: std::future::Future<Output = Result<(), super::FlowMuxError>>,
+    A: std::future::Future<Output = ()>,
+{
+    tokio::select! {
+        biased;
+        canceled = cancellation.changed() => {
+            let reason = if canceled.is_ok() {
+                "guest_reset"
+            } else {
+                "session_closed"
+            };
+            audit_failure(reason).await;
+            Ok(())
+        }
+        result = work => result,
+    }
 }
 
 /// Frame a bounded upstream stream without collecting its body in host
@@ -550,6 +568,25 @@ mod tests {
                 .is_empty()
         );
         assert!(!cancel_forwarding(&cancellations, 9));
+    }
+
+    #[tokio::test]
+    async fn a_reset_while_the_response_is_still_streaming_stops_the_forward() {
+        let (sender, mut receiver) = tokio::sync::watch::channel(false);
+        // Response framing that has sent a chunk and waits on upstream forever.
+        let streaming = std::future::pending::<Result<(), super::super::FlowMuxError>>();
+        let forward = tokio::spawn(async move {
+            run_until_canceled(&mut receiver, streaming, |reason| async move {
+                assert_eq!(reason, "guest_reset");
+            })
+            .await
+        });
+        sender.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), forward)
+            .await
+            .expect("a canceled forward must not outlive its stream")
+            .unwrap()
+            .unwrap();
     }
 
     #[test]

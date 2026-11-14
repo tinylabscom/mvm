@@ -20,7 +20,7 @@ use mvm_core::vm_backend::{
     StandbyClaim, StandbyCompat, VmBackend, VmId, WarmClaimRefusal, WarmLaunchMode,
 };
 
-use crate::vsock_transport::{self, VsockTransport};
+use mvm_vmm::vsock_transport::{self, VsockTransport};
 
 /// What a lease needs to claim (or cold-boot) a warm VM.
 pub struct AcquireSpec {

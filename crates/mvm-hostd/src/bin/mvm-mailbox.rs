@@ -9,8 +9,6 @@
 //! 3. The process dials the guest's mailbox port, serves it, and exits when
 //!    its launcher and its VM are both gone.
 
-use std::io::Read;
-
 use anyhow::{Context, Result};
 use mvm_hostd::mailbox_process::{parse, serve};
 
@@ -18,11 +16,7 @@ fn main() -> Result<()> {
     // First statement in the process: a panic before this line would print
     // its payload unredacted.
     mvm_hostd::panic_hook::install("mailbox");
-    let mut raw = Vec::with_capacity(4096);
-    std::io::stdin()
-        .lock()
-        .read_to_end(&mut raw)
-        .context("mvm-mailbox stdin read failed")?;
+    let raw = mvm_hostd::read_launch_config("mvm-mailbox")?;
     let config = parse(&raw).context("mvm-mailbox config parse failed")?;
     std::process::exit(serve(config));
 }

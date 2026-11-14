@@ -17,13 +17,9 @@
 //! path-sanitized [`builder_transfer::receive_into`] — a hostile guest cannot
 //! write outside the host's artifact dir.
 
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
-
-use crate::builder_transfer::{read_msg, receive_into, send_dir, write_msg};
 
 /// What the host asks the builder guest to build. `flake_ref`/`attr` are the
 /// same validated inputs the existing builder agent takes; the guest resolves
@@ -62,38 +58,6 @@ pub struct BuildProduct {
     /// Directory whose tree is streamed to the host on success. Ignored on failure.
     pub out_dir: PathBuf,
     pub logs: Vec<String>,
-}
-
-/// Guest side: serve one build session on `stream`. Receives `/work` +
-/// `/mvm-bins` into the given destinations, reads the request, runs `build`, then
-/// streams the logs + outcome (+ the artifact tree on success) back.
-pub fn serve_build<S, F>(
-    stream: &mut S,
-    work_dest: &Path,
-    mvm_bins_dest: &Path,
-    build: F,
-) -> Result<()>
-where
-    S: Read + Write,
-    F: FnOnce(&Path, &Path, &BuildRequest) -> BuildProduct,
-{
-    receive_into(stream, work_dest)?;
-    receive_into(stream, mvm_bins_dest)?;
-    let request: BuildRequest = read_msg(stream)?;
-    let product = build(work_dest, mvm_bins_dest, &request);
-    for line in &product.logs {
-        write_msg(stream, &SessionEvent::Log { line: line.clone() })?;
-    }
-    write_msg(
-        stream,
-        &SessionEvent::Done {
-            outcome: product.outcome.clone(),
-        },
-    )?;
-    if matches!(product.outcome, BuildOutcome::Success) {
-        send_dir(stream, &product.out_dir)?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

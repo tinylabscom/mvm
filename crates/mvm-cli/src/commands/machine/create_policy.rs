@@ -149,6 +149,9 @@ mod tests {
 
     #[test]
     fn with_no_policy_and_no_project_the_flags_pass_through() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
         let hosts = vec!["a.test".to_string()];
         let resolved = machine_policy(inputs(&[], None, &hosts)).unwrap();
         assert_eq!(resolved.allow_host, hosts);

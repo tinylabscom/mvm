@@ -361,6 +361,8 @@ pub fn bring_iface_up(iface: &str) -> Result<GuestNetwork, String> {
         // is the standard pattern. `ifru_flags` is read only after SIOCGIFFLAGS.
         let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
         ifr.ifr_name = name;
+        // SAFETY: `sock` is the open datagram socket from above and `ifr` is a live,
+        //         zero-initialised ifreq the kernel fills in.
         if unsafe { libc::ioctl(sock, SIOCGIFFLAGS_REQUEST, &mut ifr) } < 0 {
             let err = std::io::Error::last_os_error();
             // ENODEV is the kernel saying the interface does not exist, which
@@ -377,6 +379,8 @@ pub fn bring_iface_up(iface: &str) -> Result<GuestNetwork, String> {
             let flags = ifr.ifr_ifru.ifru_flags;
             ifr.ifr_ifru.ifru_flags = flags | (libc::IFF_UP as libc::c_short);
         }
+        // SAFETY: `sock` is the open datagram socket and `ifr` holds the flags read above; the
+        //         kernel only reads it.
         if unsafe { libc::ioctl(sock, SIOCSIFFLAGS_REQUEST, &ifr) } < 0 {
             return Err(format!(
                 "SIOCSIFFLAGS {iface} IFF_UP: {}",
