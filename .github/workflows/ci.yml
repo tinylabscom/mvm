@@ -51,6 +51,7 @@ jobs:
       code: ${{ steps.validate.outputs.code }}
       architecture: ${{ steps.validate.outputs.architecture }}
       docs: ${{ steps.validate.outputs.docs }}
+      docs_ledger: ${{ steps.validate.outputs.docs_ledger }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -93,7 +94,7 @@ jobs:
           set -euo pipefail
 
           set_all() {
-            for output in code architecture docs; do
+            for output in code architecture docs docs_ledger; do
               echo "${output}=true" >> "$GITHUB_OUTPUT"
             done
           }
@@ -185,6 +186,15 @@ jobs:
             echo "docs=false" >> "$GITHUB_OUTPUT"
           fi
 
+          # Inputs of the docs coverage ledger scenario: the pages and
+          # examples it extracts commands from, the ledger and harness, and
+          # the clap tree that decides which commands exist.
+          if grep -zE '^(README\.md$|public/src/content/docs/|examples/|features/suites/s29_doc_examples/|crates/mvm-conformance/|crates/mvm-cli/src/commands/)' "$CHANGED_FILE" >/dev/null; then
+            echo "docs_ledger=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs_ledger=false" >> "$GITHUB_OUTPUT"
+          fi
+
           if grep -zE '^(crates/|src/|tests/|Cargo\.|\.cargo/|rust-toolchain|scripts/check-no-orchestration-server\.sh$|\.github/workflows/(ci|architecture)\.yml$)' "$CHANGED_FILE" >/dev/null; then
             echo "architecture=true" >> "$GITHUB_OUTPUT"
           else
@@ -197,6 +207,7 @@ jobs:
           CODE: ${{ steps.decide.outputs.code }}
           ARCHITECTURE: ${{ steps.decide.outputs.architecture }}
           DOCS: ${{ steps.decide.outputs.docs }}
+          DOCS_LEDGER: ${{ steps.decide.outputs.docs_ledger }}
         run: |
           set -euo pipefail
           validate() {
@@ -209,6 +220,7 @@ jobs:
           validate code "$CODE"
           validate architecture "$ARCHITECTURE"
           validate docs "$DOCS"
+          validate docs_ledger "$DOCS_LEDGER"
 
   # Decide, before the heavy lanes start, whether the x86_64 workspace suite
   # runs on the idle self-hosted KVM box or on hosted runners. Checkout cleans
@@ -862,10 +874,43 @@ jobs:
           path: ${{ runner.temp }}/mvm-windows-identity
           if-no-files-found: error
 
+  # The one BDD scenario that ratchets which documented commands carry
+  # coverage. It reads only the docs, the ledger and the built CLI's help
+  # tree, so it needs an mvmctl binary but none of the hermetic suite's other
+  # preparation. Without it a pull request that documents a new command passes
+  # here and breaks main after the merge.
+  docs-ledger:
+    name: Docs coverage ledger
+    needs: [scope]
+    if: needs.scope.outputs.docs_ledger == 'true' && github.event_name != 'merge_group'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: libcap-ng-dev lld
+
+      - uses: ./.github/actions/rust-cache
+
+      - name: Run the docs coverage ledger scenario
+        run: |
+          set -euo pipefail
+          cargo build --bin mvmctl --features user
+          CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" \
+            cargo test -p mvm-conformance --test conformance --features bdd -- \
+            --name 'documented website commands do not lose their coverage'
+
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, runners, docs-static, lint-core, lint-policy, lint-feature-clippy, lint-windows, test-windows-identity, test-workspace-build, test-workspace]
+    needs: [scope, runners, docs-static, docs-ledger, lint-core, lint-policy, lint-feature-clippy, lint-windows, test-windows-identity, test-workspace-build, test-workspace]
     # Every admission check runs in an upstream lane; this aggregate only
     # inspects their results, so it needs no checkout or full hosted image.
     # A failed scope or picker skips its dependents, so it fails here too.
@@ -877,12 +922,19 @@ jobs:
           BAD: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
           DOCS: ${{ needs.scope.outputs.docs }}
           DOCS_RESULT: ${{ needs.docs-static.result }}
+          LEDGER: ${{ needs.scope.outputs.docs_ledger }}
+          LEDGER_RESULT: ${{ needs.docs-ledger.result }}
         run: |
           set -euo pipefail
           test "$BAD" = false
           case "$DOCS" in
             true) test "$DOCS_RESULT" = success ;;
             false) test "$DOCS_RESULT" = success || test "$DOCS_RESULT" = skipped ;;
+            *) exit 1 ;;
+          esac
+          case "$LEDGER" in
+            true) test "$LEDGER_RESULT" = success || test "$GITHUB_EVENT_NAME" = merge_group ;;
+            false) test "$LEDGER_RESULT" = success || test "$LEDGER_RESULT" = skipped ;;
             *) exit 1 ;;
           esac
 
