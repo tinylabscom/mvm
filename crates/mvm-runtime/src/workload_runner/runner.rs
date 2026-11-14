@@ -1083,6 +1083,21 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         broker_guard.defuse();
         cleanup.commit();
         if resident_handoff {
+            // The child runs out of the parent's state dir (its rootfs and its
+            // linked control files live there), so the dir cannot go at claim
+            // time — only the child's stop path may remove it, once the child's
+            // exit is confirmed. Record the consumption in the child dir so a
+            // stop in any process (explicit stop, transient teardown) finds it.
+            if let Err(error) =
+                warm_claim::record_consumed_resident_parent(&child_dir, handle.id.as_str())
+            {
+                tracing::warn!(
+                    parent = %handle.id,
+                    child = %child.0,
+                    error = %error,
+                    "recording the consumed resident parent failed; its state dir will linger"
+                );
+            }
             schedule_resident_checkpoint_reclaim(ctx, &parent);
         }
         Ok(child)
@@ -5195,6 +5210,223 @@ mod tests {
         assert!(
             !snapshots.root().join(snapshot_id).exists(),
             "committed resident claims must reclaim the consumed snapshot payload"
+        );
+        drop(env);
+    }
+
+    #[test]
+    fn resident_claim_marks_the_consumed_parent_for_stop_time_cleanup() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let store_root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let (checkpoints, snapshots, parent_id, parent_meta) =
+            seed_audited_parent(store_root.path(), src.path(), true);
+        let parent_digest = materialized_parent_rootfs_digest(&checkpoints, &parent_meta);
+        let snapshot_id = parent_meta.snapshot_id.as_deref().unwrap();
+        let manifest_digest =
+            mvm_core::checkpoint::content_manifest_digest(&parent_meta.content).to_string();
+        let identity = mvm_core::crypto::snapshot_sign::host_snapshot_identity().unwrap();
+        mvm_core::crypto::snapshot_sign::sign_manifest(
+            &snapshots.root().join(snapshot_id),
+            &manifest_digest,
+            &identity.signing,
+        )
+        .unwrap();
+
+        crate::base::runtime_meta::record_from_start_config(
+            "warm-parent",
+            StartMode::Detached,
+            &VmStartConfig {
+                name: "warm-parent".into(),
+                rootfs_path: src.path().join("rootfs.ext4").display().to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
+        let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
+        pool.record(&handle).unwrap();
+        let registry_path = store_root.path().join("vm-names.json");
+        let anchor = ClaimTestAnchor::unaudited();
+        let claim = admitted_child_claim(
+            &src.path().join("rootfs.ext4"),
+            signed_child_plan_json(&parent_digest),
+        );
+        let runner = WorkloadRunner::new(
+            MockDriver::default().with_resident_handoff(),
+            KeyingSpawner::default(),
+            RecordingBrokerRegistrar::new(),
+        );
+        let ctx = ClaimContext {
+            pool: &pool,
+            checkpoints: &checkpoints,
+            snapshots: &snapshots,
+            anchor: &anchor,
+            parent_checkpoint: &parent_id,
+            registry_path: &registry_path,
+            grant_issuer: None,
+        };
+
+        let child = runner
+            .claim_standby(&ctx, &handle, &claim)
+            .expect("resident claim");
+        let child_dir = vm_state_dir(&child.0);
+        let marker =
+            std::fs::read_to_string(child_dir.join(warm_claim::CONSUMED_RESIDENT_PARENT_FILE))
+                .expect("a committed resident claim records its consumed parent");
+        assert_eq!(
+            marker.trim(),
+            "warm-parent",
+            "the marker names the standby parent the claim consumed"
+        );
+        assert!(
+            vm_state_dir("warm-parent").is_dir(),
+            "the parent dir must outlive the claim: the child's rootfs lives in it"
+        );
+        drop(env);
+    }
+
+    #[test]
+    fn consumed_resident_parent_cleanup_waits_for_confirmed_exit() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _env = TestEnv::new();
+
+        let parent_dir = vm_state_dir("standby-parent");
+        std::fs::create_dir_all(&parent_dir).unwrap();
+        std::fs::write(parent_dir.join("rootfs.ext4"), b"resident-rootfs").unwrap();
+        let pool = SupervisorStandbyPool::open().unwrap();
+        pool.record(&idle_parent_handle(
+            "standby-parent",
+            std::path::Path::new("/tmp/control.sock"),
+        ))
+        .unwrap();
+        let child_dir = vm_state_dir("vm-child");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        warm_claim::record_consumed_resident_parent(&child_dir, "standby-parent").unwrap();
+
+        // No confirmed exit: the child may still hold the parent dir's rootfs
+        // open, so nothing may be removed.
+        warm_claim::cleanup_consumed_resident_parent(&child_dir, false);
+        assert!(
+            parent_dir.is_dir(),
+            "parent dir must survive an unconfirmed stop"
+        );
+        assert!(
+            pool.load("standby-parent").is_ok(),
+            "pool record must survive an unconfirmed stop"
+        );
+        assert!(
+            child_dir
+                .join(warm_claim::CONSUMED_RESIDENT_PARENT_FILE)
+                .exists(),
+            "the marker must survive an unconfirmed stop"
+        );
+
+        // Confirmed exit: parent dir, pool record, and marker all go.
+        warm_claim::cleanup_consumed_resident_parent(&child_dir, true);
+        assert!(
+            !parent_dir.exists(),
+            "confirmed child stop removes the parent dir"
+        );
+        assert!(
+            pool.load("standby-parent").is_err(),
+            "confirmed child stop removes the parent's pool record"
+        );
+        assert!(
+            !child_dir
+                .join(warm_claim::CONSUMED_RESIDENT_PARENT_FILE)
+                .exists(),
+            "cleanup consumes its marker"
+        );
+
+        // NotFound-tolerant: a second cleanup (crash-mid-claim shapes) is a no-op.
+        warm_claim::cleanup_consumed_resident_parent(&child_dir, true);
+    }
+
+    #[test]
+    fn consumed_resident_parent_cleanup_refuses_a_marker_that_fails_name_validation() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _env = TestEnv::new();
+
+        let child_dir = vm_state_dir("vm-child");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        std::fs::write(
+            child_dir.join(warm_claim::CONSUMED_RESIDENT_PARENT_FILE),
+            "../escape\n",
+        )
+        .unwrap();
+
+        warm_claim::cleanup_consumed_resident_parent(&child_dir, true);
+
+        assert!(
+            child_dir
+                .join(warm_claim::CONSUMED_RESIDENT_PARENT_FILE)
+                .exists(),
+            "an invalid parent name must leave the marker and every path in place"
+        );
+        assert!(child_dir.is_dir());
+    }
+
+    #[test]
+    fn saved_state_claim_marks_no_consumed_resident_parent() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let store_root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let (checkpoints, snapshots, parent_id, parent_meta) =
+            seed_audited_parent(store_root.path(), src.path(), true);
+        let parent_digest = materialized_parent_rootfs_digest(&checkpoints, &parent_meta);
+
+        let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
+        let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
+        pool.record(&handle).unwrap();
+        let registry_path = store_root.path().join("vm-names.json");
+        let anchor = ClaimTestAnchor::audited(&parent_meta);
+        let claim = admitted_child_claim(
+            &src.path().join("rootfs.ext4"),
+            signed_child_plan_json(&parent_digest),
+        );
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            KeyingSpawner::default(),
+            RecordingBrokerRegistrar::new(),
+        );
+        let ctx = ClaimContext {
+            pool: &pool,
+            checkpoints: &checkpoints,
+            snapshots: &snapshots,
+            anchor: &anchor,
+            parent_checkpoint: &parent_id,
+            registry_path: &registry_path,
+            grant_issuer: None,
+        };
+
+        let child = runner
+            .claim_standby(&ctx, &handle, &claim)
+            .expect("saved-state claim");
+        let child_dir = vm_state_dir(&child.0);
+        assert!(
+            !child_dir
+                .join(warm_claim::CONSUMED_RESIDENT_PARENT_FILE)
+                .exists(),
+            "only a resident handoff consumes the parent's state dir; a saved-state \
+             claim materializes its own"
         );
         drop(env);
     }

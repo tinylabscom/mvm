@@ -184,6 +184,16 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
         }
         lifecycle.release_installed_bundle_after_stop(&id.0)?;
 
+        // A resident-handoff claim runs the child out of the consumed standby
+        // parent's state dir. The handoff resumed the parent's own supervisor
+        // process under the child name, so the HVF `ConfirmedExit` proof above
+        // is also the parent's bounded confirmed exit: the parent dir's
+        // descriptors are closed and both the dir and the pool record the claim
+        // left behind can go. Best-effort — a cleanup failure never turns a
+        // confirmed stop into a failure.
+        #[cfg(unix)]
+        warm_claim::cleanup_consumed_resident_parent(&state_dir, stopped.hvf_exit.is_some());
+
         let timing = StopTiming {
             attach,
             endpoint_reaping,
