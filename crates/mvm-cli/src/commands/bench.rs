@@ -18,7 +18,7 @@ use clap::Args as ClapArgs;
 use std::fmt::Write as _;
 
 use crate::bench::cold_launch::{LaunchLane, MIN_MATRIX_SAMPLES, SpanStats};
-use crate::bench::cold_launch_runner::ColdLaunchBench;
+use crate::bench::cold_launch_runner::{ColdLaunchBench, InvalidSampleError};
 use crate::ui;
 
 /// Selectable lanes. Mirrors [`LaunchLane`] rather than re-deriving `ValueEnum`
@@ -85,7 +85,7 @@ pub(in crate::commands) struct Args {
     /// Warm-up launches, discarded before measuring.
     #[arg(long, default_value_t = 2)]
     pub warmup: u32,
-    /// Write the report here instead of under `~/.mvm/state/bench/`.
+    /// Write the report or refused-sample evidence here instead of under `~/.mvm/state/bench/`.
     #[arg(long, value_name = "PATH")]
     pub out: Option<std::path::PathBuf>,
     /// Print the report as JSON instead of a human summary.
@@ -171,7 +171,17 @@ pub(in crate::commands) fn run(args: Args) -> Result<()> {
         .runs(args.runs)
         .warmup(args.warmup)
         .build()?;
-    let report = bench.measure().context("running the launch benchmark")?;
+    let report = match bench.measure() {
+        Ok(report) => report,
+        Err(error) => {
+            if let Some(path) = preserve_invalid_sample(&error, args.out.clone())
+                .with_context(|| format!("preserving failed benchmark sample; {error:#}"))?
+            {
+                eprintln!("Invalid sample evidence: {}", path.display());
+            }
+            return Err(error).context("running the launch benchmark");
+        }
+    };
 
     let out_path = crate::bench::write_report_with_latest(&report, args.out.clone(), "bench")
         .context("writing the benchmark report")?;
@@ -187,6 +197,16 @@ pub(in crate::commands) fn run(args: Args) -> Result<()> {
     // is the report a user most needs to inspect, not a reason to discard it.
     bench.validate_report(&report)?;
     Ok(())
+}
+
+fn preserve_invalid_sample(
+    error: &anyhow::Error,
+    out: Option<std::path::PathBuf>,
+) -> Result<Option<std::path::PathBuf>> {
+    let Some(invalid) = error.downcast_ref::<InvalidSampleError>() else {
+        return Ok(None);
+    };
+    crate::bench::write_invalid_sample_evidence(&invalid.evidence, out).map(Some)
 }
 
 /// The launch to measure: the caller's, or the reproducible baseline.
@@ -458,6 +478,19 @@ mod tests {
             args.launch.is_empty(),
             "the default launch is applied later"
         );
+    }
+
+    #[test]
+    fn a_failed_launch_without_a_sample_writes_no_evidence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("failed.json");
+        let error = anyhow::anyhow!("launch exited before writing a sample");
+        assert!(
+            preserve_invalid_sample(&error, Some(out.clone()))
+                .unwrap()
+                .is_none()
+        );
+        assert!(!out.exists());
     }
 
     #[test]

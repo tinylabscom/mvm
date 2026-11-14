@@ -10,10 +10,11 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::cold_launch::{
     ArtifactDigests, ArtifactMeasurements, CacheState, ColdLaunchReport, ColdLaunchSample,
-    KernelConfigMeasurement, LaunchContext, LaunchLane, build_cold_launch_report,
+    KernelConfigMeasurement, LaneViolation, LaunchContext, LaunchLane, build_cold_launch_report,
     validate_hard_boot_requirement, validate_lane, validate_matrix_report,
 };
 use crate::commands::vm::launch_sample::{
@@ -22,6 +23,84 @@ use crate::commands::vm::launch_sample::{
 
 /// Program names that would fold a build into a launch sample.
 const BUILD_TOOLS: [&str; 3] = ["cargo", "rustc", "just"];
+
+/// This is evidence of a refused launch, never a publishable benchmark report.
+pub const INVALID_SAMPLE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SampleStage {
+    Warmup,
+    Measured,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceStatus {
+    InvalidSample,
+}
+
+/// A lane violation with the complete launch sample that caused it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InvalidSampleEvidence {
+    #[serde(deserialize_with = "current_invalid_sample_schema")]
+    pub schema_version: u32,
+    pub status: EvidenceStatus,
+    pub lane: LaunchLane,
+    pub stage: SampleStage,
+    /// Warm-ups are numbered from 0; measured launches are numbered from 1.
+    pub index: u32,
+    pub violation: String,
+    pub sample: LaunchSample,
+}
+
+fn current_invalid_sample_schema<'de, D>(deserializer: D) -> std::result::Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let version = u32::deserialize(deserializer)?;
+    if version != INVALID_SAMPLE_SCHEMA_VERSION {
+        return Err(serde::de::Error::custom(format!(
+            "invalid-sample evidence schema {version} is not the expected {INVALID_SAMPLE_SCHEMA_VERSION}"
+        )));
+    }
+    Ok(version)
+}
+
+/// Returned only when a completed launch wrote a sample that fails lane validation.
+#[derive(Debug)]
+pub struct InvalidSampleError {
+    pub evidence: InvalidSampleEvidence,
+}
+
+impl std::fmt::Display for InvalidSampleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.evidence.violation)
+    }
+}
+
+impl std::error::Error for InvalidSampleError {}
+
+fn invalid_sample(
+    lane: LaunchLane,
+    stage: SampleStage,
+    index: u32,
+    sample: LaunchSample,
+    violation: LaneViolation,
+) -> anyhow::Error {
+    anyhow::Error::new(InvalidSampleError {
+        evidence: InvalidSampleEvidence {
+            schema_version: INVALID_SAMPLE_SCHEMA_VERSION,
+            status: EvidenceStatus::InvalidSample,
+            lane,
+            stage,
+            index,
+            violation: violation.to_string(),
+            sample,
+        },
+    })
+}
 
 /// One lane's benchmark configuration.
 ///
@@ -95,6 +174,15 @@ impl ColdLaunchBench {
             // A warm-up that does not belong in the lane means the lane was
             // set up wrong; discarding its timing must not discard that.
             validate_lane(self.lane, &sample.launch)
+                .map_err(|violation| {
+                    invalid_sample(
+                        self.lane,
+                        SampleStage::Warmup,
+                        index,
+                        sample.launch.clone(),
+                        violation,
+                    )
+                })
                 .with_context(|| format!("warm-up launch {index} does not belong in this lane"))?;
             record_root_strategy(&mut strategy, &sample.launch, "warm-up", index)?;
         }
@@ -105,9 +193,19 @@ impl ColdLaunchBench {
             let sample = self
                 .launch_once(staging.path(), "measured", index)
                 .with_context(|| format!("measured launch {number}"))?;
-            validate_lane(self.lane, &sample.launch).with_context(|| {
-                format!("measured launch {number} does not belong in this lane")
-            })?;
+            validate_lane(self.lane, &sample.launch)
+                .map_err(|violation| {
+                    invalid_sample(
+                        self.lane,
+                        SampleStage::Measured,
+                        number,
+                        sample.launch.clone(),
+                        violation,
+                    )
+                })
+                .with_context(|| {
+                    format!("measured launch {number} does not belong in this lane")
+                })?;
             record_root_strategy(&mut strategy, &sample.launch, "measured", number)?;
             raw.push(cold_launch_sample(
                 self.lane,
@@ -966,6 +1064,63 @@ tmpfs /tmp tmpfs rw 0 0
         let rendered = format!("{err:#}");
         assert!(rendered.contains("measured launch 2"), "{rendered}");
         assert!(rendered.contains("image_pull"), "{rendered}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_warmup_retains_its_phases_without_publishing_a_report() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut slow = sample_for(358.1);
+        slow.phases.startup_ms = Some(358.1);
+        let mvmctl = fake_mvmctl(tmp.path(), &[slow]);
+        let err = ColdLaunchBench::builder(&mvmctl, LaunchLane::PreparedCold)
+            .runs(1)
+            .warmup(1)
+            .build()
+            .unwrap()
+            .measure()
+            .expect_err("an over-budget warm-up must not produce a benchmark report");
+        assert!(format!("{err:#}").contains("warm-up launch 0"));
+        let evidence = &err.downcast_ref::<InvalidSampleError>().unwrap().evidence;
+        assert_eq!(evidence.stage, SampleStage::Warmup);
+        assert_eq!(evidence.index, 0);
+        assert!(evidence.violation.contains("under 300.0ms"));
+
+        let out = tmp.path().join("results").join("bench.json");
+        crate::bench::write_invalid_sample_evidence(evidence, Some(out.clone())).unwrap();
+        let raw = std::fs::read(&out).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(json["status"], "invalid_sample");
+        assert_eq!(json["stage"], "warmup");
+        assert_eq!(json["sample"]["phases"]["startup_ms"], 358.1);
+        assert!(serde_json::from_slice::<ColdLaunchReport>(&raw).is_err());
+        assert!(!out.parent().unwrap().join("bench-latest.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_measured_sample_retains_its_number_and_refuses_future_schema() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut contaminated = sample_for(100.0);
+        contaminated.work.image_pull = true;
+        let mvmctl = fake_mvmctl(tmp.path(), &[sample_for(100.0), contaminated]);
+        let err = ColdLaunchBench::builder(&mvmctl, LaunchLane::PreparedCold)
+            .runs(2)
+            .warmup(0)
+            .build()
+            .unwrap()
+            .measure()
+            .unwrap_err();
+        let evidence = &err.downcast_ref::<InvalidSampleError>().unwrap().evidence;
+        assert_eq!(evidence.stage, SampleStage::Measured);
+        assert_eq!(evidence.index, 2);
+        assert!(evidence.sample.work.image_pull);
+        assert!(evidence.violation.contains("image_pull"));
+        let mut json = serde_json::to_value(evidence).unwrap();
+        let roundtrip: InvalidSampleEvidence = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(roundtrip.status, EvidenceStatus::InvalidSample);
+        json["schema_version"] = serde_json::json!(INVALID_SAMPLE_SCHEMA_VERSION + 1);
+        assert!(serde_json::from_value::<InvalidSampleEvidence>(json).is_err());
     }
 
     #[cfg(unix)]

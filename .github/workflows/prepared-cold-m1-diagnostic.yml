@@ -100,9 +100,9 @@ jobs:
           uptime >> "$RESULTS_DIR/provenance.txt"
           exit "$status"
 
-      # A report-level failure leaves JSON; an early warm-up refusal may leave
-      # only the CLI transcript on the current main branch. Never call either
-      # one a passing sample.
+      # A report-level failure leaves report JSON; a sampled warm-up refusal
+      # leaves separate invalid-sample JSON. A launch with no sample leaves
+      # only the CLI transcript. Never call any failure a passing sample.
       - name: Upload available evidence on success or failure
         if: always()
         uses: actions/upload-artifact@v7
