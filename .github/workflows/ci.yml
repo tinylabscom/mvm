@@ -307,39 +307,6 @@ jobs:
           cargo run -p xtask -- check-doc-links
           cargo run -p xtask -- check-doc-claims
 
-  # The one BDD scenario that ratchets which documented commands carry
-  # coverage. It reads only the docs, the ledger and the built CLI's help
-  # tree, so it needs an mvmctl binary but none of the hermetic suite's other
-  # preparation. Without it a pull request that documents a new command passes
-  # here and breaks main after the merge.
-  docs-ledger:
-    name: Docs coverage ledger
-    needs: [scope]
-    if: needs.scope.outputs.docs_ledger == 'true' && github.event_name != 'merge_group'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.97.1
-
-      - uses: ./.github/actions/apt-deps
-        with:
-          packages: libcap-ng-dev lld
-
-      - uses: ./.github/actions/rust-cache
-
-      - name: Run the docs coverage ledger scenario
-        run: |
-          set -euo pipefail
-          cargo build --bin mvmctl --features user
-          CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" \
-            cargo test -p mvm-conformance --test conformance --features bdd -- \
-            --name 'documented website commands do not lose their coverage'
-
   lint-core:
     name: Lint core (fmt + clippy)
     needs: [scope]
@@ -906,6 +873,39 @@ jobs:
           name: windows-identity-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/mvm-windows-identity
           if-no-files-found: error
+
+  # The one BDD scenario that ratchets which documented commands carry
+  # coverage. It reads only the docs, the ledger and the built CLI's help
+  # tree, so it needs an mvmctl binary but none of the hermetic suite's other
+  # preparation. Without it a pull request that documents a new command passes
+  # here and breaks main after the merge.
+  docs-ledger:
+    name: Docs coverage ledger
+    needs: [scope]
+    if: needs.scope.outputs.docs_ledger == 'true' && github.event_name != 'merge_group'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: libcap-ng-dev lld
+
+      - uses: ./.github/actions/rust-cache
+
+      - name: Run the docs coverage ledger scenario
+        run: |
+          set -euo pipefail
+          cargo build --bin mvmctl --features user
+          CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" \
+            cargo test -p mvm-conformance --test conformance --features bdd -- \
+            --name 'documented website commands do not lose their coverage'
 
   test:
     name: Test
