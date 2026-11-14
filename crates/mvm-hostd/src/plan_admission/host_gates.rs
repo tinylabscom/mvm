@@ -56,5 +56,6 @@ pub(super) fn admit_host_interface(plan: &ExecutionPlan) -> Result<()> {
         image_digest: plan.image.sha256.clone(),
         epoch: ExecutionEpoch(record.epoch.0),
     })?;
+    mvm_core::launch_trace::lap("admit_plan.grants_budget_and_host_interface");
     Ok(())
 }

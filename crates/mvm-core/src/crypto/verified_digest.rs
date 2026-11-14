@@ -512,4 +512,44 @@ mod tests {
         let dir = private_dir();
         assert!(sha256_file_verified(&dir.path().join("absent")).is_err());
     }
+
+    /// Times the digest paths on one file, for a host where a launch hashes
+    /// more slowly than expected. Not part of the suite:
+    ///
+    /// `MVM_DIGEST_BENCH_PATH=<file> cargo test -p mvm-core --release --lib
+    /// digest_throughput -- --ignored --nocapture`
+    ///
+    /// It reports the in-memory hash rate (the CPU's SHA-256 alone), then per
+    /// round the streaming read-and-hash rate and the source the verified
+    /// registry answered from, so a slow file read and a slow hash are told
+    /// apart. `MVM_DIGEST_BENCH_ROUNDS` sets the round count (default 3).
+    #[test]
+    #[ignore = "measurement tool; needs MVM_DIGEST_BENCH_PATH"]
+    fn digest_throughput() {
+        use std::time::Instant;
+        let path = std::path::PathBuf::from(
+            std::env::var_os("MVM_DIGEST_BENCH_PATH").expect("set MVM_DIGEST_BENCH_PATH"),
+        );
+        let rounds: u32 = std::env::var("MVM_DIGEST_BENCH_ROUNDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3);
+        let bytes = std::fs::read(&path).unwrap();
+        let mb = bytes.len() as f64 / 1e6;
+        let rate = |started: Instant| mb / started.elapsed().as_secs_f64();
+        let started = Instant::now();
+        crate::crypto::image_verify::sha256_generated_bytes(&bytes).unwrap();
+        println!("in-memory hash: {mb:.1} MB at {:.0} MB/s", rate(started));
+        for round in 1..=rounds {
+            let started = Instant::now();
+            sha256_file(&path).unwrap();
+            let streaming = rate(started);
+            let started = Instant::now();
+            let (_, source) = sha256_file_verified_report_source(&path).unwrap();
+            println!(
+                "round {round}: streaming {streaming:.0} MB/s; verified {:.0} MB/s via {source:?}",
+                rate(started)
+            );
+        }
+    }
 }

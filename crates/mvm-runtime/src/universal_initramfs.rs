@@ -154,6 +154,7 @@ pub fn attach_universal_initramfs_if_cached(
         let verified = mvm_build::guest_runtime::evidence::verify_runtime_release_proof(
             proof, &version, arch,
         )?;
+        mvm_core::launch_trace::lap("attach_initramfs.release_proof_verify");
         let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
         let declared = verified.declaration(arch)?.initramfs_sha256.clone();
         attach_declared_release_initramfs(start_config, &declared, &cache, &version, arch)?;
@@ -172,6 +173,7 @@ pub fn attach_universal_initramfs_if_cached(
         let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
         let checked =
             mvm_build::guest_runtime::source::check_source_runtime(&cache, version, arch)?;
+        mvm_core::launch_trace::lap("attach_initramfs.source_runtime_check");
         anyhow::ensure!(
             start_config.source_runtime_archive_sha256.as_deref() == Some(checked.archive_sha256()),
             "source runtime archive changed after overlay selection; refusing initramfs fallback"

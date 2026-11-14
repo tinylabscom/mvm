@@ -59,6 +59,7 @@ pub fn compute_plan_id(plan: &ExecutionPlan) -> PlanId {
 /// id is not a genuine content-address of this body — reject rather than trust
 /// an unverifiable id.
 pub fn verify_plan_id(plan: &ExecutionPlan) -> Result<(), PlanIdMismatch> {
+    crate::launch_trace::lap("admit_plan.sign_and_verify_plan");
     let recomputed = compute_plan_id(plan);
     if recomputed == plan.plan_id {
         Ok(())
