@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # Live runbook for the factory-edge presentation on ONE real machine (beats 3 to
 # 5 of the "Proposed factory-edge presentation" in
-# specs/contracts/host-interface-distributed-execution.md): standbys are warmed,
-# two inspection workloads and a maintenance workload each claim one, the
-# maintenance workload's request for an unapproved destination is refused and
-# recorded by the host, the refusal is read back through `mvmctl explain`, and
-# the suspect workload is stopped and a fresh one launched under a new plan.
+# specs/contracts/host-interface-distributed-execution.md): three workloads each
+# hold their own scoped network grant and start together; the maintenance
+# workload asks for a destination it was not granted and the host refuses and
+# records it, while both inspection workloads keep working; the refusal is read
+# back through `mvmctl explain`; the suspect workload is stopped and a fresh one
+# launched under a new plan.
+#
+# One path: every workload is an unnamed transient launch of the same image,
+# started the same way, so what the audience sees is a single launch path. Every
+# wait is a poll for the condition it waits on, not a fixed pause.
 #
 # The demo ASSUMES an installed mvmctl and a prepared home. Nothing here
 # installs, pulls an image or prepares a runtime: a missing prerequisite stops
@@ -16,25 +21,16 @@
 #
 # This is a CLI proof of the demo. The same operations are what Studio will
 # drive through the `mvm-client` library; this script is the reference the
-# integration is checked against: launch a workload, warm standbys, stop a
-# machine, read a run back (`mvm_client::explain::explain_local_run`) and verify
-# the audit chain.
+# integration is checked against: launch a workload, stop a machine, read a run
+# back (`mvm_client::explain::explain_local_run`) and verify the audit chain.
 #
-# What it shows: warm-standby claims; a host-recorded egress denial for one
-# workload, read back through explain; two other workloads finishing unaffected
-# at the same time; an explicit stop and relaunch that carries nothing over; and
-# an audit chain that verifies. What it does NOT show: Studio's own readback,
-# the real maintenance and inspection tasks (the workloads are small shell loops
-# over synthetic output), hot replacement, a production-profile run, or anything
-# on a physical line.
-#
-# The maintenance workload is launched cold on purpose (see step 2).
-# A named or detached machine boots cold by design, so only unnamed transient
-# runs claim a standby; the suspect workload must be named to be stopped, and is
-# reported as a NOTE. A workload granted NO egress at all fails inside the guest
-# and the host records nothing, so the maintenance workload is granted one
-# approved destination and asked for a different one; that no-grant behaviour is
-# printed as a NOTE, not asserted.
+# For maintainers, what this does NOT show: Studio's own readback, the real
+# maintenance and inspection tasks (the workloads are small shell loops over
+# synthetic output), hot replacement, a production-profile run, or anything on a
+# physical line. Launches here boot cold on purpose (MVM_RESIDENCY=cold): on the
+# v0.28.0-rc.2 release a warm-standby claim measured no faster through the CLI
+# than a cold boot, and a warm-claimed run's refusals are recorded under the
+# standby's machine name, so `explain` would not show them.
 #
 #   MVMCTL        the mvmctl to drive (default: mvmctl on PATH)
 #   MVM_HOME      the prepared demo home (default: ~/.mvm-demo). Must exist and
@@ -42,40 +38,44 @@
 #   HYPERVISOR    hvf (default on macOS) or firecracker (default on Linux)
 #   BUILDER       passed as --builder when set
 #   IMAGE         OCI image with curl (default: curlimages/curl:8.21.0)
+#   GRANT_A, GRANT_B  the destination each inspection workload is granted
+#                 (default: pypi.org:443, files.pythonhosted.org:443). Every
+#                 grant must resolve at admission, so the host needs DNS
 #   APPROVED      the one destination the maintenance workload is granted
 #                 (default: api.github.com:443)
 #   UNAPPROVED    the host it then asks for (default: example.com)
-#   WAIT_SECS     how long to wait for a machine to stop (default: 120)
-#   SETTLE_SECS, REQUEST_SECS  pauses so the maintenance request lands while the
-#                 inspection workloads still run, and the suspect's request
-#                 reaches the host before it is stopped (defaults: 6 and 10)
+#   WAIT_SECS     longest any single wait may take (default: 120)
 set -uo pipefail
 
 MVMCTL="${MVMCTL:-mvmctl}"
 IMAGE="${IMAGE:-curlimages/curl:8.21.0}"
+GRANT_A="${GRANT_A:-pypi.org:443}"
+GRANT_B="${GRANT_B:-files.pythonhosted.org:443}"
 APPROVED="${APPROVED:-api.github.com:443}"
 UNAPPROVED="${UNAPPROVED:-example.com}"
 WAIT_SECS="${WAIT_SECS:-120}"
-SETTLE_SECS="${SETTLE_SECS:-6}"
-REQUEST_SECS="${REQUEST_SECS:-10}"
 LINES_EXPECTED=6
-PLAIN_STANDBYS=2   # the two inspection workloads: no egress grant
-EGRESS_STANDBYS=1  # the replacement, which holds a grant
 if [ -z "${HYPERVISOR:-}" ]; then
   if [ "$(uname -s)" = Darwin ]; then HYPERVISOR=hvf; else HYPERVISOR=firecracker; fi
 fi
 case "$HYPERVISOR" in hvf | firecracker) ;; *) echo "FAIL unsupported HYPERVISOR=$HYPERVISOR (hvf or firecracker)" >&2; exit 2 ;; esac
 bld=(); [ -z "${BUILDER:-}" ] || bld=(--builder "$BUILDER")
 export MVM_HOME="${MVM_HOME:-$HOME/.mvm-demo}"
+export MVM_RESIDENCY=cold
 
 SUSPECT="fe-suspect-$$"
 tmp="$(mktemp -d)"
 errlog="$tmp/stderr.log"; : > "$errlog"
-# Every mvmctl call logs its stderr, so the run can tell whether the install
-# asked for bootstrap or prepared anything while the demo was running.
-mvm() { "$MVMCTL" ${bld[@]+"${bld[@]}"} "$@" 2> >(tee -a "$errlog" >&2); }
+started=$SECONDS
+# mvmctl's own progress chatter goes to a log, so the demo output is only the
+# demo; the log is shown when something fails and is read for install-time work.
+mvm() { "$MVMCTL" ${bld[@]+"${bld[@]}"} "$@" 2>>"$errlog"; }
 say() { echo "PASS $*"; }
-fail() { echo "FAIL $*" >&2; exit 1; }
+fail() {
+  echo "FAIL $*" >&2
+  if [ -s "$errlog" ]; then echo "--- mvmctl log (last lines) ---" >&2; tail -n 12 "$errlog" >&2; fi
+  exit 1
+}
 
 cleanup() {
   local status=$?
@@ -88,14 +88,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
-status_of() { mvm machine ls 2>/dev/null | awk -v n="$1" '$1 == n { print $3 }'; }
-wait_status() { # <name> <status>
-  local end=$((SECONDS + WAIT_SECS))
-  until [ "$(status_of "$1")" = "$2" ]; do
-    [ "$SECONDS" -lt "$end" ] || fail "$1 did not reach $2: '$(status_of "$1")'"
-    sleep 2
+# Poll until `cmd` succeeds; a wait never lasts longer than WAIT_SECS.
+until_ok() { # <what> <cmd...>
+  local what="$1" end=$((SECONDS + WAIT_SECS)); shift
+  until "$@" >/dev/null 2>&1; do
+    [ "$SECONDS" -lt "$end" ] || fail "timed out waiting for $what"
+    sleep 0.5
   done
 }
+status_of() { mvm machine ls 2>/dev/null | awk -v n="$1" '$1 == n { print $3 }'; }
+is_status() { [ "$(status_of "$1")" = "$2" ]; }
 
 # A fresh 32-byte token bound into each run's plan, so the run's plan id can be
 # found in the audit chain even though an unnamed run prints no name.
@@ -113,108 +115,90 @@ for line in open(sys.argv[2], errors='replace'):
 }
 # One field of `mvmctl explain <plan> --json`, printed as text.   <plan> <expr over d>
 explain_field() {
-  mvm explain "$1" --json 2>/dev/null </dev/null | python3 -I -c "
+  mvm explain "$1" --json </dev/null | python3 -I -c "
 import json, sys
 d = json.load(sys.stdin)
 print($2)"
 }
 denials_of() { explain_field "$1" "len(d['egress_denials'])"; }
-mode_of() { explain_field "$1" "next((e['labels'].get('mode') for e in d['events'] if e['event'] == 'plan.start_mode'), 'none')"; }
-# An unnamed transient run claims a standby when one is ready.      <token> <args...> -- <cmd...>
-warm_run() { local tok="$1"; shift; mvm run --image "$IMAGE" --hypervisor "$HYPERVISOR" --caller-commitment "$tok" "$@"; }
+# One launch path: an unnamed transient run bound to a token.   <token> <grant> -- <cmd...>
+launch() { local tok="$1" grant="$2"; shift 2; mvm run --image "$IMAGE" --hypervisor "$HYPERVISOR" --caller-commitment "$tok" --allow-host "$grant" "$@"; }
 
 echo "== 0. preconditions (nothing is installed or prepared here)"
 mvm --version >/dev/null 2>&1 || fail "no usable mvmctl ($MVMCTL): the demo assumes it is installed"
 [ -d "$MVM_HOME" ] || fail "demo home $MVM_HOME does not exist: prepare it first (mvmctl image pull $IMAGE, then one throwaway run)"
-mvm image ls 2>/dev/null </dev/null | grep -qF "${IMAGE#docker.io/}" \
+mvm image ls </dev/null | grep -qF "${IMAGE#docker.io/}" \
   || fail "$IMAGE is not cached in $MVM_HOME: prepare it first (mvmctl image pull $IMAGE); the demo does not install"
-say "mvmctl $(mvm --version 2>/dev/null | awk '{print $2}') on $HYPERVISOR, home $MVM_HOME, $IMAGE cached"
+say "mvmctl $(mvm --version | awk '{print $2}') on $HYPERVISOR, home $MVM_HOME, $IMAGE cached"
 
-echo "== 1. standbys are warmed"
-# A standby's guest either boots the egress client or does not, and a run claims
-# only a standby of its own shape, so a run holding a grant boots cold unless an
-# egress standby was warmed for it.
-mvm pool warm --image "$IMAGE" "$PLAIN_STANDBYS" >/dev/null </dev/null || fail "could not warm plain standbys"
-mvm pool warm --image "$IMAGE" --egress "$EGRESS_STANDBYS" >/dev/null </dev/null || fail "could not warm egress standbys"
-idle="$(mvm pool status 2>/dev/null </dev/null | grep -c ' idle ' || true)"
-[ "$idle" -ge $((PLAIN_STANDBYS + EGRESS_STANDBYS)) ] || fail "only $idle idle standbys after warming (wanted $((PLAIN_STANDBYS + EGRESS_STANDBYS)))"
-say "$idle idle standbys ready ($PLAIN_STANDBYS plain, $EGRESS_STANDBYS with the egress client)"
-
-echo "== 2. two inspection workloads run while a maintenance workload asks for an unapproved destination"
+echo "== 1. three workloads start together, each with its own scoped grant"
 tok_a="$(token)"; tok_b="$(token)"; tok_m="$(token)"
-for pair in "a:$tok_a" "b:$tok_b"; do
-  n="${pair%%:*}"; t="${pair#*:}"
-  warm_run "$t" -- sh -c "for i in 1 2 3 4 5 6; do echo line-ok \$i; sleep 3; done" >"$tmp/$n.out" 2>&1 </dev/null &
+for pair in "a:$tok_a:$GRANT_A" "b:$tok_b:$GRANT_B"; do
+  IFS=: read -r n t g_host g_port <<<"$pair"
+  launch "$t" "$g_host:$g_port" -- sh -c "for i in 1 2 3 4 5 6; do echo line-ok \$i; sleep 1; done" >"$tmp/$n.out" 2>&1 </dev/null &
   echo $! > "$tmp/$n.pid"
 done
-sleep "$SETTLE_SECS"  # the maintenance request lands while both are still running
-# The maintenance workload is launched cold on purpose. `explain` attributes a
-# refusal to a run by its machine name, and a warm-claimed run's refusals are
-# recorded under the standby's name, so a warm maintenance workload would show
-# an empty denial list even though the chain holds the entry.
-maint_out="$(MVM_RESIDENCY=cold warm_run "$tok_m" --allow-host "$APPROVED" -- \
-  sh -c "curl -sS -m 15 https://$UNAPPROVED/; echo curl_rc=\$?" 2>&1 </dev/null)"
-grep -q 'curl_rc=[1-9]' <<<"$maint_out" || fail "the request to $UNAPPROVED was not refused: $maint_out"
-say "the maintenance workload's request to $UNAPPROVED was refused in the guest"
+launch "$tok_m" "$APPROVED" -- sh -c "curl -sS -m 15 https://$UNAPPROVED/; echo curl_rc=\$?" >"$tmp/m.out" 2>&1 </dev/null &
+echo $! > "$tmp/m.pid"
+for n in a b m; do wait "$(cat "$tmp/$n.pid")" || fail "workload $n exited non-zero: $(cat "$tmp/$n.out")"; done
+grep -q 'curl_rc=[1-9]' "$tmp/m.out" || fail "the request to $UNAPPROVED was not refused: $(cat "$tmp/m.out")"
+say "the maintenance workload's request to $UNAPPROVED was refused"
 for n in a b; do
-  wait "$(cat "$tmp/$n.pid")" || fail "inspection workload $n exited non-zero: $(cat "$tmp/$n.out")"
   got="$(grep -c 'line-ok' "$tmp/$n.out" || true)"
   [ "$got" -eq "$LINES_EXPECTED" ] || fail "inspection workload $n printed $got of $LINES_EXPECTED lines: $(cat "$tmp/$n.out")"
 done
 say "both inspection workloads finished all $LINES_EXPECTED lines"
 plan_a="$(plan_of "$tok_a")"; plan_b="$(plan_of "$tok_b")"; plan_m="$(plan_of "$tok_m")"
 for p in "$plan_a" "$plan_b" "$plan_m"; do [ -n "$p" ] || fail "a run left no plan in the audit chain under its token"; done
-for pair in "inspection-a:$plan_a" "inspection-b:$plan_b"; do
-  [ "$(mode_of "${pair#*:}")" = warm ] || fail "the ${pair%%:*} workload did not claim a warm standby (start mode: $(mode_of "${pair#*:}"))"
-done
-say "both inspection workloads claimed a warm standby"
-[ "$(mode_of "$plan_m")" = cold ] || fail "the maintenance workload was meant to boot cold (start mode: $(mode_of "$plan_m"))"
-echo "NOTE the maintenance workload booted cold on purpose: explain cannot attribute a warm-claimed run's refusals to it"
 
-echo "== 3. the host recorded the refusal, for the maintenance workload only"
+echo "== 2. the host recorded the refusal, for the maintenance workload only"
 [ "$(explain_field "$plan_m" "d['chain_verified']")" = True ] || fail "the audit chain did not verify for the maintenance workload"
 [ "$(explain_field "$plan_m" "sum(1 for x in d['egress_denials'] if '$UNAPPROVED' in x['destination'])")" -ge 1 ] \
-  || fail "explain shows no recorded denial naming $UNAPPROVED for the maintenance workload: $(mvm explain "$plan_m" --json 2>&1 </dev/null)"
+  || fail "explain shows no recorded denial naming $UNAPPROVED for the maintenance workload: $(mvm explain "$plan_m" --json </dev/null)"
 [ "$(explain_field "$plan_m" "sum(1 for x in d['egress_denials'] if x['event'] == 'host.flow.denied')")" -ge 1 ] \
   || fail "the recorded denial is not a host.flow.denied entry"
 say "explain reads back a host.flow.denied naming $UNAPPROVED for the maintenance workload"
+denied_at="$(explain_field "$plan_m" "min(x['first_seen'] for x in d['egress_denials'] if '$UNAPPROVED' in x['destination'])")"
 for pair in "inspection-a:$plan_a" "inspection-b:$plan_b"; do
   p="${pair#*:}"
   [ "$(denials_of "$p")" = 0 ] || fail "the ${pair%%:*} workload has a recorded denial, so the refusal was not scoped to the maintenance workload"
-  [ "$(explain_field "$p" "any(e['event'] == 'plan.exited' for e in d['events'])")" = True ] || fail "the ${pair%%:*} workload has no plan.exited entry"
+  ended_at="$(explain_field "$p" "next((e['timestamp'] for e in d['events'] if e['event'] == 'plan.exited'), '')")"
+  [ -n "$ended_at" ] || fail "the ${pair%%:*} workload has no plan.exited entry"
+  python3 -I -c "
+import sys
+from datetime import datetime
+t = lambda s: datetime.fromisoformat(s.replace('Z', '+00:00'))
+sys.exit(0 if t(sys.argv[1]) >= t(sys.argv[2]) else 1)" "$ended_at" "$denied_at" \
+    || fail "the ${pair%%:*} workload ended ($ended_at) before the refusal ($denied_at), so it was not working through it"
 done
-say "the inspection workloads have no denials and exited normally"
-mvm trust audit verify >/dev/null 2>&1 </dev/null || fail "mvmctl trust audit verify failed"
+say "both inspection workloads kept working through the refusal and exited normally"
+mvm trust audit verify >/dev/null </dev/null || fail "mvmctl trust audit verify failed"
 say "the audit chain verifies"
 
-echo "== 4. the suspect workload is stopped and a fresh one is launched"
+echo "== 3. the suspect workload is stopped and a fresh one is launched"
 mvm run -d --image "$IMAGE" --hypervisor "$HYPERVISOR" --name "$SUSPECT" --allow-host "$APPROVED" -- \
   sh -c "curl -sS -m 10 https://$UNAPPROVED/; sleep 600" >/dev/null </dev/null || fail "could not launch the suspect workload"
-wait_status "$SUSPECT" running
-sleep "$REQUEST_SECS"  # let the suspect's request reach the host before it is stopped
+until_ok "the suspect workload to be running" is_status "$SUSPECT" running
+end=$((SECONDS + WAIT_SECS))
+until [ "$(denials_of "$SUSPECT" 2>/dev/null || echo 0)" -ge 1 ]; do
+  [ "$SECONDS" -lt "$end" ] || fail "the suspect's refusal was never recorded"
+  sleep 0.5
+done
 mvm machine stop "$SUSPECT" --yes >/dev/null </dev/null || fail "could not stop the suspect workload"
-wait_status "$SUSPECT" stopped
+until_ok "the suspect workload to stop" is_status "$SUSPECT" stopped
 say "the suspect workload stopped"
 [ "$(explain_field "$SUSPECT" "any(e['event'] == 'session.sealed' for e in d['events'])")" = True ] || fail "the suspect's session was not sealed"
 [ "$(denials_of "$SUSPECT")" -ge 1 ] || fail "the suspect has no recorded denial to keep as evidence"
 say "its session is sealed and its denial stays on record"
-echo "NOTE the suspect is a named machine, which boots cold by design (start mode: $(mode_of "$SUSPECT"))"
 tok_r="$(token)"
-out="$(warm_run "$tok_r" --allow-host "$APPROVED" -- sh -c 'echo replacement-ready' 2>&1 </dev/null)" || fail "the replacement did not run: $out"
+out="$(launch "$tok_r" "$APPROVED" -- sh -c 'echo replacement-ready' 2>&1 </dev/null)" || fail "the replacement did not run: $out"
 grep -q 'replacement-ready' <<<"$out" || fail "the replacement did not report ready: $out"
 plan_r="$(plan_of "$tok_r")"; plan_s="$(explain_field "$SUSPECT" "d['plan_id']")"
 [ -n "$plan_r" ] && [ -n "$plan_s" ] && [ "$plan_r" != "$plan_s" ] || fail "the replacement did not get a new plan ($plan_s vs $plan_r)"
 [ "$(denials_of "$plan_r")" = 0 ] || fail "the replacement inherited the suspect's denials"
-[ "$(mode_of "$plan_r")" = warm ] || fail "the replacement did not claim a warm standby (start mode: $(mode_of "$plan_r"))"
-say "the replacement claimed a warm standby under a new plan and carries none of the suspect's denials"
-mvm trust audit verify >/dev/null 2>&1 </dev/null || fail "mvmctl trust audit verify failed after the relaunch"
+say "the replacement ran under a new plan and carries none of the suspect's denials"
+mvm trust audit verify >/dev/null </dev/null || fail "mvmctl trust audit verify failed after the relaunch"
 say "the audit chain still verifies"
-
-echo "== 5. note: a workload granted no egress at all"
-tok_n="$(token)"
-ng_out="$(warm_run "$tok_n" -- sh -c "curl -sS -m 10 https://$UNAPPROVED/; echo curl_rc=\$?" 2>&1 </dev/null)"
-plan_n="$(plan_of "$tok_n")"; ng_denials="$(denials_of "$plan_n" 2>/dev/null || echo '?')"
-echo "NOTE a workload with no egress grant: $(grep -o 'curl_rc=[0-9]*' <<<"$ng_out" | head -1), host-recorded denials: $ng_denials. The refused destination is only a recorded policy decision when the workload holds some grant."
 
 # No install-time work: a prepared home runs the demo without building anything.
 if grep -q -E 'first use only|Preparing the (workload kernel|guest runtime)|runtime not prepared' "$errlog"; then
@@ -222,5 +206,5 @@ if grep -q -E 'first use only|Preparing the (workload kernel|guest runtime)|runt
   exit 1
 fi
 say "no install-time preparation ran during the demo"
-echo "== standbys left: $(mvm pool status 2>/dev/null </dev/null | head -1)"
+echo "demo completed in $((SECONDS - started))s"
 echo "DEMO_RESULT=pass"
