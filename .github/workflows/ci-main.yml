@@ -458,11 +458,10 @@ jobs:
               console::tests::a_console_spawned_shell_holds_no_capabilities \
               worker_pool::tests::a_warm_pool_worker_holds_no_capabilities \
               lifecycle_hooks::tests::a_hook_spawned_process_holds_no_capabilities; do
-            sudo -E env MVM_GUEST_PRIVILEGED_TESTS=1 "$lib" --exact "$witness" 2>&1 | tee "$RUNNER_TEMP/witness.log"
-            grep -q "1 passed" "$RUNNER_TEMP/witness.log"
+            if sudo -E env MVM_GUEST_PRIVILEGED_TESTS=1 "$lib" --exact "$witness" 2>&1 | tee "$RUNNER_TEMP/witness.log" && grep -q "1 passed" "$RUNNER_TEMP/witness.log"; then echo "WITNESS-PASS: $witness"; else echo "WITNESS-FAIL: $witness"; diag_failed=1; fi
           done
-          sudo -E env MVM_GUEST_PRIVILEGED_TESTS=1 "$agent_bin" --exact "interactive::tests::a_detached_workload_holds_no_capabilities" 2>&1 | tee "$RUNNER_TEMP/witness.log"
-          grep -q "1 passed" "$RUNNER_TEMP/witness.log"
+          if sudo -E env MVM_GUEST_PRIVILEGED_TESTS=1 "$agent_bin" --exact "interactive::tests::a_detached_workload_holds_no_capabilities" 2>&1 | tee "$RUNNER_TEMP/witness.log" && grep -q "1 passed" "$RUNNER_TEMP/witness.log"; then echo "WITNESS-PASS: interactive"; else echo "WITNESS-FAIL: interactive"; diag_failed=1; fi
+          [ "${diag_failed:-0}" = 0 ]
 
       # The same per-job HOME, MVM_HOME and TMPDIR the x86_64 shards run under.
       # Set after the root-run witnesses above, so nothing they leave behind
