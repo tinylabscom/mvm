@@ -593,13 +593,29 @@ fn run_one_call(
     })
 }
 
+/// Let `fd` survive `execve`. Runs in `pre_exec`, so it only calls
+/// async-signal-safe `fcntl` and allocates nothing.
+#[cfg(target_os = "linux")]
+fn clear_close_on_exec(fd: libc::c_int) -> io::Result<()> {
+    // SAFETY: fcntl(F_GETFD) takes integer arguments and touches no memory.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fcntl(F_SETFD) takes integer arguments and touches no memory.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn spawn_worker(
     entrypoint: &Arc<ValidatedEntrypoint>,
     worker_env: &[(String, String)],
 ) -> io::Result<WorkerHandle> {
     let program = entrypoint::spawn_path(entrypoint);
     #[cfg(target_os = "linux")]
-    let program_fd = entrypoint
+    let program_fd: u32 = entrypoint
         .file
         .as_raw_fd()
         .try_into()
@@ -621,6 +637,12 @@ fn spawn_worker(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::fd_hygiene::configure_close_fds(&mut cmd, 3, entrypoint::spawn_fd_to_keep(entrypoint));
+    // A script runs through `/proc/self/fd/<n>`: the kernel re-execs its
+    // interpreter on that path, so the descriptor has to survive the exec or
+    // the interpreter cannot reopen the script. The cold path keeps a
+    // non-close-on-exec copy for the same reason.
+    #[cfg(target_os = "linux")]
+    let keep_descriptor_across_exec = !entrypoint.use_resolved_path;
 
     // Workers execute through the validated `/proc/self/fd/<n>` path, so keep
     // that descriptor and close every other inherited agent descriptor.
@@ -629,7 +651,12 @@ fn spawn_worker(
     unsafe {
         cmd.pre_exec(move || {
             #[cfg(target_os = "linux")]
-            crate::fd_hygiene::mark_descriptors_close_on_exec_from(3, Some(program_fd))?;
+            {
+                crate::fd_hygiene::mark_descriptors_close_on_exec_from(3, Some(program_fd))?;
+                if keep_descriptor_across_exec {
+                    clear_close_on_exec(program_fd as libc::c_int)?;
+                }
+            }
             // The same strip every workload-code spawn applies: no_new_privs
             // plus every capability set emptied before exec.
             crate::guest_mount::drop_workload_capability_bounding_set()?;
