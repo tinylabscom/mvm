@@ -7,12 +7,14 @@ from pathlib import Path
 
 EXPECTED_PACKAGES = {"mvm-hello"}
 ENTRYPOINT = "srv/app/hello"
+MACHINES = {"qemuarm64": ("aarch64", 183), "qemux86-64": ("x86_64", 62)}
 
 
-def check_static_pie(program: bytes) -> None:
+def check_static_pie(program: bytes, machine: str = "qemuarm64") -> None:
+    arch, elf_machine = MACHINES[machine]
     if (len(program) < 64 or program[:6] != b"\x7fELF\x02\x01"
-            or struct.unpack_from("<HH", program, 16) != (3, 183)):
-        raise ValueError("Yocto entrypoint must be an aarch64 static PIE")
+            or struct.unpack_from("<HH", program, 16) != (3, elf_machine)):
+        raise ValueError(f"Yocto entrypoint must be an {arch} static PIE")
     phoff = struct.unpack_from("<Q", program, 32)[0]
     phentsize, phnum = struct.unpack_from("<HH", program, 54)
     if phentsize < 56 or phnum > 128 or phoff + phentsize * phnum > len(program):
@@ -32,7 +34,7 @@ def check_static_pie(program: bytes) -> None:
                     raise ValueError("Yocto entrypoint must not need a runtime linker")
 
 
-def check(manifest: Path, archive: Path) -> tuple[int, int]:
+def check(manifest: Path, archive: Path, machine: str = "qemuarm64") -> tuple[int, int]:
     installed = {
         line.split()[0]
         for line in manifest.read_text(encoding="utf-8").splitlines()
@@ -49,16 +51,17 @@ def check(manifest: Path, archive: Path) -> tuple[int, int]:
             raise ValueError("Yocto archive has no executable /srv/app/hello")
         if entrypoints[0].size > 16 * 1024 * 1024:
             raise ValueError("Yocto sample entrypoint is unexpectedly large")
-        check_static_pie(rootfs.extractfile(entrypoints[0]).read())
+        check_static_pie(rootfs.extractfile(entrypoints[0]).read(), machine)
     return archive.stat().st_size, sum(member.size for member in files)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--machine", choices=MACHINES, default="qemuarm64")
     parser.add_argument("manifest", type=Path)
     parser.add_argument("archive", type=Path)
     args = parser.parse_args()
-    compressed, file_bytes = check(args.manifest, args.archive)
+    compressed, file_bytes = check(args.manifest, args.archive, args.machine)
     print(f"guest packages: {', '.join(sorted(EXPECTED_PACKAGES))}")
     print(f"rootfs archive: {compressed} bytes; regular file contents: {file_bytes} bytes")
 

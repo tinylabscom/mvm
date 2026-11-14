@@ -2,9 +2,9 @@ SUMMARY = "Minimal one-shot workload for an MVM health boot"
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
 
-SRC_URI = "file://hello.S"
+SRC_URI = "file://hello-aarch64.S file://hello-x86_64.S"
 S = "${WORKDIR}"
-COMPATIBLE_MACHINE = "qemuarm64"
+COMPATIBLE_MACHINE = "(qemuarm64|qemux86-64)"
 
 # The standalone PIE has no interpreter or shared libraries. A GNU hash makes
 # RPM infer an rtld dependency despite that, so use the older hash table and
@@ -13,7 +13,7 @@ INSANE_SKIP:${PN} += "ldflags"
 
 do_compile() {
     ${CC} ${CFLAGS} -nostdlib -static-pie -Wl,-e,_start -Wl,--build-id=none \
-        ${LDFLAGS} -Wl,--hash-style=sysv "${WORKDIR}/hello.S" -o "${B}/mvm-hello"
+        ${LDFLAGS} -Wl,--hash-style=sysv "${WORKDIR}/hello-${TARGET_ARCH}.S" -o "${B}/mvm-hello"
 }
 
 do_install() {

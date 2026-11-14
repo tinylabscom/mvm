@@ -18,6 +18,10 @@ class YoctoInputsTests(unittest.TestCase):
             recipe.write_bytes(b"v1")
 
             first = inputs(archive, layer)
+            x86 = inputs(archive, layer, "qemux86-64")
+            self.assertEqual(x86["machine"], "qemux86-64")
+            self.assertEqual(x86["target"], "x86_64-linux")
+            self.assertEqual(first["target"], "aarch64-linux")
             self.assertEqual(
                 first["rootfs_archive_sha256"], hashlib.sha256(b"archive").hexdigest()
             )

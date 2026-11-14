@@ -7,6 +7,7 @@ import stat
 from pathlib import Path
 
 POKY_REVISION = "72983ac391008ebceb45edc7a8f0f6d5f4fe715c"
+MACHINES = {"qemuarm64": "aarch64-linux", "qemux86-64": "x86_64-linux"}
 
 
 def digest_file(path: Path) -> str:
@@ -34,13 +35,13 @@ def digest_layer(root: Path) -> str:
     return digest.hexdigest()
 
 
-def inputs(archive: Path, layer: Path) -> dict:
+def inputs(archive: Path, layer: Path, machine: str = "qemuarm64") -> dict:
     if not archive.is_file() or not layer.is_dir():
         raise ValueError("the Yocto archive and meta-mvm layer must exist")
     return {
         "schema_version": 1,
-        "target": "aarch64-linux",
-        "machine": "qemuarm64",
+        "target": MACHINES[machine],
+        "machine": machine,
         "layers": {"poky": POKY_REVISION, "meta-mvm": digest_layer(layer)},
         "rootfs_archive_sha256": digest_file(archive),
     }
@@ -48,11 +49,12 @@ def inputs(archive: Path, layer: Path) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--machine", choices=MACHINES, default="qemuarm64")
     parser.add_argument("archive", type=Path)
     parser.add_argument("layer", type=Path)
     parser.add_argument("out", type=Path)
     args = parser.parse_args()
-    record = inputs(args.archive, args.layer)
+    record = inputs(args.archive, args.layer, args.machine)
     with args.out.open("x", encoding="utf-8") as output:
         json.dump(record, output, sort_keys=True, indent=2)
         output.write("\n")

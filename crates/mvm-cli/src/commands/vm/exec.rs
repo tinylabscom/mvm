@@ -784,6 +784,7 @@ pub(in crate::commands) fn run_secure_started(
         let crate::exec::AdmitInputs {
             rootfs,
             kernel,
+            backend_kind,
             vm_name,
             sdk_sidecar,
             assets,
@@ -791,10 +792,14 @@ pub(in crate::commands) fn run_secure_started(
             bundle_archive,
             runtime_config,
         } = inputs;
+        anyhow::ensure!(
+            backend_kind == admit_backend_kind,
+            "launch backend changed after transient admission preflight"
+        );
         denials_for_admit.arm(vm_name);
         let ledger = mvm_client::admission::InMemoryNonceLedger::default();
         let instruction_mounts =
-            crate::exec::admitted_instruction_mounts(admit_backend_kind, volumes)?;
+            crate::exec::admitted_instruction_mounts(backend_kind, volumes)?;
         // Every refusal is made before this returns; the audit sync is left
         // running beside the VMM boot, and activation waits for it.
         let configured_images_dir = mvm_build::image_source::configured_images_dir();
@@ -848,7 +853,7 @@ pub(in crate::commands) fn run_secure_started(
             ),
             services: admit_host_services.clone(),
             grants: admit_grants.clone(),
-            backend_kind: Some(admit_backend_kind),
+            backend_kind: Some(backend_kind),
             entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::for_launch(
                 rootfs,
                 admit_has_argv,

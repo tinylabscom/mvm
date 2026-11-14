@@ -1359,6 +1359,7 @@ pub fn resolve_launch(
                 .kernel_path
                 .as_deref()
                 .map(std::path::Path::new),
+            backend_kind: backend.kind(),
             vm_name: &vm_name,
             sdk_sidecar: sdk_sidecar.as_ref(),
             assets: shape.assets,
