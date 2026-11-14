@@ -1,4 +1,4 @@
-//! Integration tests for the repo-root `install.sh` and `uninstall.sh`. Serves
+//! Integration tests for the repo-root `install.sh` and its uninstall option. Serves
 //! fake release assets over a loopback HTTP server and drives the scripts with
 //! their documented env overrides, always against a temporary install dir,
 //! library dir, `HOME` and `MVM_HOME`.
@@ -731,10 +731,15 @@ impl Host {
         mvm_core::config::host_agent_dir_at(self.mvm_home(), tenant)
     }
 
-    /// `sh <script>` with every path the scripts derive pinned inside the host.
+    /// `sh install.sh`, selecting its legacy test label for the uninstall mode.
     fn script(&self, script: &str) -> Command {
         let mut command = self.pinned(Command::new("sh"));
-        command.arg(repo_root().join(script));
+        command.arg(repo_root().join("install.sh"));
+        if script == "uninstall.sh" {
+            command.arg("uninstall");
+        } else {
+            assert_eq!(script, "install.sh");
+        }
         command
     }
 
@@ -2956,7 +2961,7 @@ fn install_sh_builtin_entitlement_matches_the_checked_in_profile() {
     );
 }
 
-// ---- uninstall.sh ----
+// ---- install.sh uninstall ----
 
 /// A release whose `mvmctl` hands every command to the real binary under test,
 /// so the uninstaller's running-machine and daemon checks run the shipped code.
@@ -3185,7 +3190,7 @@ fn plant_signing_key(dir: &Path) {
     std::fs::write(dir.join("keys/host-signer.ed25519"), "key").unwrap();
 }
 
-/// Run `uninstall.sh --purge` with `MVM_HOME` (and optionally `HOME`) set, and
+/// Run `install.sh uninstall --purge` with `MVM_HOME` (and optionally `HOME`) set, and
 /// assert it refuses without changing anything.
 fn assert_purge_refused(host: &Host, what: &str, mvm_home: &Path, home: Option<&str>) {
     let before = host.snapshot();
@@ -3400,20 +3405,16 @@ fn install_sh_never_writes_a_marker_through_a_symlink() {
 }
 
 #[test]
-fn install_and_uninstall_share_one_rule_for_an_older_install() {
-    let function = |script: &str| -> String {
-        let text = std::fs::read_to_string(repo_root().join(script)).unwrap();
-        let start = text
-            .find("unversioned_install_entries() {")
-            .unwrap_or_else(|| panic!("{script} lost unversioned_install_entries"));
-        let end = start + text[start..].find("\n}\n").expect("function end");
-        text[start..end].to_owned()
-    };
-    assert_eq!(
-        function("install.sh"),
-        function("uninstall.sh"),
-        "install.sh adopts and uninstall.sh removes by the same rule"
-    );
+fn uninstall_option_does_not_require_install_dependencies_or_settings() {
+    let host = Host::new();
+    let output = host
+        .script("uninstall.sh")
+        .arg("--help")
+        .env("MVM_INSTALL_KEEP", "invalid")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("install.sh uninstall"));
 }
 
 #[test]

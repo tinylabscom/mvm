@@ -5,7 +5,7 @@
 #
 #   check-upgrade.sh <target-triple> "<tags oldest..newest>" "<tolerated tags>"
 #
-# Env: INSTALLER, UNINSTALLER, MVM_UPDATE_DOWNLOAD_URL as for check-release.sh.
+# Env: INSTALLER, MVM_UPDATE_DOWNLOAD_URL as for check-release.sh.
 #
 # After each upgrade: the new release is current and reports itself, the
 # release it replaced is still on disk, complete and runnable (the history a
@@ -25,7 +25,6 @@ TOLERATED="$3"
 # shellcheck disable=SC1091 # lib.sh is shellchecked on its own
 . "$(dirname "$0")/lib.sh"
 INSTALLER="${INSTALLER:-$COMPAT_DIR/../../install.sh}"
-UNINSTALLER="${UNINSTALLER:-$COMPAT_DIR/../../uninstall.sh}"
 
 make_prefix
 logs="$PREFIX_ROOT/logs"

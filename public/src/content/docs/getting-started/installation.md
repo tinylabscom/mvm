@@ -99,7 +99,7 @@ run, so that upgrade can roll back too.
 ## Uninstalling
 
 ```bash
-curl -fsSL https://runmvm.com/uninstall.sh | sh
+curl -fsSL https://runmvm.com/install.sh | sh -s -- uninstall
 ```
 
 `mvmctl env uninstall` runs the same script. It refuses while a machine is
@@ -127,7 +127,7 @@ state directory that is a symlink is unlinked; what it points at is left alone.
 With `HOME` unset or empty, nothing is purged:
 
 ```bash
-curl -fsSL https://runmvm.com/uninstall.sh | sh -s -- --purge
+curl -fsSL https://runmvm.com/install.sh | sh -s -- uninstall --purge
 ```
 
 Pass the same `MVM_INSTALL_DIR` / `MVM_INSTALL_LIB_DIR` you installed with.
