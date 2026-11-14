@@ -135,6 +135,7 @@ impl EntrypointAdmission {
         let AdmitInputs {
             rootfs,
             kernel,
+            backend_kind,
             vm_name,
             sdk_sidecar: _,
             assets,
@@ -198,12 +199,11 @@ impl EntrypointAdmission {
             // so the path that feeds the refusal is the ordinary path.
             entrypoint: crate::admission::entrypoint_resolve::resolve_for_rootfs(rootfs),
             // An entrypoint boot admits the built workload's own launch and
-            // authors no grant of its own.
+            // authors no grant of its own. Keep the typed backend selected by
+            // the boot: canonical kernel custody cannot be inferred from the
+            // caller's backend label after the bundle is attached.
             grants: None,
-            backend_kind: self
-                .producer_identity
-                .as_ref()
-                .map(|_| mvm_core::vm_backend::BackendKind::Hvf),
+            backend_kind: Some(backend_kind),
         })?;
 
         let mut start_config = mvm_core::vm_backend::VmStartConfig::default();
@@ -402,6 +402,7 @@ mod tests {
         AdmitInputs {
             rootfs,
             kernel: None,
+            backend_kind: mvm_core::vm_backend::BackendKind::Firecracker,
             vm_name: vm,
             sdk_sidecar: None,
             assets: &[],
@@ -566,6 +567,30 @@ mod tests {
         let policy: mvm_core::security::SecurityPolicy =
             serde_json::from_str(&policy_file.content).expect("parse security policy");
         assert_eq!(policy.profile, mvm_core::security::AgentProfile::SealedProd);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn entrypoint_admission_checks_the_selected_backend_not_its_label() {
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().expect("tempdir");
+        env.isolate_mvm_home(home.path());
+        let rootfs = home.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"rootfs").expect("write rootfs");
+        let kernel = home.path().join("kernel");
+        let mut elf = vec![0u8; 64];
+        elf[..6].copy_from_slice(b"\x7fELF\x02\x01");
+        std::fs::write(&kernel, elf).expect("write ELF kernel without PVH entry note");
+        let admission = EntrypointAdmission::builder("firecracker")
+            .build()
+            .expect("entrypoint admission");
+        let mut selected = inputs(&rootfs, "selected-backend");
+        selected.kernel = Some(&kernel);
+        selected.backend_kind = mvm_core::vm_backend::BackendKind::Qemu;
+        let Err(error) = admission.admit(selected) else {
+            panic!("QEMU cannot direct-boot an ELF kernel without a PVH note");
+        };
+        assert!(format!("{error:#}").contains("PVH"), "{error:#}");
     }
 
     #[test]
@@ -768,6 +793,7 @@ mod stdin_grant_tests {
                 .admit(AdmitInputs {
                     rootfs: &self.rootfs,
                     kernel: None,
+                    backend_kind: mvm_core::vm_backend::BackendKind::Firecracker,
                     vm_name: vm,
                     sdk_sidecar: None,
                     assets: &[],

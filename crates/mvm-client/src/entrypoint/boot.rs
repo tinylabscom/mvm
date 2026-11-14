@@ -494,6 +494,8 @@ pub struct AdmitInputs<'a> {
     pub rootfs: &'a std::path::Path,
     /// The kernel confining it, when the tier has one.
     pub kernel: Option<&'a std::path::Path>,
+    /// The backend object selected for this boot, not a plan or profile label.
+    pub backend_kind: mvm_core::vm_backend::BackendKind,
     /// The name this VM will be started under.
     pub vm_name: &'a str,
     /// The SDK sidecar this boot will attach, or `None`.
@@ -785,6 +787,7 @@ fn boot_session_core(
             .kernel_path
             .as_deref()
             .map(std::path::Path::new),
+        backend_kind: backend.kind(),
         vm_name: &vm_name,
         // An entrypoint VM binds no SDK host service.
         sdk_sidecar: None,
