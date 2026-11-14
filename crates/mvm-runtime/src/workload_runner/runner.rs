@@ -85,7 +85,7 @@ use refusal::{
     admitted_seccomp_tier, refuse, require_admitted_seccomp_tier, require_fresh_child_identity,
     require_late_volumes_mounted,
 };
-use sockets::standing_sockets;
+use sockets::{gpu_endpoint_transport, standing_sockets};
 pub use spawner::{
     FlowMuxIdentitySource, NetworkEndpointSpawnRequest, NetworkEndpointSpawner,
     RealNetworkEndpointSpawner, SpawnedEndpoint, TelemetryStart,
@@ -261,26 +261,6 @@ fn append_cmdline_token(boot_cmdline: &mut String, token: &str) {
         boot_cmdline.push(' ');
     }
     boot_cmdline.push_str(token);
-}
-
-/// Backend-shaped guest→host channel for the GPU endpoint. QEMU's vhost-vsock
-/// lets the endpoint bind the real port directly; every other tier proxies the
-/// guest dial to a per-VM UDS. A free function so both `WorkloadRunner` and the
-/// unit tests name the same binding decision.
-fn gpu_endpoint_transport(
-    kind: mvm_core::vm_backend::BackendKind,
-    state_dir: &std::path::Path,
-) -> mvm_vmm::host::network_endpoint_spawn::EndpointTransport {
-    use mvm_vmm::host::network_endpoint_spawn::EndpointTransport;
-    if kind == mvm_core::vm_backend::BackendKind::Qemu {
-        EndpointTransport::Vsock {
-            port: mvm_agentd::vsock::GPU_PORT,
-        }
-    } else {
-        EndpointTransport::Uds {
-            path: mvm_core::config::vm_vsock_port_socket_at(state_dir, mvm_agentd::vsock::GPU_PORT),
-        }
-    }
 }
 
 /// The trusted-snapshot backend is opt-in: only the exact value `1` enables it.
@@ -2023,38 +2003,6 @@ mod tests {
             .find(|p| p.service.port() == EGRESS_PORT)
             .map(|p| p.host_uds.as_path())
             .expect("spec carries an EGRESS_PORT vsock channel")
-    }
-
-    #[test]
-    fn gpu_endpoint_transport_binds_vsock_only_for_qemu() {
-        use mvm_core::vm_backend::BackendKind;
-        use mvm_vmm::host::network_endpoint_spawn::EndpointTransport;
-
-        let state = tempfile::tempdir().unwrap();
-        assert_eq!(
-            gpu_endpoint_transport(BackendKind::Qemu, state.path()),
-            EndpointTransport::Vsock {
-                port: mvm_agentd::vsock::GPU_PORT,
-            },
-            "QEMU's vhost-vsock binds the GPU port directly"
-        );
-        for other in [
-            BackendKind::Firecracker,
-            BackendKind::Libkrun,
-            BackendKind::Hvf,
-            BackendKind::Wasm,
-        ] {
-            assert_eq!(
-                gpu_endpoint_transport(other, state.path()),
-                EndpointTransport::Uds {
-                    path: mvm_core::config::vm_vsock_port_socket_at(
-                        state.path(),
-                        mvm_agentd::vsock::GPU_PORT,
-                    ),
-                },
-                "every non-QEMU tier proxies the guest GPU dial to a per-VM UDS"
-            );
-        }
     }
 
     #[test]
