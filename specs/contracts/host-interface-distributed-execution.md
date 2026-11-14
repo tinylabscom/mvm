@@ -610,10 +610,19 @@ before it starts, and any first-use preparation during a run is reported as a
 3. With that home set, run `mvmctl image pull curlimages/curl:8.21.0` and one
    throwaway `mvmctl run` of that image, which builds the workload runtime.
 
-**Running.** `scripts/factory-edge-stage.sh`, then
+**Running.** Before presenting, `scripts/factory-edge-stage.sh --check` verifies
+every prerequisite and starts nothing: a working `mvmctl`, the demo home, the
+cached image, enough disk, and that every granted destination resolves, because
+a grant is resolved to addresses when its workload is admitted and the demo
+therefore needs working DNS. Then `scripts/factory-edge-stage.sh`, then
 `scripts/factory-edge-demo-live.sh`, then `scripts/factory-edge-stage.sh --down`.
-Staging replaces any earlier staging, and each staging uses its own machine
-names because `mvmctl explain <name>` is ambiguous when a name has been reused.
+Stage shortly before presenting, ten minutes or so: every lookup a staged
+workload makes is a signed audit-chain entry, so the chain, and with it the cost
+of `explain` and `trust audit verify`, grows for as long as the workloads run.
+After a reboot the staged machines are gone, so stage again; the demo home, the
+installed release and the cached image persist. Staging replaces any earlier
+staging, and each staging uses its own machine names because `mvmctl explain
+<name>` is ambiguous when a name has been reused.
 On a live run against `v0.28.0-rc.2` on HVF staging took about 15 s and the demo
 about 30 s while other builds held the host at a load average near 40. The
 maintenance workload makes its first request `ATTEMPT_AFTER` seconds (default
