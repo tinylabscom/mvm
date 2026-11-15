@@ -366,6 +366,12 @@ pub struct MachineState {
     /// RFC 3339 timestamp of the last `readiness` change.
     #[serde(default)]
     pub last_readiness_change_at: Option<String>,
+    /// Egress destinations (`host:port`) the machine's definition grants. This
+    /// is the granted list recorded for the machine, what `mvmctl machine
+    /// inspect` prints as `allow-host`; empty when it grants none or the
+    /// definition is unknown.
+    #[serde(default)]
+    pub allow_host: Vec<String>,
 }
 
 fn default_auto_resume() -> bool {
@@ -392,6 +398,7 @@ impl Default for MachineState {
             auto_resume: true,
             readiness: None,
             last_readiness_change_at: None,
+            allow_host: Vec::new(),
         }
     }
 }
@@ -878,6 +885,7 @@ mod tests {
             auto_resume: false,
             readiness: Some(crate::domain::instance::InstanceReadiness::AgentReady),
             last_readiness_change_at: Some("2026-01-01T00:00:00Z".into()),
+            allow_host: vec!["pypi.org:443".into()],
         };
         let json = serde_json::to_string(&state).unwrap();
         let back: MachineState = serde_json::from_str(&json).unwrap();

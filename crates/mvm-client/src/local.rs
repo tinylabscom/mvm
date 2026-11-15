@@ -1173,7 +1173,12 @@ impl MvmClient for LocalBackend {
             .find(|v| v.id.0 == id.0)
         {
             let reg = registry.lookup(&info.name);
-            return Ok(to_state(info, reg));
+            let mut state = to_state(info, reg);
+            // A live machine's grants come from its definition, like a stopped one's.
+            if let Some(spec) = crate::inventory::read_persisted_spec(&state.name)? {
+                state.allow_host = spec.allow_host;
+            }
+            return Ok(state);
         }
         let spec = crate::inventory::read_persisted_spec(&id.0)?
             .ok_or_else(|| MvmError::NotFound { id: id.0.clone() })?;

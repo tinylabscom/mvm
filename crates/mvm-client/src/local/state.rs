@@ -69,6 +69,7 @@ pub(super) fn to_state(info: VmInfo, reg: Option<&VmRegistration>) -> MachineSta
         auto_resume: reg.map(|r| r.auto_resume).unwrap_or(true),
         readiness: reg.and_then(|r| r.readiness.clone()),
         last_readiness_change_at: reg.and_then(|r| r.last_readiness_change_at.clone()),
+        allow_host: Vec::new(),
         name: info.name,
     }
 }

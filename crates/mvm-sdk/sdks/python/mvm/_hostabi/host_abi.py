@@ -1404,6 +1404,7 @@ class MachineCreateReply:
     id: MachineId
     name: str
     status: MachineStatus
+    allow_host: Optional[List[str]] = field(default_factory=lambda: [])
     auto_resume: Optional[bool] = True
     backend: Optional[str] = ''
     cpus: Optional[int] = 0
@@ -1425,6 +1426,7 @@ class MachineInspectReply:
     id: MachineId
     name: str
     status: MachineStatus
+    allow_host: Optional[List[str]] = field(default_factory=lambda: [])
     auto_resume: Optional[bool] = True
     backend: Optional[str] = ''
     cpus: Optional[int] = 0
@@ -1446,6 +1448,7 @@ class MachineListReplyItem:
     id: MachineId
     name: str
     status: MachineStatus
+    allow_host: Optional[List[str]] = field(default_factory=lambda: [])
     auto_resume: Optional[bool] = True
     backend: Optional[str] = ''
     cpus: Optional[int] = 0
@@ -1498,6 +1501,7 @@ class MachineReconfigureReply:
     id: MachineId
     name: str
     status: MachineStatus
+    allow_host: Optional[List[str]] = field(default_factory=lambda: [])
     auto_resume: Optional[bool] = True
     backend: Optional[str] = ''
     cpus: Optional[int] = 0
@@ -1539,6 +1543,7 @@ class MachineStartReply:
     id: MachineId
     name: str
     status: MachineStatus
+    allow_host: Optional[List[str]] = field(default_factory=lambda: [])
     auto_resume: Optional[bool] = True
     backend: Optional[str] = ''
     cpus: Optional[int] = 0
@@ -1560,6 +1565,7 @@ class MachineState:
     id: MachineId
     name: str
     status: MachineStatus
+    allow_host: Optional[List[str]] = field(default_factory=lambda: [])
     auto_resume: Optional[bool] = True
     backend: Optional[str] = ''
     cpus: Optional[int] = 0
