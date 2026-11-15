@@ -996,6 +996,7 @@ async fn start_refuses_spec_shapes_the_in_process_backend_cannot_honor() {
         schema_version: mvm_runtime::machine::persist::MACHINE_SPEC_SCHEMA_VERSION,
         name: "p-vol".into(),
         image: Some("alpine:latest".into()),
+        prepared_image: None,
         manifest: None,
         deployment: None,
         resolved_digest: None,

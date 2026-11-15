@@ -331,6 +331,7 @@ mod tests {
 
     fn spec(name: &str, image: &str, cpus: u32) -> MachineSpec {
         MachineSpec {
+            prepared_image: None,
             schema_version: mp::MACHINE_SPEC_SCHEMA_VERSION,
             name: name.to_string(),
             image: Some(image.to_string()),

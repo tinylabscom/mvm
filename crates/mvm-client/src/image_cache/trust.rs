@@ -72,18 +72,16 @@ impl CosignVerifier for CosignCommandVerifier {
 }
 
 #[derive(Debug, Clone)]
-pub(in crate::commands) struct OciRegistryAuthDecision {
-    pub(in crate::commands) auth: RegistryAuthConfig,
-    pub(in crate::commands) source: String,
+pub struct OciRegistryAuthDecision {
+    pub auth: RegistryAuthConfig,
+    pub source: String,
 }
 
-pub(in crate::commands) fn registry_auth_for(
-    image_ref: &ImageReference,
-) -> Result<OciRegistryAuthDecision> {
+pub(super) fn registry_auth_for(image_ref: &ImageReference) -> Result<OciRegistryAuthDecision> {
     registry_auth_from_lookup(image_ref, |name| std::env::var(name).ok())
 }
 
-pub(in crate::commands) fn registry_auth_from_lookup(
+pub(super) fn registry_auth_from_lookup(
     image_ref: &ImageReference,
     mut lookup: impl FnMut(&str) -> Option<String>,
 ) -> Result<OciRegistryAuthDecision> {

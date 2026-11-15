@@ -75,6 +75,54 @@ listing still ignores incomplete directories and staging. These preflight checks
 do not serialize concurrent pin, lineage,
 or path changes with deletion; they do not grant guest, MCP, or remote authority.
 
+## Prepared OCI reuse
+
+`prepared_image::select(reference, &PreparedImageContext { backend })` selects
+an already prepared **development registry OCI** image from the same cache and
+resolver used by `mvmctl image pull` and CLI prepared resolution. Supply the
+explicit backend that will launch it; MVM derives and checks the actual Linux
+platform and guest-runtime identity. The resource profile is separate from
+image trust. No public production prepared-selection mode is added.
+The platform records MVM's host target, including its architecture variant.
+The existing OCI config check verifies OS and architecture; this is not a new
+image-variant or index-to-child-manifest verification proof.
+
+Pass the returned untrusted `PreparedOciSelection` to
+`LaunchRequest::builder_for(LifecycleMode::Persistent, LaunchSource::PreparedImage { selection })`.
+MVM revalidates it at launch rather than trusting the preview. Persistent
+definitions retain the expectation without an ordinary image source fallback;
+every later Start repeats validation and admission. A changed tag, rootfs,
+runtime, platform, backend or semantic guest sidecar refuses, rather than
+silently selecting different bytes. Incidental build timestamps are excluded.
+Ordinary OCI clients and explicit materialization APIs keep their existing
+acquisition behavior.
+
+Prepared-only refuses missing or corrupt preparation, even when cached layers
+could repair it. `PreparedImageError` carries a stable `kind`, `code()` and
+explicit `remedy()`, preserved on launch as `MvmError::PreparedImage`.
+Kernel and prepared guest-runtime checks remain independent. The `prepared_image`
+selection/launch path rejects pending or unidentified runtime cache markers as
+measured identity. That path never pulls, bootstraps, unpacks, injects a runtime,
+materializes, reseals or invokes an online verifier. Adoption of an already-built matching variant may
+update the existing cache index. Force replacement and external signed plans
+are not supported by this additive mode. Prepared transient requests are refused
+before resolution; ordinary transient clients are unchanged.
+
+The manifest/config digests and measured rootfs SHA256 are distinct identities.
+The first measurement of an existing development preparation is not proof of
+its historical OCI-to-rootfs derivation or publisher authority. Admission binds
+the actual selected bytes and development-qualified provenance, not cached
+authorization. Launch acceptance is not guest readiness, a workload result,
+protected recording, or original-owner quiescence.
+
+`cli_image` is an explicitly delimited **public workspace compatibility
+surface** for existing CLI delegation, not a privacy or security boundary.
+Its explicit operations can acquire/materialize images, invoke production
+verification, update indexes and remove cached images. Documentation hiding
+does not restrict access. Embedder prepared launches use `prepared_image`
+instead; neither compatibility reports nor caller-authored expected DTOs are
+accepted as verified provenance by the prepared admission path.
+
 ## Main modules
 
 | Module | Responsibility |
@@ -82,6 +130,8 @@ or path changes with deletion; they do not grant guest, MCP, or remote authority
 | `connect` | Target parsing and backend selection |
 | `local` | In-process local implementation |
 | `launch` / `boot` | Request validation and machine startup |
+| `prepared_image` | Cache-only development OCI selection and typed refusals |
+| `cli_image` | Public workspace compatibility for existing CLI effects; not the embedder prepared-launch API |
 | `inventory` / `registration` | Machine discovery and durable identity |
 | `checkpoint` | Host-local catalog access and guarded checkpoint removal |
 | `input_journal` | Locked encrypted execution input and replay cursors |

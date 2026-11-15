@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use mvm_fs::oci::verify_sha256_digest;
 
-use super::super::shared::human_bytes;
+use super::human_bytes;
 use super::oci_types::{
     CachedOciImage, INDEX_FILE, ImageListRow, InspectOutput, OciCacheIndex, RemoveOutcome,
 };

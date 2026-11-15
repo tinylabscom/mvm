@@ -1,16 +1,6 @@
 //! Pure formatters — no I/O, no allocation outside the returned string.
 
-pub(crate) fn human_bytes(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{bytes}B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1}K", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{:.1}M", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.1}G", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
-}
+pub(crate) use mvm_client::cli_image::human_bytes;
 
 /// Human-readable age from a whole-second duration: `45s`, `12m`, `3h`,
 /// `9d`. Coarse by design — cache/blob ages (`cache info` / `doctor`)

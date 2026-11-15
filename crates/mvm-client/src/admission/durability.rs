@@ -55,6 +55,7 @@ pub fn admit_plan_for_boot_with_verified_runtime_syncing_beside_boot(
         AdmissionSync::BesideBoot,
         Some(runtime),
         None,
+        None,
     )?;
     phase.finish();
     Ok(admitted)

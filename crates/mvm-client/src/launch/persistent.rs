@@ -184,6 +184,25 @@ fn register_vm_name(vm_name: &str, network_name: &str) {
 pub fn start_persistent_oci_machine(
     params: PersistentImageStartParams<'_>,
 ) -> Result<mvm_hostd::plan_admission::AdmittedPlan> {
+    start_persistent_with_prepared(params, None)
+}
+
+pub(crate) fn start_prepared_persistent_oci_machine(
+    params: PersistentImageStartParams<'_>,
+    prepared: &crate::image_cache::prepared::ValidatedPrepared,
+) -> Result<mvm_hostd::plan_admission::AdmittedPlan> {
+    crate::image_cache::prepared::require_backend(
+        &prepared.selection,
+        params.backend_name,
+        params.backend.name(),
+    )?;
+    start_persistent_with_prepared(params, Some(prepared))
+}
+
+fn start_persistent_with_prepared(
+    params: PersistentImageStartParams<'_>,
+    prepared: Option<&crate::image_cache::prepared::ValidatedPrepared>,
+) -> Result<mvm_hostd::plan_admission::AdmittedPlan> {
     let PreparedPersistentBoot {
         backend,
         start_config,
@@ -191,7 +210,7 @@ pub fn start_persistent_oci_machine(
         prepared_volumes,
         built_runtime: _built_runtime,
         verified_runtime,
-    } = prepare_persistent_boot(params)?;
+    } = prepare_persistent_boot(params, prepared)?;
     let name_label = start_config.name.clone();
     let name = name_label.as_str();
     let backend_label = backend.name().to_string();
@@ -218,6 +237,7 @@ struct PreparedPersistentBoot {
 
 fn prepare_persistent_boot(
     params: PersistentImageStartParams<'_>,
+    prepared: Option<&crate::image_cache::prepared::ValidatedPrepared>,
 ) -> Result<PreparedPersistentBoot> {
     let PersistentImageStartParams {
         name,
@@ -313,9 +333,9 @@ fn prepare_persistent_boot(
     // Everything the boot waits on is prepared before admission, because
     // admission starts the plan's validity window and the verb grant minted
     // from it lives exactly as long. See `crate::launch::boot_order`.
-    let mut prepared = (start_config, None);
+    let mut boot = (start_config, None);
     let admission = crate::launch::boot_order::admit_after_preparation(
-        &mut prepared,
+        &mut boot,
         |(config, verified_runtime)| {
             let release = attach_runtime_overlay_if_cached_version_verified(
                 config,
@@ -353,7 +373,7 @@ fn prepare_persistent_boot(
                 })
                 .collect::<Vec<_>>();
             let configured_images_dir = mvm_build::image_source::configured_images_dir();
-            let params = AdmitPlanForBootParams {
+            let admission_params = AdmitPlanForBootParams {
                 mailbox,
                 // What the backend will arm, so the admitted tier opens
                 // the GPU endpoint's vsock socket exactly when there is one.
@@ -414,17 +434,25 @@ fn prepare_persistent_boot(
                     has_ad_hoc_argv,
                 ),
             };
-            match verified_runtime.as_ref() {
-                Some(runtime) => {
+            match (prepared, verified_runtime.as_ref()) {
+                (Some(prepared), runtime) => crate::admission::admit_prepared_plan_for_boot(
+                    admission_params,
+                    ingress,
+                    prepared,
+                    runtime,
+                ),
+                (None, Some(runtime)) => {
                     crate::admission::admit_plan_for_boot_configured_ingress_with_verified_runtime(
-                        params, ingress, runtime,
+                        admission_params,
+                        ingress,
+                        runtime,
                     )
                 }
-                None => admit_plan_for_boot_configured_ingress(params, ingress),
+                (None, None) => admit_plan_for_boot_configured_ingress(admission_params, ingress),
             }
         },
     )?;
-    let (mut start_config, verified_runtime) = prepared;
+    let (mut start_config, verified_runtime) = boot;
     for volume in &mut start_config.volumes {
         if admission
             .admitted

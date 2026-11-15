@@ -24,7 +24,7 @@ const ROOTFS_DIR: &str = "rootfs-dir:";
 /// Where an `--image` value's bytes come from. Every variant routes to the
 /// same downstream unpack / provenance / ext4 path; only acquisition differs.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::commands) enum ImageSource {
+pub enum ImageSource {
     /// A registry reference (`alpine:3.20`, `ghcr.io/x/y@sha256:…`). Parsed
     /// downstream by `mvm_fs::oci::ImageReference`; the only network-fetching
     /// source.
@@ -44,7 +44,7 @@ impl ImageSource {
     /// reference (so `alpine:3.20` and `ghcr.io/x:y` stay registry refs
     /// despite the colon). Empty input — or a transport with no locator — is
     /// an error.
-    pub(in crate::commands) fn classify(input: &str) -> Result<Self> {
+    pub fn classify(input: &str) -> Result<Self> {
         let input = input.trim();
         if input.is_empty() {
             bail!("image source must not be empty");

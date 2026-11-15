@@ -16,55 +16,26 @@ pub(super) enum PullVerification {
 }
 
 pub(super) fn run(cache_root: &Path, reference: String, prod: bool) -> Result<PullVerification> {
-    match super::source::ImageSource::classify(&reference)? {
-        super::source::ImageSource::Registry(_) => {}
-        source => {
-            let verification = match source {
-                super::source::ImageSource::RootfsDir(_) => PullVerification::Unverified,
-                _ => PullVerification::Verified,
-            };
-            crate::release_guest_runtime::ensure_release_pieces_prepared()?;
-            mvm_client::launch::runtime_overlay::prepare_oci_guest_runtime(cache_root)?;
-            let resolved = match source {
-                super::source::ImageSource::OciArchive(path) => {
-                    super::ingest::ingest_local_archive(cache_root, &path, &reference, prod)?
-                }
-                super::source::ImageSource::Stdin => {
-                    super::ingest::ingest_stdin_archive(cache_root, &reference, prod)?
-                }
-                super::source::ImageSource::RootfsDir(path) => {
-                    super::ingest::ingest_rootfs_dir(cache_root, &path, &reference, prod)?
-                }
-                super::source::ImageSource::Registry(_) => unreachable!(),
-            };
-            super::pull_core::publish_local_preparation(cache_root, &reference, &resolved)?;
-            let provenance = &resolved.provenance;
-            mvm_core::audit_emit!(
-                ImageFetch,
-                "source=image_pull reference={} digest={} prod={} layers={} trust_policy={} verification_status={} auth_source=local",
-                resolved.reference,
-                resolved.resolved_digest,
-                prod,
-                provenance.layer_digests.len(),
-                provenance.trust_policy,
-                provenance.verification_status,
-            );
-            ui::success(&format!(
-                "Prepared {} -> {}",
-                resolved.reference, resolved.resolved_digest
-            ));
-            ui::info(&format!("Rootfs: {}", resolved.rootfs_path.display()));
-            return Ok(verification);
-        }
+    use mvm_client::cli_image::{self as image_cache, ImageSource};
+    let source = ImageSource::classify(&reference)?;
+    let verification = if matches!(source, ImageSource::RootfsDir(_)) {
+        PullVerification::Unverified
+    } else {
+        PullVerification::Verified
+    };
+    image_cache::validate_preparation(&reference, prod)?;
+    crate::release_guest_runtime::ensure_release_pieces_prepared()?;
+    if matches!(source, ImageSource::Registry(_)) {
+        crate::commands::env::builder_vm::sweep_orphaned_vm_helpers_on_startup();
     }
-
-    // Materialization may spawn a builder VM (see `resolve_or_pull_run_image`);
-    // sweep any helper processes a prior builder run orphaned before adding
-    // another.
-    crate::commands::env::builder_vm::sweep_orphaned_vm_helpers_on_startup();
-
-    let (image, trust, auth_source) = super::pull_image_with_trust(cache_root, &reference, prod)?;
-    let provenance = image.provenance("image_pull", &reference, &trust);
+    let image = image_cache::pull(
+        cache_root,
+        &reference,
+        prod,
+        &super::pull_core::acquisition_hooks(),
+    )?;
+    let provenance = &image.provenance;
+    let auth_source = image.auth_source.as_deref().unwrap_or("local");
     mvm_core::audit_emit!(
         ImageFetch,
         "source=image_pull reference={} digest={} prod={} layers={} trust_policy={} verification_status={} auth_source={}",
@@ -76,17 +47,13 @@ pub(super) fn run(cache_root: &Path, reference: String, prod: bool) -> Result<Pu
         provenance.verification_status,
         auth_source
     );
+    let verb = if image.pulled { "Pulled" } else { "Prepared" };
     ui::success(&format!(
-        "Pulled {} -> {}",
+        "{verb} {} -> {}",
         image.reference, image.resolved_digest
     ));
-    if let Some(rootfs_path) = image.rootfs_path {
-        ui::info(&format!(
-            "Rootfs: {}",
-            cache_root.join(rootfs_path).display()
-        ));
-    }
-    Ok(PullVerification::Verified)
+    ui::info(&format!("Rootfs: {}", image.rootfs_path.display()));
+    Ok(verification)
 }
 
 /// Run `warm` once for `reference` when `--warm` was passed and the pull both
