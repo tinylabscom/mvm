@@ -404,15 +404,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "block2"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdeb9d870516001442e364c5220d3574d2da8dc765554b4a617230d33fa58ef5"
-dependencies = [
- "objc2",
-]
-
-[[package]]
 name = "borsh"
 version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1398,16 +1389,6 @@ dependencies = [
  "const-oid 0.10.2",
  "crypto-common 0.2.2",
  "ctutils",
-]
-
-[[package]]
-name = "dispatch2"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
-dependencies = [
- "bitflags 2.13.0",
- "objc2",
 ]
 
 [[package]]
@@ -3676,6 +3657,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvm-aead"
+version = "0.28.0-rc.4"
+dependencies = [
+ "aes-gcm",
+]
+
+[[package]]
 name = "mvm-agentd"
 version = "0.28.0-rc.4"
 dependencies = [
@@ -4009,6 +3997,7 @@ dependencies = [
  "ipnet",
  "keyring",
  "libc",
+ "mvm-aead",
  "mvm-contract",
  "mvm-http",
  "mvm-macho-sign",
@@ -4547,17 +4536,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "objc2-core-foundation"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a180dd8642fa45cdb7dd721cd4c11b1cadd4929ce112ebd8b9f5803cc79d536"
-dependencies = [
- "bitflags 2.13.0",
- "dispatch2",
- "objc2",
-]
-
-[[package]]
 name = "objc2-encode"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4570,10 +4548,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3e0adef53c21f888deb4fa59fc59f7eb17404926ee8a6f59f5df0fd7f9f3272"
 dependencies = [
  "bitflags 2.13.0",
- "block2",
- "libc",
  "objc2",
- "objc2-core-foundation",
 ]
 
 [[package]]

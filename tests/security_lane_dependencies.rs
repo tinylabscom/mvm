@@ -44,6 +44,45 @@ fn hostd_uses_contract_ir_without_the_authoring_sdk() {
 }
 
 #[test]
+fn aes_gcm_is_optimized_in_its_leaf_not_all_of_core() {
+    let core = workspace_manifest("crates/mvm-core/Cargo.toml");
+    let dependencies = core["dependencies"].as_table().unwrap();
+    assert!(dependencies.contains_key("mvm-aead"));
+    assert!(!dependencies.contains_key("aes-gcm"));
+    assert!(
+        core["dev-dependencies"]
+            .as_table()
+            .unwrap()
+            .contains_key("aes-gcm")
+    );
+
+    let root = workspace_manifest("Cargo.toml");
+    let packages = root["profile"]["dev"]["package"].as_table().unwrap();
+    assert!(
+        !packages.contains_key("mvm-core"),
+        "optimizing all of mvm-core restores the multi-minute compile bottleneck"
+    );
+    assert!(
+        packages["mvm-aead"]["opt-level"].as_integer().unwrap() >= 2,
+        "AES-GCM's concrete caller needs optimization to keep encrypted I/O fast"
+    );
+}
+
+#[test]
+fn dev_and_test_share_cargo_codegen_defaults() {
+    let root = workspace_manifest("Cargo.toml");
+    for profile in ["dev", "test"] {
+        assert!(
+            !root["profile"][profile]
+                .as_table()
+                .unwrap()
+                .contains_key("codegen-units"),
+            "{profile} must use Cargo's incremental/non-incremental defaults without an override"
+        );
+    }
+}
+
+#[test]
 fn guest_builder_excludes_the_host_keyring_feature() {
     let core = workspace_manifest("crates/mvm-core/Cargo.toml");
     assert_eq!(

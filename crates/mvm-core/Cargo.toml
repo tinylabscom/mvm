@@ -59,11 +59,11 @@ regex = { workspace = true, optional = true }
 tempfile.workspace = true
 
 # Folded in with the former mvm-security crate: the
-# `crypto` module's AEAD (aes-gcm), HMAC, OS keychain (keyring),
+# `crypto` module's AEAD (mvm-aead), HMAC, OS keychain (keyring),
 # secret wrappers (secrecy/zeroize), and secret-token scanning
 # (aho-corasick). All sync. `rand` is promoted from dev-only because
 # key_rotation / secret_store generate keys at runtime.
-aes-gcm.workspace = true
+mvm-aead.workspace = true
 # Host-only: secret-token scanning in `crypto::command_gate` /
 # `crypto::threat_classifier`. Optional; `host-state` pulls it.
 aho-corasick = { workspace = true, optional = true }
@@ -263,6 +263,8 @@ path = "tests/manifest_fixtures.rs"
 required-features = ["host-state"]
 
 [dev-dependencies]
+# Independent wire-format oracle for at-rest and session encryption tests.
+aes-gcm.workspace = true
 # Test-only: the mandatory-deny range test parses CIDRs to cross-check the
 # generated iptables script. No production path in this crate uses it.
 ipnet = { workspace = true }
