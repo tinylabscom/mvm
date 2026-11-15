@@ -155,20 +155,7 @@ impl ComposablePackSpec {
             };
             relative_path(destination, false).map_err(|_| ComposablePackError::Path)?;
         }
-        if self.entrypoint.len() > 128
-            || self.entrypoint.iter().map(String::len).sum::<usize>() > 16 * 1024
-            || self.entrypoint.first().is_none_or(|executable| {
-                !executable.starts_with('/')
-                    || executable.starts_with("//")
-                    || relative_path(executable.trim_start_matches('/'), false).is_err()
-            })
-            || self
-                .entrypoint
-                .iter()
-                .any(|argument| argument.is_empty() || argument.chars().any(char::is_control))
-        {
-            return Err(ComposablePackError::Entrypoint);
-        }
+        validate_entrypoint(&self.entrypoint)?;
         if self.resources.cpu_cores == 0 || self.resources.memory_mb == 0 {
             return Err(ComposablePackError::Resources);
         }
@@ -200,4 +187,26 @@ impl ComposablePackSpec {
         value.sort_all_objects();
         serde_json::to_vec(&value).map_err(|_| ComposablePackError::Serialization)
     }
+}
+
+/// Apply the same authored argv rule to a frozen entrypoint read from a lock.
+///
+/// # Errors
+///
+/// Refuses a non-absolute executable, unsafe path or oversized argv.
+pub fn validate_entrypoint(entrypoint: &[String]) -> Result<(), ComposablePackError> {
+    if entrypoint.len() > 128
+        || entrypoint.iter().map(String::len).sum::<usize>() > 16 * 1024
+        || entrypoint.first().is_none_or(|executable| {
+            !executable.starts_with('/')
+                || executable.starts_with("//")
+                || relative_path(executable.trim_start_matches('/'), false).is_err()
+        })
+        || entrypoint
+            .iter()
+            .any(|argument| argument.is_empty() || argument.chars().any(char::is_control))
+    {
+        return Err(ComposablePackError::Entrypoint);
+    }
+    Ok(())
 }
