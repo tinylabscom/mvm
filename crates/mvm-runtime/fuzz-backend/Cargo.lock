@@ -2193,7 +2193,6 @@ dependencies = [
 name = "mvm-core"
 version = "0.28.0-rc.5"
 dependencies = [
- "aes-gcm",
  "aho-corasick",
  "anyhow",
  "base64",
@@ -2207,6 +2206,7 @@ dependencies = [
  "keyring",
  "libc",
  "mvm-contract",
+ "mvm-crypto",
  "mvm-macho-sign",
  "plist",
  "rand",
@@ -2228,6 +2228,13 @@ dependencies = [
  "uuid",
  "x25519-dalek",
  "zeroize",
+]
+
+[[package]]
+name = "mvm-crypto"
+version = "0.28.0-rc.5"
+dependencies = [
+ "aes-gcm",
 ]
 
 [[package]]

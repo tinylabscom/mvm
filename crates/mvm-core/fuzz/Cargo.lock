@@ -639,7 +639,6 @@ dependencies = [
 name = "mvm-core"
 version = "0.28.0-rc.5"
 dependencies = [
- "aes-gcm",
  "aho-corasick",
  "anyhow",
  "base64",
@@ -652,6 +651,7 @@ dependencies = [
  "hmac",
  "libc",
  "mvm-contract",
+ "mvm-crypto",
  "mvm-macho-sign",
  "plist",
  "rand",
@@ -681,6 +681,13 @@ dependencies = [
  "libfuzzer-sys",
  "mvm-core",
  "serde_json",
+]
+
+[[package]]
+name = "mvm-crypto"
+version = "0.28.0-rc.5"
+dependencies = [
+ "aes-gcm",
 ]
 
 [[package]]
