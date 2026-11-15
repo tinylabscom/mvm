@@ -397,6 +397,17 @@ impl VolumeService for LocalVolumeService {
     }
 
     fn acquire_launch_lease(&self, request: &LaunchLeaseRequest) -> Result<LaunchPreparation> {
+        // A launch with no volumes touches no shared state, so it must not
+        // serialize with, or fail because of, every other launch on the host.
+        if request.explicit.is_empty() && VolumeMountRegistry::load(&request.owner)?.is_empty() {
+            return Ok(LaunchPreparation {
+                volumes: Vec::new(),
+                instruction_images: Vec::new(),
+                #[cfg(unix)]
+                writable_images: Vec::new(),
+                lease: LaunchLease::acquire(&request.owner, Vec::new())?,
+            });
+        }
         let _lock = lifecycle::acquire_volume_lifecycle_lock()?;
         self.acquire_launch_lease_locked(request)
     }
