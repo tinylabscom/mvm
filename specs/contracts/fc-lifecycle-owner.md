@@ -1,7 +1,13 @@
 # Firecracker persistent lifecycle owner
 
-Status: **Preparatory contract and test model. No process host, positive
-factory, protocol version or native mechanism is enabled.**
+Status: **Preparatory contract and test model, deferred past the demo by
+maintainer decision on 2026-11-14 and tracked in
+[#5522](https://github.com/tinylabscom/mvm/issues/5522). No process host,
+positive factory, protocol version or native mechanism is enabled.** The process
+model decision (an `ADR-022` amendment or a Firecracker-specific decision, with a
+focused review packet) has not been made. This document and
+`crates/mvm-client/tests/fc_owner_contract.rs` are preserved unchanged for when
+the work resumes.
 
 Scope: [PS-06 #3716](https://github.com/tinylabscom/mvm/issues/3716), coordinated
 with [#4414](https://github.com/tinylabscom/mvm/issues/4414) and
