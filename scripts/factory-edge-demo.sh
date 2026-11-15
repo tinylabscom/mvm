@@ -33,7 +33,7 @@ a="line-a-$id"; b="line-b-$id"; m="maintenance-$id"
 # refuses the loser, so a refused launch is retried.
 launch() {
   for _ in 1 2 3 4 5; do
-    $mvm run -d --image "$image" --name "$1" --allow-host "$2" -- sh -c "$3" >/dev/null 2>&1 </dev/null && return
+    $mvm machine run -d --image "$image" --name "$1" --allow-host "$2" -- sh -c "$3" >/dev/null 2>&1 </dev/null && return
     sleep 1
   done
   echo "could not start $1" >&2; return 1

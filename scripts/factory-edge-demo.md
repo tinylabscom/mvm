@@ -35,7 +35,7 @@ the command line:
 
 | Demo step | Command line | Library (`mvm-client`) |
 | --- | --- | --- |
-| Start a program with one allowed destination | `mvmctl run -d --name N --allow-host H:443 -- CMD` | `LaunchRequest::builder(LifecycleMode::Persistent, image).name(N).command(CMD).allow_egress(H, 443).build()?`, then `LocalBackend::new().launch(request)` |
+| Start a program with one allowed destination | `mvmctl machine run -d --image curlimages/curl:8.21.0 --name N --allow-host H:443 -- CMD` | `LaunchRequest::builder(LifecycleMode::Persistent, image).name(N).command(CMD).allow_egress(H, 443).build()?`, then `LocalBackend::new().launch(request)` |
 | List them | `mvmctl machine ls` | `inventory::list_local_inventory` |
 | What a program is allowed | `mvmctl machine inspect N` | not available: `inspect_machine` returns status, backend, memory and ports but not the allowed destinations ([#5521](https://github.com/tinylabscom/mvm/issues/5521)); the UI can show what it asked for at launch |
 | What the host refused, and the audit result | `mvmctl explain N` | `explain::explain_local_run("local", N)`, which returns the events, `egress_denials` and `chain_verified` |
@@ -61,14 +61,26 @@ From a checkout of this repository:
 
 ```sh
 MVM_VERSION=v0.28.0-rc.2 MVM_SKIP_BOOTSTRAP=1 sh install.sh
+export MVMCTL="${MVMCTL:-mvmctl}"
 export MVM_HOME="$HOME/.mvm-demo"
-mvmctl image pull curlimages/curl:8.21.0
-mvmctl run --image curlimages/curl:8.21.0 -- true
+"$MVMCTL" --version
+"$MVMCTL" bootstrap
+"$MVMCTL" image pull curlimages/curl:8.21.0
 ```
 
-The last command builds the runtime the first time, which takes a few minutes.
-It needs an Apple Silicon Mac on macOS 26 or later, and working internet and
-DNS, because each allowed destination is looked up when its program starts.
+Bootstrap prepares the runtime before any workload starts and can take a few
+minutes. The demo needs an Apple Silicon Mac on macOS 26 or later, and working
+internet and DNS, because each allowed destination is looked up when its
+program starts.
+
+Keep `MVMCTL` and `MVM_HOME` exported in the same terminal when running the demo
+or `--down`. `MVMCTL` selects the executable for the script; it does not change
+which executable a bare `mvmctl` command resolves to. Use `"$MVMCTL"` for setup
+commands too, so preparation and launches use the same binary and cache.
+
+To use an already-built binary from this checkout instead of the installed
+release, set `export MVMCTL="$PWD/target/release/mvmctl"` before the preparation
+commands above, and skip the installer command.
 
 ## Known limits
 
