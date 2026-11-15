@@ -93,9 +93,26 @@ pub(crate) fn local_master_key_dir() -> PathBuf {
 
 /// Exclusive host-wide lifecycle lock. Every mutating volume operation and
 /// every launch-time lease acquisition serializes on this flock.
+///
+/// Holders keep it for milliseconds, so a contended caller waits briefly for its
+/// turn instead of failing; only a holder that outlasts the wait is an error.
 pub(crate) fn acquire_volume_lifecycle_lock() -> Result<mvm_core::util::atomic_io::FileLock> {
-    mvm_core::util::atomic_io::FileLock::try_acquire(&LocalVolumeCatalog::path())?
-        .context("another local volume lifecycle operation is already in progress")
+    #[cfg(not(test))]
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+    #[cfg(test)]
+    const WAIT: std::time::Duration = std::time::Duration::from_millis(150);
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        if let Some(lock) =
+            mvm_core::util::atomic_io::FileLock::try_acquire(&LocalVolumeCatalog::path())?
+        {
+            return Ok(lock);
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("another local volume lifecycle operation is already in progress");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 pub(crate) fn unlock_staging_path(host_path: &Path) -> PathBuf {

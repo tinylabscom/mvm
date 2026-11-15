@@ -619,6 +619,29 @@ mod tests {
         );
     }
 
+    /// Stopping a VM that holds no lease takes no lock, so many stops at once
+    /// never collide.
+    #[test]
+    fn releasing_an_owner_with_no_leases_does_not_need_the_lifecycle_lock() {
+        let _home = TestVolumeHome::new();
+        let _held = super::lifecycle::acquire_volume_lifecycle_lock().unwrap();
+        let outcome = service().release_owner_leases("vm-1").unwrap();
+        assert_eq!(outcome.released, 0);
+    }
+
+    /// A contended caller waits its turn rather than failing outright.
+    #[test]
+    fn a_short_lived_lock_holder_is_waited_out() {
+        let _home = TestVolumeHome::new();
+        let held = super::lifecycle::acquire_volume_lifecycle_lock().unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            drop(held);
+        });
+        super::lifecycle::acquire_volume_lifecycle_lock().expect("waits for the holder");
+        releaser.join().unwrap();
+    }
+
     #[test]
     fn sealed_profile_refuses_read_write_launch() {
         let home = TestVolumeHome::new();
