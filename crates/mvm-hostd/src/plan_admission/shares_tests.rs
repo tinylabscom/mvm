@@ -1,8 +1,7 @@
 #![cfg(test)]
 
-use super::shares::enforce_admitted_shares;
-use super::test_support::fixture_input;
-use mvm_core::plan::synthesize_plan;
+use super::test_support::*;
+use super::*;
 
 /// Claim 1: a volume that the signed plan didn't admit — or that
 /// mismatches the admitted ro/rw — is refused before launch.

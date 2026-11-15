@@ -2,12 +2,38 @@
 
 //! Fixtures shared by the plan-admission test files.
 
-use super::*;
-use chrono::{DateTime, Utc};
-use mvm_build::guest_libc::GuestLibc;
-use mvm_core::plan::{
-    ExecutionPlan, PlanSeccompTier, SecretReleasePolicy, SynthesisInput, synthesize_plan,
+pub(super) use super::extension_packs::{
+    budgets_are_narrower, extension_artifact_exceeds_budget, extension_binding_matches_contract,
+    validate_extension_bindings,
 };
+pub(super) use super::grant_validation::{
+    enforce_mailbox_retention, enforceability_gate, host_cpu_mechanism_gap,
+};
+pub(super) use super::launch_substrate::{enforce_size_cap, write_secret_file};
+pub(super) use super::registry_pack::verify_registry_pack_assets;
+pub(super) use super::start::{attach_assurance_proxy, launch_decision_record};
+pub(super) use super::verb_grant_sidecar::mint_verb_grant_sidecar;
+use super::*;
+pub(super) use crate::audit::host_keypair::host_signer_id;
+pub(super) use chrono::{DateTime, Duration, TimeZone, Utc};
+pub(super) use ed25519_dalek::SigningKey;
+pub(super) use mvm_build::guest_libc::GuestLibc;
+pub(super) use mvm_contract::builder::BuilderError;
+pub(super) use mvm_contract::protocol::mailbox::{
+    ExecutionEpoch, MailboxGrant, MailboxId, MailboxRetentionPolicy,
+};
+pub(super) use mvm_contract::protocol::resource_controls::EnforcedGrants;
+pub(super) use mvm_contract::provenance::DecisionCategory;
+pub(super) use mvm_core::plan::test_support::PlanFixture;
+pub(super) use mvm_core::plan::{
+    ExecutionPlan, PlanSeccompTier, SecretReleasePolicy, SynthesisInput, check_window, sign_plan,
+    synthesize_plan, verify_plan,
+};
+pub(super) use mvm_core::user_config::{MvmConfig, TrustedPlanSigner};
+pub(super) use mvm_core::util::test_env::TestEnv;
+pub(super) use mvm_core::vm_backend::VmId;
+pub(super) use rand::Rng;
+pub(super) use sha2::{Digest, Sha256};
 
 pub(super) const FIXTURE_SHA: &str =
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

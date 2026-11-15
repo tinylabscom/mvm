@@ -1,9 +1,7 @@
 #![cfg(test)]
 
-use super::test_support::host_with_ceiling;
+use super::test_support::*;
 use super::*;
-use mvm_core::plan::Variant;
-use mvm_core::vm_backend::VmStartConfig;
 
 #[test]
 fn signed_runtime_identity_without_launch_evidence_is_not_admitted() {

@@ -1,14 +1,7 @@
 #![cfg(test)]
 
-use super::admit::{BundleAdmissionContext, admit_for_run, admit_signed_plan_for_run};
-use super::bundle_environment::BundleEnvironmentRefused;
-use super::nonce_ledger::InMemoryNonceLedger;
-use super::test_support::{fixture_input, host_with_ceiling};
+use super::test_support::*;
 use super::*;
-use anyhow::Result;
-use mvm_core::plan::{SynthesisInput, Variant, sign_plan, synthesize_plan};
-use mvm_core::vm_backend::VmStartConfig;
-use rand::Rng;
 
 // ── Claim 9: admit-time bundle re-verify ─────────────────────
 //

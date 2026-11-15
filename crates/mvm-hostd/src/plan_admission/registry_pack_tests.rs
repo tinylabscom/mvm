@@ -1,9 +1,7 @@
 #![cfg(test)]
 
-use super::registry_pack::verify_registry_pack_assets;
-use super::test_support::{FIXTURE_SHA, host_with_ceiling, plan_binding};
+use super::test_support::*;
 use super::*;
-use mvm_core::vm_backend::{BackendKind, VmStartConfig};
 
 #[cfg(feature = "manifest-verify")]
 const PYTHON_MANIFEST: &[u8] =

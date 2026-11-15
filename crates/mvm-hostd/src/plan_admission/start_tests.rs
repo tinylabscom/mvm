@@ -1,20 +1,7 @@
 #![cfg(test)]
 
-use super::admit::admit_for_run;
-use super::admit_params::AdmitAndStartParams;
-use super::assurance_runtime::AssuranceRuntimeBinding;
-use super::extension_packs::ExtensionAdmissionContext;
-use super::launch_substrate::thread_cpu_grant;
-use super::nonce_ledger::InMemoryNonceLedger;
-use super::start::{StartAdmittedParams, admit_and_start, attach_assurance_proxy, start_admitted};
-use super::test_support::{cpu_share, fixture_input, host_with_ceiling, plan_binding};
+use super::test_support::*;
 use super::*;
-use chrono::TimeZone;
-use chrono::Utc;
-use mvm_contract::protocol::resource_controls::EnforcedGrants;
-use mvm_core::plan::{Variant, sign_plan};
-use mvm_core::vm_backend::{VmId, VmStartConfig};
-use rand::Rng;
 
 #[test]
 fn assurance_proxy_attachment_refuses_a_duplicate_service() {

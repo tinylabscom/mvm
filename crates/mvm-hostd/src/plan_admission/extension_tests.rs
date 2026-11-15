@@ -1,12 +1,7 @@
 #![cfg(test)]
 
-use super::extension_packs::{
-    AdmittedExtension, budgets_are_narrower, extension_artifact_exceeds_budget,
-    extension_binding_matches_contract, validate_extension_bindings,
-};
+use super::test_support::*;
 use super::*;
-use sha2::Digest;
-use sha2::Sha256;
 
 fn extension_binding(
     placement: mvm_contract::protocol::extension_pack::ExtensionPlacement,

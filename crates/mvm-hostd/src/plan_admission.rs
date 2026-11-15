@@ -59,9 +59,8 @@ use anyhow::{Context, Result};
 use mvm_core::plan::{ExecutionPlan, PlanId, SignedExecutionPlan, Variant};
 use mvm_core::vm_backend::{BackendKind, VmStartConfig};
 
+mod admission_support;
 mod admit;
-mod admit_params;
-mod admitted_environment;
 mod assurance_runtime;
 mod bundle_environment;
 mod canonical_kernel;
@@ -76,19 +75,21 @@ mod mailbox_posture;
 mod nonce_ledger;
 mod registry_pack;
 mod rollback;
-mod sdk_sidecar;
 mod shares;
 mod start;
 mod verb_grant_sidecar;
 
 use assurance_runtime::AssuranceRuntimeBinding;
 
+pub use admission_support::{
+    AdmitAndStartParams, AdmitAndStartParamsBuilder, SdkSidecarBackendCompatibilityError,
+    enforce_admitted_environment, enforce_sdk_sidecar_attachment,
+    enforce_sdk_sidecar_backend_compatibility, enforce_sdk_sidecar_for_launch,
+};
 pub use admit::{
     BundleAdmissionContext, BundleImageAdmissionContext, admit_for_run, admit_plan_for_run,
     admit_signed_plan_for_run,
 };
-pub use admit_params::{AdmitAndStartParams, AdmitAndStartParamsBuilder};
-pub use admitted_environment::enforce_admitted_environment;
 pub use bundle_environment::BundleEnvironmentRefused;
 pub use extension_packs::{AdmittedExtension, ExtensionAdmissionContext};
 pub use launch_substrate::{
@@ -102,10 +103,6 @@ pub use registry_pack::{BuiltPackBootCheck, PreparedBuiltPackRuntime, prepare_bu
 pub use rollback::{
     apply_admitted_grants_or_undo_launch, record_charge_or_undo_launch,
     record_charge_with_owned_rollback,
-};
-pub use sdk_sidecar::{
-    SdkSidecarBackendCompatibilityError, enforce_sdk_sidecar_attachment,
-    enforce_sdk_sidecar_backend_compatibility, enforce_sdk_sidecar_for_launch,
 };
 pub use shares::enforce_admitted_shares;
 pub use start::{StartAdmittedParams, StartedMachine, admit_and_start, start_admitted};
@@ -367,11 +364,9 @@ impl<'a> RunPosture<'a> {
 }
 
 #[cfg(test)]
-mod admit_params_tests;
+mod admission_support_tests;
 #[cfg(test)]
 mod admit_tests;
-#[cfg(test)]
-mod admitted_environment_tests;
 #[cfg(test)]
 mod admitted_plan_tests;
 #[cfg(test)]
@@ -381,13 +376,9 @@ mod extension_tests;
 #[cfg(test)]
 mod grant_gate_tests;
 #[cfg(test)]
-mod launch_decision_record_tests;
-#[cfg(test)]
 mod launch_substrate_tests;
 #[cfg(test)]
 mod registry_pack_tests;
-#[cfg(test)]
-mod sdk_sidecar_tests;
 #[cfg(test)]
 mod shares_tests;
 #[cfg(test)]
