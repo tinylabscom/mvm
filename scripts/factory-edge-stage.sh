@@ -121,12 +121,16 @@ staged_at="$(python3 -I -c "from datetime import datetime, timezone; print(datet
 # An inspection workload's work: send a result to its granted destination, repeatedly.
 inspect() { echo "while true; do curl -sS -m 10 -o /dev/null https://$1/ >/dev/null 2>&1; sleep $INSPECT_EVERY; done"; }
 start() { # <name> <grant> <script>
-  mvm run -d --image "$IMAGE" --hypervisor "$HYPERVISOR" --name "$1" --allow-host "$2" -- sh -c "$3" >/dev/null </dev/null \
-    || fail "could not start $1"
+  mvm run -d --image "$IMAGE" --hypervisor "$HYPERVISOR" --name "$1" --allow-host "$2" -- sh -c "$3" >/dev/null </dev/null
 }
-start "$LINE_A" "$GRANT_A" "$(inspect "${GRANT_A%%:*}")"
-start "$LINE_B" "$GRANT_B" "$(inspect "${GRANT_B%%:*}")"
-start "$MAINT" "$APPROVED" "sleep $ATTEMPT_AFTER; while true; do curl -sS -m 10 https://$UNAPPROVED/ >/dev/null 2>&1; sleep $ATTEMPT_EVERY; done"
+# The three starts do not depend on each other, so run them together: one after
+# another, each would wait out its own launch.
+start "$LINE_A" "$GRANT_A" "$(inspect "${GRANT_A%%:*}")" & pid_a=$!
+start "$LINE_B" "$GRANT_B" "$(inspect "${GRANT_B%%:*}")" & pid_b=$!
+start "$MAINT" "$APPROVED" "sleep $ATTEMPT_AFTER; while true; do curl -sS -m 10 https://$UNAPPROVED/ >/dev/null 2>&1; sleep $ATTEMPT_EVERY; done" & pid_m=$!
+wait "$pid_a" || fail "could not start $LINE_A"
+wait "$pid_b" || fail "could not start $LINE_B"
+wait "$pid_m" || fail "could not start $MAINT"
 for m in "$LINE_A" "$LINE_B" "$MAINT"; do until_ok "$m to be running" is_running "$m"; done
 say "all three workloads are running"
 for m in "$LINE_A" "$LINE_B"; do until_ok "the host to record $m's lookup of its granted destination" allowed_for "$m"; done

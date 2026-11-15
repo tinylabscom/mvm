@@ -168,4 +168,18 @@ grep -q '^FINDING: install-time preparation ran during the demo' <<<"${out}" || 
 out="$(fresh; stage ok HYPERVISOR=hvf >/dev/null; demo needs-bootstrap HYPERVISOR=hvf)" && fail "an install that needs bootstrap passed"
 grep -q "^FINDING: the install asked for 'mvmctl bootstrap'" <<<"${out}" || fail "no bootstrap finding"
 
+# ---- the one-command runner ----
+fresh
+out="$(envrun ok factory-edge-run.sh HYPERVISOR=hvf)" || fail "the one-command run failed on a correct product: ${out}"
+grep -q '^DEMO_RESULT=pass$' <<<"${out}" || fail "the one-command run printed no pass line: ${out}"
+grep -q '^The demo passed in ' <<<"${out}" || fail "the one-command run did not say it passed: ${out}"
+[ "$(ls "${work}"/state/m.* 2>/dev/null | wc -l | tr -d ' ')" = 0 ] || fail "the one-command run left staged machines behind"
+fresh
+out="$(envrun inspection-silent factory-edge-run.sh HYPERVISOR=hvf)" && fail "the one-command run passed although an inspection workload stopped: ${out}"
+grep -q '^The demo did not pass' <<<"${out}" || fail "a failing one-command run did not say so: ${out}"
+[ "$(ls "${work}"/state/m.* 2>/dev/null | wc -l | tr -d ' ')" = 0 ] || fail "a failing one-command run left staged machines behind"
+fresh
+out="$(envrun image-missing factory-edge-run.sh HYPERVISOR=hvf)" && fail "the one-command run passed with the image missing: ${out}"
+grep -q 'could not be staged' <<<"${out}" || fail "a staging failure was not reported by the one-command run: ${out}"
+
 echo "ok ($n checks per run)"
