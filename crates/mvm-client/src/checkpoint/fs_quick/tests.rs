@@ -532,8 +532,8 @@ fn missing_tampered_or_wrong_tenant_history_refuses() {
 #[test]
 fn pruned_history_refuses_even_when_original_creation_is_retained() {
     use mvm_hostd::supervisor::FileAuditSigner;
-    use mvm_hostd::supervisor::audit::{AuditSigner, for_plan};
-    use mvm_hostd::supervisor::audit_file::RotationPolicy;
+    use mvm_hostd::supervisor::audit::audit_file::RotationPolicy;
+    use mvm_hostd::supervisor::audit::signer::{AuditSigner, for_plan};
     let fixture = Fixture::new(Vec::new());
     let audit = fixture.home.path().join("audit");
     std::fs::remove_file(audit.join("local.jsonl")).unwrap();

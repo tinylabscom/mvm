@@ -305,8 +305,8 @@ mod tests {
     /// Record a refusal the way the per-VM endpoint does: unbound, attributed
     /// to the machine by name, into the same tenant chain.
     fn endpoint_refusal(dir: &Path, key: &SigningKey, vm: &str, target: &str, reason: &str) {
-        use mvm_hostd::supervisor::audit_recorder::{EventCategory, Recorder};
-        let signer = mvm_hostd::supervisor::audit_file::FileAuditSigner::open(
+        use mvm_hostd::supervisor::audit::audit_recorder::{EventCategory, Recorder};
+        let signer = mvm_hostd::supervisor::audit::audit_file::FileAuditSigner::open(
             key.clone(),
             dir.to_path_buf(),
         )

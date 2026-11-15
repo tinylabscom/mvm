@@ -13,8 +13,8 @@ use mvm_core::transcript::{
     AtRestRetention, CaptureBinding, CaptureBounds, Direction, MANIFEST_FILENAME, RetentionPolicy,
     TranscriptManifest, TranscriptWriter, TranscriptWriterConfig,
 };
-use mvm_hostd::supervisor::audit::{AuditSigner, PlanAuditEntry};
-use mvm_hostd::supervisor::audit_file::{FileAuditSigner, RotationPolicy};
+use mvm_hostd::supervisor::audit::audit_file::{FileAuditSigner, RotationPolicy};
+use mvm_hostd::supervisor::audit::signer::{AuditSigner, PlanAuditEntry};
 
 struct Fixture {
     root: tempfile::TempDir,

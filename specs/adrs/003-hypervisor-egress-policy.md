@@ -86,7 +86,7 @@ destination whose rules cannot be enforced is refused.
 same endpoint that read the request holds the flow and puts the question —
 route, rule, destination, method, path — to an approval broker on a socket in
 the VM's socket directory, bound by the `mvmctl` that launched the run
-(`mvm_hostd::supervisor::runtime_approval`). A secret binding marked
+(`mvm_hostd::supervisor::endpoint::runtime_approval`). A secret binding marked
 `approve = ask` raises the same question before its placeholder is
 substituted. The broker only answers; the endpoint records each request in
 the contract's `ApprovalLedger`, enforces the timeout, the per-VM prompt rate

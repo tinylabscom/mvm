@@ -1,7 +1,9 @@
 #!/bin/sh
-# mvmctl installer. Downloads the released binary for this platform from
-# GitHub releases, verifies its SHA-256 and tag-pinned release signature,
-# installs it, and on macOS applies the required VM entitlements.
+# mvmctl installer and uninstaller. With no arguments, downloads the released
+# binary for this platform from GitHub releases, verifies its SHA-256 and
+# tag-pinned release signature, installs it, and on macOS applies the required
+# VM entitlements. `install.sh uninstall` removes a marked install, checking
+# for running machines and host-agent daemons before removing anything.
 #
 # Layout. Every release is unpacked whole into its own directory and the
 # commands on PATH reach it through one `current` link:
@@ -50,6 +52,8 @@
 #   MVM_COSIGN_DOWNLOAD_URL override the pinned cosign release base (tests)
 #   MVM_INSTALL_TTY        answer file to read the backend picker's reply from
 #                          instead of /dev/tty; empty means no terminal (tests)
+#   MVM_HOME               mvm state directory for uninstall; default: ~/.mvm
+#   MVM_UNINSTALL_CHECKER  mvmctl used to check running machines; the CLI sets itself
 set -eu
 
 REPO="tinylabscom/mvm"
@@ -64,7 +68,7 @@ COSIGN_SHA256_AARCH64_UNKNOWN_LINUX_GNU="c5d324e091826b0d7a78eb16fef316450b4eb9a
 API_BASE="${MVM_UPDATE_API_URL:-https://api.github.com}"
 DL_BASE="${MVM_UPDATE_DOWNLOAD_URL:-https://github.com}"
 COSIGN_BASE="${MVM_COSIGN_DOWNLOAD_URL:-https://github.com/sigstore/cosign/releases/download}"
-INSTALL_DIR="${MVM_INSTALL_DIR:-$HOME/.local/bin}"
+INSTALL_DIR="${MVM_INSTALL_DIR:-${HOME:-}/.local/bin}"
 LIB_DIR="${MVM_INSTALL_LIB_DIR:-$(dirname "$INSTALL_DIR")/lib/mvm}"
 KEEP="${MVM_INSTALL_KEEP:-3}"
 
@@ -78,8 +82,7 @@ PRUNE_PAYLOADS=""
 SELECTED_BACKEND=""
 LEGACY_LIBKRUN_TIER_PAYLOADS="mvm-libkrun-supervisor lib licenses sources SOURCE-OFFER.txt SOURCE-PINS"
 
-# Markers naming what this installer created. uninstall.sh and
-# `mvmctl env update` read the same names.
+# Markers naming what this installer created. `mvmctl env update` reads the same names.
 LIB_MARKER=".mvm-lib"
 RELEASE_MARKER=".mvm-release"
 
@@ -87,30 +90,6 @@ say() { printf '[mvm] %s\n' "$1"; }
 warn() { printf '[mvm] WARN: %s\n' "$1" >&2; }
 die() { printf '[mvm] ERROR: %s\n' "$1" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
-
-need curl
-need tar
-
-# Options: --backend <name> stages that backend's components instead of the
-# auto-detected tier (scripted installs; MVM_INSTALL_BACKEND is equivalent).
-BACKEND_REQUESTED="${MVM_INSTALL_BACKEND:-}"
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --backend)
-      shift
-      BACKEND_REQUESTED="${1:-}"
-      [ -n "$BACKEND_REQUESTED" ] || die "missing value for --backend"
-      ;;
-    --backend=*) BACKEND_REQUESTED="${1#--backend=}" ;;
-    *) die "unknown argument: $1 (usage: install.sh [--backend <name>])" ;;
-  esac
-  shift
-done
-
-case "$KEEP" in
-  ''|*[!0-9]*) die "MVM_INSTALL_KEEP must be a whole number, got: $KEEP" ;;
-esac
-[ "$KEEP" -ge 1 ] || die "MVM_INSTALL_KEEP must be at least 1"
 
 detect_target() {
   os="$(uname -s)"
@@ -304,8 +283,7 @@ ADOPTABLE=""
 # installer copied these names straight into the install dir. `mvmctl` must be a
 # regular file that reports itself as mvmctl, or this returns 1 and prints
 # nothing; `assets` counts only while it holds nothing but the two entitlement
-# profiles; every other name must be a regular file. install.sh and
-# uninstall.sh carry this function verbatim, and a test holds them equal.
+# profiles; every other name must be a regular file.
 unversioned_install_entries() {
   unversioned_dir="$1"
   if [ ! -f "$unversioned_dir/mvmctl" ] || [ -L "$unversioned_dir/mvmctl" ]; then
@@ -1088,6 +1066,341 @@ say_selected_backend() {
   esac
   say "Installed backend: $SELECTED_BACKEND ($host_detail). Add another with \`mvmctl backend add <name>\`."
 }
+
+# Refuse to purge anything that does not resolve to recognisable mvm state,
+# or that contains the user's home.
+uninstall_state_refusal() {
+  if [ "$STATE_DIR_STRICT" != "1" ]; then
+    echo "HOME and MVM_HOME are both unset"
+    return 0
+  fi
+  if [ -z "${HOME:-}" ]; then
+    echo "HOME is not set, so it cannot be checked against your home directory"
+    return 0
+  fi
+  if ! state_physical="$(cd "$STATE_PATH" 2>/dev/null && pwd -P)"; then
+    echo "it cannot be resolved to a directory"
+    return 0
+  fi
+  if [ "$state_physical" = "/" ]; then
+    echo "it is /"
+    return 0
+  fi
+  if ! home_physical="$(cd "$HOME" 2>/dev/null && pwd -P)"; then
+    echo "HOME cannot be resolved, so it cannot be checked against your home directory"
+    return 0
+  fi
+  case "$home_physical/" in
+    "$state_physical"/*)
+      echo "it is your home directory or contains it"
+      return 0
+      ;;
+  esac
+  if [ "${state_physical##*/}" = ".mvm" ] \
+    || [ -f "$state_physical/keys/host-signer.ed25519" ] \
+    || [ -f "$state_physical/state/log/audit.jsonl" ]; then
+    return 0
+  fi
+  for chain in "$state_physical"/audit/*.jsonl; do
+    if [ -f "$chain" ]; then
+      return 0
+    fi
+  done
+  echo "it does not look like mvm state (not a directory named .mvm, and no host signing key or audit chain)"
+}
+
+uninstall_remove_state() {
+  refusal="$(uninstall_state_refusal)"
+  if [ -n "$refusal" ]; then
+    die "refusing to remove $STATE_DIR: $refusal."
+  fi
+  if [ -L "$STATE_PATH" ]; then
+    rm -f "$STATE_PATH"
+    say "Removed the link $STATE_PATH; the directory it pointed at is left in place."
+  else
+    rm -rf "$STATE_PATH"
+    say "Removed $STATE_PATH."
+  fi
+}
+
+uninstall_cleanup() {
+  if [ -n "$LOCK" ]; then
+    $SUDO rmdir "$LOCK" 2>/dev/null || true
+  fi
+}
+
+uninstall_run() {
+  if [ "$DRY_RUN" = "1" ]; then
+    say "would run: $*"
+  else
+    $SUDO "$@"
+  fi
+}
+
+uninstall_main() {
+  PURGE=0
+  DRY_RUN=0
+  FORCE=0
+  for arg in "$@"; do
+    case "$arg" in
+      --purge) PURGE=1 ;;
+      --dry-run) DRY_RUN=1 ;;
+      --force) FORCE=1 ;;
+      -h|--help)
+        printf '%s\n' \
+          "Usage: install.sh uninstall [--purge] [--dry-run] [--force]" \
+          "  --purge     also remove the mvm state directory without asking" \
+          "  --dry-run   print what would be removed and change nothing" \
+          "  --force     skip the running-machine check and daemon shutdown"
+        return 0
+        ;;
+      *) die "unknown argument: $arg (expected --purge, --dry-run or --force)" ;;
+    esac
+  done
+
+  if [ -n "${MVM_INSTALL_LIB_DIR:-}" ]; then
+    LIB_DIR="$MVM_INSTALL_LIB_DIR"
+    if [ -n "${MVM_INSTALL_DIR:-}" ]; then
+      INSTALL_DIR="$MVM_INSTALL_DIR"
+    elif [ -f "$LIB_DIR/$LIB_MARKER" ]; then
+      INSTALL_DIR="$(sed -n 's/^install_dir=//p' "$LIB_DIR/$LIB_MARKER" | head -n1)"
+    else
+      INSTALL_DIR=""
+    fi
+    if [ -z "$INSTALL_DIR" ]; then
+      [ -n "${HOME:-}" ] || die "HOME is not set; set MVM_INSTALL_DIR to the directory mvmctl was installed into"
+      INSTALL_DIR="$HOME/.local/bin"
+    fi
+  else
+    if [ -z "${MVM_INSTALL_DIR:-}" ] && [ -z "${HOME:-}" ]; then
+      die "HOME is not set; set MVM_INSTALL_DIR to the directory mvmctl was installed into"
+    fi
+    INSTALL_DIR="${MVM_INSTALL_DIR:-$HOME/.local/bin}"
+    LIB_DIR="$(dirname "$INSTALL_DIR")/lib/mvm"
+  fi
+  if [ -n "${MVM_HOME:-}" ]; then
+    STATE_DIR="$MVM_HOME"
+    STATE_DIR_STRICT=1
+  elif [ -n "${HOME:-}" ]; then
+    STATE_DIR="$HOME/.mvm"
+    STATE_DIR_STRICT=1
+  else
+    STATE_DIR="/tmp/.mvm"
+    STATE_DIR_STRICT=0
+  fi
+  STATE_PATH="$STATE_DIR"
+  while [ "${STATE_PATH%/}" != "$STATE_PATH" ] && [ -n "${STATE_PATH%/}" ]; do
+    STATE_PATH="${STATE_PATH%/}"
+  done
+  if [ "$PURGE" = "1" ] && [ -e "$STATE_DIR" ]; then
+    refusal="$(uninstall_state_refusal)"
+    if [ -n "$refusal" ]; then
+      die "refusing --purge of $STATE_DIR: $refusal. Nothing was removed."
+    fi
+  fi
+  SUDO=""
+  LOCK=""
+  trap uninstall_cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  LIB_OURS=0
+  if [ -d "$LIB_DIR" ]; then
+    LIB_DIR="$(cd "$LIB_DIR" && pwd -P)"
+    if [ -f "$LIB_DIR/$LIB_MARKER" ]; then
+      LIB_OURS=1
+    else
+      warn "$LIB_DIR has no $LIB_MARKER marker, so install.sh did not create it; leaving it untouched."
+    fi
+  fi
+  HAS_CURRENT=0
+  LINKS=""
+  RELEASES=""
+  if [ "$LIB_OURS" = "1" ]; then
+    if [ -L "$LIB_DIR/current" ]; then
+      HAS_CURRENT=1
+    elif [ -e "$LIB_DIR/current" ]; then
+      die "$LIB_DIR/current is not a link, so install.sh did not make it; remove the install by hand."
+    fi
+    for link in "$INSTALL_DIR"/* "$INSTALL_DIR"/.[!.]*; do
+      [ -L "$link" ] || continue
+      name="${link##*/}"
+      if [ "$(readlink "$link")" = "$LIB_DIR/current/$name" ]; then
+        LINKS="$LINKS $name"
+      fi
+    done
+    for entry in "$LIB_DIR"/[1-9]*-*; do
+      if [ -L "$entry" ] || [ ! -d "$entry" ] || [ ! -f "$entry/$RELEASE_MARKER" ]; then
+        continue
+      fi
+      name="${entry##*/}"
+      case "${name%%-*}" in *[!0-9]*) continue ;; esac
+      case "$name" in *[!A-Za-z0-9._+-]*) continue ;; esac
+      RELEASES="$RELEASES $name"
+    done
+  fi
+  if ! UNVERSIONED="$(unversioned_install_entries "$INSTALL_DIR")"; then
+    die "$INSTALL_DIR/mvmctl does not report itself as mvmctl; remove it by hand."
+  fi
+  UNVERSIONED="$(printf '%s' "$UNVERSIONED" | tr '\n' ' ')"
+  if [ -d "$INSTALL_DIR/assets" ] && [ ! -L "$INSTALL_DIR/assets" ] \
+    && [ -n "$UNVERSIONED" ] && ! is_listed assets "$UNVERSIONED"; then
+    warn "leaving $INSTALL_DIR/assets in place: it holds files mvmctl did not install"
+  fi
+  FOUND_INSTALL=0
+  if [ -n "$LINKS$RELEASES$UNVERSIONED" ] || [ "$HAS_CURRENT" = "1" ]; then
+    FOUND_INSTALL=1
+  fi
+  if [ "$FOUND_INSTALL" = "0" ] && { [ "$PURGE" != "1" ] || [ ! -e "$STATE_DIR" ]; }; then
+    die "no mvmctl installation found in $INSTALL_DIR or $LIB_DIR. Set MVM_INSTALL_DIR and MVM_INSTALL_LIB_DIR to where it was installed."
+  fi
+  if [ "$LIB_OURS" = "1" ] && [ ! -w "$LIB_DIR" ]; then
+    SUDO="sudo"
+  fi
+  if [ -n "$LINKS$UNVERSIONED" ] && [ ! -w "$INSTALL_DIR" ]; then
+    SUDO="sudo"
+  fi
+  if [ -n "$SUDO" ] && [ "$DRY_RUN" != "1" ]; then
+    warn "$INSTALL_DIR or $LIB_DIR not writable — using sudo"
+  fi
+  if [ "$LIB_OURS" = "1" ] && [ "$DRY_RUN" != "1" ]; then
+    if ! $SUDO mkdir "$LIB_DIR/.install.lock" 2>/dev/null; then
+      die "an install or uninstall is in progress (remove $LIB_DIR/.install.lock if none is)"
+    fi
+    LOCK="$LIB_DIR/.install.lock"
+  fi
+
+  if [ ! -e "$STATE_DIR" ]; then
+    :
+  elif [ "$FORCE" = "1" ]; then
+    warn "--force: not checking for running machines or stopping host-agent daemons"
+  else
+    CHECKER=""
+    if [ -n "${MVM_UNINSTALL_CHECKER:-}" ] && [ -x "$MVM_UNINSTALL_CHECKER" ]; then
+      CHECKER="$MVM_UNINSTALL_CHECKER"
+    elif [ "$HAS_CURRENT" = "1" ] && [ -x "$LIB_DIR/current/mvmctl" ]; then
+      CHECKER="$LIB_DIR/current/mvmctl"
+    elif is_listed mvmctl "$UNVERSIONED"; then
+      CHECKER="$INSTALL_DIR/mvmctl"
+    elif command -v mvmctl >/dev/null 2>&1; then
+      CHECKER="$(command -v mvmctl)"
+    fi
+    if [ -z "$CHECKER" ]; then
+      die "no mvmctl is available to check for running machines. Stop them yourself and re-run with --force. Nothing was removed."
+    fi
+    quiesce_lib=""
+    if [ "$LIB_OURS" = "1" ]; then
+      quiesce_lib="$LIB_DIR"
+    fi
+    if [ "$DRY_RUN" = "1" ]; then
+      set -- --quiesce --dry-run
+    else
+      set -- --quiesce
+    fi
+    if MVM_INSTALL_LIB_DIR="$quiesce_lib" "$CHECKER" env uninstall "$@"; then
+      :
+    else
+      checked=$?
+      if [ "$checked" -eq 2 ]; then
+        die "$CHECKER predates the pre-uninstall check, so it cannot confirm that no machine is running. Stop any running machines ('mvmctl machine ls', then 'mvmctl machine stop <name>') and host-agent daemons, then re-run with --force. Nothing was removed."
+      fi
+      die "refusing to uninstall. Nothing was removed."
+    fi
+  fi
+
+  for name in $LINKS; do
+    uninstall_run rm -f "$INSTALL_DIR/$name"
+  done
+  if [ "$HAS_CURRENT" = "1" ]; then
+    uninstall_run rm -f "$LIB_DIR/current"
+  fi
+  for name in $RELEASES; do
+    uninstall_run rm -rf "${LIB_DIR:?}/$name"
+  done
+  for name in $UNVERSIONED; do
+    uninstall_run rm -rf "${INSTALL_DIR:?}/$name"
+  done
+  if [ "$LIB_OURS" = "1" ]; then
+    uninstall_run rm -f "$LIB_DIR/$LIB_MARKER"
+  fi
+  if [ "$DRY_RUN" != "1" ]; then
+    if [ -n "$LOCK" ]; then
+      $SUDO rmdir "$LOCK" 2>/dev/null || true
+      LOCK=""
+    fi
+    if [ "$LIB_OURS" = "1" ]; then
+      $SUDO rmdir "$LIB_DIR" 2>/dev/null \
+        || warn "left $LIB_DIR in place: it holds files install.sh did not create"
+    fi
+  fi
+  if [ "$FOUND_INSTALL" = "1" ]; then
+    if [ "$DRY_RUN" = "1" ]; then
+      say "Would remove mvmctl from $INSTALL_DIR and $LIB_DIR."
+    else
+      say "Removed mvmctl from $INSTALL_DIR and $LIB_DIR."
+    fi
+  fi
+  [ -e "$STATE_DIR" ] || return 0
+  if [ "$PURGE" = "1" ]; then
+    if [ "$DRY_RUN" = "1" ]; then
+      say "would remove $STATE_PATH"
+    else
+      uninstall_remove_state
+    fi
+    return 0
+  fi
+  if [ "$DRY_RUN" = "1" ]; then
+    say "Would keep $STATE_DIR (pass --purge to remove it)."
+    return 0
+  fi
+  refusal="$(uninstall_state_refusal)"
+  if [ -n "$refusal" ]; then
+    say "Kept $STATE_DIR: $refusal."
+    return 0
+  fi
+  answer=""
+  if [ -t 0 ]; then
+    printf '[mvm] Also remove %s (machines, images, keys, audit logs)? [y/N] ' "$STATE_DIR"
+    read -r answer || answer=""
+  elif [ -t 1 ] && ( exec </dev/tty ) 2>/dev/null; then
+    printf '[mvm] Also remove %s (machines, images, keys, audit logs)? [y/N] ' "$STATE_DIR"
+    read -r answer </dev/tty || answer=""
+  fi
+  case "$answer" in
+    y|Y|yes|YES) uninstall_remove_state ;;
+    *) say "Kept $STATE_DIR. Remove it with: install.sh uninstall --purge" ;;
+  esac
+}
+
+if [ "${1:-}" = "uninstall" ]; then
+  shift
+  uninstall_main "$@"
+  exit
+fi
+
+need curl
+need tar
+
+# Options: --backend <name> stages that backend's components instead of the
+# auto-detected tier (scripted installs; MVM_INSTALL_BACKEND is equivalent).
+BACKEND_REQUESTED="${MVM_INSTALL_BACKEND:-}"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --backend)
+      shift
+      BACKEND_REQUESTED="${1:-}"
+      [ -n "$BACKEND_REQUESTED" ] || die "missing value for --backend"
+      ;;
+    --backend=*) BACKEND_REQUESTED="${1#--backend=}" ;;
+    *) die "unknown argument: $1 (usage: install.sh [--backend <name>] | install.sh uninstall [--purge] [--dry-run] [--force])" ;;
+  esac
+  shift
+done
+
+case "$KEEP" in
+  ''|*[!0-9]*) die "MVM_INSTALL_KEEP must be a whole number, got: $KEEP" ;;
+esac
+[ "$KEEP" -ge 1 ] || die "MVM_INSTALL_KEEP must be at least 1"
 
 TARGET="$(detect_target)"
 ARCHIVE="mvmctl-${TARGET}.tar.gz"

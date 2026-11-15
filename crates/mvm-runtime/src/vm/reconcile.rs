@@ -9,7 +9,7 @@
 //! state has vanished are dropped. Convergence is idempotent — running it
 //! twice is a no-op.
 //!
-//! Pure-logic-first, mirroring `mvm_hostd::supervisor::reaper::sweep`:
+//! Pure-logic-first, mirroring `mvm_hostd::supervisor::lifecycle::reaper::sweep`:
 //! [`classify`] and [`sweep`] take an injected [`RuntimeView`] /
 //! [`ReconcileActions`] and need no real backend, clock, or filesystem.
 //! [`converge`] is the thin real-filesystem adapter the CLI entry path calls.
@@ -182,7 +182,7 @@ pub fn classify(registry: &VmNameRegistry, view: &dyn RuntimeView) -> Vec<Drift>
 /// records, drop stale records, reap orphan dirs, and deregister the
 /// reconciled records. Pure of filesystem I/O beyond the injected
 /// `actions` — testable with a fake backend. Mirrors
-/// `mvm_hostd::supervisor::reaper::sweep`.
+/// `mvm_hostd::supervisor::lifecycle::reaper::sweep`.
 ///
 /// Idempotent: a second `sweep` over the post-sweep registry + reality
 /// finds no drift (every dropped record is gone, every reaped dir is gone),

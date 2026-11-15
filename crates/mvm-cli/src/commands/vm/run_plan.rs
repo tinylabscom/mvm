@@ -492,7 +492,7 @@ mod tests {
     use crate::commands::build::trace_secret_scan::scan_recording_for_secrets;
     use crate::commands::vm::exec::RunProfile;
     use base64::Engine;
-    use mvm_hostd::supervisor::secrets_scanner::SecretsScanner;
+    use mvm_hostd::supervisor::inspection::secrets_scanner::SecretsScanner;
     use mvm_sdk::runtime::{Divergence, RecordedOp, RuntimeRecording, SandboxCreate};
     use std::collections::BTreeMap;
 

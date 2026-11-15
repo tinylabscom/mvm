@@ -1,6 +1,6 @@
 use super::*;
 use crate::audit::emitter::{AuditEmitter, audit_path_for_tenant};
-use crate::supervisor::audit::for_plan;
+use crate::supervisor::audit::signer::for_plan;
 use ed25519_dalek::SigningKey;
 use mvm_core::plan::ExecutionPlan;
 use mvm_core::plan::test_support::PlanFixture;
@@ -343,7 +343,7 @@ fn a_checkpoint_without_a_digest_cannot_be_sealed() {
 /// describes survive would read, afterwards, as a truncation it never was.
 #[test]
 fn session_and_segment_boundaries_are_sync_barriers() {
-    use crate::supervisor::audit_file::{SyncPolicy, sync_policy_for};
+    use crate::supervisor::audit::audit_file::{SyncPolicy, sync_policy_for};
     use mvm_core::audit_verify::segment::{CHAIN_CONTINUED, CHAIN_PRUNED, CHAIN_SEALED};
     for event in [
         SESSION_SEALED_EVENT,

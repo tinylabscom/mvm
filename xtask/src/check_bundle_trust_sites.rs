@@ -29,7 +29,7 @@ const COMPOSING_CALLS: &[&str] = &[
 
 /// Files that verify an application bundle and must compose the pinned keys.
 const MUST_COMPOSE: &[&str] = &[
-    "crates/mvm-hostd/src/supervisor/caller_registration.rs",
+    "crates/mvm-hostd/src/supervisor/admission/caller_registration.rs",
     "crates/mvm-client/src/admission/pinned_bundle.rs",
     "crates/mvm-client/src/launch/bundle_runtime.rs",
     "crates/mvm-client/src/launch/canonical_linux.rs",

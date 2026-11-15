@@ -531,9 +531,9 @@ fn then_launch_admitted(world: &mut CliWorld) {
 }
 
 /// A config carrying one bound secret, as the spawner would hand it over.
-fn secret_bearing_config() -> mvm_hostd::supervisor::network_endpoint::EndpointConfig {
+fn secret_bearing_config() -> mvm_hostd::supervisor::endpoint::network_endpoint::EndpointConfig {
     use mvm_core::plan::{SecretBinding, SecretSource};
-    use mvm_hostd::supervisor::network_endpoint::{EndpointConfig, EndpointTransport};
+    use mvm_hostd::supervisor::endpoint::network_endpoint::{EndpointConfig, EndpointTransport};
 
     EndpointConfig {
         telemetry: None,
@@ -573,7 +573,7 @@ fn secret_bearing_config() -> mvm_hostd::supervisor::network_endpoint::EndpointC
 }
 
 fn secrets_without_substitution_is_refused() -> bool {
-    mvm_hostd::supervisor::network_endpoint::refuse_secrets_without_substitution(
+    mvm_hostd::supervisor::endpoint::network_endpoint::refuse_secrets_without_substitution(
         &secret_bearing_config(),
         false,
     )
@@ -581,7 +581,7 @@ fn secrets_without_substitution_is_refused() -> bool {
 }
 
 fn secrets_with_substitution_is_admitted() -> bool {
-    mvm_hostd::supervisor::network_endpoint::refuse_secrets_without_substitution(
+    mvm_hostd::supervisor::endpoint::network_endpoint::refuse_secrets_without_substitution(
         &secret_bearing_config(),
         true,
     )

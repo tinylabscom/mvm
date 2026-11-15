@@ -39,8 +39,8 @@ pub(super) fn audit_prune(tenant: &str, through: u64, ack: bool) -> Result<()> {
 mod tests {
     use super::*;
     use mvm_hostd::audit::host_keypair as host_signer;
-    use mvm_hostd::supervisor::audit::{AuditSigner, for_plan};
-    use mvm_hostd::supervisor::audit_file::{FileAuditSigner, RotationPolicy};
+    use mvm_hostd::supervisor::audit::audit_file::{FileAuditSigner, RotationPolicy};
+    use mvm_hostd::supervisor::audit::signer::{AuditSigner, for_plan};
 
     #[test]
     fn invalid_tenant_refuses_before_keys_or_chain_discovery() {

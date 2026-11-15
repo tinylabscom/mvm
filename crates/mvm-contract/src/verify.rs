@@ -20,7 +20,7 @@
 //!
 //! Lines written before `canonical` existed carry no such copy, and are
 //! verified the original way — by re-serializing `entry`, which requires
-//! [`PlanAuditEntry`] to reproduce `mvm_hostd::supervisor::audit::AuditEntry`'s
+//! [`PlanAuditEntry`] to reproduce `mvm_hostd::supervisor::audit::signer::AuditEntry`'s
 //! serde shape field-for-field (declaration order, `#[serde(transparent)]`
 //! string ids flattened to `String`, `skip_serializing_if` on the bundle
 //! fields, `deny_unknown_fields`). That path is kept indefinitely: a log
@@ -127,7 +127,7 @@ pub struct VerifiedChain {
 }
 
 /// Why a chain failed to verify. Variants mirror
-/// `mvm_hostd::supervisor::audit_file::VerifyError` plus the key-decode case
+/// `mvm_hostd::supervisor::audit::audit_file::VerifyError` plus the key-decode case
 /// this crate owns (the supervisor receives an already-parsed key).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuditVerifyError {
@@ -202,7 +202,7 @@ pub fn verifying_key_from_hex(hex: &str) -> Result<VerifyingKey, AuditVerifyErro
 /// verifying because the writer improved.
 ///
 /// Byte-for-byte counterpart of
-/// `mvm_hostd::supervisor::audit_file::signed_bytes_for`.
+/// `mvm_hostd::supervisor::audit::audit_file::signed_bytes_for`.
 /// The bytes a line's signature covers.
 ///
 /// Post-`canonical` lines carry them verbatim; the readable `entry` is checked

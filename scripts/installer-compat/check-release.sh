@@ -1,10 +1,10 @@
 #!/bin/sh
 # Install one published release with the current installer, check what landed,
-# then uninstall it with the current uninstaller.
+# then uninstall it with the current installer.
 #
 #   check-release.sh <release-tag> <target-triple> <strict:true|false>
 #
-# Env: INSTALLER and UNINSTALLER (default: the checkout's scripts),
+# Env: INSTALLER (default: the checkout's script),
 # MVM_UPDATE_DOWNLOAD_URL (default https://github.com).
 #
 # Everything happens under a fresh temporary prefix with its own HOME and state
@@ -20,7 +20,6 @@ STRICT="$3"
 # shellcheck disable=SC1091 # lib.sh is shellchecked on its own
 . "$(dirname "$0")/lib.sh"
 INSTALLER="${INSTALLER:-$COMPAT_DIR/../../install.sh}"
-UNINSTALLER="${UNINSTALLER:-$COMPAT_DIR/../../uninstall.sh}"
 
 make_prefix
 logs="$PREFIX_ROOT/logs"

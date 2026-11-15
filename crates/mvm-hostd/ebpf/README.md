@@ -22,7 +22,7 @@ directory:
 crates/mvm-hostd/ebpf/target/bpfel-unknown-none/release/mvm-hostd-ebpf
 ```
 
-The userspace loader (`mvm-hostd/src/supervisor/ebpf_telemetry/loader.rs`)
+The userspace loader (`mvm-hostd/src/supervisor/telemetry/ebpf_telemetry/loader.rs`)
 reads that path by default, or the path configured via
 `ProbeConfig::ebpf_object_path`.
 

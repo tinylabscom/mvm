@@ -1,6 +1,6 @@
 //! `mvmctl env uninstall` — remove an installation made by `install.sh`.
 //!
-//! The removal itself is `uninstall.sh`, embedded here and run with the
+//! The removal itself is `install.sh uninstall`, embedded here and run with the
 //! arguments this verb was given, so the published script and the verb cannot
 //! drift apart. The script owns the install layout it shares with `install.sh`.
 //! This binary owns the two questions the script must not answer with a copy of
@@ -30,8 +30,8 @@ use mvm_vmm::host::process_liveness::{
 
 use super::cleanup::running_vms_at;
 
-/// The uninstaller published beside `install.sh`.
-const UNINSTALL_SCRIPT: &str = include_str!("../../../../../uninstall.sh");
+/// The published installer also owns uninstall.
+const INSTALL_SCRIPT: &str = include_str!("../../../../../install.sh");
 
 /// How long a host-agent daemon gets to exit after SIGTERM.
 const DAEMON_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -99,8 +99,9 @@ fn run_script(args: &Args) -> Result<()> {
     let exe = std::env::current_exe().context("locating this mvmctl binary")?;
     let status = mvm_core::env_hygiene::helper_command("sh")
         .arg("-c")
-        .arg(UNINSTALL_SCRIPT)
-        .arg("uninstall.sh")
+        .arg(INSTALL_SCRIPT)
+        .arg("install.sh")
+        .arg("uninstall")
         .args(script_flags(args))
         .envs(script_env(&exe, env_is_set(LIB_DIR_ENV)))
         .status()
@@ -377,10 +378,10 @@ mod tests {
 
     #[test]
     fn the_embedded_script_is_the_published_uninstaller() {
-        assert!(UNINSTALL_SCRIPT.starts_with("#!/bin/sh\n# mvmctl uninstaller."));
-        assert!(UNINSTALL_SCRIPT.contains("env uninstall \"$@\""));
-        assert!(UNINSTALL_SCRIPT.contains(CHECKER_ENV));
-        assert!(UNINSTALL_SCRIPT.contains(LIB_DIR_ENV));
+        assert!(INSTALL_SCRIPT.starts_with("#!/bin/sh\n# mvmctl installer and uninstaller."));
+        assert!(INSTALL_SCRIPT.contains("env uninstall \"$@\""));
+        assert!(INSTALL_SCRIPT.contains(CHECKER_ENV));
+        assert!(INSTALL_SCRIPT.contains(LIB_DIR_ENV));
     }
 
     #[test]

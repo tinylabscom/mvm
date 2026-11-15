@@ -55,7 +55,7 @@ fn reconcile_with(
     context: RetirementContext<'_>,
     now: u64,
     pressure: Option<&pressure::PressureEvidence>,
-    sign: impl FnOnce(&crate::supervisor::audit::PlanAuditEntry) -> Result<()>,
+    sign: impl FnOnce(&crate::supervisor::audit::signer::PlanAuditEntry) -> Result<()>,
 ) -> Result<RetirementOutcome> {
     let capture = CaptureDirectory::open(context.root, context.relative_capture)
         .context("acquiring exclusive managed capture lease")?;

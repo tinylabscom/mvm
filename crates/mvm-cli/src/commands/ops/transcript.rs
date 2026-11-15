@@ -17,7 +17,7 @@ use serde::Serialize;
 
 use mvm_client::audit::chain::emitter::AuditEmitter;
 use mvm_client::audit::chain::plan_persist::{PLAN_FILENAME, read_plan_at};
-use mvm_client::audit::chain::supervisor::audit::{
+use mvm_client::audit::chain::supervisor::audit::signer::{
     LABEL_CAPTURE_ID, LABEL_CHUNK_COUNT, LABEL_TRANSCRIPT_ROOT, LABEL_VM_NAME,
     TRANSCRIPT_SEALED_EVENT,
 };

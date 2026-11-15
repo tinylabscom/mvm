@@ -584,71 +584,15 @@ protected recording works. A verified audit chain is not proof that arbitrary
 returned bytes were recorded. Mailbox previews, destructive VM-lifetime reads
 and durable result inboxes likewise must not be conflated.
 
-#### Running and verifying the factory-edge demo
+#### Running the factory-edge demo
 
-Two scripts and a hermetic test carry the demo. They drive the CLI of one
-installed release on one real host; Studio will drive the same operations
-through `mvm-client`, and these scripts are the reference that integration is
-checked against.
-
-| File | Purpose |
-| --- | --- |
-| `scripts/factory-edge-stage.sh` | Starts the three workloads in the background ahead of the presentation. `--down` removes them. |
-| `scripts/factory-edge-demo-live.sh` | The demo: observes the staged workloads and asserts each beat. |
-| `scripts/factory-edge-demo-live.test.sh` | Runs both scripts against a fake `mvmctl` and requires each to fail, for the named reason, for about two dozen ways the product could misbehave. It proves the scripts, not the product. |
-
-**Preparation, once, outside the demo.** The demo assumes an installed `mvmctl`
-and a prepared home and installs nothing. A missing prerequisite stops a script
-before it starts, and any first-use preparation during a run is reported as a
-`FINDING` and fails it.
-
-1. Install the release with the repository installer, pinned to the tag the demo
-   uses (`MVM_VERSION=v0.28.0-rc.2 sh install.sh`). It verifies the release
-   checksums and signatures and codesigns the binaries.
-2. Use a dedicated persistent demo home (`MVM_HOME=$HOME/.mvm-demo`), not a
-   temporary directory, so a reboot does not discard it.
-3. With that home set, run `mvmctl image pull curlimages/curl:8.21.0` and one
-   throwaway `mvmctl run` of that image, which builds the workload runtime.
-
-**Running.** Before presenting, `scripts/factory-edge-stage.sh --check` verifies
-every prerequisite and starts nothing: a working `mvmctl`, the demo home, the
-cached image, enough disk, and that every granted destination resolves, because
-a grant is resolved to addresses when its workload is admitted and the demo
-therefore needs working DNS. Then `scripts/factory-edge-stage.sh`, then
-`scripts/factory-edge-demo-live.sh`, then `scripts/factory-edge-stage.sh --down`.
-Stage shortly before presenting, ten minutes or so: every lookup a staged
-workload makes is a signed audit-chain entry, so the chain, and with it the cost
-of `explain` and `trust audit verify`, grows for as long as the workloads run.
-After a reboot the staged machines are gone, so stage again; the demo home, the
-installed release and the cached image persist. Staging replaces any earlier
-staging, and each staging uses its own machine names because `mvmctl explain
-<name>` is ambiguous when a name has been reused.
-On a live run against `v0.28.0-rc.2` on HVF staging took about 15 s and the demo
-about 30 s while other builds held the host at a load average near 40. The
-maintenance workload makes its first request `ATTEMPT_AFTER` seconds (default
-30) after it starts, so stage far enough ahead.
-
-**What the demo asserts.** The three workloads are running. The host records each
-inspection workload's lookups of its own granted destination. The host records a
-refusal for the maintenance workload's request for an ungranted destination, and
-`mvmctl explain` reads it back as `policy_denied`. The inspection workloads have
-no refusal and keep working after the refusal's recorded time. The maintenance
-workload is stopped, its session is sealed and its refusal stays on record. A
-replacement launched under a new plan carries none of those refusals. The audit
-chain verifies before and after. No install-time preparation ran.
-
-**What it observes, and how.** A detached machine's own output is not readable
-from the host: `mvmctl machine logs` shows the guest console, and the recorded
-workload output is sealed. The inspection workloads' work is therefore observed
-as the host's `dns.resolved` records for their granted destination, and the
-refusal is a `dns.refused` record that `explain` reports as `DNS lookup of
-<host>`. Nothing is run inside a workload from the host, so the dev-only `exec`
-verb is never used. The workloads' behaviour is scripted (small `curl` loops),
-so the demo does not depend on a model choosing to misbehave.
-
-**What it does not show.** Studio's own readback, the real maintenance and
-inspection tasks, hot replacement, a production-profile run, and anything on a
-physical line.
+`scripts/factory-edge-demo.sh` runs the three workloads against one installed
+release and prints what the host recorded; `scripts/factory-edge-demo.md`
+covers one-time setup and how the same steps map to `mvm-client`. The demo
+uses synthetic traffic and scripted `curl` loops, so it does not depend on a
+model choosing to misbehave. It does not show Studio's own readback, the real
+maintenance and inspection tasks, hot replacement, a production-profile run,
+or anything on a physical line.
 
 **Measured launch cost.** The product's launch gates are a 300 ms ceiling for a
 cold launch and a 50 ms warm-claim target (the published warm-claim budgets are

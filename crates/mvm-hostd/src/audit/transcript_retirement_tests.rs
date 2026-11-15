@@ -1,5 +1,5 @@
 use super::*;
-use crate::supervisor::audit::for_plan;
+use crate::supervisor::audit::signer::for_plan;
 use anyhow::bail;
 use mvm_core::plan::ExecutionPlan;
 use mvm_core::transcript::{
@@ -479,7 +479,7 @@ fn recovery_fixture() -> (Fixture, TranscriptManifest, TranscriptManifest) {
 
 #[test]
 fn staged_recovery_retries_after_seal_append_fsync_failure_without_duplicate() {
-    use crate::supervisor::audit_file::write_faults::{Boundary, Guard};
+    use crate::supervisor::audit::audit_file::write_faults::{Boundary, Guard};
     let (f, seed, recovered) = recovery_fixture();
     let _capture_lease = CaptureDirectory::for_writer(&f.root.path().join("capture")).unwrap();
     let fault = Guard::arm(Boundary::Sync);
@@ -569,7 +569,7 @@ fn seal_lookup_does_not_turn_conflicting_evidence_into_absence() {
 
 #[test]
 fn historical_pruning_does_not_prove_that_a_seal_never_existed() {
-    use crate::supervisor::audit_file::{FileAuditSigner, RotationPolicy};
+    use crate::supervisor::audit::audit_file::{FileAuditSigner, RotationPolicy};
     use mvm_core::transcript::evidence::authenticated_seal;
     let (f, seed, recovered) = recovery_fixture();
     let key = ed25519_dalek::SigningKey::from_bytes(&[17; 32]);
@@ -772,7 +772,7 @@ fn conflict_or_unsigned_missing_payload_refuses() {
 
 #[test]
 fn actual_audit_append_and_fsync_failure_never_authorize_unlink() {
-    use crate::supervisor::audit_file::write_faults::{Boundary, Guard};
+    use crate::supervisor::audit::audit_file::write_faults::{Boundary, Guard};
     // These synchronous tests have no entered Tokio runtime: the emitter runs
     // its current-thread executor here. Consumption proves the seam was hit.
     for boundary in [Boundary::PartialAppend, Boundary::Sync] {

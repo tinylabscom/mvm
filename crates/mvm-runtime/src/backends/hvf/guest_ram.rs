@@ -461,6 +461,14 @@ fn nonzero_bytes_in(bytes: &[u8]) -> u64 {
         .sum()
 }
 
+/// Whether a page of a private file mapping with residency `state` is this
+/// process's own: the guest wrote it, or it is memory a release swapped in.
+/// The same test teardown applies, so a page is given back to the host under
+/// exactly the condition it would otherwise have to be scrubbed.
+pub(crate) fn file_page_is_private(state: u8) -> bool {
+    page_needs_scrub(state, true)
+}
+
 fn page_needs_scrub(state: u8, file_backed: bool) -> bool {
     if state & MINCORE_INCORE == 0 {
         return false;
