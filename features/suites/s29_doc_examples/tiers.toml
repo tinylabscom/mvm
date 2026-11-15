@@ -870,3 +870,7 @@ reason = "correctly describes a removed mode in the past tense: \"was a `mvmctl 
 [[prose]]
 text = "mvmctl surface"
 reason = "\"tenant policy verbs are not mvmctl surface\" — a noun, not an invocation"
+
+[[prose]]
+text = "mvmctl installer and"
+reason = "\"# mvmctl installer and uninstaller.\" — the install script's header comment, asserted by a test"
