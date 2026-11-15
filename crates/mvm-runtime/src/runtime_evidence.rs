@@ -404,6 +404,26 @@ pub fn checked_source_runtime_fixture(
     Ok((config, binding))
 }
 
+/// Bind a signed legacy fixture into the same retained generation used at boot.
+/// The returned binding is still untrusted until a checkpoint authenticates it.
+#[cfg(any(test, feature = "test-support"))]
+pub fn retained_legacy_runtime_fixture(
+    config: &VmStartConfig,
+) -> Result<(VmStartConfig, RuntimeLaunchBinding)> {
+    let lease = RuntimeLifecycleLease::acquire(&config.name)?;
+    let bound = lease.bind(config)?;
+    let proof = bound
+        .legacy_bundle_runtime
+        .clone()
+        .context("legacy fixture has no retained proof")?;
+    let binding = RuntimeLaunchBinding::LegacyBundle {
+        proof,
+        rootfs_path: PathBuf::from(&bound.rootfs_path),
+        initramfs_path: bound.initrd_path.as_ref().map(PathBuf::from),
+    };
+    Ok((bound, binding))
+}
+
 pub(crate) fn verify_retained_legacy_runtime(
     config: &VmStartConfig,
 ) -> Result<crate::legacy_bundle_runtime::VerifiedLegacyBundleRuntime> {

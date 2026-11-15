@@ -916,8 +916,17 @@ impl<'a> RunPosture<'a> {
             "launch cannot mix fresh and retained runtime verification"
         );
         if let Some(retained) = self.verified_retained {
-            mvm_runtime::runtime_evidence::verify_runtime_for_claim(retained, self.runtime_config)?;
-            return Ok(retained.identity().cloned());
+            if let Some(identity) = retained.identity() {
+                mvm_runtime::runtime_evidence::verify_runtime_for_claim(
+                    retained,
+                    self.runtime_config,
+                )?;
+                return Ok(Some(identity.clone()));
+            }
+            // Source and legacy forks have no signed release identity. Keep
+            // their existing admission verifier; the warm-claim comparator
+            // deliberately refuses legacy bindings and is not a fork gate.
+            return Ok(None);
         }
         self.verified_runtime
             .map(|runtime| {
@@ -2349,6 +2358,80 @@ mod tests {
             error
                 .to_string()
                 .contains("requires verified launch evidence")
+        );
+    }
+
+    #[test]
+    fn a_verified_legacy_fork_keeps_its_existing_admission_path() {
+        use mvm_core::checkpoint::{
+            CheckpointClass, CheckpointId, CheckpointMeta, ContentBlob, HVF_FRAME_BLOB,
+        };
+        use mvm_vmm::runtime_artifacts::{RuntimeArtifact, RuntimeArtifacts};
+
+        let (_env, home) = host_with_ceiling(Default::default());
+        let fixture = tempfile::tempdir().expect("signed legacy fixture");
+        let selected =
+            mvm_runtime::signed_legacy_runtime_fixture(fixture.path(), home.path(), false);
+        let (config, binding) =
+            mvm_runtime::runtime_evidence::retained_legacy_runtime_fixture(&selected)
+                .expect("retain legacy fixture before checkpoint capture");
+        let observe = |path: &str| RuntimeArtifact {
+            path: path.into(),
+            sha256: mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(path))
+                .expect("fixture digest"),
+        };
+        let actual = RuntimeArtifacts {
+            kernel: None,
+            initramfs: config.initrd_path.as_deref().map(observe),
+            disks: vec![observe(&config.rootfs_path)],
+            kernel_cmdline: "console=hvc0".into(),
+            firecracker_drives: None,
+        };
+        let store = mvm_runtime::checkpoint::CheckpointStore::at(home.path().join("checkpoints"));
+        let id = CheckpointId::new("legacy-fork");
+        let content = store.content_dir(&id);
+        std::fs::create_dir_all(&content).expect("checkpoint content directory");
+        let bytes = serde_json::to_vec(&actual).expect("runtime observation");
+        std::fs::write(content.join("runtime-artifacts.json"), &bytes)
+            .expect("checkpoint runtime evidence");
+        let meta = CheckpointMeta::builder(id, CheckpointClass::VmFull, &config.name)
+            .runtime_launch_binding(Some(binding))
+            .content(vec![
+                ContentBlob {
+                    name: "runtime-artifacts.json".into(),
+                    sha256: mvm_core::crypto::image_verify::sha256_reader(bytes.as_slice())
+                        .expect("evidence digest"),
+                },
+                ContentBlob {
+                    name: HVF_FRAME_BLOB.into(),
+                    sha256: "ab".repeat(32),
+                },
+            ])
+            .build();
+        let retained = mvm_runtime::checkpoint::verify_checkpoint_runtime(&store, &meta)
+            .expect("authenticated retained legacy generation");
+        assert!(retained.identity().is_none());
+        let plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        RunPosture::without_backend(Variant::Dev)
+            .with_runtime(Some(&config))
+            .with_verified_retained(Some(&retained))
+            .verify_launch_runtime(&plan)
+            .expect("legacy fork uses its prior verifier, not the warm-claim-only comparator");
+
+        let mut invalid = config.clone();
+        invalid
+            .legacy_bundle_runtime
+            .as_mut()
+            .expect("legacy proof")
+            .pin
+            .bundle_sha256 = "0".repeat(64);
+        assert!(
+            RunPosture::without_backend(Variant::Dev)
+                .with_runtime(Some(&invalid))
+                .with_verified_retained(Some(&retained))
+                .verify_launch_runtime(&plan)
+                .is_err(),
+            "a changed legacy proof still refuses"
         );
     }
 
