@@ -44,10 +44,10 @@ const MAX_TOTAL_SLOC: usize = 991_178;
 const MAX_TOTAL_PHYSICAL: usize = 1_259_462;
 /// How far under a ceiling the tree may sit before the ceiling must drop.
 const SLACK: usize = 10_000;
-/// Whether the ratchet fails the build. Suspended by maintainer decision on
-/// 2026-11-15 while the #4839 cleanup lands; the measurement still prints.
+/// Whether the ratchet fails the build. Suspended by maintainer decision while
+/// coordinated cleanup lands; the measurement still prints.
 /// Restore by resetting the two ceilings to the measured totals and setting
-/// this to `true` (tracked in #5567).
+/// this to `true` after that cleanup.
 const ENFORCED: bool = false;
 
 const GENERATED_MARKERS: &[&str] = &[
