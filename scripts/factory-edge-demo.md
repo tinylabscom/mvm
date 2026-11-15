@@ -40,9 +40,20 @@ the command line:
 | What a program is allowed | `mvmctl machine inspect N` | not available: `inspect_machine` returns status, backend, memory and ports but not the allowed destinations ([#5521](https://github.com/tinylabscom/mvm/issues/5521)); the UI can show what it asked for at launch |
 | What the host refused, and the audit result | `mvmctl explain N` | `explain::explain_local_run("local", N)`, which returns the events, `egress_denials` and `chain_verified` |
 
-This table comes from reading the library's code and has not been run, so check
-it against the library before building on it. Use a new name for each run,
-because `explain` by name is ambiguous when a name has been used before.
+`crates/mvm-client/examples/factory_edge.rs` runs the whole demo through the
+library: `MVM_HOME=$HOME/.mvm-demo cargo run -p mvm-client --example factory_edge`.
+Run on a source build, it started the three programs, listed them as running,
+read back the maintenance program's refusal (`DNS lookup of example.com`) and
+`chain_verified: true`, and showed the other two with no refusals. The
+"what a program is allowed" row has not been run, since the call is not in a
+release yet.
+
+A launch blocks the thread that calls it, so starting the three with `join!` on
+one thread ran them one after another (about 36 s on a loaded host, against 7 s
+for the script). Start them from separate threads to overlap them.
+
+Use a new name for each run, because `explain` by name is ambiguous when a name
+has been used before.
 
 ## Set up a new Mac, once
 
