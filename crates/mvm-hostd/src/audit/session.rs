@@ -56,7 +56,7 @@ use mvm_contract::verify::{PlanAuditEntry, SignedEnvelope, hash_line};
 use mvm_core::plan::ExecutionPlan;
 use serde::{Deserialize, Serialize};
 
-use crate::supervisor::audit_file::VerifyError;
+use crate::supervisor::audit::audit_file::VerifyError;
 use mvm_core::audit_verify::set::{SegmentSetError, read_verified_set};
 
 /// The chain event that seals a session.

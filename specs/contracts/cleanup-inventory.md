@@ -146,7 +146,7 @@ Folded onto one authority (gone from three or more crates):
 Kept, by reason. Each name below is defined in three or more crates and is not one function:
 
 - Per-crate macro: `workspace_root_from_manifest_dir` expands `env!("CARGO_MANIFEST_DIR")`, which names the crate that contains the call, so a shared copy would return the wrong directory.
-- One protocol, one frame and error type each (a shared reader would need a generic over them and would change error text): `read_frame`, `write_frame`, `encode_frame`, `encode_response`, `read_request`, `read_response`, `write_response`, `decode`, `parse`, `parse_args` (each binary's own flags), `parse_head`, `parse_number`, `read_u16`, `read_u32`, `read_u64` (different cursor types, endianness and error types), `hex_nibble` (`Option` vs `Result`, lower-only vs both cases), `is_sha256_hex` (lower-only vs either case; the `mvm-core` copy is crate-private). `exchange` is three unrelated exchanges: the guest agent's reply to a pending mailbox reader (`mvm-agentd`, `mailbox_reader.rs`), the length-prefixed client request and typed reply to the mailbox service (`mvm-core`, `mailbox/frame.rs`), and the HVF stop-gate nonce challenge (`mvm-hostd`, `supervisor/hvf_stop.rs`); each has its own stream, message and error type.
+- One protocol, one frame and error type each (a shared reader would need a generic over them and would change error text): `read_frame`, `write_frame`, `encode_frame`, `encode_response`, `read_request`, `read_response`, `write_response`, `decode`, `parse`, `parse_args` (each binary's own flags), `parse_head`, `parse_number`, `read_u16`, `read_u32`, `read_u64` (different cursor types, endianness and error types), `hex_nibble` (`Option` vs `Result`, lower-only vs both cases), `is_sha256_hex` (lower-only vs either case; the `mvm-core` copy is crate-private). `exchange` is three unrelated exchanges: the guest agent's reply to a pending mailbox reader (`mvm-agentd`, `mailbox_reader.rs`), the length-prefixed client request and typed reply to the mailbox service (`mvm-core`, `mailbox/frame.rs`), and the HVF stop-gate nonce challenge (`mvm-hostd`, `supervisor/lifecycle/hvf_stop.rs`); each has its own stream, message and error type.
 - Constructors into the crate's own error enum, so they cannot share a body: `io_at`, `io_error`, `invalid`, `error`, `refusal_message`, `refuse`, `refused`.
 - Filesystem helpers with different safety contracts (symlink, mode, `O_NOFOLLOW`, directory, size-limit or durability behaviour): `copy_file`, `copy_tree`, `copy_artifact`, `create_private_dir`, `private_directory`, `directory`, `write_private`, `remove_if_present`, `sync_dir`, `read_regular`, `read_record`, `read_manifest`, `record_path`, `manifest_path`, `load_index`, `load`, `validate_manifest`, `safe_join`, `walk`, `scan`, `path`, `read`, `non_empty`.
 - Digests of different things: `hash_file` (guest-agent source stamp, workspace graph, pack stream, chunked manifest, warm artifact with size and regular-file check), `file_digest` (`mvm-client` returns `Option` for a missing file; `mvm-fs` digests a chunk list), `digest`, `sha256_hex` (rows above), `canonical`, `seal`.
@@ -602,9 +602,9 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_BUILD_STUB_OUTDIR` | live-read | `crates/mvm-build/src/pipeline/dev_build.rs:168` | 1 | NO | - |
 | `MVM_CALLER_FIXTURE_ENABLE` | live-read | `crates/mvm-hostd/src/caller_identity/production_fixture.rs:64` | 2 | NO | - |
 | `MVM_CALLER_FIXTURE_RECORD` | live-read | `crates/mvm-hostd/src/caller_identity/production_fixture.rs:336` | 3 | NO | - |
-| `MVM_CALLER_REGISTRATION_REPLAY_DENIED` | live-read | `crates/mvm-hostd/src/supervisor/caller_registration.rs:24` | 1 | NO | - |
-| `MVM_CALLER_REPLAY_CHALLENGE` | live-read | `crates/mvm-hostd/src/supervisor/caller_replay_tests.rs:226` | 2 | NO | - |
-| `MVM_CALLER_REPLAY_CHILD` | live-read | `crates/mvm-hostd/src/supervisor/caller_replay_tests.rs:250` | 1 | NO | - |
+| `MVM_CALLER_REGISTRATION_REPLAY_DENIED` | live-read | `crates/mvm-hostd/src/supervisor/admission/caller_registration.rs:24` | 1 | NO | - |
+| `MVM_CALLER_REPLAY_CHALLENGE` | live-read | `crates/mvm-hostd/src/supervisor/admission/caller_replay_tests.rs:226` | 2 | NO | - |
+| `MVM_CALLER_REPLAY_CHILD` | live-read | `crates/mvm-hostd/src/supervisor/admission/caller_replay_tests.rs:250` | 1 | NO | - |
 | `MVM_CALLER_WITNESS_BIN` | live-read | `crates/mvm-hostd/src/caller_identity/production_fixture.rs:337` | 3 | NO | - |
 | `MVM_CALLER_WITNESS_KERNEL` | live-read | `crates/mvm-client/src/entrypoint/caller_registration_live_hvf.rs:228` | 5 | NO | - |
 | `MVM_CALLER_WITNESS_PIN_JSON` | live-read | `crates/mvm-client/src/entrypoint/caller_registration_live_hvf.rs:239` | 2 | NO | - |
@@ -643,7 +643,7 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_E2E_PRODUCER_MVMCTL` | test-only | `crates/mvm-conformance/tests/steps/cli.rs:375` | 0 | NO | yes |
 | `MVM_E2E_ROOTFS` | test-only | `crates/mvm-client/tests/launch_lifecycle_live.rs:24` | 0 | NO | yes |
 | `MVM_E2E_RUNTIME_CANDIDATE_DIR` | test-only | `crates/mvm-conformance/tests/conformance.rs:353` | 0 | NO | yes |
-| `MVM_EBPF_LIVE_TESTS` | test-only | `crates/mvm-hostd/src/supervisor/ebpf_telemetry/loader.rs:313` | 0 | NO | - |
+| `MVM_EBPF_LIVE_TESTS` | test-only | `crates/mvm-hostd/src/supervisor/telemetry/ebpf_telemetry/loader.rs:313` | 0 | NO | - |
 | `MVM_EGRESS_LISTEN` | live-read | `crates/mvm-agentd/src/bin/mvm-egress-client.rs:135` | 1 | NO | - |
 | `MVM_EGRESS_VSOCK_PORT` | live-read | `crates/mvm-agentd/src/bin/mvm-egress-client.rs:26` | 3 | NO | - |
 | `MVM_EMBED` | live-read | `crates/mvm-cli/build.rs:152` | 1 | yes | yes |
@@ -682,7 +682,7 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_GUEST_BUILD_VERBOSE` | live-read | `crates/mvm-build/src/guest_agent_build.rs:23` | 1 | NO | - |
 | `MVM_GUEST_CONSOLE_VERBOSE` | test-only | `crates/mvm-backends/src/driver/fc.rs:124` | 0 | NO | - |
 | `MVM_GUEST_PRIVILEGED_TESTS` | live-read | `crates/mvm-agentd/src/tool_helper/capability_tests.rs:60` | 2 | NO | yes |
-| `MVM_HARD_EXPIRY_FIXTURE` | test-only | `crates/mvm-hostd/src/supervisor/wall_clock.rs:394` | 0 | NO | - |
+| `MVM_HARD_EXPIRY_FIXTURE` | test-only | `crates/mvm-hostd/src/supervisor/lifecycle/wall_clock.rs:394` | 0 | NO | - |
 | `MVM_HIGH_CAPABILITY_PROBE_CHILD` | live-read | `crates/mvm-agentd/src/guest_mount/high_capability_tests.rs:13` | 1 | NO | - |
 | `MVM_HOME` | live-read | `crates/mvm-cli/src/commands/vm/runtime_pack.rs:354` | 28 | yes | yes |
 | `MVM_HOSTLIB_PATH` | live-read | `crates/mvm-sdk/src/env.rs:110` | 2 | yes | yes |
@@ -704,7 +704,7 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_HVF_KERNEL` | live-read | `crates/mvm-runtime/examples/hvf-agent-ping.rs:31` | 9 | NO | - |
 | `MVM_HVF_LEGACY_CONFIG_REPLAY` | live-read | `crates/mvm-hostd/src/bin/mvm-hvf-supervisor.rs:23` | 2 | NO | - |
 | `MVM_HVF_SIGNED` | live-read | `crates/mvm-hostd/src/bin/mvm-hvf-supervisor.rs:347` | 2 | NO | - |
-| `MVM_HVF_STARTUP_DIAGNOSTICS_FD` | live-read | `crates/mvm-hostd/src/supervisor/caller_registration.rs:202` | 2 | NO | - |
+| `MVM_HVF_STARTUP_DIAGNOSTICS_FD` | live-read | `crates/mvm-hostd/src/supervisor/admission/caller_registration.rs:202` | 2 | NO | - |
 | `MVM_HVF_SUBSTITUTION_SOCKET` | test-only | `crates/mvm-runtime/src/backends/hvf/kernel_boot.rs:1581` | 0 | NO | - |
 | `MVM_HVF_SUPERVISOR_PATH` | live-read | `crates/mvm-backends/src/driver/hvf_process.rs:116` | 9 | yes | yes |
 | `MVM_HVF_TIMEOUT` | live-read | `crates/mvm-runtime/examples/hvf-backend-persistent.rs:22` | 2 | NO | - |
@@ -769,8 +769,8 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_OCI_POLICY` | live-read | `crates/mvm-cli/src/commands/image/trust_policy.rs:279` | 1 | yes | - |
 | `MVM_OTLP_EXIT_TEST_CHILD` | test-only | `crates/mvm-cli/tests/otlp_exit.rs:19` | 0 | NO | - |
 | `MVM_OTLP_FILTER` | live-read | `crates/mvm-cli/src/observability/otlp/config.rs:12` | 1 | yes | - |
-| `MVM_OWNED_STOP_MODE` | live-read | `crates/mvm-hostd/src/supervisor/hvf_stop_native_tests.rs:18` | 1 | NO | - |
-| `MVM_OWNED_STOP_VM` | live-read | `crates/mvm-hostd/src/supervisor/hvf_stop_native_tests.rs:17` | 1 | NO | - |
+| `MVM_OWNED_STOP_MODE` | live-read | `crates/mvm-hostd/src/supervisor/lifecycle/hvf_stop_native_tests.rs:18` | 1 | NO | - |
+| `MVM_OWNED_STOP_VM` | live-read | `crates/mvm-hostd/src/supervisor/lifecycle/hvf_stop_native_tests.rs:17` | 1 | NO | - |
 | `MVM_PACK_REGISTRY` | live-read | `crates/mvm-client/src/registry_application/discovery.rs:11` | 1 | yes | yes |
 | `MVM_PHASE_TIMING` | live-read | `crates/mvm-core/src/launch_trace.rs:52` | 1 | yes | yes |
 | `MVM_PINNED_CARGO_ZIGBUILD` | live-read | `crates/mvm-cli/src/doctor/toolchain.rs:70` | 1 | NO | - |
@@ -783,7 +783,7 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_PYTHON` | live-read | `crates/mvm-cli/src/commands/build/sandbox_record.rs:213` | 1 | NO | - |
 | `MVM_QEMU_BRIDGE_PATH` | live-read | `crates/mvm-backends/src/driver/qemu_process.rs:356` | 1 | NO | - |
 | `MVM_REGENERATE_VECTORS` | test-only | `crates/mvm-core/tests/studio_telemetry_fixtures.rs:494` | 0 | NO | - |
-| `MVM_REGEN_AUDIT_CORPUS` | test-only | `crates/mvm-hostd/src/supervisor/audit_file.rs:1904` | 0 | NO | - |
+| `MVM_REGEN_AUDIT_CORPUS` | test-only | `crates/mvm-hostd/src/supervisor/audit/audit_file.rs:1904` | 0 | NO | - |
 | `MVM_RESIDENCY` | live-read | `crates/mvm-client/src/entrypoint/caller_registration_live_hvf.rs:206` | 5 | yes | yes |
 | `MVM_RESOLVE_SUBPROCESS_BIN_TEST_UNSET_PATH` | test-only | `crates/mvm-vmm/src/host/broker_services_spawn.rs:1206` | 0 | NO | - |
 | `MVM_ROOTFS_PATH` | live-read | `crates/mvm-client/src/launch/machine_start.rs:164` | 1 | NO | - |

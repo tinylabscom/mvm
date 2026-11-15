@@ -49,7 +49,7 @@ ALLOWED_FILES=(
   "crates/mvm-contract/src/policy/protected_paths.rs"
   # Secrets scanner: a one-line comment naming "OpenSSH" as one of the PEM
   # private-key formats its generic BEGIN-block regex redacts.
-  "crates/mvm-hostd/src/supervisor/secrets_scanner.rs"
+  "crates/mvm-hostd/src/supervisor/inspection/secrets_scanner.rs"
   # mkGuest's own SSH deny-scan: rejects any package/extraFile/Nix-store
   # closure path that looks SSH-shaped before a guest image is built.
   "nix/lib/mk-guest.nix"

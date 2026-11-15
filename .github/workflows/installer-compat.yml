@@ -1,7 +1,7 @@
 name: Installer compat
 
-# The current install.sh and uninstall.sh against what has actually been
-# published. tests/install_sh.rs drives both scripts against synthetic releases;
+# The current install.sh and its uninstall option against what has actually been
+# published. tests/install_sh.rs drives both modes against synthetic releases;
 # nothing ran them against real ones, so a release whose archive the installer
 # cannot handle — or a Linux binary a supported distribution cannot load — was
 # found by a user rather than by CI.
@@ -48,7 +48,6 @@ on:
   pull_request:
     paths:
       - install.sh
-      - uninstall.sh
       - public/src/content/docs/install/**
       - public/src/content/docs/getting-started/installation.md
       - scripts/installer-compat/**

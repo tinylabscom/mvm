@@ -1,7 +1,7 @@
 use super::*;
 use mvm_core::util::test_env::TestEnv;
-use mvm_hostd::supervisor::audit::{AuditSigner, for_plan};
-use mvm_hostd::supervisor::audit_file::RotationPolicy;
+use mvm_hostd::supervisor::audit::audit_file::RotationPolicy;
+use mvm_hostd::supervisor::audit::signer::{AuditSigner, for_plan};
 use std::path::PathBuf;
 
 struct Fixture {

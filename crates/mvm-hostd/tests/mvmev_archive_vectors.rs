@@ -29,7 +29,7 @@ use mvm_core::plan::{PlanId, TenantId};
 use mvm_core::receipt_archive::ArchiveScope;
 use mvm_hostd::audit::receipt_archive::{ArchiveRequest, proof_member_for, write_archive};
 use mvm_hostd::audit::receipt_archive_verify::verify_archive;
-use mvm_hostd::supervisor::audit::PlanAuditEntry;
+use mvm_hostd::supervisor::audit::signer::PlanAuditEntry;
 use mvm_hostd::supervisor::{AuditSigner, FileAuditSigner};
 
 const ARCHIVE_PATH: &str = "../../tests/vectors/mvmev-archive-v1.tar";

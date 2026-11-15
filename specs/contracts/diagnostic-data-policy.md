@@ -487,7 +487,7 @@ Result: no pull request removed a bounded queue, a redaction step, a correlation
 | 4950 | Comment-only edits in mvm-cli | Retained | - |
 | 4952 | Comment-only edits in mvm-agentd | Retained | - |
 | 4953 | Comment-only edits in mvm-sdk | Retained | - |
-| 4954 | Comment-only edits in `audit/merkle.rs`, `supervisor/audit_file.rs` and other hostd files | Retained | - |
+| 4954 | Comment-only edits in `audit/merkle.rs`, `supervisor/audit/audit_file.rs` and other hostd files | Retained | - |
 | 4955 | Comment-only edits in mvm-runtime | Retained | - |
 | 4956 | Comment-only edits in mvm-vmm | Retained | - |
 | 4958 | none | Retained | - |

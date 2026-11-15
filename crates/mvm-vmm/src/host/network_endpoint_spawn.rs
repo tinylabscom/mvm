@@ -486,7 +486,7 @@ fn resolve_network_endpoint_path() -> Result<PathBuf> {
 /// `resolver_remote` config for [`SubstitutionSpawnParams`]: resolve secret
 /// *values* over a UDS to a remote fleet-secrets daemon (mvmd's tenant
 /// vault) instead of the endpoint's local encrypted secret store. Mirrors
-/// `mvm_hostd::supervisor::network_endpoint::ResolverBackend::Remote`'s
+/// `mvm_hostd::supervisor::endpoint::network_endpoint::ResolverBackend::Remote`'s
 /// two fields exactly — but is defined here (not imported from `mvm-hostd`)
 /// because `mvm-hostd` depends on `mvm-vmm`, never the reverse; a shared
 /// field-shape (not a shared type) is how the two stay in sync without a
@@ -502,7 +502,7 @@ pub struct RemoteResolverSpawnConfig<'a> {
 
 /// Identity material for an authenticated FlowMux session.
 ///
-/// Mirrors `mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity` field-for-
+/// Mirrors `mvm_hostd::supervisor::endpoint::network_endpoint::FlowMuxIdentity` field-for-
 /// field so the JSON on stdin is identical, without creating a dependency cycle
 /// (mvm-hostd depends on mvm-vmm, never the reverse).
 #[derive(Clone, PartialEq, Eq)]
@@ -2576,7 +2576,7 @@ mod tests {
     // values over a UDS to its per-VM resolver daemon, and to read
     // allowed_hosts/auth_type bindings from a per-VM binding-store dir — not the
     // host defaults. Assert both land in the JSON exactly as
-    // `mvm_hostd::supervisor::network_endpoint::EndpointConfig`'s
+    // `mvm_hostd::supervisor::endpoint::network_endpoint::EndpointConfig`'s
     // `#[serde(tag = "backend", rename_all = "snake_case")]` `ResolverBackend`
     // and `binding_store_dir` fields expect them shaped. Pure (no subprocess).
     #[test]

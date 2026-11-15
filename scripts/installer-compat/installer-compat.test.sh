@@ -8,7 +8,7 @@
 # archive obliges an install to produce, which refusal an old release is
 # allowed, and what the docs smoke extracts from the page. Those run here,
 # against synthetic releases served from a local HTTP server, through the real
-# install.sh and uninstall.sh.
+# install.sh and its uninstall option.
 #
 # Several cases must FAIL. A compat lane that cannot go red is a lane that
 # reports green over a broken installer.

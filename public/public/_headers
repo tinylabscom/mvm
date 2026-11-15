@@ -15,9 +15,6 @@
 /install.sh
   Content-Type: text/x-shellscript; charset=utf-8
 
-/uninstall.sh
-  Content-Type: text/x-shellscript; charset=utf-8
-
 /*
   Cross-Origin-Opener-Policy: same-origin
   Cross-Origin-Embedder-Policy: require-corp

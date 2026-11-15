@@ -860,8 +860,8 @@ mod tests {
     use crate::keyholder::resolver::{
         LocalResolver, OAuthSecretString, OAuthTokenSet, ResolveError, SecretResolver,
     };
-    use crate::supervisor::audit::CapturingAuditSigner;
-    use crate::supervisor::audit_recorder::Recorder;
+    use crate::supervisor::audit::audit_recorder::Recorder;
+    use crate::supervisor::audit::signer::CapturingAuditSigner;
 
     fn bearer_ref(name: &str, hosts: &[&str]) -> SecretRef {
         SecretRef {

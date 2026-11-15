@@ -53,13 +53,13 @@ had masked it.
   ~47-67), but `EgressGate::decide_hostname_request`
   (`crates/mvm-vmm/src/vsock_egress_bridge/egress_gate.rs`; re-exported by
   `mvm-runtime`) returns only the *first* admitted IP, and the FlowMux TCP relay
-  (`crates/mvm-hostd/src/supervisor/flowmux/tcp_relay.rs`) does a single
+  (`crates/mvm-hostd/src/supervisor/endpoint/flowmux/tcp_relay.rs`) does a single
   `TcpStream::connect` with no iteration. On a dual-stack host whose first
   pinned IP (typically IPv6) has no working egress — the common dev-Mac case —
   the connect stalls the full 30s timeout.
 - **Why enforcement stays fast:** a disallowed `http://` request is classified
   `HttpForward` and answered through the FlowMux open-flow path
-  (`crates/mvm-hostd/src/supervisor/flowmux/open_flow.rs`), which synthesizes the
+  (`crates/mvm-hostd/src/supervisor/endpoint/flowmux/open_flow.rs`), which synthesizes the
   refusal with no outbound socket. The admitted-CONNECT path is the TCP relay
   above. That asymmetry — plus the optimistic `200` — is exactly why enforcement
   looks instant while an admitted connect hangs. Byte-pumping is correct in both

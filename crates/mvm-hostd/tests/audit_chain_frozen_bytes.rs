@@ -36,8 +36,8 @@ use tempfile::tempdir;
 
 use mvm_core::plan::{PlanId, TenantId};
 use mvm_core::policy::PolicyId;
-use mvm_hostd::supervisor::audit::{AuditSigner, PlanAuditEntry};
-use mvm_hostd::supervisor::audit_file::{FileAuditSigner, VerifyError, verify_audit_chain};
+use mvm_hostd::supervisor::audit::audit_file::{FileAuditSigner, VerifyError, verify_audit_chain};
+use mvm_hostd::supervisor::audit::signer::{AuditSigner, PlanAuditEntry};
 
 /// Set to regenerate both fixtures in place, then inspect the diff before
 /// committing it. A change here is a change to what old evidence verifies

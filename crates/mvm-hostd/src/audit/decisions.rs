@@ -27,7 +27,7 @@ use ed25519_dalek::VerifyingKey;
 use mvm_contract::provenance::{DecisionId, DecisionRecord, DecisionScenario};
 
 use crate::audit::emitter::write_atomic_unsynced;
-use crate::supervisor::audit_file::{flock_exclusive, verify_audit_chain_entries};
+use crate::supervisor::audit::audit_file::{flock_exclusive, verify_audit_chain_entries};
 
 /// File-backed content-addressed store for one tenant's decision records.
 #[derive(Debug, Clone)]

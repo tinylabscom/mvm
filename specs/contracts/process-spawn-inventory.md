@@ -132,7 +132,7 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-hostd | `src/bin/mvm-network-endpoint.rs` | 1 | helper bin | keeper re-execs the endpoint binary for a long-lived VM | per-VM endpoint bin | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-hostd | `src/health_probe.rs` | 1 | mvmctl self re-exec | `mvmctl machine restart` after a failed healthcheck (embedder-refused) | host daemon role | CH | - | `helper_command` env scrub; embedder refusal | embedder-refused |
 | mvm-hostd | `src/mailbox_process.rs` | 1 | helper bin | launch path starts the per-VM mailbox process with derived keys on stdin | host daemon role | CH | - | `helper_command` env scrub | required-host-primitive |
-| mvm-hostd | `src/supervisor/firewall/linux_nft.rs` | 1 | net (nft) | install host nftables rules | host daemon role | CH | - | `helper_command` env scrub | required-host-primitive |
+| mvm-hostd | `src/supervisor/datapath/firewall/linux_nft.rs` | 1 | net (nft) | install host nftables rules | host daemon role | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-hostd | `src/supervisor/services/spawn.rs` | 1 | helper bin | ProcessSpawner: start a signed, integrity-checked host service binary | host daemon role | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-runtime | `src/host_shell.rs` | 3 | shell script | bash -c for ShellEnvironment host commands | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub | open-review |
 | mvm-runtime | `src/storage/backend.rs` | 1 | storage tool | dmsetup thin-pool operations | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | bounded-fixed-argv-utility |

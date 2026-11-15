@@ -9,8 +9,10 @@ use mvm_core::util::test_env::TestEnv;
 use mvm_hostd::audit::{emitter::AuditEmitter, host_keypair};
 use mvm_hostd::supervisor::{
     FileAuditSigner,
-    audit::{AuditSigner, for_plan},
-    audit_file::RotationPolicy,
+    audit::{
+        audit_file::RotationPolicy,
+        signer::{AuditSigner, for_plan},
+    },
 };
 use std::cell::RefCell;
 use std::path::PathBuf;
