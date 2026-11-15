@@ -63,10 +63,10 @@ passes, written invariants per layer, and small files.
    `mvm-client` keeps its current path until `mvm-studio`, which depends on it
    by path, is updated in the same change.
 
-5. **`mvm-hostd` splits along the processes it ships:** audit, egress,
-   admission, broker, and supervisor. The grouping is from directory names and
-   sizes; the module import graph is measured first and may move lines between
-   them.
+5. **`mvm-hostd` aims to split along the processes it ships:** audit, egress,
+   admission, broker, and supervisor. The measured import graph below prevents
+   a direct five-crate split. Assign every root module and resolve the reverse
+   dependencies before choosing independent crate boundaries.
 
 6. **Small crates fold into their owners.** `mvm-net` (582 lines) into
    `mvm-core`. `mvm-bundler` beside the bundle format it writes.
@@ -80,22 +80,79 @@ passes, written invariants per layer, and small files.
    merging would widen what is compiled into a guest or change an image cache
    key.
 
-9. **Every step is a move.** No step mixes a move with a behaviour change, and
-   the claim gates stay green at each one.
+9. **Moves do not mix with behaviour changes.** The `mvm-hostd` split first
+   needs a separately reviewed dependency-direction change; only then can
+   each extraction be a move. The claim gates stay green at each step.
 
 10. **A file-length ratchet.** No file may grow past its current length, and a
     new file is capped. Each layer directory carries its own invariants file.
 
 ## Order
 
-1. Measure the import graph inside `mvm-hostd`, and check every merge above
-   for a dependency cycle. Record the result here.
+1. Recheck the import graph below for the target and feature set of each
+   merge, and assign destinations to the unassigned `mvm-hostd` roots.
 2. Move the wire protocol out of `mvm-agentd`.
 3. Move the HVF substrate and `mvm-backends` into `mvm-vmm`; move `host` out.
 4. Fold `mvm-net` and `mvm-bundler`; delete `runmvm-client`.
-5. Split `mvm-hostd`: audit, egress, admission, broker, then supervisor.
+5. Review and break `mvm-hostd`'s cross-boundary import cycles; then split
+   audit, egress, admission, broker, and supervisor.
 6. Regroup directories.
 7. Add the ratchet and the per-layer invariants files.
+
+## Import-graph validation
+
+Measured at `f1bfd258bb3d71bdad2cf24039d90598f0804850` (the proposal's
+head), with default features on macOS/aarch64. `cargo metadata --no-deps
+--format-version=1` yields 28 workspace packages and 110 directed normal
+local package-dependency edges: no package-level cycle. A production-only
+lexical scan of `crates/mvm-hostd/src` (excluding binaries, tests, and
+item-level inactive platform/feature code) finds 41 root modules, 262 source
+files, 91 distinct directed `crate::root_module::…` edges and 242 references.
+This is a target-specific source graph, not proof about all feature sets or
+indirect imports; repeat it for the target and features of each actual move.
+
+Two root-module strongly connected components (SCCs) have more than one
+member:
+
+- `audit_signer ↔ host_signer` (2 references one way, 1 back).
+- `{admitted_campaign_runner, assurance_agent_adapter,
+  assurance_attestation, assurance_session, audit, broker, display, drive,
+  mailbox_custody, mailbox_launch, mailbox_process, mailbox_service,
+  operator_admitted_trial_booter, plan_admission, run, stream, supervisor,
+  telemetry_collector}`.
+
+For the roots that the proposal names unambiguously, the provisional grouping
+is `audit = audit + audit_signer + host_signer`,
+`admission = admission_budget + plan_admission`, `broker = broker`,
+`egress = egress_broker`, and `supervisor = supervisor`. Its inter-group edges
+are:
+
+| Dependency | Files | References |
+| --- | ---: | ---: |
+| admission → audit | 5 | 22 |
+| audit → broker | 1 | 2 |
+| audit → supervisor | 11 | 17 |
+| broker → audit | 2 | 2 |
+| broker → egress | 1 | 1 |
+| supervisor → admission | 1 | 1 |
+| supervisor → audit | 7 | 14 |
+
+`{admission, audit, broker, supervisor}` is one SCC: `audit → broker → audit`,
+`audit → supervisor → audit`, and
+`supervisor → admission → audit → supervisor` block independent crates built
+by pure moves. This partial graph does **not** clear egress: much of its
+candidate code is still under `supervisor`, and 33 root modules have no
+destination assigned. Give every root a destination and specify which
+shared interfaces move down or become process boundaries before splitting.
+
+| Other proposed change | Cycle check against current package graph |
+| --- | --- |
+| Fold `mvm-backends` and the HVF substrate from `mvm-runtime` into `mvm-vmm` | No cycle from collapsing these existing directed dependencies: `mvm-runtime → mvm-backends → mvm-vmm` and `mvm-runtime → mvm-vmm`. |
+| Move `mvm-vmm::host` out | Cannot decide until each module's destination is named and its imports checked. |
+| Move guest wire protocol to the foundation | Moving `vsock` unchanged to `mvm-contract` would make `mvm-contract → mvm-core → mvm-contract`: it currently imports core types. A reduced contract-only vocabulary or a core-owned module with its guest-daemon dependencies removed avoids this observed cycle. |
+| Fold `mvm-net` into `mvm-core` | No cycle from the merge (`mvm-net → mvm-core`, not the reverse). |
+| Fold `mvm-bundler` beside the bundle format | Destination not specified, so the actual cycle check remains open; it currently depends on `mvm-core` and is depended on by `mvm-client`. |
+| Delete `runmvm-client`; regroup directories without renaming packages | No new package dependency edge. |
 
 ## Consequences
 
