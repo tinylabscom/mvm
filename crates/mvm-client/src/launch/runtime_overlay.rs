@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use mvm_core::arch::GuestArch;
 use mvm_fs::overlay::RuntimeOverlayArtifact;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// One assembly of the runtime overlay from a source checkout's guest
 /// runtime. A release binary assembles its overlay in `mvmctl bootstrap` from
@@ -118,22 +119,30 @@ pub fn acquire_runtime_overlay_for_launch(
     resolver: &mvm_fs::overlay::RuntimeOverlayResolver,
     arch: GuestArch,
 ) -> Result<AcquiredRuntimeOverlay> {
+    Ok(acquire_runtime_overlay_for_launch_verified(resolver, arch)?.0)
+}
+
+/// Resolve prepared overlay bytes and return the launch-owned release verification.
+/// Source runtimes return `None`; a rejected release never falls through to source.
+pub fn acquire_runtime_overlay_for_launch_verified(
+    resolver: &mvm_fs::overlay::RuntimeOverlayResolver,
+    arch: GuestArch,
+) -> Result<(
+    AcquiredRuntimeOverlay,
+    Option<Arc<mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime>>,
+)> {
     use mvm_core::launch_trace::lap;
     lap("attach_overlay.selection");
     let version = resolver.expected_version();
-    let proof = mvm_build::guest_runtime::cached_runtime_release_proof(
+    let verified = mvm_build::guest_runtime::cached_verified_release_runtime(
         resolver.cache_root(),
         version,
         arch,
-    )?;
+    )?
+    .map(Arc::new);
     lap("attach_overlay.release_proof_lookup");
-    let (declaration, source_archive_sha256) = if let Some(proof) = &proof {
-        let declared = (
-            mvm_build::guest_runtime::evidence::verify_runtime_release_proof(proof, version, arch)?
-                .declaration(arch)?
-                .clone(),
-            None,
-        );
+    let (declaration, source_archive_sha256) = if let Some(runtime) = &verified {
+        let declared = (runtime.manifest().declaration(arch)?.clone(), None);
         lap("attach_overlay.release_proof_verify");
         declared
     } else {
@@ -162,12 +171,15 @@ pub fn acquire_runtime_overlay_for_launch(
         sidecar_matches,
         "prepared runtime overlay differs from the selected archive"
     );
-    Ok(AcquiredRuntimeOverlay {
-        artifact,
-        unsigned_source: proof.is_none(),
-        release_proof: proof,
-        source_archive_sha256,
-    })
+    Ok((
+        AcquiredRuntimeOverlay {
+            artifact,
+            unsigned_source: verified.is_none(),
+            release_proof: verified.as_ref().map(|runtime| runtime.proof().clone()),
+            source_archive_sha256,
+        },
+        verified,
+    ))
 }
 
 /// Prepare the explicitly selected OCI guest runtime.
