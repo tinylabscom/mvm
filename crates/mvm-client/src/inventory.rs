@@ -422,6 +422,7 @@ mod tests {
             manifest: None,
             deployment: None,
             resolved_digest: None,
+            prepared_image: None,
             runtime_pack: false,
             registry_pack_image: None,
             net: false,

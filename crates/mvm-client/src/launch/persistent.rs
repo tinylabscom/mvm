@@ -184,13 +184,32 @@ fn register_vm_name(vm_name: &str, network_name: &str) {
 pub fn start_persistent_oci_machine(
     params: PersistentImageStartParams<'_>,
 ) -> Result<mvm_hostd::plan_admission::AdmittedPlan> {
+    start_persistent_with_prepared(params, None)
+}
+
+pub(crate) fn start_prepared_persistent_oci_machine(
+    params: PersistentImageStartParams<'_>,
+    prepared: &crate::image_cache::prepared::ValidatedPrepared,
+) -> Result<mvm_hostd::plan_admission::AdmittedPlan> {
+    crate::image_cache::prepared::require_backend(
+        &prepared.selection,
+        params.backend_name,
+        params.backend.name(),
+    )?;
+    start_persistent_with_prepared(params, Some(prepared))
+}
+
+fn start_persistent_with_prepared(
+    params: PersistentImageStartParams<'_>,
+    prepared: Option<&crate::image_cache::prepared::ValidatedPrepared>,
+) -> Result<mvm_hostd::plan_admission::AdmittedPlan> {
     let PreparedPersistentBoot {
         backend,
         start_config,
         admission,
         prepared_volumes,
         built_runtime: _built_runtime,
-    } = prepare_persistent_boot(params)?;
+    } = prepare_persistent_boot(params, prepared)?;
     let name_label = start_config.name.clone();
     let name = name_label.as_str();
     let backend_label = backend.name().to_string();
@@ -215,6 +234,7 @@ struct PreparedPersistentBoot {
 
 fn prepare_persistent_boot(
     params: PersistentImageStartParams<'_>,
+    prepared: Option<&crate::image_cache::prepared::ValidatedPrepared>,
 ) -> Result<PreparedPersistentBoot> {
     let PersistentImageStartParams {
         name,
@@ -330,72 +350,76 @@ fn prepare_persistent_boot(
                     })
                 })
                 .collect::<Vec<_>>();
-            admit_plan_for_boot_configured_ingress(
-                AdmitPlanForBootParams {
-                    mailbox,
-                    // What the backend will arm, so the admitted tier opens
-                    // the GPU endpoint's vsock socket exactly when there is one.
-                    gpu: config.gpu,
-                    instructions: crate::admission::InstructionSources::for_workload(workload_dir)
-                        .with_mount_roots(&[])
-                        .with_materialized_mounts(&instruction_mounts),
-                    outputs: Vec::new(),
-                    network_mode: preflight_network(),
-                    tenant: "local",
-                    vm_name: name,
-                    backend_name,
-                    configured_images_dir: mvm_build::image_source::configured_images_dir()
-                        .as_deref(),
+            let configured_images_dir = mvm_build::image_source::configured_images_dir();
+            let admission_params = AdmitPlanForBootParams {
+                mailbox,
+                // What the backend will arm, so the admitted tier opens
+                // the GPU endpoint's vsock socket exactly when there is one.
+                gpu: config.gpu,
+                instructions: crate::admission::InstructionSources::for_workload(workload_dir)
+                    .with_mount_roots(&[])
+                    .with_materialized_mounts(&instruction_mounts),
+                outputs: Vec::new(),
+                network_mode: preflight_network(),
+                tenant: "local",
+                vm_name: name,
+                backend_name,
+                configured_images_dir: configured_images_dir.as_deref(),
+                rootfs_path,
+                kernel_path: config.kernel_path.as_deref().map(std::path::Path::new),
+                precomputed_image_sha256: None,
+                boot_artifact_identity: None,
+                runtime_config: Some(config),
+                cpus,
+                mem_mib: u64::from(memory_mib),
+                seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+                secret_release: resolved_secrets.secret_release,
+                secrets: resolved_secrets.secrets,
+                caller_commitment,
+                ledger: &admission_ledger,
+                keys_dir: None,
+                audit_dir: None,
+                policy_dir: None,
+                bundle_pin: bundle_archive
+                    .as_deref()
+                    .map(crate::admission::BundlePin::boots),
+                bundle_posture: None,
+                deps_volume: None,
+                shares: shares_from_volume_cfg(volumes),
+                assets: registry_pack_image
+                    .into_iter()
+                    .map(crate::admission::AssetSpec::RegistryPack)
+                    .collect(),
+                redaction: mvm_core::policy::RedactionPolicy::default(),
+                network_policy: network_policy.clone(),
+                agent_verb_override: agent_verb.to_vec(),
+                // Persistent machines carrying a trailing argv run an ad-hoc Exec (DevOnly);
+                // they must not receive an attenuated ProdSafe-only grant. Baked-entrypoint
+                // boots (no argv, non-dev profile) keep the grant.
+                restrict_agent_verbs: crate::admission::agent_verbs::grant_eligible(
+                    false,
+                    has_ad_hoc_argv,
+                    profile == "dev",
+                ),
+                services: Vec::new(),
+                grants,
+                // The typed kind of the backend this start resolved, so the grant gate
+                // measures a declared bound against the mechanisms that tier has rather
+                // than refusing for want of an answer.
+                backend_kind: Some(crate::backend_kind_for(backend_name)),
+                entrypoint: crate::admission::entrypoint_resolve::ResolvedEntrypoint::for_launch(
                     rootfs_path,
-                    kernel_path: config.kernel_path.as_deref().map(std::path::Path::new),
-                    precomputed_image_sha256: None,
-                    boot_artifact_identity: None,
-                    runtime_config: Some(config),
-                    cpus,
-                    mem_mib: u64::from(memory_mib),
-                    seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-                    secret_release: resolved_secrets.secret_release,
-                    secrets: resolved_secrets.secrets,
-                    caller_commitment,
-                    ledger: &admission_ledger,
-                    keys_dir: None,
-                    audit_dir: None,
-                    policy_dir: None,
-                    bundle_pin: bundle_archive
-                        .as_deref()
-                        .map(crate::admission::BundlePin::boots),
-                    bundle_posture: None,
-                    deps_volume: None,
-                    shares: shares_from_volume_cfg(volumes),
-                    assets: registry_pack_image
-                        .into_iter()
-                        .map(crate::admission::AssetSpec::RegistryPack)
-                        .collect(),
-                    redaction: mvm_core::policy::RedactionPolicy::default(),
-                    network_policy: network_policy.clone(),
-                    agent_verb_override: agent_verb.to_vec(),
-                    // Persistent machines carrying a trailing argv run an ad-hoc Exec (DevOnly);
-                    // they must not receive an attenuated ProdSafe-only grant. Baked-entrypoint
-                    // boots (no argv, non-dev profile) keep the grant.
-                    restrict_agent_verbs: crate::admission::agent_verbs::grant_eligible(
-                        false,
-                        has_ad_hoc_argv,
-                        profile == "dev",
-                    ),
-                    services: Vec::new(),
-                    grants,
-                    // The typed kind of the backend this start resolved, so the grant gate
-                    // measures a declared bound against the mechanisms that tier has rather
-                    // than refusing for want of an answer.
-                    backend_kind: Some(crate::backend_kind_for(backend_name)),
-                    entrypoint:
-                        crate::admission::entrypoint_resolve::ResolvedEntrypoint::for_launch(
-                            rootfs_path,
-                            has_ad_hoc_argv,
-                        ),
-                },
-                ingress,
-            )
+                    has_ad_hoc_argv,
+                ),
+            };
+            match prepared {
+                Some(prepared) => crate::admission::admit_prepared_plan_for_boot(
+                    admission_params,
+                    ingress,
+                    prepared,
+                ),
+                None => admit_plan_for_boot_configured_ingress(admission_params, ingress),
+            }
         },
     )?;
     for volume in &mut start_config.volumes {

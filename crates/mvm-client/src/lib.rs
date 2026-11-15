@@ -56,6 +56,8 @@ pub mod bundle_preview;
 pub mod cache_admin;
 pub mod caller_identity;
 pub mod checkpoint;
+#[doc(hidden)]
+pub mod cli_image;
 pub mod codesign;
 pub mod connect;
 pub mod containment;
@@ -70,6 +72,7 @@ pub mod grants;
 pub mod grants_resolve;
 pub mod guest;
 pub mod image_admin;
+mod image_cache;
 /// Workload-image producers shared by Nix and Yocto pack builds.
 pub mod image_producer;
 pub mod input_journal;
@@ -86,6 +89,7 @@ pub mod output_audit;
 pub mod pack_scenario;
 pub mod policy_profiles;
 pub mod portable_boot_assets;
+pub mod prepared_image;
 pub mod profile;
 pub mod readiness;
 pub mod reconcile;

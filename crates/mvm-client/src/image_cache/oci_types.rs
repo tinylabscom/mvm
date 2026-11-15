@@ -37,7 +37,7 @@ pub(super) fn schema_version() -> u32 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(in crate::commands) struct CachedOciImage {
+pub(super) struct CachedOciImage {
     pub(super) reference: String,
     pub(super) registry: String,
     pub(super) repository: String,
@@ -67,7 +67,7 @@ pub(in crate::commands) struct CachedOciImage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::commands) struct ResolvedOciRunImage {
+pub struct ResolvedOciRunImage {
     pub reference: String,
     pub resolved_digest: String,
     pub rootfs_path: PathBuf,
@@ -82,7 +82,7 @@ pub(in crate::commands) struct ResolvedOciRunImage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(in crate::commands) struct OciProvenance {
+pub struct OciProvenance {
     pub schema_version: u32,
     pub source: String,
     pub supplied_reference: String,
@@ -153,7 +153,7 @@ impl CachedOciImage {
 }
 
 impl OciProvenance {
-    pub(in crate::commands) fn audit_labels(&self) -> Vec<(String, String)> {
+    pub fn audit_labels(&self) -> Vec<(String, String)> {
         vec![
             ("oci_source".to_string(), self.source.clone()),
             (

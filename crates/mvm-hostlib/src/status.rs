@@ -110,6 +110,7 @@ pub(crate) fn status_of(error: &MvmError) -> i32 {
         MvmError::Unauthorized { .. } => MVM_HOSTLIB_UNAUTHORIZED,
         MvmError::Conflict { .. } => MVM_HOSTLIB_CONFLICT,
         MvmError::Rejected { .. } => MVM_HOSTLIB_REJECTED,
+        MvmError::PreparedImage { .. } => MVM_HOSTLIB_REJECTED,
         MvmError::Unavailable { .. } => MVM_HOSTLIB_UNAVAILABLE,
         MvmError::RecoveryRequired { .. } => MVM_HOSTLIB_RECOVERY_REQUIRED,
     }

@@ -62,8 +62,7 @@ pub(super) fn scan_and_record_base_image(
 ) -> Result<()> {
     // One OSV request per matched advisory, in sequence: an image with a large
     // package set spends real time here, so the wait is announced.
-    let phase =
-        mvm_client::ui::activity::start("Scanning the base image for known vulnerabilities");
+    let phase = crate::ui::activity::start("Scanning the base image for known vulnerabilities");
     let report = |detail: &str| phase.set_detail(detail);
     let osv = BlockingOsvClient::default();
     let client = ReportingOsvClient::new(&osv, &report);

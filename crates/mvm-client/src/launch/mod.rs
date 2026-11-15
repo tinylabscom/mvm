@@ -533,6 +533,15 @@ impl LocalBackend {
                     None,
                 )
             }
+            LaunchSource::PreparedImage { selection } => {
+                return Err(MvmError::PreparedImage {
+                    refusal: crate::prepared_image::PreparedImageError {
+                        kind: crate::prepared_image::PreparedImageErrorKind::UnsupportedMode,
+                        reference: selection.canonical_reference.clone(),
+                        detail: "prepared OCI reuse supports persistent launches only".into(),
+                    },
+                });
+            }
             LaunchSource::RegistryPack { pin } => {
                 let image =
                     built_pack::resolve_built_pack_image(pin, backend.name(), &params.profile)
@@ -619,7 +628,7 @@ impl LocalBackend {
                 assurance: campaign.as_ref(),
             },
         )
-        .map_err(|e| crate::local::backend_err(format!("{e:#}")))
+        .map_err(prepared_client_error)
     }
 
     /// Load a declared campaign and bind it to this boot.
@@ -826,6 +835,22 @@ impl LocalBackend {
     /// requests persist their definition first, then boot from it — both
     /// through the one canonical signed-admission seam.
     pub async fn launch(&self, request: LaunchRequest) -> Result<LaunchOutcome> {
+        if let LaunchSource::PreparedImage { selection } = &request.source {
+            if request.mode != LifecycleMode::Persistent {
+                return Err(MvmError::PreparedImage {
+                    refusal: crate::prepared_image::PreparedImageError {
+                        kind: crate::prepared_image::PreparedImageErrorKind::UnsupportedMode,
+                        reference: selection.canonical_reference.clone(),
+                        detail: "prepared OCI reuse supports persistent launches only".into(),
+                    },
+                });
+            }
+            let backend = self.launch_backend(request.backend.as_deref())?;
+            crate::image_cache::prepared::revalidate(selection, backend.name(), &request.profile)
+                .map_err(|refusal| MvmError::PreparedImage { refusal })?;
+            crate::image_cache::prepared::cached_kernel(selection, backend.name())
+                .map_err(|refusal| MvmError::PreparedImage { refusal })?;
+        }
         if let LaunchSource::RegistryPack { pin } = &request.source {
             let backend = self.launch_backend(request.backend.as_deref())?;
             built_pack::resolve_built_pack_image(pin, backend.name(), &request.profile)
@@ -994,7 +1019,7 @@ impl LocalBackend {
                 mailbox,
             },
         )
-        .map_err(|e| crate::local::backend_err(format!("{e:#}")))?;
+        .map_err(prepared_client_error)?;
         Ok((started, backend))
     }
 
@@ -1182,6 +1207,10 @@ impl LocalBackend {
 /// image, a built manifest or a deployment, and its volumes arrive as typed
 /// attachments; the CLI-only shapes stay with `mvmctl machine start`.
 fn ensure_spec_bootable_in_process(spec: &mp::MachineSpec) -> Result<()> {
+    spec.validate_prepared_source()
+        .map_err(|error| MvmError::InvalidSpec {
+            reason: error.to_string(),
+        })?;
     let unsupported = |what: &str| MvmError::InvalidSpec {
         reason: format!(
             "machine {:?} declares {what}, which a library start cannot honor; use the CLI's \
@@ -1208,6 +1237,7 @@ fn ensure_spec_bootable_in_process(spec: &mp::MachineSpec) -> Result<()> {
         })?;
     }
     if spec.image.is_none()
+        && spec.prepared_image.is_none()
         && spec.manifest.is_none()
         && spec.deployment.is_none()
         && spec.registry_pack_image.is_none()
@@ -1220,6 +1250,15 @@ fn ensure_spec_bootable_in_process(spec: &mp::MachineSpec) -> Result<()> {
         });
     }
     Ok(())
+}
+
+fn prepared_client_error(error: anyhow::Error) -> MvmError {
+    if let Some(refusal) = error.downcast_ref::<crate::prepared_image::PreparedImageError>() {
+        return MvmError::PreparedImage {
+            refusal: refusal.clone(),
+        };
+    }
+    crate::local::backend_err(format!("{error:#}"))
 }
 
 impl LocalBackend {

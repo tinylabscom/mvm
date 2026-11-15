@@ -98,7 +98,7 @@ pub(super) fn write_verification_receipt(
     };
     let payload_bytes =
         serde_json::to_vec(&payload).context("serialize OCI verification receipt payload")?;
-    let signer = mvm_client::host_keypair::load_or_init()
+    let signer = crate::host_keypair::load_or_init()
         .context("load host signing key for OCI verification receipt")?;
     let receipt = OciVerificationReceipt {
         schema_version: payload.schema_version,
@@ -146,18 +146,19 @@ pub(super) fn trust_decision_from_verification_receipt(
     })?;
     let receipt: OciVerificationReceipt =
         serde_json::from_slice(&bytes).context("parse OCI verification receipt")?;
-    let public_key_path = mvm_client::host_keypair::default_keys_dir()?
-        .join(mvm_client::host_keypair::PUBLIC_FILENAME);
+    let public_key_path =
+        crate::host_keypair::default_keys_dir()?.join(crate::host_keypair::PUBLIC_FILENAME);
     let public_key_bytes = fs::read(&public_key_path).with_context(|| {
         format!(
             "read host public key for OCI verification receipt {}",
             public_key_path.display()
         )
     })?;
-    let public_key: [u8; mvm_client::host_keypair::KEY_BYTES] = public_key_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("host public key must contain exactly 32 bytes"))?;
+    let public_key: [u8; crate::host_keypair::KEY_BYTES] =
+        public_key_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("host public key must contain exactly 32 bytes"))?;
     let verifying_key = VerifyingKey::from_bytes(&public_key)
         .context("parse host public key for OCI verification receipt")?;
     verify_verification_receipt(

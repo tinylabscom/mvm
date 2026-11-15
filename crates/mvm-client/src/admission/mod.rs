@@ -415,6 +415,33 @@ fn admit(
     AdmissionContext,
     mvm_core::admission_durability::AdmissionDurability,
 )> {
+    admit_with_prepared(p, ingress, sync, None)
+}
+
+pub(crate) fn admit_prepared_plan_for_boot(
+    p: AdmitPlanForBootParams<'_>,
+    ingress: Vec<mvm_core::plan::IngressMapping>,
+    prepared: &crate::image_cache::prepared::ValidatedPrepared,
+) -> Result<AdmissionContext> {
+    let (context, durability) = admit_with_prepared(
+        p,
+        ingress,
+        durability::AdmissionSync::Inline,
+        Some(&prepared.selection),
+    )?;
+    debug_assert!(durability.is_settled());
+    Ok(context)
+}
+
+fn admit_with_prepared(
+    p: AdmitPlanForBootParams<'_>,
+    ingress: Vec<mvm_core::plan::IngressMapping>,
+    sync: durability::AdmissionSync,
+    prepared: Option<&mvm_core::prepared_image::PreparedOciSelection>,
+) -> Result<(
+    AdmissionContext,
+    mvm_core::admission_durability::AdmissionDurability,
+)> {
     // A production boot runs only verified released images, for every
     // managed artifact it resolves. The tiers recorded with those images
     // decide (below): a local-dev managed image is refused however it was
@@ -485,7 +512,20 @@ fn admit(
         .transpose()?;
     let t_admit_start = std::time::Instant::now();
     mvm_core::launch_trace::lap("admit_plan.setup_and_boot_artifact_identity");
-    let sha = resolve_image_sha256(p.rootfs_path, p.precomputed_image_sha256.or(attested_sha))?;
+    let sha = if let Some(expected) = prepared {
+        let actual = mvm_core::crypto::image_verify::sha256_file(p.rootfs_path)?;
+        if actual != expected.rootfs_sha256 || p.backend_name != expected.backend {
+            return Err(mvm_core::prepared_image::PreparedImageError {
+                kind: mvm_core::prepared_image::PreparedImageErrorKind::SelectionChanged,
+                reference: expected.canonical_reference.clone(),
+                detail: "prepared bytes or backend changed before admission".into(),
+            }
+            .into());
+        }
+        actual
+    } else {
+        resolve_image_sha256(p.rootfs_path, p.precomputed_image_sha256.or(attested_sha))?
+    };
     mvm_core::launch_trace::lap("admit_plan.image_sha256");
     let t_sha = std::time::Instant::now();
     tracing::debug!(
@@ -683,6 +723,9 @@ fn admit(
         p.gpu,
     );
     let mut bundle_audit_labels = std::collections::BTreeMap::new();
+    if let Some(prepared) = prepared {
+        bundle_audit_labels.extend(prepared.audit_labels());
+    }
     if pinned_bundle_origin == Some(mvm_core::plan::bundle::BundleOrigin::LocalBuild) {
         bundle_audit_labels.insert("origin".to_string(), "local-build".to_string());
         bundle_audit_labels.insert(
