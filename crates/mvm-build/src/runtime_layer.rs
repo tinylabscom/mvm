@@ -8,7 +8,9 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use mvm_contract::pack_spec::PackTarget;
-use mvm_contract::pack_spec_v2::{BuildMode, ComposablePackError, ComposablePackSpec};
+use mvm_contract::pack_spec_v2::{
+    BuildMode, ComposablePackError, ComposablePackSpec, validate_entrypoint,
+};
 use mvm_core::arch::GuestArch;
 use mvm_core::image_set::WorkloadImageProfile;
 use mvm_core::packs::Sha256Hex;
@@ -124,11 +126,13 @@ pub struct ComposedApplicationRootfs {
 pub enum ComposableLockSchema {
     #[serde(rename = "mvm.composable-pack-lock/v1")]
     V1,
+    #[serde(rename = "mvm.composable-pack-lock/v2")]
+    V2,
 }
 
 /// Pinned candidate inputs; a lock is not publisher trust or boot evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "ResolvedComposableLockWire", deny_unknown_fields)]
 pub struct ResolvedComposableLock {
     schema: ComposableLockSchema,
     spec_sha256: Sha256Hex,
@@ -140,6 +144,59 @@ pub struct ResolvedComposableLock {
     profile: WorkloadImageProfile,
     producer_revision: String,
     producer_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    entrypoint: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResolvedComposableLockWire {
+    schema: ComposableLockSchema,
+    spec_sha256: Sha256Hex,
+    source_tree_sha256: Sha256Hex,
+    application_archive_sha256: Sha256Hex,
+    base_manifest_sha256: Sha256Hex,
+    runtime_pins: Vec<PackPin>,
+    target: PackTarget,
+    profile: WorkloadImageProfile,
+    producer_revision: String,
+    producer_version: String,
+    entrypoint: Option<Vec<String>>,
+}
+
+impl TryFrom<ResolvedComposableLockWire> for ResolvedComposableLock {
+    type Error = &'static str;
+
+    fn try_from(wire: ResolvedComposableLockWire) -> Result<Self, Self::Error> {
+        if wire.schema == ComposableLockSchema::V2
+            && (wire.producer_revision.len() != 40
+                || !wire
+                    .producer_revision
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+        {
+            return Err("production composable lock has no pinned producer revision");
+        }
+        match (wire.schema, wire.entrypoint.as_deref()) {
+            (ComposableLockSchema::V1, None) => {}
+            (ComposableLockSchema::V2, Some(entrypoint))
+                if validate_entrypoint(entrypoint).is_ok() => {}
+            _ => return Err("composable lock schema and entrypoint disagree"),
+        }
+        Ok(Self {
+            schema: wire.schema,
+            spec_sha256: wire.spec_sha256,
+            source_tree_sha256: wire.source_tree_sha256,
+            application_archive_sha256: wire.application_archive_sha256,
+            base_manifest_sha256: wire.base_manifest_sha256,
+            runtime_pins: wire.runtime_pins,
+            target: wire.target,
+            profile: wire.profile,
+            producer_revision: wire.producer_revision,
+            producer_version: wire.producer_version,
+            entrypoint: wire.entrypoint,
+        })
+    }
 }
 
 impl ResolvedComposableLock {
@@ -156,6 +213,11 @@ impl ResolvedComposableLock {
     /// Architecture selected by the authenticated source recipe.
     pub fn target(&self) -> PackTarget {
         self.target
+    }
+
+    /// Authored argv bound in the production input record; absent in Dev-local v1.
+    pub fn entrypoint(&self) -> Option<&[String]> {
+        self.entrypoint.as_deref()
     }
 
     /// Compare against freshly resolved inputs before a production build.
@@ -202,7 +264,12 @@ impl ComposedApplicationRootfs {
         producer_revision: &str,
     ) -> Result<ResolvedComposableLock, RuntimeLayerStageError> {
         spec.check_mode_request(BuildMode::Production)?;
-        self.lock_for(spec, source_tree_sha256, producer_revision)
+        self.lock_for(
+            spec,
+            source_tree_sha256,
+            producer_revision,
+            ComposableLockSchema::V2,
+        )
     }
 
     /// Bind a development build to the same immutable inputs without claiming
@@ -218,7 +285,12 @@ impl ComposedApplicationRootfs {
         producer_revision: &str,
     ) -> Result<ResolvedComposableLock, RuntimeLayerStageError> {
         spec.check_mode_request(BuildMode::Development)?;
-        self.lock_for(spec, source_tree_sha256, producer_revision)
+        self.lock_for(
+            spec,
+            source_tree_sha256,
+            producer_revision,
+            ComposableLockSchema::V1,
+        )
     }
 
     fn lock_for(
@@ -226,6 +298,7 @@ impl ComposedApplicationRootfs {
         spec: &ComposablePackSpec,
         source_tree_sha256: &Sha256Hex,
         producer_revision: &str,
+        schema: ComposableLockSchema,
     ) -> Result<ResolvedComposableLock, RuntimeLayerStageError> {
         let spec_sha256 = Sha256Hex::from_bytes(&spec.canonical_json()?);
         if self.tree.authored_spec_sha256.as_ref() != Some(&spec_sha256)
@@ -238,7 +311,7 @@ impl ComposedApplicationRootfs {
         }
         self.tree.reverify_runtime_policies()?;
         Ok(ResolvedComposableLock {
-            schema: ComposableLockSchema::V1,
+            schema,
             spec_sha256,
             source_tree_sha256: source_tree_sha256.clone(),
             application_archive_sha256: self.application_archive_sha256.clone(),
@@ -248,6 +321,7 @@ impl ComposedApplicationRootfs {
             profile: self.tree.profile,
             producer_revision: producer_revision.to_owned(),
             producer_version: env!("CARGO_PKG_VERSION").into(),
+            entrypoint: (schema == ComposableLockSchema::V2).then(|| spec.entrypoint.clone()),
         })
     }
 
@@ -1549,8 +1623,44 @@ mod tests {
             .resolved_lock(&spec, &source_sha256, &revision)
             .unwrap();
         let locked_bytes = serde_json::to_vec(&lock).unwrap();
+        let locked_value: serde_json::Value = serde_json::from_slice(&locked_bytes).unwrap();
+        assert_eq!(locked_value["schema"], "mvm.composable-pack-lock/v2");
+        assert_eq!(
+            locked_value["entrypoint"],
+            serde_json::json!(spec.entrypoint)
+        );
         let restored: ResolvedComposableLock = serde_json::from_slice(&locked_bytes).unwrap();
         restored.verify_current(&lock).unwrap();
+        let mut missing_entrypoint = locked_value.clone();
+        missing_entrypoint
+            .as_object_mut()
+            .unwrap()
+            .remove("entrypoint");
+        assert!(serde_json::from_value::<ResolvedComposableLock>(missing_entrypoint).is_err());
+        let mut invalid_entrypoint = locked_value.clone();
+        invalid_entrypoint["entrypoint"] = serde_json::json!(["python3"]);
+        assert!(serde_json::from_value::<ResolvedComposableLock>(invalid_entrypoint).is_err());
+        for invalid in ["/", "//bin/tool", "/srv/app/../tool", "/a\\b", "/a:b"] {
+            let mut invalid_entrypoint = locked_value.clone();
+            invalid_entrypoint["entrypoint"] = serde_json::json!([invalid]);
+            assert!(
+                serde_json::from_value::<ResolvedComposableLock>(invalid_entrypoint).is_err(),
+                "{invalid}"
+            );
+        }
+        let mut invalid_entrypoint = locked_value.clone();
+        invalid_entrypoint["entrypoint"] = serde_json::json!([format!("/{}", "a".repeat(4097))]);
+        assert!(serde_json::from_value::<ResolvedComposableLock>(invalid_entrypoint).is_err());
+        let mut boundary_entrypoint = locked_value.clone();
+        boundary_entrypoint["entrypoint"] = serde_json::json!([format!("/{}", "a".repeat(4096))]);
+        assert!(serde_json::from_value::<ResolvedComposableLock>(boundary_entrypoint).is_ok());
+        let mut mixed_dev = locked_value;
+        mixed_dev["schema"] = serde_json::json!("mvm.composable-pack-lock/v1");
+        assert!(serde_json::from_value::<ResolvedComposableLock>(mixed_dev).is_err());
+        let mut unpinned_producer: serde_json::Value =
+            serde_json::from_slice(&locked_bytes).unwrap();
+        unpinned_producer["producer_revision"] = serde_json::json!("main");
+        assert!(serde_json::from_value::<ResolvedComposableLock>(unpinned_producer).is_err());
         let mut changed = lock.clone();
         changed.source_tree_sha256 = Sha256Hex::from_bytes(b"edited source");
         assert!(matches!(
@@ -1646,13 +1756,16 @@ mod tests {
         let mut development = application;
         development.tree.authored_spec_sha256 =
             Some(Sha256Hex::from_bytes(&dev.canonical_json().unwrap()));
-        assert_eq!(
-            development
-                .development_lock(&dev, &source_sha256, &revision)
-                .unwrap()
-                .base_manifest_sha256(),
-            lock.base_manifest_sha256()
-        );
+        let dev_lock = development
+            .development_lock(&dev, &source_sha256, &revision)
+            .unwrap();
+        assert_eq!(dev_lock.base_manifest_sha256(), lock.base_manifest_sha256());
+        let dev_value = serde_json::to_value(&dev_lock).unwrap();
+        assert_eq!(dev_value["schema"], "mvm.composable-pack-lock/v1");
+        assert!(dev_value.get("entrypoint").is_none());
+        let mut mixed_prod = dev_value;
+        mixed_prod["schema"] = serde_json::json!("mvm.composable-pack-lock/v2");
+        assert!(serde_json::from_value::<ResolvedComposableLock>(mixed_prod).is_err());
     }
 
     #[test]
