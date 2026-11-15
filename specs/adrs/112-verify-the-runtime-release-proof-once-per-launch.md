@@ -3,8 +3,9 @@
 Backing: preview
 Validation: none
 
-**Status: Proposed.** Direction chosen on 2026-11-14: verify once. Review of the
-claim-20 consequences, below, is still to be done before any code lands.
+**Status: Proposed.** Direction chosen on 2026-11-14: verify once. The
+claim-20 and claim-3 consequences and the assurance boundary still require
+owner review before this design is considered accepted.
 
 ## Summary, for a reader in a hurry
 
@@ -131,19 +132,35 @@ The conditions that make this the same verification, not a weaker one:
    already owns a private snapshot of the exact signed archive bytes, so that
    later use reads what was verified. The shared value keeps that ownership; it
    is shared by reference (`Arc`), not re-derived from a path.
-3. **The key covers everything the verification depends on:** the release
-   version, the guest architecture and the identity of the archive, checksum and
-   bundle files (path, size, modification time and the archive digest). If any of
-   them differs, the step verifies again.
-4. **Failures are not remembered.** A refusal on the first call is the refusal
-   for that launch.
+3. **The checked bytes, not mutable cache metadata, are the launch authority.**
+   The result owns the verified archive, checksum and signature bytes and pins
+   their digest, release version and guest architecture. A cache refresh after
+   verification cannot change what this launch boots: custody copies and hashes
+   the selected artifacts against the authenticated declaration into the
+   retained generation. A mismatch refuses. A subsequent launch verifies its
+   own selection afresh. This replaces the earlier proposal to reverify the
+   on-disk archive or bundle if its path, size or modification time changes
+   between steps of the same launch.
+4. **Failures are not remembered.** A failed verification refuses this launch;
+   another launch checks independently.
 5. **Nothing is persisted.** No record is written for a later process to trust.
-6. **Everything else is unchanged:** the overlay and verity digests are still
-   compared with the declaration, the plan is still signed and verified, and the
-   dispatch-time re-check still happens; it reuses the verified result instead of
-   repeating the archive work.
+6. **Everything else is unchanged:** the overlay, verity and initramfs digests
+   are still compared with the declaration, the plan is still signed and
+   verified, and the built registry pack's dispatch-time selection recheck
+   remains. Runtime binding consumes the launch's verified result and hashes
+   selected artifacts while taking custody instead of repeating the archive
+   signature work.
 7. **`MVM_SKIP_COSIGN_VERIFY` keeps its present meaning** for each path that
    honours it today, and the Firecracker launch proof remains non-waivable.
+
+The release identity (archive digest, selected artifact digests and verified
+signer) is signed as an optional top-level `ExecutionPlan.runtime_identity`
+and recorded in the chain-signed admission entry. A checkpoint fork resumes
+an existing VM and selects no new kernel, so its plan may have no
+`EnvironmentRef`; putting the runtime identity inside that kernel-only
+reference would silently omit the retained generation or invent a kernel pin.
+Restore, fork and warm claim verify their own retained generation rather than
+using an unrelated fresh launch's verification result.
 
 This gives a launch of about 1.7 s on the idle VM (projected from the spans:
 5.58 s minus about 3.9 s), against 5.6 s.
@@ -191,14 +208,15 @@ This gives a launch of about 1.7 s on the idle VM (projected from the spans:
 
 ## What the implementation must test
 
-1. A second request for the same archive in one launch performs no second
-   archive read, hash or signature check (assert the number of verifications).
-2. A different version, architecture, archive, checksum or bundle in the same
-   launch is verified again.
-3. A launch whose archive or bundle changes on disk between two steps verifies
-   again, and refuses if it no longer verifies.
-4. A refusal is not remembered: after a failing first call, the next call refuses
-   too.
+1. Attach, admission and bind in one launch share one whole-set verification;
+   assert the number of archive and signature checks.
+2. A different launch, even in the same process, independently verifies its
+   selected version, architecture, archive, checksum and bundle.
+3. A cache refresh between verification and bind does not change this launch's
+   retained bytes; a changed selected artifact refuses at custody, and the
+   next launch verifies the refreshed cache independently.
+4. A refusal is not remembered: after a failing first launch, the next launch
+   independently checks and refuses the same invalid bytes.
 5. Two launches in one process verify twice, once each.
 6. A tampered archive still refuses at the first call, with the same error and the
    same audit entry as before.
