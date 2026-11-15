@@ -979,10 +979,15 @@ mod tests {
         std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755))
             .expect("mark worker runnable");
         let resolved = std::fs::canonicalize(&worker).expect("canonicalize worker script");
+        // The worker is a script, so it runs by its resolved path, as a
+        // sealed-script entrypoint does. A script launched through
+        // `/proc/self/fd/<n>` needs that descriptor to survive the
+        // interpreter's re-exec, and the validator refuses a shell-shebang
+        // entrypoint for the descriptor path anyway.
         let entrypoint = Arc::new(crate::entrypoint::ValidatedEntrypoint {
             file: std::fs::File::open(&resolved).expect("open worker script"),
             resolved,
-            use_resolved_path: false,
+            use_resolved_path: true,
         });
         let worker_env = vec![(
             "PATH".to_string(),

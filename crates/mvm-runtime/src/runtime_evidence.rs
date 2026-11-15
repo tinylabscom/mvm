@@ -576,6 +576,11 @@ fn verify_runtime_for_launch_at(
             config.source_runtime_archive_sha256.as_deref(),
         )?),
     };
+    mvm_core::launch_trace::lap(if config.runtime_release_proof.is_some() {
+        "runtime_evidence.release_proof_verify"
+    } else {
+        "runtime_evidence.source_runtime_check"
+    });
     let declaration = verified.declaration(GuestArch::host())?;
     if declaration.protocol_version < minimum_protocol
         || declaration.min_supported_protocol_version > mvm_agentd::vsock::PROTOCOL_VERSION

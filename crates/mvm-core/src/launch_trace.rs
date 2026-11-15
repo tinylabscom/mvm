@@ -39,6 +39,11 @@ pub const LAUNCH_TRACE_FILE: &str = "launch-trace.json";
 /// neither writer has to know the other exists and neither ordering loses data.
 pub const LAUNCH_TRACE_DRIVER_FILE: &str = "launch-trace-driver.json";
 
+/// Sidecar the HVF supervisor process writes its own startup laps to, once its
+/// vCPUs are about to run. A third file for the same reason as the driver's: no
+/// writer has to know another exists. [`read_trace`] folds it in.
+pub const LAUNCH_TRACE_SUPERVISOR_FILE: &str = "launch-trace-supervisor.json";
+
 /// Joins a driver sub-phase to the runner phase that contains it.
 ///
 /// A driver's phases decompose one of the runner's, so a flat merge would let
@@ -353,6 +358,94 @@ pub fn recorded_acquisition() -> AcquisitionWork {
     }
 }
 
+/// Most laps one process keeps. A long-lived embedder that never reads them
+/// back must not grow without bound.
+const MAX_LAPS: usize = 256;
+
+#[derive(Default)]
+struct Laps {
+    last: Option<Instant>,
+    dir: Option<PathBuf>,
+    phases: Vec<TracePhase>,
+}
+
+static LAPS: std::sync::Mutex<Laps> = std::sync::Mutex::new(Laps {
+    last: None,
+    dir: None,
+    phases: Vec::new(),
+});
+
+fn laps() -> std::sync::MutexGuard<'static, Laps> {
+    LAPS.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Start a run of [`lap`]s now, when a launch measurement asked for one.
+///
+/// Laps are the sequential, process-wide counterpart of
+/// [`LaunchTraceRecorder::mark`] for code that sits many crates below the
+/// caller that reports the sample: each [`lap`] closes the span since the
+/// previous one. Calling this again starts a new run without discarding laps
+/// already taken. `dir`, when given, is where [`flush_laps`] writes them.
+pub fn lap_reset(dir: Option<&Path>) {
+    if !tracing_enabled() {
+        return;
+    }
+    let mut laps = laps();
+    laps.last = Some(Instant::now());
+    laps.dir = dir.map(Path::to_path_buf);
+}
+
+/// Close the span since the last [`lap_reset`] or [`lap`] and name it. A no-op
+/// unless a run was started, so callers outside a measured launch pay one lock.
+pub fn lap(name: &'static str) {
+    let mut laps = laps();
+    let Some(last) = laps.last else {
+        return;
+    };
+    let now = Instant::now();
+    let ms = now.saturating_duration_since(last).as_secs_f64() * 1000.0;
+    // The running byte count at each boundary, so the bytes a step hashed are
+    // the difference between two lines.
+    tracing::debug!(
+        lap = name,
+        ms,
+        artifact_bytes_hashed = ACQUISITION.artifact_bytes_hashed.load(Ordering::Relaxed),
+        "launch lap"
+    );
+    if laps.phases.len() < MAX_LAPS {
+        laps.phases.push(TracePhase {
+            name: name.to_string(),
+            ms,
+        });
+    }
+    laps.last = Some(now);
+}
+
+/// Every lap this process has taken, in order.
+#[must_use]
+pub fn recorded_laps() -> Vec<TracePhase> {
+    laps().phases.clone()
+}
+
+/// [`lap`], then write every lap to the directory given to [`lap_reset`] as the
+/// supervisor sidecar. Best-effort, like every other trace write.
+pub fn lap_and_flush(name: &'static str) {
+    lap(name);
+    let laps = laps();
+    let Some(dir) = &laps.dir else {
+        return;
+    };
+    let trace = BackendLaunchTrace {
+        backend: "supervisor".to_string(),
+        phases: laps.phases.clone(),
+        degraded: Vec::new(),
+    };
+    if let Ok(json) = serde_json::to_string_pretty(&trace) {
+        let _ = std::fs::write(dir.join(LAUNCH_TRACE_SUPERVISOR_FILE), json);
+    }
+}
+
 /// Where a VM's trace sidecar lives.
 #[must_use]
 pub fn trace_path(state_dir: &Path) -> PathBuf {
@@ -385,6 +478,20 @@ pub fn read_trace(state_dir: &Path) -> Option<BackendLaunchTrace> {
         // discarding the only evidence of what the driver did.
         return driver;
     };
+    // The supervisor's laps nest inside the driver's own wait for it, so they
+    // take a further qualifier rather than sitting beside the driver's phases.
+    let supervisor = read_one(state_dir.join(LAUNCH_TRACE_SUPERVISOR_FILE));
+    if let Some(supervisor) = supervisor {
+        trace
+            .phases
+            .extend(supervisor.phases.into_iter().map(|phase| {
+                let name = format!(
+                    "driver_boot{DRIVER_PHASE_SEPARATOR}supervisor{DRIVER_PHASE_SEPARATOR}{}",
+                    phase.name
+                );
+                TracePhase { name, ms: phase.ms }
+            }));
+    }
     if let Some(driver) = driver {
         trace.phases.extend(driver.phases.into_iter().map(|phase| {
             let name = format!("driver_boot{DRIVER_PHASE_SEPARATOR}{}", phase.name);
@@ -622,6 +729,34 @@ mod driver_sidecar_tests {
             .filter(|n| !n.contains(DRIVER_PHASE_SEPARATOR))
             .collect();
         assert_eq!(unqualified, vec!["driver_boot"]);
+    }
+
+    #[test]
+    fn supervisor_laps_fold_in_under_the_driver_phase() {
+        let dir = tempfile::tempdir().unwrap();
+        rec("hvf", &["driver_boot"]).write_to(dir.path());
+        let supervisor = rec("supervisor", &["hv_vm_create"]).finish().unwrap();
+        std::fs::write(
+            dir.path().join(LAUNCH_TRACE_SUPERVISOR_FILE),
+            serde_json::to_string(&supervisor).unwrap(),
+        )
+        .unwrap();
+        let names: Vec<String> = read_trace(dir.path())
+            .unwrap()
+            .phases
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(
+            names,
+            ["driver_boot", "driver_boot.supervisor.hv_vm_create"]
+        );
+    }
+
+    #[test]
+    fn laps_are_inert_until_a_measured_launch_starts_a_run() {
+        lap_and_flush("before_any_run");
+        assert!(recorded_laps().is_empty());
     }
 
     /// A driver sidecar alone is the only evidence of what happened when the

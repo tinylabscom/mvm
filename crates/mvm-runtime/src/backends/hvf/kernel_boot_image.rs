@@ -107,6 +107,7 @@ impl KernelImageSource<'_> {
         offset: usize,
         loaded_len: usize,
     ) -> Result<Option<RuntimeArtifact>, HvfError> {
+        mvm_core::launch_trace::lap("ram_alloc_fdt_and_kernel_map");
         let path = match self {
             Self::Bytes(_) => return Ok(None),
             Self::File(path) | Self::HeldFile { label: path, .. } => path,

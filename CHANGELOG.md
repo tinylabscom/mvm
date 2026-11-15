@@ -2,6 +2,37 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.28.0-rc.4] — 2026-11-14
+
+### Added
+- **sdk**: Refuse bare-string env values in both SDKs and the decorator parser
+- **xtask**: Double-key the stale-name relief valves
+- Compose local manifest sizing defaults
+- **share**: Deny-by-default path exclusion for directory shares
+
+### Documentation
+- **specs**: Record the green scheduled Security run after #5368
+- Publish mvm overview and composition guides
+- **telemetry**: Correct two stale capture-status passages
+
+### Fixed
+- **density**: Classify RSS rows by program file name, not anywhere in the command line
+- **deps**: Update quinn-udp to 0.5.16 for RUSTSEC-2026-0538
+- **client**: Retain one-start mailbox grant for persistent launch admission
+- **pack**: Admit selected backend and witness signed Yocto boot
+- Bring CI (main) green after the bare-env, console-test and docs changes
+
+### Refactored
+- **packs**: Remove the expired legacy pack-signing identity
+
+### Testing
+- **density**: Count Linux threads from procfs and sample idle CPU and wakeups
+- Add a live runbook and hermetic test for the factory-edge demo
+- **density**: Sample idle CPU, wakeups, threads and descriptors on macOS
+- Warm the home before the factory-edge script launches workloads together
+- **docs**: List the no-detect run command as covered in the docs ledger
+- Make the factory-edge demo one launch path on a prepared home
+
 ## [0.28.0-rc.3] — 2026-11-13
 
 ### Added

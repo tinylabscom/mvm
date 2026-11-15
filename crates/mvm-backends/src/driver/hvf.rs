@@ -574,6 +574,7 @@ fn boot_retaining_child(
     let state_dir = stop_wire::state_dir(&spec.name)?;
     mvm_core::config::create_private_dir(&state_dir)?;
     let _launch_lock = claim_hvf_launch(&state_dir)?;
+    let mut trace = mvm_core::launch_trace::LaunchTraceRecorder::new("hvf");
     let timeout_secs = std::env::var("MVM_HVF_TIMEOUT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -594,8 +595,10 @@ fn boot_retaining_child(
     .map_err(|e| anyhow!("write supervisor config {}: {e}", config_path.display()))?;
     let json =
         serde_json::to_string(&cfg).map_err(|e| anyhow!("serialize HvfSupervisorConfig: {e}"))?;
+    trace.mark("config_prepare");
     let supervisor = resolve_supervisor_path_verified()
         .map_err(|e| anyhow!("{}", supervisor_unavailable_message(&e)))?;
+    trace.mark("supervisor_resolve");
     // Diagnostics are optional evidence, never a launch or readiness gate.
     let mut diagnostics = StartupDiagnostics::new().ok();
     let mut command = if cfg.kernel_fd.is_some()
@@ -640,6 +643,7 @@ fn boot_retaining_child(
     if let Some(diagnostics) = &mut diagnostics {
         diagnostics.launched();
     }
+    trace.mark("supervisor_spawn");
     let agent_socket = hvf_agent_socket(&paths.state_dir);
     let readiness = (|| -> Result<()> {
         child
@@ -659,6 +663,7 @@ fn boot_retaining_child(
                     .context("pipe HVF supervisor config")
                     .context(summary.child_status(status))
             })?;
+        trace.mark("config_pipe");
         let deadline = readiness_deadline(Instant::now());
         let mut attempt = 0u32;
         loop {
@@ -696,6 +701,7 @@ fn boot_retaining_child(
             std::thread::sleep(mvm_core::poll_backoff::fine_poll_delay(attempt));
             attempt = attempt.saturating_add(1);
         }
+        trace.mark("supervisor_pid_file_wait");
         let mut observed_exit = None;
         let socket_wait = wait_for_agent_socket(&agent_socket, AGENT_SOCKET_TIMEOUT, || {
             child
@@ -719,6 +725,7 @@ fn boot_retaining_child(
                 mvm_vmm::host::hvf_supervisor::failure_record::detail(&paths.state_dir)
             ));
         }
+        trace.mark("agent_socket_wait");
         Ok(())
     })();
     if let Err(error) = readiness {
@@ -741,6 +748,8 @@ fn boot_retaining_child(
         }
     };
     let instance = owned.instance().clone();
+    trace.mark("adopt");
+    trace.write_driver_to(&paths.state_dir);
     Ok(HvfRunningVm {
         id: VmId(spec.name.clone()),
         state_dir: paths.state_dir,
