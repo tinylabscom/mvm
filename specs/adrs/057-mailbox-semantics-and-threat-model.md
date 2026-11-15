@@ -436,6 +436,33 @@ honest host does not by itself establish host-blind execution. A platform
 without confidential-computing memory protection must refuse a requested
 host-blind mailbox profile rather than silently relabel the ordinary tier.
 
+#### Local key custody at fleet density (#5292)
+
+One resident scheduler per host routes, queues, journals, and schedules wakes
+for **sealed messages only**. It holds no mailbox key and cannot open or forge
+a mailbox message. Seal/open and mailbox authorization belong to a VM-scoped
+key holder, not the scheduler or the network endpoint. A host-wide key holder
+would hold every mailbox key on a single-tenant host; putting those keys in a
+daemon that parses guest input makes one parser compromise an all-mailboxes
+compromise. A per-tenant key-holding daemon is therefore not the chosen
+density tradeoff.
+
+An existing per-VM supervisor is a candidate holder on HVF and libkrun,
+subject to a witness for its guest-input boundary, key lifecycle, and
+fail-closed admission. Firecracker has no separate per-VM supervisor today:
+its VMM is not a substitute key holder, so it needs a VM-scoped helper or a
+separately reviewed supervisor. Holders should wake on owned socket/process
+events and may exit after an idle deadline; crash recovery reconciles the
+durable journal and VM ownership without making a periodic idle poll the
+delivery path. Acceptance requires measurement of recovery, first-message
+latency, warm claims, and idle wakeups at fleet scale.
+
+This is a **design decision, not a shipped guarantee**. Compromise of a
+key holder exposes its own VM's mailbox. The scheduler sees message metadata
+(including routing, size, timing, and queue activity) even though it cannot
+read or forge payloads. A compromised host remains outside this isolation
+claim; the host-blind tier above still needs its own hardware witnesses.
+
 ### 12. Dedicated service and resource isolation
 
 Mailboxes receive a separately registered `GuestService` and dedicated vsock
