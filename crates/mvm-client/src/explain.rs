@@ -237,6 +237,9 @@ fn authenticate_run_in_live_segment(
             }
         }
     }
+    // Every line from the run's first entry to the end of the segment must be
+    // linked to the one before it, or a removed refusal would go unnoticed.
+    mvm_core::audit_verify::live::authenticate_live_tail(dir, tenant, key, &plan_id).ok()?;
     entries.sort_by_key(|e| e.timestamp);
     Some(entries)
 }
@@ -486,6 +489,62 @@ mod tests {
         assert!(
             old.history_verified,
             "a run outside the live segment is walked in full"
+        );
+    }
+
+    /// A refusal removed from the live segment must not pass for a clean record,
+    /// even when the line after it is not one the run's own lookups would parse.
+    #[test]
+    fn a_refusal_removed_from_the_live_segment_is_not_reported_as_authentic() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set(mvm_core::config::AUDIT_SEGMENT_BYTES_ENV, "16384");
+        let key = SigningKey::from_bytes(&[15; 32]);
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key.clone(), dir.path()).unwrap();
+        let mut n = 0;
+        while mvm_core::audit_verify::set::segment_shape(dir.path(), "local")
+            .map_or(true, |shape| shape.sealed.is_empty())
+        {
+            let old = fixture_plan("local", &format!("plan-old-{n}"));
+            emitter.emit_admitted(&old, "host:test").unwrap();
+            emitter.emit_exited(&old, 0, "hvf").unwrap();
+            n += 1;
+        }
+        let plan = fixture_plan("local", "plan-tamper-1");
+        emitter.emit_admitted(&plan, "host:test").unwrap();
+        emitter.emit_launched(&plan, "hvf").unwrap();
+        endpoint_refusal(
+            dir.path(),
+            &key,
+            "vm-test",
+            "example.com:443",
+            "policy_denied",
+        );
+        endpoint_refusal(
+            dir.path(),
+            &key,
+            "vm-other",
+            "other.example:443",
+            "policy_denied",
+        );
+        let path = dir.path().join("local.jsonl");
+        let clean = collect_run(&path, &vk, "local", "plan-tamper-1").unwrap();
+        assert!(clean.chain_verified && !clean.history_verified);
+        assert_eq!(clean.egress_denials.len(), 1);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let kept: Vec<&str> = content
+            .lines()
+            .filter(|line| !line.contains("example.com:443"))
+            .collect();
+        assert_eq!(kept.len() + 1, content.lines().count());
+        std::fs::write(&path, kept.join("\n") + "\n").unwrap();
+
+        let tampered = collect_run(&path, &vk, "local", "plan-tamper-1").unwrap();
+        assert!(
+            !tampered.chain_verified,
+            "a removed refusal must not verify"
         );
     }
 
