@@ -61,6 +61,7 @@ comment exists, not that its claim is true; the sites were read, but a comment i
 | Killed boot-timeout child never reaped | kill without `wait()` leaves a zombie in a long-lived parent | [#5489](https://github.com/tinylabscom/mvm/issues/5489) | libkrun driver boot and vsock-timeout paths now kill and reap through `driver::kill_and_reap`, with a waitpid-based no-zombie test; the `hvf_restore.rs` sites are owned by #5490 and the `hvf/stop_state.rs` and `fc/idle_pool.rs` sites listed with the gap were test-only and already reaped |
 | FlowMux registry and UDP relay | peer-chosen stream id overflow; unsolicited datagrams holding an association; UDP slot leak on open failure | [#5390](https://github.com/tinylabscom/mvm/pull/5390) | `crates/mvm-hostd/src/supervisor/endpoint/flowmux/registry.rs`, `udp_relay.rs`. The slot-leak fix has no test (needs fd or thread exhaustion) |
 | HVF guest PC, SMP unwind, HTTP flow cancellation | guest-chosen PC overflow; panic wedging `thread::scope`; cancellation unwatched after response head | [#5402](https://github.com/tinylabscom/mvm/pull/5402) | `crates/mvm-runtime/src/backends/hvf/smp.rs` (non-test code), `http_flow.rs`, `open_flow.rs` lines 1-352 |
+| HVF standby parent teardown | start error paths leaving the parent VM running when the recorded pid was unsignalable | [#5491](https://github.com/tinylabscom/mvm/issues/5491) | `crates/mvm-backends/src/driver/hvf/standby.rs` (`recorded_pid_or_stop`): every recorded-pid refusal stops the just-booted parent through the owned-stop path; failing-before test with a negative pid |
 | HVF snapshot and cancellation lifecycle | pause/capture races, completion notification | [#4994](https://github.com/tinylabscom/mvm/pull/4994), [#5064](https://github.com/tinylabscom/mvm/pull/5064), [#4983](https://github.com/tinylabscom/mvm/pull/4983) | fixed under the HVF owner work; not re-read for this table |
 | Volume, checkpoint and peer-EOF custody | custody, removal guard, EOF after timeout refusal | [#4880](https://github.com/tinylabscom/mvm/pull/4880), [#4957](https://github.com/tinylabscom/mvm/pull/4957), [#4864](https://github.com/tinylabscom/mvm/pull/4864), [#4879](https://github.com/tinylabscom/mvm/pull/4879) | fixed under the volume and vmm owner work; not re-read for this table |
 | Unsafe/FFI documentation | missing `SAFETY` claims | [#4993](https://github.com/tinylabscom/mvm/pull/4993), [#5438](https://github.com/tinylabscom/mvm/pull/5438) | every `unsafe` block in the workspace has a comment; see the gate above |
@@ -82,13 +83,11 @@ unreviewed.
 
 ## Known and unfixed
 
-Found during the #5390 review and left alone. No item has a fix in flight; the owner is the
-maintainer of the named area until an issue is opened, and the next step is a failing-before test
-at the cited site, then the fix.
+Found during the #5390 review. Every gap recorded here has since been fixed; the row
+that remains describes its fix so the next reader sees the resolution without digging.
 
 | Item | Site | Owner | Next step |
 | --- | --- | --- | --- |
-| `hvf/standby.rs` leaves the VM running when its pid is negative | `crates/mvm-backends/src/driver/hvf/standby.rs` | HVF owner | refuse and stop through the owned-stop path; test with a negative pid (tracked in #5491) |
 | `HvfVm::create` did not destroy the VM or release the GIC config when GIC creation fails — fixed by an RAII guard (`PendingHvfVm`) over the setup seam (`VmSetup`), so every early return after `hv_vm_create` drops into cleanup, and by `commit` releasing the config on the success path too; cleanup order is unit-tested with a fake seam, the real-FFI check on a live HVF host is still owed (tracked in #5492, fix on branch `fix/5492-hvf-gic-guard`) | `crates/mvm-runtime/src/backends/hvf/hv_impl.rs` (`HvfVm::create`) | HVF owner | merge the fix, then confirm `mvmctl` launch/teardown on a real macOS HVF host (the failure itself is not injectable through the real framework) |
 
 ## Fixed after this table was written
@@ -96,4 +95,3 @@ at the cited site, then the fix.
 | Item | Site | Fixed in | Files read and found sound or fixed |
 | --- | --- | --- | --- |
 | FlowMux registry kept `Closed` entries for the session lifetime; retired entries are now dropped, with reuse refused by the allocator's high-water mark | `crates/mvm-hostd/src/supervisor/endpoint/flowmux/registry.rs` (`StreamRegistry::retire`, `open_guest`/`open_host` watermark) | #5493 | `registry.rs`; removal is safe because every retire path has already had its final frame admitted by the session validator, relay threads gate on the per-stream `retired` flag, and ID ordering survives in the allocator counters. Verified by `open_close_cycles_do_not_accumulate_registry_entries` and `a_retired_stream_id_cannot_be_reopened_by_the_peer` |
->>>>>>> eec70abbca (fix(hostd): drop retired flowmux entries instead of accumulating them)
