@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarize a density wave's machine-start receipt publication latency."""
+"""Summarize per-launch receipt latency, refusing missing or wrong-mode samples."""
 
 import json
 import math
@@ -13,9 +13,13 @@ def percentile(values: list[float], percent: int) -> float:
     return ordered[math.ceil(len(ordered) * percent / 100) - 1]
 
 
-def summarize(wave_dir: Path, wave: int) -> str:
+def summarize(
+    wave_dir: Path, wave: int, mode: str, image: str, cpus: int, memory: str
+) -> str:
     if wave < 1:
         raise ValueError("wave count must be positive")
+    if mode not in ("cold", "warm"):
+        raise ValueError(f"invalid launch mode: {mode}")
     details = []
     names = set()
     for line in (wave_dir / "launches.tsv").read_text().splitlines():
@@ -23,8 +27,8 @@ def summarize(wave_dir: Path, wave: int) -> str:
         if len(fields) != 5:
             raise ValueError("launch record must have five tab-separated fields")
         name, _, _, _, started = fields
-        if not name or "/" in name or name in names:
-            raise ValueError(f"invalid or repeated machine name: {name!r}")
+        if not name or "/" in name or "\\" in name or name in names:
+            raise ValueError(f"invalid or repeated launch label: {name!r}")
         names.add(name)
         started_ns = int(started)
         if started_ns <= 0:
@@ -33,15 +37,28 @@ def summarize(wave_dir: Path, wave: int) -> str:
         parsed = json.loads(receipt.read_text())
         if parsed["payload"]["schema_version"] != 1:
             raise ValueError(f"{name}: unexpected receipt schema")
-        if parsed["payload"]["invocation"]["machine_name"] != name:
-            raise ValueError(f"{name}: receipt belongs to another machine")
+        invocation = parsed["payload"]["invocation"]
+        if (invocation["image"], invocation["cpus"], invocation["memory"]) != (
+            image, cpus, memory
+        ):
+            raise ValueError(f"{name}: receipt launch shape does not match")
+        # The signed invocation has no machine_name. The harness gives each
+        # invocation a unique receipt and sample path, paired by launch label.
+        sample = wave_dir / f"{name}.sample.json"
+        measured = json.loads(sample.read_text())
+        if measured["schema_version"] != 4:
+            raise ValueError(f"{name}: unexpected launch sample schema")
+        if measured["launch_mode"] != mode:
+            raise ValueError(f"{name}: expected {mode} launch, got {measured['launch_mode']}")
         elapsed_ns = receipt.stat().st_mtime_ns - started_ns
         if elapsed_ns < 0:
             raise ValueError(f"{name}: receipt predates launch")
+        if sample.stat().st_mtime_ns < started_ns:
+            raise ValueError(f"{name}: sample predates launch")
         details.append((name, elapsed_ns / 1_000_000))
 
     if len(details) != wave:
-        raise ValueError(f"expected {wave} receipts, got {len(details)}")
+        raise ValueError(f"expected {wave} receipt/sample pairs, got {len(details)}")
     (wave_dir / "boot-receipt-ms.tsv").write_text(
         "machine\telapsed_ms\n"
         + "".join(f"{name}\t{elapsed:.3f}\n" for name, elapsed in details)
@@ -54,11 +71,20 @@ def summarize(wave_dir: Path, wave: int) -> str:
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
-        print("usage: density_timings.py WAVE_DIR WAVE_COUNT", file=sys.stderr)
+    if len(sys.argv) != 7:
+        print(
+            "usage: density_timings.py WAVE_DIR WAVE_COUNT MODE IMAGE CPUS MEMORY",
+            file=sys.stderr,
+        )
         return 64
     try:
-        print(summarize(Path(sys.argv[1]), int(sys.argv[2])), end="")
+        print(
+            summarize(
+                Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3],
+                sys.argv[4], int(sys.argv[5]), sys.argv[6],
+            ),
+            end="",
+        )
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f"density boot timing unavailable: {error}", file=sys.stderr)
         return 71
