@@ -194,6 +194,20 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
         #[cfg(unix)]
         warm_claim::cleanup_consumed_resident_parent(&state_dir, stopped.hvf_exit.is_some());
 
+        // A preloaded-child claim adopted the pool's paused child and consumed
+        // its standby parent. The adopted child is its own VMM process, so a
+        // stop that reached this point already holds the driver's bounded
+        // confirmed-exit evidence — for backends without an authenticated exit
+        // proof (every preloading backend today), the successful terminate
+        // above is that evidence. Remove what the claim left behind,
+        // best-effort like the resident cleanup.
+        #[cfg(unix)]
+        warm_claim::cleanup_consumed_preloaded_parent(
+            &state_dir,
+            stopped.hvf_exit.is_some()
+                || self.driver.kind() != mvm_core::vm_backend::BackendKind::Hvf,
+        );
+
         let timing = StopTiming {
             attach,
             endpoint_reaping,

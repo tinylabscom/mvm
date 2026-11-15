@@ -1062,22 +1062,20 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         endpoint.defuse();
         broker_guard.defuse();
         cleanup.commit();
+        // Both handoff shapes consume the standby parent's state without being
+        // able to remove it at claim time (resident: the child runs out of the
+        // parent dir; preloaded: the paused child was loaded from it), so the
+        // consumption is recorded in the child dir for the child's stop path
+        // once the child's exit is confirmed. Best-effort: a write failure
+        // must not fail a claim whose child is already live.
+        warm_claim::record_consumed_parent(
+            resident_handoff,
+            preloaded_child_name.is_some(),
+            &child_dir,
+            handle.id.as_str(),
+            child.0.as_str(),
+        );
         if resident_handoff {
-            // The child runs out of the parent's state dir (its rootfs and its
-            // linked control files live there), so the dir cannot go at claim
-            // time — only the child's stop path may remove it, once the child's
-            // exit is confirmed. Record the consumption in the child dir so a
-            // stop in any process (explicit stop, transient teardown) finds it.
-            if let Err(error) =
-                warm_claim::record_consumed_resident_parent(&child_dir, handle.id.as_str())
-            {
-                tracing::warn!(
-                    parent = %handle.id,
-                    child = %child.0,
-                    error = %error,
-                    "recording the consumed resident parent failed; its state dir will linger"
-                );
-            }
             schedule_resident_checkpoint_reclaim(ctx, &parent);
         }
         Ok(child)
@@ -4862,6 +4860,183 @@ mod tests {
             before
         );
         assert!(runner.driver.forked_children().is_empty());
+    }
+
+    /// A committed preloaded-child claim consumes its standby parent, so the
+    /// claim records the consumption in the adopted child's state dir the same
+    /// way a resident claim does: the parent dir holds the state the paused
+    /// child was loaded from and can only be removed once the child's exit is
+    /// confirmed.
+    #[test]
+    fn preloaded_claim_marks_the_consumed_parent_for_stop_time_cleanup() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let runner = claim_runner();
+        let parent = ProtectedPreloadedParent::seed(&runner);
+        let parent_vm_name = parent.handle.id.clone();
+
+        let child = parent.claim(&runner).expect("preloaded claim");
+
+        let child_dir = vm_state_dir(&child.0);
+        let marker =
+            std::fs::read_to_string(child_dir.join(warm_claim::CONSUMED_PRELOADED_PARENT_FILE))
+                .expect("a committed preloaded claim records its consumed parent");
+        assert_eq!(
+            marker.trim(),
+            parent_vm_name,
+            "the marker names the standby parent the claim consumed"
+        );
+        assert!(
+            vm_state_dir(&parent_vm_name).is_dir(),
+            "the parent dir must outlive the claim: the paused child was loaded from it"
+        );
+        assert!(
+            !child_dir
+                .join(warm_claim::CONSUMED_RESIDENT_PARENT_FILE)
+                .exists(),
+            "a preloaded adoption is not a resident handoff and must not write its marker"
+        );
+    }
+
+    #[test]
+    fn consumed_preloaded_parent_cleanup_waits_for_confirmed_exit() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _env = TestEnv::new();
+
+        let parent_dir = vm_state_dir("standby-parent");
+        std::fs::create_dir_all(&parent_dir).unwrap();
+        std::fs::write(parent_dir.join("rootfs.ext4"), b"parent-rootfs").unwrap();
+        let pool = SupervisorStandbyPool::open().unwrap();
+        pool.record(&idle_parent_handle(
+            "standby-parent",
+            std::path::Path::new("/tmp/control.sock"),
+        ))
+        .unwrap();
+        let child_dir = vm_state_dir("vm-child");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        warm_claim::record_consumed_preloaded_parent(&child_dir, "standby-parent").unwrap();
+
+        // No confirmed exit: the load opened the parent dir's recorded drives,
+        // so nothing may be removed while the child may still run.
+        warm_claim::cleanup_consumed_preloaded_parent(&child_dir, false);
+        assert!(
+            parent_dir.is_dir(),
+            "parent dir must survive an unconfirmed stop"
+        );
+        assert!(
+            pool.load("standby-parent").is_ok(),
+            "pool record must survive an unconfirmed stop"
+        );
+        assert!(
+            child_dir
+                .join(warm_claim::CONSUMED_PRELOADED_PARENT_FILE)
+                .exists(),
+            "the marker must survive an unconfirmed stop"
+        );
+
+        // Confirmed exit: parent dir, pool record, and marker all go.
+        warm_claim::cleanup_consumed_preloaded_parent(&child_dir, true);
+        assert!(
+            !parent_dir.exists(),
+            "confirmed child stop removes the consumed parent dir"
+        );
+        assert!(
+            pool.load("standby-parent").is_err(),
+            "confirmed child stop removes the parent's pool record"
+        );
+        assert!(
+            !child_dir
+                .join(warm_claim::CONSUMED_PRELOADED_PARENT_FILE)
+                .exists(),
+            "cleanup consumes its marker"
+        );
+
+        // NotFound-tolerant: a second cleanup (crash mid-claim shapes) is a no-op.
+        warm_claim::cleanup_consumed_preloaded_parent(&child_dir, true);
+    }
+
+    #[test]
+    fn consumed_preloaded_parent_cleanup_refuses_a_marker_that_fails_name_validation() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _env = TestEnv::new();
+
+        let child_dir = vm_state_dir("vm-child");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        std::fs::write(
+            child_dir.join(warm_claim::CONSUMED_PRELOADED_PARENT_FILE),
+            "../escape\n",
+        )
+        .unwrap();
+
+        warm_claim::cleanup_consumed_preloaded_parent(&child_dir, true);
+
+        assert!(
+            child_dir
+                .join(warm_claim::CONSUMED_PRELOADED_PARENT_FILE)
+                .exists(),
+            "an invalid parent name must leave the marker and every path in place"
+        );
+        assert!(child_dir.is_dir());
+    }
+
+    /// A saved-state claim that forks a fresh child adopts no preloaded child,
+    /// so it must not record the preloaded-consumption marker.
+    #[test]
+    fn forked_saved_state_claim_marks_no_consumed_preloaded_parent() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let store_root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let (checkpoints, snapshots, parent_id, parent_meta) =
+            seed_audited_parent(store_root.path(), src.path(), true);
+        let parent_digest = materialized_parent_rootfs_digest(&checkpoints, &parent_meta);
+
+        let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
+        let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
+        pool.record(&handle).unwrap();
+        let registry_path = store_root.path().join("vm-names.json");
+        let anchor = ClaimTestAnchor::audited(&parent_meta);
+        let claim = admitted_child_claim(
+            &src.path().join("rootfs.ext4"),
+            signed_child_plan_json(&parent_digest),
+        );
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            KeyingSpawner::default(),
+            RecordingBrokerRegistrar::new(),
+        );
+        let ctx = ClaimContext {
+            pool: &pool,
+            checkpoints: &checkpoints,
+            snapshots: &snapshots,
+            anchor: &anchor,
+            parent_checkpoint: &parent_id,
+            registry_path: &registry_path,
+            grant_issuer: None,
+        };
+
+        let child = runner
+            .claim_standby(&ctx, &handle, &claim)
+            .expect("saved-state claim");
+        let child_dir = vm_state_dir(&child.0);
+        assert!(
+            !child_dir
+                .join(warm_claim::CONSUMED_PRELOADED_PARENT_FILE)
+                .exists(),
+            "only a claim that adopts a preloaded child consumes the parent's state dir; \
+             a forked claim materializes its own"
+        );
+        drop(env);
     }
 
     /// Not decrypting is not trusting: a sealed object changed after the
