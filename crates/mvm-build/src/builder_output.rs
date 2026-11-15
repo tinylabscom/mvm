@@ -682,6 +682,30 @@ mod tests {
     }
 
     #[test]
+    fn the_nix_transport_allowlist_matches_the_producer_contract() {
+        use mvm_builder_guest::builder_disk_transport::NIX_FLAKE_OUTPUT_MEMBERS;
+        use mvm_builder_guest::builder_job_contract::{
+            BOOT_TIMINGS_FILE, INIT_LIFECYCLE_LOG, NIX_STDERR_LOG, NIX_STDOUT_LOG, RESULT_FILE,
+        };
+
+        let mut expected = vec![
+            "rootfs.ext4",
+            "vmlinux",
+            crate::builder_vm::SIDECAR_FILENAME,
+            RESULT_FILE,
+            BOOT_TIMINGS_FILE,
+            NIX_STDERR_LOG,
+            NIX_STDOUT_LOG,
+            INIT_LIFECYCLE_LOG,
+        ];
+        expected.extend(NIX_OUTPUT_MEMBERS);
+        expected.sort_unstable();
+        let mut actual = NIX_FLAKE_OUTPUT_MEMBERS.to_vec();
+        actual.sort_unstable();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn the_member_copy_runs_and_skips_what_the_output_does_not_have() {
         let nix_out = tempfile::tempdir().unwrap();
         let out = tempfile::tempdir().unwrap();

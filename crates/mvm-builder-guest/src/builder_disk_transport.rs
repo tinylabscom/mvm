@@ -20,10 +20,16 @@
 //! stops extraction before the disk's zero padding, so a fixed-size disk carrying
 //! a shorter archive round-trips cleanly.
 
+use std::collections::BTreeSet;
+use std::io::Read;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+
+use crate::builder_job_contract::{
+    BOOT_TIMINGS_FILE, INIT_LIFECYCLE_LOG, NIX_STDERR_LOG, NIX_STDOUT_LOG, RESULT_FILE,
+};
 
 /// virtio-blk serves whole 512-byte sectors; transport images are sized up to a
 /// sector boundary so the guest sees an exact capacity.
@@ -39,6 +45,31 @@ pub const INPUT_DISK_MIN_BYTES: u64 = 16 << 20;
 /// `rootfs.ext4` plus a kernel — since the guest writes the archive raw and
 /// cannot grow the device it was handed.
 pub const OUTPUT_DISK_BYTES: u64 = 8192 << 20;
+
+/// Flat output files emitted by the Nix FlakeImage builder script.
+///
+/// This contract belongs to the Nix producer. Yocto and future producers keep
+/// their own bounded input/output contracts and converge later on a verified
+/// template revision.
+pub const NIX_FLAKE_OUTPUT_MEMBERS: &[&str] = &[
+    "rootfs.ext4",
+    "vmlinux",
+    "initrd",
+    "rootfs-closure-paths",
+    "manifest.json",
+    "mvm-meta.json",
+    RESULT_FILE,
+    BOOT_TIMINGS_FILE,
+    NIX_STDERR_LOG,
+    NIX_STDOUT_LOG,
+    INIT_LIFECYCLE_LOG,
+];
+
+const MAX_NIX_KERNEL_BYTES: u64 = 512 << 20;
+const MAX_NIX_ROOTFS_BYTES: u64 = 7 << 30;
+const MAX_NIX_LOG_BYTES: u64 = 256 << 20;
+const MAX_NIX_METADATA_BYTES: u64 = 16 << 20;
+const TAR_BLOCK_BYTES: usize = 512;
 
 /// File name of the closure NAR inside a builder pack and inside the input disk.
 pub const CLOSURE_FILE: &str = "nix-closure.nar";
@@ -201,6 +232,168 @@ pub fn read_output_disk(disk_image: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Extract a Nix FlakeImage result through its fixed flat-file contract.
+///
+/// The destination and each output member are created exclusively. Links,
+/// devices, nested paths, duplicates, oversized members, concatenated archives,
+/// and non-zero bytes after the tar terminator are refused. Files written before
+/// a later refusal remain as diagnostic evidence.
+pub fn read_nix_flake_output_disk(disk_image: &Path, dest: &Path) -> Result<()> {
+    std::fs::create_dir(dest).with_context(|| format!("create fresh {}", dest.display()))?;
+    let mut file = std::fs::File::open(disk_image)
+        .with_context(|| format!("open {}", disk_image.display()))?;
+    let mut seen = BTreeSet::new();
+    let mut total = 0_u64;
+
+    loop {
+        let header_bytes = read_tar_block(&mut file, "read Nix FlakeImage output header")?;
+        if header_bytes.iter().all(|byte| *byte == 0) {
+            let end = read_tar_block(&mut file, "read Nix FlakeImage output end marker")?;
+            anyhow::ensure!(
+                end.iter().all(|byte| *byte == 0),
+                "Nix FlakeImage output has an incomplete tar terminator"
+            );
+            break;
+        }
+        verify_tar_checksum(&header_bytes)?;
+        let header = tar::Header::from_byte_slice(&header_bytes);
+        let path = header
+            .path()
+            .context("decode Nix FlakeImage output path")?
+            .into_owned();
+        let size = header.size().context("read output member size")?;
+        if path == Path::new(".") || path == Path::new("./") {
+            anyhow::ensure!(
+                header.entry_type().is_dir() && size == 0,
+                "Nix FlakeImage output root entry is not a directory"
+            );
+            continue;
+        }
+        let name = nix_flake_member_name(&path)?;
+        anyhow::ensure!(
+            NIX_FLAKE_OUTPUT_MEMBERS.contains(&name.as_str()),
+            "undeclared Nix FlakeImage output member: {name}"
+        );
+        anyhow::ensure!(
+            header.entry_type().is_file(),
+            "Nix FlakeImage output member is not a regular file: {name}"
+        );
+        anyhow::ensure!(
+            seen.insert(name.clone()),
+            "duplicate Nix FlakeImage output member: {name}"
+        );
+        anyhow::ensure!(
+            size <= nix_flake_member_limit(&name),
+            "Nix FlakeImage output member exceeds its size limit: {name}"
+        );
+        total = total
+            .checked_add(size)
+            .context("Nix FlakeImage output size overflow")?;
+        anyhow::ensure!(
+            total <= OUTPUT_DISK_BYTES,
+            "Nix FlakeImage output exceeds disk capacity"
+        );
+
+        let output_path = dest.join(&name);
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&output_path)
+            .with_context(|| format!("create Nix FlakeImage output member {name}"))?;
+        let copied = std::io::copy(&mut (&mut file).take(size), &mut output)
+            .with_context(|| format!("extract Nix FlakeImage output member {name}"))?;
+        anyhow::ensure!(
+            copied == size,
+            "Nix FlakeImage output member was truncated: {name}"
+        );
+        let padding =
+            (TAR_BLOCK_BYTES as u64 - size % TAR_BLOCK_BYTES as u64) % TAR_BLOCK_BYTES as u64;
+        if padding != 0 {
+            let mut bytes = [0_u8; TAR_BLOCK_BYTES];
+            let padding = usize::try_from(padding).expect("tar padding fits one block");
+            file.read_exact(&mut bytes[..padding])
+                .context("read Nix FlakeImage output member padding")?;
+            anyhow::ensure!(
+                bytes[..padding].iter().all(|byte| *byte == 0),
+                "Nix FlakeImage output member has non-zero padding: {name}"
+            );
+        }
+    }
+
+    let mut trailing = [0_u8; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut trailing)
+            .context("read Nix FlakeImage output padding")?;
+        if count == 0 {
+            break;
+        }
+        anyhow::ensure!(
+            trailing[..count].iter().all(|byte| *byte == 0),
+            "Nix FlakeImage output has non-zero trailing data"
+        );
+    }
+    Ok(())
+}
+
+fn nix_flake_member_limit(name: &str) -> u64 {
+    match name {
+        "rootfs.ext4" => MAX_NIX_ROOTFS_BYTES,
+        "vmlinux" | "initrd" => MAX_NIX_KERNEL_BYTES,
+        NIX_STDERR_LOG | NIX_STDOUT_LOG | INIT_LIFECYCLE_LOG => MAX_NIX_LOG_BYTES,
+        _ => MAX_NIX_METADATA_BYTES,
+    }
+}
+
+fn read_tar_block(reader: &mut impl Read, context: &'static str) -> Result<[u8; TAR_BLOCK_BYTES]> {
+    let mut bytes = [0_u8; TAR_BLOCK_BYTES];
+    reader.read_exact(&mut bytes).context(context)?;
+    Ok(bytes)
+}
+
+fn verify_tar_checksum(bytes: &[u8; TAR_BLOCK_BYTES]) -> Result<()> {
+    const CHECKSUM: std::ops::Range<usize> = 148..156;
+
+    let expected = tar::Header::from_byte_slice(bytes)
+        .cksum()
+        .context("decode Nix FlakeImage output header checksum")?;
+    let actual = bytes[..CHECKSUM.start]
+        .iter()
+        .chain(std::iter::repeat_n(&b' ', CHECKSUM.len()))
+        .chain(bytes[CHECKSUM.end..].iter())
+        .map(|byte| u64::from(*byte))
+        .sum::<u64>();
+    anyhow::ensure!(
+        actual == u64::from(expected),
+        "Nix FlakeImage output header checksum mismatch"
+    );
+    Ok(())
+}
+
+fn nix_flake_member_name(path: &Path) -> Result<String> {
+    use std::path::Component;
+
+    let mut components = path.components();
+    let first = match components.next() {
+        Some(Component::CurDir) => components.next(),
+        other => other,
+    };
+    let Some(Component::Normal(name)) = first else {
+        anyhow::bail!(
+            "Nix FlakeImage output member is not flat: {}",
+            path.display()
+        );
+    };
+    anyhow::ensure!(
+        components.next().is_none(),
+        "Nix FlakeImage output member is not flat: {}",
+        path.display()
+    );
+    name.to_str()
+        .context("Nix FlakeImage output member name is not UTF-8")
+        .map(str::to_owned)
+}
+
 /// Add search permission for group and others to each directory in `dirs`,
 /// leaving every other bit as it was.
 ///
@@ -254,6 +447,51 @@ pub fn write_output_disk(source: &Path, disk_image: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Write as _;
+
+    fn nix_output_tar(path: &Path, members: &[(&str, &[u8])]) {
+        let file = fs::File::create(path).unwrap();
+        let mut archive = tar::Builder::new(file);
+        for (name, body) in members {
+            let mut header = tar::Header::new_gnu();
+            header.set_path(name).unwrap();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o600);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            archive.append(&header, *body).unwrap();
+        }
+        archive.finish().unwrap();
+    }
+
+    fn nix_output_header(path: &Path, name: &str, size: u64, kind: tar::EntryType) {
+        let mut header = tar::Header::new_gnu();
+        header.set_path(name).unwrap();
+        header.set_size(size);
+        header.set_mode(0o600);
+        header.set_entry_type(kind);
+        header.set_cksum();
+        let mut file = fs::File::create(path).unwrap();
+        file.write_all(header.as_bytes()).unwrap();
+        file.write_all(&[0; 1024]).unwrap();
+    }
+
+    fn nix_output_raw_entry(path: &Path, name: &str, body: &[u8], kind: tar::EntryType) {
+        assert!(name.len() < 100);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o600);
+        header.set_entry_type(kind);
+        header.as_mut_bytes()[..100].fill(0);
+        header.as_mut_bytes()[..name.len()].copy_from_slice(name.as_bytes());
+        header.set_cksum();
+        let mut file = fs::File::create(path).unwrap();
+        file.write_all(header.as_bytes()).unwrap();
+        file.write_all(body).unwrap();
+        let padding = (TAR_BLOCK_BYTES - body.len() % TAR_BLOCK_BYTES) % TAR_BLOCK_BYTES;
+        file.write_all(&vec![0; padding]).unwrap();
+        file.write_all(&[0; 1024]).unwrap();
+    }
 
     #[test]
     fn sector_round_up_snaps_to_512() {
@@ -419,6 +657,169 @@ mod tests {
             fs::read(extracted.join("nested/artifact")).unwrap(),
             b"bytes"
         );
+    }
+
+    #[test]
+    fn strict_nix_output_extracts_the_real_producer_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("output.img");
+        let members = NIX_FLAKE_OUTPUT_MEMBERS
+            .iter()
+            .map(|name| (*name, name.as_bytes()))
+            .collect::<Vec<_>>();
+        nix_output_tar(&image, &members);
+        let original_len = fs::metadata(&image).unwrap().len();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&image)
+            .unwrap()
+            .set_len(original_len + 4096)
+            .unwrap();
+
+        let output = dir.path().join("strict");
+        read_nix_flake_output_disk(&image, &output).unwrap();
+        for name in NIX_FLAKE_OUTPUT_MEMBERS {
+            assert_eq!(fs::read(output.join(name)).unwrap(), name.as_bytes());
+        }
+    }
+
+    #[test]
+    fn strict_nix_output_accepts_the_guest_tars_curdir_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("output.img");
+        nix_output_raw_entry(&image, "./rootfs.ext4", b"rootfs", tar::EntryType::Regular);
+        let output = dir.path().join("out");
+        read_nix_flake_output_disk(&image, &output).unwrap();
+        assert_eq!(fs::read(output.join("rootfs.ext4")).unwrap(), b"rootfs");
+    }
+
+    #[test]
+    fn strict_nix_output_accepts_the_init_generated_lifecycle_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("output.img");
+        nix_output_tar(&image, &[(INIT_LIFECYCLE_LOG, b"stage=cmd_sh\n")]);
+        let output = dir.path().join("out");
+        read_nix_flake_output_disk(&image, &output).unwrap();
+        assert_eq!(
+            fs::read(output.join(INIT_LIFECYCLE_LOG)).unwrap(),
+            b"stage=cmd_sh\n"
+        );
+    }
+
+    #[test]
+    fn strict_nix_output_refuses_preexisting_destination_and_member_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("output.img");
+        nix_output_tar(&image, &[("rootfs.ext4", b"rootfs")]);
+        let output = dir.path().join("out");
+        fs::create_dir(&output).unwrap();
+        std::os::unix::fs::symlink("/tmp", output.join("rootfs.ext4")).unwrap();
+        let error = read_nix_flake_output_disk(&image, &output).unwrap_err();
+        assert!(error.to_string().contains("fresh"), "{error:#}");
+    }
+
+    #[test]
+    fn strict_nix_output_refuses_undeclared_nested_duplicate_and_link_members() {
+        for (name, expected) in [
+            ("unexpected", "undeclared"),
+            ("nested/rootfs.ext4", "not flat"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let image = dir.path().join("output.img");
+            nix_output_tar(&image, &[(name, b"bytes")]);
+            let error = read_nix_flake_output_disk(&image, &dir.path().join("out")).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error:#}");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("duplicate.img");
+        nix_output_tar(&image, &[("rootfs.ext4", b"one"), ("rootfs.ext4", b"two")]);
+        let error = read_nix_flake_output_disk(&image, &dir.path().join("duplicate")).unwrap_err();
+        assert!(error.to_string().contains("duplicate"), "{error:#}");
+
+        let image = dir.path().join("link.img");
+        nix_output_header(&image, "rootfs.ext4", 0, tar::EntryType::Symlink);
+        let error = read_nix_flake_output_disk(&image, &dir.path().join("links")).unwrap_err();
+        assert!(error.to_string().contains("regular file"), "{error:#}");
+    }
+
+    #[test]
+    fn strict_nix_output_checks_size_before_writing_and_retains_prior_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("oversize.img");
+        nix_output_header(
+            &image,
+            "manifest.json",
+            MAX_NIX_METADATA_BYTES + 1,
+            tar::EntryType::Regular,
+        );
+        let output = dir.path().join("oversize");
+        let error = read_nix_flake_output_disk(&image, &output).unwrap_err();
+        assert!(error.to_string().contains("size limit"), "{error:#}");
+        assert!(!output.join("manifest.json").exists());
+
+        let image = dir.path().join("partial.img");
+        nix_output_tar(
+            &image,
+            &[("rootfs.ext4", b"evidence"), ("unexpected", b"bad")],
+        );
+        let output = dir.path().join("partial");
+        let error = read_nix_flake_output_disk(&image, &output).unwrap_err();
+        assert!(error.to_string().contains("undeclared"), "{error:#}");
+        assert_eq!(fs::read(output.join("rootfs.ext4")).unwrap(), b"evidence");
+    }
+
+    #[test]
+    fn strict_nix_output_rejects_extensions_before_reading_their_bodies() {
+        for kind in [tar::EntryType::new(b'x'), tar::EntryType::new(b'L')] {
+            let dir = tempfile::tempdir().unwrap();
+            let image = dir.path().join("extension.img");
+            nix_output_header(&image, "manifest.json", OUTPUT_DISK_BYTES, kind);
+            let output = dir.path().join("out");
+            let error = read_nix_flake_output_disk(&image, &output).unwrap_err();
+            assert!(error.to_string().contains("regular file"), "{error:#}");
+            assert!(!output.join("manifest.json").exists());
+        }
+    }
+
+    #[test]
+    fn strict_nix_output_accepts_an_image_sized_initrd() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("initrd.img");
+        let initrd = vec![0x5a; 17 << 20];
+        nix_output_tar(&image, &[("initrd", &initrd)]);
+        let output = dir.path().join("out");
+        read_nix_flake_output_disk(&image, &output).unwrap();
+        assert_eq!(fs::metadata(output.join("initrd")).unwrap().len(), 17 << 20);
+    }
+
+    #[test]
+    fn generic_output_transport_still_accepts_non_flake_shell_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("verity.img");
+        nix_output_tar(
+            &image,
+            &[("rootfs.verity", b"tree"), ("rootfs.roothash", b"digest")],
+        );
+        let output = dir.path().join("out");
+        read_output_disk(&image, &output).unwrap();
+        assert_eq!(fs::read(output.join("rootfs.verity")).unwrap(), b"tree");
+        assert_eq!(fs::read(output.join("rootfs.roothash")).unwrap(), b"digest");
+    }
+
+    #[test]
+    fn strict_nix_output_refuses_nonzero_trailing_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("trailing.img");
+        nix_output_tar(&image, &[("manifest.json", b"{}")]);
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&image)
+            .unwrap()
+            .write_all(b"another archive")
+            .unwrap();
+        let error = read_nix_flake_output_disk(&image, &dir.path().join("out")).unwrap_err();
+        assert!(error.to_string().contains("non-zero trailing"), "{error:#}");
     }
 
     #[test]

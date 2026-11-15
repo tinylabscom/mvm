@@ -58,6 +58,9 @@ pub const NIX_STDOUT_LOG: &str = "nix-stdout.log";
 /// The guest's boot phase timings, beside [`RESULT_FILE`].
 pub const BOOT_TIMINGS_FILE: &str = "boot-timings.json";
 
+/// PID-1 lifecycle breadcrumbs mirrored into the output directory.
+pub const INIT_LIFECYCLE_LOG: &str = "mvm-host-vm-init.lifecycle.log";
+
 /// The most stderr a [`JobOutcome`] carries. The full log stays in
 /// [`NIX_STDERR_LOG`]; the tail is what fits in an error message.
 pub const STDERR_TAIL_MAX_BYTES: usize = 4096;
