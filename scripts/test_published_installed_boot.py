@@ -143,5 +143,100 @@ class InstalledHashes(unittest.TestCase):
             self.run_case(macho(b"X" * 300, b"S" * 100), DARWIN)
 
 
+# The components table published in the v0.28.0-rc.5 macOS archive.
+COMPONENTS = (
+    '# mvm backend component table — generated from BACKEND_COMPONENT_TABLE; do not edit\n'
+    'firecracker\tx86_64-unknown-linux-gnu\t-\t-\tyes\tyes\tyes\tdir:firecracker\n'
+    'firecracker\taarch64-unknown-linux-gnu\t-\t-\tyes\tyes\tyes\tdir:firecracker\n'
+    'libkrun\taarch64-apple-darwin\t13\t26\tno\tyes\tyes\tbin:mvm-libkrun-supervisor dir:lib dir:licenses dir:sources file:SOURCE-OFFER.txt file:SOURCE-PINS\n'
+    'qemu\tx86_64-unknown-linux-gnu\t-\t-\tno\tno\tyes\t-\n'
+    'qemu\taarch64-unknown-linux-gnu\t-\t-\tno\tno\tyes\t-\n'
+    'mock\t-\t-\t-\tno\tno\tno\t-\n'
+    'hvf\taarch64-apple-darwin\t26\t-\tno\tyes\tyes\tbin:mvm-hvf-supervisor\n'
+    'wasm\tx86_64-unknown-linux-gnu\t-\t-\tno\tno\tno\t-\n'
+    'wasm\taarch64-unknown-linux-gnu\t-\t-\tno\tno\tno\t-\n'
+    'wasm\taarch64-apple-darwin\t-\t-\tno\tno\tno\t-\n'
+    'web-linux\t-\t-\t-\tno\tno\tno\t-\n'
+    'apple-container\taarch64-apple-darwin\t26\t-\tno\tno\tno\t-\n'
+)
+
+LIBKRUN_TIER = ["mvm-libkrun-supervisor", "lib", "licenses", "sources",
+                "SOURCE-OFFER.txt", "SOURCE-PINS"]
+
+
+class PrunedPayloads(unittest.TestCase):
+    def test_the_hvf_host_drops_exactly_the_libkrun_tier(self):
+        self.assertEqual(boot.pruned_payloads(COMPONENTS, DARWIN, "hvf"), LIBKRUN_TIER)
+
+    def test_a_libkrun_host_drops_the_hvf_supervisor_instead(self):
+        self.assertEqual(boot.pruned_payloads(COMPONENTS, DARWIN, "libkrun"),
+                         ["mvm-hvf-supervisor"])
+
+    def test_a_linux_host_drops_nothing_because_no_other_backend_owns_files(self):
+        self.assertEqual(boot.pruned_payloads(COMPONENTS, LINUX, "firecracker"), [])
+
+    def test_an_archive_without_a_table_drops_nothing(self):
+        self.assertEqual(boot.pruned_payloads(None, DARWIN, "hvf"), [])
+        self.assertEqual(boot.pruned_payloads("# only a comment\n", DARWIN, "hvf"), [])
+
+    def test_a_directory_drops_what_is_under_it_and_nothing_that_merely_shares_a_prefix(self):
+        pruned = boot.pruned_payloads(COMPONENTS, DARWIN, "hvf")
+        for name in ("lib", "lib/libkrun.1.dylib", "licenses/COPYING", "mvm-libkrun-supervisor"):
+            self.assertTrue(boot.is_pruned(name, pruned), name)
+        for name in ("libmvm_hostlib.dylib", "library", "mvm-hvf-supervisor", "mvmctl"):
+            self.assertFalse(boot.is_pruned(name, pruned), name)
+
+
+class InstalledWithAPrunedBackend(unittest.TestCase):
+    TAG = "v1"
+
+    def install(self, tmp, drop=(), extra_installed=()):
+        home = (Path(tmp) / "home").resolve()
+        base = home / ".local/bin"
+        (base / "guest-runtime").mkdir(parents=True)
+        archives = Path(tmp) / "archives"
+        archives.mkdir()
+        cli = macho(b"C" * 300, b"S" * 100)
+        members = {"mvmctl": cli, "components.tsv": COMPONENTS.encode(),
+                   "mvm-hvf-supervisor": b"supervisor", "mvm-libkrun-supervisor": b"libkrun",
+                   "lib/libkrun.1.dylib": b"dylib", "SOURCE-PINS": b"pins"}
+        tarball(archives / f"mvmctl-{DARWIN}.tar.gz", members, DARWIN)
+        runtime = b"guest runtime"
+        (archives / f"mvm-guest-bins-{self.TAG}.tar.gz").write_bytes(runtime)
+        (base / "guest-runtime" / f"mvm-guest-bins-{self.TAG}.tar.gz").write_bytes(runtime)
+        for name, data in members.items():
+            if name in drop or boot.is_pruned(name, LIBKRUN_TIER):
+                continue
+            (base / name).write_bytes(data)
+        for name in extra_installed:
+            (base / name).parent.mkdir(parents=True, exist_ok=True)
+            (base / name).write_bytes(members[name])
+        return home, archives
+
+    def check(self, backend, **kwargs):
+        with tempfile.TemporaryDirectory() as tmp:
+            home, archives = self.install(tmp, **kwargs)
+            return boot.installed_hashes(home, archives, DARWIN, self.TAG, backend)
+
+    def test_the_hvf_install_without_the_libkrun_tier_passes(self):
+        paths = {item["path"] for item in self.check("hvf")}
+        self.assertIn("mvm-hvf-supervisor", paths)
+        self.assertFalse(paths & set(LIBKRUN_TIER), paths)
+        self.assertNotIn("lib/libkrun.1.dylib", paths)
+
+    def test_without_a_backend_nothing_is_excused_and_the_gap_is_named(self):
+        with self.assertRaisesRegex(ValueError, "installed payload missing: "):
+            self.check(None)
+
+    def test_a_file_the_backend_keeps_must_still_be_there(self):
+        with self.assertRaisesRegex(ValueError,
+                                    "installed payload missing: mvm-hvf-supervisor"):
+            self.check("hvf", drop=("mvm-hvf-supervisor",))
+
+    def test_a_libkrun_host_must_have_the_libkrun_tier_and_not_the_hvf_supervisor(self):
+        with self.assertRaisesRegex(ValueError, "installed payload missing: "):
+            self.check("libkrun")
+
+
 if __name__ == "__main__":
     unittest.main()
