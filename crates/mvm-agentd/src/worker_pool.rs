@@ -593,13 +593,41 @@ fn run_one_call(
     })
 }
 
+/// Let `fd` survive `execve`. Runs in `pre_exec`, so it only calls
+/// async-signal-safe `fcntl` and allocates nothing.
+#[cfg(target_os = "linux")]
+fn clear_close_on_exec(fd: libc::c_int) -> io::Result<()> {
+    // SAFETY: fcntl(F_GETFD) takes integer arguments and touches no memory.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fcntl(F_SETFD) takes integer arguments and touches no memory.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Whether `file` starts with `#!`, so the kernel runs it by re-execing an
+/// interpreter on the path it was started through. Reads with `pread`, which
+/// leaves the file offset alone: every process that inherits the descriptor
+/// shares it. A file that cannot be read counts as not a script, so its
+/// descriptor stays close-on-exec.
+#[cfg(any(target_os = "linux", test))]
+fn is_interpreter_script(file: &std::fs::File) -> bool {
+    use std::os::unix::fs::FileExt as _;
+    let mut head = [0u8; 2];
+    file.read_exact_at(&mut head, 0).is_ok() && head == *b"#!"
+}
+
 fn spawn_worker(
     entrypoint: &Arc<ValidatedEntrypoint>,
     worker_env: &[(String, String)],
 ) -> io::Result<WorkerHandle> {
     let program = entrypoint::spawn_path(entrypoint);
     #[cfg(target_os = "linux")]
-    let program_fd = entrypoint
+    let program_fd: u32 = entrypoint
         .file
         .as_raw_fd()
         .try_into()
@@ -621,6 +649,14 @@ fn spawn_worker(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::fd_hygiene::configure_close_fds(&mut cmd, 3, entrypoint::spawn_fd_to_keep(entrypoint));
+    // A script runs through `/proc/self/fd/<n>`: the kernel re-execs its
+    // interpreter on that path, so the descriptor has to survive the exec or
+    // the interpreter cannot reopen the script. The cold path keeps a
+    // non-close-on-exec copy for the same reason. A binary is read in the
+    // first exec and needs no such handle, so it keeps none.
+    #[cfg(target_os = "linux")]
+    let keep_descriptor_across_exec =
+        !entrypoint.use_resolved_path && is_interpreter_script(&entrypoint.file);
 
     // Workers execute through the validated `/proc/self/fd/<n>` path, so keep
     // that descriptor and close every other inherited agent descriptor.
@@ -629,7 +665,12 @@ fn spawn_worker(
     unsafe {
         cmd.pre_exec(move || {
             #[cfg(target_os = "linux")]
-            crate::fd_hygiene::mark_descriptors_close_on_exec_from(3, Some(program_fd))?;
+            {
+                crate::fd_hygiene::mark_descriptors_close_on_exec_from(3, Some(program_fd))?;
+                if keep_descriptor_across_exec {
+                    clear_close_on_exec(program_fd as libc::c_int)?;
+                }
+            }
             // The same strip every workload-code spawn applies: no_new_privs
             // plus every capability set emptied before exec.
             crate::guest_mount::drop_workload_capability_bounding_set()?;
@@ -890,49 +931,62 @@ mod tests {
         assert!(rss > 0);
     }
 
-    /// Live witness: a warm-pool worker holds no capabilities. Workers serve
-    /// `RunEntrypoint` calls, so the worker spawn applies the same capability
-    /// strip as every other workload-code spawn. Same gate as the guest_mount
-    /// privilege witnesses (root plus `MVM_GUEST_PRIVILEGED_TESTS=1`).
-    #[test]
+    /// The script the capability witnesses run: print what the kernel says
+    /// about the worker's own credentials.
     #[cfg(target_os = "linux")]
-    fn a_warm_pool_worker_holds_no_capabilities() {
-        use std::io::Read as _;
+    const STATUS_SCRIPT: &[u8] =
+        b"#!/bin/sh\ngrep -E '^(NoNewPrivs|CapPrm|CapEff|CapInh|CapAmb):' /proc/self/status\n";
+
+    /// A worker entrypoint written into `dir`.
+    #[cfg(target_os = "linux")]
+    fn worker_entrypoint(
+        dir: &std::path::Path,
+        body: &[u8],
+        use_resolved_path: bool,
+    ) -> Arc<crate::entrypoint::ValidatedEntrypoint> {
         use std::os::unix::fs::PermissionsExt as _;
 
-        if !crate::guest_mount::privilege_tests::privileged() {
-            return;
-        }
-        let dir = tempfile::tempdir().expect("worker scratch directory");
-        let worker = dir.path().join("worker.sh");
-        std::fs::write(
-            &worker,
-            "#!/bin/sh\ngrep -E '^(NoNewPrivs|CapPrm|CapEff|CapInh|CapAmb):' /proc/self/status\n",
-        )
-        .expect("write worker script");
+        let worker = dir.join("worker");
+        std::fs::write(&worker, body).expect("write worker");
         std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755))
             .expect("mark worker runnable");
-        let resolved = std::fs::canonicalize(&worker).expect("canonicalize worker script");
-        // The worker is a script, so it runs by its resolved path, as a
-        // sealed-script entrypoint does. A script launched through
-        // `/proc/self/fd/<n>` needs that descriptor to survive the
-        // interpreter's re-exec, and the validator refuses a shell-shebang
-        // entrypoint for the descriptor path anyway.
-        let entrypoint = Arc::new(crate::entrypoint::ValidatedEntrypoint {
-            file: std::fs::File::open(&resolved).expect("open worker script"),
+        let resolved = std::fs::canonicalize(&worker).expect("canonicalize worker");
+        Arc::new(crate::entrypoint::ValidatedEntrypoint {
+            file: std::fs::File::open(&resolved).expect("open worker"),
             resolved,
-            use_resolved_path: true,
-        });
-        let worker_env = vec![(
+            use_resolved_path,
+        })
+    }
+
+    /// Spawn the worker, feed it `stdin_text`, and return all its stdout.
+    #[cfg(target_os = "linux")]
+    fn worker_output(
+        entrypoint: &Arc<crate::entrypoint::ValidatedEntrypoint>,
+        stdin_text: &str,
+    ) -> String {
+        use std::io::{Read as _, Write as _};
+
+        let env = vec![(
             "PATH".to_string(),
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
         )];
-        let mut handle = spawn_worker(&entrypoint, &worker_env).expect("spawn worker");
-        let mut status = String::new();
+        let mut handle = spawn_worker(entrypoint, &env).expect("spawn worker");
+        if !stdin_text.is_empty() {
+            handle
+                .stdin
+                .write_all(stdin_text.as_bytes())
+                .expect("write worker stdin");
+        }
+        let mut output = String::new();
         handle
             .stdout
-            .read_to_string(&mut status)
-            .expect("read worker status");
+            .read_to_string(&mut output)
+            .expect("read worker output");
+        output
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_workload_strip(status: &str) {
         for set in ["CapPrm", "CapEff", "CapInh", "CapAmb"] {
             assert!(
                 status.contains(&format!("{set}:\t0000000000000000")),
@@ -940,5 +994,103 @@ mod tests {
             );
         }
         assert!(status.contains("NoNewPrivs:\t1"), "got:\n{status}");
+    }
+
+    /// A warm worker that is an interpreter script, as the function-entrypoint
+    /// wrappers are (`#!/usr/bin/env python3`, `#!/usr/bin/env node`), is
+    /// started through `/proc/self/fd/<n>`. The kernel re-execs the interpreter
+    /// on that path, so the descriptor has to survive the exec: if it does not,
+    /// the interpreter cannot reopen the script and the worker never starts.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_script_worker_started_through_the_descriptor_path_runs() {
+        let dir = tempfile::tempdir().expect("worker scratch directory");
+        let entrypoint = worker_entrypoint(dir.path(), b"#!/bin/sh\necho ready\n", false);
+        assert_eq!(
+            worker_output(&entrypoint, "").trim(),
+            "ready",
+            "the script worker did not start; its stderr went to the agent's stderr"
+        );
+    }
+
+    /// A binary is read in the first exec, so its worker keeps no handle to
+    /// itself: the descriptor stays close-on-exec and is gone after exec. The
+    /// probe asks whether any open descriptor of the worker is its own binary.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_binary_worker_does_not_inherit_the_entrypoint_descriptor() {
+        let dir = tempfile::tempdir().expect("worker scratch directory");
+        let shell = std::fs::read(std::fs::canonicalize("/bin/sh").expect("resolve /bin/sh"))
+            .expect("read the shell binary");
+        let entrypoint = worker_entrypoint(dir.path(), &shell, false);
+        let kept = std::os::fd::AsRawFd::as_raw_fd(&entrypoint.file);
+        // The first line is a control: if this shell cannot compare files,
+        // "works" is missing and the test fails instead of reading "closed".
+        let probe = format!(
+            "[ /proc/$$/exe -ef /proc/$$/exe ] && echo works\n\
+             [ /proc/$$/fd/{kept} -ef /proc/$$/exe ] && echo open || echo closed\nexit\n"
+        );
+        let answers = worker_output(&entrypoint, &probe);
+        assert_eq!(
+            answers.split_whitespace().collect::<Vec<_>>(),
+            ["works", "closed"]
+        );
+    }
+
+    #[test]
+    fn only_a_hash_bang_file_is_an_interpreter_script() {
+        use std::io::Write as _;
+
+        for (bytes, expected) in [
+            (&b"#!/bin/sh\n"[..], true),
+            (b"\x7fELF\x02\x01", false),
+            (b"#", false),
+            (b"", false),
+        ] {
+            let mut file = tempfile::tempfile().expect("scratch file");
+            file.write_all(bytes).expect("write scratch file");
+            assert_eq!(is_interpreter_script(&file), expected, "{bytes:?}");
+        }
+    }
+
+    #[test]
+    fn the_script_check_leaves_the_shared_file_offset_alone() {
+        use std::io::{Seek as _, SeekFrom, Write as _};
+
+        let mut file = tempfile::tempfile().expect("scratch file");
+        file.write_all(b"#!/bin/sh\necho hi\n")
+            .expect("write scratch file");
+        file.seek(SeekFrom::Start(5)).expect("seek");
+        assert!(is_interpreter_script(&file));
+        assert_eq!(file.stream_position().expect("position"), 5);
+    }
+
+    /// Live witness: a warm-pool worker holds no capabilities. Workers serve
+    /// `RunEntrypoint` calls, so the worker spawn applies the same capability
+    /// strip as every other workload-code spawn. This one runs the script by
+    /// its resolved path, as a sealed-script entrypoint does. Same gate as the
+    /// guest_mount privilege witnesses (root plus `MVM_GUEST_PRIVILEGED_TESTS=1`).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_warm_pool_worker_holds_no_capabilities() {
+        if !crate::guest_mount::privilege_tests::privileged() {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("worker scratch directory");
+        let entrypoint = worker_entrypoint(dir.path(), STATUS_SCRIPT, true);
+        assert_workload_strip(&worker_output(&entrypoint, ""));
+    }
+
+    /// Live witness: keeping the entrypoint descriptor across exec for a
+    /// script worker does not keep any capability. Same gate as above.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_script_worker_started_through_the_descriptor_path_holds_no_capabilities() {
+        if !crate::guest_mount::privilege_tests::privileged() {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("worker scratch directory");
+        let entrypoint = worker_entrypoint(dir.path(), STATUS_SCRIPT, false);
+        assert_workload_strip(&worker_output(&entrypoint, ""));
     }
 }
