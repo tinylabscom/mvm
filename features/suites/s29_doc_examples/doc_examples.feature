@@ -31,6 +31,14 @@ Feature: Documented examples work
     And the output contains "identity.signer_id"
     And the output contains "hardware providers:"
 
+  Scenario: policy validate checks an authored group file offline
+    Given an isolated mvm home
+    And a scratch working directory
+    And an authored policy group file in the scratch directory
+    When I run mvmctl in the scratch directory with "policy validate ./policy/api-group.toml --verbose"
+    Then the command exits with code 0
+    And the output contains "policy is valid"
+
   Scenario: a sealed audit fixture has a correlated JSON verdict
     Given an isolated mvm home
     And a sealed audit fixture for session "sha256:1111111111111111111111111111111111111111111111111111111111111111"

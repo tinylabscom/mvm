@@ -162,6 +162,24 @@ fn scratch_working_directory(world: &mut CliWorld) {
     world.scratch_dir = Some(tempfile::tempdir().expect("create scratch working directory"));
 }
 
+/// The `./policy/api-group.toml` group the policies guide validates: the
+/// documented example itself, staged verbatim, so the scenario exercises the
+/// exact invocation a reader pastes.
+#[given(expr = "an authored policy group file in the scratch directory")]
+fn authored_policy_group_in_scratch(world: &mut CliWorld) {
+    let scratch = world
+        .scratch_dir
+        .as_ref()
+        .expect("`Given a scratch working directory` must run before this step");
+    let policy_dir = scratch.path().join("policy");
+    fs::create_dir(&policy_dir).expect("create policy fixture directory");
+    fs::write(
+        policy_dir.join("api-group.toml"),
+        "description = \"Read the GitHub API\"\n\n[network]\nallow = [\"api.github.com:443\"]\n",
+    )
+    .expect("write policy group fixture");
+}
+
 #[when(expr = "I run the conformance runner with {string}")]
 fn run_conformance_runner(world: &mut CliWorld, args: String) {
     run_conformance_child(world, &args, None);
