@@ -1,10 +1,7 @@
-//! Tests for the cold start path: the boot's mapping, custody, activation,
-//! console and host-service wiring, and the `VmBackend` surface.
-
+//! Tests for the cold start path: boot mapping, custody, activation and console.
 #![cfg(test)]
 
-use super::test_support::*;
-use super::*;
+use super::{test_support::*, *};
 use crate::backends::hvf::HvfDriver;
 use crate::driver::MockDriver;
 use mvm_agentd::vsock::{BROKER_PORT, EGRESS_PORT, GUEST_AGENT_PORT};

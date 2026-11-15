@@ -1,10 +1,7 @@
-//! Tests for standby creation: the factory parent's boot shape, capture and
-//! refusals.
-
+//! Tests for standby creation: the factory parent's boot shape, capture and refusals.
 #![cfg(test)]
 
-use super::test_support::*;
-use super::*;
+use super::{test_support::*, *};
 use crate::driver::MockDriver;
 use mvm_core::util::test_env::TestEnv;
 

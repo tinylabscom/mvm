@@ -1,20 +1,12 @@
-//! Tests for the warm claim: lineage and content gates, fresh identity, the
-//! child's endpoint and broker, and refusals before and after the fork.
-
+//! Tests for the warm claim: lineage and content gates, fresh identity.
 #![cfg(test)]
 
-use super::admission::admitted_network_limits;
-use super::parent_verify::{
-    reclaim_consumed_resident_checkpoint_at, verify_resident_snapshot_manifest,
-};
-use super::test_support::*;
-use super::*;
+use super::{admission::admitted_network_limits, parent_verify::*, test_support::*, *};
 use crate::checkpoint::capture_vm_full;
 use crate::driver::MockDriver;
 use crate::workload_runner::standby_boot::factory_parent_spec;
 use mvm_agentd::vsock::{BROKER_PORT, EGRESS_PORT};
-use mvm_core::checkpoint::CheckpointDigest;
-use mvm_core::checkpoint::CheckpointMeta;
+use mvm_core::checkpoint::{CheckpointDigest, CheckpointMeta};
 use mvm_core::crypto::vmgenid::GENID_BYTES;
 use mvm_core::plan::VerbId;
 use mvm_core::protocol::vm_backend::VerbGrantEnvelope;

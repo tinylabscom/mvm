@@ -1,11 +1,9 @@
 //! Doubles and fixtures the runner tests share.
-
 #![cfg(test)]
 
 use super::*;
 use crate::driver::MockDriver;
 use mvm_agentd::vsock::GUEST_AGENT_PORT;
-use mvm_core::plan::SecretBinding;
 use mvm_core::policy::network_policy::HostPort;
 use std::collections::HashMap;
 use std::sync::Mutex;

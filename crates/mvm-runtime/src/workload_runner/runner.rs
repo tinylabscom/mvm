@@ -58,7 +58,6 @@ mod backend;
 mod broker;
 mod claim_lease;
 mod claim_standby;
-#[cfg(test)]
 mod claim_tests;
 mod cold_hvf_channel;
 mod console_boot;
@@ -69,12 +68,9 @@ mod refusal;
 mod sockets;
 mod spawner;
 mod standby;
-#[cfg(test)]
 mod standby_tests;
 mod start;
-#[cfg(test)]
 mod start_tests;
-#[cfg(test)]
 mod test_support;
 mod warm_claim;
 

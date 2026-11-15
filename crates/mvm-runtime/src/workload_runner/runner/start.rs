@@ -1,5 +1,4 @@
-//! Cold start: prepare the boot, bind it, boot it and register its host
-//! services.
+//! Cold start: prepare the boot, bind it, boot it and register its host services.
 
 use super::admission::{admitted_ingress, admitted_network_limits};
 use super::broker::admitted_broker_bindings;
