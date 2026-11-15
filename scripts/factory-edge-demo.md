@@ -22,6 +22,8 @@ About 15 seconds. It starts the three programs and prints:
 3. What the host refused for the maintenance program: `DNS lookup of example.com`,
    not in its allow-list.
 4. That the two inspection programs have nothing refused.
+5. Every entry the host signed for the maintenance program's session
+   (`mvmctl trust audit show`), and that the whole chain verifies.
 
 Every `mvmctl explain` ends with `audit chain verifies clean`, which is the
 evidence line. `scripts/factory-edge-demo.sh --down` removes the programs again.
@@ -59,8 +61,10 @@ DNS, because each allowed destination is looked up when its program starts.
 
 ## Known limits
 
-- The three programs are started one after another. Starting them together can
-  fail with `another local volume lifecycle operation is already in progress`.
+- The three programs start at the same time. A release from before the
+  volume-lock fix refuses some of them with `another local volume lifecycle
+  operation is already in progress`, so the script retries them, and on such a
+  release the demo is as slow as before.
 - A launch takes about 4 seconds on this release, so the demo takes about 15.
   The cause and the fix are written up in the factory-edge section of the
   contract document.

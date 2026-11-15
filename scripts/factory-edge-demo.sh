@@ -29,13 +29,22 @@ id="$(date +%H%M%S)"   # names are unique per run, so `explain <name>` is never 
 a="line-a-$id"; b="line-b-$id"; m="maintenance-$id"
 
 # One workload: a name, the one destination it is allowed, and what it does.
-launch() { $mvm run -d --image "$image" --name "$1" --allow-host "$2" -- sh -c "$3" >/dev/null; }
+# Launches overlap; a release that still serializes them on the volume lock
+# refuses the loser, so a refused launch is retried.
+launch() {
+  for _ in 1 2 3 4 5; do
+    $mvm run -d --image "$image" --name "$1" --allow-host "$2" -- sh -c "$3" >/dev/null 2>&1 </dev/null && return
+    sleep 1
+  done
+  echo "could not start $1" >&2; return 1
+}
 work() { echo "while true; do curl -sS -m 10 -o /dev/null https://$1/; sleep 2; done"; }
 
-echo "Starting three workloads, each allowed one destination"
-launch "$a" pypi.org:443 "$(work pypi.org)"
-launch "$b" files.pythonhosted.org:443 "$(work files.pythonhosted.org)"
-launch "$m" api.github.com:443 "while true; do curl -sS -m 10 https://example.com/ >/dev/null 2>&1; sleep 3; done"
+echo "Starting three workloads at once, each allowed one destination"
+launch "$a" pypi.org:443 "$(work pypi.org)" &
+launch "$b" files.pythonhosted.org:443 "$(work files.pythonhosted.org)" &
+launch "$m" api.github.com:443 "while true; do curl -sS -m 10 https://example.com/ >/dev/null 2>&1; sleep 3; done" &
+wait
 
 echo; echo "== 1. All three are running"
 $mvm machine ls | grep -E "^NAME|-$id "
@@ -54,3 +63,8 @@ echo; echo "== 4. The inspection workloads are unaffected"
 for n in "$a" "$b"; do
   echo "-- $n"; $mvm explain "$n" | sed -n '/^outcome:/,$p'
 done
+
+echo; echo "== 5. The audit record (every entry the host signed for the maintenance workload)"
+session="$($mvm trust audit sessions | awk -v n="$m" '$NF == n { print $1 }')"
+$mvm trust audit show "$session" | cut -c1-150
+$mvm trust audit verify | tail -1
