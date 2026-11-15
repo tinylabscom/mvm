@@ -71,7 +71,8 @@ if args[:2] == ["machine", "run"]:
                     "MVM_HVF_DENSITY_CLEANUP_GRACE_SECONDS": "0",
                 })
                 result = subprocess.run(
-                    ["bash", str(ROOT / "scripts/measure-hvf-density.sh")],
+                    ["/bin/bash" if platform.system() == "Darwin" else "bash",
+                     str(ROOT / "scripts/measure-hvf-density.sh")],
                     env=env, capture_output=True, text=True, timeout=20,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)

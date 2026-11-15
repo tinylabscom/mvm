@@ -605,14 +605,14 @@ for wave in "${WAVES[@]}"; do
     fi
     launch_ns="$(python3 -c 'import time; print(time.time_ns())')"
     "${run_env[@]}" "MVM_PHASE_TIMING=1" "MVM_LAUNCH_SAMPLE_JSON=${sample}" \
-      "${claim_args[@]}" "${MVMCTL_BIN}" machine run \
-      "${name_args[@]}" \
+      "${claim_args[@]+"${claim_args[@]}"}" "${MVMCTL_BIN}" machine run \
+      "${name_args[@]+"${name_args[@]}"}" \
       --hypervisor "${BACKEND}" \
       --image "${IMAGE_REF}" \
       --memory "${MEMORY}" \
       --cpus "${CPUS}" \
       --receipt "${receipt}" \
-      "${mailbox_args[@]}" \
+      "${mailbox_args[@]+"${mailbox_args[@]}"}" \
       -- "${GUEST_COMMAND[@]}" \
       >"${stdout}" 2>"${stderr}" &
     pid=$!
