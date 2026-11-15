@@ -686,7 +686,7 @@ spans from [#5508](https://github.com/tinylabscom/mvm/pull/5508) and
 the signed guest-runtime archive seven times, at about 640 ms each, which is
 about 4.5 s of the launch. Each verification reads and digests the archive,
 checks two signatures, copies the archive and decompresses and SHA-256s all of
-its members (about 62 MB); the decompress-and-hash step alone is 422 ms of the
+its members (about 42 MB uncompressed); the decompress-and-hash step alone is 422 ms of the
 640. Signing, audit, key load and all other hashing are negligible. The physical
 M1 CI runner, which runs a source-built runtime, never takes this path and shows
 `admit_plan` at 26 ms and `attach_overlay` at 220 ms. A throwaway local change that

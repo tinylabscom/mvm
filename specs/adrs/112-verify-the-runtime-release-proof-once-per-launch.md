@@ -80,11 +80,14 @@ One verification (643 ms) is made of:
 | `write_archive_snapshot`, a temporary copy | 8 ms | 1% |
 
 `verify_guest_bins_archive` opens the guest-runtime `.tar.gz`, decompresses all of
-it (about 62 MB of binaries) and SHA-256s every member, then checks the manifest
-against those digests. The CPU on the measurement VM has no SHA instructions, so
-that costs about 420 ms; Apple silicon has them, so each call is cheaper on a Mac,
-but the count is the same. It also explains the seven temporary files of about
-20 MB that a launch writes: one copy of the archive per verification.
+it (the archive is 19.8 MB compressed and 42.4 MB uncompressed, in 77 members) and
+SHA-256s every member, then checks the manifest against those digests. That is
+about 420 ms per call on the measurement VM. Whether software SHA-256 explains
+part of it is not established: that CPU family generally lacks the SHA
+extensions, but this was not confirmed from the CPU flags. Apple silicon has
+them, so each call may be cheaper on a Mac, but the count is the same. It also
+explains the seven temporary files of about 20 MB that a launch writes: one copy
+of the archive per verification.
 
 ### What is not the cause
 
