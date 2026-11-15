@@ -16,6 +16,7 @@ MEMORY="${MVM_HVF_DENSITY_MEMORY:-512M}"
 CPUS="${MVM_HVF_DENSITY_CPUS:-2}"
 SKIP_BUILD="${MVM_HVF_DENSITY_SKIP_BUILD:-0}"
 MAILBOX="${MVM_HVF_DENSITY_MAILBOX:-0}"
+MODE="${MVM_HVF_DENSITY_MODE:-cold}"
 
 usage() {
   cat <<USAGE
@@ -23,6 +24,7 @@ Measure OCI VM density on macOS HVF or Linux/KVM Firecracker without changing ru
 Usage: $0 [-- GUEST_COMMAND [ARG ...]]
 Without a command, guests run sleep ${GUEST_SLEEP_SECONDS}; use a real agent
 command to measure working VMs. Do not put secrets in command arguments.
+A single unmeasured cold launch prepares the isolated home before each wave.
 
 Default waves: ${WAVES_TEXT}
 Default image: ${IMAGE_REF}
@@ -30,6 +32,7 @@ Default image: ${IMAGE_REF}
 Useful overrides:
   MVM_HVF_DENSITY_OUT_DIR=/tmp/path          artifact directory outside the repo
   MVM_HVF_DENSITY_BACKEND=firecracker        Linux/KVM instead of macOS HVF
+  MVM_HVF_DENSITY_MODE=cold|warm             cold (default) or sequential warm claims
   MVM_HVF_DENSITY_WAVES="1 5 10 25 50 100"  wave sizes to run
   MVM_HVF_DENSITY_IMAGE=alpine              OCI image reference
   MVM_HVF_DENSITY_GUEST_SLEEP_SECONDS=240   in-guest sleep duration
@@ -115,7 +118,7 @@ esac
 DATA_DIR="${MVM_HVF_DENSITY_DATA_DIR:-${OUT_DIR}/mvm-data}"
 CACHE_DIR="${DATA_DIR}/cache"
 TARGET_DIR="${MVM_HVF_DENSITY_TARGET_DIR:-${OUT_DIR}/target}"
-RUN_ID="plan237-${STAMP}"
+RUN_ID="plan237-$(printf '%s' "${STAMP}" | tr 'TZ' 'tz')"
 SUMMARY="${OUT_DIR}/summary.tsv"
 SEEDED_KERNEL_SOURCE="none"
 
@@ -139,6 +142,14 @@ done
 
 if [[ "${MAILBOX}" != "0" && "${MAILBOX}" != "1" ]]; then
   echo "refusing: MVM_HVF_DENSITY_MAILBOX must be 0 or 1" >&2
+  exit 70
+fi
+if [[ "${MODE}" != "cold" && "${MODE}" != "warm" ]]; then
+  echo "refusing: MVM_HVF_DENSITY_MODE must be cold or warm" >&2
+  exit 70
+fi
+if [[ "${MODE}" == "warm" && "${MAILBOX}" == "1" ]]; then
+  echo "refusing: mailbox grants are not warm-claim eligible" >&2
   exit 70
 fi
 if [[ "${MAX_WAVE}" -gt 100 && "${MVM_HVF_DENSITY_ACK_LARGE:-0}" != "1" ]]; then
@@ -168,10 +179,14 @@ if ! [[ "${host_bytes}" =~ ^[0-9]+$ ]] || [[ "${host_bytes}" -eq 0 ]]; then
   exit 70
 fi
 host_memory_mib=$((host_bytes / 1024 / 1024))
-requested_memory_mib=$((MAX_WAVE * memory_mib))
+memory_slots="${MAX_WAVE}"
+if [[ "${MODE}" == "warm" ]]; then
+  memory_slots=$((MAX_WAVE + 1))
+fi
+requested_memory_mib=$((memory_slots * memory_mib))
 # shortcut: configured guest RAM plus 20% host reserve; upgrade to measured admission accounting.
 if [[ "${requested_memory_mib}" -gt "$((host_memory_mib * 80 / 100))" ]]; then
-  echo "refusing: ${MAX_WAVE} x ${MEMORY} exceeds 80% of host RAM (${host_memory_mib} MiB)" >&2
+  echo "refusing: ${memory_slots} x ${MEMORY} exceeds 80% of host RAM (${host_memory_mib} MiB)" >&2
   exit 70
 fi
 for seconds in "${LAUNCH_SPACING_SECONDS}" "${SETTLE_SECONDS}" "${GUEST_SLEEP_SECONDS}" \
@@ -257,6 +272,7 @@ run_env=(
   env
   "MVM_HOME=${DATA_DIR}"
   "CARGO_TARGET_DIR=${TARGET_DIR}"
+  "MVM_RESIDENCY=${MODE}"
 )
 
 host_kernel_arch() {
@@ -371,6 +387,22 @@ cleanup_active_pids() {
 }
 trap cleanup_active_pids INT TERM EXIT
 
+prime_name="${RUN_ID}-prime"
+if ! "${run_env[@]}" "MVM_RESIDENCY=cold" "${MVMCTL_BIN}" machine run \
+  --name "${prime_name}" --hypervisor "${BACKEND}" --image "${IMAGE_REF}" \
+  --memory "${MEMORY}" --cpus "${CPUS}" -- sleep 1 \
+  >"${OUT_DIR}/prime.stdout" 2>"${OUT_DIR}/prime.stderr"; then
+  echo "refusing: first-use preparation failed; see ${OUT_DIR}/prime.stderr" >&2
+  exit 71
+fi
+if ! "${run_env[@]}" "${MVMCTL_BIN}" machine stop --all --yes \
+  >"${OUT_DIR}/prime-stop.stdout" 2>"${OUT_DIR}/prime-stop.stderr" ||
+  ! "${run_env[@]}" "${MVMCTL_BIN}" machine rm --all --yes \
+  >"${OUT_DIR}/prime-rm.stdout" 2>"${OUT_DIR}/prime-rm.stderr"; then
+  echo "refusing: first-use preparation left a machine; see ${OUT_DIR}/prime-*.stderr" >&2
+  exit 71
+fi
+
 capture_host_memory() {
   local phase="$1"
   local dir="$2"
@@ -439,9 +471,22 @@ capture_storage() {
 capture_matching_processes() {
   local phase="$1"
   local dir="$2"
-  ps axww -o pid=,rss=,args= | awk -v pat="${RUN_ID}" '
-    index($0, pat) > 0 && $0 !~ /awk -v pat/ && $0 !~ /measure-hvf-density.sh/ { print }
-  ' >"${dir}/matching-${phase}.txt"
+  local pids="${dir}/runtime-pids.txt"
+  if [[ "${phase}" != "after-cleanup" ]]; then
+    : >"${pids}"
+    if [[ -d "${DATA_DIR}/vms" ]]; then
+      # HVF takes its config on stdin, so its standby ID and MVM_HOME are absent
+      # from argv. Track the actual VMM PIDs before machine rm deletes markers.
+      find "${DATA_DIR}/vms" -type f \( -name hvf.pid -o -name fc.pid \) \
+        -exec cat {} + | awk '/^[0-9]+$/ { print $1 }' | sort -u >"${pids}"
+    fi
+  fi
+  ps axww -o pid=,rss=,args= | awk -v pat="${RUN_ID}" -v home="${DATA_DIR}/vms/" \
+    -v pidfile="${pids}" '
+    FILENAME == pidfile { owned[$1] = 1; next }
+    (owned[$1] || index($0, pat) > 0 || index($0, home) > 0) &&
+      $0 !~ /awk -v pat/ && $0 !~ /measure-hvf-density.sh/ { print }
+  ' "${pids}" - >"${dir}/matching-${phase}.txt"
 }
 
 check_launches() {
@@ -490,6 +535,7 @@ cleanup_wave() {
     echo "wait_pid=${pid} status=${status}" >>"${cleanup_log}"
   done
 
+  capture_matching_processes "before-cleanup" "${dir}"
   set +e
   "${run_env[@]}" "${MVMCTL_BIN}" machine stop --all --yes \
     >"${dir}/machine-stop.stdout" 2>"${dir}/machine-stop.stderr"
@@ -518,6 +564,7 @@ cleanup_wave() {
   echo -e "target_dir\t${TARGET_DIR}"
   echo -e "image\t${IMAGE_REF}"
   echo -e "backend\t${BACKEND}"
+  echo -e "launch_mode\t${MODE}"
   echo -e "waves\t${WAVES_TEXT}"
   echo -e "guest_sleep_seconds\t${GUEST_SLEEP_SECONDS}"
   echo -e "settle_seconds\t${SETTLE_SECONDS}"
@@ -552,21 +599,37 @@ for wave in "${WAVES[@]}"; do
     stdout="${wave_dir}/${name}.stdout"
     stderr="${wave_dir}/${name}.stderr"
     receipt="${wave_dir}/${name}.receipt.json"
+    sample="${wave_dir}/${name}.sample.json"
     mailbox_args=()
     if [[ "${MAILBOX}" == "1" ]]; then
       mailbox_id="$(printf '%s' "${name}" | shasum -a 256 | awk '{print $1}')"
       mailbox_args=(--mailbox "${mailbox_id}")
     fi
-    printf "%s\n" "${name}" >>"${wave_dir}/vm-names.txt"
+    printf "%s\n" "${name}" >>"${wave_dir}/launch-labels.txt"
+    name_args=()
+    claim_args=()
+    if [[ "${MODE}" == "warm" ]]; then
+      # A claim consumes a standby; replenish one immediately before each launch.
+      if ! "${run_env[@]}" "${MVMCTL_BIN}" pool warm 1 \
+        --image "${IMAGE_REF}" --cpus "${CPUS}" --memory "${MEMORY}" \
+        >"${wave_dir}/${name}.warm.stdout" 2>"${wave_dir}/${name}.warm.stderr"; then
+        echo "refusing: warm standby failed for ${name}; see ${wave_dir}/${name}.warm.stderr" >&2
+        exit 71
+      fi
+      claim_args=("MVM_HVF_WARM_REQUIRE_CLAIM=1")
+    else
+      name_args=(--name "${name}")
+    fi
     launch_ns="$(python3 -c 'import time; print(time.time_ns())')"
-    "${run_env[@]}" "${MVMCTL_BIN}" machine run \
-      --name "${name}" \
+    "${run_env[@]}" "MVM_PHASE_TIMING=1" "MVM_LAUNCH_SAMPLE_JSON=${sample}" \
+      "${claim_args[@]+"${claim_args[@]}"}" "${MVMCTL_BIN}" machine run \
+      "${name_args[@]+"${name_args[@]}"}" \
       --hypervisor "${BACKEND}" \
       --image "${IMAGE_REF}" \
       --memory "${MEMORY}" \
       --cpus "${CPUS}" \
       --receipt "${receipt}" \
-      "${mailbox_args[@]}" \
+      "${mailbox_args[@]+"${mailbox_args[@]}"}" \
       -- "${GUEST_COMMAND[@]}" \
       >"${stdout}" 2>"${stderr}" &
     pid=$!
@@ -590,12 +653,20 @@ for wave in "${WAVES[@]}"; do
     awk -F '\t' '$1 == "mvm-mailbox" { count = $2; rss = $3 }
       END { print count+0, rss+0 }' "${wave_dir}/rss-settled.tsv"
   )
+  vmm_component="firecracker"
+  if [[ "${BACKEND}" == "hvf" ]]; then
+    vmm_component="mvm-hvf-supervisor"
+  fi
+  vmm_count="$(awk -F '\t' -v component="${vmm_component}" \
+    '$1 == component { print $2; found = 1; exit }
+      END { if (!found) print 0 }' "${wave_dir}/rss-settled.tsv")"
   mailbox_threads="$(awk -F '\t' 'NR > 1 { n += $2 } END { print n+0 }' \
     "${wave_dir}/mailbox-threads-settled.tsv")"
   vm_state_kib="$(awk 'NR == 1 { print $1 }' "${wave_dir}/vm-state-blocks-settled.txt")"
   available_before="$(awk 'NR == 2 { print $4 }' "${wave_dir}/filesystem-before.txt")"
   available_settled="$(awk 'NR == 2 { print $4 }' "${wave_dir}/filesystem-settled.txt")"
   {
+    printf 'wave_%s_vmm_processes\t%s\n' "${wave}" "${vmm_count}"
     printf 'wave_%s_mailbox_processes\t%s\n' "${wave}" "${mailbox_count}"
     printf 'wave_%s_mailbox_rss_kib\t%s\n' "${wave}" "${mailbox_rss_kib}"
     printf 'wave_%s_mailbox_threads\t%s\n' "${wave}" "${mailbox_threads}"
@@ -617,11 +688,22 @@ for wave in "${WAVES[@]}"; do
   failures="$(wc -l <"${wave_dir}/launch-failures.tsv" | tr -d ' ')"
   echo -e "wave_${wave}_launch_failures\t${failures}" >>"${SUMMARY}"
   echo -e "wave_${wave}_cleanup_ok\t${cleanup_ok}" >>"${SUMMARY}"
-  if [[ "${failures}" -ne 0 || "${cleanup_ok}" -ne 1 ]]; then
+  if [[ "${failures}" -ne 0 || "${cleanup_ok}" -ne 1 ||
+        ( "${MVM_HVF_DENSITY_ALLOW_UNSUPPORTED:-0}" != "1" && "${vmm_count}" -lt "${wave}" ) ]]; then
     echo "wave ${wave} failed; see ${wave_dir}" >&2
     exit 71
   fi
-  python3 "${ROOT}/scripts/density_timings.py" "${wave_dir}" "${wave}" >>"${SUMMARY}"
+  if compgen -G "${wave_dir}/*.receipt.json" >/dev/null; then
+    python3 "${ROOT}/scripts/density_timings.py" "${wave_dir}" "${wave}" "${MODE}" \
+      "${IMAGE_REF}" "${CPUS}" "${MEMORY}" >>"${SUMMARY}"
+  else
+    # A resident workload is stopped after the idle sample; its run command
+    # never finishes and therefore cannot write a completion receipt or sample.
+    for percentile in 50 95 99; do
+      printf 'wave_%s_boot_receipt_p%s_ms\tunavailable:resident_workload\n' \
+        "${wave}" "${percentile}" >>"${SUMMARY}"
+    done
+  fi
   first_message_status="not_requested"
   if [[ "${MAILBOX}" == "1" ]]; then
     first_message_status="unavailable:no_public_receipt_probe"

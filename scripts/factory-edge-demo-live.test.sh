@@ -98,7 +98,7 @@ envrun() { # <mode> <script> <env assignments...>: the script runs while a ticke
   ( while :; do env MVMCTL="${work}/mvmctl" FAKE_STATE="${work}/state" FAKE_MODE="${mode}" MVM_HOME="${work}/home" "${work}/mvmctl" __tick >/dev/null 2>&1 || true; sleep 0.1; done ) &
   tick=$!
   env MVMCTL="${work}/mvmctl" FAKE_STATE="${work}/state" FAKE_MODE="${mode}" MVM_HOME="${work}/home" \
-    WAIT_SECS=3 ATTEMPT_AFTER=0 "$@" bash "${repo}/scripts/${script}" 2>&1; rc=$?
+    WAIT_SECS=3 ATTEMPT_AFTER=0 DNS_CHECK=0 "$@" bash "${repo}/scripts/${script}" 2>&1; rc=$?
   kill "${tick}" 2>/dev/null; wait "${tick}" 2>/dev/null || true
   return "${rc}"
 }
@@ -119,6 +119,14 @@ out2="$(stage ok HYPERVISOR=hvf)" || fail "staging twice failed: ${out2}"
 [ "$(ls "${work}"/state/m.* | wc -l | tr -d ' ')" = 3 ] || fail "a second staging left more than three machines (it must replace the earlier one)"
 out3="$(env MVMCTL="${work}/mvmctl" FAKE_STATE="${work}/state" FAKE_MODE=ok MVM_HOME="${work}/home" HYPERVISOR=hvf bash "${repo}/scripts/factory-edge-stage.sh" --down 2>&1)"
 [ "$(ls "${work}"/state/m.* 2>/dev/null | wc -l | tr -d ' ')" = 0 ] || fail "--down did not remove the staged machines: ${out3}"
+
+# --check verifies every prerequisite and starts nothing; a granted host that does not resolve is caught.
+fresh
+out="$(env MVMCTL="${work}/mvmctl" FAKE_STATE="${work}/state" FAKE_MODE=ok MVM_HOME="${work}/home" DNS_CHECK=0 HYPERVISOR=hvf bash "${repo}/scripts/factory-edge-stage.sh" --check 2>&1)" || fail "--check failed on a prepared home: ${out}"
+grep -q '^READY:' <<<"${out}" || fail "--check did not report READY: ${out}"
+[ "$(ls "${work}"/state/m.* 2>/dev/null | wc -l | tr -d ' ')" = 0 ] || fail "--check started a machine"
+out="$(env MVMCTL="${work}/mvmctl" FAKE_STATE="${work}/state" FAKE_MODE=ok MVM_HOME="${work}/home" DNS_CHECK=1 GRANT_A=no-such-host.invalid:443 HYPERVISOR=hvf bash "${repo}/scripts/factory-edge-stage.sh" --check 2>&1)" && fail "--check passed with a granted host that cannot resolve: ${out}"
+grep -q 'does not resolve' <<<"${out}" || fail "an unresolvable grant was not reported: ${out}"
 
 bad_stage() { # <mode> <what must be caught> <text the failure must name>
   fresh; local o; o="$(stage "$1" HYPERVISOR=hvf)" && fail "$2: staging passed: ${o}"

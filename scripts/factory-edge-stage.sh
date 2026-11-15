@@ -6,6 +6,7 @@
 #
 #   scripts/factory-edge-stage.sh          stage the workloads (replaces any earlier staging)
 #   scripts/factory-edge-stage.sh --down   remove the staged workloads
+#   scripts/factory-edge-stage.sh --check  check every prerequisite and start nothing
 #
 # Three named machines are started in the background, each holding its own
 # scoped network grant:
@@ -34,6 +35,7 @@
 #                   (default 30)
 #   ATTEMPT_EVERY   seconds between its requests (default 30)
 #   INSPECT_EVERY   seconds between an inspection workload's requests (default 5)
+#   DNS_CHECK       0 skips the check that each granted host resolves (default 1)
 set -uo pipefail
 
 MVMCTL="${MVMCTL:-mvmctl}"
@@ -46,6 +48,7 @@ WAIT_SECS="${WAIT_SECS:-120}"
 ATTEMPT_AFTER="${ATTEMPT_AFTER:-30}"
 ATTEMPT_EVERY="${ATTEMPT_EVERY:-30}"
 INSPECT_EVERY="${INSPECT_EVERY:-5}"
+DNS_CHECK="${DNS_CHECK:-1}"
 if [ -z "${HYPERVISOR:-}" ]; then
   if [ "$(uname -s)" = Darwin ]; then HYPERVISOR=hvf; else HYPERVISOR=firecracker; fi
 fi
@@ -108,12 +111,36 @@ down() { # remove every machine an earlier staging left behind
 
 if [ "${1:-}" = --down ]; then down; echo "staged workloads removed"; exit 0; fi
 
+# Everything the demo needs, checked without starting anything.
+preflight() {
+  mvm --version >/dev/null 2>&1 || fail "no usable mvmctl ($MVMCTL): the demo assumes it is installed"
+  [ -d "$MVM_HOME" ] || fail "demo home $MVM_HOME does not exist: prepare it first (mvmctl image pull $IMAGE, then one throwaway run)"
+  mvm image ls </dev/null | grep -qF "${IMAGE#docker.io/}" \
+    || fail "$IMAGE is not cached in $MVM_HOME: prepare it first (mvmctl image pull $IMAGE); staging does not install"
+  say "mvmctl $(mvm --version | awk '{print $2}') on $HYPERVISOR, home $MVM_HOME, $IMAGE cached"
+  # Every grant is resolved to addresses when the workload is admitted, so each granted host must resolve now.
+  if [ "$DNS_CHECK" != 0 ]; then
+    local g h
+    for g in "$GRANT_A" "$GRANT_B" "$APPROVED"; do
+      h="${g%%:*}"
+      python3 -I -c "
+import socket, sys
+socket.setdefaulttimeout(8)
+try: socket.getaddrinfo(sys.argv[1], 443)
+except OSError as e: sys.exit(str(e))" "$h" 2>/dev/null \
+        || fail "$h does not resolve: every granted destination is resolved when its workload is admitted, so the demo needs working DNS"
+    done
+    say "every granted destination resolves (${GRANT_A%%:*}, ${GRANT_B%%:*}, ${APPROVED%%:*})"
+  fi
+  local free_kb
+  free_kb="$(df -k "$MVM_HOME" | awk 'NR == 2 { print $4 }')"
+  [ "${free_kb:-0}" -ge 1048576 ] || fail "less than 1 GB free where $MVM_HOME lives"
+  say "enough free disk space"
+}
+
 echo "== 0. preconditions (nothing is installed or prepared here)"
-mvm --version >/dev/null 2>&1 || fail "no usable mvmctl ($MVMCTL): the demo assumes it is installed"
-[ -d "$MVM_HOME" ] || fail "demo home $MVM_HOME does not exist: prepare it first (mvmctl image pull $IMAGE, then one throwaway run)"
-mvm image ls </dev/null | grep -qF "${IMAGE#docker.io/}" \
-  || fail "$IMAGE is not cached in $MVM_HOME: prepare it first (mvmctl image pull $IMAGE); staging does not install"
-say "mvmctl $(mvm --version | awk '{print $2}') on $HYPERVISOR, home $MVM_HOME, $IMAGE cached"
+preflight
+if [ "${1:-}" = --check ]; then echo "READY: staging will find everything it needs. Run scripts/factory-edge-stage.sh."; exit 0; fi
 
 echo "== 1. staging the three workloads"
 down

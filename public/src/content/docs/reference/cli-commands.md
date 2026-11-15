@@ -1238,6 +1238,17 @@ flag:
   name through `machine shell`/`exec`/`stop`. Bare `-d` auto-generates a name and
   prints it; `-d --name <N>` uses your chosen name.
 
+A detached boot command (`machine run -d -- <argv>`) receives the canonical
+runtime-provisioned egress environment, just as entrypoint invocation does:
+proxy variables and, when provisioned, egress CA paths and credential
+placeholders. Other caller environment is preserved. A caller value identical
+to a provisioned value is accepted; a differing replacement is refused by
+variable name, without echoing values. With no provisioned egress environment,
+caller configuration is unchanged. This supplies environment, not proof of
+admission, network enforcement, workload readiness, or protected output.
+Boot commands remain DevOnly, with the existing environment denylist and
+sealed-guest refusal.
+
 A fourth trigger promotes into the persistent lifecycle without `-d`:
 `--healthcheck '<cmd>'` declares the workload a long-running service — its mere
 presence registers the machine (shows in `machine ps`, torn down with `machine
