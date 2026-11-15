@@ -313,13 +313,19 @@ No task is complete without all of:
 3. **Zero clippy warnings/errors**: Run `cargo clippy --workspace -- -D warnings` and fix all findings before calling a feature done. Never suppress a clippy lint with `#[allow(...)]` — fix the underlying issue instead.
 4. **Compiling workspace**: Run `cargo check --workspace` (or full `cargo test`/`cargo build`) and fix any errors before you finish. Never leave the workspace in a non-compiling state. **`--all-targets` is not exhaustive**: it silently skips targets behind `required-features` (the `mvm-conformance` cucumber runner needs `--features bdd`), and on macOS it cannot compile `cfg(target_os = "linux")` files at all — including Linux-gated _test_ files, which `just check::linux` also misses because that recipe is `--lib` only. Changing the shape of a shared type (adding a struct field, a trait method, an enum variant) therefore needs `just check::gated` before pushing. Skipping it costs a CI round trip: the break surfaces there as a compile error in the "Build workspace tests" job.
 5. **Keep the issue authoritative**: GitHub issues own work status, remaining
-   scope, dependencies, and acceptance criteria. Link the PR to its issue and
-   leave verification results in the PR. Do not create or update a shared
+   scope, dependencies, and acceptance criteria. Every PR for issue-related
+   work must link to each issue it addresses in its description, including
+   partial work, and leave verification results in the PR. After merge, update
+   the issue's checkboxes to reflect verified completion and link the merged PR.
+   Do not create or update a shared
    sprint, refactor, delivery, or progress dashboard in `specs/`.
-   **Issues may ONLY be considered closed when no unchecked checkboxes remain.**
+   **An issue is only complete when all its checkboxes are checked, or it is
+   deliberately closed or superseded with the reason recorded on the issue
+   and a link to the replacement issue when superseded.**
    Verify completion before checking each item; never check or delete unfinished
-   items merely to permit closure. This applies to manual closure and PR
-   auto-closing keywords such as `Fixes` or `Closes`.
+   items merely to permit closure. A merged PR alone does not complete an issue.
+   Use `Refs #123` for partial work; use auto-closing keywords such as `Fixes`
+   or `Closes` only when the PR completes all remaining checklist items.
 6. **Update active technical documents only when their substance changes**:
    ADRs own durable decisions and contracts own stable interfaces. An
    exceptional new plan is an immutable design attachment linked to one issue,
