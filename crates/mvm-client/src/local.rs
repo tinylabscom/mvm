@@ -1174,8 +1174,11 @@ impl MvmClient for LocalBackend {
         {
             let reg = registry.lookup(&info.name);
             let mut state = to_state(info, reg);
-            // A live machine's grants come from its definition, like a stopped one's.
-            if let Some(spec) = crate::inventory::read_persisted_spec(&state.name)? {
+            // A live machine's grants come from its definition, like a stopped
+            // one's. The read is best-effort: a corrupt or missing definition
+            // must not take down inspect for a machine the backend still
+            // tracks, so the state keeps the (empty) defaults in that case.
+            if let Ok(Some(spec)) = crate::inventory::read_persisted_spec(&state.name) {
                 state.allow_host = spec.allow_host;
             }
             return Ok(state);
