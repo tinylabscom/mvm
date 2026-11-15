@@ -34,6 +34,22 @@ be read or parsed, rather than silently omitting stopped entries or metadata.
 A missing registry remains a valid empty initial registry. Bulk-stop target
 discovery stays best-effort and excludes registry-only entries.
 
+Detached boot commands use the same canonical
+`mvm_hostd::workload_env::workload_egress_env` projection as entrypoint dispatch,
+read after guest-agent readiness. Machine names are validated before readiness
+probes or per-machine state reads. The resulting process request carries the
+runtime-provisioned proxy variables and, when present, egress CA paths and
+credential placeholders. Non-runtime caller environment is preserved. An
+identical caller value is accepted; replacing a provisioned value is refused
+by variable name without reporting either value. Without provisioned egress
+environment, caller configuration is unchanged and an empty environment stays
+empty.
+
+This delivers canonical environment to the guest process request; it is not
+additional admission, network enforcement, workload readiness, or protected
+output evidence. Boot commands remain DevOnly, sealed guests still refuse
+them, and the existing environment denylist re-admits no denied variables.
+
 `input_journal` owns the encrypted machine-exec journal and its per-machine
 lock for execution, checkpoint cursors, and replay. An absent journal is an
 empty history; an unreadable journal or dangling journal symlink is an error.
