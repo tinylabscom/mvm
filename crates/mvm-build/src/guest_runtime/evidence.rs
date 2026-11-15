@@ -1227,7 +1227,6 @@ pub use launch_scope::LaunchProofScope;
 mod launch_scope {
     use super::{GuestArch, VerifiedRuntimeManifest};
     use std::cell::RefCell;
-    use std::marker::PhantomData;
 
     /// Everything a verification read, by content.
     #[derive(PartialEq, Eq)]
@@ -1272,7 +1271,7 @@ mod launch_scope {
     #[must_use = "the scope ends when this is dropped"]
     pub struct LaunchProofScope {
         owner: bool,
-        _not_send: PhantomData<*const ()>,
+        _not_send: std::marker::PhantomData<*const ()>,
     }
 
     impl LaunchProofScope {
@@ -1291,7 +1290,7 @@ mod launch_scope {
             });
             Self {
                 owner,
-                _not_send: PhantomData,
+                _not_send: std::marker::PhantomData,
             }
         }
     }

@@ -263,8 +263,6 @@ pub fn admit_and_boot_local(
     req: &LocalRunRequest,
     ctx: LocalRunContext<'_>,
 ) -> Result<StartedMachine> {
-    // The steps of this one launch share a single check of the signed runtime
-    // release; the next launch checks again.
     let _runtime_proofs = mvm_build::guest_runtime::evidence::LaunchProofScope::begin();
     ResolvedLocal::new(req)?
         .verify()?
