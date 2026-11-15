@@ -67,6 +67,161 @@ fn a_deny_beats_an_allow_from_any_layer_in_either_order() {
 }
 
 #[test]
+fn signed_requests_are_limited_to_the_authenticated_owner_grant() {
+    let resolved = merged(&[
+        layer(
+            "runtime-one",
+            LayerOrigin::Pack,
+            "[network]\nallow = [\"one.test\", \"shared.test\"]\n",
+        ),
+        layer(
+            "runtime-two",
+            LayerOrigin::Pack,
+            "[network]\nallow = [\"two.test:8443\"]\n",
+        ),
+    ]);
+    let owner = mvm_contract::grants::EgressGrant {
+        allow: vec![
+            mvm_core::network_policy::HostPort::new("shared.test", 443),
+            mvm_core::network_policy::HostPort::new("one.test", 443),
+            mvm_core::network_policy::HostPort::new("two.test", 8443),
+            mvm_core::network_policy::HostPort::new("unrequested.test", 443),
+        ],
+    };
+    assert_eq!(
+        resolved
+            .requested_egress_with_owner_grant(&owner)
+            .expect("all signed requests have a grant")
+            .allow,
+        vec![
+            mvm_core::network_policy::HostPort::new("one.test", 443),
+            mvm_core::network_policy::HostPort::new("shared.test", 443),
+            mvm_core::network_policy::HostPort::new("two.test", 8443),
+        ],
+        "an owner grant cannot add a destination absent from signed requests"
+    );
+}
+
+#[test]
+fn an_ungranted_signed_request_names_its_layer_and_refuses() {
+    let resolved = merged(&[layer(
+        "runtime-one",
+        LayerOrigin::Pack,
+        "[network]\nallow = [\"one.test\"]\n",
+    )]);
+    let error = resolved
+        .requested_egress_with_owner_grant(&mvm_contract::grants::EgressGrant::default())
+        .expect_err("a signed request is not its own grant");
+    assert_eq!(error.layer, "runtime-one");
+    assert_eq!(
+        error.file.as_deref(),
+        Some(Path::new("/policies/runtime-one.toml"))
+    );
+    assert_eq!(error.key.as_deref(), Some("network.allow"));
+    assert!(error.message.contains("one.test:443"), "{error}");
+}
+
+#[test]
+fn signed_denial_and_block_stay_closed_over_an_owner_grant() {
+    let owner = mvm_contract::grants::EgressGrant {
+        allow: vec![mvm_core::network_policy::HostPort::new("one.test", 443)],
+    };
+    let denied = merged(&[
+        layer(
+            "runtime-one",
+            LayerOrigin::Pack,
+            "[network]\nallow = [\"one.test\"]\n",
+        ),
+        layer(
+            "runtime-two",
+            LayerOrigin::Pack,
+            "[network]\ndeny = [\"one.test\"]\n",
+        ),
+    ]);
+    assert!(
+        denied
+            .requested_egress_with_owner_grant(&owner)
+            .expect("denied request cannot be granted")
+            .allow
+            .is_empty()
+    );
+    assert!(denied.notes.iter().any(|note| note.contains("runtime-two")));
+
+    let blocked = merged(&[
+        layer(
+            "runtime-one",
+            LayerOrigin::Pack,
+            "[network]\nblock = true\n",
+        ),
+        layer(
+            "runtime-two",
+            LayerOrigin::Pack,
+            "[network]\nallow = [\"one.test\"]\n",
+        ),
+    ]);
+    assert!(
+        blocked
+            .requested_egress_with_owner_grant(&owner)
+            .expect("blocked request cannot be granted")
+            .allow
+            .is_empty()
+    );
+    let error = refused(&[
+        layer(
+            "runtime-one",
+            LayerOrigin::Pack,
+            "[network]\nblock = true\n",
+        ),
+        user("invocation", "[network]\nblock = false\n"),
+    ]);
+    assert_eq!(error.layer, "invocation");
+    assert_eq!(error.key.as_deref(), Some("network.block"));
+}
+
+#[test]
+fn signed_routes_cannot_be_lost_in_an_allow_list_projection() {
+    let resolved = merged(&[layer(
+        "runtime-one",
+        LayerOrigin::Pack,
+        "[[network.routes]]\nid = \"service\"\nhost = \"api.test\"\n",
+    )]);
+    let error = resolved
+        .requested_egress_with_owner_grant(&mvm_contract::grants::EgressGrant::default())
+        .expect_err("route constraints cannot become unrestricted host egress");
+    assert_eq!(error.key.as_deref(), Some("network.routes"));
+    assert_eq!(error.layer, "runtime-one");
+}
+
+#[test]
+fn signed_layers_narrow_resources_and_secret_destinations_without_new_grants() {
+    let resolved = merged(&[
+        layer(
+            "runtime-one",
+            LayerOrigin::Pack,
+            "[[secrets.bind]]\nname = \"token\"\nhosts = [\"api.test\", \"other.test\"]\n\
+             [resources]\ncpu_millicores = 1000\nwall_clock_secs = 60\n\
+             max_cpus = 4\nmax_memory = \"2G\"\n",
+        ),
+        layer(
+            "runtime-two",
+            LayerOrigin::Pack,
+            "[[secrets.bind]]\nname = \"token\"\nhosts = [\"api.test\"]\n\
+             [resources]\ncpu_millicores = 500\nwall_clock_secs = 30\n\
+             max_cpus = 2\nmax_memory = \"512M\"\n",
+        ),
+    ]);
+    assert_eq!(resolved.policy.secrets.bind[0].hosts, ["api.test"]);
+    assert_eq!(resolved.policy.resources.cpu_millicores, Some(500));
+    assert_eq!(resolved.policy.resources.wall_clock_secs, Some(30));
+    assert_eq!(resolved.policy.resources.max_cpus, Some(2));
+    assert_eq!(
+        resolved.policy.resources.max_memory.as_deref(),
+        Some("512M")
+    );
+    assert_eq!(resolved.provenance["resources.max_cpus"], "runtime-two");
+}
+
+#[test]
 fn a_wildcard_deny_covers_subdomains_and_a_port_deny_only_its_port() {
     let resolved = merged(&[user(
         "a",

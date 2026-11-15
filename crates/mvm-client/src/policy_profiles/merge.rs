@@ -23,8 +23,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use mvm_contract::grants::EgressGrant;
 use mvm_contract::policy::routes::{EgressRoute, RouteSet};
 use mvm_core::env_hygiene::classify;
+use mvm_core::network_policy::HostPort;
 use serde::Serialize;
 
 use super::model::{
@@ -95,6 +97,63 @@ impl ResolvedPolicy {
             notes: Vec::new(),
             backend_conditioned: false,
         }
+    }
+
+    /// Intersect merged requests with an independently authorized owner grant.
+    ///
+    /// Call only after authenticating the signed policy inputs and the owner's
+    /// grant. Neither the merge nor this projection verifies a publisher, and
+    /// this result alone cannot authorize a production launch. Route requests
+    /// refuse until they can retain their method/path constraints at admission.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a request missing from the owner's grant or a route that the
+    /// host/port-only grant cannot faithfully represent. The refusal names the
+    /// policy layer that requested the effect.
+    pub fn requested_egress_with_owner_grant(
+        &self,
+        owner: &EgressGrant,
+    ) -> Result<EgressGrant, PolicyError> {
+        let refusal = |source: &str, key: &str, reason: String| {
+            PolicyError::new(source, reason)
+                .in_file(
+                    self.layers
+                        .iter()
+                        .find(|layer| layer.label == source)
+                        .and_then(|layer| layer.file.as_deref()),
+                )
+                .at_key(key)
+        };
+        if let Some(route) = self.policy.network.routes.first() {
+            let source = self
+                .provenance
+                .get(&format!("network.routes.{}", route.id))
+                .map_or("resolved policy", String::as_str);
+            return Err(refusal(
+                source,
+                "network.routes",
+                "endpoint route cannot be projected as unrestricted host egress".into(),
+            ));
+        }
+        let mut allow = Vec::with_capacity(self.policy.network.allow.len());
+        for requested in &self.policy.network.allow {
+            let (host, port) = split_host_port(requested);
+            let destination = HostPort::new(host, port);
+            if !owner.allow.contains(&destination) {
+                let source = self
+                    .provenance
+                    .get(&format!("network.allow.{requested}"))
+                    .map_or("resolved policy", String::as_str);
+                return Err(refusal(
+                    source,
+                    "network.allow",
+                    format!("{requested} was requested without an owner grant"),
+                ));
+            }
+            allow.push(destination);
+        }
+        Ok(EgressGrant { allow })
     }
 }
 
