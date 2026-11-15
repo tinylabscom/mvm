@@ -1027,9 +1027,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         super::up::attach_universal_initramfs_if_cached(&mut start_config, &effective_hypervisor)?;
     }
     let verified_runtime = release
-        .map(|release| {
-            mvm_runtime::runtime_evidence::verify_release_runtime_set(&start_config, release)
-        })
+        .map(|release| super::up::verify_release_runtime_set(&start_config, release))
         .transpose()?;
 
     let ledger = mvm_client::admission::InMemoryNonceLedger::new();

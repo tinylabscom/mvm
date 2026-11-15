@@ -11,6 +11,7 @@
 
 use anyhow::{Context, Result};
 
+pub use mvm_runtime::runtime_evidence::{VerifiedRuntimeSet, verify_release_runtime_set};
 pub use mvm_runtime::sdk_sidecar::SdkSidecarAttachment;
 pub use mvm_runtime::universal_initramfs::attach_universal_initramfs_if_cached;
 pub use mvm_runtime::universal_initramfs::attach_universal_initramfs_with_verified_release;
