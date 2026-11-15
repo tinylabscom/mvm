@@ -1024,9 +1024,17 @@ mod tests {
             .expect("read the shell binary");
         let entrypoint = worker_entrypoint(dir.path(), &shell, false);
         let kept = std::os::fd::AsRawFd::as_raw_fd(&entrypoint.file);
-        let probe =
-            format!("[ /proc/$$/fd/{kept} -ef /proc/$$/exe ] && echo open || echo closed\nexit\n");
-        assert_eq!(worker_output(&entrypoint, &probe).trim(), "closed");
+        // The first line is a control: if this shell cannot compare files,
+        // "works" is missing and the test fails instead of reading "closed".
+        let probe = format!(
+            "[ /proc/$$/exe -ef /proc/$$/exe ] && echo works\n\
+             [ /proc/$$/fd/{kept} -ef /proc/$$/exe ] && echo open || echo closed\nexit\n"
+        );
+        let answers = worker_output(&entrypoint, &probe);
+        assert_eq!(
+            answers.split_whitespace().collect::<Vec<_>>(),
+            ["works", "closed"]
+        );
     }
 
     #[test]
