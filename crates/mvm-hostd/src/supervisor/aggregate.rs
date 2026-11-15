@@ -402,7 +402,10 @@ impl Supervisor {
         // trail is preserved even if the backend fails next. Audit
         // failure here fails the launch fail-closed: audit emits
         // before forward.
-        let admitted_extras = deps_volume_audit_extras(plan.deps_volume.as_ref());
+        let mut admitted_extras = deps_volume_audit_extras(plan.deps_volume.as_ref());
+        if let Some(runtime) = plan.runtime_identity.as_ref() {
+            admitted_extras.extend(crate::audit::emitter::runtime_identity_labels(runtime));
+        }
         if let Err(e) = self
             .emit_admission_audit_with_extras(&plan, "plan.admitted", "", admitted_extras)
             .await
@@ -1258,6 +1261,7 @@ mod tests {
             mailbox: None,
             grants: None,
             environment: None,
+            runtime_identity: None,
             build_provenance: Default::default(),
             snapshot_at: Default::default(),
             network_mode: Default::default(),

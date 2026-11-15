@@ -283,6 +283,44 @@ mod tests {
     }
 
     #[test]
+    fn runtime_identity_is_inside_the_signed_plan_payload() {
+        let mut plan = sample_plan();
+        plan.environment = None;
+        plan.runtime_identity = Some(RuntimeIdentity {
+            archive_sha256: "a".repeat(64),
+            version: "0.28.0".into(),
+            arch: "x86_64".into(),
+            declaration: RuntimeArtifactDigests {
+                overlay_sha256: "b".repeat(64),
+                overlay_verity_sha256: "c".repeat(64),
+                overlay_roothash: "d".repeat(64),
+                initramfs_sha256: "e".repeat(64),
+            },
+            selected: RuntimeArtifactDigests {
+                overlay_sha256: "b".repeat(64),
+                overlay_verity_sha256: "c".repeat(64),
+                overlay_roothash: "d".repeat(64),
+                initramfs_sha256: "e".repeat(64),
+            },
+            signer_identity: "release@example.org".into(),
+            signer_issuer: "https://issuer.example.org".into(),
+        });
+        let (sk, vk) = fresh_key();
+        let signed = sign_plan(&plan, &sk, "test-signer");
+        let recovered = verify_plan(&signed, &[("test-signer", &vk)]).expect("signed pin");
+        assert!(
+            recovered.environment.is_none(),
+            "fork has no fresh kernel pin"
+        );
+        assert_eq!(recovered.runtime_identity, plan.runtime_identity);
+        let mut tampered = signed;
+        let mut payload: serde_json::Value = serde_json::from_slice(&tampered.0.payload).unwrap();
+        payload["runtime_identity"]["selected"]["overlay_roothash"] = "0".repeat(64).into();
+        tampered.0.payload = serde_json::to_vec(&payload).unwrap();
+        assert!(verify_plan(&tampered, &[("test-signer", &vk)]).is_err());
+    }
+
+    #[test]
     fn signed_legacy_tool_policy_does_not_become_an_unrestricted_grant() {
         let mut plan = sample_plan();
         plan.agent_verbs = Some(vec![crate::plan::VerbId::new("run-entrypoint").unwrap()]);

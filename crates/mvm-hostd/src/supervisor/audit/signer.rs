@@ -323,6 +323,7 @@ pub(crate) mod tests {
             mailbox: None,
             grants: None,
             environment: None,
+            runtime_identity: None,
             build_provenance: Default::default(),
             snapshot_at: Default::default(),
             network_mode: Default::default(),

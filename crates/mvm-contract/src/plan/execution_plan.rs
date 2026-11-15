@@ -19,9 +19,9 @@ use crate::plan::types::{
     AdmissionProfile, ArtifactPolicy, AttestationRequirement, AuditLabels, BuildProvenance,
     CallerCommitment, DepsVolumeBinding, EnvironmentRef, FsPolicyRef, HostShareGrant,
     IngressMapping, IngressMappingsError, KeyRotationSpec, NetworkLimits, NetworkMode, Nonce,
-    PlanId, PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding,
-    SignedImageRef, StreamRetention, TenantId, WorkloadId, validate_ingress_mappings,
-    validate_ingress_material,
+    PlanId, PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeIdentity,
+    RuntimeIdentityMismatch, RuntimeProfileRef, SecretBinding, SignedImageRef, StreamRetention,
+    TenantId, WorkloadId, validate_ingress_mappings, validate_ingress_material,
 };
 use crate::plan::verb::VerbId;
 use crate::protocol::broker::ServiceId;
@@ -95,6 +95,11 @@ pub struct ExecutionPlan {
     /// every existing signature and frozen vector.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<EnvironmentRef>,
+
+    /// Signed release runtime selected for this launch, independent of a kernel
+    /// pin (a resumed VM need not select a new kernel).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_identity: Option<RuntimeIdentity>,
 
     pub resources: Resources,
 
@@ -379,6 +384,21 @@ const fn default_sdk_uses_sidecar() -> bool {
 }
 
 impl ExecutionPlan {
+    /// Compare every pinned runtime field with the launch verifier's identity.
+    ///
+    /// This compares data, not verification results: the caller must derive
+    /// `verified` from authenticated bytes and check before release.
+    pub fn require_runtime_identity(
+        &self,
+        verified: &RuntimeIdentity,
+    ) -> Result<(), RuntimeIdentityMismatch> {
+        match self.runtime_identity.as_ref() {
+            None => Err(RuntimeIdentityMismatch::Missing),
+            Some(pinned) if pinned == verified => Ok(()),
+            Some(_) => Err(RuntimeIdentityMismatch::Different),
+        }
+    }
+
     /// Validate all ingress mappings as one signed listener set.
     pub fn validate_ingress(&self) -> Result<(), IngressMappingsError> {
         validate_ingress_mappings(&self.ingress, self.network_limits.max_ingress_listeners)?;
@@ -422,6 +442,7 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
     ExecutionPlan {
         execution_epoch: 1,
         environment: None,
+        runtime_identity: None,
         schema_version: SCHEMA_VERSION,
         plan_id: PlanId("fixture-plan".to_string()),
         plan_version: 1,
@@ -497,6 +518,91 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+
+    fn runtime_identity() -> RuntimeIdentity {
+        let digests = crate::plan::RuntimeArtifactDigests {
+            overlay_sha256: "b".repeat(64),
+            overlay_verity_sha256: "c".repeat(64),
+            overlay_roothash: "d".repeat(64),
+            initramfs_sha256: "e".repeat(64),
+        };
+        RuntimeIdentity {
+            archive_sha256: "a".repeat(64),
+            version: "0.28.0".into(),
+            arch: "x86_64".into(),
+            declaration: digests.clone(),
+            selected: digests,
+            signer_identity: "release@example.org".into(),
+            signer_issuer: "https://issuer.example.org".into(),
+        }
+    }
+
+    #[test]
+    fn runtime_identity_is_optional_and_independent_of_kernel() {
+        let mut plan = minimal_plan();
+        let legacy = serde_json::to_vec(&plan).expect("serialize old plan");
+        assert!(
+            !serde_json::from_slice::<serde_json::Value>(&legacy)
+                .expect("json")
+                .as_object()
+                .expect("plan object")
+                .contains_key("runtime_identity")
+        );
+        let decoded: ExecutionPlan = serde_json::from_slice(&legacy).expect("old plan");
+        assert_eq!(decoded.runtime_identity, None);
+        assert_eq!(
+            serde_json::to_vec(&decoded).expect("serialize old plan again"),
+            legacy
+        );
+        assert_eq!(
+            plan.require_runtime_identity(&runtime_identity()),
+            Err(RuntimeIdentityMismatch::Missing)
+        );
+
+        plan.runtime_identity = Some(runtime_identity());
+        assert!(
+            plan.environment.is_none(),
+            "fork-style plan needs no kernel pin"
+        );
+        let encoded = serde_json::to_vec(&plan).expect("serialize pin");
+        let round: ExecutionPlan = serde_json::from_slice(&encoded).expect("roundtrip pin");
+        assert_eq!(round, plan);
+        round
+            .require_runtime_identity(&runtime_identity())
+            .expect("all identity fields agree");
+        let mut unknown = serde_json::to_value(&round).expect("json plan");
+        unknown["runtime_identity"]["verified"] = true.into();
+        assert!(serde_json::from_value::<ExecutionPlan>(unknown).is_err());
+    }
+
+    #[test]
+    fn every_runtime_identity_component_is_pinned() {
+        let mut plan = minimal_plan();
+        plan.runtime_identity = Some(runtime_identity());
+        let changes: [fn(&mut RuntimeIdentity); 13] = [
+            |i| i.archive_sha256.push('0'),
+            |i| i.version.push('0'),
+            |i| i.arch.push('0'),
+            |i| i.declaration.overlay_sha256.push('0'),
+            |i| i.declaration.overlay_verity_sha256.push('0'),
+            |i| i.declaration.overlay_roothash.push('0'),
+            |i| i.declaration.initramfs_sha256.push('0'),
+            |i| i.selected.overlay_sha256.push('0'),
+            |i| i.selected.overlay_verity_sha256.push('0'),
+            |i| i.selected.overlay_roothash.push('0'),
+            |i| i.selected.initramfs_sha256.push('0'),
+            |i| i.signer_identity.push('0'),
+            |i| i.signer_issuer.push('0'),
+        ];
+        for change in changes {
+            let mut different = runtime_identity();
+            change(&mut different);
+            assert_eq!(
+                plan.require_runtime_identity(&different),
+                Err(RuntimeIdentityMismatch::Different)
+            );
+        }
+    }
 
     #[test]
     fn legacy_tool_policy_fields_are_refused_without_widening_other_grants() {

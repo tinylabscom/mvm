@@ -61,11 +61,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 mod atomic_sync;
+mod runtime_identity;
 pub(crate) use atomic_sync::AtomicSyncState;
+use atomic_sync::append_root_history;
 #[cfg(test)]
 use atomic_sync::atomic_sync_is_batched;
-use atomic_sync::defer_atomic_sync;
 use atomic_sync::{AtomicSyncBatch, PendingSync};
+pub(crate) use runtime_identity::runtime_identity_labels;
 
 mod atomic_write;
 pub(crate) use atomic_write::{write_atomic, write_atomic_batched, write_atomic_unsynced};
@@ -405,7 +407,9 @@ impl AuditEmitter {
 
     /// Emit `plan.admitted` — fires immediately after `admit_for_run`
     /// succeeds. Binds the plan_id, signer (via `audit_labels` extras),
-    /// and the workload context.
+    /// and the workload context. A pinned release runtime is recorded as
+    /// individual chain-signed fields; the caller must first compare the pin
+    /// with the launch verifier's identity and require durable admission.
     ///
     /// Also carries the admitted output-retention mode. Without it, a workload
     /// with no transcript is ambiguous — nobody can tell a run that was
@@ -428,6 +432,9 @@ impl AuditEmitter {
                 .as_ref()
                 .map_or_else(String::new, |environment| environment.kernel_sha256.clone()),
         ));
+        if let Some(runtime) = plan.runtime_identity.as_ref() {
+            labels.extend(runtime_identity_labels(runtime));
+        }
         self.emit(plan, "plan.admitted", labels)
     }
 
@@ -1465,37 +1472,6 @@ impl AuditEmitter {
     }
 }
 
-/// Append one published root to `tenant`'s root history, durably.
-///
-/// One JSON object per line, fsynced before returning: a root that is not on
-/// disk when the next one is published is a hole in the very sequence the
-/// consistency check walks.
-fn append_root_history(
-    audit_dir: &Path,
-    tenant: &str,
-    signed: &SignedAuditRoot,
-    sync_state: &AtomicSyncState,
-) -> Result<()> {
-    use std::io::Write as _;
-
-    let path = audit_root_history_path_for_tenant(audit_dir, tenant);
-    let mut line = serde_json::to_vec(signed)?;
-    line.push(b'\n');
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .with_context(|| format!("opening root history at {}", path.display()))?;
-    file.write_all(&line)
-        .with_context(|| format!("appending to root history at {}", path.display()))?;
-    if defer_atomic_sync(sync_state, &path) {
-        return Ok(());
-    }
-    file.sync_data()
-        .with_context(|| format!("syncing root history at {}", path.display()))?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1515,6 +1491,51 @@ mod tests {
             .tenant(tenant)
             .plan_id(plan_id)
             .build()
+    }
+
+    #[test]
+    fn admitted_runtime_identity_is_chain_signed_and_tamper_detected() {
+        use mvm_contract::plan::{RuntimeArtifactDigests, RuntimeIdentity};
+
+        let dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[44; 32]);
+        let verifying = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let mut plan = fixture_plan("local", "runtime-identity-audit");
+        let digests = RuntimeArtifactDigests {
+            overlay_sha256: "b".repeat(64),
+            overlay_verity_sha256: "c".repeat(64),
+            overlay_roothash: "d".repeat(64),
+            initramfs_sha256: "e".repeat(64),
+        };
+        let runtime = RuntimeIdentity {
+            archive_sha256: "a".repeat(64),
+            version: "0.28.0".into(),
+            arch: "x86_64".into(),
+            declaration: digests.clone(),
+            selected: digests,
+            signer_identity: "release@example.org".into(),
+            signer_issuer: "https://issuer.example.org".into(),
+        };
+        plan.environment = None;
+        plan.runtime_identity = Some(runtime.clone());
+        emitter.emit_admitted(&plan, "host:test").unwrap();
+        let path = dir.path().join("local.jsonl");
+        verify_audit_chain(&path, &verifying).expect("signed admission");
+        let content = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let labels = &value["entry"]["labels"];
+        assert_eq!(labels["kernel_sha256"], "", "fork has no new kernel pin");
+        for (key, expected) in runtime_identity_labels(&runtime) {
+            assert_eq!(labels[key.as_str()], expected, "{key}");
+        }
+        let tampered = content.replacen(&runtime.signer_issuer, "https://evil.example.org", 1);
+        assert_ne!(tampered, content);
+        std::fs::write(&path, tampered).unwrap();
+        assert!(
+            verify_audit_chain(&path, &verifying).is_err(),
+            "edited issuer must refuse"
+        );
     }
 
     #[test]

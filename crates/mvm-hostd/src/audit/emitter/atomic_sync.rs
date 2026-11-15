@@ -2,7 +2,38 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use mvm_contract::merkle::SignedAuditRoot;
+
+/// Append one published root to `tenant`'s root history, durably.
+///
+/// One JSON object per line, fsynced before returning: a root that is not on
+/// disk when the next one is published is a hole in the consistency sequence.
+pub(super) fn append_root_history(
+    audit_dir: &Path,
+    tenant: &str,
+    signed: &SignedAuditRoot,
+    sync_state: &AtomicSyncState,
+) -> Result<()> {
+    use std::io::Write as _;
+
+    let path = super::audit_root_history_path_for_tenant(audit_dir, tenant);
+    let mut line = serde_json::to_vec(signed)?;
+    line.push(b'\n');
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("opening root history at {}", path.display()))?;
+    file.write_all(&line)
+        .with_context(|| format!("appending to root history at {}", path.display()))?;
+    if defer_atomic_sync(sync_state, &path) {
+        return Ok(());
+    }
+    file.sync_data()
+        .with_context(|| format!("syncing root history at {}", path.display()))?;
+    Ok(())
+}
 
 /// Atomic publications made inside one admission durability boundary.
 #[derive(Debug, Default)]

@@ -30,9 +30,10 @@ pub use types::{
     IngressProtocol, IngressTransform, InputKind, KeyRotationSpec, NetworkLimits,
     NetworkLimitsBuilder, NetworkLimitsError, NetworkMode, Nonce, NonceParseError, PlanId,
     PlanSeccompTier, PlanSeccompTierParseError, PolicyRef, PostRunLifecycle, ReleasePin, Resources,
-    RuntimeProfileRef, SecretBinding, SecretReleasePolicy, SecretSource, ShareKind, SignedImageRef,
-    StreamRetention, TenantId, TimeoutSpec, Variant, WorkloadId, WorkloadIntent,
-    validate_ingress_mappings, validate_ingress_material,
+    RuntimeArtifactDigests, RuntimeIdentity, RuntimeIdentityMismatch, RuntimeProfileRef,
+    SecretBinding, SecretReleasePolicy, SecretSource, ShareKind, SignedImageRef, StreamRetention,
+    TenantId, TimeoutSpec, Variant, WorkloadId, WorkloadIntent, validate_ingress_mappings,
+    validate_ingress_material,
 };
 pub use types::{AssetIdentity, AssetKind};
 pub use validity::FreshnessClaims;
