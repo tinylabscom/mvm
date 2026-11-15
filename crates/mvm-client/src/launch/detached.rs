@@ -247,7 +247,8 @@ pub struct BootCommand {
     /// The program and its arguments. Must not be empty.
     pub argv: Vec<String>,
     /// Environment for the command, filtered by the host's environment
-    /// denylist before it leaves this process.
+    /// denylist before it leaves this process. May repeat, but not replace,
+    /// runtime-provisioned egress values.
     pub env: BTreeMap<String, String>,
     /// Working directory, or the agent's default.
     pub cwd: Option<String>,
@@ -265,23 +266,42 @@ pub fn start_boot_command(name: &str, command: BootCommand) -> Result<String> {
     if command.argv.is_empty() {
         bail!("a boot command needs a program to run");
     }
+    mvm_core::naming::validate_vm_name(name).context("invalid boot-command machine name")?;
     if !crate::readiness::wait_for_guest_agent(name, AGENT_READY_SECS) {
         bail!(
             "the guest agent in machine {name:?} did not answer within {AGENT_READY_SECS}s, so \
              its command could not start"
         );
     }
-    crate::guest::start_process(
-        name,
-        crate::guest::ProcStart {
-            argv: command.argv,
-            env: command.env,
-            cwd: command.cwd,
-            allow_env: mvm_core::env_hygiene::EnvReadmit::none(),
-        },
-    )
-    .with_context(|| format!("starting the boot command in machine {name:?}"))
+    crate::guest::start_process(name, boot_command_process(name, command)?)
+        .with_context(|| format!("starting the boot command in machine {name:?}"))
 }
+
+fn boot_command_process(name: &str, command: BootCommand) -> Result<crate::guest::ProcStart> {
+    // These values exist after boot. A caller may repeat a provisioned value,
+    // but cannot replace the runtime's routing, trust paths or placeholders.
+    let mut env: BTreeMap<_, _> = mvm_hostd::workload_env::workload_egress_env(name)
+        .into_iter()
+        .collect();
+    for (key, value) in command.env {
+        match env.get(&key) {
+            Some(bound) if bound == &value => {}
+            Some(_) => bail!("cannot override host-provisioned egress variable {key:?}"),
+            None => {
+                env.insert(key, value);
+            }
+        }
+    }
+    Ok(crate::guest::ProcStart {
+        argv: command.argv,
+        env,
+        cwd: command.cwd,
+        allow_env: mvm_core::env_hygiene::EnvReadmit::none(),
+    })
+}
+
+#[cfg(test)]
+mod boot_command_tests;
 
 /// Starts a launch's command in its machine once the machine is up, and
 /// names the process it started.
@@ -469,24 +489,6 @@ mod tests {
     fn an_empty_boot_command_is_refused_before_touching_the_guest() {
         let err = start_boot_command("web", BootCommand::default()).unwrap_err();
         assert!(err.to_string().contains("program to run"), "{err:#}");
-    }
-
-    /// The denylist applies to a boot command's environment exactly as it
-    /// does to any guest process.
-    #[test]
-    fn a_boot_command_carrying_a_denied_variable_is_refused() {
-        let (_env, _dir) = isolated();
-        let err = crate::guest::start_process(
-            "web",
-            crate::guest::ProcStart {
-                argv: vec!["true".into()],
-                env: BTreeMap::from([("LD_PRELOAD".into(), "/x.so".into())]),
-                cwd: None,
-                allow_env: mvm_core::env_hygiene::EnvReadmit::none(),
-            },
-        )
-        .unwrap_err();
-        assert!(format!("{err:#}").contains("LD_PRELOAD"), "{err:#}");
     }
 
     #[test]
