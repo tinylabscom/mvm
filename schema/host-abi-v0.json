@@ -1952,6 +1952,14 @@
       "additionalProperties": false,
       "description": "A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.",
       "properties": {
+        "allow_host": {
+          "default": [],
+          "description": "Egress destinations (`host:port`) the machine's definition grants. This is the granted list recorded for the machine, what `mvmctl machine inspect` prints as `allow-host`; empty when it grants none or the definition is unknown.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "auto_resume": {
           "default": true,
           "description": "Whether connecting auto-resumes a sleeping machine.",
@@ -2215,6 +2223,14 @@
       "additionalProperties": false,
       "description": "A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.",
       "properties": {
+        "allow_host": {
+          "default": [],
+          "description": "Egress destinations (`host:port`) the machine's definition grants. This is the granted list recorded for the machine, what `mvmctl machine inspect` prints as `allow-host`; empty when it grants none or the definition is unknown.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "auto_resume": {
           "default": true,
           "description": "Whether connecting auto-resumes a sleeping machine.",
@@ -2373,6 +2389,14 @@
         "additionalProperties": false,
         "description": "A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.",
         "properties": {
+          "allow_host": {
+            "default": [],
+            "description": "Egress destinations (`host:port`) the machine's definition grants. This is the granted list recorded for the machine, what `mvmctl machine inspect` prints as `allow-host`; empty when it grants none or the definition is unknown.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "auto_resume": {
             "default": true,
             "description": "Whether connecting auto-resumes a sleeping machine.",
@@ -2879,6 +2903,14 @@
       "additionalProperties": false,
       "description": "A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.",
       "properties": {
+        "allow_host": {
+          "default": [],
+          "description": "Egress destinations (`host:port`) the machine's definition grants. This is the granted list recorded for the machine, what `mvmctl machine inspect` prints as `allow-host`; empty when it grants none or the definition is unknown.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "auto_resume": {
           "default": true,
           "description": "Whether connecting auto-resumes a sleeping machine.",
@@ -3317,6 +3349,14 @@
       "additionalProperties": false,
       "description": "A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.",
       "properties": {
+        "allow_host": {
+          "default": [],
+          "description": "Egress destinations (`host:port`) the machine's definition grants. This is the granted list recorded for the machine, what `mvmctl machine inspect` prints as `allow-host`; empty when it grants none or the definition is unknown.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "auto_resume": {
           "default": true,
           "description": "Whether connecting auto-resumes a sleeping machine.",
@@ -3461,6 +3501,14 @@
       "additionalProperties": false,
       "description": "A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.",
       "properties": {
+        "allow_host": {
+          "default": [],
+          "description": "Egress destinations (`host:port`) the machine's definition grants. This is the granted list recorded for the machine, what `mvmctl machine inspect` prints as `allow-host`; empty when it grants none or the definition is unknown.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "auto_resume": {
           "default": true,
           "description": "Whether connecting auto-resumes a sleeping machine.",

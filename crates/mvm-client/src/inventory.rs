@@ -173,6 +173,7 @@ pub(crate) fn persisted_machine_state(
     if state.profile.is_none() {
         state.profile = Some(spec.profile.clone());
     }
+    state.allow_host = spec.allow_host.clone();
     state
 }
 
@@ -465,6 +466,21 @@ mod tests {
         } else {
             WorkloadPosture::Prod
         }
+    }
+
+    #[test]
+    fn a_machine_state_carries_the_destinations_its_definition_grants() {
+        let mut granted = spec("web");
+        granted.allow_host = vec!["pypi.org:443".to_string()];
+        let stopped = persisted_machine_state(&granted, None);
+        assert_eq!(stopped.allow_host, ["pypi.org:443"]);
+        let running = persisted_machine_state(&granted, Some(live("web", MachineStatus::Running)));
+        assert_eq!(running.allow_host, ["pypi.org:443"]);
+        assert!(
+            persisted_machine_state(&spec("web"), None)
+                .allow_host
+                .is_empty()
+        );
     }
 
     #[test]

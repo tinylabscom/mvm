@@ -961,6 +961,10 @@ request: CreateRequest
  */
 export interface MachineState {
 /**
+ * Egress destinations (`host:port`) the machine's definition grants. This is the granted list recorded for the machine, what `mvmctl machine inspect` prints as `allow-host`; empty when it grants none or the definition is unknown.
+ */
+allow_host?: string[]
+/**
  * Whether connecting auto-resumes a sleeping machine.
  */
 auto_resume?: boolean
@@ -1089,6 +1093,10 @@ request: MachineRef
  */
 export interface MachineState1 {
 /**
+ * Egress destinations (`host:port`) the machine's definition grants. This is the granted list recorded for the machine, what `mvmctl machine inspect` prints as `allow-host`; empty when it grants none or the definition is unknown.
+ */
+allow_host?: string[]
+/**
  * Whether connecting auto-resumes a sleeping machine.
  */
 auto_resume?: boolean
@@ -1174,6 +1182,10 @@ request: MachineFilter
  * A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.
  */
 export interface MachineState2 {
+/**
+ * Egress destinations (`host:port`) the machine's definition grants. This is the granted list recorded for the machine, what `mvmctl machine inspect` prints as `allow-host`; empty when it grants none or the definition is unknown.
+ */
+allow_host?: string[]
 /**
  * Whether connecting auto-resumes a sleeping machine.
  */
@@ -1428,6 +1440,10 @@ request: ReconfigurePatchRequest
  */
 export interface MachineState3 {
 /**
+ * Egress destinations (`host:port`) the machine's definition grants. This is the granted list recorded for the machine, what `mvmctl machine inspect` prints as `allow-host`; empty when it grants none or the definition is unknown.
+ */
+allow_host?: string[]
+/**
  * Whether connecting auto-resumes a sleeping machine.
  */
 auto_resume?: boolean
@@ -1574,6 +1590,10 @@ process?: (string | null)
  */
 export interface MachineState4 {
 /**
+ * Egress destinations (`host:port`) the machine's definition grants. This is the granted list recorded for the machine, what `mvmctl machine inspect` prints as `allow-host`; empty when it grants none or the definition is unknown.
+ */
+allow_host?: string[]
+/**
  * Whether connecting auto-resumes a sleeping machine.
  */
 auto_resume?: boolean
@@ -1716,6 +1736,10 @@ request: MachineRef1
  * A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.
  */
 export interface MachineState5 {
+/**
+ * Egress destinations (`host:port`) the machine's definition grants. This is the granted list recorded for the machine, what `mvmctl machine inspect` prints as `allow-host`; empty when it grants none or the definition is unknown.
+ */
+allow_host?: string[]
 /**
  * Whether connecting auto-resumes a sleeping machine.
  */
