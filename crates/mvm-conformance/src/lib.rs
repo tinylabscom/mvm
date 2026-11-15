@@ -1,12 +1,9 @@
 //! Library surface for the dev-only cucumber-rs BDD conformance harness.
 //!
-//! `cucumber` is a dev-dependency of this crate, and Cargo never exposes a
-//! package's dev-dependencies to its own `[lib]` target — only to the test
-//! binary that links it — so the `World` type and the cucumber-attributed step
-//! definitions live under `tests/` (see `tests/conformance.rs`). Step logic
-//! that doesn't need cucumber's macros belongs here instead, so it can be
-//! unit-tested independent of the cucumber runner. Not a dependency of any
-//! shipped crate.
+//! The `bdd` feature enables Cucumber and the runner in `tests/conformance.rs`.
+//! Its `World` state lives under `tests/support/`, not in an auto-discovered
+//! test target. Pure step logic belongs here so ordinary workspace tests can
+//! exercise it without compiling Cucumber. Not a dependency of any shipped crate.
 
 pub mod claims;
 /// Pure host-evidence primitives for the `DestructiveLabOnly` CVE-containment

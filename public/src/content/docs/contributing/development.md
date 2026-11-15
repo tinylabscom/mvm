@@ -480,6 +480,31 @@ Silicon laptop and 2 min 04 s on a 12-core Linux host in a measured run. Stay on
 one selection style per worktree target directory, or point the other at its own
 `CARGO_TARGET_DIR`.
 
+For compile-time diagnosis, measure the same target and features each time:
+
+```bash
+cargo build --locked -p mvmctl --features dev --timings
+CARGO_LOG=cargo::core::compiler::fingerprint=info cargo build --locked -p mvmctl --features dev
+```
+
+The HTML report is under `$CARGO_TARGET_DIR/cargo-timings/`; the second
+command explains why Cargo considers a unit stale. Separate an empty-target
+build, an unchanged build, and a one-file edit. Do not use `release-min` for
+the edit/run loop: its size-oriented LTO is a shipping cost. Development
+builds optimize concrete AES-GCM operations in `mvm-aead`, not all of
+`mvm-core`, preserving encrypted I/O throughput without optimizing every
+core module. Dev and test use the same Cargo codegen defaults, allowing fewer
+units for non-incremental dependencies than for incremental workspace crates
+without introducing a test-only profile mismatch.
+Feature differences can still cause rebuilds. The two-job default limits
+contention between worktrees; raising it on a host already running many builds
+can make turnaround worse.
+
+Ordinary workspace tests do not compile Cucumber. The existing `bdd` feature
+enables both the conformance runner and its framework dependency; use
+`just bdd::run` for that suite. The conformance library's unit tests and
+documentation-example checks remain part of ordinary workspace validation.
+
 ## Profiling
 
 Functions carrying `#[instrument]` are timed when `MVM_SPAN_TIMINGS` is set.

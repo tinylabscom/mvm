@@ -83,6 +83,51 @@ fn dev_and_test_share_cargo_codegen_defaults() {
 }
 
 #[test]
+fn cucumber_is_enabled_only_with_the_bdd_runner() {
+    let manifest = workspace_manifest("crates/mvm-conformance/Cargo.toml");
+    assert_eq!(
+        manifest["dependencies"]
+            .get("cucumber")
+            .and_then(|dependency| dependency.get("optional"))
+            .and_then(toml::Value::as_bool),
+        Some(true),
+        "ordinary workspace tests must not compile the unused BDD framework"
+    );
+    assert!(
+        !manifest["dev-dependencies"]
+            .as_table()
+            .unwrap()
+            .contains_key("cucumber")
+    );
+    let features = manifest["features"].as_table().unwrap();
+    assert!(
+        features
+            .get("default")
+            .is_none_or(|value| value.as_array().unwrap().is_empty())
+    );
+    assert!(
+        features["bdd"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|feature| feature.as_str() == Some("dep:cucumber"))
+    );
+    let runner = manifest["test"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|target| target["name"].as_str() == Some("conformance"))
+        .expect("conformance test target");
+    assert!(
+        runner["required-features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|feature| feature.as_str() == Some("bdd"))
+    );
+}
+
+#[test]
 fn guest_builder_excludes_the_host_keyring_feature() {
     let core = workspace_manifest("crates/mvm-core/Cargo.toml");
     assert_eq!(

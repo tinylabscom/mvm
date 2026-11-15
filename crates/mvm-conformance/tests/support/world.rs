@@ -106,10 +106,6 @@ impl Drop for ScenarioEnvGuard {
 
 /// One end-to-end launch's observable result: what the CLI said, and how long
 /// the guest took to become dispatchable.
-///
-/// Lives here rather than beside its steps because `tests/world.rs` is also
-/// auto-discovered as its own integration-test target, where `crate::steps`
-/// does not exist.
 #[derive(Debug, Default)]
 pub struct LaunchRecord {
     pub stdout: String,
