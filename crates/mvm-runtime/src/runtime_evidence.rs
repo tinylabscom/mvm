@@ -12,12 +12,14 @@ use mvm_build::guest_runtime::evidence::{
 };
 use mvm_build::guest_runtime::source::{CheckedSourceRuntime, check_source_runtime};
 use mvm_core::arch::GuestArch;
+use mvm_core::plan::{RuntimeArtifactDigests, RuntimeIdentity};
 use mvm_core::protocol::runtime_release::{
     CliRuntimeLaunchBinding, RuntimeBindingProvenance, RuntimeLaunchBinding,
 };
 use mvm_core::util::atomic_io::{sync_dir, sync_file, write_private_new};
 use mvm_core::vm_backend::VmStartConfig;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 mod namespace;
 use namespace::{check_owner, private_directory};
@@ -27,11 +29,75 @@ pub const MIN_GUEST_RPC_PROTOCOL_VERSION: u32 = mvm_agentd::vsock::MIN_SUPPORTED
 /// Current guest RPC version, not the host instance-control wire version.
 pub const GUEST_RPC_PROTOCOL_VERSION: u32 = mvm_agentd::vsock::PROTOCOL_VERSION;
 
+/// One launch's authenticated release archive and checked artifact selection.
+///
+/// This cannot be serialized or constructed from plan data. A separate launch
+/// must verify its own release bytes, even inside a long-lived host process.
+#[derive(Debug)]
+pub struct VerifiedRuntimeSet {
+    release: Arc<mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime>,
+    identity: RuntimeIdentity,
+}
+
+impl VerifiedRuntimeSet {
+    /// The exact identity to compare with a signed plan and admission audit.
+    pub fn identity(&self) -> &RuntimeIdentity {
+        &self.identity
+    }
+
+    /// Borrow the verified archive through attachment and lifecycle custody.
+    pub fn release(&self) -> &mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime {
+        &self.release
+    }
+
+    /// Refuse a config that diverged from the selection this launch verified.
+    pub fn verify_config(&self, config: &VmStartConfig) -> Result<()> {
+        anyhow::ensure!(
+            config.runtime_release_proof.as_ref() == Some(self.release.proof())
+                && config.runtime_overlay_version.as_deref()
+                    == Some(self.identity.version.as_str())
+                && config.runtime_overlay_roothash.as_deref()
+                    == Some(self.identity.declaration.overlay_roothash.as_str()),
+            "runtime proof identity changed"
+        );
+        Ok(())
+    }
+}
+
+/// Complete one release-runtime verification after overlay and initramfs attach.
+/// No artifact path or serialized proof can mint the returned authority.
+pub fn verify_release_runtime_set(
+    config: &VmStartConfig,
+    release: Arc<mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime>,
+) -> Result<VerifiedRuntimeSet> {
+    let identity = verified_release_identity(config, &release, MIN_GUEST_RPC_PROTOCOL_VERSION)?;
+    Ok(VerifiedRuntimeSet { release, identity })
+}
+
+/// Authenticate an already selected release once when a caller did not attach
+/// it from the ordinary versioned cache in this process.
+pub fn verify_selected_release_runtime_set(
+    config: &VmStartConfig,
+) -> Result<Option<VerifiedRuntimeSet>> {
+    let Some(proof) = &config.runtime_release_proof else {
+        return Ok(None);
+    };
+    let release = mvm_build::guest_runtime::evidence::verify_release_runtime(
+        proof.clone(),
+        config
+            .runtime_overlay_version
+            .as_deref()
+            .context("selected guest runtime has no version")?,
+        GuestArch::host(),
+    )?;
+    verify_release_runtime_set(config, Arc::new(release)).map(Some)
+}
+
 /// Checked launch inputs retain their assurance tier through admission.
 /// Source integrity is deliberately not signed release provenance.
 #[derive(Debug)]
 pub enum VerifiedLaunchRuntime {
-    Release(VerifiedRuntimeManifest),
+    Release(Box<VerifiedRuntimeManifest>),
     Source(CheckedSourceRuntime),
     LegacyBundle(crate::legacy_bundle_runtime::VerifiedLegacyBundleRuntime),
     LegacyPortable(crate::legacy_portable_runtime::VerifiedLegacyPortableRuntime),
@@ -50,6 +116,30 @@ impl VerifiedLaunchRuntime {
                 bail!("a legacy runtime has no CLI runtime assembly")
             }
         }
+    }
+}
+
+enum CheckedLaunchRuntime<'a> {
+    Release(&'a VerifiedRuntimeManifest),
+    Source(&'a CheckedSourceRuntime),
+    LegacyBundle(&'a crate::legacy_bundle_runtime::VerifiedLegacyBundleRuntime),
+    LegacyPortable(&'a crate::legacy_portable_runtime::VerifiedLegacyPortableRuntime),
+}
+
+impl<'a> From<&'a VerifiedLaunchRuntime> for CheckedLaunchRuntime<'a> {
+    fn from(runtime: &'a VerifiedLaunchRuntime) -> Self {
+        match runtime {
+            VerifiedLaunchRuntime::Release(release) => Self::Release(release),
+            VerifiedLaunchRuntime::Source(source) => Self::Source(source),
+            VerifiedLaunchRuntime::LegacyBundle(bundle) => Self::LegacyBundle(bundle),
+            VerifiedLaunchRuntime::LegacyPortable(portable) => Self::LegacyPortable(portable),
+        }
+    }
+}
+
+impl CheckedLaunchRuntime<'_> {
+    fn is_release(&self) -> bool {
+        matches!(self, Self::Release(_))
     }
 
     fn snapshot_artifacts_in(
@@ -92,10 +182,10 @@ fn checked_source(
 /// Bind a warm child's requested runtime to its authenticated parent record.
 /// The caller must authenticate the parent checkpoint before invoking this.
 pub fn verify_runtime_for_claim(
-    parent: Option<&RuntimeLaunchBinding>,
+    parent: &crate::checkpoint::VerifiedRetainedRuntime,
     requested: Option<&VmStartConfig>,
 ) -> Result<()> {
-    let Some(parent) = parent else {
+    let Some(parent) = parent.binding() else {
         if let Some(config) = requested
             && requires_runtime_proof(config)?
         {
@@ -113,19 +203,22 @@ pub fn verify_runtime_for_claim(
     {
         bail!("warm child requested a different runtime version or verity root");
     }
-    let checked = verify_runtime_for_launch(config, MIN_GUEST_RPC_PROTOCOL_VERSION)?
-        .context("warm child omitted its runtime evidence")?;
-    if checked.is_release() != parent_assembly.release_proof().is_some() {
+    if config.runtime_release_proof.is_some() != parent_assembly.release_proof().is_some() {
         bail!("warm child cannot change its parent's runtime provenance tier");
     }
-    if let (
-        VerifiedLaunchRuntime::Source(checked),
-        RuntimeBindingProvenance::Source { archive_sha256, .. },
-    ) = (&checked, &parent_assembly.provenance)
-        && checked.archive_sha256() != archive_sha256
-    {
-        bail!("warm child requested a different source archive");
+    if let RuntimeBindingProvenance::Source { archive_sha256, .. } = &parent_assembly.provenance {
+        // The checked parent owns the retained runtime. A child may carry no
+        // source-cache pin, but a pin it does carry must name that same archive.
+        if config
+            .source_runtime_archive_sha256
+            .as_deref()
+            .is_some_and(|requested| requested != archive_sha256)
+        {
+            bail!("warm child requested a different source archive");
+        }
+        return Ok(());
     }
+    check_runtime_provenance(config)?;
     if let (Some(requested), Some(actual)) = (
         config.runtime_release_proof.as_ref(),
         parent_assembly.release_proof(),
@@ -133,7 +226,7 @@ pub fn verify_runtime_for_claim(
     {
         bail!("warm child requested a different release archive");
     }
-    verify_runtime_binding(parent)
+    Ok(())
 }
 
 /// Reverify a retained generation without changing or recopying it. Release
@@ -145,6 +238,13 @@ pub fn verify_runtime_for_claim(
 /// authenticity nor permission to delete. The host account is trusted not to
 /// chmod or replace its private generations; mvm never modifies them in place.
 pub fn verify_runtime_binding(binding: &RuntimeLaunchBinding) -> Result<()> {
+    verify_retained_runtime_identity(binding).map(|_| ())
+}
+
+/// Return a release identity only after checking its retained generation.
+pub(crate) fn verify_retained_runtime_identity(
+    binding: &RuntimeLaunchBinding,
+) -> Result<Option<RuntimeIdentity>> {
     if matches!(binding, RuntimeLaunchBinding::LegacyPortable { .. }) {
         let mut config = VmStartConfig::default();
         binding.apply_to_config(&mut config);
@@ -154,22 +254,22 @@ pub fn verify_runtime_binding(binding: &RuntimeLaunchBinding) -> Result<()> {
                 == verified.rootfs_sha256(),
             "retained portable rootfs differs from signed bundle"
         );
-        return Ok(());
+        return Ok(None);
     }
     let RuntimeLaunchBinding::CliAssembly(binding) = binding else {
         let mut config = VmStartConfig::default();
         binding.apply_to_config(&mut config);
         verify_retained_legacy_runtime(&config)?;
-        return Ok(());
+        return Ok(None);
     };
     let root = validate_generation_paths(binding)?;
     if binding.arch() != GuestArch::host() {
         bail!("retained runtime has the wrong guest architecture");
     }
     let verified = match &binding.provenance {
-        RuntimeBindingProvenance::Release { proof } => VerifiedLaunchRuntime::Release(
+        RuntimeBindingProvenance::Release { proof } => VerifiedLaunchRuntime::Release(Box::new(
             verify_runtime_release_proof(proof, binding.version(), GuestArch::host())?,
-        ),
+        )),
         RuntimeBindingProvenance::Source {
             version,
             arch,
@@ -216,7 +316,26 @@ pub fn verify_runtime_binding(binding: &RuntimeLaunchBinding) -> Result<()> {
             bail!("retained runtime artifact differs from its checked declaration");
         }
     }
-    Ok(())
+    let digests = RuntimeArtifactDigests {
+        overlay_sha256: declaration.overlay_sha256.clone(),
+        overlay_verity_sha256: declaration.overlay_verity_sha256.clone(),
+        overlay_roothash: declaration.overlay_roothash.clone(),
+        initramfs_sha256: declaration.initramfs_sha256.clone(),
+    };
+    let (RuntimeBindingProvenance::Release { proof }, VerifiedLaunchRuntime::Release(manifest)) =
+        (&binding.provenance, &verified)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(RuntimeIdentity {
+        archive_sha256: proof.archive_sha256.clone(),
+        version: proof.version.clone(),
+        arch: proof.arch.to_string(),
+        declaration: digests.clone(),
+        selected: digests,
+        signer_identity: manifest.signer().identity.clone(),
+        signer_issuer: manifest.signer().issuer.clone(),
+    }))
 }
 
 /// Checked-source runtime evidence for integration fixtures: a bound
@@ -283,6 +402,26 @@ pub fn checked_source_runtime_fixture(
     };
     binding.apply_to_config(&mut config);
     Ok((config, binding))
+}
+
+/// Bind a signed legacy fixture into the same retained generation used at boot.
+/// The returned binding is still untrusted until a checkpoint authenticates it.
+#[cfg(any(test, feature = "test-support"))]
+pub fn retained_legacy_runtime_fixture(
+    config: &VmStartConfig,
+) -> Result<(VmStartConfig, RuntimeLaunchBinding)> {
+    let lease = RuntimeLifecycleLease::acquire(&config.name)?;
+    let bound = lease.bind(config)?;
+    let proof = bound
+        .legacy_bundle_runtime
+        .clone()
+        .context("legacy fixture has no retained proof")?;
+    let binding = RuntimeLaunchBinding::LegacyBundle {
+        proof,
+        rootfs_path: PathBuf::from(&bound.rootfs_path),
+        initramfs_path: bound.initrd_path.as_ref().map(PathBuf::from),
+    };
+    Ok((bound, binding))
 }
 
 pub(crate) fn verify_retained_legacy_runtime(
@@ -528,7 +667,51 @@ pub fn verify_release_runtime_for_launch(
         bail!("selected runtime is not a CLI release");
     };
     release.verify_selected_artifacts(&runtime_selection(config, minimum_protocol)?)?;
-    Ok(release)
+    Ok(*release)
+}
+
+/// Derive a signed-plan identity only after checking the selected artifacts
+/// against the archive snapshot that was authenticated for this launch.
+pub fn verified_release_identity(
+    config: &VmStartConfig,
+    release: &mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime,
+    minimum_protocol: u32,
+) -> Result<RuntimeIdentity> {
+    check_runtime_provenance(config)?;
+    let proof = config
+        .runtime_release_proof
+        .as_ref()
+        .context("CLI release runtime proof is required")?;
+    anyhow::ensure!(
+        proof == release.proof()
+            && config.runtime_overlay_version.as_deref() == Some(proof.version.as_str())
+            && proof.arch == GuestArch::host(),
+        "runtime proof identity changed"
+    );
+    let selection = runtime_selection(config, minimum_protocol)?;
+    let declaration = release.manifest().declaration(selection.arch)?;
+    declaration.validate(selection.arch)?;
+    anyhow::ensure!(
+        declaration.protocol_version >= minimum_protocol
+            && declaration.min_supported_protocol_version <= GUEST_RPC_PROTOCOL_VERSION,
+        "checked guest runtime protocol is incompatible with this launch"
+    );
+    release.manifest().verify_selected_artifacts(&selection)?;
+    let digests = RuntimeArtifactDigests {
+        overlay_sha256: declaration.overlay_sha256.clone(),
+        overlay_verity_sha256: declaration.overlay_verity_sha256.clone(),
+        overlay_roothash: declaration.overlay_roothash.clone(),
+        initramfs_sha256: declaration.initramfs_sha256.clone(),
+    };
+    Ok(RuntimeIdentity {
+        archive_sha256: proof.archive_sha256.clone(),
+        version: proof.version.clone(),
+        arch: proof.arch.to_string(),
+        declaration: digests.clone(),
+        selected: digests,
+        signer_identity: release.signer().identity.clone(),
+        signer_issuer: release.signer().issuer.clone(),
+    })
 }
 
 #[tracing::instrument(skip_all)]
@@ -565,11 +748,11 @@ fn verify_runtime_for_launch_at(
         .context("selected guest runtime has no version")?;
     let selection = runtime_selection(config, minimum_protocol)?;
     let verified = match config.runtime_release_proof.as_ref() {
-        Some(proof) => VerifiedLaunchRuntime::Release(verify_runtime_release_proof(
+        Some(proof) => VerifiedLaunchRuntime::Release(Box::new(verify_runtime_release_proof(
             proof,
             version,
             GuestArch::host(),
-        )?),
+        )?)),
         None => VerifiedLaunchRuntime::Source(checked_source(
             version,
             GuestArch::host(),
@@ -776,17 +959,93 @@ impl RuntimeLifecycleLease {
             .parent()
             .and_then(Path::parent)
             .context("runtime lifecycle namespace has no home")?;
-        let Some(verified) = verify_runtime_for_launch_at(config, minimum_protocol, Some(home))?
-        else {
+        let verified = verify_runtime_for_launch_at(config, minimum_protocol, Some(home))?;
+        self.bind_checked(config, verified.as_ref())
+    }
+
+    /// Bind an already authenticated selection without repeating release
+    /// signature verification. The selection still has to match this config;
+    /// copying and hashing the selected artifacts remains the custody point.
+    pub(crate) fn bind_checked(
+        &self,
+        config: &VmStartConfig,
+        verified: Option<&VerifiedLaunchRuntime>,
+    ) -> Result<VmStartConfig> {
+        self.bind_checked_ref(config, verified.map(CheckedLaunchRuntime::from))
+    }
+
+    /// Borrow a launch's signed archive through the custody boundary without
+    /// reopening its mutable source path or repeating signature verification.
+    pub(crate) fn bind_verified_release(
+        &self,
+        config: &VmStartConfig,
+        release: &mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime,
+    ) -> Result<VmStartConfig> {
+        self.retain_installed_bundle(config)?;
+        anyhow::ensure!(
+            config.runtime_release_proof.as_ref() == Some(release.proof()),
+            "runtime proof identity changed"
+        );
+        self.bind_checked_ref(
+            config,
+            Some(CheckedLaunchRuntime::Release(release.manifest())),
+        )
+    }
+
+    fn bind_checked_ref(
+        &self,
+        config: &VmStartConfig,
+        verified: Option<CheckedLaunchRuntime<'_>>,
+    ) -> Result<VmStartConfig> {
+        let minimum_protocol = mvm_agentd::vsock::MIN_SUPPORTED_PROTOCOL_VERSION;
+        let Some(verified) = verified else {
+            anyhow::ensure!(
+                !requires_runtime_proof(config)?,
+                "selected guest runtime has no verified launch evidence"
+            );
             return Ok(config.clone());
         };
-        if let VerifiedLaunchRuntime::LegacyBundle(legacy) = &verified {
+        check_runtime_provenance(config)?;
+        if let CheckedLaunchRuntime::Release(release) = &verified {
+            let proof = config
+                .runtime_release_proof
+                .as_ref()
+                .context("release proof missing")?;
+            anyhow::ensure!(
+                proof.archive_sha256 == release.archive_sha256()
+                    && proof.version == config.runtime_overlay_version.as_deref().unwrap_or("")
+                    && proof.arch == GuestArch::host(),
+                "runtime proof does not match the selected version and guest architecture"
+            );
+            let declaration = release.declaration(GuestArch::host())?;
+            anyhow::ensure!(
+                declaration.protocol_version >= minimum_protocol
+                    && declaration.min_supported_protocol_version <= GUEST_RPC_PROTOCOL_VERSION,
+                "checked guest runtime protocol is incompatible with this launch"
+            );
+        } else {
+            anyhow::ensure!(
+                config.runtime_release_proof.is_none(),
+                "release runtime cannot use non-release verification evidence"
+            );
+        }
+        if let CheckedLaunchRuntime::Source(source) = &verified {
+            anyhow::ensure!(
+                config
+                    .source_runtime_archive_sha256
+                    .as_deref()
+                    .is_none_or(|digest| digest == source.archive_sha256())
+                    && source.declaration(GuestArch::host())?.arch == GuestArch::host(),
+                "source runtime archive differs from the originally selected archive"
+            );
+        }
+        if let CheckedLaunchRuntime::LegacyBundle(legacy) = &verified {
             let mut bound = legacy.snapshot_in(config, &self.directory)?;
             bound.source_runtime_archive_sha256 = None;
             self.report_retained_best_effort();
             return Ok(bound);
         }
-        if let VerifiedLaunchRuntime::LegacyPortable(portable) = &verified {
+        if let CheckedLaunchRuntime::LegacyPortable(portable) = &verified {
             let bound = portable.snapshot_in(config, &self.directory)?;
             self.report_retained_best_effort();
             return Ok(bound);
@@ -794,7 +1053,7 @@ impl RuntimeLifecycleLease {
         let selection = runtime_selection(config, minimum_protocol)?;
         let artifacts = verified.snapshot_artifacts_in(&selection, &self.directory)?;
         let mut bound = config.clone();
-        if let VerifiedLaunchRuntime::Release(release) = &verified {
+        if let CheckedLaunchRuntime::Release(release) = &verified {
             bound.runtime_release_proof = Some(
                 release.retain_release_proof_in(
                     config
@@ -807,10 +1066,10 @@ impl RuntimeLifecycleLease {
         }
         bound.unsigned_runtime_development = !verified.is_release();
         bound.source_runtime_archive_sha256 = match &verified {
-            VerifiedLaunchRuntime::Source(source) => Some(source.archive_sha256().to_owned()),
-            VerifiedLaunchRuntime::Release(_)
-            | VerifiedLaunchRuntime::LegacyBundle(_)
-            | VerifiedLaunchRuntime::LegacyPortable(_) => None,
+            CheckedLaunchRuntime::Source(source) => Some(source.archive_sha256().to_owned()),
+            CheckedLaunchRuntime::Release(_)
+            | CheckedLaunchRuntime::LegacyBundle(_)
+            | CheckedLaunchRuntime::LegacyPortable(_) => None,
         };
         bound.runtime_overlay_path = Some(artifacts.overlay_path().display().to_string());
         bound.runtime_overlay_verity_path =
@@ -1094,6 +1353,25 @@ mod tests {
         let lease = RuntimeLifecycleLease::acquire(&config.name).unwrap();
         assert!(
             lease
+                .bind_checked(&config, None)
+                .unwrap_err()
+                .to_string()
+                .contains("no verified launch evidence"),
+            "a selected runtime may not bypass the binding verifier"
+        );
+        let checked = VerifiedLaunchRuntime::Source(
+            checked_source(version, arch, Some(home.path()), None).unwrap(),
+        );
+        assert!(
+            lease
+                .bind_checked(&config, Some(&checked))
+                .unwrap_err()
+                .to_string()
+                .contains("originally selected archive"),
+            "checked evidence from another selection cannot authorize binding"
+        );
+        assert!(
+            lease
                 .bind(&config)
                 .unwrap_err()
                 .to_string()
@@ -1128,12 +1406,12 @@ mod tests {
             initramfs_path: bound.initrd_path.as_ref().unwrap().into(),
             overlay_roothash: bound.runtime_overlay_roothash.clone().unwrap(),
         };
-        verify_runtime_binding(&RuntimeLaunchBinding::CliAssembly(binding.clone())).unwrap();
-        verify_runtime_for_claim(
-            Some(&RuntimeLaunchBinding::CliAssembly(binding.clone())),
-            Some(&config),
-        )
+        let retained = crate::checkpoint::runtime_binding::verify_retained_binding_for_test(Some(
+            &RuntimeLaunchBinding::CliAssembly(binding.clone()),
+        ))
         .unwrap();
+        config.source_runtime_archive_sha256 = Some(runtime.digest.clone());
+        verify_runtime_for_claim(&retained, Some(&config)).unwrap();
         let mut changed = binding;
         let RuntimeBindingProvenance::Source { archive_sha256, .. } = &mut changed.provenance
         else {
@@ -1142,7 +1420,22 @@ mod tests {
         *archive_sha256 = "0".repeat(64);
         let changed = RuntimeLaunchBinding::CliAssembly(changed);
         assert!(verify_runtime_binding(&changed).is_err());
-        assert!(verify_runtime_for_claim(Some(&changed), Some(&config)).is_err());
+        assert!(
+            crate::checkpoint::runtime_binding::verify_retained_binding_for_test(Some(&changed))
+                .is_err()
+        );
+        // A claim compares the child request with the checked parent; it does
+        // not rerun the source-cache verifier as a second "parent" proof.
+        std::fs::rename(&cache, home.path().join("cache-removed")).unwrap();
+        verify_runtime_for_claim(&retained, Some(&config)).unwrap();
+        let mut wrong_archive = config.clone();
+        wrong_archive.source_runtime_archive_sha256 = Some("0".repeat(64));
+        assert!(
+            verify_runtime_for_claim(&retained, Some(&wrong_archive))
+                .unwrap_err()
+                .to_string()
+                .contains("warm child requested a different source archive")
+        );
     }
 
     #[cfg(unix)]

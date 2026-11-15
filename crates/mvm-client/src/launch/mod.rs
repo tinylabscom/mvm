@@ -272,7 +272,7 @@ pub(crate) fn seal_transient_end(
     // fails is a seal that failed, and is recorded as one.
     let closed = emitter.batched(|| {
         if let Some(posture) = end.posture.filter(|_| end.completed) {
-            crate::admission::record_boot(emitter, plan, end.backend, posture);
+            crate::admission::record_boot(emitter, plan, end.backend, end.vm_name, posture);
         }
         emitter.emit_exit_record(
             plan,
@@ -376,7 +376,9 @@ pub(crate) fn seal_stopped_session(plan: &mvm_core::plan::ExecutionPlan, machine
         );
         return;
     };
-    if let Err(e) = mvm_hostd::supervisor::session_expiry::seal_stopped_session(&emitter, plan) {
+    if let Err(e) =
+        mvm_hostd::supervisor::lifecycle::session_expiry::seal_stopped_session(&emitter, plan)
+    {
         record_unsealed_end(
             Some((&emitter, plan)),
             UnsealedEnd::new(machine, UnsealedReason::SealFailed).error(format!("{e:#}")),

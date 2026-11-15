@@ -180,7 +180,7 @@ that checkout where used. These are integration seams, not a security inventory:
   and [CheckpointStore](../../crates/mvm-runtime/src/checkpoint/mod.rs#L45)
   supply existing artifact/lifecycle seams. Capture, materialization and
   restore must enforce the selected profile, not just the object writer.
-- [TranscriptCaptureSink](../../crates/mvm-hostd/src/supervisor/transcript_sink.rs#L22)
+- [TranscriptCaptureSink](../../crates/mvm-hostd/src/supervisor/audit/transcript_sink.rs#L22)
   and the [host signer boundary](../../crates/mvm-hostd/src/host_signer/mod.rs#L1)
   remain distinct: payload encryption and integrity signatures are not
   interchangeable custody capabilities.

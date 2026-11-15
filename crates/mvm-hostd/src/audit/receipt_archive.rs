@@ -37,12 +37,12 @@ use mvm_core::receipt_archive::{
 use sha2::{Digest, Sha256};
 
 use crate::audit::receipt_export::{CitedEntry, ExportedEvidence, export_evidence};
-use crate::supervisor::audit::PlanAuditEntry;
-use crate::supervisor::audit::{
+use crate::supervisor::audit::audit_file::verify_audit_chain_entries;
+use crate::supervisor::audit::signer::PlanAuditEntry;
+use crate::supervisor::audit::signer::{
     LABEL_CAPTURE_ID, LABEL_CHUNK_COUNT, LABEL_TRANSCRIPT_ROOT, LABEL_VM_NAME,
     TRANSCRIPT_SEALED_EVENT,
 };
-use crate::supervisor::audit_file::verify_audit_chain_entries;
 
 /// Archive member holding the signed manifest.
 pub const MANIFEST_MEMBER: &str = "manifest.json";

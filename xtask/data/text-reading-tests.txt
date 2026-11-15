@@ -9,7 +9,7 @@ tests/github_actions_fuzz_gate.rs	3	ci.yml fuzz-crate compile gate
 tests/github_actions_instruction_signing.rs	7	sign-instructions.yml and its composite action
 tests/github_actions_self_hosted_runner.rs	18	every workflow: untrusted events never reach the self-hosted runner
 tests/homebrew_render.rs	1	nix/packaging/homebrew/render-formula.sh; runs the script (behavioural)
-tests/install_sh.rs	82	install.sh and uninstall.sh; drives them against a fake release server (claim 20 fresh_install_* text scans stay here)
+tests/install_sh.rs	82	install.sh install and uninstall; drives both against a fake release server (claim 20 fresh_install_* text scans stay here)
 tests/justfile_top_level.rs	7	root Justfile and just/ modules shape
 tests/nix_flake_structure.rs	45	nix/flake.nix and nix/profiles structure; no nix on the test host
 tests/pack_signing_smoke_workflow.rs	1	pack-signing-smoke.yml

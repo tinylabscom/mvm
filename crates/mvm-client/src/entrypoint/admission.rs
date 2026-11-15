@@ -142,10 +142,12 @@ impl EntrypointAdmission {
             volumes,
             bundle_archive,
             runtime_config,
+            verified_runtime,
         } = inputs;
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let materialized_mounts = crate::admission::instructions::materialized_mounts(volumes);
-        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+        let configured_images_dir = mvm_build::image_source::configured_images_dir();
+        let params = AdmitPlanForBootParams {
             mailbox: None,
             gpu: false,
             instructions: crate::admission::InstructionSources::for_workload(None)
@@ -156,7 +158,7 @@ impl EntrypointAdmission {
             tenant: LOCAL_TENANT,
             vm_name,
             backend_name: &self.backend_name,
-            configured_images_dir: mvm_build::image_source::configured_images_dir().as_deref(),
+            configured_images_dir: configured_images_dir.as_deref(),
             rootfs_path: rootfs,
             kernel_path: kernel,
             precomputed_image_sha256: None,
@@ -204,7 +206,13 @@ impl EntrypointAdmission {
             // caller's backend label after the bundle is attached.
             grants: None,
             backend_kind: Some(backend_kind),
-        })?;
+        };
+        let ctx = match verified_runtime {
+            Some(runtime) => {
+                crate::admission::admit_plan_for_boot_with_verified_runtime(params, runtime)?
+            }
+            None => admit_plan_for_boot(params)?,
+        };
 
         let mut start_config = mvm_core::vm_backend::VmStartConfig::default();
         attach_guest_boot_config_for_plan(
@@ -242,7 +250,7 @@ impl EntrypointAdmission {
                 let proof = credential
                     .prove_registration(&challenge, now)?
                     .verify(&challenge, now)?;
-                mvm_hostd::supervisor::caller_registration::admit_caller(
+                mvm_hostd::supervisor::admission::caller_registration::admit_caller(
                     &ctx.admitted,
                     vm_name,
                     challenge,
@@ -409,6 +417,7 @@ mod tests {
             volumes: &[],
             bundle_archive: None,
             runtime_config: None,
+            verified_runtime: None,
         }
     }
 
@@ -800,6 +809,7 @@ mod stdin_grant_tests {
                     volumes: &[],
                     bundle_archive: None,
                     runtime_config: None,
+                    verified_runtime: None,
                 })
         }
     }

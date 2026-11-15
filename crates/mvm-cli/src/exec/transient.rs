@@ -14,6 +14,8 @@ use std::io::Write as _;
 pub(super) struct BootAttempt<'a> {
     pub(super) backend: &'a AnyBackend,
     pub(super) start_config: &'a VmStartConfig,
+    pub(super) verified_release:
+        Option<&'a mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime>,
     pub(super) mailbox_posture: Option<&'a mvm_hostd::plan_admission::MailboxLaunchPosture>,
     pub(super) resolved: &'a ResolvedImage,
     /// The caller named this VM. A named run has an identity a shared standby
@@ -185,9 +187,10 @@ pub(super) fn boot_transient_vm(
             attempt.backend.name()
         ));
         sub.start(SubPhase::VmmCreate);
-        if let Err(e) = attempt.backend.start_custodied(
+        if let Err(e) = attempt.backend.start_custodied_verified_release(
             attempt.start_config,
             std::mem::take(attempt.writable_images),
+            attempt.verified_release,
         ) {
             drop(phase);
             emit_guest_console_diagnostic(&vm_name);
@@ -836,6 +839,7 @@ mod tests {
             let mut attempt = BootAttempt {
                 backend: &backend,
                 start_config: &start_config,
+                verified_release: None,
                 mailbox_posture: None,
                 resolved: &resolved,
                 user_named: true,
@@ -905,6 +909,7 @@ mod tests {
         let mut attempt = BootAttempt {
             backend: &backend,
             start_config: &start_config,
+            verified_release: None,
             mailbox_posture: None,
             resolved: &resolved,
             user_named: true,
@@ -944,6 +949,7 @@ mod tests {
         let mut attempt = BootAttempt {
             backend: &backend,
             start_config: &start_config,
+            verified_release: None,
             mailbox_posture: None,
             resolved: &resolved,
             user_named: false,
@@ -966,6 +972,7 @@ mod tests {
         let mut attempt = BootAttempt {
             backend: &backend,
             start_config: &start_config,
+            verified_release: None,
             mailbox_posture: None,
             resolved: &resolved,
             user_named: false,
@@ -1066,6 +1073,7 @@ mod tests {
         let mut attempt = BootAttempt {
             backend: &backend,
             start_config: &start_config,
+            verified_release: None,
             mailbox_posture: None,
             resolved: &resolved,
             user_named: false,

@@ -300,14 +300,14 @@ fn dispatch_config(mut cfg: SupervisorConfig) -> ExitCode {
             eprintln!("mvm-libkrun-supervisor: record start time in pid file: {e}");
         }
     }
-    let timer_inputs = mvm_hostd::supervisor::wall_clock::SupervisorTimerInputs {
+    let timer_inputs = mvm_hostd::supervisor::lifecycle::wall_clock::SupervisorTimerInputs {
         plan_json: cfg.plan.as_ref(),
         audit_dir: cfg.audit_dir.as_deref(),
         signing_key_path: cfg.signing_key_path.as_deref(),
         vm_state_dir: std::path::Path::new(&cfg.vm_state_dir),
         pid_file: &pid_file,
     };
-    let _wall_clock = match mvm_hostd::supervisor::wall_clock::arm_for_supervisor(
+    let _wall_clock = match mvm_hostd::supervisor::lifecycle::wall_clock::arm_for_supervisor(
         timer_inputs,
         Box::new(timer_inputs.exit_killer()),
     ) {
@@ -319,7 +319,7 @@ fn dispatch_config(mut cfg: SupervisorConfig) -> ExitCode {
     };
     // A session's idle timeout, for the same reason: no client is left to
     // enforce it once the one that started the session has exited.
-    mvm_hostd::supervisor::session_expiry::arm_for_supervisor(
+    mvm_hostd::supervisor::lifecycle::session_expiry::arm_for_supervisor(
         &timer_inputs,
         Box::new(timer_inputs.exit_killer()),
     );
@@ -477,12 +477,12 @@ static USAGE_STATE_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::Onc
 /// The `atexit` trampoline. Takes the reading against the directory the run loop
 /// was entered for; does nothing if no run loop was ever entered.
 ///
-/// The measurement itself lives in `mvm_hostd::supervisor::self_usage`, which is
+/// The measurement itself lives in `mvm_hostd::supervisor::telemetry::self_usage`, which is
 /// feature-independent: this binary compiles only under `libkrun-sys`, and a
 /// measurement tested only here would be tested in no lane at all.
 extern "C" fn record_self_usage_at_exit() {
     if let Some(dir) = USAGE_STATE_DIR.get() {
-        mvm_hostd::supervisor::self_usage::record_self_usage(dir);
+        mvm_hostd::supervisor::telemetry::self_usage::record_self_usage(dir);
     }
 }
 

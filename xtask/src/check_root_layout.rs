@@ -56,7 +56,6 @@ const ALLOWED: &[&str] = &[
     "tests",
     "third_party",
     "treefmt.toml",
-    "uninstall.sh",
     "web",
     "xtask",
 ];

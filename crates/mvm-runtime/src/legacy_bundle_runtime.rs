@@ -313,9 +313,11 @@ mod tests {
         verify_runtime_for_launch(&inherited, MIN_GUEST_RPC_PROTOCOL_VERSION).unwrap();
         assert!(inherited.runtime_overlay_path.is_none());
         assert!(!inherited.unsigned_runtime_development);
+        let retained =
+            crate::checkpoint::runtime_binding::verify_retained_binding_for_test(Some(&binding))
+                .unwrap();
         assert!(
-            crate::runtime_evidence::verify_runtime_for_claim(Some(&binding), Some(&inherited))
-                .is_err()
+            crate::runtime_evidence::verify_runtime_for_claim(&retained, Some(&inherited)).is_err()
         );
         let observe = |path: &str| RuntimeArtifact {
             path: path.into(),

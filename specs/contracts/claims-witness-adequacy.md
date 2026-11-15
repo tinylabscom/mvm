@@ -229,7 +229,7 @@ infer a currently clean dependency set. There is no `pull_request` trigger.
 
 Enforcement: synthesis `crates/mvm-core/src/plan/synthesis.rs`; admission and
 replay `crates/mvm-hostd/src/plan_admission.rs`; chain
-`crates/mvm-hostd/src/supervisor/audit_file.rs`; sessions
+`crates/mvm-hostd/src/supervisor/audit/audit_file.rs`; sessions
 `crates/mvm-hostd/src/audit/session.rs`.
 
 | Witness | Where | Class |
@@ -268,11 +268,11 @@ tests would not trip the gate. Proposal: add the ladder tests to the ledger row.
 ### Claim 10 — no workload reaches the network unless admitted
 
 Enforcement: egress gate `crates/mvm-vmm/src/vsock_egress_bridge/egress_gate.rs`;
-flow admission `crates/mvm-hostd/src/supervisor/flowmux/open_flow.rs`; policy
+flow admission `crates/mvm-hostd/src/supervisor/endpoint/flowmux/open_flow.rs`; policy
 `crates/mvm-contract/src/policy/{network_policy,dns_guard,restricted_address}.rs`;
 snapshot NIC refusal `crates/mvm-vmm/src/snapshot.rs` and
 `crates/mvm-runtime/src/vm/instance_snapshot.rs`; DNS audit
-`crates/mvm-hostd/src/supervisor/dns_audit.rs`.
+`crates/mvm-hostd/src/supervisor/audit/dns_audit.rs`.
 
 | Witness | Class |
 |---|---|
@@ -325,7 +325,7 @@ and enforced by `check-asserted-absence`.
 ### Claim 13 — substitution path hands the guest placeholders, never raw secrets
 
 Enforcement: `crates/mvm-hostd/src/keyholder/substitution.rs`,
-`crates/mvm-hostd/src/supervisor/network_endpoint*`.
+`crates/mvm-hostd/src/supervisor/endpoint/network_endpoint*`.
 
 | Witness | Where | Class |
 |---|---|---|

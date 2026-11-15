@@ -64,7 +64,10 @@ pub use boot_config::{
     guest_profile_for_boot,
 };
 pub use bundle_binding::{BundlePin, InheritedBundle};
-pub use durability::admit_plan_for_boot_syncing_beside_boot;
+pub use durability::{
+    admit_plan_for_boot_syncing_beside_boot,
+    admit_plan_for_boot_with_verified_runtime_syncing_beside_boot,
+};
 pub use enforce::{enforce_kernel, enforce_shares, enforce_shares_for_claim};
 pub use instructions::InstructionSources;
 pub(crate) use outcome::record_boot;
@@ -395,6 +398,39 @@ pub fn admit_plan_for_boot(p: AdmitPlanForBootParams<'_>) -> Result<AdmissionCon
     Ok(admitted)
 }
 
+/// Admit a release launch using its checked whole-runtime selection.
+pub fn admit_plan_for_boot_with_verified_runtime(
+    p: AdmitPlanForBootParams<'_>,
+    runtime: &mvm_runtime::runtime_evidence::VerifiedRuntimeSet,
+) -> Result<AdmissionContext> {
+    let phase = mvm_runtime::ui::activity::start("Signing and admitting the execution plan");
+    let admitted =
+        admit_plan_for_boot_configured_ingress_with_verified_runtime(p, Vec::new(), runtime)?;
+    phase.finish();
+    Ok(admitted)
+}
+
+/// Sign the verified retained release identity for a checkpoint fork.
+pub fn admit_plan_for_boot_with_verified_retained(
+    p: AdmitPlanForBootParams<'_>,
+    retained: &mvm_runtime::checkpoint::VerifiedRetainedRuntime,
+) -> Result<AdmissionContext> {
+    let phase = mvm_runtime::ui::activity::start("Signing and admitting the execution plan");
+    let (context, durability) = admit_with_runtime_evidence(
+        p,
+        Vec::new(),
+        durability::AdmissionSync::Inline,
+        None,
+        Some(retained),
+    )?;
+    debug_assert!(
+        durability.is_settled(),
+        "a retained-runtime admission is durable before it returns"
+    );
+    phase.finish();
+    Ok(context)
+}
+
 pub fn admit_plan_for_boot_configured_ingress(
     p: AdmitPlanForBootParams<'_>,
     ingress: Vec<mvm_core::plan::IngressMapping>,
@@ -407,10 +443,43 @@ pub fn admit_plan_for_boot_configured_ingress(
     Ok(context)
 }
 
+/// Keep a verified runtime beside the config through signed plan admission.
+pub fn admit_plan_for_boot_configured_ingress_with_verified_runtime(
+    p: AdmitPlanForBootParams<'_>,
+    ingress: Vec<mvm_core::plan::IngressMapping>,
+    runtime: &mvm_runtime::runtime_evidence::VerifiedRuntimeSet,
+) -> Result<AdmissionContext> {
+    let (context, durability) = admit_with_runtime_evidence(
+        p,
+        ingress,
+        durability::AdmissionSync::Inline,
+        Some(runtime),
+        None,
+    )?;
+    debug_assert!(
+        durability.is_settled(),
+        "an inline admission is already durable"
+    );
+    Ok(context)
+}
+
 fn admit(
     p: AdmitPlanForBootParams<'_>,
     ingress: Vec<mvm_core::plan::IngressMapping>,
     sync: durability::AdmissionSync,
+) -> Result<(
+    AdmissionContext,
+    mvm_core::admission_durability::AdmissionDurability,
+)> {
+    admit_with_runtime_evidence(p, ingress, sync, None, None)
+}
+
+fn admit_with_runtime_evidence(
+    p: AdmitPlanForBootParams<'_>,
+    ingress: Vec<mvm_core::plan::IngressMapping>,
+    sync: durability::AdmissionSync,
+    runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
+    retained: Option<&mvm_runtime::checkpoint::VerifiedRetainedRuntime>,
 ) -> Result<(
     AdmissionContext,
     mvm_core::admission_durability::AdmissionDurability,
@@ -797,7 +866,9 @@ fn admit(
         p.ledger,
         p.keys_dir,
         admission_ctx.as_ref(),
-        crate::admission::run_grants::run_posture(variant, p.backend_kind, p.runtime_config),
+        crate::admission::run_grants::run_posture(variant, p.backend_kind, p.runtime_config)
+            .with_verified_runtime(runtime)
+            .with_verified_retained(retained),
     )
     .or_else(|err| -> Result<_> {
         if let Some(refused) =
@@ -1904,6 +1975,7 @@ pub(crate) mod admit_plan_tests {
             &ctx.emitter,
             ctx.admitted.plan(),
             "firecracker",
+            "vm-boot-posture",
             BootPosture::block(),
         );
 
@@ -1933,6 +2005,7 @@ pub(crate) mod admit_plan_tests {
             &ctx.emitter,
             ctx.admitted.plan(),
             "firecracker",
+            "vm-transient-ok",
             BootPosture {
                 start: Some(StartMode::Warm),
                 ..BootPosture::block()
@@ -1962,6 +2035,7 @@ pub(crate) mod admit_plan_tests {
             &ctx.emitter,
             ctx.admitted.plan(),
             "firecracker",
+            "vm-transient-cold",
             BootPosture {
                 start: Some(StartMode::Cold {
                     reason: "no_standby_ready",

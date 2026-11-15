@@ -1556,7 +1556,7 @@ mod tests {
         chain_entries(tenant)
             .into_iter()
             .map(|e| e["entry"].clone())
-            .filter(|e| e["event"] == crate::supervisor::audit::TRANSCRIPT_SEALED_EVENT)
+            .filter(|e| e["event"] == crate::supervisor::audit::signer::TRANSCRIPT_SEALED_EVENT)
             .collect()
     }
 
@@ -1582,11 +1582,14 @@ mod tests {
 
         let labels = &anchors[0]["labels"];
         assert_eq!(
-            labels[crate::supervisor::audit::LABEL_TRANSCRIPT_ROOT],
+            labels[crate::supervisor::audit::signer::LABEL_TRANSCRIPT_ROOT],
             manifest.sealed_root_hex,
             "the anchored root must be the root a reader verifies"
         );
-        assert_eq!(labels[crate::supervisor::audit::LABEL_ADOPTED], "false");
+        assert_eq!(
+            labels[crate::supervisor::audit::signer::LABEL_ADOPTED],
+            "false"
+        );
 
         // The whole point of anchoring a ciphertext root: no payload reaches
         // the chain. A byte the workload printed must not appear in any entry.
@@ -1639,7 +1642,7 @@ mod tests {
             "a warm-claimed child's sealed transcript must be anchored in the audit chain"
         );
         assert_eq!(
-            anchors[0]["labels"][crate::supervisor::audit::LABEL_TRANSCRIPT_ROOT],
+            anchors[0]["labels"][crate::supervisor::audit::signer::LABEL_TRANSCRIPT_ROOT],
             manifest.sealed_root_hex
         );
     }
@@ -1668,7 +1671,7 @@ mod tests {
         let anchors = transcript_anchors("local");
         assert_eq!(anchors.len(), 1);
         assert_eq!(
-            anchors[0]["labels"][crate::supervisor::audit::LABEL_ADOPTED],
+            anchors[0]["labels"][crate::supervisor::audit::signer::LABEL_ADOPTED],
             "true",
             "an adopted seal must be distinguishable in the chain"
         );

@@ -21,6 +21,14 @@ use mvm_core::registry_pack::{
 };
 
 pub(super) fn verify(plan: &ExecutionPlan, bundle: &VerifiedBundle) -> Result<()> {
+    ensure!(
+        !bundle
+            .manifest
+            .members
+            .iter()
+            .any(|member| matches!(member, BundleMember::ProductionComposition(_))),
+        "production composition requires protected publisher and recipient admission"
+    );
     let Some(composition) = bundle
         .manifest
         .members
@@ -133,7 +141,8 @@ pub(super) fn verify(plan: &ExecutionPlan, bundle: &VerifiedBundle) -> Result<()
 mod tests {
     use super::*;
     use mvm_core::plan::bundle::{
-        BundleArtifact, BundleManifest, CanonicalLinuxProof, LocalComposition, VerityInfo,
+        BundleArtifact, BundleManifest, CanonicalLinuxProof, LocalComposition,
+        ProductionComposition, ProductionCompositionLayer, VerityInfo,
     };
 
     #[test]
@@ -189,6 +198,42 @@ mod tests {
             embedded_image_sets: Vec::new(),
             boot_assets: None,
         };
+        bundle
+            .manifest
+            .members
+            .push(BundleMember::ProductionComposition(ProductionComposition {
+                lock_artifact: "frozen-lock.json".into(),
+                layers: vec![ProductionCompositionLayer {
+                    manifest_artifact: "runtime-manifest.json".into(),
+                    signature_artifact: "runtime-manifest.bundle".into(),
+                    group_artifact: None,
+                    profile_artifact: Some("runtime-profile.toml".into()),
+                }],
+            }));
+        assert!(
+            verify(&plan, &bundle)
+                .unwrap_err()
+                .to_string()
+                .contains("requires protected publisher and recipient admission")
+        );
+        bundle
+            .manifest
+            .members
+            .retain(|member| !matches!(member, BundleMember::LocalComposition(_)));
+        assert!(
+            verify(&plan, &bundle)
+                .unwrap_err()
+                .to_string()
+                .contains("requires protected publisher and recipient admission")
+        );
+        bundle.manifest.members.pop();
+        bundle
+            .manifest
+            .members
+            .push(BundleMember::LocalComposition(LocalComposition {
+                lock_artifact: "composition-lock.json".into(),
+                layers: Vec::new(),
+            }));
         let error = verify(&plan, &bundle).unwrap_err();
         assert!(
             format!("{error:#}").contains("evidence artifact missing"),

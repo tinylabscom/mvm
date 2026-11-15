@@ -25,9 +25,10 @@ pub use mvm_runtime::base::runtime_meta;
 pub use mvm_runtime::base::runtime_meta::{VmRuntimeMeta, read as read_runtime_meta};
 pub use mvm_runtime::checkpoint::{
     BlobStatus, CaptureFsQuickParams, CaptureVmFullParams, CheckpointChainAnchor, CheckpointStore,
-    ForkParams, ForkParentLiveness, LineageRelation, RestoreParams, RestoredChild, WorkspaceVolume,
-    capture_fs_quick, capture_vm_full, checkpoint_ancestry, checkpoint_children, diff_checkpoints,
-    fork_vm_full, materialized_blob_sha256, materialized_source, restore_checkpoint,
+    ForkParams, ForkParentLiveness, LineageRelation, RestoreParams, RestoredChild,
+    VerifiedRetainedRuntime, WorkspaceVolume, capture_fs_quick, capture_vm_full,
+    checkpoint_ancestry, checkpoint_children, diff_checkpoints, fork_vm_full,
+    fork_vm_full_verified, materialized_blob_sha256, materialized_source, restore_checkpoint,
     verify_checkpoint_runtime, verify_lineage, vm_full_restorer_for, vm_is_running,
 };
 pub use mvm_runtime::firecracker::FcForkRestorer;

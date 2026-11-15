@@ -79,9 +79,10 @@ pub use types::{
     IngressMappingError, IngressMappingsError, IngressProtocol, IngressTransform, KeyRotationSpec,
     NetworkLimits, NetworkLimitsBuilder, NetworkLimitsError, NetworkMode, Nonce, NonceParseError,
     PlanId, PlanSeccompTier, PlanSeccompTierParseError, PolicyRef, PostRunLifecycle, ReleasePin,
-    Resources, RuntimeProfileRef, SecretBinding, SecretReleasePolicy, SecretSource, ShareKind,
-    SignedImageRef, StreamRetention, TenantId, TimeoutSpec, Variant, WorkloadId, WorkloadIntent,
-    validate_ingress_mappings, validate_ingress_material,
+    Resources, RuntimeArtifactDigests, RuntimeIdentity, RuntimeIdentityMismatch, RuntimeProfileRef,
+    SecretBinding, SecretReleasePolicy, SecretSource, ShareKind, SignedImageRef, StreamRetention,
+    TenantId, TimeoutSpec, Variant, WorkloadId, WorkloadIntent, validate_ingress_mappings,
+    validate_ingress_material,
 };
 pub use validity::{
     CheckedFreshness, Freshness, FreshnessClaims, NonceStore, PlanValidityError, check_window,

@@ -33,7 +33,7 @@ use mvm_core::receipt::SignedExecutionReceipt;
 use serde::{Deserialize, Serialize};
 
 use crate::audit::emitter::write_atomic_unsynced;
-use crate::supervisor::audit_file::flock_exclusive;
+use crate::supervisor::audit::audit_file::flock_exclusive;
 
 /// Head file content: the chain tip for one tenant's receipt store.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

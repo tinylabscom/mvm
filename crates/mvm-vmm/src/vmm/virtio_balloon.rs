@@ -131,15 +131,15 @@ pub enum RamBacking {
     Anonymous,
     /// A private copy-on-write mapping of a file (a kernel image, or a
     /// restored guest's RAM, mapped from that restore's own private clone of
-    /// the snapshot). Never released: the pages the guest has not written are
-    /// the file's page cache, so dropping them frees nothing the host can keep.
+    /// the snapshot). A page the guest has not written is the file's page
+    /// cache, so dropping it frees nothing the host can keep, and a span of
+    /// only such pages is left alone.
     ///
-    /// Known limit: nothing reclaims the pages the guest *did* write either.
-    /// Those are private anonymous copies, but releasing one here would make
-    /// the span read back as the file's bytes rather than zeros, and no
-    /// component owns that mapping's lifecycle to remap it safely. So a
-    /// restored guest's freed memory is not returned to the host until the
-    /// guest stops.
+    /// A page the guest *has* written is this process's own copy. A reported
+    /// span holding one is released like anonymous memory, when the backend
+    /// can tell ([`GuestPageRelease::holds_private_copies`]): the host swaps
+    /// in demand-zero memory for the whole span, so it reads back as zeros,
+    /// not as the file's bytes, and stops being file-backed from then on.
     PrivateFile,
 }
 
@@ -163,8 +163,8 @@ pub struct PageReleaseError {
 /// The device calls the steps in a fixed order for every span —
 /// [`unmap`](Self::unmap), [`release`](Self::release), [`remap`](Self::remap)
 /// — and acknowledges the report only after the last of them. Every span it
-/// passes lies inside one [`RamBacking::Anonymous`] region from
-/// [`regions`](Self::regions) and is aligned to [`granule`](Self::granule).
+/// passes lies inside one region from [`regions`](Self::regions) and is
+/// aligned to [`granule`](Self::granule).
 pub trait GuestPageRelease {
     /// Host page size the hypervisor maps at; spans are shrunk to it.
     fn granule(&self) -> u64;
@@ -175,6 +175,14 @@ pub trait GuestPageRelease {
     /// reports nearly all of its memory, so this keeps boot from paying three
     /// hypervisor calls per block for no reclaim. When unsure, answer `true`.
     fn resident(&self, span: GuestSpan) -> bool;
+    /// Whether a span of a [`RamBacking::PrivateFile`] region holds a page
+    /// this process owns: a copy made when the guest wrote it, or memory an
+    /// earlier release swapped in. Only such a span has anything to give
+    /// back. A backend that cannot tell answers `false`, and file-backed
+    /// memory is then never released.
+    fn holds_private_copies(&self, _span: GuestSpan) -> bool {
+        false
+    }
     /// Remove the span from the guest's memory map.
     fn unmap(&mut self, span: GuestSpan) -> Result<(), PageReleaseError>;
     /// Tell the host the span's pages are free.
@@ -183,9 +191,9 @@ pub trait GuestPageRelease {
     fn remap(&mut self, span: GuestSpan) -> Result<(), PageReleaseError>;
 }
 
-/// The spans of `reported` that can be released: each reported range cut to
-/// the anonymous regions it overlaps, shrunk inward to `granule`, and merged
-/// where adjacent within one region.
+/// The spans of `reported` that lie in anonymous memory: each reported range
+/// cut to the anonymous regions it overlaps, shrunk inward to `granule`, and
+/// merged where adjacent within one region.
 ///
 /// Empty, wrapping, and out-of-bounds ranges contribute nothing, as do the
 /// parts of a range that fall in a private file mapping or between regions.
@@ -194,14 +202,21 @@ pub fn releasable_spans(
     regions: &[RamRegion],
     granule: u64,
 ) -> Vec<GuestSpan> {
+    spans_backed_by(RamBacking::Anonymous, reported, regions, granule)
+}
+
+/// [`releasable_spans`] for one kind of backing.
+fn spans_backed_by(
+    backing: RamBacking,
+    reported: &[GuestSpan],
+    regions: &[RamRegion],
+    granule: u64,
+) -> Vec<GuestSpan> {
     if granule == 0 || !granule.is_power_of_two() {
         return Vec::new();
     }
     let mut spans = Vec::new();
-    for region in regions
-        .iter()
-        .filter(|region| region.backing == RamBacking::Anonymous)
-    {
+    for region in regions.iter().filter(|region| region.backing == backing) {
         let Some(region_end) = region.span.end() else {
             continue;
         };
@@ -524,11 +539,22 @@ impl VirtioBalloon {
 
 /// Release every releasable span of one report, in the order the hypervisor
 /// requires.
+///
+/// Anonymous spans go first and are released when anything in them is
+/// resident. File-backed spans follow and are released only when they hold a
+/// page the process owns, so an unwritten span of a restored guest's RAM is
+/// never unmapped for nothing.
 fn release_report(pages: &mut dyn GuestPageRelease, reported: &[GuestSpan]) -> ReportOutcome {
-    let spans = releasable_spans(reported, pages.regions(), pages.granule());
-    for span in spans {
-        if release_span(pages, span) == ReportOutcome::Unmapped {
-            return ReportOutcome::Unmapped;
+    let granule = pages.granule();
+    for backing in [RamBacking::Anonymous, RamBacking::PrivateFile] {
+        for span in spans_backed_by(backing, reported, pages.regions(), granule) {
+            let worth_releasing = match backing {
+                RamBacking::Anonymous => pages.resident(span),
+                RamBacking::PrivateFile => pages.holds_private_copies(span),
+            };
+            if worth_releasing && release_span(pages, span) == ReportOutcome::Unmapped {
+                return ReportOutcome::Unmapped;
+            }
         }
     }
     ReportOutcome::Settled
@@ -536,12 +562,13 @@ fn release_report(pages: &mut dyn GuestPageRelease, reported: &[GuestSpan]) -> R
 
 /// Unmap, release, and remap one span.
 ///
-/// A span with no resident host pages is skipped outright. A failed unmap leaves the span mapped and untouched, so it is skipped. A
+/// The caller has already found something in the span worth releasing. A
+/// failed unmap leaves the span mapped and untouched, so it is skipped. A
 /// failed release leaves the pages resident, which is wasteful but correct, so
 /// the span is still remapped. A remap is retried once; if it still fails the
 /// span has no memory behind it and the report must not be returned.
 fn release_span(pages: &mut dyn GuestPageRelease, span: GuestSpan) -> ReportOutcome {
-    if !pages.resident(span) || pages.unmap(span).is_err() {
+    if pages.unmap(span).is_err() {
         return ReportOutcome::Settled;
     }
     let _ = pages.release(span);
@@ -686,6 +713,8 @@ mod tests {
         fail_release: bool,
         /// Spans the fake reports as never touched.
         untouched: Vec<GuestSpan>,
+        /// File-backed spans the fake reports as holding guest-written pages.
+        written: Vec<GuestSpan>,
         remap_failures: usize,
     }
 
@@ -703,6 +732,9 @@ mod tests {
         }
         fn resident(&self, span: GuestSpan) -> bool {
             !self.journal.borrow().untouched.contains(&span)
+        }
+        fn holds_private_copies(&self, span: GuestSpan) -> bool {
+            self.journal.borrow().written.contains(&span)
         }
         fn unmap(&mut self, span: GuestSpan) -> Result<(), PageReleaseError> {
             let mut journal = self.journal.borrow_mut();
@@ -1070,6 +1102,58 @@ mod tests {
             "the file-backed block in the middle is never touched"
         );
         assert_eq!(used_count(&device), 1);
+    }
+
+    #[test]
+    fn a_file_backed_span_the_guest_wrote_is_released_after_the_anonymous_ones() {
+        let regions = vec![
+            file(REPORT_BASE, BLOCK),
+            anonymous(REPORT_BASE + BLOCK, BLOCK),
+        ];
+        let written = span(REPORT_BASE, BLOCK);
+        let anon = span(REPORT_BASE + BLOCK, BLOCK);
+        let (mut device, journal) = reporting(regions, &[&[span(REPORT_BASE, 2 * BLOCK)]]);
+        journal.borrow_mut().written.push(written);
+
+        assert!(device.write(R_QUEUE_NOTIFY, 2));
+
+        assert_eq!(
+            steps(&journal),
+            vec![
+                Step::Unmap(anon),
+                Step::Release(anon),
+                Step::Remap(anon),
+                Step::Unmap(written),
+                Step::Release(written),
+                Step::Remap(written),
+            ]
+        );
+        assert_eq!(used_count(&device), 1);
+    }
+
+    #[test]
+    fn a_file_backed_span_is_judged_by_its_private_copies_not_by_residency() {
+        // Resident by the fake's default, but the guest never wrote it: the
+        // page cache's copy, which is not this process's to give back.
+        let regions = vec![file(REPORT_BASE, 2 * BLOCK)];
+        let (mut device, journal) = reporting(regions, &[&[span(REPORT_BASE, 2 * BLOCK)]]);
+        assert!(device.write(R_QUEUE_NOTIFY, 2));
+        assert!(steps(&journal).is_empty());
+        assert_eq!(used_count(&device), 1);
+    }
+
+    #[test]
+    fn a_file_backed_span_that_cannot_be_remapped_stops_the_device() {
+        let regions = vec![file(REPORT_BASE, BLOCK)];
+        let written = span(REPORT_BASE, BLOCK);
+        let (mut device, journal) = reporting(regions, &[&[written]]);
+        {
+            let mut journal = journal.borrow_mut();
+            journal.written.push(written);
+            journal.remap_failures = 2;
+        }
+        device.write(R_QUEUE_NOTIFY, 2);
+        assert_eq!(used_count(&device), 0, "a hole in RAM is never handed back");
     }
 
     #[test]

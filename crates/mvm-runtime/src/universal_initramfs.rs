@@ -114,6 +114,28 @@ pub fn attach_universal_initramfs_if_cached(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     hypervisor: &str,
 ) -> Result<()> {
+    attach_universal_initramfs_with_release(start_config, hypervisor, None)
+}
+
+/// Attach the selected release's initramfs using the verification already
+/// performed for this launch, without authenticating the archive a second time.
+pub fn attach_universal_initramfs_with_verified_release(
+    start_config: &mut mvm_core::vm_backend::VmStartConfig,
+    hypervisor: &str,
+    release: &mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime,
+) -> Result<()> {
+    anyhow::ensure!(
+        start_config.runtime_release_proof.as_ref() == Some(release.proof()),
+        "verified release runtime differs from selected runtime proof"
+    );
+    attach_universal_initramfs_with_release(start_config, hypervisor, Some(release))
+}
+
+fn attach_universal_initramfs_with_release(
+    start_config: &mut mvm_core::vm_backend::VmStartConfig,
+    hypervisor: &str,
+    release: Option<&mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime>,
+) -> Result<()> {
     if start_config.legacy_portable_runtime.is_some() {
         crate::runtime_evidence::verify_runtime_for_launch(
             start_config,
@@ -151,12 +173,28 @@ pub fn attach_universal_initramfs_if_cached(
             .clone()
             .context("signed runtime selection has no overlay version")?;
         let arch = mvm_core::arch::GuestArch::host();
-        let verified = mvm_build::guest_runtime::evidence::verify_runtime_release_proof(
-            proof, &version, arch,
-        )?;
-        mvm_core::launch_trace::lap("attach_initramfs.release_proof_verify");
+        let declared = if let Some(release) = release {
+            anyhow::ensure!(
+                release.proof() == proof,
+                "verified release runtime differs from selected runtime proof"
+            );
+            anyhow::ensure!(
+                proof.version == version && proof.arch == arch,
+                "guest runtime cache: runtime proof does not match the selected version and guest architecture"
+            );
+            release
+                .manifest()
+                .declaration(arch)?
+                .initramfs_sha256
+                .clone()
+        } else {
+            let verified = mvm_build::guest_runtime::evidence::verify_runtime_release_proof(
+                proof, &version, arch,
+            )?;
+            mvm_core::launch_trace::lap("attach_initramfs.release_proof_verify");
+            verified.declaration(arch)?.initramfs_sha256.clone()
+        };
         let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
-        let declared = verified.declaration(arch)?.initramfs_sha256.clone();
         attach_declared_release_initramfs(start_config, &declared, &cache, &version, arch)?;
         return Ok(());
     }

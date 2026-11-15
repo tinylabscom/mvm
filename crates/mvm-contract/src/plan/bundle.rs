@@ -26,6 +26,9 @@ use crate::plan::environment::EnvironmentDescriptor;
 use crate::plan::types::BuildProvenance;
 use crate::policy::security::AgentProfile;
 
+mod production_composition;
+pub use production_composition::{ProductionComposition, ProductionCompositionLayer};
+
 /// Highest bundle-manifest schema version this build understands.
 /// Verifiers fail closed on a future bump rather than silently
 /// dropping fields they don't know about.
@@ -52,6 +55,8 @@ use crate::policy::security::AgentProfile;
 /// Version 6 separates the signed CLI runtime from the original Linux image set.
 /// Version 7 carries original canonical Linux publisher and revocation proofs.
 /// Version 8 binds a host-local composition to its authenticated input inventory.
+/// Version 9 is reserved for independently signed production composition; the
+/// reader cap remains at 8 until protected export and recipient admission exist.
 pub const BUNDLE_SCHEMA_VERSION: u32 = 8;
 
 /// The first schema that may carry [`BundleMember::Environment`].
@@ -68,6 +73,9 @@ pub const CANONICAL_LINUX_PROOF_MIN_SCHEMA: u32 = 7;
 
 /// The first schema that carries a host-local composition input inventory.
 pub const LOCAL_COMPOSITION_MIN_SCHEMA: u32 = 8;
+
+/// The reserved schema for a separately protected production composition.
+pub const PRODUCTION_COMPOSITION_MIN_SCHEMA: u32 = 9;
 
 /// The first schema that may carry backend-neutral members.
 pub const BUNDLE_MEMBERS_MIN_SCHEMA: u32 = 3;
@@ -207,6 +215,9 @@ pub enum BundleMember {
     /// Development-only assembly inputs, not a publisher signature or a grant.
     /// The bundle's rootfs and verity declarations bind the measured output.
     LocalComposition(LocalComposition),
+    /// Proposed production input inventory; not admitted until the verifier,
+    /// protected exporter and registry publisher are implemented together.
+    ProductionComposition(ProductionComposition),
     /// The kernel command line the publisher built and tested the workload
     /// with. Advisory: the launcher derives the command line it boots with,
     /// so a bundle cannot use this to switch off dm-verity or redirect init.
@@ -235,6 +246,7 @@ impl BundleMember {
             Self::EmbeddedCliBootAssets(_) => CLI_BOOT_ASSETS_MEMBER_MIN_SCHEMA,
             Self::CanonicalLinuxProof(_) => CANONICAL_LINUX_PROOF_MIN_SCHEMA,
             Self::LocalComposition(_) => LOCAL_COMPOSITION_MIN_SCHEMA,
+            Self::ProductionComposition(_) => PRODUCTION_COMPOSITION_MIN_SCHEMA,
             Self::Environment(_) => ENVIRONMENT_MEMBER_MIN_SCHEMA,
             Self::EmbeddedImageSet { .. }
             | Self::KernelCmdline { .. }
@@ -553,6 +565,7 @@ mod tests {
         assert_eq!(CLI_BOOT_ASSETS_MEMBER_MIN_SCHEMA, 6);
         assert_eq!(CANONICAL_LINUX_PROOF_MIN_SCHEMA, 7);
         assert_eq!(LOCAL_COMPOSITION_MIN_SCHEMA, 8);
+        assert_eq!(PRODUCTION_COMPOSITION_MIN_SCHEMA, 9);
     }
 
     #[test]
@@ -567,6 +580,8 @@ mod tests {
         });
         assert_eq!(member.minimum_schema_version(), 8);
         let encoded = serde_json::to_value(&member).unwrap();
+        assert_eq!(encoded["layers"][0]["group_artifact"], "runtime-group.toml");
+        assert!(encoded["layers"][0].get("profile_artifact").is_none());
         assert_eq!(
             serde_json::from_value::<BundleMember>(encoded.clone()).unwrap(),
             member
@@ -574,6 +589,9 @@ mod tests {
         let mut forged = encoded;
         forged["publisher_verified"] = true.into();
         assert!(serde_json::from_value::<BundleMember>(forged).is_err());
+        let mut wrong_shape = serde_json::to_value(member).unwrap();
+        wrong_shape["layers"][0]["profile_artifact"] = "runtime-profile.toml".into();
+        assert!(serde_json::from_value::<BundleMember>(wrong_shape).is_err());
     }
 
     #[test]

@@ -12,7 +12,7 @@ use ed25519_dalek::SigningKey;
 use mvm_core::plan::{PlanId, TenantId};
 use mvm_core::receipt_archive::{ArchiveScope, Completeness, SignedEvidenceManifest};
 use mvm_hostd::audit::receipt_archive::{ArchiveRequest, write_archive};
-use mvm_hostd::supervisor::audit::PlanAuditEntry;
+use mvm_hostd::supervisor::audit::signer::PlanAuditEntry;
 use mvm_hostd::supervisor::{AuditSigner, FileAuditSigner};
 use tempfile::TempDir;
 
@@ -58,23 +58,23 @@ fn write_chain(dir: &std::path::Path) -> SigningKey {
         {
             let mut labels = BTreeMap::new();
             labels.insert(
-                mvm_hostd::supervisor::audit::LABEL_CAPTURE_ID.into(),
+                mvm_hostd::supervisor::audit::signer::LABEL_CAPTURE_ID.into(),
                 "capture-1".into(),
             );
             labels.insert(
-                mvm_hostd::supervisor::audit::LABEL_VM_NAME.into(),
+                mvm_hostd::supervisor::audit::signer::LABEL_VM_NAME.into(),
                 "vm-1".into(),
             );
             labels.insert(
-                mvm_hostd::supervisor::audit::LABEL_TRANSCRIPT_ROOT.into(),
+                mvm_hostd::supervisor::audit::signer::LABEL_TRANSCRIPT_ROOT.into(),
                 "ab".repeat(32),
             );
             labels.insert(
-                mvm_hostd::supervisor::audit::LABEL_CHUNK_COUNT.into(),
+                mvm_hostd::supervisor::audit::signer::LABEL_CHUNK_COUNT.into(),
                 "3".into(),
             );
             sample_audit_entry(
-                mvm_hostd::supervisor::audit::TRANSCRIPT_SEALED_EVENT,
+                mvm_hostd::supervisor::audit::signer::TRANSCRIPT_SEALED_EVENT,
                 labels,
             )
         },
@@ -242,7 +242,7 @@ fn a_transcript_anchor_becomes_a_citation_pointing_at_its_chain_leaf() {
         .expect("anchor leaf must be in the leaf set");
     assert_eq!(
         anchor.event,
-        mvm_hostd::supervisor::audit::TRANSCRIPT_SEALED_EVENT
+        mvm_hostd::supervisor::audit::signer::TRANSCRIPT_SEALED_EVENT
     );
 }
 

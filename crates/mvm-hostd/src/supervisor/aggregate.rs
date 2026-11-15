@@ -33,22 +33,22 @@ use mvm_core::vm_backend::EnforcedGrants;
 use mvm_net::{EgressEnforcer, EgressWiring, EnforcementError};
 
 use crate::supervisor::artifact::{ArtifactCollector, NoopArtifactCollector};
-use crate::supervisor::audit::{AuditSigner, NoopAuditSigner};
+use crate::supervisor::audit::signer::{AuditSigner, NoopAuditSigner};
 use crate::supervisor::backend::{BackendError, BackendLauncher, NoopBackendLauncher};
-use crate::supervisor::circuit_breaker::{CircuitBreaker, InspectorReporter};
-use crate::supervisor::destination::DestinationPolicy;
-use crate::supervisor::egress::{NoopEgressProxy, SupervisorEgressProxy};
-use crate::supervisor::firewall::seam::SupervisorEgressEnforcer;
-use crate::supervisor::firewall::{
+use crate::supervisor::datapath::firewall::seam::SupervisorEgressEnforcer;
+use crate::supervisor::datapath::firewall::{
     FirewallEnforcer, FirewallError, FirewallSpec, NoopFirewallEnforcer,
 };
-use crate::supervisor::injection_guard::InjectionGuard;
-use crate::supervisor::inspector::{Inspector, InspectorChain};
+use crate::supervisor::datapath::l7_proxy::{DnsResolver, EgressAuditSink, L7EgressProxy};
+use crate::supervisor::egress::{NoopEgressProxy, SupervisorEgressProxy};
+use crate::supervisor::inspection::circuit_breaker::{CircuitBreaker, InspectorReporter};
+use crate::supervisor::inspection::destination::DestinationPolicy;
+use crate::supervisor::inspection::injection_guard::InjectionGuard;
+use crate::supervisor::inspection::inspector::{Inspector, InspectorChain};
+use crate::supervisor::inspection::pii_redactor::PiiRedactor;
+use crate::supervisor::inspection::secrets_scanner::SecretsScanner;
+use crate::supervisor::inspection::ssrf_guard::SsrfGuard;
 use crate::supervisor::keystore::{KeystoreReleaser, NoopKeystoreReleaser};
-use crate::supervisor::l7_proxy::{DnsResolver, EgressAuditSink, L7EgressProxy};
-use crate::supervisor::pii_redactor::PiiRedactor;
-use crate::supervisor::secrets_scanner::SecretsScanner;
-use crate::supervisor::ssrf_guard::SsrfGuard;
 use crate::supervisor::state::{PlanState, PlanStateMachine, StateTransitionError};
 
 /// Stable identity shared by every revision of one tenant workload.
@@ -201,7 +201,7 @@ pub struct Supervisor {
     /// verified, which is the failure mode the tier enum exists to prevent.
     enforced_grants: BTreeMap<PlanId, EnforcedGrants>,
     /// Host-side vsock egress telemetry probe manager (eBPF/procfs).
-    ebpf_telemetry: crate::supervisor::ebpf_telemetry::EbpfTelemetryManager,
+    ebpf_telemetry: crate::supervisor::telemetry::ebpf_telemetry::EbpfTelemetryManager,
 }
 
 impl Default for Supervisor {
@@ -226,7 +226,8 @@ impl Default for Supervisor {
             installed_firewalls: BTreeMap::new(),
             firewall_plan_keys: BTreeMap::new(),
             enforced_grants: BTreeMap::new(),
-            ebpf_telemetry: crate::supervisor::ebpf_telemetry::EbpfTelemetryManager::new(),
+            ebpf_telemetry: crate::supervisor::telemetry::ebpf_telemetry::EbpfTelemetryManager::new(
+            ),
         }
     }
 }
@@ -401,7 +402,10 @@ impl Supervisor {
         // trail is preserved even if the backend fails next. Audit
         // failure here fails the launch fail-closed: audit emits
         // before forward.
-        let admitted_extras = deps_volume_audit_extras(plan.deps_volume.as_ref());
+        let mut admitted_extras = deps_volume_audit_extras(plan.deps_volume.as_ref());
+        if let Some(runtime) = plan.runtime_identity.as_ref() {
+            admitted_extras.extend(crate::audit::emitter::runtime_identity_labels(runtime));
+        }
         if let Err(e) = self
             .emit_admission_audit_with_extras(&plan, "plan.admitted", "", admitted_extras)
             .await
@@ -689,10 +693,10 @@ impl Supervisor {
         if !reason.is_empty() {
             merged.push(("reason".to_string(), reason.to_string()));
         }
-        let entry = crate::supervisor::audit::for_plan(plan, None, event, merged);
+        let entry = crate::supervisor::audit::signer::for_plan(plan, None, event, merged);
         match self.audit.sign_and_emit(&entry).await {
             Ok(()) => Ok(()),
-            Err(crate::supervisor::audit::AuditError::NotWired) => {
+            Err(crate::supervisor::audit::signer::AuditError::NotWired) => {
                 warn!(
                     event,
                     "audit signer not wired (Noop) — admission audit dropped"
@@ -1061,7 +1065,7 @@ pub fn build_pii_inspector_chain(
     egress: &EgressPolicy,
     pii: &mvm_core::policy::PiiPolicy,
     breakers: Option<Arc<InspectorReporter>>,
-) -> Result<InspectorChain, crate::supervisor::pii_redactor::PiiPolicyError> {
+) -> Result<InspectorChain, crate::supervisor::inspection::pii_redactor::PiiPolicyError> {
     let disabled = |name: &'static str| egress.disabled_inspectors.iter().any(|d| d == name);
     let wrap = |inner: Box<dyn Inspector>| -> Box<dyn Inspector> {
         match &breakers {
@@ -1257,6 +1261,7 @@ mod tests {
             mailbox: None,
             grants: None,
             environment: None,
+            runtime_identity: None,
             build_provenance: Default::default(),
             snapshot_at: Default::default(),
             network_mode: Default::default(),
@@ -1376,7 +1381,7 @@ mod tests {
             .with_firewall_proxy_iface("mvmtun0")
             .with_clock(fixed_clock_inside_window())
             .with_audit_signer(Arc::new(
-                crate::supervisor::audit::CapturingAuditSigner::new(),
+                crate::supervisor::audit::signer::CapturingAuditSigner::new(),
             ))
     }
 
@@ -1387,9 +1392,9 @@ mod tests {
         b: Arc<MockBackend>,
     ) -> (
         Supervisor,
-        Arc<crate::supervisor::audit::CapturingAuditSigner>,
+        Arc<crate::supervisor::audit::signer::CapturingAuditSigner>,
     ) {
-        let audit = Arc::new(crate::supervisor::audit::CapturingAuditSigner::new());
+        let audit = Arc::new(crate::supervisor::audit::signer::CapturingAuditSigner::new());
         let s = Supervisor::new()
             .with_backend_launcher(b)
             .with_firewall_enforcer(Arc::new(MockFirewall::new()))
@@ -1412,7 +1417,7 @@ mod tests {
         let (signed, _sk, vk) = sign_sample(&plan);
         let backend = Arc::new(MockBackend::new());
         let firewall = Arc::new(MockFirewall::new());
-        let audit = Arc::new(crate::supervisor::audit::CapturingAuditSigner::new());
+        let audit = Arc::new(crate::supervisor::audit::signer::CapturingAuditSigner::new());
         let mut s = Supervisor::new()
             .with_backend_launcher(backend.clone())
             .with_firewall_enforcer(firewall.clone())
@@ -1949,7 +1954,7 @@ mod tests {
     /// Convenience: collect just the `event` strings from captured
     /// audit entries, in emit order. Test assertions are clearer
     /// against this projection than against the full struct.
-    fn audit_events(audit: &crate::supervisor::audit::CapturingAuditSigner) -> Vec<String> {
+    fn audit_events(audit: &crate::supervisor::audit::signer::CapturingAuditSigner) -> Vec<String> {
         audit.entries().into_iter().map(|e| e.event).collect()
     }
 
@@ -2141,12 +2146,14 @@ mod tests {
         // No audit means no launch.
         struct FailingAudit;
         #[async_trait]
-        impl crate::supervisor::audit::AuditSigner for FailingAudit {
+        impl crate::supervisor::audit::signer::AuditSigner for FailingAudit {
             async fn sign_and_emit(
                 &self,
-                _entry: &crate::supervisor::audit::PlanAuditEntry,
-            ) -> Result<(), crate::supervisor::audit::AuditError> {
-                Err(crate::supervisor::audit::AuditError::Io("disk full".into()))
+                _entry: &crate::supervisor::audit::signer::PlanAuditEntry,
+            ) -> Result<(), crate::supervisor::audit::signer::AuditError> {
+                Err(crate::supervisor::audit::signer::AuditError::Io(
+                    "disk full".into(),
+                ))
             }
         }
 
@@ -2165,7 +2172,7 @@ mod tests {
 
     // ---- with_l7_egress builder + Variant::Prod gate ----
 
-    use crate::supervisor::l7_proxy::{
+    use crate::supervisor::datapath::l7_proxy::{
         CapturingEgressAuditSink, DnsResolver, EgressAuditSink, NoopEgressAuditSink,
     };
     use std::net::IpAddr;
@@ -2391,7 +2398,10 @@ mod tests {
         let red = PiiRedactor::from_policy(&pii)
             .expect("ok")
             .expect("not disabled");
-        assert_eq!(red.mode(), crate::supervisor::pii_redactor::Mode::Redact);
+        assert_eq!(
+            red.mode(),
+            crate::supervisor::inspection::pii_redactor::Mode::Redact
+        );
     }
 
     #[test]
@@ -2403,7 +2413,10 @@ mod tests {
         };
         let err = build_pii_inspector_chain(&egress, &pii, None).expect_err("typo");
         match err {
-            crate::supervisor::pii_redactor::PiiPolicyError::UnknownMode { value, valid } => {
+            crate::supervisor::inspection::pii_redactor::PiiPolicyError::UnknownMode {
+                value,
+                valid,
+            } => {
                 assert_eq!(value, "paranoid");
                 assert!(valid.contains(&"detect"));
                 assert!(valid.contains(&"disabled"));
@@ -2421,7 +2434,7 @@ mod tests {
         };
         let err = build_pii_inspector_chain(&egress, &pii, None).expect_err("typo");
         match err {
-            crate::supervisor::pii_redactor::PiiPolicyError::UnknownCategory {
+            crate::supervisor::inspection::pii_redactor::PiiPolicyError::UnknownCategory {
                 index,
                 name,
                 valid,
@@ -2529,9 +2542,11 @@ mod tests {
         // Wrapping must be invisible to the chain interface — same
         // count, same names — so audit binding (which keys on
         // Inspector::name) stays intact.
-        let reporter = Arc::new(crate::supervisor::circuit_breaker::InspectorReporter::new(
-            crate::supervisor::circuit_breaker::CircuitBreakerConfig::default(),
-        ));
+        let reporter = Arc::new(
+            crate::supervisor::inspection::circuit_breaker::InspectorReporter::new(
+                crate::supervisor::inspection::circuit_breaker::CircuitBreakerConfig::default(),
+            ),
+        );
         let policy = dev_egress_policy(false);
         let chain = build_inspector_chain(&policy, Some(reporter));
         assert_eq!(chain.len(), 5);
@@ -2559,13 +2574,15 @@ mod tests {
         let policy = dev_egress_policy(false);
         let resolver = Arc::new(WiringResolver(IpAddr::from([104, 18, 32, 10])));
         let audit = Arc::new(CapturingEgressAuditSink::new());
-        let reporter = Arc::new(crate::supervisor::circuit_breaker::InspectorReporter::new(
-            crate::supervisor::circuit_breaker::CircuitBreakerConfig {
-                trip_threshold: 2,
-                trip_window: std::time::Duration::from_secs(60),
-                auto_reset_after: None,
-            },
-        ));
+        let reporter = Arc::new(
+            crate::supervisor::inspection::circuit_breaker::InspectorReporter::new(
+                crate::supervisor::inspection::circuit_breaker::CircuitBreakerConfig {
+                    trip_threshold: 2,
+                    trip_window: std::time::Duration::from_secs(60),
+                    auto_reset_after: None,
+                },
+            ),
+        );
         // Trip destination_policy before wiring the egress slot — the
         // wrapper consults the same Arc<InspectorReporter> at call
         // time, so order between "trip" and "wire" doesn't matter, but

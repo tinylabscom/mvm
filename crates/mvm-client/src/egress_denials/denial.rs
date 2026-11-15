@@ -7,7 +7,7 @@
 
 use chrono::{DateTime, Utc};
 use mvm_hostd::supervisor::PlanAuditEntry;
-use mvm_hostd::supervisor::audit_recorder::LABEL_VM_NAME;
+use mvm_hostd::supervisor::audit::audit_recorder::LABEL_VM_NAME;
 
 use super::reason::{DenialKind, ReasonInputs, Remedy};
 

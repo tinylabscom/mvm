@@ -24,9 +24,56 @@ pub struct VerifiedRuntimeManifest {
     digest: String,
     manifest: GuestBinsManifest,
     arch: GuestArch,
+    signer: mvm_core::crypto::image_verify::VerifiedSigner,
+}
+
+/// Launch-owned authentication of a release proof and its exact archive snapshot.
+///
+/// This value cannot be reconstructed from a serialized proof. Keep it alive until
+/// the launch lifecycle retains the verified archive in its durable generation.
+#[derive(Debug)]
+pub struct VerifiedReleaseRuntime {
+    proof: RuntimeReleaseProof,
+    manifest: VerifiedRuntimeManifest,
+}
+
+impl VerifiedReleaseRuntime {
+    pub(super) fn from_verified(
+        proof: RuntimeReleaseProof,
+        manifest: VerifiedRuntimeManifest,
+    ) -> Self {
+        Self { proof, manifest }
+    }
+
+    pub fn proof(&self) -> &RuntimeReleaseProof {
+        &self.proof
+    }
+
+    pub fn manifest(&self) -> &VerifiedRuntimeManifest {
+        &self.manifest
+    }
+
+    /// Verified archive signer identity and issuer required by the verifier.
+    pub fn signer(&self) -> &mvm_core::crypto::image_verify::VerifiedSigner {
+        self.manifest.signer()
+    }
+}
+
+/// Authenticate a path-based proof and retain the checked archive for this launch.
+pub fn verify_release_runtime(
+    proof: RuntimeReleaseProof,
+    expected_version: &str,
+    expected_arch: GuestArch,
+) -> Result<VerifiedReleaseRuntime, GuestRuntimeError> {
+    let manifest = verify_runtime_release_proof(&proof, expected_version, expected_arch)?;
+    Ok(VerifiedReleaseRuntime { proof, manifest })
 }
 
 impl VerifiedRuntimeManifest {
+    pub fn signer(&self) -> &mvm_core::crypto::image_verify::VerifiedSigner {
+        &self.signer
+    }
+
     pub(super) fn archive_path(&self) -> &Path {
         self.archive.path()
     }
@@ -359,6 +406,8 @@ pub(super) fn verify_release_archive(
     version: &str,
     arch: GuestArch,
 ) -> Result<VerifiedRuntimeManifest, GuestRuntimeError> {
+    #[cfg(test)]
+    RELEASE_ARCHIVE_VERIFICATIONS.with(|calls| calls.set(calls.get() + 1));
     let asset = crate::guest_bins::guest_bins_archive_name(version);
     let (bytes, digest) = read_and_digest_archive(archive)?;
     let checksum_bytes = std::fs::read(checksum)?;
@@ -383,7 +432,7 @@ pub(super) fn verify_release_archive(
         )));
     }
     let signature = std::fs::read(bundle)?;
-    crate::release_signature::verify_release_archive_bytes(
+    let signer = crate::release_signature::verify_release_archive_bytes_with_signer(
         &bytes,
         &signature,
         &asset,
@@ -402,7 +451,13 @@ pub(super) fn verify_release_archive(
         digest,
         manifest,
         arch,
+        signer,
     })
+}
+
+#[cfg(test)]
+thread_local! {
+    static RELEASE_ARCHIVE_VERIFICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Locate a checksum's signature by appending `.bundle` to its complete path.
@@ -673,6 +728,10 @@ mod tests {
             version: "fixture".into(),
             digest: "d".repeat(64),
             arch: GuestArch::X86_64,
+            signer: mvm_core::crypto::image_verify::VerifiedSigner {
+                identity: "unsigned test fixture".into(),
+                issuer: "unsigned test fixture".into(),
+            },
             manifest: GuestBinsManifest {
                 schema_version: crate::guest_bins::GUEST_BINS_MANIFEST_SCHEMA,
                 version: "1.2.3".into(),
@@ -699,6 +758,89 @@ mod tests {
             minimum_protocol: 2,
             host_protocol: 2,
         }
+    }
+
+    #[test]
+    fn launch_handle_keeps_verified_archive_bytes_after_cache_refresh() {
+        let (dir, mut verified) = fixture();
+        verified.archive.write_all(b"verified archive").unwrap();
+        verified.archive.flush().unwrap();
+        verified.digest = hex::encode(Sha256::digest(b"verified archive"));
+        let archive = dir.path().join("archive");
+        std::fs::write(&archive, b"verified archive").unwrap();
+        let proof = RuntimeReleaseProof {
+            archive: archive.clone(),
+            checksum: dir.path().join("checksum"),
+            signature_bundle: dir.path().join("signature"),
+            archive_sha256: verified.archive_sha256().to_owned(),
+            version: "fixture".into(),
+            arch: GuestArch::X86_64,
+        };
+        let launch = VerifiedReleaseRuntime::from_verified(proof, verified);
+        std::fs::write(&archive, b"concurrent cache refresh").unwrap();
+        assert_eq!(
+            std::fs::read(launch.manifest().archive_path()).unwrap(),
+            b"verified archive"
+        );
+        assert_eq!(launch.proof().archive, archive);
+        assert_eq!(
+            launch
+                .manifest()
+                .declaration(GuestArch::X86_64)
+                .unwrap()
+                .overlay_roothash,
+            "a".repeat(64)
+        );
+    }
+
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    #[ignore = "requires MVM_SIGNED_RUNTIME_FIXTURE_DIR with the published v0.28.0-rc.2 quartet"]
+    fn signed_release_verification_is_once_per_launch_and_refuses_tampering() {
+        let directory = std::path::PathBuf::from(
+            std::env::var_os("MVM_SIGNED_RUNTIME_FIXTURE_DIR")
+                .expect("set MVM_SIGNED_RUNTIME_FIXTURE_DIR to the published release quartet"),
+        );
+        let asset = "mvm-guest-bins-v0.28.0-rc.2.tar.gz";
+        let proof = RuntimeReleaseProof {
+            archive: directory.join(asset),
+            checksum: directory.join(format!("{asset}.sha256")),
+            signature_bundle: directory.join(format!("{asset}.bundle")),
+            archive_sha256: "8a36fae9e7444f92b3beaa1ed7d78c68003ea2f8d2d72320361cfa906a829921"
+                .into(),
+            version: "0.28.0-rc.2".into(),
+            arch: GuestArch::host(),
+        };
+        let before = RELEASE_ARCHIVE_VERIFICATIONS.with(std::cell::Cell::get);
+        for launch in 1..=2 {
+            let runtime = verify_release_runtime(proof.clone(), &proof.version, proof.arch)
+                .expect("signed release");
+            assert_eq!(runtime.manifest().archive_sha256(), proof.archive_sha256);
+            for _ in 0..5 {
+                runtime
+                    .manifest()
+                    .declaration(proof.arch)
+                    .expect("same authenticated declaration");
+            }
+            assert_eq!(
+                RELEASE_ARCHIVE_VERIFICATIONS.with(std::cell::Cell::get) - before,
+                launch,
+                "one archive and signature verification per launch"
+            );
+        }
+
+        let scratch = tempfile::tempdir().expect("tampered archive directory");
+        let mut edited = std::fs::read(&proof.archive).expect("published archive");
+        edited[0] ^= 1;
+        let tampered_archive = scratch.path().join(asset);
+        std::fs::write(&tampered_archive, edited).expect("write tampered archive");
+        let tampered = RuntimeReleaseProof {
+            archive: tampered_archive,
+            ..proof
+        };
+        let error = verify_release_runtime(tampered, "0.28.0-rc.2", GuestArch::host())
+            .expect_err("a modified archive must not become a launch handle");
+        assert!(error.to_string().contains("checksum"));
     }
 
     #[test]

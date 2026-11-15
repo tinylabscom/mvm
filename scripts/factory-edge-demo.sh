@@ -25,6 +25,13 @@ if [ "${1:-}" = --down ]; then
   echo "removed"; exit 0
 fi
 
+# Every `explain` and `trust audit` call verifies the whole audit chain, so on a
+# home whose chain has grown large each one takes many seconds.
+if [ "$(du -sk "$MVM_HOME/audit" 2>/dev/null | cut -f1)" -gt 20000 ] 2>/dev/null; then
+  echo "note: $MVM_HOME/audit is large, so each explain will be slow." >&2
+  echo "      Start a fresh chain with: mv $MVM_HOME/audit $MVM_HOME/audit-archive" >&2
+fi
+
 id="$(date +%H%M%S)"   # names are unique per run, so `explain <name>` is never ambiguous
 a="line-a-$id"; b="line-b-$id"; m="maintenance-$id"
 
@@ -32,19 +39,25 @@ a="line-a-$id"; b="line-b-$id"; m="maintenance-$id"
 # Launches overlap; a release that still serializes them on the volume lock
 # refuses the loser, so a refused launch is retried.
 launch() {
+  local out
   for _ in 1 2 3 4 5; do
-    $mvm run -d --image "$image" --name "$1" --allow-host "$2" -- sh -c "$3" >/dev/null 2>&1 </dev/null && return
-    sleep 1
+    out="$($mvm machine run -d --image "$image" --name "$1" --allow-host "$2" -- sh -c "$3" 2>&1 </dev/null)" && return
+    sleep 2
   done
-  echo "could not start $1" >&2; return 1
+  echo "could not start $1:" >&2; echo "$out" >&2; return 1
 }
 work() { echo "while true; do curl -sS -m 10 -o /dev/null https://$1/; sleep 2; done"; }
 
 echo "Starting three workloads at once, each allowed one destination"
+pids=()
 launch "$a" pypi.org:443 "$(work pypi.org)" &
+pids+=($!)
 launch "$b" files.pythonhosted.org:443 "$(work files.pythonhosted.org)" &
+pids+=($!)
 launch "$m" api.github.com:443 "while true; do curl -sS -m 10 https://example.com/ >/dev/null 2>&1; sleep 3; done" &
-wait
+pids+=($!)
+for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
+[ -z "${failed:-}" ] || { echo "a workload did not start; see above (clean up with --down)" >&2; exit 1; }
 
 echo; echo "== 1. All three are running"
 $mvm machine ls | grep -E "^NAME|-$id "
@@ -53,8 +66,10 @@ echo; echo "== 2. What each is allowed to reach"
 for n in "$a" "$b" "$m"; do $mvm machine inspect "$n" | grep -E "^(name|allow-host):"; done
 
 echo; echo "== 3. The maintenance workload asks for example.com, which it was not given"
-for _ in $(seq 1 30); do
-  $mvm explain "$m" 2>/dev/null | grep -q "egress denied" && break
+# Wait at most 60 s for the first refusal, however long each explain takes.
+SECONDS=0
+while [ "$SECONDS" -lt 60 ]; do
+  [ "$($mvm explain "$m" 2>/dev/null | grep -c "egress denied")" -gt 0 ] && break
   sleep 1
 done
 $mvm explain "$m" | sed -n '/^outcome:/,$p'

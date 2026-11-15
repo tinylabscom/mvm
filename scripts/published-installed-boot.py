@@ -13,6 +13,7 @@ from pathlib import Path
 import platform
 import re
 import signal
+import struct
 import subprocess
 import time
 import tarfile
@@ -42,6 +43,50 @@ def stream_sha(stream):
     for chunk in iter(lambda: stream.read(1024 * 1024), b""):
         digest.update(chunk)
     return digest.hexdigest()
+
+
+MH_MAGIC_64 = 0xFEEDFACF
+LC_SEGMENT_64 = 0x19
+LC_CODE_SIGNATURE = 0x1D
+
+
+def unsigned_macho_digest(data):
+    """sha256 of a thin 64-bit Mach-O with its code signature left out, else None.
+
+    `install.sh` re-signs the CLI and the supervisors with the entitlement
+    profile the release ships, so their installed bytes legitimately differ from
+    the tarball's. Re-signing replaces the signature blob at the end of the file
+    and changes only LC_CODE_SIGNATURE's datasize and __LINKEDIT's vmsize and
+    filesize in the header. Everything before the blob, code and data, has to
+    match, so those three fields are masked and the blob is left out. A file
+    whose signature is not the last thing in it is not described here, so the
+    caller falls back to the exact comparison.
+    """
+    if len(data) < 32 or struct.unpack_from("<I", data)[0] != MH_MAGIC_64:
+        return None
+    ncmds = struct.unpack_from("<I", data, 16)[0]
+    offset, signature, linkedit = 32, None, None
+    for _ in range(ncmds):
+        if offset + 8 > len(data):
+            return None
+        command, size = struct.unpack_from("<II", data, offset)
+        if size < 8 or offset + size > len(data):
+            return None
+        if command == LC_CODE_SIGNATURE and size == 16:
+            signature = offset
+        elif (command == LC_SEGMENT_64 and size >= 56
+              and data[offset + 8:offset + 24].rstrip(b"\0") == b"__LINKEDIT"):
+            linkedit = offset
+        offset += size
+    if signature is None or linkedit is None:
+        return None
+    dataoff, datasize = struct.unpack_from("<II", data, signature + 8)
+    if dataoff + datasize != len(data) or offset > dataoff:
+        return None
+    masked = bytearray(data[:dataoff])
+    for start, length in ((signature + 12, 4), (linkedit + 32, 8), (linkedit + 48, 8)):
+        masked[start:start + length] = bytes(length)
+    return hashlib.sha256(bytes(masked)).hexdigest()
 
 
 def run(*args, **kwargs):
@@ -137,7 +182,10 @@ def authenticate(directory, tag, targets):
     return sorted(assets, key=lambda asset: asset["name"])
 
 
-def payload_hashes(archive, target):
+def payload_hashes(archive, target, unsigned=None):
+    """sha256 of every archive member. When `unsigned` is a dict, also record
+    each Mach-O member's digest without its code signature (see
+    `unsigned_macho_digest`) so an installer's re-signing is not a mismatch."""
     result = {}
     prefix = f"mvmctl-{target}/"
     with tarfile.open(archive) as tar:
@@ -153,24 +201,45 @@ def payload_hashes(archive, target):
             require(member.isfile(), "non-regular archive payload")
             require(relative not in result, "duplicate archive member")
             with tar.extractfile(member) as stream:
-                result[relative] = stream_sha(stream)
+                if unsigned is None:
+                    result[relative] = stream_sha(stream)
+                else:
+                    data = stream.read()
+                    result[relative] = hashlib.sha256(data).hexdigest()
+                    digest = unsigned_macho_digest(data)
+                    if digest is not None:
+                        unsigned[relative] = digest
     require("mvmctl" in result, "missing CLI payload")
     return result
+
+
+def installed_matches(path, digest, unsigned_digest):
+    """The installed file is the published one: exactly, or on macOS the same
+    bytes under a different code signature."""
+    if sha(path) == digest:
+        return True
+    return (unsigned_digest is not None
+            and unsigned_macho_digest(Path(path).read_bytes()) == unsigned_digest)
 
 
 def installed_hashes(home, archives, target, tag):
     executable = (home / ".local/bin/mvmctl").resolve(strict=True)
     base = executable.parent
     require(base.is_relative_to(home.resolve()), "CLI escaped throwaway HOME")
-    expected = payload_hashes(archives / f"mvmctl-{target}.tar.gz", target)
-    require(executable.name == "mvmctl" and sha(executable) == expected["mvmctl"],
+    # Only macOS installs re-sign, so only there is a signature-blind match allowed.
+    unsigned = {}
+    expected = payload_hashes(archives / f"mvmctl-{target}.tar.gz", target,
+                              unsigned if target.endswith("apple-darwin") else None)
+    require(executable.name == "mvmctl"
+            and installed_matches(executable, expected["mvmctl"], unsigned.get("mvmctl")),
             "installed entrypoint mismatch")
     runtime = f"guest-runtime/mvm-guest-bins-{tag}.tar.gz"
     expected[runtime] = sha(archives / f"mvm-guest-bins-{tag}.tar.gz")
     for name, digest in expected.items():
         path = base / name
         require(path.resolve(strict=True).is_relative_to(base), "installed payload escaped")
-        require(sha(path) == digest, f"installed bytes mismatch: {name}")
+        require(installed_matches(path, digest, unsigned.get(name)),
+                f"installed bytes mismatch: {name}")
     return [{"path": name, "sha256": digest} for name, digest in sorted(expected.items())]
 
 

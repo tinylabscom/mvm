@@ -291,7 +291,7 @@ fn resolve_without_traffic() -> io::Result<()> {
         Err(error) => return Err(error),
     }
     let upstream = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 53));
-    let socket = crate::supervisor::dns_resolver::connected_upstream_socket(
+    let socket = crate::supervisor::datapath::dns_resolver::connected_upstream_socket(
         upstream,
         std::time::Duration::from_secs(1),
     )?;
@@ -354,7 +354,7 @@ fn append_sync_and_rotate_in(dir: &Path) -> io::Result<()> {
             .append(true)
             .mode(0o600)
             .open(&scratch)?;
-        crate::supervisor::audit_file::flock_exclusive(&file)?;
+        crate::supervisor::audit::audit_file::flock_exclusive(&file)?;
         file.sync_data()?;
         std::fs::rename(&scratch, &rotated)?;
         std::fs::remove_file(&rotated)

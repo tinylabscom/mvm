@@ -160,7 +160,7 @@ pub use launch::{
 };
 pub use local::{LocalBackend, auto_selected_backend_name, default_vcpus};
 pub use mvm_hostd::parent_death::exit_when_orphaned;
-pub use mvm_hostd::supervisor::secrets_scanner::SecretsScanner;
+pub use mvm_hostd::supervisor::inspection::secrets_scanner::SecretsScanner;
 pub use mvm_runtime::agent_session::replay_input;
 pub use mvm_runtime::build_env::default_build_env;
 pub use mvm_runtime::builder_runner::{

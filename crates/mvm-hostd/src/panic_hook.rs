@@ -33,7 +33,7 @@
 use std::panic::PanicHookInfo;
 use std::sync::Once;
 
-use crate::supervisor::secrets_scanner::SecretsScanner;
+use crate::supervisor::inspection::secrets_scanner::SecretsScanner;
 
 static INSTALL: Once = Once::new();
 

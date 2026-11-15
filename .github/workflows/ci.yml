@@ -338,10 +338,10 @@ jobs:
           cargo fetch --locked
           python3 scripts/gen-process-spawn-inventory.py --check
 
-      - name: Shellcheck install.sh + uninstall.sh + release-asset verifier
+      - name: Shellcheck install.sh + release-asset verifier
         run: |
           sudo apt-get install -y shellcheck
-          shellcheck -S warning install.sh uninstall.sh
+          shellcheck -S warning install.sh
           shellcheck nix/packaging/release/verify-release-assets.sh \
                      nix/packaging/release/verify-release-assets.test.sh \
                      nix/packaging/release/assert-init-shebang.sh \
@@ -394,6 +394,7 @@ jobs:
           python3 scripts/test_claude_demo_preflight.py
           python3 scripts/test_e2e_failure_manifest.py
           python3 scripts/test_pack_build_native.py
+          python3 scripts/test_published_installed_boot.py
           python3 scripts/test_smoke_local_demo.py
           python3 scripts/test_task_context.py
           python3 scripts/test_watch_issues.py

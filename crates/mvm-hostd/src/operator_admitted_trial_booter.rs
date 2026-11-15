@@ -656,7 +656,7 @@ pub(crate) fn verify_assurance_guest_protocol(
     .context("verifying assurance guest runtime")?;
     match verified {
         Some(mvm_runtime::runtime_evidence::VerifiedLaunchRuntime::Release(release)) => {
-            Ok(Some(release))
+            Ok(Some(*release))
         }
         Some(mvm_runtime::runtime_evidence::VerifiedLaunchRuntime::Source(_)) => {
             anyhow::bail!("assurance requires a released runtime, not a source runtime");

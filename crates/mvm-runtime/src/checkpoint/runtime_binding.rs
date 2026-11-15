@@ -9,6 +9,46 @@ use super::CheckpointStore;
 
 pub(super) const EVIDENCE_BLOB: &str = "runtime-artifacts.json";
 
+/// Evidence that the checkpoint's authenticated paused runtime and retained
+/// launch binding were checked together for this operation.
+#[derive(Debug)]
+pub struct VerifiedRetainedRuntime {
+    binding: Option<RuntimeLaunchBinding>,
+    checkpoint_digest: Option<mvm_core::checkpoint::CheckpointDigest>,
+    identity: Option<mvm_core::plan::RuntimeIdentity>,
+}
+
+impl VerifiedRetainedRuntime {
+    /// Signed release identity derived from the verified retained bytes.
+    pub fn identity(&self) -> Option<&mvm_core::plan::RuntimeIdentity> {
+        self.identity.as_ref()
+    }
+
+    pub(crate) fn binding(&self) -> Option<&RuntimeLaunchBinding> {
+        self.binding.as_ref()
+    }
+
+    pub(crate) fn matches_checkpoint(&self, meta: &CheckpointMeta) -> bool {
+        self.checkpoint_digest.as_ref() == Some(&meta.meta_digest)
+            && self.binding == meta.runtime_launch_binding
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn verify_retained_binding_for_test(
+    binding: Option<&RuntimeLaunchBinding>,
+) -> Result<VerifiedRetainedRuntime> {
+    let identity = binding
+        .map(crate::runtime_evidence::verify_retained_runtime_identity)
+        .transpose()?
+        .flatten();
+    Ok(VerifiedRetainedRuntime {
+        binding: binding.cloned(),
+        checkpoint_digest: None,
+        identity,
+    })
+}
+
 /// Plaintext digest of a small metadata blob, authenticated by the checkpoint
 /// manifest directly or by its sealed index. This never opens content chunks.
 pub(crate) fn metadata_blob_sha256(
@@ -37,6 +77,13 @@ pub(crate) fn verify_capture(
     binding: Option<&RuntimeLaunchBinding>,
     actual: &RuntimeArtifacts,
 ) -> Result<()> {
+    verify_capture_with_identity(binding, actual).map(|_| ())
+}
+
+fn verify_capture_with_identity(
+    binding: Option<&RuntimeLaunchBinding>,
+    actual: &RuntimeArtifacts,
+) -> Result<Option<mvm_core::plan::RuntimeIdentity>> {
     if actual.firecracker_drives.is_some() {
         mvm_backends::fc::runtime_artifacts::validate_artifacts(actual, binding)?;
     }
@@ -49,12 +96,15 @@ pub(crate) fn verify_capture(
                     .any(|token| token.starts_with("mvm.runtime_")),
             "externally loaded runtime has no authenticated runtime binding; restart the VM with a verified runtime before capturing it"
         );
-        return Ok(());
+        return Ok(None);
     };
-    if matches!(binding, RuntimeLaunchBinding::CliAssembly(_)) {
-        crate::runtime_evidence::verify_runtime_binding(binding)?;
-    }
-    verify_bound_artifacts(binding, actual)
+    let identity = if matches!(binding, RuntimeLaunchBinding::CliAssembly(_)) {
+        crate::runtime_evidence::verify_retained_runtime_identity(binding)?
+    } else {
+        None
+    };
+    verify_bound_artifacts(binding, actual)?;
+    Ok(identity)
 }
 
 fn verify_bound_artifacts(binding: &RuntimeLaunchBinding, actual: &RuntimeArtifacts) -> Result<()> {
@@ -249,7 +299,10 @@ pub(super) fn capture_supervisor_config(
 /// Call only after authenticating the checkpoint metadata against its chain.
 /// The evidence is independently checked against that authenticated manifest,
 /// including when the large memory image is verified lazily on load.
-pub fn verify_checkpoint_runtime(store: &CheckpointStore, meta: &CheckpointMeta) -> Result<()> {
+pub fn verify_checkpoint_runtime(
+    store: &CheckpointStore,
+    meta: &CheckpointMeta,
+) -> Result<VerifiedRetainedRuntime> {
     if meta.protection.is_sealed() && meta.class == CheckpointClass::VmFull {
         let scratch = crate::private_staging::create(
             store.root(),
@@ -273,9 +326,13 @@ pub(crate) fn verify_checkpoint_runtime_at(
     store: &CheckpointStore,
     meta: &CheckpointMeta,
     content_dir: &std::path::Path,
-) -> Result<()> {
+) -> Result<VerifiedRetainedRuntime> {
     if meta.class != CheckpointClass::VmFull {
-        return Ok(());
+        return Ok(VerifiedRetainedRuntime {
+            binding: None,
+            checkpoint_digest: Some(meta.meta_digest.clone()),
+            identity: None,
+        });
     }
     meta
         .content
@@ -303,7 +360,12 @@ pub(crate) fn verify_checkpoint_runtime_at(
             anyhow::bail!("checkpoint has no supported authenticated runtime backend identity");
         }
     }
-    verify_capture(meta.runtime_launch_binding.as_ref(), &actual)
+    let identity = verify_capture_with_identity(meta.runtime_launch_binding.as_ref(), &actual)?;
+    Ok(VerifiedRetainedRuntime {
+        binding: meta.runtime_launch_binding.clone(),
+        checkpoint_digest: Some(meta.meta_digest.clone()),
+        identity,
+    })
 }
 
 fn decode_authenticated_observation(

@@ -11,7 +11,7 @@ use assert_cmd::Command;
 use ed25519_dalek::SigningKey;
 use mvm_core::plan::{PlanId, TenantId};
 use mvm_core::receipt::{ReceiptOutcome, receipt_type};
-use mvm_hostd::supervisor::audit::PlanAuditEntry;
+use mvm_hostd::supervisor::audit::signer::PlanAuditEntry;
 use mvm_hostd::supervisor::{AuditSigner, FileAuditSigner};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -312,9 +312,11 @@ fn every_in_scope_entry_is_either_a_receipt_or_a_citation() {
     .expect("export");
 
     let path = mvm_hostd::audit::emitter::audit_path_for_tenant(&sandbox.audit_dir(), "local");
-    let chain =
-        mvm_hostd::supervisor::audit_file::verify_audit_chain_entries(&path, &key.verifying_key())
-            .expect("chain");
+    let chain = mvm_hostd::supervisor::audit::audit_file::verify_audit_chain_entries(
+        &path,
+        &key.verifying_key(),
+    )
+    .expect("chain");
     let in_scope = chain.iter().filter(|e| e.plan_id.0 == plan_id).count();
 
     assert_eq!(
@@ -459,9 +461,11 @@ fn the_audit_digest_extension_resolves_to_the_entry_it_came_from() {
     .expect("export");
 
     let path = mvm_hostd::audit::emitter::audit_path_for_tenant(&sandbox.audit_dir(), "local");
-    let chain =
-        mvm_hostd::supervisor::audit_file::verify_audit_chain_entries(&path, &key.verifying_key())
-            .expect("chain");
+    let chain = mvm_hostd::supervisor::audit::audit_file::verify_audit_chain_entries(
+        &path,
+        &key.verifying_key(),
+    )
+    .expect("chain");
 
     // First receipt is plan.admitted, the first chain entry.
     let want = mvm_hostd::audit::evidence::audit_entry_digest_hex(&chain[0]).expect("digest");

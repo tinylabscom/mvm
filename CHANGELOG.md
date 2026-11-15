@@ -2,6 +2,54 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.28.0-rc.5] — 2026-11-15
+
+### Added
+- **install**: Support uninstall through install.sh
+- **hvf**: Release memory a restored guest wrote and then freed
+- **pack**: Reserve closed schema-9 production member
+- **pack**: Bind production composition entrypoint in frozen lock
+- **client**: Report a machine's granted destinations on MachineState
+- **pack**: Reserve complete schema-nine policy evidence
+
+### Documentation
+- ADR-112, verify the signed runtime release proof once per launch
+- Reserve schema 9 for production composition
+- **contracts**: Mark the Firecracker lifecycle owner contract as deferred and link its tracking issue
+- Record VM-scoped mailbox key custody
+- Remove the factory-edge staging harness in favour of the simple demo
+- **adr**: Propose ADR-061, crate layout by where code runs
+- **trail**: Record three learnings from the #4839 cleanup
+- **adr**: Propose ADR-062, workload actor lifecycle and causal evidence
+
+### Fixed
+- **runtime**: Remove the consumed resident parent's state when its child stops
+- **client**: Launches without volumes no longer serialize on the volume lock
+- Deliver canonical runtime environment to boot commands
+- **agentd**: Keep the entrypoint descriptor across exec for a script warm worker
+- **ci**: Restore the BDD and aarch64 CI witnesses on main
+- **runtime**: Remove the consumed preloaded standby's state when its adopted child stops
+- **release**: Let the published-package smoke find a prerelease's dotted package names
+- **release**: Accept a re-signed macOS install in the published installed-boot smoke
+- Use machine run for factory-edge workloads
+- **client**: Wait briefly for the volume lock; stops with no leases skip it
+
+### Other
+- A raw factory-edge demo in one short script
+- Add explicit cold and warm density harness lanes
+- Start the three workloads at once and show the audit record
+- Run the factory-edge demo through the mvm-client library
+
+### Performance
+- **hvf**: Record where driver_boot and attach_overlay spend their time
+- **trace**: Span the runtime-proof verification, the lifecycle bind and its flushes
+
+### Refactored
+- **hostd**: Regroup the supervisor modules by responsibility
+
+### Testing
+- Add a preflight check to the factory-edge staging script
+
 ## [0.28.0-rc.4] — 2026-11-14
 
 ### Added

@@ -155,12 +155,12 @@ mod tests {
         }
     }
     use ed25519_dalek::SigningKey;
-    use mvm_hostd::supervisor::audit_recorder::{EventCategory, Recorder};
+    use mvm_hostd::supervisor::audit::audit_recorder::{EventCategory, Recorder};
 
     /// Write real chain-signed entries through the recorder the endpoint
     /// uses, as the endpoint would for machine `vm`.
     fn endpoint_recorder(dir: &std::path::Path, vm: &str) -> Recorder {
-        let signer = mvm_hostd::supervisor::audit_file::FileAuditSigner::open(
+        let signer = mvm_hostd::supervisor::audit::audit_file::FileAuditSigner::open(
             SigningKey::from_bytes(&[9; 32]),
             dir.to_path_buf(),
         )

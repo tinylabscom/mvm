@@ -2,7 +2,7 @@
 //!
 //! On libkrun and HVF the process that owns a guest for its whole life is its
 //! per-VM supervisor, and that is where a session's idle timeout is enforced
-//! (`supervisor::session_expiry`). Firecracker and QEMU have no such process:
+//! (`supervisor::lifecycle::session_expiry`). Firecracker and QEMU have no such process:
 //! the VMM is a third-party binary, Firecracker runs as root under `sudo`, and
 //! the `mvmctl` that started the session exits as soon as it is recorded. An
 //! expired session there was reaped only when someone next ran a `machine

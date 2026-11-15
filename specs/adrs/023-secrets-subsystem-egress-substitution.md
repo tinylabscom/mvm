@@ -323,7 +323,7 @@ canary secret through the path on every PR, with three witnesses:
 on the terminated path by
 `fn:a_value_echoed_in_a_header_and_a_split_body_reaches_the_guest_as_its_placeholder`
 and `fn:an_encoded_response_is_refused_rather_than_relayed_unread`
-(`crates/mvm-hostd/src/supervisor/terminator/flow/tests/reflection.rs`).
+(`crates/mvm-hostd/src/supervisor/endpoint/terminator/flow/tests/reflection.rs`).
 `xtask check-claim-catalog` resolves these against the tree on every PR.
 
 ### Status
