@@ -421,6 +421,9 @@ jobs:
       - name: Scoped feedback recipe tests
         run: python3 scripts/test_scoped_tests.py
 
+      - name: Development wrapper tests
+        run: python3 scripts/test_bin_dev.py
+
       - name: Command group help tests
         run: python3 scripts/test_just_help.py
 

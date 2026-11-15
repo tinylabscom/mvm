@@ -3,6 +3,7 @@ members = [
     # Feature-gated no_std protocol and storage contracts shared by mvm and
     # fleet orchestrators. `volume`/`local` are opt-in; the default is protocol.
     "crates/mvm-contract",
+    "crates/mvm-crypto",
     "crates/mvm-core",
     "crates/mvm-net",
     "crates/deps/libkrun-sys",
@@ -306,6 +307,7 @@ tree-sitter-typescript = "0.23.2"
 # dependency unless the workspace entry already carries it. The root binary
 # opts back into user-facing defaults through its own `[features]` block.
 mvm-contract = { path = "crates/mvm-contract", version = "0.28.0-rc.6", default-features = false, features = ["protocol"] }
+mvm-crypto = { path = "crates/mvm-crypto", version = "0.28.0-rc.6" }
 mvm-core = { path = "crates/mvm-core", version = "0.28.0-rc.6" }
 mvm-bundler = { path = "crates/mvm-bundler", version = "0.28.0-rc.6" }
 mvm-compiler = { path = "crates/mvm-compiler", version = "0.28.0-rc.6" }
@@ -430,7 +432,14 @@ mvm-hostd.workspace = true
 anyhow.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2-foundation = { version = "0.3", features = ["NSRunLoop", "NSDate", "NSAutoreleasePool"] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSAutoreleasePool",
+    "NSDate",
+    "NSObjCRuntime",
+    "NSRunLoop",
+    "NSString",
+] }
 
 [dev-dependencies]
 mvm-contract.workspace = true
@@ -655,8 +664,7 @@ panic = "abort"
 lto = true
 codegen-units = 1
 
-# Speed up `cargo test --workspace` by giving the test profile more
-# parallel codegen units and dropping debug info to line tables only.
+# Speed up `cargo test --workspace` by dropping debug info to line tables only.
 # Test binaries don't need full DWARF; we just need clean panic
 # backtraces, which `line-tables-only` preserves.
 #
@@ -667,7 +675,6 @@ codegen-units = 1
 opt-level = 0
 debug = "line-tables-only"
 incremental = true
-codegen-units = 256
 
 # Local-image integration tests repeatedly fingerprint the full source checkout.
 # Optimize the measured observation/attribute/object-decoding hot paths without
@@ -687,17 +694,13 @@ opt-level = 2
 [profile.test.package.zlib-rs]
 opt-level = 2
 
-# The `dev` profile is what cargo compiles every LIBRARY crate under, even during
-# `cargo test`/`nextest` (only the test *binaries* use `[profile.test]`). Without
-# this override it defaults to `debug = 2` — full DWARF — which is the single
-# biggest memory + disk cost of a workspace build: a large crate like `mvm-cli`
-# burns gigabytes of rustc + linker memory emitting debug info nothing on the
-# inner loop reads, and 16 of those in parallel is what makes the build a memory
-# hog on a shared dev machine. Drop it to line tables (matching `[profile.test]`):
-# panic backtraces keep their file:line, but the DWARF bloat — and its memory +
-# disk footprint — is gone. This also lightens `cargo build`/`check`/`clippy`.
+# The test profile inherits dev settings, including package overrides unless
+# replaced above. Keep both profiles on line tables rather than full DWARF:
+# panic backtraces retain file:line without the debug-info memory and disk cost.
 [profile.dev]
 debug = "line-tables-only"
+# Leave codegen units at the same Cargo defaults in dev and test: incremental
+# workspace crates and non-incremental dependencies need different defaults.
 
 # Per-package optimisation overrides applied to the `dev` and `test`
 # profiles. Build scripts + proc-macros run during compilation, so a
@@ -713,10 +716,9 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 opt-level = 0
 
-# The local-volume service encrypts whole ext4 images through mvm-core.
-# Optimise the caller where AES-GCM's generic loop is instantiated: 42
-# volume tests took 80s at level 0 and 10s at level 2 on the same host.
-[profile.dev.package.mvm-core]
+# AES-GCM's generic loops must be optimized where they are instantiated.
+# Keep that work in a small leaf instead of optimizing all of mvm-core.
+[profile.dev.package.mvm-crypto]
 opt-level = 2
 
 [profile.dev.package.syn]

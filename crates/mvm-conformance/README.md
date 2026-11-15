@@ -12,9 +12,11 @@ claims, and security behavior across the workspace.
 
 ## How it works
 
-The `bdd` feature enables the cucumber test target. Cucumber-specific `World`
-state and step macros live in `tests/`, while reusable logic in `src/` remains
-ordinary Rust that can be tested without starting the runner.
+The `bdd` feature enables both the cucumber test target and its optional
+framework dependency. Cucumber-specific `World` state lives in
+`tests/support/world.rs`, avoiding an extra auto-discovered test executable.
+Reusable logic in `src/` remains ordinary Rust that can be tested without
+compiling or starting Cucumber.
 
 Before a scenario runs, the harness derives `RuntimeCaps` from the host and
 environment. `scenario_gate_for_selection` interprets tags and either runs the

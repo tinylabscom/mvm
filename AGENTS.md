@@ -251,8 +251,9 @@ acceptable. Remove the worktree after merge (`git worktree remove ...`).
 
 **Isolate mutable state** per worktree by overriding three env vars (or just
 `source scripts/dev-env.sh`, resolved relative to the worktree root; `bin/dev`
-builds and runs this checkout's `mvmctl` via `just embed` on the `dev`
-contributor surface (so it can verify published image-set signatures),
+builds this checkout's `mvmctl` on the `dev` contributor surface and its native
+helpers together (so launch needs no implicit helper build), without embedding
+the Linux builder payload; it verifies published image-set signatures and runs
 with pair-isolated state; `.envrc.example` covers direnv users):
 
 ```bash

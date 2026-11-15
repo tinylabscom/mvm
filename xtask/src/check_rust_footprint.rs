@@ -34,14 +34,14 @@ use std::process::Command;
 
 use crate::rust_source::{CommentSyntax, blank_comments};
 
-// CI witness, overclaim, snapshot-owner, Yocto importer, and CLI option-source
-// tests remain measured; the library health/signing path adds regressions.
-// Ceilings re-measured after the typed local launch pipeline and its
-// admission-order witnesses; they are the current honest totals with no headroom claim.
+// The shared crypto boundary and typed local launch pipeline retain their
+// build/dependency regressions and admission-order witnesses.
+// Ceilings measure the combined tree, including every test category;
+// these are exact current totals, not spare growth budget.
 /// Ceiling on total SLOC, all categories.
-const MAX_TOTAL_SLOC: usize = 991_372;
+const MAX_TOTAL_SLOC: usize = 991_631;
 /// Ceiling on total physical lines, all categories.
-const MAX_TOTAL_PHYSICAL: usize = 1_259_667;
+const MAX_TOTAL_PHYSICAL: usize = 1_259_980;
 /// How far under a ceiling the tree may sit before the ceiling must drop.
 const SLACK: usize = 10_000;
 

@@ -20,14 +20,13 @@
 use std::fmt;
 use std::io::{Read, Write};
 
-use aes_gcm::aead::{Aead, KeyInit};
-use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::Result;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use mvm_contract::policy::security::{
     PROTOCOL_VERSION_AUTHENTICATED, SIG_ALG_ED25519, SessionHello, SessionHelloAck,
     SessionHelloConfirm,
 };
+use mvm_crypto::aead::{Aead, Aes256Gcm};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -382,9 +381,8 @@ impl Session {
         )
         .map_err(|e| SessionError::InvalidHandshake(e.to_string()))?;
         let nonce = session_nonce(&self.session_id, self.role, sequence);
-        let cipher = new_cipher(self.key.as_ref())?;
-        let ciphertext = cipher
-            .encrypt(&Nonce::from(nonce), plaintext)
+        let ciphertext = Aes256Gcm
+            .encrypt(&self.key, &nonce, plaintext, &[])
             .map_err(|_| SessionError::EncryptionFailed)?;
 
         let mut signed_bytes = context;
@@ -464,9 +462,8 @@ impl<Key> Session<Key> {
         )?;
 
         let nonce = session_nonce(&self.session_id, self.role.opposite(), frame.sequence);
-        let cipher = new_cipher(self.key.as_ref())?;
-        let plaintext = cipher
-            .decrypt(&Nonce::from(nonce), frame.ciphertext.as_ref())
+        let plaintext = Aes256Gcm
+            .decrypt(&self.key, &nonce, &frame.ciphertext, &[])
             .map_err(|_| SessionError::DecryptionFailed)?;
 
         self.next_receive_sequence = frame
@@ -768,10 +765,6 @@ pub fn write_sealed_frame<W: Write>(
     Ok(())
 }
 
-fn new_cipher(key: &[u8]) -> Result<Aes256Gcm, SessionError> {
-    Aes256Gcm::new_from_slice(key).map_err(|_| SessionError::EncryptionFailed)
-}
-
 fn random_bytes() -> Vec<u8> {
     (0..32).map(|_| rand::random::<u8>()).collect()
 }
@@ -1067,6 +1060,8 @@ fn secure_guest_handshake<S: Read + Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aes_gcm::aead::{Aead, KeyInit};
+    use aes_gcm::{Aes256Gcm, Nonce};
     use rand::Rng;
     use serde::Deserialize;
     use std::io::Cursor;

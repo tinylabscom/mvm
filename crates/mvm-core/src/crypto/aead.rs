@@ -12,8 +12,7 @@
 //! stored in the frame. Callers with no context pass `&[]`; that frame is
 //! byte-for-byte what this module wrote before associated data existed.
 
-use aes_gcm::aead::{Aead, KeyInit, Payload};
-use aes_gcm::{Aes256Gcm, Nonce};
+use mvm_crypto::aead::{Aead, Aes256Gcm};
 use rand::Rng;
 use zeroize::Zeroize;
 
@@ -146,22 +145,14 @@ impl Drop for Key {
 /// `aad` is authenticated but not written into the frame; [`open`] must be
 /// handed the same bytes.
 pub fn seal(key: &Key, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
-    let cipher = Aes256Gcm::new(&key.0.into());
     let mut nonce_arr = [0u8; NONCE_SIZE];
     rand::rng().fill_bytes(&mut nonce_arr);
-    let nonce = Nonce::from(nonce_arr);
-    let ciphertext = cipher
-        .encrypt(
-            &nonce,
-            Payload {
-                msg: plaintext,
-                aad,
-            },
-        )
+    let ciphertext = Aes256Gcm
+        .encrypt(&key.0, &nonce_arr, plaintext, aad)
         .expect("AES-256-GCM seal of an in-memory buffer cannot fail");
 
     let mut out = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
-    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&nonce_arr);
     out.extend_from_slice(&ciphertext);
     out
 }
@@ -178,24 +169,18 @@ pub fn open(key: &Key, framed: &[u8], aad: &[u8]) -> Result<Vec<u8>, AeadError> 
         return Err(AeadError::TooShort { got: framed.len() });
     }
     let (nonce_bytes, ciphertext) = framed.split_at(NONCE_SIZE);
-    let nonce = Nonce::from(
-        <[u8; NONCE_SIZE]>::try_from(nonce_bytes).expect("split_at(NONCE_SIZE) guarantees length"),
-    );
-    let cipher = Aes256Gcm::new(&key.0.into());
-    cipher
-        .decrypt(
-            &nonce,
-            Payload {
-                msg: ciphertext,
-                aad,
-            },
-        )
+    let nonce =
+        <[u8; NONCE_SIZE]>::try_from(nonce_bytes).expect("split_at(NONCE_SIZE) guarantees length");
+    Aes256Gcm
+        .decrypt(&key.0, &nonce, ciphertext, aad)
         .map_err(|_| AeadError::Auth)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aes_gcm::aead::{Aead, KeyInit};
+    use aes_gcm::{Aes256Gcm, Nonce};
 
     #[test]
     fn seal_open_roundtrip_and_reject_tamper() {

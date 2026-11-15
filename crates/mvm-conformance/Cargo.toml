@@ -17,21 +17,17 @@ harness = false
 required-features = ["bdd"]
 
 [features]
-# Gates the cucumber conformance runner (see the [[test]] target above).
-bdd = []
+# Gate Cucumber itself as well as the runner; dev-dependencies compile even
+# when their required-feature test target is not selected.
+bdd = ["dep:cucumber"]
 
 [dependencies]
 mvm-core = { workspace = true, features = ["host-state", "test-support"] }
 serde.workspace = true
 toml.workspace = true
-
+cucumber = { version = "0.23", optional = true }
 
 [dev-dependencies]
-# Only pulled in at test time (`just bdd` / `cargo test -p mvm-conformance
-# --test conformance`) — not a normal dependency of this crate, and never a
-# dependency of any shipped crate. `cargo tree -p mvm-conformance -e no-dev`
-# must not list cucumber.
-cucumber = "0.23"
 # `signal`: the runner stops the VMs live steps launched when the job is
 # cancelled or times out mid-step.
 tokio = { workspace = true, features = ["signal", "process"] }
