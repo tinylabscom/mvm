@@ -101,6 +101,22 @@ pub(super) fn validate_declarations(manifest: &BundleManifest) -> Result<(), Bun
     }) {
         validate_canonical_linux_proof(proof, manifest)?;
     }
+    if manifest
+        .members
+        .iter()
+        .any(|member| matches!(member, BundleMember::ProductionComposition(_)))
+    {
+        let reason = if manifest
+            .members
+            .iter()
+            .any(|member| matches!(member, BundleMember::LocalComposition(_)))
+        {
+            "local and production composition cannot be mixed"
+        } else {
+            "production composition requires protected exporter and recipient verification"
+        };
+        return Err(BundleVerifyError::ManifestParse(reason.into()));
+    }
     if let Some(composition) = manifest.members.iter().find_map(|member| match member {
         BundleMember::LocalComposition(composition) => Some(composition),
         _ => None,
@@ -153,6 +169,7 @@ fn declaration_class(member: &BundleMember) -> Option<&'static str> {
         BundleMember::EmbeddedCliBootAssets(_) => Some("embedded_cli_boot_assets"),
         BundleMember::CanonicalLinuxProof(_) => Some("canonical_linux_proof"),
         BundleMember::LocalComposition(_) => Some("local_composition"),
+        BundleMember::ProductionComposition(_) => Some("production_composition"),
         BundleMember::KernelCmdline { .. } => Some("kernel_cmdline"),
         BundleMember::SecurityPosture(_) => Some("security_posture"),
         BundleMember::BuildProvenance(_) => Some("build_provenance"),
@@ -810,6 +827,42 @@ mod tests {
         bad = composed.clone();
         bad.members.push(composed.members.last().unwrap().clone());
         assert!(validate_declarations(&bad).is_err());
+    }
+
+    #[test]
+    fn production_composition_cannot_be_admitted_or_mixed_with_local() {
+        let mut manifest = manifest(Vec::new(), Vec::new());
+        let production = BundleMember::ProductionComposition(
+            mvm_contract::plan::bundle::ProductionComposition {
+                lock_artifact: "frozen-lock.json".into(),
+                layers: Vec::new(),
+            },
+        );
+        manifest.members.push(production);
+        let error = validate_declarations(&manifest).unwrap_err();
+        assert!(
+            format!("{error}").contains("requires bundle schema 9"),
+            "{error}"
+        );
+
+        manifest.schema_version = 9;
+        let error = validate_declarations(&manifest).unwrap_err();
+        assert!(
+            format!("{error}").contains("requires protected exporter and recipient"),
+            "{error}"
+        );
+
+        manifest.members.push(BundleMember::LocalComposition(
+            mvm_contract::plan::bundle::LocalComposition {
+                lock_artifact: "local-lock.json".into(),
+                layers: Vec::new(),
+            },
+        ));
+        let error = validate_declarations(&manifest).unwrap_err();
+        assert!(
+            format!("{error}").contains("local and production composition cannot be mixed"),
+            "{error}"
+        );
     }
 
     fn with_verity(mut manifest: BundleManifest) -> BundleManifest {
