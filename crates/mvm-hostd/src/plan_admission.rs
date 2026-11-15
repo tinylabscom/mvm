@@ -107,7 +107,7 @@ pub use rollback::{
 pub use shares::enforce_admitted_shares;
 pub use start::{StartAdmittedParams, StartedMachine, admit_and_start, start_admitted};
 pub(crate) use start::{
-    admit_and_start_with_verified_release, start_admitted_with_verified_release,
+    admit_synthesized_with_verified_release, start_admitted_with_verified_release,
 };
 
 /// Result of a successful admission. Carries everything the caller
