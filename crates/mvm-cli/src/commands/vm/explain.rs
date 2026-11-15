@@ -77,8 +77,13 @@ fn render(explanation: &RunExplanation) {
     render_denials(explanation);
     println!();
     match (explanation.chain_verified, &explanation.verify_error) {
-        (true, _) => println!(
+        (true, _) if explanation.history_verified => println!(
             "\u{2713} audit chain verifies clean ({} entries)",
+            explanation.chain_entry_count
+        ),
+        (true, _) => println!(
+            "\u{2713} this run's {} entries are authentic (host signature and chain links); \
+             `mvmctl trust audit verify` attests the whole history",
             explanation.chain_entry_count
         ),
         (false, Some(e)) => println!(
