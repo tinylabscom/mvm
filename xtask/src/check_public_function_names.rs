@@ -16,6 +16,12 @@ struct SiblingPair {
 // The journal deliberately distinguishes volatile opening/admission from
 // externally anchored and retained-key custody variants. Conflating their
 // names would hide the authority boundary at call sites.
+//
+// The launch/admission entrypoints keep their `_with_verified_*` siblings
+// because those variants thread the launch-verified runtime set through
+// admission and start: the retained audit evidence must match the runtime
+// that was actually verified, and conflating the names would hide that
+// verification boundary at call sites.
 const EXCEPTIONS: &[(&str, &str, &str, &str)] = &[
     (
         "crates/mvm-core/src/mailbox/journal.rs",
@@ -34,6 +40,60 @@ const EXCEPTIONS: &[(&str, &str, &str, &str)] = &[
         "impl MailboxJournal",
         "open",
         "open_with_custody",
+    ),
+    (
+        "crates/mvm-build/src/release_signature.rs",
+        "module",
+        "verify_release_archive_bytes",
+        "verify_release_archive_bytes_with_signer",
+    ),
+    (
+        "crates/mvm-client/src/admission/mod.rs",
+        "module",
+        "admit_plan_for_boot",
+        "admit_plan_for_boot_with_verified_retained",
+    ),
+    (
+        "crates/mvm-client/src/admission/mod.rs",
+        "module",
+        "admit_plan_for_boot",
+        "admit_plan_for_boot_with_verified_runtime",
+    ),
+    (
+        "crates/mvm-client/src/admission/mod.rs",
+        "module",
+        "admit_plan_for_boot_configured_ingress",
+        "admit_plan_for_boot_configured_ingress_with_verified_runtime",
+    ),
+    (
+        "crates/mvm-client/src/boot.rs",
+        "module",
+        "start_prepared_custodied",
+        "start_prepared_custodied_with_verified_runtime",
+    ),
+    (
+        "crates/mvm-hostd/src/plan_admission.rs",
+        "module",
+        "admit_and_start",
+        "admit_and_start_with_verified_release",
+    ),
+    (
+        "crates/mvm-hostd/src/plan_admission.rs",
+        "module",
+        "start_admitted",
+        "start_admitted_with_verified_release",
+    ),
+    (
+        "crates/mvm-runtime/src/backend.rs",
+        "impl AnyBackend",
+        "prepare_owned_launch",
+        "prepare_owned_launch_with_verified_runtime",
+    ),
+    (
+        "crates/mvm-runtime/src/backend.rs",
+        "impl AnyBackend",
+        "start",
+        "start_with_verified_runtime",
     ),
 ];
 const EXPECTED_UNEXPLAINED_PAIRS: usize = 0;
