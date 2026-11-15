@@ -203,6 +203,9 @@ fn start_persistent_with_prepared(
     params: PersistentImageStartParams<'_>,
     prepared: Option<&crate::image_cache::prepared::ValidatedPrepared>,
 ) -> Result<mvm_hostd::plan_admission::AdmittedPlan> {
+    // The steps of this one launch share a single check of the signed runtime
+    // release; the next launch checks again.
+    let _runtime_proofs = mvm_build::guest_runtime::evidence::LaunchProofScope::begin();
     let PreparedPersistentBoot {
         backend,
         start_config,

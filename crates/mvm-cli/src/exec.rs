@@ -589,6 +589,9 @@ fn run_inner(
     posture: Option<&PostureSink>,
     startup_started: std::time::Instant,
 ) -> Result<Either<i32, ExecOutput>> {
+    // The steps of this one launch share a single check of the signed runtime
+    // release; the next launch checks again.
+    let _runtime_proofs = mvm_build::guest_runtime::evidence::LaunchProofScope::begin();
     // Phase timing (off unless `MVM_PHASE_TIMING` or a launch-sample path is
     // set): capture a host-monotonic mark at each run seam, then emit a
     // one-line breakdown and/or the machine-readable sample at teardown. When
