@@ -291,14 +291,17 @@ impl PackCompletion<'_> {
         }
         let mut staged = stage_template(slot, export)?;
         // The exporter re-read the slot's files; what it sealed must be what the
-        // health check booted. Read and hash the same owned file before publication.
+        // health check booted. Verify the same owned file before publication.
         let validation = (|| -> Result<String> {
             producer
                 .build
                 .verify_revision()
                 .context("private build revision changed during export; archive not published")?;
             producer.boot.verify_integrity()?;
-            let manifest = staged.manifest()?;
+            let key = mvm_client::bundle::existing_host_verifying_key()?
+                .context("host signing public key missing after pack export")?;
+            let verified = staged.verify_readback(key)?;
+            let manifest = &verified.manifest;
             if let Some(digest) = &supplemental_digest {
                 let signed = manifest
                     .find_by_name("yocto-inputs.json")
@@ -308,7 +311,7 @@ impl PackCompletion<'_> {
                     "sealed Yocto inputs differ from the verified source document"
                 );
             }
-            let sealed = SlotDigests::from_manifest(&manifest);
+            let sealed = SlotDigests::from_manifest(manifest);
             if sealed != expected_export {
                 bail!(
                     "the sealed archive differs from the health-checked build ({}); \
@@ -316,7 +319,6 @@ impl PackCompletion<'_> {
                     expected_export.changed(&sealed).join(", ")
                 );
             }
-            let digest = staged.sha256()?;
             producer.build.verify_revision().context(
                 "private build revision changed during validation; archive not published",
             )?;
@@ -325,7 +327,7 @@ impl PackCompletion<'_> {
                     .persist_noclobber(destination)
                     .context("publishing input observation without overwriting")?;
             }
-            Ok(digest)
+            Ok(verified.bundle_sha256)
         })();
         let digest = match validation {
             Ok(digest) => digest,

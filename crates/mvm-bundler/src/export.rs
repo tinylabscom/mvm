@@ -1106,6 +1106,10 @@ mod tests {
             .unwrap();
         file.seek(std::io::SeekFrom::Start(offset as u64)).unwrap();
         file.write_all(b"X").unwrap();
+        // A first-member parse and a whole-file hash both accept these bytes;
+        // only the verified readback refuses the changed payload.
+        assert!(staged.manifest().is_ok());
+        assert!(staged.sha256().is_ok());
         let error = staged.verify_readback(signer.verifying_key()).unwrap_err();
         assert!(
             format!("{error:#}").contains("sha256 mismatch"),
@@ -1114,6 +1118,34 @@ mod tests {
         staged.abort(error);
         assert!(!out.exists());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn staged_readback_returns_verified_manifest_and_archive_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = dir.path().join("vmlinux");
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&kernel, b"kernel bytes").unwrap();
+        std::fs::write(&rootfs, b"rootfs bytes").unwrap();
+        std::fs::write(dir.path().join(SIDECAR_FILENAME), b"{}").unwrap();
+        let out = dir.path().join("bundle.mvmpkg");
+        let signer = TestSigner(ed25519_dalek::SigningKey::from_bytes(&[7; 32]));
+        let inputs = BundleExportInputs::new(
+            kernel.to_str().unwrap(),
+            rootfs.to_str().unwrap(),
+            "aarch64",
+            &out,
+        );
+        let mut staged = stage_bundle_with_signer(&inputs, &signer).unwrap();
+        let verified = staged.verify_readback(signer.verifying_key()).unwrap();
+        assert_eq!(verified.manifest, staged.manifest().unwrap());
+        assert_eq!(verified.bundle_sha256, staged.sha256().unwrap());
+        assert_eq!(
+            verified.manifest.find_by_name(ROOTFS_NAME).unwrap().sha256,
+            sha256_hex(b"rootfs bytes")
+        );
+        staged.abort(anyhow::anyhow!("test cleanup"));
+        assert!(!out.exists());
     }
 
     #[test]
