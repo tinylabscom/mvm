@@ -470,29 +470,153 @@ fn sys_id(reg: SysReg) -> hv_sys_reg_t {
     }
 }
 
+/// VM + GIC setup calls for [`HvfVm::create`], behind a seam so unit tests can
+/// inject GIC failure and assert the cleanup order without the Hypervisor
+/// framework. Implementations encapsulate the matching HVF preconditions.
+trait VmSetup {
+    /// Create the process-global VM.
+    fn vm_create(&mut self) -> hv_return_t;
+    /// Create the GIC configuration object; the caller releases it exactly once.
+    fn gic_config_create(&mut self) -> hv_gic_config_t;
+    fn gic_set_distributor_base(&mut self, config: hv_gic_config_t, base: hv_ipa_t) -> hv_return_t;
+    fn gic_set_redistributor_base(
+        &mut self,
+        config: hv_gic_config_t,
+        base: hv_ipa_t,
+    ) -> hv_return_t;
+    /// Install the in-kernel GICv3 from the configuration.
+    fn gic_create(&mut self, config: hv_gic_config_t) -> hv_return_t;
+    /// Release a configuration object returned by `gic_config_create`.
+    fn gic_config_release(&mut self, config: hv_gic_config_t);
+    /// Destroy the process-global VM.
+    fn vm_destroy(&mut self);
+}
+
+/// Hypervisor.framework-backed [`VmSetup`].
+struct SysVmSetup;
+
+impl VmSetup for SysVmSetup {
+    fn vm_create(&mut self) -> hv_return_t {
+        // SAFETY: called once per process before any vCPU exists; NULL config
+        // is the documented creation call.
+        unsafe { hv_vm_create(core::ptr::null_mut()) }
+    }
+
+    fn gic_config_create(&mut self) -> hv_gic_config_t {
+        // SAFETY: the VM exists (the guard running this keeps it alive) and no
+        // vCPU has been created yet.
+        unsafe { hv_gic_config_create() }
+    }
+
+    fn gic_set_distributor_base(&mut self, config: hv_gic_config_t, base: hv_ipa_t) -> hv_return_t {
+        // SAFETY: `config` is the live object just returned by
+        // `hv_gic_config_create`, passed only to the configurator.
+        unsafe { hv_gic_config_set_distributor_base(config, base) }
+    }
+
+    fn gic_set_redistributor_base(
+        &mut self,
+        config: hv_gic_config_t,
+        base: hv_ipa_t,
+    ) -> hv_return_t {
+        // SAFETY: as for `gic_set_distributor_base`.
+        unsafe { hv_gic_config_set_redistributor_base(config, base) }
+    }
+
+    fn gic_create(&mut self, config: hv_gic_config_t) -> hv_return_t {
+        // SAFETY: `config` is live and fully configured; the GIC is installed
+        // before any vCPU is created.
+        unsafe { hv_gic_create(config) }
+    }
+
+    fn gic_config_release(&mut self, config: hv_gic_config_t) {
+        if config.is_null() {
+            return;
+        }
+        // SAFETY: `config` is the retained object from `hv_gic_config_create`,
+        // released exactly once on this path.
+        unsafe { os_release(config.cast()) };
+    }
+
+    fn vm_destroy(&mut self) {
+        // SAFETY: `hv_vm_create` succeeded for this guard and nothing else
+        // destroys this process-global VM on the error path.
+        unsafe { hv_vm_destroy() };
+    }
+}
+
+/// RAII guard covering `HvfVm::create`'s setup: holds the process-global VM
+/// created by `vm_create` and, once reached, the GIC config object. Any early
+/// return drops this and so destroys the VM and releases the config; the
+/// success path goes through [`PendingHvfVm::commit`], which keeps the VM and
+/// releases only the config.
+struct PendingHvfVm<S: VmSetup> {
+    setup: S,
+    gic_config: Option<hv_gic_config_t>,
+}
+
+impl<S: VmSetup> PendingHvfVm<S> {
+    fn new(mut setup: S) -> Result<Self, HvfError> {
+        let rc = setup.vm_create();
+        if rc != HV_SUCCESS {
+            return Err(HvfError::VmCreate(rc));
+        }
+        Ok(Self {
+            setup,
+            gic_config: None,
+        })
+    }
+
+    /// Create and install the in-kernel GICv3. Base addresses must match the
+    /// DTB's intc node, or the guest's IRQ/timer init hangs.
+    fn create_gic(&mut self) -> Result<(), HvfError> {
+        let cfg = self.setup.gic_config_create();
+        self.gic_config = Some(cfg);
+        let mut grc = self
+            .setup
+            .gic_set_distributor_base(cfg, fdt::GICV3_DIST_BASE);
+        if grc == HV_SUCCESS {
+            grc = self
+                .setup
+                .gic_set_redistributor_base(cfg, fdt::GICV3_REDIST_BASE);
+        }
+        if grc == HV_SUCCESS {
+            grc = self.setup.gic_create(cfg);
+        }
+        if grc != HV_SUCCESS {
+            return Err(HvfError::GicCreate(grc));
+        }
+        Ok(())
+    }
+
+    /// Disarm for the success path: release the GIC config object. The VM
+    /// stays alive because the returned `HvfVm` shares the process-global VM,
+    /// whose destruction is the boot path's responsibility.
+    fn commit(mut self) {
+        if let Some(cfg) = self.gic_config.take() {
+            self.setup.gic_config_release(cfg);
+        }
+        std::mem::forget(self);
+    }
+}
+
+impl<S: VmSetup> Drop for PendingHvfVm<S> {
+    fn drop(&mut self) {
+        if let Some(cfg) = self.gic_config.take() {
+            self.setup.gic_config_release(cfg);
+        }
+        self.setup.vm_destroy();
+    }
+}
+
 impl HypervisorVm for HvfVm {
     type Error = HvfError;
     type Vcpu = HvfVcpu;
 
     fn create() -> Result<Self, HvfError> {
-        // SAFETY: HVF VM + in-kernel GICv3 global setup; bases match the DTB.
-        unsafe {
-            let rc = hv_vm_create(core::ptr::null_mut());
-            if rc != HV_SUCCESS {
-                return Err(HvfError::VmCreate(rc));
-            }
-            let cfg = hv_gic_config_create();
-            let mut grc = hv_gic_config_set_distributor_base(cfg, fdt::GICV3_DIST_BASE);
-            if grc == HV_SUCCESS {
-                grc = hv_gic_config_set_redistributor_base(cfg, fdt::GICV3_REDIST_BASE);
-            }
-            if grc == HV_SUCCESS {
-                grc = hv_gic_create(cfg);
-            }
-            if grc != HV_SUCCESS {
-                return Err(HvfError::GicCreate(grc));
-            }
-        }
+        let mut pending = PendingHvfVm::new(SysVmSetup)?;
+        pending.create_gic()?;
+        pending.commit();
         Ok(HvfVm)
     }
 
@@ -581,6 +705,170 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum SetupEvent {
+        VmCreate,
+        GicConfigCreate,
+        SetDistributorBase,
+        SetRedistributorBase,
+        GicCreate,
+        GicConfigRelease,
+        VmDestroy,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum FailPoint {
+        SetDistributorBase,
+        GicCreate,
+    }
+
+    const FAIL: hv_return_t = 0xf0;
+    const FAKE_CONFIG: hv_gic_config_t = core::ptr::without_provenance_mut(0x1);
+
+    /// Records setup calls so a test can assert the exact cleanup order; the
+    /// Hypervisor.framework calls are not injectable on the host, so the seam
+    /// fakes them instead.
+    #[derive(Clone)]
+    struct FakeVmSetup {
+        log: std::rc::Rc<std::cell::RefCell<Vec<SetupEvent>>>,
+        fail_at: Option<FailPoint>,
+    }
+
+    impl FakeVmSetup {
+        fn new(fail_at: Option<FailPoint>) -> Self {
+            Self {
+                log: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+                fail_at,
+            }
+        }
+
+        fn record(&self, event: SetupEvent) {
+            self.log.borrow_mut().push(event);
+        }
+
+        fn log(&self) -> Vec<SetupEvent> {
+            self.log.borrow().clone()
+        }
+    }
+
+    impl VmSetup for FakeVmSetup {
+        fn vm_create(&mut self) -> hv_return_t {
+            self.record(SetupEvent::VmCreate);
+            HV_SUCCESS
+        }
+
+        fn gic_config_create(&mut self) -> hv_gic_config_t {
+            self.record(SetupEvent::GicConfigCreate);
+            FAKE_CONFIG
+        }
+
+        fn gic_set_distributor_base(
+            &mut self,
+            _config: hv_gic_config_t,
+            _base: hv_ipa_t,
+        ) -> hv_return_t {
+            self.record(SetupEvent::SetDistributorBase);
+            if self.fail_at == Some(FailPoint::SetDistributorBase) {
+                FAIL
+            } else {
+                HV_SUCCESS
+            }
+        }
+
+        fn gic_set_redistributor_base(
+            &mut self,
+            _config: hv_gic_config_t,
+            _base: hv_ipa_t,
+        ) -> hv_return_t {
+            self.record(SetupEvent::SetRedistributorBase);
+            HV_SUCCESS
+        }
+
+        fn gic_create(&mut self, _config: hv_gic_config_t) -> hv_return_t {
+            self.record(SetupEvent::GicCreate);
+            if self.fail_at == Some(FailPoint::GicCreate) {
+                FAIL
+            } else {
+                HV_SUCCESS
+            }
+        }
+
+        fn gic_config_release(&mut self, config: hv_gic_config_t) {
+            assert_eq!(
+                config, FAKE_CONFIG,
+                "release must target the created config"
+            );
+            self.record(SetupEvent::GicConfigRelease);
+        }
+
+        fn vm_destroy(&mut self) {
+            self.record(SetupEvent::VmDestroy);
+        }
+    }
+
+    fn run_create(setup: FakeVmSetup) -> Result<(), HvfError> {
+        let mut pending = PendingHvfVm::new(setup)?;
+        pending.create_gic()?;
+        pending.commit();
+        Ok(())
+    }
+
+    #[test]
+    fn gic_create_failure_releases_config_and_destroys_vm() {
+        let setup = FakeVmSetup::new(Some(FailPoint::GicCreate));
+        let error = run_create(setup.clone()).expect_err("injected GIC failure");
+        assert!(matches!(error, HvfError::GicCreate(code) if code == FAIL));
+        assert_eq!(
+            setup.log(),
+            [
+                SetupEvent::VmCreate,
+                SetupEvent::GicConfigCreate,
+                SetupEvent::SetDistributorBase,
+                SetupEvent::SetRedistributorBase,
+                SetupEvent::GicCreate,
+                SetupEvent::GicConfigRelease,
+                SetupEvent::VmDestroy,
+            ],
+            "the error path must release the config, then destroy the VM"
+        );
+    }
+
+    #[test]
+    fn distributor_base_failure_skips_remaining_setup_and_cleans_up() {
+        let setup = FakeVmSetup::new(Some(FailPoint::SetDistributorBase));
+        let error = run_create(setup.clone()).expect_err("injected base failure");
+        assert!(matches!(error, HvfError::GicCreate(code) if code == FAIL));
+        assert_eq!(
+            setup.log(),
+            [
+                SetupEvent::VmCreate,
+                SetupEvent::GicConfigCreate,
+                SetupEvent::SetDistributorBase,
+                SetupEvent::GicConfigRelease,
+                SetupEvent::VmDestroy,
+            ],
+            "a failed step must not run later setup steps and must still clean up"
+        );
+    }
+
+    #[test]
+    fn commit_releases_config_but_keeps_the_vm() {
+        let setup = FakeVmSetup::new(None);
+        run_create(setup.clone()).expect("setup succeeds without an injected failure");
+        assert_eq!(
+            setup.log(),
+            [
+                SetupEvent::VmCreate,
+                SetupEvent::GicConfigCreate,
+                SetupEvent::SetDistributorBase,
+                SetupEvent::SetRedistributorBase,
+                SetupEvent::GicCreate,
+                SetupEvent::GicConfigRelease,
+            ],
+            "the success path must release the config and leave the VM alive"
+        );
     }
 
     #[test]
