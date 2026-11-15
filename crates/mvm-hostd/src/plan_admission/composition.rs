@@ -142,7 +142,7 @@ mod tests {
     use super::*;
     use mvm_core::plan::bundle::{
         BundleArtifact, BundleManifest, CanonicalLinuxProof, LocalComposition,
-        ProductionComposition, VerityInfo,
+        ProductionComposition, ProductionCompositionLayer, VerityInfo,
     };
 
     #[test]
@@ -203,7 +203,12 @@ mod tests {
             .members
             .push(BundleMember::ProductionComposition(ProductionComposition {
                 lock_artifact: "frozen-lock.json".into(),
-                layers: Vec::new(),
+                layers: vec![ProductionCompositionLayer {
+                    manifest_artifact: "runtime-manifest.json".into(),
+                    signature_artifact: "runtime-manifest.bundle".into(),
+                    group_artifact: None,
+                    profile_artifact: Some("runtime-profile.toml".into()),
+                }],
             }));
         assert!(
             verify(&plan, &bundle)
@@ -211,7 +216,24 @@ mod tests {
                 .to_string()
                 .contains("requires protected publisher and recipient admission")
         );
+        bundle
+            .manifest
+            .members
+            .retain(|member| !matches!(member, BundleMember::LocalComposition(_)));
+        assert!(
+            verify(&plan, &bundle)
+                .unwrap_err()
+                .to_string()
+                .contains("requires protected publisher and recipient admission")
+        );
         bundle.manifest.members.pop();
+        bundle
+            .manifest
+            .members
+            .push(BundleMember::LocalComposition(LocalComposition {
+                lock_artifact: "composition-lock.json".into(),
+                layers: Vec::new(),
+            }));
         let error = verify(&plan, &bundle).unwrap_err();
         assert!(
             format!("{error:#}").contains("evidence artifact missing"),

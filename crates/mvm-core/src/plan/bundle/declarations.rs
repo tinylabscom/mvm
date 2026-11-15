@@ -835,7 +835,12 @@ mod tests {
         let production = BundleMember::ProductionComposition(
             mvm_contract::plan::bundle::ProductionComposition {
                 lock_artifact: "frozen-lock.json".into(),
-                layers: Vec::new(),
+                layers: vec![mvm_contract::plan::bundle::ProductionCompositionLayer {
+                    manifest_artifact: "runtime-manifest.json".into(),
+                    signature_artifact: "runtime-manifest.bundle".into(),
+                    group_artifact: None,
+                    profile_artifact: Some("runtime-profile.toml".into()),
+                }],
             },
         );
         manifest.members.push(production);
