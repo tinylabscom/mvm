@@ -413,6 +413,15 @@ impl VolumeService for LocalVolumeService {
     }
 
     fn release_owner_leases(&self, owner: &str) -> Result<ReleaseOutcome> {
+        // Only the owner's own launch adds its leases, so a read that finds
+        // none means there is nothing to release and nothing to serialize on.
+        if !lease::AttachmentLeaseCatalog::load()?
+            .leases
+            .values()
+            .any(|lease| lease.vm_name == owner)
+        {
+            return Ok(ReleaseOutcome::default());
+        }
         let _lock = lifecycle::acquire_volume_lifecycle_lock()?;
         lease::release_keys_for_owner(owner, None)
     }
