@@ -645,8 +645,15 @@ impl AuditEmitter {
         plan: &ExecutionPlan,
         mode: &str,
         cold_reason: Option<&str>,
+        machine: &str,
     ) -> Result<()> {
-        let mut labels = vec![("mode".to_string(), mode.to_string())];
+        // `machine` is the one the run booted on. A warm claim takes its
+        // standby's, and the per-VM endpoint records refusals under that name,
+        // so this is what ties them back to the run.
+        let mut labels = vec![
+            ("mode".to_string(), mode.to_string()),
+            ("machine".to_string(), machine.to_string()),
+        ];
         if let Some(reason) = cold_reason {
             labels.push(("cold_reason".to_string(), reason.to_string()));
         }

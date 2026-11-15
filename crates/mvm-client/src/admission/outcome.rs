@@ -76,6 +76,7 @@ pub(crate) fn record_boot(
     emitter: &AuditEmitter,
     plan: &ExecutionPlan,
     backend: &str,
+    machine: &str,
     posture: BootPosture,
 ) {
     if let Err(e) = emitter.emit_launched(plan, backend) {
@@ -89,7 +90,7 @@ pub(crate) fn record_boot(
         StartMode::Warm => ("warm", None),
         StartMode::Cold { reason } => ("cold", Some(reason)),
     };
-    if let Err(e) = emitter.emit_start_mode(plan, mode, reason) {
+    if let Err(e) = emitter.emit_start_mode(plan, mode, reason, machine) {
         tracing::warn!(error = %e, "audit emit_start_mode failed (non-fatal)");
     }
 }

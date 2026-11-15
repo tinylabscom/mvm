@@ -196,7 +196,8 @@ pub fn collect_run(
         })
         .collect();
 
-    let egress_denials = run_denials(&all_entries, &plan_id, &image_name);
+    let machine = booted_machine(&all_entries, &plan_id).unwrap_or(&image_name);
+    let egress_denials = run_denials(&all_entries, &plan_id, machine);
 
     let (chain_verified, chain_entry_count, verify_error) = match verification {
         Ok(count) => (true, count, None),
@@ -215,6 +216,17 @@ pub fn collect_run(
         chain_entry_count,
         verify_error,
     })
+}
+
+/// The machine the run booted on, when its start record names one. A warm claim
+/// runs on its standby's machine, not under the run's own name, and the
+/// endpoint attributes its refusals to that machine.
+fn booted_machine<'a>(entries: &'a [PlanAuditEntry], plan_id: &str) -> Option<&'a str> {
+    entries
+        .iter()
+        .find(|e| e.plan_id.0 == plan_id && e.event == "plan.start_mode")
+        .and_then(|e| e.labels.get("machine"))
+        .map(String::as_str)
 }
 
 /// The refusals the per-VM endpoint recorded for this run's machine.
@@ -329,6 +341,43 @@ mod tests {
                 ],
             ))
             .unwrap();
+    }
+
+    /// A warm claim runs on its standby's machine; its refusals are recorded
+    /// under that name and still belong to the run that claimed it.
+    #[test]
+    fn a_warm_claimed_runs_denials_are_found_under_its_standbys_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[12; 32]);
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key.clone(), dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-warm-1");
+        emitter.emit_admitted(&plan, "host:test").unwrap();
+        emitter.emit_launched(&plan, "hvf").unwrap();
+        emitter
+            .emit_start_mode(&plan, "warm", None, "vm-standby-1")
+            .unwrap();
+        endpoint_refusal(
+            dir.path(),
+            &key,
+            "vm-standby-1",
+            "example.com:443",
+            "policy_denied",
+        );
+        endpoint_refusal(
+            dir.path(),
+            &key,
+            "vm-standby-2",
+            "someone-else.example:443",
+            "policy_denied",
+        );
+        emitter.emit_exited(&plan, 0, "hvf").unwrap();
+
+        let path = dir.path().join("local.jsonl");
+        let explanation = collect_run(&path, &vk, "local", "plan-warm-1").unwrap();
+        let denied = &explanation.egress_denials;
+        assert_eq!(denied.len(), 1, "{denied:?}");
+        assert_eq!(denied[0].destination, "example.com:443");
     }
 
     /// `explain` shows the machine's refusals from its own run and no other:
