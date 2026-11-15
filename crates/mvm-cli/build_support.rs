@@ -3,6 +3,16 @@
 
 use std::path::{Path, PathBuf};
 
+/// Workspace inputs used both for the source dirty flag and Cargo invalidation.
+pub(crate) const SOURCE_IDENTITY_PATHS: &[&str] = &[
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    ".cargo",
+    "crates",
+    "src",
+];
+
 /// Return a nested Cargo target shared by every feature fingerprint of the
 /// same outer profile. Cargo gives each build-script fingerprint a different
 /// `OUT_DIR`; placing nested builds directly below it makes identical embedded

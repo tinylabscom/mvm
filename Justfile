@@ -94,9 +94,8 @@ embed *ARGS:
     ./scripts/cargo.sh build -p mvm-hostd --bins {{ARGS}}
     ./scripts/cargo.sh build -p mvm-gpu --bin mvm-gpu-endpoint {{ARGS}}
     # The default embeds the host binaries into the default surface, which
-    # carries the image-set signature verifier. bin/dev overrides this to
-    # "embed-host-bins,dev" so the binary it runs carries the contributor
-    # surface.
+    # carries the image-set signature verifier. bin/dev instead builds the
+    # contributor surface without eagerly building every helper and payload.
     FEATURES="${MVM_EMBED_FEATURES:-embed-host-bins}"
     ./scripts/cargo.sh build --features "$FEATURES" {{ARGS}}
 

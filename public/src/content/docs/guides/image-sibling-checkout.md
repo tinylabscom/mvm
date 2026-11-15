@@ -36,7 +36,9 @@ either one invalidates exactly the affected entries.
 ## The paired wrapper: `bin/dev`
 
 `bin/dev` in the mvm checkout runs this mvmctl against the named images
-checkout, with `MVM_HOME` and `CARGO_TARGET_DIR` scoped to the pair:
+checkout, with `MVM_HOME` and `CARGO_TARGET_DIR` scoped to the pair. It
+compiles the contributor CLI first; missing host helpers and the Linux
+payload are compiled on first use rather than before every invocation:
 
 ```sh
 MVM_IMAGES_DIR=../mvm-images bin/dev machine run --flake ./examples/exit_code

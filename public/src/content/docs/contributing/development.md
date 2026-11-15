@@ -203,6 +203,16 @@ cargo run -- bootstrap
 > builds the whole set up front, per-VM helpers included. Released binaries
 > always carry the payload.
 
+For live development, `bin/dev <command>` builds only the `dev`-feature CLI
+before running it, with state isolated to the checkout (and selected image
+checkout). It does not prebuild every helper or cross-compile the Linux payload
+on each invocation. The first command that needs a missing helper or builder
+payload builds it from this checkout; use `just embed` when you explicitly
+want the full set ready before running a command (set
+`MVM_EMBED_FEATURES=embed-host-bins,dev` for the same contributor surface).
+Keep the same target directory and feature selection for repeated edits to
+reuse Cargo artifacts.
+
 > **Note — how the builder VM gets them.** The builder image does not have to
 > carry `mvm-host-vm-init` or `mvm-builderd`. Every builder boot, on every
 > backend, hands the guest a small initramfs — the *builder boot payload* —

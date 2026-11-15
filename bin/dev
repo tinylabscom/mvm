@@ -32,11 +32,11 @@
 # root defaults to ${XDG_STATE_HOME:-~/.local/state}/mvm/pairs and can be
 # moved with MVM_PAIRS_DIR.
 #
-# The binary is built with the embedded host binaries (`just embed`), in the
-# debug profile, on the contributor surface (`--features dev`): bin/dev runs
-# bootstrap against published image sets, which demands signature
-# verification, and the default lean binary cannot verify. Override
-# MVM_EMBED_FEATURES to build a different surface.
+# Build the contributor surface (`--features dev`) without eagerly compiling
+# every host helper and Linux payload. The CLI builds missing binaries from
+# this checkout on first use; a full upfront build remains available via
+# `just embed`. Bootstrap against published image sets still has the signature
+# verifier supplied by `dev`.
 
 set -euo pipefail
 
@@ -93,5 +93,5 @@ printf 'mvm=%s\nimages=%s\n' "$mvm_root" "${images_root:-released-set}" > "$stat
 export MVM_HOME="$state/home"
 export CARGO_TARGET_DIR="$mvm_root/target/pair-$pair_id"
 
-(cd -- "$mvm_root" && MVM_EMBED_FEATURES=embed-host-bins,dev just embed) >&2
+(cd -- "$mvm_root" && ./scripts/cargo.sh build --features dev) >&2
 exec "$CARGO_TARGET_DIR/debug/mvmctl" "$@"
