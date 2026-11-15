@@ -653,12 +653,20 @@ for wave in "${WAVES[@]}"; do
     awk -F '\t' '$1 == "mvm-mailbox" { count = $2; rss = $3 }
       END { print count+0, rss+0 }' "${wave_dir}/rss-settled.tsv"
   )
+  vmm_component="firecracker"
+  if [[ "${BACKEND}" == "hvf" ]]; then
+    vmm_component="mvm-hvf-supervisor"
+  fi
+  vmm_count="$(awk -F '\t' -v component="${vmm_component}" \
+    '$1 == component { print $2; found = 1; exit }
+      END { if (!found) print 0 }' "${wave_dir}/rss-settled.tsv")"
   mailbox_threads="$(awk -F '\t' 'NR > 1 { n += $2 } END { print n+0 }' \
     "${wave_dir}/mailbox-threads-settled.tsv")"
   vm_state_kib="$(awk 'NR == 1 { print $1 }' "${wave_dir}/vm-state-blocks-settled.txt")"
   available_before="$(awk 'NR == 2 { print $4 }' "${wave_dir}/filesystem-before.txt")"
   available_settled="$(awk 'NR == 2 { print $4 }' "${wave_dir}/filesystem-settled.txt")"
   {
+    printf 'wave_%s_vmm_processes\t%s\n' "${wave}" "${vmm_count}"
     printf 'wave_%s_mailbox_processes\t%s\n' "${wave}" "${mailbox_count}"
     printf 'wave_%s_mailbox_rss_kib\t%s\n' "${wave}" "${mailbox_rss_kib}"
     printf 'wave_%s_mailbox_threads\t%s\n' "${wave}" "${mailbox_threads}"
@@ -680,12 +688,22 @@ for wave in "${WAVES[@]}"; do
   failures="$(wc -l <"${wave_dir}/launch-failures.tsv" | tr -d ' ')"
   echo -e "wave_${wave}_launch_failures\t${failures}" >>"${SUMMARY}"
   echo -e "wave_${wave}_cleanup_ok\t${cleanup_ok}" >>"${SUMMARY}"
-  if [[ "${failures}" -ne 0 || "${cleanup_ok}" -ne 1 ]]; then
+  if [[ "${failures}" -ne 0 || "${cleanup_ok}" -ne 1 ||
+        ( "${MVM_HVF_DENSITY_ALLOW_UNSUPPORTED:-0}" != "1" && "${vmm_count}" -lt "${wave}" ) ]]; then
     echo "wave ${wave} failed; see ${wave_dir}" >&2
     exit 71
   fi
-  python3 "${ROOT}/scripts/density_timings.py" "${wave_dir}" "${wave}" "${MODE}" \
-    "${IMAGE_REF}" "${CPUS}" "${MEMORY}" >>"${SUMMARY}"
+  if compgen -G "${wave_dir}/*.receipt.json" >/dev/null; then
+    python3 "${ROOT}/scripts/density_timings.py" "${wave_dir}" "${wave}" "${MODE}" \
+      "${IMAGE_REF}" "${CPUS}" "${MEMORY}" >>"${SUMMARY}"
+  else
+    # A resident workload is stopped after the idle sample; its run command
+    # never finishes and therefore cannot write a completion receipt or sample.
+    for percentile in 50 95 99; do
+      printf 'wave_%s_boot_receipt_p%s_ms\tunavailable:resident_workload\n' \
+        "${wave}" "${percentile}" >>"${SUMMARY}"
+    done
+  fi
   first_message_status="not_requested"
   if [[ "${MAILBOX}" == "1" ]]; then
     first_message_status="unavailable:no_public_receipt_probe"

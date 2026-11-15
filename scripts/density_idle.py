@@ -11,6 +11,8 @@ are the kernel's own per-process count (`ri_pkg_idle_wkups` plus
 `ri_interrupt_wkups`), the nearest macOS analogue of a voluntary switch.
 """
 
+from __future__ import annotations
+
 import ctypes
 import struct
 

@@ -39,6 +39,9 @@ if args[:2] == ["machine", "run"]:
         if os.environ.get("MVM_FAKE_PRIME_FAIL") == "1":
             sys.exit(3)
         sys.exit(0)  # The first-use preparation is outside the measured wave.
+    if os.environ.get("MVM_FAKE_RESIDENT") == "1":
+        time.sleep(30)  # No completion receipt while the guest is resident.
+        sys.exit(0)
     receipt = Path(flag("--receipt"))
     Path(os.environ["MVM_LAUNCH_SAMPLE_JSON"]).write_text(json.dumps({
         "schema_version": 4, "launch_mode": os.environ["MVM_RESIDENCY"]
@@ -114,6 +117,19 @@ if args[:2] == ["machine", "run"]:
                     f"wave_1_boot_receipt_p50_ms",
                     (base / "out/summary.tsv").read_text(),
                 )
+                env["MVM_FAKE_RESIDENT"] = "1"
+                env["MVM_HVF_DENSITY_OUT_DIR"] = str(base / "out-resident")
+                resident = subprocess.run(
+                    ["/bin/bash" if platform.system() == "Darwin" else "bash",
+                     str(ROOT / "scripts/measure-hvf-density.sh")],
+                    env=env, capture_output=True, text=True, timeout=20,
+                )
+                self.assertEqual(resident.returncode, 0, resident.stderr)
+                self.assertIn(
+                    "wave_1_boot_receipt_p50_ms\tunavailable:resident_workload",
+                    (base / "out-resident/summary.tsv").read_text(),
+                )
+                env.pop("MVM_FAKE_RESIDENT")
                 env["MVM_FAKE_PRIME_FAIL"] = "1"
                 env["MVM_HVF_DENSITY_OUT_DIR"] = str(base / "out-fail")
                 failed = subprocess.run(
