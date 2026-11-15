@@ -404,15 +404,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "block2"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdeb9d870516001442e364c5220d3574d2da8dc765554b4a617230d33fa58ef5"
-dependencies = [
- "objc2",
-]
-
-[[package]]
 name = "borsh"
 version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1398,16 +1389,6 @@ dependencies = [
  "const-oid 0.10.2",
  "crypto-common 0.2.2",
  "ctutils",
-]
-
-[[package]]
-name = "dispatch2"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
-dependencies = [
- "bitflags 2.13.0",
- "objc2",
 ]
 
 [[package]]
@@ -3480,7 +3461,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libkrun-sys"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "libc",
  "mvm-agentd",
@@ -3677,7 +3658,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-agentd"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -3708,7 +3689,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-backends"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
@@ -3729,7 +3710,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-build"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -3768,7 +3749,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-builder-guest"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "anyhow",
  "hex",
@@ -3788,7 +3769,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-bundler"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3802,7 +3783,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-capture"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "chrono",
  "hex",
@@ -3820,7 +3801,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-cli"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3874,7 +3855,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-client"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3917,7 +3898,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-compiler"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "flate2",
  "globset",
@@ -3938,7 +3919,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-conformance"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3972,7 +3953,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-contract"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -3992,7 +3973,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-core"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -4010,6 +3991,7 @@ dependencies = [
  "keyring",
  "libc",
  "mvm-contract",
+ "mvm-crypto",
  "mvm-http",
  "mvm-macho-sign",
  "p256",
@@ -4046,8 +4028,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvm-crypto"
+version = "0.28.0-rc.6"
+dependencies = [
+ "aes-gcm",
+]
+
+[[package]]
 name = "mvm-fs"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "am-fs-ext4",
  "async-trait",
@@ -4077,7 +4066,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-gpu"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "libc",
  "mvm-contract",
@@ -4087,7 +4076,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-host-services"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "mvm-agentd",
  "mvm-core",
@@ -4097,7 +4086,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-hostd"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4154,7 +4143,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-hostlib"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -4174,7 +4163,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-http"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -4195,7 +4184,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-macho-sign"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "plist",
  "sha1",
@@ -4204,7 +4193,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-net"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "mvm-contract",
  "mvm-core",
@@ -4213,7 +4202,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-runtime"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4257,7 +4246,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-sdk"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "base64 0.23.1",
  "blake3",
@@ -4283,14 +4272,14 @@ dependencies = [
 
 [[package]]
 name = "mvm-setpriv"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "mvm-vmm"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -4323,7 +4312,7 @@ dependencies = [
 
 [[package]]
 name = "mvmctl"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -4547,17 +4536,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "objc2-core-foundation"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a180dd8642fa45cdb7dd721cd4c11b1cadd4929ce112ebd8b9f5803cc79d536"
-dependencies = [
- "bitflags 2.13.0",
- "dispatch2",
- "objc2",
-]
-
-[[package]]
 name = "objc2-encode"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4570,10 +4548,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3e0adef53c21f888deb4fa59fc59f7eb17404926ee8a6f59f5df0fd7f9f3272"
 dependencies = [
  "bitflags 2.13.0",
- "block2",
- "libc",
  "objc2",
- "objc2-core-foundation",
 ]
 
 [[package]]
@@ -5422,7 +5397,7 @@ checksum = "323c417e1d9665a65b263ec744ba09030cfb277e9daa0b018a4ab62e57bc8189"
 
 [[package]]
 name = "runmvm-client"
-version = "0.28.0-rc.5"
+version = "0.28.0-rc.6"
 dependencies = [
  "libloading",
  "serde_json",

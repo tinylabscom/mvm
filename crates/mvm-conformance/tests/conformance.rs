@@ -12,18 +12,15 @@
 //! cucumber drives its own scenario loop instead of the standard `#[test]`
 //! harness, so it needs a plain `fn main()`.
 //!
-//! The `World` type and step definitions live under `tests/` (this crate
-//! root's own module tree) rather than `src/`: `cucumber` is a
-//! dev-dependency, and Cargo never exposes a package's dev-dependencies to
-//! its own `[lib]` target — only to test/example/bench targets themselves —
-//! so cucumber-coupled code has to live in this test binary. Step logic
-//! that doesn't need cucumber's macros belongs in `src/lib.rs` instead,
-//! where it can be unit-tested independent of the cucumber runner.
+//! The `World` type and step definitions belong to this BDD-gated binary.
+//! Step logic that does not need Cucumber belongs in `src/lib.rs`, where
+//! ordinary workspace tests can exercise it without compiling the framework.
 
 #[path = "support/live_artifacts.rs"]
 mod live_artifacts;
 mod steps;
 mod support;
+#[path = "support/world.rs"]
 mod world;
 
 use std::path::{Path, PathBuf};

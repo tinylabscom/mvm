@@ -74,23 +74,9 @@ fn emit_source_identity(workspace_root: &Path) {
     let dirty = std::env::var("MVM_BUILD_SOURCE_DIRTY")
         .ok()
         .unwrap_or_else(|| {
-            git_stdout(
-                workspace_root,
-                &[
-                    "status",
-                    "--porcelain",
-                    "--untracked-files=normal",
-                    "--",
-                    "Cargo.toml",
-                    "Cargo.lock",
-                    "rust-toolchain.toml",
-                    ".cargo",
-                    "crates",
-                    "src",
-                    "build.rs",
-                ],
-            )
-            .map_or_else(
+            let mut args = vec!["status", "--porcelain", "--untracked-files=normal", "--"];
+            args.extend_from_slice(build_support::SOURCE_IDENTITY_PATHS);
+            git_stdout(workspace_root, &args).map_or_else(
                 || "unknown".to_string(),
                 |status| (!status.is_empty()).to_string(),
             )
@@ -99,15 +85,7 @@ fn emit_source_identity(workspace_root: &Path) {
     println!("cargo:rustc-env=MVM_SOURCE_DIRTY={dirty}");
     println!("cargo:rerun-if-env-changed=MVM_BUILD_SOURCE_COMMIT");
     println!("cargo:rerun-if-env-changed=MVM_BUILD_SOURCE_DIRTY");
-    for path in [
-        "Cargo.toml",
-        "Cargo.lock",
-        "rust-toolchain.toml",
-        ".cargo",
-        "crates",
-        "src",
-        "build.rs",
-    ] {
+    for path in build_support::SOURCE_IDENTITY_PATHS {
         println!(
             "cargo:rerun-if-changed={}",
             workspace_root.join(path).display()

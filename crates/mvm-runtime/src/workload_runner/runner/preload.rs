@@ -1,5 +1,6 @@
 //! Saved-state child preparation before claim-time authorization.
 
+use super::claim_standby::MAX_CHILD_NAME_ATTEMPTS;
 use super::*;
 
 impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, B> {

@@ -64,14 +64,14 @@ MVM_VERSION=v0.28.0-rc.2 MVM_SKIP_BOOTSTRAP=1 sh install.sh
 export MVMCTL="${MVMCTL:-mvmctl}"
 export MVM_HOME="$HOME/.mvm-demo"
 "$MVMCTL" --version
-"$MVMCTL" bootstrap
-"$MVMCTL" image pull curlimages/curl:8.21.0
 ```
 
-Only the install is required. The script prepares a new home itself on its first
-run (it pulls the image and builds the runtime when it sees they are missing),
-so `bootstrap` and `image pull` here are optional and only move that wait ahead
-of the demo. Preparation can take a few minutes. The demo needs an Apple Silicon Mac on macOS 26 or later, and working
+Only the install is required. Do not run `mvmctl bootstrap`: it prepares a lot
+the demo never uses and is slow. The script prepares a new home itself on its
+first run, pulling the image and building only the workload runtime, which took
+about half a minute in testing.
+
+The demo needs an Apple Silicon Mac on macOS 26 or later, and working
 internet and DNS, because each allowed destination is looked up when its
 program starts.
 

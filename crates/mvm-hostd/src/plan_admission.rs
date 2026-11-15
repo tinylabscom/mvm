@@ -2173,6 +2173,26 @@ pub(crate) fn admit_and_start_with_verified_release(
     params: AdmitAndStartParams<'_>,
     verified_runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
 ) -> Result<StartedMachine> {
+    let admitted = admit_synthesized_with_verified_release(backend, &params, verified_runtime)?;
+    start_admitted_with_verified_release(
+        StartAdmittedParams {
+            backend,
+            admitted,
+            config: params.config,
+            policy_bundle: params.policy_bundle,
+            emitter: params.emitter,
+            assurance: params.assurance,
+        },
+        verified_runtime,
+    )
+}
+
+/// Admit a synthesized plan without dispatching it; the caller retains its one-use authority.
+pub(crate) fn admit_synthesized_with_verified_release(
+    backend: &AnyBackend,
+    params: &AdmitAndStartParams<'_>,
+    verified_runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
+) -> Result<AdmittedPlan> {
     // The tier comes from the backend that is about to boot this plan — the
     // object itself, via its typed discriminant. Nothing here reads a backend
     // name: the grant gate decides which resource controls a run is measured
@@ -2219,17 +2239,7 @@ pub(crate) fn admit_and_start_with_verified_release(
         params.audit_durability,
     )?;
 
-    start_admitted_with_verified_release(
-        StartAdmittedParams {
-            backend,
-            admitted,
-            config: params.config,
-            policy_bundle: params.policy_bundle,
-            emitter: params.emitter,
-            assurance: params.assurance,
-        },
-        verified_runtime,
-    )
+    Ok(admitted)
 }
 
 #[cfg(test)]

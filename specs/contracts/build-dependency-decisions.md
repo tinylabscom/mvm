@@ -25,6 +25,202 @@ declined; the reasons are recorded so they are not re-derived.
 | [#4713](https://github.com/tinylabscom/mvm/issues/4713) phase 2 — gate `toml` and `regex` out of the guest closure | Make `toml` and `regex` optional `mvm-core` deps owned by `host-state`; gate `domain::manifest`, `user_config` and `config::{normalize_fc_version, fc_version}` behind it (`FC_VERSION_DEFAULT`, `FC_CI_ASSETS_VERSION` and `ARCH` stay ungated; the version normalizer is not rewritten) | No guest crate names the gated modules, and `regex` enters every guest closure only through `mvm-core`. The musl guest closure (same command as phase 1) goes from 100 to 91 with the `toml` gate — `toml`, `toml_edit`, `toml_datetime`, `toml_write`, `serde_spanned`, `winnow` and their now-exclusive `equivalent`/`hashbrown`/`indexmap` edges leave — and from 91 to 87 with the `regex` gate: `regex`, `regex-automata`, `regex-syntax` and `aho-corasick` leave, the last because its only remaining guest edge was `regex`'s `perf-literal`. Phase 1 kept `regex` because the guest-referenced `config` module used it; gating just the two host-only functions leaves the guest-referenced path helpers in place. The `mvmctl` host closure is byte-identical at 351: all twelve host crates enable `host-state`. The `manifest_fixtures` integration test gains a `required-features` entry. `check-guest-agent-runtime-free` name-bans the `toml` and `regex` stacks and its module inventory names `domain::manifest`, `user_config` and `config::fc_version`; `tar` and `aho-corasick` stay unbanned because a direct guest edge to either remains legitimate. | A guest-side consumer of the workload manifest, the operator config or Firecracker version normalization — each would be a new host↔guest protocol surface, not a linked module. |
 | [#4839](https://github.com/tinylabscom/mvm/issues/4839) — consumerless `mvm-hostlib` workspace-dependency row | Delete the `mvm-hostlib` entry from `[workspace.dependencies]`; the crate stays a workspace member | No manifest in the workspace names `mvm-hostlib` as a dependency (`rg 'mvm-hostlib' --glob Cargo.toml` finds only the member list, the unused row and the crate's own manifest), and `mvm-hostlib` is a leaf that nothing links. `cargo tree -p mvmctl -e normal,build --prefix none --locked \| sed 's/ (\*)//' \| sort -u \| wc -l` is 350 before and after, and the same for `-p mvm-hostlib` is 337 before and after; `Cargo.lock` is unchanged. It removes no package: it deletes a declaration that could only mislead a reader into thinking the library has a Rust consumer. | A Rust crate that links `libmvm_hostlib` in-process; add the dependency to that crate then. |
 
+## Development compile-time boundary
+
+The development profile no longer optimizes all of `mvm-core` to make
+AES-GCM fast. `mvm-crypto` is an unpublished shared crypto crate whose `aead`
+module contains the same two concrete `aes-gcm` calls; only that crate gets
+`opt-level = 2`. Crypto operations are organized as modules in this one crate,
+not separate crates per algorithm.
+`mvm-core` keeps keys, nonces, framing, associated data, signature/replay
+checks, and error mapping. Release profiles are unchanged. This adds one
+first-party package, not a new third-party crypto dependency or implementation.
+
+`bin/dev` builds the contributor CLI and native host helpers in one Cargo
+invocation, without enabling embedded host binaries or building the Linux
+builder payload up front. The earlier CLI-only wrapper experiment was rejected
+by a live smoke: launch commands intentionally cannot compile missing host
+helpers. That capability restriction remains unchanged. The full guest-runtime
+archive is separate, pre-existing first-use work that `just embed` never prepared.
+
+Build timings on an Apple Silicon host (16 CPUs, 128 GiB, Rust 1.97.1,
+the repository's two-job default), starting from
+`f7a9759af1161c4f7182f8af9ac1b951fd3f7eab`:
+
+| Measurement | Before | AES/Foundation changes | Shared 256-codegen stage |
+|---|---:|---:|---:|
+| Clean-target `cargo build -p mvmctl --features dev`, wall seconds | 976.60 | 575.95 | 678.60 |
+| Same build, user + system CPU seconds | 894.90 | 608.36 | 655.93 |
+| `mvm-core` compilation unit, seconds | 503.07 | 91.78 | 79.00 |
+| Optimized crypto compilation unit, seconds | absent | 1.25 | 1.40 |
+| `objc2-foundation` compilation unit, seconds | 34.60 | 1.66 | 1.50 |
+| Unchanged build, wall seconds | 31.66 / 57.85 | 2.81 | 2.35 |
+
+The optimized crate was named `mvm-aead` during these measurements; it is now
+`mvm-crypto`, with the same cipher calls in `aead::Aes256Gcm` implementing
+`aead::Aead`. These timings predate that organizational rename and trait API.
+The protocol callers still select the concrete AES-256-GCM implementation,
+so its non-generic method bodies retain the optimized compilation boundary.
+
+The intermediate command was `/usr/bin/time -p ./scripts/cargo.sh build --locked
+-p mvmctl --features dev --timings --target-dir "$PWD/.mvm-test/target-cold"`,
+after sourcing `scripts/dev-env.sh`; repeating it measured the unchanged
+build. The shared-256 command used `.mvm-test/target-aligned` instead. The before
+command used `.mvm-test/target`, without `--locked`;
+the lockfile's resolved versions did not change. All three target directories
+started empty. The before run included about 24 seconds downloading crates;
+the later runs reused the downloaded registry sources. Cargo's HTML timing
+reports supplied the unit times, which overlap and must not be summed as
+wall time. Other builds were running on the host, including workspace
+validation during the shared-256 run. Its observed 31% wall-time reduction
+is not a quiet-host benchmark or a promise for another machine. These are
+historical stages; the follow-up below keeps profiles aligned using Cargo's
+defaults instead of forcing 256 units for every dependency.
+
+A one-line diagnostic-string edit in `mvm-core/src/cold_build.rs`, followed by
+the intermediate CLI build in the warm target directory, took 140.36 seconds
+(the incremental `mvm-core` unit took 20.52 seconds). This deliberately exercises
+the high-fan-out core edit, not just relinking the binary. The diagnostic change
+was reverted before validation; there is no before measurement of that edit,
+so it is not a claimed before/after speedup.
+
+The test-only `codegen-units = 256` setting also forced duplicate compilation
+when switching between tests and live development. Cargo unit graphs for
+`build -p mvmctl --features dev` and `test --workspace --no-run` contained
+289 units with identical package, target, mode, platform, and features that
+differed only in codegen units. Initially, moving the setting to `profile.dev`
+made `profile.test` inherit the same value: those 289 mismatches disappeared,
+and 390 common units had matching profile settings instead of 101.
+All 1,013 test units retained their exact previous profile settings.
+The six test-specific optimization differences remain intentional.
+This is a graph measurement, not a claim that every unit will be reused:
+feature-unification and dependency-fingerprint differences can still rebuild
+their dependents.
+
+The real transition after workspace validation with shared 256 units was measured too:
+`./scripts/cargo.sh build --locked -p mvmctl --features dev --timings --message-format=json`
+in the same target directory took 375.76 seconds, reusing 253 compiler
+artifacts and rebuilding 188. Its immediate unchanged repeat took 1.19
+seconds. Thus the 289 eliminated profile mismatches are not 289 proven
+artifact reuses, and switching between the workspace-test and contributor
+feature selections still has a substantial cost. Keep the live-build target
+separate from workspace validation when their feature selections differ;
+`bin/dev` already has its pair-specific target directory.
+
+Lowering the caller to level 1 without extracting it was rejected: four
+interleaved rounds of four 1 MiB seal/open/wrong-AAD operations took
+0.239–0.451 seconds at level 2 and 2.464–3.961 seconds at level 1.
+Optimizing `aes`, `aes-gcm`, `ghash`, `polyval`, and `ctr` separately did not
+fix the generic caller cost: a 16-operation probe took 15.808 seconds with
+caller level 0, 4.478 seconds at level 1, and 0.107 seconds at level 2.
+Those dependency-wide overrides were not retained.
+
+With the leaf, a single executable linking both old and new `mvm-core`
+artifacts ran four interleaved rounds of sixteen 1 MiB operations
+(seal, open, wrong-AAD refusal, and decryption by the other implementation).
+The old core-level-2 path took 1.312–2.247 seconds per round; the new
+core-level-0/leaf-level-2 path took 1.241–1.700 seconds. Every cross-decryption
+and refusal assertion passed. These are shared-host observations, not a
+stable throughput benchmark or a new security guarantee.
+
+The shared-256 dev artifacts were checked again with four alternating
+16 × 1 MiB seal/open/wrong-AAD runs: the original implementation took
+1.004–1.253 seconds and the aligned leaf implementation took 0.979–1.370
+seconds. All assertions passed; the level-1 caller's multi-fold slowdown
+did not return.
+
+The macOS root dependency now disables `objc2-foundation`'s broad default
+API set. It enables `std` (required for allocation) and the five API features
+used by the main-thread run loop: `NSAutoreleasePool`, `NSDate`,
+`NSObjCRuntime`, `NSRunLoop`, and `NSString`. `block2` and
+`objc2-core-foundation` leave the macOS binary closure; those two and
+`dispatch2` leave the lockfile. No platform behavior is replaced.
+
+Measured with `cargo tree --locked -p PACKAGE -e normal,build --prefix none
+--target TARGET`, counting unique package/version pairs:
+
+| Closure | Before | After |
+|---|---:|---:|
+| `mvmctl`, `aarch64-apple-darwin` | 347 | 346 |
+| `mvm-builder-guest`, `aarch64-unknown-linux-musl` | 87 | 88 |
+
+The net macOS change is two external packages removed and the internal leaf
+added. The guest grows only by the internal leaf. The unnormalized host
+`mvmctl` tree-line count (`sort -u | wc -l`) is 507 → 505; that is not a
+package count because repeat markers remain. The corresponding host-target
+`mvm-builder-guest` count is 137 → 138. At this stage the Linux default and
+all-features package/version counts were 351 and 535, respectively.
+
+The CLI build script also stops watching the deleted root `build.rs`.
+Cargo fingerprint diagnostics identified that missing path as permanently
+dirty, causing unchanged builds to recompile `mvm-cli` and relink `mvmctl`.
+Source identity and invalidation now share the same list of existing source
+roots, with a regression test rejecting missing watch paths. The actual
+crate build scripts remain covered under `crates`; source identity checks
+and payload validation are not disabled.
+
+### Shared defaults and explicit BDD dependencies
+
+Dev and test now both omit `codegen-units`: on the pinned compiler, incremental
+workspace crates use 256 and non-incremental dependencies use 16. This keeps
+the profiles aligned without forcing all dependencies to use the incremental
+crate setting. The optimized AEAD leaf and release profiles are unchanged.
+
+Fresh-target comparisons used the same locked `build -p mvmctl --features dev
+--timings` command, with `--config profile.dev.codegen-units=256` for the
+baseline and no override for the candidate:
+
+| Measurement, seconds | Explicit 256 | Cargo defaults |
+|---|---:|---:|
+| User + system CPU | 630.34 | 593.47 |
+| Cargo elapsed timer | 497.59 | 525.13 |
+| `/usr/bin/time` elapsed | 1165.17 | 1021.65 |
+
+Defaults used about 6% less CPU work. The elapsed clocks diverged and host
+load changed substantially, so this comparison does not establish a reliable
+wall-time improvement. The unchanged default build took 2.22 seconds.
+Running plain Cargo immediately after the wrapper, with identical inputs and
+fingerprint diagnostics, took 1.52 seconds and rebuilt nothing: the wrapper's
+explicit compiler path was not a source of churn in that controlled case.
+Four alternating 16 × 1 MiB AEAD runs took 0.629–0.749 seconds with explicit
+256 and 0.621–0.690 seconds with defaults; all round-trip and refusal checks passed.
+
+The BDD runner was feature-gated, but its unconditional Cucumber dev-dependency
+still compiled during ordinary workspace tests. Cucumber is now an optional
+dependency enabled by the existing `bdd` feature. Its zero-test `world.rs`
+support module moved below `tests/support/` so Cargo no longer discovers it
+as an independent integration target. Shared test-support dependencies,
+documentation examples, and all actual tests remain.
+
+Cargo unit graphs on the host, before/after Cucumber gating with shared defaults:
+
+| Build selection | Units before → after | Package/version IDs before → after |
+|---|---:|---:|
+| `test --workspace --no-run` | 996 → 936 | 481 → 433 |
+| `test -p mvm-conformance --test conformance --features bdd --no-run` | 522 → 522 | 407 → 407 |
+| `build -p mvmctl --features dev` | 474 → 474 | 372 → 372 |
+
+The live graph, including recursive dependency edges, is unchanged by BDD
+gating. Test and live Clap features now agree; regex defaults remain required
+by `predicates`, and Tokio's test-util remains explicitly used by tests.
+With BDD gated, forcing 256 again produces 948 test units versus 936 with
+defaults, so defaults also avoid 12 duplicate units in that graph.
+
+After validation, the warm-cache transition from
+`./scripts/cargo.sh test --locked --workspace --no-run` to
+`./scripts/cargo.sh build --locked -p mvmctl --features dev --timings --message-format=json`
+took 37.18 seconds: 413 compiler artifacts were reused and 19 were rebuilt,
+all first-party. The immediate unchanged repeat took 0.77 seconds.
+This is a useful current workflow observation, not a controlled speedup
+against the earlier 375.76-second transition: cache history and host load
+differed. The feature selections still differ and can rebuild first-party code.
+
+The Linux all-features normal/build budget becomes 578 rather than 535:
+43 existing BDD packages are now counted when `bdd` is explicitly enabled,
+instead of being unconditional dev-dependencies excluded by that inventory.
+This is dependency reclassification, not 43 newly introduced packages.
+The shipped default budgets remain 351 on Linux and 346 on macOS.
+
 ## Unused test dependencies
 
 Remove `wait-timeout` from `mvm-vmm` and `assert_cmd` from

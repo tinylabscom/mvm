@@ -13,7 +13,23 @@
 # MVMCTL, MVM_HOME and IMAGE can be overridden.
 set -euo pipefail
 
+# `mvmctl` can resolve to a source build in this checkout's target/ directory
+# (a PATH entry like ./target/release). A source build compiles its own guest
+# runtime on first use, which takes twenty minutes or more; the installed
+# release does not. Prefer the installed release unless MVMCTL says otherwise.
 mvm="${MVMCTL:-mvmctl}"
+if [ -z "${MVMCTL:-}" ]; then
+  resolved="$(cd "$(dirname "$0")/.." && command -v mvmctl || true)"
+  case "$resolved" in
+    */target/* | ./*)
+      if [ -x "$HOME/.local/bin/mvmctl" ]; then
+        mvm="$HOME/.local/bin/mvmctl"
+        echo "note: mvmctl here is a source build ($resolved); using the installed release $mvm" >&2
+      else
+        echo "note: mvmctl here is a source build ($resolved); its first run compiles the guest runtime (20+ minutes). Install a release, or set MVMCTL." >&2
+      fi ;;
+  esac
+fi
 image="${IMAGE:-curlimages/curl:8.21.0}"
 export MVM_HOME="${MVM_HOME:-$HOME/.mvm-demo}" MVM_RESIDENCY=cold
 

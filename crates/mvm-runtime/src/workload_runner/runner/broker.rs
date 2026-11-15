@@ -1,6 +1,7 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+use std::path::Path;
 
-use super::{BrokerGuard, BrokerRegisterRequest, BrokerRegistrar};
+use mvm_core::protocol::broker::ServiceId;
 
 /// The production broker registrar delegates to the resident host agent or
 /// the per-VM broker fork, preserving the admitted capability boundary.
@@ -49,4 +50,95 @@ impl BrokerRegistrar for RealBrokerRegistrar {
         };
         Ok(BrokerGuard::from_services_guard(guard))
     }
+}
+
+/// What the runner needs to register the per-VM host-services broker after boot.
+pub struct BrokerRegisterRequest<'a> {
+    /// VM name — the registration's `vm_id`, workload id, and per-VM chain key.
+    pub vm_name: &'a str,
+    /// Per-VM state dir (audit-signer pid/sock + the daemon tenant-ref marker).
+    pub state_dir: &'a Path,
+    /// Tenant from the admitted plan. `None` ⇒ unadmitted ⇒ a defused no-op:
+    /// no broker services and no BROKER_PORT in the spec, so a stray guest dial
+    /// stays `ECONNREFUSED` (fail-closed).
+    pub tenant: Option<&'a str>,
+    /// The `BROKER_PORT` socket the broker/daemon binds — the same path the spec
+    /// wires the guest's `BROKER_PORT` relay to. `None` on the unadmitted path.
+    pub broker_listen_socket: Option<&'a Path>,
+    /// Host services from the admitted plan. Empty means no broker process is
+    /// needed and every broker call remains fail-closed.
+    pub services: &'a [ServiceId],
+    /// Exact typed capabilities carried by admitted extension bindings.
+    pub capability_bindings: &'a [mvm_contract::protocol::agent_capability::CapabilityBinding],
+    /// Controller-backed typed services prepared by the admitting process.
+    pub service_proxies: &'a [mvm_contract::protocol::broker_control::ServiceProxyBinding],
+}
+
+/// Register/spawn the per-VM host-services broker for an admitted workload,
+/// returning a guard whose Drop reaps until defused. The claims-12/13 seam:
+/// Admitted host services reach the guest over `BROKER_PORT`. Behind a trait so
+/// the runner is unit-testable with no real broker subprocess.
+pub trait BrokerRegistrar: Send + Sync {
+    fn register(&self, req: &BrokerRegisterRequest<'_>) -> Result<BrokerGuard>;
+}
+
+/// RAII guard around the registered broker services: Drop reaps them until the
+/// VM is confirmed up and `defuse`d (the `stop` path then owns teardown). Wraps
+/// the existing `ServicesGuard` so no reaping logic is duplicated.
+pub struct BrokerGuard(pub(super) mvm_vmm::host::host_agent_spawn::ServicesGuard);
+
+impl BrokerGuard {
+    pub(crate) fn from_services_guard(
+        guard: mvm_vmm::host::host_agent_spawn::ServicesGuard,
+    ) -> Self {
+        Self(guard)
+    }
+
+    /// A guard that reaps nothing on drop — the unadmitted / spawn-failed path.
+    pub(super) fn defused() -> Self {
+        Self(mvm_vmm::host::host_agent_spawn::ServicesGuard::None)
+    }
+
+    /// Disarm: the VM is up; the `stop` path now owns teardown.
+    pub fn defuse(&mut self) {
+        self.0.defuse();
+    }
+
+    /// Whether the launch came up with the host services it asked for.
+    ///
+    /// The guard alone cannot answer this. It records only whether anything was
+    /// registered, which is the same `false` for a workload that bound no
+    /// service as for one whose registration was skipped — `requested` is what
+    /// separates them. Judging on the guard alone marks every workload that
+    /// binds no host service as degraded, and a degraded launch is refused as a
+    /// sample of a healthy one.
+    #[must_use]
+    pub fn services_healthy(&self, requested: &[ServiceId]) -> bool {
+        requested.is_empty() || self.0.is_registered()
+    }
+}
+
+pub(super) fn admitted_broker_bindings(
+    plan_json: Option<&str>,
+) -> Result<(
+    Vec<ServiceId>,
+    Vec<mvm_contract::protocol::agent_capability::CapabilityBinding>,
+)> {
+    plan_json
+        .map(mvm_core::plan::plan_from_admitted_json)
+        .transpose()
+        .context("parse admitted plan host services")
+        .map(|plan| {
+            plan.map_or_else(
+                || (Vec::new(), Vec::new()),
+                |plan| {
+                    let capabilities = plan
+                        .extensions
+                        .iter()
+                        .flat_map(|extension| extension.capabilities.iter().cloned())
+                        .collect();
+                    (plan.services, capabilities)
+                },
+            )
+        })
 }

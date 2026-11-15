@@ -14,6 +14,30 @@ separately, the files that were not read. Absence from the "read" column is not 
 soundness. "Read" is taken from the fixing PR descriptions and the review notes for the lane; the
 line ranges are as recorded there and were not re-derived when this file was written.
 
+## Compile-time AES-GCM boundary
+
+Reviewed `crates/mvm-crypto/src/aead.rs`,
+`crates/mvm-core/src/crypto/aead.rs`, and the seal/open paths and independent
+cipher tests in `crates/mvm-core/src/net/session.rs`. The shared crypto crate
+only instantiates the existing `aes-gcm` implementation in its own optimized
+compilation unit. It borrows fixed-size keys and nonces for one operation and
+returns owned ciphertext/plaintext; it owns no persistent keys, process, task,
+lock, or lifecycle state.
+
+The public `aead::Aead` trait lets implementations define their key, nonce,
+and error types. `Aes256Gcm` remains the concrete selection at both production
+call sites; no algorithm negotiation, protocol switch, or new cipher is added.
+Integration tests cover trait-object dispatch and a downstream refusal-only
+implementation with different associated types.
+
+The callers retain key zeroization, nonce generation, associated-data selection,
+framing, signature verification before session decryption, sequence advancement,
+replay checks, and existing error mapping. The at-rest encryption `expect`
+retains its existing message and failure condition. The leaf adds a known AES-256-GCM
+vector and wrong-key/nonce/AAD, truncated-tag, and byte-tampering tests; the
+independent direct-cipher tests in `mvm-core` remain. This is not a review of
+the upstream cipher implementation or of the broader snapshot/session lifecycle.
+
 ## Mechanical gate
 
 `clippy::undocumented_unsafe_blocks` is `deny` workspace-wide ([#5438](https://github.com/tinylabscom/mvm/pull/5438);

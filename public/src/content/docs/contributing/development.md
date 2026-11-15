@@ -203,6 +203,16 @@ cargo run -- bootstrap
 > builds the whole set up front, per-VM helpers included. Released binaries
 > always carry the payload.
 
+For live development, `bin/dev <command>` builds the `dev`-feature CLI and native
+host helpers together before running it, with state isolated to the checkout
+(and selected image checkout). Launch commands deliberately do not compile
+missing host helpers, so the wrapper prepares them instead. It does not embed
+the Linux builder payload; use `just embed` when you explicitly want the full
+embedded build ready before running a command (set
+`MVM_EMBED_FEATURES=embed-host-bins,dev` for the same contributor surface).
+Keep the same target directory and feature selection for repeated edits to
+reuse Cargo artifacts.
+
 > **Note — how the builder VM gets them.** The builder image does not have to
 > carry `mvm-host-vm-init` or `mvm-builderd`. Every builder boot, on every
 > backend, hands the guest a small initramfs — the *builder boot payload* —
@@ -469,6 +479,31 @@ rebuilds about twenty workspace crates each time: 4 min 34 s on an Apple
 Silicon laptop and 2 min 04 s on a 12-core Linux host in a measured run. Stay on
 one selection style per worktree target directory, or point the other at its own
 `CARGO_TARGET_DIR`.
+
+For compile-time diagnosis, measure the same target and features each time:
+
+```bash
+cargo build --locked -p mvmctl --features dev --timings
+CARGO_LOG=cargo::core::compiler::fingerprint=info cargo build --locked -p mvmctl --features dev
+```
+
+The HTML report is under `$CARGO_TARGET_DIR/cargo-timings/`; the second
+command explains why Cargo considers a unit stale. Separate an empty-target
+build, an unchanged build, and a one-file edit. Do not use `release-min` for
+the edit/run loop: its size-oriented LTO is a shipping cost. Development
+builds optimize concrete AES-GCM operations in `mvm-crypto::aead`, not all of
+`mvm-core`, preserving encrypted I/O throughput without optimizing every
+core module. Dev and test use the same Cargo codegen defaults, allowing fewer
+units for non-incremental dependencies than for incremental workspace crates
+without introducing a test-only profile mismatch.
+Feature differences can still cause rebuilds. The two-job default limits
+contention between worktrees; raising it on a host already running many builds
+can make turnaround worse.
+
+Ordinary workspace tests do not compile Cucumber. The existing `bdd` feature
+enables both the conformance runner and its framework dependency; use
+`just bdd::run` for that suite. The conformance library's unit tests and
+documentation-example checks remain part of ordinary workspace validation.
 
 ## Profiling
 

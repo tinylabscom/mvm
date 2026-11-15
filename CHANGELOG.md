@@ -2,6 +2,18 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.28.0-rc.6] — 2026-11-15
+
+### Added
+- **runtime**: Retain verified release runtime evidence per launch
+
+### Documentation
+- **trail**: Record why the installer re-signs macOS binaries and how the smoke compares them
+
+### Fixed
+- **explain**: Authenticate a recent run from the live segment, not the whole chain
+- **release**: Expect only the files the installer stages for the selected backend
+
 ## [0.28.0-rc.5] — 2026-11-15
 
 ### Added
