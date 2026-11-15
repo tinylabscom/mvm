@@ -51,6 +51,26 @@ impl StandingSockets {
     }
 }
 
+/// Backend-shaped guest→host channel for the GPU endpoint. QEMU's vhost-vsock
+/// lets the endpoint bind the real port directly; every other tier proxies the
+/// guest dial to a per-VM UDS. A free function so both `WorkloadRunner` and the
+/// unit tests name the same binding decision.
+pub(super) fn gpu_endpoint_transport(
+    kind: mvm_core::vm_backend::BackendKind,
+    state_dir: &std::path::Path,
+) -> mvm_vmm::host::network_endpoint_spawn::EndpointTransport {
+    use mvm_vmm::host::network_endpoint_spawn::EndpointTransport;
+    if kind == mvm_core::vm_backend::BackendKind::Qemu {
+        EndpointTransport::Vsock {
+            port: mvm_agentd::vsock::GPU_PORT,
+        }
+    } else {
+        EndpointTransport::Uds {
+            path: mvm_core::config::vm_vsock_port_socket_at(state_dir, mvm_agentd::vsock::GPU_PORT),
+        }
+    }
+}
+
 pub(super) fn standing_sockets(state_dir: &Path, config: &VmStartConfig) -> StandingSockets {
     StandingSockets {
         // Single source of truth shared with the host-side resolver so the
@@ -94,6 +114,38 @@ mod tests {
     use super::*;
     use mvm_net::channel::GuestService;
     use mvm_vmm::host::spec_map::workload_vsock_ports;
+
+    #[test]
+    fn gpu_endpoint_transport_binds_vsock_only_for_qemu() {
+        use mvm_core::vm_backend::BackendKind;
+        use mvm_vmm::host::network_endpoint_spawn::EndpointTransport;
+
+        let state = tempfile::tempdir().unwrap();
+        assert_eq!(
+            gpu_endpoint_transport(BackendKind::Qemu, state.path()),
+            EndpointTransport::Vsock {
+                port: mvm_agentd::vsock::GPU_PORT,
+            },
+            "QEMU's vhost-vsock binds the GPU port directly"
+        );
+        for other in [
+            BackendKind::Firecracker,
+            BackendKind::Libkrun,
+            BackendKind::Hvf,
+            BackendKind::Wasm,
+        ] {
+            assert_eq!(
+                gpu_endpoint_transport(other, state.path()),
+                EndpointTransport::Uds {
+                    path: mvm_core::config::vm_vsock_port_socket_at(
+                        state.path(),
+                        mvm_agentd::vsock::GPU_PORT,
+                    ),
+                },
+                "every non-QEMU tier proxies the guest GPU dial to a per-VM UDS"
+            );
+        }
+    }
 
     #[test]
     fn telemetry_has_its_own_socket_without_optional_workload_grants() {
