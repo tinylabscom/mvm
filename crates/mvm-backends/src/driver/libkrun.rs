@@ -338,7 +338,7 @@ impl LibkrunDriver {
                 );
             }
             if Instant::now() >= deadline {
-                let _ = child.kill();
+                super::kill_and_reap(&mut child);
                 bail!(
                     "libkrun supervisor did not confirm boot within {:?}; see {}{}",
                     crate::driver::libkrun_process::PID_FILE_TIMEOUT,
@@ -367,7 +367,7 @@ impl LibkrunDriver {
                 );
             }
             if Instant::now() >= sock_deadline {
-                let _ = child.kill();
+                super::kill_and_reap(&mut child);
                 bail!(
                     "libkrun supervisor did not bind vsock socket {} within {:?}; killed; see {}",
                     agent_socket.display(),
