@@ -457,6 +457,7 @@ jobs:
               process_rpc::tests::a_proc_start_spawned_workload_holds_no_capabilities \
               console::tests::a_console_spawned_shell_holds_no_capabilities \
               worker_pool::tests::a_warm_pool_worker_holds_no_capabilities \
+              worker_pool::tests::a_script_worker_started_through_the_descriptor_path_holds_no_capabilities \
               lifecycle_hooks::tests::a_hook_spawned_process_holds_no_capabilities; do
             sudo -E env MVM_GUEST_PRIVILEGED_TESTS=1 "$lib" --exact "$witness" 2>&1 | tee "$RUNNER_TEMP/witness.log"
             grep -q "1 passed" "$RUNNER_TEMP/witness.log"
