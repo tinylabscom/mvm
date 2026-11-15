@@ -53,7 +53,15 @@ pub struct RunExplanation {
     /// The machine's egress refusals while this run held its name, counted by
     /// destination and reason, each with its remedy.
     pub egress_denials: Vec<DeniedDestination>,
+    /// Every entry of this run was authenticated (host signature and chain
+    /// link). See `history_verified` for what that did not cover.
     pub chain_verified: bool,
+    /// The whole chain was walked from its first entry, so the history before
+    /// these entries was attested too. False when the run was found in the live
+    /// segment and only its own entries were authenticated, which is what keeps
+    /// `explain` fast on a long-lived host; `mvmctl trust audit verify` walks
+    /// everything.
+    pub history_verified: bool,
     /// Total verified entry count across the whole chain file (not just
     /// this run's events). Rendering-only; not part of the JSON contract.
     #[serde(skip)]
@@ -133,6 +141,18 @@ pub fn collect_run(
         .file_stem()
         .and_then(|stem| stem.to_str())
         .with_context(|| format!("audit chain path {} has no file stem", path.display()))?;
+    // A chain that has never rotated is one small file: walk it all. Only a
+    // rotated chain, where the walk grows with everything ever written, takes
+    // the fast path.
+    let rotated = mvm_core::audit_verify::set::segment_shape(audit_dir, base)
+        .is_ok_and(|shape| !shape.sealed.is_empty());
+    if rotated
+        && let Some(entries) =
+            authenticate_run_in_live_segment(audit_dir, base, verifying_key, run_id)
+    {
+        let count = entries.len();
+        return explain_entries(&entries, run_id, tenant, Ok(count), false);
+    }
     let (all_entries, verification) =
         match mvm_core::audit_verify::set::verify_segment_entries(audit_dir, base, verifying_key) {
             Ok(entries) => {
@@ -153,6 +173,83 @@ pub fn collect_run(
             }
         };
 
+    explain_entries(
+        &all_entries,
+        run_id,
+        tenant,
+        verification.map_err(|e| e.to_string()),
+        true,
+    )
+}
+
+/// Find `run_id` in the live audit segment and authenticate just the entries that
+/// bear on it: its own, and the endpoint's refusals under the machine it ran on.
+///
+/// The full walk costs a signature check per entry ever written, so on a host
+/// that has run for a while `explain` takes many seconds. Each entry here still
+/// carries its host signature and chain link; what is not re-attested is the
+/// history before it. `None` means the run is not wholly in the live segment or
+/// something did not authenticate, and the caller walks the whole chain.
+fn authenticate_run_in_live_segment(
+    dir: &Path,
+    tenant: &str,
+    key: &VerifyingKey,
+    run_id: &str,
+) -> Option<Vec<PlanAuditEntry>> {
+    use mvm_core::audit_verify::live::authenticate_live_entries as live;
+    if run_id.is_empty() {
+        return None;
+    }
+    let mut entries = live(dir, tenant, key, run_id, |_| true).ok()?.entries;
+    let plan_ids: BTreeSet<&str> = entries
+        .iter()
+        .filter(|e| {
+            e.plan_id.0 == run_id || e.plan_id.0.starts_with(run_id) || e.image_name == run_id
+        })
+        .map(|e| e.plan_id.0.as_str())
+        .collect();
+    let [plan_id] = plan_ids.into_iter().collect::<Vec<_>>()[..] else {
+        return None;
+    };
+    let plan_id = plan_id.to_string();
+    // A run that began before the last rotation has its start in a retired
+    // segment, which this read does not see; explaining it from here would
+    // silently drop its beginning.
+    if !entries
+        .iter()
+        .any(|e| e.plan_id.0 == plan_id && e.event == "plan.admitted")
+    {
+        return None;
+    }
+    let image_name = entries
+        .iter()
+        .find(|e| e.plan_id.0 == plan_id)?
+        .image_name
+        .clone();
+    let machine = booted_machine(&entries, &plan_id)
+        .unwrap_or(&image_name)
+        .to_string();
+    // The run's own entries first, so a run named by its image still gets all of them.
+    for needle in [plan_id.as_str(), machine.as_str()] {
+        for entry in live(dir, tenant, key, needle, |_| true).ok()?.entries {
+            if !entries.contains(&entry) {
+                entries.push(entry);
+            }
+        }
+    }
+    entries.sort_by_key(|e| e.timestamp);
+    Some(entries)
+}
+
+/// Render `run_id` from `all_entries`, which are authenticated, with the state
+/// of the chain they came from.
+fn explain_entries(
+    all_entries: &[PlanAuditEntry],
+    run_id: &str,
+    tenant: &str,
+    verification: std::result::Result<usize, String>,
+    history_verified: bool,
+) -> Result<RunExplanation> {
     let matches: Vec<&PlanAuditEntry> = all_entries
         .iter()
         .filter(|e| {
@@ -196,8 +293,8 @@ pub fn collect_run(
         })
         .collect();
 
-    let machine = booted_machine(&all_entries, &plan_id).unwrap_or(&image_name);
-    let egress_denials = run_denials(&all_entries, &plan_id, machine);
+    let machine = booted_machine(all_entries, &plan_id).unwrap_or(&image_name);
+    let egress_denials = run_denials(all_entries, &plan_id, machine);
 
     let (chain_verified, chain_entry_count, verify_error) = match verification {
         Ok(count) => (true, count, None),
@@ -213,6 +310,7 @@ pub fn collect_run(
         events,
         egress_denials,
         chain_verified,
+        history_verified: history_verified && chain_verified,
         chain_entry_count,
         verify_error,
     })
@@ -341,6 +439,94 @@ mod tests {
                 ],
             ))
             .unwrap();
+    }
+
+    /// On a chain that has rotated, `explain` authenticates the run's own
+    /// entries in the live segment instead of walking every segment, says so,
+    /// and still reports the run's refusals.
+    #[test]
+    fn a_rotated_chain_explains_a_recent_run_from_the_live_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set(mvm_core::config::AUDIT_SEGMENT_BYTES_ENV, "16384");
+        let key = SigningKey::from_bytes(&[13; 32]);
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key.clone(), dir.path()).unwrap();
+        // Fill until the first rotation, so the run below starts in a fresh live segment.
+        let mut n = 0;
+        while mvm_core::audit_verify::set::segment_shape(dir.path(), "local")
+            .map_or(true, |shape| shape.sealed.is_empty())
+        {
+            let old = fixture_plan("local", &format!("plan-old-{n}"));
+            emitter.emit_admitted(&old, "host:test").unwrap();
+            emitter.emit_exited(&old, 0, "hvf").unwrap();
+            n += 1;
+        }
+        let plan = fixture_plan("local", "plan-recent-1");
+        emitter.emit_admitted(&plan, "host:test").unwrap();
+        emitter.emit_launched(&plan, "hvf").unwrap();
+        endpoint_refusal(
+            dir.path(),
+            &key,
+            "vm-test",
+            "example.com:443",
+            "policy_denied",
+        );
+
+        let path = dir.path().join("local.jsonl");
+        let shape = mvm_core::audit_verify::set::segment_shape(dir.path(), "local").unwrap();
+        assert!(!shape.sealed.is_empty(), "the chain must have rotated");
+        let explanation = collect_run(&path, &vk, "local", "plan-recent-1").unwrap();
+        assert!(explanation.chain_verified);
+        assert!(!explanation.history_verified);
+        assert_eq!(explanation.events.len(), 2);
+        assert_eq!(explanation.egress_denials.len(), 1);
+
+        let old = collect_run(&path, &vk, "local", "plan-old-0").unwrap();
+        assert!(
+            old.history_verified,
+            "a run outside the live segment is walked in full"
+        );
+    }
+
+    /// A run whose start is in a retired segment is not explained from the live
+    /// one, which would drop its beginning: the whole chain is walked instead.
+    #[test]
+    fn a_run_that_straddles_a_rotation_is_walked_in_full() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set(mvm_core::config::AUDIT_SEGMENT_BYTES_ENV, "4096");
+        let key = SigningKey::from_bytes(&[14; 32]);
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let mut n = 0;
+        while mvm_core::audit_verify::set::segment_shape(dir.path(), "local")
+            .is_ok_and(|shape| shape.sealed.is_empty())
+            || n == 0
+        {
+            let old = fixture_plan("local", &format!("plan-old-{n}"));
+            emitter.emit_admitted(&old, "host:test").unwrap();
+            n += 1;
+        }
+        // The run is admitted, another run fills the live segment until it
+        // rotates, and only then does the first run launch.
+        let plan = fixture_plan("local", "plan-straddle-1");
+        emitter.emit_admitted(&plan, "host:test").unwrap();
+        let sealed = |dir: &Path| {
+            mvm_core::audit_verify::set::segment_shape(dir, "local")
+                .map_or(0, |shape| shape.sealed.len())
+        };
+        let before = sealed(dir.path());
+        let other = fixture_plan("local", "plan-other-1");
+        while sealed(dir.path()) == before {
+            emitter.emit_launched(&other, "hvf").unwrap();
+        }
+        emitter.emit_launched(&plan, "hvf").unwrap();
+
+        let path = dir.path().join("local.jsonl");
+        let explanation = collect_run(&path, &vk, "local", "plan-straddle-1").unwrap();
+        assert!(explanation.history_verified);
+        assert_eq!(explanation.events.len(), 2);
     }
 
     /// A warm claim runs on its standby's machine; its refusals are recorded
