@@ -380,7 +380,7 @@ fn boot(inputs: &Inputs, vm: &mut OwnedVm, opted_in: bool) -> Result<BootEvidenc
                 &registration.expected.identity == pin,
                 "registered native caller pin mismatch"
             );
-            mvm_hostd::supervisor::caller_registration::verify_cold_start(
+            mvm_hostd::supervisor::admission::caller_registration::verify_cold_start(
                 &vm.name,
                 booted.resources().admission.admitted.signed(),
                 registration,
@@ -420,7 +420,8 @@ fn boot(inputs: &Inputs, vm: &mut OwnedVm, opted_in: bool) -> Result<BootEvidenc
 }
 
 fn require_replay_denial(status: ExitStatus, diagnostic: &[u8]) -> Result<()> {
-    let category = mvm_hostd::supervisor::caller_registration::CALLER_REGISTRATION_REPLAY_DENIED;
+    let category =
+        mvm_hostd::supervisor::admission::caller_registration::CALLER_REGISTRATION_REPLAY_DENIED;
     ensure!(
         !status.success()
             && diagnostic.len() <= REPLAY_DIAGNOSTIC_LIMIT
@@ -510,12 +511,12 @@ fn native_cold_entrypoint_registration_and_replay() -> Result<()> {
     let signed = serde_json::from_value(first.config.plan.clone().context("signed plan missing")?)?;
     // Establish that replay still has valid crypto, context, time, and inputs.
     // Its refusal must not be mistaken for a bad fixture or expired proof.
-    mvm_hostd::supervisor::caller_registration::verify_cold_start(
+    mvm_hostd::supervisor::admission::caller_registration::verify_cold_start(
         &registered.name,
         &signed,
         registration,
     )?;
-    mvm_hostd::supervisor::caller_registration::load_boot_inputs(&first.config)?;
+    mvm_hostd::supervisor::admission::caller_registration::load_boot_inputs(&first.config)?;
     registered.cleaned = false;
     let status = replay_process(&inputs.supervisor, &first.config)?;
     ensure!(
@@ -701,7 +702,8 @@ fn replay_evidence_rejects_disabled_guard_and_unrelated_child_failures() -> Resu
             .env_clear()
             .output()?)
     };
-    let category = mvm_hostd::supervisor::caller_registration::CALLER_REGISTRATION_REPLAY_DENIED;
+    let category =
+        mvm_hostd::supervisor::admission::caller_registration::CALLER_REGISTRATION_REPLAY_DENIED;
     let denied = run(&format!("printf 'Error: {category}\\n' >&2; exit 1"))?;
     require_replay_denial(denied.status, &denied.stderr)?;
     for script in [

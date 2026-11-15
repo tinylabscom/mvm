@@ -24,111 +24,32 @@
 //! - `keystore` — `KeystoreReleaser` trait + `NoopKeystoreReleaser`.
 //! - `audit` — `AuditSigner` trait + `NoopAuditSigner`.
 //! - `artifact` — `ArtifactCollector` trait + `NoopArtifactCollector`.
-//! - `supervisor` — `Supervisor` aggregate that owns the slots.
+//! - `aggregate` — `Supervisor` aggregate that owns the slots.
+//!
+//! Everything else lives in a responsibility group:
+//! - `admission` — caller registration and restored/warm-claimed plan checks.
+//! - `audit` — the chain-signed audit log and per-subsystem audit events.
+//! - `datapath` — guest-egress L4/L7 proxy, DNS/ICMP and firewall primitives.
+//! - `endpoint` — the per-VM network endpoint, FlowMux and TLS termination.
+//! - `inspection` — inspectors, scanners, redaction and destination policy.
+//! - `lifecycle` — HVF stop, wall clock, session expiry, reaping, balloon.
+//! - `telemetry` — AI budgets, action ledger, sampling and egress telemetry.
+//! - `services` — the broker subprocess proxy clients.
 
-pub mod accept_loop;
-pub mod action_ledger;
-pub mod ai_meter;
+pub mod admission;
+pub mod aggregate;
 pub mod artifact;
 pub mod audit;
-pub mod audit_checkpoint;
-pub mod audit_dedup;
-pub mod audit_file;
-pub mod audit_mirror;
-pub mod audit_recorder;
 pub mod backend;
-pub mod balloon;
-pub mod balloon_runtime;
-pub mod circuit_breaker;
-pub mod destination;
-/// Chain-signed metadata audit for policy-gated DNS questions.
-pub mod dns_audit;
-/// Pure DNS resolution used by the FlowMux endpoint.
-pub mod dns_resolver;
-/// Host-side vsock egress telemetry (eBPF/procfs).
-pub mod ebpf_telemetry;
+pub mod datapath;
 pub mod egress;
-pub mod entropy_scanner;
-pub mod firewall;
-pub mod runtime_approval;
-// Per-VM gateway flow-event subscriber sink: the gateway bridge emits each
-// FlowEvent through here in parallel with the signer mpsc.
-pub mod gateway_audit;
-// Per-VM gateway audit bridge. Splices guest virtio-net <-> host
-// gateway, emits FlowOpened/FlowClosed
-// through a per-VM signer_task into the claim-8 chain, broadcasts
-// NDJSON to gateway_audit subscribers, and exposes a `FlowPolicy` hook
-// for SNI / L7 inspectors.
-pub mod egress_rate;
-#[cfg(feature = "custom-dns")]
-pub mod hickory_dns;
-pub mod hvf_stop;
-pub mod icmp_audit;
-pub mod icmp_echo;
-pub mod icmp_handler;
-pub mod injection_guard;
-pub mod inspector;
-pub mod instance_sampler;
+pub mod endpoint;
+pub mod inspection;
 pub mod keystore;
-pub mod l7_proxy;
-pub mod name_scanner;
-// Observer trait + Pipeline builder for the gateway audit substrate.
-// Observers consume `&FlowEvent` references inside `signer_task`
-// (fan-out before chain signing). Host-allowlisted via
-// `~/.mvm/observers/allowlist.toml` (mode 0600).
-/// Host substitution endpoint request preparation (placeholder → real
-/// credential, binding-checked). The forward leg + the guest-facing
-/// listener are separate transport steps.
-pub mod flowmux;
-pub mod ingress_transform;
-pub mod network;
-/// The per-VM substitution endpoint subprocess library half: the
-/// stdin config contract + store-opening/service assembly. The
-/// `mvm-network-endpoint` bin is the process wrapper.
-pub mod network_endpoint;
-pub mod network_endpoint_connector;
-pub mod network_endpoint_proxy;
-pub mod pii_redactor;
-pub mod proxy;
-pub mod reaper;
-/// Undeclared secret/PII redaction shared by the egress endpoint and the
-/// declared-ingress transform.
-pub mod redactor;
-pub mod reversible_replacement;
-/// Chain-signed `secret.substituted` / `secret.placeholder_dropped`
-/// audit events (claim 13: metadata only, never the secret value).
-pub mod secret_audit;
-pub mod secrets_scanner;
-/// What a per-VM supervisor consumed on behalf of its machine — the
-/// self-measurement the in-process VMM tiers record at teardown.
-pub mod self_usage;
-pub mod sensitive_detector;
-/// Termination of an admitted FlowMux flow to a host carrying a bound secret:
-/// TLS under the per-VM CA, request framing, and the hand-off to substitution.
-pub mod terminator;
-/// Live forensic transcript capture sink — fills an armed capture's manifest
-/// with encrypted byte chunks as they cross the host bridge.
-pub mod transcript_sink;
-// Supervisor-side UDS proxy clients for the three broker subprocesses
-// (mvm-broker, mvm-host-signer, mvm-audit-signer). Stateless client
-// libraries that open a fresh UDS connection per call.
-pub mod aggregate;
-pub mod caller_registration;
-/// Arming a warm-claimed child's bounds in the standby supervisor it inherits.
-pub mod claimed_child;
-pub mod http_hardening;
-pub mod protected_handoff;
-/// Verification of the plan a restored child's supervisor takes as authority.
-pub mod restored_plan;
+pub mod lifecycle;
 pub mod services;
-/// Session idle-timeout enforcement: the shared reap decision and the
-/// supervisor-side watcher.
-pub mod session_expiry;
-pub mod ssrf_guard;
 pub mod state;
-/// The supervisor-side wall-clock timer — the mechanism behind
-/// `WallClockControl::SupervisorTimer`.
-pub mod wall_clock;
+pub mod telemetry;
 
 /// First index of `needle` in `haystack`, or `None`.
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -146,60 +67,62 @@ pub use aggregate::{
 pub use artifact::{
     ArtifactCollector, ArtifactError, LiveArtifactCollector, NoopArtifactCollector,
 };
-pub use audit::{
-    AuditError, AuditSigner, CapturingAuditSigner, NoopAuditSigner, PlanAuditEntry, SignedEnvelope,
-    flow_closed, flow_observer_fault, flow_opened, for_plan, transcript_sealed,
-};
-pub use audit_dedup::{Decision, DedupKey, RetryStormSummary, RetryStormSuppressor};
-pub use audit_file::{
+pub use audit::audit_dedup::{Decision, DedupKey, RetryStormSummary, RetryStormSuppressor};
+pub use audit::audit_file::{
     ChainCheckpoint, FileAuditSigner, IncrementalVerification, RotationPolicy, SegmentWalk,
     VerifyError, verify_audit_chain, verify_audit_chain_entries, verify_audit_chain_incremental,
     verify_chain_bytes,
 };
-pub use audit_recorder::{
+pub use audit::audit_recorder::{
     EventCategory, Recorder, RecorderError, UNBOUND_IMAGE_NAME, UNBOUND_IMAGE_SHA256,
     UNBOUND_PLAN_ID,
 };
+pub use audit::signer::{
+    AuditError, AuditSigner, CapturingAuditSigner, NoopAuditSigner, PlanAuditEntry, SignedEnvelope,
+    flow_closed, flow_observer_fault, flow_opened, for_plan, transcript_sealed,
+};
 pub use backend::{BackendError, BackendLaunchSpec, BackendLauncher, NoopBackendLauncher};
-#[cfg(target_os = "macos")]
-pub use balloon::VmPressureLevelSource;
-pub use balloon::{
-    BalloonAction, BalloonController, BalloonPolicy, HostPressure, HostPressureSource,
-    PsiPressureSource, SysinfoPressureSource, TickOutcome, default_pressure_source,
-};
-pub use balloon_runtime::{BalloonRuntimeConfig, run_balloon_loop, run_one_tick};
-pub use circuit_breaker::{
-    CircuitBreaker, CircuitBreakerConfig, CircuitState, Clock as CircuitBreakerClock,
-    InspectorReporter, SystemClock as CircuitBreakerSystemClock,
-};
-pub use destination::DestinationPolicy;
-pub use egress::{EgressDecision, EgressError, NoopEgressProxy, SupervisorEgressProxy};
 #[cfg(any(target_os = "linux", test))]
-pub use firewall::linux_nft::{CommandNftApplier, LinuxNftFirewall, NftApplier, NftError};
-pub use firewall::{FirewallEnforcer, FirewallError, FirewallSpec, NoopFirewallEnforcer};
-#[cfg(feature = "custom-dns")]
-pub use hickory_dns::HickoryDnsResolver;
-pub use injection_guard::{InjectionGuard, InjectionRule, RuleFamily};
-pub use inspector::{Inspector, InspectorChain, InspectorVerdict, RequestCtx};
-pub use instance_sampler::{OsSources, Sample, SampleTarget, Sources, sample_once};
-pub use keystore::{
-    KeystoreError, KeystoreReleaser, LiveKeystoreReleaser, NoopKeystoreReleaser, SecretGrant,
+pub use datapath::firewall::linux_nft::{
+    CommandNftApplier, LinuxNftFirewall, NftApplier, NftError,
 };
-pub use l7_proxy::{
+pub use datapath::firewall::{FirewallEnforcer, FirewallError, FirewallSpec, NoopFirewallEnforcer};
+#[cfg(feature = "custom-dns")]
+pub use datapath::hickory_dns::HickoryDnsResolver;
+pub use datapath::l7_proxy::{
     AuditFields, CapturingEgressAuditSink, ConnectParseError, ConnectRequest, DnsResolver,
     EgressAuditSink, EgressOutcome, EvaluationResult, L7EgressProxy, NoopEgressAuditSink,
     TokioDnsResolver, parse_connect,
 };
-pub use pii_redactor::{
-    Mode as PiiMode, PII_CATEGORY_NAMES, PiiPolicyError, PiiRedactor, PiiRule, PiiValidator,
-};
-pub use proxy::l4::{
+pub use datapath::proxy::l4::{
     CanonicalL4Gate, L4Decision, L4Error, L4Gate, NoopL4Gate, Protocol as L4Protocol,
 };
-pub use reaper::{
+pub use egress::{EgressDecision, EgressError, NoopEgressProxy, SupervisorEgressProxy};
+pub use inspection::circuit_breaker::{
+    CircuitBreaker, CircuitBreakerConfig, CircuitState, Clock as CircuitBreakerClock,
+    InspectorReporter, SystemClock as CircuitBreakerSystemClock,
+};
+pub use inspection::destination::DestinationPolicy;
+pub use inspection::injection_guard::{InjectionGuard, InjectionRule, RuleFamily};
+pub use inspection::inspector::{Inspector, InspectorChain, InspectorVerdict, RequestCtx};
+pub use inspection::pii_redactor::{
+    Mode as PiiMode, PII_CATEGORY_NAMES, PiiPolicyError, PiiRedactor, PiiRule, PiiValidator,
+};
+pub use inspection::secrets_scanner::{DEFAULT_RULES, SecretRule, SecretsScanner};
+pub use inspection::ssrf_guard::SsrfGuard;
+pub use keystore::{
+    KeystoreError, KeystoreReleaser, LiveKeystoreReleaser, NoopKeystoreReleaser, SecretGrant,
+};
+#[cfg(target_os = "macos")]
+pub use lifecycle::balloon::VmPressureLevelSource;
+pub use lifecycle::balloon::{
+    BalloonAction, BalloonController, BalloonPolicy, HostPressure, HostPressureSource,
+    PsiPressureSource, SysinfoPressureSource, TickOutcome, default_pressure_source,
+};
+pub use lifecycle::balloon_runtime::{BalloonRuntimeConfig, run_balloon_loop, run_one_tick};
+pub use lifecycle::reaper::{
     DEFAULT_INTERVAL as REAPER_DEFAULT_INTERVAL, DEFAULT_JITTER as REAPER_DEFAULT_JITTER,
     ReapOutcome, Reaper, TeardownFn, deregister_only_teardown, jittered_interval,
 };
-pub use secrets_scanner::{DEFAULT_RULES, SecretRule, SecretsScanner};
-pub use ssrf_guard::SsrfGuard;
 pub use state::{PlanState, PlanStateMachine, StateTransitionError};
+pub use telemetry::instance_sampler::{OsSources, Sample, SampleTarget, Sources, sample_once};

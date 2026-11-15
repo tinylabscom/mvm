@@ -33,7 +33,7 @@ const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
 pub enum CaptureAuthority<'a> {
     Admitted(&'a ExecutionPlan),
     /// Verified and durably consumed before trusted cold-start setup.
-    CallerRegistered(Box<crate::supervisor::caller_registration::ConsumedCallerLaunch>),
+    CallerRegistered(Box<crate::supervisor::admission::caller_registration::ConsumedCallerLaunch>),
     /// Only a validated builder/standby launch role may select this variant.
     OperationalLiveOnly,
 }
@@ -44,7 +44,9 @@ impl<'a> CaptureAuthority<'a> {
     /// or standby) that may capture live output only. A launch with none of
     /// them is refused, so a restored child must carry its own plan.
     pub fn select(
-        registered: Option<Box<crate::supervisor::caller_registration::ConsumedCallerLaunch>>,
+        registered: Option<
+            Box<crate::supervisor::admission::caller_registration::ConsumedCallerLaunch>,
+        >,
         admitted: Option<&'a ExecutionPlan>,
         operational_role: bool,
     ) -> Result<Self> {
@@ -69,7 +71,7 @@ pub struct CaptureOwner {
     worker: Option<JoinHandle<()>>,
     exited: mpsc::Receiver<()>,
     failed: Arc<AtomicBool>,
-    caller: Option<crate::supervisor::caller_registration::RegisteredCaller>,
+    caller: Option<crate::supervisor::admission::caller_registration::RegisteredCaller>,
     #[cfg(test)]
     rotations: mpsc::Receiver<()>,
 }
@@ -221,7 +223,7 @@ impl CaptureOwner {
     /// accessor provides no installation, replacement, or producer-ready action.
     pub fn registered_caller(
         &self,
-    ) -> Option<&crate::supervisor::caller_registration::RegisteredCaller> {
+    ) -> Option<&crate::supervisor::admission::caller_registration::RegisteredCaller> {
         self.caller.as_ref()
     }
 
@@ -279,8 +281,12 @@ pub(super) fn record_opening(
     seed: &TranscriptManifest,
 ) -> Result<()> {
     use mvm_core::transcript::evidence;
-    let mut entry =
-        crate::supervisor::audit::for_plan(plan, None, evidence::TRANSCRIPT_OPENED_EVENT, []);
+    let mut entry = crate::supervisor::audit::signer::for_plan(
+        plan,
+        None,
+        evidence::TRANSCRIPT_OPENED_EVENT,
+        [],
+    );
     entry.labels = evidence::opening_labels(seed)?;
     emitter.emit_entry_for_evidence(&entry, EvidenceReceipt::Omitted)?;
     // Verification also syncs the matching segment and directory. Visibility

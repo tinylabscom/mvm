@@ -38,7 +38,7 @@
 //! walking. That is what
 //! `leaves_over_attested_prefix` does, and the seed it rests on is a host
 //! signature rather than a stored integer — a stronger anchor than the
-//! [`ChainCheckpoint`](crate::supervisor::audit_file::ChainCheckpoint) that
+//! [`ChainCheckpoint`](crate::supervisor::audit::audit_file::ChainCheckpoint) that
 //! `doctor` resumes from, and the reason this one is not confined to a health
 //! check.
 //!
@@ -57,7 +57,7 @@ use mvm_contract::merkle::{
 
 use crate::audit::emitter;
 use crate::audit::leaf_cache;
-use crate::supervisor::audit_file::verify_chain_bytes_resuming;
+use crate::supervisor::audit::audit_file::verify_chain_bytes_resuming;
 use mvm_contract::verify::{hash_line, verify_audit_chain_bytes};
 use mvm_core::audit_verify::set::{SegmentContent, read_topology_verified_set};
 
@@ -159,7 +159,7 @@ fn read_leaves_from_genesis(
 /// tell those apart — so this path never accuses, it only declines, and every
 /// refusal the caller ever emits stays anchored at genesis.
 ///
-/// [`ChainCheckpoint`]: crate::supervisor::audit_file::ChainCheckpoint
+/// [`ChainCheckpoint`]: crate::supervisor::audit::audit_file::ChainCheckpoint
 fn leaves_over_attested_prefix(
     audit_dir: &Path,
     tenant: &str,
@@ -1150,7 +1150,7 @@ mod tests {
     // then verify them with the `mvm_contract::merkle` verifier (the exact
     // code a browser runs). Agreement proves the host's leaf bytes == the
     // verifier's leaf bytes. Sibling to
-    // `mvm_verify_matches_supervisor_chain` in `supervisor::audit_file`.
+    // `mvm_verify_matches_supervisor_chain` in `supervisor::audit::audit_file`.
     #[test]
     fn host_built_artifacts_verify_with_no_std_verifier() {
         let (dir, key, _lines) = seed_chain(6);

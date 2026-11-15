@@ -33,10 +33,10 @@ use secrecy::ExposeSecret as _;
 use tracing::{info, warn};
 
 use mvm_hostd::keyholder::secret_placeholder_env;
-use mvm_hostd::supervisor::flowmux::{
+use mvm_hostd::supervisor::endpoint::flowmux::{
     FlowMuxIngressHandle, FlowMuxSession, FlowMuxVmResources, registry::RegistryLimits,
 };
-use mvm_hostd::supervisor::network_endpoint::{
+use mvm_hostd::supervisor::endpoint::network_endpoint::{
     EgressMode, EndpointConfig, EndpointHandshake, EndpointNetworkProjection, EndpointTransport,
     ResolverBackend, assemble_projected, fingerprint_bound_secrets, parse,
 };
@@ -105,7 +105,7 @@ fn main() -> Result<()> {
             .context("assembling substitution service")?;
         (Some((service, handed)), oauth_refresh)
     };
-    mvm_hostd::supervisor::network_endpoint::refuse_secrets_without_substitution(
+    mvm_hostd::supervisor::endpoint::network_endpoint::refuse_secrets_without_substitution(
         &cfg,
         assembled.is_some(),
     )?;
@@ -310,7 +310,9 @@ impl std::fmt::Debug for BoundTcpTransform {
 fn bind_ingress(
     cfg: &EndpointConfig,
     service: Option<
-        &std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>,
+        &std::sync::Arc<
+            mvm_hostd::supervisor::endpoint::network_endpoint_proxy::SubstitutionService,
+        >,
     >,
 ) -> Result<BoundIngress> {
     let mut tcp = Vec::new();
@@ -348,7 +350,7 @@ fn bind_ingress(
                         let pem = std::str::from_utf8(material.expose_secret())
                             .context("ingress TLS PEM is not UTF-8")?;
                         let config =
-                            mvm_hostd::supervisor::terminator::tls::server_config_from_pem_bundle(
+                            mvm_hostd::supervisor::endpoint::terminator::tls::server_config_from_pem_bundle(
                                 pem,
                             )
                             .with_context(|| {
@@ -396,7 +398,9 @@ struct ActiveIngress {
 impl BoundIngress {
     fn start(
         self,
-        service: std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>,
+        service: std::sync::Arc<
+            mvm_hostd::supervisor::endpoint::network_endpoint_proxy::SubstitutionService,
+        >,
     ) -> Result<IngressDispatcher> {
         let BoundIngress { tcp, udp } = self;
         let runtime = tokio::runtime::Handle::current();
@@ -426,7 +430,9 @@ impl BoundTcpIngress {
     fn serve(
         self,
         active: std::sync::Arc<std::sync::Mutex<ActiveIngress>>,
-        service: std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>,
+        service: std::sync::Arc<
+            mvm_hostd::supervisor::endpoint::network_endpoint_proxy::SubstitutionService,
+        >,
         runtime: tokio::runtime::Handle,
     ) {
         loop {
@@ -457,7 +463,7 @@ impl BoundTcpIngress {
         external: std::net::TcpStream,
         handle: &FlowMuxIngressHandle,
         service: &std::sync::Arc<
-            mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService,
+            mvm_hostd::supervisor::endpoint::network_endpoint_proxy::SubstitutionService,
         >,
         runtime: &tokio::runtime::Handle,
     ) -> Result<()> {
@@ -607,7 +613,7 @@ fn resolver_uds_path(cfg: &EndpointConfig) -> Option<&std::path::Path> {
 #[cfg(target_os = "linux")]
 fn confine_endpoint(cfg: &EndpointConfig) -> Result<ConfinedEndpoint> {
     use mvm_hostd::jailer::{ConfinementSpec, confine_self};
-    use mvm_hostd::supervisor::network_endpoint::resolve_store_dirs;
+    use mvm_hostd::supervisor::endpoint::network_endpoint::resolve_store_dirs;
 
     let (secret_dir, binding_dir) =
         resolve_store_dirs(cfg).context("resolve substitution-endpoint store dirs")?;
@@ -701,7 +707,7 @@ fn confine_endpoint_without_lsm(cfg: &EndpointConfig) -> Result<()> {
 enum Bound {
     Uds(std::os::unix::net::UnixListener),
     #[cfg(target_os = "linux")]
-    Vsock(mvm_hostd::supervisor::network_endpoint_proxy::vsock::VsockListener),
+    Vsock(mvm_hostd::supervisor::endpoint::network_endpoint_proxy::vsock::VsockListener),
 }
 
 fn bind_transport(transport: &EndpointTransport) -> Result<Bound> {
@@ -720,7 +726,7 @@ fn bind_transport(transport: &EndpointTransport) -> Result<Bound> {
         EndpointTransport::Vsock { port } => {
             #[cfg(target_os = "linux")]
             {
-                use mvm_hostd::supervisor::network_endpoint_proxy::vsock::VsockListener;
+                use mvm_hostd::supervisor::endpoint::network_endpoint_proxy::vsock::VsockListener;
                 let listener = VsockListener::bind(*port)
                     .with_context(|| format!("AF_VSOCK bind on port {port} failed"))?;
                 info!(port = *port, "substitution endpoint bound (vsock)");
@@ -787,8 +793,11 @@ fn bind_connector(path: Option<&std::path::Path>) -> Result<Option<BoundConnecto
 /// process is killed).
 struct ServeParams<'a> {
     cfg: &'a EndpointConfig,
-    service:
-        Option<std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>>,
+    service: Option<
+        std::sync::Arc<
+            mvm_hostd::supervisor::endpoint::network_endpoint_proxy::SubstitutionService,
+        >,
+    >,
     bound: Bound,
     ingress: BoundIngress,
     session_readiness: Option<BoundSessionReadiness>,
@@ -800,8 +809,11 @@ struct ServeParams<'a> {
 
 struct ServeParamsBuilder<'a> {
     cfg: Option<&'a EndpointConfig>,
-    service:
-        Option<std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>>,
+    service: Option<
+        std::sync::Arc<
+            mvm_hostd::supervisor::endpoint::network_endpoint_proxy::SubstitutionService,
+        >,
+    >,
     bound: Option<Bound>,
     ingress: Option<BoundIngress>,
     session_readiness: Option<BoundSessionReadiness>,
@@ -836,7 +848,9 @@ impl<'a> ServeParamsBuilder<'a> {
     fn service(
         mut self,
         service: Option<
-            std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>,
+            std::sync::Arc<
+                mvm_hostd::supervisor::endpoint::network_endpoint_proxy::SubstitutionService,
+            >,
         >,
     ) -> Self {
         self.service = service;
@@ -1003,7 +1017,9 @@ async fn notify_session_waiter(
 
 /// The WireRequest substitution serve loop over the adopted listener.
 async fn serve_wire(
-    service: std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>,
+    service: std::sync::Arc<
+        mvm_hostd::supervisor::endpoint::network_endpoint_proxy::SubstitutionService,
+    >,
     bound: Bound,
     _forward_timeout: std::time::Duration,
 ) -> Result<()> {
@@ -1049,11 +1065,14 @@ struct DecodedFlowMuxIdentity {
 struct FlowMuxEndpointProjection {
     identity: std::sync::Arc<DecodedFlowMuxIdentity>,
     gate: std::sync::Arc<mvm_runtime::vmm::egress_gate::EgressGate>,
-    recorder: Option<std::sync::Arc<mvm_hostd::supervisor::audit_recorder::Recorder>>,
+    recorder: Option<std::sync::Arc<mvm_hostd::supervisor::audit::audit_recorder::Recorder>>,
     resources: std::sync::Arc<FlowMuxVmResources>,
     limits: RegistryLimits,
-    substitution:
-        Option<std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>>,
+    substitution: Option<
+        std::sync::Arc<
+            mvm_hostd::supervisor::endpoint::network_endpoint_proxy::SubstitutionService,
+        >,
+    >,
     ingress_transports:
         std::sync::Arc<Vec<(u16, mvm_contract::protocol::network_flow::IngressFlowKind)>>,
 }
@@ -1062,7 +1081,9 @@ impl FlowMuxEndpointProjection {
     fn from_config(
         cfg: &EndpointConfig,
         substitution: Option<
-            std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>,
+            std::sync::Arc<
+                mvm_hostd::supervisor::endpoint::network_endpoint_proxy::SubstitutionService,
+            >,
         >,
         network: EndpointNetworkProjection,
     ) -> Result<Self> {
@@ -1109,8 +1130,8 @@ impl FlowMuxEndpointProjection {
         })
     }
 
-    fn accept_params(&self) -> mvm_hostd::supervisor::flowmux::FlowMuxAccept {
-        mvm_hostd::supervisor::flowmux::FlowMuxAccept::new_shared(
+    fn accept_params(&self) -> mvm_hostd::supervisor::endpoint::flowmux::FlowMuxAccept {
+        mvm_hostd::supervisor::endpoint::flowmux::FlowMuxAccept::new_shared(
             &self.identity.session_id,
             self.identity.host_key.clone(),
             self.identity.guest_anchor,
@@ -1127,7 +1148,9 @@ impl FlowMuxEndpointProjection {
 async fn serve_flowmux(
     cfg: &EndpointConfig,
     service: Option<
-        std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>,
+        std::sync::Arc<
+            mvm_hostd::supervisor::endpoint::network_endpoint_proxy::SubstitutionService,
+        >,
     >,
     network_projection: EndpointNetworkProjection,
     bound: Bound,
@@ -1176,7 +1199,7 @@ async fn serve_flowmux(
 
         let Some(session_permit) = projection.resources.try_acquire_session() else {
             warn!(
-                limit = mvm_hostd::supervisor::flowmux::MAX_CONCURRENT_FLOWMUX_SESSIONS,
+                limit = mvm_hostd::supervisor::endpoint::flowmux::MAX_CONCURRENT_FLOWMUX_SESSIONS,
                 "FlowMux session ceiling reached"
             );
             drop(stream);
@@ -1276,7 +1299,11 @@ impl ConsecutiveAcceptErrors {
 enum FlowMuxListener {
     Uds(tokio::net::UnixListener),
     #[cfg(target_os = "linux")]
-    Vsock(std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::vsock::VsockListener>),
+    Vsock(
+        std::sync::Arc<
+            mvm_hostd::supervisor::endpoint::network_endpoint_proxy::vsock::VsockListener,
+        >,
+    ),
 }
 
 impl FlowMuxListener {
@@ -1305,7 +1332,7 @@ impl FlowMuxListener {
             }
             #[cfg(target_os = "linux")]
             Self::Vsock(listener) => {
-                use mvm_hostd::supervisor::network_endpoint_proxy::vsock;
+                use mvm_hostd::supervisor::endpoint::network_endpoint_proxy::vsock;
                 use std::os::fd::FromRawFd;
                 let listener = std::sync::Arc::clone(listener);
                 let fd = tokio::task::spawn_blocking(move || vsock::accept(listener.raw_fd()))
@@ -1542,13 +1569,15 @@ mod tests {
         let guest_key = ed25519_dalek::SigningKey::from_bytes(&[4_u8; 32]);
         let mut cfg = uds_cfg();
         cfg.egress_mode = EgressMode::FlowMux;
-        cfg.flowmux_identity = Some(mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity {
-            session_id: "signed-plan-session".into(),
-            host_signing_key_base64: base64::engine::general_purpose::STANDARD
-                .encode(host_key.to_bytes()),
-            guest_verifying_key_base64: base64::engine::general_purpose::STANDARD
-                .encode(guest_key.verifying_key().to_bytes()),
-        });
+        cfg.flowmux_identity = Some(
+            mvm_hostd::supervisor::endpoint::network_endpoint::FlowMuxIdentity {
+                session_id: "signed-plan-session".into(),
+                host_signing_key_base64: base64::engine::general_purpose::STANDARD
+                    .encode(host_key.to_bytes()),
+                guest_verifying_key_base64: base64::engine::general_purpose::STANDARD
+                    .encode(guest_key.verifying_key().to_bytes()),
+            },
+        );
         cfg.ingress = vec![ingress_mapping("127.0.0.1", 8443)];
 
         let network = EndpointNetworkProjection::from_config(&cfg);
@@ -1842,10 +1871,11 @@ mod tests {
             destinations: Vec::new(),
             approval_required: false,
         });
-        let err = mvm_hostd::supervisor::network_endpoint::refuse_secrets_without_substitution(
-            &cfg, false,
-        )
-        .expect_err("a secret-bearing endpoint with no substitution must refuse");
+        let err =
+            mvm_hostd::supervisor::endpoint::network_endpoint::refuse_secrets_without_substitution(
+                &cfg, false,
+            )
+            .expect_err("a secret-bearing endpoint with no substitution must refuse");
         let message = format!("{err:#}");
         assert!(
             message.contains("nothing to resolve them"),
@@ -1865,7 +1895,7 @@ mod tests {
             approval_required: false,
         });
         assert!(
-            mvm_hostd::supervisor::network_endpoint::refuse_secrets_without_substitution(
+            mvm_hostd::supervisor::endpoint::network_endpoint::refuse_secrets_without_substitution(
                 &cfg, true
             )
             .is_ok()
@@ -1876,7 +1906,7 @@ mod tests {
     fn a_secretless_endpoint_needs_no_substitution_service() {
         let cfg = uds_cfg();
         assert!(
-            mvm_hostd::supervisor::network_endpoint::refuse_secrets_without_substitution(
+            mvm_hostd::supervisor::endpoint::network_endpoint::refuse_secrets_without_substitution(
                 &cfg, false
             )
             .is_ok()
@@ -1930,12 +1960,15 @@ mod tests {
             session_ready_socket: None,
             connector_uds_path: Some(PathBuf::from("/tmp/mvm-flowmux-connector.sock")),
             approval_socket: None,
-            flowmux_identity: Some(mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity {
-                session_id: "s".into(),
-                host_signing_key_base64: base64::engine::general_purpose::STANDARD.encode(host_key),
-                guest_verifying_key_base64: base64::engine::general_purpose::STANDARD
-                    .encode(guest_key),
-            }),
+            flowmux_identity: Some(
+                mvm_hostd::supervisor::endpoint::network_endpoint::FlowMuxIdentity {
+                    session_id: "s".into(),
+                    host_signing_key_base64: base64::engine::general_purpose::STANDARD
+                        .encode(host_key),
+                    guest_verifying_key_base64: base64::engine::general_purpose::STANDARD
+                        .encode(guest_key),
+                },
+            ),
         };
 
         let json = serde_json::to_string(&cfg).unwrap();

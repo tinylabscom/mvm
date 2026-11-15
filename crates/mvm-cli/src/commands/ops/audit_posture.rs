@@ -275,7 +275,7 @@ fn check_tls_minimum() -> PostureCheck {
     // unit test `w7_min_tls_version_is_pinned_at_1_3` would have
     // caught a regression at compile time, but the operator-
     // visible report mentioning it adds confidence.
-    let v = mvm_client::audit::chain::supervisor::http_hardening::MIN_TLS_VERSION;
+    let v = mvm_client::audit::chain::supervisor::inspection::http_hardening::MIN_TLS_VERSION;
     let detail = format!("pinned to {v:?} (plan 65 W7)");
     if v == mvm_http::TlsVersion::Tls13 {
         PostureCheck {

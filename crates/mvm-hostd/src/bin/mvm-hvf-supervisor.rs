@@ -618,12 +618,13 @@ fn run() -> anyhow::Result<()> {
     let mode = startup_mode(&cfg)?;
     // The entire startup namespace is validated before diagnostics, replay,
     // signing re-exec, or any descriptor ownership conversion.
-    mvm_hostd::supervisor::caller_registration::preflight_startup_files(&cfg)?;
+    mvm_hostd::supervisor::admission::caller_registration::preflight_startup_files(&cfg)?;
     let mut diagnostics;
     let mut files = match mode {
         StartupMode::Checked => {
             // Complete preflight precedes FIRST ownership conversion.
-            let files = mvm_hostd::supervisor::caller_registration::adopt_startup_files(&cfg)?;
+            let files =
+                mvm_hostd::supervisor::admission::caller_registration::adopt_startup_files(&cfg)?;
             // SAFETY: preflight established the distinct inherited diagnostics
             // pipe; its sole ownership is transferred by the actual launcher.
             diagnostics = unsafe { StartupReporter::inherited() };
@@ -651,7 +652,7 @@ fn run() -> anyhow::Result<()> {
             // reexec itself retains it explicitly immediately before exec.
             set_disk_cloexec(&cfg, true)?;
             ensure_self_signed(&mut diagnostics, &cfg);
-            mvm_hostd::supervisor::caller_registration::adopt_startup_files(&cfg)?
+            mvm_hostd::supervisor::admission::caller_registration::adopt_startup_files(&cfg)?
         }
     };
 
@@ -673,7 +674,8 @@ fn run() -> anyhow::Result<()> {
     diagnostics.stage(StartupStage::ConfigRead);
     diagnostics.stage(StartupStage::ConfigParse);
     mvm_core::launch_trace::lap("adopt_and_sign");
-    let registered_startup = mvm_hostd::supervisor::caller_registration::prepare_startup(&cfg)?;
+    let registered_startup =
+        mvm_hostd::supervisor::admission::caller_registration::prepare_startup(&cfg)?;
     // Declared before the disk devices so reverse drop order flushes and destroys
     // every disk before either lock description can be released.
     let mut writable_files = files.take_writable();
@@ -688,7 +690,7 @@ fn run() -> anyhow::Result<()> {
                 Some(kernel),
                 Some(images),
                 Some(
-                    mvm_hostd::supervisor::caller_registration::PreparedCallerStartup {
+                    mvm_hostd::supervisor::admission::caller_registration::PreparedCallerStartup {
                         launch,
                         initramfs: startup.initramfs,
                     },
@@ -726,7 +728,8 @@ fn run() -> anyhow::Result<()> {
         .as_ref()
         .and(cfg.pid_file.parent())
         .map(mvm_vmm::host::hvf_supervisor::restore_ready_path);
-    let stop_control = mvm_hostd::supervisor::hvf_stop::StopControl::start(&cfg.vm_name, &STOP)?;
+    let stop_control =
+        mvm_hostd::supervisor::lifecycle::hvf_stop::StopControl::start(&cfg.vm_name, &STOP)?;
     let _ = std::fs::remove_file(mvm_vmm::host::hvf_supervisor::shutdown_timing_path(
         state_dir,
     ));
@@ -741,7 +744,7 @@ fn run() -> anyhow::Result<()> {
         Some(startup) => (Some(startup.launch), startup.initramfs),
         None => (
             None,
-            mvm_hostd::supervisor::caller_registration::load_boot_inputs(&cfg)?,
+            mvm_hostd::supervisor::admission::caller_registration::load_boot_inputs(&cfg)?,
         ),
     };
     mvm_core::launch_trace::lap("boot_inputs_load");
@@ -877,7 +880,7 @@ fn run() -> anyhow::Result<()> {
     // unbounded — same fail-closed posture as an unauditable kill.
     // A restored child's plan arrives over the spawn pipe: verify it before any
     // timer or audit emitter exists, and arm only from the verified value.
-    let armed_plan = mvm_hostd::supervisor::restored_plan::plan_to_arm(
+    let armed_plan = mvm_hostd::supervisor::admission::restored_plan::plan_to_arm(
         cfg.plan.as_ref(),
         restore.is_some(),
         &cfg.vm_name,
@@ -886,14 +889,15 @@ fn run() -> anyhow::Result<()> {
     .map_err(|_| anyhow::anyhow!("restored child plan failed verification"))?;
     let _wall_clock = match cfg.pid_file.parent() {
         Some(vm_state_dir) => {
-            let timer_inputs = mvm_hostd::supervisor::wall_clock::SupervisorTimerInputs {
-                plan_json: armed_plan.as_ref(),
-                audit_dir: cfg.audit_dir.as_deref(),
-                signing_key_path: cfg.signing_key_path.as_deref(),
-                vm_state_dir,
-                pid_file: &cfg.pid_file,
-            };
-            let guard = match mvm_hostd::supervisor::wall_clock::arm_for_supervisor(
+            let timer_inputs =
+                mvm_hostd::supervisor::lifecycle::wall_clock::SupervisorTimerInputs {
+                    plan_json: armed_plan.as_ref(),
+                    audit_dir: cfg.audit_dir.as_deref(),
+                    signing_key_path: cfg.signing_key_path.as_deref(),
+                    vm_state_dir,
+                    pid_file: &cfg.pid_file,
+                };
+            let guard = match mvm_hostd::supervisor::lifecycle::wall_clock::arm_for_supervisor(
                 timer_inputs,
                 Box::new(timer_inputs.preserving_exit_killer()),
             ) {
@@ -908,7 +912,7 @@ fn run() -> anyhow::Result<()> {
             // A session's idle timeout, for the same reason as the wall clock:
             // no client is left to enforce it once the one that started the
             // session has exited.
-            mvm_hostd::supervisor::session_expiry::arm_for_supervisor(
+            mvm_hostd::supervisor::lifecycle::session_expiry::arm_for_supervisor(
                 &timer_inputs,
                 Box::new(timer_inputs.preserving_exit_killer()),
             );
@@ -933,7 +937,7 @@ fn run() -> anyhow::Result<()> {
     use mvm_hostd::stream::protected::{CaptureAuthority, CaptureParams};
     let admitted_plan = armed_plan
         .as_ref()
-        .map(mvm_hostd::supervisor::wall_clock::decode_admitted_plan)
+        .map(mvm_hostd::supervisor::lifecycle::wall_clock::decode_admitted_plan)
         .transpose()
         .map_err(|_| anyhow::anyhow!("invalid admitted capture policy"))?;
     let redaction = admitted_plan
@@ -958,7 +962,7 @@ fn run() -> anyhow::Result<()> {
                 anyhow::bail!("required protected console owner could not be provisioned");
             }
         };
-    let capture_owner = mvm_hostd::supervisor::protected_handoff::CaptureRoute::start(
+    let capture_owner = mvm_hostd::supervisor::admission::protected_handoff::CaptureRoute::start(
         capture_owner,
         cfg.pid_file.clone(),
         &STOP,
@@ -1121,7 +1125,7 @@ fn run() -> anyhow::Result<()> {
         }
         // The file above goes with the state directory; the chain entry is the
         // durable record. Best-effort for the same reason as the file.
-        let inputs = mvm_hostd::supervisor::wall_clock::SupervisorTimerInputs {
+        let inputs = mvm_hostd::supervisor::lifecycle::wall_clock::SupervisorTimerInputs {
             plan_json: armed_plan.as_ref(),
             audit_dir: cfg.audit_dir.as_deref(),
             signing_key_path: cfg.signing_key_path.as_deref(),
@@ -1136,14 +1140,14 @@ fn run() -> anyhow::Result<()> {
             whole_mapping: scrub.whole_mapping,
         };
         if let Err(error) =
-            mvm_hostd::supervisor::wall_clock::record_guest_memory_scrub(&inputs, &facts)
+            mvm_hostd::supervisor::lifecycle::wall_clock::record_guest_memory_scrub(&inputs, &facts)
         {
             eprintln!("mvm-hvf-supervisor: the RAM scrub was not audited: {error:#}");
         }
     }
     match stop_control.publish_finalized()? {
-        mvm_hostd::supervisor::hvf_stop::FinalizationPublication::Durable => {}
-        mvm_hostd::supervisor::hvf_stop::FinalizationPublication::PublishedDurabilityUnconfirmed(
+        mvm_hostd::supervisor::lifecycle::hvf_stop::FinalizationPublication::Durable => {}
+        mvm_hostd::supervisor::lifecycle::hvf_stop::FinalizationPublication::PublishedDurabilityUnconfirmed(
             _,
         ) => {
             anyhow::bail!("HVF_CONTROL_PUBLICATION_DURABILITY_UNCONFIRMED");
