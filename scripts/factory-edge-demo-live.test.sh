@@ -24,10 +24,12 @@ cat > "${work}/mvmctl" <<'S'
 #   | replacement-inherits | same-plan | inspection-silent | inspection-stops-after-refusal
 st="${FAKE_STATE:?}"; mode="${FAKE_MODE:-ok}"; home="${MVM_HOME:?}"
 [ "${1:-}" = --builder ] && shift 2
+persistent=0
+if [ "${1:-} ${2:-}" = "machine run" ]; then persistent=1; shift; fi
 chain="${home}/audit/local.jsonl"
 ts() { python3 -c "from datetime import datetime, timezone, timedelta; print((datetime.now(timezone.utc) + timedelta(seconds=${1:-1})).isoformat())"; }
 key() { printf '%s' "$1" | tr ':/' '__'; }
-role_of() { case "$1" in fe-line-a-*) echo line-a ;; fe-line-b-*) echo line-b ;; fe-maint-*) echo maint ;; *) echo other ;; esac; }
+role_of() { case "$1" in fe-line-a-*|line-a-*) echo line-a ;; fe-line-b-*|line-b-*) echo line-b ;; fe-maint-*|maintenance-*) echo maint ;; *) echo other ;; esac; }
 emit() { # <event> <vm> <labels-json>
   mkdir -p "${home}/audit"
   printf '{"entry":{"event":"%s","timestamp":"%s","plan_id":"sha256:p-%s","image_name":"%s","labels":%s}}\n' "$1" "$(ts 0)" "$2" "$2" "$3" >> "${chain}"
@@ -38,7 +40,18 @@ case "${1:-} ${2:-}" in
   "image ls") [ "${mode}" = image-missing ] || echo "docker.io/curlimages/curl:8.21.0  sha256:abc  now  36M" ;;
   "run "*|"run")
     shift; name=""; detach=0; tok=""; grant=""
-    while [ $# -gt 0 ]; do case "$1" in --name) name="$2"; shift ;; -d) detach=1 ;; --caller-commitment) tok="$2"; shift ;; --allow-host) grant="$2"; shift ;; --) shift; break ;; esac; shift; done
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --name) name="$2"; shift ;;
+        -d|--detach)
+          [ "${persistent}" = 1 ] || { echo "fake: detach requires machine run" >&2; exit 2; }
+          detach=1 ;;
+        --caller-commitment) tok="$2"; shift ;;
+        --allow-host) grant="$2"; shift ;;
+        --) shift; break ;;
+      esac
+      shift
+    done
     [ "${mode}" = needs-bootstrap ] && { echo "Error: runtime not prepared; run \`mvmctl bootstrap\` first" >&2; exit 1; }
     [ "${mode}" = prep-ran ] && echo "[mvm] Preparing the workload kernel (first use only)..." >&2
     if [ "${detach}" = 1 ]; then
@@ -70,10 +83,19 @@ case "${1:-} ${2:-}" in
     n="$3"; [ "${mode}" = never-stops ] || echo stopped > "${st}/m.${n}"
     [ "${mode}" = no-seal ] || touch "${st}/sealed.${n}"
     echo "sha256:p-${n}" > "${st}/maint-plan" ;;
+  "machine inspect")
+    [ -e "${st}/m.$3" ] || exit 1
+    printf 'name: %s\nallow-host: one destination\n' "$3" ;;
   "machine rm") rm -f "${st}/m.$3" "${st}/sealed.$3" ;;
   "trust audit") [ "${mode}" = audit-fails ] && { echo "TAMPERED" >&2; exit 1; }; echo "VERIFIED chain: 7 entries, 1 session, 1 seal" ;;
   "explain "*)
     ref="$2"; role="$(role_of "${ref}")"; plan="sha256:p-${ref}"
+    if [ "${3:-}" != --json ]; then
+      echo "outcome:"
+      [ "${role}" != maint ] || echo "egress denied"
+      echo "audit chain verifies clean"
+      exit 0
+    fi
     ev='{"event":"plan.admitted","timestamp":"2026-01-01T00:00:01Z","labels":{}}'
     [ -e "${st}/sealed.${ref}" ] && ev="${ev},{\"event\":\"session.sealed\",\"timestamp\":\"2026-01-01T00:00:30Z\",\"labels\":{}}"
     verified=true; [ "${mode}" = chain-broken ] && verified=false
@@ -109,6 +131,14 @@ both() { # <stage-mode> <demo-mode>: a fresh home, staged, then the demo
   o="$(stage "$1" HYPERVISOR=hvf)" || { printf '%s\n' "${o}"; return 1; }
   demo "$2" HYPERVISOR=hvf
 }
+
+# ---- the raw demo script ----
+fresh
+out="$(envrun ok factory-edge-demo.sh)" || fail "the raw demo failed: ${out}"
+[ "$(ls "${work}"/state/m.* | wc -l | tr -d ' ')" = 3 ] || fail "the raw demo did not start three machines"
+grep -q '^egress denied$' <<<"${out}" || fail "the raw demo did not show the refusal: ${out}"
+out="$(env MVMCTL="${work}/mvmctl" FAKE_STATE="${work}/state" MVM_HOME="${work}/home" bash "${repo}/scripts/factory-edge-demo.sh" --down 2>&1)" || fail "raw demo teardown failed: ${out}"
+[ "$(ls "${work}"/state/m.* 2>/dev/null | wc -l | tr -d ' ')" = 0 ] || fail "raw demo --down left machines: ${out}"
 
 # ---- the staging script ----
 fresh

@@ -29,7 +29,7 @@ id="$(date +%H%M%S)"   # names are unique per run, so `explain <name>` is never 
 a="line-a-$id"; b="line-b-$id"; m="maintenance-$id"
 
 # One workload: a name, the one destination it is allowed, and what it does.
-launch() { $mvm run -d --image "$image" --name "$1" --allow-host "$2" -- sh -c "$3" >/dev/null; }
+launch() { $mvm machine run -d --image "$image" --name "$1" --allow-host "$2" -- sh -c "$3" >/dev/null; }
 work() { echo "while true; do curl -sS -m 10 -o /dev/null https://$1/; sleep 2; done"; }
 
 echo "Starting three workloads, each allowed one destination"

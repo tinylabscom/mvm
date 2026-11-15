@@ -148,7 +148,7 @@ staged_at="$(python3 -I -c "from datetime import datetime, timezone; print(datet
 # An inspection workload's work: send a result to its granted destination, repeatedly.
 inspect() { echo "while true; do curl -sS -m 10 -o /dev/null https://$1/ >/dev/null 2>&1; sleep $INSPECT_EVERY; done"; }
 start() { # <name> <grant> <script>
-  mvm run -d --image "$IMAGE" --hypervisor "$HYPERVISOR" --name "$1" --allow-host "$2" -- sh -c "$3" >/dev/null </dev/null \
+  mvm machine run -d --image "$IMAGE" --hypervisor "$HYPERVISOR" --name "$1" --allow-host "$2" -- sh -c "$3" >/dev/null </dev/null \
     || fail "could not start $1"
 }
 start "$LINE_A" "$GRANT_A" "$(inspect "${GRANT_A%%:*}")"
