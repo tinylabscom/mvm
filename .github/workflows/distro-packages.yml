@@ -288,6 +288,9 @@ jobs:
             debian:*|ubuntu:*) package="mvmctl_${PKGVER}-1_${DEB_ARCH}.deb" ;;
             *)                 package="mvmctl-${PKGVER}-1.${ARCH}.rpm" ;;
           esac
+          # GitHub stores an uploaded asset's "~" as ".", so a package taken from
+          # a prerelease carries the dotted name; one built in this run keeps the tilde.
+          [ -f "distro-packages/${package}" ] || package="$(printf '%s' "${package}" | tr '~' '.')"
           [ -f "distro-packages/${package}" ] || {
             echo "::error::${package} was not built; have: $(ls distro-packages)" >&2
             exit 1
