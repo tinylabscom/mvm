@@ -37,11 +37,13 @@ use crate::rust_source::{CommentSyntax, blank_comments};
 // CI witness, overclaim, snapshot-owner, Yocto importer, and CLI option-source
 // tests remain measured; the library health/signing path adds regressions.
 // Ceilings re-measured after the verified-runtime launch-evidence retention
-// work; they are the current honest totals with no headroom claim.
+// work and raised for the module declarations, imports and re-exports the
+// plan_admission split adds (no logic was added); they are the current honest
+// totals with no headroom claim.
 /// Ceiling on total SLOC, all categories.
-const MAX_TOTAL_SLOC: usize = 991_178;
+const MAX_TOTAL_SLOC: usize = 991_354;
 /// Ceiling on total physical lines, all categories.
-const MAX_TOTAL_PHYSICAL: usize = 1_259_462;
+const MAX_TOTAL_PHYSICAL: usize = 1_259_674;
 /// How far under a ceiling the tree may sit before the ceiling must drop.
 const SLACK: usize = 10_000;
 
