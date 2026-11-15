@@ -213,6 +213,39 @@ def payload_hashes(archive, target, unsigned=None):
     return result
 
 
+def archive_components(archive, target):
+    """The archive's components.tsv text, or None for an archive without one."""
+    with tarfile.open(archive) as tar:
+        try:
+            stream = tar.extractfile(f"mvmctl-{target}/components.tsv")
+        except KeyError:
+            return None
+        return stream.read().decode()
+
+
+def pruned_payloads(components, target, backend):
+    """Archive paths `install.sh` leaves out for a host that selects `backend`.
+
+    Mirrors prune_payloads_from_table: every path owned by another backend on
+    this target, taken from the files column as `kind:path` entries. A path
+    that is a directory drops everything under it.
+    """
+    pruned = []
+    for line in (components or "").splitlines():
+        columns = line.split("\t")
+        if line.startswith("#") or len(columns) < 8:
+            continue
+        if columns[1] != target or columns[0] == backend or columns[7] == "-":
+            continue
+        for entry in columns[7].split():
+            pruned.append(entry.split(":", 1)[1] if ":" in entry else entry)
+    return pruned
+
+
+def is_pruned(name, pruned):
+    return any(name == path or name.startswith(path + "/") for path in pruned)
+
+
 def installed_matches(path, digest, unsigned_digest):
     """The installed file is the published one: exactly, or on macOS the same
     bytes under a different code signature."""
@@ -222,7 +255,7 @@ def installed_matches(path, digest, unsigned_digest):
             and unsigned_macho_digest(Path(path).read_bytes()) == unsigned_digest)
 
 
-def installed_hashes(home, archives, target, tag):
+def installed_hashes(home, archives, target, tag, backend=None):
     executable = (home / ".local/bin/mvmctl").resolve(strict=True)
     base = executable.parent
     require(base.is_relative_to(home.resolve()), "CLI escaped throwaway HOME")
@@ -235,8 +268,17 @@ def installed_hashes(home, archives, target, tag):
             "installed entrypoint mismatch")
     runtime = f"guest-runtime/mvm-guest-bins-{tag}.tar.gz"
     expected[runtime] = sha(archives / f"mvm-guest-bins-{tag}.tar.gz")
+    # The installer stages only the selected backend's components, so what it
+    # drops is not expected. Without a backend nothing is dropped, and a
+    # missing file fails.
+    pruned = []
+    if backend is not None:
+        pruned = pruned_payloads(
+            archive_components(archives / f"mvmctl-{target}.tar.gz", target), target, backend)
+    expected = {name: digest for name, digest in expected.items() if not is_pruned(name, pruned)}
     for name, digest in expected.items():
         path = base / name
+        require(os.path.lexists(path), f"installed payload missing: {name}")
         require(path.resolve(strict=True).is_relative_to(base), "installed payload escaped")
         require(installed_matches(path, digest, unsigned.get(name)),
                 f"installed bytes mismatch: {name}")
@@ -283,7 +325,7 @@ def lane(args):
         try:
             run("sh", "scripts/smoke-fresh-install.sh", args.tag, env=env)
             home = smoke_home(state_file, owned_root)
-            installed = installed_hashes(home, assets_dir, args.target, args.tag)
+            installed = installed_hashes(home, assets_dir, args.target, args.tag, backend)
             checks = boot_checks(transcript.parent)
         finally:
             stop_owned(owned_root)

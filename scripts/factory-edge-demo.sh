@@ -37,27 +37,49 @@ a="line-a-$id"; b="line-b-$id"; m="maintenance-$id"
 
 # One workload: a name, the one destination it is allowed, and what it does.
 # Launches overlap; a release that still serializes them on the volume lock
-# refuses the loser, so a refused launch is retried.
+# refuses the loser, so a refused launch is retried. Status 3 means this home
+# has not been prepared yet, which `prepare` below fixes once.
 launch() {
   local out
   for _ in 1 2 3 4 5; do
     out="$($mvm machine run -d --image "$image" --name "$1" --allow-host "$2" -- sh -c "$3" 2>&1 </dev/null)" && return
+    case "$out" in *"is not prepared"*) return 3 ;; esac
     sleep 2
   done
   echo "could not start $1:" >&2; echo "$out" >&2; return 1
 }
 work() { echo "while true; do curl -sS -m 10 -o /dev/null https://$1/; sleep 2; done"; }
 
+# First use of a home: fetch the image and build the workload runtime, which a
+# throwaway run does. Every later run of the script skips this.
+prepare() {
+  echo "Preparing this machine once (image and runtime); this takes a few minutes"
+  $mvm image pull "$image" >/dev/null
+  $mvm run --image "$image" -- true >/dev/null 2>&1 </dev/null
+}
+
+# Start the three workloads at once. Sets `unprepared` when any was refused
+# only because the home is not prepared, and `failed` for any other failure.
+start_all() {
+  local pids=() statuses=() i
+  launch "$a" pypi.org:443 "$(work pypi.org)" & pids+=($!)
+  launch "$b" files.pythonhosted.org:443 "$(work files.pythonhosted.org)" & pids+=($!)
+  launch "$m" api.github.com:443 "while true; do curl -sS -m 10 https://example.com/ >/dev/null 2>&1; sleep 3; done" & pids+=($!)
+  unprepared=""; failed=""
+  for i in "${!pids[@]}"; do
+    wait "${pids[$i]}" && continue
+    [ "$?" -eq 3 ] && unprepared=1 || failed=1
+  done
+}
+
 echo "Starting three workloads at once, each allowed one destination"
-pids=()
-launch "$a" pypi.org:443 "$(work pypi.org)" &
-pids+=($!)
-launch "$b" files.pythonhosted.org:443 "$(work files.pythonhosted.org)" &
-pids+=($!)
-launch "$m" api.github.com:443 "while true; do curl -sS -m 10 https://example.com/ >/dev/null 2>&1; sleep 3; done" &
-pids+=($!)
-for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
-[ -z "${failed:-}" ] || { echo "a workload did not start; see above (clean up with --down)" >&2; exit 1; }
+start_all
+if [ -n "$unprepared" ]; then
+  prepare
+  echo "Starting three workloads at once, each allowed one destination"
+  start_all
+fi
+[ -z "$failed$unprepared" ] || { echo "a workload did not start; see above (clean up with --down)" >&2; exit 1; }
 
 echo; echo "== 1. All three are running"
 $mvm machine ls | grep -E "^NAME|-$id "

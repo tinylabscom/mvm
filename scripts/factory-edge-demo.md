@@ -68,8 +68,10 @@ export MVM_HOME="$HOME/.mvm-demo"
 "$MVMCTL" image pull curlimages/curl:8.21.0
 ```
 
-Bootstrap prepares the runtime before any workload starts and can take a few
-minutes. The demo needs an Apple Silicon Mac on macOS 26 or later, and working
+Only the install is required. The script prepares a new home itself on its first
+run (it pulls the image and builds the runtime when it sees they are missing),
+so `bootstrap` and `image pull` here are optional and only move that wait ahead
+of the demo. Preparation can take a few minutes. The demo needs an Apple Silicon Mac on macOS 26 or later, and working
 internet and DNS, because each allowed destination is looked up when its
 program starts.
 
