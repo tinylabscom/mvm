@@ -24,6 +24,7 @@ Measure OCI VM density on macOS HVF or Linux/KVM Firecracker without changing ru
 Usage: $0 [-- GUEST_COMMAND [ARG ...]]
 Without a command, guests run sleep ${GUEST_SLEEP_SECONDS}; use a real agent
 command to measure working VMs. Do not put secrets in command arguments.
+A single unmeasured cold launch prepares the isolated home before each wave.
 
 Default waves: ${WAVES_TEXT}
 Default image: ${IMAGE_REF}
@@ -117,7 +118,7 @@ esac
 DATA_DIR="${MVM_HVF_DENSITY_DATA_DIR:-${OUT_DIR}/mvm-data}"
 CACHE_DIR="${DATA_DIR}/cache"
 TARGET_DIR="${MVM_HVF_DENSITY_TARGET_DIR:-${OUT_DIR}/target}"
-RUN_ID="plan237-${STAMP}"
+RUN_ID="plan237-$(printf '%s' "${STAMP}" | tr 'TZ' 'tz')"
 SUMMARY="${OUT_DIR}/summary.tsv"
 SEEDED_KERNEL_SOURCE="none"
 
@@ -385,6 +386,22 @@ cleanup_active_pids() {
   fi
 }
 trap cleanup_active_pids INT TERM EXIT
+
+prime_name="${RUN_ID}-prime"
+if ! "${run_env[@]}" "MVM_RESIDENCY=cold" "${MVMCTL_BIN}" machine run \
+  --name "${prime_name}" --hypervisor "${BACKEND}" --image "${IMAGE_REF}" \
+  --memory "${MEMORY}" --cpus "${CPUS}" -- sleep 1 \
+  >"${OUT_DIR}/prime.stdout" 2>"${OUT_DIR}/prime.stderr"; then
+  echo "refusing: first-use preparation failed; see ${OUT_DIR}/prime.stderr" >&2
+  exit 71
+fi
+if ! "${run_env[@]}" "${MVMCTL_BIN}" machine stop --all --yes \
+  >"${OUT_DIR}/prime-stop.stdout" 2>"${OUT_DIR}/prime-stop.stderr" ||
+  ! "${run_env[@]}" "${MVMCTL_BIN}" machine rm --all --yes \
+  >"${OUT_DIR}/prime-rm.stdout" 2>"${OUT_DIR}/prime-rm.stderr"; then
+  echo "refusing: first-use preparation left a machine; see ${OUT_DIR}/prime-*.stderr" >&2
+  exit 71
+fi
 
 capture_host_memory() {
   local phase="$1"

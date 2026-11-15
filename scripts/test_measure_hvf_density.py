@@ -35,6 +35,10 @@ with (Path(os.environ["MVM_HOME"]).parent / "commands.jsonl").open("a") as log:
 if args[:2] == ["machine", "run"]:
     def flag(name):
         return args[args.index(name) + 1]
+    if "--receipt" not in args:
+        if os.environ.get("MVM_FAKE_PRIME_FAIL") == "1":
+            sys.exit(3)
+        sys.exit(0)  # The first-use preparation is outside the measured wave.
     receipt = Path(flag("--receipt"))
     Path(os.environ["MVM_LAUNCH_SAMPLE_JSON"]).write_text(json.dumps({
         "schema_version": 4, "launch_mode": os.environ["MVM_RESIDENCY"]
@@ -80,13 +84,26 @@ if args[:2] == ["machine", "run"]:
                     json.loads(line)
                     for line in (base / "out/commands.jsonl").read_text().splitlines()
                 ]
-                launch = next((args, vars) for args, vars in commands if args[:2] == ["machine", "run"])
+                prime = commands[0][0]
+                self.assertEqual(prime[:2], ["machine", "run"])
+                self.assertNotIn("--receipt", prime)
+                self.assertRegex(prime[prime.index("--name") + 1], r"^[a-z0-9-]+$")
+                self.assertEqual(commands[1][0][:2], ["machine", "stop"])
+                self.assertEqual(commands[2][0][:2], ["machine", "rm"])
+                launch = next(
+                    (args, vars) for args, vars in commands
+                    if args[:2] == ["machine", "run"] and "--receipt" in args
+                )
                 self.assertEqual(launch[1]["MVM_RESIDENCY"], mode)
                 self.assertEqual(launch[1]["MVM_PHASE_TIMING"], "1")
                 self.assertTrue(launch[1]["MVM_LAUNCH_SAMPLE_JSON"].endswith(".sample.json"))
                 self.assertEqual("--name" in launch[0], mode == "cold")
+                if mode == "cold":
+                    self.assertRegex(
+                        launch[0][launch[0].index("--name") + 1], r"^[a-z0-9-]+$"
+                    )
                 if mode == "warm":
-                    warm = commands[0][0]
+                    warm = commands[3][0]
                     self.assertEqual(warm[:3], ["pool", "warm", "1"])
                     self.assertEqual(warm[3:], [
                         "--image", "docker.io/library/alpine:latest",
@@ -97,6 +114,16 @@ if args[:2] == ["machine", "run"]:
                     f"wave_1_boot_receipt_p50_ms",
                     (base / "out/summary.tsv").read_text(),
                 )
+                env["MVM_FAKE_PRIME_FAIL"] = "1"
+                env["MVM_HVF_DENSITY_OUT_DIR"] = str(base / "out-fail")
+                failed = subprocess.run(
+                    ["/bin/bash" if platform.system() == "Darwin" else "bash",
+                     str(ROOT / "scripts/measure-hvf-density.sh")],
+                    env=env, capture_output=True, text=True, timeout=20,
+                )
+                self.assertEqual(failed.returncode, 71, failed.stderr)
+                self.assertIn("first-use preparation failed", failed.stderr)
+                self.assertFalse((base / "out-fail/wave-1").exists())
 
 
 if __name__ == "__main__":
