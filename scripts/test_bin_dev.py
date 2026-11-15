@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class BinDevTest(unittest.TestCase):
-    def test_builds_cli_without_eager_embed_and_runs_from_pair_target(self):
+    def test_builds_cli_and_host_helpers_without_eager_embed(self):
         with (
             tempfile.TemporaryDirectory() as temporary,
             tempfile.TemporaryDirectory() as state_dir,
@@ -48,7 +48,8 @@ class BinDevTest(unittest.TestCase):
             homes = list(state.glob("*/home"))
             self.assertEqual(len(homes), 1)
             self.assertEqual(
-                (homes[0] / "build-args").read_text(), "build --features dev\n"
+                (homes[0] / "build-args").read_text(),
+                "build -p mvmctl -p mvm-hostd -p mvm-gpu --bins --features mvmctl/dev\n",
             )
             self.assertTrue(next(root.glob("target/pair-*/debug/mvmctl")).is_file())
 

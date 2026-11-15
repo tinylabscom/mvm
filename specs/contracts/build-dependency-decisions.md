@@ -36,6 +36,13 @@ not separate crates per algorithm.
 checks, and error mapping. Release profiles are unchanged. This adds one
 first-party package, not a new third-party crypto dependency or implementation.
 
+`bin/dev` builds the contributor CLI and native host helpers in one Cargo
+invocation, without enabling embedded host binaries or building the Linux
+builder payload up front. The earlier CLI-only wrapper experiment was rejected
+by a live smoke: launch commands intentionally cannot compile missing host
+helpers. That capability restriction remains unchanged. The full guest-runtime
+archive is separate, pre-existing first-use work that `just embed` never prepared.
+
 Build timings on an Apple Silicon host (16 CPUs, 128 GiB, Rust 1.97.1,
 the repository's two-job default), starting from
 `f7a9759af1161c4f7182f8af9ac1b951fd3f7eab`:
