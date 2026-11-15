@@ -4,7 +4,7 @@
 //! `install.sh` unpacks each release whole into `<lib>/<n>-<version>/` and marks
 //! it with [`RELEASE_MARKER`]; `<lib>` itself carries [`LIB_MARKER`]. Those two
 //! markers are the only evidence a directory is the installer's, so nothing
-//! here — and nothing in `uninstall.sh` — treats an unmarked directory as a
+//! here — and nothing in `install.sh uninstall` — treats an unmarked directory as a
 //! release, whatever its name.
 //!
 //! The Linux `.deb` and `.rpm` install a third marker, [`PACKAGE_MARKER`],
@@ -144,13 +144,9 @@ mod tests {
 
     #[test]
     fn the_install_scripts_use_the_same_marker_names() {
-        for script in [
-            include_str!("../../../install.sh"),
-            include_str!("../../../uninstall.sh"),
-        ] {
-            assert!(script.contains(&format!("LIB_MARKER=\"{LIB_MARKER}\"")));
-            assert!(script.contains(&format!("RELEASE_MARKER=\"{RELEASE_MARKER}\"")));
-        }
+        let script = include_str!("../../../install.sh");
+        assert!(script.contains(&format!("LIB_MARKER=\"{LIB_MARKER}\"")));
+        assert!(script.contains(&format!("RELEASE_MARKER=\"{RELEASE_MARKER}\"")));
     }
 
     #[test]

@@ -77,7 +77,7 @@ def env_block():
     sites = rust_sites()
     docs = text_mentions(["public/src/content/docs"], (".md", ".mdx"))
     ext = text_mentions(["scripts", "nix", "features", "tests", "crates", ".github", "xtask", "just", "bin", "model",
-                         "install.sh", "uninstall.sh", "Justfile", "flake.nix"],
+                         "install.sh", "Justfile", "flake.nix"],
                         (".sh", ".py", ".nix", ".ts", ".toml", ".yml", ".yaml", ".feature", ".js", ".just", ".sh"))
     ext_root = {k: v for k, v in ext.items() if not k.endswith("_")}
     rows, cls = [], collections.Counter()

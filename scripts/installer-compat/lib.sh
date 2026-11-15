@@ -121,7 +121,7 @@ in_prefix() {
 
 # Install a release into the prefix. Only MVM_INSTALL_DIR is set, so the
 # library directory comes from the installer's own default — the same default
-# uninstall.sh has to derive independently.
+# install.sh uninstall derives from the library marker.
 run_install() {
   install_tag="$1"
   install_log="$2"
@@ -240,30 +240,30 @@ assert_doctor_runs() {
 
 # Uninstall with a state directory present, as a user's would be. A release
 # older than the pre-uninstall check cannot confirm no machine is running, so
-# uninstall.sh must refuse and change nothing; --force then removes it.
+# install.sh uninstall must refuse and change nothing; --force then removes it.
 run_uninstall() {
   uninstall_tag="$1"
   uninstall_log="$2"
   mkdir -p "$PREFIX_HOME/.mvm"
   set +e
-  in_prefix MVM_INSTALL_DIR="$PREFIX_BIN" sh "$UNINSTALLER" </dev/null >"$uninstall_log" 2>&1
+  in_prefix MVM_INSTALL_DIR="$PREFIX_BIN" sh "$INSTALLER" uninstall </dev/null >"$uninstall_log" 2>&1
   uninstall_status=$?
   set -e
   UNINSTALL_MODE="checked"
   if [ "$uninstall_status" -ne 0 ]; then
     if ! grep -q "predates the pre-uninstall check" "$uninstall_log"; then
       cat "$uninstall_log" >&2
-      fail "uninstall.sh failed for $uninstall_tag (exit $uninstall_status)"
+      fail "install.sh uninstall failed for $uninstall_tag (exit $uninstall_status)"
     fi
     assert_version "$uninstall_tag"
-    [ -L "$PREFIX_LIB/current" ] || fail "uninstall.sh refused but still removed $PREFIX_LIB/current"
+    [ -L "$PREFIX_LIB/current" ] || fail "install.sh uninstall refused but still removed $PREFIX_LIB/current"
     set +e
-    in_prefix MVM_INSTALL_DIR="$PREFIX_BIN" sh "$UNINSTALLER" --force </dev/null >>"$uninstall_log" 2>&1
+    in_prefix MVM_INSTALL_DIR="$PREFIX_BIN" sh "$INSTALLER" uninstall --force </dev/null >>"$uninstall_log" 2>&1
     uninstall_status=$?
     set -e
     if [ "$uninstall_status" -ne 0 ]; then
       cat "$uninstall_log" >&2
-      fail "uninstall.sh --force failed for $uninstall_tag (exit $uninstall_status)"
+      fail "install.sh uninstall --force failed for $uninstall_tag (exit $uninstall_status)"
     fi
     UNINSTALL_MODE="refused, then --force"
   fi

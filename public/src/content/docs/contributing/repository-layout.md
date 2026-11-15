@@ -21,7 +21,7 @@ change.
 | `model/` | The conformance register: `claims.toml`, `authorities.toml`, `ledger.toml`. `CONFORMANCE.md` is generated from them. | `check-conformance`, `features/` |
 | `features/`, `tests/` | BDD scenarios (`features/suites/`) and root integration tests. | `mvm-conformance`, `cargo nextest` |
 | `assets/` | macOS code-signing entitlement profiles (`mvmctl`, `mvm-supervisor`). | `build.rs`, installer tests, release workflow |
-| `install.sh`, `uninstall.sh` | The published installer. Paths and hashes are pinned by tests and the release workflow; do not move them. | `tests/install_sh.rs`, `release.yml` |
+| `install.sh` | The published installer and uninstaller (`install.sh uninstall`). Paths and hashes are pinned by tests and the release workflow; do not move it. | `tests/install_sh.rs`, `release.yml` |
 | `AGENTS.md`, `CLAUDE.md`, `*.sigstore.json` | Contributor and agent instructions with detached signatures. | contributors, CI |
 | `Justfile`, `just/` | Recipe entry point and per-area modules (`check`, `tests`, `lints`, `payload`, `release`, ...). | contributors, CI |
 | `scripts/`, `bin/` | Shell and Python helpers used by recipes and workflows; `bin/dev` runs this checkout's `mvmctl`. | `Justfile`, workflows, tests |
