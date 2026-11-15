@@ -26,6 +26,9 @@ use crate::plan::environment::EnvironmentDescriptor;
 use crate::plan::types::BuildProvenance;
 use crate::policy::security::AgentProfile;
 
+mod production_composition;
+pub use production_composition::{ProductionComposition, ProductionCompositionLayer};
+
 /// Highest bundle-manifest schema version this build understands.
 /// Verifiers fail closed on a future bump rather than silently
 /// dropping fields they don't know about.
@@ -291,16 +294,6 @@ pub struct CanonicalLinuxProof {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalComposition {
-    pub lock_artifact: String,
-    pub layers: Vec<LocalCompositionLayer>,
-}
-
-/// Names the signed frozen lock and original runtime proofs, never an
-/// invented signature for the locally authored application. This is data
-/// only until protected production admission is implemented.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProductionComposition {
     pub lock_artifact: String,
     pub layers: Vec<LocalCompositionLayer>,
 }
@@ -587,6 +580,8 @@ mod tests {
         });
         assert_eq!(member.minimum_schema_version(), 8);
         let encoded = serde_json::to_value(&member).unwrap();
+        assert_eq!(encoded["layers"][0]["group_artifact"], "runtime-group.toml");
+        assert!(encoded["layers"][0].get("profile_artifact").is_none());
         assert_eq!(
             serde_json::from_value::<BundleMember>(encoded.clone()).unwrap(),
             member
@@ -594,28 +589,9 @@ mod tests {
         let mut forged = encoded;
         forged["publisher_verified"] = true.into();
         assert!(serde_json::from_value::<BundleMember>(forged).is_err());
-    }
-
-    #[test]
-    fn proposed_production_composition_is_distinct_closed_and_requires_schema_nine() {
-        let member = BundleMember::ProductionComposition(ProductionComposition {
-            lock_artifact: "frozen-lock.json".into(),
-            layers: vec![LocalCompositionLayer {
-                manifest_artifact: "runtime-manifest.json".into(),
-                signature_artifact: "runtime-manifest.bundle".into(),
-                group_artifact: "runtime-group.toml".into(),
-            }],
-        });
-        assert_eq!(member.minimum_schema_version(), 9);
-        let encoded = serde_json::to_value(&member).unwrap();
-        assert_eq!(encoded["class"], "production_composition");
-        assert_eq!(
-            serde_json::from_value::<BundleMember>(encoded.clone()).unwrap(),
-            member
-        );
-        let mut forged = encoded;
-        forged["publisher_verified"] = true.into();
-        assert!(serde_json::from_value::<BundleMember>(forged).is_err());
+        let mut wrong_shape = serde_json::to_value(member).unwrap();
+        wrong_shape["layers"][0]["profile_artifact"] = "runtime-profile.toml".into();
+        assert!(serde_json::from_value::<BundleMember>(wrong_shape).is_err());
     }
 
     #[test]
