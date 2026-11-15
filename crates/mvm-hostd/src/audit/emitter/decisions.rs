@@ -6,6 +6,7 @@
 //! records into the chain and the local decision store.
 
 use super::AuditEmitter;
+use super::runtime_identity_labels;
 use super::stream_audit;
 use crate::supervisor::for_plan;
 use anyhow::{Context, Result};
@@ -25,7 +26,9 @@ impl AuditEmitter {
 
     /// Emit `plan.admitted` — fires immediately after `admit_for_run`
     /// succeeds. Binds the plan_id, signer (via `audit_labels` extras),
-    /// and the workload context.
+    /// and the workload context. A pinned release runtime is recorded as
+    /// individual chain-signed fields; the caller must first compare the pin
+    /// with the launch verifier's identity and require durable admission.
     ///
     /// Also carries the admitted output-retention mode. Without it, a workload
     /// with no transcript is ambiguous — nobody can tell a run that was
@@ -48,6 +51,9 @@ impl AuditEmitter {
                 .as_ref()
                 .map_or_else(String::new, |environment| environment.kernel_sha256.clone()),
         ));
+        if let Some(runtime) = plan.runtime_identity.as_ref() {
+            labels.extend(runtime_identity_labels(runtime));
+        }
         self.emit(plan, "plan.admitted", labels)
     }
 

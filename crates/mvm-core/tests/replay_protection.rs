@@ -19,6 +19,7 @@ fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
         execution_epoch: 1,
         grants: None,
         environment: None,
+        runtime_identity: None,
         build_provenance: Default::default(),
         snapshot_at: Default::default(),
         network_mode: Default::default(),

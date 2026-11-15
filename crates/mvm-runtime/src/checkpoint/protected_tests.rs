@@ -238,7 +238,17 @@ fn sealed_runtime_evidence_verifies_without_leaving_plaintext_and_refuses_tamper
     let meta = capture_full(&store, &tmp.path().join("vm"), "runtime-evidence");
     let content = store.content_dir(&meta.id);
     let before = regular_files(store.root());
-    verify_checkpoint_runtime(&store, &meta).unwrap();
+    let verified = verify_checkpoint_runtime(&store, &meta).unwrap();
+    assert!(verified.matches_checkpoint(&meta));
+    let mut different_parent = meta.clone();
+    different_parent.meta_digest =
+        mvm_core::checkpoint::CheckpointDigest::parse(format!("sha256:{}", "0".repeat(64)))
+            .unwrap();
+    assert!(!verified.matches_checkpoint(&different_parent));
+    assert!(
+        verified.identity().is_none(),
+        "baked fixture has no release signer"
+    );
     assert_eq!(regular_files(store.root()), before);
     assert!(!content.join(runtime_binding::EVIDENCE_BLOB).exists());
     assert_no_plaintext(store.root());

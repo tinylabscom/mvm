@@ -181,19 +181,32 @@ pub fn verify_release_archive_bytes(
     identities: &[String],
     issuer: &str,
 ) -> Result<(), RuntimeOverlayError> {
+    verify_release_archive_bytes_with_signer(archive, bundle, asset, identities, issuer).map(|_| ())
+}
+
+/// Verify the archive and return the signer read from the authenticated bundle.
+/// This performs the same single signature check as `verify_release_archive_bytes`.
+pub fn verify_release_archive_bytes_with_signer(
+    archive: &[u8],
+    bundle: &[u8],
+    asset: &str,
+    identities: &[String],
+    issuer: &str,
+) -> Result<mvm_core::crypto::image_verify::VerifiedSigner, RuntimeOverlayError> {
     let identities: Vec<&str> = identities.iter().map(String::as_str).collect();
-    mvm_core::crypto::image_verify::verify_signed_payload_under_any_identity(
-        archive,
-        bundle,
-        &identities,
-        issuer,
-    )
-    .map_err(|error| RuntimeOverlayError::SignatureInvalid {
-        asset: asset.to_string(),
-        reason: error.to_string(),
-    })?;
+    let signer =
+        mvm_core::crypto::image_verify::verify_signed_payload_and_signer_under_any_identity(
+            archive,
+            bundle,
+            &identities,
+            issuer,
+        )
+        .map_err(|error| RuntimeOverlayError::SignatureInvalid {
+            asset: asset.to_string(),
+            reason: error.to_string(),
+        })?;
     tracing::debug!(asset, "release archive signature verified");
-    Ok(())
+    Ok(signer)
 }
 
 #[cfg(test)]
@@ -391,6 +404,56 @@ mod tests {
         assert!(
             matches!(&err, RuntimeOverlayError::SignatureInvalid { asset, .. } if asset == ASSET),
             "an empty identity set is a signature refusal for this asset: {err}"
+        );
+    }
+
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn authenticated_bundle_returns_its_actual_signer_and_refuses_wrong_identity() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/release-signature/v0.18.0-rc.1");
+        let asset = "builder-vm-aarch64-checksums-sha256.txt";
+        let payload = std::fs::read(dir.join(asset)).expect("fixture payload");
+        let bundle = std::fs::read(dir.join(format!("{asset}.bundle"))).expect("fixture bundle");
+        let accepted = mvm_core::release_trust::accepted_release_identities("0.18.0-rc.1");
+        let issuer = mvm_core::release_trust::RELEASE_OIDC_ISSUER;
+        let candidates = vec![
+            "https://example.invalid/not-the-signer".into(),
+            accepted[0].clone(),
+        ];
+        let signer =
+            verify_release_archive_bytes_with_signer(&payload, &bundle, asset, &candidates, issuer)
+                .expect("published release bundle verifies under its actual signer");
+        assert_eq!(signer.identity, accepted[0]);
+        assert_eq!(signer.issuer, issuer);
+        assert!(
+            verify_release_archive_bytes_with_signer(
+                &payload,
+                &bundle,
+                asset,
+                &["https://example.invalid/not-the-signer".into()],
+                issuer,
+            )
+            .is_err(),
+            "a different identity must refuse"
+        );
+        assert!(
+            verify_release_archive_bytes_with_signer(
+                &payload,
+                &bundle,
+                asset,
+                &accepted,
+                "https://issuer.example.invalid",
+            )
+            .is_err(),
+            "a different issuer must refuse"
+        );
+        let mut tampered = payload;
+        tampered.push(b'\n');
+        assert!(
+            verify_release_archive_bytes_with_signer(&tampered, &bundle, asset, &accepted, issuer)
+                .is_err(),
+            "changed payload must refuse"
         );
     }
 

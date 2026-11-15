@@ -545,13 +545,47 @@ pub struct RuntimeProfileRef(pub String);
 ///
 /// Pinning it makes the mismatch refusable at admission instead of silent at
 /// boot. The struct (rather than a bare digest) is so the rest of the
-/// environment — initrd, runtime overlay, seccomp tier — can be added without
-/// another plan field.
+/// kernel environment can be added without changing the kernel pin's meaning.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentRef {
     /// Lowercase hex SHA-256 of the kernel image this workload boots.
     pub kernel_sha256: String,
+}
+
+/// Data pinned by a signed plan, not proof that a runtime has been verified.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeIdentity {
+    pub archive_sha256: String,
+    pub version: String,
+    /// Canonical guest architecture (`x86_64` or `aarch64`).
+    pub arch: String,
+    /// Digests declared inside the authenticated runtime archive.
+    pub declaration: RuntimeArtifactDigests,
+    /// Digests of the actual artifact bytes selected for this launch.
+    pub selected: RuntimeArtifactDigests,
+    pub signer_identity: String,
+    pub signer_issuer: String,
+}
+
+/// Overlay, verity tree, root hash and initramfs fingerprints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeArtifactDigests {
+    pub overlay_sha256: String,
+    pub overlay_verity_sha256: String,
+    pub overlay_roothash: String,
+    pub initramfs_sha256: String,
+}
+
+/// A plan may not release a verified runtime whose identity differs from its pin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RuntimeIdentityMismatch {
+    #[error("the signed plan does not pin a runtime identity")]
+    Missing,
+    #[error("the verified runtime differs from the signed plan")]
+    Different,
 }
 
 /// Reference to a signed image. SHA-256 of the rootfs + name. The

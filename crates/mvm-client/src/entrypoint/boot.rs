@@ -15,8 +15,8 @@ use mvm_core::vm_backend::{VmId, VmStartConfig};
 use mvm_runtime::AnyBackend;
 
 use crate::launch::runtime_source::{
-    PairArtifactSource, SdkSidecarAttachment, attach_runtime_overlay_if_cached_version,
-    attach_universal_initramfs_if_cached,
+    PairArtifactSource, SdkSidecarAttachment, attach_runtime_overlay_if_cached_version_verified,
+    attach_universal_initramfs_if_cached, attach_universal_initramfs_with_verified_release,
 };
 
 /// The original higher-layer objects for one host-owned launch. This object is
@@ -29,6 +29,7 @@ pub(crate) struct ClientBootResources {
     // and reseals attachments, so it must outlive every uncertain native use.
     pub _volumes: Option<crate::volume::LaunchPreparation>,
     pub built_runtime: Option<mvm_hostd::plan_admission::PreparedBuiltPackRuntime>,
+    pub verified_runtime: Option<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
 }
 
 struct ClientCustody {
@@ -68,7 +69,11 @@ impl OwnedClientBoot {
             group.runtime = Some(
                 resources
                     .backend
-                    .prepare_owned_launch(&resources.config, images)?,
+                    .prepare_owned_launch_with_verified_runtime(
+                        &resources.config,
+                        images,
+                        resources.verified_runtime.as_ref(),
+                    )?,
             );
             let runtime = group.runtime.as_mut().expect("prepared runtime");
             if let Some(built) = &resources.built_runtime {
@@ -525,6 +530,8 @@ pub struct AdmitInputs<'a> {
     /// The selected runtime artifacts and their untrusted release proof.
     /// Admission verifies this same config before the backend consumes it.
     pub runtime_config: Option<&'a VmStartConfig>,
+    /// Launch-owned archive verification, carried beside the cloneable config.
+    pub verified_runtime: Option<&'a mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
 }
 
 /// Identity policy for a session-style VM boot.
@@ -767,16 +774,35 @@ fn boot_session_core(
     // The runtime overlay is the single source of the guest agent and its
     // helpers here, as on the transient path; a missing required overlay is
     // built or acquired, never replaced by a copy baked into the rootfs.
-    if let Some(assets) = portable_boot_assets {
+    let verified_runtime = if let Some(assets) = portable_boot_assets {
         anyhow::ensure!(
             bundle_archive.is_none(),
             "producer health cannot replace an installed bundle's boot closure"
         );
         assets.apply_for_health(&mut start_config)?;
+        None
     } else {
-        attach_runtime_overlay_if_cached_version(&mut start_config, backend.name(), None, pair)?;
-        attach_universal_initramfs_if_cached(&mut start_config, backend.name())?;
-    }
+        let release = attach_runtime_overlay_if_cached_version_verified(
+            &mut start_config,
+            backend.name(),
+            None,
+            pair,
+        )?;
+        if let Some(release) = release {
+            attach_universal_initramfs_with_verified_release(
+                &mut start_config,
+                backend.name(),
+                &release,
+            )?;
+            Some(mvm_runtime::runtime_evidence::verify_release_runtime_set(
+                &start_config,
+                release,
+            )?)
+        } else {
+            attach_universal_initramfs_if_cached(&mut start_config, backend.name())?;
+            None
+        }
+    };
 
     // Admission starts the plan and verb-grant validity windows. All boot
     // preparation therefore completes before this point, immediately before
@@ -797,6 +823,7 @@ fn boot_session_core(
         volumes: &start_config.volumes,
         bundle_archive: bundle_archive.as_deref(),
         runtime_config: Some(&start_config),
+        verified_runtime: verified_runtime.as_ref(),
     })?;
     let (mut substrate, context) = match admitted {
         BootAdmission::Legacy(substrate) => (*substrate, None),
@@ -821,6 +848,9 @@ fn boot_session_core(
     if let Some(runtime) = &_built_runtime {
         runtime.verify_config(&start_config)?;
     }
+    if let Some(runtime) = &verified_runtime {
+        runtime.verify_config(&start_config)?;
+    }
     if mvm_runtime::catalog::descriptor(backend.kind()).is_workload {
         mvm_hostd::plan_admission::stash_plan_for_bridge(&start_config)
             .context("persisting admitted session plan before backend start")?;
@@ -837,6 +867,7 @@ fn boot_session_core(
             admission,
             _volumes: None,
             built_runtime: _built_runtime,
+            verified_runtime,
         })
         .map_err(|mut failure| {
             failure.emit_failed("backend-start");
@@ -850,7 +881,7 @@ fn boot_session_core(
         return Ok(SessionBootResult::Owned(owner));
     }
     let vm_id = backend
-        .start(&start_config)
+        .start_with_verified_runtime(&start_config, verified_runtime.as_ref())
         .with_context(|| format!("starting session microVM '{vm_name}'"))?;
     // The budget gate this boot admitted under counts only what is recorded:
     // a session boot that skipped the charge would be invisible to every
@@ -936,6 +967,7 @@ mod tests {
                     admission,
                     _volumes: None,
                     built_runtime: None,
+                    verified_runtime: None,
                 }),
                 runtime: None,
             })),

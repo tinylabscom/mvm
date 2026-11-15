@@ -337,44 +337,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         inputs: &WorkloadLaunchInputs<'_>,
         writable_images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
     ) -> Result<Box<dyn RunningVm>> {
-        self.require_caller_registration_shape(inputs.config)?;
-        let lifecycle =
-            crate::runtime_evidence::RuntimeLifecycleLease::acquire(&inputs.config.name)?;
-        anyhow::ensure!(
-            !crate::kernel_custody::has_retained_kernel(&lifecycle)?,
-            "canonical kernel lifetime for this VM is still unresolved"
-        );
-        let bound_config = lifecycle.bind(inputs.config)?;
-        let kernel_binding = crate::kernel_custody::KernelBoundLaunch::bind(
-            bound_config,
-            self.driver.kind(),
-            &lifecycle,
-        )?;
-        let bound_config = kernel_binding.config();
-        let bound_cmdline = if bound_config.runtime_release_proof.is_some()
-            || bound_config.unsigned_runtime_development
-        {
-            cmdline::runner_cmdline(
-                bound_config,
-                &vm_state_dir(&bound_config.name),
-                |has_disk| self.driver.workload_base_bootargs(has_disk),
-            )
-        } else {
-            inputs.cmdline.clone()
-        };
-        let inputs = &WorkloadLaunchInputs {
-            config: bound_config,
-            tenant: inputs.tenant,
-            secrets: inputs.secrets,
-            redaction: inputs.redaction,
-            network_policy: inputs.network_policy,
-            cmdline: bound_cmdline,
-        };
-        let result =
-            self.boot_bound_workload_guarded(inputs, Some(&kernel_binding), writable_images);
-        result.map_err(|error| {
-            cold_hvf_channel::retain_boot_error(error, (lifecycle, kernel_binding))
-        })
+        self.start_workload_custodied_with_release(inputs, writable_images, None)
     }
 
     /// Maps an already-bound configuration into a backend boot. Production
@@ -715,11 +678,11 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         } else {
             crate::checkpoint::verify_checkpoint_runtime(ctx.checkpoints, &parent)
         };
-        runtime_verified.map_err(|error| {
+        let runtime_verified = runtime_verified.map_err(|error| {
             StandbyError::ClaimFailed(format!("verify paused runtime: {error:#}"))
         })?;
         crate::runtime_evidence::verify_runtime_for_claim(
-            parent.runtime_launch_binding.as_ref(),
+            &runtime_verified,
             claim.start_config.as_ref(),
         )
         .map_err(|error| {
@@ -729,6 +692,11 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // (2) + (4) Bind the admitted plan's image digest to the verified parent.
         // A missing plan or a digest mismatch refuses before any child side effect.
         let plan = claim_plan(claim)?;
+        if let Some(identity) = runtime_verified.identity() {
+            plan.require_runtime_identity(identity).map_err(|error| {
+                StandbyError::ClaimFailed(format!("verify inherited runtime: {error}"))
+            })?;
+        }
         let parent_image_sha256 =
             materialized_blob_sha256(ctx.checkpoints, &parent, mvm_core::checkpoint::ROOTFS_BLOB)
                 .map_err(|_| refuse(ClaimRefusal::ParentTampered))?;

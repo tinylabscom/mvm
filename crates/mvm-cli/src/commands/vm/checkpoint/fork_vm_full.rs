@@ -11,7 +11,7 @@
 //! the child's own state dir before the child VMM starts.
 
 use anyhow::{Context, Result};
-use mvm_client::checkpoint::{CheckpointStore, ForkParams, ForkParentLiveness, fork_vm_full};
+use mvm_client::checkpoint::{CheckpointStore, ForkParams, ForkParentLiveness};
 use mvm_contract::protocol::vm_backend::BackendKind;
 use mvm_core::checkpoint::{CheckpointId, VmFullOrigin, vm_full_origin};
 use mvm_core::config::vm_state_dir;
@@ -172,6 +172,7 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
         admission,
         child_plan_json,
         child_tenant_id,
+        retained_runtime,
     } = admit_forked_child(&AdmitForkedChildParams {
         store: p.store,
         checkpoint: p.checkpoint,
@@ -187,7 +188,7 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
     let parent_meta = p.store.read_meta(p.checkpoint)?;
     let anchor = SignedChainAnchor::load()
         .context("loading the signed audit chain to verify the fork parent")?;
-    let fork_result = fork_vm_full(
+    let fork_result = mvm_client::checkpoint::fork_vm_full_verified(
         p.store,
         ForkParams {
             checkpoint: p.checkpoint.clone(),
@@ -214,6 +215,7 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
             )
         },
         &anchor,
+        &retained_runtime,
     );
     if let Err(ref e) = fork_result {
         crate::commands::vm::up::emit_failed(&admission, "fork-vm-full-fc", e);
@@ -307,6 +309,7 @@ struct AdmittedForkChild {
     admission: crate::commands::vm::up::AdmissionContext,
     child_plan_json: String,
     child_tenant_id: String,
+    retained_runtime: mvm_client::checkpoint::VerifiedRetainedRuntime,
 }
 
 /// Admit a fresh claim-8 plan for a vm_full fork child, and mint its verb-grant
@@ -328,7 +331,8 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
         p.parent_meta.compute_meta_digest() == p.store.read_meta(p.checkpoint)?.meta_digest,
         "fork runtime metadata differs from the authenticated checkpoint"
     );
-    mvm_client::checkpoint::verify_checkpoint_runtime(p.store, p.parent_meta)?;
+    let retained_runtime =
+        mvm_client::checkpoint::verify_checkpoint_runtime(p.store, p.parent_meta)?;
     let restrict_agent_verbs = fork_restrict_agent_verbs(p)?;
     let user_cfg = mvm_core::user_config::load(None);
     // A chunked checkpoint has no contiguous rootfs in its content directory.
@@ -354,7 +358,7 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
         p.allow_secret_drop,
     )?;
     let ledger = mvm_client::admission::InMemoryNonceLedger::new();
-    let admission = crate::commands::vm::up::admit_plan_for_boot(
+    let admission = crate::commands::vm::up::admit_plan_for_boot_with_verified_retained(
         crate::commands::vm::up::AdmitPlanForBootParams {
             mailbox: None,
             gpu: false,
@@ -417,6 +421,7 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
                 "a checkpoint fork boots the image the parent booted; this path resolves no entrypoint",
             ),
         },
+        &retained_runtime,
     )?;
 
     let child_plan_json = serde_json::to_string(admission.admitted.signed())
@@ -437,6 +442,7 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
         admission,
         child_plan_json,
         child_tenant_id,
+        retained_runtime,
     })
 }
 
@@ -558,6 +564,7 @@ fn fork_vm_full_arm_hvf(
         admission,
         child_plan_json,
         child_tenant_id,
+        retained_runtime,
     } = admit_forked_child(&AdmitForkedChildParams {
         store: p.store,
         checkpoint: p.checkpoint,
@@ -572,7 +579,7 @@ fn fork_vm_full_arm_hvf(
     // Verify the parent against the signed audit chain before cloning anything.
     let anchor = SignedChainAnchor::load()
         .context("loading the signed audit chain to verify the fork parent")?;
-    let fork_result = fork_vm_full(
+    let fork_result = mvm_client::checkpoint::fork_vm_full_verified(
         p.store,
         ForkParams {
             checkpoint: p.checkpoint.clone(),
@@ -586,6 +593,7 @@ fn fork_vm_full_arm_hvf(
         },
         &mvm_client::checkpoint::HvfForkRestorer,
         &anchor,
+        &retained_runtime,
     );
     if let Err(ref e) = fork_result {
         crate::commands::vm::up::emit_failed(&admission, "fork-vm-full-hvf", e);

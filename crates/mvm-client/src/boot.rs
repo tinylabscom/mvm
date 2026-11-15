@@ -198,13 +198,24 @@ pub fn start_prepared_custodied(
     config: &mvm_core::vm_backend::VmStartConfig,
     images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
 ) -> Result<StartedVm> {
+    start_prepared_custodied_with_verified_runtime(backend, config, images, None)
+}
+
+/// Transfer release proof custody beside the selected config to the backend.
+#[cfg(unix)]
+pub fn start_prepared_custodied_with_verified_runtime(
+    backend: mvm_runtime::backend::AnyBackend,
+    config: &mvm_core::vm_backend::VmStartConfig,
+    images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
+    runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
+) -> Result<StartedVm> {
     mvm_runtime::workload_backend::require_workload_backend(&backend).map_err(|e| {
         MvmError::Backend {
             reason: format!("{e:#}"),
         }
     })?;
     let vm_id = backend
-        .start_custodied(config, images)
+        .start_custodied_verified_release(config, images, runtime.map(|set| set.release()))
         .map_err(|e| MvmError::Backend {
             reason: format!("{e:#}"),
         })?;

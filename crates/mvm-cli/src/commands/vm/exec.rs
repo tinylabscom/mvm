@@ -791,6 +791,7 @@ pub(in crate::commands) fn run_secure_started(
             volumes,
             bundle_archive,
             runtime_config,
+            verified_runtime,
         } = inputs;
         anyhow::ensure!(
             backend_kind == admit_backend_kind,
@@ -860,7 +861,14 @@ pub(in crate::commands) fn run_secure_started(
             ),
             assets: assets.to_vec(),
         };
-        let (c, durability) = super::up::admit_plan_for_boot_syncing_beside_boot(params)?;
+        let (c, durability) = match verified_runtime {
+            Some(runtime) => {
+                super::up::admit_plan_for_boot_with_verified_runtime_syncing_beside_boot(
+                    params, runtime,
+                )?
+            }
+            None => super::up::admit_plan_for_boot_syncing_beside_boot(params)?,
+        };
         // Persist the bare plan so the pre-start moat / endpoint can read it
         // on the backends that consume it from disk (mirrors the invoke path).
         if super::up::persists_plan_before_start(&admit_backend) {

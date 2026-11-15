@@ -338,6 +338,28 @@ pub fn fork_vm_full(
     restore: &ForkRestore<'_>,
     anchor: &dyn CheckpointChainAnchor,
 ) -> Result<CheckpointMeta> {
+    fork_vm_full_with_verified_runtime(store, params, restore, anchor, None)
+}
+
+/// Fork after pre-admission verification of the same authenticated parent.
+/// The proof cannot be minted from serialized checkpoint or child launch data.
+pub fn fork_vm_full_verified(
+    store: &CheckpointStore,
+    params: ForkParams,
+    restore: &ForkRestore<'_>,
+    anchor: &dyn CheckpointChainAnchor,
+    runtime: &VerifiedRetainedRuntime,
+) -> Result<CheckpointMeta> {
+    fork_vm_full_with_verified_runtime(store, params, restore, anchor, Some(runtime))
+}
+
+fn fork_vm_full_with_verified_runtime(
+    store: &CheckpointStore,
+    params: ForkParams,
+    restore: &ForkRestore<'_>,
+    anchor: &dyn CheckpointChainAnchor,
+    runtime: Option<&VerifiedRetainedRuntime>,
+) -> Result<CheckpointMeta> {
     let parent = store.read_meta(&params.checkpoint)?;
     if parent.class != CheckpointClass::VmFull {
         anyhow::bail!(
@@ -362,7 +384,14 @@ pub fn fork_vm_full(
     // Same fail-closed posture as fork_checkpoint: the parent's sealed record
     // must still match the digest the host signed at creation before we clone.
     verify_checkpoint_against_chain(anchor, &parent)?;
-    verify_checkpoint_runtime(store, &parent)?;
+    if let Some(runtime) = runtime {
+        anyhow::ensure!(
+            runtime.matches_checkpoint(&parent),
+            "fork runtime metadata differs from the authenticated checkpoint"
+        );
+    } else {
+        verify_checkpoint_runtime(store, &parent)?;
+    }
 
     if params.parent_liveness == ForkParentLiveness::MustBeStopped && vm_is_running(&parent.vm_name)
     {
@@ -545,7 +574,7 @@ pub use mvm_core::checkpoint::DeviceAnchors;
 pub use mvm_vmm::checkpoint::VmFullControl;
 
 pub(crate) mod runtime_binding;
-pub use runtime_binding::verify_checkpoint_runtime;
+pub use runtime_binding::{VerifiedRetainedRuntime, verify_checkpoint_runtime};
 pub(crate) use runtime_binding::{metadata_blob_sha256, verify_checkpoint_runtime_at};
 
 /// Record how long into a checkpoint capture a step finished. A standby's

@@ -72,8 +72,15 @@ pub fn record_admission(
     signer_id: &str,
     durability: AuditDurability,
 ) -> Result<()> {
+    let release_runtime = plan.runtime_identity.is_some();
+    let required = durability.is_required() || release_runtime;
     let Some(emitter) = emitter else {
-        if durability.is_required() {
+        if release_runtime {
+            anyhow::bail!(
+                "signed release runtime has no audit chain to record its admission; refusing to boot"
+            );
+        }
+        if required {
             anyhow::bail!(
                 "this run is sealed-production and has no audit chain to record its \
                  admission in; refusing to boot a workload that cannot be shown to \
@@ -93,7 +100,10 @@ pub fn record_admission(
             publish_boundary_root(emitter, &plan.tenant.0, "admission");
             Ok(())
         }
-        Err(e) if durability.is_required() => Err(e).context(
+        Err(e) if release_runtime => Err(e).context(
+            "recording signed release runtime admission in the chain-signed audit log; refusing to boot without durable runtime evidence",
+        ),
+        Err(e) if required => Err(e).context(
             "recording the admission in the chain-signed audit log; refusing to boot a \
              sealed-production workload whose admission cannot be proven afterwards",
         ),
@@ -175,6 +185,46 @@ mod tests {
 
     fn plan() -> ExecutionPlan {
         mvm_core::plan::test_support::PlanFixture::new().build()
+    }
+
+    fn release_plan() -> ExecutionPlan {
+        let mut plan = plan();
+        let digests = mvm_core::plan::RuntimeArtifactDigests {
+            overlay_sha256: "a".repeat(64),
+            overlay_verity_sha256: "b".repeat(64),
+            overlay_roothash: "c".repeat(64),
+            initramfs_sha256: "d".repeat(64),
+        };
+        plan.runtime_identity = Some(mvm_core::plan::RuntimeIdentity {
+            archive_sha256: "e".repeat(64),
+            version: "0.28.0".into(),
+            arch: mvm_core::arch::GuestArch::host().to_string(),
+            declaration: digests.clone(),
+            selected: digests,
+            signer_identity: "release@example.org".into(),
+            signer_issuer: "https://issuer.example.org".into(),
+        });
+        plan
+    }
+
+    #[test]
+    fn release_runtime_admission_refuses_missing_or_unwritable_audit_even_in_dev() {
+        let plan = release_plan();
+        let error = record_admission(None, &plan, "host:test", AuditDurability::BestEffort)
+            .expect_err("a release runtime cannot run without chain-signed admission");
+        assert!(error.to_string().contains("signed release runtime"));
+
+        let dir = tempfile::tempdir().expect("audit dir");
+        let emitter = fresh_emitter(dir.path());
+        std::fs::create_dir(dir.path().join("local.jsonl")).expect("block chain path");
+        let error = record_admission(
+            Some(&emitter),
+            &plan,
+            "host:test",
+            AuditDurability::BestEffort,
+        )
+        .expect_err("a release runtime cannot run after its audit write fails");
+        assert!(error.to_string().contains("durable runtime evidence"));
     }
 
     #[test]

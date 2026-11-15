@@ -16,8 +16,8 @@ use crate::launch::start_params::VmStartParams;
 use crate::record_readiness as record_vm_readiness;
 
 use super::runtime_source::{
-    attach_runtime_overlay_if_cached, attach_universal_initramfs_if_cached,
-    emit_runtime_source_status,
+    attach_runtime_overlay_if_cached_version_verified, attach_universal_initramfs_if_cached,
+    attach_universal_initramfs_with_verified_release, emit_runtime_source_status,
 };
 use crate::admission::policy::shares_from_volume_cfg;
 use crate::admission::{
@@ -190,6 +190,7 @@ pub fn start_persistent_oci_machine(
         admission,
         prepared_volumes,
         built_runtime: _built_runtime,
+        verified_runtime,
     } = prepare_persistent_boot(params)?;
     let name_label = start_config.name.clone();
     let name = name_label.as_str();
@@ -200,6 +201,7 @@ pub fn start_persistent_oci_machine(
         start_config,
         admission,
         prepared_volumes,
+        verified_runtime,
         name,
         backend_name,
     )
@@ -211,6 +213,7 @@ struct PreparedPersistentBoot {
     admission: crate::admission::AdmissionContext,
     prepared_volumes: crate::volume::LaunchPreparation,
     built_runtime: Option<mvm_hostd::plan_admission::PreparedBuiltPackRuntime>,
+    verified_runtime: Option<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
 }
 
 fn prepare_persistent_boot(
@@ -310,13 +313,32 @@ fn prepare_persistent_boot(
     // Everything the boot waits on is prepared before admission, because
     // admission starts the plan's validity window and the verb grant minted
     // from it lives exactly as long. See `crate::launch::boot_order`.
+    let mut prepared = (start_config, None);
     let admission = crate::launch::boot_order::admit_after_preparation(
-        &mut start_config,
-        |config| {
-            attach_runtime_overlay_if_cached(config, backend_name)?;
-            attach_universal_initramfs_if_cached(config, backend_name)
+        &mut prepared,
+        |(config, verified_runtime)| {
+            let release = attach_runtime_overlay_if_cached_version_verified(
+                config,
+                backend_name,
+                None,
+                None,
+            )?;
+            match release {
+                Some(release) => {
+                    attach_universal_initramfs_with_verified_release(
+                        config,
+                        backend_name,
+                        &release,
+                    )?;
+                    *verified_runtime = Some(
+                        mvm_runtime::runtime_evidence::verify_release_runtime_set(config, release)?,
+                    );
+                    Ok(())
+                }
+                None => attach_universal_initramfs_if_cached(config, backend_name),
+            }
         },
-        |config| {
+        |(config, verified_runtime)| {
             let admission_ledger = InMemoryNonceLedger::new();
             let ingress = machine_port_ingress(ports)?;
             let instruction_mounts = volumes
@@ -330,74 +352,79 @@ fn prepare_persistent_boot(
                     })
                 })
                 .collect::<Vec<_>>();
-            admit_plan_for_boot_configured_ingress(
-                AdmitPlanForBootParams {
-                    mailbox,
-                    // What the backend will arm, so the admitted tier opens
-                    // the GPU endpoint's vsock socket exactly when there is one.
-                    gpu: config.gpu,
-                    instructions: crate::admission::InstructionSources::for_workload(workload_dir)
-                        .with_mount_roots(&[])
-                        .with_materialized_mounts(&instruction_mounts),
-                    outputs: Vec::new(),
-                    network_mode: preflight_network(),
-                    tenant: "local",
-                    vm_name: name,
-                    backend_name,
-                    configured_images_dir: mvm_build::image_source::configured_images_dir()
-                        .as_deref(),
+            let configured_images_dir = mvm_build::image_source::configured_images_dir();
+            let params = AdmitPlanForBootParams {
+                mailbox,
+                // What the backend will arm, so the admitted tier opens
+                // the GPU endpoint's vsock socket exactly when there is one.
+                gpu: config.gpu,
+                instructions: crate::admission::InstructionSources::for_workload(workload_dir)
+                    .with_mount_roots(&[])
+                    .with_materialized_mounts(&instruction_mounts),
+                outputs: Vec::new(),
+                network_mode: preflight_network(),
+                tenant: "local",
+                vm_name: name,
+                backend_name,
+                configured_images_dir: configured_images_dir.as_deref(),
+                rootfs_path,
+                kernel_path: config.kernel_path.as_deref().map(std::path::Path::new),
+                precomputed_image_sha256: None,
+                boot_artifact_identity: None,
+                runtime_config: Some(config),
+                cpus,
+                mem_mib: u64::from(memory_mib),
+                seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+                secret_release: resolved_secrets.secret_release,
+                secrets: resolved_secrets.secrets,
+                caller_commitment,
+                ledger: &admission_ledger,
+                keys_dir: None,
+                audit_dir: None,
+                policy_dir: None,
+                bundle_pin: bundle_archive
+                    .as_deref()
+                    .map(crate::admission::BundlePin::boots),
+                bundle_posture: None,
+                deps_volume: None,
+                shares: shares_from_volume_cfg(volumes),
+                assets: registry_pack_image
+                    .into_iter()
+                    .map(crate::admission::AssetSpec::RegistryPack)
+                    .collect(),
+                redaction: mvm_core::policy::RedactionPolicy::default(),
+                network_policy: network_policy.clone(),
+                agent_verb_override: agent_verb.to_vec(),
+                // Persistent machines carrying a trailing argv run an ad-hoc Exec (DevOnly);
+                // they must not receive an attenuated ProdSafe-only grant. Baked-entrypoint
+                // boots (no argv, non-dev profile) keep the grant.
+                restrict_agent_verbs: crate::admission::agent_verbs::grant_eligible(
+                    false,
+                    has_ad_hoc_argv,
+                    profile == "dev",
+                ),
+                services: Vec::new(),
+                grants,
+                // The typed kind of the backend this start resolved, so the grant gate
+                // measures a declared bound against the mechanisms that tier has rather
+                // than refusing for want of an answer.
+                backend_kind: Some(crate::backend_kind_for(backend_name)),
+                entrypoint: crate::admission::entrypoint_resolve::ResolvedEntrypoint::for_launch(
                     rootfs_path,
-                    kernel_path: config.kernel_path.as_deref().map(std::path::Path::new),
-                    precomputed_image_sha256: None,
-                    boot_artifact_identity: None,
-                    runtime_config: Some(config),
-                    cpus,
-                    mem_mib: u64::from(memory_mib),
-                    seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-                    secret_release: resolved_secrets.secret_release,
-                    secrets: resolved_secrets.secrets,
-                    caller_commitment,
-                    ledger: &admission_ledger,
-                    keys_dir: None,
-                    audit_dir: None,
-                    policy_dir: None,
-                    bundle_pin: bundle_archive
-                        .as_deref()
-                        .map(crate::admission::BundlePin::boots),
-                    bundle_posture: None,
-                    deps_volume: None,
-                    shares: shares_from_volume_cfg(volumes),
-                    assets: registry_pack_image
-                        .into_iter()
-                        .map(crate::admission::AssetSpec::RegistryPack)
-                        .collect(),
-                    redaction: mvm_core::policy::RedactionPolicy::default(),
-                    network_policy: network_policy.clone(),
-                    agent_verb_override: agent_verb.to_vec(),
-                    // Persistent machines carrying a trailing argv run an ad-hoc Exec (DevOnly);
-                    // they must not receive an attenuated ProdSafe-only grant. Baked-entrypoint
-                    // boots (no argv, non-dev profile) keep the grant.
-                    restrict_agent_verbs: crate::admission::agent_verbs::grant_eligible(
-                        false,
-                        has_ad_hoc_argv,
-                        profile == "dev",
-                    ),
-                    services: Vec::new(),
-                    grants,
-                    // The typed kind of the backend this start resolved, so the grant gate
-                    // measures a declared bound against the mechanisms that tier has rather
-                    // than refusing for want of an answer.
-                    backend_kind: Some(crate::backend_kind_for(backend_name)),
-                    entrypoint:
-                        crate::admission::entrypoint_resolve::ResolvedEntrypoint::for_launch(
-                            rootfs_path,
-                            has_ad_hoc_argv,
-                        ),
-                },
-                ingress,
-            )
+                    has_ad_hoc_argv,
+                ),
+            };
+            match verified_runtime.as_ref() {
+                Some(runtime) => {
+                    crate::admission::admit_plan_for_boot_configured_ingress_with_verified_runtime(
+                        params, ingress, runtime,
+                    )
+                }
+                None => admit_plan_for_boot_configured_ingress(params, ingress),
+            }
         },
     )?;
+    let (mut start_config, verified_runtime) = prepared;
     for volume in &mut start_config.volumes {
         if admission
             .admitted
@@ -445,12 +472,18 @@ fn prepare_persistent_boot(
             emit_failed(&admission, "registry-pack-runtime", error);
         })?;
     }
+    if let Some(runtime) = &verified_runtime {
+        runtime.verify_config(&start_config).inspect_err(|error| {
+            emit_failed(&admission, "release-runtime", error);
+        })?;
+    }
     Ok(PreparedPersistentBoot {
         backend,
         start_config,
         admission,
         prepared_volumes,
         built_runtime: _built_runtime,
+        verified_runtime,
     })
 }
 
@@ -485,6 +518,7 @@ fn finish_legacy_persistent(
     start_config: mvm_core::vm_backend::VmStartConfig,
     admission: crate::admission::AdmissionContext,
     mut prepared_volumes: crate::volume::LaunchPreparation,
+    verified_runtime: Option<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
     name: &str,
     backend_name: &str,
 ) -> Result<mvm_hostd::plan_admission::AdmittedPlan> {
@@ -500,10 +534,11 @@ fn finish_legacy_persistent(
             &backend,
             mailbox_posture.as_ref(),
         )?;
-        Ok(crate::boot::start_prepared_custodied(
+        Ok(crate::boot::start_prepared_custodied_with_verified_runtime(
             backend,
             &start_config,
             images,
+            verified_runtime.as_ref(),
         )?)
     })() {
         Ok(started) => started,

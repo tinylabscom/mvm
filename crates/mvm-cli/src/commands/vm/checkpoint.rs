@@ -1009,18 +1009,30 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         memory_mib: mem_mib as u32,
         ..Default::default()
     };
-    crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
-        super::up::attach_runtime_overlay_if_cached_version(
+    let release = crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
+        super::up::attach_runtime_overlay_if_cached_version_verified(
             &mut start_config,
             &effective_hypervisor,
             parent_meta.runtime_overlay_version.as_deref(),
             pair,
         )
     })?;
-    super::up::attach_universal_initramfs_if_cached(&mut start_config, &effective_hypervisor)?;
+    if let Some(release) = &release {
+        super::up::attach_universal_initramfs_with_verified_release(
+            &mut start_config,
+            &effective_hypervisor,
+            release,
+        )?;
+    } else {
+        super::up::attach_universal_initramfs_if_cached(&mut start_config, &effective_hypervisor)?;
+    }
+    let verified_runtime = release
+        .map(|release| super::up::verify_release_runtime_set(&start_config, release))
+        .transpose()?;
 
     let ledger = mvm_client::admission::InMemoryNonceLedger::new();
-    let admission = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+    let configured_images_dir = mvm_build::image_source::configured_images_dir();
+    let params = super::up::AdmitPlanForBootParams {
         mailbox: None,
         gpu: false,
         instructions: Default::default(),
@@ -1029,7 +1041,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         tenant,
         vm_name: child_vm_name,
         backend_name: &effective_hypervisor,
-        configured_images_dir: mvm_build::image_source::configured_images_dir().as_deref(),
+        configured_images_dir: configured_images_dir.as_deref(),
         rootfs_path: p.instance_rootfs,
         kernel_path: Some(std::path::Path::new(&vmlinux_path)),
         precomputed_image_sha256: None,
@@ -1066,7 +1078,11 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
             "a checkpoint fork boots the image the parent booted; this path resolves no entrypoint",
         ),
-    })?;
+    };
+    let admission = match &verified_runtime {
+        Some(runtime) => super::up::admit_plan_for_boot_with_verified_runtime(params, runtime)?,
+        None => super::up::admit_plan_for_boot(params)?,
+    };
 
     populate_fork_rootfs_verity(&mut start_config, p.instance_rootfs)?;
 
@@ -1088,7 +1104,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         return Err(error);
     }
     let backend = AnyBackend::from_hypervisor(&effective_hypervisor);
-    if let Err(e) = backend.start(&start_config) {
+    if let Err(e) = backend.start_with_verified_runtime(&start_config, verified_runtime.as_ref()) {
         super::up::emit_failed(&admission, "backend-start", &e);
         return Err(e);
     }

@@ -232,6 +232,17 @@ pub fn cached_runtime_release_proof(
     version: &str,
     arch: GuestArch,
 ) -> Result<Option<evidence::RuntimeReleaseProof>, GuestRuntimeError> {
+    Ok(cached_verified_release_runtime(cache_root, version, arch)?
+        .map(|runtime| runtime.proof().clone()))
+}
+
+/// Locate and authenticate the selected release once, retaining its archive snapshot.
+/// A missing triplet is a source-runtime miss; a partial or invalid triplet refuses.
+pub fn cached_verified_release_runtime(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+) -> Result<Option<evidence::VerifiedReleaseRuntime>, GuestRuntimeError> {
     if !version.starts_with(|c: char| c.is_ascii_digit())
         || !version
             .bytes()
@@ -272,14 +283,18 @@ pub fn cached_runtime_release_proof(
                 version,
                 arch,
             )?;
-            return Ok(Some(evidence::RuntimeReleaseProof {
+            verified.declaration(arch)?.validate(arch)?;
+            let proof = evidence::RuntimeReleaseProof {
                 archive: archive.canonicalize()?,
                 checksum: checksum.canonicalize()?,
                 signature_bundle: signature_bundle.canonicalize()?,
                 archive_sha256: verified.archive_sha256().to_string(),
                 version: version.to_owned(),
                 arch,
-            }));
+            };
+            return Ok(Some(evidence::VerifiedReleaseRuntime::from_verified(
+                proof, verified,
+            )));
         }
     }
     Ok(None)

@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-use super::{AdmissionContext, AdmitPlanForBootParams, admit};
+use super::{AdmissionContext, AdmitPlanForBootParams, admit, admit_with_runtime_evidence};
 
 /// Where admission blocks on its audit sync.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +36,26 @@ pub fn admit_plan_for_boot_syncing_beside_boot(
 )> {
     let phase = mvm_runtime::ui::activity::start("Signing and admitting the execution plan");
     let admitted = admit(p, Vec::new(), AdmissionSync::BesideBoot)?;
+    phase.finish();
+    Ok(admitted)
+}
+
+/// Keep a launch-owned release verification through signed plan admission.
+pub fn admit_plan_for_boot_with_verified_runtime_syncing_beside_boot(
+    p: AdmitPlanForBootParams<'_>,
+    runtime: &mvm_runtime::runtime_evidence::VerifiedRuntimeSet,
+) -> Result<(
+    AdmissionContext,
+    mvm_core::admission_durability::AdmissionDurability,
+)> {
+    let phase = mvm_runtime::ui::activity::start("Signing and admitting the execution plan");
+    let admitted = admit_with_runtime_evidence(
+        p,
+        Vec::new(),
+        AdmissionSync::BesideBoot,
+        Some(runtime),
+        None,
+    )?;
     phase.finish();
     Ok(admitted)
 }

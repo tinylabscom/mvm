@@ -11,15 +11,21 @@
 
 use anyhow::{Context, Result};
 
+pub use mvm_runtime::runtime_evidence::{VerifiedRuntimeSet, verify_release_runtime_set};
 pub use mvm_runtime::sdk_sidecar::SdkSidecarAttachment;
 pub use mvm_runtime::universal_initramfs::attach_universal_initramfs_if_cached;
+pub use mvm_runtime::universal_initramfs::attach_universal_initramfs_with_verified_release;
 
 use crate::launch::runtime_overlay::{
     AcquiredRuntimeOverlay, RuntimeOverlayAcquireMode, RuntimeOverlayAcquireParams,
-    acquire_runtime_overlay, acquire_runtime_overlay_for_launch, runtime_overlay_acquire_mode,
-    runtime_overlay_source_checkout_root,
+    acquire_runtime_overlay, acquire_runtime_overlay_for_launch_verified,
+    runtime_overlay_acquire_mode, runtime_overlay_source_checkout_root,
 };
 use mvm_runtime::ui;
+use std::sync::Arc;
+
+/// Shared ownership of a release verification for one launch only.
+pub type ReleaseRuntime = Arc<mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime>;
 
 /// Report where this launch's guest binaries come from.
 ///
@@ -82,16 +88,25 @@ pub fn attach_runtime_overlay(
     resolver: &mvm_fs::overlay::RuntimeOverlayResolver,
     arch: mvm_core::arch::GuestArch,
 ) -> Result<()> {
+    attach_runtime_overlay_verified(start_config, hypervisor, resolver, arch).map(|_| ())
+}
+
+fn attach_runtime_overlay_verified(
+    start_config: &mut mvm_core::vm_backend::VmStartConfig,
+    hypervisor: &str,
+    resolver: &mvm_fs::overlay::RuntimeOverlayResolver,
+    arch: mvm_core::arch::GuestArch,
+) -> Result<Option<ReleaseRuntime>> {
     // Every backend that boots a kernel boots the universal initramfs, and
     // that initramfs mounts the overlay. `apple-container` is the HVF runner
     // with another kernel image, so it needs the overlay exactly as HVF does.
     if !mvm_runtime::universal_initramfs::KERNEL_BOOTING_HYPERVISORS.contains(&hypervisor) {
-        return Ok(());
+        return Ok(None);
     }
-    match acquire_runtime_overlay_for_launch(resolver, arch) {
-        Ok(a) => {
+    match acquire_runtime_overlay_for_launch_verified(resolver, arch) {
+        Ok((a, release)) => {
             apply_acquired_runtime_overlay(start_config, a);
-            Ok(())
+            Ok(release)
         }
         Err(e) => {
             anyhow::bail!("runtime overlay required for {hypervisor} boot but unavailable: {e}")
@@ -132,10 +147,28 @@ pub fn attach_runtime_overlay_if_cached_version(
     expected_version: Option<&str>,
     pair: Option<&mut PairArtifactSource<'_>>,
 ) -> Result<()> {
+    attach_runtime_overlay_if_cached_version_verified(
+        start_config,
+        hypervisor,
+        expected_version,
+        pair,
+    )
+    .map(|_| ())
+}
+
+/// Attach a prepared runtime and return the launch-owned authenticated release.
+/// `None` means the selected path is source, legacy, bundle, or kernel-less.
+pub fn attach_runtime_overlay_if_cached_version_verified(
+    start_config: &mut mvm_core::vm_backend::VmStartConfig,
+    hypervisor: &str,
+    expected_version: Option<&str>,
+    pair: Option<&mut PairArtifactSource<'_>>,
+) -> Result<Option<ReleaseRuntime>> {
     let mut selected = start_config.clone();
-    attach_runtime_overlay_selection(&mut selected, hypervisor, expected_version, pair)?;
+    let release =
+        attach_runtime_overlay_selection(&mut selected, hypervisor, expected_version, pair)?;
     *start_config = selected;
-    Ok(())
+    Ok(release)
 }
 
 fn attach_runtime_overlay_selection(
@@ -143,9 +176,9 @@ fn attach_runtime_overlay_selection(
     hypervisor: &str,
     expected_version: Option<&str>,
     pair: Option<&mut PairArtifactSource<'_>>,
-) -> Result<()> {
+) -> Result<Option<ReleaseRuntime>> {
     if super::bundle_runtime::attach_if_installed_bundle(start_config, hypervisor)? {
-        return Ok(());
+        return Ok(None);
     }
     anyhow::ensure!(
         start_config.bundle_boot_assets.is_none(),
@@ -157,16 +190,28 @@ fn attach_runtime_overlay_selection(
         || start_config.source_runtime_archive_sha256.is_some()
         || start_config.unsigned_runtime_development
     {
+        if let Some(proof) = &start_config.runtime_release_proof {
+            let version = start_config
+                .runtime_overlay_version
+                .as_deref()
+                .context("selected guest runtime has no version")?;
+            let release = mvm_build::guest_runtime::evidence::verify_release_runtime(
+                proof.clone(),
+                version,
+                mvm_core::arch::GuestArch::host(),
+            )?;
+            return Ok(Some(std::sync::Arc::new(release)));
+        }
         mvm_runtime::runtime_evidence::verify_runtime_for_launch(
             start_config,
             mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
         )?;
-        return Ok(());
+        return Ok(None);
     }
     // The wasm backend runs a WASI module directly; it has no guest agent
     // runtime overlay to attach.
     if hypervisor == "wasm" {
-        return Ok(());
+        return Ok(None);
     }
     let version = expected_version.unwrap_or(env!("CARGO_PKG_VERSION"));
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
@@ -185,7 +230,7 @@ fn attach_runtime_overlay_selection(
     // The overlay is assembled from this CLI's own guest runtime and lives
     // only in its version-keyed slot. A miss is preparation work for
     // `mvmctl bootstrap`; no other copy is attached in its place.
-    attach_runtime_overlay(start_config, hypervisor, &resolver, arch).with_context(|| {
+    attach_runtime_overlay_verified(start_config, hypervisor, &resolver, arch).with_context(|| {
         match expected_version {
             // Continuity asked for the overlay a machine booted with; this CLI
             // cannot assemble another version's, so name what is missing.
