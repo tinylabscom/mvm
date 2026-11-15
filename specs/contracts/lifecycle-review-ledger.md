@@ -16,9 +16,9 @@ line ranges are as recorded there and were not re-derived when this file was wri
 
 ## Compile-time AES-GCM boundary
 
-Reviewed `crates/mvm-aead/src/lib.rs`,
+Reviewed `crates/mvm-crypto/src/aead.rs`,
 `crates/mvm-core/src/crypto/aead.rs`, and the seal/open paths and independent
-cipher tests in `crates/mvm-core/src/net/session.rs`. The new unpublished leaf
+cipher tests in `crates/mvm-core/src/net/session.rs`. The shared crypto crate
 only instantiates the existing `aes-gcm` implementation in its own optimized
 compilation unit. It borrows fixed-size keys and nonces for one operation and
 returns owned ciphertext/plaintext; it owns no persistent keys, process, task,

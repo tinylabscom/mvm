@@ -1,9 +1,7 @@
-//! Concrete AES-256-GCM calls, optimized independently of the protocol owners.
+//! Concrete AES-256-GCM operations.
 //!
 //! Callers retain key custody, nonce generation, framing, and admission.
-//! This internal crate delegates cryptography to `aes-gcm` unchanged.
-
-#![forbid(unsafe_code)]
+//! This module delegates cryptography to `aes-gcm` unchanged.
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};

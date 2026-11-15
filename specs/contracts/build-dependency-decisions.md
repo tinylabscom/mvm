@@ -28,8 +28,10 @@ declined; the reasons are recorded so they are not re-derived.
 ## Development compile-time boundary
 
 The development profile no longer optimizes all of `mvm-core` to make
-AES-GCM fast. `mvm-aead` is an unpublished, two-operation leaf containing the
-same concrete `aes-gcm` calls; only that leaf gets `opt-level = 2`.
+AES-GCM fast. `mvm-crypto` is an unpublished shared crypto crate whose `aead`
+module contains the same two concrete `aes-gcm` calls; only that crate gets
+`opt-level = 2`. Crypto operations are organized as modules in this one crate,
+not separate crates per algorithm.
 `mvm-core` keeps keys, nonces, framing, associated data, signature/replay
 checks, and error mapping. Release profiles are unchanged. This adds one
 first-party package, not a new third-party crypto dependency or implementation.
@@ -43,9 +45,13 @@ the repository's two-job default), starting from
 | Clean-target `cargo build -p mvmctl --features dev`, wall seconds | 976.60 | 575.95 | 678.60 |
 | Same build, user + system CPU seconds | 894.90 | 608.36 | 655.93 |
 | `mvm-core` compilation unit, seconds | 503.07 | 91.78 | 79.00 |
-| Optimized `mvm-aead` compilation unit, seconds | absent | 1.25 | 1.40 |
+| Optimized crypto compilation unit, seconds | absent | 1.25 | 1.40 |
 | `objc2-foundation` compilation unit, seconds | 34.60 | 1.66 | 1.50 |
 | Unchanged build, wall seconds | 31.66 / 57.85 | 2.81 | 2.35 |
+
+The optimized crate was named `mvm-aead` during these measurements; it is now
+`mvm-crypto`, with the same implementation under `aead`. These timings predate
+that organizational rename.
 
 The intermediate command was `/usr/bin/time -p ./scripts/cargo.sh build --locked
 -p mvmctl --features dev --timings --target-dir "$PWD/.mvm-test/target-cold"`,

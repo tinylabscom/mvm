@@ -491,7 +491,7 @@ The HTML report is under `$CARGO_TARGET_DIR/cargo-timings/`; the second
 command explains why Cargo considers a unit stale. Separate an empty-target
 build, an unchanged build, and a one-file edit. Do not use `release-min` for
 the edit/run loop: its size-oriented LTO is a shipping cost. Development
-builds optimize concrete AES-GCM operations in `mvm-aead`, not all of
+builds optimize concrete AES-GCM operations in `mvm-crypto::aead`, not all of
 `mvm-core`, preserving encrypted I/O throughput without optimizing every
 core module. Dev and test use the same Cargo codegen defaults, allowing fewer
 units for non-incremental dependencies than for incremental workspace crates

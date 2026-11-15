@@ -380,7 +380,7 @@ impl Session {
         )
         .map_err(|e| SessionError::InvalidHandshake(e.to_string()))?;
         let nonce = session_nonce(&self.session_id, self.role, sequence);
-        let ciphertext = mvm_aead::encrypt(&self.key, &nonce, plaintext, &[])
+        let ciphertext = mvm_crypto::aead::encrypt(&self.key, &nonce, plaintext, &[])
             .map_err(|_| SessionError::EncryptionFailed)?;
 
         let mut signed_bytes = context;
@@ -460,7 +460,7 @@ impl<Key> Session<Key> {
         )?;
 
         let nonce = session_nonce(&self.session_id, self.role.opposite(), frame.sequence);
-        let plaintext = mvm_aead::decrypt(&self.key, &nonce, &frame.ciphertext, &[])
+        let plaintext = mvm_crypto::aead::decrypt(&self.key, &nonce, &frame.ciphertext, &[])
             .map_err(|_| SessionError::DecryptionFailed)?;
 
         self.next_receive_sequence = frame

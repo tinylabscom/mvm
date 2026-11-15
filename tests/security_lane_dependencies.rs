@@ -44,10 +44,10 @@ fn hostd_uses_contract_ir_without_the_authoring_sdk() {
 }
 
 #[test]
-fn aes_gcm_is_optimized_in_its_leaf_not_all_of_core() {
+fn aes_gcm_is_optimized_in_crypto_not_all_of_core() {
     let core = workspace_manifest("crates/mvm-core/Cargo.toml");
     let dependencies = core["dependencies"].as_table().unwrap();
-    assert!(dependencies.contains_key("mvm-aead"));
+    assert!(dependencies.contains_key("mvm-crypto"));
     assert!(!dependencies.contains_key("aes-gcm"));
     assert!(
         core["dev-dependencies"]
@@ -63,7 +63,7 @@ fn aes_gcm_is_optimized_in_its_leaf_not_all_of_core() {
         "optimizing all of mvm-core restores the multi-minute compile bottleneck"
     );
     assert!(
-        packages["mvm-aead"]["opt-level"].as_integer().unwrap() >= 2,
+        packages["mvm-crypto"]["opt-level"].as_integer().unwrap() >= 2,
         "AES-GCM's concrete caller needs optimization to keep encrypted I/O fast"
     );
 }

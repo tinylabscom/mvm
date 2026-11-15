@@ -3,7 +3,7 @@ members = [
     # Feature-gated no_std protocol and storage contracts shared by mvm and
     # fleet orchestrators. `volume`/`local` are opt-in; the default is protocol.
     "crates/mvm-contract",
-    "crates/mvm-aead",
+    "crates/mvm-crypto",
     "crates/mvm-core",
     "crates/mvm-net",
     "crates/deps/libkrun-sys",
@@ -307,7 +307,7 @@ tree-sitter-typescript = "0.23.2"
 # dependency unless the workspace entry already carries it. The root binary
 # opts back into user-facing defaults through its own `[features]` block.
 mvm-contract = { path = "crates/mvm-contract", version = "0.28.0-rc.5", default-features = false, features = ["protocol"] }
-mvm-aead = { path = "crates/mvm-aead", version = "0.28.0-rc.5" }
+mvm-crypto = { path = "crates/mvm-crypto", version = "0.28.0-rc.5" }
 mvm-core = { path = "crates/mvm-core", version = "0.28.0-rc.5" }
 mvm-bundler = { path = "crates/mvm-bundler", version = "0.28.0-rc.5" }
 mvm-compiler = { path = "crates/mvm-compiler", version = "0.28.0-rc.5" }
@@ -718,7 +718,7 @@ opt-level = 0
 
 # AES-GCM's generic loops must be optimized where they are instantiated.
 # Keep that work in a small leaf instead of optimizing all of mvm-core.
-[profile.dev.package.mvm-aead]
+[profile.dev.package.mvm-crypto]
 opt-level = 2
 
 [profile.dev.package.syn]

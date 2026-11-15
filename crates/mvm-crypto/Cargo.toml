@@ -1,10 +1,10 @@
 [package]
-name = "mvm-aead"
+name = "mvm-crypto"
 publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Concrete AES-256-GCM operations for mvm's existing at-rest and session protocols"
+description = "Shared cryptographic primitives for mvm protocols"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

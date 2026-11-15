@@ -146,7 +146,7 @@ impl Drop for Key {
 pub fn seal(key: &Key, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
     let mut nonce_arr = [0u8; NONCE_SIZE];
     rand::rng().fill_bytes(&mut nonce_arr);
-    let ciphertext = mvm_aead::encrypt(&key.0, &nonce_arr, plaintext, aad)
+    let ciphertext = mvm_crypto::aead::encrypt(&key.0, &nonce_arr, plaintext, aad)
         .expect("AES-256-GCM seal of an in-memory buffer cannot fail");
 
     let mut out = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
@@ -169,7 +169,7 @@ pub fn open(key: &Key, framed: &[u8], aad: &[u8]) -> Result<Vec<u8>, AeadError> 
     let (nonce_bytes, ciphertext) = framed.split_at(NONCE_SIZE);
     let nonce =
         <[u8; NONCE_SIZE]>::try_from(nonce_bytes).expect("split_at(NONCE_SIZE) guarantees length");
-    mvm_aead::decrypt(&key.0, &nonce, ciphertext, aad).map_err(|_| AeadError::Auth)
+    mvm_crypto::aead::decrypt(&key.0, &nonce, ciphertext, aad).map_err(|_| AeadError::Auth)
 }
 
 #[cfg(test)]
