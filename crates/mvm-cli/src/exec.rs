@@ -622,6 +622,7 @@ fn run_inner(
     let ResolvedLaunch {
         backend,
         start_config,
+        verified_runtime,
         mailbox_posture,
         use_snapshot,
         root_strategy,
@@ -656,6 +657,7 @@ fn run_inner(
     let mut boot_attempt = BootAttempt {
         backend: &backend,
         start_config: &start_config,
+        verified_release: verified_runtime.as_ref().map(|runtime| runtime.release()),
         mailbox_posture: mailbox_posture.as_ref(),
         resolved: &resolved,
         user_named: req.name.is_some(),
@@ -1212,6 +1214,8 @@ pub struct ResolvedLaunch {
     /// which backend's capabilities shaped the config.
     pub backend: AnyBackend,
     pub start_config: VmStartConfig,
+    /// Exact signed release bytes owned until the lifecycle generation is bound.
+    pub verified_runtime: Option<std::sync::Arc<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>>,
     /// Only admission may supply Dev posture for an opted-in mailbox.
     pub mailbox_posture: Option<mvm_hostd::plan_admission::MailboxLaunchPosture>,
     /// Whether snapshot restore survives admission (an admitted workload
@@ -1318,8 +1322,8 @@ pub fn resolve_launch(
     let t_overlay = std::time::Instant::now();
     sub.start(SubPhase::AttachOverlay);
     mvm_core::launch_trace::lap_reset(None);
-    crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
-        crate::commands::vm::up::attach_runtime_overlay_if_cached_version(
+    let verified_release = crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
+        crate::commands::vm::up::attach_runtime_overlay_if_cached_version_verified(
             &mut start_config,
             backend.name(),
             None,
@@ -1336,16 +1340,30 @@ pub fn resolve_launch(
     let t_initramfs = std::time::Instant::now();
     sub.start(SubPhase::AttachInitramfs);
     mvm_core::launch_trace::lap_reset(None);
-    crate::commands::vm::up::attach_universal_initramfs_if_cached(
-        &mut start_config,
-        backend.name(),
-    )?;
+    if let Some(release) = &verified_release {
+        crate::commands::vm::up::attach_universal_initramfs_with_verified_release(
+            &mut start_config,
+            backend.name(),
+            release,
+        )?;
+    } else {
+        crate::commands::vm::up::attach_universal_initramfs_if_cached(
+            &mut start_config,
+            backend.name(),
+        )?;
+    }
     mvm_core::launch_trace::lap("attach_initramfs.tail");
     sub.finish(SubPhase::AttachInitramfs);
     tracing::debug!(
         ms = t_initramfs.elapsed().as_secs_f64() * 1000.0,
         "admit window: attach universal initramfs"
     );
+    let verified_runtime = verified_release
+        .map(|release| {
+            mvm_runtime::runtime_evidence::verify_release_runtime_set(&start_config, release)
+                .map(std::sync::Arc::new)
+        })
+        .transpose()?;
 
     // Admit the transient run as a locally-signed workload. Setting
     // tenant_id + plan_json makes the runner-backed microVM supervisor enforce
@@ -1376,6 +1394,7 @@ pub fn resolve_launch(
             volumes: &start_config.volumes,
             bundle_archive: bundle_archive.as_deref(),
             runtime_config: Some(&start_config),
+            verified_runtime: verified_runtime.as_deref(),
         })?
     {
         let mut sub = sub;
@@ -1450,6 +1469,7 @@ pub fn resolve_launch(
     Ok(ResolvedLaunch {
         backend,
         start_config,
+        verified_runtime,
         mailbox_posture,
         use_snapshot,
         root_strategy: boot.root_strategy,

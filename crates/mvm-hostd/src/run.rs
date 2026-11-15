@@ -29,10 +29,12 @@ use anyhow::{Context, Result};
 use mvm_core::plan::{PlanSeccompTier, SecretBinding, SecretReleasePolicy, SynthesisInput};
 use mvm_core::vm_backend::{VmStartConfig, VmVolume};
 use mvm_runtime::AnyBackend;
+use mvm_runtime::runtime_evidence::{VerifiedRuntimeSet, verify_release_runtime_set};
 
 use crate::audit::emitter::AuditEmitter;
 use crate::plan_admission::{
-    AdmitAndStartParams, Clock, InMemoryNonceLedger, StartedMachine, admit_and_start,
+    AdmitAndStartParams, Clock, InMemoryNonceLedger, StartedMachine,
+    admit_and_start_with_verified_release,
 };
 
 /// The tenant every locally-run machine is admitted under. Local runs are
@@ -188,19 +190,36 @@ pub(crate) fn attach_runtime_overlay_from_cache(
 /// runtime-lean rootfs then has no `/init` at all: the guest panics before
 /// userspace and the host sees only an agent that never answers. The
 /// initramfs comes from the same resolution every other launch path uses.
-pub(crate) fn attach_guest_runtime(config: &mut VmStartConfig, backend_name: &str) -> Result<()> {
+pub(crate) fn attach_guest_runtime(
+    config: &mut VmStartConfig,
+    backend_name: &str,
+) -> Result<Option<VerifiedRuntimeSet>> {
     if !mvm_runtime::universal_initramfs::KERNEL_BOOTING_HYPERVISORS.contains(&backend_name) {
-        return Ok(());
+        return Ok(None);
     }
     let mut selected = config.clone();
     attach_runtime_overlay_from_cache(&mut selected, backend_name)?;
     let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
     let version = env!("CARGO_PKG_VERSION");
     let arch = mvm_core::arch::GuestArch::host();
-    selected.runtime_release_proof = match &config.runtime_release_proof {
-        Some(proof) => Some(proof.clone()),
-        None => mvm_build::guest_runtime::cached_runtime_release_proof(&cache, version, arch)?,
+    // An explicit proof may select a runtime outside the default cache, but it
+    // must still own one authenticated snapshot for this launch.
+    let release = if let Some(proof) = &config.runtime_release_proof {
+        Some(std::sync::Arc::new(
+            mvm_build::guest_runtime::evidence::verify_release_runtime(
+                proof.clone(),
+                version,
+                arch,
+            )?,
+        ))
+    } else {
+        mvm_build::guest_runtime::cached_verified_release_runtime(&cache, version, arch)?
+            .map(std::sync::Arc::new)
     };
+    selected.runtime_release_proof = config
+        .runtime_release_proof
+        .clone()
+        .or_else(|| release.as_ref().map(|release| release.proof().clone()));
     selected.unsigned_runtime_development = selected.runtime_release_proof.is_none();
     selected.source_runtime_archive_sha256 = if selected.unsigned_runtime_development {
         let checked =
@@ -219,12 +238,17 @@ pub(crate) fn attach_guest_runtime(config: &mut VmStartConfig, backend_name: &st
         .resolve(&arch.to_string())
         .context("cached initramfs required for local boot; prepare the guest runtime first")?;
     selected.initrd_path = Some(initramfs.image_path.display().to_string());
-    mvm_runtime::runtime_evidence::verify_runtime_for_launch(
-        &selected,
-        mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
-    )?;
+    let verified = if let Some(release) = release {
+        Some(verify_release_runtime_set(&selected, release)?)
+    } else {
+        mvm_runtime::runtime_evidence::verify_runtime_for_launch(
+            &selected,
+            mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+        )?;
+        None
+    };
     *config = selected;
-    Ok(())
+    Ok(verified)
 }
 
 /// Admit `req` through the signed-plan gate and boot it on `backend`.
@@ -353,9 +377,9 @@ pub fn admit_and_boot_local(
         network_policy,
         ..Default::default()
     };
-    attach_guest_runtime(&mut config, &req.backend_name)?;
+    let verified_runtime = attach_guest_runtime(&mut config, &req.backend_name)?;
 
-    admit_and_start(
+    admit_and_start_with_verified_release(
         backend,
         AdmitAndStartParams {
             synthesis: &synthesis,
@@ -376,6 +400,7 @@ pub fn admit_and_boot_local(
             audit_durability: crate::audit::durability::AuditDurability::BestEffort,
             assurance: ctx.assurance,
         },
+        verified_runtime.as_ref(),
     )
 }
 
@@ -396,9 +421,21 @@ fn admit_signed_and_boot_local(
     rootfs_sha: &str,
     ctx: LocalRunContext<'_>,
 ) -> Result<StartedMachine> {
-    use crate::plan_admission::{RunPosture, StartAdmittedParams, start_admitted};
+    use crate::plan_admission::{RunPosture, StartAdmittedParams};
 
-    let posture = RunPosture::on_backend(mvm_core::plan::Variant::Dev, backend.kind());
+    let path_string = |p: &Path| p.to_string_lossy().into_owned();
+    let mut config = VmStartConfig {
+        name: req.name.clone(),
+        rootfs_path: path_string(&req.rootfs_path),
+        kernel_path: req.kernel_path.as_deref().map(path_string),
+        verity_path: req.verity_path.as_deref().map(path_string),
+        roothash: req.roothash.clone(),
+        ..Default::default()
+    };
+    let verified_runtime = attach_guest_runtime(&mut config, &req.backend_name)?;
+    let posture = RunPosture::on_backend(mvm_core::plan::Variant::Dev, backend.kind())
+        .with_runtime(Some(&config))
+        .with_verified_runtime(verified_runtime.as_ref());
     let admitted = crate::plan_admission::admit_signed_plan_for_run(
         signed, ctx.clock, ctx.ledger, None, posture,
     )?;
@@ -427,30 +464,17 @@ fn admit_signed_and_boot_local(
         );
     }
 
-    let path_string = |p: &Path| p.to_string_lossy().into_owned();
-    let mut config = VmStartConfig {
-        name: req.name.clone(),
-        rootfs_path: path_string(&req.rootfs_path),
-        kernel_path: req.kernel_path.as_deref().map(path_string),
-        verity_path: req.verity_path.as_deref().map(path_string),
-        roothash: req.roothash.clone(),
-        cpus: plan.resources.cpus,
-        memory_mib: u32::try_from(plan.resources.mem_mib)
-            .context("plan memory does not fit the launch config")?,
-        volumes: req.volumes.clone(),
-        tenant_id: Some(plan.tenant.0.clone()),
-        // The plan's egress grant projects onto the launch config's policy,
-        // exactly as a synthesized plan's does: what the gate enforces is what
-        // the plan was signed for. No grant means deny-all.
-        network_policy: match plan.grants.as_ref() {
-            Some(grants) if grants.egress.is_some() => {
-                mvm_contract::grants::projection::network_policy_from_grants(grants)
-            }
-            _ => mvm_core::network_policy::NetworkPolicy::deny_all(),
-        },
-        ..Default::default()
+    config.cpus = plan.resources.cpus;
+    config.memory_mib = u32::try_from(plan.resources.mem_mib)
+        .context("plan memory does not fit the launch config")?;
+    config.volumes = req.volumes.clone();
+    config.tenant_id = Some(plan.tenant.0.clone());
+    config.network_policy = match plan.grants.as_ref() {
+        Some(grants) if grants.egress.is_some() => {
+            mvm_contract::grants::projection::network_policy_from_grants(grants)
+        }
+        _ => mvm_core::network_policy::NetworkPolicy::deny_all(),
     };
-    attach_guest_runtime(&mut config, &req.backend_name)?;
 
     crate::audit::durability::record_admission(
         ctx.emitter,
@@ -459,14 +483,17 @@ fn admit_signed_and_boot_local(
         crate::audit::durability::AuditDurability::BestEffort,
     )?;
 
-    start_admitted(StartAdmittedParams {
-        backend,
-        admitted,
-        config,
-        policy_bundle: None,
-        emitter: ctx.emitter,
-        assurance: ctx.assurance,
-    })
+    crate::plan_admission::start_admitted_with_verified_release(
+        StartAdmittedParams {
+            backend,
+            admitted,
+            config,
+            policy_bundle: None,
+            emitter: ctx.emitter,
+            assurance: ctx.assurance,
+        },
+        verified_runtime.as_ref(),
+    )
 }
 
 #[cfg(test)]
@@ -844,7 +871,12 @@ mod tests {
                 kernel_path: Some("/kernel".into()),
                 ..Default::default()
             };
-            attach_guest_runtime(&mut config, backend).unwrap();
+            assert!(
+                attach_guest_runtime(&mut config, backend)
+                    .unwrap()
+                    .is_none(),
+                "source runtime must not acquire signed-release authority"
+            );
             assert!(config.unsigned_runtime_development);
             assert!(config.runtime_release_proof.is_none());
             mvm_runtime::runtime_evidence::verify_runtime_for_launch(
@@ -914,7 +946,12 @@ mod tests {
                 kernel_path: Some("/vmlinux".into()),
                 ..Default::default()
             };
-            attach_guest_runtime(&mut config, backend).expect("both artifacts are cached");
+            assert!(
+                attach_guest_runtime(&mut config, backend)
+                    .expect("both artifacts are cached")
+                    .is_none(),
+                "source fixture is not a signed release"
+            );
             assert!(
                 config.runtime_overlay_path.is_some(),
                 "{backend}: the overlay carries the agent"
@@ -940,7 +977,11 @@ mod tests {
             kernel_path: Some("/vmlinux".into()),
             ..Default::default()
         };
-        attach_guest_runtime(&mut config, "mock").expect("the mock needs nothing");
+        assert!(
+            attach_guest_runtime(&mut config, "mock")
+                .expect("the mock needs nothing")
+                .is_none()
+        );
         assert!(config.runtime_overlay_path.is_none());
         assert!(config.initrd_path.is_none());
     }
