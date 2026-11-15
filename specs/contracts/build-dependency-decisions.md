@@ -50,8 +50,10 @@ the repository's two-job default), starting from
 | Unchanged build, wall seconds | 31.66 / 57.85 | 2.81 | 2.35 |
 
 The optimized crate was named `mvm-aead` during these measurements; it is now
-`mvm-crypto`, with the same implementation under `aead`. These timings predate
-that organizational rename.
+`mvm-crypto`, with the same cipher calls in `aead::Aes256Gcm` implementing
+`aead::Aead`. These timings predate that organizational rename and trait API.
+The protocol callers still select the concrete AES-256-GCM implementation,
+so its non-generic method bodies retain the optimized compilation boundary.
 
 The intermediate command was `/usr/bin/time -p ./scripts/cargo.sh build --locked
 -p mvmctl --features dev --timings --target-dir "$PWD/.mvm-test/target-cold"`,

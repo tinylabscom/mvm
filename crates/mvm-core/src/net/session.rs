@@ -26,6 +26,7 @@ use mvm_contract::policy::security::{
     PROTOCOL_VERSION_AUTHENTICATED, SIG_ALG_ED25519, SessionHello, SessionHelloAck,
     SessionHelloConfirm,
 };
+use mvm_crypto::aead::{Aead, Aes256Gcm};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -380,7 +381,8 @@ impl Session {
         )
         .map_err(|e| SessionError::InvalidHandshake(e.to_string()))?;
         let nonce = session_nonce(&self.session_id, self.role, sequence);
-        let ciphertext = mvm_crypto::aead::encrypt(&self.key, &nonce, plaintext, &[])
+        let ciphertext = Aes256Gcm
+            .encrypt(&self.key, &nonce, plaintext, &[])
             .map_err(|_| SessionError::EncryptionFailed)?;
 
         let mut signed_bytes = context;
@@ -460,7 +462,8 @@ impl<Key> Session<Key> {
         )?;
 
         let nonce = session_nonce(&self.session_id, self.role.opposite(), frame.sequence);
-        let plaintext = mvm_crypto::aead::decrypt(&self.key, &nonce, &frame.ciphertext, &[])
+        let plaintext = Aes256Gcm
+            .decrypt(&self.key, &nonce, &frame.ciphertext, &[])
             .map_err(|_| SessionError::DecryptionFailed)?;
 
         self.next_receive_sequence = frame

@@ -24,6 +24,12 @@ compilation unit. It borrows fixed-size keys and nonces for one operation and
 returns owned ciphertext/plaintext; it owns no persistent keys, process, task,
 lock, or lifecycle state.
 
+The public `aead::Aead` trait lets implementations define their key, nonce,
+and error types. `Aes256Gcm` remains the concrete selection at both production
+call sites; no algorithm negotiation, protocol switch, or new cipher is added.
+Integration tests cover trait-object dispatch and a downstream refusal-only
+implementation with different associated types.
+
 The callers retain key zeroization, nonce generation, associated-data selection,
 framing, signature verification before session decryption, sequence advancement,
 replay checks, and existing error mapping. The at-rest encryption `expect`
