@@ -685,31 +685,29 @@ point away from the obvious suspects: the product's own offline release verifier
 (`mvmctl env verify-release`, the signature and checksum check of the runtime
 archive) took 0.20 to 0.29 s including process start, and CPU contention does not
 explain the numbers, because a fixed 0.3 CPU-second task took 0.33 s of wall time
-at a load average of 90 on 16 cores. Which function inside `admit_plan_for_run`
-and the overlay attach spends the seconds is not established: the release binary
-has no symbols. The measurements, the reproduction and the open questions are in
-[#5487](https://github.com/tinylabscom/mvm/issues/5487).
+at a load average of 90 on 16 cores.
 
-A separate measurement on the physical M1 CI runner, recorded in the learning of
-the `fix/bootstrap-warms-source-declaration` branch, found `attach_overlay` at
-1.3 ms and a whole startup of about 305 to 340 ms once the source runtime
-declaration was cached, against 228 ms and 528 ms without it, with the remaining
-steady-state cost in `vmm_create` (about 260 ms). That was a source build, not
-the signed release, so it does not show that the release path is fast; the gap
-between it and the 1.5 to 3.3 s `attach_overlay` measured here on the release is
-the thing to explain.
-
-**Path to the launch gates** (a proposal, none of it verified). First, find out
-whether the gap is the release path: run the same measurement with a source
-build and with the signed release on the same idle host. Second, build the same
-release tag with line-level symbols and profile one launch there, which names
-the functions. Third, remove the repeated work the profile names; by reading,
-the attach calls `verify_runtime_release_proof` and re-hashes the overlay and its
-verity sidecar on every launch with no cache on the release path, and a cache
-keyed by artifact identity is the candidate fix, but the signature check and the
-hashing both measured cheap, so neither is the likely cost. Fourth, re-measure
-against the 300 ms gate with the product's own bench, which needs a launch the
-`prepared-cold` lane accepts.
+**Cause, found on an idle host.** On a temporary idle Linux VM (Firecracker, SSD,
+load under 1) the signed release took about 5.6 s to 7.2 s per cold launch, with
+a spread of about 10 ms, so the cost is deterministic and not load. The timing
+spans from [#5508](https://github.com/tinylabscom/mvm/pull/5508) and
+[#5506](https://github.com/tinylabscom/mvm/pull/5506) show that a launch verifies
+the signed guest-runtime archive seven times, at about 640 ms each, which is
+about 4.5 s of the launch. Each verification reads and digests the archive,
+checks two signatures, copies the archive and decompresses and SHA-256s all of
+its members (about 42 MB uncompressed); the decompress-and-hash step alone is 422 ms of the
+640. Signing, audit, key load and all other hashing are negligible. The physical
+M1 CI runner, which runs a source-built runtime, never takes this path and shows
+`admit_plan` at 26 ms and `attach_overlay` at 220 ms. A throwaway local change that
+cached only the member check took the launch from about 5.58 s to about 3.03 s.
+The decision to verify once per launch, the conditions that keep it the same
+verification, the alternatives and the tests it needs are in
+[ADR-112](../adrs/112-verify-the-runtime-release-proof-once-per-launch.md); the
+measurements and the discussion are in
+[#5487](https://github.com/tinylabscom/mvm/issues/5487). Verifying once is
+projected to give a launch of about 1.7 s, which still misses the 300 ms gate; the
+remaining costs are one verification (about 640 ms), about 320 ms in
+`grants_budget_and_host_interface` and about 300 ms in `driver_boot`.
 
 **Other findings from building the demo.**
 
