@@ -40,6 +40,7 @@ impl VerifiedRuntimeManifest {
     }
 
     /// Retain only the evidence bytes consumed by the successful verifier.
+    #[tracing::instrument(skip_all)]
     pub fn retain_release_proof_in(
         &self,
         proof: &RuntimeReleaseProof,
@@ -318,6 +319,7 @@ impl PersistedRuntimeArtifacts {
     }
 }
 
+#[tracing::instrument(skip_all)]
 pub fn verify_runtime_release_proof(
     proof: &RuntimeReleaseProof,
     expected_version: &str,
@@ -349,6 +351,7 @@ pub fn verify_runtime_release_proof(
     Ok(verified)
 }
 
+#[tracing::instrument(skip_all)]
 pub(super) fn verify_release_archive(
     archive: &Path,
     checksum: &Path,
@@ -357,8 +360,7 @@ pub(super) fn verify_release_archive(
     arch: GuestArch,
 ) -> Result<VerifiedRuntimeManifest, GuestRuntimeError> {
     let asset = crate::guest_bins::guest_bins_archive_name(version);
-    let bytes = std::fs::read(archive)?;
-    let digest = hex::encode(Sha256::digest(&bytes));
+    let (bytes, digest) = read_and_digest_archive(archive)?;
     let checksum_bytes = std::fs::read(checksum)?;
     let checksum_bundle = checksum_bundle_path(checksum);
     // Legacy offline packages carry only the archive signature, which already
@@ -388,9 +390,7 @@ pub(super) fn verify_release_archive(
         &mvm_core::release_trust::accepted_release_identities(version),
         mvm_core::release_trust::RELEASE_OIDC_ISSUER,
     )?;
-    let mut snapshot = tempfile::NamedTempFile::new()?;
-    snapshot.write_all(&bytes)?;
-    snapshot.flush()?;
+    let snapshot = write_archive_snapshot(&bytes)?;
     let manifest = crate::guest_bins::verify_guest_bins_archive(snapshot.path())?;
     super::validate_release_guest_runtime_manifest(&manifest, version)?;
     Ok(VerifiedRuntimeManifest {
@@ -430,6 +430,7 @@ pub(super) fn verify_checksum_signature(
     verify_checksum_signature_bytes(checksum_bytes, &std::fs::read(bundle)?, version)
 }
 
+#[tracing::instrument(skip_all)]
 fn verify_checksum_signature_bytes(
     checksum_bytes: &[u8],
     bundle: &[u8],
@@ -448,6 +449,32 @@ fn verify_checksum_signature_bytes(
     Ok(())
 }
 
+/// Read the archive once and digest the bytes that were read.
+#[tracing::instrument(skip_all)]
+fn read_and_digest_archive(archive: &Path) -> Result<(Vec<u8>, String), GuestRuntimeError> {
+    let bytes = std::fs::read(archive)?;
+    let digest = hex::encode(Sha256::digest(&bytes));
+    Ok((bytes, digest))
+}
+
+/// Write the authenticated bytes to a private temporary file, the copy the
+/// member check and any later retention read from.
+#[tracing::instrument(skip_all)]
+fn write_archive_snapshot(bytes: &[u8]) -> Result<tempfile::NamedTempFile, GuestRuntimeError> {
+    let mut snapshot = tempfile::NamedTempFile::new()?;
+    snapshot.write_all(bytes)?;
+    snapshot.flush()?;
+    Ok(snapshot)
+}
+
+/// The durability barrier for one snapshot, apart from the copy so its cost
+/// is measured on its own. On macOS this empties the drive cache.
+#[tracing::instrument(skip_all)]
+fn sync_snapshot(output: &std::fs::File) -> std::io::Result<()> {
+    output.sync_all()
+}
+
+#[tracing::instrument(skip_all, fields(artifact = snapshot_name(destination)))]
 fn snapshot_file(
     source: &Path,
     destination: &Path,
@@ -466,8 +493,16 @@ fn snapshot_file(
     let mut permissions = output.metadata()?.permissions();
     permissions.set_readonly(true);
     output.set_permissions(permissions)?;
-    output.sync_all()?;
+    sync_snapshot(&output)?;
     Ok(())
+}
+
+/// The snapshot's own file name: a fixed artifact name, never a caller path.
+fn snapshot_name(destination: &Path) -> &str {
+    destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unnamed")
 }
 
 fn write_evidence(path: &Path, bytes: &[u8]) -> Result<(), GuestRuntimeError> {
@@ -580,6 +615,38 @@ mod tests {
             ),
             "present checksum signature must be checked before reading the archive bundle: {error}"
         );
+    }
+
+    #[test]
+    fn the_archive_digest_is_of_the_bytes_that_were_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("archive");
+        std::fs::write(&archive, b"archive bytes").unwrap();
+        let (bytes, digest) = read_and_digest_archive(&archive).unwrap();
+        assert_eq!(bytes, b"archive bytes");
+        assert_eq!(digest, hex::encode(Sha256::digest(b"archive bytes")));
+        assert!(read_and_digest_archive(&dir.path().join("absent")).is_err());
+    }
+
+    #[test]
+    fn the_archive_snapshot_holds_exactly_the_given_bytes() {
+        let snapshot = write_archive_snapshot(b"verified bytes").unwrap();
+        assert_eq!(std::fs::read(snapshot.path()).unwrap(), b"verified bytes");
+    }
+
+    #[test]
+    fn a_snapshot_is_named_by_its_file_and_never_by_its_directory() {
+        assert_eq!(
+            snapshot_name(Path::new("/private/vm/runtime-1/overlay.ext4")),
+            "overlay.ext4"
+        );
+        assert_eq!(snapshot_name(Path::new("/")), "unnamed");
+    }
+
+    #[test]
+    fn syncing_a_snapshot_succeeds_on_an_open_file() {
+        let file = tempfile::tempfile().unwrap();
+        sync_snapshot(&file).unwrap();
     }
 
     fn fixture() -> (tempfile::TempDir, VerifiedRuntimeManifest) {

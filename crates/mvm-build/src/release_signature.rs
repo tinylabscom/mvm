@@ -173,6 +173,7 @@ fn verify_against_release_identities(
 /// The try-each loop, including refusing an empty set and reporting the last
 /// failure, is [`mvm_core::crypto::image_verify::verify_signed_payload_under_any_identity`]'s;
 /// this only attributes its refusal to the asset.
+#[tracing::instrument(skip_all)]
 pub fn verify_release_archive_bytes(
     archive: &[u8],
     bundle: &[u8],

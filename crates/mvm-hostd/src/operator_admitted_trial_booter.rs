@@ -642,6 +642,7 @@ impl OperatorConfiguredTrialBooter {
     }
 }
 
+#[tracing::instrument(skip_all)]
 pub(crate) fn verify_assurance_guest_protocol(
     config: &VmStartConfig,
 ) -> Result<Option<mvm_build::guest_runtime::evidence::VerifiedRuntimeManifest>> {

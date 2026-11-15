@@ -531,6 +531,7 @@ pub fn verify_release_runtime_for_launch(
     Ok(release)
 }
 
+#[tracing::instrument(skip_all)]
 fn verify_runtime_for_launch_at(
     config: &VmStartConfig,
     minimum_protocol: u32,
@@ -687,6 +688,7 @@ impl RuntimeLifecycleLease {
         self.directory.join("bundle-use.sha256")
     }
 
+    #[tracing::instrument(name = "runtime_lifecycle.retain_installed_bundle", skip_all)]
     fn retain_installed_bundle(&self, config: &VmStartConfig) -> Result<()> {
         let registry = mvm_core::plan::bundle::BundleRegistry::default_path()?;
         let Ok(relative) = Path::new(&config.rootfs_path).strip_prefix(registry.root()) else {
@@ -765,6 +767,7 @@ impl RuntimeLifecycleLease {
     /// Publish a fresh immutable generation before any backend side effect.
     /// Once persisted, neither an error return nor dropping the VM handle
     /// removes the artifacts.
+    #[tracing::instrument(name = "runtime_lifecycle.bind", skip_all)]
     pub(crate) fn bind(&self, config: &VmStartConfig) -> Result<VmStartConfig> {
         self.retain_installed_bundle(config)?;
         let minimum_protocol = mvm_agentd::vsock::MIN_SUPPORTED_PROTOCOL_VERSION;
@@ -846,6 +849,7 @@ impl RuntimeLifecycleLease {
         }
     }
 
+    #[tracing::instrument(name = "runtime_lifecycle.report_retained", skip_all)]
     pub(crate) fn report_retained(&self) -> Result<()> {
         let mut generations = 0_u64;
         let mut bytes = 0_u64;

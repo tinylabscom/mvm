@@ -113,6 +113,7 @@ pub struct AcquiredRuntimeOverlay {
 
 /// Read prepared artifacts only. Acquisition belongs to explicit preparation,
 /// never to startup. A rejected release must not fall through to source.
+#[tracing::instrument(skip_all)]
 pub fn acquire_runtime_overlay_for_launch(
     resolver: &mvm_fs::overlay::RuntimeOverlayResolver,
     arch: GuestArch,

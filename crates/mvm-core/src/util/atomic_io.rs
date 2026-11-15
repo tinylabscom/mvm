@@ -66,6 +66,7 @@ pub fn atomic_write_str(path: &Path, content: &str) -> Result<()> {
 /// For a file written by some other party — a hypervisor saving guest memory,
 /// a copy-on-write clone — whose bytes must be durable before a record naming
 /// them is published. On macOS this is `F_FULLFSYNC`, a full device flush.
+#[tracing::instrument(level = "debug", skip_all)]
 pub fn sync_file(path: &Path) -> Result<()> {
     fs::File::open(path)
         .with_context(|| format!("opening {} to sync it", path.display()))?
@@ -78,6 +79,7 @@ pub fn sync_file(path: &Path) -> Result<()> {
 ///
 /// Syncing a file makes its bytes durable but not its name; only syncing the
 /// directory that holds the name does that.
+#[tracing::instrument(level = "debug", skip_all)]
 pub fn sync_dir(path: &Path) -> Result<()> {
     let dir =
         fs::File::open(path).with_context(|| format!("opening directory {}", path.display()))?;
