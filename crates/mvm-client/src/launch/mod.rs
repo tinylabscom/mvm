@@ -272,7 +272,7 @@ pub(crate) fn seal_transient_end(
     // fails is a seal that failed, and is recorded as one.
     let closed = emitter.batched(|| {
         if let Some(posture) = end.posture.filter(|_| end.completed) {
-            crate::admission::record_boot(emitter, plan, end.backend, posture);
+            crate::admission::record_boot(emitter, plan, end.backend, end.vm_name, posture);
         }
         emitter.emit_exit_record(
             plan,

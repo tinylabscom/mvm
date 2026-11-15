@@ -1904,6 +1904,7 @@ pub(crate) mod admit_plan_tests {
             &ctx.emitter,
             ctx.admitted.plan(),
             "firecracker",
+            "vm-boot-posture",
             BootPosture::block(),
         );
 
@@ -1933,6 +1934,7 @@ pub(crate) mod admit_plan_tests {
             &ctx.emitter,
             ctx.admitted.plan(),
             "firecracker",
+            "vm-transient-ok",
             BootPosture {
                 start: Some(StartMode::Warm),
                 ..BootPosture::block()
@@ -1962,6 +1964,7 @@ pub(crate) mod admit_plan_tests {
             &ctx.emitter,
             ctx.admitted.plan(),
             "firecracker",
+            "vm-transient-cold",
             BootPosture {
                 start: Some(StartMode::Cold {
                     reason: "no_standby_ready",
