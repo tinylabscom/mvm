@@ -32,9 +32,9 @@ use mvm_hostd::keyholder::{
     BindingStore, FileBindingStore, LocalResolver, SecretBindingMeta, SecretResolver,
     SubstitutionRegistry, secret_placeholder_env,
 };
-use mvm_hostd::supervisor::audit_file::FileAuditSigner;
-use mvm_hostd::supervisor::audit_recorder::Recorder;
-use mvm_hostd::supervisor::network_endpoint_proxy::{
+use mvm_hostd::supervisor::audit::audit_file::FileAuditSigner;
+use mvm_hostd::supervisor::audit::audit_recorder::Recorder;
+use mvm_hostd::supervisor::endpoint::network_endpoint_proxy::{
     ForwardError, ForwardResponse, Forwarder, FromPlanInputs, PreparedRequest, SubstitutionService,
 };
 
@@ -65,7 +65,7 @@ impl Forwarder for RecordingForwarder {
 
 /// The endpoint suites' claim-10 test gate, included by path so both use one
 /// definition.
-#[path = "../src/supervisor/network_endpoint_proxy/test_support/gate.rs"]
+#[path = "../src/supervisor/endpoint/network_endpoint_proxy/test_support/gate.rs"]
 mod gate;
 use gate::gate_admitting;
 

@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use mvm_core::plan::{PlanId, TenantId};
 use mvm_hostd::audit::session::{SESSION_SEALED_EVENT, SealReason, SealRequest, compute_seal};
-use mvm_hostd::supervisor::audit::PlanAuditEntry;
+use mvm_hostd::supervisor::audit::signer::PlanAuditEntry;
 use mvm_hostd::supervisor::{AuditSigner, FileAuditSigner};
 
 const SEALED: &str = "sha256:aaaa1111bbbb2222cccc3333";

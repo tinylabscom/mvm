@@ -636,7 +636,7 @@ The IR hash isn't decorative — it's load-bearing in the admission path.
 
 The admission profile is the security-posture binding. It records the declared intent, selected seccomp tier, network/filesystem/egress policy refs, secret-release posture, and audit taxonomy. It is deliberately not a new runtime engine: seccomp is still enforced by the guest manifest and network policy by the admitted host endpoint. The profile makes those choices signed and auditable.
 
-**Audit emissions** (`crates/mvm-hostd/src/supervisor/audit_recorder.rs`):
+**Audit emissions** (`crates/mvm-hostd/src/supervisor/audit/audit_recorder.rs`):
 
 - `plan.admitted` — admission accepted, chain-signed
 - `plan.launched` — backend dispatch succeeded

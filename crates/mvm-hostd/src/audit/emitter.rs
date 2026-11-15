@@ -44,7 +44,7 @@ use crate::audit::evidence::{EvidenceReceipt, audit_entry_digest_hex};
 use crate::audit::receipt_export::audit_entry_to_receipt;
 use crate::audit::receipt_store::ReceiptStore;
 use crate::supervisor::{
-    AuditSigner, FileAuditSigner, PlanAuditEntry, audit_mirror, for_plan, transcript_sealed,
+    AuditSigner, FileAuditSigner, PlanAuditEntry, audit::audit_mirror, for_plan, transcript_sealed,
 };
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -2367,18 +2367,18 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(
             entries[0].event,
-            crate::supervisor::audit::TRANSCRIPT_SEALED_EVENT
+            crate::supervisor::audit::signer::TRANSCRIPT_SEALED_EVENT
         );
         assert_eq!(
             entries[0]
                 .labels
-                .get(crate::supervisor::audit::LABEL_TRANSCRIPT_ROOT),
+                .get(crate::supervisor::audit::signer::LABEL_TRANSCRIPT_ROOT),
             Some(&root)
         );
         assert_eq!(
             entries[0]
                 .labels
-                .get(crate::supervisor::audit::LABEL_CHUNK_COUNT),
+                .get(crate::supervisor::audit::signer::LABEL_CHUNK_COUNT),
             Some(&"3".to_string())
         );
     }
@@ -2446,8 +2446,8 @@ mod tests {
         // The record of why a session ended unsealed is a terminal outcome and
         // must be on disk before the call returns.
         assert_eq!(
-            crate::supervisor::audit_file::sync_policy_for("plan.teardown_failed"),
-            crate::supervisor::audit_file::SyncPolicy::Barrier
+            crate::supervisor::audit::audit_file::sync_policy_for("plan.teardown_failed"),
+            crate::supervisor::audit::audit_file::SyncPolicy::Barrier
         );
     }
 

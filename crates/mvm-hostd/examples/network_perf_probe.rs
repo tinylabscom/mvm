@@ -24,9 +24,9 @@ use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
 use mvm_core::substitution_wire::{WireRequest, WireResponse};
 use mvm_hostd::keyholder::resolver::LocalResolver;
 use mvm_hostd::keyholder::substitution::SubstitutionRegistry;
-use mvm_hostd::supervisor::flowmux::registry::RegistryLimits;
-use mvm_hostd::supervisor::flowmux::{FlowMuxAccept, FlowMuxSession};
-use mvm_hostd::supervisor::network_endpoint_proxy::{
+use mvm_hostd::supervisor::endpoint::flowmux::registry::RegistryLimits;
+use mvm_hostd::supervisor::endpoint::flowmux::{FlowMuxAccept, FlowMuxSession};
+use mvm_hostd::supervisor::endpoint::network_endpoint_proxy::{
     ForwardError, ForwardResponse, Forwarder, SubstitutionService,
 };
 use mvm_runtime::vmm::egress_gate::EgressGate;
@@ -323,7 +323,8 @@ fn echo_substitution_service() -> Result<(tempfile::TempDir, Arc<SubstitutionSer
     Ok((secret_dir, Arc::new(service)))
 }
 
-type FlowMuxHost = thread::JoinHandle<Result<(), mvm_hostd::supervisor::flowmux::FlowMuxError>>;
+type FlowMuxHost =
+    thread::JoinHandle<Result<(), mvm_hostd::supervisor::endpoint::flowmux::FlowMuxError>>;
 
 fn start_flowmux_session(
     gate: EgressGate,
@@ -338,7 +339,7 @@ fn start_flowmux_session(
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
-            .map_err(mvm_hostd::supervisor::flowmux::FlowMuxError::Transport)?;
+            .map_err(mvm_hostd::supervisor::endpoint::flowmux::FlowMuxError::Transport)?;
         let _entered = runtime.enter();
         let accept = FlowMuxAccept::new(
             "network-perf",

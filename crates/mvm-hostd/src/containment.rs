@@ -15,7 +15,7 @@ use mvm_core::host_interface::{ExecutionEpoch, workload::WorkloadLedger};
 use mvm_core::plan::ExecutionPlan;
 
 use crate::audit::emitter::AuditEmitter;
-use crate::supervisor::audit::PlanAuditEntry;
+use crate::supervisor::audit::signer::PlanAuditEntry;
 
 /// Emit an operator event about a workload, bound to `plan` when one is at
 /// hand and otherwise to the workload's own labels alone (no plan or image).

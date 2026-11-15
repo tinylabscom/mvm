@@ -297,7 +297,7 @@ pub fn session_for_stop(raw_id: &str) -> Result<SessionRecord> {
 /// The per-VM supervisor enforces the same timeout on its own on the backends
 /// that have one; this sweep is what catches the rest when a session verb
 /// runs. Both claim a session through
-/// [`mvm_hostd::supervisor::session_expiry::claim_expired_session`], so a
+/// [`mvm_hostd::supervisor::lifecycle::session_expiry::claim_expired_session`], so a
 /// session is reaped and audited once whichever notices first.
 ///
 /// The record is marked before the VM is torn down, as [`kill_session`]
@@ -316,14 +316,16 @@ pub fn reap_expired_sessions() -> Vec<SessionId> {
     };
     let mut reaped = Vec::new();
     for id in candidates {
-        let record = match mvm_hostd::supervisor::session_expiry::claim_expired_session(&id, now) {
-            Ok(Some(record)) => record,
-            Ok(None) => continue,
-            Err(e) => {
-                tracing::warn!(session = %id, err = %e, "reap: could not claim session");
-                continue;
-            }
-        };
+        let record =
+            match mvm_hostd::supervisor::lifecycle::session_expiry::claim_expired_session(&id, now)
+            {
+                Ok(Some(record)) => record,
+                Ok(None) => continue,
+                Err(e) => {
+                    tracing::warn!(session = %id, err = %e, "reap: could not claim session");
+                    continue;
+                }
+            };
         end_session_vm(&record.vm_name);
         forget_call_lock(&id);
         reaped.push(id);

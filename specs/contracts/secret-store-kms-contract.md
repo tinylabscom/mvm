@@ -57,7 +57,7 @@ Production construction sites of `FileSecretStore`, and readers of the
 | --- | --- |
 | `mvm-client::secret` | operator secret commands; builds the default store (`default_secret_store`) or an injected `Arc<dyn SecretStore>` |
 | `mvm-client::entrypoint::foreground_diagnostic` | reads the default store |
-| `mvm-hostd::supervisor::network_endpoint` | per-VM substitution endpoint; `FileSecretStore::with_dir` over the configured or default directory |
+| `mvm-hostd::supervisor::endpoint::network_endpoint` | per-VM substitution endpoint; `FileSecretStore::with_dir` over the configured or default directory |
 | `mvm-hostd::keyholder::resolver` | resolves a reference to a value through `Arc<dyn SecretStore>` |
 | `mvm-hostd::jailer` | names the store key path (`file_store_key_path_for_base`) |
 
@@ -91,7 +91,7 @@ Consumers exercise the file provider through their own tests, which build
 (`admission::secrets`, `admission::run_secrets`, `secret`, `launch`,
 `checkpoint::fs_quick`), `mvm-cli` (`commands::ops::secret`,
 `commands::vm::exec::application_source`), `mvm-hostd` (`keyholder::*`,
-`supervisor::network_endpoint*`, `supervisor::flowmux`, `supervisor::terminator`,
+`supervisor::endpoint::network_endpoint*`, `supervisor::endpoint::flowmux`, `supervisor::endpoint::terminator`,
 and the `egress_secret_leak_gate`, `network_endpoint_bin` and
 `wasm_egress_witness` integration tests) and `mvm-conformance`
 (`steps/secrets_pii.rs`). These tests were not re-run for this document.

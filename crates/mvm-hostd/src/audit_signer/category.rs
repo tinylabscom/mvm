@@ -5,7 +5,7 @@
 //! refuse unknown categories so that a confused or hostile caller can't
 //! seed the chain with categories that downstream tooling won't recognise.
 //!
-//! Keep this list in sync with `mvm-supervisor::audit_recorder::EventCategory::as_str`.
+//! Keep this list in sync with `mvm-supervisor::audit::audit_recorder::EventCategory::as_str`.
 
 /// Categories the audit-signer will accept on `AppendEntry`.
 pub const ALLOWED_CATEGORIES: &[&str] = &[

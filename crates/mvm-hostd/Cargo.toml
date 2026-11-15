@@ -173,7 +173,7 @@ aya = { version = "0.13", optional = true }
 seccompiler = { workspace = true }
 landlock = { workspace = true }
 # DNS wire codec for the FlowMux resolver. Every consumer in
-# `supervisor/dns_resolver.rs` is `cfg(target_os = "linux")`; the
+# `supervisor/datapath/dns_resolver.rs` is `cfg(target_os = "linux")`; the
 # `cfg(not(target_os = "linux"))` arm resolves through the host instead and
 # touches none of it. Declared unconditionally this linked hickory-proto plus
 # a second CSPRNG (`rand` 0.10, `rand_core` 0.10, `chacha20`) and

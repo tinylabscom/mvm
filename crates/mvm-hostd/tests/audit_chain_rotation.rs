@@ -10,10 +10,10 @@ use mvm_core::audit_verify::segment::{
 };
 use mvm_core::audit_verify::set::{SegmentSetError, verify_segment_set, verify_segment_topology};
 use mvm_core::plan::{PlanId, TenantId};
-use mvm_hostd::supervisor::audit::{AuditSigner, PlanAuditEntry};
-use mvm_hostd::supervisor::audit_file::{
+use mvm_hostd::supervisor::audit::audit_file::{
     FileAuditSigner, RotationPolicy, VerifyError, verify_audit_chain,
 };
+use mvm_hostd::supervisor::audit::signer::{AuditSigner, PlanAuditEntry};
 use std::path::Path;
 
 fn key() -> SigningKey {

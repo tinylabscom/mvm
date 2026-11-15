@@ -17,7 +17,7 @@ use mvm_contract::stream::{StreamKind, StreamSource};
 use mvm_core::policy::RedactionPolicy;
 use serde::Serialize;
 
-use crate::supervisor::pii_redactor::PiiRedactor;
+use crate::supervisor::inspection::pii_redactor::PiiRedactor;
 
 /// Wire name of the marker record the broker substitutes for a chunk the
 /// seam could not check. Shared so the emitter and any reader agree on the

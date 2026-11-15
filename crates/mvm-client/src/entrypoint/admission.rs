@@ -242,7 +242,7 @@ impl EntrypointAdmission {
                 let proof = credential
                     .prove_registration(&challenge, now)?
                     .verify(&challenge, now)?;
-                mvm_hostd::supervisor::caller_registration::admit_caller(
+                mvm_hostd::supervisor::admission::caller_registration::admit_caller(
                     &ctx.admitted,
                     vm_name,
                     challenge,

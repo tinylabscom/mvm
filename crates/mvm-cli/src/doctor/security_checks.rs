@@ -216,7 +216,7 @@ fn scan_audit_chains() -> AuditChainScan {
             scan.verified += 1;
             continue;
         }
-        let checkpoint = mvm_hostd::supervisor::audit_checkpoint::load(&active);
+        let checkpoint = mvm_hostd::supervisor::audit::audit_checkpoint::load(&active);
         match mvm_hostd::supervisor::verify_audit_chain_incremental(
             &active,
             &signer.verifying,
@@ -227,7 +227,7 @@ fn scan_audit_chains() -> AuditChainScan {
                 if !outcome.walked_from_genesis {
                     scan.resumed += 1;
                 }
-                mvm_hostd::supervisor::audit_checkpoint::store(&active, &outcome.checkpoint);
+                mvm_hostd::supervisor::audit::audit_checkpoint::store(&active, &outcome.checkpoint);
             }
             Err(e) => scan
                 .broken

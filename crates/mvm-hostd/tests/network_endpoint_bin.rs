@@ -19,7 +19,7 @@ use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
 use mvm_core::plan::{SecretBinding, SecretSource};
 use mvm_core::substitution_wire::{WireRequest, WireResponse};
 use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
-use mvm_hostd::supervisor::network_endpoint::{
+use mvm_hostd::supervisor::endpoint::network_endpoint::{
     EgressMode, EndpointConfig, EndpointTransport, ResolverBackend,
 };
 use secrecy::SecretBox;
@@ -287,7 +287,7 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
         binding_store_dir: Some(dir.path().join("bindings")),
         // Deny-all: the endpoint gates every destination — even the bound one.
         network_policy: Some(mvm_core::policy::network_policy::NetworkPolicy::deny_all()),
-        egress_mode: mvm_hostd::supervisor::network_endpoint::EgressMode::Wire,
+        egress_mode: mvm_hostd::supervisor::endpoint::network_endpoint::EgressMode::Wire,
         ..test_config(EndpointTransport::Uds { path: sock.clone() })
     };
 
@@ -339,7 +339,7 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
 fn a_flowmux_endpoint_keeps_serving_sessions_after_one_ends() {
     use base64::Engine as _;
     use mvm_core::net::session::Session;
-    use mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity;
+    use mvm_hostd::supervisor::endpoint::network_endpoint::FlowMuxIdentity;
 
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("network.sock");
@@ -428,7 +428,7 @@ fn a_flowmux_endpoint_keeps_serving_sessions_after_one_ends() {
 fn a_flowmux_endpoint_enforces_one_admitted_ceiling_across_sessions() {
     use base64::Engine as _;
     use mvm_core::net::session::Session;
-    use mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity;
+    use mvm_hostd::supervisor::endpoint::network_endpoint::FlowMuxIdentity;
 
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("network.sock");
@@ -517,7 +517,7 @@ fn a_flowmux_endpoint_enforces_one_admitted_ceiling_across_sessions() {
 #[test]
 fn a_flowmux_endpoint_refuses_zero_limits_decoded_from_config() {
     use base64::Engine as _;
-    use mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity;
+    use mvm_hostd::supervisor::endpoint::network_endpoint::FlowMuxIdentity;
 
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("network.sock");
@@ -802,7 +802,7 @@ fn signalling_the_recorded_pid_stops_a_kept_endpoint() {
 fn every_endpoint_thread_serves_under_confinement() {
     use base64::Engine as _;
     use mvm_core::net::session::Session;
-    use mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity;
+    use mvm_hostd::supervisor::endpoint::network_endpoint::FlowMuxIdentity;
 
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("network.sock");
@@ -901,7 +901,7 @@ fn an_endpoint_embedding_the_collector_collects_and_keeps_serving() {
     };
     use mvm_hostd::audit_signer::helper::{SignerHelper, serve_on_listener};
     use mvm_hostd::audit_signer::helper_client::DEFAULT_HELPER_MAX_FRAME_BYTES;
-    use mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity;
+    use mvm_hostd::supervisor::endpoint::network_endpoint::FlowMuxIdentity;
     use mvm_hostd::telemetry_collector::TelemetryEmbedConfig;
     use mvm_vmm::host::broker_services_spawn::{AUDIT_SIGNER_SOCK, HOST_SIGNER_PUB};
     use mvm_vmm::host::telemetry_provisioning::{
@@ -1088,7 +1088,7 @@ fn an_endpoint_embedding_the_collector_collects_and_keeps_serving() {
 fn an_endpoint_whose_collector_cannot_start_keeps_serving() {
     use base64::Engine as _;
     use mvm_core::net::session::Session;
-    use mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity;
+    use mvm_hostd::supervisor::endpoint::network_endpoint::FlowMuxIdentity;
     use mvm_hostd::telemetry_collector::TelemetryEmbedConfig;
 
     let dir = tempfile::tempdir().unwrap();

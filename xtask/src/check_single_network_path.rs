@@ -45,7 +45,7 @@ const SPEC_MAP_RS: &str = "crates/mvm-vmm/src/host/spec_map.rs";
 const RUNNER_RS: &str = "crates/mvm-runtime/src/workload_runner/runner.rs";
 const LIVE_SNAPSHOT_RS: &str = "crates/mvm-runtime/src/vm/instance_snapshot.rs";
 const ROUTE_DECISION_OWNER: &str =
-    "crates/mvm-hostd/src/supervisor/network_endpoint_proxy/routing.rs";
+    "crates/mvm-hostd/src/supervisor/endpoint/network_endpoint_proxy/routing.rs";
 const ROUTE_DECISION_GATE: &str = "crates/mvm-vmm/src/vsock_egress_bridge/egress_gate.rs";
 
 const RUNNERS: &[(&str, &str)] = &[
@@ -104,8 +104,8 @@ const NIC_GUARDED_PATHS: &[&str] = &[
     "crates/mvm-vmm/src/driver/spec.rs",
     "crates/mvm-vmm/src/host/spec_map.rs",
     ENDPOINT_BIN,
-    "crates/mvm-hostd/src/supervisor/flowmux.rs",
-    "crates/mvm-hostd/src/supervisor/flowmux",
+    "crates/mvm-hostd/src/supervisor/endpoint/flowmux.rs",
+    "crates/mvm-hostd/src/supervisor/endpoint/flowmux",
     "crates/mvm-net/src",
 ];
 
@@ -118,16 +118,16 @@ const LEGACY_INPUT_BOUNDARIES: &[&str] = &[
 
 const ENDPOINT_SOCKET_OWNERS: &[&str] = &[
     ENDPOINT_BIN,
-    "crates/mvm-hostd/src/supervisor/dns_resolver.rs",
-    "crates/mvm-hostd/src/supervisor/flowmux.rs",
-    "crates/mvm-hostd/src/supervisor/flowmux/",
+    "crates/mvm-hostd/src/supervisor/datapath/dns_resolver.rs",
+    "crates/mvm-hostd/src/supervisor/endpoint/flowmux.rs",
+    "crates/mvm-hostd/src/supervisor/endpoint/flowmux/",
     "crates/mvm-http/src/client.rs",
 ];
 
 /// Host network users that do not carry workload traffic. Each exemption is
 /// exact and purpose-labelled so the list cannot silently widen by directory.
 const INFRA_SOCKET_EXEMPTIONS: &[(&str, &str)] = &[(
-    "crates/mvm-hostd/src/supervisor/l7_proxy.rs",
+    "crates/mvm-hostd/src/supervisor/datapath/l7_proxy.rs",
     "standalone supervisor proxy component outside the admitted workload runner",
 )];
 
@@ -374,7 +374,8 @@ const PEER_BRANCH_OWNER: &str = "crates/mvm-vmm/src/vsock_egress_bridge/egress_g
 
 /// The connect sites that route a guest target through the gate. Each must go
 /// through `decide_target`.
-const PEER_BRANCH_CALLERS: &[&str] = &["crates/mvm-hostd/src/supervisor/flowmux/open_flow.rs"];
+const PEER_BRANCH_CALLERS: &[&str] =
+    &["crates/mvm-hostd/src/supervisor/endpoint/flowmux/open_flow.rs"];
 
 /// The module tree those connect sites live in. No file here may call
 /// `decide_peer` or re-derive the branch itself — stated over the whole tree
@@ -382,8 +383,8 @@ const PEER_BRANCH_CALLERS: &[&str] = &["crates/mvm-hostd/src/supervisor/flowmux/
 /// connect path into a new sibling cannot move a second branch out from under
 /// the check.
 const PEER_BRANCH_NON_DERIVERS: &[&str] = &[
-    "crates/mvm-hostd/src/supervisor/flowmux.rs",
-    "crates/mvm-hostd/src/supervisor/flowmux",
+    "crates/mvm-hostd/src/supervisor/endpoint/flowmux.rs",
+    "crates/mvm-hostd/src/supervisor/endpoint/flowmux",
 ];
 
 /// Deliberate non-callers: production code that sees a target but must not
@@ -395,8 +396,8 @@ const PEER_BRANCH_NON_DERIVERS: &[&str] = &[
 /// Naming only the facade would pass while reading nothing, because the facade
 /// holds no request path at all.
 const PEER_REFUSAL_SITES: &[&str] = &[
-    "crates/mvm-hostd/src/supervisor/network_endpoint_proxy.rs",
-    "crates/mvm-hostd/src/supervisor/network_endpoint_proxy",
+    "crates/mvm-hostd/src/supervisor/endpoint/network_endpoint_proxy.rs",
+    "crates/mvm-hostd/src/supervisor/endpoint/network_endpoint_proxy",
 ];
 
 /// What marks the proxy's one peer refusal.
@@ -583,8 +584,8 @@ const FLOW_AUDIT_LABEL_KEYS: &[&str] = &[
 /// moving a connect path into a sibling cannot move its labels out from under
 /// the allow-list.
 const FLOW_AUDIT_SITES: &[&str] = &[
-    "crates/mvm-hostd/src/supervisor/flowmux.rs",
-    "crates/mvm-hostd/src/supervisor/flowmux",
+    "crates/mvm-hostd/src/supervisor/endpoint/flowmux.rs",
+    "crates/mvm-hostd/src/supervisor/endpoint/flowmux",
 ];
 
 fn check_flow_audit_labels(workspace: &Path) -> Result<()> {
@@ -1056,7 +1057,7 @@ mod tests {
     fn endpoint_and_exact_infra_socket_cases_are_the_only_allowed_shapes() {
         assert!(path_allowed(ENDPOINT_BIN, ENDPOINT_SOCKET_OWNERS));
         assert!(path_allowed(
-            "crates/mvm-hostd/src/supervisor/flowmux/tcp_relay.rs",
+            "crates/mvm-hostd/src/supervisor/endpoint/flowmux/tcp_relay.rs",
             ENDPOINT_SOCKET_OWNERS
         ));
         assert!(!path_allowed(
@@ -1064,19 +1065,19 @@ mod tests {
             ENDPOINT_SOCKET_OWNERS
         ));
         assert!(!path_allowed(
-            "crates/mvm-hostd/src/supervisor/terminator/flow.rs",
+            "crates/mvm-hostd/src/supervisor/endpoint/terminator/flow.rs",
             ENDPOINT_SOCKET_OWNERS
         ));
         assert!(
             INFRA_SOCKET_EXEMPTIONS
                 .iter()
-                .any(|(path, _)| *path == "crates/mvm-hostd/src/supervisor/l7_proxy.rs")
+                .any(|(path, _)| *path == "crates/mvm-hostd/src/supervisor/datapath/l7_proxy.rs")
         );
     }
 
     fn proxy_file(name: &str, code: &str) -> (String, String) {
         (
-            format!("crates/mvm-hostd/src/supervisor/network_endpoint_proxy/{name}"),
+            format!("crates/mvm-hostd/src/supervisor/endpoint/network_endpoint_proxy/{name}"),
             code.to_string(),
         )
     }
