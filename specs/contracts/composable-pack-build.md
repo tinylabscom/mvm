@@ -300,6 +300,12 @@ admits one application with its actual selected entrypoint, ordered
 authenticated runtime inputs and one signed selected base. Multiple
 applications, tool graphs, production command precedence and in-file keyless
 provenance require a later reviewed version, not optional fields in this one.
+The first application is locally authored, not a pre-existing signed
+application component. Freeze its spec, source tree, assembled payload digest
+and producer revision; a separate protected verifier rechecks those inputs,
+the health-tested output and distribution rights before signing the complete
+archive. Do not invent an original application-component signature or treat
+a source digest alone as publisher trust.
 Do not raise the reader's maximum schema or emit schema 9 until its closed
 member encoding, protected producer and recipient checks are implemented
 together. Then production exports use schema 9 only: no legacy-output option,
@@ -310,10 +316,13 @@ Carry one typed production member, not reuse the v7 `other` role as an
 implicit grant. Its Ed25519-signed manifest
 binds the authored spec/source/producer lock, selected signed Linux root,
 ordered runtime manifest pins, policy digests, output artifact hashes and
-health-tested entrypoint. Embed each
-runtime's original keyless-signed descriptor, signature bundle and declared
-policy document as small digest-bound bundle artifacts; a clean offline
-recipient must verify both publisher and bundle trust roots and check
+health-tested entrypoint. After the archive is finalized, the registry
+publisher signs a separate descriptor pinned to that archive's exact digest,
+size, author key and architecture. Embed each runtime's original
+keyless-signed descriptor, signature bundle and declared policy document
+as small digest-bound bundle artifacts; a clean offline
+recipient must verify the final descriptor and bundle under independent trust
+roots, recheck the embedded signed runtime proofs and check
 current revocations for every pinned layer before admission. The final
 package carries the composed rootfs and CLI runtime itself, not an external
 layer fetch dependency. Missing evidence, ambiguous policy, changed
