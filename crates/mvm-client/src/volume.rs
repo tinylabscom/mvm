@@ -587,6 +587,38 @@ mod tests {
         assert!(!prepared.volumes[0].read_only);
     }
 
+    /// Launches that name no volume share nothing, so one holding the host-wide
+    /// lifecycle lock (another launch, a volume operation) must not stop them.
+    #[test]
+    fn a_launch_without_volumes_does_not_need_the_lifecycle_lock() {
+        let _home = TestVolumeHome::new();
+        let _held = super::lifecycle::acquire_volume_lifecycle_lock().unwrap();
+        for owner in ["vm-1", "vm-2", "vm-3"] {
+            let request = LaunchLeaseRequest::builder(owner).unwrap().build();
+            let prepared = service().acquire_launch_lease(&request).unwrap();
+            assert!(prepared.volumes.is_empty());
+        }
+    }
+
+    /// The other side of the fast path: a VM with a registered volume still
+    /// serializes on the lifecycle lock.
+    #[test]
+    fn a_launch_with_a_registered_volume_still_takes_the_lifecycle_lock() {
+        let home = TestVolumeHome::new();
+        home.create_block("work", TEST_VOLUME_MIB);
+        service().unlock_volume("work").unwrap();
+        service()
+            .prepare_attachment(&attach("vm-1", "work", "/data/work", AccessMode::ReadOnly))
+            .unwrap();
+        let _held = super::lifecycle::acquire_volume_lifecycle_lock().unwrap();
+        let request = LaunchLeaseRequest::builder("vm-1").unwrap().build();
+        let err = service().acquire_launch_lease(&request).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("already in progress"),
+            "got: {err:#}"
+        );
+    }
+
     #[test]
     fn sealed_profile_refuses_read_write_launch() {
         let home = TestVolumeHome::new();
