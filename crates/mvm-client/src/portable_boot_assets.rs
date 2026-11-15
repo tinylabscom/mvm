@@ -363,8 +363,11 @@ impl PreparedPortableBootAssets {
             root: self.publisher.root(),
             revocations: self.publisher.revocations(),
         });
-        let output = mvm_bundler::stage_bundle_with_signer(&selected, signer)?;
-        if let Err(error) = self.verify_integrity() {
+        let mut output = mvm_bundler::stage_bundle_with_signer(&selected, signer)?;
+        if let Err(error) = output
+            .verify_readback(signer.verifying_key())
+            .and_then(|_| self.verify_integrity())
+        {
             return Err(output.abort(error));
         }
         Ok(output)

@@ -669,6 +669,9 @@ fn staged_validation_and_publication_use_the_same_owned_archive() {
     assert!(!out.exists());
     let manifest = staged.manifest().unwrap();
     let sha256 = staged.sha256().unwrap();
+    let readback = staged.verify_readback(signer.verifying_key()).unwrap();
+    assert_eq!(readback.manifest, manifest);
+    assert_eq!(readback.bundle_sha256, sha256);
     assert_eq!(staged.manifest().unwrap(), manifest);
     assert_eq!(staged.sha256().unwrap(), sha256);
     let exported = staged.publish().unwrap();
@@ -676,6 +679,25 @@ fn staged_validation_and_publication_use_the_same_owned_archive() {
     assert_eq!(sha256, bundle_sha256(&actual));
     assert_eq!(exported.size_bytes, actual.len() as u64);
     assert_eq!(verify(&out, &signer).unwrap().manifest, manifest);
+}
+
+#[test]
+fn wrong_readback_key_aborts_without_publishing() {
+    let slot = Slot::new();
+    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let signer = TestSigner::new(7);
+    let inputs = BundleExportInputs::new(&vmlinux, &rootfs, "aarch64", &out);
+    let mut staged = stage_bundle_with_signer(&inputs, &signer).unwrap();
+    let error = staged
+        .verify_readback(TestSigner::new(8).verifying_key())
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("trust store has no entry for key_id"),
+        "{error:#}"
+    );
+    staged.abort(error);
+    assert!(!out.exists());
+    assert_eq!(std::fs::read_dir(out.parent().unwrap()).unwrap().count(), 0);
 }
 
 #[test]

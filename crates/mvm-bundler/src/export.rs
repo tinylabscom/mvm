@@ -5,12 +5,14 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use ed25519_dalek::VerifyingKey;
 use mvm_core::crypto::image_verify::{sha256_file, sha256_reader};
 use mvm_core::guest_sidecar::SIDECAR_FILENAME;
 use mvm_core::plan::bundle::{
     ARTIFACTS_DIR, ArtifactRole, BUNDLE_MEMBERS_MIN_SCHEMA, BundleArtifact, BundleManifest,
-    BundleMember, BundlePayload, BundleSecurityPosture, BundleSizeBudget, KeyId, VerityInfo,
-    sha256_hex, write_bundle_to,
+    BundleMember, BundlePayload, BundleSecurityPosture, BundleSizeBudget, KeyId, TrustStore,
+    VerifiedBundleFile, VerityInfo, key_id_from_pubkey, sha256_hex, verify_staged_bundle_file,
+    write_bundle_to,
 };
 use mvm_core::plan::types::BuildProvenance;
 use mvm_core::util::atomic_io::StagedFile;
@@ -103,6 +105,29 @@ impl StagedBundle {
         file.rewind()
             .context("rewinding staged bundle for hashing")?;
         sha256_reader(file).context("hashing staged bundle")
+    }
+
+    /// Read back the owned sealed bytes with a caller-selected public key.
+    /// This proves archive integrity, not publisher enrollment or admission.
+    ///
+    /// # Errors
+    ///
+    /// Refuses an invalid signature, declaration, member, or changed staged file.
+    pub fn verify_readback(&mut self, key: VerifyingKey) -> Result<VerifiedBundleFile> {
+        struct OneKey(VerifyingKey);
+        impl TrustStore for OneKey {
+            fn lookup(&self, key_id: &KeyId) -> Option<VerifyingKey> {
+                (*key_id == key_id_from_pubkey(&self.0)).then_some(self.0)
+            }
+        }
+
+        let verified = verify_staged_bundle_file(self.output.file_mut(), &OneKey(key))
+            .context("verifying privately staged bundle")?;
+        anyhow::ensure!(
+            verified.key_id == self.exported.key_id,
+            "staged bundle signer differs from sealed export"
+        );
+        Ok(verified)
     }
 
     /// Publish only to the destination captured from the export inputs.
@@ -1052,6 +1077,43 @@ mod tests {
         *staged.output.file_mut() = original;
         staged.abort(anyhow::anyhow!("validation failed"));
         assert_eq!(std::fs::read(&out).unwrap(), b"foreign");
+    }
+
+    #[test]
+    fn changed_staged_member_fails_readback_and_aborts_without_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = dir.path().join("vmlinux");
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&kernel, b"kernel bytes").unwrap();
+        std::fs::write(&rootfs, b"rootfs bytes").unwrap();
+        std::fs::write(dir.path().join(SIDECAR_FILENAME), b"{}").unwrap();
+        let out = dir.path().join("bundle.mvmpkg");
+        let signer = TestSigner(ed25519_dalek::SigningKey::from_bytes(&[7; 32]));
+        let inputs = BundleExportInputs::new(
+            kernel.to_str().unwrap(),
+            rootfs.to_str().unwrap(),
+            "aarch64",
+            &out,
+        );
+        let mut staged = stage_bundle_with_signer(&inputs, &signer).unwrap();
+        let file = staged.output.file_mut();
+        file.rewind().unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        let offset = bytes
+            .windows(b"rootfs bytes".len())
+            .position(|part| part == b"rootfs bytes")
+            .unwrap();
+        file.seek(std::io::SeekFrom::Start(offset as u64)).unwrap();
+        file.write_all(b"X").unwrap();
+        let error = staged.verify_readback(signer.verifying_key()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("sha256 mismatch"),
+            "{error:#}"
+        );
+        staged.abort(error);
+        assert!(!out.exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
     }
 
     #[test]

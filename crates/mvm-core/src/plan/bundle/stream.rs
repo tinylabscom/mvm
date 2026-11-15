@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 #[cfg(feature = "host-state")]
 use std::collections::BTreeSet;
 use std::fs::File;
+#[cfg(feature = "host-state")]
+use std::io::Seek;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -231,9 +233,8 @@ enum Destination<'a> {
 /// destination `route` picks for it and checking it against the manifest.
 /// Returns the bytes of the artifacts routed to [`Destination::Capture`].
 ///
-/// Entries the manifest does not declare are skipped, as the in-memory
-/// verifier skips them; a declared artifact that appears twice or never is
-/// refused.
+/// Unique entries the manifest does not declare are skipped, as the in-memory
+/// verifier skips them; any repeated path or a missing declared artifact is refused.
 #[cfg(feature = "host-state")]
 fn stream_artifacts<'p>(
     archive: impl Read,
@@ -261,6 +262,11 @@ fn stream_artifacts<'p>(
             .into_owned();
         ensure_safe_path(&path)?;
         budget.admit(&path, entry.size())?;
+        if !seen.insert(path.clone()) {
+            return Err(BundleVerifyError::ManifestParse(format!(
+                "archive carries {path} more than once"
+            )));
+        }
         let Some(artifact) = declared.get(path.as_str()) else {
             continue;
         };
@@ -270,11 +276,6 @@ fn stream_artifacts<'p>(
                 declared: artifact.size_bytes,
                 actual: entry.size(),
             });
-        }
-        if !seen.insert(path.clone()) {
-            return Err(BundleVerifyError::ManifestParse(format!(
-                "archive carries {path} more than once"
-            )));
         }
         let (size, sha256) = match route(artifact) {
             Destination::Discard => {
@@ -796,6 +797,70 @@ pub fn verify_bundle_file(
     let boot_assets = super::verify_boot_assets(&manifest, &InMemoryArtifacts(&captured))?;
     Ok(VerifiedBundleFile {
         bundle_sha256: archive_sha256(path)?,
+        manifest,
+        key_id,
+        embedded_image_sets,
+        boot_assets,
+        manifest_signature,
+    })
+}
+
+/// Verify a privately held, uncompressed staged archive without reopening a pathname.
+/// The caller must retain exclusive ownership of its contents through publication;
+/// a file descriptor pins the inode, not an immutable snapshot of its bytes.
+///
+/// # Errors
+///
+/// Refuses nonregular or oversized files, invalid signatures, declarations, or member bytes.
+#[cfg(feature = "host-state")]
+pub fn verify_staged_bundle_file(
+    file: &mut File,
+    trust_store: &dyn TrustStore,
+) -> Result<VerifiedBundleFile, BundleVerifyError> {
+    let invalid = |reason: String| BundleVerifyError::ManifestParse(reason);
+    let metadata = file
+        .metadata()
+        .map_err(|error| invalid(error.to_string()))?;
+    let limit = super::MAX_BUNDLE_TOTAL_BYTES + 64 * 1024 * 1024;
+    if !metadata.is_file() || metadata.len() > limit {
+        return Err(invalid(
+            "staged bundle is not regular or exceeds the size bound".into(),
+        ));
+    }
+    file.rewind().map_err(|error| invalid(error.to_string()))?;
+    let (manifest_bytes, signature) = read_manifest_entries((&mut *file).take(limit + 1))?;
+    let (manifest, key_id) = verify_signed_manifest(&manifest_bytes, &signature, trust_store)?;
+    let manifest_signature = signature
+        .try_into()
+        .map_err(|_| invalid("verified manifest signature has invalid length".into()))?;
+    file.rewind().map_err(|error| invalid(error.to_string()))?;
+    let capture = image_set_manifest_paths(&manifest);
+    let captured = stream_artifacts((&mut *file).take(limit + 1), &manifest, |artifact| {
+        if capture.contains(&artifact.path) {
+            Destination::Capture
+        } else {
+            Destination::Discard
+        }
+    })?;
+    let embedded_image_sets = verify_embedded_image_sets(&manifest, &InMemoryArtifacts(&captured))?;
+    let boot_assets = super::verify_boot_assets(&manifest, &InMemoryArtifacts(&captured))?;
+    file.rewind().map_err(|error| invalid(error.to_string()))?;
+    let mut hasher = HashingWriter::new(io::sink());
+    io::copy(&mut (&mut *file).take(limit + 1), &mut hasher)
+        .map_err(|error| invalid(error.to_string()))?;
+    let (bytes, bundle_sha256) = hasher.finish();
+    if bytes != metadata.len()
+        || bytes > limit
+        || file
+            .metadata()
+            .map_err(|error| invalid(error.to_string()))?
+            .len()
+            != bytes
+    {
+        return Err(invalid("staged bundle size changed during readback".into()));
+    }
+    Ok(VerifiedBundleFile {
+        bundle_sha256,
         manifest,
         key_id,
         embedded_image_sets,

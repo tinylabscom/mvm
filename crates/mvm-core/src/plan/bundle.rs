@@ -133,7 +133,7 @@ pub(crate) use stream::HashingWriter;
 #[cfg(feature = "host-state")]
 pub use stream::{
     BundlePayload, VerifiedBundleFile, capture_canonical_linux_inputs, open_archive,
-    read_bundle_archive, verify_bundle_file, write_bundle_to,
+    read_bundle_archive, verify_bundle_file, verify_staged_bundle_file, write_bundle_to,
 };
 pub use stream::{CapturedCanonicalLinuxInputs, MAX_IMAGE_SET_MANIFEST_BYTES};
 pub use verify_error::{BundleVerifyError, ensure_safe_path};
@@ -1128,7 +1128,11 @@ pub fn read_and_verify_bundle(
         entry
             .read_to_end(&mut buf)
             .map_err(|e| BundleVerifyError::ManifestParse(format!("tar entry body read: {e}")))?;
-        entries.insert(path, buf);
+        if entries.insert(path.clone(), buf).is_some() {
+            return Err(BundleVerifyError::ManifestParse(format!(
+                "archive carries {path} more than once"
+            )));
+        }
     }
 
     let manifest_bytes = entries
@@ -2541,6 +2545,67 @@ mod tests {
                 assert_eq!(name, "rootfs.ext4");
             }
             other => panic!("expected ArtifactSha256Mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_archive_paths_refuse_in_memory_file_and_staged_readback() {
+        let sk = fresh_key();
+        let kernel = b"kernel-bytes";
+        let rootfs = b"rootfs-bytes";
+        let manifest = make_manifest(
+            key_id_from_pubkey(&sk.verifying_key()),
+            vec![
+                art("vmlinux", ArtifactRole::Kernel, "artifacts/vmlinux", kernel),
+                art(
+                    "rootfs.ext4",
+                    ArtifactRole::Rootfs,
+                    "artifacts/rootfs.ext4",
+                    rootfs,
+                ),
+            ],
+        );
+        let manifest_bytes = canonical_manifest_bytes(&manifest).unwrap();
+        let signature = sk.sign(&manifest_bytes);
+        let signature_bytes = signature.to_bytes();
+        for duplicate in [
+            MANIFEST_FILENAME,
+            SIGNATURE_FILENAME,
+            "artifacts/vmlinux",
+            "ignored",
+        ] {
+            let mut tar = tar::Builder::new(Vec::new());
+            append_bytes(&mut tar, MANIFEST_FILENAME, &manifest_bytes).unwrap();
+            append_bytes(&mut tar, SIGNATURE_FILENAME, &signature_bytes).unwrap();
+            append_bytes(&mut tar, "artifacts/vmlinux", kernel).unwrap();
+            append_bytes(&mut tar, "artifacts/rootfs.ext4", rootfs).unwrap();
+            if duplicate == "ignored" {
+                append_bytes(&mut tar, duplicate, b"unused").unwrap();
+            }
+            let bytes = match duplicate {
+                MANIFEST_FILENAME => manifest_bytes.as_slice(),
+                SIGNATURE_FILENAME => signature_bytes.as_slice(),
+                "artifacts/vmlinux" => kernel.as_slice(),
+                _ => b"unused",
+            };
+            append_bytes(&mut tar, duplicate, bytes).unwrap();
+            tar.finish().unwrap();
+            let archive = tar.into_inner().unwrap();
+            let path = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(path.path(), &archive).unwrap();
+            let mut file = std::fs::File::open(path.path()).unwrap();
+            assert!(
+                read_and_verify_bundle(&archive, &trust(&sk)).is_err(),
+                "{duplicate}"
+            );
+            assert!(
+                verify_bundle_file(path.path(), &trust(&sk)).is_err(),
+                "{duplicate}"
+            );
+            assert!(
+                verify_staged_bundle_file(&mut file, &trust(&sk)).is_err(),
+                "{duplicate}"
+            );
         }
     }
 

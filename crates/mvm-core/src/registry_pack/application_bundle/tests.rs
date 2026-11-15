@@ -15,6 +15,19 @@ use serde_json::json;
 mod builtin_author;
 
 fn fixture() -> (tempfile::TempDir, Vec<u8>, FsTrustStore, String) {
+    fixture_with_archive(|manifest, key| {
+        write_bundle(
+            manifest,
+            key,
+            vec![("artifacts/rootfs.ext4".to_string(), b"rootfs".to_vec())],
+        )
+        .unwrap()
+    })
+}
+
+fn fixture_with_archive(
+    archive: impl FnOnce(&BundleManifest, &SigningKey) -> Vec<u8>,
+) -> (tempfile::TempDir, Vec<u8>, FsTrustStore, String) {
     use rand::Rng;
     let directory = tempfile::tempdir().unwrap();
     let mut seed = [0; 32];
@@ -50,13 +63,93 @@ fn fixture() -> (tempfile::TempDir, Vec<u8>, FsTrustStore, String) {
         verity: None,
         resources: None,
     };
-    let archive = write_bundle(
-        &manifest,
-        &key,
-        vec![("artifacts/rootfs.ext4".to_string(), bytes.to_vec())],
+    let archive = archive(&manifest, &key);
+    (directory, archive, trust, key_id.0)
+}
+
+#[test]
+fn signed_schema_nine_production_archive_refuses_at_registry_recipient_boundary() {
+    use crate::plan::bundle::{BundleMember, BundleVerifyError, canonical_manifest_bytes};
+    use mvm_contract::plan::bundle::{ProductionComposition, ProductionCompositionLayer};
+
+    let (directory, bytes, trust, key_id) = fixture_with_archive(|manifest, key| {
+        let mut manifest = manifest.clone();
+        manifest.schema_version = 9;
+        manifest
+            .members
+            .push(BundleMember::ProductionComposition(ProductionComposition {
+                lock_artifact: "frozen-lock.json".into(),
+                layers: vec![ProductionCompositionLayer {
+                    manifest_artifact: "runtime-manifest.json".into(),
+                    signature_artifact: "runtime-manifest.bundle".into(),
+                    group_artifact: None,
+                    profile_artifact: Some("runtime-profile.toml".into()),
+                }],
+            }));
+        // The production writer deliberately refuses this proposed format. Seal
+        // only this adversarial test vector, preserving the actual wire layout.
+        let head = canonical_manifest_bytes(&manifest).unwrap();
+        let signature = ed25519_dalek::Signer::sign(key, &head).to_bytes();
+        let mut tar = tar::Builder::new(Vec::new());
+        for (path, content) in [
+            ("manifest.json", head.as_slice()),
+            ("manifest.sig", signature.as_slice()),
+            ("artifacts/rootfs.ext4", b"rootfs".as_slice()),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, path, content).unwrap();
+        }
+        tar.into_inner().unwrap()
+    });
+    let source = directory.path().join("proposed.mvmpkg");
+    std::fs::write(&source, &bytes).unwrap();
+    let application = descriptor(&bytes, &key_id, |_| {});
+    assert_eq!(
+        application
+            .manifest()
+            .application
+            .bundle
+            .archive_sha256
+            .as_str(),
+        sha256_hex(&bytes),
+        "the registry descriptor must pin the exact signed archive"
+    );
+    let mut archive = tar::Archive::new(bytes.as_slice());
+    let mut entries = archive.entries().unwrap();
+    let mut head = Vec::new();
+    entries
+        .next()
+        .unwrap()
+        .unwrap()
+        .read_to_end(&mut head)
+        .unwrap();
+    let mut signature = [0; 64];
+    entries
+        .next()
+        .unwrap()
+        .unwrap()
+        .read_exact(&mut signature)
+        .unwrap();
+    let public_key = std::fs::read(trust.root().join(format!("{key_id}.pub"))).unwrap();
+    ed25519_dalek::Verifier::verify(
+        &ed25519_dalek::VerifyingKey::from_bytes(&public_key.try_into().unwrap()).unwrap(),
+        &head,
+        &ed25519_dalek::Signature::from_bytes(&signature),
     )
     .unwrap();
-    (directory, archive, trust, key_id.0)
+
+    assert!(matches!(
+        verify_application_bundle(&application, &source, &trust),
+        Err(ApplicationBundleError::Verification(
+            BundleVerifyError::UnsupportedSchema {
+                found: 9,
+                supported: BUNDLE_SCHEMA_VERSION
+            }
+        ))
+    ));
 }
 
 fn descriptor(
