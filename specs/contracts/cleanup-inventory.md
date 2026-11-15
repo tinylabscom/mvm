@@ -516,7 +516,7 @@ Documented as removed or non-existent (checked against the generated block: none
 | `MVM_NO_VM` | read by the SDKs (`__sdk-no-vm`) | not a Rust literal |
 
 <!-- env:begin -->
-Distinct `MVM_*` literals in Rust (`crates`, `src`, tests included): **374**; live-read **219**, set-only **7**, test-only **148**; live-read and absent from `public/src/content/docs`: **148**; names in `public/src/content/docs` that no Rust literal or script/nix/feature/test file uses: **1**.
+Distinct `MVM_*` literals in Rust (`crates`, `src`, tests included): **374**; live-read **220**, set-only **7**, test-only **147**; live-read and absent from `public/src/content/docs`: **149**; names in `public/src/content/docs` that no Rust literal or script/nix/feature/test file uses: **1**.
 
 Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only` = only written to a child process, so the reader is outside Rust or in another process; `test-only` = test code only), first reader `file:line`, count of live-read sites, documented in `public/src/content/docs`, referenced by a script/nix/feature/test file.
 
@@ -698,7 +698,7 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_HVF_DIAGNOSTICS_TEST_CHILD` | test-only | `crates/mvm-vmm/src/host/hvf_supervisor/startup_diagnostics.rs:255` | 0 | NO | - |
 | `MVM_HVF_DIAGNOSTICS_TEST_SYNC_FD` | test-only | `crates/mvm-vmm/src/host/hvf_supervisor/startup_diagnostics.rs:257` | 0 | NO | - |
 | `MVM_HVF_DISK` | live-read | `crates/mvm-runtime/examples/hvf-agent-ping.rs:32` | 5 | NO | - |
-| `MVM_HVF_ENABLE_TRUSTED_SNAPSHOT` | test-only | `crates/mvm-runtime/src/workload_runner/runner.rs:1317` | 0 | NO | yes |
+| `MVM_HVF_ENABLE_TRUSTED_SNAPSHOT` | live-read | `crates/mvm-runtime/src/workload_runner/runner/standby.rs:216` | 2 | NO | yes |
 | `MVM_HVF_INITRAMFS` | live-read | `crates/mvm-runtime/examples/hvf-kernel-boot.rs:29` | 1 | NO | - |
 | `MVM_HVF_INITRD` | live-read | `crates/mvm-runtime/examples/hvf-backend-egress.rs:104` | 6 | NO | - |
 | `MVM_HVF_KERNEL` | live-read | `crates/mvm-runtime/examples/hvf-agent-ping.rs:31` | 9 | NO | - |

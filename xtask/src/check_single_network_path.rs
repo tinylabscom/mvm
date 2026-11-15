@@ -42,7 +42,7 @@ const OWNED_SEAM_SHARES: &[&str] = &[
 ];
 const ENDPOINT_BIN: &str = "crates/mvm-hostd/src/bin/mvm-network-endpoint.rs";
 const SPEC_MAP_RS: &str = "crates/mvm-vmm/src/host/spec_map.rs";
-const RUNNER_RS: &str = "crates/mvm-runtime/src/workload_runner/runner.rs";
+const RUNNER_RS: &str = "crates/mvm-runtime/src/workload_runner/runner/start.rs";
 const LIVE_SNAPSHOT_RS: &str = "crates/mvm-runtime/src/vm/instance_snapshot.rs";
 const ROUTE_DECISION_OWNER: &str =
     "crates/mvm-hostd/src/supervisor/endpoint/network_endpoint_proxy/routing.rs";
