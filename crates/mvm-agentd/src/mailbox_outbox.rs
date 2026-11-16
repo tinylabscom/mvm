@@ -70,11 +70,19 @@ pub fn wait_and_forward_outbox<S: Read + Write>(
     stream: &mut S,
     outbox: &Path,
 ) -> Result<(), Refusal> {
+    wait_and_forward_outbox_with(stream, outbox, || std::thread::sleep(IDLE_INTERVAL))
+}
+
+fn wait_and_forward_outbox_with<S: Read + Write>(
+    stream: &mut S,
+    outbox: &Path,
+    mut wait: impl FnMut(),
+) -> Result<(), Refusal> {
     for _ in 0..IDLE_CHECKS {
         if outbox.exists() {
             return forward_outbox(stream, outbox);
         }
-        std::thread::sleep(IDLE_INTERVAL);
+        wait();
     }
     Err(Refusal::Unavailable)
 }
@@ -615,13 +623,15 @@ mod tests {
             OutboxMessage::decode(&body).unwrap()
         });
         let written = message(b"later");
-        let path = outbox.clone();
-        let workload = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(100));
-            write_outbox(&path, &written).unwrap();
-        });
-        wait_and_forward_outbox(&mut ours, &outbox).expect("late write was forwarded");
-        workload.join().unwrap();
+        let mut pending = Some(written);
+        wait_and_forward_outbox_with(&mut ours, &outbox, || {
+            write_outbox(
+                &outbox,
+                &pending.take().expect("write exactly after the first poll"),
+            )
+            .unwrap();
+        })
+        .expect("late write was forwarded");
         assert_eq!(host.join().unwrap(), message(b"later"));
         assert!(!outbox.exists());
     }
