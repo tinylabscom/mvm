@@ -193,16 +193,41 @@ fn verified_release_for_attached_proof(
     Ok(Some(std::sync::Arc::new(release)))
 }
 
+/// A bundle that selected a release runtime must hand its verified evidence to
+/// admission; one that selected none must not claim any.
+fn bundle_release_evidence(
+    start_config: &mvm_core::vm_backend::VmStartConfig,
+    release: Option<ReleaseRuntime>,
+) -> Result<Option<ReleaseRuntime>> {
+    match (start_config.runtime_release_proof.as_ref(), release) {
+        (Some(proof), Some(release)) => {
+            anyhow::ensure!(
+                release.proof() == proof,
+                "verified release runtime differs from the bundle's selected runtime proof"
+            );
+            Ok(Some(release))
+        }
+        (None, None) => Ok(None),
+        (Some(_), None) => anyhow::bail!(
+            "bundle selected a release runtime but produced no verified launch evidence; \
+             release runtime requires verified launch evidence"
+        ),
+        (None, Some(_)) => {
+            anyhow::bail!("bundle produced verified release evidence for no selected runtime proof")
+        }
+    }
+}
+
 fn attach_runtime_overlay_selection(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     hypervisor: &str,
     expected_version: Option<&str>,
     pair: Option<&mut PairArtifactSource<'_>>,
 ) -> Result<Option<ReleaseRuntime>> {
-    if super::bundle_runtime::attach_if_installed_bundle(start_config, hypervisor)? {
-        // A bundle that carries the CLI runtime attached a release proof; admission
-        // refuses that proof without the authenticated release behind it.
-        return verified_release_for_attached_proof(start_config);
+    if let Some(attached) =
+        super::bundle_runtime::attach_installed_bundle_with_release(start_config, hypervisor)?
+    {
+        return bundle_release_evidence(start_config, attached.release);
     }
     anyhow::ensure!(
         start_config.bundle_boot_assets.is_none(),
@@ -844,6 +869,31 @@ mod runtime_overlay_attach_tests {
             arch: mvm_core::arch::GuestArch::host().to_string(),
             version: "selected-release".into(),
         }
+    }
+
+    #[test]
+    fn a_bundle_that_selected_a_release_proof_must_hand_back_verified_evidence() {
+        let config = VmStartConfig {
+            runtime_release_proof: Some(mock_proof()),
+            ..Default::default()
+        };
+        let error = bundle_release_evidence(&config, None)
+            .expect_err("a selected release proof with no verified evidence is refused");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("requires verified launch evidence"),
+            "{message}"
+        );
+        // The proof is unverifiable (its files do not exist). Reaching the
+        // verifier here would surface its I/O error instead, which is the
+        // bundle path verifying a proof `attach_cli_runtime` already verified.
+        assert!(!message.contains("No such file"), "{message}");
+    }
+
+    #[test]
+    fn a_bundle_that_selected_no_release_proof_carries_no_evidence() {
+        let config = VmStartConfig::default();
+        assert!(bundle_release_evidence(&config, None).unwrap().is_none());
     }
 
     #[test]
