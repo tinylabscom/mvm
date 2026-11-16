@@ -90,4 +90,10 @@ at the cited site, then the fix.
 | --- | --- | --- | --- |
 | `hvf/standby.rs` leaves the VM running when its pid is negative | `crates/mvm-backends/src/driver/hvf/standby.rs` | HVF owner | refuse and stop through the owned-stop path; test with a negative pid (tracked in #5491) |
 | `HvfVm::create` did not destroy the VM or release the GIC config when GIC creation fails — fixed by an RAII guard (`PendingHvfVm`) over the setup seam (`VmSetup`), so every early return after `hv_vm_create` drops into cleanup, and by `commit` releasing the config on the success path too; cleanup order is unit-tested with a fake seam, the real-FFI check on a live HVF host is still owed (tracked in #5492, fix on branch `fix/5492-hvf-gic-guard`) | `crates/mvm-runtime/src/backends/hvf/hv_impl.rs` (`HvfVm::create`) | HVF owner | merge the fix, then confirm `mvmctl` launch/teardown on a real macOS HVF host (the failure itself is not injectable through the real framework) |
-| FlowMux registry keeps `Closed` entries for the session lifetime (memory only, rate-limited) | `crates/mvm-hostd/src/supervisor/endpoint/flowmux/registry.rs` | hostd maintainer | evict closed entries on a bound; test that a long session does not grow without limit (tracked in #5493) |
+
+## Fixed after this table was written
+
+| Item | Site | Fixed in | Files read and found sound or fixed |
+| --- | --- | --- | --- |
+| FlowMux registry kept `Closed` entries for the session lifetime; retired entries are now dropped, with reuse refused by the allocator's high-water mark | `crates/mvm-hostd/src/supervisor/endpoint/flowmux/registry.rs` (`StreamRegistry::retire`, `open_guest`/`open_host` watermark) | #5493 | `registry.rs`; removal is safe because every retire path has already had its final frame admitted by the session validator, relay threads gate on the per-stream `retired` flag, and ID ordering survives in the allocator counters. Verified by `open_close_cycles_do_not_accumulate_registry_entries` and `a_retired_stream_id_cannot_be_reopened_by_the_peer` |
+>>>>>>> eec70abbca (fix(hostd): drop retired flowmux entries instead of accumulating them)
