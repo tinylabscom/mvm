@@ -9,11 +9,12 @@
 #[must_use]
 pub fn workload_egress_env(vm: &str) -> Vec<(String, String)> {
     let substitution = substitution_env(vm);
-    if substitution.is_empty() {
+    let env = if substitution.is_empty() {
         vsock_egress_env(vm)
     } else {
         substitution
-    }
+    };
+    with_egress_ca_env(env, egress_ca_present(vm))
 }
 
 fn substitution_env(vm: &str) -> Vec<(String, String)> {
@@ -22,11 +23,14 @@ fn substitution_env(vm: &str) -> Vec<(String, String)> {
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
-    with_egress_ca_env(build_substitution_env(placeholders), egress_ca_present(vm))
+    build_substitution_env(placeholders)
 }
 
 fn vsock_egress_env(vm: &str) -> Vec<(String, String)> {
-    if !mvm_core::config::vm_vsock_egress_marker_path(vm).is_file() {
+    let authenticated = mvm_vmm::host::network_endpoint_spawn::endpoint_session_established(
+        &mvm_core::config::vm_state_dir(vm),
+    );
+    if !authenticated && !mvm_core::config::vm_vsock_egress_marker_path(vm).is_file() {
         return Vec::new();
     }
     mvm_core::guest_netd::proxy_env_vars(mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN)
@@ -80,6 +84,59 @@ fn build_substitution_env(placeholders: Vec<(String, String)>) -> Vec<(String, S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authenticated_endpoint_supplies_proxy_without_legacy_marker_or_placeholders() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let vm = "plain-authenticated-endpoint";
+        let state = mvm_core::config::vm_state_dir(vm);
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(
+            state.join(mvm_vmm::host::network_endpoint_spawn::SUBST_SESSION_FILE),
+            b"1",
+        )
+        .unwrap();
+        assert!(!mvm_core::config::vm_vsock_egress_marker_path(vm).exists());
+        assert!(!mvm_core::config::vm_substitution_env_path(vm).exists());
+
+        for with_ca in [false, true] {
+            if with_ca {
+                std::fs::write(
+                    state.join(mvm_vmm::host::network_endpoint_spawn::EGRESS_CA_STATE_FILE),
+                    b"certificate state present",
+                )
+                .unwrap();
+            }
+            let projected = workload_egress_env(vm);
+            for expected in mvm_core::guest_netd::proxy_env_vars(
+                mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN,
+            ) {
+                assert!(projected.contains(&expected), "{projected:?}");
+            }
+            assert_eq!(
+                projected.iter().any(|(key, _)| key == "SSL_CERT_FILE"),
+                with_ca
+            );
+        }
+    }
+
+    #[test]
+    fn endpoint_process_without_authenticated_session_does_not_supply_proxy() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let vm = "unready-endpoint";
+        let state = mvm_core::config::vm_state_dir(vm);
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(
+            state.join(mvm_vmm::host::network_endpoint_spawn::SUBST_PID_FILE),
+            b"123",
+        )
+        .unwrap();
+        assert!(workload_egress_env(vm).is_empty());
+    }
 
     #[test]
     fn workload_synthesis_delivers_the_stored_substitution_pair() {

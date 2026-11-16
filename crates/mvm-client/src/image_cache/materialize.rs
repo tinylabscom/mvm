@@ -156,7 +156,7 @@ pub(super) fn reusable_rootfs(rootfs_abs: &Path, prod: bool) -> Result<bool> {
 /// picks the guest profile from the image's sidecar, and an unsealed one
 /// would quietly boot the dev agent profile for a production run.
 pub(super) fn refuse_unsealed_prod_rootfs(rootfs_path: &Path, prod: bool) -> Result<()> {
-    if prod && !crate::commands::vm::agent_verbs::image_is_sealed(rootfs_path) {
+    if prod && !crate::admission::agent_verbs::image_is_sealed(rootfs_path) {
         bail!(
             "--prod resolved {} but its sidecar does not record a sealed image; refusing to \
              boot a production run with the dev agent profile",
@@ -275,7 +275,7 @@ pub(super) fn rematerialize_cached_image(
     if !reusable_rootfs(&rootfs_abs, prod)? {
         let signer;
         let evidence = if prod {
-            signer = mvm_client::host_keypair::load_or_init()
+            signer = crate::host_keypair::load_or_init()
                 .context("load host signing key for the provenance mark")?;
             Some(
                 mvm_build::provenance_mark::SealEvidence::builder(&signer.signing)
@@ -347,7 +347,7 @@ pub(super) fn inject_runtime_and_materialize(call: MaterializeCall<'_>) -> Resul
     // The in-process ext4 writer walks and copies the whole image, and a tree
     // it cannot emit falls back to a builder VM; either can take a while.
     let phase =
-        mvm_client::ui::activity::start(format!("Building the root filesystem for {image_label}"));
+        crate::ui::activity::start(format!("Building the root filesystem for {image_label}"));
     mvm_build::run_image::inject_and_materialize(
         mvm_build::run_image::InjectAndMaterializeRequest::builder(
             cache_root,
@@ -385,9 +385,8 @@ pub(super) fn prepare_rootfs_only_tree(
     let parent = prepared_root
         .parent()
         .with_context(|| format!("{} has no parent", prepared_root.display()))?;
-    let phase = mvm_client::ui::activity::start(
-        "Preparing the image tree for boot (first run of this image)",
-    );
+    let phase =
+        crate::ui::activity::start("Preparing the image tree for boot (first run of this image)");
     fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     remove_stale_prepare_staging(parent)?;
     // Built beside its final name and renamed into place once complete, so a

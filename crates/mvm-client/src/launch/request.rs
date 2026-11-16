@@ -77,6 +77,11 @@ pub enum LaunchSource {
     /// A rootfs declaration: an OCI reference, a rootfs path, or a flake
     /// output.
     Image(RootfsSource),
+    /// Development OCI preparation selected by MVM, revalidated on every boot.
+    /// Expected data is persisted without a legacy acquisition fallback.
+    PreparedImage {
+        selection: mvm_core::prepared_image::PreparedOciSelection,
+    },
     /// A workload already built from a manifest into the local slot registry,
     /// named by its slot. Resolve one with [`LaunchSource::from_manifest`].
     Built {
@@ -131,6 +136,7 @@ impl LaunchSource {
     fn written(&self) -> String {
         match self {
             Self::Image(image) => image.to_string(),
+            Self::PreparedImage { selection } => selection.canonical_reference.clone(),
             Self::Built { slot_hash } => slot_hash.clone(),
             Self::RegistryPack { pin } => format!("pack:{}", pin.reference()),
         }
@@ -204,10 +210,18 @@ pub(crate) fn persisted_spec_from_request(
         // caller declared, so a spec read back reconstructs the same value.
         image: match &request.source {
             LaunchSource::Image(image) => Some(image.to_string()),
-            LaunchSource::Built { .. } | LaunchSource::RegistryPack { .. } => None,
+            LaunchSource::Built { .. }
+            | LaunchSource::RegistryPack { .. }
+            | LaunchSource::PreparedImage { .. } => None,
+        },
+        prepared_image: match &request.source {
+            LaunchSource::PreparedImage { selection } => Some(selection.clone()),
+            _ => None,
         },
         manifest: match &request.source {
-            LaunchSource::Image(_) | LaunchSource::RegistryPack { .. } => None,
+            LaunchSource::Image(_)
+            | LaunchSource::RegistryPack { .. }
+            | LaunchSource::PreparedImage { .. } => None,
             LaunchSource::Built { slot_hash } => Some(slot_hash.clone()),
         },
         deployment: None,
@@ -517,6 +531,22 @@ impl LaunchRequestBuilder {
     pub fn build(self) -> Result<LaunchRequest> {
         let invalid = |reason: String| MvmError::InvalidSpec { reason };
 
+        if let LaunchSource::PreparedImage { selection } = &self.source {
+            crate::image_cache::prepared::validate_profile(
+                &self.profile,
+                &selection.canonical_reference,
+            )
+            .map_err(|refusal| MvmError::PreparedImage { refusal })?;
+            if self.mode != LifecycleMode::Persistent || self.force || self.signed_plan.is_some() {
+                return Err(MvmError::PreparedImage {
+                    refusal: crate::prepared_image::PreparedImageError {
+                        kind: crate::prepared_image::PreparedImageErrorKind::UnsupportedMode,
+                        reference: selection.canonical_reference.clone(),
+                        detail: "prepared OCI reuse supports persistent launches only, without force replacement or an external plan".into(),
+                    },
+                });
+            }
+        }
         if let Some(name) = self.name.as_deref() {
             mvm_core::naming::validate_vm_name(name)
                 .map_err(|e| invalid(format!("invalid machine name {name:?}: {e}")))?;

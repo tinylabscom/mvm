@@ -239,13 +239,41 @@ pub fn start_machine_spec(
     host: &dyn StartHost,
     params: MachineStartParams<'_>,
 ) -> Result<MachineStart> {
+    spec.validate_prepared_source()?;
     AnyBackend::require_hypervisor_selectable(params.hypervisor)?;
+    let prepared_backend = spec
+        .prepared_image
+        .as_ref()
+        .map(|selection| {
+            let backend = host.backend(params.hypervisor);
+            crate::image_cache::prepared::require_backend(
+                selection,
+                params.hypervisor,
+                backend.name(),
+            )?;
+            Ok::<_, crate::prepared_image::PreparedImageError>(backend)
+        })
+        .transpose()?;
+    let prepared = spec
+        .prepared_image
+        .as_ref()
+        .map(|selection| {
+            crate::image_cache::prepared::revalidate(selection, params.hypervisor, &spec.profile)
+        })
+        .transpose()?;
     super::discard_stopped_runtime_state(params.hypervisor, &spec.name)?;
     validate_registry_pack_source(spec)?;
     let network_policy = persisted_network_policy(spec)?;
     let (memory_mib, mem_initial_mib) =
         mp::validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
-    let boot = if let Some(pin) = spec
+    let boot = if let Some(prepared) = &prepared {
+        BootSource {
+            kernel: None,
+            label: prepared.image.reference.clone(),
+            rootfs: prepared.image.rootfs_path.clone(),
+            digest: prepared.selection.manifest_digest.clone(),
+        }
+    } else if let Some(pin) = spec
         .registry_pack_image
         .as_ref()
         .filter(|_| spec.manifest.is_none())
@@ -261,9 +289,14 @@ pub fn start_machine_spec(
     } else {
         resolve_boot_source(spec, host)?
     };
-    let kernel_path = match boot.kernel {
-        Some(kernel) => Some(kernel),
-        None => host.workload_kernel(params.hypervisor)?,
+    let kernel_path = match &prepared {
+        Some(prepared) => {
+            crate::image_cache::prepared::cached_kernel(&prepared.selection, params.hypervisor)?
+        }
+        None => match boot.kernel {
+            Some(kernel) => Some(kernel),
+            None => host.workload_kernel(params.hypervisor)?,
+        },
     };
     // Validated before any volume is leased, so a missing secret refuses the
     // start without leaving a lease behind.
@@ -273,7 +306,7 @@ pub fn start_machine_spec(
         .prepare_volumes(&spec.name, &spec.volumes)
         .context("resolving registered local volumes before admission")?;
     let workload_dir = persistent_workload_dir(spec);
-    let admitted = start_persistent_oci_machine(PersistentImageStartParams {
+    let start_params = PersistentImageStartParams {
         name: &spec.name,
         image_label: &boot.label,
         resolved_digest: &boot.digest,
@@ -297,8 +330,14 @@ pub fn start_machine_spec(
         gpu_device: spec.gpu_device,
         workload_dir: workload_dir.as_deref(),
         secrets,
-        backend: host.backend(params.hypervisor),
-    })?;
+        backend: prepared_backend.unwrap_or_else(|| host.backend(params.hypervisor)),
+    };
+    let admitted = match &prepared {
+        Some(prepared) => {
+            super::persistent::start_prepared_persistent_oci_machine(start_params, prepared)?
+        }
+        None => start_persistent_oci_machine(start_params)?,
+    };
     Ok(MachineStart {
         resolved_digest: boot.digest,
         admitted,
@@ -480,6 +519,7 @@ mod tests {
 
     fn spec(name: &str) -> mp::MachineSpec {
         mp::MachineSpec {
+            prepared_image: None,
             schema_version: mp::MACHINE_SPEC_SCHEMA_VERSION,
             name: name.to_string(),
             image: None,

@@ -21,13 +21,35 @@ answer to both, not a choice between them.
 
 ## Decision
 
-**OCI distribution and rootfs materialization are separate steps, and only
-distribution happens at `mvmctl image pull`.** Pulling an image fetches its
-manifest, verifies every layer's digest against that manifest, and unpacks
-layers through an allow-listed unpacker. No filesystem materialization and
-no verity generation happen at pull time. An ext4 rootfs, and its verity
-metadata, are produced later, at the point a pulled image is actually
-launched.
+**OCI acquisition/preparation and prepared launch are separate operations.**
+`mvmctl image pull` fetches the manifest, verifies layer digests, unpacks
+through the hardened unpacker, and prepares the runtime-specific rootfs and
+verity sidecars. Explicit acquisition APIs can still acquire or materialize;
+ordinary client `RootfsSource::Oci` behavior is unchanged.
+
+The client additionally offers development-only, persistent-only prepared registry OCI
+selection through the same canonical cache resolver the CLI uses.
+Prepared-only resolution refuses missing, incompatible, or incomplete
+preparation instead of pulling, unpacking, injecting a runtime, materializing,
+resealing, bootstrapping, or verifying signatures online. It may update the
+index to adopt an already-built matching runtime variant. It is cache-only,
+not write-free.
+
+A displayed or persisted selection is untrusted expected data, not admission.
+MVM re-resolves it at every launch and persistent start, compares stable
+reference, manifest, rootfs, runtime, platform, backend and development
+provenance identity, then binds the actual bytes into the original signed
+admission. Changed selection refuses rather than refreshing implicitly.
+The optional persistent selection has no legacy source fallback, and ordinary
+specs omit the field. Older readers reject the unknown field.
+
+Development provenance distinguishes manifest/config digest verification
+from a measurement of the prepared rootfs bytes. First measuring an existing
+cache is not a cryptographic proof of the historical OCI-to-rootfs derivation,
+publisher verification, or protection from a compromised active host. This
+extension adds no public production prepared-image mode or signed-pack claim.
+Prepared transient requests refuse before effects; ordinary transient behavior
+and the existing lower signing seam are unchanged.
 
 **Every OCI-derived rootfs materialization computes deterministic dm-verity
 metadata, regardless of profile.** A Merkle tree and roothash are generated
@@ -49,8 +71,11 @@ verity metadata that was already computed for it.
 network access.** `--prod` requires a digest-pinned reference and a
 configured registry trust policy; a tag-only reference is rejected before
 the registry is ever contacted, for both `mvmctl image pull` and a launch.
-Cosign verification of the resolved digest is required under `--prod`, and
-the policy cannot disable it.
+Cosign verification of the resolved digest is required during explicit
+production preparation, and the policy cannot disable it. Existing CLI
+prepared-only production resolution checks its authenticated pull receipt
+against the current policy, the sealed variant, and the base-image scan
+without invoking an online verifier.
 
 **Every launch of a pulled image records its provenance in the chain-signed
 audit log.** The registry host, repository, the reference as supplied, the
@@ -60,11 +85,10 @@ of those fields breaks the chain.
 
 ## Consequences
 
-Deferring materialization and verity generation to launch time, rather than
-to pull time, means the first production launch of a freshly pulled image
-pays the sealing cost inline instead of amortizing it across the pull. It
-also means a pull-only workflow — inspecting or re-exporting a pulled image
-without ever launching it — never has to carry verity machinery at all.
+Explicit preparation pays acquisition, materialization and sealing costs
+before a prepared-only launch. A cold or stale prepared-only launch refuses
+with an explicit preparation remedy; retries do not perform the remedy.
+Existing explicit acquisition/materialization entrypoints remain available.
 
 Two writers computing the same deterministic verity metadata, the
 in-process default and the builder-VM-shelled fallback, is accepted

@@ -280,6 +280,7 @@ A = {
     "mvm-vmm/src/host/network_endpoint_spawn/collector.rs": ("helper bin", "spawn the egress telemetry collector"),
     "mvm-vmm/src/host/network_endpoint_spawn/owned.rs": ("helper bin", "spawn an owned network endpoint"),
     "mvm-vmm/src/host/shell/exec.rs": ("shell script", "run_in_vm / run_host: bash -c and direct program exec for every ShellEnvironment caller"),
+    "mvm-client/src/image_cache/trust.rs": ("toolchain", "cosign verify for production OCI policy"),
     "mvm-client/src/secret/source.rs": ("password manager", "run the user's configured secret-source CLI (op, etc.) to read a credential"),
     # host daemons
     "mvm-hostd/src/bin/mvm-host-agent.rs": ("helper bin", "re-exec self as a worker process"),
@@ -299,7 +300,6 @@ A = {
     "mvm-cli/src/commands/env/artifact_verify.rs": ("network fetch", "curl of the pinned image-set manifest"),
     "mvm-cli/src/commands/env/builder_vm/vm_helpers.rs": ("host probe", "ps to find builder processes"),
     "mvm-cli/src/commands/env/uninstall.rs": ("shell script", "sh -c uninstall step"),
-    "mvm-cli/src/commands/image/trust.rs": ("toolchain", "cosign verify"),
     "mvm-cli/src/commands/ops/config.rs": ("user editor", "$EDITOR for `mvmctl config edit`"),
     "mvm-cli/src/commands/ops/secret.rs": ("user opener", "xdg-open / open of an OAuth URL"),
     "mvm-cli/src/commands/pool/refill.rs": ("mvmctl self re-exec", "detached `mvmctl` pool refill helper"),
@@ -360,6 +360,7 @@ OPEN_REVIEW_CEILING = 12
 # (disposition, reason); the reason names the functions a reviewer can open.
 # A file listed here that is no longer open-review by derivation is an error.
 REVIEWED = {
+    "mvm-client/src/image_cache/trust.rs": ("fixed-argv-utility", "`CosignCommandVerifier::verify`: resolves `cosign` through PATH and runs fixed `verify` flags, configured certificate identity/issuer and the digest-qualified reference as separate argv under `helper_command`; no shell. Production OCI policy requires a successful status, and failures are mapped to signature/tool refusals. The shared CLI compatibility facade can reach this in an embedder; it is not CLI-only or embedder-refused. Development prepared selection returns before signature verification. This relocation adds no timeout, trusted executable-path restriction or capture bound; stdout/stderr remain unbounded."),
     "mvm-backends/src/fc/fetch.rs": ("fixed-argv-utility", "`curl` accepts only the lock-derived HTTPS URL and writes to a private temporary file; `tar` extracts only the lock-named member after verifying the archive digest. Both use separate argv under `helper_command`, and the binary's size and digest are checked before installation. Neither spawn has a wall-clock bound."),
     "mvm-build/src/builder_vm_image.rs": ("fixed-argv-utility", "`prepopulate_with_mkfs`: program is the e2fsprogs `mkfs.ext4` path from `find_host_mkfs_ext4` (fixed candidate list), argv is a fixed flag list plus typed paths and a block count, no shell, status checked and mapped to `BuilderVmError`. Formats the builder's own store image from a digest-verified seed; no caller-supplied text reaches argv. Stdio is inherited and there is no wall-clock bound (not changed: the output is the operator's progress display, not captured)."),
     "mvm-build/src/builder_vm_runtime.rs": ("bounded-fixed-argv-utility", "`debugfs_cat`: read-only `debugfs -R` on the builder store image. The request comes from `debugfs_cat_request` (refuses a relative path or whitespace and control characters). It runs under `mvm_core::bounded_run::run_bounded` with a 60 s timeout (typed error) and a 1 MiB stdout cap, and its error text is `excerpt`-capped; tests drive a fake tool for the hang, the 10 MB output and the normal and not-found paths."),

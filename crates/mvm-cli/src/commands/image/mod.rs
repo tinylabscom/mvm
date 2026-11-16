@@ -2,51 +2,33 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
-
-// Kept here (rather than folded into a submodule's own imports) so the
-// unmoved `trust` sibling's `use super::*;` glob keeps resolving these
-// without touching its call sites.
-use mvm_fs::oci::{ImageReference, RegistryAuthConfig};
 
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
 
-mod base_image;
 pub(crate) mod boot;
 mod build_layer;
-mod cache;
 pub(in crate::commands) mod dev;
-mod ingest;
 mod inspect;
 mod ls;
-mod materialize;
-mod oci_types;
 mod pull;
 mod pull_core;
-mod recent;
+#[cfg(test)]
+mod pull_sweep_tests;
 mod revocations;
 mod rm;
-mod source;
-mod trust;
-mod trust_policy;
 
-// Re-exports preserve two frozen call-site shapes without editing them: the
-// sibling verb modules' `super::<name>` calls, and
-// `crate::commands::vm::exec`'s `super::super::image::<name>` reach-in.
-use cache::{inspect_image, list_rows, remove_image, render_inspect, render_list};
-use oci_types::CosignIdentity;
-use pull_core::pull_image_with_trust;
-pub(in crate::commands) use pull_core::{acquire_run_image, resolve_or_pull_run_image};
-pub(in crate::commands) use pull_core::{
+pub(in crate::commands) use mvm_client::cli_image::recent_image_references;
+#[cfg(test)]
+pub(in crate::commands) use mvm_client::cli_image::registry_auth_from_lookup;
+pub(in crate::commands) use mvm_client::cli_image::{OciRegistryAuthDecision, registry_auth_for};
+pub(in crate::commands) use mvm_client::cli_image::{
     ensure_prod_digest_pin, ensure_prod_registry_allowed, require_prod_digest_pin,
 };
-pub(in crate::commands) use recent::recent_image_references;
-#[cfg(test)]
-pub(in crate::commands) use trust::registry_auth_from_lookup;
-pub(in crate::commands) use trust::{OciRegistryAuthDecision, registry_auth_for};
+pub(in crate::commands) use pull_core::{acquire_run_image, resolve_or_pull_run_image};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {

@@ -9,7 +9,7 @@ use crate::ui;
 use super::super::shared::human_bytes;
 
 pub(super) fn run(cache_root: &Path, reference: &str) -> Result<()> {
-    let outcome = super::remove_image(cache_root, reference)?;
+    let outcome = mvm_client::cli_image::remove_image(cache_root, reference)?;
     ui::success(&format!(
         "Removed cached image {} ({} file(s), freed {}).",
         outcome.reference,

@@ -17,7 +17,7 @@ use chrono::{DateTime, Utc};
 use super::oci_types::CachedOciImage;
 
 /// References of the cached images, newest pull first, each once.
-pub(in crate::commands) fn recent_image_references(cache_root: &Path) -> Result<Vec<String>> {
+pub(super) fn recent_image_references(cache_root: &Path) -> Result<Vec<String>> {
     let index = super::cache::load_index(cache_root)?;
     Ok(newest_first(&index.images))
 }

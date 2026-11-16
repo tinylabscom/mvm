@@ -25,9 +25,30 @@ use mvm_core::{config, naming};
 pub const MACHINE_SPEC_SCHEMA_VERSION: u32 = 1;
 
 /// Declarative persistent machine spec. Runtime state lives elsewhere.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MachineSpec {
+macro_rules! machine_spec_fields {
+    ($($(#[$attribute:meta])* pub $field:ident: $ty:ty,)*) => {
+        #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+        pub struct MachineSpec {
+            $($(#[$attribute])* pub $field: $ty,)*
+        }
+
+        impl<'de> Deserialize<'de> for MachineSpec {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Fields {
+                    $($(#[$attribute])* $field: $ty,)*
+                }
+                let fields = Fields::deserialize(deserializer)?;
+                let spec = Self { $($field: fields.$field,)* };
+                spec.validate_prepared_source().map_err(serde::de::Error::custom)?;
+                Ok(spec)
+            }
+        }
+    };
+}
+
+machine_spec_fields! {
     pub schema_version: u32,
     pub name: String,
     /// OCI image reference. Present for image-backed machines.
@@ -36,6 +57,9 @@ pub struct MachineSpec {
     /// always serialised `image`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
+    /// Untrusted expected prepared OCI identity. Never paired with a legacy source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_image: Option<mvm_core::prepared_image::PreparedOciSelection>,
     /// Pre-built manifest slot hash or path. Present when the machine was
     /// created with `--manifest` or (after a build) `--flake`. Absent for
     /// image-backed machines.
@@ -120,6 +144,23 @@ pub struct MachineSpec {
     pub gpu_device: Option<u32>,
 }
 
+impl MachineSpec {
+    /// Reject ambiguous sources instead of allowing resolution order to choose.
+    pub fn validate_prepared_source(&self) -> Result<()> {
+        if self.prepared_image.is_some() {
+            anyhow::ensure!(
+                self.image.is_none()
+                    && self.manifest.is_none()
+                    && self.deployment.is_none()
+                    && !self.runtime_pack
+                    && self.registry_pack_image.is_none(),
+                "prepared OCI selection is exclusive of every legacy machine source"
+            );
+        }
+        Ok(())
+    }
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -135,6 +176,7 @@ fn is_false(value: &bool) -> bool {
 /// the loser gets this same "already exists" error, distinguishable from any
 /// other write failure via [`is_already_exists`].
 pub fn save_machine_spec(spec: &MachineSpec, force: bool) -> Result<()> {
+    spec.validate_prepared_source()?;
     let path = config::machine_spec_path(&spec.name);
     let bytes = serde_json::to_vec_pretty(spec).context("serializing machine spec")?;
     if force {
@@ -179,6 +221,7 @@ fn discard_orphaned_instance_state(name: &str) -> Result<()> {
 
 /// Overwrite an existing spec unconditionally (no `force` flag required).
 pub fn overwrite_machine_spec(spec: &MachineSpec) -> Result<()> {
+    spec.validate_prepared_source()?;
     let path = config::machine_spec_path(&spec.name);
     let bytes = serde_json::to_vec_pretty(spec).context("serializing machine spec")?;
     atomic_write(&path, &bytes)
@@ -277,6 +320,7 @@ fn same_allow_host(a: &[String], b: &[String]) -> bool {
 
 pub fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
     a.image == b.image
+        && a.prepared_image == b.prepared_image
         && a.manifest == b.manifest
         && a.deployment == b.deployment
         && a.runtime_pack == b.runtime_pack
@@ -307,6 +351,7 @@ pub fn machine_config_diff(current: &MachineSpec, desired: &MachineSpec) -> Stri
     // single "source" change. `machine_config_matches` already compares both, so
     // without this a manifest-only swap recreates with an empty `changed` list.
     if current.image != desired.image
+        || current.prepared_image != desired.prepared_image
         || current.manifest != desired.manifest
         || current.deployment != desired.deployment
         || current.runtime_pack != desired.runtime_pack
@@ -385,6 +430,10 @@ pub fn reconcile_machine_spec(
     desired: &MachineSpec,
     force: bool,
 ) -> Result<SpecReconcile> {
+    desired.validate_prepared_source()?;
+    if let Some(current) = existing {
+        current.validate_prepared_source()?;
+    }
     match existing {
         None => Ok(SpecReconcile::Create),
         Some(current) if machine_config_matches(current, desired) => Ok(SpecReconcile::Reuse),
@@ -496,6 +545,7 @@ mod tests {
 
     pub(super) fn spec_fixture(name: &str) -> MachineSpec {
         MachineSpec {
+            prepared_image: None,
             schema_version: MACHINE_SPEC_SCHEMA_VERSION,
             name: name.to_string(),
             image: Some("alpine:latest".to_string()),
@@ -875,6 +925,7 @@ mod tests {
     /// A fixture with a volume so patch tests can confirm it is preserved.
     fn reconfigure_spec_fixture() -> MachineSpec {
         MachineSpec {
+            prepared_image: None,
             schema_version: MACHINE_SPEC_SCHEMA_VERSION,
             name: "web".into(),
             image: Some("img:1".into()),

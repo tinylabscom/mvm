@@ -422,6 +422,7 @@ pub fn admit_plan_for_boot_with_verified_retained(
         durability::AdmissionSync::Inline,
         None,
         Some(retained),
+        None,
     )?;
     debug_assert!(
         durability.is_settled(),
@@ -455,6 +456,7 @@ pub fn admit_plan_for_boot_configured_ingress_with_verified_runtime(
         durability::AdmissionSync::Inline,
         Some(runtime),
         None,
+        None,
     )?;
     debug_assert!(
         durability.is_settled(),
@@ -471,7 +473,25 @@ fn admit(
     AdmissionContext,
     mvm_core::admission_durability::AdmissionDurability,
 )> {
-    admit_with_runtime_evidence(p, ingress, sync, None, None)
+    admit_with_runtime_evidence(p, ingress, sync, None, None, None)
+}
+
+pub(crate) fn admit_prepared_plan_for_boot(
+    p: AdmitPlanForBootParams<'_>,
+    ingress: Vec<mvm_core::plan::IngressMapping>,
+    prepared: &crate::image_cache::prepared::ValidatedPrepared,
+    runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
+) -> Result<AdmissionContext> {
+    let (context, durability) = admit_with_runtime_evidence(
+        p,
+        ingress,
+        durability::AdmissionSync::Inline,
+        runtime,
+        None,
+        Some(prepared),
+    )?;
+    debug_assert!(durability.is_settled());
+    Ok(context)
 }
 
 fn admit_with_runtime_evidence(
@@ -480,10 +500,12 @@ fn admit_with_runtime_evidence(
     sync: durability::AdmissionSync,
     runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
     retained: Option<&mvm_runtime::checkpoint::VerifiedRetainedRuntime>,
+    prepared: Option<&crate::image_cache::prepared::ValidatedPrepared>,
 ) -> Result<(
     AdmissionContext,
     mvm_core::admission_durability::AdmissionDurability,
 )> {
+    let prepared = prepared.map(|validated| &validated.selection);
     // A production boot runs only verified released images, for every
     // managed artifact it resolves. The tiers recorded with those images
     // decide (below): a local-dev managed image is refused however it was
@@ -554,7 +576,20 @@ fn admit_with_runtime_evidence(
         .transpose()?;
     let t_admit_start = std::time::Instant::now();
     mvm_core::launch_trace::lap("admit_plan.setup_and_boot_artifact_identity");
-    let sha = resolve_image_sha256(p.rootfs_path, p.precomputed_image_sha256.or(attested_sha))?;
+    let sha = if let Some(expected) = prepared {
+        let actual = mvm_core::crypto::image_verify::sha256_file(p.rootfs_path)?;
+        if actual != expected.rootfs_sha256 || p.backend_name != expected.backend {
+            return Err(mvm_core::prepared_image::PreparedImageError {
+                kind: mvm_core::prepared_image::PreparedImageErrorKind::SelectionChanged,
+                reference: expected.canonical_reference.clone(),
+                detail: "prepared bytes or backend changed before admission".into(),
+            }
+            .into());
+        }
+        actual
+    } else {
+        resolve_image_sha256(p.rootfs_path, p.precomputed_image_sha256.or(attested_sha))?
+    };
     mvm_core::launch_trace::lap("admit_plan.image_sha256");
     let t_sha = std::time::Instant::now();
     tracing::debug!(
@@ -752,6 +787,9 @@ fn admit_with_runtime_evidence(
         p.gpu,
     );
     let mut bundle_audit_labels = std::collections::BTreeMap::new();
+    if let Some(prepared) = prepared {
+        bundle_audit_labels.extend(prepared.audit_labels());
+    }
     if pinned_bundle_origin == Some(mvm_core::plan::bundle::BundleOrigin::LocalBuild) {
         bundle_audit_labels.insert("origin".to_string(), "local-build".to_string());
         bundle_audit_labels.insert(

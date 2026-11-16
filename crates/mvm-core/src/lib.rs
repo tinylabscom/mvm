@@ -172,6 +172,7 @@ pub mod mvmd_iface;
 pub mod plan;
 pub mod platform;
 pub mod policy;
+pub mod prepared_image;
 pub mod private_fs;
 pub mod protocol;
 #[cfg(feature = "provenance")]
