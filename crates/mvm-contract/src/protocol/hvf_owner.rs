@@ -484,4 +484,132 @@ mod tests {
             assert_eq!(decoded, request);
         }
     }
+
+    #[test]
+    fn pre_native_request_naming_a_generation_is_refused() {
+        let instance = json!({"vm_id": "vm-a", "boot_nonce": vec![6u8; 32]});
+        for phase in [
+            RecoveryPhase::BeforeAdmission {
+                proposed_plan_digest: [5; 32],
+            },
+            RecoveryPhase::Admitted {
+                plan_digest: [5; 32],
+                effective_config_digest: [7; 32],
+            },
+        ] {
+            let mut request = request(RecoveryOperation::Observe {});
+            request.binding.phase = phase;
+            let mut value = serde_json::to_value(&request).unwrap();
+            value["binding"]["phase"]["instance"] = instance.clone();
+            assert_eq!(
+                decode_bound_request(&serde_json::to_vec(&value).unwrap(), &request.binding, None),
+                Err(RecoveryDecodeError::Malformed)
+            );
+            // A native binding does not match a retained pre-native one either.
+            let native = self::request(RecoveryOperation::Observe {});
+            assert_eq!(
+                decode_bound_request(
+                    &serde_json::to_vec(&native).unwrap(),
+                    &request.binding,
+                    None
+                ),
+                Err(RecoveryDecodeError::BindingMismatch)
+            );
+        }
+    }
+
+    #[test]
+    fn the_client_surface_enumerates_exactly_three_recovery_verbs() {
+        // Exhaustive: a fourth variant stops this compiling.
+        fn tag(action: RecoveryOperation) -> &'static str {
+            match action {
+                RecoveryOperation::Observe {} => "observe",
+                RecoveryOperation::CancelStop {} => "cancel_stop",
+                RecoveryOperation::AcknowledgeResult { .. } => "acknowledge_result",
+            }
+        }
+        for action in [
+            RecoveryOperation::Observe {},
+            RecoveryOperation::CancelStop {},
+            RecoveryOperation::AcknowledgeResult {
+                revision: revision(1),
+            },
+        ] {
+            let request = request(action);
+            let value = serde_json::to_value(&request).unwrap();
+            assert_eq!(value["action"]["operation"], tag(action));
+            assert_eq!(
+                decode_bound_request(
+                    &serde_json::to_vec(&request).unwrap(),
+                    &request.binding,
+                    Some(revision(1)),
+                )
+                .unwrap(),
+                request
+            );
+        }
+        let request = request(RecoveryOperation::Observe {});
+        for verb in [
+            "start", "run", "exec", "detach", "sign", "adopt", "attach", "restart", "kill",
+            "Observe", "",
+        ] {
+            let mut value = serde_json::to_value(&request).unwrap();
+            value["action"] = json!({ "operation": verb });
+            assert_eq!(
+                decode_bound_request(&serde_json::to_vec(&value).unwrap(), &request.binding, None),
+                Err(RecoveryDecodeError::Malformed),
+                "verb {verb:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_recovery_request_field_accepts_a_path_pid_or_command() {
+        let carriers = [
+            "pid",
+            "path",
+            "command",
+            "argv",
+            "args",
+            "executable",
+            "shell",
+            "fd",
+            "key",
+        ];
+        for action in [
+            RecoveryOperation::Observe {},
+            RecoveryOperation::CancelStop {},
+            RecoveryOperation::AcknowledgeResult {
+                revision: revision(1),
+            },
+        ] {
+            let request = request(action);
+            let value = serde_json::to_value(&request).unwrap();
+            for level in [
+                vec![],
+                vec!["action"],
+                vec!["binding"],
+                vec!["binding", "phase"],
+                vec!["binding", "phase", "instance"],
+            ] {
+                for field in carriers {
+                    let mut altered = value.clone();
+                    let mut slot = &mut altered;
+                    for key in &level {
+                        slot = &mut slot[*key];
+                    }
+                    slot[field] = json!("/bin/sh");
+                    assert_eq!(
+                        decode_bound_request(
+                            &serde_json::to_vec(&altered).unwrap(),
+                            &request.binding,
+                            Some(revision(1)),
+                        ),
+                        Err(RecoveryDecodeError::Malformed),
+                        "{field} at {level:?}"
+                    );
+                }
+            }
+        }
+    }
 }

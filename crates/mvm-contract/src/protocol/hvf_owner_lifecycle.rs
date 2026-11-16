@@ -627,4 +627,155 @@ mod tests {
         );
         assert_eq!(life.state(), OwnerState::Registered);
     }
+
+    #[test]
+    fn cancel_is_accepted_during_startup() {
+        let registered = OwnerLifecycle::register(binding(6));
+        let mut prepared = OwnerLifecycle::register(binding(6));
+        prepared.prepared().unwrap();
+        for (mut life, state) in [
+            (registered, OwnerState::Registered),
+            (prepared, OwnerState::Prepared),
+        ] {
+            let mut foreign = req(1, RecoveryOperation::CancelStop {});
+            foreign.binding = binding(9);
+            assert_eq!(life.apply(&foreign), Err(LifecycleRefusal::BindingMismatch));
+            assert!(!life.cancel_pending());
+            assert_eq!(
+                life.apply(&req(1, RecoveryOperation::CancelStop {})),
+                Ok(Applied::CancelPending)
+            );
+            assert!(life.cancel_pending());
+            assert_eq!(life.state(), state);
+        }
+    }
+
+    #[test]
+    fn disconnect_at_every_state_never_infers_success() {
+        let ack = RecoveryOperation::AcknowledgeResult { revision: nz(1) };
+        let partial = TerminalProof {
+            cleanup_and_audit: false,
+            ..FULL
+        };
+        let mut stopping = active();
+        stopping.stop_started().unwrap();
+        let mut prepared = OwnerLifecycle::register(binding(6));
+        prepared.prepared().unwrap();
+        let mut quarantined = active();
+        quarantined.owner_died();
+        let mut unproven = active();
+        unproven.finished(partial, nz(1)).unwrap();
+        let cases = [
+            (OwnerLifecycle::register(binding(6)), OwnerState::Registered),
+            (prepared, OwnerState::Prepared),
+            (active(), OwnerState::Active),
+            (stopping, OwnerState::Stopping),
+            (unproven, OwnerState::RecoveryRequired),
+            (quarantined, OwnerState::Quarantined),
+        ];
+        for (mut life, state) in cases {
+            life.frontend_disconnected();
+            assert_eq!(life.state(), state, "{state:?}");
+            assert_eq!(life.result_revision, None, "{state:?}");
+            let refusal = if state == OwnerState::Quarantined {
+                LifecycleRefusal::Quarantined
+            } else {
+                LifecycleRefusal::ResultNotReady
+            };
+            assert_eq!(life.apply(&req(1, ack)), Err(refusal), "{state:?}");
+        }
+        // After a proven end a disconnect requests nothing and changes nothing.
+        let mut done = active();
+        done.finished(FULL, nz(1)).unwrap();
+        done.frontend_disconnected();
+        assert!(!done.cancel_pending());
+        assert_eq!(done.state(), OwnerState::Terminal);
+        assert_eq!(done.result_revision, Some(nz(1)));
+    }
+
+    #[test]
+    fn repeated_observe_does_not_advance_state_or_sequence() {
+        let mut life = active();
+        life.apply(&req(1, RecoveryOperation::CancelStop {}))
+            .unwrap();
+        let expected = Applied::Observed {
+            state: OwnerState::Active,
+            result_revision: None,
+        };
+        for seq in 2..=6 {
+            assert_eq!(
+                life.apply(&req(seq, RecoveryOperation::Observe {})),
+                Ok(expected)
+            );
+            assert_eq!(life.state(), OwnerState::Active);
+            assert!(life.cancel_pending());
+            assert_eq!(life.result_revision, None);
+            assert!(!life.acknowledged && !life.stop_attempted);
+        }
+        // The replay watermark moves to the observed sequence and no further.
+        assert_eq!(life.last_sequence, 6);
+        assert_eq!(
+            life.apply(&req(6, RecoveryOperation::Observe {})),
+            Err(LifecycleRefusal::StaleSequence)
+        );
+        assert_eq!(life.last_sequence, 6);
+    }
+
+    #[test]
+    fn new_owner_incarnation_cannot_observe_or_clear_a_prior_quarantine() {
+        let mut life = active();
+        life.owner_died();
+        let mut successor = binding(6);
+        successor.owner_incarnation = [8; 32];
+        for action in [
+            RecoveryOperation::Observe {},
+            RecoveryOperation::CancelStop {},
+            RecoveryOperation::AcknowledgeResult { revision: nz(1) },
+        ] {
+            let mut request = req(1, action);
+            request.binding = successor.clone();
+            assert_eq!(life.apply(&request), Err(LifecycleRefusal::Quarantined));
+            assert_eq!(
+                life.apply(&req(1, action)),
+                Err(LifecycleRefusal::Quarantined)
+            );
+        }
+        assert_eq!(life.state(), OwnerState::Quarantined);
+        assert!(!life.cancel_pending());
+        assert_eq!(life.last_sequence, 0);
+        // A successor's own lifecycle refuses the prior incarnation's binding.
+        let mut fresh = OwnerLifecycle::register(successor);
+        assert_eq!(
+            fresh.apply(&req(1, RecoveryOperation::Observe {})),
+            Err(LifecycleRefusal::BindingMismatch)
+        );
+    }
+
+    #[test]
+    fn result_delivered_but_cleanup_failed_is_not_terminal() {
+        let mut life = active();
+        life.stop_started().unwrap();
+        let cleanup_failed = TerminalProof {
+            cleanup_and_audit: false,
+            ..FULL
+        };
+        life.finished(cleanup_failed, nz(1)).unwrap();
+        assert_eq!(life.state(), OwnerState::RecoveryRequired);
+        assert_eq!(life.result_revision, None);
+        assert_eq!(
+            life.apply(&req(1, RecoveryOperation::Observe {})),
+            Ok(Applied::Observed {
+                state: OwnerState::RecoveryRequired,
+                result_revision: None,
+            })
+        );
+        assert_eq!(
+            life.apply(&req(
+                2,
+                RecoveryOperation::AcknowledgeResult { revision: nz(1) }
+            )),
+            Err(LifecycleRefusal::ResultNotReady)
+        );
+        assert!(!life.acknowledged);
+    }
 }
