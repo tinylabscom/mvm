@@ -765,11 +765,9 @@ pub(in crate::commands) fn run_secure_started(
         .map(mvm_client::installed_bundle_posture)
         .transpose()?
         .flatten();
-    // The audit substrate carries no emitter, so stash the AdmissionContext here
-    // as the closure runs (during boot) and emit launched/failed after `run`
-    // returns — mirroring `up.rs`, so the claim-8 admitted/launched/failed
-    // narrative holds on the transient-run path too.
-    let admit_ctx: std::rc::Rc<std::cell::RefCell<Option<super::up::AdmissionContext>>> =
+    // Keep the actual admitted authority through warm/cold selection. Its
+    // signer and plan body remain for output/command audit after the run.
+    let admit_ctx: std::rc::Rc<std::cell::RefCell<Option<mvm_client::admission::CliAdmission>>> =
         std::rc::Rc::new(std::cell::RefCell::new(None));
     let ctx_sink = std::rc::Rc::clone(&admit_ctx);
     // Written by image resolution below, read inside the closure once the real
@@ -926,9 +924,8 @@ pub(in crate::commands) fn run_secure_started(
                 .context("recording OCI image provenance on the admitted plan")?;
         }
 
-        // Hand the admission context (with its emitter) to the command layer so
-        // it can emit `plan.launched` / `plan.failed` once the boot resolves.
-        *ctx_sink.borrow_mut() = Some(c);
+        // Keep this authority alive until the selected legacy boot returns.
+        *ctx_sink.borrow_mut() = Some(mvm_client::admission::CliAdmission::new(c));
         Ok(Some(substrate))
     };
 
@@ -950,8 +947,13 @@ pub(in crate::commands) fn run_secure_started(
             &oci_provenance,
         )?);
         let posture = crate::exec::PostureSink::new(mvm_client::admission::BootPosture::block());
-        let result =
-            crate::exec::run_captured_started(req, Some(&admit), Some(&posture), startup_started);
+        let result = crate::exec::run_captured_started(
+            req,
+            Some(&admit),
+            Some(&admit_ctx),
+            Some(&posture),
+            startup_started,
+        );
         let refused = denials.finish_and_summarize(!json_requested);
         let output = outputs.close_run(&admit_ctx, result)?;
         if !json_requested && !output.stdout.is_empty() {
@@ -1018,14 +1020,12 @@ pub(in crate::commands) fn run_secure_started(
     )
 }
 
-/// The boot-time admission hook plus the plumbing needed to chain-audit the
-/// run after it resolves: the cell the hook fills with the `AdmissionContext`
-/// (the audit emitter lives inside it) and the resolved backend name for the
-/// audit `backend` label.
+/// The boot-time admission hook plus the owner retained through warm/cold
+/// selection and later command/output audit.
 struct RunAudit<'a> {
     startup_started: std::time::Instant,
     admit: Option<&'a crate::exec::SessionAdmit<'a>>,
-    ctx: &'a std::cell::RefCell<Option<super::up::AdmissionContext>>,
+    ctx: &'a std::cell::RefCell<Option<mvm_client::admission::CliAdmission>>,
     /// Filled by image resolution, read by the admission that boots it.
     oci_provenance: &'a OciProvenanceSink,
     /// Output grants whose disks the run attaches and whose collection is
@@ -1045,7 +1045,7 @@ struct RunAudit<'a> {
 ///
 /// The labels are discovered in `build_exec_request`, which runs before the
 /// plan exists; the entry they belong on is emitted from the admit closure,
-/// which runs after. Same shape as the `AdmissionContext` hand-off directly
+/// which runs after. Same shape as the admitted-owner hand-off directly
 /// above it: written on one side of the boot, read on the other.
 pub(in crate::commands) type OciProvenanceSink =
     std::rc::Rc<std::cell::RefCell<Option<Vec<(String, String)>>>>;
@@ -1081,7 +1081,13 @@ fn run_run_args(
     let posture = crate::exec::PostureSink::new(mvm_client::admission::BootPosture::block());
     // A non-zero exit still means the VM booted and the command ran, so it
     // records as launched; only a failure to run at all records as failed.
-    let result = crate::exec::run_started(req, audit.admit, Some(&posture), audit.startup_started);
+    let result = crate::exec::run_started(
+        req,
+        audit.admit,
+        Some(audit.ctx),
+        Some(&posture),
+        audit.startup_started,
+    );
     let refused = audit.denials.finish_and_summarize(true);
     let exit_code = audit.outputs.close_run(audit.ctx, result)?;
     audit

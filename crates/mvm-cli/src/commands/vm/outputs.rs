@@ -18,8 +18,8 @@ use mvm_client::output_audit::{OutputOutcome, OutputRecord};
 use mvm_core::plan::OutputGrant;
 use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
 
-use super::up::AdmissionContext;
 use crate::ui;
+use mvm_client::admission::{AuditContinuation, CliAdmission};
 
 const MIB: u64 = 1024 * 1024;
 
@@ -185,7 +185,7 @@ impl PreparedOutputs {
     /// back. Only a run that did not complete is left uncollected.
     pub(super) fn close_run<T>(
         &self,
-        admitted: &std::cell::RefCell<Option<AdmissionContext>>,
+        admitted: &std::cell::RefCell<Option<CliAdmission>>,
         result: Result<T>,
     ) -> Result<T> {
         if result.as_ref().is_err_and(|error| {
@@ -196,10 +196,12 @@ impl PreparedOutputs {
             self.retain_scratch.set(true);
             return result;
         }
-        let admitted = admitted.borrow_mut().take();
+        let admitted = admitted
+            .borrow_mut()
+            .take()
+            .map(CliAdmission::finish_legacy);
         if let (Some(ctx), Err(e)) = (admitted.as_ref(), &result) {
-            super::up::emit_failed(
-                ctx,
+            ctx.emit_failed(
                 mvm_client::launch::startup_budget::failure_class(e, "launch"),
                 e,
             );
@@ -217,7 +219,7 @@ impl PreparedOutputs {
     /// flags: what is enforced is what was signed. A run that did not complete
     /// has no flushed disk to trust, so its outputs are recorded as refused
     /// and nothing is read.
-    fn collect(&self, admitted: Option<&AdmissionContext>, run_completed: bool) -> Result<()> {
+    fn collect(&self, admitted: Option<&AuditContinuation>, run_completed: bool) -> Result<()> {
         if self.outputs.is_empty() {
             return Ok(());
         }
@@ -226,7 +228,7 @@ impl PreparedOutputs {
                 "outputs were not collected: the run has no admitted plan to record them against"
             );
         };
-        let plan = admitted.admitted.plan();
+        let plan = admitted.plan();
         let mut refusals = Vec::new();
         for output in &self.outputs {
             let guest_path = output.grant.guest_path.as_str();
@@ -303,22 +305,111 @@ impl PreparedOutputs {
     }
 }
 
-fn record(admitted: &AdmissionContext, guest_path: &str, outcome: OutputOutcome<'_>) -> Result<()> {
+fn record(
+    admitted: &AuditContinuation,
+    guest_path: &str,
+    outcome: OutputOutcome<'_>,
+) -> Result<()> {
     admitted
-        .emitter
-        .emit_outputs(
-            admitted.admitted.plan(),
-            &OutputRecord {
-                guest_path,
-                outcome,
-            },
-        )
+        .record_output(&OutputRecord {
+            guest_path,
+            outcome,
+        })
         .with_context(|| format!("recording the output collection for {guest_path}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn admitted_owner(
+        vm_name: &str,
+        rootfs: &std::path::Path,
+        keys_dir: &std::path::Path,
+        audit_dir: &std::path::Path,
+    ) -> CliAdmission {
+        let ledger = mvm_client::admission::InMemoryNonceLedger::new();
+        let context = mvm_client::admission::admit_plan_for_boot(
+            mvm_client::admission::AdmitPlanForBootParams {
+                mailbox: None,
+                gpu: false,
+                instructions: Default::default(),
+                outputs: Vec::new(),
+                network_mode: Default::default(),
+                tenant: "local",
+                vm_name,
+                runtime_config: None,
+                backend_name: "mock",
+                configured_images_dir: None,
+                rootfs_path: rootfs,
+                kernel_path: None,
+                precomputed_image_sha256: None,
+                boot_artifact_identity: None,
+                cpus: 1,
+                mem_mib: 128,
+                seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+                secret_release: mvm_core::plan::SecretReleasePolicy::None,
+                secrets: Vec::new(),
+                caller_commitment: None,
+                ledger: &ledger,
+                keys_dir: Some(keys_dir),
+                audit_dir: Some(audit_dir),
+                policy_dir: None,
+                bundle_pin: None,
+                bundle_posture: None,
+                deps_volume: None,
+                shares: Vec::new(),
+                redaction: Default::default(),
+                network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+                agent_verb_override: Vec::new(),
+                restrict_agent_verbs: false,
+                services: Vec::new(),
+                grants: None,
+                backend_kind: None,
+                entrypoint:
+                    mvm_client::admission::entrypoint_resolve::ResolvedEntrypoint::unresolved(
+                        "test does not launch",
+                    ),
+                assets: Vec::new(),
+            },
+        )
+        .expect("real signed admission");
+        CliAdmission::new(context)
+    }
+
+    #[test]
+    fn close_run_retires_cli_authority_and_records_only_later_failures() {
+        for failed in [false, true] {
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            let home = tempfile::tempdir().expect("home");
+            env.isolate_mvm_home(home.path());
+            let keys = tempfile::tempdir().expect("keys");
+            let audit = tempfile::tempdir().expect("audit");
+            let root = tempfile::tempdir().expect("root");
+            let image = root.path().join("rootfs.ext4");
+            std::fs::write(&image, b"test rootfs").expect("rootfs");
+            let owner = admitted_owner("vm-close-run", &image, keys.path(), audit.path());
+            let id = owner.plan().plan_id.0.clone();
+            let admitted = std::cell::RefCell::new(Some(owner));
+            let prepared = PreparedOutputs::prepare(&[], &[]).expect("no outputs");
+            let result = if failed {
+                Err(anyhow::anyhow!("command failed after boot"))
+            } else {
+                Ok(0)
+            };
+            assert_eq!(prepared.close_run(&admitted, result).is_err(), failed);
+            assert!(admitted.borrow().is_none(), "one-use owner is retired");
+            let chain = std::fs::read_to_string(audit.path().join("local.jsonl"))
+                .expect("the admission's audit chain");
+            assert!(chain.contains(&id), "{chain}");
+            assert_eq!(
+                chain.matches("plan.failed").count(),
+                usize::from(failed),
+                "{chain}"
+            );
+            assert!(!chain.contains("plan.launched"), "{chain}");
+        }
+    }
 
     #[test]
     fn uncertain_stop_retains_scratch_after_close_and_drop_without_consuming_admission() {
