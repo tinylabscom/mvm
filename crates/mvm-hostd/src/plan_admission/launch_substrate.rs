@@ -91,9 +91,7 @@ pub fn populate_audit_substrate(
         .context("serializing SignedExecutionPlan for VmStartConfig.plan_json")?;
     enforce_size_cap("plan_json", plan_json.len(), PLAN_JSON_MAX_BYTES)?;
     cfg.plan_json = Some(plan_json);
-    cfg.audit_context = Some(mvm_core::audit_sink::AuditContext::Workload {
-        plan: Box::new(admitted.plan().clone()),
-    });
+    cfg.audit_context = Some(admitted.workload_audit_context());
 
     // `bundle_json` carries the resolved tenant **PolicyBundle** (network /
     // egress / tool policy) that the supervisor's L4 gate + observers consume.

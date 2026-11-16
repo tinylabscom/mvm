@@ -443,6 +443,9 @@ pub struct SessionAuditSubstrate {
     pub tenant_id: String,
     /// The signed plan, serialized.
     pub plan_json: String,
+    /// The admitted workload's audit identity. The host endpoint refuses to
+    /// start without it, so a boot that applies this substrate must carry it.
+    pub audit_context: mvm_core::audit_sink::AuditContext,
     /// Verified launch posture retained outside caller-authored plan JSON.
     pub mailbox_posture: Option<mvm_hostd::plan_admission::MailboxLaunchPosture>,
     /// Trusted admission's optional caller registration, never a producer ACK.
@@ -471,6 +474,7 @@ impl SessionAuditSubstrate {
     pub fn apply_to(self, start_config: &mut mvm_core::vm_backend::VmStartConfig) -> Vec<String> {
         start_config.tenant_id = Some(self.tenant_id);
         start_config.plan_json = Some(self.plan_json);
+        start_config.audit_context = Some(self.audit_context);
         start_config.caller_registration = self.caller_registration;
         start_config.bundle_json = self.bundle_json;
         start_config.config_files.extend(self.config_files);
@@ -991,6 +995,13 @@ mod tests {
         // proof, uncertain deferral, or a synthesized ConfirmedExit.
     }
 
+    fn test_audit_context() -> mvm_core::audit_sink::AuditContext {
+        mvm_core::audit_sink::AuditContext::Builder {
+            tenant: mvm_core::plan::TenantId("tenant".into()),
+            name: "vm".into(),
+        }
+    }
+
     #[test]
     fn applying_admission_preserves_durability_and_materialized_images() {
         for outcome in [Ok(()), Err(anyhow::anyhow!("audit sync refused"))] {
@@ -998,6 +1009,7 @@ mod tests {
             let mut substrate = SessionAuditSubstrate {
                 tenant_id: "tenant".into(),
                 plan_json: "signed-plan".into(),
+                audit_context: test_audit_context(),
                 mailbox_posture: None,
                 caller_registration: None,
                 bundle_json: Some("policy-bundle".into()),
@@ -1016,6 +1028,11 @@ mod tests {
             assert_eq!(images, vec!["image.ext4"]);
             assert_eq!(config.tenant_id.as_deref(), Some("tenant"));
             assert_eq!(config.plan_json.as_deref(), Some("signed-plan"));
+            assert_eq!(
+                config.audit_context,
+                Some(test_audit_context()),
+                "the endpoint refuses to start without the admitted audit identity"
+            );
             assert_eq!(config.bundle_json.as_deref(), Some("policy-bundle"));
             assert_eq!(
                 config.admission_durability.as_ref().unwrap().wait().is_ok(),
