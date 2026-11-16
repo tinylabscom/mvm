@@ -3,7 +3,7 @@
 use super::{OpenOptionsModeExt, PRIVATE_DIR_MODE};
 use std::fs::{File, Metadata, OpenOptions, Permissions};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Require metadata owned by the current effective user.
 ///
@@ -125,11 +125,45 @@ pub fn sync_managed_directory_chain(root: &Path, directory: &Path) -> io::Result
     sync_managed_directory_chain_with(root, directory, |_, file| file.sync_all())
 }
 
+/// Sync a managed directory chain the way [`crate::util::atomic_io::submit_file_data`]
+/// syncs a file: hand every directory's metadata to the drive with a plain
+/// fsync, then issue one full flush at the end.
+///
+/// On macOS each per-directory `sync_all` is an `F_FULLFSYNC`, a device-wide
+/// flush costing several milliseconds, and this chain runs on every launch;
+/// one final full flush covers the metadata of every directory submitted
+/// before it, so the end durability is the same at a fraction of the cost.
+/// Elsewhere the per-directory fsync is the real durability operation and the
+/// final `sync_all` is redundant but correct.
+pub fn submit_managed_directory_chain(root: &Path, directory: &Path) -> io::Result<()> {
+    let directories = open_managed_chain(root, directory)?;
+    for (path, directory) in &directories {
+        directory
+            .sync_data()
+            .map_err(|error| io::Error::new(error.kind(), format!("{path:?}: {error}")))?;
+    }
+    let Some((_, deepest)) = directories.first() else {
+        return Ok(());
+    };
+    deepest.sync_all()
+}
+
 pub(super) fn sync_managed_directory_chain_with(
     root: &Path,
     directory: &Path,
     mut sync: impl FnMut(&Path, &File) -> io::Result<()>,
 ) -> io::Result<()> {
+    for (path, directory) in open_managed_chain(root, directory)? {
+        sync(&path, &directory)?;
+    }
+    Ok(())
+}
+
+/// Open the managed chain exactly the way the sync functions consume it:
+/// leaf first, then the remaining managed directories up to the root, then
+/// the root's ancestry. Kept as one list so every sync strategy walks the
+/// same validated, descriptor-relative path.
+fn open_managed_chain(root: &Path, directory: &Path) -> io::Result<Vec<(PathBuf, File)>> {
     use rustix::fs::{Mode, OFlags};
     use std::path::Component;
     let relative = directory
@@ -151,23 +185,21 @@ pub(super) fn sync_managed_directory_chain_with(
     if canonical_root.ancestors().count() > 128 {
         return Err(io::Error::other("managed root ancestry exceeds bound"));
     }
-    let mut chain = vec![(canonical_root.clone(), root_file)];
+    let mut managed = vec![(canonical_root.clone(), root_file)];
     for component in components {
         let Component::Normal(name) = component else {
             return Err(io::Error::other("invalid managed directory component"));
         };
-        let (path, parent) = chain
+        let (path, parent) = managed
             .last()
             .ok_or_else(|| io::Error::other("managed root missing"))?;
         let child = File::from(rustix::fs::openat(parent, name, flags, Mode::empty())?);
-        chain.push((path.join(name), child));
+        managed.push((path.join(name), child));
     }
-    for (path, directory) in chain.iter().rev() {
-        sync(path, directory)?;
-    }
+    let mut chain: Vec<(PathBuf, File)> = managed.into_iter().rev().collect();
     for parent in canonical_root.ancestors().skip(1) {
         let file = File::from(rustix::fs::open(parent, flags, Mode::empty())?);
-        sync(parent, &file)?;
+        chain.push((parent.to_path_buf(), file));
     }
-    Ok(())
+    Ok(chain)
 }

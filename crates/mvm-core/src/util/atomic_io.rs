@@ -78,6 +78,26 @@ pub fn sync_file(path: &Path) -> Result<()> {
         .with_context(|| format!("syncing {}", path.display()))
 }
 
+/// Submit a file's data to the drive without asking the drive to flush its
+/// cache.
+///
+/// On macOS `File::sync_all` is `F_FULLFSYNC`, a full device flush costing
+/// 8-18 ms each on Apple silicon; this is plain `fsync(2)` (about 1 ms), which
+/// hands the bytes to the drive but does not make them durable by itself. The
+/// caller must follow the last such call with one [`sync_file`] or [`sync_dir`],
+/// whose flush covers everything submitted before it. Elsewhere this is
+/// `sync_all`, so a caller written for macOS is still correct.
+pub fn submit_file_data(file: &fs::File) -> Result<()> {
+    #[cfg(target_vendor = "apple")]
+    {
+        rustix::fs::fsync(file).context("submitting file data to the drive")
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        file.sync_all().context("syncing file data")
+    }
+}
+
 /// Flush a directory's entries to stable storage, so a file created in it or
 /// renamed into or out of it survives a crash.
 ///
@@ -892,6 +912,18 @@ mod tests {
             .map(|entry| entry.expect("entry").file_name())
             .collect();
         assert_eq!(entries, vec![std::ffi::OsString::from("occupied")]);
+    }
+
+    #[test]
+    fn submitted_data_is_readable_and_a_later_flush_accepts_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        let mut file = fs::File::create(&path).unwrap();
+        std::io::Write::write_all(&mut file, b"payload").unwrap();
+        submit_file_data(&file).unwrap();
+        sync_file(&path).unwrap();
+        sync_dir(dir.path()).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"payload");
     }
 
     #[test]

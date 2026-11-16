@@ -39,7 +39,7 @@ mod platform;
 
 pub use platform::{
     create_owned_private_dir, ensure_private_dir, mode_bits, permissions, require_current_owner,
-    set_mode, sync_managed_directory_chain,
+    set_mode, submit_managed_directory_chain, sync_managed_directory_chain,
 };
 #[cfg(all(test, unix))]
 use platform::{require_owner_uid, sync_managed_directory_chain_with};
@@ -153,6 +153,32 @@ mod tests {
         assert!(sync_managed_directory_chain(home.path(), outside.path()).is_err());
         assert!(sync_managed_directory_chain(home.path(), &home.path().join("../escape")).is_err());
         assert!(sync_managed_directory_chain(home.path(), &home.path().join("link")).is_err());
+    }
+
+    /// The submit variant walks and validates the identical chain: it accepts
+    /// exactly what the full-sync variant accepts, refuses the same escapes,
+    /// and is idempotent across repeated launches against existing state.
+    #[test]
+    fn submitted_managed_namespace_sync_matches_the_full_sync_acceptance() {
+        let home = tempfile::tempdir().unwrap();
+        let generation = home.path().join("vms/demo/protected/run/000");
+        ensure_private_dir(&generation).unwrap();
+        std::fs::write(generation.join("instance.json"), b"{}").unwrap();
+        for _ in 0..2 {
+            submit_managed_directory_chain(home.path(), &generation).unwrap();
+        }
+        assert_eq!(
+            std::fs::read(generation.join("instance.json")).unwrap(),
+            b"{}"
+        );
+
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), home.path().join("link")).unwrap();
+        assert!(submit_managed_directory_chain(home.path(), outside.path()).is_err());
+        assert!(
+            submit_managed_directory_chain(home.path(), &home.path().join("../escape")).is_err()
+        );
+        assert!(submit_managed_directory_chain(home.path(), &home.path().join("link")).is_err());
     }
 
     #[test]
