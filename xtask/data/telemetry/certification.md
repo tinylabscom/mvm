@@ -60,6 +60,15 @@ reason this record distinguishes *live* from *unit-witnessed*.
   (`a_stalled_writer_costs_counted_records_never_a_waiting_receive_loop`);
   one VM's stall does not slow another's collector
   (`a_stalled_vms_collector_does_not_slow_another_vms_collector`).
+- **Delivery is lossy by design; signed audit is separate.** The guest queues
+  are finite, so an indefinite outage sheds records rather than growing or
+  blocking the workload. Shedding is counted, never silent
+  (`count_and_byte_limits_shed_without_replacing_queued_records`), and the
+  count reaches the host as a capacity loss summary once a session exists
+  (`shed_evidence_reaches_the_host_as_a_capacity_loss_summary`). Telemetry
+  therefore promises no delivery of every record. The signed, hash-chained
+  audit log (claim 8 in ADR-001) is a different, mandatory path and does not
+  ride this queue.
 
 ## Operator-visible behaviour (BDD)
 
