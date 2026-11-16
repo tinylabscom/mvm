@@ -9,8 +9,10 @@
 # between hosts (the three-node story is the scripted, simulated demo), a
 # production-profile run, or a physical memory wipe.
 #
-# Never runs `mvmctl bootstrap`. If an installed mvmctl asks for it, the run
-# fails with a FINDING line: a release must work with no bootstrap step.
+# One command, no setup: if the home has not been prepared, the first launch is
+# refused with "is not prepared" and the script prepares it itself (pulls the
+# image and does one throwaway run) and launches again. It never runs
+# `mvmctl bootstrap`.
 #
 #   MVMCTL             the mvmctl to drive (default: mvmctl on PATH)
 #   HYPERVISOR         hvf (default on macOS) or firecracker (default on Linux)
@@ -75,10 +77,7 @@ own_home=""
 if [ -z "${MVM_HOME:-}" ]; then
   own_home="$(mktemp -d)"; export MVM_HOME="$own_home"
 fi
-errlog="$(mktemp)"
-# Every mvmctl call logs its stderr, so the exit trap can tell whether the
-# install asked the user to run bootstrap.
-mvm() { "$MVMCTL" ${bld[@]+"${bld[@]}"} "$@" 2> >(tee -a "$errlog" >&2); }
+mvm() { "$MVMCTL" ${bld[@]+"${bld[@]}"} "$@"; }
 say() { echo "PASS $*"; }
 fail() { echo "FAIL $*" >&2; exit 1; }
 state_dir() { echo "$MVM_HOME/vms/$NAME"; }
@@ -87,11 +86,7 @@ state_dir() { echo "$MVM_HOME/vms/$NAME"; }
 sha12() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1"; else sha256sum "$1"; fi | cut -c1-12; }
 
 cleanup() {
-  local status=$?
-  if [ "$status" -ne 0 ] && grep -q 'mvmctl bootstrap' "$errlog"; then
-    echo "FINDING: the install asked for 'mvmctl bootstrap'. A release must run with no bootstrap step." >&2
-  fi
-  rm -f "$errlog" "/tmp/mission-demo-$$".*
+  rm -f "/tmp/mission-demo-$$".*
   mvm machine stop "$NAME" --yes >/dev/null 2>&1 || true
   mvm machine rm "$NAME" --yes >/dev/null 2>&1 || true
   [ -z "$own_home" ] || rm -rf "$own_home"
@@ -113,7 +108,26 @@ OWN=000     # the guest's own mailbox
 OTHER=377   # anyone else: must be refused
 recv() { mvm machine mailbox recv "$NAME"; }
 got() { [ "$(recv)" = "$1" ]; }
-launch() { mvm machine run -d --image "$IMAGE" --mailbox "$ID" --hypervisor "$HYPERVISOR" --name "$NAME" -- sleep 900 >/dev/null; }
+# First use of a home: pull the image and build the workload runtime, which one
+# throwaway run does.
+prepare() {
+  echo "Preparing this machine once (image and runtime)"
+  mvm image pull "$IMAGE" >/dev/null || fail "could not pull $IMAGE"
+  out="$(mvm machine run --image "$IMAGE" --hypervisor "$HYPERVISOR" -- true 2>&1 </dev/null)" || fail "the first run on this machine failed: $out"
+}
+# Start the granted persistent machine running `$@`, preparing the home once if
+# the launch says it is not prepared.
+start_granted() {
+  local out
+  out="$(mvm machine run -d --image "$IMAGE" --mailbox "$ID" --hypervisor "$HYPERVISOR" --name "$NAME" -- "$@" 2>&1)" && return 0
+  case "$out" in
+    *"is not prepared"*)
+      prepare
+      out="$(mvm machine run -d --image "$IMAGE" --mailbox "$ID" --hypervisor "$HYPERVISOR" --name "$NAME" -- "$@" 2>&1)" && return 0 ;;
+  esac
+  echo "$out" >&2; return 1
+}
+launch() { start_granted sleep 900; }
 # The entrypoint driver's workloads. Timings are from the guest's first frame:
 # own mailbox at 0, another mailbox at 10, an outbound attempt at 15, an own
 # frame left unread at 30; the host reads the first and leaves the last.
@@ -133,7 +147,7 @@ workload_replacement() {
   mailbox_guest_writer
   printf 'sleep 12; mbx_write 000 %s; sleep 900\n' "$SECOND"
 }
-launch_entrypoint() { mvm machine run -d --image "$IMAGE" --mailbox "$ID" --hypervisor "$HYPERVISOR" --name "$NAME" -- sh -c "$1" >/dev/null; }
+launch_entrypoint() { start_granted sh -c "$1"; }
 audit_dir="$MVM_HOME/audit"
 count() { grep -rhoF "$1" "$audit_dir" 2>/dev/null | wc -l | tr -d ' '; }
 
