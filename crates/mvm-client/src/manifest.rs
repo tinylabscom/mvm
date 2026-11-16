@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use mvm_core::client::MvmError;
 use mvm_core::domain::template_tags::TemplateTags;
 use mvm_core::manifest::{PersistedManifest, canonical_key_for_path, resolve_manifest_config_path};
 use mvm_core::template::SnapshotInfo;
@@ -193,15 +194,21 @@ pub fn verify(request: &VerifyRequest) -> Result<VerifiedSlot> {
 }
 
 /// Remove one built slot; `manifest_file` also deletes the source `mvm.toml`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct RemoveRequest {
+    #[serde(default)]
     pub path: Option<String>,
+    #[serde(default)]
     pub force: bool,
+    #[serde(default)]
     pub manifest_file: bool,
 }
 
 /// What `remove` deleted.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RemovedSlot {
     pub slot_hash: String,
     pub manifest_path: PathBuf,
@@ -214,7 +221,21 @@ pub fn remove(request: &RemoveRequest) -> Result<RemovedSlot> {
         request.path.as_deref(),
         "No manifest found from cwd. Pass a path explicitly or `--force` if removing an orphaned slot by hash.",
     )?;
-    tmpl::template_delete_slot(&slot_hash, request.force)?;
+    tmpl::template_delete_slot(&slot_hash, request.force).map_err(|error| {
+        let missing = error.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+        });
+        if missing {
+            anyhow::Error::new(MvmError::NotFound {
+                id: slot_hash.clone(),
+            })
+            .context(format!("Failed to delete slot {slot_hash}"))
+        } else {
+            error
+        }
+    })?;
     let manifest_file_deleted = request.manifest_file && canonical.exists();
     if manifest_file_deleted {
         std::fs::remove_file(&canonical)
@@ -235,9 +256,33 @@ pub fn remove(request: &RemoveRequest) -> Result<RemovedSlot> {
 
 /// A slot whose source manifest is gone; `reason` is filled only by a dry run.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct OrphanSlot {
     pub slot_hash: String,
     pub reason: Option<String>,
+}
+
+/// Sweep built slots. `orphans` is the only mode today and must be named, so a
+/// future mode cannot be selected by an old caller's omission.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct PruneRequest {
+    #[serde(default)]
+    pub orphans: bool,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// Prune the slots the request names; refuses a request that names no mode.
+pub fn prune(request: &PruneRequest) -> Result<Vec<OrphanSlot>> {
+    if !request.orphans {
+        return Err(anyhow::Error::new(MvmError::InvalidSpec {
+            reason: "no prune mode specified. Pass `--orphans` to remove slots whose manifest file is gone."
+                .into(),
+        }));
+    }
+    prune_orphans(request.dry_run)
 }
 
 /// Remove orphaned slots, or with `dry_run` only report them with reasons.

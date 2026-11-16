@@ -3,7 +3,7 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
 
-use mvm_client::manifest;
+use mvm_client::manifest::{self, PruneRequest};
 use mvm_core::user_config::MvmConfig;
 
 use super::super::Cli;
@@ -25,13 +25,10 @@ pub(in crate::commands) struct Args {
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    if !args.orphans {
-        anyhow::bail!(
-            "no prune mode specified. Pass `--orphans` to remove slots whose manifest file is gone."
-        );
-    }
-
-    let orphans = manifest::prune_orphans(args.dry_run)?;
+    let orphans = manifest::prune(&PruneRequest {
+        orphans: args.orphans,
+        dry_run: args.dry_run,
+    })?;
     let prefix = if args.dry_run { "(dry-run) " } else { "" };
 
     if args.json {

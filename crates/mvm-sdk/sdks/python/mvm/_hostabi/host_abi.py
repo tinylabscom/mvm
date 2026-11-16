@@ -769,6 +769,35 @@ class ManifestListRequest:
 
 
 @dataclass
+class ManifestPruneReplyItem:
+    slot_hash: str
+    reason: Optional[str] = None
+
+
+ManifestPruneReply = List[ManifestPruneReplyItem]
+
+
+@dataclass
+class ManifestPruneRequest:
+    dry_run: Optional[bool] = False
+    orphans: Optional[bool] = False
+
+
+@dataclass
+class ManifestRemoveReply:
+    manifest_file_deleted: bool
+    manifest_path: str
+    slot_hash: str
+
+
+@dataclass
+class ManifestRemoveRequest:
+    force: Optional[bool] = False
+    manifest_file: Optional[bool] = False
+    path: Optional[str] = None
+
+
+@dataclass
 class ManifestVerifyReply:
     manifest_path: str
     slot_hash: str
@@ -1261,6 +1290,18 @@ class ManifestInfo:
 class ManifestList:
     reply: ManifestListReply
     request: ManifestListRequest
+
+
+@dataclass
+class ManifestPrune:
+    reply: ManifestPruneReply
+    request: ManifestPruneRequest
+
+
+@dataclass
+class ManifestRemove:
+    reply: ManifestRemoveReply
+    request: ManifestRemoveRequest
 
 
 @dataclass
@@ -1841,6 +1882,8 @@ class HostAbi:
     machine_stop: MachineStop
     manifest_info: ManifestInfo
     manifest_list: ManifestList
+    manifest_prune: ManifestPrune
+    manifest_remove: ManifestRemove
     manifest_verify: ManifestVerify
     session_call: SessionCall
     session_info: SessionInfo

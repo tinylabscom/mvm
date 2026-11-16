@@ -202,6 +202,7 @@ export type MachineListReply = MachineState2[]
  */
 export type RunMode = ("transient" | "persistent")
 export type ManifestListReply = SlotRow[]
+export type ManifestPruneReply = OrphanSlot[]
 
 export interface HostAbi {
 attestation_export: AttestationExport
@@ -251,6 +252,8 @@ machine_start: MachineStart
 machine_stop: MachineStop
 manifest_info: ManifestInfo
 manifest_list: ManifestList
+manifest_prune: ManifestPrune
+manifest_remove: ManifestRemove
 manifest_verify: ManifestVerify
 session_call: SessionCall
 session_info: SessionInfo
@@ -1867,6 +1870,44 @@ updated_at: string
 export interface ListRequest1 {
 orphans?: boolean
 tags?: string[]
+}
+export interface ManifestPrune {
+reply: ManifestPruneReply
+request: PruneRequest
+}
+/**
+ * A slot whose source manifest is gone; `reason` is filled only by a dry run.
+ */
+export interface OrphanSlot {
+reason?: (string | null)
+slot_hash: string
+}
+/**
+ * Sweep built slots. `orphans` is the only mode today and must be named, so a future mode cannot be selected by an old caller's omission.
+ */
+export interface PruneRequest {
+dry_run?: boolean
+orphans?: boolean
+}
+export interface ManifestRemove {
+reply: RemovedSlot
+request: RemoveRequest2
+}
+/**
+ * What `remove` deleted.
+ */
+export interface RemovedSlot {
+manifest_file_deleted: boolean
+manifest_path: string
+slot_hash: string
+}
+/**
+ * Remove one built slot; `manifest_file` also deletes the source `mvm.toml`.
+ */
+export interface RemoveRequest2 {
+force?: boolean
+manifest_file?: boolean
+path?: (string | null)
 }
 export interface ManifestVerify {
 reply: VerifiedSlot

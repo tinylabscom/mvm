@@ -39,7 +39,10 @@ use crate::guest::{
     StdinRequest, WaitReply, WaitRequest, WriteRequest, WrittenReply,
 };
 use crate::launch::{CreateRequest, MACHINE_CREATE, MACHINE_RUN, RunReply, RunRequest};
-use crate::manifest::{INFO as MANIFEST_INFO, LIST as MANIFEST_LIST, VERIFY as MANIFEST_VERIFY};
+use crate::manifest::{
+    INFO as MANIFEST_INFO, LIST as MANIFEST_LIST, PRUNE as MANIFEST_PRUNE,
+    REMOVE as MANIFEST_REMOVE, VERIFY as MANIFEST_VERIFY,
+};
 use crate::stream::{
     CloseRequest, Empty as StreamEmpty, LOGS_CLOSE, LOGS_NEXT, LOGS_OPEN, LogsOpenRequest,
     NextReply, NextRequest, OpenReply, OpenRequest, STREAM_CLOSE, STREAM_NEXT, STREAM_OPEN,
@@ -282,6 +285,22 @@ pub const REGISTRY: &[MethodDef] = &[
         classification: Classification::ProdSafe,
         request: schema_of::<mvm_client::manifest::ListRequest>,
         reply: array_of::<mvm_client::manifest::SlotRow>,
+    },
+    MethodDef {
+        name: MANIFEST_PRUNE,
+        key: "manifest_prune",
+        summary: "Remove built manifest slots whose source file is gone, or with dry_run only report them; `orphans` must be named.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::manifest::PruneRequest>,
+        reply: array_of::<mvm_client::manifest::OrphanSlot>,
+    },
+    MethodDef {
+        name: MANIFEST_REMOVE,
+        key: "manifest_remove",
+        summary: "Delete one built manifest slot from the local registry; manifest_file also deletes the source file.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::manifest::RemoveRequest>,
+        reply: schema_of::<mvm_client::manifest::RemovedSlot>,
     },
     MethodDef {
         name: MANIFEST_VERIFY,

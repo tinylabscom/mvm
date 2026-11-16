@@ -1,6 +1,6 @@
 {
   "abi_major": 1,
-  "abi_minor": 13,
+  "abi_minor": 14,
   "methods": [
     {
       "classification": "prod_safe",
@@ -61,6 +61,18 @@
       "key": "manifest_list",
       "name": "manifest.list",
       "summary": "List built manifest slots with orphan and tag-intersection filters."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "manifest_prune",
+      "name": "manifest.prune",
+      "summary": "Remove built manifest slots whose source file is gone, or with dry_run only report them; `orphans` must be named."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "manifest_remove",
+      "name": "manifest.remove",
+      "summary": "Delete one built manifest slot from the local registry; manifest_file also deletes the source file."
     },
     {
       "classification": "prod_safe",

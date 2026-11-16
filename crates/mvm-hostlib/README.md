@@ -155,6 +155,7 @@ classes and method tables for both SDKs.
 | Functions | `entrypoint.call`, `session.{start,call,stop,info}` | `mvm_client::entrypoint`, the dispatch `mvmctl machine run --entrypoint` and `machine session` use |
 | Host identity | `attestation.export`, `attestation.verify`, `attestation.status` | bounded `mvm_client::attestation` facade, without machine services |
 | Host-local checkpoints | `checkpoint.list`, `checkpoint.remove`, `checkpoint.verify_lineage` | `mvm_client::checkpoint::Checkpoints`, without machine services |
+| Built manifests | `manifest.list`, `manifest.info`, `manifest.verify`, `manifest.remove`, `manifest.prune` | `mvm_client::manifest`, without machine services |
 | Image revocations | `image_revocations.update`, `image_revocations.status` | canonical signed revocation store through `mvm_client::image_admin::revocations` |
 
 ABI 1.10 adds `checkpoint.list`, a strict empty-object request returning the
@@ -190,6 +191,21 @@ The host anchor may initialize the existing host identity when an audit
 directory exists. Success does not hash snapshot blobs, establish runtime
 compatibility or authorize a restore. No VM service, guest capability, MCP
 method, remote endpoint or HTTP server is added.
+
+ABI 1.14 adds `manifest.remove` and `manifest.prune`, the same operations as
+`mvmctl manifest rm` and `manifest prune`, answered by
+`mvm_client::manifest::{remove, prune}`. `manifest.remove` takes
+`{"path"?, "force"?, "manifest_file"?}`, deletes the built slot under the host
+registry and, only when `manifest_file` is true, also deletes the resolved
+`mvm.toml`; it returns `{slot_hash, manifest_path, manifest_file_deleted}`. A
+slot that does not exist is a nonretryable `NOT_FOUND` unless `force` is true.
+`manifest.prune` takes `{"orphans": true, "dry_run"?}` and returns the orphaned
+slots removed (or, with `dry_run`, the ones that would be, each with a reason);
+a request that does not name `orphans` is refused with `INVALID_SPEC` and
+deletes nothing. Both are `prod_safe` host-local registry operations: like
+`checkpoint.remove` they need a negotiated ABI and no machine service, and they
+add no authority beyond the caller's own filesystem and `MVM_HOME` access. Each
+success is recorded in the host audit log by the client.
 
 These host-local methods are `ProdSafe` data/admin operations under the
 registry's guest-tier classification, not authentication or a role grant. They
