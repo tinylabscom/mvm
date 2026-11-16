@@ -81,6 +81,9 @@ pub mod launch_trace;
 pub mod mailbox;
 /// Shared backoff for polls that wait on a condition.
 pub mod poll_backoff;
+/// Client for the resident host signer, available only on Unix transports.
+#[cfg(all(unix, feature = "hostd-transport"))]
+pub mod signer_helper;
 /// Per-VM host bounds on a VMM process through a transient systemd scope on
 /// the user's own manager — the one mechanism that both places an unprivileged
 /// process under cgroup v2 CPU, memory and task limits and reports back what is

@@ -281,6 +281,49 @@ async fn a_stalled_signer_request_has_one_deadline_and_closes_its_socket() {
 }
 
 #[tokio::test]
+async fn aborting_a_signer_request_closes_its_socket() {
+    use tokio::io::AsyncReadExt;
+    let (handshake, anchor) = tokio::task::spawn_blocking(capture_handshake)
+        .await
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("abort.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    let client: mvm_core::signer_helper::SignerHelperClient = SignerHelperClient::new(path);
+    let call = tokio::spawn(async move {
+        client
+            .sign_telemetry_handshake(
+                &handshake.hello,
+                &handshake.ack,
+                &anchor,
+                Duration::from_secs(30),
+            )
+            .await
+    });
+    let mut peer = tokio::time::timeout(Duration::from_secs(5), async {
+        let (mut peer, _) = listener.accept().await.unwrap();
+        let _: SignerHelperRequest =
+            mvm_hostd::framing::read_json_frame(&mut peer, DEFAULT_HELPER_MAX_FRAME_BYTES)
+                .await
+                .unwrap();
+        peer
+    })
+    .await
+    .expect("signer request must reach the fixture before its deadline");
+    call.abort();
+    assert!(call.await.unwrap_err().is_cancelled());
+    let mut byte = [0];
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), peer.read(&mut byte))
+            .await
+            .unwrap()
+            .unwrap(),
+        0,
+        "aborted RPC releases the owned socket"
+    );
+}
+
+#[tokio::test]
 async fn signer_client_refuses_invalid_deadlines_before_connecting() {
     let (handshake, anchor) = tokio::task::spawn_blocking(capture_handshake)
         .await
