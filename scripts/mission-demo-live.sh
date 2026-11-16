@@ -46,6 +46,14 @@
 #                      attempt with `machine exec`, a dev-profile verb a
 #                      production workload does not have. This is the shape a
 #                      production run needs; it is still the dev profile.
+#   NETWORK_SEGMENT=1  after the evidence, run mvmd's own Iroh smoke test
+#                      (MVMD_DIR, a checkout of mvmd, default ../mvmd) and print
+#                      what it shows. Scope, stated on the screen: separate node
+#                      and controller processes on this host, Iroh/QUIC over
+#                      loopback with the relay disabled. It is not two hosts,
+#                      WAN or NAT traversal, object transfer or a microVM
+#                      launch, and it never changes the demo's result: a failure
+#                      is printed and the demo still ends in its own verdict.
 #   MVM_FIRECRACKER_BIN, MVM_MAILBOX_PATH
 #                      read by mvmctl; leave unset to test an install
 #
@@ -305,5 +313,31 @@ if [ "${EGRESS_PROBE:-0}" = 1 ]; then
   grep -qF "egress denied:" <<<"$eout" && grep -qF "blocked.example:443" <<<"$eout" || fail "explain did not report the denial: $eout"
   say "explain reports the denied destination blocked.example:443"
   mvm machine rm "$ALLOW" --yes >/dev/null 2>&1 || true; mvm machine rm "$DENY" --yes >/dev/null 2>&1 || true
+fi
+if [ "${NETWORK_SEGMENT:-0}" = 1 ]; then
+  echo "== 11. optional: fleet networking carrier (separate processes, loopback only)"
+  echo "Scope: a mvmd node and controller as separate processes on THIS host, talking over Iroh/QUIC on loopback with the relay disabled."
+  echo "Not shown: two hosts, WAN or NAT traversal, object transfer, or a microVM launch. A connected carrier authorizes nothing."
+  smoke="${MVMD_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../mvmd}/scripts/smoke-iroh.sh"
+  if [ ! -f "$smoke" ]; then
+    echo "NETWORK_SEGMENT skipped: no $smoke (set MVMD_DIR to a mvmd checkout)"
+  else
+    net_root="$(mktemp -d)"; net_log="$net_root.log"
+    # Bounded so a stuck carrier cannot hold up the demo.
+    ( cd "$(dirname "$smoke")/.." && exec bash "$smoke" "$net_root" ) >"$net_log" 2>&1 </dev/null &
+    net_pid=$!
+    net_end=$((SECONDS + ${NETWORK_SEGMENT_SECS:-240}))
+    while kill -0 "$net_pid" 2>/dev/null && [ "$SECONDS" -lt "$net_end" ]; do sleep 1; done
+    if kill -0 "$net_pid" 2>/dev/null; then
+      kill "$net_pid" 2>/dev/null; echo "NETWORK_SEGMENT did not finish in ${NETWORK_SEGMENT_SECS:-240} s; omitted (the demo's result above is unaffected)"
+    elif wait "$net_pid"; then
+      sed -n $'s/\033\\[[0-9;]*m//g;/Iroh cross-host node service ready/p' "$net_root/node.log" 2>/dev/null | sed 's/^[^ ]* *//'
+      grep -E '"status"|"mode"|"replicated"' "$net_log" | sed 's/^ */  controller health: /'
+      echo "NETWORK_SEGMENT ok: node and controller started as separate processes over Iroh (loopback); the controller reports healthy"
+    else
+      echo "NETWORK_SEGMENT failed; omitted (the demo's result above is unaffected). Last lines:"; tail -5 "$net_log"
+    fi
+    rm -rf "$net_root" "$net_log"
+  fi
 fi
 echo "DEMO_RESULT=pass"

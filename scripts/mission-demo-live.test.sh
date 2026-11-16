@@ -143,6 +143,29 @@ grep -q 'explain reports the denied destination' <<<"${out}" || fail "explain wa
 out="$(run ok HYPERVISOR=firecracker EGRESS_PROBE=1 FAKE_FLOW=no-audit)" && fail "EGRESS_PROBE passed with no flow audit entries: ${out}"
 grep -q '^DEMO_RESULT=pass$' <<<"${out}" && fail "EGRESS_PROBE printed a pass line without flow audit entries"
 
+# The optional networking segment states its scope and can never change the
+# demo's verdict: a carrier that fails, hangs, or is not installed is reported
+# and the demo still ends in its own result.
+mvmd="${work}/mvmd"; mkdir -p "${mvmd}/scripts"
+fake_smoke() { printf '#!/usr/bin/env bash\n%s\n' "$1" > "${mvmd}/scripts/smoke-iroh.sh"; }
+fake_smoke 'echo "{\"status\": \"ok\"}"; echo "iroh smoke test passed"'
+out="$(run ok HYPERVISOR=firecracker NETWORK_SEGMENT=1 MVMD_DIR="${mvmd}")" || fail "a passing network segment broke the run: ${out}"
+grep -q "separate processes on THIS host" <<<"${out}" || fail "the segment did not state its scope: ${out}"
+grep -q "Not shown: two hosts, WAN or NAT traversal" <<<"${out}" || fail "the segment did not state what it does not show: ${out}"
+grep -q "^NETWORK_SEGMENT ok" <<<"${out}" || fail "a passing segment was not reported ok: ${out}"
+grep -q '^DEMO_RESULT=pass$' <<<"${out}" || fail "the demo lost its verdict after the segment"
+fake_smoke 'echo "node failed to bind"; exit 1'
+out="$(run ok HYPERVISOR=firecracker NETWORK_SEGMENT=1 MVMD_DIR="${mvmd}")" || fail "a failing network segment failed the demo: ${out}"
+grep -q "^NETWORK_SEGMENT failed" <<<"${out}" || fail "a failing segment was not reported: ${out}"
+grep -q '^DEMO_RESULT=pass$' <<<"${out}" || fail "a failing segment changed the demo's verdict"
+fake_smoke 'sleep 30'
+out="$(run ok HYPERVISOR=firecracker NETWORK_SEGMENT=1 NETWORK_SEGMENT_SECS=2 MVMD_DIR="${mvmd}")" || fail "a hung network segment failed the demo: ${out}"
+grep -q "^NETWORK_SEGMENT did not finish" <<<"${out}" || fail "a hung segment was not omitted: ${out}"
+out="$(run ok HYPERVISOR=firecracker NETWORK_SEGMENT=1 MVMD_DIR="${work}/no-such-checkout")" || fail "a missing mvmd failed the demo: ${out}"
+grep -q "^NETWORK_SEGMENT skipped" <<<"${out}" || fail "a missing mvmd was not reported as skipped: ${out}"
+out="$(run ok HYPERVISOR=firecracker)" || fail "the default run failed"
+! grep -q "NETWORK_SEGMENT\|networking carrier" <<<"${out}" || fail "the segment ran without being asked for: ${out}"
+
 # The audit checks must be about THIS run: an earlier run's entries must not
 # satisfy them. The fake writes nothing for a replace it refuses, so a missing
 # entry is a failure even though older lines mention the same events.
