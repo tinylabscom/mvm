@@ -1289,15 +1289,20 @@ mod tests {
         resolve_verified_in(&hvf_spec(), &lookup, &env).unwrap();
         assert_eq!(probe_runs(&probe_log), 1);
 
-        // Same name, different bytes: the stamp must not match, and the stale
-        // answer must be discovered by a fresh probe rather than trusted from
-        // the memo.
-        write_exe(&bin, &counting_helper("mvm-hvf-supervisor", 0, &probe_log));
+        // Same name, different-length bytes, so the length half of the stamp
+        // differs even on filesystems whose timestamp granularity would let
+        // two quick rewrites share a tick: the stamp must not match, and the
+        // stale answer must be discovered by a fresh probe rather than
+        // trusted from the memo.
+        write_exe(
+            &bin,
+            &counting_helper("mvm-hvf-supervisor", 100, &probe_log),
+        );
         let err = resolve_verified_in(&hvf_spec(), &lookup, &env)
             .unwrap_err()
             .to_string();
         assert_eq!(probe_runs(&probe_log), 2, "changed bytes must re-probe");
-        assert!(err.contains("contract version 0"), "{err}");
+        assert!(err.contains("contract version 100"), "{err}");
     }
 
     #[test]
