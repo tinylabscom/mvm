@@ -84,6 +84,18 @@ To use an already-built binary from this checkout instead of the installed
 release, set `export MVMCTL="$PWD/target/release/mvmctl"` before the preparation
 commands above, and skip the installer command.
 
+## Other machines
+
+Tested end to end, from an empty home, on:
+
+- an Apple Silicon Mac on macOS 26 (HVF): about 6 s once prepared;
+- an x86_64 Linux host with KVM (Firecracker), as a normal user in the `kvm`
+  group with a systemd user session: 19 s including first-time preparation,
+  9 s after.
+
+Not tested: Intel Macs, macOS 13 to 25 (libkrun), Linux on aarch64. On Linux the
+script refuses to run as root, because Firecracker does.
+
 ## Known limits
 
 - The three programs start at the same time. A release from before the
