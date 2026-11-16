@@ -228,14 +228,21 @@ enum StartupMode {
 fn startup_mode(
     cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
 ) -> anyhow::Result<StartupMode> {
-    // A kernel descriptor alone is a canonical-kernel legacy boot (a signed
-    // bundle with no frozen images or caller); images and a caller are a
-    // checked boot and must arrive together with the kernel.
-    if cfg.boot_image_fds.is_some() || cfg.caller_registration.is_some() {
+    startup_mode_for(
+        cfg.boot_image_fds.is_some(),
+        cfg.kernel_fd.is_some(),
+        cfg.caller_registration.is_some(),
+    )
+}
+
+/// A kernel descriptor alone is a canonical-kernel legacy boot (a signed
+/// bundle with no frozen images or caller); images and a caller are a checked
+/// boot and must arrive together with the kernel.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn startup_mode_for(images: bool, kernel: bool, caller: bool) -> anyhow::Result<StartupMode> {
+    if images || caller {
         anyhow::ensure!(
-            cfg.boot_image_fds.is_some()
-                && cfg.kernel_fd.is_some()
-                && cfg.caller_registration.is_some(),
+            images && kernel && caller,
             "incomplete checked boot cannot use legacy startup"
         );
         Ok(StartupMode::Checked)
@@ -511,6 +518,33 @@ mod tests {
         cfg.kernel_fd = None;
         assert!(super::startup_mode(&cfg).is_err());
         // Raw config shape only: no original caller/VM/checked owner is minted.
+    }
+
+    /// Every shape of (frozen images, kernel descriptor, caller registration):
+    /// only the three together are a checked boot, a kernel (or nothing) alone
+    /// is the legacy startup, and any other mix is refused.
+    #[test]
+    fn only_a_complete_checked_set_or_a_kernel_alone_may_start() {
+        use super::{StartupMode, startup_mode_for};
+        for images in [false, true] {
+            for kernel in [false, true] {
+                for caller in [false, true] {
+                    let mode = startup_mode_for(images, kernel, caller);
+                    match (images, kernel, caller) {
+                        (true, true, true) => {
+                            assert!(matches!(mode, Ok(StartupMode::Checked)))
+                        }
+                        (false, _, false) => {
+                            assert!(matches!(mode, Ok(StartupMode::Legacy)))
+                        }
+                        _ => assert!(
+                            mode.is_err(),
+                            "images={images} kernel={kernel} caller={caller} must be refused"
+                        ),
+                    }
+                }
+            }
+        }
     }
 
     #[test]
