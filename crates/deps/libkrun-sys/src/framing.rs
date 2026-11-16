@@ -8,8 +8,8 @@
 //! frames — because both ends need it without a dependency cycle: the **writer** is
 //! `mvm-backend`'s libkrun `claim_standby` and the **reader** is the
 //! `mvm-libkrun-supervisor` bin's prelaunch attach path. `mvm-backend`
-//! cannot depend on `mvm-hostd` (that crate depends on `mvm-backend`), so this can't live
-//! in `mvm_hostd::framing` (which keeps the *async* tokio variants for its own channels).
+//! uses synchronous I/O. The separate async helpers live in `mvm_core::framing`,
+//! behind its optional transport feature, and are re-exported by `mvm_hostd::framing`.
 //!
 //! This is the no-auth transport — correct for the same-uid control UDS. The trust
 //! boundary is the supervisor's independent plan re-verify on the attach, not this

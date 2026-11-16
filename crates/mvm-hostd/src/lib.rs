@@ -45,11 +45,8 @@ pub mod drive;
 pub mod egress_broker;
 pub mod extension_admission;
 pub mod extension_controller;
-/// Length-prefixed message framing (4-byte BE length + body,
-/// cap-before-alloc) for the same-uid UDS control channels. Relocated
-/// from `mvm_core::framing` so `mvm-core`'s default build pulls no
-/// async runtime.
-pub mod framing;
+/// Shared length-prefixed framing for same-UID host control channels.
+pub use mvm_core::framing;
 /// Host->guest healthcheck probe: run a workload's healthcheck command via
 /// the guest agent's exec protocol and decide pass/fail.
 pub mod health_probe;
