@@ -183,7 +183,34 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    // What these witnesses do and do not establish. The helper owns exactly one
+    // retained `Child`; a deadline or observer failure kills and reaps that
+    // handle and nothing else, so a bystander process must survive. Nothing
+    // here claims that descendants of the child are signalled (there is no
+    // process group or tree cleanup), that a grandchild outlives or dies with
+    // the child, or that the child is cleaned up if the *parent* test process
+    // is itself killed: SIGKILL of the parent leaves the child to the OS.
+    // Parent-termination behaviour is whatever the helper implements, which is
+    // none. A failing kill or reap cannot be provoked from outside the helper
+    // (kill on an owned live child does not fail), so that branch is witnessed
+    // through `failure_summary` rather than a real failed cleanup.
     const MODE: &str = "MVM_ISOLATED_HELPER_TEST_MODE";
+
+    /// Kills and reaps its child on drop so a failed assertion leaves no process.
+    struct Bystander(Child);
+
+    impl Drop for Bystander {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn pid_exists(pid: u32) -> bool {
+        let pid = libc::pid_t::try_from(pid).expect("pid fits pid_t");
+        // SAFETY: signal 0 only probes for existence; it delivers nothing.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
 
     fn fixture(mode: &str) -> Command {
         let mut command = mvm_core::env_hygiene::helper_command(std::env::current_exe().unwrap());
@@ -286,5 +313,61 @@ mod tests {
         assert!(String::from_utf8_lossy(&bytes).contains("middle omitted; 1 MiB retained"));
         assert!(bytes.ends_with(b"capture-tail"));
         assert!(bytes.len() < 1024 * 1024 + 100);
+    }
+
+    #[test]
+    fn observer_and_cleanup_failures_are_both_reported() {
+        let summary = failure_summary(
+            Err(anyhow::anyhow!("observer unavailable")),
+            Err(anyhow::anyhow!("kill refused")),
+        );
+        assert!(
+            summary.contains("exit observation failed: observer unavailable"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("cleanup failed: kill refused"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn a_blocked_running_child_is_killed_and_reaped_and_a_bystander_survives() {
+        let mut bystander = Bystander(fixture("block").spawn().unwrap());
+        let mut owned = fixture("block").spawn().unwrap();
+        let owned_pid = owned.id();
+
+        let status = reap_owned_child(&mut owned).unwrap();
+
+        assert!(!status.success(), "a killed child does not exit cleanly");
+        assert!(owned.try_wait().unwrap().is_some(), "owned child is reaped");
+        assert!(!pid_exists(owned_pid), "no zombie is left behind");
+        assert!(
+            bystander.0.try_wait().unwrap().is_none(),
+            "a process the helper does not own is untouched"
+        );
+    }
+
+    #[test]
+    fn the_wrapper_deadline_on_a_blocked_child_reaps_it_and_spares_a_bystander() {
+        let bystander = Bystander(fixture("block").spawn().unwrap());
+        let pid = std::cell::Cell::new(0);
+
+        let error = run_test_child_with(
+            &mut fixture("block"),
+            Duration::from_millis(250),
+            |child, deadline| {
+                pid.set(child.id());
+                wait_for_child(child, deadline)
+            },
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("execution deadline exceeded"), "{error}");
+        assert!(error.contains("owned child reaped"), "{error}");
+        assert_ne!(pid.get(), 0);
+        assert!(!pid_exists(pid.get()), "no zombie is left behind");
+        assert!(pid_exists(bystander.0.id()), "bystander is still alive");
     }
 }
