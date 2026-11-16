@@ -61,9 +61,10 @@ impl KernelBoundLaunch {
             #[cfg(unix)]
             {
                 // This is a data-continuity constraint, NOT an admission
-                // capability. HVF still consumes the actual caller launch
-                // registration; Firecracker retains its existing admission
-                // and synchronous API startup path on the same Linux host.
+                // capability. On HVF the descriptor alone starts a legacy-policy
+                // supervisor, so it carries no consumed caller registration;
+                // Firecracker retains its existing admission and synchronous
+                // API startup path on the same Linux host.
                 let source = Path::new(
                     config
                         .kernel_path
@@ -88,8 +89,10 @@ impl KernelBoundLaunch {
             );
             let host = mvm_build::stage0_kernel::current_image_set_protocol_support();
             // This layer owns artifact mechanics, not plan-admission authority.
-            // The native supervisor requires the existing consumed caller
-            // launch capability before using a canonical kernel descriptor.
+            // Admission has already bound this owner to the verified plan's
+            // bundle pin (`bind_canonical_kernel`). The HVF supervisor takes
+            // the descriptor alone as a legacy-policy boot; only frozen boot
+            // images additionally require a consumed caller registration.
             owner.retain_for_native_handoff(&config, backend, &host)?;
             #[cfg(unix)]
             {
