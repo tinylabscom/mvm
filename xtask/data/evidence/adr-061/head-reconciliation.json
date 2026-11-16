@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "status": "conditional-design-delta",
+  "base_source_revision": "dd2af0833eeaf1e2abd738e694dc1b463140ff25",
+  "head_source_revision": "052276763f889960b0fd16cb7d58583e6cce4ec5",
+  "adr_status": "Proposed",
+  "acceptance_gate_cleared": false,
+  "method": "Declared local normal/build manifest-edge comparison plus bounded source-diff review; additive reconciliation of graph.json, not full source re-extraction.",
+  "workspace_packages_before": 28,
+  "workspace_packages_after": 29,
+  "added_declared_local_edges": [["mvm-core", "mvm-crypto"]],
+  "removed_declared_local_edges": [],
+  "added_projected_edges": [["core", "crypto", "ffffffffff", "ffffffffff"]],
+  "edge_fields": ["from", "to", "combined_case_mask_hex", "source_case_mask_hex"],
+  "review": [
+    "mvm-crypto depends only on the existing third-party aes-gcm crate; core's at-rest/session wrappers call it. Key custody and protocol state stay with callers.",
+    "Runner start/standby/claim and broker-registration definitions move between files within runtime ownership; this does not add a role dependency direction.",
+    "BDD now gates its Cucumber dependency with bdd; required-feature coverage remains necessary.",
+    "Upstream suspended the Rust footprint ratchet. This design review does not restore it or treat a measurement-only pass as enforcement."
+  ],
+  "expected_composed_graph": {
+    "cases": 40,
+    "union_incident_nodes": 29,
+    "union_edges": 123,
+    "nontrivial_scc": []
+  },
+  "limits": [
+    "The base source-inventory fingerprint still describes the base revision, not the head.",
+    "The delta is not compiler resolution, behavior validation, or authorization to implement.",
+    "Only the recorded additive local dependency and unchanged ownership of the reviewed runner split are reconciled; no full source scanner was rerun.",
+    "Current closure measurements are retained separately in closure-baseline.json."
+  ]
+}

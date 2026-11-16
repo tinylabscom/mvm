@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "source_revision": "052276763f889960b0fd16cb7d58583e6cce4ec5",
+  "status": "current-source-resolution-only",
+  "method": "Package-selected cargo tree normal/build closures; no compilation, installation or future-manifest simulation.",
+  "command_template": ["cargo", "tree", "--offline", "--locked", "-p", "$PACKAGE", "--target", "$TARGET", "-e", "normal,build", "--prefix", "none", "--format", "{p}|{f}"],
+  "counting": "Distinct package identities including the selected root; not compiler units or size budgets.",
+  "default_case_fields": ["package", "target", "packages_including_root"],
+  "default_cases": [
+    ["mvm-core", "aarch64-unknown-linux-musl", 77],
+    ["mvm-agentd", "aarch64-unknown-linux-musl", 84],
+    ["mvm-builder-guest", "aarch64-unknown-linux-musl", 88],
+    ["mvm-host-services", "aarch64-unknown-linux-musl", 85],
+    ["mvm-setpriv", "aarch64-unknown-linux-musl", 2],
+    ["mvm-core", "x86_64-unknown-linux-musl", 78],
+    ["mvm-agentd", "x86_64-unknown-linux-musl", 85],
+    ["mvm-builder-guest", "x86_64-unknown-linux-musl", 89],
+    ["mvm-host-services", "x86_64-unknown-linux-musl", 86],
+    ["mvm-setpriv", "x86_64-unknown-linux-musl", 2],
+    ["mvm-core", "aarch64-unknown-linux-gnu", 77],
+    ["mvm-agentd", "aarch64-unknown-linux-gnu", 84],
+    ["mvm-builder-guest", "aarch64-unknown-linux-gnu", 88],
+    ["mvm-host-services", "aarch64-unknown-linux-gnu", 85],
+    ["mvm-setpriv", "aarch64-unknown-linux-gnu", 2],
+    ["mvm-core", "x86_64-unknown-linux-gnu", 78],
+    ["mvm-agentd", "x86_64-unknown-linux-gnu", 85],
+    ["mvm-builder-guest", "x86_64-unknown-linux-gnu", 89],
+    ["mvm-host-services", "x86_64-unknown-linux-gnu", 86],
+    ["mvm-setpriv", "x86_64-unknown-linux-gnu", 2]
+  ],
+  "default_observations": {
+    "all_commands_exit_zero": true,
+    "core_features_when_present": ["default"],
+    "checked_absent": [
+      "tokio", "async-trait", "rtnetlink", "netlink-packet-route", "schemars",
+      "opentelemetry", "opentelemetry_sdk", "opentelemetry-otlp", "opentelemetry-proto", "tracing-opentelemetry",
+      "bs58", "unicode-normalization", "keyring", "toml", "toml_edit", "toml_datetime", "toml_write",
+      "serde_spanned", "winnow", "regex", "regex-automata", "regex-syntax",
+      "mvm-http", "rustls", "ring", "cc"
+    ],
+    "absent_set_hits": []
+  },
+  "contrast_fields": ["package", "target", "additional_args", "packages_including_root", "core_features_if_present", "selected_dependencies_present"],
+  "contrast_dependency_filter": ["tokio", "schemars", "hickory-proto", "tokio-vsock", "cc", "mvm-http", "rustls", "ring"],
+  "contrast_cases": [
+    ["mvm-core", "aarch64-apple-darwin", [], 99, ["default"], []],
+    ["mvm-core", "aarch64-unknown-linux-musl", ["--features", "hostd-transport"], 81, ["default", "hostd-transport"], ["tokio"]],
+    ["mvm-agentd", "aarch64-unknown-linux-musl", ["--features", "schema"], 88, ["default", "schema"], ["schemars"]],
+    ["mvm-agentd", "aarch64-unknown-linux-musl", ["--features", "addons"], 144, ["default"], ["hickory-proto", "tokio", "tokio-vsock"]],
+    ["mvm-contract", "riscv32imac-unknown-none-elf", [], 33, [], []],
+    ["mvm-contract", "riscv32imac-unknown-none-elf", ["--no-default-features"], 30, [], []],
+    ["mvm-contract", "wasm32-unknown-unknown", [], 33, [], []],
+    ["mvm-host-services", "wasm32-unknown-unknown", [], 76, ["default"], []]
+  ],
+  "all_contrast_commands_exit_zero": true,
+  "limits": [
+    "Package selection is narrower than whole-workspace metadata; this is not an independent consumer lockfile or build.",
+    "Core's default feature is empty; the resolved feature name default does not mean host-state or hostd-transport.",
+    "Remeasured after the upstream mvm-crypto addition; proposed ADR crate moves/features were not applied or compiled.",
+    "Browser/Wasm and bare-metal dependency resolution does not establish source portability or runtime support.",
+    "The graph replay does not validate this separate current-source baseline."
+  ]
+}
