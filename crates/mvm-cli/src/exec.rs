@@ -502,12 +502,13 @@ pub fn run_captured(
     admit: Option<&SessionAdmit<'_>>,
     posture: Option<&PostureSink>,
 ) -> Result<ExecOutput> {
-    run_captured_started(req, admit, posture, std::time::Instant::now())
+    run_captured_started(req, admit, None, posture, std::time::Instant::now())
 }
 
 pub(crate) fn run_captured_started(
     req: ExecRequest,
     admit: Option<&SessionAdmit<'_>>,
+    audit_owner: Option<&std::cell::RefCell<Option<mvm_client::admission::CliAdmission>>>,
     posture: Option<&PostureSink>,
     startup_started: std::time::Instant,
 ) -> Result<ExecOutput> {
@@ -515,6 +516,7 @@ pub(crate) fn run_captured_started(
         req,
         /* capture = */ true,
         admit,
+        audit_owner,
         posture,
         startup_started,
     )
@@ -537,12 +539,13 @@ pub fn run(
     admit: Option<&SessionAdmit<'_>>,
     posture: Option<&PostureSink>,
 ) -> Result<i32> {
-    run_started(req, admit, posture, std::time::Instant::now())
+    run_started(req, admit, None, posture, std::time::Instant::now())
 }
 
 pub(crate) fn run_started(
     req: ExecRequest,
     admit: Option<&SessionAdmit<'_>>,
+    audit_owner: Option<&std::cell::RefCell<Option<mvm_client::admission::CliAdmission>>>,
     posture: Option<&PostureSink>,
     startup_started: std::time::Instant,
 ) -> Result<i32> {
@@ -550,6 +553,7 @@ pub(crate) fn run_started(
         req,
         /* capture = */ false,
         admit,
+        audit_owner,
         posture,
         startup_started,
     )
@@ -581,6 +585,7 @@ fn run_inner(
     req: ExecRequest,
     capture: bool,
     admit: Option<&SessionAdmit<'_>>,
+    audit_owner: Option<&std::cell::RefCell<Option<mvm_client::admission::CliAdmission>>>,
     posture: Option<&PostureSink>,
     startup_started: std::time::Instant,
 ) -> Result<Either<i32, ExecOutput>> {
@@ -654,6 +659,13 @@ fn run_inner(
     if let Some(runtime) = &_built_runtime {
         runtime.verify_config(&start_config)?;
     }
+    let admission = audit_owner.map(std::cell::RefCell::borrow);
+    if let Some(admission) = admission.as_ref() {
+        let owner = admission
+            .as_ref()
+            .context("CLI launch has no signed admission owner before warm/cold selection")?;
+        owner.check_legacy_projection(&start_config)?;
+    }
     let mut boot_attempt = BootAttempt {
         backend: &backend,
         start_config: &start_config,
@@ -670,6 +682,7 @@ fn run_inner(
         timing.then_some(&mut warm_claim_marks),
         &mut sub_marks,
     )?;
+    drop(admission);
     let vm_name = booted.name;
     let launch_mode = booted.launch_mode;
     if let Some(sink) = posture {

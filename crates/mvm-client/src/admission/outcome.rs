@@ -99,19 +99,27 @@ pub(crate) fn record_boot(
 /// (e.g. `backend-start`, `snapshot-restore`); `err` becomes the
 /// rendered error chain.
 pub fn emit_failed(ctx: &AdmissionContext, class: &str, err: &anyhow::Error) {
+    emit_failure(&ctx.emitter, ctx.admitted.plan(), class, err);
+}
+
+impl super::AuditContinuation {
+    /// Record and seal a command, output or teardown failure on this plan's chain.
+    pub fn emit_failed(&self, class: &str, err: &anyhow::Error) {
+        emit_failure(&self.emitter, self.plan(), class, err);
+    }
+}
+
+fn emit_failure(emitter: &AuditEmitter, plan: &ExecutionPlan, class: &str, err: &anyhow::Error) {
     let msg = format!("{err:#}");
-    if let Err(e) = ctx.emitter.emit_failed(ctx.admitted.plan(), class, &msg) {
+    if let Err(e) = emitter.emit_failed(plan, class, &msg) {
         tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
     }
     // A failed boot is the end of its session.
-    if let Err(e) = ctx.emitter.seal_session(
-        ctx.admitted.plan(),
-        mvm_hostd::audit::session::SealReason::Failed,
-    ) {
+    if let Err(e) = emitter.seal_session(plan, mvm_hostd::audit::session::SealReason::Failed) {
         crate::launch::record_unsealed_end(
-            Some((&ctx.emitter, ctx.admitted.plan())),
+            Some((emitter, plan)),
             crate::launch::UnsealedEnd::new(
-                &ctx.admitted.plan().workload.0,
+                &plan.workload.0,
                 crate::launch::UnsealedReason::SealFailed,
             )
             .error(format!("{e:#}")),
