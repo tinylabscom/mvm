@@ -205,7 +205,11 @@ mod tests {
 
     #[test]
     fn campaign_binding_checks_selected_bytes_and_vm_before_promotion() {
+        // The fixture writes its signing key into the trust store under
+        // `MVM_HOME`; without the guard another test's home swaps in between.
+        let mut env = mvm_core::util::test_env::TestEnv::new();
         let directory = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(directory.path());
         let mut config = mvm_runtime::signed_legacy_portable_runtime_fixture(directory.path());
         config.name = "campaign".into();
         let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
