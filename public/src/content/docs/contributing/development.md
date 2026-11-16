@@ -187,11 +187,12 @@ cargo run -- bootstrap
 ```
 
 > **Note — where the Linux host binaries come from.** Their musl cross-compile
-> is the only work `mvm-cli`'s build script still does. A release build
-> (`cargo build --release`) embeds them by default; set `MVM_EMBED=0` to opt
-> out, and a release build that finds the toolchain missing warns and carries
-> on without them. A debug build — the one `cargo check`, clippy and nextest use
-> — never cross-compiles, so the edit/check/test loop stays fast.
+> is the only work `mvm-cli`'s build script still does, and it runs only when
+> you build with the `embed-host-bins` feature. Nothing else turns it on: not the
+> release profile, not an environment variable. So a plain `cargo build
+> --release` is as fast as a debug build, the same command produces the same kind
+> of binary on every machine, and the edit/check/test loop (`cargo check`,
+> clippy, nextest) never cross-compiles.
 >
 > Either way the result lands in the content store at `~/.cache/mvm/embed`,
 > keyed to the sources it was built from, and every build restores from there:
@@ -202,6 +203,30 @@ cargo run -- bootstrap
 > It never compiles a second `mvmctl`. `just embed` (or `just embed --release`)
 > builds the whole set up front, per-VM helpers included. Released binaries
 > always carry the payload.
+
+### When to build with `embed-host-bins`
+
+`embed-host-bins` makes the build cross-compile the Linux host binaries and
+compile them into `mvmctl`. It is the only switch for that, and it adds minutes
+to a build, so use it deliberately.
+
+| You are... | Use it? | Why |
+| --- | --- | --- |
+| Editing, running `cargo check`, clippy or the tests | No | None of these need the payload, and the cross-compile would sit in every iteration. |
+| Running `mvmctl` from your own checkout, including the demo | No | An unembedded `mvmctl` builds the payload from its checkout the first time it needs a builder VM and caches it. Or use an installed release, which already carries it. |
+| Building a release, or anything you hand to someone else | Yes | The recipient has no checkout to build the payload from. The tag-push release workflow passes the feature, so a downloaded binary is self-sufficient. |
+| Running `just embed` | Already on | The recipe passes it, and also builds the per-VM helpers next to the binary. |
+| A CI lane that needs a builder VM and has no checkout to build from | Yes | Add `--features embed-host-bins` to its build. |
+| Testing the cross-compile itself | Yes | `cargo nextest run -p mvm-cli --features embed-host-bins` is the lane that covers it. |
+
+```sh
+cargo build --release                                  # fast; no payload compiled
+cargo build --release --features embed-host-bins       # slow; carries the payload
+just embed --release                                   # the same, plus the per-VM helpers
+```
+
+The pinned zig and `cargo-zigbuild` must be installed for the feature
+(`just payload::toolchain`); without them the build fails and names the fix.
 
 For live development, `bin/dev <command>` builds the `dev`-feature CLI and native
 host helpers together before running it, with state isolated to the checkout

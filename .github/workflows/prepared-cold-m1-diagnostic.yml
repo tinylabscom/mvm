@@ -49,7 +49,7 @@ jobs:
       - name: Build the release CLI and its actual HVF supervisor
         run: |
           set -euo pipefail
-          cargo build --locked --release --bin mvmctl
+          cargo build --locked --release --bin mvmctl --features embed-host-bins
           cargo build --locked --release -p mvm-hostd --bins
           shasum -a 256 target/release/mvmctl target/release/mvm-hvf-supervisor \
             >> "$RESULTS_DIR/provenance.txt"

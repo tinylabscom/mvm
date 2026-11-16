@@ -48,16 +48,20 @@ binaries (`mvm-host-vm-init`, `mvm-builderd`) as static
 `aarch64-unknown-linux-musl` (the builder VM rootfs has no dynamic loader).
 See Plan 115 / ADR-004.
 
-That cross-compile is the only work `build.rs` still does, and it runs in
-exactly two cases: a **release-profile** build (`cargo build --release`, or any
-profile inheriting from `release`), and a build with the `embed-host-bins`
-feature. `MVM_EMBED=0` opts a release build out. A debug build — which is what
-`cargo check`, clippy and nextest use — never cross-compiles.
+That cross-compile is the only work `build.rs` still does, and it runs only
+when the `embed-host-bins` feature is on. No profile and no environment variable
+turns it on: a plain `cargo build --release` is the same fast, unembedded build
+as a debug one, and `cargo check`, clippy and nextest never cross-compile. The
+feature fails the build hard when the pinned toolchain is missing, because it
+was asked for by name.
 
-When a release build finds the pinned toolchain missing it does not fail: it
-prints a `cargo:warning=` naming `just payload::toolchain` and ships the unembedded
-table. The explicit feature keeps failing hard, because it was asked for by
-name.
+Use the feature when the `mvmctl` you build has to carry the Linux host
+binaries itself: `just embed` (which also builds the per-VM helpers beside it),
+the tag-push release workflow (so a downloaded binary is self-sufficient), and
+any CI lane that needs a builder VM without a checkout to build the payload
+from. Do not use it for the edit, check and test loop, or to run `mvmctl` from
+your own checkout: that binary builds the payload from its checkout the first
+time it needs a builder VM and caches it.
 
 Every build **restores** the payload from the content store at
 `~/.cache/mvm/embed` when the store holds bytes keyed to this tree — the key is

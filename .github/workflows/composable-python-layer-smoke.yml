@@ -33,7 +33,6 @@ jobs:
       - uses: sigstore/cosign-installer@v3
       - name: Reproduce and verify an unpublished Python runtime input
         env:
-          MVM_EMBED: "0"
           ARCH: ${{ matrix.arch }}
           IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/composable-python-layer-smoke.yml@${{ github.ref }}
         run: |
@@ -143,7 +142,6 @@ jobs:
       - uses: sigstore/cosign-installer@v3
       - name: Authenticate a synthetic development base before materialization
         env:
-          MVM_EMBED: "0"
           IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/composable-python-layer-smoke.yml@${{ github.ref }}
         run: |
           set -euo pipefail
@@ -202,7 +200,6 @@ jobs:
       - uses: sigstore/cosign-installer@v3
       - name: Read an authored value in a QEMU guest from a signed-input composition
         env:
-          MVM_EMBED: "0"
           IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/composable-python-layer-smoke.yml@${{ github.ref }}
         run: |
           set -euo pipefail

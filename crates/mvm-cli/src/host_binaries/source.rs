@@ -1,8 +1,8 @@
 //! Where `mvmctl`'s Linux host payload comes from.
 //!
 //! A binary built with the payload carries it compiled in. One built without it
-//! — a debug build, or a release built with `MVM_EMBED=0` or without the
-//! cross-compile toolchain — produces the same set from the source checkout it
+//! — any build made without the `embed-host-bins` feature, a plain release
+//! build included — produces the same set from the source checkout it
 //! was built from, through the content store the build script restores from. So
 //! reaching a builder VM takes one command and one `mvmctl` either way, and the
 //! next plain `cargo build` embeds the bytes this produced without compiling
