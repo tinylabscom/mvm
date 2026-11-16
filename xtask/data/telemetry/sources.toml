@@ -346,6 +346,12 @@ anchor = "display-bridge"
 activation = "on-demand"
 
 [[launch_edge]]
+producer = "mvm-agentd/mvm-mailbox-client"
+launcher = "crates/mvm-build/src/runtime_overlay.rs"
+anchor = "mailbox-client"
+activation = "on-demand"
+
+[[launch_edge]]
 producer = "mvm-agentd/mvm-ping"
 launcher = "crates/mvm-agentd/src/guest_bootstrap.rs"
 anchor = "NETWORK_UTILITY_REPLACEMENTS"

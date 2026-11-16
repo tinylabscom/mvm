@@ -709,7 +709,7 @@ provision_guest_bin_dir() {
   local missing=()
   local required=(
     mvm-guest-agent mvm-guest-netinit mvm-egress-client mvm-oci-entrypoint
-    mvm-seccomp-apply mvm-runner mvm-addon-dns mvm-exit-report mvm-ping
+    mvm-seccomp-apply mvm-runner mvm-addon-dns mvm-exit-report mvm-mailbox-client mvm-ping
   )
   local bin
   for bin in "${required[@]}"; do

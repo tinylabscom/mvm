@@ -96,6 +96,7 @@ pub const REQUIRED_OVERLAY_GUEST_PATHS: &[&str] = &[
     "/egress-client",
     "/addon-dns",
     "/exit-report",
+    "/mailbox-client",
     "/VERSION",
 ];
 

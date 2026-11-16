@@ -52,13 +52,12 @@ content type, and payload. Process the payload **before** sending
 `Ack { lease }` on a new connection. An empty inbox and a refusal are not
 successful delivery; reading never automatically ACKs.
 
-For a guest application example, build:
+A guest application reads with `mvm-mailbox-client recv`, which ships in the
+runtime overlay (the signed guest runtime), so a workload image carries no copy
+of its own. It is also the example to read: the client is one small file,
+`src/bin/mvm-mailbox-client.rs`.
 
-```sh
-cargo build -p mvm-agentd --example mailbox_reader_client --target aarch64-unknown-linux-musl
-```
-
-Run it without arguments to read without acknowledging; pass `--ack` only when
+`recv` reads without acknowledging; pass `--ack` only when
 writing and flushing its stdout counts as completed processing. The returned
 `Acknowledged { ack }` echoes the exact guest-signed operation after the local
 journal and anchor commit. This is a trusted-local confirmation, **not** a
@@ -67,8 +66,8 @@ destination-signed, exportable ACK receipt. A lost delivery or ACK response is
 while this boot's agent remains active, or reconcile against the durable
 journal; a different ACK for the same lease conflicts.
 
-`mailbox_writer_client <message>` stages into the Dev/legacy spool.
-`mailbox_writer_client --local <message>` uses the separate immutable
+`mvm-mailbox-client send <message>` stages into the Dev/legacy spool.
+`mvm-mailbox-client send --local <message>` uses the separate immutable
 `outbox-local` request for the production local-durable tier; the guest agent
 retains it until it verifies the boot-bound signed V2 receipt. A response it
 cannot verify is not acceptance. Both commands report **local staging only**,
