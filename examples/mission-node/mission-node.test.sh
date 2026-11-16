@@ -31,9 +31,9 @@ run() {
 }
 
 : > "$work/calls"; run env
-expected=$'send --local aircraft-observation-1\nsend --local --to ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff exfiltrate-to-someone-else\nwget -T 4 -q -O- http://example.com\nsend --local left-unread-in-the-old-workload'
+expected=$'send --local aircraft-observation-1\nsend --local --to ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff exfiltrate-to-someone-else\nwget -T 4 -q -O- http://blocked.example\nsend --local left-unread-in-the-old-workload'
 [ "$(cat "$work/calls")" = "$expected" ] || fail "unexpected calls: $(cat "$work/calls")"
-grep -q "the outbound connection failed" "$work/out" || fail "the outbound attempt was not made: $(cat "$work/out")"
+grep -q "the request was refused" "$work/out" || fail "the outbound attempt was not made: $(cat "$work/out")"
 
 # A refused or failed send is reported and does not stop the schedule.
 : > "$work/calls"; run env FAKE_REFUSES=1

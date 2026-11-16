@@ -21,8 +21,15 @@ A production run executes the image's own command; there is nothing to pass afte
 ```sh
 MVM_OCI_POLICY=examples/mission-node/oci-policy.toml \
   mvmctl machine run --prod --image ghcr.io/tinylabscom/mvm-mission-node@sha256:<digest> \
-  --mailbox <64 hex> --mailbox-retention-ms 60000
+  --mailbox <64 hex> --mailbox-retention-ms 60000 --allow-host example.com
 ```
+
+The guest has no network interface; every request leaves it over the vsock egress
+channel to the host's per-VM endpoint. `--allow-host example.com` gives the
+workload a grant, so its requests cross that channel, and the script asks for
+`blocked.example`, which the endpoint refuses and the audit chain records. Without
+a grant there is no endpoint behind the channel and the attempt fails inside the
+guest without a host record.
 
 `--prod` verifies the signature with the `cosign` binary, so it must be on PATH.
 Whether this runs end to end under `--prod` is not yet shown; see #5353.

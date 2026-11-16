@@ -5,7 +5,8 @@
 #
 #   1. an approved observation to its own mailbox,
 #   2. a message addressed to a different mailbox, which the host must refuse,
-#   3. an outbound connection, which the host must refuse and audit,
+#   3. a request to a host it was not granted, which crosses the vsock egress
+#      channel to the host's endpoint, which must refuse and audit it,
 #   4. a message left unread, which the containment step must make unreadable
 #      to a replacement.
 #
@@ -29,7 +30,7 @@ send "aircraft-observation-1"
 sleep $((step * 2))
 send --to "$other" "exfiltrate-to-someone-else"
 sleep "$step"
-wget -T 4 -q -O- http://example.com >/dev/null 2>&1 || say "the outbound connection failed"
+wget -T 4 -q -O- http://blocked.example >/dev/null 2>&1 || say "the request was refused"
 sleep $((step * 3))
 send "left-unread-in-the-old-workload"
 say "done; waiting to be contained"
