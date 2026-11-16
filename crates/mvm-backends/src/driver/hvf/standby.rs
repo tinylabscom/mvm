@@ -1,11 +1,12 @@
 //! The warm-standby parent spawn for the HVF driver: boot the parent through
 //! the handoff path, wait for its guest agent, and describe it as a standby.
 
+use mvm_vmm::driver::traits::RunningVm;
 use mvm_vmm::host::process_liveness::read_pid_file;
 use std::path::Path;
 use std::time::Instant;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use mvm_core::config::vm_state_dir;
 use mvm_core::vm_backend::{StandbyHandle, StandbyState};
 
@@ -17,12 +18,8 @@ pub(super) fn spawn_standby_parent(req: &StandbyParentSpawn<'_>) -> Result<Stand
     let handoff = handoff_config(&req.spec.id).context("prepare HVF handoff")?;
     let vm = boot_with_handoff(req.boot, Some(&handoff), None, None).context("boot HVF standby")?;
     let state_dir = vm_state_dir(&req.spec.id);
-    let Some(pid) = read_pid_file(&state_dir.join(PID_FILE_NAME)) else {
-        let _ = vm.kill();
-        bail!("HVF standby '{}' did not publish a pid", req.spec.id);
-    };
-    let pid =
-        u32::try_from(pid).map_err(|_| anyhow!("HVF standby '{}' pid is negative", req.spec.id))?;
+    let recorded = read_pid_file(&state_dir.join(PID_FILE_NAME));
+    let pid = recorded_pid_or_stop(vm.as_ref(), recorded, &req.spec.id)?;
     if let Err(error) = wait_for_guest_agent(&state_dir) {
         let _ = vm.kill();
         bail!(
@@ -51,6 +48,23 @@ pub(super) fn spawn_standby_parent(req: &StandbyParentSpawn<'_>) -> Result<Stand
         preloaded_child_vm_name: None,
         vsock_egress: req.spec.vsock_egress,
     })
+}
+
+/// The supervisor pid a freshly booted standby parent must be trackable by,
+/// stopping the VM on every refusal. `recorded` is what the shared pid-file
+/// guard accepted; a record it filtered out, or a negative value that would
+/// wrap into a process-group signal target, can never be torn down or reaped
+/// later, so no refusal here may leave the parent running.
+fn recorded_pid_or_stop(vm: &dyn RunningVm, recorded: Option<i32>, id: &str) -> Result<u32> {
+    let Some(pid) = recorded else {
+        let _ = vm.kill();
+        bail!("HVF standby '{id}' did not publish a pid");
+    };
+    let Ok(pid) = u32::try_from(pid) else {
+        let _ = vm.kill();
+        bail!("HVF standby '{id}' pid is negative");
+    };
+    Ok(pid)
 }
 
 fn handoff_config(parent_vm_name: &str) -> Result<HandoffConfig> {
@@ -127,4 +141,112 @@ pub(super) fn wait_for_standby_agent(socket: &Path, timeout: std::time::Duration
         "guest agent socket {} was not responsive within {timeout:?} ({reason})",
         socket.display()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mvm_core::vm_backend::{VmExitStatus, VmId, VmStatus};
+    use mvm_vmm::driver::DuplexStream;
+    use std::sync::Mutex;
+
+    /// Records kills so a test can prove a refused standby was stopped.
+    struct FakeStandbyVm {
+        id: VmId,
+        kill_count: Mutex<u32>,
+    }
+
+    impl FakeStandbyVm {
+        fn new() -> Self {
+            Self {
+                id: VmId("standby-test".into()),
+                kill_count: Mutex::new(0),
+            }
+        }
+
+        fn killed(&self) -> bool {
+            *self.kill_count.lock().expect("kill count lock") > 0
+        }
+    }
+
+    impl RunningVm for FakeStandbyVm {
+        fn id(&self) -> &VmId {
+            &self.id
+        }
+
+        fn wait(&self) -> Result<VmExitStatus> {
+            Ok(VmExitStatus::SUCCESS)
+        }
+
+        fn kill(&self) -> Result<()> {
+            *self.kill_count.lock().expect("kill count lock") += 1;
+            Ok(())
+        }
+
+        fn pause(&self) -> Result<()> {
+            Ok(())
+        }
+
+        fn resume(&self) -> Result<()> {
+            Ok(())
+        }
+
+        fn status(&self) -> Result<VmStatus> {
+            Ok(VmStatus::Running)
+        }
+
+        fn vsock_connect(&self, _guest_port: u32) -> Result<Box<dyn DuplexStream>> {
+            bail!("fake standby VM has no vsock")
+        }
+    }
+
+    fn with_pid_file(dir: &Path, contents: &str) {
+        std::fs::write(dir.join(PID_FILE_NAME), contents).unwrap();
+    }
+
+    /// The shared pid-file guard reads a record it cannot accept as `None`,
+    /// so a file holding one is indistinguishable from a missing file here.
+    #[test]
+    fn an_unsignalable_recorded_pid_reads_as_none() {
+        // 0 names the caller's whole process group, 1 is init, and a negative
+        // value names a process group; none may ever reach a kill.
+        for contents in ["0", "1", "-5"] {
+            let dir = tempfile::tempdir().unwrap();
+            with_pid_file(dir.path(), contents);
+            assert_eq!(read_pid_file(&dir.path().join(PID_FILE_NAME)), None);
+        }
+    }
+
+    #[test]
+    fn a_negative_recorded_pid_stops_the_standby_and_is_refused() {
+        let vm = FakeStandbyVm::new();
+        let error = recorded_pid_or_stop(&vm, Some(-5), "standby-test")
+            .expect_err("a negative recorded pid must be refused");
+        assert!(
+            format!("{error:#}").contains("pid is negative"),
+            "{error:#}"
+        );
+        assert!(vm.killed(), "a refused standby must be stopped");
+    }
+
+    #[test]
+    fn a_missing_or_unsignalable_recorded_pid_stops_the_standby_and_is_refused() {
+        let vm = FakeStandbyVm::new();
+        let error = recorded_pid_or_stop(&vm, None, "standby-test")
+            .expect_err("no recorded pid must be refused");
+        assert!(
+            format!("{error:#}").contains("did not publish a pid"),
+            "{error:#}"
+        );
+        assert!(vm.killed(), "a refused standby must be stopped");
+    }
+
+    #[test]
+    fn a_signalable_recorded_pid_keeps_the_standby_running() {
+        let vm = FakeStandbyVm::new();
+        let pid = recorded_pid_or_stop(&vm, Some(4242), "standby-test")
+            .expect("a signalable recorded pid is accepted");
+        assert_eq!(pid, 4242);
+        assert!(!vm.killed(), "an accepted standby must keep running");
+    }
 }
