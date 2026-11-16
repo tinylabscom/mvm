@@ -1,6 +1,7 @@
 //! The per-VM network endpoint: the substitution endpoint and its proxy pipeline, FlowMux, TLS termination, runtime approval and the ingress transform.
 
 pub mod accept_loop;
+pub mod audit_start;
 /// Host substitution endpoint request preparation (placeholder -> real
 /// credential, binding-checked). The forward leg + the guest-facing
 /// listener are separate transport steps.

@@ -197,6 +197,7 @@ pub fn bind_plan_to_parent_digest(
 pub struct EndpointSpawnInputs<'a> {
     pub state_dir: &'a Path,
     pub tenant: &'a str,
+    pub audit: Option<&'a mvm_core::audit_sink::AuditContext>,
     pub secrets: &'a [SecretBinding],
     pub redaction: &'a RedactionPolicy,
     pub network_policy: &'a NetworkPolicy,
@@ -308,6 +309,7 @@ impl<'a> ClaimGuards<'a> {
             vm_name: &vm.0,
             state_dir: inputs.state_dir,
             tenant: inputs.tenant,
+            audit: inputs.audit,
             secrets: inputs.secrets,
             redaction: inputs.redaction,
             network_policy: inputs.network_policy,
@@ -517,6 +519,7 @@ mod tests {
             identity: FlowMuxIdentitySource::Mint,
             state_dir,
             tenant: "tenant-x",
+            audit: None,
             secrets: &[],
             redaction,
             network_policy: policy,

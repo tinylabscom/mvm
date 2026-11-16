@@ -137,6 +137,39 @@ material host-side, bounds streams, datagrams, DNS state, connector work, and
 ingress peers, and emits the canonical audit result. Declared ingress uses the
 same endpoint and delivers only to a signed guest-loopback target.
 
+Closing a UDP association cancels its relay without closing unrelated TCP flows.
+Its capacity remains reserved until the relay exits. Each outgoing frame uses
+one deadline from the configured credit-wait budget, including a peer that
+drains bytes slowly. A failed or timed-out write closes the shared transport
+rather than sending later frames after a partial encrypted frame.
+
+### Audit availability is part of readiness
+
+A workload endpoint needs an audit sink bound to its admitted plan and execution
+epoch before it reports ready. A missing sink or an unsuccessful journal probe
+refuses startup, including in development. Builder endpoints also require a
+working sink, but identify their records as builder activity rather than
+inventing a workload plan.
+
+Flow decisions are recorded before the response or authorized network effect.
+An allow whose required write fails is refused; a deny remains denied and marks
+the epoch's host record incomplete. Repeated UDP denials retain their
+once-per-destination suppression, with suppressed repeats counted separately.
+Reconnecting does not reset the endpoint's write-failure streak.
+
+This recording rule applies in development and under `--prod`. If the journal
+recovers, later operations may proceed only after their own required write
+succeeds. Success resets the failure streak, not the incomplete mark.
+
+VM lifecycle behavior is unchanged by the audit sink. Automatic VM termination
+after three consecutive production audit-write failures remains required work
+under [#5538](https://github.com/tinylabscom/mvm/issues/5538), but is not
+implemented here. Refusing unrecordable network operations is not a substitute
+for that shutdown requirement.
+
+The endpoint's health sidecar is not an epoch seal; see
+[audit durability](/guides/audit-and-receipts/#flow-decision-failures).
+
 The same contract applies across the standard Firecracker and HVF backends and
 the optional libkrun integration: no production backend attaches a routable
 workload NIC, and none may substitute a second networking implementation.

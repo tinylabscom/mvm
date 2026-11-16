@@ -5,6 +5,7 @@ pub mod audit_dedup;
 pub mod audit_file;
 pub mod audit_mirror;
 pub mod audit_recorder;
+pub mod bound_sink;
 /// Chain-signed metadata audit for policy-gated DNS questions.
 pub mod dns_audit;
 /// Per-VM gateway flow-event subscriber sink: the gateway bridge emits each

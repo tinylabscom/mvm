@@ -271,12 +271,20 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             );
         }
         let parent_state_dir = vm_state_dir(handle.id.as_str());
+        if let Some(audit) = &claim.audit_context
+            && audit.plan() != Some(&plan)
+        {
+            return Err(StandbyError::ClaimFailed(
+                "workload audit context differs from admitted claim plan".into(),
+            ));
+        }
         let mut endpoint = guards
             .spawn_endpoint(
                 &child,
                 &EndpointSpawnInputs {
                     state_dir: &child_dir,
                     tenant: claim.tenant_id.as_str(),
+                    audit: claim.audit_context.as_ref(),
                     secrets: &secrets,
                     redaction: &redaction,
                     network_policy: &claim.network_policy,

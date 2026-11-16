@@ -70,9 +70,39 @@ impl SubstitutionService {
     /// over-reports a connect or DNS failure as a substitution and never
     /// under-reports a send. How the forward ended is
     /// [`Self::audit_forward_outcome`].
-    pub(super) async fn audit_handoff(&self, flow: &PreparedFlow) {
-        self.audit_substitutions(&flow.substituted, flow.destination.as_deref())
-            .await;
+    pub(super) async fn audit_handoff(
+        &self,
+        flow: &PreparedFlow,
+    ) -> Result<(), mvm_core::substitution_wire::WireResponse> {
+        let result = if flow.substituted.is_empty() {
+            if let Some(recorder) = &self.recorder {
+                recorder
+                    .record_unbound(
+                        crate::supervisor::audit::audit_recorder::EventCategory::Host,
+                        "host.flow.allowed",
+                        [
+                            ("class".into(), "http".into()),
+                            (
+                                "destination".into(),
+                                flow.destination.clone().unwrap_or_default(),
+                            ),
+                            ("phase".into(), "forward".into()),
+                        ],
+                    )
+                    .await
+            } else {
+                Ok(())
+            }
+        } else {
+            self.audit_substitutions(&flow.substituted, flow.destination.as_deref())
+                .await
+        };
+        result.map_err(|error| {
+            tracing::warn!(%error, "HTTP forwarding refused because its audit write failed");
+            mvm_core::substitution_wire::WireResponse::Refused {
+                message: "forward audit unavailable".into(),
+            }
+        })
     }
 
     /// Record how a forward that carried a substituted credential ended. A
@@ -158,33 +188,25 @@ impl SubstitutionService {
         }
     }
 
-    /// Emit one `secret.substituted` audit entry per substituted secret (claim
-    /// 13 — metadata only). Best-effort: an audit failure is logged, never
-    /// fails the request. No-op when no recorder is wired.
+    /// Record each credential handoff before forwarding; a failed write refuses it.
     async fn audit_substitutions(
         &self,
         substituted: &[SubstitutedSecret],
         destination: Option<&str>,
-    ) {
+    ) -> Result<(), crate::supervisor::audit::audit_recorder::RecorderError> {
         let (Some(recorder), Some(dest)) = (&self.recorder, destination) else {
-            return;
+            return Ok(());
         };
         for substituted_secret in substituted {
-            if let Err(e) = emit_secret_substituted(
+            emit_secret_substituted(
                 recorder,
                 &substituted_secret.name,
                 dest,
                 substituted_secret.auth_type,
             )
-            .await
-            {
-                tracing::warn!(
-                    error = %e,
-                    secret = %substituted_secret.name,
-                    "secret.substituted audit emit failed"
-                );
-            }
+            .await?;
         }
+        Ok(())
     }
 
     async fn audit_rewrite_proofs(
@@ -453,6 +475,134 @@ mod forward_path_tests {
 
 #[cfg(test)]
 mod server_tests {
+    struct FailedCredentialAudit(Mutex<mvm_core::audit_sink::AuditHealth>);
+
+    impl mvm_core::audit_sink::AuditSink for FailedCredentialAudit {
+        fn record(
+            &self,
+            event: &str,
+            _: std::collections::BTreeMap<String, String>,
+        ) -> std::io::Result<()> {
+            let mut health = self.0.lock().unwrap();
+            if event == "secret.substituted" {
+                health.record_failure();
+                return Err(std::io::Error::other("injected credential audit failure"));
+            }
+            health.record_success();
+            Ok(())
+        }
+
+        fn suppress_denial(&self) {
+            self.0.lock().unwrap().suppress_denial();
+        }
+
+        fn flush_health(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_credential_handoff_preserves_the_shared_failure_streak() {
+        use crate::supervisor::audit::audit_recorder::Recorder;
+        use crate::supervisor::audit::signer::NoopAuditSigner;
+        use crate::supervisor::endpoint::network_endpoint_proxy::test_support::service_with;
+        use mvm_core::audit_sink::{AuditHealth, AuditSink};
+        use mvm_core::plan::TenantId;
+
+        let (service, placeholder, forwarder, _directory) =
+            service_with("test-value", &["api.example.com"]);
+        let recorder = Recorder::new(Arc::new(NoopAuditSigner), TenantId("local".into()));
+        let service = Arc::try_unwrap(service)
+            .ok()
+            .unwrap()
+            .with_recorder(recorder.clone());
+        let health = Arc::new(FailedCredentialAudit(Mutex::new(AuditHealth::default())));
+        let sink: Arc<dyn AuditSink> = health.clone();
+        // Bind after assembly, as startup does, so the service's clone must share it.
+        recorder.bind_audit_sink(&sink).unwrap();
+        for _ in 0..3 {
+            let response = service
+                .process(WireRequest {
+                    method: "GET".into(),
+                    url: "https://api.example.com/".into(),
+                    headers: vec![("authorization".into(), format!("Bearer {placeholder}"))],
+                    body_b64: String::new(),
+                })
+                .await;
+            assert!(matches!(response, WireResponse::Refused { .. }));
+        }
+        assert!(forwarder.seen.lock().unwrap().is_none());
+        let health = health.0.lock().unwrap();
+        assert_eq!(health.consecutive_write_failures, 3);
+        assert!(health.host_record_incomplete());
+    }
+
+    #[tokio::test]
+    async fn a_failed_handoff_never_reaches_any_forward_variant() {
+        use crate::supervisor::audit::audit_recorder::Recorder;
+        use crate::supervisor::audit::signer::NoopAuditSigner;
+        use crate::supervisor::endpoint::network_endpoint_proxy::test_support::service_with;
+        use mvm_core::plan::TenantId;
+        use mvm_core::substitution_wire::HttpFlowHead;
+
+        for credentialed in [false, true] {
+            for variant in 0..3 {
+                let (service, placeholder, forwarder, _directory) =
+                    service_with("test-value", &["api.example.com"]);
+                let service = Arc::new(Arc::try_unwrap(service).ok().unwrap().with_recorder(
+                    Recorder::new(Arc::new(NoopAuditSigner), TenantId("local".into())),
+                ));
+                let headers = if credentialed {
+                    vec![("authorization".into(), format!("Bearer {placeholder}"))]
+                } else {
+                    Vec::new()
+                };
+                let request = WireRequest {
+                    method: "GET".into(),
+                    url: "https://api.example.com/".into(),
+                    headers,
+                    body_b64: String::new(),
+                };
+                let refusal = match variant {
+                    0 => service.process(request).await,
+                    1 => service
+                        .process_stream(request)
+                        .await
+                        .err()
+                        .expect("stream refused"),
+                    _ => {
+                        let (sender, body) = tokio::sync::mpsc::channel(1);
+                        let refusal = service
+                            .process_body_stream(
+                                HttpFlowHead {
+                                    method: request.method,
+                                    url: request.url,
+                                    headers: request.headers,
+                                    body_len: 1,
+                                },
+                                body,
+                            )
+                            .await
+                            .err()
+                            .expect("body stream refused");
+                        assert!(
+                            sender.send(zeroize::Zeroizing::new(vec![1])).await.is_err(),
+                            "no body producer may remain after failed admission"
+                        );
+                        refusal
+                    }
+                };
+                assert!(
+                    matches!(refusal, WireResponse::Refused { message } if message.contains("audit"))
+                );
+                assert!(
+                    forwarder.seen.lock().unwrap().is_none(),
+                    "variant {variant} forwarded despite a failed handoff record"
+                );
+            }
+        }
+    }
+
     use crate::framing::{read_json_frame, write_json_frame};
     use crate::keyholder::{LocalResolver, SecretResolver, SubstitutionRegistry};
     use crate::supervisor::endpoint::network_endpoint_proxy::test_support::{

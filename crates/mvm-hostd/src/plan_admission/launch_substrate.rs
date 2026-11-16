@@ -35,16 +35,16 @@ pub(super) fn enforce_size_cap(what: &str, len: usize, cap: usize) -> Result<()>
     Ok(())
 }
 
-/// Populate the three `VmStartConfig` audit-substrate fields
-/// (`tenant_id`, `plan_json`, `bundle_json`) from the admitted
-/// plan. Call after the `VmStartConfig` is built and before
+/// Populate the `VmStartConfig` audit substrate (`tenant_id`, `plan_json`,
+/// `bundle_json`, and `audit_context`) from the admitted plan.
+/// Call after the `VmStartConfig` is built and before
 /// `backend.start()`; the libkrun/HVF backends read these to wire
 /// `SupervisorConfig.{tenant_id, audit_dir, gateway_audit_socket,
 /// gateway_events_socket, signing_key_path}` and activate the
 /// bridge-factory path.
 ///
-/// JSON-encoded so the `VmStartConfig` wire type stays a serde seam
-/// with no typed coupling to `mvm_core::plan` at the backend boundary. The
+/// The signed plan and policy bundle remain JSON envelopes; the endpoint's
+/// typed audit context carries the admitted plan identity. The
 /// supervisor re-verifies the `SignedExecutionPlan` envelope before
 /// trusting any decoded field — see
 /// `mvm_hostd::supervisor::supervisor::SupervisorAdmission::admit`.
@@ -91,6 +91,9 @@ pub fn populate_audit_substrate(
         .context("serializing SignedExecutionPlan for VmStartConfig.plan_json")?;
     enforce_size_cap("plan_json", plan_json.len(), PLAN_JSON_MAX_BYTES)?;
     cfg.plan_json = Some(plan_json);
+    cfg.audit_context = Some(mvm_core::audit_sink::AuditContext::Workload {
+        plan: Box::new(admitted.plan().clone()),
+    });
 
     // `bundle_json` carries the resolved tenant **PolicyBundle** (network /
     // egress / tool policy) that the supervisor's L4 gate + observers consume.

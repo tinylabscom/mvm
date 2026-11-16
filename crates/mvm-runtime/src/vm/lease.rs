@@ -252,6 +252,7 @@ mod tests {
             gateway_audit_socket: std::path::PathBuf::from("/tmp/gw-audit.sock"),
             gateway_events_socket: None,
             plan_json: "{}".to_string(),
+            audit_context: None,
             bundle_json: None,
             network_policy: NetworkPolicy::deny_all(),
         }

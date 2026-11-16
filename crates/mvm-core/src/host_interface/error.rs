@@ -28,6 +28,8 @@ pub enum Denial {
     Resources,
     #[error("required secret provider unavailable")]
     SecretProvider,
+    #[error("required bound audit sink cannot append to its journal")]
+    AuditUnavailable,
     #[error("required hardware attestation unavailable (assurance: {0:?})")]
     AttestationRequired(super::policy::Assurance),
     #[error("workload {0} is quarantined")]

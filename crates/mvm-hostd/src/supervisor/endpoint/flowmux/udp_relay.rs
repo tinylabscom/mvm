@@ -6,21 +6,26 @@
 //! with the single relay thread. Both directions carry the peer address in the
 //! wire prefix this module encodes and decodes.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, SocketAddr};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
 use mvm_contract::protocol::network_flow::{MAX_UDP_DATAGRAM_LEN, Opcode, UDP_ADDR_PREFIX_LEN};
-use mvm_core::net::session::Session;
+use mvm_core::{audit_sink::AuditSink, net::session::Session};
 use tracing::warn;
 
+use super::decision_audit::{self, UdpDenials, udp_labels};
 use super::registry::StreamRegistry;
-use super::{lock_registry, write_frame_to};
+use super::wire::write_stream_frame_to;
+use super::{lock_registry, lock_udp_associations};
 
 /// A request from the main session thread to a UDP relay thread to send one
 /// datagram to an admitted destination.
@@ -33,15 +38,17 @@ pub(super) struct UdpSendMsg {
 /// the socket; the main thread forwards guest `UdpSend` frames through a
 /// channel.
 pub(super) struct UdpAssociationHandle {
-    pub(super) tx: std::sync::mpsc::Sender<UdpSendMsg>,
+    pub(super) tx: Option<std::sync::mpsc::Sender<UdpSendMsg>>,
     pub(super) waker: Arc<Waker>,
+    pub(super) relay: Option<std::thread::JoinHandle<()>>,
+    pub(super) cancelled: Arc<AtomicBool>,
     pub(super) peer_admission: UdpPeerAdmission,
     /// Destinations whose refusal on this association has already been
     /// audited. Every refusal is still enforced; only the first per
     /// destination is recorded, because recording signs and syncs on the
     /// session thread and a guest repeating a refused send would otherwise
     /// turn each datagram into a stall of its own session.
-    pub(super) audited_denials: BTreeSet<SocketAddr>,
+    pub(super) audited_denials: Arc<UdpDenials>,
 }
 
 impl UdpAssociationHandle {
@@ -50,24 +57,54 @@ impl UdpAssociationHandle {
         tx: std::sync::mpsc::Sender<UdpSendMsg>,
         waker: Arc<Waker>,
         peer_admission: UdpPeerAdmission,
+        audited_denials: Arc<UdpDenials>,
     ) -> Self {
         Self {
-            tx,
+            tx: Some(tx),
             waker,
+            relay: None,
+            cancelled: Arc::new(AtomicBool::new(false)),
             peer_admission,
-            audited_denials: BTreeSet::new(),
+            audited_denials,
         }
     }
 
-    /// Note a refusal of `target`, answering whether it is the first one on
-    /// this association and so the one to audit.
-    pub(super) fn first_denial_of(&mut self, target: SocketAddr) -> bool {
-        self.audited_denials.insert(target)
+    pub(super) fn cancel(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.tx.take();
+        let _ = self.waker.wake();
+    }
+
+    pub(super) fn join(&mut self, stream_id: u32) {
+        if let Some(relay) = self.relay.take()
+            && relay.join().is_err()
+        {
+            warn!(stream_id, "FlowMux UDP relay panicked during cleanup");
+        }
     }
 }
 
+/// Reclaim completed owners on admission, never wait for a live relay here.
+pub(super) fn reap_associations(
+    associations: &Mutex<BTreeMap<u32, UdpAssociationHandle>>,
+    registry: &Mutex<StreamRegistry>,
+) {
+    lock_udp_associations(associations).retain(|&stream_id, owner| {
+        if owner
+            .relay
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished)
+        {
+            owner.join(stream_id);
+            let _ = lock_registry(registry).retire(stream_id);
+            false
+        } else {
+            true
+        }
+    });
+}
+
 /// Parameters for the per-association UDP relay thread.
-#[derive(Debug)]
 pub(super) struct UdpRelayParams {
     pub(super) stream_id: u32,
     pub(super) socket: std::net::UdpSocket,
@@ -79,6 +116,9 @@ pub(super) struct UdpRelayParams {
     pub(super) peer_admission: UdpPeerAdmission,
     pub(super) rx: std::sync::mpsc::Receiver<UdpSendMsg>,
     pub(super) registry: Arc<Mutex<StreamRegistry>>,
+    pub(super) audit_sink: Arc<dyn AuditSink>,
+    pub(super) audited_denials: Arc<UdpDenials>,
+    pub(super) cancelled: Arc<AtomicBool>,
 }
 
 /// Whether a guest datagram may introduce a peer or may only answer one that
@@ -131,6 +171,9 @@ pub(super) fn run_udp_relay(params: UdpRelayParams) {
         peer_admission,
         rx,
         registry,
+        audit_sink,
+        audited_denials,
+        cancelled,
     } = params;
 
     let mut buf = vec![0_u8; MAX_UDP_DATAGRAM_LEN];
@@ -142,6 +185,9 @@ pub(super) fn run_udp_relay(params: UdpRelayParams) {
     let mut relay_failed = false;
 
     loop {
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
         let remaining = idle_timeout.saturating_sub(last_activity.elapsed());
         if remaining.is_zero() {
             idle_expired = true;
@@ -161,6 +207,10 @@ pub(super) fn run_udp_relay(params: UdpRelayParams) {
         for event in &events {
             match event.token() {
                 UDP_SOCKET => loop {
+                    if cancelled.load(Ordering::Acquire) {
+                        guest_closed = true;
+                        break;
+                    }
                     match socket.recv_from(&mut buf) {
                         Ok((len, source)) => {
                             let already_peer = peers.contains(&source);
@@ -170,7 +220,23 @@ pub(super) fn run_udp_relay(params: UdpRelayParams) {
                                 peers.len(),
                                 max_peers,
                             ) {
+                                audited_denials.record(
+                                    audit_sink.as_ref(),
+                                    stream_id,
+                                    source,
+                                    "unsolicited_or_peer_limit",
+                                    max_peers,
+                                );
                                 // Dropped traffic is not the guest's activity.
+                                continue;
+                            }
+                            if decision_audit::record(
+                                audit_sink.as_ref(),
+                                "host.flow.allowed",
+                                udp_labels(stream_id, source),
+                            )
+                            .is_err()
+                            {
                                 continue;
                             }
                             activity_this_iter = true;
@@ -178,13 +244,22 @@ pub(super) fn run_udp_relay(params: UdpRelayParams) {
                             let mut payload = encode_udp_addr(source.ip(), source.port());
                             payload.extend_from_slice(&buf[..len]);
                             let frame_len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
-                            if let Err(e) =
-                                lock_registry(&registry).consume_host_credit(stream_id, frame_len)
-                            {
+                            let credit_error = lock_registry(&registry)
+                                .consume_host_credit(stream_id, frame_len)
+                                .err();
+                            if let Some(e) = credit_error {
                                 warn!(stream_id, error = %e, "FlowMux UDP host credit exhausted");
-                                let _ = write_frame_to(
+                                audited_denials.record(
+                                    audit_sink.as_ref(),
+                                    stream_id,
+                                    source,
+                                    "resource_exhausted",
+                                    max_peers,
+                                );
+                                let _ = write_stream_frame_to(
                                     &session,
                                     &writer,
+                                    &cancelled,
                                     Opcode::Reset,
                                     stream_id,
                                     b"host credit exhausted",
@@ -192,17 +267,23 @@ pub(super) fn run_udp_relay(params: UdpRelayParams) {
                                 relay_failed = true;
                                 break;
                             }
-                            if write_frame_to(
+                            match write_stream_frame_to(
                                 &session,
                                 &writer,
+                                &cancelled,
                                 Opcode::UdpRecv,
                                 stream_id,
                                 &payload,
-                            )
-                            .is_err()
-                            {
-                                relay_failed = true;
-                                break;
+                            ) {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    guest_closed = true;
+                                    break;
+                                }
+                                Err(_) => {
+                                    relay_failed = true;
+                                    break;
+                                }
                             }
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
@@ -214,18 +295,41 @@ pub(super) fn run_udp_relay(params: UdpRelayParams) {
                     }
                 },
                 UDP_WAKE => loop {
+                    if cancelled.load(Ordering::Acquire) {
+                        guest_closed = true;
+                        break;
+                    }
                     match rx.try_recv() {
                         Ok(msg) => {
                             activity_this_iter = true;
                             let already_peer = peers.contains(&msg.destination);
-                            if !already_peer {
-                                if peer_admission == UdpPeerAdmission::ObservedOnly
-                                    || peers.len() >= max_peers
-                                {
-                                    continue;
-                                }
-                                peers.insert(msg.destination);
+                            if !already_peer
+                                && (peer_admission == UdpPeerAdmission::ObservedOnly
+                                    || peers.len() >= max_peers)
+                            {
+                                audited_denials.record(
+                                    audit_sink.as_ref(),
+                                    stream_id,
+                                    msg.destination,
+                                    "unobserved_or_peer_limit",
+                                    max_peers,
+                                );
+                                continue;
                             }
+                            if decision_audit::record(
+                                audit_sink.as_ref(),
+                                "host.flow.allowed",
+                                udp_labels(stream_id, msg.destination),
+                            )
+                            .is_err()
+                            {
+                                continue;
+                            }
+                            if cancelled.load(Ordering::Acquire) {
+                                guest_closed = true;
+                                break;
+                            }
+                            peers.insert(msg.destination);
                             if let Err(error) = socket.send_to(&msg.payload, msg.destination) {
                                 warn!(stream_id, %error, "FlowMux UDP send failed");
                                 relay_failed = true;
@@ -254,19 +358,21 @@ pub(super) fn run_udp_relay(params: UdpRelayParams) {
         }
     }
 
-    let _ = lock_registry(&registry).retire(stream_id);
+    // The association owner retains its registry charge until this thread is joined.
     if idle_expired {
-        let _ = write_frame_to(
+        let _ = write_stream_frame_to(
             &session,
             &writer,
+            &cancelled,
             Opcode::CloseUdp,
             stream_id,
             b"idle timeout",
         );
     } else if relay_failed {
-        let _ = write_frame_to(
+        let _ = write_stream_frame_to(
             &session,
             &writer,
+            &cancelled,
             Opcode::Reset,
             stream_id,
             b"UDP relay error",

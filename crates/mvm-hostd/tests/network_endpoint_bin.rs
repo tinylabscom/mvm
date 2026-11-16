@@ -26,6 +26,26 @@ use secrecy::SecretBox;
 
 const BIN: &str = env!("CARGO_BIN_EXE_mvm-network-endpoint");
 
+#[path = "network_endpoint_bin/audit.rs"]
+mod audit;
+
+fn builder_audit(name: &str) -> mvm_core::audit_sink::AuditContext {
+    mvm_core::audit_sink::AuditContext::Builder {
+        tenant: mvm_core::plan::TenantId("local".into()),
+        name: name.into(),
+    }
+}
+
+fn audit_environment(root: &std::path::Path) -> mvm_core::util::test_env::TestEnv {
+    let home = root.join("mvm-home");
+    let keys = mvm_core::config::mvm_keys_dir_at(&home);
+    std::fs::create_dir_all(&keys).unwrap();
+    mvm_core::atomic_io::write_private(&keys.join("host-signer.ed25519"), &[42; 32]).unwrap();
+    let mut env = mvm_core::util::test_env::TestEnv::new();
+    env.set("MVM_HOME", &home);
+    env
+}
+
 #[test]
 fn endpoint_bin_refuses_legacy_tool_rules_before_binding() {
     let dir = tempfile::tempdir().unwrap();
@@ -342,6 +362,7 @@ fn a_flowmux_endpoint_keeps_serving_sessions_after_one_ends() {
     use mvm_hostd::supervisor::endpoint::network_endpoint::FlowMuxIdentity;
 
     let dir = tempfile::tempdir().unwrap();
+    let _audit_environment = audit_environment(dir.path());
     let sock = dir.path().join("network.sock");
     let session_marker = dir.path().join("session.marker");
     let session_ready_socket = dir.path().join("session-ready.sock");
@@ -431,6 +452,7 @@ fn a_flowmux_endpoint_enforces_one_admitted_ceiling_across_sessions() {
     use mvm_hostd::supervisor::endpoint::network_endpoint::FlowMuxIdentity;
 
     let dir = tempfile::tempdir().unwrap();
+    let _audit_environment = audit_environment(dir.path());
     let sock = dir.path().join("network.sock");
     let host_key = ed25519_dalek::SigningKey::from_bytes(&[17u8; 32]);
     let host_verify = host_key.verifying_key();
@@ -580,6 +602,7 @@ fn a_flowmux_endpoint_refuses_zero_limits_decoded_from_config() {
 /// Shared passive endpoint fixture data; each caller selects its transport and mode.
 fn test_config(transport: EndpointTransport) -> EndpointConfig {
     EndpointConfig {
+        audit: Some(builder_audit("test")),
         tenant_id: "local".into(),
         instance_id: "test".into(),
         secrets: vec![],
@@ -805,6 +828,7 @@ fn every_endpoint_thread_serves_under_confinement() {
     use mvm_hostd::supervisor::endpoint::network_endpoint::FlowMuxIdentity;
 
     let dir = tempfile::tempdir().unwrap();
+    let _audit_environment = audit_environment(dir.path());
     let sock = dir.path().join("network.sock");
     let log = dir.path().join("endpoint.log");
     let host_key = ed25519_dalek::SigningKey::from_bytes(&[23u8; 32]);
@@ -924,6 +948,8 @@ fn an_endpoint_embedding_the_collector_collects_and_keeps_serving() {
     let keys_dir = mvm_core::config::mvm_keys_dir_at(&mvm_home);
     std::fs::create_dir_all(&keys_dir).unwrap();
     let host_key = ed25519_dalek::SigningKey::from_bytes(&[23u8; 32]);
+    mvm_core::atomic_io::write_private(&keys_dir.join("host-signer.ed25519"), &host_key.to_bytes())
+        .unwrap();
     let host_verify = host_key.verifying_key();
     let anchor_path = keys_dir.join(HOST_SIGNER_PUB);
     std::fs::write(&anchor_path, host_verify.to_bytes()).unwrap();
@@ -999,6 +1025,7 @@ fn an_endpoint_embedding_the_collector_collects_and_keeps_serving() {
             records_byte_cap: 64 * 1024,
             records_key_b64: "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=".into(),
         }),
+        audit: Some(builder_audit(VM)),
         instance_id: VM.into(),
         egress_mode: EgressMode::FlowMux,
         session_marker: Some(state_dir.join("session.marker")),
@@ -1092,6 +1119,7 @@ fn an_endpoint_whose_collector_cannot_start_keeps_serving() {
     use mvm_hostd::telemetry_collector::TelemetryEmbedConfig;
 
     let dir = tempfile::tempdir().unwrap();
+    let _audit_environment = audit_environment(dir.path());
     let state_dir = dir.path().join("state");
     std::fs::create_dir_all(&state_dir).unwrap();
     let sock = state_dir.join("network.sock");
@@ -1109,6 +1137,7 @@ fn an_endpoint_whose_collector_cannot_start_keeps_serving() {
             records_byte_cap: 64 * 1024,
             records_key_b64: "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=".into(),
         }),
+        audit: Some(builder_audit("collector-refused-vm")),
         instance_id: "collector-refused-vm".into(),
         egress_mode: EgressMode::FlowMux,
         session_marker: Some(state_dir.join("session.marker")),

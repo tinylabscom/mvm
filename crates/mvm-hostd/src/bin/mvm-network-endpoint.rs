@@ -84,6 +84,7 @@ fn main() -> Result<()> {
     }
     let cfg = parse(&raw).context("mvm-network-endpoint config parse failed")?;
     validate_flowmux_limits(&cfg)?;
+    mvm_hostd::supervisor::endpoint::audit_start::validate(&cfg)?;
     info!(
         tenant_id = %cfg.tenant_id,
         secrets = cfg.secrets.len(),
@@ -174,6 +175,17 @@ fn main() -> Result<()> {
 
     #[cfg(target_os = "linux")]
     confined.self_test(runtime.handle())?;
+
+    let network_projection = if matches!(cfg.egress_mode, EgressMode::FlowMux) {
+        let sink = mvm_hostd::supervisor::endpoint::audit_start::bind(
+            &cfg,
+            &network_projection,
+            runtime.handle(),
+        )?;
+        network_projection.with_audit_sink(sink)
+    } else {
+        network_projection
+    };
 
     {
         let mut stdout = std::io::stdout().lock();
@@ -1065,7 +1077,7 @@ struct DecodedFlowMuxIdentity {
 struct FlowMuxEndpointProjection {
     identity: std::sync::Arc<DecodedFlowMuxIdentity>,
     gate: std::sync::Arc<mvm_runtime::vmm::egress_gate::EgressGate>,
-    recorder: Option<std::sync::Arc<mvm_hostd::supervisor::audit::audit_recorder::Recorder>>,
+    audit_sink: std::sync::Arc<dyn mvm_core::audit_sink::AuditSink>,
     resources: std::sync::Arc<FlowMuxVmResources>,
     limits: RegistryLimits,
     substitution: Option<
@@ -1122,7 +1134,7 @@ impl FlowMuxEndpointProjection {
         Ok(Self {
             identity,
             gate: network.gate(),
-            recorder: network.recorder(),
+            audit_sink: network.audit_sink()?,
             resources,
             limits,
             substitution,
@@ -1138,7 +1150,7 @@ impl FlowMuxEndpointProjection {
             self.limits,
             std::sync::Arc::clone(&self.gate),
         )
-        .with_recorder(self.recorder.as_ref().map(std::sync::Arc::clone))
+        .with_audit_sink(std::sync::Arc::clone(&self.audit_sink))
         .with_substitution(self.substitution.as_ref().map(std::sync::Arc::clone))
         .with_vm_resources(std::sync::Arc::clone(&self.resources))
         .with_ingress_transports(self.ingress_transports.iter().copied())
@@ -1380,6 +1392,10 @@ mod tests {
 
     fn uds_cfg() -> EndpointConfig {
         EndpointConfig {
+            audit: Some(mvm_core::audit_sink::AuditContext::Builder {
+                tenant: mvm_core::plan::TenantId("local".into()),
+                name: "test".into(),
+            }),
             telemetry: None,
             tenant_id: "local".into(),
             instance_id: "test".into(),
@@ -1419,6 +1435,7 @@ mod tests {
     /// matter — this test never spawns or serves.
     fn config_with_resolver(resolver: ResolverBackend) -> EndpointConfig {
         EndpointConfig {
+            audit: None,
             telemetry: None,
             tenant_id: "acme".into(),
             instance_id: "test".into(),
@@ -1581,27 +1598,27 @@ mod tests {
         cfg.ingress = vec![ingress_mapping("127.0.0.1", 8443)];
 
         let network = EndpointNetworkProjection::from_config(&cfg);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let sink =
+            mvm_hostd::supervisor::endpoint::audit_start::bind(&cfg, &network, runtime.handle())
+                .unwrap();
+        let network = network.with_audit_sink(sink);
         let projection = FlowMuxEndpointProjection::from_config(&cfg, None, network).unwrap();
         let expected = (
             std::sync::Arc::as_ptr(&projection.gate).cast::<()>() as usize,
             std::sync::Arc::as_ptr(&projection.resources).cast::<()>() as usize,
             std::sync::Arc::as_ptr(&projection.identity).cast::<()>() as usize,
-            projection
-                .recorder
-                .as_ref()
-                .map(|recorder| std::sync::Arc::as_ptr(recorder).cast::<()>() as usize),
+            std::sync::Arc::as_ptr(&projection.audit_sink).cast::<()>() as usize,
         );
-        assert!(expected.3.is_some(), "fixture must carry an audit sink");
 
         for surface in ["tcp", "udp", "dns", "typed_connector", "ingress"] {
             let observed = (
                 std::sync::Arc::as_ptr(&projection.gate).cast::<()>() as usize,
                 std::sync::Arc::as_ptr(&projection.resources).cast::<()>() as usize,
                 std::sync::Arc::as_ptr(&projection.identity).cast::<()>() as usize,
-                projection
-                    .recorder
-                    .as_ref()
-                    .map(|recorder| std::sync::Arc::as_ptr(recorder).cast::<()>() as usize),
+                std::sync::Arc::as_ptr(&projection.audit_sink).cast::<()>() as usize,
             );
             assert_eq!(
                 observed, expected,
@@ -1935,6 +1952,7 @@ mod tests {
         let host_key = [1u8; 32];
         let guest_key = [2u8; 32];
         let cfg = EndpointConfig {
+            audit: None,
             telemetry: None,
             tenant_id: "tenant".into(),
             instance_id: "test".into(),

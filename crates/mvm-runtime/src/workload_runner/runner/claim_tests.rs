@@ -1220,6 +1220,7 @@ fn admitted_child_claim(rootfs: &Path, plan_json: String) -> StandbyClaim {
         gateway_audit_socket: rootfs.with_file_name("gw-audit.sock"),
         gateway_events_socket: None,
         plan_json,
+        audit_context: None,
         bundle_json: None,
         network_policy: egress_allowing_policy(),
     }

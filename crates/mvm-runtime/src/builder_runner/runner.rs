@@ -259,6 +259,10 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
             // returns.
             lifetime: mvm_vmm::host::network_endpoint_spawn::EndpointLifetime::Launcher,
             tenant: "builder",
+            audit: mvm_core::audit_sink::AuditContext::Builder {
+                tenant: mvm_core::plan::TenantId("builder".into()),
+                name: transport.name.clone(),
+            },
             secrets: &[],
             redaction: &RedactionPolicy::default(),
             transport: EndpointTransport::Uds {

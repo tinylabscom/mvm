@@ -192,6 +192,10 @@ pub struct EndpointConfig {
     /// records to this workload.
     #[serde(default)]
     pub instance_id: String,
+    /// Explicit admitted workload or builder audit identity. Missing is refused
+    /// for FlowMux rather than lowered to a builder or an unbound recorder.
+    #[serde(default)]
+    pub audit: Option<mvm_core::audit_sink::AuditContext>,
     /// The admitted plan's `secrets` (name → source). Only
     /// [`mvm_core::plan::SecretSource::Keystore`] entries participate; the
     /// endpoint reconstructs each one's binding from the host binding store.
@@ -359,6 +363,7 @@ pub fn resolve_store_dirs(cfg: &EndpointConfig) -> anyhow::Result<(PathBuf, Path
 pub struct EndpointNetworkProjection {
     gate: Arc<mvm_runtime::vmm::egress_gate::EgressGate>,
     recorder: Option<Arc<crate::supervisor::audit::audit_recorder::Recorder>>,
+    audit_sink: Option<Arc<dyn mvm_core::audit_sink::AuditSink>>,
 }
 
 impl EndpointNetworkProjection {
@@ -379,7 +384,23 @@ impl EndpointNetworkProjection {
             // machine on the host shares the tenant's chain.
             recorder: build_audit_recorder(&cfg.tenant_id)
                 .map(|recorder| Arc::new(recorder.with_vm_name(&cfg.instance_id))),
+            audit_sink: None,
         }
+    }
+
+    /// Complete the projection with the sink that passed launch-time preflight.
+    #[must_use]
+    pub fn with_audit_sink(mut self, sink: Arc<dyn mvm_core::audit_sink::AuditSink>) -> Self {
+        self.audit_sink = Some(sink);
+        self
+    }
+
+    /// Return the required shared sink, refusing an unfinished projection.
+    pub fn audit_sink(&self) -> anyhow::Result<Arc<dyn mvm_core::audit_sink::AuditSink>> {
+        self.audit_sink
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or_else(|| anyhow::anyhow!("FlowMux projection has no bound audit sink"))
     }
 
     /// The one claim-10 policy object every network surface decides against.
@@ -834,6 +855,7 @@ mod tests {
         let projection = EndpointNetworkProjection {
             gate: Arc::clone(&gate),
             recorder: Some(Arc::clone(&recorder)),
+            audit_sink: None,
         };
 
         let (service, _, oauth_refresh) = assemble_projected(&cfg, &projection).unwrap();
@@ -931,6 +953,7 @@ mod tests {
 
         let signer = Arc::new(crate::supervisor::audit::signer::CapturingAuditSigner::new());
         let projection = EndpointNetworkProjection {
+            audit_sink: None,
             gate: Arc::new(mvm_runtime::vmm::egress_gate::EgressGate::default_deny()),
             recorder: Some(Arc::new(
                 crate::supervisor::audit::audit_recorder::Recorder::new(
@@ -1027,6 +1050,7 @@ mod tests {
         let projection = EndpointNetworkProjection {
             gate: Arc::new(mvm_runtime::vmm::egress_gate::EgressGate::default_deny()),
             recorder: None,
+            audit_sink: None,
         };
         let err = match assemble_projected(&cfg, &projection) {
             Ok(_) => panic!("a cleartext token endpoint must refuse assembly"),
@@ -1064,6 +1088,7 @@ mod tests {
         let projection = EndpointNetworkProjection {
             gate: Arc::new(mvm_runtime::vmm::egress_gate::EgressGate::default_deny()),
             recorder: None,
+            audit_sink: None,
         };
         let error = assemble_projected(&cfg, &projection)
             .err()
@@ -1097,6 +1122,7 @@ mod tests {
 
     fn vsock_cfg(secrets: Vec<SecretBinding>, dir: &std::path::Path) -> EndpointConfig {
         EndpointConfig {
+            audit: None,
             telemetry: None,
             tenant_id: "local".into(),
             instance_id: "test".into(),

@@ -323,6 +323,10 @@ fn params<'a>(
         .state_dir(state)
         .lifetime(EndpointLifetime::Launcher)
         .tenant("fixture")
+        .audit(mvm_core::audit_sink::AuditContext::Builder {
+            tenant: mvm_core::plan::TenantId("fixture".into()),
+            name: "owned-endpoint-fixture".into(),
+        })
         .secrets(&[])
         .redaction(redaction)
         .network_limits(mvm_core::plan::NetworkLimits::default())

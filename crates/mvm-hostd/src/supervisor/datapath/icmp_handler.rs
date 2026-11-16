@@ -92,18 +92,28 @@ pub(crate) fn serve_request(
     rate_guard: &EgressRateGuard,
     echo: &dyn EchoTransport,
 ) -> (Vec<IcmpEchoReply>, EchoAudit) {
+    serve_request_audited(line, gate, rate_guard, echo, |_| Ok(()))
+}
+
+/// Record the decision after admission but before any echo or refusal escapes.
+pub(crate) fn serve_request_audited(
+    line: &str,
+    gate: &EgressGate,
+    rate_guard: &EgressRateGuard,
+    echo: &dyn EchoTransport,
+    mut record: impl FnMut(&EchoAudit) -> std::io::Result<()>,
+) -> (Vec<IcmpEchoReply>, EchoAudit) {
     // Every refusal answers the guest and records the same reason, so the chain
     // and the caller never disagree about why.
-    let refused = |host: &str, message: String| {
-        (
-            vec![IcmpEchoReply::Refused {
-                message: message.clone(),
-            }],
-            EchoAudit::Refused {
-                host: host.to_string(),
-                reason: message,
-            },
-        )
+    let mut refused = |host: &str, message: String| {
+        let audit = EchoAudit::Refused {
+            host: host.to_string(),
+            reason: message.clone(),
+        };
+        if let Err(error) = record(&audit) {
+            tracing::warn!(%error, "ICMP remains refused after audit failure");
+        }
+        (vec![IcmpEchoReply::Refused { message }], audit)
     };
 
     let request = match serde_json::from_str::<IcmpEchoRequest>(line.trim_end()) {
@@ -134,6 +144,20 @@ pub(crate) fn serve_request(
         return refused(&request.host, "echo rate limit reached".to_string());
     };
 
+    let audit = EchoAudit::Admitted {
+        host: request.host.clone(),
+        ip: ip.to_string(),
+        count: request.count,
+    };
+    if let Err(error) = record(&audit) {
+        tracing::warn!(%error, "ICMP refused before echo because audit failed");
+        return (
+            vec![IcmpEchoReply::Refused {
+                message: "audit unavailable".into(),
+            }],
+            audit,
+        );
+    }
     let timeout = Duration::from_millis(u64::from(request.timeout_ms));
     let mut replies = Vec::with_capacity(usize::from(request.count));
     for seq in 0..request.count {
@@ -156,14 +180,7 @@ pub(crate) fn serve_request(
             }
         }
     }
-    (
-        replies,
-        EchoAudit::Admitted {
-            host: request.host.clone(),
-            ip: ip.to_string(),
-            count: request.count,
-        },
-    )
+    (replies, audit)
 }
 
 async fn write_line<W>(guest: &mut W, reply: &IcmpEchoReply) -> std::io::Result<()>

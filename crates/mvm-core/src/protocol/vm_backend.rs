@@ -242,6 +242,9 @@ pub struct VmStartConfig {
     /// secret bindings, env vars, or policy refs that resolve to
     /// credentials.
     pub plan_json: Option<String>,
+    /// Audit identity projected by the admitting host.
+    /// Missing context never implies a builder identity.
+    pub audit_context: Option<crate::audit_sink::AuditContext>,
     /// Optional caller registration from the trusted entrypoint admission path.
     /// This is not producer readiness and is not accepted by warm launches.
     pub caller_registration: Option<caller_registration::CallerRegistration>,
@@ -387,6 +390,8 @@ pub struct StandbyClaim {
     pub gateway_events_socket: Option<std::path::PathBuf>,
     /// JSON-encoded signed `ExecutionPlan` envelope (claim 8).
     pub plan_json: String,
+    /// This child's admitted audit identity, never the standby parent's.
+    pub audit_context: Option<crate::audit_sink::AuditContext>,
     /// JSON-encoded `PolicyBundle`, if any.
     pub bundle_json: Option<String>,
     /// The launcher's resolved bare egress policy, threaded so a warm-claimed
@@ -774,6 +779,7 @@ mod tests {
             gateway_audit_socket: "/audit/g.sock".into(),
             gateway_events_socket: None,
             plan_json: "{}".into(),
+            audit_context: None,
             bundle_json: None,
             network_policy: crate::network_policy::NetworkPolicy::deny_all(),
         }

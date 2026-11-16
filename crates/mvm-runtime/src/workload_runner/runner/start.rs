@@ -60,6 +60,12 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             .map(mvm_core::plan::plan_from_admitted_json)
             .transpose()
             .context("parse admitted mailbox reader plan")?;
+        if let Some(audit) = &inputs.config.audit_context {
+            anyhow::ensure!(
+                audit.plan() == reader_plan.as_ref(),
+                "workload audit context differs from admitted plan"
+            );
+        }
 
         // Spawn the per-child substitution endpoint through the shared
         // `ClaimGuards`, so a warm claim stands up the identical guarded endpoint
@@ -71,6 +77,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             &EndpointSpawnInputs {
                 state_dir: &state_dir,
                 tenant: inputs.tenant,
+                audit: inputs.config.audit_context.as_ref(),
                 secrets: inputs.secrets,
                 redaction: inputs.redaction,
                 network_policy: inputs.network_policy,
