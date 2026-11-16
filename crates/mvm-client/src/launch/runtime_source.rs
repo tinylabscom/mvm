@@ -157,7 +157,8 @@ pub fn attach_runtime_overlay_if_cached_version(
 }
 
 /// Attach a prepared runtime and return the launch-owned authenticated release.
-/// `None` means the selected path is source, legacy, bundle, or kernel-less.
+/// `None` means the selected path is source, legacy, a bundle with no CLI
+/// runtime, or kernel-less.
 pub fn attach_runtime_overlay_if_cached_version_verified(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     hypervisor: &str,
@@ -171,6 +172,27 @@ pub fn attach_runtime_overlay_if_cached_version_verified(
     Ok(release)
 }
 
+/// The authenticated release behind the proof a start config already carries,
+/// or `None` when it carries none. A carried proof is never answered with
+/// `None`: it is verified or the launch is refused.
+fn verified_release_for_attached_proof(
+    start_config: &mvm_core::vm_backend::VmStartConfig,
+) -> Result<Option<ReleaseRuntime>> {
+    let Some(proof) = &start_config.runtime_release_proof else {
+        return Ok(None);
+    };
+    let version = start_config
+        .runtime_overlay_version
+        .as_deref()
+        .context("selected guest runtime has no version")?;
+    let release = mvm_build::guest_runtime::evidence::verify_release_runtime(
+        proof.clone(),
+        version,
+        mvm_core::arch::GuestArch::host(),
+    )?;
+    Ok(Some(std::sync::Arc::new(release)))
+}
+
 fn attach_runtime_overlay_selection(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     hypervisor: &str,
@@ -178,7 +200,9 @@ fn attach_runtime_overlay_selection(
     pair: Option<&mut PairArtifactSource<'_>>,
 ) -> Result<Option<ReleaseRuntime>> {
     if super::bundle_runtime::attach_if_installed_bundle(start_config, hypervisor)? {
-        return Ok(None);
+        // A bundle that carries the CLI runtime attached a release proof; admission
+        // refuses that proof without the authenticated release behind it.
+        return verified_release_for_attached_proof(start_config);
     }
     anyhow::ensure!(
         start_config.bundle_boot_assets.is_none(),
@@ -190,17 +214,8 @@ fn attach_runtime_overlay_selection(
         || start_config.source_runtime_archive_sha256.is_some()
         || start_config.unsigned_runtime_development
     {
-        if let Some(proof) = &start_config.runtime_release_proof {
-            let version = start_config
-                .runtime_overlay_version
-                .as_deref()
-                .context("selected guest runtime has no version")?;
-            let release = mvm_build::guest_runtime::evidence::verify_release_runtime(
-                proof.clone(),
-                version,
-                mvm_core::arch::GuestArch::host(),
-            )?;
-            return Ok(Some(std::sync::Arc::new(release)));
+        if let Some(release) = verified_release_for_attached_proof(start_config)? {
+            return Ok(Some(release));
         }
         mvm_runtime::runtime_evidence::verify_runtime_for_launch(
             start_config,
@@ -859,6 +874,30 @@ mod runtime_overlay_attach_tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_carried_release_proof_is_verified_or_refused_never_answered_with_none() {
+        let none = VmStartConfig::default();
+        assert!(
+            verified_release_for_attached_proof(&none)
+                .unwrap()
+                .is_none()
+        );
+
+        let unversioned = VmStartConfig {
+            runtime_release_proof: Some(mock_proof()),
+            ..Default::default()
+        };
+        assert!(verified_release_for_attached_proof(&unversioned).is_err());
+
+        // A synthetic locator is not a verifiable release, so it must refuse.
+        let unverifiable = VmStartConfig {
+            runtime_release_proof: Some(mock_proof()),
+            runtime_overlay_version: Some("selected-release".into()),
+            ..Default::default()
+        };
+        assert!(verified_release_for_attached_proof(&unverifiable).is_err());
     }
 
     #[test]
