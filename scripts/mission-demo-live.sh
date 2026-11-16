@@ -37,6 +37,13 @@
 #                      host's audited flow.allowed and flow.denied decisions
 #                      and `explain`'s denial summary. Off by default: it adds
 #                      two short transient guests and changes nothing before it.
+#   DRIVER=entrypoint  the workload leaves its own frames and attempts its own
+#                      outbound connection from its command, and the host only
+#                      observes (`machine mailbox recv`, the audit chain). The
+#                      default, `exec`, injects frames and the connection
+#                      attempt with `machine exec`, a dev-profile verb a
+#                      production workload does not have. This is the shape a
+#                      production run needs; it is still the dev profile.
 #   MVM_FIRECRACKER_BIN, MVM_MAILBOX_PATH
 #                      read by mvmctl; leave unset to test an install
 #
@@ -53,6 +60,8 @@ if [ -z "${HYPERVISOR:-}" ]; then
 fi
 case "$HYPERVISOR" in hvf | firecracker) ;; *) echo "FAIL unsupported HYPERVISOR=$HYPERVISOR (hvf or firecracker)" >&2; exit 2 ;; esac
 [ "${SOURCE_BUILD:-0}" != 1 ] || export MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build
+DRIVER="${DRIVER:-exec}"
+case "$DRIVER" in exec | entrypoint) ;; *) echo "FAIL unsupported DRIVER=$DRIVER (exec or entrypoint)" >&2; exit 2 ;; esac
 bld=(); [ -z "${BUILDER:-}" ] || bld=(--builder "$BUILDER")
 
 NAME="demo-$$"
@@ -105,28 +114,62 @@ OTHER=377   # anyone else: must be refused
 recv() { mvm machine mailbox recv "$NAME"; }
 got() { [ "$(recv)" = "$1" ]; }
 launch() { mvm machine run -d --image "$IMAGE" --mailbox "$ID" --hypervisor "$HYPERVISOR" --name "$NAME" -- sleep 900 >/dev/null; }
+# The entrypoint driver's workloads. Timings are from the guest's first frame:
+# own mailbox at 0, another mailbox at 10, an outbound attempt at 15, an own
+# frame left unread at 30; the host reads the first and leaves the last.
+workload_first() {
+  mailbox_guest_writer
+  cat <<EOS
+n=\$(grep -o mvm.mailbox=1 /proc/cmdline | wc -l)
+if [ "\$n" = 1 ]; then b=$FIRST; else b=bad-cmdline-\$n; fi
+mbx_write 000 "\$b"
+sleep 10; mbx_write 377 $CONTAINED
+sleep 5; wget -T 4 -q -O- http://example.com >/dev/null 2>&1 || true
+sleep 15; mbx_write 000 $UNREAD
+sleep 900
+EOS
+}
+workload_replacement() {
+  mailbox_guest_writer
+  printf 'sleep 12; mbx_write 000 %s; sleep 900\n' "$SECOND"
+}
+launch_entrypoint() { mvm machine run -d --image "$IMAGE" --mailbox "$ID" --hypervisor "$HYPERVISOR" --name "$NAME" -- sh -c "$1" >/dev/null; }
 audit_dir="$MVM_HOME/audit"
 count() { grep -rhoF "$1" "$audit_dir" 2>/dev/null | wc -l | tr -d ' '; }
 
 echo "== 1. a granted guest boots (mvmctl: $(mvm --version), $HYPERVISOR)"
 mvm image pull "$IMAGE" >/dev/null
-launch
-wait_for "the guest to take commands" mvm machine exec "$NAME" -- true
-[ "$(mvm machine exec "$NAME" -- cat /proc/cmdline | grep -o 'mvm.mailbox=1' | wc -l)" -eq 1 ] || fail "not exactly one mvm.mailbox=1"
-say "granted guest booted with exactly one mvm.mailbox=1"
+denials() { grep -rhE 'flow\.egress\.denied|host\.flow\.denied' "$audit_dir" 2>/dev/null | grep -cF example.com || true; }
+denied_before="$(denials)"
+if [ "$DRIVER" = entrypoint ]; then
+  launch_entrypoint "$(workload_first)"
+  say "granted guest launched with its own command; it checks its command line itself"
+else
+  launch
+  wait_for "the guest to take commands" mvm machine exec "$NAME" -- true
+  [ "$(mvm machine exec "$NAME" -- cat /proc/cmdline | grep -o 'mvm.mailbox=1' | wc -l)" -eq 1 ] || fail "not exactly one mvm.mailbox=1"
+  say "granted guest booted with exactly one mvm.mailbox=1"
+fi
 
 echo "== 2. the guest delivers a message to its host mailbox"
-mailbox_write_frame "$NAME" "$OWN" "$FIRST"
+[ "$DRIVER" = entrypoint ] || mailbox_write_frame "$NAME" "$OWN" "$FIRST"
 wait_for "the message" got "$FIRST"; say "message read back exactly"
+[ "$DRIVER" != entrypoint ] || { t_first=$SECONDS; say "the entrypoint saw exactly one mvm.mailbox=1 (otherwise its frame would differ)"; }
 [ -z "$(recv)" ] || fail "mailbox not empty after reading"; say "mailbox empty after reading"
 
 echo "== 3. a planted compromise is denied"
-mailbox_write_frame "$NAME" "$OTHER" "$CONTAINED"; sleep 8
+if [ "$DRIVER" = entrypoint ]; then
+  while [ $((SECONDS - t_first)) -lt 18 ]; do sleep 1; done
+else
+  mailbox_write_frame "$NAME" "$OTHER" "$CONTAINED"; sleep 8
+fi
 [ -z "$(recv)" ] || fail "a message to another recipient was queued"; say "a message to another mailbox was refused"
-denials() { grep -rhE 'flow\.egress\.denied|host\.flow\.denied' "$audit_dir" 2>/dev/null | grep -cF example.com || true; }
-denied_before="$(denials)"
-if mvm machine exec "$NAME" -- sh -c 'wget -T 4 -q -O- http://example.com >/dev/null 2>&1'; then fail "the guest reached the network"; fi
-say "an outbound connection from the guest failed (this shows it fails, not why)"
+if [ "$DRIVER" = entrypoint ]; then
+  say "the entrypoint attempted an outbound connection (its result is not visible to the host; the host's decision is checked below)"
+else
+  if mvm machine exec "$NAME" -- sh -c 'wget -T 4 -q -O- http://example.com >/dev/null 2>&1'; then fail "the guest reached the network"; fi
+  say "an outbound connection from the guest failed (this shows it fails, not why)"
+fi
 # Whether the host audited the refusal is a separate question from the attempt
 # failing; give the entry a few seconds to be written before judging.
 for _ in 1 2 3 4 5 6 7 8 9 10; do [ "$(denials)" -gt "$denied_before" ] && break; sleep 1; done
@@ -146,7 +189,11 @@ say "replace refused while running, naming \`machine stop $NAME\`"
 echo "== 5. contain: quarantine and terminate"
 # A frame left unread in the workload being contained: step 8 proves its
 # replacement cannot read it.
-mailbox_write_frame "$NAME" "$OWN" "$UNREAD"; sleep 3
+if [ "$DRIVER" = entrypoint ]; then
+  while [ $((SECONDS - t_first)) -lt 34 ]; do sleep 1; done
+else
+  mailbox_write_frame "$NAME" "$OWN" "$UNREAD"; sleep 3
+fi
 secret="$(state_dir)/mailbox-epoch.secret"
 [ -s "$secret" ] || fail "no per-launch secret at $secret"
 old_secret="$(sha12 "$secret")"
@@ -191,13 +238,18 @@ grep -q "\"epoch\": *2" "$MVM_HOME/host-interface/workloads.json" || fail "the l
 say "the ledger is at epoch 2"
 
 echo "== 8. the replacement runs under new keys; the old state is refused"
-launch; wait_for "the replacement to take commands" mvm machine exec "$NAME" -- true
+if [ "$DRIVER" = entrypoint ]; then
+  launch_entrypoint "$(workload_replacement)"; sleep 4
+else
+  launch; wait_for "the replacement to take commands" mvm machine exec "$NAME" -- true
+fi
 new_secret="$(sha12 "$secret")"
 [ "$new_secret" != "$old_secret" ] || fail "the replacement has the old per-launch secret"
 say "per-launch secret changed ($old_secret... -> $new_secret...)"
 [ -z "$(recv)" ] || fail "the replacement could read a message from the old workload"
 say "the frame left unread in the old workload is not readable by its replacement"
-mailbox_write_frame "$NAME" "$OWN" "$SECOND"; wait_for "a fresh message under the new epoch" got "$SECOND"
+[ "$DRIVER" = entrypoint ] || mailbox_write_frame "$NAME" "$OWN" "$SECOND"
+wait_for "a fresh message under the new epoch" got "$SECOND"
 say "a fresh message under the new epoch is read exactly"
 
 echo "== 9. the evidence"
