@@ -34,6 +34,7 @@ case "${1:-} ${2:-}" in
       exit 0
     fi
     allargs=" $* "; shift 2; name=""; hv=firecracker
+    echo "$allargs" >> "${fake}/runs"
     while [ $# -gt 0 ]; do case "$1" in --name) name="$2"; shift ;; --hypervisor) hv="$2"; shift ;; esac; shift; done
     if [ "${mode}" = needs-bootstrap ] && [ ! -f "${fake}/prepared" ]; then
       # A home that has not been prepared refuses a persistent launch; one
@@ -52,7 +53,9 @@ case "${1:-} ${2:-}" in
     case "$*" in
       true) ;;
       "cat /proc/cmdline") echo "ro mvm.mailbox=1 quiet" ;;
-      sh*wget*) [ "${FAKE_DENIAL:-}" = 1 ] && echo '{"event":"flow.egress.denied","labels":{"destination":"example.com"}}' >> "${audit}"; exit 1 ;;
+      sh*wget*) [ "${FAKE_DENIAL:-}" = 1 ] && echo '{"event":"flow.egress.denied","labels":{"destination":"blocked.example"}}' >> "${audit}"
+                [ "${FAKE_DENIAL:-}" = dns ] && echo '{"event":"dns.refused","labels":{"qname":"blocked.example","reason":"policy_denied"}}' >> "${audit}"
+                exit 1 ;;
       sh*) fill="${*: -2:1}"; body="${*: -1}"
            if [ "${fill}" = 000 ] || [ "${mode}" = queues-other ]; then echo "${body}" >> "${fake}/queue"; fi ;;
       *) echo "fake: unhandled exec: $*" >&2; exit 2 ;;
@@ -72,7 +75,9 @@ case "${1:-} ${2:-}" in
     echo "${name} may launch again under execution epoch ${e}" ;;
   "machine quarantine")
     name="$3"
-    [ "${mode}" = wedge ] && sleep 30
+    # A wedged quarantine never completes. It must not go on to write the ledger
+    # or the audit after its sleep: the shared home belongs to a later case by then.
+    [ "${mode}" = wedge ] && { sleep 30; exit 1; }
     rm -f "${fake}/running.${name}"
     if [ "$(cat "${fake}/hv" 2>/dev/null)" = hvf ]; then echo '{"schema_version":1}' > "${home}/vms/${name}/ram-scrub.json"; sleep 0.2
       echo '{"event":"plan.guest_memory_scrubbed","labels":{"scrubbed_pages":"2000"}}' >> "${audit}"; fi
@@ -112,7 +117,9 @@ grep -q 'plan.guest_memory_scrubbed' <<<"${out}" || fail "the scrub audit entry 
 run ok HYPERVISOR=firecracker EXPECT_SCRUB_AUDIT=1 >/dev/null && fail "EXPECT_SCRUB_AUDIT passed on firecracker"
 run ok HYPERVISOR=qemu >/dev/null && fail "an unsupported hypervisor was accepted"
 out="$(run ok HYPERVISOR=firecracker FAKE_DENIAL=1 EXPECT_EGRESS_DENIAL_AUDIT=1)" || fail "a run with an audited denial failed under EXPECT_EGRESS_DENIAL_AUDIT: ${out}"
-grep -q 'audited egress denial naming example.com' <<<"${out}" || fail "the audited denial was not reported: ${out}"
+grep -q 'audited egress denial naming blocked.example' <<<"${out}" || fail "the audited denial was not reported: ${out}"
+out="$(run ok HYPERVISOR=firecracker FAKE_DENIAL=dns EXPECT_EGRESS_DENIAL_AUDIT=1)" || fail "a refused name lookup (dns.refused) did not count as an audited denial: ${out}"
+grep -q 'audited egress denial naming blocked.example' <<<"${out}" || fail "the dns.refused denial was not reported: ${out}"
 run ok HYPERVISOR=firecracker EXPECT_EGRESS_DENIAL_AUDIT=1 >/dev/null && fail "EXPECT_EGRESS_DENIAL_AUDIT passed with no denial entry"
 out="$(run ok HYPERVISOR=firecracker)" || fail "a run with no denial entry failed without the strict flag: ${out}"
 grep -q '^FINDING: the refused outbound attempt left no' <<<"${out}" || fail "the missing denial entry was not reported as a FINDING: ${out}"
@@ -134,6 +141,13 @@ grep -q "DEMO_RESULT=pass" <<<"${out}" || fail "the run did not pass after prepa
 ! grep -qi "bootstrap" <<<"${out}" || fail "the run mentioned bootstrap: ${out}"
 out="$(run wedge HYPERVISOR=firecracker)" && fail "a wedged quarantine passed"
 grep -q 'WEDGE' <<<"${out}" || fail "a wedged quarantine was not reported: ${out}"
+
+# The workload is granted one host so its requests cross the vsock egress
+# channel and the endpoint's refusal is audited; ALLOW_HOST overrides it.
+out="$(run ok HYPERVISOR=firecracker)" || fail "the default run failed: ${out}"
+grep -q -- ' --allow-host example.com ' "${work}/state/runs" || fail "the granted launch carried no --allow-host example.com: $(cat "${work}/state/runs")"
+out="$(run ok HYPERVISOR=firecracker ALLOW_HOST=granted.example)" || fail "a run with ALLOW_HOST failed: ${out}"
+grep -q -- ' --allow-host granted.example ' "${work}/state/runs" || fail "ALLOW_HOST was not used: $(cat "${work}/state/runs")"
 
 # The optional egress probe: allowed and denied requests must both be audited
 # and explained; without the audit entries the run must fail.

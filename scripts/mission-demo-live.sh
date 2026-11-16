@@ -26,6 +26,13 @@
 #                      the source: sets MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build
 #   EXPECT_SCRUB_AUDIT=1   (hvf only) also require the signed
 #                      plan.guest_memory_scrubbed audit entry
+#   ALLOW_HOST         the one host the workload is granted (default example.com).
+#                      The guest has no network interface: every request leaves it
+#                      over the vsock egress channel to the host's per-VM endpoint,
+#                      and a workload with no grant has no endpoint behind that
+#                      channel, so a refusal would be invisible to the host. With a
+#                      grant, the planted request for blocked.example crosses the
+#                      channel and the endpoint's refusal is audited.
 #   EXPECT_EGRESS_DENIAL_AUDIT=1   also require that the guest's refused outbound
 #                      attempt left a flow.egress.denied or host.flow.denied
 #                      entry naming the destination. Without it a missing
@@ -65,6 +72,7 @@ set -uo pipefail
 MVMCTL="${MVMCTL:-mvmctl}"
 IMAGE="${IMAGE:-alpine}"
 WAIT_SECS="${WAIT_SECS:-120}"
+ALLOW_HOST="${ALLOW_HOST:-example.com}"
 if [ -z "${HYPERVISOR:-}" ]; then
   if [ "$(uname -s)" = Darwin ]; then HYPERVISOR=hvf; else HYPERVISOR=firecracker; fi
 fi
@@ -127,11 +135,11 @@ prepare() {
 # the launch says it is not prepared.
 start_granted() {
   local out
-  out="$(mvm machine run -d --image "$IMAGE" --mailbox "$ID" --hypervisor "$HYPERVISOR" --name "$NAME" -- "$@" 2>&1)" && return 0
+  out="$(mvm machine run -d --image "$IMAGE" --mailbox "$ID" --hypervisor "$HYPERVISOR" --allow-host "$ALLOW_HOST" --name "$NAME" -- "$@" 2>&1)" && return 0
   case "$out" in
     *"is not prepared"*)
       prepare
-      out="$(mvm machine run -d --image "$IMAGE" --mailbox "$ID" --hypervisor "$HYPERVISOR" --name "$NAME" -- "$@" 2>&1)" && return 0 ;;
+      out="$(mvm machine run -d --image "$IMAGE" --mailbox "$ID" --hypervisor "$HYPERVISOR" --allow-host "$ALLOW_HOST" --name "$NAME" -- "$@" 2>&1)" && return 0 ;;
   esac
   echo "$out" >&2; return 1
 }
@@ -146,7 +154,7 @@ n=\$(grep -o mvm.mailbox=1 /proc/cmdline | wc -l)
 if [ "\$n" = 1 ]; then b=$FIRST; else b=bad-cmdline-\$n; fi
 mbx_write 000 "\$b"
 sleep 10; mbx_write 377 $CONTAINED
-sleep 5; wget -T 4 -q -O- http://example.com >/dev/null 2>&1 || true
+sleep 5; wget -T 4 -q -O- http://blocked.example >/dev/null 2>&1 || true
 sleep 15; mbx_write 000 $UNREAD
 sleep 900
 EOS
@@ -161,7 +169,9 @@ count() { grep -rhoF "$1" "$audit_dir" 2>/dev/null | wc -l | tr -d ' '; }
 
 echo "== 1. a granted guest boots (mvmctl: $(mvm --version), $HYPERVISOR)"
 mvm image pull "$IMAGE" >/dev/null
-denials() { grep -rhE 'flow\.egress\.denied|host\.flow\.denied' "$audit_dir" 2>/dev/null | grep -cF example.com || true; }
+# A refused name lookup (dns.refused) is how the endpoint records a request for a
+# host the workload was not granted; a refused connection is a flow denial.
+denials() { grep -rhE 'flow\.egress\.denied|host\.flow\.denied|dns\.refused' "$audit_dir" 2>/dev/null | grep -cF blocked.example || true; }
 denied_before="$(denials)"
 if [ "$DRIVER" = entrypoint ]; then
   launch_entrypoint "$(workload_first)"
@@ -189,18 +199,18 @@ fi
 if [ "$DRIVER" = entrypoint ]; then
   say "the entrypoint attempted an outbound connection (its result is not visible to the host; the host's decision is checked below)"
 else
-  if mvm machine exec "$NAME" -- sh -c 'wget -T 4 -q -O- http://example.com >/dev/null 2>&1'; then fail "the guest reached the network"; fi
+  if mvm machine exec "$NAME" -- sh -c 'wget -T 4 -q -O- http://blocked.example >/dev/null 2>&1'; then fail "the guest reached the network"; fi
   say "an outbound connection from the guest failed (this shows it fails, not why)"
 fi
 # Whether the host audited the refusal is a separate question from the attempt
 # failing; give the entry a few seconds to be written before judging.
 for _ in 1 2 3 4 5 6 7 8 9 10; do [ "$(denials)" -gt "$denied_before" ] && break; sleep 1; done
 if [ "$(denials)" -gt "$denied_before" ]; then
-  say "the refused outbound attempt left an audited egress denial naming example.com"
+  say "the refused outbound attempt left an audited egress denial naming blocked.example"
 elif [ "${EXPECT_EGRESS_DENIAL_AUDIT:-0}" = 1 ]; then
-  fail "the refused outbound attempt left no flow.egress.denied or host.flow.denied entry naming example.com"
+  fail "the refused outbound attempt left no flow.egress.denied, host.flow.denied or dns.refused entry naming blocked.example"
 else
-  echo "FINDING: the refused outbound attempt left no flow.egress.denied or host.flow.denied entry naming example.com; the failure is observed but the host's decision is not audited here."
+  echo "FINDING: the refused outbound attempt left no flow.egress.denied, host.flow.denied or dns.refused entry naming blocked.example; the failure is observed but the host's decision is not audited here."
 fi
 
 echo "== 4. a running workload cannot be replaced"
