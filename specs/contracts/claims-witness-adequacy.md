@@ -96,7 +96,7 @@ activation path (tier installed per workload process); tier selection in
 `crates/mvm-runtime/src/workload_runner/runner/refusal.rs`; mount allow-list in
 `crates/mvm-core/src/crypto/policy/mount.rs` and
 `crates/mvm-cli/src/commands/shared/parse.rs`; share re-verification in
-`crates/mvm-hostd/src/plan_admission.rs`; libkrun refusal in
+`crates/mvm-hostd/src/plan_admission/shares.rs`; libkrun refusal in
 `crates/mvm-backends/src/driver/libkrun.rs`.
 
 | Witness | Where | Class |
@@ -109,7 +109,7 @@ activation path (tier installed per workload process); tier selection in
 | `validated_conversion_enforces_mount_allow_list`, `dir_share_two_part_defaults_ro` | `crates/mvm-cli/src/commands/shared/parse.rs` | OUTCOME-UNIT (by location): CLI parse-time allow-list. |
 | `bare_mnt_is_refused_because_it_shadows_the_config_drive` | `crates/mvm-core/src/crypto/policy/mount.rs` | OUTCOME-UNIT. |
 | `libkrun_refuses_any_virtio_fs_share_before_mapping` | `crates/mvm-backends/src/driver/libkrun.rs` | OUTCOME-UNIT (by location): driver config refusal, no VM. |
-| `enforce_admitted_shares_refuses_unadmitted_or_mismatched` | `crates/mvm-hostd/src/plan_admission.rs` | OUTCOME-UNIT over temp directories. |
+| `enforce_admitted_shares_refuses_unadmitted_or_mismatched` | `crates/mvm-hostd/src/plan_admission/shares_tests.rs` | OUTCOME-UNIT over temp directories. |
 
 Limits carried through (ADR-001 row and `CLAUDE.md`): a cold boot whose guest
 agent is older than the `mvm.seccomp=<tier>` token runs workloads **unfiltered**,
@@ -228,14 +228,14 @@ infer a currently clean dependency set. There is no `pull_request` trigger.
 ### Claim 8 — every workload runs from a signed, audited ExecutionPlan
 
 Enforcement: synthesis `crates/mvm-core/src/plan/synthesis.rs`; admission and
-replay `crates/mvm-hostd/src/plan_admission.rs`; chain
+replay `crates/mvm-hostd/src/plan_admission/admit.rs`; chain
 `crates/mvm-hostd/src/supervisor/audit/audit_file.rs`; sessions
 `crates/mvm-hostd/src/audit/session.rs`.
 
 | Witness | Where | Class |
 |---|---|---|
-| `synthesize_plan`, `admit_for_run`, `verify_audit_chain` | synthesis.rs, plan_admission.rs, audit_file.rs | IMPL. |
-| `a_tampered_payload_is_refused`, `an_unknown_signer_is_refused`, `a_not_yet_valid_plan_is_refused`, `a_replayed_nonce_is_refused`, `admission_refuses_before_signing`, `propagates_synthesis_failures` | `plan_admission.rs` tests | OUTCOME-UNIT: real verification code, test keys and a temp replay store. |
+| `synthesize_plan`, `admit_for_run`, `verify_audit_chain` | synthesis.rs, plan_admission/admit.rs, audit_file.rs | IMPL. |
+| `a_tampered_payload_is_refused`, `an_unknown_signer_is_refused`, `a_not_yet_valid_plan_is_refused`, `a_replayed_nonce_is_refused`, `admission_refuses_before_signing`, `propagates_synthesis_failures` | `plan_admission/` test files (`admit_tests.rs`, `grant_gate_tests.rs`, `signed_plan_admission_tests.rs`) | OUTCOME-UNIT: real verification code, test keys and a temp replay store. |
 | `naively_dropping_old_entries_fails_verification_at_line_zero`, `a_spliced_segment_is_refused`, `a_missing_segment_is_named_not_silently_skipped`, `an_interrupted_rotation_continues_history_instead_of_restarting_it` | `crates/mvm-hostd/tests/audit_chain_rotation.rs` | OUTCOME-REAL at the file level: real files, real signatures, tamper by editing bytes. |
 | `a_prune_record_that_over_claims_is_refused`, `the_same_deletion_without_a_record_is_still_refused`, `pruning_a_broken_chain_is_refused_before_anything_is_deleted` | `crates/mvm-hostd/tests/audit_chain_prune.rs` | same. |
 | `a_correctly_signed_seal_that_lies_is_refused_field_by_field`, `truncating_through_the_seal_leaves_the_session_unsealed` | `crates/mvm-hostd/src/audit/session.rs` | OUTCOME-UNIT. |
@@ -367,7 +367,7 @@ no-authority lanes in `security.yml`, which are not cited here.
 
 ### Claim 19 — assets and pinned shares content-identified; drift fails closed
 
-Enforcement: `crates/mvm-hostd/src/plan_admission.rs`
+Enforcement: `crates/mvm-hostd/src/plan_admission/shares.rs`
 (`enforce_admitted_shares`), `crates/mvm-core/src/plan/synthesis.rs`,
 `crates/mvm-contract/src/plan/types.rs`, `crates/mvm-hostd/src/audit/emitter.rs`.
 
@@ -432,7 +432,7 @@ inventory parsers or the sidecar digest binding by name; the row's
 |---|---|---|
 | 16 | `handed_placeholders_never_contain_the_secret_value`, `network_endpoint_refuses_unbound_destination`, `audit_chain_carries_no_secret_value` (all in `egress_secret_leak_gate.rs`), `substitution_is_audited_when_upstream_fails_after_send` (`terminator/flow.rs`) | OUTCOME-UNIT/real-binary integration (by location). Appropriately `Preview`. |
 | 17 | 9 witnesses in `input_gate.rs`, `network_endpoint.rs`, `network_endpoint_spawn.rs`, `workload_input_plane.rs`, `mvm-client` admission | OUTCOME-UNIT with one plane-level integration (`a_secret_split_across_two_frames_does_not_reassemble_in_the_workload`). Its permanent limits (fingerprint match is not identity; encoding and window-straddling splits defeat the scan) are in ADR-001 and are not witnessed away. |
-| 18 | 32 witnesses across `admission_budget.rs`, `plan_admission.rs`, `spawn_scope.rs`, `wall_clock.rs`, restored-child tests | Mostly OUTCOME-UNIT. Three live kernel-cgroup witnesses are GATED (`#[ignore]`, Linux + systemd). The Firecracker and HVF restored-child witnesses assert the **launch-line/argv prefix** carries the quota (the test comments say so), not an effective cgroup or scheduler bound. Firecracker has no wall-clock supervisor; libkrun CPU is declared-only. |
+| 18 | 32 witnesses across `admission_budget.rs`, `plan_admission/`, `spawn_scope.rs`, `wall_clock.rs`, restored-child tests | Mostly OUTCOME-UNIT. Three live kernel-cgroup witnesses are GATED (`#[ignore]`, Linux + systemd). The Firecracker and HVF restored-child witnesses assert the **launch-line/argv prefix** carries the quota (the test comments say so), not an effective cgroup or scheduler bound. Firecracker has no wall-clock supervisor; libkrun CPU is declared-only. |
 
 ## 5. Text-scan and weak-witness replacement proposals (not implemented)
 

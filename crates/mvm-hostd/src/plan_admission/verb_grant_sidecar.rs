@@ -1,6 +1,6 @@
 //! Persist the signed agent and drive authority consumed at guest boot.
 
-use super::write_secret_file;
+use super::launch_substrate::write_secret_file;
 use anyhow::{Context, Result};
 use mvm_core::plan::{ExecutionPlan, SignedExecutionPlan, VerbId};
 use mvm_core::protocol::vm_backend::VerbGrantEnvelope;

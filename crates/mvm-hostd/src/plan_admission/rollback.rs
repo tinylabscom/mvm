@@ -1,6 +1,12 @@
 //! One post-launch rollback and failure-audit policy for all admission callers.
 
-use super::{AdmittedPlan, AnyBackend, Result, VmId};
+use anyhow::{Context, Result};
+use mvm_contract::grants::Grants;
+use mvm_contract::protocol::resource_controls::EnforcedGrants;
+use mvm_core::vm_backend::VmId;
+use mvm_runtime::AnyBackend;
+
+use super::AdmittedPlan;
 
 /// What rolling a launch back needs to know. A struct rather than seven
 /// positional arguments, so a caller cannot silently swap the stage label for
@@ -77,4 +83,162 @@ pub(super) fn undo_launch_with(
             stop,
         }),
     }
+}
+
+/// Apply the admitted plan's grants to the VM that is now running, and report
+/// what the backend achieved.
+///
+/// After `start` rather than before, because a control needs something to
+/// attach to; the backends that bound CPU do it by placing the VMM process
+/// itself, which does not exist until then.
+///
+/// Not best-effort. A workload whose bounds could not be applied is running
+/// unbounded, so the launch is undone rather than completed alongside a record
+/// that says otherwise — the same posture the supervisor's own launch path
+/// takes.
+fn apply_admitted_grants(
+    backend: &AnyBackend,
+    vm_id: &VmId,
+    admitted: &AdmittedPlan,
+) -> Result<EnforcedGrants> {
+    let undeclared = Grants::default();
+    let grants = admitted.plan().grants.as_ref().unwrap_or(&undeclared);
+    backend
+        .as_vm_backend()
+        .apply_grants(vm_id, grants)
+        .context("applying the admitted plan's grants to the started VM")
+}
+
+/// Apply the admitted plan's grants to a VM that has just started, and undo
+/// the launch if they cannot be applied.
+///
+/// Every launch path that starts a VM itself and then applies its grants goes
+/// through here, so they share one failure posture: a backend that cannot
+/// report what bounded the VM stops it, the chain records `plan.failed` at the
+/// `grants` stage, and the error comes back. A caller never gets to substitute
+/// an all-`Declared` answer for a failed application, because that answer
+/// would then be signed into `plan.grants_enforced` as if it were the tier
+/// the host achieved.
+///
+/// `Declared` is still a legitimate *successful* answer: a host with no
+/// mechanism for a dimension reports it that way, and the boot proceeds. Only
+/// an application that errored refuses.
+///
+/// `backend` must be the object that started `vm_id`. A backend rebuilt from a
+/// name is a different object, and one that keeps per-run state in memory has
+/// nothing to read back for a VM it did not start.
+pub fn apply_admitted_grants_or_undo_launch(
+    backend: &AnyBackend,
+    vm_id: &VmId,
+    admitted: &AdmittedPlan,
+    emitter: Option<&crate::audit::emitter::AuditEmitter>,
+) -> Result<EnforcedGrants> {
+    apply_admitted_grants_with_rollback(
+        backend,
+        vm_id,
+        admitted,
+        emitter,
+        || backend.stop(vm_id).map(|_| ()),
+        FailureAuditPolicy::LegacyImmediate,
+    )
+}
+
+fn apply_admitted_grants_with_rollback(
+    backend: &AnyBackend,
+    vm_id: &VmId,
+    admitted: &AdmittedPlan,
+    emitter: Option<&crate::audit::emitter::AuditEmitter>,
+    rollback: impl FnOnce() -> Result<()>,
+    audit_policy: FailureAuditPolicy,
+) -> Result<EnforcedGrants> {
+    apply_admitted_grants(backend, vm_id, admitted).map_err(|err| {
+        undo_launch_with(
+            UndoLaunch {
+                backend,
+                vm_id,
+                admitted,
+                emitter,
+                stage: "grants",
+                reason: "grants could not be applied",
+                err,
+            },
+            rollback,
+            audit_policy,
+        )
+    })
+}
+
+/// Record what this boot committed against the host budget, rolling the
+/// launch back when the record cannot be written.
+///
+/// A missing per-VM record makes a running machine invisible to later budget
+/// admissions, so recording failure is fatal. `vm_name` keys the charge while
+/// `vm_id` identifies the machine to stop; callers must provide both.
+pub fn record_charge_or_undo_launch(
+    backend: &AnyBackend,
+    vm_id: &VmId,
+    vm_name: &str,
+    admitted: &AdmittedPlan,
+    emitter: Option<&crate::audit::emitter::AuditEmitter>,
+) -> Result<()> {
+    record_charge_with_rollback(
+        backend,
+        vm_id,
+        vm_name,
+        admitted,
+        emitter,
+        || backend.stop(vm_id).map(|_| ()),
+        FailureAuditPolicy::LegacyImmediate,
+    )
+}
+
+/// Share budget policy while the host receiver keeps original native custody.
+pub fn record_charge_with_owned_rollback(
+    backend: &AnyBackend,
+    vm_id: &VmId,
+    vm_name: &str,
+    admitted: &AdmittedPlan,
+    emitter: Option<&crate::audit::emitter::AuditEmitter>,
+    rollback: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    record_charge_with_rollback(
+        backend,
+        vm_id,
+        vm_name,
+        admitted,
+        emitter,
+        rollback,
+        FailureAuditPolicy::OwnedAfterConfirmedRollback,
+    )
+}
+
+fn record_charge_with_rollback(
+    backend: &AnyBackend,
+    vm_id: &VmId,
+    vm_name: &str,
+    admitted: &AdmittedPlan,
+    emitter: Option<&crate::audit::emitter::AuditEmitter>,
+    rollback: impl FnOnce() -> Result<()>,
+    audit_policy: FailureAuditPolicy,
+) -> Result<()> {
+    let undeclared = Grants::default();
+    let charge = crate::admission_budget::charge_for(
+        admitted.plan().resources.mem_mib,
+        admitted.plan().grants.as_ref().unwrap_or(&undeclared),
+    );
+    crate::admission_budget::record_charge(vm_name, charge).map_err(|err| {
+        undo_launch_with(
+            UndoLaunch {
+                backend,
+                vm_id,
+                admitted,
+                emitter,
+                stage: "host-budget",
+                reason: "its admitted charge could not be recorded",
+                err,
+            },
+            rollback,
+            audit_policy,
+        )
+    })
 }

@@ -72,13 +72,13 @@ const EXCEPTIONS: &[(&str, &str, &str, &str)] = &[
         "start_prepared_custodied_with_verified_runtime",
     ),
     (
-        "crates/mvm-hostd/src/plan_admission.rs",
+        "crates/mvm-hostd/src/plan_admission/start.rs",
         "module",
         "admit_and_start",
         "admit_and_start_with_verified_release",
     ),
     (
-        "crates/mvm-hostd/src/plan_admission.rs",
+        "crates/mvm-hostd/src/plan_admission/start.rs",
         "module",
         "start_admitted",
         "start_admitted_with_verified_release",
