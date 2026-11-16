@@ -1,8 +1,8 @@
 //! Length-prefixed JSON framing for the four supervisor proxies.
 //!
-//! Thin adapter over [`crate::framing`] (was `mvm_core::framing`):
+//! Thin adapter over [`mvm_core::framing`], re-exported by [`crate::framing`]:
 //! the on-wire format (4-byte big-endian length +
-//! JSON body, cap-before-alloc) and its tests live in [`crate::framing`];
+//! JSON body, cap-before-alloc) and its tests live in core;
 //! this module only maps the shared [`FrameError`] onto the
 //! path-carrying [`ProxyError`] the proxy call sites surface, and keeps
 //! the UDS [`connect`] helper.

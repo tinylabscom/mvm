@@ -52,6 +52,9 @@ pub mod exit_capture;
 /// Host-state only: only the host downloads or runs a Firecracker binary.
 #[cfg(feature = "host-state")]
 pub mod firecracker_lock;
+/// Bounded asynchronous JSON framing for host control channels.
+#[cfg(feature = "hostd-transport")]
+pub mod framing;
 /// Shared guest loopback-egress helpers (proxy env-var injection for cooperative apps).
 pub mod guest_netd;
 /// The filename of the sidecar manifest that sits beside a built rootfs.

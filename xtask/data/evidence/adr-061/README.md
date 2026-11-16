@@ -13,6 +13,10 @@ The first implementation-planning attachment is
 [P1: lower bounded host framing](framing-prerequisite-plan.md).
 It is an issue-linked planning snapshot, not implementation or landing approval.
 
+The later authorized P1 implementation is described separately in its
+[implementation report](framing-implementation-report.md), including validation
+results and environment corrections. The design snapshots below are unchanged.
+
 The JSON snapshots keep `adr_status: Proposed` and
 `acceptance_gate_cleared: false` as historical measurement-time values.
 They do not track the current ADR decision; replay cannot confer acceptance
