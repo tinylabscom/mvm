@@ -1489,6 +1489,13 @@ cache and never loads the producer library. Its trusted execution inputs
 remain the checked-out helper, pinned Python setup action, GitHub runner,
 and Apple's signing/notarization tools.
 
+The two macOS helper jobs pin Python 3.13.17, which has a Darwin ARM64
+artifact in `actions/python-versions`. The initial 3.12.16 pin was rejected
+by both macOS jobs in SDK rehearsal run 43800053469 before compilation:
+that version is available for Linux but not Darwin ARM64. Interpreter pins
+must be checked against the actual OS/architecture, not just a release number.
+The SDK package-test interpreter choices are unchanged.
+
 The producer exports the immutable artifact ID, archive digest, raw library
 digest, and producing attempt. Before the Apple credential step, the signer
 checks its checkout revision and fetches the exact same-run artifact through

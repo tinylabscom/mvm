@@ -156,6 +156,13 @@ class TransferTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_both_macos_jobs_pin_an_available_arm64_interpreter(self):
+        workflow = (ROOT / ".github/workflows/sdk-macos-hostlib.yml").read_text()
+        # Verified against actions/python-versions' Darwin ARM64 manifest;
+        # 3.12.16 exists for Linux but cannot provision these macOS jobs.
+        self.assertEqual(workflow.count('python-version: "3.13.17"'), 2)
+        self.assertNotIn('python-version: "3.12.16"', workflow)
+
     def test_signer_is_fresh_and_secrets_are_step_scoped(self):
         workflow = (ROOT / ".github/workflows/sdk-macos-hostlib.yml").read_text()
         build, signer = workflow.split("\n  sign:\n", 1)
