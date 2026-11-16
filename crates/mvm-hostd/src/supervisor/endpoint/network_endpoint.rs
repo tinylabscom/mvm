@@ -196,9 +196,6 @@ pub struct EndpointConfig {
     /// for FlowMux rather than lowered to a builder or an unbound recorder.
     #[serde(default)]
     pub audit: Option<mvm_core::audit_sink::AuditContext>,
-    /// Identity of the keeper's inherited, notification-only shutdown channel.
-    #[serde(default)]
-    pub audit_control: Option<mvm_vmm::host::audit_control::AuditBinding>,
     /// The admitted plan's `secrets` (name → source). Only
     /// [`mvm_core::plan::SecretSource::Keystore`] entries participate; the
     /// endpoint reconstructs each one's binding from the host binding store.
@@ -1126,7 +1123,6 @@ mod tests {
     fn vsock_cfg(secrets: Vec<SecretBinding>, dir: &std::path::Path) -> EndpointConfig {
         EndpointConfig {
             audit: None,
-            audit_control: None,
             telemetry: None,
             tenant_id: "local".into(),
             instance_id: "test".into(),

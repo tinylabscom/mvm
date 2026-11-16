@@ -203,7 +203,7 @@ pub fn spawn_network_endpoint_owned(
     mut params: SubstitutionSpawnParams<'_>,
 ) -> Result<OwnedEndpoint> {
     require_child_custody()?;
-    super::validate_audit_control(&params)?;
+    super::validate_audit_context(&params)?;
     if params.lifetime != EndpointLifetime::Launcher {
         bail!(
             "owned endpoint requires launcher lifetime; a VM keeper does not own the serving child"

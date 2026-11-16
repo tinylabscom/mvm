@@ -102,6 +102,8 @@ fn admitted_claim(name: &str) -> StandbyClaim {
         gateway_audit_socket: std::path::PathBuf::from("/run/mvm/gw-audit.sock"),
         gateway_events_socket: None,
         plan_json: "{}".to_string(),
+        // MockBackend starts no guest or endpoint, so there is no admitted audit identity.
+        audit_context: None,
         bundle_json: None,
         network_policy: NetworkPolicy::deny_all(),
     }

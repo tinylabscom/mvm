@@ -50,9 +50,13 @@ fn synced_temp_in(path: &Path, data: &[u8]) -> Result<tempfile::NamedTempFile> {
 /// is unguaranteed either way. Making that stronger means adding a directory
 /// fsync, not keeping a more expensive file sync.
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
-    let tmp = synced_temp_in(path, data)?;
-    tmp.persist(path)
+    let mut tmp = synced_temp_in(path, data)?;
+    // Use the same libc rename path as confined audit segment rotation, not
+    // tempfile's raw renameat syscall. Cleanup still owns the temp on failure.
+    fs::rename(tmp.path(), path)
         .with_context(|| format!("failed to persist temp file to {}", path.display()))?;
+    // The name moved; dropping the guard must not unlink a later file there.
+    tmp.disable_cleanup(true);
     Ok(())
 }
 
@@ -870,6 +874,24 @@ mod tests {
             .map(|entry| entry.expect("entry").file_name())
             .collect();
         assert_eq!(entries, vec![std::ffi::OsString::from("meta.json")]);
+    }
+
+    #[test]
+    fn atomic_write_failed_rename_cleans_the_temp_and_preserves_the_destination() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let destination = dir.path().join("occupied");
+        fs::create_dir(&destination).expect("directory");
+        fs::write(destination.join("evidence"), b"unchanged").expect("seed");
+        assert!(atomic_write_durable(&destination, b"replacement").is_err());
+        assert_eq!(
+            fs::read(destination.join("evidence")).expect("preserved"),
+            b"unchanged"
+        );
+        let entries: Vec<_> = fs::read_dir(dir.path())
+            .expect("read_dir")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("occupied")]);
     }
 
     #[test]

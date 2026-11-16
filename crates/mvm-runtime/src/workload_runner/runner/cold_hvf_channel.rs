@@ -273,9 +273,6 @@ impl ColdHvfChannel {
         }
         let native = custody.native.as_mut().context("native owner missing")?;
         preparation.launch.observe_instance(native.instance()?)?;
-        preparation.prepared.endpoint.register_audit_target(
-            mvm_vmm::host::audit_control::ShutdownTarget::Hvf(native.instance()?.clone()),
-        )?;
         native.open()?;
         durability::wait_for_owned_activation(config)?;
         crate::microvm::activation::activate_cold_hvf(native, config)?;

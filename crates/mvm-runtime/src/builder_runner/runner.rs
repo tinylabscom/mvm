@@ -250,7 +250,6 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
                 tenant: mvm_core::plan::TenantId("builder".into()),
                 name: transport.name.clone(),
             },
-            audit_control: None,
             secrets: &[],
             redaction: &RedactionPolicy::default(),
             transport: EndpointTransport::Uds {

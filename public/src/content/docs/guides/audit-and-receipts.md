@@ -292,16 +292,13 @@ These sidecars are operational health records, not signed epoch seals.
 `trust audit verify` still verifies the signed chain; a valid chain alone is
 not evidence that no host decision was lost.
 
-Production endpoints request exact-instance shutdown after three consecutive
-audit-write failures. Development endpoints keep running with incomplete
-evidence, while refusing any operation whose required authorization write fails.
-The keeper owns the shutdown; loss of that lifecycle owner itself is not a
-guarantee that the VM terminated.
-
-Post-boot registration failures also remain an unresolved ownership boundary:
-the launch path does not yet guarantee original-VM rollback before releasing
-its state. This blocks production qualification of the failure policy, even
-when the signed records and registered-target shutdown tests pass.
+In development and production, the sink refuses an operation whose required
+authorization write fails. A recovered journal permits later recorded
+operations without erasing the incomplete mark. These failures do not change
+VM lifetime: automatic termination after three consecutive production failures
+is still unimplemented work under
+[#5538](https://github.com/tinylabscom/mvm/issues/5538). Loss accounting alone
+does not satisfy that shutdown requirement.
 
 ## Rotation
 

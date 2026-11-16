@@ -191,16 +191,13 @@ ready. This is required in development as well as production. If a required flow
 record cannot be written, an allow is refused and a deny remains denied with
 incomplete host evidence.
 
-With `--prod`, three consecutive audit-write failures request shutdown through
-the keeper bound to that exact VM instance. A backend without that safe shutdown
-mechanism is refused rather than silently treated as development. Development
-keeps the workload running but does not allow unrecordable operations. A
-successful write resets the failure streak, not the incomplete evidence mark.
+The same recording rule applies in development and under `--prod`. A recovered
+journal permits later operations only after their own required writes succeed;
+successful writes reset the failure streak, not the incomplete evidence mark.
+VM lifecycle behavior is unchanged. Automatic VM termination after three
+consecutive production audit failures remains required but unimplemented; this
+audit-only change does not claim that guarantee.
 See [flow audit availability](/guides/flowmux-networking/#audit-availability-is-part-of-readiness).
-
-Production qualification is blocked by unresolved ownership and cleanup when
-post-boot audit registration fails; a successful stop request is not proof that
-every failed launch is safely torn down.
 
 ### GPU device selection
 

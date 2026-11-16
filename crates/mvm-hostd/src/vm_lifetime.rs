@@ -17,7 +17,7 @@
 //! the stop path, a failed launch's rollback — signals the keeper, whose death
 //! takes the endpoint with it.
 //!
-//! The keeper reads nothing from stdin and holds no workload secret. The endpoint
+//! The keeper reads nothing from stdin and holds no secret. The endpoint
 //! inherits the launcher's pipes directly, and the keeper points its own copies
 //! at `/dev/null` so the launcher still sees end-of-file when the endpoint
 //! exits.
@@ -28,8 +28,6 @@ use std::process::{Child, Command, ExitStatus};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-
-mod audit_control;
 
 pub use mvm_vmm::host::network_endpoint_spawn::VM_LIFETIME_FLAG;
 
@@ -69,16 +67,6 @@ pub fn requested_vm_state_dir(args: impl IntoIterator<Item = OsString>) -> Resul
 pub fn keep_endpoint_for_vm(mut endpoint: Command, vm_state_dir: &Path) -> i32 {
     // SAFETY: `getppid` is async-signal-safe and infallible.
     let launcher = unsafe { libc::getppid() };
-    let control = match mvm_vmm::host::audit_control::KeeperControl::from_env() {
-        Ok(control) => control,
-        Err(error) => {
-            eprintln!("mvm-network-endpoint keeper: invalid audit control: {error}");
-            return 1;
-        }
-    };
-    if let Some(control) = &control {
-        control.configure_endpoint(&mut endpoint);
-    }
     let child = match endpoint.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -87,24 +75,8 @@ pub fn keep_endpoint_for_vm(mut endpoint: Command, vm_state_dir: &Path) -> i32 {
         }
     };
     release_launcher_pipes();
-    let audit = match control
-        .map(|control| {
-            std::thread::Builder::new()
-                .name("mvm-audit-stop".into())
-                .spawn(move || audit_control::serve(control))
-        })
-        .transpose()
-    {
-        Ok(audit) => audit,
-        Err(error) => {
-            eprintln!("mvm-network-endpoint keeper: audit control failed: {error}");
-            let mut child = child;
-            stop(&mut child);
-            return 1;
-        }
-    };
     let state_dir = vm_state_dir.to_path_buf();
-    let status = keep_with_audit(
+    keep(
         child,
         &Probes {
             launcher_alive: &move || launcher_is_alive(launcher),
@@ -113,19 +85,7 @@ pub fn keep_endpoint_for_vm(mut endpoint: Command, vm_state_dir: &Path) -> i32 {
             },
         },
         POLL_INTERVAL,
-        audit.as_ref(),
-    );
-    if let Some(audit) = audit {
-        match audit.join() {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                eprintln!("mvm-network-endpoint keeper: audit shutdown unconfirmed: {error:#}");
-                return 1;
-            }
-            Err(_) => return 1,
-        }
-    }
-    status
+    )
 }
 
 /// The two questions the keeper asks on every poll.
@@ -139,22 +99,8 @@ pub(crate) fn endpoint_needed(launcher_alive: bool, vm_alive: bool) -> bool {
     launcher_alive || vm_alive
 }
 
-#[cfg(test)]
-fn keep(child: Child, probes: &Probes<'_>, interval: Duration) -> i32 {
-    keep_with_audit(child, probes, interval, None)
-}
-
-fn keep_with_audit(
-    mut child: Child,
-    probes: &Probes<'_>,
-    interval: Duration,
-    audit: Option<&std::thread::JoinHandle<Result<()>>>,
-) -> i32 {
+fn keep(mut child: Child, probes: &Probes<'_>, interval: Duration) -> i32 {
     loop {
-        if audit.is_some_and(std::thread::JoinHandle::is_finished) {
-            stop(&mut child);
-            return 1;
-        }
         match child.try_wait() {
             Ok(Some(status)) => return exit_code(status),
             Ok(None) => {}
@@ -360,24 +306,5 @@ mod tests {
         assert!(launcher_is_alive(parent));
         assert!(!launcher_is_alive(parent + 1));
         assert!(!launcher_is_alive(1));
-    }
-
-    #[test]
-    fn completed_audit_shutdown_reaps_the_endpoint_even_with_a_live_launcher() {
-        let child = sleeper();
-        let pid = child.id();
-        let audit = std::thread::spawn(|| Ok(()));
-        let status = keep_with_audit(
-            child,
-            &Probes {
-                launcher_alive: &|| true,
-                vm_alive: &|| true,
-            },
-            FAST,
-            Some(&audit),
-        );
-        assert_eq!(status, 1);
-        assert!(audit.join().unwrap().is_ok());
-        assert!(!running(pid));
     }
 }

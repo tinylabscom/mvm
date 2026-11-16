@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::*;
 use crate::supervisor::audit::audit_file::FileAuditSigner;
@@ -7,12 +7,11 @@ use crate::supervisor::audit::signer::{
     AuditError, AuditSigner, CapturingAuditSigner, PlanAuditEntry,
 };
 
-fn context(mode: AuditFailureMode) -> AuditContext {
+fn context() -> AuditContext {
     let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
     plan.execution_epoch = 7;
     AuditContext::Workload {
         plan: Box::new(plan),
-        mode,
     }
 }
 
@@ -30,11 +29,70 @@ fn runtime() -> tokio::runtime::Runtime {
 }
 
 #[test]
+fn health_creation_never_resets_existing_or_interrupted_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = runtime();
+    let health = dir.path().join("health.json");
+    for previous in [b"".as_slice(), b"previous epoch evidence"] {
+        std::fs::write(&health, previous).unwrap();
+        let signer = Arc::new(CapturingAuditSigner::new());
+        let error = BoundRecorder::builder(
+            recorder(signer.clone()),
+            runtime.handle().clone(),
+            context(),
+        )
+        .health_file(health.clone())
+        .build()
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&health).unwrap(), previous);
+        assert!(signer.entries().is_empty());
+    }
+}
+
+#[test]
+fn health_updates_stay_private_and_replace_symlinks_without_following_them() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = runtime();
+    let health = dir.path().join("health.json");
+    let sink = BoundRecorder::builder(
+        recorder(Arc::new(CapturingAuditSigner::new())),
+        runtime.handle().clone(),
+        context(),
+    )
+    .health_file(health.clone())
+    .build()
+    .unwrap();
+    assert_eq!(
+        std::fs::metadata(&health).unwrap().permissions().mode() & 0o177,
+        0,
+        "health evidence must not grant execute, group, or other access"
+    );
+    let unrelated = dir.path().join("unrelated");
+    std::fs::write(&unrelated, b"untouched").unwrap();
+    std::fs::remove_file(&health).unwrap();
+    symlink(&unrelated, &health).unwrap();
+    sink.suppress_denial();
+    sink.flush_health().unwrap();
+    assert_eq!(std::fs::read(&unrelated).unwrap(), b"untouched");
+    assert!(!std::fs::symlink_metadata(&health).unwrap().is_symlink());
+    assert_eq!(
+        std::fs::metadata(&health).unwrap().permissions().mode() & 0o177,
+        0
+    );
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&health).unwrap()).unwrap();
+    assert_eq!(saved["health"]["denials_suppressed"], 1);
+}
+
+#[test]
 fn binding_overwrites_forged_identity_labels_with_the_admitted_plan() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = runtime();
     let signer = Arc::new(CapturingAuditSigner::new());
-    let mut context = context(AuditFailureMode::Development);
+    let mut context = context();
     if let AuditContext::Workload { plan, .. } = &mut context {
         plan.audit_labels
             .insert("builder".into(), "forged-builder".into());
@@ -83,14 +141,10 @@ fn assembled_async_consumers_share_binding_and_never_fall_back_after_sink_expiry
     let recorder = recorder(signer.clone());
     let assembled_consumer = recorder.as_ref().clone();
     let sink = Arc::new(
-        BoundRecorder::builder(
-            Arc::clone(&recorder),
-            runtime.handle().clone(),
-            context(AuditFailureMode::Development),
-        )
-        .health_file(dir.path().join("health.json"))
-        .build()
-        .unwrap(),
+        BoundRecorder::builder(Arc::clone(&recorder), runtime.handle().clone(), context())
+            .health_file(dir.path().join("health.json"))
+            .build()
+            .unwrap(),
     );
     let shared: Arc<dyn AuditSink> = sink.clone();
     recorder.bind_audit_sink(&shared).unwrap();
@@ -193,7 +247,7 @@ fn builder_reboots_keep_distinct_health_records_while_workload_binding_is_stable
         BoundRecorder::health_path(root, &builder).unwrap(),
         BoundRecorder::health_path(root, &builder).unwrap(),
     );
-    let workload = context(AuditFailureMode::Development);
+    let workload = context();
     assert_eq!(
         BoundRecorder::health_path(root, &workload).unwrap(),
         BoundRecorder::health_path(root, &workload).unwrap(),
@@ -216,28 +270,18 @@ impl AuditSigner for SwitchableSigner {
 }
 
 #[test]
-fn flow_and_async_service_failures_share_one_production_streak() {
+fn flow_and_async_service_failures_share_one_streak() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = runtime();
     let signer = Arc::new(SwitchableSigner {
         fail: AtomicBool::new(false),
     });
     let recorder = recorder(signer.clone());
-    let stops = Arc::new(AtomicUsize::new(0));
-    let observed = Arc::clone(&stops);
     let sink = Arc::new(
-        BoundRecorder::builder(
-            Arc::clone(&recorder),
-            runtime.handle().clone(),
-            context(AuditFailureMode::Production),
-        )
-        .health_file(dir.path().join("health.json"))
-        .on_stop(Arc::new(move || {
-            observed.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }))
-        .build()
-        .unwrap(),
+        BoundRecorder::builder(Arc::clone(&recorder), runtime.handle().clone(), context())
+            .health_file(dir.path().join("health.json"))
+            .build()
+            .unwrap(),
     );
     let shared: Arc<dyn AuditSink> = sink.clone();
     recorder.bind_audit_sink(&shared).unwrap();
@@ -254,61 +298,24 @@ fn flow_and_async_service_failures_share_one_production_streak() {
     );
     sink.suppress_denial();
     assert_eq!(sink.health().consecutive_write_failures, 2);
-    assert_eq!(stops.load(Ordering::SeqCst), 0);
     assert!(shared.record("dns.refused", BTreeMap::new()).is_err());
-    assert_eq!(stops.load(Ordering::SeqCst), 1);
     assert_eq!(sink.health().write_failures, 3);
-}
 
-#[test]
-fn a_production_sink_requires_a_real_stop_notifier_before_readiness() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime();
-    let result = BoundRecorder::builder(
-        recorder(Arc::new(CapturingAuditSigner::new())),
-        runtime.handle().clone(),
-        context(AuditFailureMode::Production),
-    )
-    .health_file(dir.path().join("health.json"))
-    .build();
-    assert!(result.is_err());
-    assert!(!dir.path().join("health.json").exists());
-}
-
-#[test]
-fn third_failed_write_notifies_once_and_latches_production_closed() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime();
-    let signer = Arc::new(SwitchableSigner {
-        fail: AtomicBool::new(false),
-    });
-    let stopped = Arc::new(AtomicUsize::new(0));
-    let stop_count = Arc::clone(&stopped);
-    let sink = BoundRecorder::builder(
-        recorder(signer.clone()),
-        runtime.handle().clone(),
-        context(AuditFailureMode::Production),
-    )
-    .health_file(dir.path().join("health.json"))
-    .on_stop(Arc::new(move || {
-        stop_count.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }))
-    .build()
-    .unwrap();
-    signer.fail.store(true, Ordering::SeqCst);
-    for n in 1..=3 {
-        assert!(sink.record("host.flow.allowed", BTreeMap::new()).is_err());
-        assert_eq!(stopped.load(Ordering::SeqCst), usize::from(n == 3));
-    }
     signer.fail.store(false, Ordering::SeqCst);
-    assert!(sink.record("host.flow.allowed", BTreeMap::new()).is_err());
-    assert_eq!(stopped.load(Ordering::SeqCst), 1);
+    runtime
+        .block_on(recorder.record_unbound(
+            EventCategory::Host,
+            "host.flow.allowed",
+            BTreeMap::new(),
+        ))
+        .unwrap();
+    assert_eq!(sink.health().consecutive_write_failures, 0);
+    assert_eq!(sink.health().write_failures, 3);
     assert!(sink.health().host_record_incomplete());
 }
 
 #[test]
-fn development_keeps_running_but_success_does_not_erase_the_incomplete_mark() {
+fn repeated_write_errors_remain_counted_and_recovery_preserves_incomplete_evidence() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = runtime();
     let signer = Arc::new(SwitchableSigner {
@@ -317,25 +324,31 @@ fn development_keeps_running_but_success_does_not_erase_the_incomplete_mark() {
     let sink = BoundRecorder::builder(
         recorder(signer.clone()),
         runtime.handle().clone(),
-        context(AuditFailureMode::Development),
+        context(),
     )
     .health_file(dir.path().join("health.json"))
     .build()
     .unwrap();
+
     signer.fail.store(true, Ordering::SeqCst);
     for _ in 0..4 {
-        assert!(sink.record("host.flow.denied", BTreeMap::new()).is_err());
+        assert!(sink.record("host.flow.allowed", BTreeMap::new()).is_err());
     }
+    assert_eq!(sink.health().write_failures, 4);
+    assert_eq!(sink.health().consecutive_write_failures, 4);
+
     signer.fail.store(false, Ordering::SeqCst);
     sink.record("host.flow.allowed", BTreeMap::new()).unwrap();
     assert_eq!(sink.health().consecutive_write_failures, 0);
     assert_eq!(sink.health().write_failures, 4);
+    assert!(sink.health().host_record_incomplete());
     sink.suppress_denial();
     sink.suppress_denial();
     sink.flush_health().unwrap();
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.path().join("health.json")).unwrap()).unwrap();
     assert_eq!(saved["completeness"], "host_record_incomplete");
+    assert_eq!(saved["health"]["write_failures"], 4);
     assert_eq!(saved["health"]["denials_suppressed"], 2);
 }
 
@@ -352,7 +365,7 @@ fn an_unwritable_journal_marks_the_epoch_before_returning_the_error() {
     let sink = BoundRecorder::builder(
         recorder(Arc::new(signer)),
         runtime.handle().clone(),
-        context(AuditFailureMode::Development),
+        context(),
     )
     .health_file(health.clone())
     .build()

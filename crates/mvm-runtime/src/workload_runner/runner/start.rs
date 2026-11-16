@@ -37,7 +37,6 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         &self,
         inputs: &WorkloadLaunchInputs<'_>,
     ) -> Result<PreparedWorkloadBoot> {
-        self.require_audit_shutdown_backend(inputs.config.audit_context.as_ref())?;
         // A caller times this call from outside and cannot see past it, yet the
         // VMM boot and every post-boot registration happen in here. Off unless
         // a measurement asked for it.
@@ -225,9 +224,6 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         if let Some(kernel) = kernel {
             kernel.observe_booted(&*vm)?;
         }
-        endpoint
-            .register_audit_vm(&*vm)
-            .context("register production audit shutdown")?;
         trace.mark("console_stream_start");
 
         // Universal initramfs path: the guest PID-1 agent waits for a signed
@@ -253,27 +249,6 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         trace.degrade_unless("host_services", broker_guard.services_healthy(&services));
         trace.write_to(&state_dir);
         Ok(vm)
-    }
-
-    pub(super) fn require_audit_shutdown_backend(
-        &self,
-        audit: Option<&mvm_core::audit_sink::AuditContext>,
-    ) -> Result<()> {
-        if audit
-            .is_some_and(|audit| audit.mode() == mvm_core::audit_sink::AuditFailureMode::Production)
-        {
-            use mvm_core::vm_backend::BackendKind;
-            let supported = match self.driver.kind() {
-                BackendKind::Hvf => cfg!(all(target_os = "macos", target_arch = "aarch64")),
-                BackendKind::Firecracker => cfg!(target_os = "linux"),
-                _ => false,
-            };
-            anyhow::ensure!(
-                supported,
-                "backend cannot enforce production audit shutdown on this host"
-            );
-        }
-        Ok(())
     }
 
     pub(super) fn register_workload_broker(

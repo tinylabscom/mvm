@@ -242,8 +242,8 @@ pub struct VmStartConfig {
     /// secret bindings, env vars, or policy refs that resolve to
     /// credentials.
     pub plan_json: Option<String>,
-    /// Audit identity and failure mode projected by the admitting host.
-    /// Missing context never means a builder or a development workload.
+    /// Audit identity projected by the admitting host.
+    /// Missing context never implies a builder identity.
     pub audit_context: Option<crate::audit_sink::AuditContext>,
     /// Optional caller registration from the trusted entrypoint admission path.
     /// This is not producer readiness and is not accepted by warm launches.

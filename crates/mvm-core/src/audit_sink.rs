@@ -7,30 +7,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::plan::{ExecutionPlan, TenantId};
 
-/// The host's explicit audit identity and failure policy for an endpoint.
+/// The host's explicit audit identity for an endpoint.
 ///
 /// This is launch configuration, not a new authorization source. Workload
 /// callers construct it only from their admitted plan.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AuditContext {
-    Workload {
-        plan: Box<ExecutionPlan>,
-        mode: AuditFailureMode,
-    },
-    Builder {
-        tenant: TenantId,
-        name: String,
-    },
+    Workload { plan: Box<ExecutionPlan> },
+    Builder { tenant: TenantId, name: String },
 }
 
 impl std::fmt::Debug for AuditContext {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Workload { plan, mode } => formatter
+            Self::Workload { plan } => formatter
                 .debug_struct("WorkloadAudit")
                 .field("plan_id", &plan.plan_id)
-                .field("mode", mode)
                 .finish_non_exhaustive(),
             Self::Builder { tenant, name } => formatter
                 .debug_struct("BuilderAudit")
@@ -45,16 +38,8 @@ impl AuditContext {
     #[must_use]
     pub fn plan(&self) -> Option<&ExecutionPlan> {
         match self {
-            Self::Workload { plan, .. } => Some(plan),
+            Self::Workload { plan } => Some(plan),
             Self::Builder { .. } => None,
-        }
-    }
-
-    #[must_use]
-    pub fn mode(&self) -> AuditFailureMode {
-        match self {
-            Self::Workload { mode, .. } => *mode,
-            Self::Builder { .. } => AuditFailureMode::Development,
         }
     }
 
@@ -66,7 +51,7 @@ impl AuditContext {
     /// execution epoch is not a binding for this endpoint.
     pub fn validate_for(&self, tenant: &str, name: &str) -> io::Result<()> {
         let matches = match self {
-            Self::Workload { plan, .. } => {
+            Self::Workload { plan } => {
                 plan.tenant.0 == tenant
                     && plan.workload.0 == name
                     && !plan.plan_id.0.is_empty()
@@ -98,8 +83,8 @@ pub trait AuditSink: Send + Sync {
     /// # Errors
     ///
     /// Failure means the caller must refuse an allow. The implementation marks
-    /// its bound epoch incomplete before returning the error and notifies the
-    /// lifecycle owner when the production failure threshold is reached.
+    /// its bound epoch incomplete before returning the error. Workload lifetime
+    /// is outside this interface.
     fn record(&self, event: &str, labels: BTreeMap<String, String>) -> io::Result<()>;
 
     /// Count an enforced denial whose repeated record was suppressed.
@@ -116,14 +101,6 @@ pub trait AuditSink: Send + Sync {
     fn flush_health(&self) -> io::Result<()>;
 }
 
-/// Whether repeated audit failures require termination of the bound workload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuditFailureMode {
-    Development,
-    Production,
-}
-
 /// Loss accounting shared by every session of one bound execution epoch.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -132,9 +109,6 @@ pub struct AuditHealth {
     pub write_failures: u64,
     pub denials_suppressed: u64,
 }
-
-/// Three successive failed writes make a production boundary unauditable.
-const STOP_AFTER_FAILURES: u64 = 3;
 
 impl AuditHealth {
     /// A successful append resets the streak, not the epoch's missing records.
@@ -156,12 +130,6 @@ impl AuditHealth {
     #[must_use]
     pub fn host_record_incomplete(&self) -> bool {
         self.write_failures != 0
-    }
-
-    #[must_use]
-    pub fn must_stop(&self, mode: AuditFailureMode) -> bool {
-        mode == AuditFailureMode::Production
-            && self.consecutive_write_failures >= STOP_AFTER_FAILURES
     }
 }
 

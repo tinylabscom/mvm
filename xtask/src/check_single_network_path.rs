@@ -367,19 +367,24 @@ fn check_network_flow_channels(workspace: &Path) -> Result<()> {
 /// Files permitted to decide a peer target.
 ///
 /// The peer namespace and the host-name namespace share one input, and the
-/// branch between them lives in exactly one place: `EgressGate::decide_target`.
+/// branch between them lives in exactly one place: `EgressGate::decide_target_with`.
 /// A second copy of that branch is how one of the two paths quietly stops being
 /// gated — the copy gets a new caller, the caller drifts, and nothing says so.
 const PEER_BRANCH_OWNER: &str = "crates/mvm-vmm/src/vsock_egress_bridge/egress_gate.rs";
 
-/// The connect sites that route a guest target through the gate. Each must go
-/// through `decide_target`.
-const PEER_BRANCH_CALLERS: &[&str] =
-    &["crates/mvm-hostd/src/supervisor/endpoint/flowmux/open_flow.rs"];
+const TARGET_CALLER: &str = "crates/mvm-hostd/src/supervisor/endpoint/flowmux/open_flow.rs";
+const TARGET_WRAPPER: &str = "crates/mvm-hostd/src/supervisor/endpoint/flowmux/dns_decision.rs";
+
+/// The one connect path: the wrapper journals DNS admission inside the gate's
+/// resolver closure, before the DNS effect, without owning a second policy branch.
+const PEER_BRANCH_CALLERS: &[(&str, &str)] = &[
+    (TARGET_CALLER, "dns_decision::decide_target("),
+    (TARGET_WRAPPER, "gate.decide_target_with("),
+];
 
 /// The module tree those connect sites live in. No file here may call
 /// `decide_peer` or re-derive the branch itself — stated over the whole tree
-/// rather than over the one file that calls `decide_target`, so splitting the
+/// rather than over the files in the delegation chain, so splitting the
 /// connect path into a new sibling cannot move a second branch out from under
 /// the check.
 const PEER_BRANCH_NON_DERIVERS: &[&str] = &[
@@ -414,26 +419,30 @@ fn check_single_peer_resolver(workspace: &Path) -> Result<()> {
              is the single decision point; a second one is a second policy."
         );
     }
-    if !owner.contains("pub fn decide_target") {
+    if !owner.contains("pub fn decide_target_with(") {
         bail!(
-            "check-single-network-path: {PEER_BRANCH_OWNER} must expose `decide_target` \
+            "check-single-network-path: {PEER_BRANCH_OWNER} must expose `decide_target_with` \
              as the one entry point every workload connect goes through"
         );
     }
 
-    // Every connect site goes through it.
-    for rel in PEER_BRANCH_CALLERS {
+    // Every link in the audited connect path must exist exactly once.
+    for (rel, call) in PEER_BRANCH_CALLERS {
         let src = production_code(&read(workspace, rel)?);
-        if !src.contains("gate.decide_target(") {
+        let calls = src.matches(call).count();
+        if calls != 1 {
             bail!(
-                "check-single-network-path: {rel} must decide its guest target via \
-                 `gate.decide_target(..)`. A connect site that resolves a target another \
-                 way is outside the gate."
+                "check-single-network-path: {rel} must make exactly one `{call}` call, \
+                 found {calls}. Workload connects must use the audited wrapper and \
+                 its single call to the peer/host branch owner."
             );
         }
     }
 
     // And nothing in the tree they live in reaches past it.
+    let bypass =
+        Regex::new(r"(?:\.|::)\s*decide_target(?:_with)?\s*\(|\bdecide_request(?:_with)?\s*\(")
+            .expect("static target bypass regex");
     let mut derived = Vec::new();
     for rel in PEER_BRANCH_NON_DERIVERS {
         let path = workspace.join(rel);
@@ -444,13 +453,24 @@ fn check_single_peer_resolver(workspace: &Path) -> Result<()> {
             if code.contains("decide_peer(") {
                 derived.push(format!(
                     "{file} calls `decide_peer` directly, bypassing the peer/host branch \
-                     in {PEER_BRANCH_OWNER}. Call `decide_target`."
+                     in {PEER_BRANCH_OWNER}. Use the audited target decision path."
                 ));
             }
             if code.contains("is_peer_target") {
                 derived.push(format!(
                     "{file} re-derives the peer/host branch. The branch belongs to \
                      {PEER_BRANCH_OWNER} alone."
+                ));
+            }
+            // Exempt only this file's pinned link, not the rest of its gate calls.
+            let remaining = match PEER_BRANCH_CALLERS.iter().find(|(rel, _)| *rel == file) {
+                Some((_, call)) => code.replace(call, ""),
+                None => code.to_string(),
+            };
+            if bypass.is_match(&remaining) {
+                derived.push(format!(
+                    "{file} resolves a target outside the audited delegation \
+                     {TARGET_CALLER} -> {TARGET_WRAPPER} -> {PEER_BRANCH_OWNER}."
                 ));
             }
         })?;
@@ -527,7 +547,10 @@ fn peer_refusal_violations(sources: &[(String, String)]) -> Vec<String> {
     let mut violations = Vec::new();
     let mut refusing = Vec::new();
     for (file, code) in sources {
-        if code.contains("decide_peer(") || code.contains("decide_target(") {
+        if code.contains("decide_peer(")
+            || code.contains("decide_target(")
+            || code.contains("decide_target_with(")
+        {
             violations.push(format!(
                 "{file} resolves a peer target. It is a refusal site: peer traffic goes over \
                  FlowMux, not the substitution proxy. If that is meant to change, change it \
@@ -1082,6 +1105,170 @@ mod tests {
         )
     }
 
+    const AUDITED_TARGET_CALL: &str = "fn open() {
+        super::dns_decision::decide_target(gate, sink, id, host, port, resolver);
+    }";
+    const AUDITED_TARGET_WRAPPER: &str = "pub(super) fn decide_target() {
+        gate.decide_target_with(host, port, |name| {
+            decision_audit::record(sink, \"dns.admitted\", labels)?;
+            resolver(name)
+        });
+    }";
+
+    fn write_peer_source(workspace: &Path, rel: &str, code: &str) {
+        let path = workspace.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, code).unwrap();
+    }
+
+    fn peer_workspace() -> tempfile::TempDir {
+        let workspace = tempfile::tempdir().unwrap();
+        for (rel, code) in [
+            (
+                PEER_BRANCH_OWNER,
+                "pub fn decide_target_with() { PeerName::is_peer_target(host); }",
+            ),
+            (TARGET_CALLER, AUDITED_TARGET_CALL),
+            (TARGET_WRAPPER, AUDITED_TARGET_WRAPPER),
+            (
+                PEER_BRANCH_NON_DERIVERS[0],
+                "mod open_flow; mod dns_decision;",
+            ),
+            (PEER_REFUSAL_SITES[0], "mod prepare;"),
+            (
+                "crates/mvm-hostd/src/supervisor/endpoint/network_endpoint_proxy/prepare.rs",
+                "fn prepare() { PeerName::is_peer_target(host); }",
+            ),
+        ] {
+            write_peer_source(workspace.path(), rel, code);
+        }
+        workspace
+    }
+
+    #[test]
+    fn audited_target_delegation_keeps_one_peer_resolver() {
+        let workspace = peer_workspace();
+        check_single_peer_resolver(workspace.path()).unwrap();
+    }
+
+    #[test]
+    fn a_missing_audited_target_wrapper_is_refused() {
+        let workspace = peer_workspace();
+        std::fs::remove_file(workspace.path().join(TARGET_WRAPPER)).unwrap();
+        let error = check_single_peer_resolver(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains(TARGET_WRAPPER), "{error:#}");
+    }
+
+    #[test]
+    fn each_audited_target_link_must_call_its_owner_once() {
+        for (rel, code) in [
+            (TARGET_CALLER, AUDITED_TARGET_CALL),
+            (TARGET_WRAPPER, AUDITED_TARGET_WRAPPER),
+        ] {
+            let workspace = peer_workspace();
+            for (replacement, count) in [
+                (
+                    format!("/* {code} */\n#[cfg(test)] mod tests {{ {code} }}"),
+                    0,
+                ),
+                (format!("{code}\n{code}"), 2),
+            ] {
+                write_peer_source(workspace.path(), rel, &replacement);
+                let error = check_single_peer_resolver(workspace.path()).unwrap_err();
+                let message = error.to_string();
+                assert!(
+                    message.contains(rel) && message.contains(&format!("found {count}")),
+                    "{error:#}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn peer_resolver_bypasses_in_any_flowmux_file_are_refused() {
+        for rel in [
+            PEER_BRANCH_NON_DERIVERS[0],
+            TARGET_CALLER,
+            TARGET_WRAPPER,
+            "crates/mvm-hostd/src/supervisor/endpoint/flowmux/nested/bypass.rs",
+        ] {
+            for bypass in [
+                "gate.decide_peer(host, port);",
+                "PeerName::is_peer_target(host);",
+                "gate.decide_target(host, port);",
+                "EgressGate::decide_target_with(gate, host, port, resolver);",
+                "gate.decide_request_with(target, resolver);",
+            ] {
+                let workspace = peer_workspace();
+                let path = workspace.path().join(rel);
+                let existing = if path.exists() {
+                    std::fs::read_to_string(path).unwrap()
+                } else {
+                    String::new()
+                };
+                write_peer_source(
+                    workspace.path(),
+                    rel,
+                    &format!("{existing}\nfn bypass() {{ {bypass} }}"),
+                );
+                let error = check_single_peer_resolver(workspace.path()).unwrap_err();
+                assert!(error.to_string().contains(rel), "{bypass}: {error:#}");
+            }
+        }
+    }
+
+    #[test]
+    fn audited_target_links_cannot_move_to_a_sibling() {
+        let sibling = "crates/mvm-hostd/src/supervisor/endpoint/flowmux/nested/bypass.rs";
+        for call in [
+            "gate.decide_target_with(host, port, resolver);",
+            "super::dns_decision::decide_target(gate, sink, id, host, port, resolver);",
+        ] {
+            let workspace = peer_workspace();
+            write_peer_source(
+                workspace.path(),
+                sibling,
+                &format!("fn bypass() {{ {call} }}"),
+            );
+            let error = check_single_peer_resolver(workspace.path()).unwrap_err();
+            assert!(error.to_string().contains(sibling), "{call}: {error:#}");
+        }
+    }
+
+    #[test]
+    fn the_peer_branch_must_have_exactly_one_owner() {
+        for branches in [
+            "",
+            "PeerName::is_peer_target(a); PeerName::is_peer_target(b);",
+        ] {
+            let workspace = peer_workspace();
+            write_peer_source(
+                workspace.path(),
+                PEER_BRANCH_OWNER,
+                &format!("pub fn decide_target_with() {{ {branches} }}"),
+            );
+            let error = check_single_peer_resolver(workspace.path()).unwrap_err();
+            assert!(error.to_string().contains(PEER_BRANCH_OWNER), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn the_peer_owner_must_expose_the_resolver_aware_entry_point() {
+        let workspace = peer_workspace();
+        write_peer_source(
+            workspace.path(),
+            PEER_BRANCH_OWNER,
+            "pub fn decide_target() { PeerName::is_peer_target(host); }",
+        );
+        let error = check_single_peer_resolver(workspace.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("must expose `decide_target_with`"),
+            "{error:#}"
+        );
+    }
+
     #[test]
     fn one_route_decision_at_the_endpoint_is_clean() {
         let sources = [(ROUTE_DECISION_OWNER.into(), "gate.decide_route(a)".into())];
@@ -1123,16 +1310,21 @@ mod tests {
 
     #[test]
     fn a_proxy_file_resolving_a_peer_target_is_named() {
-        let sources = [
-            proxy_file(
-                "prepare.rs",
-                "if PeerName::is_peer_target(host) { refuse() }",
-            ),
-            proxy_file("pipeline.rs", "let v = gate.decide_target(host);"),
-        ];
-        let violations = peer_refusal_violations(&sources);
-        assert_eq!(violations.len(), 1, "{violations:?}");
-        assert!(violations[0].contains("pipeline.rs resolves a peer target"));
+        for call in [
+            "gate.decide_target(host, port)",
+            "gate.decide_target_with(host, port, resolver)",
+        ] {
+            let sources = [
+                proxy_file(
+                    "prepare.rs",
+                    "if PeerName::is_peer_target(host) { refuse() }",
+                ),
+                proxy_file("pipeline.rs", call),
+            ];
+            let violations = peer_refusal_violations(&sources);
+            assert_eq!(violations.len(), 1, "{violations:?}");
+            assert!(violations[0].contains("pipeline.rs resolves a peer target"));
+        }
     }
 
     #[test]

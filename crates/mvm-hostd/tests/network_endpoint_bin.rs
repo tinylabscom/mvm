@@ -603,7 +603,6 @@ fn a_flowmux_endpoint_refuses_zero_limits_decoded_from_config() {
 fn test_config(transport: EndpointTransport) -> EndpointConfig {
     EndpointConfig {
         audit: Some(builder_audit("test")),
-        audit_control: None,
         tenant_id: "local".into(),
         instance_id: "test".into(),
         secrets: vec![],

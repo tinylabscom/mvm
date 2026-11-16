@@ -1,5 +1,5 @@
 use super::*;
-use mvm_core::audit_sink::{AuditContext, AuditFailureMode};
+use mvm_core::audit_sink::AuditContext;
 use mvm_hostd::supervisor::endpoint::network_endpoint::FlowMuxIdentity;
 
 fn flow_config(socket: &std::path::Path) -> (EndpointConfig, ed25519_dalek::SigningKey) {
@@ -22,6 +22,7 @@ fn flow_config(socket: &std::path::Path) -> (EndpointConfig, ed25519_dalek::Sign
 fn refused_start(cfg: &EndpointConfig, home: &std::path::Path) -> std::process::Output {
     let mut child = Command::new(BIN)
         .env("MVM_HOME", home)
+        .env("HOME", home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -89,7 +90,6 @@ fn twenty_fresh_endpoint_sessions_record_each_plan_bound_denial_before_response(
         plan.execution_epoch = epoch;
         cfg.audit = Some(AuditContext::Workload {
             plan: Box::new(plan.clone()),
-            mode: AuditFailureMode::Development,
         });
         let mut child = Command::new(BIN)
             .stdin(Stdio::piped())

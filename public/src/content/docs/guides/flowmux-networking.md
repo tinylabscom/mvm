@@ -157,18 +157,15 @@ the epoch's host record incomplete. Repeated UDP denials retain their
 once-per-destination suppression, with suppressed repeats counted separately.
 Reconnecting does not reset the endpoint's write-failure streak.
 
-Under `--prod`, three consecutive write failures latch the endpoint closed and
-notify the VM's keeper to stop the exact registered workload instance. A
-successful write resets the streak, not the incomplete mark. Development keeps
-the workload running, but still refuses an operation whose authorization cannot
-be recorded. Production startup refuses a backend without the required safe
-shutdown mechanism. A stop request is not proof of termination: a failed backend
-stop is reported as unconfirmed rather than retried against a VM name or PID.
+This recording rule applies in development and under `--prod`. If the journal
+recovers, later operations may proceed only after their own required write
+succeeds. Success resets the failure streak, not the incomplete mark.
 
-Production qualification remains blocked on ownership during failed launch
-setup. The post-boot registration path does not yet guarantee that an error
-retains control of the original VM through confirmed cleanup. Successful
-shutdown of a registered target does not establish that rollback guarantee.
+VM lifecycle behavior is unchanged by the audit sink. Automatic VM termination
+after three consecutive production audit-write failures remains required work
+under [#5538](https://github.com/tinylabscom/mvm/issues/5538), but is not
+implemented here. Refusing unrecordable network operations is not a substitute
+for that shutdown requirement.
 
 The endpoint's health sidecar is not an epoch seal; see
 [audit durability](/guides/audit-and-receipts/#flow-decision-failures).

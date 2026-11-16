@@ -44,7 +44,7 @@ pub(super) fn enforce_size_cap(what: &str, len: usize, cap: usize) -> Result<()>
 /// bridge-factory path.
 ///
 /// The signed plan and policy bundle remain JSON envelopes; the endpoint's
-/// typed audit context carries the admitted plan and failure posture. The
+/// typed audit context carries the admitted plan identity. The
 /// supervisor re-verifies the `SignedExecutionPlan` envelope before
 /// trusting any decoded field — see
 /// `mvm_hostd::supervisor::supervisor::SupervisorAdmission::admit`.
@@ -93,11 +93,6 @@ pub fn populate_audit_substrate(
     cfg.plan_json = Some(plan_json);
     cfg.audit_context = Some(mvm_core::audit_sink::AuditContext::Workload {
         plan: Box::new(admitted.plan().clone()),
-        mode: if admitted.variant.is_prod() {
-            mvm_core::audit_sink::AuditFailureMode::Production
-        } else {
-            mvm_core::audit_sink::AuditFailureMode::Development
-        },
     });
 
     // `bundle_json` carries the resolved tenant **PolicyBundle** (network /

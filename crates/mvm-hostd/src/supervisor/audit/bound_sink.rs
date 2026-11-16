@@ -5,15 +5,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use mvm_core::atomic_io::{self, NewFile};
-use mvm_core::audit_sink::{AuditContext, AuditFailureMode, AuditHealth, AuditSink};
+use mvm_core::atomic_io;
+use mvm_core::audit_sink::{AuditContext, AuditHealth, AuditSink};
+use mvm_core::private_fs::{OpenOptionsModeExt as _, PRIVATE_FILE_MODE};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::audit_recorder::{EventCategory, Recorder};
-
-/// An owned notification to the lifecycle authority, not a PID or VM name.
-pub type StopNotifier = Arc<dyn Fn() -> io::Result<()> + Send + Sync>;
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "scope", rename_all = "snake_case")]
@@ -47,12 +45,6 @@ impl Binding {
     }
 }
 
-#[derive(Debug, Default)]
-struct State {
-    health: AuditHealth,
-    stopping: bool,
-}
-
 #[derive(Serialize)]
 struct HealthRecord<'a> {
     binding: &'a Binding,
@@ -67,8 +59,7 @@ pub struct BoundRecorder {
     context: AuditContext,
     binding: Binding,
     health_file: PathBuf,
-    stop: Option<StopNotifier>,
-    state: Mutex<State>,
+    state: Mutex<AuditHealth>,
 }
 
 impl std::fmt::Debug for BoundRecorder {
@@ -79,13 +70,12 @@ impl std::fmt::Debug for BoundRecorder {
     }
 }
 
-/// Configures the persistent health record and optional production stop owner.
+/// Configures the persistent health record.
 pub struct BoundRecorderBuilder {
     recorder: Arc<Recorder>,
     runtime: tokio::runtime::Handle,
     context: AuditContext,
     health_file: Option<PathBuf>,
-    stop: Option<StopNotifier>,
 }
 
 impl BoundRecorder {
@@ -100,7 +90,6 @@ impl BoundRecorder {
             runtime,
             context,
             health_file: None,
-            stop: None,
         }
     }
 
@@ -126,35 +115,37 @@ impl BoundRecorder {
     /// Current accounting, including repeats not yet flushed to the sidecar.
     #[must_use]
     pub fn health(&self) -> AuditHealth {
-        self.state
-            .lock()
-            .expect("bound audit state poisoned")
-            .health
+        *self.state.lock().expect("bound audit state poisoned")
     }
 
-    fn health_bytes(&self, state: &State) -> io::Result<Vec<u8>> {
+    fn health_bytes(&self, state: &AuditHealth) -> io::Result<Vec<u8>> {
         serde_json::to_vec(&HealthRecord {
             binding: &self.binding,
             // An active endpoint is not a sealed epoch. A crash or failed
             // health write leaves this explicit unknown, never "complete".
-            completeness: if state.health.host_record_incomplete() {
+            completeness: if state.host_record_incomplete() {
                 "host_record_incomplete"
             } else {
                 "active"
             },
-            health: state.health,
+            health: *state,
         })
         .map_err(io::Error::other)
     }
 
-    fn persist(&self, state: &State) -> io::Result<()> {
-        atomic_io::write_private(&self.health_file, &self.health_bytes(state)?)
+    fn persist(&self, state: &AuditHealth) -> io::Result<()> {
+        // NamedTempFile starts owner-only on Unix; the umask can only narrow
+        // that mode. No permission-changing syscall is needed under confinement.
+        atomic_io::atomic_write_durable(&self.health_file, &self.health_bytes(state)?)
+            .map_err(io::Error::other)
     }
 
-    fn failed(&self, mut state: std::sync::MutexGuard<'_, State>, error: io::Error) -> io::Error {
-        state.health.record_failure();
-        let notify = state.health.must_stop(self.context.mode()) && !state.stopping;
-        state.stopping |= notify;
+    fn failed(
+        &self,
+        mut state: std::sync::MutexGuard<'_, AuditHealth>,
+        error: io::Error,
+    ) -> io::Error {
+        state.record_failure();
         if let Err(health_error) = self.persist(&state) {
             tracing::error!(
                 binding = ?self.binding,
@@ -164,19 +155,10 @@ impl BoundRecorder {
         }
         tracing::error!(
             binding = ?self.binding,
-            consecutive = state.health.consecutive_write_failures,
+            consecutive = state.consecutive_write_failures,
             error = %error,
             "host_record_incomplete"
         );
-        drop(state);
-        if notify
-            && let Some(stop) = &self.stop
-            && let Err(stop_error) = stop()
-        {
-            return io::Error::other(format!(
-                "audit recording failed and workload stop notification failed: {stop_error}"
-            ));
-        }
         error
     }
 }
@@ -188,18 +170,12 @@ impl BoundRecorderBuilder {
         self
     }
 
-    #[must_use]
-    pub fn on_stop(mut self, stop: StopNotifier) -> Self {
-        self.stop = Some(stop);
-        self
-    }
-
     /// Bind and probe the real journal before reporting an endpoint ready.
     ///
     /// # Errors
     ///
-    /// Refuses missing health storage or production stop authority, invalid
-    /// identity, an existing health record, or a journal that cannot append.
+    /// Refuses missing health storage, invalid identity, an existing health
+    /// record, or a journal that cannot append.
     pub fn build(self) -> io::Result<BoundRecorder> {
         match &self.context {
             AuditContext::Workload { plan, .. } => {
@@ -210,11 +186,6 @@ impl BoundRecorderBuilder {
                 self.context.validate_for(&tenant.0, name)?;
             }
         }
-        if self.context.mode() == AuditFailureMode::Production && self.stop.is_none() {
-            return Err(io::Error::other(
-                "production audit sink has no workload stop owner",
-            ));
-        }
         let sink = BoundRecorder {
             binding: Binding::from_context(&self.context),
             recorder: self.recorder,
@@ -223,16 +194,26 @@ impl BoundRecorderBuilder {
             health_file: self
                 .health_file
                 .ok_or_else(|| io::Error::other("audit sink has no health file"))?,
-            stop: self.stop,
-            state: Mutex::new(State::default()),
+            state: Mutex::new(AuditHealth::default()),
         };
-        let bytes = sink.health_bytes(&State::default())?;
-        if atomic_io::write_private_new(&sink.health_file, &bytes)? == NewFile::AlreadyPresent {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "audit binding already has a health record; refusing to reset epoch evidence",
-            ));
-        }
+        // Reserve the epoch exclusively before publishing its initial health.
+        // A crash can leave an empty reservation: it still refuses a restart,
+        // never resets evidence or claims a complete epoch.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open_with_mode(PRIVATE_FILE_MODE, &sink.health_file)
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    io::Error::new(
+                        error.kind(),
+                        "audit binding already has a health record; refusing to reset epoch evidence",
+                    )
+                } else {
+                    error
+                }
+            })?;
+        sink.persist(&AuditHealth::default())?;
         mvm_core::host_interface::preflight::audit::check(Some(&sink)).map_err(io::Error::other)?;
         Ok(sink)
     }
@@ -263,11 +244,6 @@ fn category(event: &str) -> io::Result<EventCategory> {
 impl AuditSink for BoundRecorder {
     fn record(&self, event: &str, labels: BTreeMap<String, String>) -> io::Result<()> {
         let mut state = self.state.lock().expect("bound audit state poisoned");
-        if state.stopping {
-            return Err(io::Error::other(
-                "workload stop requested after audit failures",
-            ));
-        }
         let result = category(event).and_then(|category| {
             self.runtime
                 .block_on(self.recorder.record_audit_context_direct(
@@ -280,7 +256,7 @@ impl AuditSink for BoundRecorder {
         });
         match result {
             Ok(()) => {
-                state.health.record_success();
+                state.record_success();
                 Ok(())
             }
             Err(error) => Err(self.failed(state, error)),
@@ -291,7 +267,6 @@ impl AuditSink for BoundRecorder {
         self.state
             .lock()
             .expect("bound audit state poisoned")
-            .health
             .suppress_denial();
     }
 

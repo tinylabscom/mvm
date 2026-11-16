@@ -543,8 +543,6 @@ pub struct SubstitutionSpawnParams<'a> {
     pub tenant: &'a str,
     /// Explicit admitted workload or builder audit identity.
     pub audit: mvm_core::audit_sink::AuditContext,
-    /// Production launcher's one-shot lifecycle registration channel.
-    pub audit_control: Option<&'a super::audit_control::LaunchControl>,
     /// The admitted plan's secret bindings handed to the endpoint on stdin.
     pub secrets: &'a [SecretBinding],
     /// Per-destination redaction policy from the signed plan.
@@ -610,7 +608,6 @@ pub struct SubstitutionSpawnParamsBuilder<'a> {
     lifetime: Option<EndpointLifetime>,
     tenant: Option<&'a str>,
     audit: Option<mvm_core::audit_sink::AuditContext>,
-    audit_control: Option<&'a super::audit_control::LaunchControl>,
     secrets: Option<&'a [SecretBinding]>,
     redaction: Option<&'a mvm_core::policy::RedactionPolicy>,
     transport: Option<EndpointTransport>,
@@ -636,7 +633,6 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
             lifetime: None,
             tenant: None,
             audit: None,
-            audit_control: None,
             secrets: None,
             redaction: None,
             transport: None,
@@ -797,7 +793,6 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
             audit: self
                 .audit
                 .ok_or(BuilderError::missing("SubstitutionSpawnParams", "audit"))?,
-            audit_control: self.audit_control,
             secrets: self
                 .secrets
                 .ok_or(BuilderError::missing("SubstitutionSpawnParams", "secrets"))?,
@@ -833,13 +828,6 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
         self.audit = Some(audit);
         self
     }
-
-    /// Bind a production endpoint to its launcher's registration capability.
-    #[must_use]
-    pub fn audit_control(mut self, control: &'a super::audit_control::LaunchControl) -> Self {
-        self.audit_control = Some(control);
-        self
-    }
 }
 
 impl<'a> Default for SubstitutionSpawnParamsBuilder<'a> {
@@ -870,7 +858,6 @@ pub fn endpoint_config_for_identity(
             tenant: mvm_core::plan::TenantId("local".into()),
             name: "conformance".into(),
         },
-        audit_control: None,
         secrets: &[],
         redaction: &redaction,
         transport: EndpointTransport::Uds {
@@ -895,7 +882,6 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
     let mut cfg = serde_json::json!({
         "tenant_id": params.tenant,
         "audit": params.audit,
-        "audit_control": params.audit_control.map(|control| control.binding()),
         // The machine this endpoint serves. It stamps every audit entry it
         // records with it, so a reader of the shared tenant chain can tell
         // whose egress decision each one was.
@@ -1013,7 +999,7 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
 /// address space — only the opaque placeholders are persisted/handed out.
 pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result<()> {
     use std::io::Write;
-    validate_audit_control(&params)?;
+    validate_audit_context(&params)?;
     // One resolution point for every backend. A caller that supplied a proxy
     // explicitly keeps it; everyone else resolves host config before ambient
     // variables. Refuse invalid settings before touching sockets or children.
@@ -1060,9 +1046,6 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
         state_dir,
         log_file,
     );
-    if let Some(control) = params.audit_control {
-        control.configure(&mut cmd)?;
-    }
     // Detach into its own session so it survives this `mvmctl` process.
     // SAFETY: the pre_exec closure runs in the forked child and only calls setsid,
     // which is async-signal-safe.
@@ -1132,47 +1115,13 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
     Ok(())
 }
 
-fn validate_audit_control(params: &SubstitutionSpawnParams<'_>) -> Result<()> {
-    use mvm_core::audit_sink::{AuditContext, AuditFailureMode};
+fn validate_audit_context(params: &SubstitutionSpawnParams<'_>) -> Result<()> {
     let logical_workload = params
         .audit
         .plan()
         .map(|plan| plan.workload.0.as_str())
         .unwrap_or(params.vm_name);
     params.audit.validate_for(params.tenant, logical_workload)?;
-    match &params.audit {
-        AuditContext::Workload {
-            plan,
-            mode: AuditFailureMode::Production,
-        } => {
-            let control = params
-                .audit_control
-                .context("production endpoint has no lifecycle owner")?;
-            let binding = control.binding();
-            anyhow::ensure!(
-                binding.tenant_id == plan.tenant.0
-                    && binding.instance_id == params.vm_name
-                    && binding.workload_id == plan.workload.0
-                    && binding.plan_id == plan.plan_id.0
-                    && binding.epoch == plan.execution_epoch,
-                "production audit lifecycle binding differs from admitted plan"
-            );
-            anyhow::ensure!(
-                params.lifetime == EndpointLifetime::Vm,
-                "production audit shutdown requires the VM lifetime keeper"
-            );
-        }
-        AuditContext::Workload {
-            mode: AuditFailureMode::Development,
-            ..
-        }
-        | AuditContext::Builder { .. } => {
-            anyhow::ensure!(
-                params.audit_control.is_none(),
-                "non-production endpoint cannot carry workload shutdown authority"
-            );
-        }
-    }
     Ok(())
 }
 
@@ -2290,7 +2239,6 @@ mod tests {
             lifetime: EndpointLifetime::Launcher,
             tenant: "tenant-x",
             audit: builder_audit("uds-xport-vm"),
-            audit_control: None,
             secrets: &[],
             redaction: &redaction,
             transport: EndpointTransport::Uds { path: sock.clone() },
@@ -2311,6 +2259,11 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&captured).expect("config is JSON");
         assert_eq!(v["transport"]["kind"], "uds");
         assert_eq!(v["transport"]["path"], sock.to_string_lossy().as_ref());
+        assert_eq!(
+            v["audit"],
+            serde_json::to_value(builder_audit("uds-xport-vm")).unwrap()
+        );
+        assert!(v.get("audit_control").is_none());
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2357,7 +2310,6 @@ mod tests {
             lifetime: EndpointLifetime::Launcher,
             tenant: "tenant-x",
             audit: builder_audit(vm),
-            audit_control: None,
             secrets: &[],
             redaction: &redaction,
             transport: EndpointTransport::Uds {
@@ -2434,7 +2386,6 @@ mod tests {
             lifetime: EndpointLifetime::Launcher,
             tenant: "tenant-x",
             audit: builder_audit(vm),
-            audit_control: None,
             secrets: &[],
             redaction: &redaction,
             transport: EndpointTransport::Uds {
@@ -2507,7 +2458,6 @@ mod tests {
             lifetime: EndpointLifetime::Launcher,
             tenant: "tenant-x",
             audit: builder_audit("rollback-vm"),
-            audit_control: None,
             secrets: &[],
             redaction: &redaction,
             transport: EndpointTransport::Uds {
@@ -2572,23 +2522,43 @@ mod tests {
     }
 
     #[test]
-    fn builder_endpoint_cannot_receive_workload_shutdown_capability() {
+    fn endpoint_config_keeps_workload_audit_without_shutdown_control() {
         let redaction = mvm_core::policy::RedactionPolicy::default();
         let mut params = minimal_params(&redaction, Path::new("/tmp/unused-audit-test"), None);
-        let control = super::super::audit_control::LaunchControl::new(
-            super::super::audit_control::AuditBinding {
-                tenant_id: "tenant-x".into(),
-                instance_id: "cfg-vm".into(),
-                workload_id: "logical-workload".into(),
-                plan_id: "plan".into(),
-                epoch: 1,
-                generation: [0; 32],
-            },
-        )
-        .unwrap();
-        assert!(validate_audit_control(&params).is_ok());
-        params.audit_control = Some(&control);
-        assert!(validate_audit_control(&params).is_err());
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("tenant-x")
+            .build();
+        plan.execution_epoch = 7;
+        plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
+        params.audit = mvm_core::audit_sink::AuditContext::Workload {
+            plan: Box::new(plan),
+        };
+        for lifetime in [EndpointLifetime::Launcher, EndpointLifetime::Vm] {
+            params.lifetime = lifetime;
+            validate_audit_context(&params).unwrap();
+        }
+        let config = build_endpoint_config_json(&params);
+        assert_eq!(
+            config["audit"],
+            serde_json::to_value(&params.audit).unwrap()
+        );
+        assert_eq!(config["instance_id"], params.vm_name);
+        assert!(
+            config.get("audit_control").is_none(),
+            "audit evidence must not introduce a shutdown protocol"
+        );
+    }
+
+    #[test]
+    fn endpoint_audit_context_rejects_wrong_tenant_or_builder_name() {
+        let redaction = mvm_core::policy::RedactionPolicy::default();
+        let mut params = minimal_params(&redaction, Path::new("/tmp/unused-audit-test"), None);
+        validate_audit_context(&params).unwrap();
+        params.tenant = "other-tenant";
+        assert!(validate_audit_context(&params).is_err());
+        params.tenant = "tenant-x";
+        params.audit = builder_audit("other-builder");
+        assert!(validate_audit_context(&params).is_err());
     }
 
     fn minimal_params<'a>(
@@ -2603,7 +2573,6 @@ mod tests {
             lifetime: EndpointLifetime::Launcher,
             tenant: "tenant-x",
             audit: builder_audit("cfg-vm"),
-            audit_control: None,
             secrets: &[],
             redaction,
             transport: EndpointTransport::Uds {

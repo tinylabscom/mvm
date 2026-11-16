@@ -84,8 +84,7 @@ fn main() -> Result<()> {
     }
     let cfg = parse(&raw).context("mvm-network-endpoint config parse failed")?;
     validate_flowmux_limits(&cfg)?;
-    let audit_startup =
-        mvm_hostd::supervisor::endpoint::audit_start::AuditStartup::from_config(&cfg)?;
+    mvm_hostd::supervisor::endpoint::audit_start::validate(&cfg)?;
     info!(
         tenant_id = %cfg.tenant_id,
         secrets = cfg.secrets.len(),
@@ -178,7 +177,11 @@ fn main() -> Result<()> {
     confined.self_test(runtime.handle())?;
 
     let network_projection = if matches!(cfg.egress_mode, EgressMode::FlowMux) {
-        let sink = audit_startup.bind(&cfg, &network_projection, runtime.handle())?;
+        let sink = mvm_hostd::supervisor::endpoint::audit_start::bind(
+            &cfg,
+            &network_projection,
+            runtime.handle(),
+        )?;
         network_projection.with_audit_sink(sink)
     } else {
         network_projection
@@ -193,8 +196,6 @@ fn main() -> Result<()> {
         handed = handed_len,
         fingerprinted, "placeholders handed; serving"
     );
-
-    audit_startup.wait_ready(&cfg)?;
 
     runtime.block_on(async move {
         // The embedded telemetry collector starts after confinement so its
@@ -1395,7 +1396,6 @@ mod tests {
                 tenant: mvm_core::plan::TenantId("local".into()),
                 name: "test".into(),
             }),
-            audit_control: None,
             telemetry: None,
             tenant_id: "local".into(),
             instance_id: "test".into(),
@@ -1436,7 +1436,6 @@ mod tests {
     fn config_with_resolver(resolver: ResolverBackend) -> EndpointConfig {
         EndpointConfig {
             audit: None,
-            audit_control: None,
             telemetry: None,
             tenant_id: "acme".into(),
             instance_id: "test".into(),
@@ -1602,9 +1601,9 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
-        let startup =
-            mvm_hostd::supervisor::endpoint::audit_start::AuditStartup::from_config(&cfg).unwrap();
-        let sink = startup.bind(&cfg, &network, runtime.handle()).unwrap();
+        let sink =
+            mvm_hostd::supervisor::endpoint::audit_start::bind(&cfg, &network, runtime.handle())
+                .unwrap();
         let network = network.with_audit_sink(sink);
         let projection = FlowMuxEndpointProjection::from_config(&cfg, None, network).unwrap();
         let expected = (
@@ -1954,7 +1953,6 @@ mod tests {
         let guest_key = [2u8; 32];
         let cfg = EndpointConfig {
             audit: None,
-            audit_control: None,
             telemetry: None,
             tenant_id: "tenant".into(),
             instance_id: "test".into(),

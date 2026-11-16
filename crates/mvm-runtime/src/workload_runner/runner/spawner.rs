@@ -33,7 +33,6 @@ pub struct NetworkEndpointSpawnRequest<'a> {
     pub state_dir: &'a Path,
     pub tenant: &'a str,
     pub audit: Option<&'a mvm_core::audit_sink::AuditContext>,
-    pub audit_control: Option<&'a mvm_vmm::host::audit_control::LaunchControl>,
     pub secrets: &'a [SecretBinding],
     pub redaction: &'a RedactionPolicy,
     pub network_policy: &'a NetworkPolicy,
@@ -204,7 +203,6 @@ pub(super) fn prepare_standby_identity(
             state_dir: Path::new(&spec.vm_state_dir),
             tenant: "local",
             audit: None,
-            audit_control: None,
             secrets: &[],
             redaction: &RedactionPolicy::default(),
             network_policy: &NetworkPolicy::deny_all(),
@@ -368,7 +366,6 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
             telemetry,
             tenant: req.tenant,
             audit: audit.clone(),
-            audit_control: req.audit_control,
             secrets: req.secrets,
             redaction: req.redaction,
             transport: EndpointTransport::Uds { path: uds.clone() },
@@ -631,13 +628,12 @@ mod tests {
 
     #[test]
     fn workload_audit_refuses_missing_or_builder_identity_but_accepts_a_warm_alias() {
-        use mvm_core::audit_sink::{AuditContext, AuditFailureMode};
+        use mvm_core::audit_sink::AuditContext;
         let mut request = NetworkEndpointSpawnRequest {
             vm_name: "physical-warm-alias",
             state_dir: Path::new("/unused"),
             tenant: "local",
             audit: None,
-            audit_control: None,
             secrets: &[],
             redaction: &RedactionPolicy::default(),
             network_policy: &NetworkPolicy::deny_all(),
@@ -659,7 +655,6 @@ mod tests {
                     .tenant("local")
                     .build(),
             ),
-            mode: AuditFailureMode::Development,
         };
         request.audit = Some(&workload);
         assert!(workload_audit(&request).is_ok());
@@ -740,7 +735,6 @@ mod tests {
                 state_dir: state,
                 tenant: "tenant",
                 audit: None,
-                audit_control: None,
                 secrets: &[],
                 redaction: &RedactionPolicy::default(),
                 network_policy: &NetworkPolicy::deny_all(),
@@ -839,7 +833,6 @@ mod tests {
             state_dir: &parent,
             tenant: "tenant",
             audit: None,
-            audit_control: None,
             secrets: &[],
             redaction: &redaction,
             network_policy: &policy,

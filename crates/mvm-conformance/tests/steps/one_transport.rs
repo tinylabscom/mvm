@@ -537,7 +537,6 @@ fn secret_bearing_config() -> mvm_hostd::supervisor::endpoint::network_endpoint:
 
     EndpointConfig {
         audit: None,
-        audit_control: None,
         telemetry: None,
         tenant_id: "local".into(),
         instance_id: "test".into(),

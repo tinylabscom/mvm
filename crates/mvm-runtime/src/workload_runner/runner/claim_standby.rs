@@ -271,8 +271,6 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             );
         }
         let parent_state_dir = vm_state_dir(handle.id.as_str());
-        self.require_audit_shutdown_backend(claim.audit_context.as_ref())
-            .map_err(|error| StandbyError::ClaimFailed(format!("{error:#}")))?;
         if let Some(audit) = &claim.audit_context
             && audit.plan() != Some(&plan)
         {
@@ -391,14 +389,6 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         }
         forked?;
         claim_phase!("child_forked");
-        if endpoint.needs_audit_registration() {
-            let vm = self.driver.attach(&child).map_err(|error| {
-                StandbyError::ClaimFailed(format!("attach audit shutdown target: {error:#}"))
-            })?;
-            endpoint.register_audit_vm(&*vm).map_err(|error| {
-                StandbyError::ClaimFailed(format!("register audit shutdown: {error:#}"))
-            })?;
-        }
 
         // Unconditional and best-effort, mirroring `start_workload`: started
         // the moment the restored guest is live, before the fallible
