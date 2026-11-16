@@ -74,6 +74,14 @@ Evidence and traces have three views:
 Locally the host issues workload IDs; in managed mode `mvmd` does. Neither may
 mint an identity that the signed plan does not name.
 
+The mailbox surface remains ADR-057's: one public capability-bound mailbox
+identity per actor, with a bounded inbox and pending-send outbox internally.
+The outbox is not a second address, service or per-actor process. Hosts and
+workloads can independently initiate authorized `call` and `cast` operations
+and issue scoped `reply` messages. Delivery acceptance is not an application
+reply; Receive or Reply authority never implies general reverse Send authority.
+Outbox durability follows the requested admission class.
+
 ### 2. State classes
 
 A workload declares how its state survives, in the plan; host and organization
@@ -202,10 +210,21 @@ other embedders add no verifier, recorder or storage reader of their own.
 ### 6. Storage and encryption
 
 **Keys.** Records are encrypted with a 256-bit AEAD under a per-workload key
-derived from the tenant key, with a per-epoch subkey. Destroying a key erases
-that workload or epoch cryptographically. Traces, mailbox journals and
-snapshots share one custody decision, #5292 D1, decided by the owner on
-2026-11-14 (see Owner decisions).
+derived from the tenant key, with a per-epoch subkey. Deleting a derived key
+alone does not erase anything that a retained ancestor key can recover.
+Cryptographic erasure requires destroying all recoverable key material,
+including derivation and backup paths and retained copies. Rotation is not
+erasure; neither can undo prior plaintext exposure or prove physical erasure.
+A missing history key refuses recovery rather than minting a replacement or
+reporting empty history. Selective workload/epoch erasure cannot be claimed
+until the key hierarchy and retention mechanism satisfy these conditions.
+
+**Mailbox custody.** ADR-057 §11 and #5292 govern mailbox keys: the shared
+scheduler routes and stores sealed messages and holds no mailbox keys.
+Mailbox seal/open and authorization remain with VM-scoped holders; an
+authorized host endpoint needs its own explicitly scoped custody, not ambient
+access to other actors. Shared trace or snapshot infrastructure acquires no
+mailbox-key authority from handling related records.
 
 **Who can read.** By default the host can read stored traces (trusted-host
 tier), so local search, `explain` and export work. A host-blind tier, in which
@@ -218,16 +237,26 @@ records as stored, so completeness can be checked without decrypting.
 
 | Hop | Protection | Reason |
 | --- | --- | --- |
-| Guest to host over vsock | Authenticated, bounded framing; the stream is bound to the VM through the socket the VMM was handed, never through a guest claim | No network is involved, and the only parties able to read it (the host user, root) can already read guest memory |
-| Host to host, mailbox | End-to-end per ADR-057 | Leaves the host |
+| Mailbox endpoint to endpoint, including same-host vsock | End-to-end authenticated encryption per ADR-057 before entering scheduling, relay, retry or storage infrastructure | A shared service compromise must not disclose payloads or endpoint keys |
+| Guest telemetry to its authorized host collector, trusted-host tier | Authenticated, bounded framing; the stream is bound to the VM through the socket the VMM was handed, never through a guest claim | The collector is an authorized telemetry recipient; this is not a plaintext exception for mailbox traffic |
 | Cross-host transport, export | Encrypted transport | Leaves the host |
 
-The host-blind tier is the exception: there the guest encrypts before data
-leaves the VM.
+Inbox, outbox and dead-letter stores retain sealed payloads, including in
+standalone local operation. Plaintext processing stays inside the declared
+endpoint/custody boundary. Routing, size and timing metadata remain visible;
+encryption does not conceal traffic patterns. An authorized host application
+may read messages addressed to it, but a routing service is not therefore an
+authorized endpoint.
 
-**Residual.** Plaintext exists briefly in host process memory before it is
-encrypted at rest. Unencrypted Linux swap could write it to disk. Either lock
-those buffers in memory or state the limit.
+The host-blind tier additionally requires confidential-computing memory
+protection, attestation-bound key release and rollback witnesses under
+ADR-057 §11, or refusal. Encrypting mailbox traffic does not hide guest
+plaintext from a compromised ordinary hypervisor host.
+
+**Residual.** Plaintext can exist in authorized endpoint/holder memory and in
+host collector memory for trusted-host telemetry. Swap or crash dumps can
+retain it unless the selected profile prevents that; state those limits.
+This does not authorize plaintext mailbox buffers in shared intermediaries.
 
 **Retention.** Set in the signed plan and capped by host and organization
 ceilings; the smallest wins. Recovery after a failure exports a sealed epoch as
@@ -273,7 +302,8 @@ mailbox, trace collection, keys and buffers. The figures are set from the
 test is 10 MiB host memory and 0.05% of a core idle per resident VM. Specific
 rules:
 
-- One trace collector and one mailbox service per host, not per VM (#5292).
+- One trace collector and one keyless mailbox scheduler per host, not per VM
+  (#5292). Shared scheduling does not combine mailbox-key custody.
 - Trace buffers are small and fixed. Asserted spans are opt-in and sampled;
   host-witnessed events are always on and cost the guest nothing.
 - Wake admission has its own budget, because every wake is an admission.
@@ -329,7 +359,8 @@ Requirements the presentation makes visible:
 - #5097's host interface gains a residency report and a wake preflight.
 - The audit pipeline gains a rule that decisions are recorded before results
   are returned, and per-epoch seals with completeness labels.
-- Traces, mailboxes and snapshots wait on #5292 D1.
+- Mailbox scheduling and custody follow ADR-057 §11 and #5292. Shared tracing
+  and snapshot infrastructure must not widen that custody boundary.
 - The warm budget becomes a messaging budget. The HVF warm gap, and warm claims
   for mailbox-granted launches (#5292), move onto the critical path.
 
@@ -342,13 +373,19 @@ Requirements the presentation makes visible:
 - **Guest-buffered traces flushed at exit.** A crash loses the tail, which is
   the part an investigation needs.
 - **Application spans as evidence.** A compromised guest controls its spans.
-- **Encrypting the guest-to-host hop by default.** It adds cost and protects
-  against no party that cannot already read guest memory.
+- **Treating a local hop as mailbox confidentiality.** A shared service can be
+  compromised without control of the hypervisor. Local vsock traffic therefore
+  keeps mailbox payloads encrypted; the trusted-host telemetry exception does
+  not apply to it.
 - **Several consumers on one mailbox.** Every worker would hold the mailbox's
   decryption key, and per-scope ordering would break.
 - **A Rust actor framework.** See section 10.
 
-## Owner decisions (2026-11-14)
+## Owner decisions
+
+The initial decisions were recorded on 2026-11-14. Mailbox custody follows
+the subsequent ADR-057 §11 amendment and #5292; the inbox/outbox API model
+was clarified on 2026-11-16.
 
 1. One durable execution epoch per workload, shared by the plan, the host
    interface and the mailbox. Today's node-wide host-interface epoch becomes
@@ -358,10 +395,13 @@ Requirements the presentation makes visible:
 2. Under `--prod`, three consecutive audit-write failures stop the workload. In
    development the workload keeps running and its epoch is sealed as host
    record incomplete. The threshold is revisited once measured.
-3. #5292 D1: one mailbox daemon per tenant may hold that tenant's derived keys.
-   It never serves two tenants; keys are derived on demand and zeroized.
+3. #5292 D1 follows ADR-057 §11: a keyless shared scheduler handles sealed
+   messages; mailbox seal/open and authorization remain VM-scoped. This
+   supersedes the earlier per-tenant key-holding-daemon wording. Authorized
+   host endpoints require independently scoped custody as described in §6.
 4. A per-workload mailbox storage key survives a wake; the per-epoch authority
-   keys rotate. A compromise replace destroys both.
+   keys rotate. A compromise replace destroys both; any erasure claim must
+   also satisfy the recoverable-key-material conditions in §6.
 5. The guest agent may accept OTLP on a Unix socket inside the guest. This needs
    an explicit carve-out in `check-single-network-path` and the PRD's
    no-listening-socket rule before it ships.
@@ -371,6 +411,9 @@ Requirements the presentation makes visible:
 8. The production requirement is #5097: every actor operation runs through its
    fail-closed preflight, local production comes before managed production, and
    finishing and measuring preflight on the launch path gates the rest.
+9. One public mailbox identity per actor, with bounded inbox/outbox state
+   internally, supports independent bidirectional `call`, `cast` and `reply`.
+   A Cast-only implementation or delivery ACK is not full Call/Reply support.
 
 Still open: the per-VM density budget values, set from the #5510 baseline, and
 whether cross-tenant base-page sharing is ever allowed.
@@ -383,6 +426,16 @@ Each item needs a test or CI lane named in the implementing issue:
   count, and every host-witnessed event before the crash is present.
 - A denied egress is never returned to the guest without its audit record,
   including under induced journal failure, which refuses instead.
+- Host and workload endpoints each initiate authorized messages in both
+  directions. Application replies bind the exact original call and authorized
+  responder; delivery ACKs, duplicate replies and late replies cannot complete
+  another call.
+- Shared scheduling, retry, journal and dead-letter paths expose neither
+  plaintext payloads nor endpoint keys, including for same-host traffic.
+- A wake preserves immutable sender provenance and historical acceptance while
+  requiring fresh destination admission and Receive authority. Retaining a
+  storage key cannot revive an expired or revoked capability or retarget the
+  original envelope.
 - A wake under revoked policy is refused and the queued message receives a
   terminal receipt.
 - Restoring the same snapshot twice leaves exactly one epoch that brokers
