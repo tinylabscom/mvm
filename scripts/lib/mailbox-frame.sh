@@ -16,10 +16,11 @@
 mailbox_guest_writer() {
   cat <<'EOS'
 mbx_write() {
-    d=/run/mvm/mailbox; owner=$(stat -c %u "$d"); t="$d/.frame.$$"
-    { head -c 32 /dev/zero | tr "\\0" "\\$1"; printf "%s" "$2"; } > "$t"
-    [ "$(id -u)" != 0 ] || chown "$owner" "$t"
-    chmod 640 "$t"
+    d=/run/mvm/mailbox; owner=$(stat -c %u "$d") || return
+    t="$d/.frame.$$"
+    { head -c 32 /dev/zero | tr "\\0" "\\$1"; printf "%s" "$2"; } > "$t" || return
+    if [ "$(id -u)" = 0 ]; then chown "$owner" "$t" || return; fi
+    chmod 640 "$t" || return
     mv "$t" "$d/outbox/$(date +%s)-$$"
 }
 EOS
@@ -28,12 +29,6 @@ EOS
 mailbox_write_frame() { # <vm> <fill: 000 = own mailbox, 377 = anyone else> <body>
   # The script expands in the guest, not here.
   # shellcheck disable=SC2016
-  mvm machine exec "$1" -- sh -c '
-    d=/run/mvm/mailbox; owner=$(stat -c %u "$d"); t="$d/.frame.$$"
-    { head -c 32 /dev/zero | tr "\\0" "\\$1"; printf "%s" "$2"; } > "$t"
-    [ "$(id -u)" != 0 ] || chown "$owner" "$t"
-    chmod 640 "$t"
-    # BusyBox date has no %N: seconds plus the pid keeps names unique per exec
-    # and ordered across execs; the temp name is dotted so it is never read.
-    mv "$t" "$d/outbox/$(date +%s)-$$"' _ "$2" "$3"
+  mvm machine exec "$1" -- sh -c "$(mailbox_guest_writer)"'
+    mbx_write "$1" "$2"' _ "$2" "$3"
 }

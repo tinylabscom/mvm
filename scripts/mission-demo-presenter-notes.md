@@ -84,3 +84,23 @@ and carries no message body. The three nodes are simulated in one process in the
 hermetic test, delivery into a second guest is not built (#5312), the uplink
 loss act is the simulated offline-lease path (#5120), and the production
 profile on a signed image has not been run (#5353).
+
+### Reading the shell script's verdict
+
+`DRIVER=entrypoint` observes the workload's own staging/action markers through
+`machine logs` and reads its messages through `machine mailbox recv`; it does
+not use `machine exec`. Markers are workload reports, not host authorization
+receipts. A missing marker, failed read or launch, or unexpected message fails
+the run rather than being treated as an empty mailbox.
+
+Both drivers finish with `DEMO_RESULT=partial` when the observed lifecycle
+checks complete. Exit status 0 means that subset completed, not that the full
+mission scenario passed. The script prints two remaining evidence gaps:
+
+- An empty mailbox does not establish that the host processed and refused the
+  other-recipient frame.
+- Staging an unread frame does not establish host acceptance before quarantine;
+  not seeing it after replacement therefore does not prove its erasure.
+
+Do not describe those findings as successful security checks. A nonzero exit
+means an observed check failed; there is no final demo verdict on that path.
