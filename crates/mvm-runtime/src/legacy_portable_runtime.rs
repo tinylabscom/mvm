@@ -280,7 +280,13 @@ pub(crate) mod fixtures {
 
     /// Signed original portable inputs, not a verified capability.
     pub fn signed_legacy_portable_runtime_fixture(home: &Path) -> VmStartConfig {
-        fixture(home, Some(2), false, 4).unwrap()
+        fixture(
+            home,
+            Some(crate::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION),
+            false,
+            4,
+        )
+        .unwrap()
     }
 
     pub(super) fn fixture(
@@ -325,7 +331,8 @@ pub(crate) mod fixtures {
         let mut baked_metadata =
             mvm_build::builder_vm::GuestSidecar::for_oci_run("hybrid", true, false);
         baked_metadata.agent_binary = "real".into();
-        baked_metadata.protocol_version = 2;
+        baked_metadata.protocol_version =
+            u8::try_from(crate::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION).unwrap();
         let payloads = vec![
             (
                 mvm_core::guest_sidecar::SIDECAR_FILENAME,
@@ -476,22 +483,45 @@ mod tests {
             let home = tempfile::tempdir().unwrap();
             let mut env = mvm_core::util::test_env::TestEnv::new();
             env.isolate_mvm_home(home.path());
-            let prepared = fixture(home.path(), Some(2), false, schema);
+            let prepared = fixture(
+                home.path(),
+                Some(crate::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION),
+                false,
+                schema,
+            );
             if schema == 6 {
                 match prepared {
                     Err(mvm_core::plan::BundleVerifyError::UnsupportedSchema {
                         found: 6, ..
                     }) => {}
-                    Ok(config) => assert!(verify_runtime_for_launch(&config, 2).is_err()),
+                    Ok(config) => assert!(
+                        verify_runtime_for_launch(
+                            &config,
+                            crate::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION
+                        )
+                        .is_err()
+                    ),
                     Err(error) => panic!("unexpected future-envelope refusal: {error}"),
                 }
                 continue;
             }
             let config = prepared.unwrap();
-            assert!(verify_runtime_for_launch(&config, 2).is_ok());
+            assert!(
+                verify_runtime_for_launch(
+                    &config,
+                    crate::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION
+                )
+                .is_ok()
+            );
             let mut mixed = config.clone();
             mixed.source_runtime_archive_sha256 = Some("a".repeat(64));
-            assert!(verify_runtime_for_launch(&mixed, 2).is_err());
+            assert!(
+                verify_runtime_for_launch(
+                    &mixed,
+                    crate::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION
+                )
+                .is_err()
+            );
             let archive = &config.legacy_portable_runtime.as_ref().unwrap().archive;
             let mut bytes = std::fs::read(archive).unwrap();
             let needle = format!("\"schema_version\":{schema}");
@@ -501,7 +531,13 @@ mod tests {
                 .unwrap();
             bytes[offset + needle.len() - 1] = b'3';
             std::fs::write(archive, bytes).unwrap();
-            assert!(verify_runtime_for_launch(&config, 2).is_err());
+            assert!(
+                verify_runtime_for_launch(
+                    &config,
+                    crate::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION
+                )
+                .is_err()
+            );
         }
     }
 
@@ -510,9 +546,16 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(home.path());
-        let config = fixture(home.path(), Some(2), false, 4).unwrap();
+        let config = fixture(
+            home.path(),
+            Some(crate::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION),
+            false,
+            4,
+        )
+        .unwrap();
         assert!(matches!(
-            verify_runtime_for_launch(&config, 2).unwrap(),
+            verify_runtime_for_launch(&config, crate::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION)
+                .unwrap(),
             Some(crate::runtime_evidence::VerifiedLaunchRuntime::LegacyPortable(_))
         ));
         assert!(VmStartConfig::default().legacy_portable_runtime.is_none());
@@ -565,7 +608,14 @@ mod tests {
                 "conflict" => changed.source_runtime_archive_sha256 = Some("a".repeat(64)),
                 _ => unreachable!(),
             }
-            assert!(verify_runtime_for_launch(&changed, 2).is_err(), "{field}");
+            assert!(
+                verify_runtime_for_launch(
+                    &changed,
+                    crate::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION
+                )
+                .is_err(),
+                "{field}"
+            );
         }
         let lease = RuntimeLifecycleLease::acquire(&config.name).unwrap();
         let bound = lease.bind(&config).unwrap();
@@ -637,12 +687,19 @@ mod tests {
             (None, false),
             (Some(1), false),
             (Some(999), false),
-            (Some(2), true),
+            (
+                Some(crate::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION),
+                true,
+            ),
         ] {
             let source = tempfile::tempdir().unwrap();
             let config = fixture(source.path(), protocol, wrong_role, 4).unwrap();
             assert!(
-                verify_runtime_for_launch(&config, 2).is_err(),
+                verify_runtime_for_launch(
+                    &config,
+                    crate::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION
+                )
+                .is_err(),
                 "{protocol:?} {wrong_role}"
             );
             let proof = config.legacy_portable_runtime.as_ref().unwrap();
@@ -656,10 +713,13 @@ mod tests {
                 ..Default::default()
             };
             assert!(
-                verify_runtime_for_launch(&downgraded, 2)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("portable bundle")
+                verify_runtime_for_launch(
+                    &downgraded,
+                    crate::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("portable bundle")
             );
         }
     }
@@ -674,7 +734,13 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(home.path());
-        let config = fixture(home.path(), Some(2), false, 4).unwrap();
+        let config = fixture(
+            home.path(),
+            Some(crate::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION),
+            false,
+            4,
+        )
+        .unwrap();
         let bound = RuntimeLifecycleLease::acquire(&config.name)
             .unwrap()
             .bind(&config)

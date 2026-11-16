@@ -358,20 +358,9 @@ pub fn query_fs_diff_at(vsock_uds_path: &str) -> Result<Vec<FsChange>> {
 /// Query filesystem diff on an already-connected stream. Backend-agnostic
 /// entry point for `mvmctl diff` — the stream comes from
 /// `mvm_vmm::vsock_transport::for_vm(name)` so the verb works against any VMM.
-/// `FsDiff` is part of the filesystem RPC surface, so this drives
-/// the hello prelude requiring `FilesystemRpc` exactly like
-/// [`send_fs_request_on`] — the dir-based wrappers used to skip the hello,
-/// which a hard-cutover agent would reject.
+/// `FsDiff` is part of the filesystem RPC surface: the session refuses it
+/// unless the guest advertised `FilesystemRpc` in its handshake.
 pub fn query_fs_diff_on(stream: &mut UnixStream) -> Result<Vec<FsChange>> {
-    require_capabilities(stream, &[GuestCapability::FilesystemRpc])?;
-    // `call_unary`, not `send_request`. Both open a session, but on different
-    // seams: `call_unary` uses `ControlSession::open`, which resumes the stream
-    // the hello prelude above has already advanced, while `send_request` routes
-    // to `open_authenticated_session_stream`, which expects a stream nobody has
-    // spoken on yet. Against a live guest the second waits for a handshake that
-    // already happened and fails with `failed to fill whole buffer` — reported
-    // to the caller as `host session handshake failed`, which names the symptom
-    // and not the doubled handshake.
     let resp = call_unary(stream, &GuestRequest::FsDiff)?;
     match resp {
         GuestResponse::FsDiffResult { changes } => Ok(changes),
@@ -389,7 +378,6 @@ pub fn query_fs_diff_on(stream: &mut UnixStream) -> Result<Vec<FsChange>> {
 /// the disk. Part of the filesystem RPC surface, so it is refused by a sealed
 /// agent exactly where the diff it serves would be.
 pub fn sync_filesystems_on(stream: &mut UnixStream) -> Result<()> {
-    require_capabilities(stream, &[GuestCapability::FilesystemRpc])?;
     match call_unary(stream, &GuestRequest::SyncFilesystems)? {
         GuestResponse::FilesystemsSynced => Ok(()),
         GuestResponse::Error { message } => bail!("guest filesystem sync failed: {message}"),
@@ -421,7 +409,6 @@ pub fn send_proc_request_on(stream: &mut UnixStream, req: GuestRequest) -> Resul
             | GuestRequest::ProcSendInput { .. }
             | GuestRequest::ProcKill { .. }
     ));
-    require_capabilities(stream, &[GuestCapability::ProcessRpc])?;
     let resp = call_unary(stream, &req)?;
     match resp {
         GuestResponse::ProcResult(r) => Ok(r),
@@ -457,13 +444,12 @@ pub fn send_proc_wait_on<F: FnMut(&ProcWaitEvent)>(
     timeout_secs: Option<u64>,
     mut on_event: F,
 ) -> Result<ProcWaitEvent> {
-    require_capabilities(stream, &[GuestCapability::ProcessRpc])?;
     let req = GuestRequest::ProcWait {
         pid_token: pid_token.to_string(),
         timeout_secs,
     };
     let mut session = super::connection::open_authenticated_session(stream)?;
-    session.write(stream, &req)?;
+    session.send(stream, &req)?;
     loop {
         let resp: GuestResponse = session.read(stream)?;
         match resp {
@@ -508,7 +494,6 @@ pub fn send_fs_request(instance_dir: &str, req: GuestRequest) -> Result<FsResult
 /// launched the VM. `send_fs_request` is the dir-based wrapper
 /// over this for callers that still pass an instance dir (mvmd, mock).
 pub fn send_fs_request_on(stream: &mut UnixStream, req: GuestRequest) -> Result<FsResult> {
-    require_capabilities(stream, &[GuestCapability::FilesystemRpc])?;
     let resp = call_unary(stream, &req)?;
     match resp {
         GuestResponse::FsResult(r) => Ok(r),
@@ -532,7 +517,6 @@ pub fn mount_volume_on(
     guest_path: &str,
     read_only: bool,
 ) -> Result<String> {
-    let _ = negotiate_protocol(stream, Vec::new())?;
     let resp = send_request(
         stream,
         &GuestRequest::MountVolume {
@@ -564,24 +548,10 @@ mod tests {
 
     fn serve_unary_response(
         mut guest: UnixStream,
-        capability: GuestCapability,
         expected_verb: &'static str,
         response: GuestResponse,
     ) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
-            let hello: GuestRequest = read_frame(&mut guest).unwrap();
-            assert!(matches!(hello, GuestRequest::ProtocolHello { .. }));
-            write_frame(
-                &mut guest,
-                &GuestResponse::ProtocolHelloAck {
-                    agent_protocol_version: PROTOCOL_VERSION,
-                    min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
-                    agent_version: env!("CARGO_PKG_VERSION").to_string(),
-                    capabilities: vec![capability],
-                },
-            )
-            .unwrap();
-
             let request: GuestRequest = read_frame(&mut guest).unwrap();
             assert_eq!(request.kind_name(), expected_verb);
             write_frame(&mut guest, &response).unwrap();
@@ -593,7 +563,6 @@ mod tests {
         let (mut host, guest) = UnixStream::pair().unwrap();
         let server = serve_unary_response(
             guest,
-            GuestCapability::FilesystemRpc,
             "fs-read",
             GuestResponse::VerbNotAuthorized {
                 verb: "fs-read".to_string(),
@@ -620,7 +589,6 @@ mod tests {
         let (mut host, guest) = UnixStream::pair().unwrap();
         let server = serve_unary_response(
             guest,
-            GuestCapability::ProcessRpc,
             "proc-list",
             GuestResponse::UnsupportedInProfile {
                 profile: mvm_core::security::AgentProfile::SealedProd,

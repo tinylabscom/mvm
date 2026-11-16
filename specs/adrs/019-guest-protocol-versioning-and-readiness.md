@@ -23,27 +23,45 @@ failure modes instead of reading raw logs.
 
 ## Decision
 
-### Protocol hello, every session
+### Session prelude
 
 Every guest-agent session — including a pure reachability probe — begins
-with a `ProtocolHello`: the host sends its protocol version, minimum
-supported version, host binary version, and requested capabilities; the
-guest replies with the same shape. A version mismatch returns a typed
-`ProtocolMismatch` naming the required remediation (`upgrade_host`,
-`rebuild_guest`, or `downgrade_host`) before any operational request
-dispatches. There is no untyped compatibility shim: a non-hello first
-request in a session, or an incompatible version, is rejected and the
-connection closed rather than silently degraded. Protocol types stay
-closed Rust enums with `#[serde(deny_unknown_fields)]`.
+with the authenticated handshake. In it the guest's `SessionHelloAck` carries
+a `ControlOffer`: its control protocol range, its agent version, and the
+closed set of capabilities it serves. The offer is covered by the guest's
+handshake proof and by the host's transcript signature, so a swapped or
+stripped offer fails the handshake. The host's protocol range rides in
+`SessionHelloConfirm`; it is not signed, because a forged range can only make
+the guest refuse. Both sides refuse before any request dispatches: the host
+refuses a guest whose ack carries no offer or whose range does not overlap its
+own, before it writes the confirm; the guest refuses a host whose range does
+not overlap, or that sent none, by answering the first request with a typed
+`ProtocolMismatch` and closing without dispatching it. The remedy is
+`upgrade_host` when the host's newest protocol is below the guest's oldest and
+`rebuild_guest` when the host's oldest is above the guest's newest; an ack with
+no offer is `rebuild_guest`. There is no compatibility shim: a peer that offers
+no advertisement, or an incompatible range, is refused with a typed remedy, and
+control protocol 3 does not speak to 2. The other planes that share this
+handshake send no offer and no range, and a plane that receives one refuses it.
+Protocol types stay closed Rust enums with `#[serde(deny_unknown_fields)]`.
 
 ### Capability negotiation
 
 Capabilities are a closed enum, never ad hoc strings: `Ping`,
-`IntegrationStatus`, `EntrypointStatus`, `RunEntrypoint`, `FilesystemRpc`,
-`ProcessRpc`, `Console`, `UnixSocketForward`, `VolumeMount`,
-`UpdateIdleTimeout`, `Readiness`. A caller that needs a capability the
+`ResourceUsage`, `IntegrationStatus`, `EntrypointStatus`, `RunEntrypoint`,
+`AgentPrompt`, `Drive`, `RunExtension`, `FilesystemRpc`, `ProcessRpc`,
+`Console`, `UnixSocketForward`, `VolumeMount`, `UpdateIdleTimeout`,
+`Readiness`. Every request verb maps, exhaustively, to the capability it
+needs or to none (`Verb::capability`). A caller that needs a capability the
 guest doesn't advertise fails closed before the command runs, with the
-missing capability named in the error.
+missing capability named in the error. The host checks the guest's signed
+advertisement at the single point where it writes a request
+(`HostControlSession::send`); no other writer exists on the host. The
+advertisement only narrows what the host sends. It is never read by an
+authorization decision: the agent's profile gate, signed verb grants and
+seccomp tier decide what runs, and a guest that advertises more than it serves
+gains nothing. The advertisement is held for the life of one connection and is
+never persisted or reused across a restore.
 
 ### Runtime readiness is separate from lifecycle
 
@@ -121,9 +139,10 @@ class of "worked on my machine because I have Nix installed" bug.
 Receipts and readiness share one vocabulary across the CLI and any other
 consumer of the same guest protocol.
 
-**Negative.** Every guest-agent caller that depends on a capability
-beyond the unconditional baseline has to negotiate before dispatch.
-Receipt redaction needs its own tests to keep proving raw payloads never
+**Negative.** Callers do not negotiate; the session checks each verb against
+the advertised set. A guest agent built before the advertisement existed is
+refused with `rebuild_guest`, and so is any runtime that still carries
+control protocol 2. Receipt redaction needs its own tests to keep proving raw payloads never
 land in a receipt, since a regression there is a silent leak, not a
 loud failure.
 

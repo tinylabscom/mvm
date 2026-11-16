@@ -458,6 +458,7 @@ mod tests {
                 &mut guest,
                 SigningKey::from_bytes(&guest_seed),
                 &anchor,
+                &mvm_agentd::vsock::control_offer(),
             )
             .expect("guest handshake");
             let request: mvm_agentd::vsock::GuestRequest =

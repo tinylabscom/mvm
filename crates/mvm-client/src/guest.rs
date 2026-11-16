@@ -14,9 +14,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
-use mvm_agentd::vsock::{
-    ControlSession, FsResult, GuestCapability, GuestRequest, GuestResponse, ProcResult,
-};
+use mvm_agentd::vsock::{ControlSession, FsResult, GuestRequest, GuestResponse, ProcResult};
 /// The payloads these operations return, so a caller names them from here.
 pub use mvm_agentd::vsock::{FsEntry, FsEntryKind, FsStat, ProcInfo, ProcState, ProcWaitEvent};
 use mvm_core::net::session::SessionError;
@@ -87,10 +85,6 @@ pub fn sync_filesystems(name: &str) -> Result<()> {
     with_initial_handshake_retry(
         || {
             let mut stream = connect(name)?;
-            mvm_agentd::vsock::require_capabilities(
-                &mut stream,
-                &[GuestCapability::FilesystemRpc],
-            )?;
             let session = ControlSession::open(&mut stream)?;
             Ok((stream, session))
         },

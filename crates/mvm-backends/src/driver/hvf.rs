@@ -1659,6 +1659,7 @@ mod tests {
                 &mut guest,
                 ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]),
                 &anchor,
+                &mvm_agentd::vsock::control_offer(),
             )
             .expect("guest handshake");
             let request: mvm_agentd::vsock::GuestRequest =

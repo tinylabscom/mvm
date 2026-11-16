@@ -46,11 +46,23 @@ fn session() -> Session {
     let guest_key = keypair();
 
     let guest = std::thread::spawn(move || {
-        AuthenticatedSession::guest(&mut guest_stream, guest_key, &anchor).unwrap()
+        AuthenticatedSession::guest(
+            &mut guest_stream,
+            guest_key,
+            &anchor,
+            &mvm_agentd::vsock::control_offer(),
+        )
+        .unwrap()
     });
-    let host = AuthenticatedSession::host(&mut host_stream, "envelope-cost", host_key).unwrap();
+    let (host, _, _) = Session::host_control(
+        &mut host_stream,
+        "envelope-cost",
+        host_key,
+        &mvm_agentd::vsock::control_range(),
+    )
+    .unwrap();
     let _ = guest.join().unwrap();
-    host.into()
+    host
 }
 
 #[test]

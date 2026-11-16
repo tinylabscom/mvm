@@ -480,6 +480,68 @@ pub struct ResponseContract {
 }
 
 impl Verb {
+    /// The capability a guest must advertise before the host sends this verb.
+    ///
+    /// Exhaustive on purpose: a new verb does not compile until it is mapped.
+    /// `None` means the verb is gated by the protocol range alone. The host's
+    /// session checks this against the guest's signed advertisement at the one
+    /// place a request is written; the answer only narrows what the host
+    /// sends and never decides what the guest is authorized to run.
+    pub fn capability(self) -> Option<GuestCapability> {
+        use GuestCapability as C;
+        match self {
+            Self::ActivateEnvironment
+            | Self::ProtocolHello
+            | Self::WorkerStatus
+            | Self::SleepPrep
+            | Self::Wake
+            | Self::Ping
+            | Self::CheckpointIntegrations
+            | Self::ProbeStatus
+            | Self::PrimedStatus
+            | Self::PostRestore
+            | Self::DisplayInput => None,
+            Self::ResourceUsage => Some(C::ResourceUsage),
+            Self::IntegrationStatus => Some(C::IntegrationStatus),
+            Self::EntrypointStatus => Some(C::EntrypointStatus),
+            Self::RunEntrypoint | Self::StreamInput | Self::CloseStreamInput => {
+                Some(C::RunEntrypoint)
+            }
+            Self::AgentPrompt => Some(C::AgentPrompt),
+            Self::DriveOpen | Self::DriveFile => Some(C::Drive),
+            Self::RunExtension | Self::CancelExtension => Some(C::RunExtension),
+            Self::FsDiff
+            | Self::SyncFilesystems
+            | Self::FsRead
+            | Self::FsWrite
+            | Self::FsList
+            | Self::FsStat
+            | Self::FsMkdir
+            | Self::FsRemove
+            | Self::FsMove => Some(C::FilesystemRpc),
+            Self::Exec
+            | Self::ExecBatch
+            | Self::RunDetached
+            | Self::RunCode
+            | Self::ProcStart
+            | Self::ProcList
+            | Self::ProcSignal
+            | Self::ProcSendInput
+            | Self::ProcWait
+            | Self::ProcKill => Some(C::ProcessRpc),
+            Self::ConsoleOpen
+            | Self::ConsoleAttach
+            | Self::ConsoleDetach
+            | Self::ConsoleList
+            | Self::ConsoleClose
+            | Self::ConsoleResize => Some(C::Console),
+            Self::StartUnixSocketForward => Some(C::UnixSocketForward),
+            Self::MountVolume | Self::UnmountVolume => Some(C::VolumeMount),
+            Self::UpdateIdleTimeout => Some(C::UpdateIdleTimeout),
+            Self::ReadinessStatus => Some(C::Readiness),
+        }
+    }
+
     /// Exhaustive control/data-plane classification for this wire verb.
     pub fn traffic_plane(self) -> TrafficPlane {
         use TrafficPlane::{Control, Data};
@@ -798,56 +860,6 @@ impl DriveRefusal {
         }
     }
 }
-/// Guest-agent control protocol capability. Closed enum so host and
-/// guest fail loudly on drift instead of accepting arbitrary strings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub enum GuestCapability {
-    Ping,
-    ResourceUsage,
-    IntegrationStatus,
-    EntrypointStatus,
-    RunEntrypoint,
-    /// `AgentPrompt`: one prompt to the image's resident agent.
-    AgentPrompt,
-    Drive,
-    RunExtension,
-    FilesystemRpc,
-    ProcessRpc,
-    /// Legacy request, always refused rather than treated as an ordinary exec.
-    Console,
-    /// Unix-domain socket forwarding (`StartUnixSocketForward`). Not an SSH
-    /// session capability — no SSH client/server or key material crosses the
-    /// guest boundary.
-    UnixSocketForward,
-    VolumeMount,
-    UpdateIdleTimeout,
-    /// `ReadinessStatus` returns
-    /// `GuestResponse::ReadinessStatusReport(ReadinessReport)`.
-    /// `mvmctl machine wait` / `mvmctl machine boot-report` require this capability.
-    Readiness,
-}
-
-/// Required remediation for a host/guest protocol mismatch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub enum ProtocolUpgradeAction {
-    UpgradeHost,
-    RebuildGuest,
-    DowngradeHost,
-}
-
-/// Protocol negotiation result returned by [`negotiate_protocol`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProtocolNegotiation {
-    pub agent_protocol_version: u32,
-    pub min_supported_version: u32,
-    pub agent_version: String,
-    pub capabilities: Vec<GuestCapability>,
-}
-
 /// Capabilities served by this agent build.
 pub fn supported_capabilities() -> Vec<GuestCapability> {
     vec![
@@ -869,9 +881,23 @@ pub fn supported_capabilities() -> Vec<GuestCapability> {
     ]
 }
 
-/// Return `true` when `[a_min, a_max]` overlaps `[b_min, b_max]`.
-fn protocol_ranges_overlap(a_min: u32, a_max: u32, b_min: u32, b_max: u32) -> bool {
-    a_min <= b_max && b_min <= a_max
+/// The advertisement this agent build puts in its session handshake: its
+/// protocol range, build version and the closed set of capabilities it serves.
+pub fn control_offer() -> ControlOffer {
+    ControlOffer {
+        protocol_version: PROTOCOL_VERSION,
+        min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
+        agent_version: env!("CARGO_PKG_VERSION").to_string(),
+        capabilities: supported_capabilities().into_iter().collect(),
+    }
+}
+
+/// The protocol range this build speaks as the host.
+pub const fn control_range() -> ControlRange {
+    ControlRange {
+        protocol_version: PROTOCOL_VERSION,
+        min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
+    }
 }
 
 /// Build the guest side response for a protocol hello request.
@@ -881,29 +907,16 @@ pub fn protocol_hello_response(
     _host_version: &str,
     requested_capabilities: &[GuestCapability],
 ) -> GuestResponse {
-    if !protocol_ranges_overlap(
-        host_min_supported_version,
-        host_protocol_version,
-        MIN_SUPPORTED_PROTOCOL_VERSION,
-        PROTOCOL_VERSION,
-    ) {
-        let required_action = if host_protocol_version < MIN_SUPPORTED_PROTOCOL_VERSION {
-            ProtocolUpgradeAction::UpgradeHost
-        } else {
-            ProtocolUpgradeAction::RebuildGuest
-        };
-
+    let host = ControlRange {
+        protocol_version: host_protocol_version,
+        min_supported_version: host_min_supported_version,
+    };
+    if let Err(mismatch) = host.check(&control_offer()) {
         return GuestResponse::ProtocolMismatch {
-            host_protocol_version,
-            agent_protocol_version: PROTOCOL_VERSION,
-            required_action,
-            message: format!(
-                "guest-agent protocol mismatch: host supports {}..={}, agent supports {}..={}",
-                host_min_supported_version,
-                host_protocol_version,
-                MIN_SUPPORTED_PROTOCOL_VERSION,
-                PROTOCOL_VERSION
-            ),
+            host_protocol_version: mismatch.host_protocol_version,
+            agent_protocol_version: mismatch.agent_protocol_version,
+            required_action: mismatch.required_action,
+            message: mismatch.message,
         };
     }
 
