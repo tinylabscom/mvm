@@ -94,11 +94,11 @@ sequence number. A request carrying a generation before the owner has one is
 malformed, not an invitation to invent one.
 
 Existing: `a_stale_generation_or_identity_is_refused_and_consumes_nothing`.
+Existing, parser level: `pre_native_request_naming_a_generation_is_refused` (crates/mvm-contract/src/protocol/hvf_owner.rs:489).
 
 Planned witnesses:
 - receiver_refuses_wrong_principal_tenant_incarnation_and_plan_over_a_real_socket
 - receiver_refuses_a_generation_from_a_prior_owner_incarnation (HVF)
-- pre_native_request_naming_a_generation_is_refused
 
 ### R4. Authentication of the peer, not only the bytes
 
@@ -125,12 +125,11 @@ startup, dispatch or output delivery is blocked.
 
 Existing: `disconnect_requests_cancellation_and_keeps_custody`,
 `repeated_cancellation_coalesces_and_never_completes`.
+Existing, table level only (the reserved-path and blocked-reader halves need a receiver): `cancel_is_accepted_during_startup` (crates/mvm-contract/src/protocol/hvf_owner_lifecycle.rs:632), `disconnect_at_every_state_never_infers_success` (crates/mvm-contract/src/protocol/hvf_owner_lifecycle.rs:654).
 
 Planned witnesses:
 - kill_the_cli_mid_dispatch_owner_stops_the_original_child (HVF)
 - cancel_is_accepted_while_output_reader_is_blocked
-- cancel_is_accepted_during_startup
-- disconnect_at_every_state_never_infers_success
 
 ### R6. Failed recovery handoff
 
@@ -156,9 +155,9 @@ most once; deadline exhaustion retains uncertainty and starts no retry loop.
 
 Existing: `acknowledgement_is_exact_and_repeated_delivery_repeats_nothing`,
 `stop_is_attempted_at_most_once`.
+Existing, table level: `repeated_observe_does_not_advance_state_or_sequence` (crates/mvm-contract/src/protocol/hvf_owner_lifecycle.rs:697); it pins state, intent and result as unchanged and the sequence as the replay watermark only.
 
 Planned witnesses:
-- repeated_observe_does_not_advance_state_or_sequence
 - repeated_acknowledge_seals_the_audit_chain_once
 
 ### R8. Stale generation and stale sequence
@@ -168,10 +167,10 @@ exists). A sequence cannot wrap. An acknowledgement of an earlier or later
 result revision than the retained terminal revision refuses. After owner loss
 there is no stale-generation recovery: the operation stays quarantined.
 
+Existing, table level: `sequence_at_u64_max_is_refused_not_wrapped` (crates/mvm-contract/src/protocol/hvf_owner_lifecycle.rs:373), `new_owner_incarnation_cannot_observe_or_clear_a_prior_quarantine` (crates/mvm-contract/src/protocol/hvf_owner_lifecycle.rs:725; it shows no binding clears or observes a quarantined lifecycle, not that a durable record survives).
+
 Planned witnesses:
-- sequence_at_u64_max_is_refused_not_wrapped
 - early_and_stale_result_acknowledgement_over_the_receiver_are_refused
-- new_owner_incarnation_cannot_observe_or_clear_a_prior_quarantine
 
 ### R9. Owner death is quarantine, never recovery
 
@@ -200,10 +199,10 @@ durably committed retirement.
 
 Existing: `each_missing_half_of_the_terminal_proof_stays_recoverable`,
 `recovery_required_completes_only_with_all_three_halves`.
+Existing, table level: `result_delivered_but_cleanup_failed_is_not_terminal` (crates/mvm-contract/src/protocol/hvf_owner_lifecycle.rs:755).
 
 Planned witnesses:
 - cli_exit_then_reconnect_observes_terminal_result_after_cleanup (HVF)
-- result_delivered_but_cleanup_failed_is_not_terminal
 - acknowledge_does_not_retire_quarantine
 - retirement_is_durable_before_reuse_is_allowed
 
@@ -216,11 +215,11 @@ possession proof. Responses carry sanitized observations. They never carry
 There is no verb that takes an executable, argument vector, shell string,
 descriptor, process identifier or key. CLI and Studio use the same service.
 
+Existing, request representation only (no client library exists): `the_client_surface_enumerates_exactly_three_recovery_verbs` (crates/mvm-contract/src/protocol/hvf_owner.rs:522), `no_recovery_request_field_accepts_a_path_pid_or_command` (crates/mvm-contract/src/protocol/hvf_owner.rs:567).
+
 Planned witnesses:
-- the_client_surface_enumerates_exactly_three_recovery_verbs
 - responses_cannot_be_converted_into_completion_or_cleanup_capabilities
 - cli_and_studio_reach_the_receiver_through_one_client_service
-- no_recovery_request_field_accepts_a_path_pid_or_command
 
 ## Not covered here
 
