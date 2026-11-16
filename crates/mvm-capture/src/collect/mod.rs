@@ -78,7 +78,11 @@ pub fn collect_project(options: &CollectOptions) -> Result<CaptureReportV1, Capt
         linux::collect_packages(&mut report)?;
         linux::collect_path_executables(&mut report, &options.limits)?;
         if !options.explicit_commands.is_empty() {
-            linux::trace_explicit_commands(&mut report, &options.explicit_commands)?;
+            linux::trace_explicit_commands(
+                &mut report,
+                &options.explicit_commands,
+                &options.project_path,
+            )?;
         }
     }
 

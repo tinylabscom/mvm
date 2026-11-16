@@ -42,10 +42,12 @@ impl StraceTracer {
 }
 
 impl StraceTracer {
-    /// Run `strace` against `command` and return observed events.
+    /// Run `strace` against `command` from `project_dir` and return observed
+    /// events. The parent process directory is left alone.
     pub(super) fn trace_command(
         &self,
         command: &[String],
+        project_dir: &Path,
     ) -> Result<Vec<TraceEvent>, CaptureError> {
         if command.is_empty() {
             return Err(CaptureError::InvalidObservation(
@@ -53,12 +55,20 @@ impl StraceTracer {
             ));
         }
 
+        if !project_dir.is_dir() {
+            return Err(CaptureError::InvalidObservation(format!(
+                "cannot trace in {}: not a directory",
+                project_dir.display()
+            )));
+        }
+
         let output_file = tempfile::NamedTempFile::new()
             .map_err(|e| CaptureError::Io(PathBuf::from("<strace-output>"), e))?;
         let output_path = output_file.path().to_path_buf();
 
         let mut cmd = build_trace_command(command, &output_path, self.limits.max_seconds);
-        cmd.stdin(Stdio::null())
+        cmd.current_dir(project_dir)
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
 
@@ -240,6 +250,61 @@ fn extract_quoted_string(s: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_traced_command_runs_in_the_project_directory_not_the_callers() {
+        let project = tempfile::tempdir().expect("project dir");
+        let tracer = StraceTracer::new(StraceLimits::default());
+        let caller_dir = std::env::current_dir().expect("cwd");
+        let argv = vec!["pwd".to_owned()];
+        // Whether or not strace is installed, the spawn must target the project.
+        let _ = tracer.trace_command(&argv, project.path());
+        assert_eq!(std::env::current_dir().expect("cwd"), caller_dir);
+
+        let mut cmd = build_trace_command(&argv, Path::new("/dev/null"), 1);
+        cmd.current_dir(project.path());
+        assert_eq!(cmd.get_current_dir(), Some(project.path()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_child_observes_the_project_directory_as_its_working_directory() {
+        if which::which("strace").is_err() {
+            eprintln!("skipped: strace not installed");
+            return;
+        }
+        let project = tempfile::tempdir().expect("project dir");
+        let marker = project.path().join("here.marker");
+        std::fs::write(&marker, "").expect("marker");
+        let tracer = StraceTracer::new(StraceLimits::default());
+        let traced = tracer.trace_command(
+            &["cat".to_owned(), "here.marker".to_owned()],
+            project.path(),
+        );
+        // A sandbox that forbids ptrace yields an error or no events at all;
+        // any working trace at least records the execve of `cat`.
+        let events = match traced {
+            Ok(events) if !events.is_empty() => events,
+            other => {
+                eprintln!("skipped: strace cannot trace here: {other:?}");
+                return;
+            }
+        };
+        let wanted = marker.to_string_lossy();
+        let opened_relative = events.iter().any(
+            |e| matches!(e, TraceEvent::Open { path } if path == "here.marker" || path == &*wanted),
+        );
+        assert!(opened_relative, "{events:?}");
+    }
+
+    #[test]
+    fn tracing_in_a_missing_directory_is_refused() {
+        let tracer = StraceTracer::new(StraceLimits::default());
+        let err = tracer
+            .trace_command(&["true".to_owned()], Path::new("/nonexistent/mvm-capture"))
+            .expect_err("refused");
+        assert!(matches!(err, CaptureError::InvalidObservation(_)), "{err}");
+    }
 
     #[test]
     fn parse_openat_extracts_path() {

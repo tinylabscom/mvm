@@ -2979,7 +2979,7 @@ Inspect a project directory and emit a versioned capture report.
 | ----------------- | --------------------------------------------------------------------- |
 | `<path>`          | Project directory to inspect                                          |
 | `--output <path>` | Output file for the capture report (required)                         |
-| `--run "<cmd>"`   | Explicit command to record for later tracing/verification; repeatable |
+| `--run "<cmd>"`   | Explicit command to record for later tracing/verification; repeatable. On Linux it is traced with its working directory set to `<path>`, not the directory you ran `mvmctl` from; a `<path>` that is not a directory refuses the trace |
 
 ### `mvmctl capture resolve`
 
