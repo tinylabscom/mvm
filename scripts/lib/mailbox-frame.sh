@@ -21,7 +21,10 @@ mbx_write() {
     { head -c 32 /dev/zero | tr "\\0" "\\$1"; printf "%s" "$2"; } > "$t" || return
     if [ "$(id -u)" = 0 ]; then chown "$owner" "$t" || return; fi
     chmod 640 "$t" || return
-    mv "$t" "$d/outbox/$(date +%s)-$$"
+    # One workload may stage multiple reports in the same second.
+    mbx_sequence=$((${mbx_sequence:-0} + 1))
+    suffix=$(printf '%010d' "$mbx_sequence") || return
+    mv "$t" "$d/outbox/$(date +%s)-$$-$suffix"
 }
 EOS
 }
