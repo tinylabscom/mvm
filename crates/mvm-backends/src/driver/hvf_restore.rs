@@ -543,14 +543,20 @@ fn await_restored(
         if marker.is_file()
             && let Some(pid) = read_pid_file(&cfg.pid_file)
         {
-            let pid = u32::try_from(pid).map_err(|_| {
-                anyhow!("restored HVF VM '{}' published a negative pid", req.vm_name)
-            })?;
-            let agent_socket = cfg
-                .agent_socket
-                .clone()
-                .ok_or_else(|| anyhow!("restored HVF VM '{}' has no agent socket", req.vm_name))?;
-            return Ok(RestoredHvfVm { pid, agent_socket });
+            return match restored_identity(req.vm_name, pid, cfg.agent_socket.as_deref()) {
+                Ok(restored) => Ok(restored),
+                Err(failure) => {
+                    // The restore is a failure from here; the supervisor it
+                    // started must not outlive the report.
+                    stop_failed_restore(child);
+                    tracing::warn!(
+                        vm = req.vm_name,
+                        outcome = %failure,
+                        "HVF restore: stopped the supervisor it started"
+                    );
+                    Err(failure)
+                }
+            };
         }
         if let Some(status) = child.try_wait().context("polling the HVF supervisor")? {
             bail!(restore_failure(
@@ -568,6 +574,35 @@ fn await_restored(
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
+}
+
+/// The restored machine's identity, from what the supervisor published.
+///
+/// A ready marker is only believed once the record it accompanies names one
+/// machine: a pid that fits the identity and an agent socket to dial. Either
+/// failing makes the marker a broken promise, so the caller stops and reaps
+/// the supervisor on every error return from here.
+fn restored_identity(
+    vm_name: &str,
+    pid: i32,
+    agent_socket: Option<&Path>,
+) -> Result<RestoredHvfVm> {
+    let pid = u32::try_from(pid)
+        .map_err(|_| anyhow!("restored HVF VM '{vm_name}' published a negative pid"))?;
+    let agent_socket = agent_socket
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow!("restored HVF VM '{vm_name}' has no agent socket"))?;
+    Ok(RestoredHvfVm { pid, agent_socket })
+}
+
+/// Stop and reap the supervisor a failed restore started.
+///
+/// Every error return of the readiness wait passes through here so a restore
+/// reported as failed cannot leave the VMM it started running unowned. The
+/// kill goes through the owned child handle, never the published pid.
+fn stop_failed_restore(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Report control-plane status without reflecting untrusted supervisor stderr.
@@ -1463,6 +1498,81 @@ mod tests {
         // SAFETY: signal 0 only probes whether the pid exists.
         let alive = unsafe { libc::kill(pid, 0) } == 0;
         assert!(!alive, "the unresponsive supervisor was killed and reaped");
+    }
+
+    /// A ready marker whose published record cannot name the restored machine
+    /// — here, no agent socket in the config — fails the restore, and the
+    /// supervisor that published the marker must not outlive the failure: it
+    /// is stopped and reaped before the error comes back.
+    #[test]
+    fn await_restored_stops_and_reaps_the_supervisor_when_the_record_cannot_be_believed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let anchors = materialized(dir);
+        let parent = parent_config(dir, vec![]);
+        let mut cfg = hvf_child_restore_config(&parent, &anchors, &request("child", dir)).unwrap();
+        cfg.agent_socket = None;
+        // The marker is up and a well-formed pid is published, so the wait
+        // reaches the identity check instead of the exit or deadline arms.
+        std::fs::write(&cfg.pid_file, "424242\n").unwrap();
+        std::fs::write(
+            mvm_vmm::host::hvf_supervisor::restore_ready_path(dir),
+            b"ready",
+        )
+        .unwrap();
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 60"])
+            .spawn()
+            .unwrap();
+        let pid = libc::pid_t::try_from(child.id()).unwrap();
+
+        let error = await_restored(
+            &mut child,
+            &request("child", dir),
+            &cfg,
+            std::time::Duration::from_secs(5),
+        )
+        .expect_err("a ready marker without an agent socket is not a restored VM");
+
+        assert!(error.to_string().contains("no agent socket"), "{error:#}");
+        // SAFETY: signal 0 only probes whether the pid still names a process.
+        let stopped = unsafe { libc::kill(pid, 0) } != 0;
+        assert!(stopped, "the supervisor was stopped");
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "the stopped supervisor was reaped, not left running or a zombie"
+        );
+    }
+
+    /// A published pid that does not fit the restored-machine identity is
+    /// refused, and the refusal names the record. The pid guard in
+    /// `process_liveness` keeps a value like this from ever becoming a signal
+    /// target; this is the error the ready marker would produce if one were
+    /// read through a path without that guard.
+    #[test]
+    fn restored_identity_refuses_a_negative_published_pid() {
+        let socket = Path::new("/parent/hvf-agent.sock");
+        let error = restored_identity("restored", -5, Some(socket)).unwrap_err();
+        assert!(
+            error.to_string().contains("negative pid"),
+            "the refusal must name the pid record, got: {error:#}"
+        );
+    }
+
+    /// The identity is only complete with the socket the agent dials; a ready
+    /// marker with no agent socket in the config is a broken promise, not a
+    /// restored machine.
+    #[test]
+    fn restored_identity_requires_an_agent_socket() {
+        let socket = Path::new("/parent/hvf-agent.sock");
+        let restored = restored_identity("restored", 4242, Some(socket)).expect("complete");
+        assert_eq!(restored.pid, 4242);
+        assert_eq!(restored.agent_socket, socket);
+        let error = restored_identity("restored", 4242, None).unwrap_err();
+        assert!(
+            error.to_string().contains("no agent socket"),
+            "the refusal must name the missing socket, got: {error:#}"
+        );
     }
 
     /// Readiness is the marker, published after the state is applied.

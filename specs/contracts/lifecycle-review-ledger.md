@@ -63,6 +63,7 @@ comment exists, not that its claim is true; the sites were read, but a comment i
 | HVF snapshot and cancellation lifecycle | pause/capture races, completion notification | [#4994](https://github.com/tinylabscom/mvm/pull/4994), [#5064](https://github.com/tinylabscom/mvm/pull/5064), [#4983](https://github.com/tinylabscom/mvm/pull/4983) | fixed under the HVF owner work; not re-read for this table |
 | Volume, checkpoint and peer-EOF custody | custody, removal guard, EOF after timeout refusal | [#4880](https://github.com/tinylabscom/mvm/pull/4880), [#4957](https://github.com/tinylabscom/mvm/pull/4957), [#4864](https://github.com/tinylabscom/mvm/pull/4864), [#4879](https://github.com/tinylabscom/mvm/pull/4879) | fixed under the volume and vmm owner work; not re-read for this table |
 | Unsafe/FFI documentation | missing `SAFETY` claims | [#4993](https://github.com/tinylabscom/mvm/pull/4993), [#5438](https://github.com/tinylabscom/mvm/pull/5438) | every `unsafe` block in the workspace has a comment; see the gate above |
+| Restore readiness teardown | failed restore leaving its supervisor running | [#5490](https://github.com/tinylabscom/mvm/issues/5490) (fix on `fix/5490-hvf-restore-teardown`, PR pending) | `crates/mvm-backends/src/driver/hvf_restore.rs` (`await_restored`): both error returns after the ready marker now stop and reap the spawned supervisor through the owned child handle, with the outcome logged; the published record is validated by `restored_identity` and the pid read stays on the guarded `process_liveness` helper |
 
 ## Files NOT read
 
@@ -86,8 +87,7 @@ at the cited site, then the fix.
 
 | Item | Site | Owner | Next step |
 | --- | --- | --- | --- |
-| `child.kill()` on boot timeout is never followed by `wait()` (zombie); same shape in other drivers | `crates/mvm-backends/src/driver/libkrun.rs` lines 340 and 369; also `driver/hvf/stop_state.rs`, `driver/hvf_restore.rs`, `fc/idle_pool.rs` | backends maintainer | add `wait()` after each kill with a test using a stub child; sweep the other sites (tracked in #5489) |
-| `await_restored` returns an error without killing the supervisor when the pid is negative or the agent socket is missing after the ready marker | `crates/mvm-backends/src/driver/hvf_restore.rs` (`await_restored`) | HVF restore owner | kill and reap on every error return; test with a ready marker and no socket (tracked in #5490) |
+| `child.kill()` on boot timeout is never followed by `wait()` (zombie); same shape in other drivers | `crates/mvm-backends/src/driver/libkrun.rs` lines 340 and 369; also `driver/hvf/stop_state.rs`, `fc/idle_pool.rs` | backends maintainer | add `wait()` after each kill with a test using a stub child; sweep the other sites (tracked in #5489) |
 | `hvf/standby.rs` leaves the VM running when its pid is negative | `crates/mvm-backends/src/driver/hvf/standby.rs` | HVF owner | refuse and stop through the owned-stop path; test with a negative pid (tracked in #5491) |
 | `HvfVm::create` does not destroy the VM or release the GIC config when GIC creation fails | `crates/mvm-runtime/src/backends/hvf/hv_impl.rs` (`HvfVm::create`) | HVF owner | release on the error path; needs a fault-injection seam on the GIC call, so a live HVF host or a seam first (tracked in #5492) |
 | FlowMux registry keeps `Closed` entries for the session lifetime (memory only, rate-limited) | `crates/mvm-hostd/src/supervisor/endpoint/flowmux/registry.rs` | hostd maintainer | evict closed entries on a bound; test that a long session does not grow without limit (tracked in #5493) |
