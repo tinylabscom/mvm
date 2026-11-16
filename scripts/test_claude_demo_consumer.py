@@ -21,7 +21,7 @@ spec.loader.exec_module(demo)
 
 class ConsumerTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(dir="/tmp")
+        self.temp = tempfile.TemporaryDirectory(dir=os.environ.get("DELTA_SCRATCH_DIR", "/tmp"))
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
         self.home = self.root / "home"
@@ -91,6 +91,36 @@ class ConsumerTests(unittest.TestCase):
             "artifacts": [{"role": role, "sha256": sha} for role, sha in (
                 ("kernel", self.args.kernel_sha256), ("rootfs", self.args.rootfs_sha256))],
         }}
+
+    def test_live_consumer_uses_shared_native_home_environment(self):
+        self.args.native_home = self.root / "account"
+        env = {"HOME": str(self.args.native_home), "MVM_HOME": str(self.home)}
+
+        def preflight(args, runner, report):
+            self.assertIs(args, self.args)
+            self.assertEqual(args.native_home, self.root / "account")
+            report["verified_application"] = self.info
+            return env
+
+        with patch.object(demo.base.argparse.ArgumentParser, "parse_args",
+                          return_value=self.args), \
+                patch.object(demo.os, "umask"), \
+                patch.object(demo, "evidence_dir", return_value=self.evidence), \
+                patch.object(demo, "live_prerequisites"), \
+                patch.object(demo.base, "preflight", side_effect=preflight) as check, \
+                patch.object(demo, "signed_prerequisites"), \
+                patch.object(demo.base, "released_cli"), \
+                patch.object(demo.base.witness, "Runner") as runner, \
+                patch.object(demo, "dispatch_once",
+                             side_effect=demo.Blocked("hermetic stop")) as dispatch, \
+                patch.object(demo, "persist"), \
+                patch.object(demo, "scan_for_secrets", return_value=[]), \
+                patch("builtins.print"):
+            self.args.results_dir = str(self.evidence)
+            self.assertEqual(demo.main(), 1)
+        check.assert_called_once()
+        self.assertIs(dispatch.call_args.args[1], env)
+        self.assertIs(runner.return_value.run.call_args.args[2], env)
 
     def entry(self, event, labels):
         plan_id = self.plan if event.startswith("plan.") else demo.UNBOUND
