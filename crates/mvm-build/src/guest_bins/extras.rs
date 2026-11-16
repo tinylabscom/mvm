@@ -470,6 +470,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn no_global_rustflags_variable_shadows_a_cdylibs_per_target_flags() {
+        let musl = by_path(GuestArch::X86_64, "x86_64/lib/musl/libmvm_host_services.so");
+        let spec = GuestAgentBuildSpec::new(
+            PathBuf::from("/ws"),
+            GuestArch::X86_64,
+            PathBuf::from("/tmp/t"),
+        );
+        let mut cmd = std::process::Command::new("cargo");
+        cmd.env("RUSTFLAGS", "-Zthreads=8")
+            .env("CARGO_ENCODED_RUSTFLAGS", "-Zthreads=8");
+        crate::guest_agent_build::apply_zigbuild_env(&mut cmd, &spec, None)
+            .expect("configure zigbuild env");
+        cmd.envs(musl.env.iter().map(|(k, v)| (k, v)));
+
+        let value = |name: &str| {
+            cmd.get_envs()
+                .find(|(k, _)| *k == std::ffi::OsStr::new(name))
+                .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+        };
+        assert_eq!(
+            value("CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS").as_deref(),
+            Some("-C target-feature=-crt-static")
+        );
+        for global in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"] {
+            assert_eq!(
+                value(global),
+                None,
+                "{global} would shadow the per-target flags"
+            );
+        }
+    }
+
     /// Each object takes the profile its own recipe sets: `mvm-gpu-shims.nix`
     /// size-tunes the shims, and `mvm-sdk-cdylib.nix` overrides nothing.
     #[test]
