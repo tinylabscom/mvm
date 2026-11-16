@@ -26,6 +26,7 @@ pub(in crate::commands) mod application_source;
 mod composition;
 pub(in crate::commands) mod detect;
 mod image_source;
+mod launch_handoff;
 pub(in crate::commands) mod positional_source;
 pub(in crate::commands) use detect::{Inference, resolve_run_source};
 mod network_access;
@@ -35,6 +36,7 @@ mod standby_refill;
 mod transient_mounts;
 
 pub(in crate::commands) use image_source::resolve_launch_image_source;
+use launch_handoff::{ImageSelection, same_launch_runtime};
 use network_access::NetworkAccess;
 pub(in crate::commands) use review_source::build_flake_slot;
 use review_source::offer_review;
@@ -790,7 +792,12 @@ pub(in crate::commands) fn run_secure_started(
             bundle_archive,
             runtime_config,
             verified_runtime,
+            verified_runtime_owner,
         } = inputs;
+        anyhow::ensure!(
+            same_launch_runtime(verified_runtime_owner, verified_runtime),
+            "CLI admission must retain the same launch-owned runtime set it verified"
+        );
         anyhow::ensure!(
             backend_kind == admit_backend_kind,
             "launch backend changed after transient admission preflight"
@@ -926,7 +933,11 @@ pub(in crate::commands) fn run_secure_started(
         }
 
         // Keep this authority alive until the selected legacy boot returns.
-        *ctx_sink.borrow_mut() = Some(mvm_client::admission::CliAdmission::new(c));
+        *ctx_sink.borrow_mut() = Some(mvm_client::admission::CliAdmission::new_for_rootfs_with_runtime(
+            c,
+            rootfs,
+            verified_runtime_owner.cloned(),
+        ));
         Ok(Some(substrate))
     };
 
@@ -1050,17 +1061,6 @@ struct RunAudit<'a> {
 /// above it: written on one side of the boot, read on the other.
 pub(in crate::commands) type OciProvenanceSink =
     std::rc::Rc<std::cell::RefCell<Option<Vec<(String, String)>>>>;
-
-/// The inputs that decide which `ImageSource` a run boots from: the OCI
-/// reference (`--image`), the prod/dev posture that gates it, and whether to
-/// boot from a verified attested runtime pack instead. Grouped so
-/// `build_exec_request` and its callers don't grow a loose bool/Option
-/// parameter apiece.
-struct ImageSelection {
-    image_ref: Option<String>,
-    prod: bool,
-    runtime_pack: bool,
-}
 
 fn run_run_args(
     _cli: &Cli,

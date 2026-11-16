@@ -43,6 +43,7 @@ mod boot_config;
 mod bundle_binding;
 pub mod bundle_environment;
 pub mod bundle_posture;
+mod cli_dispatch;
 mod durability;
 mod enforce;
 pub mod entrypoint_resolve;
@@ -64,6 +65,7 @@ pub use boot_config::{
     guest_profile_for_boot,
 };
 pub use bundle_binding::{BundlePin, InheritedBundle};
+pub use cli_dispatch::{CliStartFailureKind, cli_start_failure_kind};
 pub use durability::{
     admit_plan_for_boot_syncing_beside_boot,
     admit_plan_for_boot_with_verified_runtime_syncing_beside_boot,
@@ -325,12 +327,22 @@ pub struct AdmissionContext {
 
 /// The admitted CLI run before it chooses warm claim or cold boot.
 ///
-/// The authority cannot be cloned or built from signed-plan JSON. The legacy
-/// warm and cold paths only borrow it; dispatch will consume it when migrated.
-pub struct CliAdmission {
+/// The authority cannot be cloned or built from signed-plan JSON. A cold
+/// dispatch consumes it; the unmigrated warm path borrows it until completion.
+pub enum CliAdmission {
+    /// One-use authority before warm/cold selection.
+    Pending(Box<PendingCliAdmission>),
+    /// Dispatch spent the authority; only the audit continuation remains.
+    Dispatched(Box<AuditContinuation>),
+}
+
+/// Private fields keep the pending authority one-shot.
+pub struct PendingCliAdmission {
     authority: AdmittedPlan,
     policy_bundle: Option<PolicyBundle>,
     audit: AuditContinuation,
+    source_rootfs: Option<std::path::PathBuf>,
+    verified_runtime: Option<std::sync::Arc<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>>,
 }
 
 /// Read-only admitted plan and its original signer for post-run accounting.
@@ -349,77 +361,23 @@ impl std::fmt::Debug for AuditContinuation {
     }
 }
 
-impl CliAdmission {
-    /// Retain the actual admission and audit owner, never a decoded plan JSON.
-    #[must_use]
-    pub fn new(context: AdmissionContext) -> Self {
-        let audit = AuditContinuation {
-            plan: context.admitted.plan().clone(),
-            emitter: context.emitter,
-        };
-        Self {
-            authority: context.admitted,
-            policy_bundle: context.policy_bundle,
-            audit,
-        }
-    }
-
-    /// The signed plan that owns this run's single admission.
-    #[must_use]
-    pub fn plan(&self) -> &mvm_core::plan::ExecutionPlan {
-        self.authority.plan()
-    }
-
-    /// Compare the legacy VM name, signed-plan JSON and policy-bundle JSON.
-    ///
-    /// Kernel, rootfs, volume and network enforcement remain in their existing
-    /// admission and runner gates; this comparison does not replace them.
-    ///
-    /// # Errors
-    /// Refuses a changed name or different signed-plan or policy-bundle JSON.
-    /// The JSON is compared with the typed owner, never used as authority.
-    pub fn check_legacy_projection(
-        &self,
-        config: &mvm_core::vm_backend::VmStartConfig,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            config.name == self.authority.plan().image.name,
-            "launch identity differs from admitted plan"
-        );
-        let expected = serde_json::to_string(self.authority.signed())?;
-        anyhow::ensure!(
-            config.plan_json.as_deref() == Some(expected.as_str()),
-            "legacy launch plan projection differs from admitted authority"
-        );
-        let policy = self
-            .policy_bundle
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-        anyhow::ensure!(
-            config.bundle_json == policy,
-            "legacy launch policy projection differs from admitted authority"
-        );
-        Ok(())
-    }
-
-    /// Retire the one-use authority after the unmigrated warm or cold path.
-    #[must_use]
-    pub fn finish_legacy(self) -> AuditContinuation {
-        let Self {
-            authority: _,
-            policy_bundle: _,
-            audit,
-        } = self;
-        audit
-    }
-}
-
 impl AuditContinuation {
     /// The exact plan admitted for this run, not one decoded from boot JSON.
     #[must_use]
     pub fn plan(&self) -> &mvm_core::plan::ExecutionPlan {
         &self.plan
+    }
+
+    /// Record an unresolved host rollback without sealing a possibly live VM.
+    pub fn record_uncertain_stop(&self, error: &anyhow::Error) {
+        mvm_hostd::audit::unsealed::record_unsealed_end(
+            Some((&self.emitter, &self.plan)),
+            mvm_hostd::audit::unsealed::UnsealedEnd::new(
+                &self.plan.workload.0,
+                mvm_hostd::audit::unsealed::UnsealedReason::StopFailed,
+            )
+            .error(format!("{error:#}")),
+        );
     }
 
     /// Record an output against an actual signed grant.
@@ -2192,6 +2150,52 @@ pub(crate) mod admit_plan_tests {
             .expect("admission was recorded");
         assert_eq!(chain.matches("plan.admitted").count(), 1, "{chain}");
         assert!(!chain.contains("plan.launched"), "{chain}");
+    }
+
+    #[test]
+    fn cli_cold_refuses_a_changed_source_projection_without_spending_authority() {
+        let _home = isolated_home();
+        let keys_dir = tempfile::tempdir().expect("keys dir");
+        let audit_dir = tempfile::tempdir().expect("audit dir");
+        let context = admitted_into(keys_dir.path(), audit_dir.path(), "vm-source-owner");
+        let original_nonce = context.admitted.plan().nonce.clone();
+        let signed = serde_json::to_string(context.admitted.signed()).expect("signed plan");
+        let bundle = context
+            .policy_bundle
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .expect("policy");
+        let owner = CliAdmission::new_for_rootfs(context, std::path::Path::new("/admitted/rootfs"));
+        let config = mvm_core::vm_backend::VmStartConfig {
+            name: "vm-source-owner".into(),
+            rootfs_path: "/substituted/rootfs".into(),
+            plan_json: Some(signed),
+            bundle_json: bundle,
+            ..Default::default()
+        };
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let (owner, result) = owner.start_cold(&backend, config, Vec::new());
+        assert!(result.is_err(), "altered projection must not dispatch");
+        assert_eq!(owner.plan().nonce, original_nonce);
+        let chain = std::fs::read_to_string(audit_dir.path().join("local.jsonl"))
+            .expect("admission record");
+        assert_eq!(chain.matches("plan.admitted").count(), 1, "{chain}");
+        assert!(!chain.contains("plan.launched"), "{chain}");
+    }
+
+    #[test]
+    fn cli_cold_cannot_dispatch_a_legacy_owner_without_source_binding() {
+        let _home = isolated_home();
+        let keys_dir = tempfile::tempdir().expect("keys dir");
+        let audit_dir = tempfile::tempdir().expect("audit dir");
+        let context = admitted_into(keys_dir.path(), audit_dir.path(), "vm-no-source");
+        let nonce = context.admitted.plan().nonce.clone();
+        let owner = CliAdmission::new(context);
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let (owner, result) = owner.start_cold(&backend, Default::default(), Vec::new());
+        assert!(result.is_err(), "a plan without its source cannot dispatch");
+        assert_eq!(owner.plan().nonce, nonce);
     }
 
     #[test]

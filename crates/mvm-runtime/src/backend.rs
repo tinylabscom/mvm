@@ -825,6 +825,26 @@ impl AnyBackend {
         self.inner().start(config)
     }
 
+    /// Whether this backend is migrated to the CLI admitted-cold host tail.
+    ///
+    /// This is migration scope, not a statement of isolation or runner support:
+    /// QEMU and AppleContainer still keep their existing CLI start behavior.
+    pub fn uses_cli_admitted_cold_dispatch(&self) -> bool {
+        if !cfg!(unix) {
+            return false;
+        }
+        matches!(self, Self::Firecracker(_) | Self::Libkrun(_) | Self::Hvf(_)) || {
+            #[cfg(feature = "test-support")]
+            {
+                matches!(self, Self::Mock(_))
+            }
+            #[cfg(not(feature = "test-support"))]
+            {
+                false
+            }
+        }
+    }
+
     /// Start with one launch-owned release verification when one was selected.
     pub fn start_with_verified_runtime(
         &self,

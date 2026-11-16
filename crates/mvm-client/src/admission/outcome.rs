@@ -107,6 +107,23 @@ impl super::AuditContinuation {
     pub fn emit_failed(&self, class: &str, err: &anyhow::Error) {
         emit_failure(&self.emitter, self.plan(), class, err);
     }
+
+    /// Seal a registry-pack dispatch refusal whose chain failure was already written.
+    pub fn seal_recorded_boot_failure(&self) {
+        if let Err(error) = self
+            .emitter
+            .seal_session(self.plan(), mvm_hostd::audit::session::SealReason::Failed)
+        {
+            crate::launch::record_unsealed_end(
+                Some((&self.emitter, self.plan())),
+                crate::launch::UnsealedEnd::new(
+                    &self.plan().workload.0,
+                    crate::launch::UnsealedReason::SealFailed,
+                )
+                .error(format!("{error:#}")),
+            );
+        }
+    }
 }
 
 fn emit_failure(emitter: &AuditEmitter, plan: &ExecutionPlan, class: &str, err: &anyhow::Error) {

@@ -16,12 +16,30 @@ pub(super) struct BootAttempt<'a> {
     pub(super) start_config: &'a VmStartConfig,
     pub(super) verified_release:
         Option<&'a mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime>,
+    pub(super) admission:
+        Option<&'a std::cell::RefCell<Option<mvm_client::admission::CliAdmission>>>,
     pub(super) mailbox_posture: Option<&'a mvm_hostd::plan_admission::MailboxLaunchPosture>,
     pub(super) resolved: &'a ResolvedImage,
     /// The caller named this VM. A named run has an identity a shared standby
     /// cannot take on, so it keeps its cold path instead of requiring a claim.
     pub(super) user_named: bool,
     pub(super) writable_images: &'a mut mvm_vmm::driver::prepared_disks::WritableVolumeImages,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColdDispatch {
+    HostAdmitted,
+    Legacy,
+}
+
+impl ColdDispatch {
+    fn select(backend: &AnyBackend, has_admission: bool) -> Self {
+        if has_admission && backend.uses_cli_admitted_cold_dispatch() {
+            Self::HostAdmitted
+        } else {
+            Self::Legacy
+        }
+    }
 }
 
 /// Claim a warm standby for this attempt, or learn why it boots cold.
@@ -168,13 +186,18 @@ pub(super) fn boot_transient_vm(
         };
 
     if !booted {
-        mvm_hostd::mailbox_process::require_servable(
-            attempt.start_config,
-            attempt.backend,
-            attempt.mailbox_posture,
-        )?;
+        let admitted_cold = ColdDispatch::select(attempt.backend, attempt.admission.is_some())
+            == ColdDispatch::HostAdmitted;
+        if !admitted_cold {
+            mvm_hostd::mailbox_process::require_servable(
+                attempt.start_config,
+                attempt.backend,
+                attempt.mailbox_posture,
+            )?;
+        }
         ui::info(&format!("Booting transient VM '{vm_name}'..."));
-        if mvm_runtime::catalog::descriptor(attempt.backend.kind()).is_workload
+        if !admitted_cold
+            && mvm_runtime::catalog::descriptor(attempt.backend.kind()).is_workload
             && let Err(error) =
                 mvm_hostd::plan_admission::stash_plan_for_bridge(attempt.start_config)
         {
@@ -187,24 +210,58 @@ pub(super) fn boot_transient_vm(
             attempt.backend.name()
         ));
         sub.start(SubPhase::VmmCreate);
-        if let Err(e) = attempt.backend.start_custodied_verified_release(
-            attempt.start_config,
-            std::mem::take(attempt.writable_images),
-            attempt.verified_release,
-        ) {
+        let start = if let Some(admission) = attempt.admission.filter(|_| admitted_cold) {
+            let owner = admission
+                .borrow_mut()
+                .take()
+                .context("CLI cold launch lost its admitted authority")?;
+            let (owner, result) = owner.start_cold(
+                attempt.backend,
+                attempt.start_config.clone(),
+                std::mem::take(attempt.writable_images),
+            );
+            *admission.borrow_mut() = Some(owner);
+            result
+        } else {
+            #[cfg(unix)]
+            let started = attempt.backend.start_custodied_verified_release(
+                attempt.start_config,
+                std::mem::take(attempt.writable_images),
+                attempt.verified_release,
+            );
+            #[cfg(not(unix))]
+            let started = {
+                anyhow::ensure!(
+                    attempt.writable_images.is_empty(),
+                    "writable image custody is unavailable on this host"
+                );
+                attempt.backend.start(attempt.start_config)
+            };
+            started.map(|_| ())
+        };
+        if let Err(e) = start {
             drop(phase);
             emit_guest_console_diagnostic(&vm_name);
-            remove_transient_state_dir(&mvm_core::config::vm_state_dir(&vm_name).to_string_lossy());
+            if !matches!(
+                e.downcast_ref::<mvm_hostd::plan_admission::CliStartFailure>(),
+                Some(mvm_hostd::plan_admission::CliStartFailure::UncertainStop(_))
+            ) {
+                remove_transient_state_dir(
+                    &mvm_core::config::vm_state_dir(&vm_name).to_string_lossy(),
+                );
+            }
             return Err(e).context("starting transient microVM");
         }
         // The guest was told to serve a mailbox iff the plan grants one, and
         // the host side of it starts here or the launch fails.
-        if let Err(e) = mvm_hostd::mailbox_process::serve_started(
-            attempt.backend,
-            &VmId(vm_name.clone()),
-            attempt.start_config,
-            attempt.mailbox_posture,
-        ) {
+        if !admitted_cold
+            && let Err(e) = mvm_hostd::mailbox_process::serve_started(
+                attempt.backend,
+                &VmId(vm_name.clone()),
+                attempt.start_config,
+                attempt.mailbox_posture,
+            )
+        {
             drop(phase);
             remove_transient_state_dir(&mvm_core::config::vm_state_dir(&vm_name).to_string_lossy());
             return Err(e).context("starting transient microVM");
@@ -594,6 +651,33 @@ mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
 
+    #[test]
+    fn unmigrated_admitted_backends_keep_legacy_cold_dispatch() {
+        let wasm = AnyBackend::from_hypervisor("wasm");
+        let qemu = AnyBackend::from_hypervisor("qemu");
+        let apple_container = AnyBackend::from_hypervisor("apple-container");
+        let firecracker = AnyBackend::from_hypervisor("firecracker");
+        assert_eq!(ColdDispatch::select(&wasm, true), ColdDispatch::Legacy);
+        assert_eq!(ColdDispatch::select(&qemu, true), ColdDispatch::Legacy);
+        assert_eq!(
+            ColdDispatch::select(&apple_container, true),
+            ColdDispatch::Legacy
+        );
+        assert_eq!(
+            ColdDispatch::select(&firecracker, false),
+            ColdDispatch::Legacy
+        );
+        assert_eq!(
+            ColdDispatch::select(&firecracker, true),
+            ColdDispatch::HostAdmitted
+        );
+        let mock = AnyBackend::Mock(mvm_runtime::mock::MockBackend::new());
+        assert_eq!(
+            ColdDispatch::select(&mock, true),
+            ColdDispatch::HostAdmitted
+        );
+    }
+
     fn state_dirs(home: &Path) -> (TestEnv, (std::path::PathBuf, std::path::PathBuf)) {
         let mut env = TestEnv::new();
         env.isolate_mvm_home(home);
@@ -840,6 +924,7 @@ mod tests {
                 backend: &backend,
                 start_config: &start_config,
                 verified_release: None,
+                admission: None,
                 mailbox_posture: None,
                 resolved: &resolved,
                 user_named: true,
@@ -910,6 +995,7 @@ mod tests {
             backend: &backend,
             start_config: &start_config,
             verified_release: None,
+            admission: None,
             mailbox_posture: None,
             resolved: &resolved,
             user_named: true,
@@ -950,6 +1036,7 @@ mod tests {
             backend: &backend,
             start_config: &start_config,
             verified_release: None,
+            admission: None,
             mailbox_posture: None,
             resolved: &resolved,
             user_named: false,
@@ -973,6 +1060,7 @@ mod tests {
             backend: &backend,
             start_config: &start_config,
             verified_release: None,
+            admission: None,
             mailbox_posture: None,
             resolved: &resolved,
             user_named: false,
@@ -1074,6 +1162,7 @@ mod tests {
             backend: &backend,
             start_config: &start_config,
             verified_release: None,
+            admission: None,
             mailbox_posture: None,
             resolved: &resolved,
             user_named: false,

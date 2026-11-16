@@ -105,7 +105,10 @@ pub use rollback::{
     record_charge_with_owned_rollback,
 };
 pub use shares::enforce_admitted_shares;
-pub use start::{StartAdmittedParams, StartedMachine, admit_and_start, start_admitted};
+pub use start::{
+    CliStartFailure, StartAdmittedParams, StartedMachine, admit_and_start, start_admitted,
+    start_cli_transient,
+};
 pub(crate) use start::{
     admit_synthesized_with_verified_release, start_admitted_with_verified_release,
 };

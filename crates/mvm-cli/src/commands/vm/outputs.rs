@@ -192,8 +192,17 @@ impl PreparedOutputs {
             error
                 .downcast_ref::<crate::exec::TransientStopFailure>()
                 .is_some()
+                || mvm_client::admission::cli_start_failure_kind(error)
+                    == Some(mvm_client::admission::CliStartFailureKind::UncertainStop)
         }) {
             self.retain_scratch.set(true);
+            if let Some(error) = result.as_ref().err()
+                && mvm_client::admission::cli_start_failure_kind(error)
+                    == Some(mvm_client::admission::CliStartFailureKind::UncertainStop)
+                && let Some(owner) = admitted.borrow().as_ref()
+            {
+                owner.audit_continuation().record_uncertain_stop(error);
+            }
             return result;
         }
         let admitted = admitted
@@ -201,10 +210,16 @@ impl PreparedOutputs {
             .take()
             .map(CliAdmission::finish_legacy);
         if let (Some(ctx), Err(e)) = (admitted.as_ref(), &result) {
-            ctx.emit_failed(
-                mvm_client::launch::startup_budget::failure_class(e, "launch"),
-                e,
-            );
+            if mvm_client::admission::cli_start_failure_kind(e)
+                == Some(mvm_client::admission::CliStartFailureKind::Recorded)
+            {
+                ctx.seal_recorded_boot_failure();
+            } else {
+                ctx.emit_failed(
+                    mvm_client::launch::startup_budget::failure_class(e, "launch"),
+                    e,
+                );
+            }
         }
         let collected = self.collect(admitted.as_ref(), result.is_ok());
         let value = result?;
@@ -409,6 +424,132 @@ mod tests {
             );
             assert!(!chain.contains("plan.launched"), "{chain}");
         }
+    }
+
+    #[test]
+    fn host_boot_refusal_keeps_the_cli_failure_class_and_message() {
+        let mut legacy_labels: Option<(serde_json::Value, serde_json::Value)> = None;
+        for hostd in [false, true] {
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            let home = tempfile::tempdir().expect("home");
+            env.isolate_mvm_home(home.path());
+            let keys = tempfile::tempdir().expect("keys");
+            let audit = tempfile::tempdir().expect("audit");
+            let root = tempfile::tempdir().expect("root");
+            let image = root.path().join("rootfs.ext4");
+            std::fs::write(&image, b"test rootfs").expect("rootfs");
+            let owner = admitted_owner("vm-boot-failure", &image, keys.path(), audit.path());
+            let admitted = std::cell::RefCell::new(Some(owner));
+            let prepared = PreparedOutputs::prepare(&[], &[]).expect("no outputs");
+            let failure = anyhow::anyhow!("mock: VM 'vm-boot-failure' already running");
+            let failure = if hostd {
+                anyhow::Error::new(mvm_hostd::plan_admission::CliStartFailure::Unrecorded(
+                    failure,
+                ))
+            } else {
+                failure
+            };
+            let result: Result<()> = Err(failure.context("starting transient microVM"));
+            assert!(prepared.close_run(&admitted, result).is_err());
+            let chain =
+                std::fs::read_to_string(audit.path().join("local.jsonl")).expect("audit chain");
+            assert_eq!(chain.matches("plan.failed").count(), 1, "{chain}");
+            assert_eq!(chain.matches("session.sealed").count(), 1, "{chain}");
+            assert!(!chain.contains("plan.launched"), "{chain}");
+            let failed: serde_json::Value = chain
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("audit entry"))
+                .find(|entry| entry["entry"]["event"] == "plan.failed")
+                .expect("CLI failure entry");
+            let labels = (
+                failed["entry"]["labels"]["error_class"].clone(),
+                failed["entry"]["labels"]["error_message"].clone(),
+            );
+            assert_eq!(labels.0, "launch");
+            assert_eq!(
+                labels.1,
+                "starting transient microVM: mock: VM 'vm-boot-failure' already running"
+            );
+            if let Some(legacy) = &legacy_labels {
+                assert_eq!(
+                    &labels, legacy,
+                    "hostd must preserve legacy CLI failure labels"
+                );
+            } else {
+                legacy_labels = Some(labels);
+            }
+        }
+    }
+
+    #[test]
+    fn host_final_gate_refusal_keeps_the_cli_launch_failure_label() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().expect("home");
+        env.isolate_mvm_home(home.path());
+        let keys = tempfile::tempdir().expect("keys");
+        let audit = tempfile::tempdir().expect("audit");
+        let root = tempfile::tempdir().expect("root");
+        let image = root.path().join("rootfs.ext4");
+        std::fs::write(&image, b"test rootfs").expect("rootfs");
+        let admitted = std::cell::RefCell::new(Some(admitted_owner(
+            "vm-gate-refusal",
+            &image,
+            keys.path(),
+            audit.path(),
+        )));
+        let prepared = PreparedOutputs::prepare(&[], &[]).expect("no outputs");
+        let gate = anyhow::anyhow!("share differs from the admitted plan")
+            .context("admission gate refused (admitted-shares)");
+        let result: Result<()> = Err(anyhow::Error::new(
+            mvm_hostd::plan_admission::CliStartFailure::Unrecorded(gate),
+        )
+        .context("starting transient microVM"));
+        assert!(prepared.close_run(&admitted, result).is_err());
+        let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).expect("audit chain");
+        assert_eq!(chain.matches("plan.failed").count(), 1, "{chain}");
+        assert!(!chain.contains("plan.launched"), "{chain}");
+        let failed: serde_json::Value = chain
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("audit entry"))
+            .find(|entry| entry["entry"]["event"] == "plan.failed")
+            .expect("CLI failure entry");
+        assert_eq!(failed["entry"]["labels"]["error_class"], "launch");
+        assert_eq!(
+            failed["entry"]["labels"]["error_message"],
+            "starting transient microVM: admission gate refused (admitted-shares): share differs from the admitted plan"
+        );
+    }
+
+    #[test]
+    fn unresolved_host_rollback_keeps_output_custody_and_session_unsealed() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().expect("home");
+        env.isolate_mvm_home(home.path());
+        let keys = tempfile::tempdir().expect("keys");
+        let audit = tempfile::tempdir().expect("audit");
+        let scratch = tempfile::tempdir().expect("scratch");
+        let path = scratch.path().to_path_buf();
+        let image = path.join("rootfs.ext4");
+        std::fs::write(&image, b"still possibly attached").expect("rootfs");
+        let owner = admitted_owner("vm-uncertain-boot", &image, keys.path(), audit.path());
+        let admitted = std::cell::RefCell::new(Some(owner));
+        let prepared = PreparedOutputs {
+            outputs: Vec::new(),
+            _scratch: Some(scratch),
+            retain_scratch: std::cell::Cell::new(false),
+        };
+        let result: Result<()> = Err(mvm_hostd::plan_admission::CliStartFailure::UncertainStop(
+            anyhow::anyhow!("rollback was not confirmed"),
+        )
+        .into());
+        assert!(prepared.close_run(&admitted, result).is_err());
+        drop(prepared);
+        assert!(image.exists(), "scratch remains while VM may still use it");
+        let chain = std::fs::read_to_string(audit.path().join("local.jsonl"))
+            .expect("admission audit chain");
+        assert!(!chain.contains("plan.failed"), "{chain}");
+        assert!(!chain.contains("plan.launched"), "{chain}");
+        assert!(!chain.contains("session.sealed"), "{chain}");
     }
 
     #[test]

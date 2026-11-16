@@ -143,6 +143,7 @@ impl EntrypointAdmission {
             bundle_archive,
             runtime_config,
             verified_runtime,
+            verified_runtime_owner: _,
         } = inputs;
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let materialized_mounts = crate::admission::instructions::materialized_mounts(volumes);
@@ -419,6 +420,7 @@ mod tests {
             bundle_archive: None,
             runtime_config: None,
             verified_runtime: None,
+            verified_runtime_owner: None,
         }
     }
 
@@ -811,6 +813,7 @@ mod stdin_grant_tests {
                     bundle_archive: None,
                     runtime_config: None,
                     verified_runtime: None,
+                    verified_runtime_owner: None,
                 })
         }
     }

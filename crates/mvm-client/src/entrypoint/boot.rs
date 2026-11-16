@@ -536,6 +536,9 @@ pub struct AdmitInputs<'a> {
     pub runtime_config: Option<&'a VmStartConfig>,
     /// Launch-owned archive verification, carried beside the cloneable config.
     pub verified_runtime: Option<&'a mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
+    /// The launch-owned handle, when a caller must retain this exact set after admission.
+    pub verified_runtime_owner:
+        Option<&'a std::sync::Arc<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>>,
 }
 
 /// Identity policy for a session-style VM boot.
@@ -828,6 +831,7 @@ fn boot_session_core(
         bundle_archive: bundle_archive.as_deref(),
         runtime_config: Some(&start_config),
         verified_runtime: verified_runtime.as_ref(),
+        verified_runtime_owner: None,
     })?;
     let (mut substrate, context) = match admitted {
         BootAdmission::Legacy(substrate) => (*substrate, None),
