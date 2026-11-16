@@ -496,8 +496,6 @@ const VSOCK_EGRESS_PORT_ENV: &str = "MVM_EGRESS_VSOCK_PORT";
 #[cfg(any(target_os = "linux", test))]
 const VSOCK_EGRESS_PORT_TOKEN_PREFIX: &str = "mvm.vsock_egress_port=";
 #[cfg(any(target_os = "linux", test))]
-const INIT_LIFECYCLE_BREADCRUMB_FILE: &str = "mvm-host-vm-init.lifecycle.log";
-
 #[cfg(any(target_os = "linux", test))]
 fn vsock_egress_requested_from_cmdline(cmdline: &str) -> bool {
     cmdline
@@ -601,7 +599,8 @@ fn append_init_breadcrumb_at(
     }
     for persistent_mount in persistent_targets {
         let _ = std::fs::create_dir_all(persistent_mount);
-        let persistent_log = persistent_mount.join(INIT_LIFECYCLE_BREADCRUMB_FILE);
+        let persistent_log =
+            persistent_mount.join(mvm_builder_guest::builder_job_contract::INIT_LIFECYCLE_LOG);
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -1056,7 +1055,10 @@ mod tests {
     #[test]
     fn init_breadcrumb_writer_appends_to_run_and_all_persistent_logs() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let run_log = dir.path().join("run").join(INIT_LIFECYCLE_BREADCRUMB_FILE);
+        let run_log = dir
+            .path()
+            .join("run")
+            .join(mvm_builder_guest::builder_job_contract::INIT_LIFECYCLE_LOG);
         let persistent_a = dir.path().join("persistent-a");
         let persistent_b = dir.path().join("persistent-b");
         std::fs::create_dir_all(&persistent_a).expect("persistent-a dir");
@@ -1076,12 +1078,14 @@ mod tests {
         );
 
         let run_body = std::fs::read_to_string(&run_log).expect("read run log");
-        let persistent_a_body =
-            std::fs::read_to_string(persistent_a.join(INIT_LIFECYCLE_BREADCRUMB_FILE))
-                .expect("read persistent-a log");
-        let persistent_b_body =
-            std::fs::read_to_string(persistent_b.join(INIT_LIFECYCLE_BREADCRUMB_FILE))
-                .expect("read persistent log");
+        let persistent_a_body = std::fs::read_to_string(
+            persistent_a.join(mvm_builder_guest::builder_job_contract::INIT_LIFECYCLE_LOG),
+        )
+        .expect("read persistent-a log");
+        let persistent_b_body = std::fs::read_to_string(
+            persistent_b.join(mvm_builder_guest::builder_job_contract::INIT_LIFECYCLE_LOG),
+        )
+        .expect("read persistent log");
         assert!(run_body.contains("stage-a: first"));
         assert!(run_body.contains("stage-b: second"));
         assert_eq!(run_body, persistent_a_body);

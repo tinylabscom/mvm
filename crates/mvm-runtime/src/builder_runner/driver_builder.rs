@@ -342,7 +342,7 @@ impl<D: VmmDriver + Clone + 'static> BuilderVm for DriverBuilderVm<D> {
         let name = format!("mvm-{}-builder-{job_id}", self.driver.name());
         let runtime_overlay = require_runtime_overlay_ext4()?;
         let outcome = BuilderRunner::new(self.driver.clone())
-            .build(&BuilderBuild {
+            .build_nix_flake(&BuilderBuild {
                 name: &name,
                 kernel: &self.kernel,
                 rootfs: &self.rootfs,

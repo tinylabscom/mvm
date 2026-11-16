@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use mvm_agentd::vsock::EGRESS_PORT;
 use mvm_build::builder_boot::stage_builder_boot;
 use mvm_build::builder_disk_transport::{
-    InputTree, create_output_disk, pack_input_disk, read_output_disk,
+    InputTree, create_output_disk, pack_input_disk, read_nix_flake_output_disk, read_output_disk,
 };
 use mvm_build::builder_vm_runtime::stage_filtered_work_input;
 use mvm_core::config::{vm_state_dir, vm_vsock_port_socket_at};
@@ -87,9 +87,21 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
         Self { driver }
     }
 
-    /// Pack the inputs onto the input disk, boot the builder VM, wait for it to
-    /// finish, and extract the artifact tar off the output disk.
+    /// Run a generic builder shell job with its caller-defined output members.
     pub fn build(&self, b: &BuilderBuild<'_>) -> Result<BuilderOutcome> {
+        self.build_with_extractor(b, read_output_disk)
+    }
+
+    /// Run the Nix FlakeImage producer with its fixed output contract.
+    pub fn build_nix_flake(&self, b: &BuilderBuild<'_>) -> Result<BuilderOutcome> {
+        self.build_with_extractor(b, read_nix_flake_output_disk)
+    }
+
+    fn build_with_extractor(
+        &self,
+        b: &BuilderBuild<'_>,
+        extract_output: fn(&Path, &Path) -> Result<()>,
+    ) -> Result<BuilderOutcome> {
         let mut progress = BuildConsoleProgress::start(
             "Builder VM: running the in-guest nix build",
             crate::ui::is_verbose(),
@@ -149,7 +161,7 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
             memory_mib: b.memory_mib,
         });
 
-        let outcome = self.run_to_completion(&spec, &transport, &mut progress)?;
+        let outcome = self.run_to_completion(&spec, &transport, &mut progress, extract_output)?;
         progress.finish();
         Ok(outcome)
     }
@@ -218,7 +230,7 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
             memory_mib: s.memory_mib,
         });
 
-        let outcome = self.run_to_completion(&spec, &transport, &mut progress)?;
+        let outcome = self.run_to_completion(&spec, &transport, &mut progress, read_output_disk)?;
         progress.finish();
         Ok(outcome)
     }
@@ -235,6 +247,7 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
         spec: &VmmSpec,
         transport: &BootTransport,
         progress: &mut BuildConsoleProgress<TerminalSink>,
+        extract_output: fn(&Path, &Path) -> Result<()>,
     ) -> Result<BuilderOutcome> {
         let builder_policy = NetworkPolicy::trusted_build_egress();
         spawn_network_endpoint(SubstitutionSpawnParams {
@@ -296,7 +309,7 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
         // The guest wrote a tar onto the output disk; extract it host-side.
         progress.host_step("extracting the build output");
         let output_dir = transport.state_dir.join("out");
-        read_output_disk(&transport.output_disk, &output_dir)?;
+        extract_output(&transport.output_disk, &output_dir)?;
         endpoint_guard.defuse();
         Ok(BuilderOutcome {
             stopped,
@@ -499,7 +512,7 @@ mod tests {
         // poll-until-off loop returns at once.
         let runner = BuilderRunner::new(MockDriver::default().reporting_status(VmStatus::Stopped));
         let outcome = runner
-            .build(&BuilderBuild {
+            .build_nix_flake(&BuilderBuild {
                 name: "bld-unit",
                 kernel: &fx.kernel,
                 rootfs: &fx.rootfs,
@@ -624,7 +637,7 @@ mod tests {
         let _endpoint = EndpointGuard::new("bld-keys");
         let runner = BuilderRunner::new(MockDriver::default().reporting_status(VmStatus::Stopped));
         runner
-            .build(&BuilderBuild {
+            .build_nix_flake(&BuilderBuild {
                 name: "bld-keys",
                 kernel: &fx.kernel,
                 rootfs: &fx.rootfs,
@@ -725,7 +738,7 @@ mod tests {
 
         let runner = BuilderRunner::new(MockDriver::default().reporting_status(VmStatus::Stopped));
         let outcome = runner
-            .build(&BuilderBuild {
+            .build_nix_flake(&BuilderBuild {
                 name: "bld-closure",
                 kernel: &fx.kernel,
                 rootfs: &fx.rootfs,
