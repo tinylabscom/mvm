@@ -34,6 +34,12 @@ struct Drive {
 }
 
 pub(super) fn query(socket: &Path) -> Result<RuntimeArtifacts> {
+    query_bound(socket, None)
+}
+
+/// [`query`], additionally requiring every read-only drive to be a file the
+/// VMM holds open when `held` is given.
+fn query_bound(socket: &Path, held: Option<&HeldFiles>) -> Result<RuntimeArtifacts> {
     let info: InstanceInfo = serde_json::from_str(&super::call(socket, "GET", "/", None)?)?;
     ensure!(
         info.state == "Paused",
@@ -41,10 +47,15 @@ pub(super) fn query(socket: &Path) -> Result<RuntimeArtifacts> {
     );
     let config = super::call(socket, "GET", "/vm/config", None)
         .context("querying Firecracker's actual runtime configuration")?;
-    from_config(&config)
+    from_config_bound(&config, held)
 }
 
+#[cfg(test)]
 fn from_config(json: &str) -> Result<RuntimeArtifacts> {
+    from_config_bound(json, None)
+}
+
+fn from_config_bound(json: &str, held: Option<&HeldFiles>) -> Result<RuntimeArtifacts> {
     let mut config: VmConfig =
         serde_json::from_str(json).context("parsing Firecracker's actual runtime configuration")?;
     ensure!(
@@ -81,7 +92,7 @@ fn from_config(json: &str) -> Result<RuntimeArtifacts> {
         .drives
         .into_iter()
         .filter(|drive| drive.is_read_only)
-        .map(|drive| observe_file(drive.path_on_host))
+        .map(|drive| observe_disk(drive.path_on_host, held))
         .collect::<Result<Vec<_>>>()?;
     Ok(RuntimeArtifacts {
         kernel: Some(observe_file(config.boot_source.kernel_image_path)?),
@@ -104,6 +115,77 @@ fn observe_file(path: PathBuf) -> Result<RuntimeArtifact> {
     );
     let sha256 = mvm_core::crypto::verified_digest::sha256_file_verified(&path)?;
     Ok(RuntimeArtifact { path, sha256 })
+}
+
+/// A read-only drive: opened once, so the digest and the identity come from the
+/// same file, and checked against the files the VMM holds when they are known.
+fn observe_disk(path: PathBuf, held: Option<&HeldFiles>) -> Result<RuntimeArtifact> {
+    ensure!(
+        path.is_absolute(),
+        "Firecracker runtime device path is not absolute"
+    );
+    let file = std::fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?;
+    if let Some(held) = held {
+        let identity = FileId::of(&file.metadata()?);
+        ensure!(
+            held.contains(identity),
+            "{} is not the file Firecracker holds open for it",
+            path.display()
+        );
+    }
+    let sha256 = mvm_core::crypto::verified_digest::sha256_open_file_verified(&file)?;
+    Ok(RuntimeArtifact { path, sha256 })
+}
+
+/// Device and inode: what makes two paths the same file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct FileId(u64, u64);
+
+impl FileId {
+    #[cfg(unix)]
+    fn of(meta: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self(meta.dev(), meta.ino())
+    }
+
+    #[cfg(not(unix))]
+    fn of(_meta: &std::fs::Metadata) -> Self {
+        Self(0, 0)
+    }
+}
+
+/// The files a process has open, by identity.
+struct HeldFiles(std::collections::BTreeSet<FileId>);
+
+impl HeldFiles {
+    fn contains(&self, id: FileId) -> bool {
+        self.0.contains(&id)
+    }
+
+    /// What `pid` holds open, read from `/proc/<pid>/fd`. `None` where there is
+    /// no such directory to read (any non-Linux host, or Linux without procfs);
+    /// the caller then relies on the digest alone, as it did before this check.
+    #[cfg(target_os = "linux")]
+    fn of_process(pid: u32) -> Result<Option<Self>> {
+        if !Path::new("/proc/self/fd").is_dir() {
+            return Ok(None);
+        }
+        let dir = format!("/proc/{pid}/fd");
+        let mut held = std::collections::BTreeSet::new();
+        for entry in std::fs::read_dir(&dir).with_context(|| format!("reading {dir}"))? {
+            // `metadata` follows the descriptor's link to the inode it names. An
+            // entry that closed since the listing is simply not held any more.
+            if let Ok(meta) = std::fs::metadata(entry?.path()) {
+                held.insert(FileId::of(&meta));
+            }
+        }
+        Ok(Some(Self(held)))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn of_process(_pid: u32) -> Result<Option<Self>> {
+        Ok(None)
+    }
 }
 
 fn validate_layout(drives: &[FirecrackerDrive]) -> Result<()> {
@@ -275,9 +357,35 @@ pub(crate) fn verify_restored_layout(
     let devices = io
         .fork_devices()
         .context("a restored fork's layout is checked against the child's own devices")?;
-    let actual = query(&io.socket_path)?;
+    let held = restored_vmm_pid(io)?
+        .map(HeldFiles::of_process)
+        .transpose()?
+        .flatten();
+    let actual = query_bound(&io.socket_path, held.as_ref())?;
     compare_restored_layout(&actual, &devices.as_child_capture(expected))?;
     Ok(actual)
+}
+
+/// The pid of the Firecracker serving `io`, from the marker beside its socket.
+///
+/// `None` when the platform cannot list a process's descriptors; otherwise a
+/// marker that is missing or names another VM's Firecracker is an error, since
+/// accepting it would let the check pass against the wrong process.
+fn restored_vmm_pid(io: &super::io::FirecrackerIO) -> Result<Option<u32>> {
+    if !cfg!(target_os = "linux") {
+        return Ok(None);
+    }
+    let dir = io
+        .socket_path
+        .parent()
+        .context("Firecracker socket has no directory")?;
+    let pid = super::daemon::read_firecracker_pid(&dir.to_string_lossy())?;
+    ensure!(
+        super::host::is_firecracker_for_socket(pid, &io.socket_path)?,
+        "pid {pid} is not the Firecracker serving {}",
+        io.socket_path.display()
+    );
+    Ok(Some(pid))
 }
 
 /// Let later processes reuse the digests a layout verification just accepted.
@@ -386,6 +494,61 @@ mod tests {
         );
         std::fs::remove_file(&overlay).unwrap();
         assert!(from_config(&config.to_string()).is_err());
+    }
+
+    fn holding(file: &std::fs::File) -> HeldFiles {
+        HeldFiles(std::iter::once(FileId::of(&file.metadata().unwrap())).collect())
+    }
+
+    #[test]
+    fn a_drive_path_that_still_names_the_held_inode_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let overlay = dir.path().join("overlay");
+        std::fs::write(&overlay, b"runtime").unwrap();
+        let vmm_fd = std::fs::File::open(&overlay).unwrap();
+        let observed = observe_disk(overlay.clone(), Some(&holding(&vmm_fd))).unwrap();
+        assert_eq!(
+            observed.sha256,
+            mvm_core::crypto::image_verify::sha256_file(&overlay).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_drive_path_swapped_after_the_load_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let overlay = dir.path().join("overlay");
+        std::fs::write(&overlay, b"runtime").unwrap();
+        let vmm_fd = std::fs::File::open(&overlay).unwrap();
+        // A different file, with the same bytes, takes the path over.
+        let impostor = dir.path().join("impostor");
+        std::fs::write(&impostor, b"runtime").unwrap();
+        std::fs::rename(&impostor, &overlay).unwrap();
+        let error = observe_disk(overlay, Some(&holding(&vmm_fd))).unwrap_err();
+        assert!(error.to_string().contains("holds open"), "{error}");
+    }
+
+    #[test]
+    fn without_a_descriptor_table_the_digest_alone_decides() {
+        let dir = tempfile::tempdir().unwrap();
+        let overlay = dir.path().join("overlay");
+        std::fs::write(&overlay, b"runtime").unwrap();
+        assert!(observe_disk(overlay, None).is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_process_that_holds_a_file_open_is_seen_holding_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let held_path = dir.path().join("held");
+        let other = dir.path().join("other");
+        std::fs::write(&held_path, b"a").unwrap();
+        std::fs::write(&other, b"a").unwrap();
+        let fd = std::fs::File::open(&held_path).unwrap();
+        let held = HeldFiles::of_process(std::process::id())
+            .unwrap()
+            .expect("procfs is mounted");
+        assert!(held.contains(FileId::of(&fd.metadata().unwrap())));
+        assert!(!held.contains(FileId::of(&std::fs::metadata(&other).unwrap())));
     }
 
     #[test]
