@@ -1105,6 +1105,69 @@ The closure and unit counts fell and the lock grew for reasons outside this
 section (the sigstore 0.15.1 move and other merged work); no delta here is
 claimed as a reduction from this pass. No timing was taken.
 
+## Runtime consumers without the authoring SDK
+
+The runtime client no longer re-exports `mvm_client::authoring` or depends on
+`mvm-sdk` in production. Authoring callers depend on `mvm-sdk` directly.
+Deployment-record DTOs live in `mvm-contract::deploy_record`; host-side
+record I/O and exact-byte artifact verification live in
+`mvm-core::deploy_record`, under `host-state`. The SDK delegates to that
+implementation while preserving its existing public error variants.
+The record schema, field order, serialization, and digest algorithms are
+unchanged. BLAKE3 is an optional core dependency enabled only for host state.
+
+Measured against `54eb7a05a8`, using `cargo tree --locked --offline -p PACKAGE
+--target TARGET -e normal,build --prefix none` and deduplicating by package name
+and version, rather than whole display lines:
+
+| Package | Target | Before | After |
+|---|---|---:|---:|
+| `mvm-client` | `aarch64-apple-darwin` | 334 | 324 |
+| `mvm-hostlib` | `aarch64-apple-darwin` | 335 | 325 |
+| `mvmctl` | `aarch64-apple-darwin` | 346 | 346 |
+| `mvmctl` | `x86_64-unknown-linux-gnu` | 351 | 351 |
+| `mvm-builder-guest` | `aarch64-unknown-linux-musl` | 88 | 88 |
+| `mvm-agentd` | `aarch64-unknown-linux-musl` | 84 | 84 |
+
+The client, runtime, and host-library normal/build graphs exclude `mvm-sdk`,
+`mvm-compiler`, and the Tree-sitter family on both host targets, with default
+features and with all package features enabled. The explicit SDK dependency
+in the client's embedder integration test is dev-only. The CLI retains its
+authoring commands, so this change does not shrink its graph.
+
+Static graph checks and formatting checks passed. Executable validation on
+Linux ARM64 with Rust 1.97.1 passed all 34 scoped tests, workspace compilation,
+and workspace clippy with warnings denied:
+
+```sh
+cargo test --locked --offline -p mvm-core --features host-state --test deploy_record
+cargo test --locked --offline -p mvm-sdk --features deploy --test deploy_record_contract
+cargo test --locked --offline -p mvm-sdk --features deploy --lib deploy::tests
+cargo test --locked --offline -p mvm-client --test embedder_surface --test no_authoring_dep
+cargo test --locked --offline -p mvmctl --test security_lane_dependencies
+cargo check --workspace --locked --offline
+cargo clippy --workspace --locked --offline -- -D warnings
+```
+
+Validation used a disposable, unprivileged container with no network or
+credentials, read-only source/toolchain mounts, all capabilities dropped,
+no-new-privileges, four CPUs, 24 GiB memory without swap, 256 processes,
+16 GiB temporary build storage, a 1 GiB per-file limit, and a 40-minute
+deadline. All 696 registry archives came from the local cache and were
+checked against `Cargo.lock` checksums. Tool preparation used the official
+Rust image at
+`sha256:6e957ef098dcc77d33e310261e4ed5843bb108d5c3b5dc2b476cbc8b6caf53fa`
+plus Rust 1.97.1 clippy/rustfmt, producing local image
+`sha256:10f7e8d963e4e594675023665cd4073a97a907ed7a68d4daabb75991fa410076`.
+No repository source was available during network-enabled tool preparation.
+
+The runner used its system linker instead of the repository's Linux `lld`
+setting (`RUSTFLAGS` cleared), debug info disabled, and incremental compilation
+disabled. This is portable Linux validation, not a release-toolchain witness.
+The full workspace test suite, native macOS checks, and live admission checks
+remain unrun. The counts above are dependency-resolution evidence, not a
+measurement of linked binary contents.
+
 ## Owner decisions
 
 - 2026-10-24, #4663: patch the Sigstore Rekor and timestamp crates locally so
@@ -1209,3 +1272,266 @@ done | awk -F'\t' '{p[$1]+=$2; s[$1]+=$3} END{for(a in p) printf "%-40s physical
 ```
 
 The total is 1,236,863 physical lines, so the strict under-1,000,000 target is still open; this record measures it and does not meet it.
+
+## Optional addon Nix syntax validation
+
+Accepted: gate `mvm-sdk::addon::validator` and `tree-sitter-nix` behind the
+explicit, off-by-default `addon-nix-validation` SDK feature. Exhaustive source
+searches for the module, `NixSyntaxError`, grammar use, wildcard addon imports,
+and addon publishing found no production caller: only the validator's three
+unit tests called `validate`. Publishing references in schema descriptions and
+comments do not constitute a wired publishing path. No required check is
+replaced with a successful stub: without the feature the module is unavailable
+at compile time. Existing external Rust callers must enable the feature;
+with it, the parse-only API and error behavior are unchanged. This does not
+change runtime admission or backend security claims.
+
+Core `tree-sitter` is retained: `mvm-compiler` still uses it for decorator
+parsing, reachability, framework stripping, and function description. No
+parser replacement, new crate, SDK/client dependency, or `stdx` was introduced.
+
+Static measurements used `cargo tree --locked --offline -p PACKAGE -e
+normal,build --prefix none --target TARGET`, counting distinct `(package,
+version)` pairs (not distinct tree-output lines). Both explicit targets were
+measured before and after against the existing lockfile:
+
+| Default closure | Before | After |
+|---|---:|---:|
+| `mvmctl`, `x86_64-unknown-linux-gnu` | 351 | 350 |
+| `mvmctl`, `aarch64-apple-darwin` | 346 | 345 |
+| `mvm-sdk`, `x86_64-unknown-linux-gnu` | 130 | 129 |
+| `mvm-sdk`, `aarch64-apple-darwin` | 144 | 143 |
+
+Each default closure loses exactly `tree-sitter-nix v0.0.2`, with no added
+package/version pairs. Explicit SDK `--features addon-nix-validation` restores
+exactly the baseline closure on each target (130 Linux, 144 macOS).
+The default CLI budgets are ratcheted to 350 Linux and 345 macOS accordingly.
+
+The existing positive and malformed-input unit tests inherit the module's
+feature gate; a public-API doctest also exercises acceptance and rejection
+when enabled. The disposable Linux ARM64 runner passed
+`cargo test --locked --offline -p mvm-sdk --features deploy,addon-nix-validation`
+(191 unit/integration tests and four doctests), the migrated client and
+deployment-record tests, and the executable closure-budget gate. Workspace
+test targets compiled with `cargo test --workspace --locked --offline --no-run`,
+and workspace clippy passed with warnings denied. This is not full workspace
+test execution or native macOS/live-backend validation.
+
+## Release dependency checks and signing authority
+
+`supply-chain.yml` is an input-free reusable workflow. `ci.yml` calls it for
+changes to Cargo manifests/locks, vendored sources, dependency policy, or CI
+definitions, with classification failures falling back to running the checks.
+The PR and release calls and the nightly `security.yml` jobs use
+one checker action: Rust 1.97.1, cargo-deny 0.20.2, and cargo-audit 0.23.0,
+with exact, locked tool installations. Checkout is pinned to an immutable
+upstream commit and does not persist credentials. The checker jobs have only
+repository-read authority; they cannot publish or request an OIDC signature.
+Advisory data remains refreshed by CI rather than frozen with the tool binary.
+
+The release workflow calls this gate for its own source revision. Both the
+runtime candidate signer and the final publisher require successful completion;
+failure, cancellation, or skipping cannot authorize signing. The CI `Test`
+aggregate also requires success when the dependency scope is active, while
+allowing a skipped scan for documentation-only changes. The repository's
+existing protection requires `Test`; no external protection setting was
+changed. An independent path-filtered workflow is deliberately avoided so
+unrelated PRs do not wait forever for a required check that never starts.
+
+Release workflow permissions now default to `contents: read`. Signing,
+attestation, promotion, and pin-proposal jobs declare their existing required
+privileges explicitly instead of granting them to compilation and tests.
+Direct external action references in `release.yml` are pinned to commit SHAs;
+Cosign is explicitly v2.5.2, verified using the pinned installer's embedded
+bootstrap checksums. This does not claim that every nested reusable workflow
+or composite action in the repository has been hardened.
+
+SBOM generation uses pinned cargo-cyclonedx 0.5.10 in a separate read-only-
+permission job. The signer does not install Rust, compile this tool, or run
+SBOM generation. It retrieves only `sbom.cdx.json`, checking the artifact ID,
+repository, run, source SHA, producer-attempt range, archive digest, exact
+member set, bounded size, and independent content digest before signing.
+The release's signing identity and published SBOM filename stay unchanged.
+These checks preserve the producer's exact bytes; they do not prove that a
+compromised SBOM producer described the build honestly.
+
+The closure-budget gate also covers the actual release feature set, with a
+test binding that set to the workflow, and the three guest packages:
+
+| Package and surface | Target | Budget |
+|---|---|---:|
+| Release `mvmctl` | `aarch64-apple-darwin` | 371 |
+| Release `mvmctl` | `x86_64-unknown-linux-gnu` | 370 |
+| Release `mvmctl` | `aarch64-unknown-linux-gnu` | 369 |
+| `mvm-builder-guest` | `aarch64-unknown-linux-musl` | 88 |
+| `mvm-agentd` | `aarch64-unknown-linux-musl` | 84 |
+| `mvm-host-services` | `aarch64-unknown-linux-musl` | 85 |
+
+Pinned checker binaries were exercised offline in a credential-free,
+network-disabled container against RustSec database revision
+`02e2517f457a359fc6d3440ea4560c8ea188fee8`. cargo-deny passed advisories,
+bans, licenses, and sources, with existing unnecessary-skip/license-allowance
+warnings. cargo-audit exited successfully with an unmaintained-package warning
+for `proc-macro-error2` 2.0.1 (`RUSTSEC-2026-0173`). No suppression was added.
+The package is present in the lockfile but is not reached by the current
+workspace `--all-features --target all` tree. Offline validation used a
+pre-fetched database and cached index; it is not evidence that a hosted CI
+run or the registry publication paths have executed successfully.
+
+Offline validation also passed 50 runtime/SBOM transport tests and ten
+supply-chain workflow/classification/required-result tests, the 53 release
+asset contract tests, the workflow-path and closure-budget xtask tests, and
+actionlint on the four changed workflows. The Linux runner retained the
+read-only, credential-free, network-disabled controls recorded above and
+used the system linker rather than `lld`. Native macOS/full workspace test
+execution, live admission, trusted instruction re-signing, and hosted
+workflow execution remain separate validation requirements.
+
+### Repository-wide action revision enforcement
+
+The follow-up extends action-code pinning to all repository-owned workflows
+and recursively discovered composite actions: 301 external references across
+20 action names use full commit SHAs. The workflow-path checker rejects
+mutable tags, branches, shortened hashes, missing revisions, and aliases,
+and enforces one revision per action across both kinds of file. Composite
+action symlinks are refused rather than followed outside the scan or into
+cycles. Pinning the shared actions repository-wide keeps the existing
+single-revision rule intact instead of exempting release callers.
+
+Release workflow descendants explicitly select Rust 1.97.1, Node 22.23.5,
+Just 1.59.0, and Cosign 2.5.2 where installed. Hosted setup-python uses
+Python 3.12.16; the existing uv 0.12.5 composite uses Python 3.12.14,
+which is available in that pinned uv release's embedded download catalogue.
+Stable/nightly compiler selections outside the release call graph retain
+their existing purpose. This is not a claim of hermetic operating-system
+packages or immutable transitive downloads inside every external action.
+
+Authority boundaries identified for separate changes (implemented below):
+
+- The pinned upstream PyPI publishing action selects its publishing container through
+  a commit-named image tag, not an image digest. Pinning its action source
+  alone does not bind the container bytes.
+- SDK macOS host-library compilation and Developer ID signing shared
+  a job. Moving secrets to a later step did not isolate them from a
+  compromised build process that persists within that job.
+- The instruction-signing composite's combined build/sign mode required a
+  separate public API migration, described below; action pins alone did not
+  provide build/sign isolation.
+
+No registry publication, instruction re-signing, or hosted release run was
+performed to validate these changes. Static workflow linting passed; the
+expanded workflow-path tests and executable gate passed in the isolated
+Linux runner, alongside the toolchain script, Python transport and supply-chain
+tests, and the release-assets, workspace-shard-isolation, extended-E2E-workflow,
+and instruction-signing contract test targets. Workspace Clippy passed with
+`--locked --offline -- -D warnings`. The runner additionally supplied a
+bounded, disposable `/tmp` because the workspace-isolation contract exercises
+the workflow's absolute `/tmp` paths; source and toolchain remained read-only,
+without network or credentials. These are workflow contract checks, not live
+E2E runs or evidence of the remaining signing boundaries being isolated.
+
+### Instruction signing: separate preparation, authority, and verification
+
+The combined action invocation is removed. Callers must use mandatory
+`phase: prepare`, `phase: sign`, and `phase: verify` invocations in separate
+fresh jobs. Only sign receives `id-token: write`; prepare and verify refuse
+an exposed OIDC request token. The repository workflow independently checks
+out `github.sha` without persisted credentials in each job. Signing stays
+in the caller's workflow, preserving the certificate identity and the
+prohibition on a public `workflow_call` signer.
+
+Preparation uses the existing MVM instruction discovery policy and uploads
+a bounded request binding paths and SHA-256 hashes to the source revision,
+repository, workflow, ref, run, and attempt. The signer treats it as untrusted:
+it validates the complete request before signing, refuses traversal and
+non-regular Git objects, and reads the original blobs from its own source
+commit. Producer binaries, modified source files, Rust installation, Cargo
+builds, and Rust caches do not enter the sign phase. The signer still trusts
+the fresh host, checked-in signing helper, Git, Python, and pinned Cosign
+and GitHub artifact actions; this is not a malicious-host guarantee.
+
+The separate verification job checks the complete canonical file selection,
+exact candidate bundle set, and unchanged instruction bytes, then invokes
+MVM's in-process verifier with the caller identity policy. Only successful
+verification stages the final `instruction-signatures` artifact. Intermediate
+request/candidate artifacts are explicitly not that verified publication.
+Attempt binding deliberately requires **Re-run all jobs** after failure;
+partial retries do not reuse earlier requests or signatures.
+
+The migration guide covers the changed public action API. Static review
+found no source-byte authorization bypass and identified the partial-retry
+limitation above. Offline transfer tests exercise original-byte signing,
+wrong source/run metadata, malformed paths, symlinks, missing/extra bundles,
+modified verifier checkouts, and verification failure before publication.
+Cosign and MVM calls are mocked in those transfer tests; no actual keyless
+signature or hosted workflow run has been performed.
+
+Validation passed in the same credential-free, network-disabled Linux
+container: 23 Python supply-chain tests, 8 instruction-signing workflow
+contracts, 53 release-asset contracts, 22 instruction-policy tests (including
+the documented caller's include set), 43 workflow-path tests and the actual
+workflow-path gate. Workspace Clippy passed with `--locked --offline --
+-D warnings`; actionlint, scoped rustfmt checks, and `git diff --check` also
+passed. The first policy-test invocation selected zero tests because its
+filter used the source filename; the corrected
+`instruction_trust::policy::tests` invocation ran all 22. These checks do not
+replace a hosted three-job signing witness, full native workspace execution,
+or live VM validation.
+
+### SDK macOS signing and immutable PyPI publisher bytes
+
+Both SDK distribution workflows now call `sdk-macos-hostlib.yml` for the
+Darwin library. Its unprivileged build and signing steps run in different,
+fresh `macos-15` jobs. The build retains mandatory ad-hoc producer signing;
+only the signer receives Apple credentials, scoped to the existing signing
+script invocation. The signer installs no Rust, package builder, or dependency
+cache and never loads the producer library. Its trusted execution inputs
+remain the checked-out helper, pinned Python setup action, GitHub runner,
+and Apple's signing/notarization tools.
+
+The producer exports the immutable artifact ID, archive digest, raw library
+digest, and producing attempt. Before the Apple credential step, the signer
+checks its checkout revision and fetches the exact same-run artifact through
+the existing bounded transport. Repository IDs, run ID, source SHA, artifact
+name, ZIP digest, flat one-member inventory, and raw dylib digest must match.
+The flat internal transfer is restored to
+`darwin-arm64/libmvm_hostlib.dylib` for the existing SDK package layouts.
+No producer scripts or checkout files cross that boundary. The transport's
+new repository argument defaults to the existing runtime repository, leaving
+runtime callers' validation unchanged.
+
+npm packaging waits for the Linux producers and separate Darwin signer.
+PyPI's Darwin package job downloads the finished library by artifact ID;
+Linux builds retain their existing compilation and wheel-repair paths.
+Existing producer/notarization report names, package inspection, installed
+package smoke checks, and dry-run behavior are preserved. In particular,
+`--skip-unconfigured` still reports an unsigned/unconfigured result when no
+Apple credentials are configured; this change does not elevate that result
+to notarized release evidence.
+
+The PyPI publisher now uses the repository-owned Docker action wrapper
+`.github/actions/publish-pypi`, with image
+`ghcr.io/pypa/gh-action-pypi-publish@sha256:411241df99067c98b6d08fd8e26d14e86740a22460599c2af571e6dc26e27ffc`.
+The manifest bytes fetched for upstream commit
+`7245906fb61fa33a13554f9d5fb856fe61758086` matched that digest and the registry's
+content-digest header; its config identified Linux/amd64 and
+`/app/twine-upload.sh`. This pins registry content, not signed source-to-build
+provenance. All nine canonical upstream inputs retain their effective defaults,
+including Trusted Publishing and attestations. The container reads canonical
+hyphenated `INPUT_*` names; the wrapper does not override its entrypoint.
+
+The publishing job remains on Linux/amd64 with the existing `pypi` environment
+and OIDC permission. It checks out the exact workflow revision without persisted
+credentials to load the local action. No live upload, notarization, signing,
+or container-publisher execution was performed. The upstream publisher warns
+about reusable-workflow Trusted Publishing support; this pre-existing binding
+is unchanged and requires a hosted configuration check before claiming that
+publication succeeds.
+
+Offline validation passed 39 supply-chain tests, 50 runtime-artifact tests,
+9 SDK preflight tests, and 94 release-helper tests (the native macOS codesign
+check was skipped). The release-helper runner used checksum-verified jq 1.8.1;
+no host installation was changed. Cargo workflow-path tests and the executable
+gate, release-asset, instruction-signing, and security-lane tests passed, as
+did workspace Clippy with warnings denied and actionlint. These are local
+contract/fixture results, not a hosted SDK rehearsal or publication witness.

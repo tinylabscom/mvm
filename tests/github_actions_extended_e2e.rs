@@ -1589,7 +1589,7 @@ fn documented_surface_jobs_install_the_sdk_codegen_runtime() {
     for job in ["e2e-docs-linux", "e2e-docs-macos"] {
         let block = job_block(&workflow, job);
         assert!(
-            block.contains("uses: astral-sh/setup-uv@v8.2.0"),
+            block.contains("uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39"),
             "{job} invokes uvx through the SDK drift witness and must use the repository-pinned action"
         );
         assert!(

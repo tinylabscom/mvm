@@ -41,10 +41,12 @@ jobs:
     # eight shared objects per arch.
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: 1.97.1
 
       # The guest artifacts are cross-compiled with cargo-zigbuild under the
       # pinned toolchain, for the musl and glibc targets of both arches; this
@@ -78,7 +80,7 @@ jobs:
 
       - name: Upload the artifact
         id: upload
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: mvm-guest-bins-attempt-${{ github.run_attempt }}
           path: dist/

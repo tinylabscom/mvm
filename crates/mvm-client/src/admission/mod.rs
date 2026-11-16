@@ -14,6 +14,7 @@
 
 use anyhow::{Context, Result, bail};
 
+use mvm_core::deploy_record::{BootArtifactIdentity, read_deploy_record, verify_boot_artifact};
 use mvm_core::plan::{StreamRetention, SynthesisInput, Variant};
 use mvm_core::policy::PolicyBundle;
 pub use mvm_hostd::plan_admission::{
@@ -21,7 +22,6 @@ pub use mvm_hostd::plan_admission::{
     RunPosture, SystemClock, admit_for_run, populate_audit_substrate,
     stash_plan_and_mint_verb_grant, stash_plan_for_bridge,
 };
-use mvm_sdk::deploy::{BootArtifactIdentity, read_deploy_record, verify_boot_artifact};
 
 use crate::admission::entrypoint_resolve::ResolvedEntrypoint;
 use crate::admission::policy_resolver::{
@@ -1276,12 +1276,12 @@ pub(crate) mod admit_plan_tests {
     fn sibling_deploy_record_is_only_used_for_its_rootfs_directory() {
         let dir = tempfile::tempdir().unwrap();
         let rootfs = write_rootfs(dir.path(), b"recorded rootfs");
-        let boot_artifact = mvm_sdk::deploy::digest_boot_artifact(&rootfs).unwrap();
-        let record = mvm_sdk::deploy::DeployRecord {
-            schema_version: mvm_sdk::deploy::DEPLOY_RECORD_SCHEMA_VERSION,
+        let boot_artifact = mvm_core::deploy_record::digest_boot_artifact(&rootfs).unwrap();
+        let record = mvm_core::deploy_record::DeployRecord {
+            schema_version: mvm_core::deploy_record::DEPLOY_RECORD_SCHEMA_VERSION,
             workload_id: "vm-test".to_string(),
             ir_hash: "ir-hash".to_string(),
-            image: mvm_sdk::deploy::ArtifactDigests {
+            image: mvm_core::deploy_record::ArtifactDigests {
                 blake3: "b".repeat(64),
                 sha256: "a".repeat(64),
                 size_bytes: 1,
@@ -1290,7 +1290,8 @@ pub(crate) mod admit_plan_tests {
             environment: None,
             dependency_volume: None,
         };
-        mvm_sdk::deploy::write_deploy_record(&record, &dir.path().join("deploy.json")).unwrap();
+        mvm_core::deploy_record::write_deploy_record(&record, &dir.path().join("deploy.json"))
+            .unwrap();
 
         assert_eq!(
             sibling_deploy_boot_artifact(&rootfs).unwrap(),
@@ -1771,7 +1772,7 @@ pub(crate) mod admit_plan_tests {
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
         let rootfs = write_rootfs(rootfs_dir.path(), b"hello rootfs");
-        let boot_artifact = mvm_sdk::deploy::digest_boot_artifact(&rootfs).unwrap();
+        let boot_artifact = mvm_core::deploy_record::digest_boot_artifact(&rootfs).unwrap();
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
             mailbox: None,

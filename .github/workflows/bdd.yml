@@ -24,20 +24,20 @@ jobs:
     # scenarios another 7; leave time for the remaining conformance suite.
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v8.2.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           version: "0.12.5"
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: "22"
+          node-version: "22.23.5"
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: 1.97.1
 
@@ -49,9 +49,9 @@ jobs:
       # scenarios that would need the payload are `@live`-tagged, which this
       # hermetic lane skips. The live job below does need it.
       - name: Install just
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
-          tool: just
+          tool: just@1.59.0
 
       # Restore-only, through the shared action, for the reason its own
       # comment gives: the repo cache is capped at 10 GB with LRU eviction, so
@@ -64,8 +64,8 @@ jobs:
       # cache and gives every other lane back the dependency half of theirs.
       #
       # It shares the default `workspace` key rather than taking one of its
-      # own: the warm job already builds on nightly, which is this lane's
-      # toolchain, so the dependency graph and every unchanged workspace crate
+      # own: the warm job uses the same pinned stable compiler, so the
+      # dependency graph and every unchanged workspace crate
       # come back warm. `--features bdd` adds a handful of crates on top. A
       # `bdd`-keyed entry would need its own writer, and that means a second
       # full build on every merge to save the smaller half of one lane.
@@ -97,18 +97,20 @@ jobs:
       MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build
       MVM_BDD_GUEST_BIN_DIR: ${{ github.workspace }}/dist/staged
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/free-disk
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: 1.97.1
       - uses: ./.github/actions/apt-deps
         with:
           packages: libcap-ng-dev lld qemu-system-x86 qemu-utils
       - uses: ./.github/actions/install-zigbuild
       - name: Install just
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
-          tool: just
+          tool: just@1.59.0
       - uses: ./.github/actions/rust-cache
         with:
           key: bdd-live-ps11

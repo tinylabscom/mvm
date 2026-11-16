@@ -24,7 +24,7 @@ permissions:
   attestations: read
 
 concurrency:
-  group: publish-sdk
+  group: ${{ github.event_name == 'release' && 'publish-sdk' || format('publish-sdk-rehearsal-{0}', github.ref) }}
   cancel-in-progress: false
 
 jobs:
@@ -35,12 +35,15 @@ jobs:
   preflight:
     if: ${{ github.event_name != 'release' || startsWith(github.event.release.tag_name, 'sdk-v') }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: read
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"
       - name: Check release orchestration refusal and retry paths
@@ -49,7 +52,7 @@ jobs:
         run: |
           python scripts/test-sdk-release-preflight.py
           node --test scripts/test-publish-npm-packages.mjs
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
         if: github.event_name == 'release'
       - name: Validate SDK compatibility and signed published CLI runtime
         env:
@@ -62,6 +65,10 @@ jobs:
   publish_pypi_release:
     if: ${{ github.event_name == 'release' }}
     needs: [preflight, bdd]
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
     uses: ./.github/workflows/publish-pypi.yml
     with:
       dry_run: false
@@ -70,6 +77,10 @@ jobs:
   publish_pypi_dry_run:
     if: ${{ github.event_name != 'release' }}
     needs: preflight
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
     uses: ./.github/workflows/publish-pypi.yml
     with:
       dry_run: true
@@ -78,6 +89,10 @@ jobs:
   publish_npm_release:
     if: ${{ github.event_name == 'release' }}
     needs: [preflight, bdd]
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
     uses: ./.github/workflows/publish-npm.yml
     with:
       dry_run: false
@@ -86,6 +101,10 @@ jobs:
   publish_npm_dry_run:
     if: ${{ github.event_name != 'release' }}
     needs: preflight
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
     uses: ./.github/workflows/publish-npm.yml
     with:
       dry_run: true

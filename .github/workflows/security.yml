@@ -1,6 +1,6 @@
 name: Security
 
-# ADR-001 §W6.3 — single workflow that hosts every CI-side security
+# ADR-001 §W6.3 — workflow that hosts the nightly CI-side security
 # gate. Lanes correspond to the microVM hardening workstreams and the
 # seven claims in CLAUDE.md::Security model. These lanes provide release,
 # nightly, and manually requested security evidence; they are not PR checks
@@ -8,7 +8,9 @@ name: Security
 #
 # Triggers: release-tag pushes (final pre-publish gate), a nightly cron,
 # and manual dispatch. There is no `pull_request` trigger here; day-to-day
-# PR checks live in ci.yml. The nightly cron catches advisory-DB additions
+# PR checks live in ci.yml and supply-chain.yml. Release publication also
+# calls supply-chain.yml; both paths share these dependency checkers.
+# The nightly cron catches advisory-DB additions
 # even on quiet branches. `push: branches: [main]` was dropped in the
 # ecosystem-wide CI cost reduction — the nightly cron covers the
 # post-merge "did a new advisory land overnight" case at zero
@@ -50,41 +52,30 @@ env:
 jobs:
   # ── Lane 1: Supply chain ──────────────────────────────────────────
   # Maps to ADR-001 §W5.2 — advisories, license allowlist, multi-
-  # version bans, and registry source allowlist. Cheap (<2 min).
+  # version bans, and registry source allowlist.
   cargo-deny:
     name: Supply chain — cargo-deny (ADR-001 §W5.2)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
-
-      - name: Install cargo-deny
-        run: cargo install --locked cargo-deny
-
-      - name: cargo deny check
-        run: cargo deny check
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/supply-chain-check
+        with:
+          checker: deny
 
   cargo-audit:
     name: Supply chain — cargo-audit (ADR-001 §W5.2)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Install cargo-audit
-        run: cargo install --locked cargo-audit
-
-      - name: cargo audit
-        # No `--ignore` flags, mirroring deny.toml's empty
-        # `[advisories].ignore`. cargo-audit does not read deny.toml, so
-        # the two suppression lists can drift apart silently — and did:
-        # this step carried ten `--ignore` entries that deny.toml had
-        # never held, none of which still matched anything in the graph.
-        # A dead ignore is worse than none, because it reads as "we
-        # looked at this" when nothing looks at it. An advisory that
-        # fires here gets fixed, not listed.
-        run: cargo audit
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/supply-chain-check
+        with:
+          checker: audit
 
   # ── Lane 2: Guest-agent runtime boundary ─────────────────────────
   # The guest agent is one universal artifact. Its runtime profile and
@@ -94,13 +85,15 @@ jobs:
     name: Guest agent — runtime profile and grant boundary
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: nightly
 
       - name: Cache cargo
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry
@@ -122,7 +115,7 @@ jobs:
     name: No SSH of any kind, anywhere (ADR-001)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Assert no SSH-capability identifiers in source
         run: ./scripts/check-no-ssh.sh
@@ -136,13 +129,15 @@ jobs:
     name: prod agent carries no host-authority symbols
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: nightly
 
       - name: Cache cargo
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry
@@ -158,13 +153,15 @@ jobs:
     name: builder daemon carries no host-authority symbols
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: nightly
 
       - name: Cache cargo
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry
@@ -190,13 +187,15 @@ jobs:
     name: Seccomp tier functional denial (ADR-001 §W2.4)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: nightly
 
       - name: Cache cargo
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry
@@ -225,10 +224,12 @@ jobs:
       # nothing about them. Keep this lane's subject what it was.
       MVM_EMBED: "0"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: nightly
 
       # The release-artifact feature embeds the helper binaries that shipped
       # mvmctl artifacts need at runtime, so this reproducibility check must
@@ -292,7 +293,7 @@ jobs:
       FUZZ_SECS_SCHEDULE: 60
       FUZZ_SECS_DISPATCH: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust toolchain
         # Pinned dated nightly. cargo-fuzz needs nightly for the -Z sanitizer
@@ -301,8 +302,8 @@ jobs:
         # committed per-crate fuzz Cargo.locks so the whole lane is
         # deterministic — bump this date deliberately. This is the nightly the
         # lane last passed on. The other security lanes intentionally stay on
-        # floating @nightly: they run no sanitizer build and gain little.
-        uses: dtolnay/rust-toolchain@master
+        # the floating nightly compiler input; the action code itself is pinned.
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: nightly-2026-06-11
 
@@ -535,7 +536,7 @@ jobs:
 
       - name: Upload corpus on failure
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: fuzz-corpus-${{ github.run_id }}
           path: |
@@ -558,10 +559,12 @@ jobs:
     name: Hash-verify regression (ADR-001 §W5.1)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: nightly
 
       # build.rs cross-compiles the embedded host-vm binaries (Plan 115 /
       # ADR-065); without zig + cargo-zigbuild the mvmctl build panics.
@@ -593,7 +596,7 @@ jobs:
       # under test is this tree's.
       MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       # veritysetup, to check the roothash against the tree rather than
       # only its shape.
@@ -602,7 +605,9 @@ jobs:
           packages: cryptsetup-bin lld
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: 1.97.1
 
       # The guest binaries are static musl, cross-compiled with the pinned
       # toolchain the build script and `mvmctl` both use.
@@ -709,14 +714,16 @@ jobs:
       # under test is this tree's.
       MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - uses: ./.github/actions/apt-deps
         with:
           packages: lld
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: 1.97.1
 
       # The guest binaries are static musl, cross-compiled with the pinned
       # toolchain the build script and `mvmctl` both use.
@@ -809,7 +816,7 @@ jobs:
     name: Flake locks — committed + in sync (plan 36 §Layer 0)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
@@ -881,10 +888,12 @@ jobs:
     name: app-deps-audit (ADR-047 claim 9 / Plan 73 Followup D)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: nightly
 
       - uses: ./.github/actions/install-zigbuild
 
@@ -892,7 +901,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y jq
 
       - name: Cache cargo
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry
@@ -938,10 +947,12 @@ jobs:
             zigbuild: true
             test: cargo test --test oci_ext4_materialization -p mvm-fs
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: nightly
 
       - uses: ./.github/actions/install-zigbuild
         if: matrix.lane.zigbuild
@@ -953,7 +964,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld e2fsprogs
 
       - name: Cache cargo
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry
@@ -975,16 +986,18 @@ jobs:
     name: Sealed-prod vsock allowlist (plan 76 Phase 1)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: nightly
 
       - name: Install system build deps
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
 
       - name: Cache cargo
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry
@@ -1000,10 +1013,12 @@ jobs:
     name: jailer property tests (seccomp + Landlock) (Plan 113 §Task 9)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: nightly
 
       - name: Install system build deps
         run: |
@@ -1011,7 +1026,7 @@ jobs:
           sudo apt-get install -y libcap-ng-dev lld
 
       - name: Cache cargo
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry

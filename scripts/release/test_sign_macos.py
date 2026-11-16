@@ -380,12 +380,11 @@ class SigningTests(unittest.TestCase):
         repo = Path(__file__).resolve().parents[2]
         for workflow, after in (
             ("release.yml", "      - name: Package binary"),
-            ("publish-pypi.yml", "      - name: Build sdist + wheel"),
-            ("publish-npm.yml", "      - name: Upload the platform library"),
+            ("sdk-macos-hostlib.yml", "      - name: Upload unsigned library only"),
         ):
             source = (repo / ".github/workflows" / workflow).read_text()
             start = source.index("      - name: Mandatory ad-hoc producer signing")
-            end = source.index("      - name: Retain macOS producer")
+            end = source.index("      - name: Retain", start)
             block = source[start:end]
             self.assertLess(end, source.index(after))
             optional = "      - name: Sign and notarize" if workflow == "release.yml" else (
@@ -401,23 +400,26 @@ class SigningTests(unittest.TestCase):
 
     def test_sdk_signing_precedes_packaging_for_every_publish_and_tag_rehearsal(self):
         repo = Path(__file__).resolve().parents[2]
-        for workflow, after in (
-            ("publish-pypi.yml", "      - name: Build sdist + wheel"),
-            ("publish-npm.yml", "      - name: Upload the platform library"),
-        ):
+        shared = (repo / ".github/workflows/sdk-macos-hostlib.yml").read_text()
+        build, sign = shared.split("\n  sign:", 1)
+        self.assertIn("needs: build", sign)
+        self.assertNotIn("secrets.", build)
+        self.assertNotIn("build-hostlib", sign)
+        self.assertNotIn("cargo ", sign)
+        start = sign.index("      - name: Developer ID sign")
+        end = sign.index("      - name: Retain notarization")
+        signing_step = sign[start:end]
+        self.assertIn("!inputs.dry_run || github.ref_type == 'tag'", signing_step)
+        self.assertIn("--skip-unconfigured", signing_step)
+        for credential in signing.CREDENTIALS:
+            self.assertIn(f"secrets.{credential}", signing_step)
+        for workflow in ("publish-pypi.yml", "publish-npm.yml"):
             source = (repo / ".github/workflows" / workflow).read_text()
-            start = source.index("      - name: Developer ID sign")
-            end = source.index(after)
-            block = source[start:end]
-            self.assertIn("sign_macos.py", block)
-            signing_step = block.split("      - name: Retain")[0]
-            self.assertIn(
-                "runner.os == 'macOS' && (!inputs.dry_run || github.ref_type == 'tag')",
-                signing_step,
-            )
-            for credential in signing.CREDENTIALS:
-                self.assertIn(f"secrets.{credential}", block)
-            self.assertIn("--skip-unconfigured", signing_step)
+            self.assertIn("uses: ./.github/workflows/sdk-macos-hostlib.yml", source)
+            packaging = source.split("\n  build:", 1)[1].split("\n  smoke:", 1)[0]
+            self.assertIn("macos-hostlib", packaging.split("    steps:", 1)[0])
+            self.assertNotIn("secrets.APPLE_", packaging)
+            self.assertNotIn("scripts/release/sign_macos.py", source)
 
 class NativeRequirementTests(unittest.TestCase):
     @unittest.skipUnless(os.sys.platform == "darwin", "requires macOS codesign")

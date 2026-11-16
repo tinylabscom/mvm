@@ -1,65 +1,65 @@
 name: Sign instruction files
 description: >
-  Keyless-sign the calling repository's agent instruction files (CLAUDE.md,
-  AGENTS.md, SKILL.md, .claude/**/*.md, .cursor/rules/**, ...) under the
-  calling workflow's own GitHub Actions OIDC identity, verify every fresh
-  bundle through mvmctl's in-process Sigstore verifier, and upload the
-  `<file>.sigstore.json` bundles as an artifact.
-
-# This is a composite action, not a reusable workflow, and that choice is the
-# security property. A keyless certificate's identity is the workflow file the
-# job ran: for a composite action that is the caller's own workflow
-# (`https://github.com/<caller>/.github/workflows/<file>@<ref>`), so each
-# repository signs under an identity only it can produce. A reusable workflow
-# would sign as this repository's file whoever called it, and since this
-# repository is public, any repository on GitHub could mint a signature that a
-# policy trusting that identity accepts. The verifier pins the certificate
-# identity alone, so it could not tell those signatures apart.
-#
-# The caller must check its repository out first and grant `id-token: write`.
-# mvmctl is built from the tree this action was fetched from, so the verifier
-# that checks the bundles is the one at the ref the caller pinned.
+  Prepare, sign, or verify instruction bundles in three separate caller jobs.
+  Only the sign job may hold OIDC authority. The caller's workflow identity
+  remains the signing identity; this must not become a reusable workflow.
 
 inputs:
+  phase:
+    description: Required phase (prepare, sign, verify), each in a fresh job.
+    required: true
   artifact-name:
-    description: Name of the uploaded bundle artifact.
-    required: false
+    description: Final verified artifact name and intermediate artifact prefix.
     default: instruction-signatures
   retention-days:
-    description: >
-      How long the artifact is kept. A checkout is verified by downloading the
-      artifact of the run that signed it, so this bounds how long after the
-      last instruction-file edit that remains possible without a re-run.
-    required: false
+    description: Days to retain the final verified artifact.
     default: "90"
   cache-key:
-    description: Shared key for the Rust build cache of the mvmctl build.
-    required: false
+    description: Rust cache key for the unprivileged prepare and verify jobs.
     default: instruction-signing
   cache-save:
-    description: Whether this run may write the Rust build cache.
-    required: false
+    description: Whether an unprivileged job may save its Rust build cache.
     default: "false"
 
 runs:
   using: composite
   steps:
-    # The action's path is `<checkout of tinylabscom/mvm>/.github/actions/
-    # sign-instructions`, both when called from another repository and when
-    # this repository uses it by relative path.
-    - name: Locate the mvmctl source and isolate its state
+    - name: Refuse the legacy combined mode and misplaced signing authority
       shell: bash
+      env:
+        PHASE: ${{ inputs.phase }}
       run: |
         set -euo pipefail
-        mvm_src="$(cd "$GITHUB_ACTION_PATH/../../.." && pwd)"
-        test -f "$mvm_src/Cargo.toml"
+        if [ "$GITHUB_RUN_ATTEMPT" != 1 ]; then
+          echo "::notice::Attempt-bound artifacts require Re-run all jobs; partial retries cannot reuse earlier requests."
+        fi
+        case "$PHASE" in
+          prepare|verify)
+            test -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" || {
+              echo "prepare and verify must run in jobs without id-token: write" >&2
+              exit 1
+            }
+            ;;
+          sign)
+            test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" || {
+              echo "sign requires its own job with id-token: write" >&2
+              exit 1
+            }
+            ;;
+          *)
+            echo "Use phase: prepare, sign, verify in three separate jobs; combined mode is removed." >&2
+            exit 1
+            ;;
+        esac
+        state="$(mktemp -d "$RUNNER_TEMP/instruction-signing.XXXXXX")"
         {
-          echo "MVM_SIGN_SRC=$mvm_src"
-          echo "MVM_HOME=$RUNNER_TEMP/mvm-home"
+          echo "MVM_SIGN_STATE=$state"
+          echo "MVM_HOME=$state/mvm"
+          echo "MVM_SIGN_SRC=$(cd "$GITHUB_ACTION_PATH/../../.." && pwd)"
         } >> "$GITHUB_ENV"
 
-    # The workspace links with lld (`.cargo/config.toml`).
-    - name: Install lld
+    - name: Install lld for the unprivileged verifier build
+      if: ${{ inputs.phase != 'sign' }}
       shell: bash
       run: |
         set -euo pipefail
@@ -68,26 +68,22 @@ runs:
           timeout 300 sudo apt-get install -y --no-install-recommends lld
         fi
 
-    # The first rustc call inside the source tree makes rustup install the
-    # toolchain its rust-toolchain.toml pins.
     - name: Install the pinned Rust toolchain
+      if: ${{ inputs.phase != 'sign' }}
       shell: bash
       run: cd "$MVM_SIGN_SRC" && rustc --version
 
     - name: Restore the Rust build cache
-      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      if: ${{ inputs.phase != 'sign' }}
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       with:
         prefix-key: v1-rust
         shared-key: ${{ inputs.cache-key }}
         workspaces: ${{ env.MVM_SIGN_SRC }} -> target
         save-if: ${{ inputs.cache-save }}
 
-    - name: Install cosign
-      uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
-
-    # `user` carries the Sigstore verifier; a build without it reports every
-    # keyless signature as uncheckable.
-    - name: Build mvmctl with the Sigstore verifier
+    - name: Build mvmctl without signing authority
+      if: ${{ inputs.phase != 'sign' }}
       shell: bash
       run: |
         set -euo pipefail
@@ -95,79 +91,66 @@ runs:
         cargo build --locked -p mvmctl --features user --bin mvmctl
         echo "MVM_SIGN_MVMCTL=$MVM_SIGN_SRC/target/debug/mvmctl" >> "$GITHUB_ENV"
 
-    - name: List the instruction files
+    - name: Prepare the source-bound request
+      if: ${{ inputs.phase == 'prepare' }}
       shell: bash
-      run: |
-        set -euo pipefail
-        "$MVM_SIGN_MVMCTL" trust instructions sign --dry-run . \
-          > "$RUNNER_TEMP/instruction-files.txt"
-        echo "instruction files:"
-        cat "$RUNNER_TEMP/instruction-files.txt"
+      run: python3 "$GITHUB_ACTION_PATH/instruction-signing.py" prepare
 
-    # --new-bundle-format writes the Sigstore bundle the in-process verifier
-    # parses, at the sidecar name it looks for.
-    - name: Keyless-sign each file
+    - name: Upload the request
+      if: ${{ inputs.phase == 'prepare' }}
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+      with:
+        name: ${{ inputs.artifact-name }}-request-${{ github.run_attempt }}
+        path: ${{ env.MVM_SIGN_STATE }}/request/
+        if-no-files-found: error
+        retention-days: 1
+
+    - name: Download this attempt's request
+      if: ${{ inputs.phase != 'prepare' }}
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+      with:
+        name: ${{ inputs.artifact-name }}-request-${{ github.run_attempt }}
+        path: ${{ env.MVM_SIGN_STATE }}/request/
+
+    - name: Install cosign only in the signing job
+      if: ${{ inputs.phase == 'sign' }}
+      uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      with:
+        cosign-release: v2.5.2
+
+    - name: Sign only original tracked source bytes
+      if: ${{ inputs.phase == 'sign' }}
       shell: bash
-      run: |
-        set -euo pipefail
-        while IFS= read -r file; do
-          cosign sign-blob \
-            --yes \
-            --new-bundle-format \
-            --bundle "${file}.sigstore.json" \
-            "${file}"
-        done < "$RUNNER_TEMP/instruction-files.txt"
+      run: python3 "$GITHUB_ACTION_PATH/instruction-signing.py" sign
 
-    # The round trip that matters: the bundles cosign just wrote, checked by
-    # the verifier admission uses, under a policy that trusts exactly the
-    # calling workflow on this ref and refuses anything else.
+    - name: Upload candidate bundles (not the verified publication)
+      if: ${{ inputs.phase == 'sign' }}
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+      with:
+        name: ${{ inputs.artifact-name }}-candidate-${{ github.run_attempt }}
+        path: ${{ env.MVM_SIGN_STATE }}/candidate/
+        include-hidden-files: true
+        if-no-files-found: error
+        retention-days: 1
+
+    - name: Download this attempt's candidate bundles
+      if: ${{ inputs.phase == 'verify' }}
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+      with:
+        name: ${{ inputs.artifact-name }}-candidate-${{ github.run_attempt }}
+        path: ${{ env.MVM_SIGN_STATE }}/candidate/
+
     - name: Verify the bundles under the calling workflow's identity
+      if: ${{ inputs.phase == 'verify' }}
       shell: bash
-      run: |
-        set -euo pipefail
-        # GITHUB_WORKFLOW_REF is `<owner>/<repo>/<workflow path>@<ref>`.
-        workflow="${GITHUB_WORKFLOW_REF#"$GITHUB_REPOSITORY/"}"
-        workflow="${workflow%%@*}"
-        # Both are interpolated into TOML below; refuse anything but a plain
-        # workflow path and ref name.
-        if ! printf '%s' "$workflow" | grep -Eq '^\.github/workflows/[A-Za-z0-9._-]+\.ya?ml$'; then
-          echo "refusing to build a policy for workflow ${workflow}" >&2
-          exit 1
-        fi
-        if ! printf '%s' "$GITHUB_REF" | grep -Eq '^refs/[A-Za-z0-9._/-]+$'; then
-          echo "refusing to build a policy for ref ${GITHUB_REF}" >&2
-          exit 1
-        fi
-        cat > "$RUNNER_TEMP/instruction-trust.toml" <<EOF
-        enforcement = "deny"
+      run: python3 "$GITHUB_ACTION_PATH/instruction-signing.py" verify
 
-        [[publishers]]
-        kind = "keyless"
-        name = "sign-instructions"
-        issuer = "https://token.actions.githubusercontent.com"
-        repository = "${GITHUB_REPOSITORY}"
-        workflow = "${workflow}"
-        ref = "${GITHUB_REF}"
-        EOF
-        "$MVM_SIGN_MVMCTL" trust instructions verify . \
-          --policy "$RUNNER_TEMP/instruction-trust.toml"
-
-    - name: Collect the bundles
-      shell: bash
-      run: |
-        set -euo pipefail
-        mkdir -p "$RUNNER_TEMP/bundles"
-        while IFS= read -r file; do
-          cp --parents "${file}.sigstore.json" "$RUNNER_TEMP/bundles/"
-        done < "$RUNNER_TEMP/instruction-files.txt"
-
-    # Instruction files live under dot-directories (.claude/, .cursor/), and
-    # upload-artifact drops hidden paths unless told otherwise.
-    - name: Upload the bundles
+    - name: Upload only verified bundles
+      if: ${{ inputs.phase == 'verify' }}
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
       with:
         name: ${{ inputs.artifact-name }}
-        path: ${{ runner.temp }}/bundles/
+        path: ${{ env.MVM_SIGN_STATE }}/verified/
         include-hidden-files: true
         if-no-files-found: error
         retention-days: ${{ inputs.retention-days }}

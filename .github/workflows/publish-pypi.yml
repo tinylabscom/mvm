@@ -22,7 +22,24 @@ on:
         required: false
 
 jobs:
+  macos-hostlib:
+    uses: ./.github/workflows/sdk-macos-hostlib.yml
+    permissions:
+      contents: read
+      actions: read
+    with:
+      channel: pypi
+      dry_run: ${{ inputs.dry_run }}
+    secrets:
+      APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+      APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+      APPLE_DEVELOPER_ID_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_IDENTITY }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+
   build:
+    needs: macos-hostlib
     name: ${{ matrix.platform }}
     # One wheel per platform: the wheel embeds that platform's host library,
     # so its tag must say which hosts can load it. Each leg runs on a runner
@@ -66,13 +83,18 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
 
       - name: Validate SDK release manifest and package metadata
         run: |
@@ -104,61 +126,42 @@ jobs:
           PY
 
       - name: Build the in-process host library
+        if: ${{ runner.os != 'macOS' }}
         id: hostlib
         uses: ./.github/actions/build-hostlib
         with:
           platform: ${{ matrix.platform }}
 
+      - name: Download the separately signed macOS host library
+        if: ${{ runner.os == 'macOS' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          artifact-ids: ${{ needs.macos-hostlib.outputs.artifact-id }}
+          path: hostlib-out
+          merge-multiple: true
+
       - name: Embed the host library in the package
         env:
-          HOSTLIB: ${{ steps.hostlib.outputs.path }}
+          HOSTLIB: ${{ runner.os == 'macOS' && 'hostlib-out/darwin-arm64/libmvm_hostlib.dylib' || steps.hostlib.outputs.path }}
         run: |
           set -euo pipefail
           mkdir -p crates/mvm-sdk/sdks/python/mvm/_native
           cp "${HOSTLIB}" crates/mvm-sdk/sdks/python/mvm/_native/
           echo "embedded ${HOSTLIB}"
 
-      - name: Mandatory ad-hoc producer signing
+      - name: Download macOS producer signing evidence
         if: ${{ runner.os == 'macOS' }}
-        run: |
-          python3 scripts/release/sign_macos.py --producer-adhoc \
-            --payload crates/mvm-sdk/sdks/python/mvm/_native \
-            --report "${RUNNER_TEMP}/pypi-producer-signing.json"
-
-      - name: Retain macOS producer signing evidence
-        if: ${{ always() && runner.os == 'macOS' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: pypi-producer-signing-${{ matrix.platform }}
-          path: ${{ runner.temp }}/pypi-producer-signing.json
-          if-no-files-found: warn
+          path: ${{ runner.temp }}
 
-      - name: Developer ID sign and notarize macOS native payload
+      - name: Download macOS notarization evidence
         if: ${{ runner.os == 'macOS' && (!inputs.dry_run || github.ref_type == 'tag') }}
-        env:
-          APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
-          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
-          APPLE_DEVELOPER_ID_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_IDENTITY }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-        run: |
-          python3 scripts/release/sign_macos.py \
-            --payload crates/mvm-sdk/sdks/python/mvm/_native \
-            --skip-unconfigured \
-            --report "${RUNNER_TEMP}/pypi-notarization.json"
-
-      - name: Retain macOS notarization evidence
-        if: ${{ runner.os == 'macOS' && (!inputs.dry_run || github.ref_type == 'tag') }}
-        uses: actions/upload-artifact@v7
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: pypi-notarization-${{ matrix.platform }}
-          path: ${{ runner.temp }}/pypi-notarization.json
-          if-no-files-found: error
-
-      - name: Mark unsigned branch rehearsal
-        if: ${{ runner.os == 'macOS' && inputs.dry_run && github.ref_type != 'tag' }}
-        run: echo "::notice::Unsigned branch build only; NOT macOS release acceptance evidence."
+          path: ${{ runner.temp }}
 
       - name: Build sdist + wheel
         shell: bash
@@ -229,7 +232,7 @@ jobs:
 
       - name: Retain final macOS wheel inspection
         if: ${{ always() && runner.os == 'macOS' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: pypi-final-package-${{ matrix.platform }}
           path: ${{ runner.temp }}/pypi-final-package.json
@@ -263,7 +266,7 @@ jobs:
       # One artifact per leg: two matrix legs uploading the same name
       # collide, and the second upload fails.
       - name: Upload built artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: pypi-dist-${{ matrix.platform }}
           path: dist/*
@@ -280,15 +283,20 @@ jobs:
       id-token: write
       contents: read
     steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
       - name: Download built artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: pypi-dist-*
           path: dist
           merge-multiple: true
 
       - name: Publish to PyPI (Trusted Publishing)
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: ./.github/actions/publish-pypi
         with:
           packages-dir: dist
           skip-existing: true

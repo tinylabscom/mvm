@@ -45,10 +45,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
-          python-version: "3.12"
+          python-version: "3.12.16"
       - name: Check packaging and signing refusal paths
         env:
           PYTHONDONTWRITEBYTECODE: "1"
@@ -76,12 +76,12 @@ jobs:
       pkgver: ${{ steps.source.outputs.pkgver }}
       artifact_attempt: ${{ github.run_attempt }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       # Match installer v3's SHA256-verified bootstrap and the release signer's
       # cosign version. It verifies --new-bundle-format bundles; cosign v3
       # binaries no longer publish the detached .sig that installer v3 needs.
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
         with:
           cosign-release: v2.5.2
 
@@ -105,7 +105,7 @@ jobs:
 
       - name: Download this run's release tarballs
         if: ${{ !inputs.published_packages && inputs.tarballs == 'build' }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: mvmctl-*-unknown-linux-gnu-attempt-${{ github.run_attempt }}
           path: tarballs
@@ -113,7 +113,7 @@ jobs:
 
       - name: Download this run's guest runtime
         if: ${{ !inputs.published_packages && inputs.tarballs == 'build' }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: mvm-guest-bins-attempt-${{ github.run_attempt }}
           path: guest-runtime
@@ -182,7 +182,7 @@ jobs:
 
       - name: Download the original payload manifests
         if: ${{ inputs.published_packages }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: distro-package-payloads-attempt-${{ github.run_attempt }}
           path: distro-packages
@@ -224,7 +224,7 @@ jobs:
       # The release collector selects this exact attempt's package/checksum
       # pairs. Reports and payload manifests are not release signing inputs.
       - name: Upload the packages
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ${{ format('{0}-attempt-{1}', inputs.published_packages && 'published-distro-packages' || 'distro-packages', github.run_attempt) }}
           path: |
@@ -236,7 +236,7 @@ jobs:
 
       - name: Upload the payload manifests
         if: ${{ !inputs.published_packages }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: distro-package-payloads-attempt-${{ github.run_attempt }}
           path: distro-packages/*.sha256sums
@@ -261,16 +261,16 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Download the packages
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: ${{ format('{0}-attempt-{1}', inputs.published_packages && 'published-distro-packages' || 'distro-packages', needs.package.outputs.artifact_attempt) }}
           path: distro-packages
 
       - name: Download the payload manifests
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: distro-package-payloads-attempt-${{ needs.package.outputs.artifact_attempt }}
           path: distro-packages

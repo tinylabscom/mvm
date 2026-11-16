@@ -44,9 +44,8 @@
 //! ```
 //!
 //! This crate authors workloads; it does not drive machines. A Rust program
-//! that boots, drives or stops a machine uses `mvm-client`, which re-exports
-//! this crate's authoring surface as `mvm_client::authoring`, so one
-//! dependency covers both.
+//! that boots, drives or stops a machine uses `mvm-client`. Programs that
+//! also author workloads depend explicitly on both crates.
 
 mod builder;
 mod ctor;

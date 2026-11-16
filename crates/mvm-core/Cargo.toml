@@ -16,6 +16,8 @@ base64.workspace = true
 # Host-only: the `did_key` module's did:key codec. Optional so guest binaries
 # never resolve it; enabled by the `host-state` feature.
 bs58 = { workspace = true, optional = true }
+# Host-only exact-byte deploy artifact identities.
+blake3 = { workspace = true, optional = true }
 serde_jcs = "0.1"
 # Host-only: `workload_address` normalization. Optional; `host-state` pulls it.
 unicode-normalization = { version = "0.1", optional = true }
@@ -142,6 +144,7 @@ os-keyring = ["dep:keyring"]
 # `unicode-normalization`, `aho-corasick`, `tar`, `toml` or `regex`; host
 # crates opt in.
 host-state = [
+    "dep:blake3",
     "dep:bs58",
     "dep:unicode-normalization",
     "dep:aho-corasick",
@@ -242,6 +245,10 @@ required-features = ["host-state"]
 
 # Integration tests that exercise host-state-gated modules (bundle archive
 # I/O, registry packs, receipts) only build where the feature is on.
+[[test]]
+name = "deploy_record"
+required-features = ["host-state"]
+
 [[test]]
 name = "bundle_streaming_memory"
 path = "tests/bundle_streaming_memory.rs"

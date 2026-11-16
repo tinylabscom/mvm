@@ -303,8 +303,8 @@ class PackageTests(unittest.TestCase):
         step = step.split("\n      - ", 1)[0]
         if job == "e2e-docs-linux":
             match = re.search(
-                r'uses: actions/setup-python@v5\n\s+with:\n'
-                r'\s+python-version: "(3)\.(\d+)"', setup,
+                r'uses: actions/setup-python@[0-9a-f]{40}(?: +#[^\n]*)?\n\s+with:\n'
+                r'\s+python-version: "(3)\.(\d+)\.\d+"', setup,
             )
             self.assertIsNotNone(match, "Linux must install a pinned interpreter before the suite")
             self.assertGreaterEqual(int(match[2]), 12)
@@ -313,7 +313,9 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(job, "e2e-docs-macos")
         self.assertNotIn("uses: actions/setup-python@", setup,
                          "the macOS installer requires the hosted /Users/runner path")
-        self.assertIn("uses: astral-sh/setup-uv@v8.2.0", setup)
+        self.assertIn(
+            "uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39", setup
+        )
         self.assertIn('version: "0.12.5"', setup)
         self.assertIn("        run: |\n", step)
         run = textwrap.dedent(step.split("        run: |\n", 1)[1])

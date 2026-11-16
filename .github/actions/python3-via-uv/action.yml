@@ -11,9 +11,9 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        uv python install 3.12
+        uv python install 3.12.14
         shim="${RUNNER_TEMP}/python3-shim"
         mkdir -p "$shim"
-        ln -sf "$(uv python find 3.12)" "$shim/python3"
+        ln -sf "$(uv python find 3.12.14)" "$shim/python3"
         echo "$shim" >> "$GITHUB_PATH"
         "$shim/python3" -c 'import sys, tomllib; print(sys.version)'

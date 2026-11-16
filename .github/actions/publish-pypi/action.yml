@@ -1,0 +1,47 @@
+name: Publish to PyPI
+description: Run the digest-pinned upstream PyPI publisher container
+# Upstream action: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086
+# The commit-named GHCR tag resolved to this manifest; its bytes matched
+# Docker-Content-Digest. This pins registry content, not signed build provenance.
+# Linux/amd64 only. Retain the image's /app/twine-upload.sh entrypoint.
+# Defaults below are the upstream composite action's effective canonical inputs.
+inputs:
+  user:
+    description: PyPI user
+    required: false
+    default: __token__
+  password:
+    description: Password for your PyPI user or an access token
+    required: false
+    default: ''
+  repository-url:
+    description: The repository URL to use
+    required: false
+    default: https://upload.pypi.org/legacy/
+  packages-dir:
+    description: The target directory for distribution
+    required: false
+    default: dist
+  verify-metadata:
+    description: Check metadata before uploading
+    required: false
+    default: 'true'
+  skip-existing:
+    description: Do not fail if a distribution exists in the target package index
+    required: false
+    default: 'false'
+  verbose:
+    description: Show verbose output
+    required: false
+    default: 'true'
+  print-hash:
+    description: Show hash values of files to be uploaded
+    required: false
+    default: 'true'
+  attestations:
+    description: Enable PEP 740 attestations via Trusted Publishing
+    required: false
+    default: 'true'
+runs:
+  using: docker
+  image: docker://ghcr.io/pypa/gh-action-pypi-publish@sha256:411241df99067c98b6d08fd8e26d14e86740a22460599c2af571e6dc26e27ffc

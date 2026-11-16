@@ -12,7 +12,8 @@
 //!   the lockfile blob as the file-level authenticity proof.
 //! - `validator` — tree-sitter-nix-backed validator for hand-authored
 //!   Nix bodies bundled with addons. v1 is parse-only (rejects malformed
-//!   Nix); AST-level merging arrives with the in-VM addon tier.
+//!   Nix); requires the off-by-default `addon-nix-validation` feature.
+//!   Without that feature the module is unavailable, not a no-op validator.
 //! - `registry` — registry client surface plus a directory-backed
 //!   `LocalRegistry` (test / offline; real sigstore-keyless
 //!   verification lands in a follow-up).
@@ -32,6 +33,7 @@ pub mod lockfile;
 pub mod manifest;
 pub mod registry;
 pub mod sbom;
+#[cfg(feature = "addon-nix-validation")]
 pub mod validator;
 pub mod verify;
 

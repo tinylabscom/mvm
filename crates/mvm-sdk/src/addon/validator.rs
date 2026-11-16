@@ -1,6 +1,15 @@
 //! Tree-sitter-nix validator for hand-authored Nix bodies bundled
 //! with addons. v1 is parse-only.
 //!
+//! Available only with the `addon-nix-validation` feature.
+//!
+//! ```
+//! use mvm_sdk::addon::validator::validate;
+//!
+//! assert!(validate("{ pkgs, ... }: { packages = [ pkgs.hello ]; }").is_ok());
+//! assert!(validate("{ broken syntax }} let in").is_err());
+//! ```
+//!
 //! v1 scope: parse the input under tree-sitter-nix; report any
 //! `ERROR` or `MISSING` nodes with their byte offsets so the publish
 //! flow can surface line/column to the addon author.

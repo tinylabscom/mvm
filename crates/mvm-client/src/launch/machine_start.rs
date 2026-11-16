@@ -110,10 +110,10 @@ pub fn resolve_local_deployment(path: &Path) -> Result<LocalDeployment> {
     }
     let record_path = directory.join("deploy.json");
     let rootfs = directory.join("rootfs.ext4");
-    let record = mvm_sdk::deploy::read_deploy_record(&record_path)
+    let record = mvm_core::deploy_record::read_deploy_record(&record_path)
         .map_err(anyhow::Error::from)
         .with_context(|| format!("reading deployment record {}", record_path.display()))?;
-    mvm_sdk::deploy::verify_boot_artifact(&rootfs, &record.boot_artifact)
+    mvm_core::deploy_record::verify_boot_artifact(&rootfs, &record.boot_artifact)
         .map_err(anyhow::Error::from)
         .with_context(|| format!("verifying deployment boot artifact {}", rootfs.display()))?;
     Ok(LocalDeployment {

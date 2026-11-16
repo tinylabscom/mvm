@@ -3,16 +3,34 @@ title: Rust SDK
 description: Rust build-time SDK and Workload IR contract.
 ---
 
-Rust has two SDK surfaces, and one dependency reaches both: `mvm-client`.
+Rust has two SDK surfaces with separate direct dependencies:
 
 - **Authoring** — build Workload IR (the same IR the Python/TypeScript
-  decorators emit). Implemented in `mvm-sdk`; re-exported as
-  `mvm_client::authoring`.
-- **Runtime** — the `MvmClient` facade and the in-process `LocalBackend` for
+  decorators emit). Depend on `mvm-sdk` and import from `mvm_sdk`.
+- **Runtime** — depend on `mvm-client` for the `MvmClient` facade and the
+  in-process `LocalBackend` for
   driving machines (launch/create/start/stop/inventory, plus guest process and
   file operations on a dev machine), shared with the CLI, the GUI, the fleet
   orchestrator, and — through the `libmvm_hostlib` C ABI — the Python and
   TypeScript SDKs.
+
+```toml
+[dependencies]
+# Build-time authoring; omit from runtime-only programs.
+mvm-sdk = { git = "https://github.com/tinylabscom/mvm" }
+# Execution; omit from authoring-only tools.
+mvm-client = { git = "https://github.com/tinylabscom/mvm" }
+```
+
+The runtime client does not depend on `mvm-sdk`, including through an optional
+authoring feature. Build-time authoring stays outside its dependency closure.
+
+### Migration from `mvm_client::authoring`
+
+The re-export has been removed. Callers must add a direct `mvm-sdk` dependency
+and replace the `mvm_client::authoring` import prefix with `mvm_sdk`. Keep
+execution imports under `mvm_client`. This is a Rust source compatibility
+break; the common IR and wire semantics are unchanged.
 
 `mvm-client` also re-exports every type those calls take and return: the
 launch request and its parts (`RootfsSource`, `Grants`, `HostPort`,
@@ -21,7 +39,25 @@ launch request and its parts (`RootfsSource`, `Grants`, `HostPort`,
 (`mvm_client::guest`), the signed plan types, and the stable error codes
 (`mvm_client::error_codes`).
 
-## Authoring — build Workload IR (`mvm_client::authoring`)
+## Authoring — build Workload IR (`mvm-sdk`)
+
+### Optional addon Nix validation
+
+`mvm_sdk::addon::validator` requires the off-by-default
+`addon-nix-validation` feature:
+
+```toml
+mvm-sdk = { git = "https://github.com/tinylabscom/mvm", features = ["addon-nix-validation"] }
+```
+
+This is a Rust source compatibility break for callers of `validate` or
+`NixSyntaxError`: enable the feature to retain the existing API. Without it,
+the module is unavailable at compile time, rather than silently accepting
+input. With it, validation rejects malformed Nix syntax; it does not evaluate
+Nix, enforce semantic rules, or replace runtime admission. Core Tree-sitter
+remains in the authoring closure for other language parsers.
+
+### Workload builders
 
 Current:
 
@@ -32,7 +68,7 @@ Current:
 - runtime recording types and lowering.
 
 ```rust
-use mvm_client::authoring::*;
+use mvm_sdk::{app, emit, entrypoint_command, local_path, nix_packages, resources, workload};
 
 let workload = workload("worker")
     .app(

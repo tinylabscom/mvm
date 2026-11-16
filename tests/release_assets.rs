@@ -715,10 +715,15 @@ fn distro_packages_are_built_from_the_tarballs_and_signed_like_them() {
 
     let packages = fs::read_to_string(".github/workflows/distro-packages.yml")
         .expect("distro-packages.yml must exist");
+    let cosign = packages
+        .split("uses: sigstore/cosign-installer@")
+        .nth(1)
+        .expect("packaging installs the verified signer")
+        .split("\n      - ")
+        .next()
+        .expect("the installer step is present");
     assert!(
-        packages.contains(
-            "uses: sigstore/cosign-installer@v3\n        with:\n          cosign-release: v2.5.2"
-        ),
+        cosign.contains("cosign-release: v2.5.2"),
         "packaging must use installer v3's verified bootstrap: cosign v3 binaries lack the detached .sig it requires"
     );
     assert!(
@@ -1342,7 +1347,7 @@ fn workers_deployment_uses_the_checked_in_wrangler_config() {
         "the Workers workflow must verify its Cloudflare credentials before building"
     );
     assert!(
-        workflow.contains("uses: pnpm/action-setup@v6"),
+        workflow.contains("uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115"),
         "the Workers workflow must use the Node 24-compatible pnpm setup action"
     );
     assert!(

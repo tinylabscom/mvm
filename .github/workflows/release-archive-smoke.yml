@@ -100,7 +100,7 @@ jobs:
     # so a slow step fails on its own budget with a transcript, not on this.
     timeout-minutes: 50
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Require explicit attempt for a named run
         env:
@@ -131,14 +131,14 @@ jobs:
       # is decided by the input alone.
       - name: Download the archive the calling release run built
         if: inputs.run_id == ''
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: mvmctl-x86_64-unknown-linux-gnu-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-archive
 
       - name: Download the archive the named release run built
         if: inputs.run_id != ''
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: mvmctl-x86_64-unknown-linux-gnu-attempt-${{ inputs.run_attempt }}
           path: ${{ runner.temp }}/release-archive
@@ -147,14 +147,14 @@ jobs:
 
       - name: Download the guest runtime the calling release run built
         if: inputs.run_id == '' && inputs.runtime_candidate_artifact_id == ''
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: mvm-guest-bins-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/guest-runtime
 
       - name: Download the guest runtime the named release run built
         if: inputs.run_id != '' && inputs.runtime_candidate_artifact_id == ''
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: mvm-guest-bins-attempt-${{ inputs.run_attempt }}
           path: ${{ runner.temp }}/guest-runtime
@@ -216,7 +216,7 @@ jobs:
 
       - name: Upload the transcript
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-archive-smoke-linux-firecracker
           path: ${{ runner.temp }}/release-archive-smoke

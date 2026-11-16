@@ -15,10 +15,7 @@ on:
         default: true
 
 permissions:
-  contents: write
-  id-token: write        # Required for cosign keyless signing via OIDC
-  actions: write         # Required for post-promotion workflow dispatch
-  attestations: write    # Required to record build provenance for the release binaries
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -33,6 +30,45 @@ env:
   MVMCTL_RELEASE_FEATURES: host,user,release-artifact-bootstrap,release-channel,embed-host-bins
 
 jobs:
+  supply-chain:
+    uses: ./.github/workflows/supply-chain.yml
+
+  sbom:
+    needs: [supply-chain]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+      content_sha256: ${{ steps.digest.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install pinned SBOM tooling without signing authority
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --no-self-update
+          cargo +1.97.1 install cargo-cyclonedx --version '=0.5.10' --locked
+      - name: Generate SBOM
+        run: |
+          cargo +1.97.1 cyclonedx --format json --all --override-filename sbom.cdx
+          git diff --exit-code -- Cargo.lock
+          test -s sbom.cdx.json
+      - name: Record exact SBOM content
+        id: digest
+        run: |
+          digest="$(sha256sum sbom.cdx.json)"
+          echo "sha256=${digest%% *}" >> "$GITHUB_OUTPUT"
+      - name: Upload only the SBOM
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-sbom-attempt-${{ github.run_attempt }}
+          path: sbom.cdx.json
+          if-no-files-found: error
+
   bdd:
     uses: ./.github/workflows/bdd.yml
 
@@ -94,7 +130,7 @@ jobs:
       checked_artifact_id: ${{ steps.upload.outputs.artifact-id }}
       checked_artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -116,15 +152,15 @@ jobs:
             --out-dir "$RUNNER_TEMP/runtime-checked"
       - name: Upload the unchanged checked inputs
         id: upload
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: mvm-runtime-proof-input-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/runtime-checked/
           if-no-files-found: error
 
   runtime-proof-candidate:
-    needs: [guest-runtime, runtime-proof-input-check]
-    if: ${{ !cancelled() && github.event_name == 'push' && github.ref_type == 'tag' && needs.guest-runtime.result == 'success' && needs.runtime-proof-input-check.result == 'success' }}
+    needs: [guest-runtime, runtime-proof-input-check, supply-chain]
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref_type == 'tag' && needs.guest-runtime.result == 'success' && needs.runtime-proof-input-check.result == 'success' && needs.supply-chain.result == 'success' }}
     environment: release-signing
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ubuntu-24.04
@@ -141,7 +177,7 @@ jobs:
       archive_bundle_sha256: ${{ steps.seal.outputs.archive_bundle_sha256 }}
       checksum_bundle_sha256: ${{ steps.seal.outputs.checksum_bundle_sha256 }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -170,7 +206,9 @@ jobs:
             --checked-dir "$RUNNER_TEMP/runtime-checked" \
             --directory "$RUNNER_TEMP/runtime-candidate"
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: v2.5.2
       - name: Sign only the original archive and checksum
         shell: bash
         run: |
@@ -192,7 +230,7 @@ jobs:
             --directory "$RUNNER_TEMP/runtime-candidate"
       - name: Upload the exact candidate quartet and transport context
         id: upload
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: mvm-runtime-proof-candidate-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/runtime-candidate/
@@ -239,11 +277,14 @@ jobs:
     timeout-minutes: 135
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
+          toolchain: 1.97.1
           targets: ${{ matrix.build_target }}
 
       # The SDK host library is built against this arch's gnu target even on
@@ -283,7 +324,7 @@ jobs:
       - name: Restore the embedded payload store (rehearsal only)
         id: embed_cache
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ~/.cache/mvm/embed
           key: embed-${{ startsWith(matrix.build_target, 'aarch64') && 'aarch64' || 'x86_64' }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'crates/**/Cargo.toml', 'crates/**/*.rs') }}
@@ -304,7 +345,7 @@ jobs:
 
       - name: Save the embedded payload store
         if: ${{ github.event_name == 'workflow_dispatch' && steps.embed_cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ~/.cache/mvm/embed
           key: ${{ steps.embed_cache.outputs.cache-primary-key }}
@@ -396,7 +437,7 @@ jobs:
       - name: Restore the pinned kernel source tarball
         id: kernel_cache
         if: ${{ matrix.target == 'aarch64-apple-darwin' }}
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ runner.temp }}/libkrunfw-kernel
           key: libkrunfw-kernel-${{ hashFiles('scripts/release/build-libkrun-tier.sh') }}
@@ -408,7 +449,7 @@ jobs:
       - name: Restore the libkrun upstream tree (rehearsal only)
         id: libkrun_cache
         if: ${{ matrix.target == 'aarch64-apple-darwin' && github.event_name == 'workflow_dispatch' }}
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ runner.temp }}/libkrun-upstream
           key: libkrun-upstream-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageVersion }}-${{ hashFiles('scripts/release/build-libkrun-tier.sh', 'scripts/release/libkrunfw-macos-host.patch') }}
@@ -434,14 +475,14 @@ jobs:
 
       - name: Save the pinned kernel source tarball
         if: ${{ matrix.target == 'aarch64-apple-darwin' && github.event_name == 'workflow_dispatch' && steps.kernel_cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ runner.temp }}/libkrunfw-kernel
           key: ${{ steps.kernel_cache.outputs.cache-primary-key }}
 
       - name: Save the libkrun upstream tree
         if: ${{ matrix.target == 'aarch64-apple-darwin' && github.event_name == 'workflow_dispatch' && steps.libkrun_cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ runner.temp }}/libkrun-upstream
           key: ${{ steps.libkrun_cache.outputs.cache-primary-key }}
@@ -655,7 +696,7 @@ jobs:
 
       - name: Retain macOS producer signing evidence
         if: ${{ always() && matrix.target == 'aarch64-apple-darwin' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: macos-producer-signing
           path: ${{ runner.temp }}/macos-producer-signing.json
@@ -678,7 +719,7 @@ jobs:
 
       - name: Retain macOS notarization evidence
         if: ${{ always() && matrix.target == 'aarch64-apple-darwin' && github.ref_type == 'tag' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: macos-notarization
           path: ${{ runner.temp }}/macos-notarization.json
@@ -724,14 +765,14 @@ jobs:
 
       - name: Retain final macOS package inspection
         if: ${{ always() && matrix.target == 'aarch64-apple-darwin' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: macos-final-package
           path: ${{ runner.temp }}/macos-final-package.json
           if-no-files-found: warn
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: mvmctl-${{ matrix.target }}-attempt-${{ github.run_attempt }}
           path: |
@@ -770,7 +811,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: mvmctl-${{ matrix.target }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/archive
@@ -828,6 +869,9 @@ jobs:
     # A dry run signs no candidate, so its candidate job is skipped; the smoke
     # still has to run there.
     if: ${{ !cancelled() && needs.build.result == 'success' && needs.guest-runtime.result == 'success' && (needs.runtime-proof-candidate.result == 'success' || needs.runtime-proof-candidate.result == 'skipped') }}
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/release-archive-smoke.yml
     with:
       runtime_candidate_artifact_id: ${{ needs.runtime-proof-candidate.outputs.candidate_artifact_id }}
@@ -850,12 +894,12 @@ jobs:
       tarballs: build
 
   release:
-    needs: [bdd, e2e-docs, build, archive-install-smoke, guest-runtime, runtime-proof-candidate, release-archive-smoke, distro-packages]
+    needs: [bdd, e2e-docs, build, archive-install-smoke, guest-runtime, runtime-proof-candidate, release-archive-smoke, distro-packages, supply-chain, sbom]
     # `!cancelled()` overrides the implicit all-needs-succeeded rule, so every
     # entry in `needs` must appear in this condition.
     #
     # A manual tag ref is not a real tag push and cannot satisfy this gate.
-    if: ${{ !cancelled() && github.event_name == 'push' && github.ref_type == 'tag' && needs.bdd.result == 'success' && needs.e2e-docs.result == 'success' && needs.build.result == 'success' && needs.archive-install-smoke.result == 'success' && needs.guest-runtime.result == 'success' && needs.runtime-proof-candidate.result == 'success' && needs.release-archive-smoke.result == 'success' && needs.distro-packages.result == 'success' }}
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref_type == 'tag' && needs.bdd.result == 'success' && needs.e2e-docs.result == 'success' && needs.build.result == 'success' && needs.archive-install-smoke.result == 'success' && needs.guest-runtime.result == 'success' && needs.runtime-proof-candidate.result == 'success' && needs.release-archive-smoke.result == 'success' && needs.distro-packages.result == 'success' && needs.supply-chain.result == 'success' && needs.sbom.result == 'success' }}
     # This job mints the one keyless identity every installed mvmctl trusts:
     # `release.yml@refs/tags/v{version}`, the sole entry in
     # RELEASE_IDENTITY_TEMPLATES. The environment's policy admits `v*` tags and
@@ -863,6 +907,11 @@ jobs:
     # ref cannot produce a signature the shipped verifier accepts. Revocations
     # are gated the same way against their own tag.
     environment: release-signing
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+      attestations: write
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ubuntu-24.04
     env:
@@ -871,19 +920,26 @@ jobs:
       RUNTIME_ARCHIVE_BUNDLE_SHA256: ${{ needs.runtime-proof-candidate.outputs.archive_bundle_sha256 }}
       RUNTIME_CHECKSUM_BUNDLE_SHA256: ${{ needs.runtime-proof-candidate.outputs.checksum_bundle_sha256 }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
-
-      - name: Install cargo-cyclonedx
-        run: cargo install cargo-cyclonedx --locked
-
-      - name: Generate SBOM
-        run: cargo cyclonedx --format json --all --override-filename sbom.cdx
+      - name: Retrieve the exact same-source SBOM without running producer code
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SBOM_ID: ${{ needs.sbom.outputs.artifact_id }}
+          SBOM_DIGEST: ${{ needs.sbom.outputs.artifact_digest }}
+          SBOM_SHA256: ${{ needs.sbom.outputs.content_sha256 }}
+        run: |
+          python3 scripts/runtime-proof-candidate.py fetch-sbom \
+            --artifact-id "$SBOM_ID" --artifact-digest "$SBOM_DIGEST" \
+            --content-sha256 "$SBOM_SHA256" --out-dir release-sbom
+          mv release-sbom/sbom.cdx.json sbom.cdx.json
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: v2.5.2
 
       - name: Collect exact same-run release inputs without overlays
         env:
@@ -1026,7 +1082,7 @@ jobs:
 
       - name: Attest build provenance for the release tarballs (release-provenance)
         if: ${{ github.event_name == 'push' }}
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
           subject-path: |
             artifacts/*.tar.gz
@@ -1148,10 +1204,14 @@ jobs:
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: v2.5.2
 
       - name: Download published release assets
         env:
@@ -1229,9 +1289,13 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v6
-      - uses: sigstore/cosign-installer@v3
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: v2.5.2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: installed-boot-lane-*-${{ github.run_attempt }}
           path: ${{ runner.temp }}/boot-lanes
@@ -1246,7 +1310,7 @@ jobs:
             --out "${RUNNER_TEMP}/published-installed-boot/installed-boot.json"
       - name: Attest the installed boot report
         id: boot-attestation
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
           subject-path: ${{ runner.temp }}/published-installed-boot/installed-boot.json
       - name: Keep the offline attestation bundle beside the report
@@ -1255,7 +1319,7 @@ jobs:
         run: |
           test -s "$BUNDLE"
           cp "$BUNDLE" "${RUNNER_TEMP}/published-installed-boot/installed-boot.json.bundle"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: published-installed-boot-v1
           overwrite: true
@@ -1290,6 +1354,9 @@ jobs:
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: write
     steps:
       # The release event emitted by GITHUB_TOKEN does not start workers.yml,
       # so the site is dispatched explicitly, after the release is promoted.
@@ -1332,12 +1399,14 @@ jobs:
     env:
       PIN_WORKTREE: ${{ github.workspace }}/../.worktrees/mvm-prebuilt-pin
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: main
           fetch-depth: 0
 
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: v2.5.2
 
       - name: Create the pin worktree
         env:

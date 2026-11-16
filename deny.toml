@@ -1,7 +1,7 @@
 # cargo-deny configuration — ADR-001 claim 7.
 #
 # Three policies enforced against the workspace's transitive Cargo
-# graph on every PR:
+# graph on dependency-changing PRs, nightly, and before release signing:
 #
 #   1. RustSec advisories block merge.
 #   2. License is in a vetted allowlist.

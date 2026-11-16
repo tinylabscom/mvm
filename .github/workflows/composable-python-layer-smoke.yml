@@ -28,9 +28,11 @@ jobs:
       matrix:
         arch: [x86_64, aarch64]
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: sigstore/cosign-installer@v3
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: 1.97.1
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
       - name: Reproduce and verify an unpublished Python runtime input
         env:
           MVM_EMBED: "0"
@@ -138,9 +140,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: sigstore/cosign-installer@v3
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: 1.97.1
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
       - name: Authenticate a synthetic development base before materialization
         env:
           MVM_EMBED: "0"
@@ -188,18 +192,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Select reviewed test-only Linux source
         id: test-images-ref
         run: echo "ref=$(cat tests/fixtures/composable-images-source.ref)" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: tinylabscom/mvm-images
           ref: ${{ steps.test-images-ref.outputs.ref }}
           path: mvm-images
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
-      - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: sigstore/cosign-installer@v3
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: 1.97.1
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
       - name: Read an authored value in a QEMU guest from a signed-input composition
         env:
           MVM_EMBED: "0"

@@ -24,7 +24,7 @@ jobs:
     outputs:
       sha: ${{ steps.source.outputs.sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -59,11 +59,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ needs.source.outputs.sha }}
           path: helper-source
@@ -75,8 +75,9 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git -C helper-source rev-parse HEAD)" = "${SOURCE_SHA}"
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
+          toolchain: 1.97.1
           targets: ${{ matrix.build_target }}
       - uses: ./.github/actions/install-zigbuild
       - name: Build launch helpers
@@ -110,7 +111,7 @@ jobs:
             cp "helper-source/target/${BUILD_TARGET}/release/mvm-hvf-supervisor" "dist/${name}/"
           fi
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: source-host-helpers-${{ matrix.target }}
           path: dist/*.tar.gz
@@ -124,16 +125,16 @@ jobs:
       id-token: write
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: source-host-helpers-*
           path: dist
           merge-multiple: true
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
       - name: Sign exact helper bundles
         shell: bash
         run: |

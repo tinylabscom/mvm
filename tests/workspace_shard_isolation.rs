@@ -185,7 +185,7 @@ fn dedicated_linux_runners_use_their_cpus_without_changing_shared_host_limits() 
     let configure = cache
         .find("- name: Configure dedicated Linux build workers")
         .unwrap();
-    assert!(cache.find("uses: Swatinem/rust-cache@v2").unwrap() < configure);
+    assert!(cache.find("uses: Swatinem/rust-cache@").unwrap() < configure);
     let step = &cache[configure..];
     assert!(step.contains("runner.environment == 'github-hosted'"));
     assert!(step.contains("runner.os == 'Linux'"));

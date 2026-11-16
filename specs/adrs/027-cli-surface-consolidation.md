@@ -9,6 +9,8 @@ buckets, and the cost of hiding".
 Amended 2026-09-26: the language SDKs no longer shell out to `mvmctl`;
 they load `libmvm_hostlib` in-process. See "One client contract behind both
 the CLI and the SDK".
+Amended: Rust build-time authoring is a direct `mvm-sdk` dependency, not a
+client re-export. See "Separate build-time authoring from runtime execution".
 
 ## Context
 
@@ -170,7 +172,7 @@ returns; and `GatewayBackend`, a REST client reachable only when the
 that re-exports the trait, the DTOs, and both backends, so a consumer
 writes one import regardless of transport.
 
-The language SDKs converged on it through a library rather than an edge
+Historically, the language SDKs converged on it through a library rather than an edge
 out of `mvm-sdk`. `mvm-sdk` sits below the runtime in the dependency graph
 (`mvm-client` depends on it), so linking the local backend there would form
 a cycle. `crates/mvm-hostlib` instead sits at the top of the graph beside
@@ -181,7 +183,8 @@ Python and TypeScript SDKs load that library in-process and never run
 subprocess-backed `MvmClient`) are deleted, and `xtask check-no-cli-shellout`
 fails the build if SDK source reaches for a process API or resolves the CLI
 to run it. A Rust embedder uses `mvm-client` directly, which re-exports the
-authoring surface as `mvm_client::authoring`.
+authoring surface as `mvm_client::authoring`. The SDK dependency and re-export
+described in this historical rationale are superseded by the amendment below.
 
 The library's launch methods go through `LocalBackend::launch`, the same
 admitted-boot path every in-process launcher uses. That path does not yet
@@ -189,6 +192,19 @@ share the CLI's `machine run` front half (a command override, a template
 slot, guest environment), so those refuse in the library rather than falling
 back to the CLI; converging the two launchers is tracked in the drive-plane
 plan.
+
+### Separate build-time authoring from runtime execution (amendment)
+
+Rust callers depend directly on `mvm-sdk` for build-time workload authoring
+and on `mvm-client` for execution. The client no longer depends on the SDK,
+including through an optional authoring feature, and no longer exposes
+`mvm_client::authoring`. Existing callers must add `mvm-sdk` to their manifest
+and change that import prefix to `mvm_sdk`.
+
+This deliberately breaks Rust source compatibility while preserving the common
+IR and wire semantics. Runtime-only consumers do not pull in the authoring
+stack. The language SDKs continue to use `libmvm_hostlib` for in-process
+execution; removing the dependency does not introduce another runtime path.
 
 ## Consequences
 

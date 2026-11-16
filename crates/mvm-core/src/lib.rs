@@ -30,6 +30,8 @@ pub mod bounded_run;
 pub mod client;
 pub mod cold_build;
 pub mod config;
+#[cfg(feature = "host-state")]
+pub mod deploy_record;
 pub mod dev_network;
 /// did:key codec for host-side signing identity (receipts, conformance).
 /// Host-state only: guest binaries never sign or parse host identity.
@@ -193,8 +195,8 @@ pub mod session_transition;
 pub mod snapshot_frame;
 /// Read side of the workload stream plane: the consumer trait, its filters,
 /// and the framed transport to a VM's host-side broker. Lives here rather
-/// than in `mvm-client` so `mvm-sdk` — which sits below `mvm-hostd`, which
-/// `mvm-client` depends on — can expose the same reader without a cycle.
+/// than in `mvm-client` so `mvm-sdk` can expose the same reader without
+/// depending on the runtime client.
 /// Host-state: the console reader redacts with `pii::PiiRedactor`.
 #[cfg(feature = "host-state")]
 pub mod stream_client;

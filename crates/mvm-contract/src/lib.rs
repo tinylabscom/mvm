@@ -31,6 +31,8 @@ pub mod assurance;
 /// never set. Shared so every input struct reports it identically.
 pub mod builder;
 #[cfg(feature = "protocol")]
+pub mod deploy_record;
+#[cfg(feature = "protocol")]
 pub mod entrypoint;
 /// A workload's permission set — CPU, wall clock, egress destinations.
 #[cfg(feature = "protocol")]
