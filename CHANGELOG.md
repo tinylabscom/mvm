@@ -2,6 +2,38 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.28.0-rc.7] — 2026-11-16
+
+### Added
+- **runtime**: Retain verified release runtime evidence per launch
+
+### Changed
+- **xtask**: Suspend the Rust footprint ratchet while the #4839 cleanup lands
+
+### Documentation
+- **trail**: Record why the installer re-signs macOS binaries and how the smoke compares them
+- Require issue-linked PRs and explicit completion tracking
+
+### Fixed
+- **explain**: Authenticate a recent run from the live segment, not the whole chain
+- **release**: Expect only the files the installer stages for the selected backend
+- **agentd**: Wait out the outbox directory lock instead of refusing on first contention
+- **contract**: Refuse exhausted HVF owner sequence
+
+### Other
+- Prepare an unprepared home itself instead of asking for bootstrap
+- V0.28.0-rc.6
+- Take bootstrap out of the guide's setup
+- Prefer the installed release over a source build on PATH
+
+### Performance
+- **dev**: Reduce build work and isolate BDD dependencies
+
+### Refactored
+- Stage local workload launches through host admission
+- **runtime**: Split the workload runner by responsibility
+- **hostd**: Split plan_admission by responsibility
+
 ## [0.28.0-rc.6] — 2026-11-15
 
 ### Added
