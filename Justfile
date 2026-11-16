@@ -71,10 +71,9 @@ test FILTER="":
 # Build an mvmctl that carries the Linux host binaries the builder VM needs,
 # plus the native per-VM helpers it spawns beside the resulting executable.
 #
-# Not required to boot a VM: `cargo build --release` embeds the host binaries by
-# default, and an mvmctl built without them builds them itself the first time
-# it needs a builder VM. This recipe does both halves in one go and embeds in a
-# debug build too. Note that it and a plain `cargo build` write the same
+# Not required to boot a VM: an mvmctl built without the host binaries builds
+# them itself the first time it needs a builder VM. This recipe builds them up
+# front, embeds them (in a debug build too), and is the way to get that. Note that it and a plain `cargo build` write the same
 # `target/<profile>/mvmctl` under different feature sets, so alternating the two
 # relinks mvmctl; that is why this is a deliberate step and not part of `build`.
 # Bare, this writes `target/debug/mvmctl` — pass `--release` if the mvmctl you

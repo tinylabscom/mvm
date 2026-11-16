@@ -570,12 +570,12 @@ release-artifact-bootstrap = ["mvm-cli/release-artifact-bootstrap"]
 release-channel = ["mvm-cli/release-channel"]
 
 # Build-only: cross-compile the Linux host binaries and embed them in `mvmctl`,
-# in every profile, failing the build when the toolchain is missing. A release
-# profile embeds without it (`MVM_EMBED=0` opts out) and only warns when it
-# cannot. Acquisition mechanics, not product behaviour — a build with this on
-# and one with it off expose exactly the same verbs; an `mvmctl` without the
-# payload builds it from its checkout when it first needs a builder VM. Off by
-# default so debug builds keep the cross-compile off the inner loop.
+# in every profile, failing the build when the toolchain is missing. This is the
+# only thing that makes a build embed: no profile and no environment variable
+# does. Acquisition mechanics, not product behaviour — a build with this on and
+# one with it off expose exactly the same verbs; an `mvmctl` without the payload
+# builds it from its checkout when it first needs a builder VM. Off by default so
+# neither a debug nor a plain release build pays for the cross-compile.
 
 # `just embed` and the tag-push release workflow turn it on.
 embed-host-bins = ["mvm-cli/embed-host-bins"]

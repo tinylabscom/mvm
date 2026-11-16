@@ -124,13 +124,12 @@ native-caller-identity = [
 ]
 # Cross-compile the Linux host binaries (`mvm-host-vm-init`, `stage0-init`, …)
 # and `include_bytes!` them into `mvmctl` in every profile, failing the build if
-# the pinned zig + cargo-zigbuild toolchain is missing. Without it a release
-# profile still embeds (unless `MVM_EMBED=0`), warning instead of failing when
-# it cannot, and a debug build compiles nothing: it restores what the content
-# store proves belongs to this tree and otherwise writes an empty table. An
-# `mvmctl` with an empty table builds the payload from its checkout on first
-# use (`host_binaries::source`). `just embed` and the release workflow
-# turn it on.
+# the pinned zig + cargo-zigbuild toolchain is missing. It is the only thing that
+# makes a build embed. Without it no profile cross-compiles anything: a build
+# restores what the content store proves belongs to this tree and otherwise
+# writes an empty table, and an `mvmctl` with an empty table builds the payload
+# from its checkout on first use (`host_binaries::source`). `just embed` and the
+# release workflow turn it on.
 embed-host-bins = []
 # Forward to `mvm-runtime/wasm-backend`: enables `mvmctl --hypervisor wasm`.
 # Off by default so the default workspace build carries no `wasmtime` dependency.

@@ -646,7 +646,6 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_EBPF_LIVE_TESTS` | test-only | `crates/mvm-hostd/src/supervisor/telemetry/ebpf_telemetry/loader.rs:313` | 0 | NO | - |
 | `MVM_EGRESS_LISTEN` | live-read | `crates/mvm-agentd/src/bin/mvm-egress-client.rs:135` | 1 | NO | - |
 | `MVM_EGRESS_VSOCK_PORT` | live-read | `crates/mvm-agentd/src/bin/mvm-egress-client.rs:26` | 3 | NO | - |
-| `MVM_EMBED` | live-read | `crates/mvm-cli/build.rs:152` | 1 | yes | yes |
 | `MVM_EMBED_CACHE_DIR` | live-read | `crates/mvm-cli/build_embed_cache.rs:131` | 1 | NO | - |
 | `MVM_EMBED_CACHE_MAX_BYTES` | live-read | `crates/mvm-cli/src/host_binaries/payload_build.rs:135` | 1 | NO | - |
 | `MVM_EMBED_CARGO` | live-read | `crates/mvm-build/src/embed_toolchain.rs:219` | 1 | NO | yes |

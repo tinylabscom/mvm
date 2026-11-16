@@ -25,7 +25,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use build_support::{EmbedDecision, EmbedRequest, embed_request};
+use build_support::{EmbedDecision, embed_decision};
 use embed_toolchain::{Pin, workspace_root_from_manifest_dir};
 use payload_build::{
     EmbedCache, EmbeddedSourceBinary, ZigbuildRequest, artifact_key_for, build_embed_cache,
@@ -51,18 +51,16 @@ fn main() {
 
     emit_pinned_toolchain_env(&workspace_root);
     emit_source_identity(&workspace_root);
-    println!("cargo:rerun-if-env-changed=MVM_EMBED");
 
-    // A release build embeds unless told not to; a debug one — which is what
-    // `cargo check`, clippy and nextest run — compiles nothing and only restores
-    // a payload the content store can already prove belongs to this tree.
-    match embed_decision(embed_request_from_env(), || {
-        embed_toolchain::check_toolchain_ready(&read_pinned_toolchain(&workspace_root))
-    }) {
+    // Only the `embed-host-bins` feature embeds. Cargo sets
+    // `CARGO_FEATURE_<NAME>` for each enabled feature of this package, so the
+    // script reads it without knowing how it was turned on. Every other build,
+    // including `cargo check`, clippy, nextest and a plain release build,
+    // compiles nothing and only restores a payload the content store can
+    // already prove belongs to this tree.
+    match embed_decision(std::env::var_os("CARGO_FEATURE_EMBED_HOST_BINS").is_some()) {
         EmbedDecision::Compile => embed_host_binaries(&workspace_root, &out_dir),
-        EmbedDecision::RestoreOnly { warning } => {
-            write_unembedded_table(&workspace_root, &out_dir, warning.as_deref())
-        }
+        EmbedDecision::RestoreOnly => write_unembedded_table(&workspace_root, &out_dir),
     }
 }
 
@@ -118,31 +116,6 @@ fn git_stdout(workspace_root: &Path, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// This build's embed request, from the environment cargo hands the script.
-///
-/// Cargo sets `CARGO_FEATURE_<NAME>` for each enabled feature of the package
-/// being built, so this reads the `embed-host-bins` feature without the build
-/// script needing to know how it was turned on.
-fn embed_request_from_env() -> EmbedRequest {
-    embed_request(
-        std::env::var_os("CARGO_FEATURE_EMBED_HOST_BINS").is_some(),
-        &std::env::var("PROFILE").unwrap_or_default(),
-        std::env::var("MVM_EMBED").ok().as_deref(),
-    )
-}
-
-/// Settle `request`, probing the toolchain only when the answer depends on it.
-fn embed_decision(
-    request: EmbedRequest,
-    toolchain: impl FnOnce() -> Result<(), String>,
-) -> EmbedDecision {
-    let readiness = match request {
-        EmbedRequest::ReleaseProfile => toolchain(),
-        EmbedRequest::Feature | EmbedRequest::NotRequested => Ok(()),
-    };
-    build_support::embed_decision(request, readiness)
-}
-
 /// Export the pinned zig / rust / cargo-zigbuild versions `mvmctl doctor`
 /// reports. Needed under both arms: doctor tells you what the embed toolchain
 /// *would* be even when this build did not use it.
@@ -176,7 +149,7 @@ fn emit_pinned_toolchain_env(workspace_root: &Path) {
 /// At least one `rerun-if-*` line is mandatory. Emitting none does not mean
 /// "never re-run" — it restores cargo's default, which re-runs the script on
 /// *any* change to the package, i.e. every edit to `mvm-cli`'s 251 files.
-fn write_unembedded_table(workspace_root: &Path, out_dir: &Path, warning: Option<&str>) {
+fn write_unembedded_table(workspace_root: &Path, out_dir: &Path) {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=build_support.rs");
     println!("cargo:rerun-if-changed=build_embed_cache.rs");
@@ -187,18 +160,13 @@ fn write_unembedded_table(workspace_root: &Path, out_dir: &Path, warning: Option
     println!("cargo:rerun-if-changed=../mvm-build/src/embed_toolchain.rs");
     println!("cargo:rerun-if-env-changed=MVM_EMBED_NO_CACHE");
     println!("cargo:rerun-if-env-changed=MVM_EMBED_CACHE_DIR");
-    // A release build lands here when the toolchain probe failed; pointing
-    // these at a working toolchain has to be able to bring it back.
+    // These name the toolchain the store's key covers, so changing one has to
+    // be able to change what is restored.
     println!("cargo:rerun-if-env-changed=MVM_EMBED_CARGO");
     println!("cargo:rerun-if-env-changed=MVM_EMBED_RUSTC");
     println!("cargo:rerun-if-env-changed=MVM_EMBED_ZIG");
 
     let entries = restore_embedded_from_store(workspace_root, out_dir);
-    // Only when the restore came up empty: a store hit embeds after all, and
-    // warning about a payload the binary carries would be noise.
-    if let (true, Some(warning)) = (entries.is_empty(), warning) {
-        println!("cargo:warning={warning}");
-    }
     std::fs::write(out_dir.join("embedded.rs"), render_embedded_rs(&entries)).unwrap();
     println!(
         "cargo:rustc-env=MVM_EMBEDDED_BINS_REUSED={}",
