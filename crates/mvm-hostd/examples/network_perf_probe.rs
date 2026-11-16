@@ -336,11 +336,36 @@ fn start_flowmux_session(
     let guest_anchor = guest_key.verifying_key();
     let (host_stream, guest_stream) = UnixStream::pair()?;
     let host = thread::spawn(move || {
+        use mvm_core::audit_sink::AuditContext;
+        use mvm_core::plan::TenantId;
+        use mvm_hostd::supervisor::audit::{
+            audit_file::FileAuditSigner, audit_recorder::Recorder, bound_sink::BoundRecorder,
+        };
+        use mvm_hostd::supervisor::endpoint::flowmux::FlowMuxError;
+
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .map_err(mvm_hostd::supervisor::endpoint::flowmux::FlowMuxError::Transport)?;
         let _entered = runtime.enter();
+        let audit_dir = tempfile::tempdir().map_err(FlowMuxError::Transport)?;
+        let signer = FileAuditSigner::open_file(
+            SigningKey::from_bytes(&[0x41; 32]),
+            &audit_dir.path().join("audit.jsonl"),
+        )
+        .map_err(|error| FlowMuxError::Audit(std::io::Error::other(error)))?;
+        let tenant = TenantId("network-perf".into());
+        let sink = BoundRecorder::builder(
+            Arc::new(Recorder::new(Arc::new(signer), tenant.clone())),
+            runtime.handle().clone(),
+            AuditContext::Builder {
+                tenant,
+                name: "network-perf".into(),
+            },
+        )
+        .health_file(audit_dir.path().join("health.json"))
+        .build()
+        .map_err(FlowMuxError::Audit)?;
         let accept = FlowMuxAccept::new(
             "network-perf",
             host_key,
@@ -348,6 +373,7 @@ fn start_flowmux_session(
             RegistryLimits::default(),
             gate,
         )
+        .with_audit_sink(Arc::new(sink))
         .with_substitution(service);
         let mut session = FlowMuxSession::accept_with(host_stream, accept)?;
         session.serve()

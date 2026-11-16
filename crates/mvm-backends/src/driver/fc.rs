@@ -47,11 +47,13 @@ use mvm_vmm::host::boot_config::{
 
 mod config;
 mod dial;
+mod identity_stop;
 mod kernel;
 mod stop;
 pub use config::FcApiPut;
 use config::fc_drive_puts;
 use dial::fc_guest_dial_socket;
+pub use identity_stop::FirecrackerStop;
 #[cfg(all(test, unix))]
 use kernel::fc_descriptor_recipe;
 use kernel::resolve_fc_kernel_path;
@@ -620,26 +622,20 @@ pub(crate) fn terminate_firecracker_pid(name: &str, pid: u32, pid_file: &Path) -
     let outcome = if let Ok(observer) =
         mvm_vmm::host::process_exit::ProcessExitObserver::arm(pid as libc::pid_t)
     {
-        fc_signal(pid, FcStopSignal::Terminate);
-        let exited = mvm_vmm::host::process_exit::wait_for_pid_exit(
-            pid as libc::pid_t,
-            Instant::now() + crate::driver::libkrun_process::STOP_TIMEOUT,
-            Some(&observer),
-        );
-        if exited {
-            KillOutcome::Stopped
-        } else {
-            fc_signal(pid, FcStopSignal::ForceKill);
-            if mvm_vmm::host::process_exit::wait_for_pid_exit(
-                pid as libc::pid_t,
-                Instant::now() + Duration::from_millis(500),
-                Some(&observer),
-            ) {
-                KillOutcome::Stopped
-            } else {
-                KillOutcome::StillRunning
-            }
-        }
+        terminate_observed(
+            |signal| {
+                fc_signal(pid, signal);
+                Ok(())
+            },
+            |deadline| {
+                Ok(mvm_vmm::host::process_exit::wait_for_pid_exit(
+                    pid as libc::pid_t,
+                    deadline,
+                    Some(&observer),
+                ))
+            },
+        )?;
+        KillOutcome::Stopped
     } else {
         escalate_kill(
             crate::driver::libkrun_process::STOP_TIMEOUT,
@@ -651,6 +647,22 @@ pub(crate) fn terminate_firecracker_pid(name: &str, pid: u32, pid_file: &Path) -
         )?
     };
     finish_firecracker_kill(name, pid, pid_file, outcome)
+}
+
+fn terminate_observed(
+    mut signal: impl FnMut(FcStopSignal) -> Result<()>,
+    mut wait: impl FnMut(Instant) -> Result<bool>,
+) -> Result<()> {
+    signal(FcStopSignal::Terminate)?;
+    if wait(Instant::now() + crate::driver::libkrun_process::STOP_TIMEOUT)? {
+        return Ok(());
+    }
+    signal(FcStopSignal::ForceKill)?;
+    anyhow::ensure!(
+        wait(Instant::now() + Duration::from_millis(500))?,
+        "Firecracker remains live after termination and escalation"
+    );
+    Ok(())
 }
 
 fn finish_firecracker_kill(

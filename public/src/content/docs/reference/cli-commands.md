@@ -184,6 +184,24 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine set-timeout <name> <seconds>` | Update the runtime idle timeout of a running machine; `<seconds>` must be greater than 0 |
 | `mvmctl machine rekernel <name> [--flake <ref>] [--kernel-pin <kernel>] [--hypervisor <backend>]` | Relaunch a VM on a chosen or updated workload kernel; `--flake` rebuilds the source for the new boot, `--kernel-pin` uses the locally built workload kernel from the mvm cache instead of the one the image ships |
 
+### Network audit failures
+
+A FlowMux endpoint must establish its plan-bound audit sink before reporting
+ready. This is required in development as well as production. If a required flow
+record cannot be written, an allow is refused and a deny remains denied with
+incomplete host evidence.
+
+With `--prod`, three consecutive audit-write failures request shutdown through
+the keeper bound to that exact VM instance. A backend without that safe shutdown
+mechanism is refused rather than silently treated as development. Development
+keeps the workload running but does not allow unrecordable operations. A
+successful write resets the failure streak, not the incomplete evidence mark.
+See [flow audit availability](/guides/flowmux-networking/#audit-availability-is-part-of-readiness).
+
+Production qualification is blocked by unresolved ownership and cleanup when
+post-boot audit registration fails; a successful stop request is not proof that
+every failed launch is safely torn down.
+
 ### GPU device selection
 
 `mvmctl run`, `mvmctl machine run`, `mvmctl machine create`, and the

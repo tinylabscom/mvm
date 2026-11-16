@@ -1203,6 +1203,11 @@ fn spawn_owned_builder_endpoint(
             // This supervisor is the builder VM, so its own life is the VM's.
             lifetime: mvm_vmm::host::network_endpoint_spawn::EndpointLifetime::Launcher,
             tenant: "builder",
+            audit: mvm_core::audit_sink::AuditContext::Builder {
+                tenant: mvm_core::plan::TenantId("builder".into()),
+                name: endpoint.vm_name.clone(),
+            },
+            audit_control: None,
             secrets: &[],
             redaction: &mvm_core::policy::RedactionPolicy::default(),
             transport: mvm_vmm::host::network_endpoint_spawn::EndpointTransport::Uds {

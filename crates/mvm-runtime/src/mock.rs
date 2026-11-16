@@ -530,6 +530,7 @@ mod tests {
             runner_dir: None,
             tenant_id: None,
             plan_json: None,
+            audit_context: None,
             caller_registration: None,
             bundle_json: None,
             warm_pool_size: 0,

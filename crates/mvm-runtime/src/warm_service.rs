@@ -411,6 +411,7 @@ mod integration_tests {
             gateway_audit_socket: PathBuf::from("/tmp/audit.sock"),
             gateway_events_socket: None,
             plan_json: "{}".into(),
+            audit_context: None,
             bundle_json: None,
             network_policy: NetworkPolicy::deny_all(),
         }

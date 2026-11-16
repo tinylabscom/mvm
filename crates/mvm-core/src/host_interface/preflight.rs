@@ -2,6 +2,8 @@ use std::collections::BTreeSet;
 
 use super::error::Denial;
 
+pub mod audit;
+
 /// The checks the launch invariant requires. Every kind in `REQUIRED` must
 /// report a result; a missing one is a denial.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

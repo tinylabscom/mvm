@@ -134,7 +134,9 @@ impl SubstitutionService {
             url: request.url.clone(),
             request_bytes: request.body.len() as u64,
         });
-        self.audit_handoff(&flow).await;
+        if let Err(refusal) = self.audit_handoff(&flow).await {
+            return refusal;
+        }
         match self.forwarder.forward(request).await {
             Ok(mut response) => {
                 if let Err(refusal) = self.scrub_buffered_response(&flow, &mut response).await {
@@ -183,7 +185,7 @@ impl SubstitutionService {
             url: request.url.clone(),
             request_bytes: request.body.len() as u64,
         });
-        self.audit_handoff(&flow).await;
+        self.audit_handoff(&flow).await?;
         let upstream = match self.forwarder.forward_stream(request).await {
             Ok(upstream) => upstream,
             Err(error) => {
@@ -306,6 +308,7 @@ impl SubstitutionService {
             url: request.url.clone(),
             request_bytes: head.body_len,
         });
+        self.audit_handoff(&flow).await?;
         let expected_len = head.body_len;
         let (sender, receiver) = tokio::sync::mpsc::channel(4);
         let service = Arc::clone(self);
@@ -418,7 +421,6 @@ impl SubstitutionService {
             }
             Ok(hits)
         });
-        self.audit_handoff(&flow).await;
         let upstream = match self.forwarder.forward_body_stream(request, receiver).await {
             Ok(upstream) => upstream,
             Err(error) => {
@@ -1033,14 +1035,13 @@ mod server_tests {
                 .await
         });
 
-        tokio::task::yield_now().await;
-        tokio::time::advance(HTTP_REQUEST_IDLE_TIMEOUT + std::time::Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
-        drop(sender);
+        // Keep the producer alive until the paused clock reaches its read deadline.
+        // Admission may first run on a blocking worker; yielding is not readiness.
         let refusal = match request.await.expect("request task") {
             Ok(_) => panic!("idle request must refuse"),
             Err(refusal) => refusal,
         };
+        drop(sender);
         assert!(
             matches!(
                 refusal,

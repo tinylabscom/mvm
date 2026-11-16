@@ -62,6 +62,12 @@ fn populate_audit_substrate_threads_tenant_and_signed_envelope() {
         cfg.tenant_id.as_deref(),
         Some(admitted.plan().tenant.0.as_str())
     );
+    let audit = cfg.audit_context.as_ref().expect("audit binding populated");
+    assert_eq!(audit.plan(), Some(admitted.plan()));
+    assert_eq!(
+        audit.mode(),
+        mvm_core::audit_sink::AuditFailureMode::Development
+    );
     let plan_json = cfg.plan_json.expect("plan_json populated");
     let roundtrip: mvm_core::plan::SignedExecutionPlan =
         serde_json::from_str(&plan_json).expect("roundtrip");

@@ -197,6 +197,7 @@ pub fn bind_plan_to_parent_digest(
 pub struct EndpointSpawnInputs<'a> {
     pub state_dir: &'a Path,
     pub tenant: &'a str,
+    pub audit: Option<&'a mvm_core::audit_sink::AuditContext>,
     pub secrets: &'a [SecretBinding],
     pub redaction: &'a RedactionPolicy,
     pub network_policy: &'a NetworkPolicy,
@@ -222,6 +223,7 @@ pub struct EndpointHandle {
     identity_drive: Option<PathBuf>,
     telemetry: TelemetryStart,
     guard: EndpointGuard,
+    audit_control: Option<mvm_vmm::host::audit_control::LaunchControl>,
 }
 
 impl Drop for EndpointHandle {
@@ -255,6 +257,69 @@ impl EndpointHandle {
         // The collector start stays in flight: joining here would put it on
         // the launch path it was moved off. Dropping the handle joins it.
         self.guard.defuse();
+    }
+
+    /// Whether this endpoint still requires post-boot registration.
+    pub fn needs_audit_registration(&self) -> bool {
+        self.audit_control.is_some()
+    }
+
+    /// Bind production shutdown before guest activation or external effects.
+    pub fn register_audit_target(
+        &mut self,
+        target: mvm_vmm::host::audit_control::ShutdownTarget,
+    ) -> Result<()> {
+        if let Some(control) = self.audit_control.take()
+            && let Err(error) = control.register(target.clone())
+        {
+            stop_audit_target(target).map_err(|cleanup| anyhow::anyhow!(
+                "audit registration failed: {error}; exact-target cleanup unconfirmed: {cleanup:#}"
+            ))?;
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
+    /// Register authority from the handle returned by the selected driver.
+    pub fn register_audit_vm(&mut self, vm: &dyn mvm_vmm::driver::RunningVm) -> Result<()> {
+        if !self.needs_audit_registration() {
+            return Ok(());
+        }
+        use mvm_vmm::host::audit_control::ShutdownTarget;
+        let target = if let Some(instance) = vm.authenticated_hvf_instance()? {
+            ShutdownTarget::Hvf(instance)
+        } else if let Some(process) = vm.process_identity()? {
+            ShutdownTarget::Firecracker {
+                process,
+                api_socket: mvm_backends::fc::fc_api_socket_path(
+                    &mvm_core::config::vm_state_dir(&vm.id().0).to_string_lossy(),
+                )
+                .into(),
+            }
+        } else {
+            anyhow::bail!("production workload has no identity-safe audit shutdown target");
+        };
+        self.register_audit_target(target)
+    }
+}
+
+fn stop_audit_target(target: mvm_vmm::host::audit_control::ShutdownTarget) -> Result<()> {
+    use mvm_vmm::host::audit_control::ShutdownTarget;
+    match target {
+        ShutdownTarget::Hvf(instance) => {
+            mvm_vmm::host::hvf_stop::ConnectedInstance::connect_instance(instance)?
+                .stop()?
+                .verify_current()
+        }
+        ShutdownTarget::Firecracker {
+            process,
+            api_socket,
+        } => {
+            if process.has_exited()? {
+                return Ok(());
+            }
+            mvm_backends::driver::fc::FirecrackerStop::connect(&process, &api_socket)?.stop()
+        }
     }
 }
 
@@ -304,10 +369,33 @@ impl<'a> ClaimGuards<'a> {
         vm: &VmId,
         inputs: &EndpointSpawnInputs<'_>,
     ) -> Result<EndpointHandle> {
+        let audit_control = inputs
+            .audit
+            .filter(|audit| audit.mode() == mvm_core::audit_sink::AuditFailureMode::Production)
+            .map(|audit| {
+                let plan = audit
+                    .plan()
+                    .ok_or_else(|| anyhow::anyhow!("builder cannot register workload shutdown"))?;
+                audit.validate_for(inputs.tenant, &plan.workload.0)?;
+                mvm_vmm::host::audit_control::LaunchControl::new(
+                    mvm_vmm::host::audit_control::AuditBinding {
+                        tenant_id: plan.tenant.0.clone(),
+                        instance_id: vm.0.clone(),
+                        workload_id: plan.workload.0.clone(),
+                        plan_id: plan.plan_id.0.clone(),
+                        epoch: plan.execution_epoch,
+                        generation: [0; 32],
+                    },
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .transpose()?;
         let request = NetworkEndpointSpawnRequest {
             vm_name: &vm.0,
             state_dir: inputs.state_dir,
             tenant: inputs.tenant,
+            audit: inputs.audit,
+            audit_control: audit_control.as_ref(),
             secrets: inputs.secrets,
             redaction: inputs.redaction,
             network_policy: inputs.network_policy,
@@ -333,6 +421,7 @@ impl<'a> ClaimGuards<'a> {
                     EndpointGuard::defused()
                 },
                 telemetry,
+                audit_control: None,
             });
         }
         // No protocol choice is made here any more. Whether a workload carries
@@ -346,6 +435,7 @@ impl<'a> ClaimGuards<'a> {
             identity_drive: spawned.identity_drive,
             telemetry: TelemetryStart::default(),
             guard: EndpointGuard::new(&vm.0),
+            audit_control,
         })
     }
 }
@@ -517,6 +607,7 @@ mod tests {
             identity: FlowMuxIdentitySource::Mint,
             state_dir,
             tenant: "tenant-x",
+            audit: None,
             secrets: &[],
             redaction,
             network_policy: policy,

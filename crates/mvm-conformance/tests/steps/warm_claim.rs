@@ -343,6 +343,7 @@ fn when_claim_parent(world: &mut CliWorld) {
         gateway_audit_socket: rootfs_path.with_file_name("gw-audit.sock"),
         gateway_events_socket: None,
         plan_json,
+        audit_context: None,
         bundle_json: None,
         network_policy: mvm_core::policy::network_policy::NetworkPolicy::deny_all(),
     };

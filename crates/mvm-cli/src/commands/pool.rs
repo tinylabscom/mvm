@@ -1095,6 +1095,7 @@ pub(crate) fn try_warm_claim(
                 .context("audit substrate missing gateway_audit_socket")?,
             gateway_events_socket: sub.gateway_events_socket,
             plan_json: plan_json.clone(),
+            audit_context: cfg.audit_context.clone(),
             bundle_json: bundle_json.clone(),
             network_policy: cfg.network_policy.clone(),
         })

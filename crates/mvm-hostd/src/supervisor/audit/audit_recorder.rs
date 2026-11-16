@@ -46,9 +46,11 @@
 //! categories use [`Recorder::record_unbound`] which constructs
 //! an envelope with sentinel plan-id values.
 
+mod bound;
+
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, OnceLock, Weak};
 
 use mvm_core::observability::metrics::Metrics;
 use mvm_core::plan::{ExecutionPlan, PlanId, TenantId};
@@ -165,6 +167,9 @@ pub enum RecorderError {
 
     #[error(transparent)]
     Signer(#[from] AuditError),
+
+    #[error("bound audit sink failed: {0}")]
+    Bound(#[from] std::io::Error),
 }
 
 /// Unified audit-event recorder. Owns an `Arc<dyn AuditSigner>`
@@ -188,6 +193,7 @@ pub struct Recorder {
     /// carries sentinel plan and image fields and would otherwise say nothing
     /// about which workload it describes.
     vm_name: Option<String>,
+    bound_sink: Arc<OnceLock<Weak<dyn mvm_core::audit_sink::AuditSink>>>,
 }
 
 impl Recorder {
@@ -201,6 +207,7 @@ impl Recorder {
             default_tenant,
             metrics: None,
             vm_name: None,
+            bound_sink: Arc::new(OnceLock::new()),
         }
     }
 
@@ -282,10 +289,15 @@ impl Recorder {
         event_name: impl Into<String>,
         extras: impl IntoIterator<Item = (String, String)>,
     ) -> Result<(), RecorderError> {
+        let event_name = event_name.into();
+        if self.bound_sink.get().is_some() {
+            return self
+                .record_through_bound_sink(category, event_name, extras)
+                .await;
+        }
         if category.requires_plan_context() {
             return Err(RecorderError::MissingPlanContext { category });
         }
-        let event_name = event_name.into();
         validate_event_prefix(category, &event_name)?;
         let entry = self.unbound_entry(category, event_name, extras);
         self.signer.sign_and_emit(&entry).await?;

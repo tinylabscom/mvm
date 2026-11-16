@@ -221,28 +221,59 @@ fn claim10_refusal(
     gate: &mvm_runtime::vmm::egress_gate::EgressGate,
     target: Option<&str>,
 ) -> Option<&'static str> {
-    claim10_decision(gate, target).err()
+    target
+        .ok_or(REASON_MALFORMED)
+        .and_then(|target| claim10_result(gate.decide_request(target)))
+        .err()
 }
 
 /// The gate's decision for `target`: the addresses it admitted, or the fixed
 /// label of why not. A restricted address records its class
 /// (`cloud_metadata`, `private_range`), every other policy refusal
 /// `policy_denied`.
-fn claim10_decision(
-    gate: &mvm_runtime::vmm::egress_gate::EgressGate,
-    target: Option<&str>,
+fn claim10_result(
+    verdict: mvm_runtime::vmm::egress_gate::EgressVerdict,
 ) -> Result<Vec<std::net::IpAddr>, &'static str> {
     use mvm_runtime::vmm::egress_gate::EgressVerdict;
-    let Some(target) = target else {
-        return Err(REASON_MALFORMED);
-    };
-    match gate.decide_request(target) {
+    match verdict {
         EgressVerdict::Allow { ips, .. } => Ok(ips),
         EgressVerdict::Malformed => Err(REASON_MALFORMED),
         EgressVerdict::Deny(reason) => Err(match reason.audit_label() {
             "policy_denied" => REASON_POLICY_DENIED,
             label => label,
         }),
+    }
+}
+
+const REASON_AUDIT_UNAVAILABLE: &str = "audit_unavailable";
+
+fn claim10_with_resolver(
+    gate: &mvm_runtime::vmm::egress_gate::EgressGate,
+    sink: Option<&dyn mvm_core::audit_sink::AuditSink>,
+    target: &str,
+    resolve: impl Fn(&str) -> std::io::Result<Vec<std::net::IpAddr>>,
+) -> Result<Vec<std::net::IpAddr>, &'static str> {
+    let audit_failed = std::cell::Cell::new(false);
+    let verdict = gate.decide_request_with(target, |name| {
+        let recorded = sink
+            .ok_or_else(|| std::io::Error::other("live DNS requires a bound audit sink"))
+            .and_then(|sink| {
+                sink.record(
+                    "dns.admitted",
+                    std::collections::BTreeMap::from([("qname".into(), name.into())]),
+                )
+            });
+        if let Err(error) = recorded {
+            tracing::warn!(%error, "HTTP live DNS refused before resolving");
+            audit_failed.set(true);
+            return Err(error);
+        }
+        resolve(name)
+    });
+    if audit_failed.get() {
+        Err(REASON_AUDIT_UNAVAILABLE)
+    } else {
+        claim10_result(verdict)
     }
 }
 
@@ -331,8 +362,36 @@ impl SubstitutionService {
         Ok(())
     }
 
-    /// Apply every pre-connect security decision once, returning the prepared
-    /// request plus the state needed to transform and audit its response.
+    /// Keep blocking DNS and its synchronous audit outside the async worker.
+    async fn admitted_http_addresses(
+        &self,
+        target: Option<&str>,
+    ) -> Result<Vec<std::net::IpAddr>, &'static str> {
+        let target = target.ok_or(REASON_MALFORMED)?.to_owned();
+        let sink = match &self.recorder {
+            Some(recorder) => recorder.bound_audit_sink().map_err(|error| {
+                tracing::warn!(%error, "HTTP bound audit sink unavailable");
+                REASON_AUDIT_UNAVAILABLE
+            })?,
+            None => None,
+        };
+        let gate = std::sync::Arc::clone(&self.egress_gate);
+        tokio::task::spawn_blocking(move || {
+            claim10_with_resolver(&gate, sink.as_deref(), &target, |name| {
+                crate::supervisor::datapath::dns_resolver::resolve_hostname_ips(
+                    name,
+                    std::time::Duration::from_secs(30),
+                )
+            })
+        })
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "HTTP destination admission worker failed");
+            "resolution_failed"
+        })?
+    }
+
+    /// Apply each pre-connect decision before preparing the forwarded request.
     pub(super) async fn prepare_flow(
         &self,
         wire: WireRequest,
@@ -340,6 +399,8 @@ impl SubstitutionService {
         let body = match B64.decode(wire.body_b64.as_bytes()) {
             Ok(b) => b,
             Err(e) => {
+                self.audit_flow_refused(UNPARSEABLE_DESTINATION, REASON_MALFORMED)
+                    .await;
                 return Err(WireResponse::Refused {
                     message: format!("bad body encoding: {e}"),
                 });
@@ -381,7 +442,7 @@ impl SubstitutionService {
             });
         }
         let target = url_host_port(&req.url);
-        match claim10_decision(&self.egress_gate, target.as_deref()) {
+        match self.admitted_http_addresses(target.as_deref()).await {
             Ok(ips) => {
                 // The forward leg connects to exactly these; see `pinned_dns`.
                 if let Some((host, port)) = url_host_and_port(&req.url) {
@@ -403,6 +464,11 @@ impl SubstitutionService {
                 }
             }
             Err(reason) => {
+                if reason == REASON_AUDIT_UNAVAILABLE {
+                    return Err(WireResponse::Refused {
+                        message: "destination audit unavailable".into(),
+                    });
+                }
                 let recorded = target
                     .as_deref()
                     .or(destination.as_deref())
@@ -540,6 +606,9 @@ impl SubstitutionService {
         })
     }
 }
+
+#[cfg(test)]
+mod dns_audit_tests;
 
 #[cfg(test)]
 mod tests {

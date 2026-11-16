@@ -3,12 +3,16 @@
 use std::collections::BTreeMap;
 use std::net::TcpStream;
 use std::os::unix::net::UnixStream;
-use std::sync::{Arc, Mutex, atomic::AtomicBool};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use mvm_contract::protocol::network_flow::{Direction, Opcode, SessionValidator};
-use mvm_core::net::session::Session;
+use mvm_core::{audit_sink::AuditSink, net::session::Session};
 
+use super::decision_audit::{self, UdpDenials};
 use super::registry::{self, StreamRegistry};
 use super::socket::FlowSocket;
 use super::tcp_relay::{TcpRelayParams, run_tcp_relay};
@@ -17,7 +21,6 @@ use super::udp_relay::{
 };
 use super::wire::{lock_registry, lock_validator, write_frame_to};
 use super::{FlowMuxError, TcpStreamHandle};
-use crate::supervisor::audit::audit_recorder::{EventCategory, Recorder};
 
 pub(super) type IngressOpenResult = Result<(), String>;
 pub(super) type IngressOpenWaiters = BTreeMap<u32, std::sync::mpsc::SyncSender<IngressOpenResult>>;
@@ -33,9 +36,10 @@ pub struct FlowMuxIngressHandle {
     pub(super) registry: Arc<Mutex<StreamRegistry>>,
     pub(super) streams: Arc<Mutex<BTreeMap<u32, TcpStreamHandle>>>,
     pub(super) pending: SharedIngressOpenWaiters,
+    pub(super) activity: Arc<Mutex<()>>,
+    pub(super) session_closed: Arc<AtomicBool>,
     pub(super) credit_wait: Duration,
-    pub(super) recorder: Option<Arc<Recorder>>,
-    pub(super) runtime_handle: Option<tokio::runtime::Handle>,
+    pub(super) audit_sink: Arc<dyn AuditSink>,
     pub(super) udp_associations: SharedUdpAssociations,
     pub(super) udp_idle_timeout: Duration,
     pub(super) max_udp_peers: usize,
@@ -44,23 +48,12 @@ pub struct FlowMuxIngressHandle {
 impl FlowMuxIngressHandle {
     /// Open one accepted opaque TCP connection on an admitted mapping.
     pub fn open_tcp(&self, mapping_id: u16, external: TcpStream) -> Result<(), FlowMuxError> {
+        let _activity = self.activity.lock().expect("ingress owner poisoned");
+        self.require_live_session()?;
         let result = self.open_tcp_inner(mapping_id, external);
-        let (event_name, verdict) = if result.is_ok() {
-            ("host.ingress.allowed", "allowed")
-        } else {
-            ("host.ingress.denied", "denied")
-        };
-        emit_unbound_audit(
-            self.recorder.as_ref(),
-            self.runtime_handle.as_ref(),
-            EventCategory::Host,
-            event_name,
-            BTreeMap::from([
-                ("mapping_id".to_string(), mapping_id.to_string()),
-                ("class".to_string(), "tcp_ingress".to_string()),
-                ("verdict".to_string(), verdict.to_string()),
-            ]),
-        );
+        if result.is_err() && !matches!(result, Err(FlowMuxError::Audit(_))) {
+            self.audit_ingress_denial(mapping_id, "tcp_ingress");
+        }
         result
     }
 
@@ -103,18 +96,23 @@ impl FlowMuxIngressHandle {
             let _ = lock_registry(&self.registry).retire(stream_id);
             return Err(FlowMuxError::FrameRefused(error.to_string()));
         }
-        if let Err(error) = write_frame_to(
-            &self.session,
-            &self.writer,
-            Opcode::InboundOpen,
-            stream_id,
-            &payload,
-        ) {
+        if let Err(error) = self
+            .audit_ingress(mapping_id, "tcp_ingress", true)
+            .and_then(|()| {
+                write_frame_to(
+                    &self.session,
+                    &self.writer,
+                    Opcode::InboundOpen,
+                    stream_id,
+                    &payload,
+                )
+            })
+        {
             lock_pending_ingress(&self.pending).remove(&stream_id);
             if let Some(handle) = lock_tcp_streams(&self.streams).remove(&stream_id) {
                 let _ = handle.upstream.shutdown(std::net::Shutdown::Both);
             }
-            let _ = lock_registry(&self.registry).retire(stream_id);
+            self.retire_unopened(stream_id);
             return Err(error);
         }
 
@@ -147,23 +145,12 @@ impl FlowMuxIngressHandle {
         mapping_id: u16,
         socket: std::net::UdpSocket,
     ) -> Result<(), FlowMuxError> {
+        let _activity = self.activity.lock().expect("ingress owner poisoned");
+        self.require_live_session()?;
         let result = self.open_udp_inner(mapping_id, socket);
-        let (event_name, verdict) = if result.is_ok() {
-            ("host.ingress.allowed", "allowed")
-        } else {
-            ("host.ingress.denied", "denied")
-        };
-        emit_unbound_audit(
-            self.recorder.as_ref(),
-            self.runtime_handle.as_ref(),
-            EventCategory::Host,
-            event_name,
-            BTreeMap::from([
-                ("mapping_id".to_string(), mapping_id.to_string()),
-                ("class".to_string(), "udp_ingress".to_string()),
-                ("verdict".to_string(), verdict.to_string()),
-            ]),
-        );
+        if result.is_err() && !matches!(result, Err(FlowMuxError::Audit(_))) {
+            self.audit_ingress_denial(mapping_id, "udp_ingress");
+        }
         result
     }
 
@@ -172,6 +159,7 @@ impl FlowMuxIngressHandle {
         mapping_id: u16,
         socket: std::net::UdpSocket,
     ) -> Result<(), FlowMuxError> {
+        super::udp_relay::reap_associations(&self.udp_associations, &self.registry);
         let stream_id = lock_registry(&self.registry)
             .alloc_host(registry::FlowClass::Udp)
             .map_err(|error| FlowMuxError::FrameRefused(error.to_string()))?;
@@ -191,15 +179,20 @@ impl FlowMuxIngressHandle {
             let _ = lock_registry(&self.registry).retire(stream_id);
             return Err(FlowMuxError::FrameRefused(error.to_string()));
         }
-        if let Err(error) = write_frame_to(
-            &self.session,
-            &self.writer,
-            Opcode::InboundOpen,
-            stream_id,
-            &payload,
-        ) {
+        if let Err(error) = self
+            .audit_ingress(mapping_id, "udp_ingress", true)
+            .and_then(|()| {
+                write_frame_to(
+                    &self.session,
+                    &self.writer,
+                    Opcode::InboundOpen,
+                    stream_id,
+                    &payload,
+                )
+            })
+        {
             lock_pending_ingress(&self.pending).remove(&stream_id);
-            let _ = lock_registry(&self.registry).retire(stream_id);
+            self.retire_unopened(stream_id);
             return Err(error);
         }
         match receiver.recv_timeout(Duration::from_secs(5)) {
@@ -221,21 +214,35 @@ impl FlowMuxIngressHandle {
         let (poll, waker) = match udp_event_sources(&socket) {
             Ok(sources) => sources,
             Err(error) => {
-                self.abort_udp_ingress(stream_id, b"UDP relay setup failed");
+                self.abort_udp_ingress(mapping_id, stream_id, b"UDP relay setup failed");
                 return Err(FlowMuxError::Transport(error));
             }
         };
         let (tx, rx) = std::sync::mpsc::channel();
-        lock_udp_associations(&self.udp_associations).insert(
-            stream_id,
-            UdpAssociationHandle::new(tx, Arc::clone(&waker), UdpPeerAdmission::ObservedOnly),
+        let audited_denials = Arc::new(UdpDenials::default());
+        let association = UdpAssociationHandle::new(
+            tx,
+            Arc::clone(&waker),
+            UdpPeerAdmission::ObservedOnly,
+            Arc::clone(&audited_denials),
         );
+        let cancelled = Arc::clone(&association.cancelled);
+        {
+            let mut associations = lock_udp_associations(&self.udp_associations);
+            if lock_registry(&self.registry).get(stream_id).is_none() {
+                return Err(FlowMuxError::FrameRefused(
+                    "UDP ingress closed before relay start".into(),
+                ));
+            }
+            associations.insert(stream_id, association);
+        }
         let session = Arc::clone(&self.session);
         let writer = Arc::clone(&self.writer);
         let registry = Arc::clone(&self.registry);
         let idle_timeout = self.udp_idle_timeout;
         let max_peers = self.max_udp_peers;
-        if let Err(error) = std::thread::Builder::new()
+        let audit_sink = Arc::clone(&self.audit_sink);
+        let relay = std::thread::Builder::new()
             .name(format!("flowmux-ingress-udp-{stream_id}"))
             .spawn(move || {
                 run_udp_relay(UdpRelayParams {
@@ -249,17 +256,35 @@ impl FlowMuxIngressHandle {
                     peer_admission: UdpPeerAdmission::ObservedOnly,
                     rx,
                     registry,
+                    audit_sink,
+                    audited_denials,
+                    cancelled,
                 });
-            })
-        {
-            lock_udp_associations(&self.udp_associations).remove(&stream_id);
-            self.abort_udp_ingress(stream_id, b"UDP relay unavailable");
-            return Err(FlowMuxError::Transport(error));
+            });
+        match relay {
+            Ok(relay) => {
+                if let Some(association) =
+                    lock_udp_associations(&self.udp_associations).get_mut(&stream_id)
+                {
+                    association.relay = Some(relay);
+                } else {
+                    let _ = waker.wake();
+                    if relay.join().is_err() {
+                        tracing::warn!(stream_id, "UDP ingress relay panicked during cleanup");
+                    }
+                }
+            }
+            Err(error) => {
+                lock_udp_associations(&self.udp_associations).remove(&stream_id);
+                self.abort_udp_ingress(mapping_id, stream_id, b"UDP relay unavailable");
+                return Err(FlowMuxError::Transport(error));
+            }
         }
         Ok(())
     }
 
-    fn abort_udp_ingress(&self, stream_id: u32, reason: &[u8]) {
+    fn abort_udp_ingress(&self, mapping_id: u16, stream_id: u32, reason: &[u8]) {
+        self.audit_ingress_denial(mapping_id, "udp_ingress");
         lock_pending_ingress(&self.pending).remove(&stream_id);
         lock_udp_associations(&self.udp_associations).remove(&stream_id);
         if lock_validator(&self.validator)
@@ -282,6 +307,53 @@ impl FlowMuxIngressHandle {
             );
         }
         let _ = lock_registry(&self.registry).retire(stream_id);
+    }
+
+    fn require_live_session(&self) -> Result<(), FlowMuxError> {
+        if self.session_closed.load(Ordering::Acquire) {
+            return Err(FlowMuxError::FrameRefused("session closed".into()));
+        }
+        Ok(())
+    }
+
+    fn retire_unopened(&self, stream_id: u32) {
+        let _ = lock_validator(&self.validator).admit(
+            &mvm_contract::protocol::network_flow::FrameFacts::new(
+                Direction::HostToGuest,
+                Opcode::Reset,
+                stream_id,
+            ),
+        );
+        let _ = lock_registry(&self.registry).retire(stream_id);
+    }
+
+    fn audit_ingress(
+        &self,
+        mapping_id: u16,
+        class: &str,
+        allowed: bool,
+    ) -> Result<(), FlowMuxError> {
+        let (event, verdict) = if allowed {
+            ("host.ingress.allowed", "allowed")
+        } else {
+            ("host.ingress.denied", "denied")
+        };
+        decision_audit::record(
+            self.audit_sink.as_ref(),
+            event,
+            BTreeMap::from([
+                ("mapping_id".into(), mapping_id.to_string()),
+                ("class".into(), class.into()),
+                ("verdict".into(), verdict.into()),
+            ]),
+        )
+        .map_err(FlowMuxError::Audit)
+    }
+
+    fn audit_ingress_denial(&self, mapping_id: u16, class: &str) {
+        if self.audit_ingress(mapping_id, class, false).is_err() {
+            tracing::debug!("FlowMux ingress remains refused after audit failure");
+        }
     }
 
     pub(super) fn spawn_tcp_relay(
@@ -347,24 +419,4 @@ pub(super) fn lock_udp_associations(
     associations
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-}
-
-pub(super) fn emit_unbound_audit(
-    recorder: Option<&Arc<Recorder>>,
-    runtime_handle: Option<&tokio::runtime::Handle>,
-    category: EventCategory,
-    event_name: &str,
-    labels: BTreeMap<String, String>,
-) {
-    let (Some(recorder), Some(handle)) = (recorder, runtime_handle) else {
-        return;
-    };
-    let recorder = Arc::clone(recorder);
-    let event_name = event_name.to_string();
-    let future = async move {
-        let _ = recorder.record_unbound(category, event_name, labels).await;
-    };
-    // Session and ingress relay work runs outside Tokio's async workers. The
-    // signer writes one local record and returns before the flow proceeds.
-    handle.block_on(future);
 }

@@ -3,6 +3,7 @@
 //! Keeping these helpers in `mvm-vmm` lets `mvm-backends` depend on them
 //! without creating a dependency cycle with `mvm-runtime` or `mvm-build`.
 
+pub mod audit_control;
 pub mod audit_substrate;
 pub mod aux_bin;
 pub mod boot_config;

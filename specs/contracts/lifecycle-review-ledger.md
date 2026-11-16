@@ -64,6 +64,61 @@ comment exists, not that its claim is true; the sites were read, but a comment i
 | Volume, checkpoint and peer-EOF custody | custody, removal guard, EOF after timeout refusal | [#4880](https://github.com/tinylabscom/mvm/pull/4880), [#4957](https://github.com/tinylabscom/mvm/pull/4957), [#4864](https://github.com/tinylabscom/mvm/pull/4864), [#4879](https://github.com/tinylabscom/mvm/pull/4879) | fixed under the volume and vmm owner work; not re-read for this table |
 | Unsafe/FFI documentation | missing `SAFETY` claims | [#4993](https://github.com/tinylabscom/mvm/pull/4993), [#5438](https://github.com/tinylabscom/mvm/pull/5438) | every `unsafe` block in the workspace has a comment; see the gate above |
 
+## Flow-audit lifecycle boundary
+
+The focused review for [#5538](https://github.com/tinylabscom/mvm/issues/5538)
+covers the changed FlowMux decision and session-cleanup paths, the bound-recorder
+adapter and shared asynchronous-recorder bridge, endpoint readiness, the
+VM-lifetime keeper's one-shot audit-control channels, and the identity-bound
+Firecracker stop helper. It is not a new review of every file in the earlier
+census below.
+
+The transition owners are:
+
+- The admitting host supplies the workload plan and production/development
+  posture; a builder supplies an explicit non-workload identity.
+- Endpoint startup requires a successful write through the actual bound sink.
+  The launcher then registers the exact live VM with its keeper. Flow serving
+  waits for that registration in production, including a restored child.
+- One endpoint-owned state serializes write outcomes across all its sessions.
+  Missing records remain marked incomplete after recovery of the journal;
+  suppressed UDP repeats do not reset the failure streak.
+- The third consecutive production failure latches further authorizations
+  closed and notifies the keeper. The keeper consumes its registered target
+  once and uses authenticated HVF control or the identity-bound Firecracker
+  stop path. Notification is not termination confirmation.
+- Session completion cancels its forwarding work and flushes accumulated health.
+  The health file begins `active`, never `complete`; an unclean exit or failed
+  health-file write cannot establish a complete epoch. Signed epoch sealing and
+  crash-recovery integration remain separate contracts.
+
+UDP closure retains the relay and its capacity charge until the worker exits;
+the session thread never joins a live relay while handling CloseUdp or Reset.
+Nonblocking transport I/O and readiness preserve blocking read behavior while
+bounding a whole frame write by one credit-wait deadline. Session locking ends
+before the write can wait, so incoming cancellation can still be authenticated.
+Final cleanup closes the transport, cancels and joins relay owners, releases
+their charges, then flushes suppression counts. Native socket tests cover a
+non-reading guest, slow draining, partial-frame failure, and continuous denied
+datagrams; ordinary association closure leaves unrelated TCP flows intact.
+
+The portable subprocess witnesses exercise channel ownership and keeper survival
+after launcher exit. They do not establish live HVF/Firecracker behavior, Linux
+confinement of the new path, or survival of abrupt keeper death. Backend-specific
+verification is recorded in the implementing issue and PR, not inferred here.
+
+The review found an unresolved post-boot ownership gap: obtaining or registering
+the target can fail before the keeper receives it. The cold Firecracker handle
+does not retain original process custody, and ordinary warm claims rediscover a
+handle after fork/resume rather than retaining it from that transition. A failure
+can leave a live child while normal claim rollback releases its reservation or
+removes its state. The registered-target stop witnesses do not cover this gap.
+Production qualification of #5538 is blocked on an owning handoff and confirmed
+rollback, not a second lookup by name or PID. Original-owner persistent
+Firecracker work remains subject to the explicit deferral and process-model
+decision in [#5522](https://github.com/tinylabscom/mvm/issues/5522); this change
+does not approve or implement that process model.
+
 ## Files NOT read
 
 None of the following was read for lifecycle, ownership or cancellation defects. Treat them as

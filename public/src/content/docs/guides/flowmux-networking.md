@@ -137,6 +137,42 @@ material host-side, bounds streams, datagrams, DNS state, connector work, and
 ingress peers, and emits the canonical audit result. Declared ingress uses the
 same endpoint and delivers only to a signed guest-loopback target.
 
+Closing a UDP association cancels its relay without closing unrelated TCP flows.
+Its capacity remains reserved until the relay exits. Each outgoing frame uses
+one deadline from the configured credit-wait budget, including a peer that
+drains bytes slowly. A failed or timed-out write closes the shared transport
+rather than sending later frames after a partial encrypted frame.
+
+### Audit availability is part of readiness
+
+A workload endpoint needs an audit sink bound to its admitted plan and execution
+epoch before it reports ready. A missing sink or an unsuccessful journal probe
+refuses startup, including in development. Builder endpoints also require a
+working sink, but identify their records as builder activity rather than
+inventing a workload plan.
+
+Flow decisions are recorded before the response or authorized network effect.
+An allow whose required write fails is refused; a deny remains denied and marks
+the epoch's host record incomplete. Repeated UDP denials retain their
+once-per-destination suppression, with suppressed repeats counted separately.
+Reconnecting does not reset the endpoint's write-failure streak.
+
+Under `--prod`, three consecutive write failures latch the endpoint closed and
+notify the VM's keeper to stop the exact registered workload instance. A
+successful write resets the streak, not the incomplete mark. Development keeps
+the workload running, but still refuses an operation whose authorization cannot
+be recorded. Production startup refuses a backend without the required safe
+shutdown mechanism. A stop request is not proof of termination: a failed backend
+stop is reported as unconfirmed rather than retried against a VM name or PID.
+
+Production qualification remains blocked on ownership during failed launch
+setup. The post-boot registration path does not yet guarantee that an error
+retains control of the original VM through confirmed cleanup. Successful
+shutdown of a registered target does not establish that rollback guarantee.
+
+The endpoint's health sidecar is not an epoch seal; see
+[audit durability](/guides/audit-and-receipts/#flow-decision-failures).
+
 The same contract applies across the standard Firecracker and HVF backends and
 the optional libkrun integration: no production backend attaches a routable
 workload NIC, and none may substitute a second networking implementation.

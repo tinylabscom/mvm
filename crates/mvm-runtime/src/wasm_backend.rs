@@ -382,6 +382,7 @@ struct WasmEndpointPlan {
     vm_name: String,
     state_dir: PathBuf,
     tenant: String,
+    audit: mvm_core::audit_sink::AuditContext,
     secrets: Vec<mvm_core::plan::SecretBinding>,
     redaction: mvm_core::policy::RedactionPolicy,
     network_limits: mvm_core::plan::NetworkLimits,
@@ -429,6 +430,11 @@ fn wasm_endpoint_plan(
         vm_name: config.name.clone(),
         state_dir: state_dir.to_path_buf(),
         tenant,
+        audit: config
+            .audit_context
+            .clone()
+            .filter(|audit| audit.plan().is_some())
+            .context("wasm endpoint has no admitted workload audit context")?,
         secrets,
         redaction,
         network_limits,
@@ -458,6 +464,8 @@ fn wasm_network_endpoint_spawn_params<'a>(
         // The wasm guest runs inside this process.
         lifetime: crate::network_endpoint_spawn::EndpointLifetime::Launcher,
         tenant: &plan.tenant,
+        audit: plan.audit.clone(),
+        audit_control: None,
         secrets: &plan.secrets,
         redaction: &plan.redaction,
         transport: crate::network_endpoint_spawn::EndpointTransport::Uds {
@@ -2017,6 +2025,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = VmStartConfig {
             name: "policy-allow-wasm-vm".to_string(),
+            audit_context: Some(mvm_core::audit_sink::AuditContext::Workload {
+                plan: Box::new(mvm_core::plan::test_support::PlanFixture::new().build()),
+                mode: mvm_core::audit_sink::AuditFailureMode::Development,
+            }),
             network_policy: mvm_core::network_policy::NetworkPolicy::preset(
                 mvm_core::network_policy::NetworkPreset::Dev,
             ),
@@ -2027,6 +2039,23 @@ mod tests {
             .expect("a policy allowing egress must produce a spawn plan");
         assert!(plan.secrets.is_empty());
         assert_eq!(plan.tenant, "local");
+    }
+
+    #[test]
+    fn wasm_endpoint_plan_rejects_builder_identity_for_a_workload() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = VmStartConfig {
+            name: "wasm-workload".into(),
+            audit_context: Some(mvm_core::audit_sink::AuditContext::Builder {
+                tenant: mvm_core::plan::TenantId("local".into()),
+                name: "wasm-workload".into(),
+            }),
+            network_policy: mvm_core::network_policy::NetworkPolicy::preset(
+                mvm_core::network_policy::NetworkPreset::Dev,
+            ),
+            ..Default::default()
+        };
+        assert!(wasm_endpoint_plan(&config, dir.path()).is_err());
     }
 
     // Secrets present (even under a deny-all `VmStartConfig::network_policy`,
@@ -2063,6 +2092,10 @@ mod tests {
 
         let config = VmStartConfig {
             name: "secret-wasm-vm".to_string(),
+            audit_context: Some(mvm_core::audit_sink::AuditContext::Workload {
+                plan: Box::new(admitted),
+                mode: mvm_core::audit_sink::AuditFailureMode::Development,
+            }),
             ..Default::default()
         };
         let plan = wasm_endpoint_plan(&config, dir.path())

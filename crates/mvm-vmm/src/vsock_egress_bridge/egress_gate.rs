@@ -389,6 +389,16 @@ impl EgressGate {
     /// by the caller, so an auditor can record which namespace authorized a
     /// flow without any call site re-testing the suffix.
     pub fn decide_target(&self, host: &str, port: u16) -> TargetDecision {
+        self.decide_target_with(host, port, resolve_hostname_ips)
+    }
+
+    /// Decide a routed target using a caller-owned resolver for admitted live lookups.
+    pub fn decide_target_with(
+        &self,
+        host: &str,
+        port: u16,
+        resolve: impl Fn(&str) -> std::io::Result<Vec<IpAddr>>,
+    ) -> TargetDecision {
         if PeerName::is_peer_target(host) {
             TargetDecision {
                 verdict: self.decide_peer(host, port),
@@ -396,7 +406,7 @@ impl EgressGate {
             }
         } else {
             TargetDecision {
-                verdict: self.decide_request(&format!("{host}:{port}")),
+                verdict: self.decide_request_with(&format!("{host}:{port}"), resolve),
                 route: Route::Egress,
             }
         }

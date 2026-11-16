@@ -9,6 +9,7 @@
 pub mod action;
 pub mod admission_durability;
 pub mod arch;
+pub mod audit_sink;
 pub mod audit_verify;
 pub mod build_env;
 pub mod canonical_linux;

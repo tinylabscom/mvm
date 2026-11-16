@@ -271,6 +271,38 @@ missing. A seal is a barrier because it is a completeness claim: losing the
 claim while keeping the entries it describes would afterwards read as a
 truncation.
 
+### Flow decision failures
+
+FlowMux workload records carry their admitted plan identity and an
+`execution_epoch` label. Host-stamped identity overrides event or plan-author
+labels. Builder records carry an explicit builder identity instead; a missing
+workload binding never falls back to builder activity.
+
+The endpoint keeps a private `flow-health-*.json` sidecar in the audit directory,
+outside the VM state directory. It records the binding, failed-write count,
+consecutive-failure count, and suppressed UDP denial count. A write failure
+marks `host_record_incomplete` before the refusal is returned. Successful writes
+do not erase that mark. Suppression counts are accumulated without a synchronous
+write per repeated datagram and flushed when a session finishes.
+
+The initial status is `active`, not `complete`. If the endpoint crashes or the
+health sidecar itself cannot be updated, the retained record does not prove
+completeness, and its counters are only the last persisted observation.
+These sidecars are operational health records, not signed epoch seals.
+`trust audit verify` still verifies the signed chain; a valid chain alone is
+not evidence that no host decision was lost.
+
+Production endpoints request exact-instance shutdown after three consecutive
+audit-write failures. Development endpoints keep running with incomplete
+evidence, while refusing any operation whose required authorization write fails.
+The keeper owns the shutdown; loss of that lifecycle owner itself is not a
+guarantee that the VM terminated.
+
+Post-boot registration failures also remain an unresolved ownership boundary:
+the launch path does not yet guarantee original-VM rollback before releasing
+its state. This blocks production qualification of the failure policy, even
+when the signed records and registered-target shutdown tests pass.
+
 ## Rotation
 
 The chain rotates into sequenced segments once the active file reaches
