@@ -21,6 +21,12 @@ use mvm_agentd::vsock::{
 pub use mvm_agentd::vsock::{FsEntry, FsEntryKind, FsStat, ProcInfo, ProcState, ProcWaitEvent};
 use mvm_core::net::session::SessionError;
 
+mod process_output;
+pub use process_output::{
+    ProcessOutputEnd, ProcessOutputReader, ProcessOutputRecord, ProcessOutputSnapshot,
+    ProcessOutputStream, ProcessOutputs,
+};
+
 /// Record the host→guest RPC in the audit chain, before it is sent.
 ///
 /// The verb name lands in the entry as `verb=<kebab-name>`, so every guest
