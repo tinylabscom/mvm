@@ -71,6 +71,15 @@ heal_helper() {
 }
 heal_helper
 
+# Firecracker refuses to run as root, and the Linux host needs /dev/kvm access
+# and a systemd user session (for the CPU and memory scope around each VM).
+if [ "$(uname -s)" = Linux ]; then
+  if [ "$(id -u)" = 0 ]; then
+    echo "error: on Linux run this as a normal user in the kvm group, not as root." >&2; exit 1
+  fi
+  [ -r /dev/kvm ] && [ -w /dev/kvm ] || { echo "error: /dev/kvm is not accessible to $(id -un); add the user to the kvm group." >&2; exit 1; }
+fi
+
 id="$(date +%H%M%S)"   # names are unique per run, so `explain <name>` is never ambiguous
 a="line-a-$id"; b="line-b-$id"; m="maintenance-$id"
 
@@ -93,8 +102,9 @@ work() { echo "while true; do curl -sS -m 10 -o /dev/null https://$1/; sleep 2; 
 # throwaway run does. Every later run of the script skips this.
 prepare() {
   echo "Preparing this machine once (image and runtime); this takes a few minutes"
-  $mvm image pull "$image" >/dev/null
-  $mvm run --image "$image" -- true >/dev/null 2>&1 </dev/null
+  local out
+  out="$($mvm image pull "$image" 2>&1)" || { echo "could not pull $image:" >&2; echo "$out" >&2; return 1; }
+  out="$($mvm run --image "$image" -- true 2>&1 </dev/null)" || { echo "the first run on this machine failed:" >&2; echo "$out" >&2; return 1; }
 }
 
 # Start the three workloads at once. Sets `unprepared` when any was refused
@@ -114,7 +124,7 @@ start_all() {
 echo "Starting three workloads at once, each allowed one destination"
 start_all
 if [ -n "$unprepared" ]; then
-  prepare
+  prepare || exit 1
   echo "Starting three workloads at once, each allowed one destination"
   start_all
 fi
