@@ -4,6 +4,7 @@
 
 pub mod active_signer;
 pub mod assurance;
+pub mod audit_client;
 pub mod bind;
 /// Whether a run's `plan.admitted` entry is a control or a note — the one
 /// place a failure to record an admission becomes a refused boot.
