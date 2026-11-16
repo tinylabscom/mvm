@@ -1,0 +1,30 @@
+name: Supply-chain check
+description: Run a pinned dependency checker with the repository policy
+inputs:
+  checker:
+    description: Required checker (deny or audit)
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install and run dependency checker
+      shell: bash
+      env:
+        CHECKER: ${{ inputs.checker }}
+        RUSTUP_TOOLCHAIN: "1.97.1"
+      run: |
+        set -euo pipefail
+        case "$CHECKER" in
+          deny) package=cargo-deny; version=0.20.2 ;;
+          audit) package=cargo-audit; version=0.23.0 ;;
+          *) echo "checker must be deny or audit" >&2; exit 1 ;;
+        esac
+        test -f Cargo.lock
+        test -f deny.toml
+        # Use runner-provided rustup; never bootstrap it from an unpinned script.
+        rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
+        cargo install --locked --version "=$version" "$package"
+        case "$CHECKER" in
+          deny) cargo deny --locked --workspace --config deny.toml check ;;
+          audit) cargo audit --file Cargo.lock ;;
+        esac

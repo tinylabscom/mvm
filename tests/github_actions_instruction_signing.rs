@@ -3,6 +3,7 @@
 
 const WORKFLOW: &str = include_str!("../.github/workflows/sign-instructions.yml");
 const ACTION: &str = include_str!("../.github/actions/sign-instructions/action.yml");
+const TRANSFER: &str = include_str!("../.github/actions/sign-instructions/instruction-signing.py");
 
 /// Every `uses:` target in the action, read line by line, without the
 /// trailing `# vN` comment the pins carry.
@@ -68,7 +69,7 @@ fn the_signing_workflow_holds_no_write_access() {
         .and_then(|rest| rest.split("\n\n").next())
         .expect("sign-instructions.yml declares workflow permissions");
     let granted: Vec<&str> = permissions.lines().map(str::trim).collect();
-    assert_eq!(granted, ["contents: read", "id-token: write"]);
+    assert_eq!(granted, ["contents: read"]);
     assert_eq!(
         WORKFLOW.matches(": write").count(),
         1,
@@ -124,7 +125,7 @@ fn the_signing_action_pin_guard_rejects_every_mutable_yaml_form() {
 #[test]
 fn the_uploaded_artifact_keeps_bundles_under_hidden_directories() {
     let upload = ACTION
-        .split("uses: actions/upload-artifact@")
+        .split("- name: Upload only verified bundles")
         .nth(1)
         .expect("the action uploads the bundles");
     assert!(
@@ -137,17 +138,51 @@ fn the_uploaded_artifact_keeps_bundles_under_hidden_directories() {
 /// what the certificate of a composite action's signature carries.
 #[test]
 fn the_action_verifies_under_the_calling_workflow() {
-    let verify = ACTION
-        .split("- name: Verify the bundles under the calling workflow's identity")
-        .nth(1)
-        .expect("the action verifies what it signed");
     for needle in [
         "GITHUB_WORKFLOW_REF",
-        "repository = \"${GITHUB_REPOSITORY}\"",
-        "workflow = \"${workflow}\"",
-        "ref = \"${GITHUB_REF}\"",
-        "trust instructions verify",
+        "\"repository\": ctx[\"GITHUB_REPOSITORY\"]",
+        "\"workflow\": workflow",
+        "\"ref\": ctx[\"GITHUB_REF\"]",
+        "\"trust\", \"instructions\", \"verify\"",
     ] {
-        assert!(verify.contains(needle), "verify step must use {needle}");
+        assert!(TRANSFER.contains(needle), "verify step must use {needle}");
     }
+}
+
+#[test]
+fn signing_authority_is_confined_to_a_separate_fresh_job() {
+    let jobs = WORKFLOW.split("\njobs:\n").nth(1).unwrap();
+    let prepare = jobs.split("\n  sign:").next().unwrap();
+    let sign = jobs
+        .split("\n  sign:")
+        .nth(1)
+        .unwrap()
+        .split("\n  verify:")
+        .next()
+        .unwrap();
+    let verify = jobs.split("\n  verify:").nth(1).unwrap();
+    for job in [prepare, verify] {
+        assert!(!job.contains("id-token: write"));
+        assert!(job.contains("runs-on: ubuntu-latest"));
+    }
+    assert!(sign.contains("id-token: write"));
+    assert!(sign.contains("needs: prepare"));
+    assert!(verify.contains("needs: sign"));
+    assert_eq!(WORKFLOW.matches("ref: ${{ github.sha }}").count(), 3);
+    for phase in ["prepare", "sign", "verify"] {
+        assert!(WORKFLOW.contains(&format!("phase: {phase}")));
+    }
+    for step in ACTION.split("\n    - name: ").skip(1) {
+        if step.contains("cargo build")
+            || step.contains("rustc --version")
+            || step.contains("uses: Swatinem/rust-cache@")
+            || step.contains("apt-get")
+        {
+            assert!(step.contains("if: ${{ inputs.phase != 'sign' }}"), "{step}");
+        }
+    }
+    assert!(ACTION.contains("combined mode is removed"));
+    assert!(ACTION.contains("ACTIONS_ID_TOKEN_REQUEST_TOKEN"));
+    assert!(ACTION.contains("-request-${{ github.run_attempt }}"));
+    assert!(ACTION.contains("-candidate-${{ github.run_attempt }}"));
 }

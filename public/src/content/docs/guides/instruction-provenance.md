@@ -186,7 +186,30 @@ verifies every fresh bundle through `mvmctl trust instructions verify` under a
 policy trusting exactly that workflow and ref, and uploads the bundles as the
 `instruction-signatures` artifact of that run, kept for 90 days. The steps live
 in the composite action `.github/actions/sign-instructions`, which is what
-another repository calls.
+another repository calls in three separate jobs on fresh Ubuntu runners:
+`prepare` → `sign` → `verify`.
+
+Each job independently checks out the exact `github.sha` with
+`persist-credentials: false`. Workflow-level permissions are only
+`contents: read`; only the signing job additionally receives `id-token: write`.
+
+- **Prepare** builds `mvmctl` without signing authority, discovers instruction
+  files, and uploads `instruction-signatures-request-${{ github.run_attempt }}`.
+- **Sign** downloads the request and validates its exact source commit and run
+  metadata against its own checkout and run. It accepts only tracked regular
+  files with their original Git bytes, never executes producer binaries, and
+  signs with pinned Cosign. It uploads
+  `instruction-signatures-candidate-${{ github.run_attempt }}`.
+- **Verify** builds `mvmctl` without signing authority and consumes both the
+  request and candidate. It checks the complete discovered file set and verifies
+  the bundles with `mvmctl`'s in-process verifier under a policy trusting the
+  same caller workflow identity and ref. Only then does it upload the final
+  `instruction-signatures` artifact, retained for 90 days.
+
+The request and candidate are intermediate handoffs, not the final verified
+artifact. Separating the jobs keeps compilation out of the OIDC-authorized
+signing job; it is not a guarantee against a compromised host or proof that
+the verifier's compiler is honest.
 
 ### How bundles reach the repository
 
@@ -252,8 +275,9 @@ run; a manual dispatch on `main` can regenerate bundles for the current files.
 ### Signing another repository
 
 Add this workflow to the repository as
-`.github/workflows/sign-instructions.yml`. It checks the repository out and
-hands the rest to the action:
+`.github/workflows/sign-instructions.yml`. Each job checks the repository out
+independently and invokes the same composite action with its corresponding
+`phase`:
 
 ```yaml
 name: Sign instruction files
@@ -274,23 +298,78 @@ on:
       - ".github/workflows/sign-instructions.yml"
 permissions:
   contents: read
-  id-token: write
 jobs:
-  sign:
+  prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: tinylabscom/mvm/.github/actions/sign-instructions@main
+        with:
+          phase: prepare
+
+  sign:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: tinylabscom/mvm/.github/actions/sign-instructions@main
+        with:
+          phase: sign
+
+  verify:
+    needs: sign
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: tinylabscom/mvm/.github/actions/sign-instructions@main
+        with:
+          phase: verify
 ```
 
-`@main` builds the action's `mvmctl` from the current `mvm` main; pin a commit
-SHA instead to fix the signing code a repository runs. The `paths` list is the
-built-in instruction-file set and only decides when the workflow runs; what gets
-signed is whatever `mvmctl trust instructions sign --dry-run .` selects, the
-same list `verify` reads.
+Install the action from a reviewed revision containing the three-phase change.
+The example uses `@main`; before deploying it, replace all three action
+references with the same reviewed commit SHA to fix the action code and
+`mvmctl` source used by prepare and verify. Do not use an older revision that
+only supports the one-call interface.
+
+**Source-breaking migration:** `phase` is mandatory and must be `prepare`,
+`sign`, or `verify`; the old one-call invocation fails without it. Replace the
+single job with all three jobs above, retain the dependency chain and fresh
+runners, and move `id-token: write` from workflow permissions to the signing
+job alone. Do not combine the phases into steps in one job.
+
+The existing `artifact-name` input still defaults to `instruction-signatures`.
+It names the final artifact and prefixes the intermediate names:
+`ARTIFACT_NAME-request-${{ github.run_attempt }}` and
+`ARTIFACT_NAME-candidate-${{ github.run_attempt }}`. If overriding it, use the
+same value in all three calls and adjust the final artifact download name.
+The `cache-key` and `cache-save` inputs apply only to prepare and verify, not
+sign.
+
+**Retry recovery:** partial or failed-job-only retries are intentionally refused
+by run-attempt binding. Use **Re-run all jobs** so prepare, sign, and verify
+share the current attempt. Artifacts from earlier attempts are not automatically
+reused.
+
+The `paths` list is the built-in instruction-file set and only decides when
+the workflow runs; discovery uses `mvmctl trust instructions sign --dry-run .`,
+the same selection `verify` reads. CI signing additionally requires the
+selected files to be tracked regular files with their original Git bytes.
 
 The signatures are the calling repository's own. Pin that identity in the
 publisher entry, and pin the ref: `workflow_dispatch` can run the workflow on any

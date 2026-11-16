@@ -23,90 +23,17 @@
 //! is the additional sidecar the receiver reads to make scheduling
 //! decisions without unpacking the rest.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::ir::{EnvValue, Workload};
 use serde::{Deserialize, Serialize};
-use sha2::Digest as _;
 
 use mvm_compiler::{CompileError, archive_dir, compile};
 
-/// Schema version of the local deploy record.
-pub const DEPLOY_RECORD_SCHEMA_VERSION: u32 = 2;
-
-/// Exact-byte identities of the sealed deploy archive.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactDigests {
-    /// BLAKE3 identity used by the local content-addressed store.
-    pub blake3: String,
-    /// SHA-256 identity retained for external tooling and interop.
-    pub sha256: String,
-    /// Number of bytes hashed in the archive.
-    pub size_bytes: u64,
-}
-
-/// Exact-byte identity of the filesystem image that the boot path mounts.
-///
-/// This is deliberately separate from [`ArtifactDigests`]: the deploy archive
-/// is a transport envelope, while this identity names the boot subject. A
-/// caller must never use the archive digest as a rootfs digest.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BootArtifactIdentity {
-    /// Stable artifact kind understood by the boot path.
-    pub kind: String,
-    /// BLAKE3 identity used by the local content-addressed store.
-    pub blake3: String,
-    /// SHA-256 identity used by the signed execution plan and dm-verity
-    /// interoperability boundaries.
-    pub sha256: String,
-    /// Number of bytes in the exact boot artifact.
-    pub size_bytes: u64,
-}
-
-/// The pinned runtime environment used when the workload is admitted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EnvironmentPin {
-    /// Lowercase hexadecimal SHA-256 of the workload kernel.
-    pub kernel_sha256: String,
-}
-
-/// The verified dependency-volume evidence carried by a deploy record.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DependencyVolumeRecord {
-    /// Hash returned by `verify_sealed_volume`.
-    pub volume_hash: String,
-    /// SHA-256 of the sealed SBOM bytes.
-    pub sbom_sha256: String,
-    /// SHA-256 of the sealed CVE result bytes.
-    pub cve_sha256: String,
-}
-
-/// Local attestation record for a sealed workload artifact.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DeployRecord {
-    /// Record schema version. Readers must reject versions they do not know.
-    pub schema_version: u32,
-    /// Workload identifier from the IR.
-    pub workload_id: String,
-    /// Internal canonical IR fingerprint used by launch plans.
-    pub ir_hash: String,
-    /// Exact-byte identities of the sealed image archive.
-    pub image: ArtifactDigests,
-    /// Exact-byte identity of the filesystem image selected for boot.
-    pub boot_artifact: BootArtifactIdentity,
-    /// Runtime environment pin, when one was resolved before deployment.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub environment: Option<EnvironmentPin>,
-    /// Dependency-volume evidence, when the workload uses one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dependency_volume: Option<DependencyVolumeRecord>,
-}
+pub use mvm_contract::deploy_record::{
+    ArtifactDigests, BootArtifactIdentity, DEPLOY_RECORD_SCHEMA_VERSION, DependencyVolumeRecord,
+    DeployRecord, EnvironmentPin,
+};
 
 /// The mvmd-bound payload embedded into the deploy archive as
 /// `mvmd-spec.json`. Mirrors the schema fixed mvmd-side.
@@ -311,6 +238,26 @@ impl From<serde_json::Error> for DeployError {
     }
 }
 
+impl From<mvm_core::deploy_record::DeployRecordError> for DeployError {
+    fn from(error: mvm_core::deploy_record::DeployRecordError) -> Self {
+        use mvm_core::deploy_record::DeployRecordError;
+        match error {
+            DeployRecordError::Io(error) => Self::Io(error),
+            DeployRecordError::Serialize(error) => Self::Serialize(error),
+            DeployRecordError::SchemaVersion {
+                path,
+                found,
+                expected,
+            } => Self::SchemaVersion {
+                path,
+                found,
+                expected,
+            },
+            DeployRecordError::BootArtifact { path, reason } => Self::BootArtifact { path, reason },
+        }
+    }
+}
+
 /// Compile a workload, derive `mvmd-spec.json`, and pack everything
 /// into a single deterministic `.tar.gz` at `out`. Returns the
 /// [`DeployBundle`] for the shipping step.
@@ -349,27 +296,7 @@ pub fn build_deploy_bundle(
 
 /// Compute both identity digests of a sealed archive using one streaming read.
 pub fn digest_artifact(path: &Path) -> Result<ArtifactDigests, DeployError> {
-    let mut file = std::fs::File::open(path)?;
-    let mut blake3 = blake3::Hasher::new();
-    let mut sha256 = sha2::Sha256::new();
-    let mut size_bytes = 0_u64;
-    let mut buffer = [0_u8; 128 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        blake3.update(&buffer[..read]);
-        sha256.update(&buffer[..read]);
-        size_bytes = size_bytes
-            .checked_add(u64::try_from(read).expect("buffer length fits in u64"))
-            .expect("artifact size must fit in u64");
-    }
-    Ok(ArtifactDigests {
-        blake3: blake3.finalize().to_hex().to_string(),
-        sha256: hex::encode(sha256.finalize()),
-        size_bytes,
-    })
+    mvm_core::deploy_record::digest_artifact(path).map_err(DeployError::from)
 }
 
 /// Build the local attestation record for a previously-created bundle.
@@ -398,13 +325,7 @@ pub fn build_deploy_record(
 
 /// Hash the exact filesystem image selected for the boot path.
 pub fn digest_boot_artifact(path: &Path) -> Result<BootArtifactIdentity, DeployError> {
-    let digest = digest_artifact(path)?;
-    Ok(BootArtifactIdentity {
-        kind: "rootfs.ext4".to_string(),
-        blake3: digest.blake3,
-        sha256: digest.sha256,
-        size_bytes: digest.size_bytes,
-    })
+    mvm_core::deploy_record::digest_boot_artifact(path).map_err(DeployError::from)
 }
 
 /// Verify that a selected boot path still contains the bytes named by a
@@ -414,35 +335,12 @@ pub fn verify_boot_artifact(
     path: &Path,
     expected: &BootArtifactIdentity,
 ) -> Result<(), DeployError> {
-    validate_boot_artifact_identity(path, expected)?;
-    let actual = digest_boot_artifact(path)?;
-    if actual != *expected {
-        return Err(DeployError::BootArtifact {
-            path: path.to_path_buf(),
-            reason: format!(
-                "boot artifact identity mismatch for {}: expected {} / {}, got {} / {}",
-                path.display(),
-                expected.blake3,
-                expected.sha256,
-                actual.blake3,
-                actual.sha256
-            ),
-        });
-    }
-    Ok(())
+    mvm_core::deploy_record::verify_boot_artifact(path, expected).map_err(DeployError::from)
 }
 
 /// Write a deploy record as private, human-readable JSON.
 pub fn write_deploy_record(record: &DeployRecord, path: &Path) -> Result<(), DeployError> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut bytes = serde_json::to_vec_pretty(record)?;
-    bytes.push(b'\n');
-    std::fs::write(path, bytes)?;
-    Ok(())
+    mvm_core::deploy_record::write_deploy_record(record, path).map_err(DeployError::from)
 }
 
 /// A readable deployment plus its content-addressed store key.
@@ -516,41 +414,7 @@ pub fn list_deployments(
 /// Read a deploy record and reject stale or future schemas before any of its
 /// fields can influence admission.
 pub fn read_deploy_record(path: &Path) -> Result<DeployRecord, DeployError> {
-    let record: DeployRecord = serde_json::from_slice(&std::fs::read(path)?)?;
-    if record.schema_version != DEPLOY_RECORD_SCHEMA_VERSION {
-        return Err(DeployError::SchemaVersion {
-            path: path.to_path_buf(),
-            found: record.schema_version,
-            expected: DEPLOY_RECORD_SCHEMA_VERSION,
-        });
-    }
-    validate_boot_artifact_identity(path, &record.boot_artifact)?;
-    Ok(record)
-}
-
-fn validate_boot_artifact_identity(
-    path: &Path,
-    identity: &BootArtifactIdentity,
-) -> Result<(), DeployError> {
-    if identity.kind != "rootfs.ext4" {
-        return Err(DeployError::BootArtifact {
-            path: path.to_path_buf(),
-            reason: format!("unsupported boot artifact kind {:?}", identity.kind),
-        });
-    }
-    for (label, value) in [("BLAKE3", &identity.blake3), ("SHA-256", &identity.sha256)] {
-        if value.len() != 64
-            || !value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(DeployError::BootArtifact {
-                path: path.to_path_buf(),
-                reason: format!("{label} must be 64 hexadecimal characters"),
-            });
-        }
-    }
-    Ok(())
+    mvm_core::deploy_record::read_deploy_record(path).map_err(DeployError::from)
 }
 
 fn read_dependency_volume(path: &Path) -> Result<DependencyVolumeRecord, DeployError> {

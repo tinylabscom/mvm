@@ -52,13 +52,15 @@ sha2 = { workspace = true }
 tar = { workspace = true }
 toml = { workspace = true }
 tree-sitter = { workspace = true }
-tree-sitter-nix = { workspace = true }
+tree-sitter-nix = { workspace = true, optional = true }
 
 # Deployment staging.
 tempfile = { workspace = true }
 
 [features]
 default = []
+# Parse-only validation of hand-authored addon Nix; not a runtime admission check.
+addon-nix-validation = ["dep:tree-sitter-nix"]
 # mvm-compiler is a required dependency (decorator parser lives there); this
 # feature gates the pack composer and deployment assembly that need the pipeline.
 compiler = []

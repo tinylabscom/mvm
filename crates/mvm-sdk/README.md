@@ -31,12 +31,20 @@ The builder API constructs a validated `mvm_contract::ir::Workload`. `emit`
 canonicalizes that IR and writes it to `MVM_IR_OUT` or stdout for the build
 tooling to consume. Decorator parsing and runtime-recording modules translate
 language authoring constructs into the same IR. This crate does not drive
-machines: booting, driving and stopping one is `mvm-client`'s job, and that
-crate re-exports this one as `mvm_client::authoring`, so a Rust program needs
-only the one dependency.
+machines: booting, driving and stopping one is `mvm-client`'s job. Depend on
+`mvm-sdk` directly for build-time authoring and on `mvm-client` for execution.
+The runtime client does not depend on the SDK, even through an optional
+authoring feature.
+
+Removing `mvm_client::authoring` is a Rust source compatibility break: add a
+direct `mvm-sdk` dependency and replace that import prefix with `mvm_sdk`.
+The common IR and wire semantics are unchanged; this separates build-time
+authoring dependencies from the runtime client.
 
 Optional features keep secondary surfaces out of the base closure:
 
+- `addon-nix-validation` enables `mvm_sdk::addon::validator` and its
+  Tree-sitter Nix grammar for parse-only validation of hand-authored addon Nix.
 - `schema` enables schema emission.
 - `compiler` enables the pack composer, which needs the `mvm-compiler`
   pipeline. Host tools that only compile depend on `mvm-compiler` directly.
@@ -44,8 +52,18 @@ Optional features keep secondary surfaces out of the base closure:
   It also enables `compiler`, but does not enable HTTP transport.
 - `deploy-remote` enables `deploy` and its HTTP shipping transport.
 
-All are off by default. The base SDK retains Tree-sitter for Python/TypeScript
-decorator parsing, but does not link `mvm-compiler`, `globset`, or `mvm-http`.
+All are off by default. The base SDK still depends on `mvm-compiler` and its
+Tree-sitter and `globset` dependencies for source analysis. The `compiler`
+feature exposes additional authoring APIs; it does not remove that dependency
+when disabled. HTTP shipping through `mvm-http` remains opt-in.
+
+Gating `mvm_sdk::addon::validator` is a Rust source compatibility break:
+existing users of `validate` or `NixSyntaxError` must enable
+`features = ["addon-nix-validation"]` on their direct `mvm-sdk` dependency.
+The module is absent without the feature; validation never becomes a success
+stub. Enabling it preserves the existing parse-only API and error behavior,
+not a semantic or runtime admission guarantee. Its unit tests run with
+`cargo test -p mvm-sdk --features addon-nix-validation --lib addon::validator`.
 
 ## Machine lifecycle
 

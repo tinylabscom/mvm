@@ -1,18 +1,26 @@
 ---
 title: Rust quickstart
-description: Declare, launch and drive mvm workloads from Rust with one dependency, mvm-client.
+description: Declare workloads with mvm-sdk; launch and drive them with mvm-client.
 ---
 
-A Rust program depends on one crate, `mvm-client`. It carries the runtime
-surface (the `MvmClient` lifecycle facade shared with the CLI and the fleet
-orchestrator, and `LocalBackend`, which admits and boots on this host) and
-re-exports the authoring surface as `mvm_client::authoring`, so the same
-dependency declares a workload, launches it, and drives its guest.
+A Rust program uses `mvm-sdk` for build-time workload authoring and
+`mvm-client` for execution. The client carries the runtime surface: the
+`MvmClient` lifecycle facade shared with the CLI and the fleet orchestrator,
+and `LocalBackend`, which admits and boots on this host. Runtime-only callers
+do not need the SDK; authoring-only tools do not need the client.
 
 ```toml
 [dependencies]
+mvm-sdk = { git = "https://github.com/tinylabscom/mvm" }
 mvm-client = { git = "https://github.com/tinylabscom/mvm" }
 ```
+
+Keep only the dependencies your program uses. `mvm-client` does not pull in
+`mvm-sdk` or offer an optional authoring feature.
+
+**Migrating:** `mvm_client::authoring` has been removed. Add `mvm-sdk` directly
+and change authoring imports to `mvm_sdk`, as below. This is a Rust source
+compatibility break, not a change to the common IR or wire semantics.
 
 > **Status:** `mvm-client` ships `LocalBackend` (in-process) and, behind the
 > `remote` feature, `GatewayBackend` over REST. The Python and TypeScript SDKs
@@ -22,7 +30,7 @@ mvm-client = { git = "https://github.com/tinylabscom/mvm" }
 ## Build-time declaration
 
 ```rust
-use mvm_client::authoring::*;
+use mvm_sdk::{app, emit, entrypoint_command, local_path, nix_packages, resources, workload};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workload = workload("hello-rust")

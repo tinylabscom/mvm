@@ -1,7 +1,7 @@
 //! The SDK authors workloads and never drives a machine, so it stays
 //! independent from the client surface and adds nothing to mvmctl's default
-//! closure. Linking the runtime backend (`mvm-client`'s `LocalBackend`) here
-//! would form a dependency cycle: `mvm-client` depends on this crate.
+//! closure. Execution and authoring share contracts, not implementations:
+//! neither the SDK nor the client may depend on the other in production.
 
 fn cargo_tree(args: &[&str]) -> String {
     let out = std::process::Command::new("cargo")

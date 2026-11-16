@@ -64,6 +64,67 @@ class CandidateTransportTests(unittest.TestCase):
         stream.seek(0)
         return stream
 
+    def test_sbom_transfer_binds_source_archive_and_content(self):
+        sbom = b'{"bomFormat":"CycloneDX","specVersion":"1.6","version":1}'
+        blob = self.zipped([("sbom.cdx.json", sbom)]).getvalue()
+        metadata = self.metadata()
+        metadata.update(name="release-sbom-attempt-1",
+                        digest="sha256:" + hashlib.sha256(blob).hexdigest(),
+                        size_in_bytes=len(blob))
+        source = candidate.tag_source(self.env(), "0.24.0")
+        with tempfile.TemporaryDirectory() as temporary:
+            args = SimpleNamespace(artifact_id="789", artifact_digest=metadata["digest"],
+                                   content_sha256=hashlib.sha256(sbom).hexdigest(),
+                                   out_dir=Path(temporary) / "sbom")
+            with patch.dict(os.environ, {"GITHUB_JOB": "release"}, clear=True), \
+                 patch.object(candidate, "gh_json", return_value=metadata), \
+                 patch.object(candidate, "download_archive",
+                              side_effect=lambda _endpoint, path, **_kw: path.write_bytes(blob)):
+                result = candidate.fetch_sbom(source, args)
+            self.assertEqual(result, {"sbom.cdx.json": args.content_sha256})
+            self.assertEqual((args.out_dir / "sbom.cdx.json").read_bytes(), sbom)
+
+    def test_sbom_transfer_refuses_wrong_source_attempt_digest_and_members(self):
+        sbom = b'{"bomFormat":"CycloneDX","specVersion":"1.6","version":1}'
+        source = candidate.tag_source(self.env(), "0.24.0")
+        for mutation in ["source", "run", "expired", "future", "name", "zip-digest",
+                         "content-digest", "extra-member", "format", "job"]:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                data = b'{"bomFormat":"other"}' if mutation == "format" else sbom
+                members = [("sbom.cdx.json", data)]
+                if mutation == "extra-member":
+                    members.append(("tool", b"must not enter signer"))
+                blob = self.zipped(members).getvalue()
+                metadata = self.metadata()
+                metadata.update(name="release-sbom-attempt-1",
+                                digest="sha256:" + hashlib.sha256(blob).hexdigest(),
+                                size_in_bytes=len(blob))
+                if mutation == "source":
+                    metadata["workflow_run"]["head_sha"] = "c" * 40
+                elif mutation == "run":
+                    metadata["workflow_run"]["id"] += 1
+                elif mutation == "expired":
+                    metadata["expired"] = True
+                elif mutation == "future":
+                    metadata["name"] = "release-sbom-attempt-2"
+                elif mutation == "name":
+                    metadata["name"] = "unrelated-artifact"
+                elif mutation == "zip-digest":
+                    metadata["digest"] = "d" * 64
+                args = SimpleNamespace(
+                    artifact_id="789", artifact_digest=metadata["digest"],
+                    content_sha256=("e" * 64 if mutation == "content-digest"
+                                    else hashlib.sha256(data).hexdigest()),
+                    out_dir=Path(temporary) / "sbom",
+                )
+                job = "build" if mutation == "job" else "release"
+                with patch.dict(os.environ, {"GITHUB_JOB": job}, clear=True), \
+                     patch.object(candidate, "gh_json", return_value=metadata), \
+                     patch.object(candidate, "download_archive",
+                                  side_effect=lambda _endpoint, path, **_kw: path.write_bytes(blob)):
+                    with self.assertRaises(ValueError):
+                        candidate.fetch_sbom(source, args)
+
     def test_real_tag_and_matching_rc_only(self):
         for version in ["0.24.0", "0.24.0-rc.1"]:
             self.assertEqual(candidate.tag_source(self.env(version), version).version, version)
@@ -639,9 +700,11 @@ class CandidateTransportTests(unittest.TestCase):
             "!cancelled()", "github.event_name == 'push'", "github.ref_type == 'tag'",
             "needs.guest-runtime.result == 'success'",
             "needs.runtime-proof-input-check.result == 'success'",
+            "needs.supply-chain.result == 'success'",
         })
-        for event, ref_type, cancelled, producer, checker in itertools.product(
+        for event, ref_type, cancelled, producer, checker, dependencies in itertools.product(
             ["push", "workflow_dispatch", "pull_request"], ["tag", "branch"], [False, True],
+            ["success", "failure", "cancelled", "skipped"],
             ["success", "failure", "cancelled", "skipped"],
             ["success", "failure", "cancelled", "skipped"],
         ):
@@ -651,10 +714,11 @@ class CandidateTransportTests(unittest.TestCase):
                 "github.ref_type == 'tag'": ref_type == "tag",
                 "needs.guest-runtime.result == 'success'": producer == "success",
                 "needs.runtime-proof-input-check.result == 'success'": checker == "success",
+                "needs.supply-chain.result == 'success'": dependencies == "success",
             }
             actual = all(values[term] for term in terms)
             expected = (not cancelled and event == "push" and ref_type == "tag"
-                        and producer == checker == "success")
+                        and producer == checker == dependencies == "success")
             self.assertEqual(actual, expected)
 
     def release_inputs(self, root, attempt="2"):

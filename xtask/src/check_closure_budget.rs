@@ -1,11 +1,8 @@
 //! `xtask check-closure-budget`
 //!
-//! Assert the **default** `mvmctl` binary closure stays within a committed
-//! crate budget (a ratchet). Dependency weight is a first-class DX/security
-//! goal: every crate in the default no-dev closure is code that ships in the
-//! binary and is a supply-chain + attack-surface unit. This gate makes a *new*
-//! default dependency a deliberate, reviewed choice rather than a silent
-//! accretion.
+//! Bound default CLI, release CLI, and guest normal/build dependency graphs.
+//! Each package/version is a build trust input, not necessarily linked code.
+//! A new dependency must be a deliberate, reviewed choice.
 //!
 //! The closure is platform-sensitive (macOS pulls libkrun/objc2; Linux pulls
 //! firecracker), so the gate pins explicit targets for a deterministic count
@@ -24,31 +21,75 @@ use anyhow::{Context, Result, bail};
 use std::path::Path;
 use std::process::Command;
 
-/// One budgeted target: the triple `cargo tree` resolves against, and the max
-/// distinct crates allowed in `mvmctl`'s default no-dev closure there.
+/// One package, feature set, and target's maximum distinct dependency count.
 struct ClosureBudget {
+    package: &'static str,
     target: &'static str,
+    features: &'static str,
     max: usize,
 }
 
-/// Both shipped targets. Lower a budget freely as deps drop; raising one must
+const RELEASE_FEATURES: &str =
+    "host,user,release-artifact-bootstrap,release-channel,embed-host-bins";
+
+/// Lower a budget freely as deps drop; raising one must
 /// be justified in the change that does.
 const BUDGETS: &[ClosureBudget] = &[
     ClosureBudget {
+        package: "mvmctl",
         target: "x86_64-unknown-linux-gnu",
+        features: "",
         max: CLOSURE_BUDGET,
     },
     ClosureBudget {
+        package: "mvmctl",
         target: "aarch64-apple-darwin",
+        features: "",
         max: MACOS_CLOSURE_BUDGET,
+    },
+    ClosureBudget {
+        package: "mvmctl",
+        target: "aarch64-apple-darwin",
+        features: RELEASE_FEATURES,
+        max: 371,
+    },
+    ClosureBudget {
+        package: "mvmctl",
+        target: "x86_64-unknown-linux-gnu",
+        features: RELEASE_FEATURES,
+        max: 370,
+    },
+    ClosureBudget {
+        package: "mvmctl",
+        target: "aarch64-unknown-linux-gnu",
+        features: RELEASE_FEATURES,
+        max: 369,
+    },
+    ClosureBudget {
+        package: "mvm-builder-guest",
+        target: "aarch64-unknown-linux-musl",
+        features: "",
+        max: 88,
+    },
+    ClosureBudget {
+        package: "mvm-agentd",
+        target: "aarch64-unknown-linux-musl",
+        features: "",
+        max: 84,
+    },
+    ClosureBudget {
+        package: "mvm-host-services",
+        target: "aarch64-unknown-linux-musl",
+        features: "",
+        max: 85,
     },
 ];
 
 /// macOS omits the Linux-only confinement and networking dependencies.
-const MACOS_CLOSURE_BUDGET: usize = 346;
+const MACOS_CLOSURE_BUDGET: usize = 345;
 
 /// Maximum distinct packages in the default Linux closure.
-pub(crate) const CLOSURE_BUDGET: usize = 351;
+pub(crate) const CLOSURE_BUDGET: usize = 350;
 
 pub(crate) fn run(workspace: &Path) -> Result<()> {
     for budget in BUDGETS {
@@ -58,12 +99,22 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
 }
 
 fn check_one(workspace: &Path, budget: &ClosureBudget) -> Result<()> {
-    let ClosureBudget { target, max } = *budget;
-    let count = default_closure_crate_count(workspace, target)?;
+    let ClosureBudget {
+        package,
+        target,
+        features,
+        max,
+    } = *budget;
+    let count = closure_crate_count(workspace, budget)?;
+    let surface = if features.is_empty() {
+        "default"
+    } else {
+        features
+    };
     if count > max {
         bail!(
-            "check-closure-budget: mvmctl's default {target} closure is {count} crates, \
-             over the budget of {max} — a new dependency entered the default binary. \
+            "check-closure-budget: {package} ({surface}) {target} closure is {count} crates, \
+             over the budget of {max} — a new dependency entered the measured graph. \
              Drop it, gate it behind an off-by-default feature (or a \
              `[target.'cfg(...)'.dependencies]` table if it is platform-specific), or, if it \
              is genuinely required, bump the budget in xtask/src/check_closure_budget.rs with \
@@ -72,25 +123,38 @@ fn check_one(workspace: &Path, budget: &ClosureBudget) -> Result<()> {
     }
     if count < max {
         eprintln!(
-            "check-closure-budget: {target} {count} crates (budget {max}); deps dropped — \
+            "check-closure-budget: {package} ({surface}) {target} {count} crates (budget {max}); deps dropped — \
              ratchet the budget down to {count}."
         );
     } else {
-        eprintln!("check-closure-budget: {target} {count} crates (at budget {max})");
+        eprintln!(
+            "check-closure-budget: {package} ({surface}) {target} {count} crates (at budget {max})"
+        );
     }
     Ok(())
 }
 
-fn default_closure_crate_count(workspace: &Path, target: &str) -> Result<usize> {
+fn closure_crate_count(workspace: &Path, budget: &ClosureBudget) -> Result<usize> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let output = Command::new(&cargo)
-        .current_dir(workspace)
-        .args([
-            "tree", "-p", "mvmctl", "-e", "no-dev", "--prefix", "none", "--locked", "--target",
-            target,
-        ])
+    let mut command = Command::new(&cargo);
+    command.current_dir(workspace).args([
+        "tree",
+        "-p",
+        budget.package,
+        "-e",
+        "normal,build",
+        "--prefix",
+        "none",
+        "--locked",
+        "--target",
+        budget.target,
+    ]);
+    if !budget.features.is_empty() {
+        command.args(["--features", budget.features]);
+    }
+    let output = command
         .output()
-        .context("running `cargo tree -p mvmctl -e no-dev --target ...`")?;
+        .context("running budgeted `cargo tree -e normal,build --target ...`")?;
     if !output.status.success() {
         bail!(
             "cargo tree failed: {}",
@@ -122,7 +186,20 @@ fn unique_crate_count(tree: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::unique_crate_count;
+    use super::{RELEASE_FEATURES, unique_crate_count};
+
+    #[test]
+    fn release_budget_matches_workflow_features() {
+        let workflow = include_str!("../../.github/workflows/release.yml");
+        let features = workflow
+            .lines()
+            .find_map(|line| line.strip_prefix("  MVMCTL_RELEASE_FEATURES: "))
+            .expect("release workflow declares its feature set");
+        assert_eq!(
+            features, RELEASE_FEATURES,
+            "budget the exact shipped feature set"
+        );
+    }
 
     #[test]
     fn counts_distinct_name_version_pairs() {

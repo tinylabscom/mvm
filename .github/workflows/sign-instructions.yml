@@ -48,7 +48,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 # Serialize rather than cancel: pull requests never trigger this workflow, so
 # cancelling could only kill a signing run already in flight, leaving a
@@ -61,19 +60,46 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  sign:
-    name: Sign and verify instruction files
+  prepare:
+    name: Prepare instruction signing request
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
-
-      - uses: ./.github/actions/apt-deps
-        with:
-          packages: lld
-
+          ref: ${{ github.sha }}
       - uses: ./.github/actions/sign-instructions
         with:
+          phase: prepare
+          cache-key: workspace
+  sign:
+    name: Sign original instruction source
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: ./.github/actions/sign-instructions
+        with:
+          phase: sign
+  verify:
+    name: Verify and publish instruction bundles
+    needs: sign
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: ./.github/actions/sign-instructions
+        with:
+          phase: verify
           cache-key: workspace

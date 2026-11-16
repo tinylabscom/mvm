@@ -65,13 +65,8 @@ mvm-core = { workspace = true, features = ["client", "host-state", "os-keyring"]
 mvm-runtime = { workspace = true, default-features = false }
 # The in-process admitted-boot seam (`run::admit_and_boot_local`). mvm-hostd is
 # already in the mvmctl closure (the CLI links it), so this edge adds no crates
-# to the default build; it does not form a cycle because mvm-sdk — which
-# mvm-hostd pulls in — carries no dependency back on this crate.
+# to the default build; mvm-hostd has no dependency back on this crate.
 mvm-hostd = { workspace = true }
-# Boot admission reads the deploy record a build left beside the rootfs and
-# verifies the booting artifact against it. Already in this crate's closure
-# through mvm-hostd, so the direct edge adds no crates.
-mvm-sdk = { workspace = true, features = ["deploy"] }
 # The guest-agent request type agent-verb grants are keyed on, and the wire
 # protocol the guest process and filesystem operations speak. Already in this
 # crate's closure through mvm-hostd.
@@ -139,8 +134,7 @@ mvm-http = { workspace = true }
 # `clap` feature only. Already in the mvmctl closure through mvm-cli, which is
 # the one crate that turns the feature on.
 clap = { workspace = true, optional = true }
-# Instruction-file provenance include globs (already in this crate's closure
-# through mvm-sdk).
+# Instruction-file provenance include globs.
 globset = { workspace = true }
 # Authored policy profiles and instruction trust policy TOML documents.
 toml = { workspace = true }
@@ -164,6 +158,8 @@ path = "src/bin/emit_instruction_trust_schema.rs"
 required-features = ["schema"]
 
 [dev-dependencies]
+# Embedders opt into authoring explicitly, separately from runtime control.
+mvm-sdk = { workspace = true }
 base64 = { workspace = true }
 mvm-build = { workspace = true, default-features = false, features = ["test-support"] }
 mvm-core = { workspace = true, features = ["test-support"] }

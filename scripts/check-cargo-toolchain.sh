@@ -47,7 +47,8 @@ for workflow in ci ci-main bdd workspace-shard; do
   require_text ".github/workflows/${workflow}.yml" "toolchain: ${toolchain}"
 done
 for workflow in ci cache-warm; do
-  require_text ".github/workflows/${workflow}.yml" "uses: dtolnay/rust-toolchain@${toolchain}"
+  require_text ".github/workflows/${workflow}.yml" "uses: dtolnay/rust-toolchain@"
+  require_text ".github/workflows/${workflow}.yml" "toolchain: ${toolchain}"
 done
 
 embedded_rust="$(sed -n 's/^rust = "\([^"]*\)"$/\1/p' Cargo.toml)"
@@ -58,9 +59,9 @@ require_text crates/mvm-build/src/guest_agent_build.rs '.env_remove("CARGO_ENCOD
 require_text crates/mvm-conformance/tests/steps/cli.rs 'var_os("CARGO_BIN_EXE_mvmctl")'
 
 # eBPF builds core for a target stable Rust does not ship.
-floating_nightly="$(grep -Fc 'rust-toolchain@nightly' .github/workflows/ci-main.yml || true)"
+floating_nightly="$(grep -Ec '^[[:space:]]*toolchain: nightly[[:space:]]*$' .github/workflows/ci-main.yml || true)"
 [[ "$floating_nightly" == 1 ]]
-if grep -Fq 'rust-toolchain@nightly' .github/workflows/cache-warm.yml; then
+if grep -Eq '^[[:space:]]*toolchain: nightly[[:space:]]*$' .github/workflows/cache-warm.yml; then
   echo "check-cargo-toolchain: workspace cache warming must use the stable pin" >&2
   exit 1
 fi

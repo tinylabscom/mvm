@@ -21,9 +21,9 @@
 //! [`HostPort`]), the results ([`LaunchOutcome`], [`MachineState`], the
 //! [`inventory`] records), the guest operations and their payloads
 //! ([`guest`]), the typed errors and their stable codes ([`MvmError`],
-//! [`error_codes`]), signed plans ([`SignedExecutionPlan`]), and the workload
-//! authoring surface ([`authoring`]). The language SDKs reach the same surface
-//! through `libmvm_hostlib`, a C ABI over this crate.
+//! [`error_codes`]), and signed plans ([`SignedExecutionPlan`]). Workload
+//! authoring requires an explicit `mvm-sdk` dependency. The language SDKs
+//! reach the runtime surface through `libmvm_hostlib`, a C ABI over this crate.
 //!
 //! ```no_run
 //! use mvm_client::{LaunchRequest, LifecycleMode, LocalBackend, RootfsSource};
@@ -115,9 +115,6 @@ pub mod vsock_transport;
 pub mod workspace_apply;
 /// Import a pinned Yocto workload image through health boot to a local signed pack.
 pub mod yocto_pack;
-
-/// The workload authoring surface: builders, constructors, IR emission.
-pub use mvm_sdk as authoring;
 
 /// The host signing keypair (`host-signer.ed25519`) every admission signs under.
 pub use mvm_hostd::audit::host_keypair;

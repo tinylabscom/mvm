@@ -24,6 +24,22 @@ on:
         required: false
 
 jobs:
+  macos-hostlib:
+    uses: ./.github/workflows/sdk-macos-hostlib.yml
+    permissions:
+      contents: read
+      actions: read
+    with:
+      channel: npm
+      dry_run: ${{ inputs.dry_run }}
+    secrets:
+      APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+      APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+      APPLE_DEVELOPER_ID_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_IDENTITY }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+
   hostlib:
     name: ${{ matrix.platform }}
     # `@runmvm/mvm` is platform-neutral; each host's library ships in its
@@ -35,8 +51,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: darwin-arm64
-            runner: macos-15
           - platform: linux-x64-gnu
             runner: ubuntu-latest
           - platform: linux-arm64-gnu
@@ -49,68 +63,32 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
 
       - name: Build the in-process host library for this platform
         uses: ./.github/actions/build-hostlib
         with:
           platform: ${{ matrix.platform }}
 
-      - name: Mandatory ad-hoc producer signing
-        if: ${{ runner.os == 'macOS' }}
-        run: |
-          python3 scripts/release/sign_macos.py --producer-adhoc \
-            --payload hostlib-out \
-            --report "${RUNNER_TEMP}/npm-producer-signing.json"
-
-      - name: Retain macOS producer signing evidence
-        if: ${{ always() && runner.os == 'macOS' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: npm-producer-signing-${{ matrix.platform }}
-          path: ${{ runner.temp }}/npm-producer-signing.json
-          if-no-files-found: warn
-
-      - name: Developer ID sign and notarize macOS native payload
-        if: ${{ runner.os == 'macOS' && (!inputs.dry_run || github.ref_type == 'tag') }}
-        env:
-          APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
-          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
-          APPLE_DEVELOPER_ID_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_IDENTITY }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-        run: |
-          python3 scripts/release/sign_macos.py --payload hostlib-out \
-            --skip-unconfigured \
-            --report "${RUNNER_TEMP}/npm-notarization.json"
-
-      - name: Retain macOS notarization evidence
-        if: ${{ runner.os == 'macOS' && (!inputs.dry_run || github.ref_type == 'tag') }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: npm-notarization-${{ matrix.platform }}
-          path: ${{ runner.temp }}/npm-notarization.json
-          if-no-files-found: error
-
-      - name: Mark unsigned branch rehearsal
-        if: ${{ runner.os == 'macOS' && inputs.dry_run && github.ref_type != 'tag' }}
-        run: echo "::notice::Unsigned branch build only; NOT macOS release acceptance evidence."
-
       # The artifact keeps the `<platform>/` directory, so the build job can
       # download every leg into one tree without the five same-named files
       # overwriting each other.
       - name: Upload the platform library
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: hostlib-${{ matrix.platform }}
           path: hostlib-out/
           retention-days: 1
 
   build:
-    needs: hostlib
+    needs: [hostlib, macos-hostlib]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -118,14 +96,17 @@ jobs:
       run:
         working-directory: crates/mvm-sdk/sdks/typescript
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
@@ -163,7 +144,7 @@ jobs:
       # job's default working directory, so it names the package directory
       # the run steps below read from.
       - name: Download the platform libraries
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: hostlib-*
           path: crates/mvm-sdk/sdks/typescript/native-downloads
@@ -209,7 +190,7 @@ jobs:
             '
 
       - name: Upload packed artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: npm-dist
           path: crates/mvm-sdk/sdks/typescript/packed/*.tgz
@@ -245,28 +226,28 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"
 
       - name: Download packed artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: npm-dist
           path: npm-dist
 
       - name: Download Darwin producer signing report
         if: ${{ runner.os == 'macOS' }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: npm-producer-signing-darwin-arm64
           path: signing-reports
 
       - name: Download Darwin final signing report
         if: ${{ runner.os == 'macOS' && (!inputs.dry_run || github.ref_type == 'tag') }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: npm-notarization-darwin-arm64
           path: signing-reports
@@ -289,7 +270,7 @@ jobs:
 
       - name: Retain final Darwin npm package inspection
         if: ${{ always() && runner.os == 'macOS' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: npm-final-package-darwin-arm64
           path: ${{ runner.temp }}/npm-final-package.json
@@ -332,9 +313,9 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
@@ -349,7 +330,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Download packed artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: npm-dist
           path: dist

@@ -38,11 +38,12 @@ jobs:
       matrix:
         suite: [portable, signatures]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
+          toolchain: 1.97.1
           components: clippy
 
       - uses: ./.github/actions/apt-deps
@@ -56,7 +57,7 @@ jobs:
         run: ./scripts/cargo.sh clippy -p mvm-client --all-targets --features tracing-bridge -- -D warnings
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: nextest
 
@@ -155,10 +156,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: 1.97.1
 
       - uses: ./.github/actions/apt-deps
         with:
@@ -181,7 +184,7 @@ jobs:
       - uses: ./.github/actions/install-zigbuild
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: nextest
 
@@ -249,10 +252,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: 1.97.1
 
       - uses: ./.github/actions/apt-deps
         with:
@@ -265,7 +270,7 @@ jobs:
       - uses: ./.github/actions/install-zigbuild
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: nextest
 
@@ -332,10 +337,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: 1.97.1
 
@@ -345,7 +350,7 @@ jobs:
 
       - uses: ./.github/actions/rust-cache
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: nextest
 
@@ -391,12 +396,12 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - uses: ./.github/actions/free-disk
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: 1.97.1
 
@@ -410,7 +415,7 @@ jobs:
       - uses: ./.github/actions/install-zigbuild
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: nextest
 
@@ -491,6 +496,10 @@ jobs:
             printf 'HOME=%s\nMVM_HOME=%s\nTMPDIR=%s\n' "$base/home" "$base/mvm" "$base/tmp"
           } >> "$GITHUB_ENV"
 
+      # Offline graph tests also inspect macOS and non-default features.
+      - name: Fetch locked sources for cross-target graph tests
+        run: cargo fetch --locked
+
       - name: Run the aarch64 workspace tests
         run: cargo nextest run --workspace --exclude mvm-fs --all-targets
 
@@ -512,12 +521,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - uses: ./.github/actions/free-disk
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: 1.97.1
 
@@ -526,7 +535,7 @@ jobs:
           packages: attr cryptsetup-bin lld
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: nextest
 
@@ -576,10 +585,10 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: 1.97.1
           targets: ${{ matrix.target }}
@@ -609,7 +618,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       # No uv, Node or `just` here. All three existed for the `just bdd::run` this
       # lane no longer runs — the suite builds the TypeScript SDK, which is what
@@ -619,7 +628,7 @@ jobs:
       - uses: ./.github/actions/free-disk
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: 1.97.1
           targets: wasm32-wasip1
@@ -710,10 +719,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install stable Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
 
       # The one lane that must keep a floating nightly, and not by oversight.
       # `crates/mvm-hostd/ebpf/rust-toolchain.toml` pins `channel = "nightly"`,
@@ -727,8 +738,9 @@ jobs:
       # file just gained. `check-cargo-toolchain.sh` allows exactly this one and ties
       # the exemption to the `cargo +nightly` that causes it.
       - name: Install nightly Rust toolchain for eBPF build
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
+          toolchain: nightly
           components: rust-src
 
       - uses: ./.github/actions/apt-deps
@@ -818,7 +830,7 @@ jobs:
             --no-default-features --features llvm-23 bpf-linker
 
       - name: Install just
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: just
 
@@ -866,12 +878,14 @@ jobs:
       # the CLI train — `v0.18.0` was a workspace version bump, never a cut
       # release, so this lane once 404'd on an asset nobody had published.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - uses: ./.github/actions/free-disk
 
       - name: Install stable Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
 
       - uses: ./.github/actions/apt-deps
         with:
@@ -886,7 +900,7 @@ jobs:
       # is only worth anchoring on once its signature is checked — which is the
       # same reasoning that made these manifests signed in the first place.
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       - uses: ./.github/actions/rust-cache
         with:
@@ -1074,12 +1088,14 @@ jobs:
       # the guest runtime under test is this tree's.
       MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - uses: ./.github/actions/free-disk
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: 1.97.1
 
       - uses: ./.github/actions/apt-deps
         with:
@@ -1090,7 +1106,7 @@ jobs:
       - uses: ./.github/actions/install-zigbuild
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       - uses: ./.github/actions/rust-cache
         with:
@@ -1245,7 +1261,7 @@ jobs:
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22

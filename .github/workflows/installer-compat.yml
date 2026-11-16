@@ -72,7 +72,7 @@ jobs:
       upgrade: ${{ steps.resolve.outputs.upgrade }}
       latest: ${{ steps.resolve.outputs.latest }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Pick releases from the releases API
         id: resolve
@@ -122,7 +122,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       # v0.16.1's Apple Silicon mvmctl dynamically links libkrunfw. Exercise
       # that immutable release with the dependency it documented rather than
@@ -153,7 +153,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install historical macOS runtime dependency
         if: matrix.runner == 'macos-latest'
@@ -191,7 +191,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install and run the released mvmctl in the container
         env:
@@ -223,7 +223,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       # On a pull request the page's commands run against the install.sh that
       # pull request changes; on the schedule and on dispatch, against the

@@ -1,14 +1,8 @@
-//! An embedder depends on `mvm-client` alone.
+//! Runtime embedders depend on `mvm-client`; authoring opts into `mvm-sdk`.
 //!
-//! Every type a Rust program names to author a workload, launch a machine,
-//! drive its guest and read the results is reachable through `mvm_client::`.
-//! This file imports nothing else from the workspace, so a re-export that
-//! goes missing fails to compile here rather than sending an embedder to a
-//! second crate.
+//! Types to launch a machine, drive its guest and read results are reachable
+//! through `mvm_client::`. Workload authoring uses an explicit SDK dependency.
 
-use mvm_client::authoring::{
-    app, entrypoint_command, local_path, nix_packages, resources, workload,
-};
 use mvm_client::grants::{CpuGrant, Grants, WallClockGrant};
 use mvm_client::guest::{FsEntry, FsEntryKind, FsStat, ProcInfo, ProcStart, ProcWaitEvent};
 use mvm_client::{
@@ -17,6 +11,7 @@ use mvm_client::{
     MachineSpec, MachineState, MvmClient, MvmError, RootfsSource, RootfsSourceParseError,
     SignedExecutionPlan, WorkloadPosture, error_codes,
 };
+use mvm_sdk::{app, entrypoint_command, local_path, nix_packages, resources, workload};
 
 /// The launch request and every part of it are nameable from here.
 #[test]
@@ -71,9 +66,9 @@ fn refusals_carry_codes_from_the_client_surface() {
     assert_eq!(empty, RootfsSourceParseError::Empty);
 }
 
-/// The authoring surface builds a workload through the same dependency.
+/// The authoring surface builds a workload through an explicit SDK dependency.
 #[test]
-fn a_workload_is_authored_through_the_client() {
+fn a_workload_is_authored_through_the_explicit_sdk() {
     let built = workload("embedder")
         .app(
             app("hello")

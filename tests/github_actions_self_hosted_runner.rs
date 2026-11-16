@@ -239,7 +239,7 @@ fn no_untrusted_event_can_place_a_job_on_the_self_hosted_runner() {
         "bench --lane prepared-cold --runs 20 --warmup 2",
         "--out \"$RESULTS_DIR/bench.json\"",
         "if: always()",
-        "actions/upload-artifact@v7",
+        "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
         "${{ runner.temp }}/mvm-physical-cold-${{ github.run_id }}-${{ github.run_attempt }}/bench.json",
         "${{ runner.temp }}/mvm-physical-cold-${{ github.run_id }}-${{ github.run_attempt }}/bench.log",
     ] {

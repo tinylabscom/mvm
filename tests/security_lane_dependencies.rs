@@ -44,6 +44,22 @@ fn hostd_uses_contract_ir_without_the_authoring_sdk() {
 }
 
 #[test]
+fn execution_manifests_do_not_depend_on_authoring() {
+    for package in ["mvm-client", "mvm-runtime", "mvm-hostlib", "mvm-core"] {
+        let manifest = workspace_manifest(&format!("crates/{package}/Cargo.toml"));
+        let dependencies = manifest["dependencies"]
+            .as_table()
+            .expect("execution dependencies must be a table");
+        for forbidden in ["mvm-sdk", "mvm-compiler"] {
+            assert!(
+                !dependencies.contains_key(forbidden),
+                "{package} must consume shared contracts, not {forbidden}"
+            );
+        }
+    }
+}
+
+#[test]
 fn aes_gcm_is_optimized_in_crypto_not_all_of_core() {
     let core = workspace_manifest("crates/mvm-core/Cargo.toml");
     let dependencies = core["dependencies"].as_table().unwrap();

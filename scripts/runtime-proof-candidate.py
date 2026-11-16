@@ -458,10 +458,10 @@ def download_archive(endpoint, archive, *, max_bytes=None):
         stream.close()
 
 
-def retrieve_artifact(source, transfer, metadata=None):
+def retrieve_artifact(source, transfer, metadata=None, *, repository=REPOSITORY):
     if type(transfer.artifact_id) is not int or transfer.artifact_id <= 0:
         raise ValueError("artifact ID must be an actual positive numeric upload ID")
-    endpoint = f"repos/{REPOSITORY}/actions/artifacts/{transfer.artifact_id}"
+    endpoint = f"repos/{repository}/actions/artifacts/{transfer.artifact_id}"
     digest = sha256(transfer.digest)
     metadata = gh_json(endpoint) if metadata is None else metadata
     validate_artifact(metadata, source, (transfer.artifact_id, digest, transfer.name),
@@ -492,6 +492,32 @@ def fetch(args, source):
     if record.get("run_attempt") != producer.run_attempt:
         raise ValueError("runtime artifact name and producer attempt differ")
     return verify_directory(source, args.out_dir, args.kind)
+
+
+def fetch_sbom(source, args):
+    """Retrieve only the digest-pinned SBOM, never executable producer tools."""
+    if os.environ.get("GITHUB_JOB") != "release":
+        raise ValueError("SBOM collection requires the fixed publishing job")
+    if not re.fullmatch(r"[1-9][0-9]*", args.artifact_id):
+        raise ValueError("SBOM artifact ID must be the actual numeric upload ID")
+    expected = sha256(args.content_sha256)
+    metadata = gh_json(f"repos/{REPOSITORY}/actions/artifacts/{args.artifact_id}")
+    name = metadata.get("name")
+    attempt = (re.fullmatch(r"release-sbom-attempt-([1-9][0-9]*)", name)
+               if isinstance(name, str) else None)
+    if not attempt or int(attempt[1]) > source.run_attempt:
+        raise ValueError("SBOM artifact is not from this or a prior run attempt")
+    retrieve_artifact(source, ArtifactTransfer(
+        int(args.artifact_id), args.artifact_digest, name, ("sbom.cdx.json",),
+        args.out_dir, 16 * 1024 * 1024,
+    ), metadata)
+    data = (args.out_dir / "sbom.cdx.json").read_bytes()
+    if hashlib.sha256(data).hexdigest() != expected:
+        raise ValueError("SBOM content differs from the producer output digest")
+    document = json.loads(data, object_pairs_hook=no_duplicate_keys)
+    if not isinstance(document, dict) or document.get("bomFormat") != "CycloneDX":
+        raise ValueError("release SBOM is not a CycloneDX document")
+    return {"sbom.cdx.json": expected}
 
 
 def checksum_pairs(directory, names):
@@ -706,6 +732,11 @@ def main():
     transfer.add_argument("--artifact-id", required=True)
     transfer.add_argument("--artifact-digest", required=True)
     transfer.add_argument("--out-dir", type=Path, required=True)
+    sbom = commands.add_parser("fetch-sbom")
+    sbom.add_argument("--artifact-id", required=True)
+    sbom.add_argument("--artifact-digest", required=True)
+    sbom.add_argument("--content-sha256", required=True)
+    sbom.add_argument("--out-dir", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "emit-upload-context":
         print(json.dumps(emit_upload_context(args.root, args.directory, args.kind), sort_keys=True))
@@ -714,6 +745,8 @@ def main():
     result = {"source_sha": source.sha, "run_attempt": source.run_attempt, "version": source.version}
     if args.command == "fetch":
         result["files"] = fetch(args, source)
+    elif args.command == "fetch-sbom":
+        result["files"] = fetch_sbom(source, args)
     elif args.command == "validate-input":
         result["manifest"] = validate_unsigned_runtime(source, args.directory)
     elif args.command == "prepare-checked":

@@ -1,0 +1,151 @@
+name: Build and sign macOS SDK host library
+
+on:
+  workflow_call:
+    inputs:
+      channel:
+        description: SDK distribution channel (npm or pypi)
+        required: true
+        type: string
+      dry_run:
+        description: Build rehearsal without publishing
+        required: true
+        type: boolean
+    secrets:
+      APPLE_DEVELOPER_ID_P12_BASE64:
+        required: false
+      APPLE_DEVELOPER_ID_P12_PASSWORD:
+        required: false
+      APPLE_DEVELOPER_ID_IDENTITY:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_APP_SPECIFIC_PASSWORD:
+        required: false
+    outputs:
+      artifact-id:
+        description: Immutable final library artifact ID
+        value: ${{ jobs.sign.outputs.artifact-id }}
+      artifact-digest:
+        description: SHA-256 of the final library artifact ZIP
+        value: ${{ jobs.sign.outputs.artifact-digest }}
+
+jobs:
+  build:
+    runs-on: macos-15
+    permissions:
+      contents: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+      library-sha256: ${{ steps.inventory.outputs.library-sha256 }}
+      run-attempt: ${{ steps.inventory.outputs.run-attempt }}
+    env:
+      SDK_CHANNEL: ${{ inputs.channel }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      # Python 3.12.16 has no Darwin ARM64 artifact in actions/python-versions.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13.17"
+      - name: Validate channel
+        run: python3 scripts/release/sdk_hostlib_artifact.py validate-channel --channel "$SDK_CHANNEL"
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: 1.97.1
+      - name: Build host library
+        uses: ./.github/actions/build-hostlib
+        env:
+          RUSTUP_TOOLCHAIN: 1.97.1
+        with:
+          platform: darwin-arm64
+      - name: Mandatory ad-hoc producer signing
+        run: |
+          python3 scripts/release/sign_macos.py --producer-adhoc \
+            --payload hostlib-out \
+            --report "${RUNNER_TEMP}/${SDK_CHANNEL}-producer-signing.json"
+      - name: Retain producer signing evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ${{ inputs.channel }}-producer-signing-darwin-arm64
+          path: ${{ runner.temp }}/${{ inputs.channel }}-producer-signing.json
+          if-no-files-found: warn
+      - name: Bind the library bytes and producer attempt
+        id: inventory
+        run: python3 scripts/release/sdk_hostlib_artifact.py inventory --channel "$SDK_CHANNEL"
+      - name: Upload unsigned library only
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: unsigned-${{ inputs.channel }}-hostlib-${{ github.run_attempt }}
+          path: hostlib-out/darwin-arm64/libmvm_hostlib.dylib
+          if-no-files-found: error
+          retention-days: 1
+
+  sign:
+    needs: build
+    runs-on: macos-15
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+    env:
+      SDK_CHANNEL: ${{ inputs.channel }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13.17"
+      - name: Retrieve and verify immutable producer library
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ needs.build.outputs.artifact-digest }}
+          LIBRARY_SHA256: ${{ needs.build.outputs.library-sha256 }}
+          PRODUCER_ATTEMPT: ${{ needs.build.outputs.run-attempt }}
+        run: |
+          python3 scripts/release/sdk_hostlib_artifact.py fetch --channel "$SDK_CHANNEL" \
+            --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" \
+            --library-sha256 "$LIBRARY_SHA256" --producer-attempt "$PRODUCER_ATTEMPT"
+      - name: Developer ID sign and notarize
+        id: sign
+        if: ${{ !inputs.dry_run || github.ref_type == 'tag' }}
+        env:
+          APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_DEVELOPER_ID_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          python3 scripts/release/sign_macos.py --payload hostlib-out --skip-unconfigured \
+            --report "${RUNNER_TEMP}/${SDK_CHANNEL}-notarization.json"
+      - name: Retain notarization evidence
+        if: ${{ always() && steps.sign.outcome != 'skipped' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ${{ inputs.channel }}-notarization-darwin-arm64
+          path: ${{ runner.temp }}/${{ inputs.channel }}-notarization.json
+          if-no-files-found: error
+      - name: Mark unsigned branch rehearsal
+        if: ${{ inputs.dry_run && github.ref_type != 'tag' }}
+        run: echo "::notice::Unsigned branch build only; NOT macOS release acceptance evidence."
+      - name: Upload final library only
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ${{ inputs.channel == 'npm' && 'hostlib-darwin-arm64' || 'pypi-hostlib-darwin-arm64' }}
+          path: hostlib-out/
+          if-no-files-found: error
+          retention-days: 1

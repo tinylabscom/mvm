@@ -52,10 +52,12 @@ jobs:
       architecture: ${{ steps.validate.outputs.architecture }}
       docs: ${{ steps.validate.outputs.docs }}
       docs_ledger: ${{ steps.validate.outputs.docs_ledger }}
+      dependencies: ${{ steps.validate.outputs.dependencies }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       # The queue is either a singleton or the one batched shape that
       # scripts/check-merge-queue-policy.sh names. Batching is safe only
@@ -94,7 +96,7 @@ jobs:
           set -euo pipefail
 
           set_all() {
-            for output in code architecture docs docs_ledger; do
+            for output in code architecture docs docs_ledger dependencies; do
               echo "${output}=true" >> "$GITHUB_OUTPUT"
             done
           }
@@ -140,7 +142,8 @@ jobs:
 
           CHANGED_FILE=$(mktemp)
           trap 'rm -f "$CHANGED_FILE"' EXIT
-          if ! git diff --name-only -z "$BASE" "$HEAD" > "$CHANGED_FILE" 2>/dev/null; then
+          # Classify both sides of renames, including removed dependency inputs.
+          if ! git diff --name-only -z --no-renames "$BASE" "$HEAD" > "$CHANGED_FILE" 2>/dev/null; then
             set_all
             echo "could not diff $BASE..$HEAD — running every lane to stay safe"
             exit 0
@@ -201,6 +204,12 @@ jobs:
             echo "architecture=false" >> "$GITHUB_OUTPUT"
           fi
 
+          if grep -zE '(^|/)(Cargo\.toml|Cargo\.lock|deny\.toml|audit\.toml|rust-toolchain[^/]*)$|^third_party/|(^|/)\.cargo/|^\.github/(actions|workflows)/|^tests/test_.*supply_chain.*\.py$' "$CHANGED_FILE" >/dev/null; then
+            echo "dependencies=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "dependencies=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Validate classification
         id: validate
         env:
@@ -208,6 +217,7 @@ jobs:
           ARCHITECTURE: ${{ steps.decide.outputs.architecture }}
           DOCS: ${{ steps.decide.outputs.docs }}
           DOCS_LEDGER: ${{ steps.decide.outputs.docs_ledger }}
+          DEPENDENCIES: ${{ steps.decide.outputs.dependencies }}
         run: |
           set -euo pipefail
           validate() {
@@ -221,6 +231,12 @@ jobs:
           validate architecture "$ARCHITECTURE"
           validate docs "$DOCS"
           validate docs_ledger "$DOCS_LEDGER"
+          validate dependencies "$DEPENDENCIES"
+
+  supply-chain:
+    needs: [scope]
+    if: ${{ needs.scope.outputs.dependencies == 'true' }}
+    uses: ./.github/workflows/supply-chain.yml
 
   # Decide, before the heavy lanes start, whether the x86_64 workspace suite
   # runs on the idle self-hosted KVM box or on hosted runners. Checkout cleans
@@ -290,10 +306,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: 1.97.1
 
       - uses: ./.github/actions/apt-deps
         with:
@@ -314,11 +332,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
+          toolchain: 1.97.1
           components: rustfmt, clippy
 
       - uses: ./.github/actions/apt-deps
@@ -390,6 +409,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
           python3 scripts/test-runtime-proof-candidate.py
+          python3 -m unittest discover -s tests -p 'test_*supply_chain*.py'
           python3 scripts/test_claude_demo_consumer.py
           python3 scripts/test_claude_demo_preflight.py
           python3 scripts/test_e2e_failure_manifest.py
@@ -414,7 +434,7 @@ jobs:
         run: bash .githooks/pre-commit.test.sh
 
       - name: Install just for scoped feedback tests
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: just
 
@@ -458,11 +478,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
+          toolchain: 1.97.1
           components: clippy
 
       - uses: ./.github/actions/apt-deps
@@ -525,12 +546,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: 1.97.1
 
@@ -569,11 +590,11 @@ jobs:
         run: actionlint .github/workflows/*.yml
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v8.2.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           version: "0.12.5"
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"
 
@@ -825,10 +846,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: 1.97.1
 
       # rust-toolchain.toml overrides the action's toolchain, so a target
       # installed through the action is not the one cargo builds with and
@@ -857,14 +880,16 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         env:
           GIT_CONFIG_COUNT: "1"
           GIT_CONFIG_KEY_0: core.autocrlf
           GIT_CONFIG_VALUE_0: "false"
 
       - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: 1.97.1
 
       - name: Run supported Windows identity and producer tests
         shell: pwsh
@@ -872,7 +897,7 @@ jobs:
 
       - name: Retain Windows test inventory and results
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: windows-identity-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/mvm-windows-identity
@@ -890,10 +915,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: 1.97.1
 
@@ -914,7 +939,7 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, runners, docs-static, docs-ledger, lint-core, lint-policy, lint-feature-clippy, lint-windows, test-windows-identity, test-workspace-build, test-workspace]
+    needs: [scope, runners, docs-static, docs-ledger, lint-core, lint-policy, lint-feature-clippy, lint-windows, test-windows-identity, test-workspace-build, test-workspace, supply-chain]
     # Every admission check runs in an upstream lane; this aggregate only
     # inspects their results, so it needs no checkout or full hosted image.
     # A failed scope or picker skips its dependents, so it fails here too.
@@ -928,6 +953,8 @@ jobs:
           DOCS_RESULT: ${{ needs.docs-static.result }}
           LEDGER: ${{ needs.scope.outputs.docs_ledger }}
           LEDGER_RESULT: ${{ needs.docs-ledger.result }}
+          DEPENDENCIES: ${{ needs.scope.outputs.dependencies }}
+          DEPENDENCIES_RESULT: ${{ needs.supply-chain.result }}
         run: |
           set -euo pipefail
           test "$BAD" = false
@@ -939,6 +966,11 @@ jobs:
           case "$LEDGER" in
             true) test "$LEDGER_RESULT" = success || test "$GITHUB_EVENT_NAME" = merge_group ;;
             false) test "$LEDGER_RESULT" = success || test "$LEDGER_RESULT" = skipped ;;
+            *) exit 1 ;;
+          esac
+          case "$DEPENDENCIES" in
+            true) test "$DEPENDENCIES_RESULT" = success ;;
+            false) test "$DEPENDENCIES_RESULT" = success || test "$DEPENDENCIES_RESULT" = skipped ;;
             *) exit 1 ;;
           esac
 
@@ -980,10 +1012,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: 1.97.1
 
@@ -997,7 +1029,7 @@ jobs:
       - uses: ./.github/actions/install-zigbuild
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: nextest
 
@@ -1021,7 +1053,7 @@ jobs:
           df -h /
 
       - name: Upload the workspace test archive
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: workspace-tests
           path: ${{ runner.temp }}/workspace-tests.tar.zst

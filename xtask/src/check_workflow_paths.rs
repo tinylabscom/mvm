@@ -84,11 +84,7 @@ fn action_version_conflicts(workflows: &[(String, String)]) -> Vec<String> {
         }
     }
     seen.into_iter()
-        .filter(|(action, refs)| {
-            // The toolchain action encodes the channel in the ref, so
-            // several "versions" of it is the intended usage.
-            refs.len() > 1 && !FLOATING_REF_ALLOWED.contains(&action.as_str())
-        })
+        .filter(|(_, refs)| refs.len() > 1)
         .map(|(action, refs)| {
             let detail = refs
                 .iter()
@@ -100,23 +96,7 @@ fn action_version_conflicts(workflows: &[(String, String)]) -> Vec<String> {
         .collect()
 }
 
-/// Third-party action refs allowed to float, and why.
-///
-/// `dtolnay/rust-toolchain` publishes no version tags: the channel is the
-/// branch name, and `@master` is the documented entry point when the
-/// toolchain is supplied as an input instead — which is how the lanes that
-/// pin a nightly *date* have to call it. Floating the action to pin the
-/// compiler is the trade that action's design forces.
-const FLOATING_REF_ALLOWED: [&str; 1] = ["dtolnay/rust-toolchain"];
-
-/// `uses:` refs that move under us.
-///
-/// `@main` and `@master` re-resolve on every run, so what executes is
-/// whatever the upstream default branch holds at that moment. This is not
-/// hypothetical distance: when this gate was written, all 18 of this
-/// repository's `nix-installer-action` uses floated on `@main`, which was
-/// 43 commits ahead of the newest release — 43 unreviewed commits running
-/// on the lanes that build and sign what we publish.
+/// Literal action references; aliases or missing refs are refused by the pin check.
 fn third_party_action_refs(src: &str) -> impl Iterator<Item = (&str, &str)> {
     src.lines().filter_map(|line| {
         // Both step forms: `uses:` under a `- name:`, and `- uses:` where
@@ -127,20 +107,24 @@ fn third_party_action_refs(src: &str) -> impl Iterator<Item = (&str, &str)> {
         let rest = trimmed
             .strip_prefix("- uses:")
             .or_else(|| trimmed.strip_prefix("uses:"))?
-            .trim();
+            .split_whitespace()
+            .next()?
+            .trim_matches(['\'', '"']);
         // Local composite actions and reusable workflows are our own code.
         if rest.starts_with("./") {
             return None;
         }
-        let (action, git_ref) = rest.split_once('@')?;
-        Some((action, git_ref.split_whitespace().next()?))
+        Some(rest.split_once('@').unwrap_or((rest, "")))
     })
 }
 
 fn floating_action_refs(src: &str) -> Vec<String> {
     third_party_action_refs(src)
-        .filter(|(action, git_ref)| {
-            matches!(*git_ref, "main" | "master") && !FLOATING_REF_ALLOWED.contains(action)
+        .filter(|(_, git_ref)| {
+            git_ref.len() != 40
+                || !git_ref
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         })
         .map(|(action, git_ref)| format!("{action}@{git_ref}"))
         .collect()
@@ -177,16 +161,17 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
         let src =
             std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+            .strip_prefix(workspace)
+            .unwrap_or(path)
+            .display()
+            .to_string();
 
         checked_actions += third_party_action_refs(&src).count();
         sources.push((name.clone(), src.clone()));
         for floating in floating_action_refs(&src) {
             problems.push(format!(
-                "{name}: {floating} floats on a branch — pin it to a tag or \
-                 commit, or a run executes whatever upstream pushed last"
+                "{name}: {floating} lacks an immutable full commit SHA — \
+                 tags and branches can change; select toolchain versions through action inputs"
             ));
         }
         if unversioned_setup_uv_steps(&src) > 0 {
@@ -246,8 +231,8 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
             "check-workflow-paths: {} unsound workflow reference(s):\n  {}\n\n\
              A step pointing at a path that no longer exists fails before it \
              runs anything — update the workflow in the same change that moves \
-             or renames the directory. A step pointing at a branch runs \
-             whatever upstream pushed last: pin it to a tag or a commit sha, \
+             or renames the directory. A step pointing at a tag or branch runs \
+             whatever upstream publishes there: pin it to a full commit SHA, \
              with the version in a trailing comment.",
             problems.len(),
             problems.join("\n  ")
@@ -281,7 +266,7 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
     }
 
     eprintln!(
-        "check-workflow-paths: clean ({} working-directory, {} fuzz target(s), {} cargo -p package(s), {} pinned action ref(s) across {} workflow file(s))",
+        "check-workflow-paths: clean ({} working-directory, {} fuzz target(s), {} cargo -p package(s), {} pinned action ref(s) across {} workflow/action input(s))",
         checked_dirs,
         checked_targets,
         checked_packages,
@@ -425,8 +410,34 @@ fn workflow_files(root: &Path) -> Result<Vec<std::path::PathBuf>> {
             out.push(path);
         }
     }
+    let actions = root.join(".github/actions");
+    if actions.exists() {
+        collect_action_files(&actions, &mut out)?;
+    }
     out.sort();
     Ok(out)
+}
+
+fn collect_action_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            bail!("action inputs must not be symlinks: {}", path.display());
+        }
+        if kind.is_dir() {
+            collect_action_files(&path, out)?;
+        } else if kind.is_file()
+            && matches!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some("action.yml" | "action.yaml")
+            )
+        {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 /// The body of one top-level job, by name.
@@ -608,7 +619,7 @@ mod tests {
         for required in [
             "shard: [\"0/2\", \"1/2\"]",
             "run: just e2e::docs",
-            "uses: actions/checkout@v6\n",
+            "uses: actions/checkout@",
             "MVM_BDD_ALLOW_RUNTIME_CANDIDATE_SKIP: ${{ inputs.allow_runtime_candidate_skip }}",
         ] {
             assert!(linux.contains(required), "missing {required}");
@@ -694,7 +705,7 @@ mod tests {
             "shard: [\"0/2\", \"1/2\"]",
             "MVM_BDD_SNAPSHOT: \"1\"",
             "just e2e::docs",
-            "uses: actions/checkout@v6\n",
+            "uses: actions/checkout@",
         ] {
             assert!(mac.contains(required), "missing {required}");
         }
@@ -882,8 +893,9 @@ mod tests {
         assert!(lane.contains("needs: [scope]"));
         assert_eq!(job_if(lane), "needs.scope.outputs.docs == 'true'");
         for setup in [
-            "actions/checkout@v6",
-            "dtolnay/rust-toolchain@1.97.1",
+            "actions/checkout@",
+            "dtolnay/rust-toolchain@",
+            "toolchain: 1.97.1",
             "uses: ./.github/actions/rust-cache",
         ] {
             assert!(lane.contains(setup));
@@ -902,7 +914,7 @@ mod tests {
             "docs: ${{ steps.validate.outputs.docs }}",
             "DOCS: ${{ steps.decide.outputs.docs }}",
             "validate docs \"$DOCS\"",
-            "for output in code architecture docs docs_ledger; do",
+            "for output in code architecture docs docs_ledger dependencies; do",
         ] {
             assert!(scope.contains(wiring));
         }
@@ -951,6 +963,7 @@ mod tests {
                 .env("ARCHITECTURE", "false")
                 .env("DOCS", docs)
                 .env("DOCS_LEDGER", "false")
+                .env("DEPENDENCIES", "false")
                 .env("GITHUB_OUTPUT", temp.path())
                 .output()
                 .unwrap();
@@ -989,6 +1002,8 @@ mod tests {
                             .env("DOCS_RESULT", lane)
                             .env("LEDGER", "false")
                             .env("LEDGER_RESULT", "skipped")
+                            .env("DEPENDENCIES", "false")
+                            .env("DEPENDENCIES_RESULT", "skipped")
                             .output()
                             .unwrap();
                         let expected = !bad
@@ -1241,7 +1256,7 @@ mod tests {
         );
         assert!(test.contains(
             "needs: [scope, runners, docs-static, docs-ledger, lint-core, lint-policy, \
-             lint-feature-clippy, lint-windows, test-windows-identity, test-workspace-build, test-workspace]"
+             lint-feature-clippy, lint-windows, test-windows-identity, test-workspace-build, test-workspace, supply-chain]"
         ));
         let test_main = job_block(&main, "test-main");
         assert!(test_main.contains("name: Test (main)"));
@@ -1336,7 +1351,7 @@ mod tests {
         }
 
         let test_workspace = job_block(&workflow, "test-workspace");
-        assert!(!test_workspace.contains("uses: actions/cache@v5"));
+        assert!(!test_workspace.contains("uses: actions/cache@"));
         assert_workspace_suite_compiles_once_and_runs_everything(&workflow, &main);
         assert_aarch64_suite_compiles_once_and_runs_everything(&main);
         for expected in [
@@ -1884,13 +1899,14 @@ mod tests {
         );
     }
 
-    /// A branch ref re-resolves on every run, so what executes is whatever
-    /// upstream pushed last.
+    /// Tags and branches both move; toolchain inputs do not require floating action code.
     #[test]
     fn a_branch_ref_is_reported_and_a_pinned_one_is_not() {
         let floating = "\
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: some/other-action@master
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
 ";
         let found = floating_action_refs(floating);
         assert_eq!(
@@ -1898,18 +1914,20 @@ mod tests {
             vec![
                 "DeterminateSystems/nix-installer-action@main".to_string(),
                 "some/other-action@master".to_string(),
+                "actions/checkout@v6".to_string(),
+                "dtolnay/rust-toolchain@master".to_string(),
             ]
         );
 
         let pinned = "\
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-      - uses: actions/checkout@v6
+      - uses: \"actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd\"
       - uses: ./.github/actions/rust-cache
       - uses: ./.github/workflows/bdd.yml
 ";
         assert!(
             floating_action_refs(pinned).is_empty(),
-            "a pinned ref, a tag, a local action and a reusable workflow are all fine"
+            "full commit refs, local actions and reusable workflows are allowed"
         );
 
         // The trailing `# v22` comment must not be read as part of the ref.
@@ -1919,12 +1937,64 @@ mod tests {
             "the sha must parse without the version comment attached"
         );
 
-        // The documented exception, and only for the action that needs it.
-        assert!(floating_action_refs("      - uses: dtolnay/rust-toolchain@master\n").is_empty());
+        for reference in [
+            "actions/checkout@de0fac2",
+            "actions/checkout",
+            "*action_alias",
+        ] {
+            assert_eq!(
+                floating_action_refs(&format!("uses: {reference}\n")).len(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn composite_actions_are_checked_recursively_and_share_version_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let workflows = temp.path().join(".github/workflows");
+        let nested = temp.path().join(".github/actions/outer/inner");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        let workflow = workflows.join("release.yml");
+        let action = nested.join("action.yaml");
+        std::fs::write(
+            &workflow,
+            "uses: owner/action@1111111111111111111111111111111111111111\n",
+        )
+        .unwrap();
+        std::fs::write(&action, "uses: owner/action@main\n").unwrap();
+        let files = workflow_files(temp.path()).unwrap();
+        assert_eq!(files.len(), 2);
+        let sources = files
+            .iter()
+            .map(|path| {
+                (
+                    path.display().to_string(),
+                    std::fs::read_to_string(path).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
-            floating_action_refs("      - uses: dtolnay/other@master\n").len(),
-            1,
-            "the exception is per-action, not a blanket pass for the owner"
+            floating_action_refs(&std::fs::read_to_string(action).unwrap()),
+            ["owner/action@main"]
+        );
+        assert_eq!(action_version_conflicts(&sources).len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn composite_symlinks_cannot_escape_or_loop_the_scan() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
+        let actions = temp.path().join(".github/actions");
+        std::fs::create_dir_all(&actions).unwrap();
+        std::os::unix::fs::symlink(&actions, actions.join("loop")).unwrap();
+        assert!(
+            workflow_files(temp.path())
+                .unwrap_err()
+                .to_string()
+                .contains("symlinks")
         );
     }
 
@@ -1974,17 +2044,11 @@ mod tests {
         );
     }
 
-    /// No workflow in the tree may float, exception aside.
+    /// Neither workflows nor nested composite actions may use mutable refs.
     #[test]
     fn no_workflow_floats_a_third_party_action() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join(".github/workflows");
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().is_none_or(|e| e != "yml") {
-                continue;
-            }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        for path in workflow_files(&root).unwrap() {
             let src = std::fs::read_to_string(&path).unwrap();
             assert!(
                 floating_action_refs(&src).is_empty(),

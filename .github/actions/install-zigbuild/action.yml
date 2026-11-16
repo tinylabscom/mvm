@@ -150,7 +150,7 @@ runs:
           exit 1
         fi
         echo "rust_version=${RUST_VERSION}" >> "$GITHUB_OUTPUT"
-        rustup toolchain install "${RUST_VERSION}" --profile minimal
+        rustup toolchain install "${RUST_VERSION}" --profile minimal --no-self-update
         rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl \
           aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu \
           --toolchain "${RUST_VERSION}"
