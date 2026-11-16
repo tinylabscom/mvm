@@ -68,6 +68,16 @@ above. Nothing in the next section is demonstrated.
 
 ### Proposed: post-quantum roadmap. None of it is implemented.
 
+This section is held to the code mechanically. `cargo xtask check-pq-claims`
+fails when `Cargo.lock` gains a post-quantum implementation crate (ML-KEM,
+ML-DSA, SLH-DSA, liboqs, pqcrypto and their pre-standard names) while the
+"not implemented today" sentence below is still here, and fails when the
+sentence is removed with no such crate behind it. So when the quantum work
+lands, the build tells whoever lands it to rewrite these notes: move what
+shipped into **Implemented**, what the demo shows into **Demonstrated**, and
+leave only what is still ahead here. It is a signal, not a proof: a vendored or
+renamed implementation would pass unnoticed.
+
 Say this regardless of whether anyone asks:
 
 > Today, MVM uses Ed25519 for execution-plan and audit signing. Our proposed
