@@ -1,0 +1,12 @@
+# The registry policy a production run of the mission node image needs.
+# Install it as the host's OCI policy, or point MVM_OCI_POLICY at it.
+#
+# It trusts one registry and exactly one signer: the workflow that publishes
+# this image, run from main. The signature is checked with the `cosign` binary,
+# which must be on PATH.
+allowed_registries = ["ghcr.io"]
+require_signatures = true
+
+[[cosign]]
+certificate_identity = "https://github.com/tinylabscom/mvm/.github/workflows/mission-node-image.yml@refs/heads/main"
+certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
