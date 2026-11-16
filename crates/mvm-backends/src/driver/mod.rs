@@ -30,6 +30,18 @@ pub(crate) fn socket_tempdir() -> tempfile::TempDir {
         .expect("create short private socket fixture directory")
 }
 
+/// Kill a child that timed out or failed during boot, and reap it, so a
+/// long-lived parent never accumulates zombies. Failures are logged rather
+/// than returned: the caller is already on the error path this exists for.
+pub(crate) fn kill_and_reap(child: &mut std::process::Child) {
+    if let Err(error) = child.kill() {
+        tracing::warn!(%error, pid = child.id(), "failed to kill child on error path");
+    }
+    if let Err(error) = child.wait() {
+        tracing::warn!(%error, pid = child.id(), "failed to reap killed child");
+    }
+}
+
 /// Host-dialable workload services. Guest-dialed and builder-only services
 /// must never be exposed through a workload's host connection API.
 fn host_dialable_port(port: u32) -> bool {
@@ -43,6 +55,40 @@ fn host_dialable_port(port: u32) -> bool {
 mod tests {
     use super::host_dialable_port;
     use mvm_net::channel::GuestService;
+
+    #[test]
+    fn kill_and_reap_leaves_no_zombie() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("300")
+            .spawn()
+            .expect("spawn sleep fixture");
+        let pid = i32::try_from(child.id()).expect("child pid fits pid_t");
+        super::kill_and_reap(&mut child);
+        // The helper must have reaped the child: a raw WNOHANG waitpid then
+        // finds no child at all (ECHILD). A zombie would be reported
+        // reapable (waitpid returns its pid).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let mut status = 0;
+            // SAFETY: `pid` names our own just-spawned child; `status` is a
+            // writable int buffer read only after a successful call.
+            let found = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+            if found == -1 {
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::ECHILD),
+                    "waitpid failed for a reason other than the child being reaped"
+                );
+                return;
+            }
+            assert_ne!(found, pid, "child was left a zombie: killed but not reaped");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "killed child did not exit within the deadline"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 
     #[test]
     fn socket_fixture_binds_nested_endpoints_and_cleans_up() {

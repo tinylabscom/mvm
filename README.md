@@ -38,7 +38,9 @@ npm install @runmvm/mvm
 ```
 
 Nothing else is required for a release install: no Docker, no host Nix, no
-Homebrew packages. A source build on macOS 13–25 still needs the Homebrew
+Homebrew packages. On macOS 13–25 that rests on the libkrun tier packaged in
+the signed archive; a guest boot from that archive on macOS 13–25 hardware has
+no recorded witness yet. A source build on macOS 13–25 still needs the Homebrew
 libkrun packages.
 `mvmctl doctor` checks the host and says what is missing. Source builds have a
 few extra steps, covered in
