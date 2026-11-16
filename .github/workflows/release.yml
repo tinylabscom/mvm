@@ -1264,12 +1264,13 @@ jobs:
           retention-days: 90
 
   published-package-smoke:
-    needs: [verify-release]
+    needs: [verify-release, distro-packages]
     if: ${{ github.event_name == 'push' }}
     uses: ./.github/workflows/distro-packages.yml
     with:
       release_tag: ${{ github.ref_name }}
       published_packages: true
+      payload_attempt: ${{ needs.distro-packages.outputs.artifact_attempt }}
 
   recipe-install-smoke:
     needs: [verify-release]

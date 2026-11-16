@@ -325,10 +325,16 @@ class ReleaseSmokeWorkflowShapeTests(unittest.TestCase):
         # github.run_attempt of the consumer is 2; naming the consumer's own
         # attempt would look for artifacts that were never uploaded.
         packages = (WORKFLOWS / "distro-packages.yml").read_text()
+        release = (WORKFLOWS / "release.yml").read_text()
         self.assertIn("artifact_attempt: ${{ github.run_attempt }}", packages)
         consumer = packages.split("  install-smoke:", 1)[1]
         self.assertEqual(consumer.count("needs.package.outputs.artifact_attempt"), 2)
         self.assertNotIn("github.run_attempt", consumer)
+        producer = packages.split("  package:", 1)[1].split("  install-smoke:", 1)[0]
+        self.assertIn("name: distro-package-payloads-attempt-${{ inputs.payload_attempt }}",
+                      producer)
+        self.assertIn("payload_attempt: ${{ needs.distro-packages.outputs.artifact_attempt }}",
+                      release)
 
 
 if __name__ == "__main__":

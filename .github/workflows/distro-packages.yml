@@ -29,6 +29,14 @@ on:
         description: Install the exact published packages instead of rebuilding; reuse this run's payload manifests
         type: boolean
         default: false
+      payload_attempt:
+        description: Attempt that produced the original payload manifests for published packages
+        type: string
+        default: ""
+    outputs:
+      artifact_attempt:
+        description: Attempt that produced this workflow's package payload manifests
+        value: ${{ jobs.package.outputs.artifact_attempt }}
   workflow_dispatch:
     inputs:
       release_tag:
@@ -77,6 +85,14 @@ jobs:
       artifact_attempt: ${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v6
+
+      - name: Require a producing attempt for published payloads
+        if: ${{ inputs.published_packages }}
+        env:
+          PAYLOAD_ATTEMPT: ${{ inputs.payload_attempt }}
+        run: |
+          [[ "$PAYLOAD_ATTEMPT" =~ ^[1-9][0-9]*$ ]] ||
+            { echo "::error::published payloads need the producing package attempt" >&2; exit 1; }
 
       # Match installer v3's SHA256-verified bootstrap and the release signer's
       # cosign version. It verifies --new-bundle-format bundles; cosign v3
@@ -184,7 +200,7 @@ jobs:
         if: ${{ inputs.published_packages }}
         uses: actions/download-artifact@v8
         with:
-          name: distro-package-payloads-attempt-${{ github.run_attempt }}
+          name: distro-package-payloads-attempt-${{ inputs.payload_attempt }}
           path: distro-packages
 
       # A release build packages under the tree's version, which the tag
