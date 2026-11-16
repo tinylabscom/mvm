@@ -85,6 +85,26 @@ fn boot_command_delivers_canonical_proxy_env_without_changing_argv_or_cwd() {
 }
 
 #[test]
+fn boot_command_delivers_proxy_from_current_endpoint_session() {
+    let (_env, _dir) = isolated();
+    let name = "boot-current-endpoint";
+    let state = mvm_core::config::vm_state_dir(name);
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(
+        state.join(mvm_vmm::host::network_endpoint_spawn::SUBST_SESSION_FILE),
+        b"1",
+    )
+    .unwrap();
+    assert!(!mvm_core::config::vm_vsock_egress_marker_path(name).exists());
+    let process = boot_command_process(name, command(BTreeMap::new())).unwrap();
+    for (key, value) in
+        mvm_core::guest_netd::proxy_env_vars(mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN)
+    {
+        assert_eq!(process.env.get(&key), Some(&value), "{key}");
+    }
+}
+
+#[test]
 fn boot_command_delivers_canonical_ca_and_substitution_env() {
     let (_env, _dir) = isolated();
     let name = "boot-substitution";

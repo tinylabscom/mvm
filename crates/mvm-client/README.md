@@ -45,6 +45,11 @@ by variable name without reporting either value. Without provisioned egress
 environment, caller configuration is unchanged and an empty environment stays
 empty.
 
+Plain endpoints use the existing authenticated endpoint-session state as well
+as the legacy egress marker to select the canonical proxy environment. An
+endpoint PID alone is insufficient. Egress CA paths are merged after proxy
+selection, so CA-only state cannot suppress the proxy variables.
+
 This delivers canonical environment to the guest process request; it is not
 additional admission, network enforcement, workload readiness, or protected
 output evidence. Boot commands remain DevOnly, sealed guests still refuse
