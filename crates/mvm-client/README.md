@@ -55,6 +55,32 @@ additional admission, network enforcement, workload readiness, or protected
 output evidence. Boot commands remain DevOnly, sealed guests still refuse
 them, and the existing environment denylist re-admits no denied variables.
 
+### App-session process stdout/stderr
+
+`guest::ProcessOutputs` owns a bounded observation of an existing process token.
+It uses the same capability-checked, authenticated `ProcWait` operation as
+`guest::wait_process`; it does not start a command, widen its grant, create a
+capture producer or write transcript history. One reader remains owned through
+process termination even when its UI is hidden. Following the same machine/token
+again reuses that reader, while changing the token retires the previous local
+observation without signalling the guest process.
+
+Each reader retains the newest 400 chunks / 1 MiB with source-local sequence,
+separate stdout/stderr, dropped-record/byte counters and explicit terminal or
+unavailable state. Debug output omits payload bytes. There are at most 32
+tracked machines per service; terminal windows can be evicted under pressure,
+and a full active set refuses another observation before opening its connection.
+Opening/authentication does not hold the service registry lock. Local retirement
+shuts down the reader's socket and bounds its worker join to one second; an
+unconfirmed join is not reported as confirmed on a later close.
+
+The guest process API consumes output buffers. Competing readers, an evicted
+window or a disconnected app cannot recover bytes already consumed. Closing the
+local socket does not withdraw an already-dispatched guest wait and never sends
+a process-kill or VM-stop request. A transport failure leaves completion unknown
+and withholds its old display window. This is app-session observation, not
+protected history, original-native-owner custody or off-host provenance.
+
 `input_journal` owns the encrypted machine-exec journal and its per-machine
 lock for execution, checkpoint cursors, and replay. An absent journal is an
 empty history; an unreadable journal or dangling journal symlink is an error.
