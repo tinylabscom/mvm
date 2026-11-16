@@ -286,7 +286,10 @@ fn start_admitted_with_finalization(
     // can never authorize another launch, whatever the start's outcome.
     admitted.dispatched = true;
     if cli_transient
-        && mvm_runtime::catalog::descriptor(backend.kind()).is_workload
+        && (mvm_runtime::catalog::descriptor(backend.kind()).is_workload
+            // The hermetic mock is not a shipped workload backend, but it
+            // exercises this exact bridge handoff in CLI integration tests.
+            || backend.kind() == mvm_core::vm_backend::BackendKind::Mock)
         && let Err(err) = super::stash_plan_for_bridge(&config)
     {
         return Err(CliStartFailure::Unrecorded(err).into());
