@@ -106,7 +106,6 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-cli | `src/commands/env/artifact_verify.rs` | 1 | network fetch | curl of the pinned image-set manifest | CLI (`mvmctl`) | - | - | `helper_command` env scrub | cli-only |
 | mvm-cli | `src/commands/env/builder_vm/vm_helpers.rs` | 1 | host probe | ps to find builder processes | CLI (`mvmctl`) | - | - | `helper_command` env scrub | cli-only |
 | mvm-cli | `src/commands/env/uninstall.rs` | 1 | shell script | sh -c uninstall step | CLI (`mvmctl`) | - | - | `helper_command` env scrub | cli-only |
-| mvm-cli | `src/commands/image/trust.rs` | 1 | toolchain | cosign verify | CLI (`mvmctl`) | - | - | `helper_command` env scrub | cli-only |
 | mvm-cli | `src/commands/ops/config.rs` | 1 | user editor | $EDITOR for `mvmctl config edit` | CLI (`mvmctl`) | - | - | `helper_command` env scrub | cli-only |
 | mvm-cli | `src/commands/ops/secret.rs` | 1 | user opener | xdg-open / open of an OAuth URL | CLI (`mvmctl`) | - | - | `helper_command` env scrub | cli-only |
 | mvm-cli | `src/commands/pool/refill.rs` | 1 | mvmctl self re-exec | detached `mvmctl` pool refill helper | CLI (`mvmctl`) | - | - | `helper_command` env scrub | cli-only |
@@ -117,6 +116,7 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-cli | `src/doctor/toolchain.rs` | 1 | host probe | `<tool> --version` probes in doctor | CLI (`mvmctl`) | - | - | `helper_command` env scrub | cli-only |
 | mvm-cli | `src/host_binaries/payload_build.rs` | 2 | toolchain | cargo zigbuild of the embedded host binaries (refusal is in host_binaries/source.rs) | CLI (`mvmctl`) | - | - | `helper_command` env scrub | cli-only |
 | mvm-cli | `src/update.rs` | 2 | mvmctl self re-exec | `--version` smoke test and `bootstrap` of the freshly installed mvmctl | CLI (`mvmctl`) | - | - | `helper_command` env scrub | cli-only |
+| mvm-client | `src/image_cache/trust.rs` | 1 | toolchain | cosign verify for production OCI policy | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub; check-no-cli-shellout | fixed-argv-utility |
 | mvm-client | `src/secret/source.rs` | 1 | password manager | run the user's configured secret-source CLI (op, etc.) to read a credential | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub; check-no-cli-shellout | bounded-user-adapter |
 | mvm-conformance | `src/vmm_reaper.rs` | 3 | test harness | ps / kill / sudo to reap leaked VMMs in conformance runs | dev harness, not shipped | - | - | `helper_command` env scrub | test-only |
 | mvm-core | `src/bounded_run.rs` | 1 | test harness | test-support only: writes a test script through a short-lived sh (absent from a build without the test-support feature) | dev harness, not shipped | CHS | - | `helper_command` env scrub | test-only |
@@ -156,8 +156,8 @@ Totals: 186 production sites in 96 files.
 | mvm-build | 27 |
 | mvm-builder-guest | 32 |
 | mvm-capture | 6 |
-| mvm-cli | 27 |
-| mvm-client | 1 |
+| mvm-cli | 26 |
+| mvm-client | 2 |
 | mvm-conformance | 3 |
 | mvm-core | 14 |
 | mvm-fs | 2 |
@@ -170,10 +170,10 @@ Totals: 186 production sites in 96 files.
 |---|--:|--:|
 | bounded-fixed-argv-utility | 12 | 6 |
 | bounded-user-adapter | 1 | 1 |
-| cli-only | 33 | 23 |
+| cli-only | 32 | 22 |
 | embedder-refused | 11 | 8 |
 | embedder-refused-by-caller | 8 | 1 |
-| fixed-argv-utility | 9 | 5 |
+| fixed-argv-utility | 10 | 6 |
 | guest-side | 60 | 27 |
 | open-review | 12 | 3 |
 | required-host-primitive | 36 | 20 |
@@ -188,6 +188,7 @@ Reviewed library-reachable sites (disposition, then why):
 | `mvm-build/src/builder_vm_runtime.rs` | bounded-fixed-argv-utility | `debugfs_cat`: read-only `debugfs -R` on the builder store image. The request comes from `debugfs_cat_request` (refuses a relative path or whitespace and control characters). It runs under `mvm_core::bounded_run::run_bounded` with a 60 s timeout (typed error) and a 1 MiB stdout cap, and its error text is `excerpt`-capped; tests drive a fake tool for the hang, the 10 MB output and the normal and not-found paths. |
 | `mvm-build/src/embed_toolchain.rs` | embedder-refused-by-caller | The module is shared with `build.rs` and the CLI payload build, which are not library paths. The only non-CLI caller is `rustc_has_target`, reached from `guest_agent_build::ensure_rust_targets` after `zigbuild_tools`, whose first statement is `refuse_toolchain_spawn` (`CliSpawn::GuestRuntimeToolchain`); a library embedder is refused before any `rustup`, `cargo`, `rustc`, `zig` or `python3` probe runs. The module cannot call that function itself because `build.rs` includes it without `mvm-vmm`. |
 | `mvm-build/src/stage0.rs` | fixed-argv-utility | `extract_nix_store_tarball_with_native_tar`: fixed `tar -xJf <tarball> -C <dir> --strip-components 1` on the Stage 0 root tarball, which is a bootstrap seed digest-verified before extraction; any failure clears the partial extract and falls back to the in-process extractor (`extract_nix_store_tarball_pure_rust`), so the spawn is an optimisation with a typed error and a pure-Rust alternative. No wall-clock bound. |
+| `mvm-client/src/image_cache/trust.rs` | fixed-argv-utility | `CosignCommandVerifier::verify`: resolves `cosign` through PATH and runs fixed `verify` flags, configured certificate identity/issuer and the digest-qualified reference as separate argv under `helper_command`; no shell. Production OCI policy requires a successful status, and failures are mapped to signature/tool refusals. The shared CLI compatibility facade can reach this in an embedder; it is not CLI-only or embedder-refused. Development prepared selection returns before signature verification. This relocation adds no timeout, trusted executable-path restriction or capture bound; stdout/stderr remain unbounded. |
 | `mvm-client/src/secret/source.rs` | bounded-user-adapter | `SecretSourceResolver::run_cli`: the program is one of two fixed names (`Cli::OnePassword`, `Cli::Bitwarden`) found only in trusted directories (`find_trusted`: absolute, canonical, not under an untrusted root, owner and mode checked); argv is a fixed subcommand plus typed references; environment is scrubbed with only that CLI's own session variables re-admitted by exact name (`helper_command_with`); stdin null; run through the shared `mvm_core::bounded_run::run_bounded` with stdout capped at `MAX_SOURCE_BYTES` and stderr at 4 KiB, and a wall-clock timeout that kills the child (`CliTimedOut`); errors carry at most 200 characters of the first stderr line and never the value. It cannot run `mvmctl` (`check-no-cli-shellout`). |
 | `mvm-core/src/crypto/key_rotation.rs` | bounded-fixed-argv-utility | `rotate_luks_slot` via `run_change_key`: fixed `cryptsetup luksChangeKey`; both passphrases go through 0600 tempfiles named in argv, never argv text or env. Runs under `run_bounded` (5 min timeout, 64 KiB capture, stdin null); the error carries a capped, control-stripped stderr excerpt only. Requires a live LUKS device by contract. |
 | `mvm-core/src/host_storage_encryption.rs` | fixed-argv-utility | `detect_macos`/`detect_linux`: read-only `diskutil info`, `findmnt --json`, `tune2fs -l` and `lsblk --inverse` probes with fixed argv; the only variable argument is a path or a `/dev/` device that `detect_linux` checks with `starts_with("/dev/")` before `tune2fs` and `lsblk` (after `--`). The runner is injected, and tests pin fail-closed behaviour (`missing_tools_fail_closed`, `failed_findmnt_never_inspects_a_device`, `failed_diskutil_refuses_even_with_encrypted_stdout`). A failed or absent probe means not-encrypted. No wall-clock bound. |
