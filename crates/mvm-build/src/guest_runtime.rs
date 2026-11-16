@@ -2653,6 +2653,19 @@ mod tests {
         }
     }
 
+    /// The newest modification time anywhere under `dir`, or `None` when it does
+    /// not exist: a cheap way to see whether a build touched it.
+    fn newest_modification(dir: &Path) -> Option<std::time::SystemTime> {
+        let meta = std::fs::symlink_metadata(dir).ok()?;
+        let mut newest = meta.modified().ok();
+        if meta.is_dir() {
+            for entry in std::fs::read_dir(dir).ok()?.flatten() {
+                newest = newest.max(newest_modification(&entry.path()));
+            }
+        }
+        newest
+    }
+
     #[test]
     fn source_resolver_seeds_default_cache_without_a_guest_build() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
@@ -2664,12 +2677,22 @@ mod tests {
         let source = crate::cache_install::default_cache_root();
         let target = temp.path().join("isolated/cache");
         let original = source_cache_fixture(&source, &workspace);
+        // The guest build output lives in the checkout, which a developer who has
+        // built before already has: what must not happen is a new build, so
+        // compare what is there before and after instead of asking whether it
+        // exists.
+        let build_dir = guest_agent_build::guest_build_target_dir(&target, &workspace);
+        let before = newest_modification(&build_dir);
         let runtime =
             resolve_or_build_source_guest_runtime(&target, "1.2.3", GuestArch::X86_64, &workspace)
                 .unwrap();
         assert_eq!(original.digest, runtime.digest);
         assert!(runtime.root.starts_with(&target));
-        assert!(!guest_agent_build::guest_build_target_dir(&target, &workspace).exists());
+        assert_eq!(
+            before,
+            newest_modification(&build_dir),
+            "seeding must not run a guest build"
+        );
     }
 
     #[test]

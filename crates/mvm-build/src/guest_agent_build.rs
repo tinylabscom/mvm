@@ -307,12 +307,46 @@ impl GuestAgentBuildSpec {
     }
 }
 
-/// The worktree-isolated Cargo target dir for guest cross-compiles.
+/// Directory, inside a source checkout's own `target/`, where the guest
+/// cross-compiles keep their Cargo output.
+const CHECKOUT_GUEST_TARGET_DIR: &str = "mvm-guest-build";
+
+/// Whether the checkout's `target/` is, or can become, a writable directory.
+/// Looks only; resolving a path creates nothing, Cargo makes the directory when
+/// the build runs.
+fn checkout_can_hold_a_target_dir(workspace_root: &Path) -> bool {
+    let target = workspace_root.join("target");
+    let probe = if target.exists() {
+        target
+    } else {
+        workspace_root.to_path_buf()
+    };
+    probe.is_dir()
+        && probe
+            .metadata()
+            .is_ok_and(|meta| !meta.permissions().readonly())
+}
+
+/// The Cargo target dir for guest cross-compiles.
 ///
-/// One checkout reuses dependency output across source edits; different
-/// worktrees hash to different target dirs and cannot serve each other stale
-/// workspace artifacts. Final guest binaries remain content-keyed separately.
+/// The compiled dependency output (hundreds of crates, an hour on a busy
+/// host) belongs to the checkout, not to the `MVM_HOME` that happened to ask
+/// for it, so it lives in the checkout's own `target/`: a new home, a temp home
+/// from a script or a test, or a second `mvmctl` against the same tree reuses it
+/// instead of compiling everything again. Different worktrees have different
+/// `target/` directories, so they cannot serve each other stale workspace
+/// artifacts, and `cargo clean` removes it. Final guest binaries stay keyed by
+/// their content in each home's cache.
+///
+/// A checkout whose `target/` cannot be written (read-only, or not a
+/// directory) falls back to the per-home location keyed by the workspace path,
+/// which is where this output lived before.
 pub fn guest_build_target_dir(cache_root: &Path, workspace_root: &Path) -> PathBuf {
+    if checkout_can_hold_a_target_dir(workspace_root) {
+        return workspace_root
+            .join("target")
+            .join(CHECKOUT_GUEST_TARGET_DIR);
+    }
     let stable_root =
         std::fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
     let digest = Sha256::digest(stable_root.to_string_lossy().as_bytes());
@@ -1489,18 +1523,50 @@ mod tests {
     }
 
     #[test]
-    fn guest_build_target_dir_reuses_dependencies_across_edits_in_one_checkout() {
-        let first = guest_build_target_dir(Path::new("/c"), Path::new("/ws"));
-        assert!(first.starts_with("/c/guest-agent-build/targets"));
+    fn guest_build_output_belongs_to_the_checkout_not_the_home() {
+        let checkout = tempfile::tempdir().unwrap();
+        let first = guest_build_target_dir(Path::new("/home-a/cache"), checkout.path());
         assert_eq!(
             first,
-            guest_build_target_dir(Path::new("/c"), Path::new("/ws")),
-            "source edits in one checkout must reuse Cargo dependency output"
+            checkout.path().join("target").join("mvm-guest-build"),
+            "the output lives in the checkout's own target directory"
+        );
+        assert_eq!(
+            first,
+            guest_build_target_dir(Path::new("/home-b/cache"), checkout.path()),
+            "a second home reuses the same dependency output"
+        );
+    }
+
+    #[test]
+    fn different_worktrees_keep_their_guest_build_output_apart() {
+        let one = tempfile::tempdir().unwrap();
+        let two = tempfile::tempdir().unwrap();
+        assert_ne!(
+            guest_build_target_dir(Path::new("/c"), one.path()),
+            guest_build_target_dir(Path::new("/c"), two.path())
+        );
+    }
+
+    #[test]
+    fn a_checkout_that_cannot_hold_a_target_dir_falls_back_to_the_per_home_location() {
+        let checkout = tempfile::tempdir().unwrap();
+        // `target` is a file, so a directory cannot be created beneath it.
+        std::fs::write(checkout.path().join("target"), b"not a directory").unwrap();
+        let fallback = guest_build_target_dir(Path::new("/c"), checkout.path());
+        assert!(
+            fallback.starts_with("/c/guest-agent-build/targets"),
+            "{fallback:?}"
+        );
+        assert_eq!(
+            fallback,
+            guest_build_target_dir(Path::new("/c"), checkout.path()),
+            "the fallback is stable across calls"
         );
         assert_ne!(
-            first,
-            guest_build_target_dir(Path::new("/c"), Path::new("/other-ws")),
-            "different worktrees must keep Cargo outputs isolated"
+            fallback,
+            guest_build_target_dir(Path::new("/other-home"), checkout.path()),
+            "the fallback is per home"
         );
     }
 
