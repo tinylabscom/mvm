@@ -281,10 +281,13 @@ There is no Docker or container backend on the runtime path. A `qemu`
 
 You don't need Nix on the host. On first build, mvm bootstraps or reuses a Linux builder VM, runs Nix evaluation and `nix build` inside it, and extracts the rootfs back. You run `mvmctl machine build` from the host; you do not need to enter a dev shell first. See [Builder VM](/guides/builder-vm/) for the full model.
 
-### First-Time Setup (optional)
+### First-Time Setup
 
-Your first `mvmctl machine run` sets up what it needs, so this step is not
-required. To do that setup ahead of time instead:
+`install.sh` prepares the shared guest runtime and workload kernel by default.
+Run your workload with a single `mvmctl machine run` command; an image not
+already cached is still pulled on first use. To keep installation short, set
+`MVM_SKIP_BOOTSTRAP=1` when installing; the first machine command will prepare
+missing artifacts automatically. You can also repeat preparation manually:
 
 ```bash
 mvmctl bootstrap

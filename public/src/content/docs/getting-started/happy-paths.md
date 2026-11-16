@@ -34,16 +34,16 @@ image, no daemon or persistent volume, and a named foreground transient run
 so it leaves no standby behind.
 
 ```bash
-mvmctl doctor --workflow cli-run                 # preflight
-mvmctl bootstrap                                # prepare shared artifacts
-mvmctl image pull alpine                        # prepare this OCI image
 mvmctl run --image alpine -- uname -a            # boot, run, tear down
-mvmctl image inspect alpine                      # inspect cached provenance
 ```
 
-`machine run` does not pull or materialize; a cache miss fails quickly with the
-command needed to prepare it. The first run of an image boots cold and leaves a
-standby behind, so later runs claim it and start inside the 300 ms ceiling.
+`install.sh` prewarms shared artifacts by default; `machine run` pulls and
+prepares an uncached image on first use. No separate `bootstrap` or image-pull
+command is required. Run `mvmctl doctor --workflow cli-run` to diagnose a
+refusal, or `mvmctl image inspect alpine` to inspect cached provenance.
+The first run of an image boots cold and leaves a standby behind, so later
+matching runs can claim it. Warm claims have a 300 ms launch ceiling, not a
+guarantee that every host already meets it.
 `mvmctl pool warm 1 --image alpine` prepares one ahead of time if the first run
 should be warm too. Production
 image runs should use digest-pinned refs and the existing OCI policy

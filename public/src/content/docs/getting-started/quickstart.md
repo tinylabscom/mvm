@@ -18,17 +18,17 @@ Start with the [native local demo](/getting-started/native-demo/): no
 remote credentials, persistent volumes, or source build. Launch directly:
 
 ```bash
-mvmctl doctor --workflow cli-run
 mvmctl machine run --name local-demo --profile dev \
   --image alpine \
   --cpus 1 --memory 256M --timeout 30 \
   -- /bin/sh -c 'printf "hello from a microVM\n"; /bin/uname -s'
 ```
 
-The first run fetches missing launch artifacts and caches them. You can run
-`mvmctl bootstrap` and `mvmctl image pull alpine` ahead of time to prewarm
-them. Bootstrap also creates the host snapshot key used for encrypted warm
-standbys at `~/.mvm/keys/local.key`; keep a copy of it.
+`install.sh` prewarms shared launch artifacts by default. The first run
+fetches an uncached image and caches it; no separate `bootstrap` or image-pull
+command is required. Run `mvmctl doctor --workflow cli-run` if launch fails.
+Bootstrap creates the host snapshot key used for encrypted warm standbys at
+`~/.mvm/keys/local.key`; keep a copy of it.
 The named foreground run above is transient and cold; it tears down on exit
 and requests no standby. The digest pin identifies prepared content; it is
 not a publisher signature or production-policy approval.
