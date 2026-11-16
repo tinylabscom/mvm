@@ -694,7 +694,7 @@ fn main() -> Result<()> {
                 "  check-cli-runtime-surface              Reject mvm_runtime::vm::name_registry + AnyBackend reaches in mvm-cli drive-a-machine code — route through the mvm-client facade"
             );
             eprintln!(
-                "  check-thin-cli                         Reject new mvm_hostd / mvm_runtime reaches in mvm-cli commands outside a shrink-only allowlist — land logic in mvm-client"
+                "  check-thin-cli                         Reject new mvm_hostd / mvm_runtime / mvm_build reaches in mvm-cli outside a shrink-only allowlist — land logic in mvm-client"
             );
             eprintln!(
                 "  check-no-network-literals              Reject baked IPs/ports/tmp-sockets — route through mvm-core::dev_network / guest_netd"
