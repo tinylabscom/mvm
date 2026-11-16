@@ -679,8 +679,10 @@ warm_launch_artifacts
 #
 #   cache/oci/guest-agent/src-v2-<key>/<arch>/  — mvm-guest-agent, mvm-guest-netinit,
 #                                                 mvm-egress-client, mvm-oci-entrypoint
-#   cache/guest-agent-build/targets/<h>/<triple>/release/ — the runtime-overlay set
-#                                                 (mvm-seccomp-apply, mvm-runner, …)
+#   target/mvm-guest-build/<triple>/release/ in the checkout — the runtime-overlay
+#                                                 set (mvm-seccomp-apply, mvm-runner, …);
+#                                                 a checkout that cannot hold it uses
+#                                                 cache/guest-agent-build/targets/<h>/
 #
 # `cache/runtime-overlay-bins/` is deliberately *not* a source: it stores the
 # same binaries under their destination short names (`agent`, `netinit`), and
@@ -697,7 +699,7 @@ provision_guest_bin_dir() {
 
   local guest_dir overlay_dir
   guest_dir="$(ls -dt "$E2E_HOME"/cache/oci/guest-agent/src-v2-*/*/ 2>/dev/null | head -1 || true)"
-  overlay_dir="$(ls -dt "$E2E_HOME"/cache/guest-agent-build/targets/*/*/release/ 2>/dev/null | head -1 || true)"
+  overlay_dir="$(ls -dt "$REPO"/target/mvm-guest-build/*/release/ "$E2E_HOME"/cache/guest-agent-build/targets/*/*/release/ 2>/dev/null | head -1 || true)"
 
   [[ -n "$guest_dir" ]] && cp "$guest_dir"/mvm-* "$stage/" 2>/dev/null || true
   # `-n`: the guest-agent layout wins where both carry a name, since it is the
