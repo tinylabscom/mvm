@@ -49,6 +49,30 @@ describe("manifest inspection", () => {
       request: { path: "/build/manifest.json", revision: "rev", check_signature: true },
       reply: verified,
     },
+    {
+      operation: () => manifest.remove(),
+      method: "manifest.remove",
+      request: { path: null, force: false },
+      reply: verified,
+    },
+    {
+      operation: () => manifest.remove("/build/mvm.toml", { force: true }),
+      method: "manifest.remove",
+      request: { path: "/build/mvm.toml", force: true },
+      reply: verified,
+    },
+    {
+      operation: () => manifest.prune(),
+      method: "manifest.prune",
+      request: { orphans: true, dry_run: false },
+      reply: [{ slot_hash: "abc", reason: null }],
+    },
+    {
+      operation: () => manifest.prune({ dryRun: true }),
+      method: "manifest.prune",
+      request: { orphans: true, dry_run: true },
+      reply: [{ slot_hash: "abc", reason: "manifest gone: /build/mvm.toml" }],
+    },
   ];
 
   it.each(cases)("marshals $method and preserves its reply", ({ operation, method, request, reply }) => {
@@ -73,6 +97,14 @@ describe("manifest inspection", () => {
     {
       operation: () => manifest.list(),
       message: "invalid manifest: malformed JSON",
+    },
+    {
+      operation: () => manifest.remove("/build/mvm.toml"),
+      message: "slot abc does not exist",
+    },
+    {
+      operation: () => manifest.prune(),
+      message: "slot abc is unreadable",
     },
   ])("preserves backend failure: $message", ({ operation, message }) => {
     setInvokeForTesting(() => [1, Buffer.from(JSON.stringify({

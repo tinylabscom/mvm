@@ -1,4 +1,4 @@
-"""Built-manifest inspection through the host library.
+"""Built-manifest inspection and removal through the host library.
 
 Discovery, verification, and validation are owned by the client facade.
 Persisted manifests and snapshots are returned without interpretation.
@@ -10,7 +10,13 @@ import builtins
 from typing import Any
 
 from mvm import _hostlib
-from mvm._hostabi.methods import MANIFEST_INFO, MANIFEST_LIST, MANIFEST_VERIFY
+from mvm._hostabi.methods import (
+    MANIFEST_INFO,
+    MANIFEST_LIST,
+    MANIFEST_PRUNE,
+    MANIFEST_REMOVE,
+    MANIFEST_VERIFY,
+)
 
 
 def list(
@@ -38,3 +44,16 @@ def verify(
         MANIFEST_VERIFY,
         {"path": path, "revision": revision, "check_signature": check_signature},
     )
+
+
+def remove(path: str | None = None, *, force: bool = False) -> dict[str, Any]:
+    """Delete a built slot from the registry; the source manifest file is never deleted.
+
+    A missing slot raises unless force is true.
+    """
+    return _hostlib.call(MANIFEST_REMOVE, {"path": path, "force": force})
+
+
+def prune(*, dry_run: bool = False) -> builtins.list[dict[str, Any]]:
+    """Remove built slots whose source manifest is gone; dry_run only reports them."""
+    return _hostlib.call(MANIFEST_PRUNE, {"orphans": True, "dry_run": dry_run})

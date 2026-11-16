@@ -3772,6 +3772,80 @@
       "title": "ListRequest",
       "type": "object"
     },
+    "ManifestPruneReply": {
+      "items": {
+        "description": "A slot whose source manifest is gone; `reason` is filled only by a dry run.",
+        "properties": {
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slot_hash": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "slot_hash"
+        ],
+        "title": "OrphanSlot",
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "ManifestPruneRequest": {
+      "additionalProperties": false,
+      "description": "Sweep built slots. `orphans` is the only mode today and must be named, so a future mode cannot be selected by an old caller's omission.",
+      "properties": {
+        "dry_run": {
+          "default": false,
+          "type": "boolean"
+        },
+        "orphans": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "title": "PruneRequest",
+      "type": "object"
+    },
+    "ManifestRemoveReply": {
+      "description": "The slot `manifest.remove` deleted.",
+      "properties": {
+        "manifest_path": {
+          "type": "string"
+        },
+        "slot_hash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "manifest_path",
+        "slot_hash"
+      ],
+      "title": "RemovedSlot",
+      "type": "object"
+    },
+    "ManifestRemoveRequest": {
+      "additionalProperties": false,
+      "description": "Remove one built slot. There is deliberately no way to name a source file: the client's path resolution accepts any regular file, so deleting one over this surface would delete arbitrary files. Only the registry slot is removed.",
+      "properties": {
+        "force": {
+          "default": false,
+          "type": "boolean"
+        },
+        "path": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "RemoveRequest",
+      "type": "object"
+    },
     "ManifestVerifyReply": {
       "description": "Identity of a slot whose runtime checksum verification succeeded.",
       "properties": {
@@ -5494,6 +5568,40 @@
       "title": "ManifestList",
       "type": "object"
     },
+    "manifest_prune": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/ManifestPruneReply"
+        },
+        "request": {
+          "$ref": "#/definitions/ManifestPruneRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "ManifestPrune",
+      "type": "object"
+    },
+    "manifest_remove": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/ManifestRemoveReply"
+        },
+        "request": {
+          "$ref": "#/definitions/ManifestRemoveRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "ManifestRemove",
+      "type": "object"
+    },
     "manifest_verify": {
       "additionalProperties": false,
       "properties": {
@@ -5625,6 +5733,8 @@
     "image_revocations_status",
     "manifest_info",
     "manifest_list",
+    "manifest_prune",
+    "manifest_remove",
     "manifest_verify",
     "backend_capabilities",
     "entrypoint_call",
