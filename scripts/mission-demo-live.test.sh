@@ -30,6 +30,20 @@ for fault in none stat chmod mv; do
   fi
 done
 
+# One guest process can stage a whole burst within the same clock tick.
+rm -rf "${work}/guest/outbox"; mkdir -p "${work}/guest/outbox"
+guest_script='stat() { id -u; }; date() { echo 1700000000; };'
+guest_script+="$writer"$'\ni=1; while [ "$i" -le 12 ]; do mbx_write 000 "message-$i" || exit 1; i=$((i + 1)); done'
+sh -c "$guest_script" || fail "writer failed during same-second burst"
+frames=("${work}/guest/outbox/"*)
+[ "${#frames[@]}" -eq 12 ] || fail "same-second writes overwrote frames: ${#frames[@]} files"
+i=1
+while IFS= read -r frame; do
+  { dd if=/dev/zero bs=32 count=1 2>/dev/null; printf 'message-%s' "$i"; } > "${work}/expected-frame"
+  cmp -s "${work}/expected-frame" "$frame" || fail "frame $i is not in lexical/payload order"
+  i=$((i + 1))
+done < <(printf '%s\n' "${frames[@]}" | LC_ALL=C sort)
+
 cat > "${work}/mvmctl" <<'S'
 #!/usr/bin/env bash
 # FAKE_MODE: ok | replace-works-running | secret-survives | leaks-old-state | leaks-body
@@ -72,12 +86,25 @@ case "${1:-} ${2:-}" in
     [ "${mode}" = leaks-old-state ] || : > "${fake}/queue"
     if [ "${DRIVER:-exec}" = entrypoint ]; then
       if [ "$(epoch_of "${name}")" = 1 ]; then
-        for action in other-staged outbound-failed unread-staged; do
+        for action in other-staged outbound-failed; do
           grep -qF "MISSION_ACTION=$name:$action" <<<"$allargs" || exit 2
         done
+        ! grep -qF 'unread-staged' <<<"$allargs" || exit 2
+        # Queue every report immediately: the host must not require empty
+        # intermediate snapshots, nor discard a report to find the next one.
         [ "${mode}" != wrong-first ] || echo unexpected >> "${fake}/queue"
         [ "${mode}" = missing-first ] || echo aircraft-observation-1 >> "${fake}/queue"
+        [ "${mode}" != duplicate-first ] || echo aircraft-observation-1 >> "${fake}/queue"
+        marker_name="$name"
+        [ "${mode}" != stale-actions ] || marker_name=old-run
+        [ "${mode}" != out-of-order ] || echo "MISSION_ACTION=$marker_name:outbound-failed" >> "${fake}/queue"
+        [ "${mode}" = missing-contained ] || echo "MISSION_ACTION=$marker_name:other-staged" >> "${fake}/queue"
+        [ "${mode}" != duplicate-contained ] || echo "MISSION_ACTION=$marker_name:other-staged" >> "${fake}/queue"
+        [ "${mode}" = missing-outbound ] || echo "MISSION_ACTION=$marker_name:outbound-failed" >> "${fake}/queue"
+        [ "${mode}" != duplicate-outbound ] || echo "MISSION_ACTION=$marker_name:outbound-failed" >> "${fake}/queue"
+        [ "${mode}" = missing-unread ] || echo left-unread-in-the-old-workload >> "${fake}/queue"
       else
+        [ "${mode}" != leaks-old-state ] || echo left-unread-in-the-old-workload >> "${fake}/queue"
         [ "${mode}" != wrong-second ] || echo unexpected >> "${fake}/queue"
         [ "${mode}" = missing-second ] || echo fresh-under-epoch-2 >> "${fake}/queue"
         [ "${mode}" != trailing-old-state ] || echo left-unread-in-the-old-workload >> "${fake}/queue"
@@ -102,24 +129,12 @@ case "${1:-} ${2:-}" in
     if [ "${mode}" = empty-recv-failure ] && [ ! -s "${fake}/queue" ]; then exit 1; fi
     [ -s "${fake}/queue" ] || exit 0
     body="$(head -n1 "${fake}/queue")"; sed -i.bak 1d "${fake}/queue"; printf '%s' "${body}"
+    [ "$body" != left-unread-in-the-old-workload ] || touch "${fake}/sample-read"
     echo '{"event":"mailbox.read","labels":{"bytes":"7"}}' >> "${audit}"
     if [ "${mode}" = leaks-body ]; then echo "{\"event\":\"x\",\"labels\":{\"body\":\"${body}\"}}" >> "${audit}"; fi ;;
   "machine logs")
-    [ "${mode}" != logs-failure ] || exit 1
-    if [ "${mode}" = stale-actions ]; then
-      printf 'MISSION_ACTION=old-run:%s\n' other-staged outbound-failed unread-staged
-      exit 0
-    fi
-    [ "${mode}" = missing-contained ] || echo "MISSION_ACTION=$3:other-staged"
-    [ "${mode}" = missing-outbound ] || echo "MISSION_ACTION=$3:outbound-failed"
-    calls="$(cat "${fake}/log-calls" 2>/dev/null || echo 0)"
-    calls=$((calls + 1)); echo "$calls" > "${fake}/log-calls"
-    if [ "${mode}" != missing-unread ]; then
-      echo "MISSION_ACTION=$3:unread-staged"
-      if [ "${mode}" = leaks-old-state ] && [ "$calls" -eq 3 ]; then
-        echo left-unread-in-the-old-workload >> "${fake}/queue"; touch "${fake}/unread"
-      fi
-    fi ;;
+    echo logs >> "${fake}/forbidden-logs"
+    echo "persistent application stdout is unavailable" >&2; exit 2 ;;
   "machine replace")
     name="$3"
     if [ -f "${fake}/running.${name}" ] && [ "${mode}" != replace-works-running ]; then
@@ -130,6 +145,9 @@ case "${1:-} ${2:-}" in
     echo "${name} may launch again under execution epoch ${e}" ;;
   "machine quarantine")
     name="$3"
+    if [ "${DRIVER:-exec}" = entrypoint ] && [ ! -f "${fake}/sample-read" ]; then
+      echo "sample was not read before containment" >&2; exit 2
+    fi
     # A wedged quarantine never completes. It must not go on to write the ledger
     # or the audit after its sleep: the shared home belongs to a later case by then.
     [ "${mode}" = wedge ] && { sleep 30; exit 1; }
@@ -205,22 +223,23 @@ bad recv-failure "failed mailbox read"
 bad empty-recv-failure "failed mailbox read treated as empty"
 
 # Entrypoint observations are a narrowed witness, never proof of unread queue
-# acceptance or host refusal. No machine exec is permitted on this path.
+# acceptance or host refusal. Neither machine exec nor logs is available.
 out="$(run ok HYPERVISOR=firecracker DRIVER=entrypoint)" || fail "entrypoint observations failed: ${out}"
 grep -q '^DEMO_RESULT=partial$' <<<"${out}" || fail "entrypoint must report incomplete host evidence: ${out}"
-grep -q 'FINDING:.*host acceptance' <<<"${out}" || fail "missing queue evidence not explained: ${out}"
+grep -q 'FINDING:.*unread' <<<"${out}" || fail "missing unread-erasure evidence not explained: ${out}"
 ! grep -q 'PASS.*was refused\|PASS.*frame left unread.*not readable\|DEMO_RESULT=pass' <<<"${out}" || fail "unsupported entrypoint claim: ${out}"
 [ ! -f "${work}/state/forbidden-exec" ] || fail "entrypoint used machine exec"
-for mode in missing-first wrong-first missing-contained missing-outbound missing-unread stale-actions missing-second wrong-second recv-failure recv-output-failure empty-recv-failure logs-failure launch-failure replacement-launch-failure leaks-old-state trailing-old-state; do
+[ ! -f "${work}/state/forbidden-logs" ] || fail "entrypoint used machine logs"
+[ -f "${work}/state/sample-read" ] || fail "entrypoint did not read the pre-containment sample"
+for mode in missing-first wrong-first duplicate-first missing-contained missing-outbound missing-unread stale-actions out-of-order duplicate-contained duplicate-outbound missing-second wrong-second recv-failure recv-output-failure empty-recv-failure launch-failure replacement-launch-failure leaks-old-state trailing-old-state; do
   out="$(run "$mode" HYPERVISOR=firecracker DRIVER=entrypoint)" && fail "entrypoint accepted $mode: ${out}"
   ! grep -q '^DEMO_RESULT=' <<<"${out}" || fail "entrypoint printed a result for $mode: ${out}"
   [ ! -f "${work}/state/forbidden-exec" ] || fail "entrypoint used machine exec in $mode"
+  [ ! -f "${work}/state/forbidden-logs" ] || fail "entrypoint used machine logs in $mode"
   case "$mode" in
-    missing-first | missing-second) reason="timed out waiting for" ;;
-    wrong-first | wrong-second | leaks-old-state) reason="unexpected mailbox message while waiting for" ;;
-    missing-contained | missing-outbound | missing-unread | stale-actions) reason="timed out waiting for guest action" ;;
+    missing-unread | missing-second) reason="timed out waiting for" ;;
+    missing-first | wrong-first | duplicate-first | wrong-second | leaks-old-state | missing-contained | missing-outbound | stale-actions | out-of-order | duplicate-contained | duplicate-outbound) reason="unexpected mailbox message while waiting for" ;;
     recv-failure | recv-output-failure | empty-recv-failure) reason="mailbox read failed" ;;
-    logs-failure) reason="guest logs read failed" ;;
     launch-failure | replacement-launch-failure) reason="entrypoint launch failed" ;;
     trailing-old-state) reason="unexpected message after the replacement's fresh message" ;;
   esac
@@ -279,7 +298,7 @@ cp "${repo}/scripts/mission-demo-live.sh" "${tree}/scripts/"; cp -R "${repo}/scr
 cp "${work}/mvmctl" "${tree}/target/release/mvmctl"
 rm -rf "${work:?}/state"; mkdir -p "${work}/state"
 out="$(env -u MVMCTL -u MVM_HOME FAKE_STATE="${work}/state" FAKE_MODE=ok HYPERVISOR=firecracker WAIT_SECS=4 QUARANTINE_DEADLINE=3 bash "${tree}/scripts/mission-demo-live.sh" 2>&1)" || fail "a run from a built checkout failed: ${out}"
-grep -q '^DEMO_RESULT=pass$' <<<"${out}" || fail "the built checkout's run did not pass: ${out}"
+grep -q '^DEMO_RESULT=partial$' <<<"${out}" || fail "the built checkout's run did not report partial: ${out}"
 [ -d "${tree}/target/mission-demo-home" ] || fail "a run from a built checkout did not keep its home under target/"
 
 # The audit checks must be about THIS run: an earlier run's entries must not

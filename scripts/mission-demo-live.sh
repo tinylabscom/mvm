@@ -58,8 +58,8 @@
 #                      two short transient guests and changes nothing before it.
 #   DRIVER=entrypoint  the workload leaves its own frames and attempts its own
 #                      outbound connection from its command, and the host only
-#                      observes (`machine logs --stream stdout`, mailbox recv,
-#                      the audit chain). Guest markers attest staging/actions,
+#                      observes (`machine mailbox recv`, the audit chain).
+#                      Guest mailbox reports describe staging/actions,
 #                      not host acceptance or refusal. The
 #                      default, `exec`, injects frames and the connection
 #                      attempt with `machine exec`, a dev-profile verb a
@@ -165,19 +165,10 @@ wait_message() {
   done
   fail "timed out waiting for $expected"
 }
-# Captured stdout is externally owned; reconcile at most five times. A future
-# action-event API could replace this bounded snapshot polling.
+# Persistent command stdout is not captured on every supported release.
+# Reports use the same ordered mailbox path as the workload's observations.
 wait_action() {
-  local action="$1" logs end=$((SECONDS + WAIT_SECS)) delay=$(((WAIT_SECS + 14) / 15)) attempt remaining
-  for attempt in 1 2 3 4 5; do
-    logs="$(mvm machine logs "$NAME" --stream stdout -n 1000)" || fail "guest logs read failed"
-    grep -qxF "MISSION_ACTION=$NAME:$action" <<<"$logs" && return 0
-    [ "$attempt" -lt 5 ] && [ "$SECONDS" -lt "$end" ] || break
-    remaining=$((end - SECONDS))
-    [ "$delay" -le "$remaining" ] || delay="$remaining"
-    sleep "$delay"; delay=$((delay * 2))
-  done
-  fail "timed out waiting for guest action $action"
+  wait_message "MISSION_ACTION=$NAME:$1"
 }
 # First use of a home: pull the image and build the workload runtime, which one
 # throwaway run does.
@@ -207,15 +198,14 @@ n=\$(grep -o mvm.mailbox=1 /proc/cmdline | wc -l)
 if [ "\$n" = 1 ]; then b=$FIRST; else b=bad-cmdline-\$n; fi
 mbx_write 000 "\$b" || exit 1
 sleep 10; mbx_write 377 $CONTAINED || exit 1
-echo 'MISSION_ACTION=$NAME:other-staged'
+mbx_write 000 'MISSION_ACTION=$NAME:other-staged' || exit 1
 sleep 5
 command -v wget >/dev/null 2>&1 || exit 1
 if wget -T 4 -q -O- http://blocked.example >/dev/null 2>&1; then
-  echo 'MISSION_ACTION=$NAME:outbound-succeeded'; exit 1
+  mbx_write 000 'MISSION_ACTION=$NAME:outbound-succeeded'; exit 1
 fi
-echo 'MISSION_ACTION=$NAME:outbound-failed'
+mbx_write 000 'MISSION_ACTION=$NAME:outbound-failed' || exit 1
 sleep 15; mbx_write 000 $UNREAD || exit 1
-echo 'MISSION_ACTION=$NAME:unread-staged'
 sleep 900
 EOS
 }
@@ -247,7 +237,9 @@ echo "== 2. the guest delivers a message to its host mailbox"
 [ "$DRIVER" = entrypoint ] || mailbox_write_frame "$NAME" "$OWN" "$FIRST" || fail "first frame staging failed"
 wait_message "$FIRST"; say "message read back exactly"
 [ "$DRIVER" != entrypoint ] || say "the entrypoint saw exactly one mvm.mailbox=1 (otherwise its frame would differ)"
-empty_mailbox "mailbox not empty after reading"; say "mailbox empty after reading"
+if [ "$DRIVER" = exec ]; then
+  empty_mailbox "mailbox not empty after reading"; say "mailbox empty after reading"
+fi
 
 echo "== 3. observe a planted compromise attempt"
 if [ "$DRIVER" = entrypoint ]; then
@@ -256,10 +248,10 @@ if [ "$DRIVER" = entrypoint ]; then
 else
   mailbox_write_frame "$NAME" "$OTHER" "$CONTAINED" || fail "other frame staging failed"
   sleep 8
+  empty_mailbox "a message to another recipient was queued"
+  say "host mailbox read returned empty after the other-recipient staging"
 fi
-empty_mailbox "a message to another recipient was queued"
-say "host mailbox read returned empty after the other-recipient staging"
-echo "FINDING: host refusal is unproven; an empty read is not a host decision or proof the staged frame was processed."
+echo "FINDING: host refusal is unproven; neither a guest report nor an empty read is a host refusal receipt."
 if [ "$DRIVER" = entrypoint ]; then
   wait_action outbound-failed
   say "guest reported a failed outbound attempt; the host's decision is checked separately"
@@ -286,12 +278,14 @@ say "replace refused while running, naming \`machine stop $NAME\`"
 echo "== 5. contain: quarantine and terminate"
 # A staged frame is not evidence that the host accepted it before containment.
 if [ "$DRIVER" = entrypoint ]; then
-  wait_action unread-staged
+  wait_message "$UNREAD"
+  say "pre-containment sample delivered and consumed through the host mailbox"
+  echo "FINDING: the pre-containment sample was read, not left unread; this run cannot prove unread-message erasure."
 else
   mailbox_write_frame "$NAME" "$OWN" "$UNREAD" || fail "unread frame staging failed"
   sleep 3
+  echo "FINDING: unread frame host acceptance is unproven; no non-destructive queue evidence is exposed here, so replacement cannot prove its purge."
 fi
-echo "FINDING: unread frame host acceptance is unproven; no non-destructive queue evidence is exposed here, so replacement cannot prove its purge."
 secret="$(state_dir)/mailbox-epoch.secret"
 [ -s "$secret" ] || fail "no per-launch secret at $secret"
 old_secret="$(sha12 "$secret")"
@@ -370,7 +364,7 @@ if [ "${EXPECT_SCRUB_AUDIT:-0}" = 1 ]; then
   [ "$(count plan.guest_memory_scrubbed)" -gt "$scrub_before" ] || fail "the containment added no plan.guest_memory_scrubbed entry"
   say "this run added a plan.guest_memory_scrubbed entry (signed, counts only)"
 fi
-! grep -rqF -e "$FIRST" -e "$SECOND" -e "$CONTAINED" -e "$UNREAD" "$audit_dir" || fail "a message body is in the audit log"
+! grep -rqF -e "$FIRST" -e "$SECOND" -e "$CONTAINED" -e "$UNREAD" -e "MISSION_ACTION=$NAME:" "$audit_dir" || fail "a message body is in the audit log"
 say "no message body appears in the audit log"
 if [ "${EGRESS_PROBE:-0}" = 1 ]; then
   echo "== 10. a denied outbound request is audited and explained"
