@@ -4,6 +4,7 @@ use mvm_core::protocol::dns::DnsRecordType;
 use mvm_runtime::vmm::egress_gate::DnsVerdict;
 
 use crate::supervisor::audit::audit_recorder::{EventCategory, Recorder};
+use crate::supervisor::audit::denial_stage::stamp;
 
 /// Record one policy-gated DNS decision without retaining query or response bytes.
 pub async fn emit_dns_query(
@@ -69,12 +70,13 @@ async fn record_dns(
     verdict: &str,
     ips: String,
 ) {
-    let labels = [
+    let mut labels = std::collections::BTreeMap::from([
         ("qname".to_string(), qname.to_string()),
         ("qtype".to_string(), qtype.to_string()),
         ("verdict".to_string(), verdict.to_string()),
         ("ips".to_string(), ips),
-    ];
+    ]);
+    stamp(event, &mut labels);
     if let Err(error) = recorder
         .record_unbound(EventCategory::Dns, event, labels)
         .await
@@ -131,8 +133,12 @@ mod tests {
             entry.labels.get("verdict").map(String::as_str),
             Some("refused")
         );
+        assert_eq!(
+            entry.labels.get("stage").map(String::as_str),
+            Some("lookup")
+        );
         assert_eq!(entry.labels.get("ips").map(String::as_str), Some(""));
-        assert_eq!(entry.labels.len(), 5, "only fixed DNS metadata is audited");
+        assert_eq!(entry.labels.len(), 6, "only fixed DNS metadata is audited");
         assert_eq!(metrics.snapshot().audit_dns_total, 1);
     }
 
@@ -194,7 +200,7 @@ mod tests {
         assert_eq!(entry.labels.get("qname").map(String::as_str), Some(""));
         assert_eq!(
             entry.labels.len(),
-            5,
+            6,
             "malformed keeps the fixed DNS schema"
         );
         assert_eq!(metrics.snapshot().audit_dns_total, 1);

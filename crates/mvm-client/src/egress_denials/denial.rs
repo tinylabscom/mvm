@@ -8,6 +8,7 @@
 use chrono::{DateTime, Utc};
 use mvm_hostd::supervisor::PlanAuditEntry;
 use mvm_hostd::supervisor::audit::audit_recorder::LABEL_VM_NAME;
+use mvm_hostd::supervisor::audit::denial_stage::DenialStage;
 
 use super::reason::{DenialKind, ReasonInputs, Remedy};
 
@@ -42,7 +43,7 @@ impl Subject {
     }
 
     /// The host half of the destination, brackets kept off an IPv6 literal.
-    fn host(&self) -> Option<&str> {
+    pub fn host(&self) -> Option<&str> {
         match self {
             Self::Tcp(target) | Self::Udp(target) | Self::Request { target, .. } => Some(
                 target
@@ -86,6 +87,9 @@ pub struct EgressDenial {
     pub reason: String,
     pub subject: Subject,
     pub kind: DenialKind,
+    /// Which step was refused. Refusals the endpoint's route and secret paths
+    /// record carry no stage of their own and read as a connect.
+    pub stage: DenialStage,
 }
 
 impl EgressDenial {
@@ -145,6 +149,8 @@ impl EgressDenial {
             reason: reason.to_string(),
             subject,
             kind,
+            stage: DenialStage::of_entry(&entry.event, &entry.labels)
+                .unwrap_or(DenialStage::Connect),
         })
     }
 
@@ -273,6 +279,72 @@ pub(crate) mod tests {
             ],
         );
         assert_eq!(d.kind, DenialKind::NotAllowed);
+    }
+
+    #[test]
+    fn a_lookup_and_a_connect_to_one_host_share_a_host_and_differ_in_stage() {
+        let lookup = denial(
+            "dns.refused",
+            &[
+                ("vm_name", "vm-a"),
+                ("qname", "x.example"),
+                ("reason", "policy_denied"),
+            ],
+        );
+        let connect = denial(
+            "host.flow.denied",
+            &[
+                ("vm_name", "vm-a"),
+                ("class", "tcp"),
+                ("target", "x.example:443"),
+                ("reason", "policy_denied"),
+            ],
+        );
+        let datagram = denial(
+            "host.flow.denied",
+            &[
+                ("vm_name", "vm-a"),
+                ("class", "udp"),
+                ("target", "x.example:53"),
+                ("reason", "policy_denied"),
+            ],
+        );
+        for d in [&lookup, &connect, &datagram] {
+            assert_eq!(d.subject.host(), Some("x.example"));
+            assert_eq!(d.kind, DenialKind::NotAllowed);
+        }
+        assert_eq!(
+            [lookup.stage, connect.stage, datagram.stage],
+            [
+                DenialStage::Lookup,
+                DenialStage::Connect,
+                DenialStage::Datagram
+            ]
+        );
+    }
+
+    #[test]
+    fn a_recorded_stage_label_is_read_and_its_absence_is_not_an_error() {
+        let labelled = denial(
+            "host.flow.denied",
+            &[
+                ("vm_name", "vm-a"),
+                ("class", "udp"),
+                ("stage", "datagram"),
+                ("target", "8.8.8.8:53"),
+                ("reason", "policy_denied"),
+            ],
+        );
+        assert_eq!(labelled.stage, DenialStage::Datagram);
+        let legacy = denial(
+            "host.flow.denied",
+            &[
+                ("vm_name", "vm-a"),
+                ("target", "a.example:443"),
+                ("reason", "policy_denied"),
+            ],
+        );
+        assert_eq!(legacy.stage, DenialStage::Connect);
     }
 
     #[test]
