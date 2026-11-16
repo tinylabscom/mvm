@@ -46,20 +46,12 @@ def verify(
     )
 
 
-def remove(
-    path: str | None = None,
-    *,
-    force: bool = False,
-    manifest_file: bool = False,
-) -> dict[str, Any]:
-    """Delete a built slot; manifest_file also deletes the source manifest file.
+def remove(path: str | None = None, *, force: bool = False) -> dict[str, Any]:
+    """Delete a built slot from the registry; the source manifest file is never deleted.
 
     A missing slot raises unless force is true.
     """
-    return _hostlib.call(
-        MANIFEST_REMOVE,
-        {"path": path, "force": force, "manifest_file": manifest_file},
-    )
+    return _hostlib.call(MANIFEST_REMOVE, {"path": path, "force": force})
 
 
 def prune(*, dry_run: bool = False) -> builtins.list[dict[str, Any]]:

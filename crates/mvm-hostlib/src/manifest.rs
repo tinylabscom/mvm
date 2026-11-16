@@ -3,9 +3,7 @@
 //! These local registry operations need neither a running machine nor guest
 //! helpers. Requests and reports are owned by the client, not re-modeled here.
 
-use mvm_client::manifest::{
-    self, InfoRequest, ListRequest, PruneRequest, RemoveRequest, VerifyRequest,
-};
+use mvm_client::manifest::{self, InfoRequest, ListRequest, PruneRequest, VerifyRequest};
 use mvm_core::client::MvmError;
 
 use crate::status::Outcome;
@@ -16,6 +14,27 @@ pub const VERIFY: &str = "manifest.verify";
 pub const REMOVE: &str = "manifest.remove";
 pub const PRUNE: &str = "manifest.prune";
 pub const METHODS: &[&str] = &[LIST, INFO, VERIFY, REMOVE, PRUNE];
+
+/// Remove one built slot. There is deliberately no way to name a source file:
+/// the client's path resolution accepts any regular file, so deleting one over
+/// this surface would delete arbitrary files. Only the registry slot is removed.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RemoveRequest {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    force: bool,
+}
+
+/// The slot `manifest.remove` deleted.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct RemovedSlot {
+    slot_hash: String,
+    manifest_path: String,
+}
 
 pub fn is_known(method: &str) -> bool {
     METHODS.contains(&method)
@@ -43,7 +62,17 @@ fn answer(method: &str, request: &[u8]) -> Result<Outcome, Outcome> {
         }
         REMOVE => {
             let request: RemoveRequest = parse(request)?;
-            manifest::remove(&request).map(|reply| Outcome::ok(&reply))
+            manifest::remove(&manifest::RemoveRequest {
+                path: request.path,
+                force: request.force,
+                manifest_file: false,
+            })
+            .map(|removed| {
+                Outcome::ok(&RemovedSlot {
+                    slot_hash: removed.slot_hash,
+                    manifest_path: removed.manifest_path.display().to_string(),
+                })
+            })
         }
         PRUNE => {
             let request: PruneRequest = parse(request)?;
@@ -184,19 +213,37 @@ mod tests {
         assert_eq!(outcome.status, crate::status::MVM_HOSTLIB_OK);
         let reply = body(&outcome);
         assert_eq!(reply["slot_hash"], slot);
-        assert_eq!(reply["manifest_file_deleted"], false);
+        assert!(reply.get("manifest_file_deleted").is_none());
         assert!(!std::path::Path::new(&mvm_core::manifest::slot_dir(&slot)).exists());
         assert!(path.exists());
     }
 
     #[test]
-    fn remove_can_also_delete_the_manifest_file_when_asked() {
+    fn remove_refuses_manifest_file_and_never_touches_a_file_on_disk() {
+        let (_home, _env, path, slot) = built_slot();
+        let bystander = path.with_file_name("precious.txt");
+        std::fs::write(&bystander, "keep").unwrap();
+        for request in [
+            serde_json::json!({"path": path, "manifest_file": true}),
+            serde_json::json!({"path": bystander, "force": true, "manifest_file": true}),
+        ] {
+            let outcome = dispatch(REMOVE, &serde_json::to_vec(&request).unwrap());
+            assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT);
+        }
+        assert!(path.exists() && bystander.exists());
+        assert!(std::path::Path::new(&mvm_core::manifest::slot_dir(&slot)).exists());
+    }
+
+    #[test]
+    fn forced_remove_of_a_plain_file_leaves_the_file_alone() {
         let (_home, _env, path, _slot) = built_slot();
-        let request = serde_json::json!({"path": path, "manifest_file": true});
+        let bystander = path.with_file_name("precious.txt");
+        std::fs::write(&bystander, "keep").unwrap();
+        let request = serde_json::json!({"path": bystander, "force": true});
         let outcome = dispatch(REMOVE, &serde_json::to_vec(&request).unwrap());
-        assert_eq!(outcome.status, crate::status::MVM_HOSTLIB_OK);
-        assert_eq!(body(&outcome)["manifest_file_deleted"], true);
-        assert!(!path.exists());
+        assert_eq!(body(&outcome).get("manifest_file_deleted"), None);
+        assert_eq!(std::fs::read_to_string(&bystander).unwrap(), "keep");
+        assert!(path.exists());
     }
 
     #[test]

@@ -194,21 +194,15 @@ pub fn verify(request: &VerifyRequest) -> Result<VerifiedSlot> {
 }
 
 /// Remove one built slot; `manifest_file` also deletes the source `mvm.toml`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default)]
 pub struct RemoveRequest {
-    #[serde(default)]
     pub path: Option<String>,
-    #[serde(default)]
     pub force: bool,
-    #[serde(default)]
     pub manifest_file: bool,
 }
 
 /// What `remove` deleted.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone)]
 pub struct RemovedSlot {
     pub slot_hash: String,
     pub manifest_path: PathBuf,

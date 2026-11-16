@@ -194,11 +194,13 @@ method, remote endpoint or HTTP server is added.
 
 ABI 1.14 adds `manifest.remove` and `manifest.prune`, the same operations as
 `mvmctl manifest rm` and `manifest prune`, answered by
-`mvm_client::manifest::{remove, prune}`. `manifest.remove` takes
-`{"path"?, "force"?, "manifest_file"?}`, deletes the built slot under the host
-registry and, only when `manifest_file` is true, also deletes the resolved
-`mvm.toml`; it returns `{slot_hash, manifest_path, manifest_file_deleted}`. A
-slot that does not exist is a nonretryable `NOT_FOUND` unless `force` is true.
+`mvm_client::manifest::{remove, prune}`. `manifest.remove` takes `{"path"?, "force"?}`, deletes the built slot under the
+host registry and returns `{slot_hash, manifest_path}`. It never deletes a
+source file and has no field to ask for one: path resolution accepts any
+regular file, so a library-level file delete would need its own review with a
+manifest-name-and-content check. A request carrying `manifest_file` is refused
+as an unknown field. A slot that does not exist is a nonretryable `NOT_FOUND`
+unless `force` is true.
 `manifest.prune` takes `{"orphans": true, "dry_run"?}` and returns the orphaned
 slots removed (or, with `dry_run`, the ones that would be, each with a reason);
 a request that does not name `orphans` is refused with `INVALID_SPEC` and

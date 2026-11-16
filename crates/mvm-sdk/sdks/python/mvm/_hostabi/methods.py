@@ -80,8 +80,8 @@ MANIFEST_LIST: Final = "manifest.list"
 MANIFEST_PRUNE: Final = "manifest.prune"
 
 
-#: Delete one built manifest slot from the local registry;
-#: manifest_file also deletes the source file.
+#: Delete one built manifest slot from the local registry; the source
+#: manifest file is never deleted.
 MANIFEST_REMOVE: Final = "manifest.remove"
 
 
@@ -280,7 +280,7 @@ METHODS: dict[str, Method] = {
     "manifest.info": Method(key="manifest_info", classification=Classification.PROD_SAFE, summary="Inspect a built manifest slot and its optional snapshot."),
     "manifest.list": Method(key="manifest_list", classification=Classification.PROD_SAFE, summary="List built manifest slots with orphan and tag-intersection filters."),
     "manifest.prune": Method(key="manifest_prune", classification=Classification.PROD_SAFE, summary="Remove built manifest slots whose source file is gone, or with dry_run only report them; `orphans` must be named."),
-    "manifest.remove": Method(key="manifest_remove", classification=Classification.PROD_SAFE, summary="Delete one built manifest slot from the local registry; manifest_file also deletes the source file."),
+    "manifest.remove": Method(key="manifest_remove", classification=Classification.PROD_SAFE, summary="Delete one built manifest slot from the local registry; the source manifest file is never deleted."),
     "manifest.verify": Method(key="manifest_verify", classification=Classification.PROD_SAFE, summary="Verify built manifest artifact checksums; signature verification is refused."),
     "backend.capabilities": Method(key="backend_capabilities", classification=Classification.PROD_SAFE, summary="Reports what the backend can do."),
     "entrypoint.call": Method(key="entrypoint_call", classification=Classification.PROD_SAFE, summary="Calls a workload's entrypoint in a transient microVM, admitted under a signed plan."),

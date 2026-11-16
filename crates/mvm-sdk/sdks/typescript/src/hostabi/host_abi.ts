@@ -1894,19 +1894,17 @@ reply: RemovedSlot
 request: RemoveRequest2
 }
 /**
- * What `remove` deleted.
+ * The slot `manifest.remove` deleted.
  */
 export interface RemovedSlot {
-manifest_file_deleted: boolean
 manifest_path: string
 slot_hash: string
 }
 /**
- * Remove one built slot; `manifest_file` also deletes the source `mvm.toml`.
+ * Remove one built slot. There is deliberately no way to name a source file: the client's path resolution accepts any regular file, so deleting one over this surface would delete arbitrary files. Only the registry slot is removed.
  */
 export interface RemoveRequest2 {
 force?: boolean
-manifest_file?: boolean
 path?: (string | null)
 }
 export interface ManifestVerify {

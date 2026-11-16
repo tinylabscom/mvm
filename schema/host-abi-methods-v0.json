@@ -72,7 +72,7 @@
       "classification": "prod_safe",
       "key": "manifest_remove",
       "name": "manifest.remove",
-      "summary": "Delete one built manifest slot from the local registry; manifest_file also deletes the source file."
+      "summary": "Delete one built manifest slot from the local registry; the source manifest file is never deleted."
     },
     {
       "classification": "prod_safe",

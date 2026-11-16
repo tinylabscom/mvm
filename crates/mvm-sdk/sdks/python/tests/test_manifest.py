@@ -32,14 +32,11 @@ from mvm._errors.types import HostLibraryError, MachineBackendError
          {"path": "/build/manifest.json", "revision": "rev", "check_signature": True},
          {"slot_hash": "abc", "manifest_path": "/build/manifest.json"}),
         (lambda: mvm.manifest.remove(), "manifest.remove",
-         {"path": None, "force": False, "manifest_file": False},
-         {"slot_hash": "abc", "manifest_path": "/build/mvm.toml",
-          "manifest_file_deleted": False}),
-        (lambda: mvm.manifest.remove("/build/mvm.toml", force=True, manifest_file=True),
-         "manifest.remove",
-         {"path": "/build/mvm.toml", "force": True, "manifest_file": True},
-         {"slot_hash": "abc", "manifest_path": "/build/mvm.toml",
-          "manifest_file_deleted": True}),
+         {"path": None, "force": False},
+         {"slot_hash": "abc", "manifest_path": "/build/mvm.toml"}),
+        (lambda: mvm.manifest.remove("/build/mvm.toml", force=True),
+         "manifest.remove", {"path": "/build/mvm.toml", "force": True},
+         {"slot_hash": "abc", "manifest_path": "/build/mvm.toml"}),
         (lambda: mvm.manifest.prune(), "manifest.prune",
          {"orphans": True, "dry_run": False}, [{"slot_hash": "abc", "reason": None}]),
         (lambda: mvm.manifest.prune(dry_run=True), "manifest.prune",
@@ -74,3 +71,8 @@ def test_failures_preserve_backend_error(hostlib, operation, method, message):
     assert isinstance(caught.value, HostLibraryError)
     assert str(caught.value) == message
     assert caught.value.code == "BACKEND_ERROR"
+
+
+def test_remove_has_no_way_to_ask_for_a_file_delete():
+    with pytest.raises(TypeError):
+        mvm.manifest.remove("/build/mvm.toml", manifest_file=True)

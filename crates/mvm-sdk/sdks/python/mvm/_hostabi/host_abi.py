@@ -785,7 +785,6 @@ class ManifestPruneRequest:
 
 @dataclass
 class ManifestRemoveReply:
-    manifest_file_deleted: bool
     manifest_path: str
     slot_hash: str
 
@@ -793,7 +792,6 @@ class ManifestRemoveReply:
 @dataclass
 class ManifestRemoveRequest:
     force: Optional[bool] = False
-    manifest_file: Optional[bool] = False
     path: Optional[str] = None
 
 

@@ -38,16 +38,12 @@ export function verify(
   });
 }
 
-/** Delete a built slot; `manifestFile` also deletes the source manifest file. */
+/** Delete a built slot from the registry; the source manifest file is never deleted. */
 export function remove(
   path: string | null = null,
-  opts: { force?: boolean; manifestFile?: boolean } = {},
+  opts: { force?: boolean } = {},
 ): Record<string, unknown> {
-  return call(MANIFEST_REMOVE, {
-    path,
-    force: opts.force ?? false,
-    manifest_file: opts.manifestFile ?? false,
-  });
+  return call(MANIFEST_REMOVE, { path, force: opts.force ?? false });
 }
 
 /** Remove built slots whose source manifest is gone; `dryRun` only reports them. */

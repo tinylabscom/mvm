@@ -3811,11 +3811,8 @@
       "type": "object"
     },
     "ManifestRemoveReply": {
-      "description": "What `remove` deleted.",
+      "description": "The slot `manifest.remove` deleted.",
       "properties": {
-        "manifest_file_deleted": {
-          "type": "boolean"
-        },
         "manifest_path": {
           "type": "string"
         },
@@ -3824,7 +3821,6 @@
         }
       },
       "required": [
-        "manifest_file_deleted",
         "manifest_path",
         "slot_hash"
       ],
@@ -3833,13 +3829,9 @@
     },
     "ManifestRemoveRequest": {
       "additionalProperties": false,
-      "description": "Remove one built slot; `manifest_file` also deletes the source `mvm.toml`.",
+      "description": "Remove one built slot. There is deliberately no way to name a source file: the client's path resolution accepts any regular file, so deleting one over this surface would delete arbitrary files. Only the registry slot is removed.",
       "properties": {
         "force": {
-          "default": false,
-          "type": "boolean"
-        },
-        "manifest_file": {
           "default": false,
           "type": "boolean"
         },

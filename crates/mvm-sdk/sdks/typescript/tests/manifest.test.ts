@@ -52,14 +52,14 @@ describe("manifest inspection", () => {
     {
       operation: () => manifest.remove(),
       method: "manifest.remove",
-      request: { path: null, force: false, manifest_file: false },
-      reply: { ...verified, manifest_file_deleted: false },
+      request: { path: null, force: false },
+      reply: verified,
     },
     {
-      operation: () => manifest.remove("/build/mvm.toml", { force: true, manifestFile: true }),
+      operation: () => manifest.remove("/build/mvm.toml", { force: true }),
       method: "manifest.remove",
-      request: { path: "/build/mvm.toml", force: true, manifest_file: true },
-      reply: { ...verified, manifest_file_deleted: true },
+      request: { path: "/build/mvm.toml", force: true },
+      reply: verified,
     },
     {
       operation: () => manifest.prune(),

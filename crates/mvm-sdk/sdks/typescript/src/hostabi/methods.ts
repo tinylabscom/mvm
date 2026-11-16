@@ -70,8 +70,8 @@ export const MANIFEST_LIST = "manifest.list";
 export const MANIFEST_PRUNE = "manifest.prune";
 
 /**
- * Delete one built manifest slot from the local registry;
- * manifest_file also deletes the source file.
+ * Delete one built manifest slot from the local registry; the source
+ * manifest file is never deleted.
  */
 export const MANIFEST_REMOVE = "manifest.remove";
 
@@ -240,7 +240,7 @@ export const METHODS: Readonly<Record<string, HostAbiMethod>> = {
   "manifest.info": { key: "manifest_info", classification: "prod_safe", summary: "Inspect a built manifest slot and its optional snapshot." },
   "manifest.list": { key: "manifest_list", classification: "prod_safe", summary: "List built manifest slots with orphan and tag-intersection filters." },
   "manifest.prune": { key: "manifest_prune", classification: "prod_safe", summary: "Remove built manifest slots whose source file is gone, or with dry_run only report them; `orphans` must be named." },
-  "manifest.remove": { key: "manifest_remove", classification: "prod_safe", summary: "Delete one built manifest slot from the local registry; manifest_file also deletes the source file." },
+  "manifest.remove": { key: "manifest_remove", classification: "prod_safe", summary: "Delete one built manifest slot from the local registry; the source manifest file is never deleted." },
   "manifest.verify": { key: "manifest_verify", classification: "prod_safe", summary: "Verify built manifest artifact checksums; signature verification is refused." },
   "backend.capabilities": { key: "backend_capabilities", classification: "prod_safe", summary: "Reports what the backend can do." },
   "entrypoint.call": { key: "entrypoint_call", classification: "prod_safe", summary: "Calls a workload's entrypoint in a transient microVM, admitted under a signed plan." },

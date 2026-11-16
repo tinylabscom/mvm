@@ -297,10 +297,10 @@ pub const REGISTRY: &[MethodDef] = &[
     MethodDef {
         name: MANIFEST_REMOVE,
         key: "manifest_remove",
-        summary: "Delete one built manifest slot from the local registry; manifest_file also deletes the source file.",
+        summary: "Delete one built manifest slot from the local registry; the source manifest file is never deleted.",
         classification: Classification::ProdSafe,
-        request: schema_of::<mvm_client::manifest::RemoveRequest>,
-        reply: schema_of::<mvm_client::manifest::RemovedSlot>,
+        request: schema_of::<crate::manifest::RemoveRequest>,
+        reply: schema_of::<crate::manifest::RemovedSlot>,
     },
     MethodDef {
         name: MANIFEST_VERIFY,
