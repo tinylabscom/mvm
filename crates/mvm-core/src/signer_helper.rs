@@ -1,14 +1,14 @@
-//! Client for the resident per-tenant signer helper.
+//! Unix client for the resident per-tenant signer helper.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
-use mvm_core::protocol::audit_signer::{
+use crate::protocol::audit_signer::{
     SignerHelperRequest, SignerHelperResponse, SignerHelperSignHost,
 };
-use mvm_core::protocol::host_signer::{SignRequest, SignResponse};
+use crate::protocol::host_signer::{SignRequest, SignResponse};
+use anyhow::{Context, Result, bail};
 
 /// Default cap for helper control frames.
 pub const DEFAULT_HELPER_MAX_FRAME_BYTES: usize = 64 * 1024;
@@ -18,8 +18,7 @@ mod telemetry {
 
     use std::time::Duration;
 
-    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-    use mvm_core::{
+    use crate::{
         net::telemetry::{TelemetryError, handshake_signing_bytes},
         protocol::{
             audit_signer::{SignerHelperRequest, SignerHelperResponse, SignerHelperSignHost},
@@ -27,6 +26,7 @@ mod telemetry {
         },
         security::{SIG_ALG_ED25519, SessionHello, SessionHelloAck},
     };
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
     use super::SignerHelperClient;
 
@@ -190,8 +190,8 @@ fn send_helper_request(
 mod tests {
     use std::sync::Arc;
 
-    use mvm_core::protocol::audit_signer::AuditSignerErrorCode;
-    use mvm_core::protocol::host_signer::HostSignerErrorCode;
+    use crate::protocol::audit_signer::AuditSignerErrorCode;
+    use crate::protocol::host_signer::HostSignerErrorCode;
     use tempfile::tempdir;
     use tokio::net::UnixListener;
     use tokio::sync::Mutex;
@@ -228,7 +228,7 @@ mod tests {
                 request_id: "sign-1".into(),
                 response: SignResponse::Ok {
                     request_id: "sign-1".into(),
-                    sig_alg: mvm_core::security::SIG_ALG_ED25519,
+                    sig_alg: crate::security::SIG_ALG_ED25519,
                     signature: vec![0u8; 64],
                     signer_pubkey: vec![1u8; 32],
                 },
