@@ -7,6 +7,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import platform
+import pwd
 import re
 import stat
 import sys
@@ -38,26 +40,47 @@ def private_directory(path):
             "consumer directory must be owned by this user with mode 0700")
 
 
-def consumer_environment(home, mvm_home):
+def consumer_environment(home, mvm_home, native_home=None):
     private_directory(home)
     private_directory(mvm_home)
+    account_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    require(home != account_home.resolve(),
+            "refusing the operator's account home as isolated HOME")
     require(home != Path.home().resolve(), "refusing the operator's ordinary HOME")
     require(mvm_home.is_relative_to(home) and mvm_home != home,
             "MVM_HOME must be inside the isolated HOME")
+    require(mvm_home != account_home.resolve() / ".mvm",
+            "refusing the operator's ordinary MVM_HOME")
+    if native_home is not None:
+        require(platform.system() == "Darwin", "native HOME requires macOS")
+        require(native_home.is_absolute() and native_home == native_home.resolve()
+                and native_home == account_home,
+                "native HOME must be the canonical account home without symlinks")
+        info = native_home.stat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid(),
+                "native HOME must be a directory owned by this user")
     # Never traverse prepared identity, binding or trust stores.
+    for relative in ("cache", "registry"):
+        path = mvm_home / relative
+        require(not path.is_symlink(), "consumer state parent must not be a symlink")
+        if path.exists():
+            private_directory(path)
     for relative in ("bundles", "cache/registry-packs", "registry/packs.lock.toml",
                      "audit", "sessions", "vms"):
         path = mvm_home / relative
-        require(not path.exists() and not path.is_symlink(),
+        require(not path.is_symlink() and not path.exists(),
                 f"consumer application/runtime state is not pristine: {relative}")
-    config = home / ".config"
-    require(not config.exists() and not config.is_symlink(),
-            "ambient consumer configuration present")
+    for relative in (".config", ".cache", ".state"):
+        path = home / relative
+        require(not path.is_symlink() and not path.exists(),
+                f"ambient consumer XDG state present: {relative}")
     return {
-        "HOME": str(home), "MVM_HOME": str(mvm_home),
+        "HOME": str(native_home if native_home is not None else home),
+        "MVM_HOME": str(mvm_home),
         "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "en_US.UTF-8",
         "XDG_CONFIG_HOME": str(home / ".config"),
         "XDG_CACHE_HOME": str(home / ".cache"),
+        "XDG_STATE_HOME": str(home / ".state"),
     }
 
 
@@ -147,7 +170,7 @@ def preflight(args, runner, report):
             "release commit must be a full Git SHA")
     for value in (args.descriptor_sha256, args.archive_sha256):
         sha256(value)
-    env = consumer_environment(args.home, args.mvm_home)
+    env = consumer_environment(args.home, args.mvm_home, getattr(args, "native_home", None))
     identity = released_cli(args.cli, args.cli_sha256)
     if getattr(args, "check_readiness", False):
         require(args.caller_installation and args.caller_public_key_sha256
@@ -184,6 +207,9 @@ def parser():
     result = argparse.ArgumentParser(description=__doc__)
     for name in ("cli", "home", "mvm-home"):
         result.add_argument("--" + name, type=Path, required=True)
+    result.add_argument("--native-home", type=Path,
+                        help="opt-in macOS account HOME for native discovery only; "
+                             "MVM/XDG state stays under --home")
     for name in ("cli-sha256", "version", "release-commit", "descriptor-sha256",
                  "archive-sha256", "key-id", "endpoint"):
         result.add_argument("--" + name, required=True)

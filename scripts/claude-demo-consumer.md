@@ -7,11 +7,33 @@ Its hermetic tests do not launch `mvmctl` or contact a model.
 ## Prepare before opting in
 
 Use an approved native Apple Silicon consumer, outside a source checkout.
-Prepare a private mode-0700 HOME containing a private MVM_HOME with only public
+Prepare a private mode-0700 `--home` containing a private `--mvm-home` with only public
 trust/configuration, an already-enrolled caller identity for the exact final
 executable, and exactly one Anthropic-provider host binding. No enrollment,
 credential import, trust-key addition, cleanup or permission change is done by
 the runner. Never pass a credential value in any option or environment variable.
+
+The shared preflight distinguishes three locations:
+
+- `--home` is always the isolated state root, not the normal account home.
+  Its `.config`, `.cache` and `.state` children supply `XDG_CONFIG_HOME`,
+  `XDG_CACHE_HOME` and `XDG_STATE_HOME`; each must be absent, not a symlink.
+- `--mvm-home` is strictly beneath `--home`, never the normal account's `.mvm`.
+  Both supplied private directories must be absolute, canonical, owned by the
+  current user, mode 0700 and non-symlink. Existing cache/registry parents must
+  also be private and non-symlink; prepared trust/binding stores are not traversed.
+- Optional `--native-home` changes only child `HOME` to the current macOS user's
+  account-database home for native user-keychain discovery. It must be an existing,
+  owned, absolute, canonical directory without symlinks, matching `pwd.getpwuid`,
+  not ambient `HOME`. The runner does not change its permissions or inspect or
+  reconfigure the keychain. Without this option, child `HOME` stays `--home`.
+
+The live consumer inherits this option from the same preflight parser and uses
+the same minimal environment for acquisition and dispatch. Ambient secrets,
+proxies and registry overrides are not forwarded. No host-home guest mount is
+added. Native-home discovery is **not native ACL proof, enrollment, authorization
+to launch, or cleanup permission**; canonical admission and separate live consent
+are still required.
 
 The CLI must be the absolute, independently verified released executable, with
 no symlinks or writable permission bits and an OS immutable flag. Enrollment
