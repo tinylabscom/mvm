@@ -180,6 +180,16 @@ grep -q "^NETWORK_SEGMENT skipped" <<<"${out}" || fail "a missing mvmd was not r
 out="$(run ok HYPERVISOR=firecracker)" || fail "the default run failed"
 ! grep -q "NETWORK_SEGMENT\|networking carrier" <<<"${out}" || fail "the segment ran without being asked for: ${out}"
 
+# After `cargo build --release --locked` the script needs no arguments: it drives
+# the checkout's own binary and keeps its home under target/ between runs.
+tree="${work}/tree"; rm -rf "${tree}"; mkdir -p "${tree}/scripts" "${tree}/target/release"
+cp "${repo}/scripts/mission-demo-live.sh" "${tree}/scripts/"; cp -R "${repo}/scripts/lib" "${tree}/scripts/lib"
+cp "${work}/mvmctl" "${tree}/target/release/mvmctl"
+rm -rf "${work:?}/state"; mkdir -p "${work}/state"
+out="$(env -u MVMCTL -u MVM_HOME FAKE_STATE="${work}/state" FAKE_MODE=ok HYPERVISOR=firecracker WAIT_SECS=4 QUARANTINE_DEADLINE=3 bash "${tree}/scripts/mission-demo-live.sh" 2>&1)" || fail "a run from a built checkout failed: ${out}"
+grep -q '^DEMO_RESULT=pass$' <<<"${out}" || fail "the built checkout's run did not pass: ${out}"
+[ -d "${tree}/target/mission-demo-home" ] || fail "a run from a built checkout did not keep its home under target/"
+
 # The audit checks must be about THIS run: an earlier run's entries must not
 # satisfy them. The fake writes nothing for a replace it refuses, so a missing
 # entry is a failure even though older lines mention the same events.

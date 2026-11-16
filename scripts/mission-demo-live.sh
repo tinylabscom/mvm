@@ -14,10 +14,17 @@
 # image and does one throwaway run) and launches again. It never runs
 # `mvmctl bootstrap`.
 #
-#   MVMCTL             the mvmctl to drive (default: mvmctl on PATH)
+#   MVMCTL             the mvmctl to drive. Default: this checkout's
+#                      target/release/mvmctl when `cargo build --release --locked`
+#                      has produced one, otherwise mvmctl on PATH. Build, then run
+#                      this script: nothing else is needed.
 #   HYPERVISOR         hvf (default on macOS) or firecracker (default on Linux)
 #   BUILDER            passed as --builder when set
-#   MVM_HOME           default: a new empty directory, removed on exit
+#   MVM_HOME           default: a new empty directory, removed on exit; with this
+#                      checkout's own build, target/mission-demo-home instead,
+#                      kept between runs. A build from source compiles its guest
+#                      runtime the first time it launches (tens of minutes, one
+#                      line of progress every 15 s); a kept home pays that once.
 #   IMAGE              OCI image to boot (default: alpine)
 #   WAIT_SECS          how long to wait for a guest or a stop (default: 120)
 #   QUARANTINE_DEADLINE  seconds before a quarantine that has not finished is
@@ -69,6 +76,11 @@
 # not finish.
 set -uo pipefail
 
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+from_checkout=0
+if [ -z "${MVMCTL:-}" ] && [ -x "$here/target/release/mvmctl" ]; then
+  MVMCTL="$here/target/release/mvmctl"; from_checkout=1
+fi
 MVMCTL="${MVMCTL:-mvmctl}"
 IMAGE="${IMAGE:-alpine}"
 WAIT_SECS="${WAIT_SECS:-120}"
@@ -91,7 +103,11 @@ ID="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
 
 own_home=""
 if [ -z "${MVM_HOME:-}" ]; then
-  own_home="$(mktemp -d)"; export MVM_HOME="$own_home"
+  if [ "$from_checkout" = 1 ]; then
+    export MVM_HOME="$here/target/mission-demo-home"; mkdir -p "$MVM_HOME"
+  else
+    own_home="$(mktemp -d)"; export MVM_HOME="$own_home"
+  fi
 fi
 mvm() { "$MVMCTL" ${bld[@]+"${bld[@]}"} "$@"; }
 say() { echo "PASS $*"; }
