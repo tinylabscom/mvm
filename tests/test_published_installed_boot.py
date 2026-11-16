@@ -327,6 +327,7 @@ class ReleaseSmokeWorkflowShapeTests(unittest.TestCase):
         packages = (WORKFLOWS / "distro-packages.yml").read_text()
         release = (WORKFLOWS / "release.yml").read_text()
         self.assertIn("artifact_attempt: ${{ github.run_attempt }}", packages)
+        self.assertIn("value: ${{ jobs.package.outputs.artifact_attempt }}", packages)
         consumer = packages.split("  install-smoke:", 1)[1]
         self.assertEqual(consumer.count("needs.package.outputs.artifact_attempt"), 2)
         self.assertNotIn("github.run_attempt", consumer)
