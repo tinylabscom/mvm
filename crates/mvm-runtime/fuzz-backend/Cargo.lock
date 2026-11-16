@@ -2196,6 +2196,7 @@ dependencies = [
  "aho-corasick",
  "anyhow",
  "base64",
+ "blake3",
  "bs58",
  "chrono",
  "core-foundation",
