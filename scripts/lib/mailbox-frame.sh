@@ -9,6 +9,22 @@
 # octal <fill>), then the body, put in place with a rename so the agent never
 # reads half a frame. Written as the directory's own owner, which is the
 # identity that may use it.
+# The same recipe as shell text a guest can run itself: it defines `mbx_write
+# <fill> <body>`. A workload that leaves its own frames (the entrypoint-driven
+# path) sources this instead of being driven through `machine exec`, so the
+# layout is still known in one place.
+mailbox_guest_writer() {
+  cat <<'EOS'
+mbx_write() {
+    d=/run/mvm/mailbox; owner=$(stat -c %u "$d"); t="$d/.frame.$$"
+    { head -c 32 /dev/zero | tr "\\0" "\\$1"; printf "%s" "$2"; } > "$t"
+    [ "$(id -u)" != 0 ] || chown "$owner" "$t"
+    chmod 640 "$t"
+    mv "$t" "$d/outbox/$(date +%s)-$$"
+}
+EOS
+}
+
 mailbox_write_frame() { # <vm> <fill: 000 = own mailbox, 377 = anyone else> <body>
   # The script expands in the guest, not here.
   # shellcheck disable=SC2016

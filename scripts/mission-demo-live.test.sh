@@ -33,9 +33,14 @@ case "${1:-} ${2:-}" in
       [ "${FAKE_FLOW:-ok}" = no-audit ] || echo "{\"event\":\"host.flow.allowed\",\"labels\":{\"target\":\"example.com:443\",\"vm_name\":\"${cname}\"}}" >> "${audit}"
       exit 0
     fi
-    shift 2; name=""; hv=firecracker
+    allargs=" $* "; shift 2; name=""; hv=firecracker
     while [ $# -gt 0 ]; do case "$1" in --name) name="$2"; shift ;; --hypervisor) hv="$2"; shift ;; esac; shift; done
-    if [ "${mode}" = needs-bootstrap ]; then echo "Error: runtime not prepared; run \`mvmctl bootstrap\` first" >&2; exit 1; fi
+    if [ "${mode}" = needs-bootstrap ] && [ ! -f "${fake}/prepared" ]; then
+      # A home that has not been prepared refuses a persistent launch; one
+      # throwaway transient run prepares it.
+      if [[ "${allargs}" == *" -d "* ]]; then echo "Error: the published OCI guest runtime is not prepared; run \`mvmctl bootstrap\` first" >&2; exit 1; fi
+      touch "${fake}/prepared"; exit 0
+    fi
     if grep -q '"quarantined": true' "${ledger}" 2>/dev/null; then echo "Error: workload ${name} is quarantined" >&2; exit 1; fi
     mkdir -p "${home}/vms/${name}"; head -c 16 /dev/urandom | od -An -tx1 > "${home}/vms/${name}/mailbox-epoch.secret"
     if [ "${hv}" = hvf ]; then echo "4242 1" > "${home}/vms/${name}/hvf.pid"; fi
@@ -122,8 +127,11 @@ bad secret-survives "the per-launch secret survived the quarantine"
 bad leaks-old-state "the replacement could read the old workload's frame"
 bad leaks-body "a message body was in the audit log"
 bad queues-other "a message to another recipient was queued"
-out="$(run needs-bootstrap HYPERVISOR=firecracker)" && fail "an install that needs bootstrap passed"
-grep -q "^FINDING: the install asked for 'mvmctl bootstrap'" <<<"${out}" || fail "no bootstrap finding: ${out}"
+# An unprepared home is prepared by the script itself, with no bootstrap step.
+out="$(run needs-bootstrap HYPERVISOR=firecracker)" || fail "an unprepared home was not prepared: ${out}"
+grep -q "^Preparing this machine once" <<<"${out}" || fail "the script did not say it was preparing: ${out}"
+grep -q "DEMO_RESULT=pass" <<<"${out}" || fail "the run did not pass after preparing: ${out}"
+! grep -qi "bootstrap" <<<"${out}" || fail "the run mentioned bootstrap: ${out}"
 out="$(run wedge HYPERVISOR=firecracker)" && fail "a wedged quarantine passed"
 grep -q 'WEDGE' <<<"${out}" || fail "a wedged quarantine was not reported: ${out}"
 
@@ -134,6 +142,29 @@ grep -q 'audit has host.flow.denied for egress-deny-' <<<"${out}" || fail "the d
 grep -q 'explain reports the denied destination' <<<"${out}" || fail "explain was not checked: ${out}"
 out="$(run ok HYPERVISOR=firecracker EGRESS_PROBE=1 FAKE_FLOW=no-audit)" && fail "EGRESS_PROBE passed with no flow audit entries: ${out}"
 grep -q '^DEMO_RESULT=pass$' <<<"${out}" && fail "EGRESS_PROBE printed a pass line without flow audit entries"
+
+# The optional networking segment states its scope and can never change the
+# demo's verdict: a carrier that fails, hangs, or is not installed is reported
+# and the demo still ends in its own result.
+mvmd="${work}/mvmd"; mkdir -p "${mvmd}/scripts"
+fake_smoke() { printf '#!/usr/bin/env bash\n%s\n' "$1" > "${mvmd}/scripts/smoke-iroh.sh"; }
+fake_smoke 'echo "{\"status\": \"ok\"}"; echo "iroh smoke test passed"'
+out="$(run ok HYPERVISOR=firecracker NETWORK_SEGMENT=1 MVMD_DIR="${mvmd}")" || fail "a passing network segment broke the run: ${out}"
+grep -q "separate processes on THIS host" <<<"${out}" || fail "the segment did not state its scope: ${out}"
+grep -q "Not shown: two hosts, WAN or NAT traversal" <<<"${out}" || fail "the segment did not state what it does not show: ${out}"
+grep -q "^NETWORK_SEGMENT ok" <<<"${out}" || fail "a passing segment was not reported ok: ${out}"
+grep -q '^DEMO_RESULT=pass$' <<<"${out}" || fail "the demo lost its verdict after the segment"
+fake_smoke 'echo "node failed to bind"; exit 1'
+out="$(run ok HYPERVISOR=firecracker NETWORK_SEGMENT=1 MVMD_DIR="${mvmd}")" || fail "a failing network segment failed the demo: ${out}"
+grep -q "^NETWORK_SEGMENT failed" <<<"${out}" || fail "a failing segment was not reported: ${out}"
+grep -q '^DEMO_RESULT=pass$' <<<"${out}" || fail "a failing segment changed the demo's verdict"
+fake_smoke 'sleep 30'
+out="$(run ok HYPERVISOR=firecracker NETWORK_SEGMENT=1 NETWORK_SEGMENT_SECS=2 MVMD_DIR="${mvmd}")" || fail "a hung network segment failed the demo: ${out}"
+grep -q "^NETWORK_SEGMENT did not finish" <<<"${out}" || fail "a hung segment was not omitted: ${out}"
+out="$(run ok HYPERVISOR=firecracker NETWORK_SEGMENT=1 MVMD_DIR="${work}/no-such-checkout")" || fail "a missing mvmd failed the demo: ${out}"
+grep -q "^NETWORK_SEGMENT skipped" <<<"${out}" || fail "a missing mvmd was not reported as skipped: ${out}"
+out="$(run ok HYPERVISOR=firecracker)" || fail "the default run failed"
+! grep -q "NETWORK_SEGMENT\|networking carrier" <<<"${out}" || fail "the segment ran without being asked for: ${out}"
 
 # The audit checks must be about THIS run: an earlier run's entries must not
 # satisfy them. The fake writes nothing for a replace it refuses, so a missing
