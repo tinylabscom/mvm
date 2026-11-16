@@ -7,6 +7,24 @@
 use std::fs;
 
 #[test]
+fn cold_runners_fetch_cross_target_sources_before_offline_graph_tests() {
+    let shard = fs::read_to_string(".github/workflows/workspace-shard.yml").unwrap();
+    let main = fs::read_to_string(".github/workflows/ci-main.yml").unwrap();
+    let arm = main.split("\n  test-workspace-aarch64:\n").nth(1).unwrap();
+    for workflow in [&shard[..], arm] {
+        let fetch = workflow.find("run: cargo fetch --locked").unwrap();
+        let tests = workflow.find("cargo nextest run --workspace").unwrap();
+        assert!(
+            fetch < tests,
+            "offline graph tests need the full locked source cache"
+        );
+    }
+    let graph = fs::read_to_string("crates/mvm-client/tests/no_authoring_dep.rs").unwrap();
+    assert!(graph.contains("\"--offline\""));
+    assert!(graph.contains("\"--locked\""));
+}
+
+#[test]
 fn workspace_isolation_resolves_runner_home_and_refuses_missing_accounts() {
     for workflow in [
         ".github/workflows/workspace-shard.yml",

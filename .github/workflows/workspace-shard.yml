@@ -205,6 +205,12 @@ jobs:
             printf 'HOME=%s\nMVM_HOME=%s\nTMPDIR=%s\n' "$base/home" "$base/mvm" "$base/tmp"
           } >> "$GITHUB_ENV"
 
+      # Offline graph tests inspect other targets and optional features too.
+      # A native build alone does not populate those locked dependency sources.
+      - name: Fetch locked sources for cross-target graph tests
+        if: inputs.archive_run_id == ''
+        run: cargo fetch --locked
+
       # Nextest builds the exact workspace selection itself. Queue-owned
       # doctests, feature suites and filter validation live in the extras job.
       - name: Run tests

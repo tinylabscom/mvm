@@ -496,6 +496,10 @@ jobs:
             printf 'HOME=%s\nMVM_HOME=%s\nTMPDIR=%s\n' "$base/home" "$base/mvm" "$base/tmp"
           } >> "$GITHUB_ENV"
 
+      # Offline graph tests also inspect macOS and non-default features.
+      - name: Fetch locked sources for cross-target graph tests
+        run: cargo fetch --locked
+
       - name: Run the aarch64 workspace tests
         run: cargo nextest run --workspace --exclude mvm-fs --all-targets
 
