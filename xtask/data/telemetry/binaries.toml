@@ -170,6 +170,20 @@ required_witness = "Authenticated host collector receives producer startup, stan
 
 [[binary]]
 package = "mvm-agentd"
+name = "mvm-mailbox-client"
+source = "crates/mvm-agentd/src/bin/mvm-mailbox-client.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "workload-guest"
+owner = "Guest mailbox client"
+signals = ["diagnostics", "stdio"]
+entrypoint = "fn main("
+gap = "Local stderr only; no certified bounded VM-lifetime telemetry capture path."
+required_witness = "Authenticated host collector receives producer startup and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
+
+[[binary]]
+package = "mvm-agentd"
 name = "mvm-ping"
 source = "crates/mvm-agentd/src/bin/mvm-ping.rs"
 required_features = []

@@ -82,6 +82,12 @@ required-features = ["addons"]
 name = "mvm-ping"
 path = "src/bin/mvm-ping.rs"
 
+# A workload's client for the mailbox its launch granted: `send` and `recv`.
+# Ships in the signed runtime overlay.
+[[bin]]
+name = "mvm-mailbox-client"
+path = "src/bin/mvm-mailbox-client.rs"
+
 # In-guest one-shot workload-exit-code reporter over AF_VSOCK.
 [[bin]]
 name = "mvm-exit-report"

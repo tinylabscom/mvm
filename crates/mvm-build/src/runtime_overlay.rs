@@ -187,7 +187,7 @@ const LOCAL_BUILD_EPOCH: &str = "9";
 /// name, name under `/mvm/runtime`). Every one but `mvm-setpriv` is an
 /// `mvm-agentd` binary; the privilege helper is its own package, built beside
 /// them into the same archive, and rides here so a root needs no copy of it.
-const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 10] = [
+const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 11] = [
     ("mvm-guest-agent", "agent"),
     ("mvm-guest-netinit", "netinit"),
     ("mvm-ping", "ping"),
@@ -197,6 +197,7 @@ const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 10] = [
     ("mvm-egress-client", "egress-client"),
     ("mvm-addon-dns", "addon-dns"),
     ("mvm-exit-report", "exit-report"),
+    ("mvm-mailbox-client", "mailbox-client"),
     ("mvm-setpriv", "setpriv"),
 ];
 /// The GPU shim sonames the overlay carries under `gpu/<libc>/`, read from the

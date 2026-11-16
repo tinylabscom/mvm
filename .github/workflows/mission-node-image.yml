@@ -1,0 +1,81 @@
+name: Mission node image
+
+# Publishes the mission demo's workload image and signs it, so a production run
+# (`mvmctl machine run --prod --image ...@sha256:...`) can verify it.
+#
+# Manual only: running this creates or updates a public package, so it is never
+# triggered by a push. The signature is keyless: the certificate names this
+# workflow at a ref, which is exactly what the OCI registry policy trusts
+# (examples/mission-node/oci-policy.toml).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mission-node-image
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build, push and sign
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/mvm-mission-node
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Log in to ghcr.io
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+
+      # The image only copies a script onto a digest-pinned base, so both
+      # architectures build without emulation. The index digest is what is
+      # signed and what a production run pins.
+      - name: Build and push a multi-architecture index
+        id: build
+        run: |
+          set -euo pipefail
+          docker buildx create --use --driver docker-container >/dev/null
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --tag "$IMAGE:$GITHUB_SHA" \
+            --metadata-file "$RUNNER_TEMP/meta.json" \
+            --push \
+            examples/mission-node
+          digest="$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/meta.json")"
+          case "$digest" in sha256:????????????????????????????????????????????????????????????????) ;; *) echo "no image digest: $digest" >&2; exit 1 ;; esac
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Sign the index by digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$IMAGE@$DIGEST"
+
+      # Verify the way mvmctl will, under the identity the policy names, before
+      # reporting success.
+      - name: Verify under the policy's identity
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign verify \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/mission-node-image.yml@${GITHUB_REF}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$IMAGE@$DIGEST" >/dev/null
+          {
+            echo "### Mission node image"
+            echo
+            echo "\`$IMAGE@$DIGEST\`"
+          } >> "$GITHUB_STEP_SUMMARY"

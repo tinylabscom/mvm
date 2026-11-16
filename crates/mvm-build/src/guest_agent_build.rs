@@ -122,6 +122,7 @@ pub struct RuntimeOverlayGuestBinaries {
     pub egress_client: PathBuf,
     pub addon_dns: PathBuf,
     pub exit_report: PathBuf,
+    pub mailbox_client: PathBuf,
     pub ping: PathBuf,
 }
 
@@ -131,7 +132,7 @@ impl RuntimeOverlayGuestBinaries {
     /// The overlay itself stages these under short names (`agent`,
     /// `netinit`, …); a consumer that builds images from the binaries knows
     /// them by their Cargo names, so that is the name an exported set uses.
-    pub fn artifacts(&self) -> [(&'static str, &Path); 9] {
+    pub fn artifacts(&self) -> [(&'static str, &Path); 10] {
         [
             ("mvm-guest-agent", self.agent.as_path()),
             ("mvm-guest-netinit", self.netinit.as_path()),
@@ -141,6 +142,7 @@ impl RuntimeOverlayGuestBinaries {
             ("mvm-egress-client", self.egress_client.as_path()),
             ("mvm-addon-dns", self.addon_dns.as_path()),
             ("mvm-exit-report", self.exit_report.as_path()),
+            ("mvm-mailbox-client", self.mailbox_client.as_path()),
             ("mvm-ping", self.ping.as_path()),
         ]
     }
@@ -157,6 +159,7 @@ pub struct RuntimeOverlayGuestLayout {
     pub egress_client: PathBuf,
     pub addon_dns: PathBuf,
     pub exit_report: PathBuf,
+    pub mailbox_client: PathBuf,
     pub ping: PathBuf,
 }
 
@@ -176,6 +179,7 @@ impl RuntimeOverlayGuestLayout {
             egress_client: dir.join("egress-client"),
             addon_dns: dir.join("addon-dns"),
             exit_report: dir.join("exit-report"),
+            mailbox_client: dir.join("mailbox-client"),
             ping: dir.join("ping"),
             dir,
         }
@@ -190,6 +194,7 @@ impl RuntimeOverlayGuestLayout {
             && self.egress_client.is_file()
             && self.addon_dns.is_file()
             && self.exit_report.is_file()
+            && self.mailbox_client.is_file()
             && self.ping.is_file()
     }
 
@@ -203,6 +208,7 @@ impl RuntimeOverlayGuestLayout {
             egress_client: self.egress_client.clone(),
             addon_dns: self.addon_dns.clone(),
             exit_report: self.exit_report.clone(),
+            mailbox_client: self.mailbox_client.clone(),
             ping: self.ping.clone(),
         }
     }
@@ -773,7 +779,7 @@ pub fn runtime_overlay_source_checkout_fingerprint(
 
 /// Runtime-overlay binaries built without `mvm-agentd/addons`: the sealed
 /// agent and the helpers it launches, none of which may link an async runtime.
-pub const RUNTIME_OVERLAY_SEALED_BINS: [&str; 7] = [
+pub const RUNTIME_OVERLAY_SEALED_BINS: [&str; 8] = [
     "mvm-guest-agent",
     "mvm-guest-netinit",
     "mvm-seccomp-apply",
@@ -781,6 +787,7 @@ pub const RUNTIME_OVERLAY_SEALED_BINS: [&str; 7] = [
     "mvm-ping",
     "mvm-runner",
     "mvm-exit-report",
+    "mvm-mailbox-client",
 ];
 
 /// Runtime-overlay binaries that need `mvm-agentd/addons`: the async loopback
@@ -857,6 +864,10 @@ fn build_runtime_overlay_guest_binaries_into_cache(
     install_one(&output_dir.join("mvm-egress-client"), &layout.egress_client)?;
     install_one(&output_dir.join("mvm-addon-dns"), &layout.addon_dns)?;
     install_one(&output_dir.join("mvm-exit-report"), &layout.exit_report)?;
+    install_one(
+        &output_dir.join("mvm-mailbox-client"),
+        &layout.mailbox_client,
+    )?;
 
     Ok(layout.binaries())
 }
@@ -1475,6 +1486,7 @@ mod tests {
                 "mvm-ping",
                 "mvm-runner",
                 "mvm-exit-report",
+                "mvm-mailbox-client",
             ]
         );
         assert!(features_of(&sealed).is_empty(), "{sealed:?}");
@@ -2053,6 +2065,7 @@ rust = "1.91.1"
         assert_eq!(layout.egress_client, layout.dir.join("egress-client"));
         assert_eq!(layout.addon_dns, layout.dir.join("addon-dns"));
         assert_eq!(layout.exit_report, layout.dir.join("exit-report"));
+        assert_eq!(layout.mailbox_client, layout.dir.join("mailbox-client"));
     }
 
     #[test]
