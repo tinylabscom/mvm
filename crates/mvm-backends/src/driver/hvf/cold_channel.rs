@@ -197,7 +197,12 @@ pub(super) fn failed_owned_boot(
             original.context("owned HVF rollback confirmed; runtime evidence retained")
         }
         Err(error) => {
-            original.context(error.context("safe HVF rollback unconfirmed; custody retained"))
+            // Both failures are shown: the boot's own, and why the rollback
+            // could not be confirmed. Folding the second into a context
+            // value printed only its first line and dropped the cause.
+            original.context(format!(
+                "safe HVF rollback unconfirmed; custody retained ({error:#})"
+            ))
         }
     }
 }
@@ -721,6 +726,39 @@ mod tests {
     use super::super::{KernelImage, PID_FILE_NAME, relay_supervisor_config};
     use super::*;
     use std::io::Read;
+
+    /// A boot that fails while its supervisor is still running, and whose
+    /// rollback cannot be confirmed, reports both causes.
+    #[test]
+    fn an_unconfirmed_rollback_reports_the_boot_failure_and_why_rollback_failed() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let mut child = Some(
+            std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .unwrap(),
+        );
+        let mut rollback = None;
+        let error = failed_owned_boot(
+            anyhow::anyhow!("the boot's own failure"),
+            &mut child,
+            "never-started",
+            &mut rollback,
+        );
+        let shown = format!("{error:#}");
+        assert!(shown.contains("the boot's own failure"), "{shown}");
+        assert!(shown.contains("safe HVF rollback unconfirmed"), "{shown}");
+        assert!(
+            shown.contains("HVF control evidence") || shown.contains("custody"),
+            "the rollback failure's cause must be shown: {shown}"
+        );
+        assert!(rollback.is_none());
+        let mut child = child.unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
 
     #[test]
     fn readonly_data_is_refused_by_every_unsupported_backend_before_recipe_dispatch() {

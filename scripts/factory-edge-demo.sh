@@ -48,6 +48,29 @@ if [ "$(du -sk "$MVM_HOME/audit" 2>/dev/null | cut -f1)" -gt 20000 ] 2>/dev/null
   echo "      Start a fresh chain with: mv $MVM_HOME/audit $MVM_HOME/audit-archive" >&2
 fi
 
+# macOS can cache a bad code-signature verdict for one installed helper file and
+# kill it on every start, which mvmctl reports as "does not answer the contract
+# probe (... signal: 9)". A fresh copy with identical bytes (same signature, new
+# file) clears it. Check the VM helper next to the mvmctl in use and refresh it
+# only if it is killed and the copy is byte-identical.
+heal_helper() {
+  [ "$(uname -s)" = Darwin ] || return 0
+  local real helper fresh
+  real="$(python3 -c 'import os,shutil,sys; p=shutil.which(sys.argv[1]) or sys.argv[1]; print(os.path.realpath(p))' "$mvm" 2>/dev/null)" || return 0
+  helper="$(dirname "$real")/mvm-hvf-supervisor"
+  [ -x "$helper" ] || return 0
+  probe() { bash -c 'perl -e "alarm 10; exec @ARGV" "$0" --contract-version </dev/null >/dev/null 2>&1' "$1" 2>/dev/null; }
+  probe "$helper" && return 0
+  fresh="$helper.fresh.$$"
+  if cp -p "$helper" "$fresh" && cmp -s "$helper" "$fresh" && probe "$fresh" && mv -f "$fresh" "$helper"; then
+    echo "note: refreshed $helper (macOS had stopped it from starting)" >&2
+  else
+    rm -f "$fresh"
+    echo "warning: $helper does not start; the launches below will fail" >&2
+  fi
+}
+heal_helper
+
 id="$(date +%H%M%S)"   # names are unique per run, so `explain <name>` is never ambiguous
 a="line-a-$id"; b="line-b-$id"; m="maintenance-$id"
 

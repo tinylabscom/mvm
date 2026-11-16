@@ -18,7 +18,9 @@ use tracing::warn;
 /// Why a stream/association operation was refused.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RegistryError {
-    /// The requested stream ID is outside the allowed space or parity.
+    /// The requested stream ID is outside the allowed space or parity, or
+    /// sits at or below the allocator's high-water mark, meaning this
+    /// session already retired it.
     #[error("invalid stream id {stream_id}")]
     InvalidStreamId { stream_id: u32 },
     /// A new flow cannot be admitted because the matching ceiling is hit.
@@ -57,6 +59,12 @@ impl std::fmt::Display for FlowClass {
 }
 
 /// Life-cycle state of a TCP stream or UDP association.
+///
+/// Only states a *live* entry can be in are representable: retirement removes
+/// the entry from the map rather than marking it, so a long session does not
+/// accumulate one record per closed flow. The ID stays retired even though
+/// the entry is gone, because the allocator's high-water counters live
+/// outside the map and `open_guest`/`open_host` refuse IDs at or below them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamState {
     /// `OpenTcp`/`OpenUdp`/`InboundOpen` received, host has not yet confirmed.
@@ -65,8 +73,6 @@ pub enum StreamState {
     Open,
     /// One side has sent `Close`; the other direction may still send.
     HalfClosed,
-    /// Fully closed; the ID is retired and may not be reused.
-    Closed,
 }
 
 /// Per-stream bookkeeping. The payload bytes are held outside the registry by
@@ -353,18 +359,13 @@ impl StreamRegistry {
     /// fourth copy or be silently uncounted against its own ceiling.
     #[must_use]
     pub fn live_in_class(&self, class: FlowClass) -> usize {
-        self.streams
-            .values()
-            .filter(|e| e.class == class && e.state != StreamState::Closed)
-            .count()
+        self.streams.values().filter(|e| e.class == class).count()
     }
 
     /// Return the entry for a live stream, if any.
     #[must_use]
     pub fn get(&self, stream_id: u32) -> Option<&StreamEntry> {
-        self.streams
-            .get(&stream_id)
-            .filter(|e| e.state != StreamState::Closed)
+        self.streams.get(&stream_id)
     }
 
     /// Allocate a fresh guest-initiated stream ID for `class` and record it as
@@ -399,6 +400,15 @@ impl StreamRegistry {
         if stream_id == 0 || stream_id.is_multiple_of(2) {
             return Err(RegistryError::InvalidStreamId { stream_id });
         }
+        // Retired entries are dropped from the map, so the presence check
+        // below cannot catch a reused ID on its own. The high-water mark
+        // refuses it: an ID at or below the allocator's next ID was retired
+        // earlier in this session and must not come back. This mirrors the
+        // session validator's watermark rule, so the registry cannot be made
+        // to reuse an ID even by a caller with no validator in front of it.
+        if stream_id < self.next_guest_id {
+            return Err(RegistryError::InvalidStreamId { stream_id });
+        }
         if self.live_in_class(class) >= self.class_limit(class) {
             return Err(RegistryError::Ceiling {
                 class,
@@ -422,6 +432,11 @@ impl StreamRegistry {
     /// The ID must be even, not already live, and within the class ceiling.
     pub fn open_host(&mut self, stream_id: u32, class: FlowClass) -> Result<(), RegistryError> {
         if stream_id == 0 || !stream_id.is_multiple_of(2) {
+            return Err(RegistryError::InvalidStreamId { stream_id });
+        }
+        // Same high-water rule as `open_guest`: retirement removes the entry,
+        // so only the mark, not the map, proves an ID was already used.
+        if stream_id < self.next_host_id {
             return Err(RegistryError::InvalidStreamId { stream_id });
         }
         if self.live_in_class(class) >= self.class_limit(class) {
@@ -502,24 +517,35 @@ impl StreamRegistry {
                 entry.state = StreamState::HalfClosed;
                 Ok(())
             }
-            StreamState::HalfClosed | StreamState::Closed => {
-                // Already half-closed or fully closed: treat as no-op rather
-                // than an error so a duplicate close does not tear the session.
+            StreamState::HalfClosed => {
+                // Already half-closed: treat as no-op rather than an error so
+                // a duplicate close does not tear the session.
                 Ok(())
             }
             state => Err(RegistryError::IllegalState { stream_id, state }),
         }
     }
 
-    /// Retire a stream. `Reset` always retires immediately; a second `Close`
-    /// on a `HalfClosed` stream also retires it.
+    /// Retire a stream: drop its entry, returning its VM budget slot.
+    /// `Reset` always retires immediately; a second `Close` on a `HalfClosed`
+    /// stream also retires it.
+    ///
+    /// The entry is removed, not marked: keeping closed entries would let a
+    /// long session accumulate one record per closed flow. Removal is safe
+    /// because nothing can still reference the entry — every retire path has
+    /// already had its final frame admitted by the session validator (which
+    /// independently refuses later frames naming the stream), relay threads
+    /// gate their last frames on the stream's `retired` flag rather than the
+    /// registry, and the ID itself stays retired through the allocator's
+    /// high-water counters, which live outside the map.
     pub fn retire(&mut self, stream_id: u32) -> Result<(), RegistryError> {
         let entry = self
             .streams
-            .get_mut(&stream_id)
+            .remove(&stream_id)
             .ok_or(RegistryError::NotLive { stream_id })?;
-        entry.state = StreamState::Closed;
-        entry.budget_permit.take();
+        // Return the VM-wide capacity slot; the permit's `Drop` gives the
+        // flow's reservation back to the shared owner.
+        drop(entry.budget_permit);
         Ok(())
     }
 
@@ -696,6 +722,64 @@ mod tests {
         reg.half_close(id).unwrap(); // idempotent
         reg.retire(id).unwrap();
         assert!(reg.get(id).is_none());
+    }
+
+    /// A long session opens and closes many flows. Retired entries must be
+    /// dropped, not kept until the session ends, and removing them must not
+    /// rewind the ID allocator: the stream-id ordering the session validator
+    /// enforces comes from these monotonic counters, not from the entries.
+    #[test]
+    fn open_close_cycles_do_not_accumulate_registry_entries() {
+        let mut reg = StreamRegistry::new(RegistryLimits::default());
+        let cycles = 10_000u32;
+        for _ in 0..cycles {
+            let id = reg.alloc_guest(FlowClass::Tcp).unwrap();
+            reg.confirm(id).unwrap();
+            reg.half_close(id).unwrap();
+            reg.retire(id).unwrap();
+
+            let id = reg.alloc_host(FlowClass::Udp).unwrap();
+            reg.confirm(id).unwrap();
+            reg.retire(id).unwrap();
+        }
+        assert_eq!(
+            reg.streams.len(),
+            0,
+            "retired entries must be dropped, not accumulated for the session lifetime"
+        );
+
+        assert_eq!(
+            reg.alloc_guest(FlowClass::Tcp).unwrap(),
+            2 * cycles + 1,
+            "guest id allocation must stay monotonic after removals"
+        );
+        assert_eq!(
+            reg.alloc_host(FlowClass::Tcp).unwrap(),
+            2 * cycles + 2,
+            "host id allocation must stay monotonic after removals"
+        );
+        assert_eq!(reg.streams.len(), 2);
+    }
+
+    /// The map lookup alone no longer catches a reopened ID once retired
+    /// entries are dropped, so the allocator's high-water mark must refuse
+    /// it. IDs are never reusable within a session.
+    #[test]
+    fn a_retired_stream_id_cannot_be_reopened_by_the_peer() {
+        let mut reg = StreamRegistry::new(RegistryLimits::default());
+        let id = reg.alloc_guest(FlowClass::Tcp).unwrap();
+        reg.retire(id).unwrap();
+        assert_eq!(
+            reg.open_guest(id, FlowClass::Tcp),
+            Err(RegistryError::InvalidStreamId { stream_id: id })
+        );
+
+        let id = reg.alloc_host(FlowClass::Udp).unwrap();
+        reg.retire(id).unwrap();
+        assert_eq!(
+            reg.open_host(id, FlowClass::Udp),
+            Err(RegistryError::InvalidStreamId { stream_id: id })
+        );
     }
 
     #[test]

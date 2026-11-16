@@ -1,6 +1,14 @@
 //! Host checks and prepared attachments performed after plan admission.
 
-use super::*;
+use anyhow::Result;
+use mvm_core::policy::PolicyBundle;
+use mvm_core::vm_backend::{BackendKind, VmStartConfig};
+
+use super::{
+    AdmittedPlan, PreparedBuiltPackRuntime, enforce_admitted_environment, enforce_admitted_shares,
+    enforce_sdk_sidecar_attachment, enforce_sdk_sidecar_backend_compatibility,
+    populate_audit_substrate, prepare_built_pack_start,
+};
 
 /// The post-admission gates between `plan.admitted` and backend start, run in
 /// order. On refusal, return the failing stage label for the terminal audit

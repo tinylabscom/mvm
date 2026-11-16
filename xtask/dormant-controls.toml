@@ -70,7 +70,7 @@ production caller applies it."""
 
 [[control]]
 symbol = "apply_admitted_grants_or_undo_launch"
-file = "crates/mvm-hostd/src/plan_admission.rs"
+file = "crates/mvm-hostd/src/plan_admission/rollback.rs"
 dormant = false
 why = """
 Calls `VmBackend::apply_grants` on the backend that started the VM and stops \

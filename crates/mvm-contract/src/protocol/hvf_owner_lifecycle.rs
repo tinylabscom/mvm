@@ -64,6 +64,8 @@ pub enum LifecycleRefusal {
     BindingMismatch,
     #[error("request sequence is not newer than the last accepted one")]
     StaleSequence,
+    #[error("request sequence has no successor")]
+    SequenceExhausted,
     #[error("the owner is quarantined; recovery is not available")]
     Quarantined,
     #[error("result is not available for acknowledgement")]
@@ -235,7 +237,7 @@ impl OwnerLifecycle {
     /// # Errors
     /// Refuses a quarantined owner, a binding that is not exactly this operation's
     /// (stale generation or identity included), a sequence that is not strictly
-    /// newer, and early or conflicting acknowledgements.
+    /// newer or has no successor, and early or conflicting acknowledgements.
     pub fn apply(
         &mut self,
         request: &UntrustedRecoveryRequest,
@@ -248,6 +250,9 @@ impl OwnerLifecycle {
         }
         if request.sequence.get() <= self.last_sequence {
             return Err(LifecycleRefusal::StaleSequence);
+        }
+        if request.sequence.get() == u64::MAX {
+            return Err(LifecycleRefusal::SequenceExhausted);
         }
         // Refused requests do not consume the sequence.
         let applied = match request.action {
@@ -362,6 +367,48 @@ mod tests {
             );
         }
         assert!(life.apply(&req(6, RecoveryOperation::Observe {})).is_ok());
+    }
+
+    #[test]
+    fn sequence_at_u64_max_is_refused_not_wrapped() {
+        let mut life = active();
+        let max_cancel = req(u64::MAX, RecoveryOperation::CancelStop {});
+        assert_eq!(
+            life.apply(&max_cancel),
+            Err(LifecycleRefusal::SequenceExhausted)
+        );
+        assert_eq!(life.state(), OwnerState::Active);
+        assert!(!life.cancel_pending());
+        assert_eq!(life.last_sequence, 0);
+
+        let mut foreign = max_cancel.clone();
+        foreign.binding = binding(9);
+        assert_eq!(life.apply(&foreign), Err(LifecycleRefusal::BindingMismatch));
+        assert_eq!(
+            life.apply(&req(u64::MAX - 1, RecoveryOperation::Observe {})),
+            Ok(Applied::Observed {
+                state: OwnerState::Active,
+                result_revision: None,
+            })
+        );
+        assert_eq!(life.last_sequence, u64::MAX - 1);
+        assert_eq!(
+            life.apply(&max_cancel),
+            Err(LifecycleRefusal::SequenceExhausted)
+        );
+        for seq in [u64::MAX - 1, 1] {
+            assert_eq!(
+                life.apply(&req(seq, RecoveryOperation::Observe {})),
+                Err(LifecycleRefusal::StaleSequence)
+            );
+        }
+        assert_eq!(life.state(), OwnerState::Active);
+        assert!(!life.cancel_pending());
+        assert_eq!(life.last_sequence, u64::MAX - 1);
+
+        life.owner_died();
+        assert_eq!(life.apply(&max_cancel), Err(LifecycleRefusal::Quarantined));
+        assert_eq!(life.last_sequence, u64::MAX - 1);
     }
 
     #[test]

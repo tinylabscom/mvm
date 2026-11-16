@@ -70,11 +70,19 @@ pub fn wait_and_forward_outbox<S: Read + Write>(
     stream: &mut S,
     outbox: &Path,
 ) -> Result<(), Refusal> {
+    wait_and_forward_outbox_with(stream, outbox, || std::thread::sleep(IDLE_INTERVAL))
+}
+
+fn wait_and_forward_outbox_with<S: Read + Write>(
+    stream: &mut S,
+    outbox: &Path,
+    mut wait: impl FnMut(),
+) -> Result<(), Refusal> {
     for _ in 0..IDLE_CHECKS {
         if outbox.exists() {
             return forward_outbox(stream, outbox);
         }
-        std::thread::sleep(IDLE_INTERVAL);
+        wait();
     }
     Err(Refusal::Unavailable)
 }
@@ -174,7 +182,20 @@ fn archive_outbox(outbox: &Path, message: &OutboxMessage, prefix: &str) -> Resul
     sync_dir(dir).map_err(|_| Refusal::Unavailable)
 }
 
+/// Longest a caller waits for another holder of the outbox directory lock. A
+/// writer holds it only across one small atomic write; a forwarder holds it
+/// across one bounded exchange, so this covers [`MAILBOX_IO_TIMEOUT`] plus slack.
+const OUTBOX_LOCK_WAIT: Duration = Duration::from_secs(8);
+const OUTBOX_LOCK_POLL: Duration = Duration::from_millis(10);
+
 fn lock_outbox_dir(dir: &Path) -> Result<std::fs::File, Refusal> {
+    lock_outbox_dir_within(dir, OUTBOX_LOCK_WAIT)
+}
+
+/// The outbox file becomes visible to a forwarder while the writer that
+/// created it still holds the lock to sync the directory, so contention is
+/// expected and waited out rather than refused on first sight.
+fn lock_outbox_dir_within(dir: &Path, wait: Duration) -> Result<std::fs::File, Refusal> {
     let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
@@ -183,11 +204,19 @@ fn lock_outbox_dir(dir: &Path) -> Result<std::fs::File, Refusal> {
             eprintln!("mvm-guest-agent: outbox directory open failed: {error}");
             Refusal::Unavailable
         })?;
-    file.try_lock().map_err(|error| {
-        eprintln!("mvm-guest-agent: outbox directory lock failed: {error}");
-        Refusal::Unavailable
-    })?;
-    Ok(file)
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(OUTBOX_LOCK_POLL);
+            }
+            Err(error) => {
+                eprintln!("mvm-guest-agent: outbox directory lock failed: {error}");
+                return Err(Refusal::Unavailable);
+            }
+        }
+    }
 }
 
 fn open_outbox(outbox: &Path) -> std::io::Result<std::fs::File> {
@@ -468,6 +497,24 @@ mod tests {
     }
 
     #[test]
+    fn the_outbox_lock_waits_out_a_short_holder_and_refuses_a_long_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let holder = lock_outbox_dir_within(dir.path(), Duration::ZERO).unwrap();
+        assert_eq!(
+            lock_outbox_dir_within(dir.path(), Duration::from_millis(50)).err(),
+            Some(Refusal::Unavailable),
+            "a holder that outlasts the wait is refused"
+        );
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(holder);
+        });
+        lock_outbox_dir_within(dir.path(), Duration::from_secs(5))
+            .expect("a holder that lets go inside the wait is waited out");
+        release.join().unwrap();
+    }
+
+    #[test]
     fn a_peer_that_never_answers_fails_the_forward_within_the_bound() {
         use std::os::fd::AsRawFd;
         let dir = tempfile::tempdir().unwrap();
@@ -615,13 +662,15 @@ mod tests {
             OutboxMessage::decode(&body).unwrap()
         });
         let written = message(b"later");
-        let path = outbox.clone();
-        let workload = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(100));
-            write_outbox(&path, &written).unwrap();
-        });
-        wait_and_forward_outbox(&mut ours, &outbox).expect("late write was forwarded");
-        workload.join().unwrap();
+        let mut pending = Some(written);
+        wait_and_forward_outbox_with(&mut ours, &outbox, || {
+            write_outbox(
+                &outbox,
+                &pending.take().expect("write exactly after the first poll"),
+            )
+            .unwrap();
+        })
+        .expect("late write was forwarded");
         assert_eq!(host.join().unwrap(), message(b"later"));
         assert!(!outbox.exists());
     }
