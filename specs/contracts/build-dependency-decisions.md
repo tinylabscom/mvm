@@ -1527,13 +1527,22 @@ provenance. All nine canonical upstream inputs retain their effective defaults,
 including Trusted Publishing and attestations. The container reads canonical
 hyphenated `INPUT_*` names; the wrapper does not override its entrypoint.
 
-The publishing job remains on Linux/amd64 with the existing `pypi` environment
-and OIDC permission. It checks out the exact workflow revision without persisted
-credentials to load the local action. No live upload, notarization, signing,
-or container-publisher execution was performed. The upstream publisher warns
-about reusable-workflow Trusted Publishing support; this pre-existing binding
-is unchanged and requires a hosted configuration check before claiming that
-publication succeeds.
+The upload-only publishing job runs directly in the top-level
+`publish-sdk.yml`, on Linux/amd64 with the existing `pypi` environment and
+job-scoped OIDC permission. It waits for SDK preflight, BDD, and the reusable
+Python distribution builder. The builder no longer uploads or holds OIDC
+authority; registry evidence waits for the actual top-level upload. The
+top-level workflow no longer accepts `workflow_call`, since PyPI does not
+support a reusable workflow as the Trusted Publisher.
+
+The publisher checks out the exact workflow revision without persisted
+credentials to load the local action. The PyPI project owner must register
+`tinylabscom/mvm`, workflow filename `publish-sdk.yml`, environment `pypi`,
+and retire the old `publish-pypi.yml` registration after migration. The
+maintainer procedure is documented in
+`public/src/content/docs/contributing/sdk-publishing.md`. No account settings
+were changed and no live upload, token exchange, notarization, signing, or
+container-publisher execution was performed to validate this identity change.
 
 Offline validation passed 39 supply-chain tests, 50 runtime-artifact tests,
 9 SDK preflight tests, and 94 release-helper tests (the native macOS codesign

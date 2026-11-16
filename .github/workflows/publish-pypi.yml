@@ -1,10 +1,10 @@
-name: Publish SDK to PyPI
+name: Build Python SDK distributions
 
 on:
   workflow_call:
     inputs:
       dry_run:
-        description: "Build + smoke only; skip the PyPI upload"
+        description: "Branch rehearsal; skip Developer ID signing unless running on a tag"
         required: true
         type: boolean
     secrets:
@@ -273,30 +273,3 @@ jobs:
           # Keep the actual package bytes available for release evidence review.
           retention-days: 30
           if-no-files-found: error
-
-  publish:
-    if: ${{ !inputs.dry_run }}
-    needs: build
-    runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Download built artifacts
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
-        with:
-          pattern: pypi-dist-*
-          path: dist
-          merge-multiple: true
-
-      - name: Publish to PyPI (Trusted Publishing)
-        uses: ./.github/actions/publish-pypi
-        with:
-          packages-dir: dist
-          skip-existing: true

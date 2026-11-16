@@ -1,6 +1,7 @@
 """Keep SDK packaging outside signing jobs and pin publisher container bytes."""
 
 from pathlib import Path
+import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,7 +16,7 @@ class PublisherTests(unittest.TestCase):
             "format('publish-sdk-rehearsal-{0}', github.ref)", workflow
         )
         preflight = workflow.split("\n  preflight:\n", 1)[1].split(
-            "\n  publish_pypi_release:\n", 1
+            "\n  build_pypi_release:\n", 1
         )[0]
         permissions = preflight.split("    permissions:\n", 1)[1].split(
             "    steps:\n", 1
@@ -48,8 +49,10 @@ class PublisherTests(unittest.TestCase):
             self.assertIn(f"    default: {value}", lines, name)
 
     def test_local_publisher_has_trusted_checkout_and_no_build_step(self):
-        workflow = (ROOT / ".github/workflows/publish-pypi.yml").read_text()
-        publish = workflow.split("\n  publish:\n", 1)[1]
+        workflow = (ROOT / ".github/workflows/publish-sdk.yml").read_text()
+        publish = workflow.split("\n  publish_pypi:\n", 1)[1].split(
+            "\n  publish_npm_release:\n", 1
+        )[0]
         for value in (
             "environment: pypi", "id-token: write", "runs-on: ubuntu-latest",
             "ref: ${{ github.sha }}", "persist-credentials: false",
@@ -59,6 +62,38 @@ class PublisherTests(unittest.TestCase):
             self.assertIn(value, publish)
         for command in ("pip install", "python -m build", "cargo ", "npm "):
             self.assertNotIn(command, publish)
+
+    def test_pypi_authority_exists_only_in_the_top_level_release_job(self):
+        workflow = (ROOT / ".github/workflows/publish-sdk.yml").read_text()
+        builder = (ROOT / ".github/workflows/publish-pypi.yml").read_text()
+        self.assertNotIn("workflow_call:", workflow)
+        defaults = workflow.split("\npermissions:\n", 1)[1].split("\n\n", 1)[0]
+        self.assertNotIn("id-token:", defaults)
+        self.assertIn("workflow_call:", builder)
+        for authority in ("environment: pypi", "id-token: write",
+                          "uses: ./.github/actions/publish-pypi"):
+            self.assertNotIn(authority, builder)
+        publish = workflow.split("\n  publish_pypi:\n", 1)[1].split(
+            "\n  publish_npm_release:\n", 1
+        )[0]
+        self.assertIn(
+            "if: ${{ github.event_name == 'release' && "
+            "startsWith(github.event.release.tag_name, 'sdk-v') }}", publish
+        )
+        self.assertIn("needs: [preflight, bdd, build_pypi_release]", publish)
+        self.assertIn("pattern: pypi-dist-*", publish)
+        download = publish.split(
+            "- name: Download checked Python distributions from this run", 1
+        )[1].split("- name: Publish to PyPI", 1)[0]
+        for override in ("run-id:", "repository:", "github-token:"):
+            self.assertNotIn(override, download)
+        self.assertIn("needs: [publish_pypi, publish_npm_release]", workflow)
+        for name in ("build_pypi_release", "build_pypi_dry_run"):
+            job = re.split(
+                r"\n  [a-z][a-z0-9_]*:\n",
+                workflow.split(f"\n  {name}:\n", 1)[1], maxsplit=1,
+            )[0]
+            self.assertNotIn("id-token:", job)
 
     def test_sdk_packaging_depends_on_separate_macos_signer(self):
         for channel in ("npm", "pypi"):
