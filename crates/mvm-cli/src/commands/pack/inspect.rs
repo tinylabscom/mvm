@@ -265,7 +265,7 @@ fn application_info(
         arch_warning: crate::pack_registry::arch_mismatch_warning(
             &manifest.reference.to_string(),
             &manifest.application.guest_arch,
-            mvm_build::builder_vm::host_arch_tag(),
+            mvm_client::build_types::host_arch_tag(),
         ),
     }
 }

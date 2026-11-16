@@ -61,7 +61,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             if let Some(warning) = crate::pack_registry::arch_mismatch_warning(
                 &reference,
                 &application.manifest().application.guest_arch,
-                mvm_build::builder_vm::host_arch_tag(),
+                mvm_client::build_types::host_arch_tag(),
             ) {
                 crate::ui::warn(&warning);
             }
