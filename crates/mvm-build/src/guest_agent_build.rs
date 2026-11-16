@@ -1025,6 +1025,9 @@ fn apply_zigbuild_env(
         .env("RUSTC_WORKSPACE_WRAPPER", "")
         .env_remove("RUSTUP_TOOLCHAIN")
         .env_remove("RUSTFLAGS")
+        // Scrub the outer session's encoded flags before setting our own, so
+        // no inherited flag can ride along even if the set below is dropped.
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env("CARGO_ENCODED_RUSTFLAGS", ZIGBUILD_RUSTFLAGS);
 
     // Keep cargo-zigbuild's own cache under the mvm cache root instead of
