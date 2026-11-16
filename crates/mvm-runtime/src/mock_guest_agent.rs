@@ -267,7 +267,12 @@ fn handle_connection(mut stream: UnixStream, next_token: Arc<AtomicU64>, host_ke
     }
 
     let guest_key = SigningKey::from_bytes(&[9u8; 32]);
-    let mut session = match AuthenticatedSession::guest(&mut stream, guest_key, &host_key) {
+    let mut session = match AuthenticatedSession::guest(
+        &mut stream,
+        guest_key,
+        &host_key,
+        &mvm_agentd::vsock::control_offer(),
+    ) {
         Ok(session) => session,
         Err(error) => {
             tracing::warn!("mock-guest-agent: authenticated handshake failed: {error}");
@@ -325,11 +330,8 @@ fn read_line_byte_by_byte(stream: &mut UnixStream) -> Option<String> {
 fn dispatch(req: GuestRequest, next_token: &AtomicU64) -> GuestResponse {
     match req {
         // ── Protocol negotiation ────────────────────────────────────
-        // Every call site hellos before the first operational request.
-        // The mock answers with whatever the
-        // real `protocol_hello_response` would produce so the host
-        // helpers (`negotiate_protocol` / `require_capabilities`) see
-        // the same ack shape they expect from a real agent.
+        // No host path sends this any more; the mock still answers it
+        // exactly as the real agent would.
         GuestRequest::ProtocolHello {
             host_protocol_version,
             min_supported_version,

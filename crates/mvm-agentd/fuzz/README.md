@@ -9,6 +9,7 @@ ADR-001's claims ledger.
 | ---------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------- |
 | `fuzz_guest_request`         | `GuestRequest` JSON frame                              | every host→guest RPC lands here                                           |
 | `fuzz_sealed_frame`          | `SealedFrame::decode`, the control pre-auth ingress    | runs *before* signature verification                                      |
+| `fuzz_session_handshake`     | `SessionHello` / `SessionHelloAck` / `SessionHelloConfirm` JSON | handshake frames carrying the guest's advertisement, parsed before any signature is checked |
 | `fuzz_entrypoint_event`      | `EntrypointEvent` JSON (host-side stream)              | host's first parser surface for `RunEntrypoint` response frames           |
 | `fuzz_authed_path`           | (scenario × payload) pair, signed in-process           | drives `verify_authenticated_frame` past sig check; ensures tampered frames never reach inner deserializer |
 

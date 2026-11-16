@@ -57,15 +57,21 @@ and the manifest types in `mvm-core::receipt_archive`. Witnesses are in
 ## Protocol and readiness (ADR-019)
 
 Enforcing code is `mvm-agentd` (`vsock/response.rs`, `vsock/rpc.rs`,
-`bin/mvm-guest-agent*`) and `mvm-runtime::warm_readiness`. The ADR's
-"non-hello first request is rejected" is superseded in the agent: the
-authenticated session handshake is the mandatory prelude and `ProtocolHello`
-is capability negotiation (`handle_client_requires_authenticated_control`).
+`bin/mvm-guest-agent*`) and `mvm-runtime::warm_readiness`. The
+authenticated session handshake is the mandatory prelude: the guest's signed
+advertisement and the host's range are exchanged inside it, and the host checks
+each verb against the advertisement at `HostControlSession::send`. The
+`ProtocolHello` verb remains in the wire enum for now
+(`handle_client_requires_authenticated_control`); it no longer negotiates
+anything.
 
 | Property | Witness | Verdict |
 | --- | --- | --- |
-| Version negotiation, typed remedy | `a_hello_outside_the_supported_range_is_a_typed_mismatch_naming_the_remedy`, `test_negotiate_protocol_mismatch_is_error` | MET (`DowngradeHost` is in the enum and never emitted) |
-| Capability negotiation fails closed, names the capability | `a_hello_ack_grants_only_what_was_asked_for`, `test_require_capabilities_rejects_missing_capability` | MET |
+| Version negotiation, typed remedy | `a_host_range_outside_the_guests_is_refused_at_handshake_and_names_the_remedy`, `a_range_outside_the_guests_is_refused_with_the_remedy_in_each_direction`, `a_guest_refuses_a_host_range_it_does_not_overlap_and_a_missing_one`, `a_refused_host_gets_one_typed_mismatch_for_its_first_request_and_nothing_is_dispatched` | MET on the production transport (handshake tests over real sessions). Not witnessed against a booted guest |
+| An agent that advertises nothing is refused before any request | `a_guest_with_no_advertisement_is_refused_before_the_confirm`, `a_legacy_guest_with_no_advertisement_is_refused_with_rebuild_guest_before_the_confirm` | MET; not witnessed against the published rc.2 agent |
+| The advertisement is signed | `a_tampered_advertisement_fails_the_guests_own_proof`, `the_guest_proof_label_is_versioned_for_the_advertisement` | MET |
+| Capability negotiation fails closed, names the capability, before any byte is sent | `an_older_guest_with_fewer_capabilities_is_refused_before_any_byte_is_sent`, `a_guest_agent_without_the_prompt_capability_never_sees_the_prompt`, `every_verb_maps_to_a_capability_the_agent_advertises` | MET. The `cfg(test)` plain-frame transport used by the other mock-agent RPC tests does not run the check |
+| The advertisement never authorizes | `a_guest_that_advertises_more_than_it_serves_gains_no_authority` | MET: the guest's own profile gate still answers |
 | Readiness distinct from running and from disabled | `only_a_ready_control_plane_is_accepted`, `test_component_state_default_is_disabled`, `a_run_before_validation_finishes_is_not_ready_and_a_settled_state_is_not` | MET |
 | Bounded payload and control capacity | `sealed_worst_case_chunk_fits_the_frame_cap`, `oversized_write_is_rejected_before_writing_any_bytes`, `data_plane_limit_reserves_control_plane_capacity`, `a_saturated_data_plane_refuses_data_requests_and_still_admits_control` | MET |
 | Typed backpressure | `test_backpressure_reason_unit_variants_serde_roundtrip`, `backpressure_rising_edge_emits_output_consumer_slow_with_metadata_detail` | MET (reason wire shape and edge emission) |

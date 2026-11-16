@@ -323,7 +323,7 @@ fn copy_checkpoint_content(
 
 fn exec_on_retained_flow(
     stream: &mut std::os::unix::net::UnixStream,
-    session: &mut mvm_agentd::vsock::AuthenticatedSession,
+    session: &mut mvm_agentd::vsock::HostControlSession,
     command: &str,
 ) -> Result<i32, String> {
     let request = mvm_agentd::vsock::GuestRequest::Exec {
@@ -656,9 +656,7 @@ fn fc_live_fork_n_children_from_running_parent() {
     // never exchange guest state with a restored child.
     let mut stale_flow = connect_to(&parent_vsock, AGENT_TIMEOUT_SECS)
         .expect("connect the flow that will remain open across restore");
-    mvm_agentd::vsock::negotiate_protocol(&mut stale_flow, Vec::new())
-        .expect("negotiate the retained flow protocol");
-    let mut stale_session = mvm_agentd::vsock::AuthenticatedSession::host(
+    let mut stale_session = mvm_agentd::vsock::HostControlSession::host(
         &mut stale_flow,
         &format!("fc-stale-flow-{pid}"),
         host_signing_key.clone(),

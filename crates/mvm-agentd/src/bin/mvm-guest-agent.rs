@@ -347,30 +347,35 @@ fn handle_client_operations(
         eprintln!("mvm-guest-agent: rejecting control connection without a pinned host key");
         return;
     };
-    let mut session =
-        match AuthenticatedSession::guest(&mut file, guest_signing_key.clone(), &host_signer_key) {
-            Ok(session) => session,
-            // A peer that hangs up part-way through the handshake did not fail
-            // to authenticate — it produced no signature at all, and the read
-            // hit end-of-stream. On this socket that is the host's readiness
-            // poll, which connects on a backoff while the guest boots and drops
-            // each probe once it has its answer. Reporting it as a failed
-            // authentication put a security-relevant line on every healthy
-            // boot, which is how a real one gets skipped. Nor is it worth a
-            // line at all: the probe hangs up on every boot, and on
-            // Firecracker each byte of stderr is a serial-port VM exit on the
-            // launch path.
-            Err(error) if error.is_peer_hangup() => return,
-            Err(error) => {
-                eprintln!("mvm-guest-agent: authenticated control handshake failed: {error}");
-                return;
-            }
-        };
+    let mut session = match AuthenticatedSession::guest(
+        &mut file,
+        guest_signing_key.clone(),
+        &host_signer_key,
+        &mvm_agentd::vsock::control_offer(),
+    ) {
+        Ok(session) => session,
+        // A peer that hangs up part-way through the handshake did not fail
+        // to authenticate — it produced no signature at all, and the read
+        // hit end-of-stream. On this socket that is the host's readiness
+        // poll, which connects on a backoff while the guest boots and drops
+        // each probe once it has its answer. Reporting it as a failed
+        // authentication put a security-relevant line on every healthy
+        // boot, which is how a real one gets skipped. Nor is it worth a
+        // line at all: the probe hangs up on every boot, and on
+        // Firecracker each byte of stderr is a serial-port VM exit on the
+        // launch path.
+        Err(error) if error.is_peer_hangup() => return,
+        // A host range this agent does not speak was already answered with a
+        // typed mismatch inside the handshake; nothing was dispatched.
+        Err(error) => {
+            eprintln!("mvm-guest-agent: authenticated control handshake failed: {error}");
+            return;
+        }
+    };
 
-    // The authenticated session handshake is the mandatory prelude. A legacy
-    // ProtocolHello may still be sent by an older helper for capability
-    // negotiation, but it is no longer the security boundary.
-    let mut hello_seen = true;
+    // The authenticated handshake is the mandatory prelude: it carries the
+    // host's protocol range and this agent's advertisement, and refuses a
+    // peer with no overlap before any request is read.
     let mut continuation = ColdContinuation::OneShot;
     loop {
         let req = loop {
@@ -398,25 +403,9 @@ fn handle_client_operations(
                         &host_version,
                         &requested_capabilities,
                     );
-                    if matches!(resp, GuestResponse::ProtocolHelloAck { .. }) {
-                        hello_seen = true;
-                    }
                     send_authenticated_response(&mut file, &mut session, &resp);
                 }
-                other => {
-                    if !hello_seen {
-                        let resp = GuestResponse::ProtocolMismatch {
-                            host_protocol_version: 0,
-                            agent_protocol_version: mvm_agentd::vsock::PROTOCOL_VERSION,
-                            required_action: mvm_agentd::vsock::ProtocolUpgradeAction::UpgradeHost,
-                            message: "guest agent requires protocol_hello before any other request"
-                                .to_string(),
-                        };
-                        send_authenticated_response(&mut file, &mut session, &resp);
-                        return;
-                    }
-                    break other;
-                }
+                other => break other,
             }
         };
         let next = match continuation.next_request(&req) {
@@ -1155,7 +1144,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_agentd::vsock::GuestCapability;
+    use mvm_agentd::vsock::{GuestCapability, HostControlSession};
     use mvm_core::security::AgentProfile;
     use std::os::fd::IntoRawFd;
     use std::os::unix::net::UnixStream;
@@ -1234,7 +1223,7 @@ mod tests {
 
     struct DispatchFixture {
         stream: UnixStream,
-        session: AuthenticatedSession,
+        session: HostControlSession,
         thread: std::thread::JoinHandle<()>,
         calls: Arc<Mutex<Vec<&'static str>>>,
         boot: Arc<AgentBootState>,
@@ -1275,7 +1264,7 @@ mod tests {
                     &mut { effects },
                 );
             });
-            let (session, key) = AuthenticatedSession::host_retaining_peer(
+            let (session, key) = HostControlSession::host_retaining_peer(
                 &mut stream,
                 "production-dispatch",
                 host_key,
@@ -1292,7 +1281,7 @@ mod tests {
         }
 
         fn call(&mut self, request: &GuestRequest) -> GuestResponse {
-            self.session.write(&mut self.stream, request).unwrap();
+            self.session.send(&mut self.stream, request).unwrap();
             self.session.read(&mut self.stream).unwrap()
         }
 
@@ -1475,7 +1464,7 @@ mod tests {
         ));
         fixture
             .session
-            .write(&mut fixture.stream, &dispatch_exec())
+            .send(&mut fixture.stream, &dispatch_exec())
             .unwrap();
         assert!(matches!(
             fixture.session.read::<GuestResponse>(&mut fixture.stream).unwrap(),
@@ -1590,7 +1579,7 @@ mod tests {
         let mut original_frame = Vec::new();
         fixture
             .session
-            .write(&mut original_frame, &dispatch_exec())
+            .send(&mut original_frame, &dispatch_exec())
             .unwrap();
         fixture.stream.write_all(&original_frame).unwrap();
         assert!(matches!(
@@ -1641,7 +1630,7 @@ mod tests {
         let mut closed = DispatchFixture::start(AgentProfile::Dev, effects);
         closed
             .session
-            .write(&mut closed.stream, &dispatch_activation())
+            .send(&mut closed.stream, &dispatch_activation())
             .unwrap();
         entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         closed.stream.shutdown(std::net::Shutdown::Both).unwrap();
@@ -1677,13 +1666,16 @@ mod tests {
         let host_key = SigningKey::from_bytes(&[31; 32]);
         let anchor = host_key.verifying_key();
         let peer = std::thread::spawn(move || {
-            let _session =
-                AuthenticatedSession::guest(&mut guest, SigningKey::from_bytes(&[32; 32]), &anchor)
-                    .unwrap();
+            let _session = HostControlSession::host(&mut guest, "ack-failure", host_key).unwrap();
             guest.shutdown(std::net::Shutdown::Both).unwrap();
         });
-        let (mut session, _) =
-            AuthenticatedSession::host_retaining_peer(&mut host, "ack-failure", host_key).unwrap();
+        let mut session = AuthenticatedSession::guest(
+            &mut host,
+            SigningKey::from_bytes(&[32; 32]),
+            &anchor,
+            &mvm_agentd::vsock::control_offer(),
+        )
+        .unwrap();
         peer.join().unwrap();
         // This tests the real protected write seam, not activation or native
         // ownership. A candidate ACK alone cannot create a continuation.
@@ -1894,10 +1886,10 @@ mod tests {
             );
         });
 
-        let mut session = AuthenticatedSession::host(&mut host, "test-control", host_key)
+        let mut session = HostControlSession::host(&mut host, "test-control", host_key)
             .expect("authenticated host session");
         session
-            .write(
+            .send(
                 &mut host,
                 &GuestRequest::ProtocolHello {
                     host_protocol_version: mvm_agentd::vsock::PROTOCOL_VERSION,
@@ -1918,7 +1910,7 @@ mod tests {
         ));
 
         session
-            .write(&mut host, &GuestRequest::Ping)
+            .send(&mut host, &GuestRequest::Ping)
             .expect("write ping");
         let pong: GuestResponse = session.read(&mut host).expect("read pong");
         assert!(matches!(pong, GuestResponse::Pong));
@@ -1927,7 +1919,7 @@ mod tests {
         // agent closes it after replying, so a caller cannot carry a
         // pre-restore session (including its sequence numbers) into a later
         // request; the next request must perform a fresh handshake.
-        let _ = session.write(&mut host, &GuestRequest::Ping);
+        let _ = session.send(&mut host, &GuestRequest::Ping);
         let reused = session.read::<GuestResponse>(&mut host);
         assert!(reused.is_err(), "operational sessions must not be reusable");
 
@@ -1968,7 +1960,7 @@ mod tests {
             );
         });
 
-        let result = AuthenticatedSession::host(&mut host, "untrusted-control", host_key);
+        let result = HostControlSession::host(&mut host, "untrusted-control", host_key);
         assert!(
             result.is_err(),
             "agent must refuse an unpinned host identity"

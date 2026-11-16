@@ -65,11 +65,28 @@ pub enum RpcError {
         /// The variant(s) the contract permits.
         expected: &'static [ResponseVariant],
     },
+    /// The guest's signed advertisement does not include the capability this
+    /// verb needs. Nothing was written.
+    #[error("guest agent did not advertise {capability:?}, which {verb} requires")]
+    CapabilityNotAdvertised {
+        /// The capability the verb maps to.
+        capability: GuestCapability,
+        /// `name()` of the refused verb.
+        verb: &'static str,
+    },
+    /// The guest answered with a typed protocol mismatch.
+    #[error("guest-agent protocol mismatch ({required_action:?}): {message}")]
+    ProtocolMismatch {
+        /// What the operator has to change.
+        required_action: ProtocolUpgradeAction,
+        /// Operator-facing text naming the remedy.
+        message: String,
+    },
 }
 
 struct RpcSession {
     #[cfg(not(test))]
-    inner: AuthenticatedSession,
+    inner: HostControlSession,
 }
 
 /// An authenticated control session that can carry multiple RPCs when the
@@ -135,14 +152,14 @@ impl RpcSession {
         }
     }
 
-    fn write<T: serde::Serialize>(&mut self, stream: &mut UnixStream, value: &T) -> Result<()> {
+    fn write(&mut self, stream: &mut UnixStream, request: &GuestRequest) -> Result<()> {
         #[cfg(test)]
         {
-            write_frame(stream, value)
+            write_frame(stream, request)
         }
         #[cfg(not(test))]
         {
-            self.inner.write(stream, value)
+            Ok(self.inner.send(stream, request)?)
         }
     }
 
@@ -168,6 +185,21 @@ pub fn check_response(req: &GuestRequest, resp: GuestResponse) -> Result<GuestRe
             Err(RpcError::UnsupportedInProfile { profile, verb })
         }
         GuestResponse::VerbNotAuthorized { verb } => Err(RpcError::VerbNotAuthorized { verb }),
+        // Only for a verb whose contract does not already name it.
+        GuestResponse::ProtocolMismatch {
+            required_action,
+            message,
+            ..
+        } if !req
+            .response_contract()
+            .responses
+            .contains(&ResponseVariant::ProtocolMismatch) =>
+        {
+            Err(RpcError::ProtocolMismatch {
+                required_action,
+                message,
+            })
+        }
         GuestResponse::WorkloadPrivilegeRefused { verb, uid } => {
             Err(RpcError::WorkloadPrivilegeRefused { verb, uid })
         }
@@ -220,9 +252,8 @@ pub fn call_streaming(
 /// unrelated response proves a peer exists, but not that it can serve the
 /// control protocol expected by the launch path.
 ///
-/// Unlike [`negotiate_protocol`], this is never satisfied by a host-local check:
-/// a probe that answers without touching the stream cannot tell a booting guest
-/// from a serving one.
+/// A probe that answers without touching the stream cannot tell a booting guest
+/// from a serving one, so this is never satisfied by a host-local check.
 pub fn probe_agent_ready(stream: &mut UnixStream) -> Result<()> {
     match probe_agent_serving(stream)? {
         AgentServing::Ready => Ok(()),
@@ -257,7 +288,7 @@ pub enum AgentServing {
 /// transport failure, is an error the caller polls past.
 pub fn probe_agent_serving(stream: &mut UnixStream) -> Result<AgentServing> {
     let mut session = connection::open_authenticated_session(stream)?;
-    session.write(stream, &GuestRequest::Ping)?;
+    session.send(stream, &GuestRequest::Ping)?;
     match session.read(stream)? {
         GuestResponse::Pong => Ok(AgentServing::Ready),
         GuestResponse::NotActivated => Ok(AgentServing::AwaitingActivation),
@@ -267,111 +298,6 @@ pub fn probe_agent_serving(stream: &mut UnixStream) -> Result<AgentServing> {
     }
 }
 
-/// Validate guest-agent protocol version and capabilities on an
-/// already-connected control stream.
-///
-/// This helper is intentionally stream-level so it works with both the
-/// Firecracker UDS multiplexer path and Apple Container's direct vsock
-/// stream. The authenticated session handshake is performed when the RPC
-/// session is opened and is the security boundary for every backend. The
-/// `ProtocolHello` request remains a compatibility-level capability check for
-/// test transports and older callers; production sessions validate the same
-/// capability set locally after the secure handshake.
-pub fn negotiate_protocol(
-    stream: &mut UnixStream,
-    requested_capabilities: Vec<GuestCapability>,
-) -> Result<ProtocolNegotiation> {
-    #[cfg(test)]
-    {
-        negotiate_protocol_test(stream, requested_capabilities)
-    }
-
-    #[cfg(not(test))]
-    {
-        negotiate_protocol_authenticated(stream, requested_capabilities)
-    }
-}
-
-#[cfg(test)]
-fn negotiate_protocol_test(
-    stream: &mut UnixStream,
-    requested_capabilities: Vec<GuestCapability>,
-) -> Result<ProtocolNegotiation> {
-    let mut session = RpcSession::open(stream)?;
-    session.write(
-        stream,
-        &GuestRequest::ProtocolHello {
-            host_protocol_version: PROTOCOL_VERSION,
-            min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
-            host_version: env!("CARGO_PKG_VERSION").to_string(),
-            requested_capabilities,
-        },
-    )?;
-    match session.read(stream)? {
-        GuestResponse::ProtocolHelloAck {
-            agent_protocol_version,
-            min_supported_version,
-            agent_version,
-            capabilities,
-        } => Ok(ProtocolNegotiation {
-            agent_protocol_version,
-            min_supported_version,
-            agent_version,
-            capabilities,
-        }),
-        GuestResponse::ProtocolMismatch {
-            required_action,
-            message,
-            ..
-        } => bail!("guest-agent protocol mismatch ({required_action:?}): {message}"),
-        GuestResponse::Error { message } => {
-            bail!("guest-agent protocol negotiation error: {message}")
-        }
-        other => bail!("unexpected response to ProtocolHello: {other:?}"),
-    }
-}
-
-#[cfg(not(test))]
-fn negotiate_protocol_authenticated(
-    _stream: &mut UnixStream,
-    requested_capabilities: Vec<GuestCapability>,
-) -> Result<ProtocolNegotiation> {
-    let capabilities = supported_capabilities();
-    let missing: Vec<_> = requested_capabilities
-        .iter()
-        .copied()
-        .filter(|cap| !capabilities.contains(cap))
-        .collect();
-    if !missing.is_empty() {
-        bail!("guest-agent missing required capabilities: {missing:?}");
-    }
-    Ok(ProtocolNegotiation {
-        agent_protocol_version: PROTOCOL_VERSION,
-        min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
-        agent_version: env!("CARGO_PKG_VERSION").to_string(),
-        capabilities: requested_capabilities,
-    })
-}
-
-/// Negotiate the guest-agent protocol and fail if any mandatory
-/// capability is missing.
-pub fn require_capabilities(
-    stream: &mut UnixStream,
-    required_capabilities: &[GuestCapability],
-) -> Result<ProtocolNegotiation> {
-    let negotiated = negotiate_protocol(stream, required_capabilities.to_vec())?;
-    let missing: Vec<_> = required_capabilities
-        .iter()
-        .copied()
-        .filter(|cap| !negotiated.capabilities.contains(cap))
-        .collect();
-
-    if !missing.is_empty() {
-        bail!("guest-agent missing required capabilities: {missing:?}");
-    }
-
-    Ok(negotiated)
-}
 /// One `RunEntrypoint` call as a value.
 ///
 /// Grouped rather than passed positionally because the fields are all
@@ -417,7 +343,6 @@ where
     F: FnMut(&EntrypointEvent),
 {
     ensure_drive_path(grant, &call.cwd)?;
-    require_capabilities(stream, &[GuestCapability::Drive])?;
     let request = GuestRequest::DriveOpen {
         program_id: grant.program_id.clone(),
         cwd: call.cwd,
@@ -463,7 +388,6 @@ pub fn send_drive_file(
         }
         .into());
     }
-    require_capabilities(stream, &[GuestCapability::Drive])?;
     let request = GuestRequest::DriveFile { operation };
     match call_unary(stream, &request)? {
         GuestResponse::FsResult(result) => Ok(result),
@@ -625,15 +549,7 @@ where
         env,
         stream_input,
     };
-    stream_entrypoint_events(
-        stream,
-        EntrypointStreamRequest {
-            request: req,
-            capability: GuestCapability::RunEntrypoint,
-        },
-        on_event,
-        still_alive,
-    )
+    stream_entrypoint_events(stream, req, on_event, still_alive)
 }
 
 /// One prompt for the guest's resident agent. See [`GuestRequest::AgentPrompt`].
@@ -670,29 +586,19 @@ where
     } = call;
     stream_entrypoint_events(
         stream,
-        EntrypointStreamRequest {
-            request: GuestRequest::AgentPrompt {
-                prompt,
-                timeout_secs,
-                env,
-            },
-            capability: GuestCapability::AgentPrompt,
+        GuestRequest::AgentPrompt {
+            prompt,
+            timeout_secs,
+            env,
         },
         on_event,
         still_alive,
     )
 }
 
-/// A request answered by an `EntrypointEvent` stream, and the capability the
-/// agent must advertise before it is sent.
-struct EntrypointStreamRequest {
-    request: GuestRequest,
-    capability: GuestCapability,
-}
-
 fn stream_entrypoint_events<F, L>(
     stream: &mut UnixStream,
-    call: EntrypointStreamRequest,
+    req: GuestRequest,
     mut on_event: F,
     mut still_alive: L,
 ) -> Result<EntrypointEvent>
@@ -700,11 +606,6 @@ where
     F: FnMut(&EntrypointEvent),
     L: FnMut() -> bool,
 {
-    let EntrypointStreamRequest {
-        request: req,
-        capability,
-    } = call;
-    require_capabilities(stream, &[capability])?;
     let verb = req.verb_name();
     let mut session = RpcSession::open(stream)?;
     session.write(stream, &req)?;
@@ -786,7 +687,6 @@ pub fn send_run_extension<F>(
 where
     F: FnMut(&EntrypointEvent),
 {
-    require_capabilities(stream, &[GuestCapability::RunExtension])?;
     let request = GuestRequest::RunExtension { dispatch };
     let mut session = RpcSession::open(stream)?;
     session.write(stream, &request)?;
@@ -812,7 +712,6 @@ pub fn send_cancel_extension(
     stream: &mut UnixStream,
     cancellation: ExtensionCancellation,
 ) -> Result<()> {
-    require_capabilities(stream, &[GuestCapability::RunExtension])?;
     let request = GuestRequest::CancelExtension { cancellation };
     match call_unary(stream, &request)? {
         GuestResponse::ExtensionCancellationAck => Ok(()),
@@ -834,7 +733,6 @@ pub fn send_exec_streaming<F>(
 where
     F: FnMut(&ExecEvent),
 {
-    let _ = negotiate_protocol(stream, Vec::new())?;
     let req = GuestRequest::Exec {
         command: command.to_string(),
         stdin,
@@ -845,11 +743,11 @@ where
     read_exec_stream_with_session(stream, &mut session, on_event)
 }
 
-/// Dispatch on an existing authenticated session, without hello, handshake or
+/// Dispatch on an existing authenticated session, without a new handshake or
 /// reconnect. A framing/transport failure is terminal for this session.
 pub fn send_exec_on_authenticated_session(
     stream: &mut UnixStream,
-    session: &mut crate::vsock::AuthenticatedSession,
+    session: &mut HostControlSession,
     request: &GuestRequest,
     mut on_event: impl FnMut(&ExecEvent),
 ) -> Result<ExecEvent> {
@@ -857,7 +755,7 @@ pub fn send_exec_on_authenticated_session(
         matches!(request, GuestRequest::Exec { .. }),
         "expected Exec request"
     );
-    session.write(stream, request)?;
+    session.send(stream, request)?;
     loop {
         let response = check_response(request, session.read(stream)?)?;
         let GuestResponse::ExecEvent(event) = response else {
@@ -871,28 +769,24 @@ pub fn send_exec_on_authenticated_session(
 }
 
 /// One original entrypoint verb on an already authenticated session. Never
-/// negotiates, reopens, resets counters, or retries a partial protected frame.
+/// reopens, resets counters, or retries a partial protected frame.
 pub fn send_entrypoint_on_authenticated_session(
     stream: &mut UnixStream,
-    session: &mut AuthenticatedSession,
+    session: &mut HostControlSession,
     request: &GuestRequest,
     mut on_event: impl FnMut(&EntrypointEvent),
 ) -> Result<EntrypointEvent> {
-    let capability = match request {
-        GuestRequest::RunEntrypoint {
-            stream_input: false,
-            ..
-        } => GuestCapability::RunEntrypoint,
-        GuestRequest::AgentPrompt { .. } => GuestCapability::AgentPrompt,
-        _ => bail!("retained entrypoint session requires one-shot RunEntrypoint or AgentPrompt"),
-    };
-    // Same local compatibility check as production negotiation, without
-    // opening a new authenticated session on the retained stream.
     anyhow::ensure!(
-        supported_capabilities().contains(&capability),
-        "unsupported entrypoint capability"
+        matches!(
+            request,
+            GuestRequest::RunEntrypoint {
+                stream_input: false,
+                ..
+            } | GuestRequest::AgentPrompt { .. }
+        ),
+        "retained entrypoint session requires one-shot RunEntrypoint or AgentPrompt"
     );
-    session.write(stream, request)?;
+    session.send(stream, request)?;
     loop {
         let response = check_response(request, session.read(stream)?)?;
         let GuestResponse::EntrypointEvent(event) = response else {
@@ -915,7 +809,6 @@ pub fn send_run_code_streaming<F>(
 where
     F: FnMut(&ExecEvent),
 {
-    let _ = negotiate_protocol(stream, Vec::new())?;
     let req = GuestRequest::RunCode {
         code: code.to_string(),
         timeout_secs,
@@ -938,7 +831,6 @@ pub fn send_run_detached(
     argv: Vec<String>,
     env: Vec<(String, String)>,
 ) -> Result<i32> {
-    let _ = negotiate_protocol(stream, Vec::new())?;
     let req = GuestRequest::RunDetached { argv, env };
     let mut session = RpcSession::open(stream)?;
     session.write(stream, &req)?;
@@ -958,7 +850,7 @@ pub fn send_run_detached(
 
 /// Read an `ExecEvent` response stream from `stream`: invoke `on_event`
 /// for each non-terminal chunk, return the terminal `Exit`. The caller
-/// must have already done the protocol hello and written the request
+/// must have already opened the session and written the request
 /// frame (`Exec` or `RunCode` — both stream `ExecEvent`).
 pub fn read_exec_stream<F>(stream: &mut UnixStream, on_event: F) -> Result<ExecEvent>
 where
@@ -1141,7 +1033,8 @@ mod tests {
             let expected_verb = std::mem::discriminant(&request);
             let peer = std::thread::spawn(move || {
                 let mut session =
-                    AuthenticatedSession::guest(&mut guest, guest_key, &anchor).unwrap();
+                    AuthenticatedSession::guest(&mut guest, guest_key, &anchor, &control_offer())
+                        .unwrap();
                 let incoming: GuestRequest = session.read(&mut guest).unwrap();
                 assert_eq!(std::mem::discriminant(&incoming), expected_verb);
                 session
@@ -1167,7 +1060,7 @@ mod tests {
                     .unwrap();
                 guest.flush().unwrap();
             });
-            let (mut session, key) = AuthenticatedSession::host_retaining_peer(
+            let (mut session, key) = HostControlSession::host_retaining_peer(
                 &mut host,
                 "retained-entrypoint-test",
                 host_key,
@@ -1185,7 +1078,7 @@ mod tests {
             assert!(matches!(terminal, EntrypointEvent::Exit { code: 0 }));
             assert_eq!(events.len(), 1);
             session
-                .write(&mut host, &GuestRequest::SyncFilesystems)
+                .send(&mut host, &GuestRequest::SyncFilesystems)
                 .unwrap();
             assert!(matches!(
                 session.read::<GuestResponse>(&mut host).unwrap(),
@@ -1208,6 +1101,7 @@ mod tests {
                     &mut guest,
                     ed25519_dalek::SigningKey::from_bytes(&[54; 32]),
                     &anchor,
+                    &control_offer(),
                 )
                 .unwrap();
                 assert!(matches!(
@@ -1230,7 +1124,7 @@ mod tests {
                     session.write(&mut guest, &response).unwrap();
                 }
             });
-            let (mut session, _) = AuthenticatedSession::host_retaining_peer(
+            let (mut session, _) = HostControlSession::host_retaining_peer(
                 &mut host,
                 "retained-negative-test",
                 host_key,
@@ -1295,91 +1189,11 @@ mod tests {
     }
 
     #[test]
-    fn test_negotiate_protocol_round_trip_on_stream() {
-        let (mut host, mut guest) = UnixStream::pair().unwrap();
-
-        let guest_thread = std::thread::spawn(move || {
-            let req: GuestRequest = read_frame(&mut guest).unwrap();
-            match req {
-                GuestRequest::ProtocolHello {
-                    host_protocol_version,
-                    min_supported_version,
-                    host_version,
-                    requested_capabilities,
-                } => {
-                    let resp = protocol_hello_response(
-                        host_protocol_version,
-                        min_supported_version,
-                        &host_version,
-                        &requested_capabilities,
-                    );
-                    write_frame(&mut guest, &resp).unwrap();
-                }
-                other => panic!("expected ProtocolHello, got {other:?}"),
-            }
-        });
-
-        let negotiated = negotiate_protocol(
-            &mut host,
-            vec![GuestCapability::Ping, GuestCapability::FilesystemRpc],
-        )
-        .unwrap();
-
-        guest_thread.join().unwrap();
-        assert_eq!(negotiated.agent_protocol_version, PROTOCOL_VERSION);
-        assert_eq!(
-            negotiated.capabilities,
-            vec![GuestCapability::Ping, GuestCapability::FilesystemRpc]
-        );
-    }
-
-    #[test]
-    fn test_negotiate_protocol_mismatch_is_error() {
-        let (mut host, mut guest) = UnixStream::pair().unwrap();
-
-        let guest_thread = std::thread::spawn(move || {
-            let _req: GuestRequest = read_frame(&mut guest).unwrap();
-            write_frame(
-                &mut guest,
-                &GuestResponse::ProtocolMismatch {
-                    host_protocol_version: PROTOCOL_VERSION + 1,
-                    agent_protocol_version: PROTOCOL_VERSION,
-                    required_action: ProtocolUpgradeAction::RebuildGuest,
-                    message: "rebuild guest image".to_string(),
-                },
-            )
-            .unwrap();
-        });
-
-        let err = negotiate_protocol(&mut host, vec![GuestCapability::Ping]).unwrap_err();
-        guest_thread.join().unwrap();
-        assert!(err.to_string().contains("protocol mismatch"));
-        assert!(err.to_string().contains("rebuild guest image"));
-    }
-
-    #[test]
     fn extension_cancellation_round_trips_over_mock_io() {
         let (mut host, mut guest) = UnixStream::pair().expect("socket pair");
         let expected = extension_cancellation();
         let expected_by_guest = expected.clone();
         let guest_thread = std::thread::spawn(move || {
-            let hello: GuestRequest = read_frame(&mut guest).expect("hello");
-            let GuestRequest::ProtocolHello {
-                host_protocol_version,
-                min_supported_version,
-                host_version,
-                requested_capabilities,
-            } = hello
-            else {
-                panic!("expected protocol hello");
-            };
-            let response = protocol_hello_response(
-                host_protocol_version,
-                min_supported_version,
-                &host_version,
-                &requested_capabilities,
-            );
-            write_frame(&mut guest, &response).expect("hello response");
             let request: GuestRequest = read_frame(&mut guest).expect("cancel request");
             assert!(matches!(
                 request,
@@ -1394,114 +1208,10 @@ mod tests {
     }
 
     #[test]
-    fn test_require_capabilities_accepts_present_capability() {
-        let (mut host, mut guest) = UnixStream::pair().unwrap();
-
-        let guest_thread = std::thread::spawn(move || {
-            let req: GuestRequest = read_frame(&mut guest).unwrap();
-            match req {
-                GuestRequest::ProtocolHello {
-                    host_protocol_version,
-                    min_supported_version,
-                    host_version,
-                    requested_capabilities,
-                } => {
-                    let resp = protocol_hello_response(
-                        host_protocol_version,
-                        min_supported_version,
-                        &host_version,
-                        &requested_capabilities,
-                    );
-                    write_frame(&mut guest, &resp).unwrap();
-                }
-                other => panic!("expected ProtocolHello, got {other:?}"),
-            }
-        });
-
-        let negotiated =
-            require_capabilities(&mut host, &[GuestCapability::FilesystemRpc]).unwrap();
-
-        guest_thread.join().unwrap();
-        assert_eq!(
-            negotiated.capabilities,
-            vec![GuestCapability::FilesystemRpc]
-        );
-    }
-
-    #[test]
-    fn test_require_capabilities_rejects_missing_capability() {
-        let (mut host, mut guest) = UnixStream::pair().unwrap();
-
-        let guest_thread = std::thread::spawn(move || {
-            let _req: GuestRequest = read_frame(&mut guest).unwrap();
-            write_frame(
-                &mut guest,
-                &GuestResponse::ProtocolHelloAck {
-                    agent_protocol_version: PROTOCOL_VERSION,
-                    min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
-                    agent_version: "0.1.0".to_string(),
-                    capabilities: vec![GuestCapability::Ping],
-                },
-            )
-            .unwrap();
-        });
-
-        let err = require_capabilities(&mut host, &[GuestCapability::FilesystemRpc]).unwrap_err();
-
-        guest_thread.join().unwrap();
-        assert!(err.to_string().contains("missing required capabilities"));
-        assert!(err.to_string().contains("FilesystemRpc"));
-    }
-
-    #[test]
-    fn test_require_capabilities_surfaces_protocol_mismatch() {
-        let (mut host, mut guest) = UnixStream::pair().unwrap();
-
-        let guest_thread = std::thread::spawn(move || {
-            let _req: GuestRequest = read_frame(&mut guest).unwrap();
-            write_frame(
-                &mut guest,
-                &GuestResponse::ProtocolMismatch {
-                    host_protocol_version: PROTOCOL_VERSION + 1,
-                    agent_protocol_version: PROTOCOL_VERSION,
-                    required_action: ProtocolUpgradeAction::RebuildGuest,
-                    message: "guest image is stale".to_string(),
-                },
-            )
-            .unwrap();
-        });
-
-        let err = require_capabilities(&mut host, &[GuestCapability::FilesystemRpc]).unwrap_err();
-
-        guest_thread.join().unwrap();
-        assert!(err.to_string().contains("protocol mismatch"));
-        assert!(err.to_string().contains("guest image is stale"));
-    }
-
-    #[test]
     fn test_send_run_detached_returns_pid() {
         let (mut host, mut guest) = UnixStream::pair().unwrap();
 
         let guest_thread = std::thread::spawn(move || {
-            // Hello prelude.
-            let req: GuestRequest = read_frame(&mut guest).unwrap();
-            match req {
-                GuestRequest::ProtocolHello {
-                    host_protocol_version,
-                    min_supported_version,
-                    host_version,
-                    requested_capabilities,
-                } => {
-                    let resp = protocol_hello_response(
-                        host_protocol_version,
-                        min_supported_version,
-                        &host_version,
-                        &requested_capabilities,
-                    );
-                    write_frame(&mut guest, &resp).unwrap();
-                }
-                other => panic!("expected ProtocolHello, got {other:?}"),
-            }
             // The RunDetached frame, then ack with a pid.
             let req: GuestRequest = read_frame(&mut guest).unwrap();
             match req {
@@ -1529,17 +1239,6 @@ mod tests {
         let (mut host, mut guest) = UnixStream::pair().unwrap();
 
         let guest_thread = std::thread::spawn(move || {
-            let _hello: GuestRequest = read_frame(&mut guest).unwrap();
-            write_frame(
-                &mut guest,
-                &GuestResponse::ProtocolHelloAck {
-                    agent_protocol_version: PROTOCOL_VERSION,
-                    min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
-                    agent_version: "0.1.0".to_string(),
-                    capabilities: vec![],
-                },
-            )
-            .unwrap();
             let _req: GuestRequest = read_frame(&mut guest).unwrap();
             write_frame(
                 &mut guest,
@@ -1564,27 +1263,6 @@ mod tests {
         write_frame(stream, &GuestResponse::EntrypointEvent(event.clone())).unwrap();
     }
 
-    fn answer_run_entrypoint_protocol_hello(stream: &mut UnixStream) {
-        let req: GuestRequest = read_frame(stream).unwrap();
-        match req {
-            GuestRequest::ProtocolHello {
-                requested_capabilities,
-                ..
-            } => assert_eq!(requested_capabilities, vec![GuestCapability::RunEntrypoint]),
-            other => panic!("expected ProtocolHello, got {other:?}"),
-        }
-        write_frame(
-            stream,
-            &GuestResponse::ProtocolHelloAck {
-                agent_protocol_version: PROTOCOL_VERSION,
-                min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
-                agent_version: "test-agent".to_string(),
-                capabilities: vec![GuestCapability::RunEntrypoint],
-            },
-        )
-        .unwrap();
-    }
-
     #[test]
     fn test_send_run_entrypoint_collects_events_until_terminal() {
         let (mut host, mut guest) = UnixStream::pair().unwrap();
@@ -1595,7 +1273,6 @@ mod tests {
 
         // Guest side: read the request, emit Stdout, Stderr, Exit.
         let guest_handle = std::thread::spawn(move || {
-            answer_run_entrypoint_protocol_hello(&mut guest);
             let req: GuestRequest = read_frame(&mut guest).unwrap();
             assert!(matches!(
                 req,
@@ -1638,27 +1315,6 @@ mod tests {
         assert!(matches!(terminal, EntrypointEvent::Exit { code: 0 }));
     }
 
-    fn answer_agent_prompt_hello(stream: &mut UnixStream, advertised: Vec<GuestCapability>) {
-        let req: GuestRequest = read_frame(stream).unwrap();
-        match req {
-            GuestRequest::ProtocolHello {
-                requested_capabilities,
-                ..
-            } => assert_eq!(requested_capabilities, vec![GuestCapability::AgentPrompt]),
-            other => panic!("expected ProtocolHello, got {other:?}"),
-        }
-        write_frame(
-            stream,
-            &GuestResponse::ProtocolHelloAck {
-                agent_protocol_version: PROTOCOL_VERSION,
-                min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
-                agent_version: "test-agent".to_string(),
-                capabilities: advertised,
-            },
-        )
-        .unwrap();
-    }
-
     fn prompt_call(prompt: &[u8]) -> AgentPromptCall {
         AgentPromptCall {
             prompt: prompt.to_vec(),
@@ -1680,7 +1336,6 @@ mod tests {
     fn agent_prompt_carries_the_prompt_and_streams_the_answer_back() {
         let (mut host, mut guest) = paired();
         let guest_handle = std::thread::spawn(move || {
-            answer_agent_prompt_hello(&mut guest, vec![GuestCapability::AgentPrompt]);
             let req: GuestRequest = read_frame(&mut guest).unwrap();
             let GuestRequest::AgentPrompt {
                 prompt,
@@ -1726,7 +1381,6 @@ mod tests {
         // untyped "unexpected response" error would let it go unrecorded.
         let (mut host, mut guest) = paired();
         let guest_handle = std::thread::spawn(move || {
-            answer_agent_prompt_hello(&mut guest, vec![GuestCapability::AgentPrompt]);
             let _req: GuestRequest = read_frame(&mut guest).unwrap();
             write_frame(
                 &mut guest,
@@ -1747,26 +1401,215 @@ mod tests {
         }
     }
 
+    /// A guest whose handshake advertises `capabilities`, on a real session.
+    /// The guest end is returned already past the handshake.
+    fn real_session_with(
+        capabilities: &[GuestCapability],
+    ) -> (
+        (UnixStream, HostControlSession),
+        std::thread::JoinHandle<(UnixStream, AuthenticatedSession)>,
+    ) {
+        let (mut host, mut guest) = paired();
+        let host_key = ed25519_dalek::SigningKey::from_bytes(&[61; 32]);
+        let anchor = host_key.verifying_key();
+        let mut offer = control_offer();
+        offer.capabilities = capabilities.iter().copied().collect();
+        let guest_thread = std::thread::spawn(move || {
+            let session = AuthenticatedSession::guest(
+                &mut guest,
+                ed25519_dalek::SigningKey::from_bytes(&[62; 32]),
+                &anchor,
+                &offer,
+            )
+            .unwrap();
+            (guest, session)
+        });
+        let session = HostControlSession::host(&mut host, "negotiation-test", host_key).unwrap();
+        ((host, session), guest_thread)
+    }
+
+    fn all_capabilities_except(missing: GuestCapability) -> Vec<GuestCapability> {
+        supported_capabilities()
+            .into_iter()
+            .filter(|capability| *capability != missing)
+            .collect()
+    }
+
     #[test]
     fn a_guest_agent_without_the_prompt_capability_never_sees_the_prompt() {
-        let (mut host, mut guest) = paired();
-        let guest_handle = std::thread::spawn(move || {
-            answer_agent_prompt_hello(&mut guest, vec![GuestCapability::RunEntrypoint]);
-            // Nothing further may arrive: the host refuses after the hello.
-            guest
-                .set_read_timeout(Some(Duration::from_millis(200)))
-                .unwrap();
-            read_frame::<GuestRequest>(&mut guest).is_err()
-        });
+        let ((mut host, mut session), guest_thread) =
+            real_session_with(&[GuestCapability::RunEntrypoint]);
+        let (mut guest, _guest_session) = guest_thread.join().unwrap();
+        guest
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
 
-        let err = send_agent_prompt_while(&mut host, prompt_call(b"secret plan"), |_| {}, || true)
-            .expect_err("missing capability");
+        let prompt = GuestRequest::AgentPrompt {
+            prompt: b"secret plan".to_vec(),
+            timeout_secs: 5,
+            env: vec![],
+        };
+        let err =
+            send_entrypoint_on_authenticated_session(&mut host, &mut session, &prompt, |_| {})
+                .expect_err("missing capability");
         drop(host);
+        // Nothing further may arrive: the host refuses before sealing anything.
+        let mut seen = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut guest, &mut seen);
         assert!(
-            guest_handle.join().unwrap(),
+            seen.is_empty(),
             "the prompt reached a guest agent that cannot serve it"
         );
         assert!(err.to_string().contains("AgentPrompt"), "{err}");
+        assert!(matches!(
+            err.downcast_ref::<RpcError>(),
+            Some(RpcError::CapabilityNotAdvertised {
+                capability: GuestCapability::AgentPrompt,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn an_older_guest_with_fewer_capabilities_is_refused_before_any_byte_is_sent() {
+        let ((mut host, mut session), guest_thread) =
+            real_session_with(&all_capabilities_except(GuestCapability::FilesystemRpc));
+        let (mut guest, _guest_session) = guest_thread.join().unwrap();
+
+        let read = GuestRequest::FsRead {
+            path: "/etc/hostname".into(),
+            offset: None,
+            length: 16,
+            follow_symlinks: false,
+        };
+        let error = session.send(&mut host, &read).unwrap_err();
+        let RpcError::CapabilityNotAdvertised { capability, verb } = &error else {
+            panic!("expected a capability refusal, got {error:?}");
+        };
+        assert_eq!(*capability, GuestCapability::FilesystemRpc);
+        assert_eq!(*verb, "FsRead");
+        assert!(error.to_string().contains("FilesystemRpc"), "{error}");
+
+        // Not a byte went out, and the refusal spent no sequence: the next
+        // verb the guest does serve still lands as the very first frame.
+        guest
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        drop(host);
+        let mut seen = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut guest, &mut seen);
+        assert!(seen.is_empty(), "a refused verb wrote {} bytes", seen.len());
+    }
+
+    #[test]
+    fn a_refused_verb_spends_no_sequence_and_a_served_verb_still_flows() {
+        let ((mut host, mut session), guest_thread) =
+            real_session_with(&all_capabilities_except(GuestCapability::FilesystemRpc));
+        let (mut guest, mut guest_session) = guest_thread.join().unwrap();
+        session.send(&mut host, &GuestRequest::FsDiff).unwrap_err();
+        session
+            .send(&mut host, &GuestRequest::ResourceUsage)
+            .unwrap();
+        assert!(matches!(
+            guest_session.read::<GuestRequest>(&mut guest).unwrap(),
+            GuestRequest::ResourceUsage
+        ));
+    }
+
+    #[test]
+    fn the_host_session_holds_exactly_what_the_guest_advertised() {
+        let ((_host, session), guest_thread) =
+            real_session_with(&[GuestCapability::Ping, GuestCapability::Readiness]);
+        let _guest = guest_thread.join().unwrap();
+        let offer = session.offer();
+        assert_eq!(offer.protocol_version, PROTOCOL_VERSION);
+        assert_eq!(offer.min_supported_version, MIN_SUPPORTED_PROTOCOL_VERSION);
+        assert_eq!(offer.agent_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            offer.capabilities,
+            [GuestCapability::Ping, GuestCapability::Readiness]
+                .into_iter()
+                .collect()
+        );
+    }
+
+    #[test]
+    fn a_guest_that_advertises_more_than_it_serves_gains_no_authority() {
+        // Advertising a capability only widens what the host MAY send. The
+        // guest's own profile gate still answers, and the host's check never
+        // reads the guest's profile: a sealed-prod guest that claims
+        // `ProcessRpc` is sent the verb and refuses it.
+        let ((mut host, mut session), guest_thread) = real_session_with(&supported_capabilities());
+        let (mut guest, mut guest_session) = guest_thread.join().unwrap();
+        let guest_side = std::thread::spawn(move || {
+            let request: GuestRequest = guest_session.read(&mut guest).unwrap();
+            assert!(!request.allowed_in(AgentProfile::SealedProd));
+            guest_session
+                .write(
+                    &mut guest,
+                    &GuestResponse::UnsupportedInProfile {
+                        profile: AgentProfile::SealedProd,
+                        verb: request.verb_name().to_string(),
+                    },
+                )
+                .unwrap();
+        });
+        session
+            .send(&mut host, &GuestRequest::ProcList)
+            .expect("the advertisement lets the host send");
+        let refusal = check_response(&GuestRequest::ProcList, session.read(&mut host).unwrap())
+            .expect_err("the guest's own gate still decides");
+        guest_side.join().unwrap();
+        assert!(matches!(
+            refusal,
+            RpcError::UnsupportedInProfile {
+                profile: AgentProfile::SealedProd,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_guest_sent_protocol_mismatch_surfaces_as_a_typed_error_naming_the_remedy() {
+        let mismatch = GuestResponse::ProtocolMismatch {
+            host_protocol_version: PROTOCOL_VERSION + 1,
+            agent_protocol_version: PROTOCOL_VERSION,
+            required_action: ProtocolUpgradeAction::RebuildGuest,
+            message: "rebuild guest image".to_string(),
+        };
+        let err = check_response(&GuestRequest::Ping, mismatch).unwrap_err();
+        assert!(matches!(
+            err,
+            RpcError::ProtocolMismatch {
+                required_action: ProtocolUpgradeAction::RebuildGuest,
+                ..
+            }
+        ));
+        assert!(err.to_string().contains("protocol mismatch"));
+        assert!(err.to_string().contains("rebuild guest image"));
+    }
+
+    #[test]
+    fn every_verb_maps_to_a_capability_the_agent_advertises() {
+        let advertised: std::collections::BTreeSet<_> =
+            supported_capabilities().into_iter().collect();
+        let mut mapped = std::collections::BTreeSet::new();
+        for verb in Verb::ALL {
+            if let Some(capability) = verb.capability() {
+                assert!(
+                    advertised.contains(&capability),
+                    "{} needs {capability:?}, which no agent build advertises",
+                    verb.name()
+                );
+                mapped.insert(capability);
+            }
+        }
+        // The converse: an advertised capability that no verb needs would be
+        // dead weight in every handshake. `Ping` is the one baseline
+        // capability: the verb is version-gated only, because the readiness
+        // probe sends it to an agent that has not activated yet.
+        let unmapped: Vec<_> = advertised.difference(&mapped).copied().collect();
+        assert_eq!(unmapped, vec![GuestCapability::Ping]);
     }
 
     #[test]
@@ -1781,7 +1624,6 @@ mod tests {
         // The handler must observe the Stdout but stop reading after
         // Error.
         let guest_handle = std::thread::spawn(move || {
-            answer_run_entrypoint_protocol_hello(&mut guest);
             let _req: GuestRequest = read_frame(&mut guest).unwrap();
             write_event_frame(
                 &mut guest,
@@ -1837,7 +1679,6 @@ mod tests {
 
         // Guest writes a Pong instead of an EntrypointEvent.
         let guest_handle = std::thread::spawn(move || {
-            answer_run_entrypoint_protocol_hello(&mut guest);
             let _req: GuestRequest = read_frame(&mut guest).unwrap();
             write_frame(&mut guest, &GuestResponse::Pong).unwrap();
         });
@@ -1864,7 +1705,6 @@ mod tests {
         // This shouldn't normally happen for RunEntrypoint, but the
         // host-side consumer should map it to a clear Result error.
         let guest_handle = std::thread::spawn(move || {
-            answer_run_entrypoint_protocol_hello(&mut guest);
             let _req: GuestRequest = read_frame(&mut guest).unwrap();
             write_frame(
                 &mut guest,
@@ -1888,27 +1728,6 @@ mod tests {
     // send_exec_streaming host reader
     // -------------------------------------------------------------------
 
-    fn answer_exec_protocol_hello(stream: &mut UnixStream) {
-        let req: GuestRequest = read_frame(stream).unwrap();
-        match req {
-            GuestRequest::ProtocolHello {
-                requested_capabilities,
-                ..
-            } => assert_eq!(requested_capabilities, vec![]),
-            other => panic!("expected ProtocolHello, got {other:?}"),
-        }
-        write_frame(
-            stream,
-            &GuestResponse::ProtocolHelloAck {
-                agent_protocol_version: PROTOCOL_VERSION,
-                min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
-                agent_version: "test-agent".to_string(),
-                capabilities: vec![],
-            },
-        )
-        .unwrap();
-    }
-
     #[test]
     fn send_exec_streaming_collects_chunks_until_exit() {
         let (mut host, mut guest) = UnixStream::pair().unwrap();
@@ -1918,7 +1737,6 @@ mod tests {
             .unwrap();
 
         let guest_handle = std::thread::spawn(move || {
-            answer_exec_protocol_hello(&mut guest);
             let req: GuestRequest = read_frame(&mut guest).unwrap();
             assert!(matches!(req, GuestRequest::Exec { ref command,.. } if command == "echo hi"));
             write_frame(
@@ -2202,6 +2020,7 @@ mod tests {
                 &mut guest,
                 SigningKey::from_bytes(&guest_key_seed),
                 &anchor,
+                &control_offer(),
             )
             .expect("guest handshake");
             let req: GuestRequest = session.read(&mut guest).expect("read probe request");
@@ -2236,6 +2055,7 @@ mod tests {
                 &mut guest,
                 SigningKey::from_bytes(&guest_key_seed),
                 &anchor,
+                &control_offer(),
             )
             .expect("guest handshake");
             let req: GuestRequest = session.read(&mut guest).expect("read probe request");
@@ -2279,6 +2099,7 @@ mod tests {
                 &mut guest,
                 SigningKey::from_bytes(&guest_key_seed),
                 &anchor,
+                &control_offer(),
             )
             .expect("guest handshake");
             let req: GuestRequest = session.read(&mut guest).expect("read probe request");

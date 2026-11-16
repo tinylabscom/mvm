@@ -187,7 +187,6 @@ impl ProcessOutputReader {
         } else {
             connect(name)?
         };
-        mvm_agentd::vsock::require_capabilities(&mut stream, &[GuestCapability::ProcessRpc])?;
         let mut session = ControlSession::open(&mut stream)?;
         // Handshake bounds must not become a lifetime limit on a quiet program.
         // The owned duplicate interrupts a blocked read at reader retirement.

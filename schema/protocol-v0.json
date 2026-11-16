@@ -4991,8 +4991,7 @@
       "type": "string",
       "enum": [
         "upgrade_host",
-        "rebuild_guest",
-        "downgrade_host"
+        "rebuild_guest"
       ]
     },
     "ReadinessReport": {

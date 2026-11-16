@@ -303,9 +303,13 @@ pub(super) fn spawn_activation_guest(
             found.expect("the runner connected to the guest agent port")
         };
         let host_key = SigningKey::from_bytes(&host_signer).verifying_key();
-        let mut session =
-            AuthenticatedSession::guest(&mut stream, SigningKey::from_bytes(&[9u8; 32]), &host_key)
-                .expect("guest handshake");
+        let mut session = AuthenticatedSession::guest(
+            &mut stream,
+            SigningKey::from_bytes(&[9u8; 32]),
+            &host_key,
+            &mvm_agentd::vsock::control_offer(),
+        )
+        .expect("guest handshake");
         let req: GuestRequest = session.read(&mut stream).expect("read request");
         assert!(
             matches!(req, GuestRequest::ActivateEnvironment(_)),

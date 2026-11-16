@@ -232,8 +232,13 @@ mod tests {
         let anchor = host_key.verifying_key();
         let guest_thread = std::thread::spawn(move || {
             let guest_key = SigningKey::from_bytes(&[9; 32]);
-            let mut session = AuthenticatedSession::guest(&mut guest, guest_key, &anchor)
-                .expect("guest authentication");
+            let mut session = AuthenticatedSession::guest(
+                &mut guest,
+                guest_key,
+                &anchor,
+                &mvm_agentd::vsock::control_offer(),
+            )
+            .expect("guest authentication");
             let request: GuestRequest = session.read(&mut guest).expect("read readiness request");
             assert!(matches!(request, GuestRequest::ReadinessStatus));
             session
