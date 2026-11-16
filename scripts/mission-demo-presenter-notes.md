@@ -38,6 +38,12 @@ after.
 
 ## What to say
 
+Three kinds of statement, kept apart in the slides and in the spoken script:
+what is **implemented**, what the demo **demonstrates**, and what is
+**proposed**. Say which one you are in.
+
+### Implemented
+
 **Networking.**
 
 > Our fleet networking uses interchangeable carriers behind MVMD's networking
@@ -46,36 +52,48 @@ after.
 > itself authorize an operation; fleet membership and command authorization
 > remain separate.
 
-Changed from the requested wording: it said the current repository includes
-"an experimental Veilid adapter". mvmd's `docs/VEILID_WAN_SPIKE.md` says that
+Changed from an earlier request that said the current repository includes "an
+experimental Veilid adapter": mvmd's `docs/VEILID_WAN_SPIKE.md` says that
 carrier is **retired from the supported build** and survives only in git
-history (commit `50d64da`), so it cannot be called current. If you want it
-back in the build, say so and the sentence changes.
+history (commit `50d64da`), so it cannot be called current.
 
-**Today's signing.**
+**Signing.** Ed25519 for execution-plan and audit signing. This is covered in
+the first sentence of the script below.
 
-> Today, MVM uses Ed25519 for execution-plan and audit signing.
+### Demonstrated
 
-**The proposed post-quantum roadmap. Proposed, not implemented.**
+The contain, terminate and replace sequence described at the end of this file,
+and, if you run the optional segment, the loopback Iroh smoke test described
+above. Nothing in the next section is demonstrated.
 
-> Our proposed post-quantum roadmap starts with versioned, algorithm-explicit
-> audit formats, followed by dual Ed25519/ML-DSA signatures. An algorithm
-> identifier is migration groundwork, not post-quantum protection. We would
-> then extend that approach to execution plans and evaluate hybrid
-> X25519/ML-KEM key establishment for cross-host communication.
+### Proposed: post-quantum roadmap. None of it is implemented.
 
-> CNSA 2.0 is a requirements-led direction we can discuss, not a compliance
-> claim. None of those post-quantum extensions is implemented today.
+Say this regardless of whether anyone asks:
 
-These priorities were proposed and still need confirmation. One thing to
-settle first: ADR-062 section 7 orders the work the other way round. It puts
-hybrid X25519 + ML-KEM-768 for mailbox key agreement and cross-host transport
-**first** (recorded traffic can be decrypted later), and hybrid Ed25519 +
-ML-DSA-65 for audit and epoch seals, evidence archives, packs and plans
-**second**. The wording above follows the request; if the ADR's order is the
-intended one, the two halves swap. Either way, nothing post-quantum exists in
-either repository today: a search for ML-DSA, ML-KEM and Kyber finds only that
-ADR.
+> Today, MVM uses Ed25519 for execution-plan and audit signing. Our proposed
+> post-quantum roadmap prioritizes long-lived audit evidence: versioned,
+> algorithm-explicit formats first, then dual Ed25519/ML-DSA signatures,
+> followed by execution plans. Algorithm identifiers alone do not provide
+> post-quantum protection. For cross-host traffic, we plan to evaluate hybrid
+> X25519/ML-KEM key establishment within our existing networking architecture.
+> These post-quantum extensions are not implemented today.
+
+If asked about defense requirements:
+
+> CNSA 2.0 alignment is a requirements-led direction, not a current compliance
+> claim. We would scope the algorithms, cryptographic modules, deployment
+> configuration, and supporting evidence against your requirements. We are not
+> claiming a qualified FIPS deployment for this demo.
+
+**The audit-first ordering is unconfirmed.** It came from the same source as
+this wording and still needs Ari's confirmation. One thing to settle first:
+ADR-062 section 7 orders the work differently. It puts hybrid X25519 +
+ML-KEM-768 for mailbox key agreement and cross-host transport **first**
+(recorded traffic can be decrypted later), and hybrid Ed25519 + ML-DSA-65 for
+audit and epoch seals, evidence archives, packs and plans **second**. If the
+ADR's order is the intended one, the first and last sentences about priorities
+swap; the "not implemented today" sentence stays either way. A search for ML-DSA,
+ML-KEM and Kyber finds only that ADR in either repository.
 
 ## What the demo itself claims
 
