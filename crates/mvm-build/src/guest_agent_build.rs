@@ -1001,6 +1001,14 @@ fn zigbuild_args_for_output(args: &[String]) -> Vec<String> {
     quiet
 }
 
+/// The only compiler flags these builds carry. rustc asks the linker for
+/// `-Wl,-O1` on an optimized build, and zig's linker answers every link with
+/// "ignoring deprecated linker optimization setting '1'", which rustc's
+/// `linker_messages` lint reprints as a warning under each of the dozens of
+/// guest binaries. That message is zig's, not a problem in the code, so it is
+/// allowed here; the workspace's own builds keep the lint on.
+const ZIGBUILD_RUSTFLAGS: &str = "-Alinker-messages";
+
 fn apply_zigbuild_env(
     cmd: &mut std::process::Command,
     spec: &GuestAgentBuildSpec,
@@ -1017,7 +1025,10 @@ fn apply_zigbuild_env(
         .env("RUSTC_WORKSPACE_WRAPPER", "")
         .env_remove("RUSTUP_TOOLCHAIN")
         .env_remove("RUSTFLAGS")
-        .env_remove("CARGO_ENCODED_RUSTFLAGS");
+        // Scrub the outer session's encoded flags before setting our own, so
+        // no inherited flag can ride along even if the set below is dropped.
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env("CARGO_ENCODED_RUSTFLAGS", ZIGBUILD_RUSTFLAGS);
 
     // Keep cargo-zigbuild's own cache under the mvm cache root instead of
     // whatever platform-global default the host picks (for example
@@ -1662,7 +1673,12 @@ mod tests {
             envs.get(std::ffi::OsStr::new("RUSTC_WORKSPACE_WRAPPER")),
             Some(&Some(std::ffi::OsString::new()))
         );
-        for removed in ["RUSTUP_TOOLCHAIN", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"] {
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("CARGO_ENCODED_RUSTFLAGS")),
+            Some(&Some(std::ffi::OsString::from("-Alinker-messages"))),
+            "the guest build carries only the flag that silences zig's linker notice, not the outer session's"
+        );
+        for removed in ["RUSTUP_TOOLCHAIN", "RUSTFLAGS"] {
             assert_eq!(
                 envs.get(std::ffi::OsStr::new(removed)),
                 Some(&None),
