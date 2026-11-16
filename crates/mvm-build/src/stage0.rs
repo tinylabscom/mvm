@@ -393,7 +393,7 @@ fn extract_nix_store_tarball(tarball: &Path, nix_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(nix_dir).with_context(|| format!("creating {}", nix_dir.display()))?;
 
     match extract_nix_store_tarball_with_native_tar(tarball, nix_dir) {
-        Ok(()) => return Ok(()),
+        Ok(()) => return clear_special_mode_bits(nix_dir),
         Err(native_err) => {
             if !dir_is_empty(nix_dir)? {
                 std::fs::remove_dir_all(nix_dir)
@@ -409,13 +409,47 @@ fn extract_nix_store_tarball(tarball: &Path, nix_dir: &Path) -> Result<()> {
         }
     }
 
-    extract_nix_store_tarball_pure_rust(tarball, nix_dir)
+    extract_nix_store_tarball_pure_rust(tarball, nix_dir)?;
+    clear_special_mode_bits(nix_dir)
+}
+
+/// Drop setuid, setgid and sticky bits from everything under `dir`. Both
+/// extractors keep the archive's permission bits whatever the umask, and the
+/// seed has no use for the special ones: a store path never needs to run
+/// privileged, and the extracting user keeps ownership.
+fn clear_special_mode_bits(dir: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+            let path = entry?.path();
+            let meta = std::fs::symlink_metadata(&path)
+                .with_context(|| format!("inspecting {}", path.display()))?;
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            let mode = meta.permissions().mode();
+            if mode & 0o7000 != 0 {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode & 0o777))
+                    .with_context(|| format!("clearing special bits on {}", path.display()))?;
+            }
+            if meta.is_dir() {
+                clear_special_mode_bits(&path)?;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
 }
 
 fn extract_nix_store_tarball_with_native_tar(tarball: &Path, nix_dir: &Path) -> Result<()> {
     let output = mvm_core::env_hygiene::helper_command("tar")
         .arg("-xJf")
         .arg(tarball)
+        // Keep the archive's modes whatever the umask, and never adopt its owners.
+        .arg("-p")
+        .arg("--no-same-owner")
         .arg("-C")
         .arg(nix_dir)
         .arg("--strip-components")
@@ -687,6 +721,46 @@ mod tests {
     /// that wraps everything in one `nix-<ver>-<arch>-linux/` dir (the shape
     /// of the official Nix release tarball), extract it, and assert the
     /// wrapper is stripped so `store/` lands at `<nix_dir>/store/`.
+    #[test]
+    #[cfg(unix)]
+    fn extract_keeps_archive_modes_under_restrictive_and_open_umasks() {
+        for mask in ["077", "022"] {
+            let output = std::process::Command::new("sh")
+                .args([
+                    "-c",
+                    "umask \"$1\"; exec \"$2\" --exact stage0::tests::extract_nix_store_tarball_decodes_xz_and_strips_wrapper --test-threads=1",
+                    "stage0-extract-umask",
+                    mask,
+                ])
+                .arg(std::env::current_exe().unwrap())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "umask {mask} child failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn special_mode_bits_are_cleared_and_ordinary_modes_kept() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let sub = dir.path().join("d");
+        std::fs::create_dir(&sub).unwrap();
+        let file = sub.join("f");
+        std::fs::write(&file, b"x").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o6755)).unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o1755)).unwrap();
+        clear_special_mode_bits(dir.path()).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode(&file), 0o755);
+        assert_eq!(mode(&sub), 0o755);
+    }
+
     #[test]
     fn extract_nix_store_tarball_decodes_xz_and_strips_wrapper() {
         let dir = TempDir::new().unwrap();

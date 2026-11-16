@@ -333,10 +333,14 @@ fn stage_runtime_overlay_root(
     root: &Path,
 ) -> Result<(), RuntimeOverlayError> {
     stage_guest_runtime_overlay_tree(runtime, arch, root)?;
-    std::fs::write(
-        root.join("VERSION"),
-        format!("{}\n", runtime.manifest.version),
-    )?;
+    let version = root.join("VERSION");
+    std::fs::write(&version, format!("{}\n", runtime.manifest.version))?;
+    // The image records 0644; a created file would follow the process umask.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&version, std::fs::Permissions::from_mode(0o644))?;
+    }
     Ok(())
 }
 
@@ -1607,6 +1611,29 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn overlay_tree_matches_the_image_under_restrictive_and_open_umasks() {
+        for mask in ["077", "022"] {
+            let output = std::process::Command::new("sh")
+                .args([
+                    "-c",
+                    "umask \"$1\"; exec \"$2\" --exact runtime_overlay::tests::overlay_tree_holds_exactly_what_the_overlay_image_holds --test-threads=1",
+                    "runtime-overlay-tree-umask",
+                    mask,
+                ])
+                .arg(std::env::current_exe().unwrap())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "umask {mask} child failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     #[test]
