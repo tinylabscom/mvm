@@ -263,6 +263,7 @@ pub fn admit_and_boot_local(
     req: &LocalRunRequest,
     ctx: LocalRunContext<'_>,
 ) -> Result<StartedMachine> {
+    let _runtime_proofs = mvm_build::guest_runtime::evidence::LaunchProofScope::begin();
     ResolvedLocal::new(req)?
         .verify()?
         .admit(backend, ctx)?

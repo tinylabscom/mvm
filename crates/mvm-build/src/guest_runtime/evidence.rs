@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 
 /// Authenticated declarations plus ownership of the exact signed archive bytes.
 /// Private fields and no Deserialize implementation prevent caller-minted trust.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VerifiedRuntimeManifest {
-    archive: tempfile::NamedTempFile,
+    archive: std::sync::Arc<tempfile::NamedTempFile>,
     checksum: Vec<u8>,
     signature: Vec<u8>,
     checksum_signature: Option<Vec<u8>>,
@@ -406,17 +406,39 @@ pub(super) fn verify_release_archive(
     version: &str,
     arch: GuestArch,
 ) -> Result<VerifiedRuntimeManifest, GuestRuntimeError> {
-    #[cfg(test)]
-    RELEASE_ARCHIVE_VERIFICATIONS.with(|calls| calls.set(calls.get() + 1));
     let asset = crate::guest_bins::guest_bins_archive_name(version);
     let (bytes, digest) = read_and_digest_archive(archive)?;
     let checksum_bytes = std::fs::read(checksum)?;
     let checksum_bundle = checksum_bundle_path(checksum);
+    // The archive's signature is read here, once, and these are the bytes the
+    // verification below uses, so what is remembered is exactly what was
+    // checked. An unreadable bundle skips the memo and fails where it always
+    // did, after a present checksum signature has been held to its own check.
+    let signature_bytes = std::fs::read(bundle).ok();
+    let checksum_signature_bytes = std::fs::read(&checksum_bundle).ok();
+    let key = signature_bytes.as_ref().map(|signature| {
+        launch_scope::Key::new(
+            &digest,
+            &checksum_bytes,
+            checksum_signature_bytes.as_deref(),
+            signature.clone(),
+            version,
+            arch,
+        )
+    });
+    if let Some(shared) = key.as_ref().and_then(launch_scope::recall) {
+        return Ok(shared);
+    }
+    #[cfg(test)]
+    RELEASE_ARCHIVE_VERIFICATIONS.with(|calls| calls.set(calls.get() + 1));
     // Legacy offline packages carry only the archive signature, which already
     // authenticates its bytes. A present standalone checksum signature must
     // still verify; portable acquisition separately requires that fourth file.
     let checksum_signature = if checksum_bundle_present(&checksum_bundle)? {
-        let signature = std::fs::read(&checksum_bundle)?;
+        let signature = match checksum_signature_bytes {
+            Some(signature) => signature,
+            None => std::fs::read(&checksum_bundle)?,
+        };
         verify_checksum_signature_bytes(&checksum_bytes, &signature, version)?;
         Some(signature)
     } else {
@@ -431,7 +453,10 @@ pub(super) fn verify_release_archive(
             "guest runtime checksum missing or mismatched for {asset}"
         )));
     }
-    let signature = std::fs::read(bundle)?;
+    let signature = match signature_bytes {
+        Some(signature) => signature,
+        None => std::fs::read(bundle)?,
+    };
     let signer = crate::release_signature::verify_release_archive_bytes_with_signer(
         &bytes,
         &signature,
@@ -442,8 +467,8 @@ pub(super) fn verify_release_archive(
     let snapshot = write_archive_snapshot(&bytes)?;
     let manifest = crate::guest_bins::verify_guest_bins_archive(snapshot.path())?;
     super::validate_release_guest_runtime_manifest(&manifest, version)?;
-    Ok(VerifiedRuntimeManifest {
-        archive: snapshot,
+    let verified = VerifiedRuntimeManifest {
+        archive: std::sync::Arc::new(snapshot),
         checksum: checksum_bytes,
         signature,
         checksum_signature,
@@ -452,7 +477,11 @@ pub(super) fn verify_release_archive(
         manifest,
         arch,
         signer,
-    })
+    };
+    if let Some(key) = key {
+        launch_scope::remember(key, &verified);
+    }
+    Ok(verified)
 }
 
 #[cfg(test)]
@@ -721,7 +750,7 @@ mod tests {
             initramfs_sha256: digest(b"initramfs"),
         };
         let verified = VerifiedRuntimeManifest {
-            archive: tempfile::NamedTempFile::new().unwrap(),
+            archive: std::sync::Arc::new(tempfile::NamedTempFile::new().unwrap()),
             checksum: Vec::new(),
             signature: Vec::new(),
             checksum_signature: None,
@@ -763,8 +792,8 @@ mod tests {
     #[test]
     fn launch_handle_keeps_verified_archive_bytes_after_cache_refresh() {
         let (dir, mut verified) = fixture();
-        verified.archive.write_all(b"verified archive").unwrap();
-        verified.archive.flush().unwrap();
+        (&*verified.archive).write_all(b"verified archive").unwrap();
+        (&*verified.archive).flush().unwrap();
         verified.digest = hex::encode(Sha256::digest(b"verified archive"));
         let archive = dir.path().join("archive");
         std::fs::write(&archive, b"verified archive").unwrap();
@@ -829,6 +858,19 @@ mod tests {
             );
         }
 
+        let scope = LaunchProofScope::begin();
+        let before = RELEASE_ARCHIVE_VERIFICATIONS.with(std::cell::Cell::get);
+        for _ in 0..7 {
+            verify_release_runtime(proof.clone(), &proof.version, proof.arch)
+                .expect("signed release inside one launch scope");
+        }
+        assert_eq!(
+            RELEASE_ARCHIVE_VERIFICATIONS.with(std::cell::Cell::get) - before,
+            1,
+            "seven asks inside one launch scope verify once"
+        );
+        drop(scope);
+
         let scratch = tempfile::tempdir().expect("tampered archive directory");
         let mut edited = std::fs::read(&proof.archive).expect("published archive");
         edited[0] ^= 1;
@@ -841,6 +883,74 @@ mod tests {
         let error = verify_release_runtime(tampered, "0.28.0-rc.2", GuestArch::host())
             .expect_err("a modified archive must not become a launch handle");
         assert!(error.to_string().contains("checksum"));
+    }
+
+    #[test]
+    fn a_launch_scope_shares_one_verification_among_steps_that_read_the_same_bytes() {
+        let (_dir, verified) = fixture();
+        let key = |archive: &str, version: &str| {
+            launch_scope::Key::new(
+                archive,
+                b"sums",
+                Some(b"sums-sig"),
+                b"sig".to_vec(),
+                version,
+                GuestArch::X86_64,
+            )
+        };
+        // No scope: nothing is remembered, so every step verifies in full.
+        launch_scope::remember(key("a", "1"), &verified);
+        assert!(launch_scope::recall(&key("a", "1")).is_none());
+
+        let scope = LaunchProofScope::begin();
+        launch_scope::remember(key("a", "1"), &verified);
+        assert!(launch_scope::recall(&key("a", "1")).is_some());
+        // One byte of anything the verification read is a different question.
+        assert!(launch_scope::recall(&key("b", "1")).is_none());
+        assert!(launch_scope::recall(&key("a", "2")).is_none());
+        let other_signature = launch_scope::Key::new(
+            "a",
+            b"sums",
+            Some(b"sums-sig"),
+            b"sig2".to_vec(),
+            "1",
+            GuestArch::X86_64,
+        );
+        assert!(launch_scope::recall(&other_signature).is_none());
+        let other_arch = launch_scope::Key::new(
+            "a",
+            b"sums",
+            Some(b"sums-sig"),
+            b"sig".to_vec(),
+            "1",
+            GuestArch::Aarch64,
+        );
+        assert!(launch_scope::recall(&other_arch).is_none());
+
+        // A scope begun inside another is inert and closes nothing.
+        drop(LaunchProofScope::begin());
+        assert!(launch_scope::recall(&key("a", "1")).is_some());
+
+        // The next launch starts with nothing remembered.
+        drop(scope);
+        assert!(launch_scope::recall(&key("a", "1")).is_none());
+        let _next = LaunchProofScope::begin();
+        assert!(launch_scope::recall(&key("a", "1")).is_none());
+    }
+
+    #[test]
+    fn a_launch_scope_does_not_reach_another_thread() {
+        let (_dir, verified) = fixture();
+        let key = launch_scope::Key::new("a", b"s", None, b"g".to_vec(), "1", GuestArch::X86_64);
+        let _scope = LaunchProofScope::begin();
+        launch_scope::remember(key, &verified);
+        std::thread::spawn(|| {
+            let key =
+                launch_scope::Key::new("a", b"s", None, b"g".to_vec(), "1", GuestArch::X86_64);
+            assert!(launch_scope::recall(&key).is_none());
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]
@@ -1098,5 +1208,117 @@ mod tests {
         let started = std::time::Instant::now();
         snapshot_file(&source, &dir.path().join("snapshot"), &digest).unwrap();
         eprintln!("128 MiB copy+SHA256: {:?}", started.elapsed());
+    }
+}
+
+pub use launch_scope::LaunchProofScope;
+
+/// What one launch shares between the steps that each ask whether the signed
+/// runtime release is authentic.
+///
+/// A launch asks that question several times (admission, overlay, initramfs,
+/// dispatch, lifecycle bind), and each ask re-reads and re-verifies the whole
+/// archive. Within one launch scope a successful verification is remembered
+/// under the content of everything it consumed, so the next ask over the same
+/// bytes returns the same result instead of repeating the work. Nothing here
+/// outlives the scope, nothing is written to disk, a failure is never
+/// remembered, and a call whose archive, checksum, signature, version or
+/// architecture differs by a single byte finds no entry and verifies in full.
+mod launch_scope {
+    use super::{GuestArch, VerifiedRuntimeManifest};
+    use std::cell::RefCell;
+
+    /// Everything a verification read, by content.
+    #[derive(PartialEq, Eq)]
+    pub(super) struct Key {
+        archive_digest: String,
+        checksum: Vec<u8>,
+        checksum_signature: Option<Vec<u8>>,
+        signature: Vec<u8>,
+        version: String,
+        arch: GuestArch,
+    }
+
+    impl Key {
+        pub(super) fn new(
+            archive_digest: &str,
+            checksum: &[u8],
+            checksum_signature: Option<&[u8]>,
+            signature: Vec<u8>,
+            version: &str,
+            arch: GuestArch,
+        ) -> Self {
+            Self {
+                archive_digest: archive_digest.to_owned(),
+                checksum: checksum.to_vec(),
+                checksum_signature: checksum_signature.map(<[u8]>::to_vec),
+                signature,
+                version: version.to_owned(),
+                arch,
+            }
+        }
+    }
+
+    thread_local! {
+        static SCOPE: RefCell<Option<Vec<(Key, VerifiedRuntimeManifest)>>> =
+            const { RefCell::new(None) };
+    }
+
+    /// Open while one launch runs on this thread. Not `Send`: the memory it
+    /// guards is the thread's, so it cannot be carried to another thread or
+    /// held across a task that may move. A launch step on a thread with no
+    /// scope simply verifies in full.
+    #[must_use = "the scope ends when this is dropped"]
+    pub struct LaunchProofScope {
+        owner: bool,
+        _not_send: std::marker::PhantomData<*const ()>,
+    }
+
+    impl LaunchProofScope {
+        /// Begin a launch's scope. Inside an already open scope this is inert
+        /// and ends nothing, so a launch that starts another launch's steps
+        /// never extends or closes its caller's.
+        pub fn begin() -> Self {
+            let owner = SCOPE.with(|scope| {
+                let mut scope = scope.borrow_mut();
+                if scope.is_some() {
+                    false
+                } else {
+                    *scope = Some(Vec::new());
+                    true
+                }
+            });
+            Self {
+                owner,
+                _not_send: std::marker::PhantomData,
+            }
+        }
+    }
+
+    impl Drop for LaunchProofScope {
+        fn drop(&mut self) {
+            if self.owner {
+                SCOPE.with(|scope| *scope.borrow_mut() = None);
+            }
+        }
+    }
+
+    pub(super) fn recall(key: &Key) -> Option<VerifiedRuntimeManifest> {
+        SCOPE.with(|scope| {
+            scope
+                .borrow()
+                .as_ref()?
+                .iter()
+                .find(|(seen, _)| seen == key)
+                .map(|(_, verified)| verified.clone())
+        })
+    }
+
+    pub(super) fn remember(key: Key, verified: &VerifiedRuntimeManifest) {
+        SCOPE.with(|scope| {
+            if let Some(entries) = scope.borrow_mut().as_mut() {
+                entries.push((key, verified.clone()));
+            }
+        });
     }
 }
