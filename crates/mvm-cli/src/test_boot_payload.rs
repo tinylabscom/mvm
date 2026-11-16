@@ -13,6 +13,8 @@ const CHILD: &str = "MVM_BASE_CONTRACT_TEST_CHILD";
 const FRESH_CHILD: &str = "MVM_FRESH_PROCESS_TEST_CHILD";
 const CHILD_DEADLINE: Duration = Duration::from_secs(120);
 const CLEANUP_DEADLINE: Duration = Duration::from_secs(10);
+/// Longest observer or cleanup error text kept in a failure report.
+const ERROR_TEXT_LIMIT: usize = 4096;
 
 pub(crate) fn in_payload_capable_test_process(module: &str, name: &str) -> bool {
     in_test_process(module, name, CHILD)
@@ -54,10 +56,20 @@ fn in_test_process(module: &str, name: &str, marker: &str) -> bool {
 }
 
 fn wait_for_child(child: &mut Child, deadline: Instant) -> anyhow::Result<Option<ExitStatus>> {
+    wait_for_child_with(child, deadline, ProcessExitObserver::arm)
+}
+
+/// `arm` builds the exit observer; tests inject its failure modes.
+fn wait_for_child_with(
+    child: &mut Child,
+    deadline: Instant,
+    arm: impl FnOnce(libc::pid_t) -> Result<ProcessExitObserver, ProcessExitError>,
+) -> anyhow::Result<Option<ExitStatus>> {
     if let Some(status) = child.try_wait()? {
         return Ok(Some(status));
     }
-    let observer = ProcessExitObserver::arm(i32::try_from(child.id())?);
+    let pid = i32::try_from(child.id())?;
+    let observer = arm(pid);
     match observer {
         Ok(observer) => match observer.wait_event(deadline)? {
             ProcessExitWait::Exited => Ok(collect_after_exit_event(deadline, || child.try_wait())?),
@@ -67,7 +79,8 @@ fn wait_for_child(child: &mut Child, deadline: Instant) -> anyhow::Result<Option
         Err(ProcessExitError::Unsupported) => {
             Ok(collect_after_exit_event(deadline, || child.try_wait())?)
         }
-        Err(error) => Err(error.into()),
+        Err(error) => Err(anyhow::Error::from(error)
+            .context(format!("arm process-exit observer for child {pid}"))),
     }
 }
 
@@ -93,12 +106,40 @@ fn run_test_child(command: &mut Command, within: Duration) -> anyhow::Result<Out
 }
 
 fn reap_owned_child(child: &mut Child) -> anyhow::Result<ExitStatus> {
-    if let Some(status) = child.try_wait()? {
+    reap_owned_child_with(child, CLEANUP_DEADLINE, Child::kill, Child::try_wait)
+}
+
+/// `kill` and `try_wait` are the two steps tests make fail; a failure names
+/// the child and is returned, never swallowed.
+fn reap_owned_child_with(
+    child: &mut Child,
+    deadline: Duration,
+    kill: impl FnOnce(&mut Child) -> std::io::Result<()>,
+    mut try_wait: impl FnMut(&mut Child) -> std::io::Result<Option<ExitStatus>>,
+) -> anyhow::Result<ExitStatus> {
+    let pid = child.id();
+    if let Some(status) = try_wait(child).with_context(|| format!("poll owned child {pid}"))? {
         return Ok(status);
     }
-    child.kill().context("terminate owned isolated child")?;
-    collect_after_exit_event(Instant::now() + CLEANUP_DEADLINE, || child.try_wait())?
-        .context("owned child was not reaped within cleanup deadline")
+    kill(child).with_context(|| format!("terminate owned isolated child {pid}"))?;
+    collect_after_exit_event(Instant::now() + deadline, || try_wait(child))
+        .with_context(|| format!("reap owned isolated child {pid}"))?
+        .with_context(|| format!("owned child {pid} was not reaped within cleanup deadline"))
+}
+
+/// Keep the head and tail of an error text over `ERROR_TEXT_LIMIT`, cutting on
+/// char boundaries, as `captured_output` does for child output.
+fn bounded_error_text(text: String) -> String {
+    if text.len() <= ERROR_TEXT_LIMIT {
+        return text;
+    }
+    let head = text.floor_char_boundary(ERROR_TEXT_LIMIT / 2);
+    let tail = text.ceil_char_boundary(text.len() - ERROR_TEXT_LIMIT / 2);
+    format!(
+        "{}\n[isolated test error: middle omitted; {ERROR_TEXT_LIMIT} bytes retained]\n{}",
+        &text[..head],
+        &text[tail..]
+    )
 }
 
 fn failure_summary(
@@ -107,11 +148,11 @@ fn failure_summary(
 ) -> String {
     let reason = match outcome {
         Ok(_) => "execution deadline exceeded".to_owned(),
-        Err(error) => format!("exit observation failed: {error:#}"),
+        Err(error) => bounded_error_text(format!("exit observation failed: {error:#}")),
     };
     let cleanup = match cleanup {
         Ok(status) => format!("owned child reaped: {status}"),
-        Err(error) => format!("cleanup failed: {error:#}"),
+        Err(error) => bounded_error_text(format!("cleanup failed: {error:#}")),
     };
     format!("{reason}; {cleanup}")
 }
@@ -120,6 +161,15 @@ fn run_test_child_with(
     command: &mut Command,
     within: Duration,
     wait: impl FnOnce(&mut Child, Instant) -> anyhow::Result<Option<ExitStatus>>,
+) -> anyhow::Result<Output> {
+    run_test_child_with_cleanup(command, within, wait, reap_owned_child)
+}
+
+fn run_test_child_with_cleanup(
+    command: &mut Command,
+    within: Duration,
+    wait: impl FnOnce(&mut Child, Instant) -> anyhow::Result<Option<ExitStatus>>,
+    cleanup: impl FnOnce(&mut Child) -> anyhow::Result<ExitStatus>,
 ) -> anyhow::Result<Output> {
     // Files avoid pipe backpressure while the parent waits for the exit event.
     let mut stdout = tempfile::tempfile().context("create child stdout capture")?;
@@ -140,7 +190,7 @@ fn run_test_child_with(
         }),
         outcome => {
             // The retained Child is the authority; never rediscover or signal a PID.
-            let summary = failure_summary(outcome, reap_owned_child(&mut child));
+            let summary = failure_summary(outcome, cleanup(&mut child));
             bail!(
                 "child {pid} after {:?}: {summary}\nstdout:\n{}\nstderr:\n{}",
                 started.elapsed(),
@@ -191,9 +241,12 @@ mod tests {
     // the child, or that the child is cleaned up if the *parent* test process
     // is itself killed: SIGKILL of the parent leaves the child to the OS.
     // Parent-termination behaviour is whatever the helper implements, which is
-    // none. A failing kill or reap cannot be provoked from outside the helper
-    // (kill on an owned live child does not fail), so that branch is witnessed
-    // through `failure_summary` rather than a real failed cleanup.
+    // none. The observer, kill and reap steps are injectable, so a refused
+    // kill, an unreaped child, a wait error and an observer that cannot be
+    // armed are each forced and shown to be reported and (where the helper
+    // owns the kill) to leave no process; every injected failure keeps a drop
+    // guard that kills and reaps the child so a failing test leaks nothing.
+    // A refused kill is reported with the child's pid and is not retried.
     const MODE: &str = "MVM_ISOLATED_HELPER_TEST_MODE";
 
     /// Kills and reaps its child on drop so a failed assertion leaves no process.
@@ -369,5 +422,186 @@ mod tests {
         assert_ne!(pid.get(), 0);
         assert!(!pid_exists(pid.get()), "no zombie is left behind");
         assert!(pid_exists(bystander.0.id()), "bystander is still alive");
+    }
+
+    fn blocked_child() -> Bystander {
+        Bystander(fixture("block").spawn().unwrap())
+    }
+
+    fn io_error(message: &str) -> std::io::Error {
+        std::io::Error::other(message.to_owned())
+    }
+
+    #[test]
+    fn an_unsupported_observer_falls_back_to_polling_and_collects_the_exit() {
+        let mut child = blocked_child();
+        let raw = libc::pid_t::try_from(child.0.id()).expect("pid fits pid_t");
+        let status = wait_for_child_with(
+            &mut child.0,
+            Instant::now() + Duration::from_secs(10),
+            |_| {
+                // Reached only after the first try_wait found the child running.
+                // SAFETY: SIGKILL to the pid of a child this test owns and has not reaped.
+                assert_eq!(unsafe { libc::kill(raw, libc::SIGKILL) }, 0);
+                Err(ProcessExitError::Unsupported)
+            },
+        )
+        .unwrap();
+        assert!(status.is_some_and(|status| !status.success()));
+    }
+
+    #[test]
+    fn an_observer_that_cannot_be_armed_is_reported_and_the_child_is_reaped() {
+        let bystander = blocked_child();
+        let pid = std::cell::Cell::new(0);
+        let error = run_test_child_with(
+            &mut fixture("block"),
+            Duration::from_secs(10),
+            |child, deadline| {
+                pid.set(child.id());
+                wait_for_child_with(child, deadline, |_| {
+                    Err(ProcessExitError::Io(io_error("kqueue refused")))
+                })
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("arm process-exit observer for child"),
+            "{error}"
+        );
+        assert!(error.contains("kqueue refused"), "{error}");
+        assert!(error.contains("owned child reaped"), "{error}");
+        assert_ne!(pid.get(), 0);
+        assert!(!pid_exists(pid.get()), "no zombie is left behind");
+        assert!(pid_exists(bystander.0.id()), "bystander is still alive");
+    }
+
+    #[test]
+    fn an_unsupported_observer_on_a_blocked_child_hits_the_deadline_and_reaps() {
+        let error = run_test_child_with(
+            &mut fixture("block"),
+            Duration::from_millis(250),
+            |child, deadline| {
+                wait_for_child_with(child, deadline, |_| Err(ProcessExitError::Unsupported))
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("execution deadline exceeded"), "{error}");
+        assert!(error.contains("owned child reaped"), "{error}");
+    }
+
+    #[test]
+    fn a_refused_kill_is_reported_with_the_pid_and_touches_nothing_else() {
+        let mut owned = blocked_child();
+        let bystander = blocked_child();
+        let pid = owned.0.id();
+        let error = reap_owned_child_with(
+            &mut owned.0,
+            Duration::from_secs(10),
+            |_| Err(io_error("kill refused")),
+            Child::try_wait,
+        )
+        .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(
+            text.contains(&format!("terminate owned isolated child {pid}")),
+            "{text}"
+        );
+        assert!(text.contains("kill refused"), "{text}");
+        assert!(
+            owned.0.try_wait().unwrap().is_none(),
+            "the refused kill left it running"
+        );
+        assert!(bystander.0.id() != pid && pid_exists(bystander.0.id()));
+    }
+
+    #[test]
+    fn a_child_not_reaped_within_the_cleanup_deadline_is_reported() {
+        let mut owned = blocked_child();
+        let pid = owned.0.id();
+        let error = reap_owned_child_with(&mut owned.0, Duration::ZERO, Child::kill, |_| Ok(None))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!(
+                "owned child {pid} was not reaped within cleanup deadline"
+            )),
+            "{error}"
+        );
+        // The kill itself was real, so the guard's own wait collects it.
+        assert!(!owned.0.wait().unwrap().success());
+    }
+
+    #[test]
+    fn a_wait_error_while_reaping_is_reported() {
+        let mut owned = blocked_child();
+        let pid = owned.0.id();
+        let mut calls = 0;
+        let error =
+            reap_owned_child_with(&mut owned.0, Duration::from_secs(10), Child::kill, |_| {
+                calls += 1;
+                if calls == 1 {
+                    Ok(None)
+                } else {
+                    Err(io_error("wait failed"))
+                }
+            })
+            .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(
+            text.contains(&format!("reap owned isolated child {pid}")),
+            "{text}"
+        );
+        assert!(text.contains("wait failed"), "{text}");
+    }
+
+    #[test]
+    fn a_failing_cleanup_is_reported_through_the_wrapper() {
+        let pid = std::cell::Cell::new(0);
+        let error = run_test_child_with_cleanup(
+            &mut fixture("block"),
+            Duration::from_millis(250),
+            wait_for_child,
+            |child| {
+                // End the child so the failing cleanup still leaves no process.
+                pid.set(child.id());
+                child.kill()?;
+                child.wait()?;
+                bail!("reap refused")
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("execution deadline exceeded"), "{error}");
+        assert!(error.contains("cleanup failed: reap refused"), "{error}");
+        assert!(!error.contains("owned child reaped"), "{error}");
+        assert!(!pid_exists(pid.get()));
+    }
+
+    #[test]
+    fn an_oversized_error_text_is_bounded_on_a_char_boundary() {
+        let huge = format!("start-{}-end", "é".repeat(ERROR_TEXT_LIMIT * 4));
+        let summary = failure_summary(
+            Err(anyhow::anyhow!(huge.clone())),
+            Err(anyhow::anyhow!(huge)),
+        );
+        assert!(summary.len() < 4 * ERROR_TEXT_LIMIT, "{}", summary.len());
+        assert!(summary.contains("exit observation failed: start-"));
+        assert!(summary.contains("middle omitted"), "{summary}");
+        assert!(
+            summary.contains("-end; cleanup failed: start-"),
+            "{summary}"
+        );
+        assert!(summary.ends_with("-end"));
+    }
+
+    #[test]
+    fn short_error_text_passes_through_unchanged() {
+        let at_limit = "x".repeat(ERROR_TEXT_LIMIT);
+        assert_eq!(bounded_error_text(at_limit.clone()), at_limit);
+        let summary = failure_summary(Err(anyhow::anyhow!("a")), Err(anyhow::anyhow!("b")));
+        assert_eq!(summary, "exit observation failed: a; cleanup failed: b");
     }
 }
