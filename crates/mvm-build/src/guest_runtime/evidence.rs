@@ -552,7 +552,10 @@ fn write_archive_snapshot(bytes: &[u8]) -> Result<tempfile::NamedTempFile, Guest
 }
 
 /// The durability barrier for one snapshot, apart from the copy so its cost
-/// is measured on its own. On macOS this empties the drive cache.
+/// is measured on its own. On macOS this empties the drive cache. Production
+/// snapshots submit their data instead and rely on the launch's one final
+/// full flush; this remains as the direct unit for that contract.
+#[cfg(test)]
 #[tracing::instrument(skip_all)]
 fn sync_snapshot(output: &std::fs::File) -> std::io::Result<()> {
     output.sync_all()
@@ -577,7 +580,11 @@ fn snapshot_file(
     let mut permissions = output.metadata()?.permissions();
     permissions.set_readonly(true);
     output.set_permissions(permissions)?;
-    sync_snapshot(&output)?;
+    // Submitted, not flushed: the launch's retention record is synced after
+    // every snapshot file and that one full flush covers them, where a flush
+    // per file cost ~8-18 ms each on macOS.
+    mvm_core::util::atomic_io::submit_file_data(&output)
+        .map_err(|error| GuestRuntimeError::Cache(format!("{error:#}")))?;
     Ok(())
 }
 

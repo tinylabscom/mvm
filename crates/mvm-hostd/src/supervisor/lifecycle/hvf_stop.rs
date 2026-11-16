@@ -353,7 +353,11 @@ fn provision(vm: &str) -> Result<(HvfInstance, UnixListener)> {
         &dir.join(wire::INSTANCE_FILE),
         &serde_json::to_vec(&instance)?,
     )?;
-    mvm_core::private_fs::sync_managed_directory_chain(
+    // Submitted, not flushed per directory: this chain runs on every launch,
+    // and on macOS each per-directory flush is a device-wide F_FULLFSYNC
+    // costing several milliseconds. One final full flush covers every
+    // directory submitted before it, so the end durability is unchanged.
+    mvm_core::private_fs::submit_managed_directory_chain(
         &mvm_core::config::mvm_home_strict()?,
         &dir,
     )?;
