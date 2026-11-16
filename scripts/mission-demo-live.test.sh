@@ -10,6 +10,26 @@ work="$(mktemp -d)"
 trap 'rm -rf "${work}"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+# Run the actual generated guest writer against a disposable directory.
+# stat's Linux syntax is stubbed so this stays hermetic on macOS as well.
+# shellcheck source-path=SCRIPTDIR source=lib/mailbox-frame.sh
+. "${repo}/scripts/lib/mailbox-frame.sh"
+writer="$(mailbox_guest_writer)"
+mkdir -p "${work}/guest/outbox"
+writer="${writer//\/run\/mvm\/mailbox/${work}/guest}"
+for fault in none stat chmod mv; do
+  guest_script='stat() { id -u; };'
+  [ "$fault" = none ] || guest_script+=" $fault() { return 1; };"
+  guest_script+="$writer"$'\nmbx_write 000 hello || exit 1\necho staged'
+  if out="$(sh -c "$guest_script")"; then
+    [ "$fault" = none ] || fail "writer ignored $fault failure"
+    [ "$out" = staged ] || fail "writer did not stage"
+  else
+    [ "$fault" != none ] || fail "writer failed"
+    [ -z "$out" ] || fail "writer reported staging after $fault failed"
+  fi
+done
+
 cat > "${work}/mvmctl" <<'S'
 #!/usr/bin/env bash
 # FAKE_MODE: ok | replace-works-running | secret-survives | leaks-old-state | leaks-body
@@ -43,12 +63,28 @@ case "${1:-} ${2:-}" in
       touch "${fake}/prepared"; exit 0
     fi
     if grep -q '"quarantined": true' "${ledger}" 2>/dev/null; then echo "Error: workload ${name} is quarantined" >&2; exit 1; fi
+    [ "${mode}" != launch-failure ] || { echo "launch failed" >&2; exit 1; }
+    if [ "${mode}" = replacement-launch-failure ] && [ "$(epoch_of "${name}")" = 2 ]; then echo "replacement launch failed" >&2; exit 1; fi
     mkdir -p "${home}/vms/${name}"; head -c 16 /dev/urandom | od -An -tx1 > "${home}/vms/${name}/mailbox-epoch.secret"
     if [ "${hv}" = hvf ]; then echo "4242 1" > "${home}/vms/${name}/hvf.pid"; fi
     [ -f "${ledger}" ] || set_ledger "${name}" 1 false
     touch "${fake}/running.${name}"; echo "${hv}" > "${fake}/hv"
-    [ "${mode}" = leaks-old-state ] || : > "${fake}/queue" ;;
+    [ "${mode}" = leaks-old-state ] || : > "${fake}/queue"
+    if [ "${DRIVER:-exec}" = entrypoint ]; then
+      if [ "$(epoch_of "${name}")" = 1 ]; then
+        for action in other-staged outbound-failed unread-staged; do
+          grep -qF "MISSION_ACTION=$name:$action" <<<"$allargs" || exit 2
+        done
+        [ "${mode}" != wrong-first ] || echo unexpected >> "${fake}/queue"
+        [ "${mode}" = missing-first ] || echo aircraft-observation-1 >> "${fake}/queue"
+      else
+        [ "${mode}" != wrong-second ] || echo unexpected >> "${fake}/queue"
+        [ "${mode}" = missing-second ] || echo fresh-under-epoch-2 >> "${fake}/queue"
+        [ "${mode}" != trailing-old-state ] || echo left-unread-in-the-old-workload >> "${fake}/queue"
+      fi
+    fi ;;
   "machine exec")
+    if [ "${DRIVER:-exec}" = entrypoint ]; then echo exec >> "${fake}/forbidden-exec"; exit 2; fi
     name="$3"; shift 4; [ -f "${fake}/running.${name}" ] || exit 1
     case "$*" in
       true) ;;
@@ -61,10 +97,29 @@ case "${1:-} ${2:-}" in
       *) echo "fake: unhandled exec: $*" >&2; exit 2 ;;
     esac ;;
   "machine mailbox")
+    [ "${mode}" != recv-failure ] || { echo "recv failed" >&2; exit 1; }
+    [ "${mode}" != recv-output-failure ] || { printf aircraft-observation-1; exit 1; }
+    if [ "${mode}" = empty-recv-failure ] && [ ! -s "${fake}/queue" ]; then exit 1; fi
     [ -s "${fake}/queue" ] || exit 0
     body="$(head -n1 "${fake}/queue")"; sed -i.bak 1d "${fake}/queue"; printf '%s' "${body}"
     echo '{"event":"mailbox.read","labels":{"bytes":"7"}}' >> "${audit}"
     if [ "${mode}" = leaks-body ]; then echo "{\"event\":\"x\",\"labels\":{\"body\":\"${body}\"}}" >> "${audit}"; fi ;;
+  "machine logs")
+    [ "${mode}" != logs-failure ] || exit 1
+    if [ "${mode}" = stale-actions ]; then
+      printf 'MISSION_ACTION=old-run:%s\n' other-staged outbound-failed unread-staged
+      exit 0
+    fi
+    [ "${mode}" = missing-contained ] || echo "MISSION_ACTION=$3:other-staged"
+    [ "${mode}" = missing-outbound ] || echo "MISSION_ACTION=$3:outbound-failed"
+    calls="$(cat "${fake}/log-calls" 2>/dev/null || echo 0)"
+    calls=$((calls + 1)); echo "$calls" > "${fake}/log-calls"
+    if [ "${mode}" != missing-unread ]; then
+      echo "MISSION_ACTION=$3:unread-staged"
+      if [ "${mode}" = leaks-old-state ] && [ "$calls" -eq 3 ]; then
+        echo left-unread-in-the-old-workload >> "${fake}/queue"; touch "${fake}/unread"
+      fi
+    fi ;;
   "machine replace")
     name="$3"
     if [ -f "${fake}/running.${name}" ] && [ "${mode}" != replace-works-running ]; then
@@ -95,21 +150,31 @@ esac
 S
 chmod +x "${work}/mvmctl"
 
+# The fake has no asynchronous guest transport. Skip transport pacing, while
+# retaining short process waits and the real wedge/network deadline clocks.
+real_sleep="$(command -v sleep)"
+cat > "${work}/sleep" <<'S'
+#!/usr/bin/env bash
+case "$1" in 1 | 2 | 3 | 4 | 8) exec "${REAL_SLEEP:?}" 0.01 ;; esac
+exec "${REAL_SLEEP:?}" "$@"
+S
+chmod +x "${work}/sleep"
+
 run() { # <mode> <env assignments...> -> output; the script's own exit status is returned
   local mode="$1"; shift
   rm -rf "${work:?}/state" "${work:?}/home"; mkdir -p "${work}/state" "${work}/home"
-  env MVMCTL="${work}/mvmctl" FAKE_STATE="${work}/state" FAKE_MODE="${mode}" MVM_HOME="${work}/home" \
+  env PATH="${work}:$PATH" REAL_SLEEP="$real_sleep" MVMCTL="${work}/mvmctl" FAKE_STATE="${work}/state" FAKE_MODE="${mode}" MVM_HOME="${work}/home" \
     WAIT_SECS=4 QUARANTINE_DEADLINE=3 "$@" bash "${repo}/scripts/mission-demo-live.sh" 2>&1
 }
 passes() { grep -c '^PASS ' <<<"$1"; }
 
 out="$(run ok HYPERVISOR=firecracker)" || fail "a correct firecracker run failed: ${out}"
-grep -q '^DEMO_RESULT=pass$' <<<"${out}" || fail "no pass line (firecracker): ${out}"
+grep -q '^DEMO_RESULT=partial$' <<<"${out}" || fail "no partial result (firecracker): ${out}"
 grep -q 'RAM scrub record' <<<"${out}" && fail "a firecracker run reported a RAM scrub record"
 n="$(passes "${out}")"
 
 out="$(run ok HYPERVISOR=hvf)" || fail "a correct hvf run failed: ${out}"
-grep -q '^DEMO_RESULT=pass$' <<<"${out}" || fail "no pass line (hvf): ${out}"
+grep -q '^DEMO_RESULT=partial$' <<<"${out}" || fail "no partial result (hvf): ${out}"
 grep -q 'RAM scrub record' <<<"${out}" || fail "the hvf run did not read the RAM scrub record: ${out}"
 
 out="$(run ok HYPERVISOR=hvf EXPECT_SCRUB_AUDIT=1)" || fail "hvf with the scrub audit entry failed: ${out}"
@@ -134,10 +199,37 @@ bad secret-survives "the per-launch secret survived the quarantine"
 bad leaks-old-state "the replacement could read the old workload's frame"
 bad leaks-body "a message body was in the audit log"
 bad queues-other "a message to another recipient was queued"
+bad launch-failure "initial launch failure"
+bad replacement-launch-failure "replacement launch failure"
+bad recv-failure "failed mailbox read"
+bad empty-recv-failure "failed mailbox read treated as empty"
+
+# Entrypoint observations are a narrowed witness, never proof of unread queue
+# acceptance or host refusal. No machine exec is permitted on this path.
+out="$(run ok HYPERVISOR=firecracker DRIVER=entrypoint)" || fail "entrypoint observations failed: ${out}"
+grep -q '^DEMO_RESULT=partial$' <<<"${out}" || fail "entrypoint must report incomplete host evidence: ${out}"
+grep -q 'FINDING:.*host acceptance' <<<"${out}" || fail "missing queue evidence not explained: ${out}"
+! grep -q 'PASS.*was refused\|PASS.*frame left unread.*not readable\|DEMO_RESULT=pass' <<<"${out}" || fail "unsupported entrypoint claim: ${out}"
+[ ! -f "${work}/state/forbidden-exec" ] || fail "entrypoint used machine exec"
+for mode in missing-first wrong-first missing-contained missing-outbound missing-unread stale-actions missing-second wrong-second recv-failure recv-output-failure empty-recv-failure logs-failure launch-failure replacement-launch-failure leaks-old-state trailing-old-state; do
+  out="$(run "$mode" HYPERVISOR=firecracker DRIVER=entrypoint)" && fail "entrypoint accepted $mode: ${out}"
+  ! grep -q '^DEMO_RESULT=' <<<"${out}" || fail "entrypoint printed a result for $mode: ${out}"
+  [ ! -f "${work}/state/forbidden-exec" ] || fail "entrypoint used machine exec in $mode"
+  case "$mode" in
+    missing-first | missing-second) reason="timed out waiting for" ;;
+    wrong-first | wrong-second | leaks-old-state) reason="unexpected mailbox message while waiting for" ;;
+    missing-contained | missing-outbound | missing-unread | stale-actions) reason="timed out waiting for guest action" ;;
+    recv-failure | recv-output-failure | empty-recv-failure) reason="mailbox read failed" ;;
+    logs-failure) reason="guest logs read failed" ;;
+    launch-failure | replacement-launch-failure) reason="entrypoint launch failed" ;;
+    trailing-old-state) reason="unexpected message after the replacement's fresh message" ;;
+  esac
+  grep -qF "$reason" <<<"${out}" || fail "wrong failure for $mode: ${out}"
+done
 # An unprepared home is prepared by the script itself, with no bootstrap step.
 out="$(run needs-bootstrap HYPERVISOR=firecracker)" || fail "an unprepared home was not prepared: ${out}"
 grep -q "^Preparing this machine once" <<<"${out}" || fail "the script did not say it was preparing: ${out}"
-grep -q "DEMO_RESULT=pass" <<<"${out}" || fail "the run did not pass after preparing: ${out}"
+grep -q "DEMO_RESULT=partial" <<<"${out}" || fail "the run did not complete after preparing: ${out}"
 ! grep -qi "bootstrap" <<<"${out}" || fail "the run mentioned bootstrap: ${out}"
 out="$(run wedge HYPERVISOR=firecracker)" && fail "a wedged quarantine passed"
 grep -q 'WEDGE' <<<"${out}" || fail "a wedged quarantine was not reported: ${out}"
@@ -167,11 +259,11 @@ out="$(run ok HYPERVISOR=firecracker NETWORK_SEGMENT=1 MVMD_DIR="${mvmd}")" || f
 grep -q "separate processes on THIS host" <<<"${out}" || fail "the segment did not state its scope: ${out}"
 grep -q "Not shown: two hosts, WAN or NAT traversal" <<<"${out}" || fail "the segment did not state what it does not show: ${out}"
 grep -q "^NETWORK_SEGMENT ok" <<<"${out}" || fail "a passing segment was not reported ok: ${out}"
-grep -q '^DEMO_RESULT=pass$' <<<"${out}" || fail "the demo lost its verdict after the segment"
+grep -q '^DEMO_RESULT=partial$' <<<"${out}" || fail "the demo lost its verdict after the segment"
 fake_smoke 'echo "node failed to bind"; exit 1'
 out="$(run ok HYPERVISOR=firecracker NETWORK_SEGMENT=1 MVMD_DIR="${mvmd}")" || fail "a failing network segment failed the demo: ${out}"
 grep -q "^NETWORK_SEGMENT failed" <<<"${out}" || fail "a failing segment was not reported: ${out}"
-grep -q '^DEMO_RESULT=pass$' <<<"${out}" || fail "a failing segment changed the demo's verdict"
+grep -q '^DEMO_RESULT=partial$' <<<"${out}" || fail "a failing segment changed the demo's verdict"
 fake_smoke 'sleep 30'
 out="$(run ok HYPERVISOR=firecracker NETWORK_SEGMENT=1 NETWORK_SEGMENT_SECS=2 MVMD_DIR="${mvmd}")" || fail "a hung network segment failed the demo: ${out}"
 grep -q "^NETWORK_SEGMENT did not finish" <<<"${out}" || fail "a hung segment was not omitted: ${out}"
