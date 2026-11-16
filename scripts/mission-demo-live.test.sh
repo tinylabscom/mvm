@@ -279,7 +279,10 @@ cp "${repo}/scripts/mission-demo-live.sh" "${tree}/scripts/"; cp -R "${repo}/scr
 cp "${work}/mvmctl" "${tree}/target/release/mvmctl"
 rm -rf "${work:?}/state"; mkdir -p "${work}/state"
 out="$(env -u MVMCTL -u MVM_HOME FAKE_STATE="${work}/state" FAKE_MODE=ok HYPERVISOR=firecracker WAIT_SECS=4 QUARANTINE_DEADLINE=3 bash "${tree}/scripts/mission-demo-live.sh" 2>&1)" || fail "a run from a built checkout failed: ${out}"
-grep -q '^DEMO_RESULT=pass$' <<<"${out}" || fail "the built checkout's run did not pass: ${out}"
+# The checkout's own binary runs the same runbook with the same evidence, so it
+# must report the same verdict as the MVMCTL-driven runs above: the unproven
+# host-evidence checks are FINDINGs and the result is partial, never pass.
+grep -q '^DEMO_RESULT=partial$' <<<"${out}" || fail "the built checkout's run did not report the expected partial verdict: ${out}"
 [ -d "${tree}/target/mission-demo-home" ] || fail "a run from a built checkout did not keep its home under target/"
 
 # The audit checks must be about THIS run: an earlier run's entries must not
