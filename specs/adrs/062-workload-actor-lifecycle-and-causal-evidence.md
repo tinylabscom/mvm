@@ -18,6 +18,9 @@ factory-edge presentation merged in #5396.
 **Tracked in:** #5544 (design, decisions and phases); first issues #5538,
 #5539, #5540, #5541, #5542 and #5543. Nothing here may be described as shipped,
 and no ADR-001 claim changes, until the evidence listed at the end exists.
+**Continuation design:** [#5126](https://github.com/tinylabscom/mvm/issues/5126)
+and proposed [ADR-060](060-mailbox-rebuild-handoff.md). Neither accepts a
+mailbox protocol amendment or qualifies cross-epoch Call completion.
 
 ## Context
 
@@ -45,6 +48,40 @@ What remains undecided is the lifecycle around those messages:
   OpenTelemetry. That data must survive a VM failure without being mistaken
   for evidence.
 
+## Function-model overview
+
+The interface is function-like; the logical lifetime is actor-like. A workload
+receives immutable signed inputs, performs capability-bounded work, and emits
+an explicit result or reply. These are not mathematically pure functions:
+identical inputs need not produce identical output or effects. ADR-051 names
+one VM incarnation with its mailbox, lifecycle handle, authority and evidence;
+this proposal extends logical identity across incarnations, not across
+multiple workloads inside one guest.
+
+Read the model through [identity](#1-identity-workload-epoch-recipe),
+[state classes](#2-state-classes), [residency](#3-residency-is-a-condition-not-a-lifecycle-state),
+[continuation](#41-explicit-continuation-across-incarnations),
+[evidence](#5-evidence-and-tracing) and [custody](#6-storage-and-encryption).
+ADR-057 remains the mailbox authority, not ADR-046's superseded messaging
+contract. No new actor framework, public invocation schema or SDK API is
+defined here.
+
+Every incarnation uses the existing signed-plan admission and isolation path.
+Required checks precede applicable readiness, disclosure and effects; child
+authority only attenuates under every parent and policy ceiling. No guest NIC,
+SSH or generic privileged machine-exec/control path bypasses the admitted
+application interface. A sandboxed code-runner may process declared code/script
+inputs under its capabilities; callers gain no arbitrary platform-control
+authority. External API credentials stay in ADR-023's host-service boundary;
+narrowly scoped internal decryption keys are different and do not themselves
+authorize effects.
+
+MVM owns local execution, mailbox and context contracts without MVMD, an
+external account or external key service. Optional MVMD adds fleet routing
+and orchestration, not plaintext access or a second local authority. Packaged
+MVM background components are not external-service dependencies; their presence
+does not qualify an unattended OS-manager deployment profile.
+
 ## Decision
 
 ### 1. Identity: workload, epoch, recipe
@@ -56,6 +93,13 @@ Three identifiers, each with one job:
 | Workload ID | The logical actor; the name a mailbox address resolves to. | Restart, rebuild, park, wake, move |
 | Execution epoch | One VM lifetime of that workload (`ExecutionEpoch`). | Nothing: every boot, restore or wake is a new epoch |
 | Recipe hash | Digest over the measured inputs of the signed plan: image, kernel, verity roots, asset identities (claim 19) and policy. | Identical inputs only |
+
+The definition/recipe is not the logical workload or a particular invocation.
+A message is one immutable value; a Call requests an application Reply, while
+a conversation relates messages and explicit task progress. One incarnation
+may handle many Calls, and a task may span incarnations. These are conceptual
+distinctions, not a new `InvocationId` or wire schema. The policy epoch tracks
+authorization policy separately from the execution epoch and boot identity.
 
 At admission the host signs one binding per epoch: workload ID, epoch, recipe
 hash, plan digest and policy version. The workload ID is a name; the recipe
@@ -81,6 +125,16 @@ workloads can independently initiate authorized `call` and `cast` operations
 and issue scoped `reply` messages. Delivery acceptance is not an application
 reply; Receive or Reply authority never implies general reverse Send authority.
 Outbox durability follows the requested admission class.
+
+Sender queuing, destination acceptance, delivery ACK, application Reply/result
+and VM exit are separate observations. Stdout/stderr remain diagnostics.
+A Cast requests no application Reply, not silent loss. Delivery is at least
+once within finite expiry/retry bounds; application effects need their own
+idempotency. Call waiting deadlines are separate from message expiry: timeout
+does not prove non-execution, cancellation is not rollback, and a late Reply
+cannot complete a different Call. Unreconciled effects remain `Unknown`.
+ADR-057 owns acceptance classes, scoped ordering, deduplication and bounded
+queues/credits; mailbox saturation cannot borrow another service's capacity.
 
 ### 2. State classes
 
@@ -109,7 +163,7 @@ Residency is independent of the authority states in #5097 (`Pending`, `Active`,
 | --- | --- | --- |
 | Running | Working set plus VMM | Delivery, timer, launch |
 | Idle | Working set after free-page reporting | The workload blocks |
-| Parked | No RAM or CPU; recipe, or recipe plus snapshot, on disk | Blocked in receive with no pending timer, past a grace period |
+| Parked | No guest RAM or vCPU; retained recipe/state and bounded host bookkeeping | Blocked in receive with no pending timer, past a grace period |
 
 Rules:
 
@@ -128,7 +182,9 @@ Rules:
    parked standard-class actor as holding a slot but no memory.
 
 This ADR does not change the warm-start requirement; it puts it on the message
-path. Wake latency is the warm budget (under 50 ms, admission included).
+path. Cold <300 ms, warm/wake <50 ms (admission included) and 1,000-workload
+density are unverified acceptance targets, not current performance claims.
+Snapshot and warm mechanisms require their own backend and fencing evidence.
 
 ### 4. Supervision: let it crash, rebuild from the recipe
 
@@ -140,6 +196,95 @@ path. Wake latency is the warm budget (under 50 ms, admission included).
   crashed guest's memory.
 - Exceeding the restart limit moves the workload to `Quarantined`.
 - Restarts, give-ups and escalations are host-witnessed events (section 5).
+
+### 4.1 Explicit continuation across incarnations
+
+The workload deliberately persists bounded task progress and pending
+conversation bindings, then explicitly reloads them under a new admission.
+This is application continuation, not suspended-call-stack restoration,
+deterministic journal replay or automatic repetition of uncertain effects.
+Retained context supplies data, never the predecessor's grants.
+
+#### Pending Calls and committed outcomes
+
+[#5126's opt-in decision](https://github.com/tinylabscom/mvm/issues/5126#issuecomment-6669316870)
+and its [rebuild confirmation](https://github.com/tinylabscom/mvm/issues/5126#issuecomment-6780490193)
+record a product preference: transfer requires explicit opt-in in both the
+conversation and signed workload plan. Durability alone is insufficient.
+The signed representation and current-authority transfer mechanism remain
+unqualified; ADR-057's epoch fencing remains authoritative.
+
+A still-pending Call is not an already committed Reply/outcome. Authorized
+recovery of a committed outcome reads history; it does not complete a new
+Call or revive a superseded wait. The proposed V3 strict caller-epoch
+completion rule does not automatically transfer a pending Call to a replacement,
+even when its task context survives.
+
+Eligible transfer would preserve immutable accepted envelopes and provenance,
+prove durable old-owner fencing, and require fresh admission, scoped
+Receive/Reply authority and key possession for the specific replacement.
+A separate authenticated delivery decision must bind the current consumer
+without retargeting the old envelope or making an old grant current.
+Invocation-pinned, expired, revoked or unprovable items remain pinned or receive
+a truthful terminal/uncertain disposition. A retained key revives no capability;
+revocation cannot retract plaintext or keys a previous endpoint already saw.
+
+#### Crash consistency and send intent
+
+An atomic local commit of encrypted continuation plus durable send intent is
+a **design target to prove**, not a shipped transaction or cross-owner
+atomicity. It must preserve independent authorization, queue/credit admission
+and finite storage budgets. Remote acceptance, replies and external effects
+are outside that commit. If one safe transaction cannot own the necessary
+state, compare a bounded recoverable-intent protocol with explicit outcomes.
+
+Producers retain sealed bytes for retry under a stable immutable
+message/content/context binding in the selected canonical version.
+Authenticated duplicate recognition follows that version's reviewed rule,
+not an invented cross-version raw JSON or signature-byte equality rule.
+Lost commit responses require reconciliation, not a new identity.
+
+As proposed in [ADR-060](060-mailbox-rebuild-handoff.md#proposed-boundary), a
+never-dispatched intent may be freshly sealed by its authorized sender for an
+admitted replacement. Eligibility requires evidence of no prior disclosure at
+the actual source handoff boundary: a missing receipt or locally absent
+dispatch marker does not prove no disclosure occurred. Partial or lost handoff
+is possibly dispatched/`Unknown`, not permission to reseal or retry with a new
+message ID.
+
+Still open under #5126: transfer representation and eligibility, cancellation
+scope and timeout/expiry races, context revisions/retention and key recovery,
+and crash-safe ordering of Reply consumption, continuation update and ACK.
+Existing ADR-057 retention and retry rules are not replaced by new defaults.
+
+#### Example: ask a person, replace the VM, continue
+
+This is the intended **qualified workflow**, not current functionality or SDK
+syntax. It depends on the transfer and crash-consistency proofs above.
+
+1. An admitted restart-safe workload has narrowly scoped Read and Write
+   authority for its private continuation space, plus authority to ask a person
+   a question and receive the exact Reply. Read does not confer Write, and a
+   stateless declaration gains no persistence. Its plan and conversation
+   opt into replacement continuation with finite expiry and waiting bounds.
+2. It records "waiting for this answer" and the encrypted question's send
+   intent under the proposed local commit. Destination acceptance and a
+   person's application Reply are separate later events.
+3. The VM goes away while waiting. A planned park retains admitted state; a
+   crash causes recipe-based reconstruction, never reuse of crashed memory.
+4. The person's authorized endpoint sends the encrypted Reply within its
+   allowed window. Pending mailbox state can outlive the VM in the local
+   durability domain; a keyless scheduler does not decrypt the answer.
+5. A newly admitted incarnation, under a fresh epoch, may receive that Reply
+   and explicitly continue only after the pending-conversation transfer proof,
+   old-owner fencing, current authorization and scoped key release succeed.
+   If the outcome was already committed, authorized history recovery instead
+   retrieves it without reviving the old wait.
+6. The workload durably records progress and ACKs under the reviewed ordering.
+   Crash/lost-ACK duplicates require deduplication and application idempotency;
+   external effects are not generally exactly once. Expiry, revocation, lost
+   keys or unprovable ownership refuse or report uncertainty, never success.
+   A late Reply cannot resurrect a timed-out Call.
 
 ### 5. Evidence and tracing
 
@@ -178,6 +323,13 @@ record holding its RFC 6962 root and a completeness label:
 A sealed epoch is never silently partial.
 
 #### 5.4 Causal links across actors
+
+**Privacy and version boundary.** Initial V3 profile A is designed to encrypt
+application payloads while exposing explicitly declared routing/authorization
+metadata. All causal/trace-header descriptions in this ADR are proposals whose
+placement and protection require their own versioned review. Profile A does not
+permit indiscriminate disclosure of additional tracing fields. This ADR does not
+amend ADR-057's wire contract or qualify the private-metadata profile B.
 
 1. **Messages carry the sender's leaf hash.** The encrypted inner header of
    each mailbox envelope carries the hash of the sender's send entry. The
@@ -221,10 +373,27 @@ until the key hierarchy and retention mechanism satisfy these conditions.
 
 **Mailbox custody.** ADR-057 §11 and #5292 govern mailbox keys: the shared
 scheduler routes and stores sealed messages and holds no mailbox keys.
+Signing and MAC secrets are also excluded from the shared scheduler.
 Mailbox seal/open and authorization remain with VM-scoped holders; an
 authorized host endpoint needs its own explicitly scoped custody, not ambient
 access to other actors. Shared trace or snapshot infrastructure acquires no
 mailbox-key authority from handling related records.
+
+**Private context.** #5126 starts with a minimal encrypted task/workload space,
+not a boot-scoped memory image or an agent-only API. It carries attributable
+untrusted data, not authority, following proposed [ADR-047](047-agent-memory-plane.md#3-memory-carries-facts-it-never-carries-authority).
+Future sharing needs explicit content capabilities and administrative RBAC;
+fleet membership grants no ambient access, and read/write rights do not grant
+policy administration. A plaintext-blind store cannot provide plaintext
+server search or semantic scans. Context revision, provenance and retention
+must be reconciled with ADR-047 rather than silently replacing its rules.
+Mailboxes remain usable without a shared context pool.
+
+**Local durability.** Continuation survives guest replacement only with its
+backing storage, verifiable history, usable keys and current authorization
+intact. It does not survive permanent host/disk/key loss by default or prove
+whole-host rollback protection. Optional replication is a separate tier;
+neither P2P transport nor OS service restart provides it.
 
 **Who can read.** By default the host can read stored traces (trusted-host
 tier), so local search, `explain` and export work. A host-blind tier, in which
@@ -302,8 +471,13 @@ mailbox, trace collection, keys and buffers. The figures are set from the
 test is 10 MiB host memory and 0.05% of a core idle per resident VM. Specific
 rules:
 
-- One trace collector and one keyless mailbox scheduler per host, not per VM
-  (#5292). Shared scheduling does not combine mailbox-key custody.
+- One trace collector per host, not per VM.
+- One keyless mailbox scheduler is shared across tenants within a single
+  unprivileged OS user and canonical MVM runtime instance, not per VM
+  ([scope decision](https://github.com/tinylabscom/mvm/issues/5544#issuecomment-6929453494)).
+  Separate OS users and runtime homes are not implicitly merged. Deployment
+  profiles and authority/fencing qualification remain separate; shared
+  scheduling does not combine mailbox-key custody.
 - Trace buffers are small and fixed. Asserted spans are opt-in and sampled;
   host-witnessed events are always on and cost the guest nothing.
 - Wake admission has its own budget, because every wake is an admission.
@@ -436,6 +610,11 @@ Each item needs a test or CI lane named in the implementing issue:
   requiring fresh destination admission and Receive authority. Retaining a
   storage key cannot revive an expired or revoked capability or retarget the
   original envelope.
+- Pending-Call transfer is qualified separately from committed-outcome
+  recovery; neither retained context nor a late Reply revives a superseded wait.
+- Crash injection at continuation commit, source handoff, receipt, Reply and
+  ACK boundaries preserves authorization and budgets. Possibly disclosed work
+  is never misclassified as never dispatched or automatically resealed.
 - A wake under revoked policy is refused and the queued message receives a
   terminal receipt.
 - Restoring the same snapshot twice leaves exactly one epoch that brokers

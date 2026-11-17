@@ -120,10 +120,14 @@ envelope deduplication. A failure to prove durable single-owner custody
 keeps the strict pinning/refusal fallback.
 
 Measure build-to-ready, cutover, queued-send latency, destination acceptance,
-and cold/warm boot p50/p95/p99 separately on supported native hosts. A warm
-shared mailbox service and logical mailbox avoid a per-VM helper or
-synchronous preboot disk transaction; these are design constraints, not
-measured performance claims. Implementing the local service (#4629) and
+and cold boot, warm boot, and wake p50/p95/p99 separately on supported native
+hosts. A warm shared mailbox service and logical mailbox are intended to avoid
+per-VM processes merely to hold mailbox listeners and redundant mailbox-specific
+startup transactions, not qualified VM-scoped custody helpers or required durable
+admission, epoch, fencing, or audit work. All required checks
+and writes remain within the applicable measured path; none may be omitted or
+deferred to meet a benchmark. These are design constraints, not measured
+performance claims. Implementing the local service (#4629) and
 durable store (#4630) is prerequisite to an end-to-end witness; cross-host
 movement stays under #4631. No unchecked issue criterion or production
 mailbox claim is completed by this proposed ADR.

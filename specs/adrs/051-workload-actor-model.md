@@ -12,7 +12,9 @@ ADR-046 (the secure message fabric).
 ADR-046's mailbox identity, envelope, delivery, durability, and ownership
 contract.
 **Complements:** ADR-001, ADR-014, ADR-020, ADR-031, ADR-035, ADR-042, ADR-047.
-**Implemented by:** no plan yet. The vertical slice below is the first one to write.
+**Tracked by:** [#5544](https://github.com/tinylabscom/mvm/issues/5544)
+(workload actor design) and [#4622](https://github.com/tinylabscom/mvm/issues/4622)
+(mailbox work). The vertical slice below remains unqualified.
 
 ## Context
 
@@ -73,6 +75,12 @@ A **workload actor** is one microVM together with:
 An actor is not a new runtime object. It is the name for a workload seen
 through those four bindings at once.
 
+This describes one VM incarnation. Proposed
+[ADR-062](062-workload-actor-lifecycle-and-causal-evidence.md#function-model-overview)
+extends logical workload identity across epochs and describes
+[explicit continuation](062-workload-actor-lifecycle-and-causal-evidence.md#41-explicit-continuation-across-incarnations);
+its evidence gates remain open.
+
 ### 2. Four invariants
 
 1. **One guest is one actor.** No multi-workload guest, no nested
@@ -83,9 +91,11 @@ through those four bindings at once.
 3. **Authority only attenuates.** A child's capabilities, egress, secrets,
    filesystem, tools, resources, and delegation are subsets of every applicable
    parent, workflow, tenant, template, and host ceiling.
-4. **Every message is durable, bounded, and audited.** No control path may
-   deliver a message the fabric would refuse, and no lifecycle transition may
-   escape the chain-signed log.
+4. **Every message is bounded and audited, with declared durability.**
+   ADR-057's admission and durability classes, including ephemeral acceptance,
+   apply; an ordinary accepted `cast` is never silently dropped. No control
+   path may deliver a message the mailbox contract would refuse, and no
+   lifecycle transition may escape the chain-signed log.
 
 ### 3. One vocabulary — the fabric's
 
@@ -118,6 +128,11 @@ spaces behind vsock, running workloads in Python, TypeScript, and other
 languages. An in-process Rust actor framework addresses actors by a typed
 handle to a task in the current process. It cannot name a microVM, and the
 addressing model it provides is the one ADR-046 explicitly rejects.
+
+The replay, SQLite and `mvmd` discussion below records ADR-046's historical
+fabric proposal, not deterministic workload execution or a required current
+SQLite implementation. ADR-057 owns mailbox semantics, and local MVM requires
+no `mvmd`.
 
 **Supervision conflicts with determinism.** ADR-046 requires a deterministic
 command log that replays exactly, because `mvmd` data-group replicas re-execute
@@ -165,10 +180,11 @@ than described as shared.
 ## Consequences
 
 - ADR-045 and its plan lose their independent mailbox contract and gain a hard
-  dependency on ADR-046. The workflow layer cannot start its communication
-  workstream before the fabric's local mailbox milestone lands.
+  dependency on ADR-057 for mailboxes and ADR-046 for other proposed fabric
+  lanes. The workflow layer cannot start its communication workstream before
+  the local mailbox milestone lands.
 - `mvm-contract` gains exactly one messaging module. The runtime-free and
-  `no_std + alloc` posture of the transport-free types is preserved, as ADR-046
+  `no_std + alloc` posture of the transport-free types is preserved, as ADR-057
   already requires.
 - Sequencing becomes explicit: fabric contracts and state machine first, then
   child lifecycle, then the planner. The planner is the last thing built, not
