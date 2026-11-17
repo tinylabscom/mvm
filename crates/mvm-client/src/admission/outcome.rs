@@ -102,6 +102,16 @@ pub fn emit_failed(ctx: &AdmissionContext, class: &str, err: &anyhow::Error) {
     emit_failure(&ctx.emitter, ctx.admitted.plan(), class, err);
 }
 
+/// A failed restore whose child stop could not be confirmed cannot seal a
+/// terminal failure: retain recovery evidence while the VM may still run.
+pub fn record_uncertain_restore_stop(ctx: &AdmissionContext, name: &str, err: &anyhow::Error) {
+    crate::launch::record_unsealed_end(
+        Some((&ctx.emitter, ctx.admitted.plan())),
+        crate::launch::UnsealedEnd::new(name, crate::launch::UnsealedReason::StopFailed)
+            .error(format!("{err:#}")),
+    );
+}
+
 impl super::AuditContinuation {
     /// Record and seal a command, output or teardown failure on this plan's chain.
     pub fn emit_failed(&self, class: &str, err: &anyhow::Error) {

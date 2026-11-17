@@ -73,7 +73,9 @@ pub use durability::{
 };
 pub use enforce::{enforce_kernel, enforce_shares, enforce_shares_for_claim};
 pub use instructions::InstructionSources;
-pub use outcome::{BootPosture, StartMode, emit_failed, emit_launched};
+pub use outcome::{
+    BootPosture, StartMode, emit_failed, emit_launched, record_uncertain_restore_stop,
+};
 pub(crate) use outcome::{record_boot, seal_recorded_failure};
 
 /// A content-bound asset. Operator-declared files and internally selected

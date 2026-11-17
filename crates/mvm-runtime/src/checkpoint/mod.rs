@@ -338,19 +338,44 @@ pub fn fork_vm_full(
     restore: &ForkRestore<'_>,
     anchor: &dyn CheckpointChainAnchor,
 ) -> Result<CheckpointMeta> {
-    fork_vm_full_with_verified_runtime(store, params, restore, anchor, None)
+    fork_vm_full_with_verified_runtime(store, params, restore, anchor, None, None, None)
 }
 
-/// Fork after pre-admission verification of the same authenticated parent.
-/// The proof cannot be minted from serialized checkpoint or child launch data.
-pub fn fork_vm_full_verified(
+/// A restored child whose post-spawn checkpoint commit failed and whose stop
+/// could not be confirmed. Keep this typed so callers record unsealed recovery
+/// evidence rather than claiming a clean failed launch.
+#[derive(Debug, thiserror::Error)]
+#[error("forked child {name} may still be running after {primary:#}; stop failed: {stop:#}")]
+pub struct ForkStopUncertain {
+    pub name: String,
+    pub primary: anyhow::Error,
+    pub stop: anyhow::Error,
+}
+
+type ForkStopCallback<'a> = dyn Fn(&str) -> Result<()> + 'a;
+
+/// Fork after pre-admission verification of the authenticated parent, binding
+/// the child's admitted image to the same checked checkpoint and stopping it
+/// if metadata commit fails after the VMM has already started.
+/// Neither runtime proof nor authority can be minted from serialized launch data.
+pub fn fork_vm_full_verified_with_rollback(
     store: &CheckpointStore,
     params: ForkParams,
     restore: &ForkRestore<'_>,
     anchor: &dyn CheckpointChainAnchor,
     runtime: &VerifiedRetainedRuntime,
+    admitted_image_sha256: &str,
+    stop_child: &dyn Fn(&str) -> Result<()>,
 ) -> Result<CheckpointMeta> {
-    fork_vm_full_with_verified_runtime(store, params, restore, anchor, Some(runtime))
+    fork_vm_full_with_verified_runtime(
+        store,
+        params,
+        restore,
+        anchor,
+        Some(runtime),
+        Some(admitted_image_sha256),
+        Some(stop_child),
+    )
 }
 
 fn fork_vm_full_with_verified_runtime(
@@ -359,6 +384,8 @@ fn fork_vm_full_with_verified_runtime(
     restore: &ForkRestore<'_>,
     anchor: &dyn CheckpointChainAnchor,
     runtime: Option<&VerifiedRetainedRuntime>,
+    admitted_image_sha256: Option<&str>,
+    stop_child: Option<&ForkStopCallback<'_>>,
 ) -> Result<CheckpointMeta> {
     // A library caller can reach this boot seam without going through the
     // CLI's launch guard. Keep activation out until the child is restored.
@@ -395,6 +422,17 @@ fn fork_vm_full_with_verified_runtime(
         );
     } else {
         verify_checkpoint_runtime(store, &parent)?;
+    }
+    if let Some(admitted_image_sha256) = admitted_image_sha256 {
+        // Use the same authenticated parent object the retained-runtime and
+        // content checks above accepted. A separate metadata read could bind
+        // the admitted image to one checkpoint and restore another.
+        let restored_rootfs =
+            materialized_blob_sha256(store, &parent, mvm_core::checkpoint::ROOTFS_BLOB)?;
+        anyhow::ensure!(
+            restored_rootfs == admitted_image_sha256,
+            "admitted child image differs from the authenticated restored rootfs"
+        );
     }
 
     if params.parent_liveness == ForkParentLiveness::MustBeStopped && vm_is_running(&parent.vm_name)
@@ -447,6 +485,7 @@ fn fork_vm_full_with_verified_runtime(
         content: &content,
     })?;
 
+    let child_name = params.child_vm_name.clone();
     let child = CheckpointMeta::builder(
         params.child_id,
         CheckpointClass::VmFull,
@@ -471,7 +510,24 @@ fn fork_vm_full_with_verified_runtime(
     // binding is meaningful.
     .session(None)
     .build();
-    store.write_meta(&child)?;
+    if let Err(error) = store.write_meta(&child) {
+        if let Some(stop_child) = stop_child {
+            match stop_child(&child_name) {
+                Ok(()) => {
+                    return Err(error.context("stopped fork child after checkpoint commit failure"));
+                }
+                Err(stop) => {
+                    return Err(ForkStopUncertain {
+                        name: child_name,
+                        primary: error,
+                        stop,
+                    }
+                    .into());
+                }
+            }
+        }
+        return Err(error);
+    }
     Ok(child)
 }
 
@@ -2818,6 +2874,110 @@ mod tests {
         )
         .expect("an explicitly coexistence-safe backend may fork a live parent");
         assert!(coexistence_safe.seen.borrow().is_some());
+    }
+
+    #[test]
+    fn verified_fork_stops_a_child_when_post_spawn_checkpoint_commit_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", tmp.path().join("home"));
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let parent = seed_fc_vm_full_checkpoint(&store, tmp.path(), "failed-child-commit");
+        let runtime = verify_checkpoint_runtime(&store, &parent).unwrap();
+        let admitted_image =
+            materialized_blob_sha256(&store, &parent, mvm_core::checkpoint::ROOTFS_BLOB).unwrap();
+        let child_id = CheckpointId::new("meta-fail-child");
+        std::fs::create_dir_all(store.meta_path(&child_id)).unwrap();
+        let (child_plan_json, child_tenant_id) = admitted_child_plan();
+        let restored = RecordedRestore::default();
+        let stopped = std::cell::Cell::new(false);
+        let error = fork_vm_full_verified_with_rollback(
+            &store,
+            ForkParams {
+                checkpoint: parent.id.clone(),
+                child_id,
+                child_vm_name: "fc-childvm".into(),
+                dest_dir: tmp.path().join("staged-child"),
+                created_unix: 2,
+                parent_liveness: ForkParentLiveness::MayBeRunning,
+                child_plan_json: Some(child_plan_json),
+                child_tenant_id: Some(child_tenant_id),
+            },
+            &restored.restore(),
+            &AgreeingAnchor,
+            &runtime,
+            &admitted_image,
+            &|_| {
+                stopped.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(
+            restored.seen.borrow().is_some(),
+            "restorer actually spawned"
+        );
+        assert!(
+            stopped.get(),
+            "post-spawn commit failure must stop the child"
+        );
+        assert!(
+            error.to_string().contains("stopped fork child"),
+            "{error:#}"
+        );
+
+        let child_id = CheckpointId::new("unresolved-child");
+        std::fs::create_dir_all(store.meta_path(&child_id)).unwrap();
+        let (child_plan_json, child_tenant_id) = admitted_child_plan();
+        let uncertain = fork_vm_full_verified_with_rollback(
+            &store,
+            ForkParams {
+                checkpoint: parent.id.clone(),
+                child_id,
+                child_vm_name: "fc-childvm".into(),
+                dest_dir: tmp.path().join("unresolved-child"),
+                created_unix: 3,
+                parent_liveness: ForkParentLiveness::MayBeRunning,
+                child_plan_json: Some(child_plan_json),
+                child_tenant_id: Some(child_tenant_id),
+            },
+            &restored.restore(),
+            &AgreeingAnchor,
+            &runtime,
+            &admitted_image,
+            &|_| anyhow::bail!("stop not confirmed"),
+        )
+        .unwrap_err();
+        assert!(
+            uncertain.downcast_ref::<ForkStopUncertain>().is_some(),
+            "unconfirmed stop must remain typed: {uncertain:#}"
+        );
+
+        let wrong_restorer = RecordedRestore::default();
+        let mismatch = fork_vm_full_verified_with_rollback(
+            &store,
+            ForkParams {
+                checkpoint: parent.id,
+                child_id: CheckpointId::new("wrong-image-child"),
+                child_vm_name: "fc-childvm".into(),
+                dest_dir: tmp.path().join("wrong-image-child"),
+                created_unix: 4,
+                parent_liveness: ForkParentLiveness::MayBeRunning,
+                child_plan_json: Some(admitted_child_plan().0),
+                child_tenant_id: Some("local".into()),
+            },
+            &wrong_restorer.restore(),
+            &AgreeingAnchor,
+            &runtime,
+            &"0".repeat(64),
+            &|_| panic!("the child must not start before image binding"),
+        )
+        .unwrap_err();
+        assert!(
+            mismatch.to_string().contains("restored rootfs"),
+            "{mismatch:#}"
+        );
+        assert!(wrong_restorer.seen.borrow().is_none());
     }
 
     #[test]

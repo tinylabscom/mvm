@@ -74,6 +74,7 @@ mod launch_substrate;
 mod mailbox_posture;
 mod nonce_ledger;
 mod registry_pack;
+mod restore;
 mod rollback;
 mod shares;
 mod start;
@@ -100,6 +101,7 @@ pub use mailbox_posture::{MailboxLaunchPosture, MailboxPostureHandoff};
 pub use mvm_core::time::{Clock, SystemClock};
 pub use nonce_ledger::InMemoryNonceLedger;
 pub use registry_pack::{BuiltPackBootCheck, PreparedBuiltPackRuntime, prepare_built_pack_start};
+pub use restore::dispatch_vm_full_fork;
 pub use rollback::{
     apply_admitted_grants_or_undo_launch, record_charge_or_undo_launch,
     record_charge_with_owned_rollback,
