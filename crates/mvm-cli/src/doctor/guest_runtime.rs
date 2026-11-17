@@ -7,9 +7,9 @@
 //! know which archive, and whether the pieces agree with each other and with
 //! it. Read from the cache alone: nothing is built, downloaded or hashed.
 
-use mvm_build::runtime_pieces::{
-    PieceOrigin, PieceOriginError, RuntimePiece, adopted_release_archive, piece_origin,
-    short_digest,
+use mvm_client::diagnostics::{
+    PieceOrigin, PieceOriginError, RuntimePiece, adopted_release_runtime_digest,
+    runtime_piece_origin, short_digest,
 };
 use mvm_client::launch::runtime_overlay::{
     RuntimeOverlayAcquireMode, runtime_overlay_acquire_mode, runtime_overlay_source_checkout_root,
@@ -44,7 +44,7 @@ impl CurrentArchive {
         let Some(workspace_root) = runtime_overlay_source_checkout_root() else {
             return Self::release(cache_root, version, arch);
         };
-        match mvm_build::guest_runtime::source_guest_runtime_digest(
+        match mvm_client::diagnostics::source_runtime_archive_digest(
             cache_root,
             version,
             arch,
@@ -62,9 +62,9 @@ impl CurrentArchive {
         version: &str,
         arch: mvm_core::arch::GuestArch,
     ) -> Self {
-        match adopted_release_archive(cache_root, version, arch) {
+        match adopted_release_runtime_digest(cache_root, version, arch) {
             Ok(Some(digest)) => Self::Release {
-                name: mvm_build::guest_bins::guest_bins_archive_name(version),
+                name: mvm_client::diagnostics::release_runtime_archive_name(version),
                 digest,
             },
             Ok(None) => Self::NoSourceTree,
@@ -106,7 +106,12 @@ pub(super) fn guest_runtime_check() -> Check {
     let arch = mvm_core::arch::GuestArch::host();
     let pieces: Vec<_> = RuntimePiece::ALL
         .into_iter()
-        .map(|piece| (piece, piece_origin(&cache_root, version, arch, piece)))
+        .map(|piece| {
+            (
+                piece,
+                runtime_piece_origin(&cache_root, version, arch, piece),
+            )
+        })
         .collect();
     guest_runtime_line(
         &CurrentArchive::detect(&cache_root, version, arch),
