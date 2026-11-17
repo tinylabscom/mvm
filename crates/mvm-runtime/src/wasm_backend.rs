@@ -403,6 +403,8 @@ impl VmBackend for WasmBackend {
     }
 
     fn start_in_mode(&self, config: &VmStartConfig, _mode: StartMode) -> Result<VmId> {
+        let _activation_barrier =
+            mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
         reject_unsupported_start_config(config)?;
 
         // Admission for this tier's resource controls happens here, not in

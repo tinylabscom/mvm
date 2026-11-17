@@ -375,6 +375,20 @@ impl<'a> RunPosture<'a> {
     }
 }
 
+fn verify_project_generation(plan: &ExecutionPlan, posture: RunPosture<'_>) -> Result<()> {
+    if plan.asset_identities.iter().any(|asset| {
+        asset
+            .name
+            .starts_with(crate::policy_generation::GENERATION_ASSET_PREFIX)
+    }) {
+        anyhow::ensure!(
+            cfg!(target_os = "linux") && posture.backend == Some(BackendKind::Firecracker),
+            "a committed project generation requires a known Linux Firecracker backend"
+        );
+    }
+    crate::policy_generation::verify_plan_generation_assets(plan)
+}
+
 #[cfg(test)]
 mod admission_support_tests;
 #[cfg(test)]

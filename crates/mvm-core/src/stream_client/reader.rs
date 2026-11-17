@@ -18,6 +18,12 @@ use super::wire::{MAX_FRAME_BYTES, StreamBatch, read_batch};
 /// Why a consumer could not read the next record.
 #[derive(Debug, thiserror::Error)]
 pub enum StreamError {
+    /// Sealed-only readback cannot use this capture state.
+    #[error("sealed protected history refused: {0}")]
+    SealedHistory(#[from] super::output::SealedHistoryRefusal),
+    /// Custody evidence did not authenticate this protected capture.
+    #[error("protected history retention authorization failed: {0}")]
+    ProtectedAuthorization(String),
     /// No broker is serving this microVM's stream.
     #[error("no output stream for microVM `{vm}` at {}: {source}", path.display())]
     Connect {

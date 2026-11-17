@@ -16,6 +16,7 @@ impl LocalBackend {
             .name
             .clone()
             .unwrap_or_else(generated_transient_name);
+        let lifecycle = crate::local::machine_lifecycle(&name).await?;
         self.ensure_transient_name_free(&name)?;
         crate::volume::ownership::begin_session(&self.session_root(), &name)
             .map_err(|e| crate::local::backend_err(format!("{e:#}")))?;
@@ -25,13 +26,16 @@ impl LocalBackend {
             .register_transient_volumes(&name, &request)
             .and_then(|()| self.record_transient_secret_refs(&name, &request.secret_refs));
         let booted = match prepared {
-            Ok(()) => self.attach_lease_and_boot(&name, &request, true).await,
+            Ok(()) => {
+                self.attach_lease_and_boot(&name, &request, true, &lifecycle)
+                    .await
+            }
             Err(e) => Err(e),
         };
         let result = match booted {
             Ok(outcome) => {
                 phase = Phase::TransientCommand;
-                match self.start_requested_command(outcome, &request) {
+                match self.start_requested_command(outcome, &request, &lifecycle) {
                     Ok(outcome) => Ok(outcome),
                     Err(failure) if failure.stop.is_err() => {
                         Record::new(phase).emit();
@@ -47,7 +51,7 @@ impl LocalBackend {
             Err(e) => {
                 observe_then_cleanup(Record::new(phase), Record::emit, || {
                     // Idempotent rollback of everything this session recorded.
-                    if let Err(cleanup) = self.cleanup_transient(&name) {
+                    if let Err(cleanup) = self.cleanup_transient_in_lifecycle(&name, &lifecycle) {
                         tracing::warn!(error = %cleanup, machine = %name, "transient cleanup after failed launch");
                     }
                 });

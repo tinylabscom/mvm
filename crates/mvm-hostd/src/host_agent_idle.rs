@@ -194,6 +194,7 @@ pub async fn run_health_watcher(daemon: Arc<Mutex<HostAgentDaemon>>) {
             (d.registered_vm_ids(), d.health_audit_sink())
         };
         if vm_ids.is_empty() {
+            prober.act(&[], now_unix(), &MachineRestarter);
             continue;
         }
         // Move the prober into the blocking pass and take it back afterwards so

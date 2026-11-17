@@ -254,7 +254,10 @@ backend_catalog![
         tier: Tier3,
         marker_file: None,
         started_vm_probe_order: None,
-        list_all: true,
+        // This descriptor is a native stub: it has no local workloads to
+        // enumerate and deliberately refuses `list()`. Include only backends
+        // whose inventory can actually prove native-host quiescence.
+        list_all: false,
         balloon_support: false,
         warm_start_support: false,
         needs_plan_json: false,

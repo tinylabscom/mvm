@@ -744,6 +744,16 @@ fn require_native_owner(backend: mvm_core::vm_backend::BackendKind, has_owner: b
     Ok(())
 }
 
+/// The launch-owned verified set for the runtime this session config selected.
+fn session_runtime_set(
+    config: &VmStartConfig,
+    release: Option<crate::launch::runtime_source::ReleaseRuntime>,
+) -> Result<Option<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>> {
+    crate::launch::runtime_source::paired_release_evidence(config, release)?
+        .map(|release| mvm_runtime::runtime_evidence::verify_release_runtime_set(config, release))
+        .transpose()
+}
+
 fn boot_session_core(
     boot: SessionBoot<'_>,
     admit: impl FnOnce(AdmitInputs<'_>) -> Result<BootAdmission>,
@@ -793,13 +803,12 @@ fn boot_session_core(
     // The runtime overlay is the single source of the guest agent and its
     // helpers here, as on the transient path; a missing required overlay is
     // built or acquired, never replaced by a copy baked into the rootfs.
-    let verified_runtime = if let Some(assets) = portable_boot_assets {
+    let release = if let Some(assets) = portable_boot_assets {
         anyhow::ensure!(
             bundle_archive.is_none(),
             "producer health cannot replace an installed bundle's boot closure"
         );
-        assets.apply_for_health(&mut start_config)?;
-        None
+        Some(assets.apply_for_health(&mut start_config)?)
     } else {
         let release = attach_runtime_overlay_if_cached_version_verified(
             &mut start_config,
@@ -807,21 +816,18 @@ fn boot_session_core(
             None,
             pair,
         )?;
-        if let Some(release) = release {
+        if let Some(release) = &release {
             attach_universal_initramfs_with_verified_release(
                 &mut start_config,
                 backend.name(),
-                &release,
-            )?;
-            Some(mvm_runtime::runtime_evidence::verify_release_runtime_set(
-                &start_config,
                 release,
-            )?)
+            )?;
         } else {
             attach_universal_initramfs_if_cached(&mut start_config, backend.name())?;
-            None
         }
+        release
     };
+    let verified_runtime = session_runtime_set(&start_config, release)?;
 
     // Admission starts the plan and verb-grant validity windows. All boot
     // preparation therefore completes before this point, immediately before
@@ -1047,6 +1053,37 @@ mod tests {
             );
             assert!(!chain.contains("\"plan.launched\""));
         }
+    }
+
+    #[test]
+    fn a_session_config_carrying_a_release_proof_must_carry_verified_evidence() {
+        let config = VmStartConfig {
+            runtime_release_proof: Some(mvm_core::protocol::runtime_release::RuntimeReleaseProof {
+                archive: "/mock/archive".into(),
+                checksum: "/mock/checksum".into(),
+                signature_bundle: "/mock/signature".into(),
+                archive_sha256: "a".repeat(64),
+                version: "selected-release".into(),
+                arch: mvm_core::arch::GuestArch::host(),
+            }),
+            runtime_overlay_version: Some("selected-release".into()),
+            ..Default::default()
+        };
+        let error = session_runtime_set(&config, None)
+            .expect_err("a selected release proof with no verified evidence is refused");
+        assert!(
+            format!("{error:#}").contains("requires verified launch evidence"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_session_config_with_no_release_proof_carries_no_evidence() {
+        assert!(
+            session_runtime_set(&VmStartConfig::default(), None)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

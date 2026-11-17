@@ -73,6 +73,8 @@ pub struct PersistentImageStartParams<'a> {
     pub caller_commitment: Option<mvm_core::plan::CallerCommitment>,
     /// Publisher-verified image pack to bind on every start, if selected.
     pub registry_pack_image: Option<mvm_core::registry_pack::PackPin>,
+    /// Initial committed project generation restored from the machine spec.
+    pub policy_generation: Option<&'a mvm_core::plan::AssetIdentity>,
     /// True when the caller will run a trailing `-- argv` command after boot
     /// (i.e. the machine is booted only to exec an ad-hoc command). An ad-hoc
     /// command issues the DevOnly `Exec` verb, so the admitted plan must NOT
@@ -250,6 +252,7 @@ fn prepare_persistent_boot(
         agent_verb,
         caller_commitment,
         registry_pack_image,
+        policy_generation,
         has_ad_hoc_argv,
         grants,
         mailbox,
@@ -260,6 +263,12 @@ fn prepare_persistent_boot(
         backend,
     } = params;
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
+    if policy_generation.is_some() {
+        anyhow::ensure!(
+            resolved_secrets.secrets.is_empty(),
+            "committed persistent machines cannot start with secret references outside their stored policy"
+        );
+    }
     if let Some(granted) = crate::clamp_vcpus_for_backend(backend_name, cpus) {
         mvm_runtime::ui::warn(&format!(
             "{backend_name} supports at most {granted} vCPU(s); {cpus} requested, booting with {granted}"
@@ -368,6 +377,7 @@ fn prepare_persistent_boot(
                 .collect::<Vec<_>>();
             let configured_images_dir = mvm_build::image_source::configured_images_dir();
             let admission_params = AdmitPlanForBootParams {
+                bundle_sizing: Default::default(),
                 mailbox,
                 // What the backend will arm, so the admitted tier opens
                 // the GPU endpoint's vsock socket exactly when there is one.
@@ -405,6 +415,11 @@ fn prepare_persistent_boot(
                 assets: registry_pack_image
                     .into_iter()
                     .map(crate::admission::AssetSpec::RegistryPack)
+                    .chain(
+                        policy_generation
+                            .cloned()
+                            .map(crate::admission::AssetSpec::CommittedPolicy),
+                    )
                     .collect(),
                 redaction: mvm_core::policy::RedactionPolicy::default(),
                 network_policy: network_policy.clone(),

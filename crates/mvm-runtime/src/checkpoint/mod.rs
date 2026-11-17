@@ -360,6 +360,10 @@ fn fork_vm_full_with_verified_runtime(
     anchor: &dyn CheckpointChainAnchor,
     runtime: Option<&VerifiedRetainedRuntime>,
 ) -> Result<CheckpointMeta> {
+    // A library caller can reach this boot seam without going through the
+    // CLI's launch guard. Keep activation out until the child is restored.
+    let _activation_barrier =
+        mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
     let parent = store.read_meta(&params.checkpoint)?;
     if parent.class != CheckpointClass::VmFull {
         anyhow::bail!(
@@ -1031,6 +1035,10 @@ pub fn restore_checkpoint(
     restore: &dyn VmFullRestore,
     anchor: &dyn CheckpointChainAnchor,
 ) -> Result<()> {
+    // The CLI also checks the generation-bearing plan, but callers of this
+    // library seam must not restore while activation is publishing.
+    let _activation_barrier =
+        mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
     let meta = store.read_meta(&params.checkpoint)?;
     if meta.class != CheckpointClass::VmFull {
         anyhow::bail!(

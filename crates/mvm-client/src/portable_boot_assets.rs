@@ -255,7 +255,13 @@ impl PreparedPortableBootAssets {
 
     /// Bind producer health to this closure, with no host-runtime fallback.
     /// Runtime lifecycle custody still snapshots these exact files before boot.
-    pub fn apply_for_health(&self, config: &mut mvm_core::vm_backend::VmStartConfig) -> Result<()> {
+    ///
+    /// Returns this launch's verification of the release proof it just
+    /// attached, so the proof cannot reach admission without its evidence.
+    pub fn apply_for_health(
+        &self,
+        config: &mut mvm_core::vm_backend::VmStartConfig,
+    ) -> Result<crate::launch::runtime_source::ReleaseRuntime> {
         self.verify_build_kernel(Path::new(
             config
                 .kernel_path
@@ -270,7 +276,8 @@ impl PreparedPortableBootAssets {
         config.runtime_overlay_roothash = Some(self.runtime.overlay_roothash.clone());
         config.runtime_overlay_version = Some(self.release_proof.version.clone());
         config.runtime_release_proof = Some(self.release_proof.clone());
-        Ok(())
+        crate::launch::runtime_source::verified_release_for_attached_proof(config)?
+            .context("producer health runtime produced no verified launch evidence")
     }
 
     /// Check the actual post-admission health config before backend effects.

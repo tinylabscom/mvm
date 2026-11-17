@@ -26,6 +26,7 @@ mod oci_unpack;
 mod one_transport;
 mod pack_build;
 mod policy_approval;
+mod policy_generation;
 mod readme_contract;
 mod runtime_overlay;
 mod sdk;

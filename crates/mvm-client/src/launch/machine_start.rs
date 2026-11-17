@@ -239,8 +239,46 @@ pub fn start_machine_spec(
     host: &dyn StartHost,
     params: MachineStartParams<'_>,
 ) -> Result<MachineStart> {
+    let lifecycle = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(&spec.name)?;
+    start_machine_spec_in_lifecycle(spec, host, params, &lifecycle)
+}
+
+/// Start under the same transition that checked and stopped a predecessor.
+pub fn start_machine_spec_in_lifecycle(
+    spec: &mp::MachineSpec,
+    host: &dyn StartHost,
+    params: MachineStartParams<'_>,
+    lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+) -> Result<MachineStart> {
+    lifecycle.require_name(&spec.name)?;
+    let _activation_barrier =
+        mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
+    if cfg!(target_os = "linux")
+        && crate::backend_kind_for(params.hypervisor) != mvm_core::vm_backend::BackendKind::Mock
+    {
+        crate::policy_profiles::coordinator::ensure_if_activated()?;
+    }
+    crate::policy_profiles::coordinator::validate_machine_spec_generation(
+        spec,
+        &_activation_barrier,
+    )?;
+    anyhow::ensure!(
+        spec.policy_generation.is_none()
+            || crate::backend_kind_for(params.hypervisor)
+                == mvm_core::vm_backend::BackendKind::Firecracker,
+        "a committed project machine requires Firecracker"
+    );
     spec.validate_prepared_source()?;
     AnyBackend::require_hypervisor_selectable(params.hypervisor)?;
+    anyhow::ensure!(
+        !matches!(
+            host.backend(params.hypervisor)
+                .status(&mvm_core::vm_backend::VmId(spec.name.clone())),
+            Ok(mvm_core::vm_backend::VmStatus::Running | mvm_core::vm_backend::VmStatus::Paused)
+        ),
+        "machine {:?} is already running",
+        spec.name
+    );
     let prepared_backend = spec
         .prepared_image
         .as_ref()
@@ -261,7 +299,11 @@ pub fn start_machine_spec(
             crate::image_cache::prepared::revalidate(selection, params.hypervisor, &spec.profile)
         })
         .transpose()?;
-    super::discard_stopped_runtime_state(params.hypervisor, &spec.name)?;
+    anyhow::ensure!(
+        lifecycle.reap_unowned_state()?,
+        "machine {:?} still owns its runtime state",
+        spec.name
+    );
     validate_registry_pack_source(spec)?;
     let network_policy = persisted_network_policy(spec)?;
     let (memory_mib, mem_initial_mib) =
@@ -323,6 +365,7 @@ pub fn start_machine_spec(
         agent_verb: spec.agent_verb.clone(),
         caller_commitment: spec.caller_commitment.clone(),
         registry_pack_image: spec.registry_pack_image.clone(),
+        policy_generation: spec.policy_generation.as_ref(),
         has_ad_hoc_argv: params.has_ad_hoc_argv,
         grants: spec.grants.clone(),
         mailbox: params.mailbox,
@@ -524,6 +567,7 @@ mod tests {
             name: name.to_string(),
             image: None,
             manifest: None,
+            policy_generation: None,
             deployment: None,
             resolved_digest: None,
             runtime_pack: false,
@@ -579,7 +623,9 @@ mod tests {
         std::fs::create_dir_all(&state).unwrap();
         std::fs::write(state.join("hvf-instance.json"), "{}").unwrap();
 
-        super::super::discard_stopped_runtime_state("firecracker", "restarted").unwrap();
+        let lifecycle =
+            mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire("restarted").unwrap();
+        assert!(lifecycle.reap_unowned_state().unwrap());
 
         assert!(!state.exists());
     }

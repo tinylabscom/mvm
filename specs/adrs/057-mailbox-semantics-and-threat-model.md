@@ -551,6 +551,213 @@ same-host delivery, direct same-region delivery, customer relay, public relay,
 offline delivery, and partition recovery are measured and reported separately.
 Security never downgrades to satisfy latency.
 
+## Proposed amendment: Call, Cast and Reply service decisions
+
+**Status:** Proposed. Nothing in this section is accepted, wire-visible, or
+implementable as a decision until a maintainer accepts it here, one item at a
+time. It adds no claim to ADR-001 and promotes nothing. Sections 1-15 above
+stay authoritative where they speak; D7 only restates them.
+
+**Tracks:** [#4629](https://github.com/tinylabscom/mvm/issues/4629) and
+[#4622](https://github.com/tinylabscom/mvm/issues/4622); also bears on
+[#4630](https://github.com/tinylabscom/mvm/issues/4630),
+[#5126](https://github.com/tinylabscom/mvm/issues/5126),
+[#5255](https://github.com/tinylabscom/mvm/issues/5255),
+[#5292](https://github.com/tinylabscom/mvm/issues/5292), and
+[#4633](https://github.com/tinylabscom/mvm/issues/4633).
+
+Section 5 fixes what Call, Cast and Reply mean. It does not say how they are
+carried, who admits them, what a caller sees when they are refused, or what
+happens to an unanswered Call when the callee's epoch ends. The questions below
+are the open ones. Each gives the options, a recommendation, and what the
+choice blocks. D7 is the exception: it is recorded as decided.
+
+### D1. Envelope: build on V1 now, or wait for V3
+
+Question: does the Call/Cast/Reply service ship on the current V1 envelope, or
+wait for the V3 profile that adds endpoint encryption?
+
+Constraints already stated by the maintainer in the V3 design session:
+
+- No approval was given to use the legacy plaintext or host-sealing path for V3.
+- V3 retry equality is authenticated-body identity, not signature-byte
+  identity. A retry compares the authenticated body; the original proof bytes
+  are retained and not regenerated.
+- Receive or Reply authority never implies general reverse Send authority.
+
+Options:
+
+1. Build the whole service on V1 now, including the guest send path.
+2. Wait for V3 before writing anything.
+3. Define conversation semantics (correlation, deadlines, late-reply handling,
+   refusals, admission) independent of the envelope, and hold the guest send
+   path until V3's field table exists.
+
+Recommendation: option 3. The semantics do not depend on how a body is sealed,
+and writing them once avoids a second rewrite. Do not extend the V1
+host-sealing send path: it puts sealing in the host, which is what V3 is meant
+to avoid, and any retry-equality rule built on it would have to be unpicked.
+The guest send-path slice waits for the V3 field table.
+
+Blocks: the kind-and-correlation send path and the guest-to-host slice wait on
+this. The conversation core and the quota ledger do not.
+
+### D2. Guest wire: sibling request or extended outbox frame
+
+Question: how does a guest ask for a Call, Cast or Reply?
+
+Options:
+
+1. Extend the existing outbox frame with kind and correlation fields.
+2. Add a sibling, separately versioned request next to the outbox frame.
+
+Recommendation: option 2, defined independent of the envelope. The outbox
+frame is the sender-owned pending-work record of section 6; giving it a second
+meaning (conversation state) couples its retry rules to deadlines and replies.
+A sibling request can be versioned and refused on its own, and an older guest
+that knows only the outbox frame fails closed instead of misreading new fields.
+
+Blocks: the guest-to-host and host-to-guest slices.
+
+### D3. Refusal names and the advisory rule
+
+Question: what refusals does a caller see, and what may it conclude from a
+timeout?
+
+Proposed names and meanings. These are proposals only; none is wire-visible
+until accepted.
+
+| Name | Meaning |
+| --- | --- |
+| RateLimited | A rate or outstanding-call limit was exceeded for this sender. Retrying later may succeed. |
+| ShuttingDown | The destination mailbox is closing and takes no new work. |
+| Expired | The message's signed expiry had passed when it was presented. |
+| Unavailable | The destination is not reachable or not live in an authorized epoch. |
+
+Each is synchronous: the refusal is returned before acceptance. Each is a
+refusal and never consumes a dedup identity, so the same message ID may be
+retried once the condition clears. This matches section 5 (a full, expired,
+rate-limited or shutting-down mailbox refuses before acceptance) and the
+existing rule that a refused message does not consume its identity. The
+existing full and unauthorized outcomes are not redefined here.
+
+Rule recorded by the maintainer: MVE1 is advisory only. It is not
+authoritative termination, not evidence of non-execution, not a budget
+release, and not permission to send a fresh message ID. Consequently a
+TimedOut or Cancelled outcome means only that the caller stopped waiting. It is
+never evidence that the callee did not execute, and never permission to reuse a
+message ID or to treat the call's budget as returned. This restates section 5
+(a timeout does not assert non-execution) for the two outcome names.
+
+Recommendation: accept the four names and the advisory rule together. Splitting
+them risks a caller reading Unavailable or TimedOut as "safe to resend as a new
+message".
+
+Blocks: the conversation core's outcome type can carry the advisory rule now as
+documentation. The wire names block the send path and both directions' slices.
+
+### D4. Unreplied Calls at epoch end or restart
+
+Question: what happens to a Call that has no Reply when the callee's epoch ends
+or the host restarts?
+
+Options:
+
+1. Resolve as Unavailable, always.
+2. Carry the Call into the durable journal automatically when the destination
+   is durable.
+3. Resolve as Unavailable by default; carry into the journal only by explicit
+   opt-in in both the conversation and the signed workload plan.
+
+Recommendation: option 3, which is the preference the maintainer recorded on
+#5126. Durability alone is not sufficient reason to transfer: a durable
+mailbox says the message survives, not that its sender agreed to have a
+pending wait outlive the epoch. Requiring both the conversation and the signed
+plan keeps the decision in signed authority. A pending Call is never revived
+as a wait by transfer (ADR-062 keeps this separate from recovering a committed
+outcome). Until accepted, the behavior is option 1.
+
+Blocks: the epoch-end handling in the conversation core, and #5126's transfer
+work. The default (Unavailable) needs no new storage and can proceed.
+
+### D5. Quotas and admission
+
+Question: where are max_outstanding_calls, max_messages_per_minute and
+max_queue_contribution_bytes enforced?
+
+Constraints:
+
+- The scheduler (the mailbox scheduler inside the existing host daemon, no new
+  crate, shared within one unprivileged OS user and canonical runtime instance)
+  is keyless. Signing and MAC secrets are excluded from it.
+- A counter or a mutex is never authority. Acceptance, receive and ACK need an
+  authoritative compare-and-commit against the current generation.
+- Accounting uses the actual encoded objects and retained evidence. Admission
+  must reserve the worst-case completion evidence the message may later need,
+  or refuse.
+
+Options:
+
+1. Enforce in the scheduler.
+2. Enforce in the per-VM service, which holds the key and sees each message.
+3. A ledger interface implemented in the per-VM service, shaped so a scheduler
+   can later call it, with no quota state that outlives the authority that
+   granted it.
+
+Recommendation: option 3. The scheduler cannot be the authority because it is
+keyless and a counter held there is not authority; the per-VM service can commit
+and compare against the current generation. Defining the ledger as an
+interface keeps fleet-density scheduling (#5292) possible without moving
+authority. A quota that survives its grant's epoch would let a stale holder
+spend a fresh one's budget, so ledger state is dropped with the authority.
+
+Blocks: the quota ledger slice, and every send path, since admission precedes
+acceptance. The limit values themselves are not decided here.
+
+### D6. Audit entries
+
+Undecided. This records the questions and the minimum, not an answer.
+
+Open questions:
+
+- Which of Call, Cast, Reply, each refusal, and a late Reply emit an entry?
+- Is a refusal an entry per attempt, or aggregated, given that refusals are
+  synchronous and unbounded in number?
+- Do entries carry the message ID, correlation ID and kind, and never payload
+  bytes, as the stream plane's audit entries do?
+- Is a late Reply recorded against the original Call or as its own event?
+
+Minimum needed for chain coverage of the kind claim 8 gives plan admission:
+every accepted Call, Cast and Reply, and every terminal disposition of a Call
+(replied, late, expired, unavailable), is represented by a chain-signed entry,
+and a refusal that consumed no identity is either recorded or explicitly
+exempted by the accepted rule. This proposes no new numbered claim; any claim
+language is a separate maintainer decision.
+
+Blocks: audit wiring in every send path. Not the conversation core.
+
+### D7. Transport ownership (decided)
+
+Recorded as decided by the maintainer on 2026-11-16, consistent with sections
+1 and 13. `mvm` has no network and implements no cross-host transport. `mvmd`
+owns the Iroh adapter behind the peer transport interface. `mvm` keeps the
+transport-neutral contract. Text in #4622 and #4633 saying that `mvm` owns the
+adapter is stale and is superseded by this paragraph.
+
+### What each decision unblocks
+
+| Slice | D1 | D2 | D3 | D4 | D5 | D6 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Conversation core (open as a PR) | no | no | outcome docs only | default only | no | no |
+| Quota ledger | no | no | names | no | yes | no |
+| Kind-and-correlation send path | yes | yes | yes | no | yes | yes |
+| Guest to host | yes | yes | yes | yes | yes | yes |
+| Host to guest | yes | yes | yes | yes | yes | yes |
+| Boundary tests | per slice | per slice | yes | yes | yes | yes |
+
+"Yes" means the slice cannot be built as final until the decision is accepted.
+D7 blocks nothing; it is settled.
+
 ## Threat model
 
 ### In scope

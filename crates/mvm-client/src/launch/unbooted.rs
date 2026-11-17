@@ -13,7 +13,7 @@
 use mvm_core::client::Result;
 use mvm_core::config::machine_state_dir;
 
-use super::{LocalBackend, remove_dir_if_present, remove_vm_runtime_dirs};
+use super::{LocalBackend, remove_dir_if_present};
 
 /// Whether persisting a definition wrote it from nothing or found one in place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,12 +28,26 @@ impl LocalBackend {
     /// Delete `name`'s persistent definition and everything it owns: session
     /// resources, the per-VM runtime dir and the definition directory. The
     /// caller decides whether a running machine may be stopped first.
-    pub(super) fn remove_definition(&self, name: &str) -> Result<()> {
+    pub(super) fn remove_definition(
+        &self,
+        name: &str,
+        lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+    ) -> Result<()> {
+        lifecycle
+            .require_name(name)
+            .map_err(crate::local::backend_err)?;
+        if !lifecycle
+            .reap_unowned_state()
+            .map_err(crate::local::backend_err)?
+        {
+            return Err(mvm_core::client::MvmError::Conflict {
+                reason: format!("machine {name:?} still owns its runtime state"),
+            });
+        }
         self.release_session_resources(name)?;
-        // A stale substitution-endpoint socket left in the runtime dir blocks
-        // the next launch under the same name: the endpoint dies binding it,
-        // before its ready handshake.
-        remove_vm_runtime_dirs(name)?;
+        lifecycle
+            .remove_saved_state()
+            .map_err(crate::local::backend_err)?;
         // The definition directory carries machine.json plus the secret-refs
         // sidecar, already cleared above; drop it whole.
         remove_dir_if_present(&machine_state_dir(name))
@@ -49,10 +63,11 @@ impl LocalBackend {
         name: &str,
         origin: DefinitionOrigin,
         result: Result<T>,
+        lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
     ) -> Result<T> {
         if result.is_err() && origin == DefinitionOrigin::Created {
             if self.machine_running(name)
-                && let Err(stop) = self.stop_for_recreate(name)
+                && let Err(stop) = self.stop_for_recreate(name, lifecycle)
             {
                 tracing::warn!(
                     error = %stop,
@@ -61,7 +76,7 @@ impl LocalBackend {
                 );
                 return result;
             }
-            match self.remove_definition(name) {
+            match self.remove_definition(name, lifecycle) {
                 Ok(()) => mvm_core::audit_emit!(
                     ConfigChange,
                     vm: name,
@@ -218,6 +233,31 @@ mod tests {
         client.create_from_request(&request).unwrap_err();
 
         assert_nothing_left("sdk-create-refused", &inventory_names(&client).await);
+    }
+
+    #[tokio::test]
+    async fn removing_an_unbooted_definition_preserves_the_lifecycle_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = isolated(home.path());
+        let client = LocalBackend::with_hypervisor("mock");
+        let name = "sdk-unbooted-remove";
+        client
+            .create_from_request(&persistent(&rootfs(home.path()), name).build().unwrap())
+            .expect("create unbooted definition");
+        let lifecycle =
+            mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(name).unwrap();
+
+        client
+            .remove_definition(name, &lifecycle)
+            .expect("remove unbooted definition and its resources");
+
+        assert_nothing_left(name, &inventory_names(&client).await);
+        assert!(
+            mvm_runtime::vm::instance_snapshot::try_lock_resume(name)
+                .unwrap()
+                .is_none(),
+            "definition removal must not replace the lifecycle lock inode"
+        );
     }
 
     /// A definition the failed launch did not write is not its to remove.

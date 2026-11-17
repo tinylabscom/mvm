@@ -341,3 +341,211 @@ The maintainer decided, for the cold-HVF owner envelope and owner death
 This decision does not authorise a launcher by itself; the keyless lifecycle
 operations, authenticated recovery proof and the local-built frozen-input
 route above remain prerequisites.
+
+## Approved owner design: executable verification and peer binding
+
+Status: **PROPOSED-APPROVED-NOT-IMPLEMENTED.** The maintainer approved the
+design decisions below on
+[#4655](https://github.com/tinylabscom/mvm/issues/4655#issuecomment-6938453523)
+(2026-11-17): decisions D1 to D8 of the
+[design proposal](https://github.com/tinylabscom/mvm/issues/4655#issuecomment-6904452438)
+as recommended, except D4, which is rejected. The
+[native probe results](https://github.com/tinylabscom/mvm/issues/4655#issuecomment-6938617195)
+refine it. Nothing in this section is implemented, enabled or activated; no
+claim in ADR-001 changes, and no claim-bearing statement here is shipped. It
+exists so that implementation slices have one source. Where it names an
+existing function, that function is shipped (claim 20 covers release
+archives); its use for the owner is not.
+
+### Executable verification (approved, not implemented)
+
+1. **Verifier.** The owner is authenticated with
+   `verify_release_archive_bytes_with_signer`, the byte-level verifier, with
+   `ReleaseTrain::Cli` for a release and `ReleaseTrain::SourceHelpers` for a
+   source build. The wrapper `verify_release_archive_signature` is never used on
+   this path: it returns no result when `MVM_SKIP_COSIGN_VERIFY` is set and it
+   fetches over the network. That variable is not read on the owner path.
+   `aux_bin::resolve_verified` is not publisher proof either: it runs the
+   helper's `--contract-version` probe before any publisher check and honours
+   path overrides. The owner is never run, probed or asked its contract version
+   before verification passes; the contract version is carried in the manifest
+   and compared as bytes. No new cryptography and no new trust root.
+2. **Manifest inside the signed archive.** The owner is a member of the existing
+   macOS archive and of the per-VM binary inventory. After the last
+   byte-changing macOS signing step, the release job writes `owner-component.json`
+   into the archive: component name, SHA-256 of the final owner bytes, release
+   version and target, and source commit. The archive signature then
+   authenticates the manifest. A detached digest list is not accepted.
+3. **No installer re-signing.** The owner is excluded from the installer's
+   re-signing targets, so installed bytes equal the signed manifest digest. An
+   owner whose signature or entitlements are wrong is refused, not repaired
+   locally.
+4. **Offline re-verification at spawn.** Install retains the verified bundle,
+   the archive digest and the component manifest in a proof directory beside the
+   install. Spawn re-verifies the retained bundle against the retained archive
+   digest, with no network fetch, then compares the manifest digest with the
+   owner file digest. A missing bundle or proof directory refuses; no "not
+   verified" result is accepted as a pass.
+5. **Fixed location, no parameters.** The owner path derives from the install
+   directory of the running `mvmctl` (`std::env::current_exe()` parent), never
+   from `PATH`, any `MVM_*_PATH` override or a caller argument. The preparation
+   function takes no parameters.
+6. **Retained identity.** Preparation opens the file read-only without following
+   links and close-on-exec, checks it is a regular file owned by the effective
+   uid and not group- or other-writable, hashes it from the descriptor, and
+   compares to the manifest digest. The prepared value holds the descriptor, its
+   device, inode, size and modification time, and the digest; spawn re-checks
+   them against the descriptor and the path immediately before launch. Any
+   change refuses. This detects accidental change and a different-UID writer; it
+   is not a defense against a same-UID writer (below).
+7. **Incomplete or mixed install.** The manifest version and commit must equal
+   the running `mvmctl`. A mismatch, a missing file, a missing proof directory or
+   a marker left by a partially completed update refuses with the existing
+   `mvmctl env update` pointer.
+8. **Source builds (D4 rejected).** There is no contributor-only unverified owner
+   path, flag or posture. A source build is accepted only when it carries a
+   `SourceHelpers` signed bundle for the exact current commit of a clean tree
+   (no modified or untracked files) and the manifest commit equals that commit.
+   That establishes "built by the same publisher workflow on `main`", not release
+   authority, and must be documented as such. A dirty tree, an unpublished
+   commit, a locally compiled or ad-hoc-signed owner, or a missing proof
+   refuses with a typed error that names the missing proof. No environment
+   variable or flag turns that refusal into a local build.
+
+### Same-UID replacement (trusted-host boundary)
+
+ADR-001's boundary applies: a process running as the invoking user is trusted
+with that user's install files. Stated plainly:
+
+- **Defended:** a stale, downgraded or foreign archive; a wrong component; a
+  missing or skip-hatched proof; a mixed or partial update; `PATH` or `MVM_*`
+  redirection; a writer under a different UID when the install directory is not
+  writable by others; accidental corruption.
+- **Not defended:** any process under the invoking UID that replaces the owner,
+  the install directory, the proof directory or `mvmctl` itself before the check
+  or between check and exec. It can replace `mvmctl`, which is the verifier. An
+  open descriptor, no-follow open, two hashes and an owner/mode check are not a
+  same-UID race defense and must not be described as one. Host administration,
+  root and a compromised kernel are out of scope.
+
+### macOS peer binding (approved, not implemented)
+
+Order on each recovery connection, each step refusing before any state change:
+
+1. Accept under the connection and frame caps; `getpeereid` with the peer uid
+   equal to `geteuid()`; capture the peer audit token with `LOCAL_PEERTOKEN`.
+2. Check a SecCode requirement on that token: the code-directory hash
+   (`cdhash`) of the verified client of the same release.
+3. Issue the challenge. The signed `RecoveryChallenge` is unchanged (D5 is
+   declined): the token stays owner-side, and the proof remains the existing
+   recovery-possession proof of the enrolled controlling principal.
+4. Read the request and verify the proof against the retained enrollment,
+   operation, incarnation and generation.
+5. Re-read the token and compare **(pid, pidversion)**, then re-run the SecCode
+   check, immediately before the mutation commit.
+6. Only then consume the nonce and sequence and apply the request.
+
+A failure at any step returns a typed refusal, closes the connection, consumes
+no nonce or sequence and does not move the lifecycle state. A peer failure is
+audited as a peer refusal, separately from a proof failure. The peer check says
+who is on the socket; the proof says who is allowed. The pid alone is not
+compared at step 5 because the probes showed that `exec` changes `pidversion`
+and leaves the pid and `LOCAL_PEERPID` unchanged.
+
+**Fallback.** If the Security.framework FFI for the SecCode check is rejected in
+review, or native test 4 fails on a supported macOS, the check is the uid plus
+`LOCAL_PEERTOKEN` only. It is labelled weaker: the peer's code identity is then
+unchecked.
+
+**Stops:** a different UID (refused at accept, independent of socket mode); an
+unrelated same-UID process without the enrolled key (proof) and without the
+client code identity (requirement); a socat-style relay (its own `cdhash`
+fails); a replayed proof on another connection (the per-connection nonce); a
+replaced client binary with a different `cdhash`.
+
+**Does not stop:** a same-UID process that can debug or inject into the verified
+client, read the controlling key and run inside the real client, or replace
+`mvmctl`; a legitimate client that deliberately passes its connected descriptor
+to another process (the token still names the original connector, and nothing
+detects it); exec-after-connect and pid reuse beyond what the (pid, pidversion)
+re-check observes, so the window is narrowed, not closed; root, host
+administrators and a compromised kernel.
+
+### Probe-derived requirements (approved, not implemented)
+
+From the native probes recorded on
+[#4655](https://github.com/tinylabscom/mvm/issues/4655#issuecomment-6938617195):
+
+- **Hardened runtime.** The owner is built with hardened runtime. Default
+  ad-hoc and hardened builds refused same-UID attach and task-port access in the
+  probe; a build carrying `get-task-allow` allowed both, so that entitlement is
+  never present. Hardened runtime also makes the dynamic loader ignore its
+  environment overrides unless a specific entitlement allows them; ad-hoc
+  binaries, with or without the hypervisor entitlement, honored them.
+- **Environment allowlist.** The owner's spawn environment is scrubbed to an
+  explicit allowlist; no inherited loader variable passes.
+- **System libraries only.** The owner links only system libraries. A hardened
+  ad-hoc binary cannot start if it links an ad-hoc library (library validation),
+  and a non-system library would widen what is loaded.
+- **Residual exec-by-path window (D7 accepted).** macOS has no descriptor-pinned
+  exec: `posix_spawn("/dev/fd/N")` was refused in every probe run, with the
+  descriptor close-on-exec or not. Replacing the path after the descriptor is
+  opened changes what runs. The window between the final check and exec is
+  therefore documented and not closed; it falls under the same-UID statement
+  above.
+- **Post-exec self-hash handshake (D8, defense in depth).** After spawn, the
+  child reports its own path and code-directory hash before the parent sends any
+  bootstrap bytes; the parent compares with the retained digest and kills the
+  child on mismatch. This runs after exec, so it cannot prevent execution; it
+  only detects replacement. **Exact limit:** SecCode validates the signature the
+  kernel loaded, not the bytes now on disk. A binary patched on disk and not
+  re-signed still validated in the probe until the kernel faulted the bad page,
+  so a code-directory check does not catch an on-disk patch that was never
+  faulted in. The handshake is not a substitute for the checks above.
+
+### Status of the approved design
+
+| Item | Status |
+| --- | --- |
+| Byte-level verifier with the two trains, no skip hatch | PROPOSED-APPROVED-NOT-IMPLEMENTED |
+| Manifest inside the signed archive | PROPOSED-APPROVED-NOT-IMPLEMENTED |
+| Owner excluded from installer re-signing | PROPOSED-APPROVED-NOT-IMPLEMENTED |
+| Retained bundle and archive digest, offline re-verification at spawn | PROPOSED-APPROVED-NOT-IMPLEMENTED |
+| Exact-commit clean-tree bundle or typed refusal; no unverified path | PROPOSED-APPROVED-NOT-IMPLEMENTED |
+| Peer binding: `getpeereid`, `LOCAL_PEERTOKEN`, SecCode, re-check at commit | PROPOSED-APPROVED-NOT-IMPLEMENTED |
+| Security.framework FFI (fallback: uid plus token, labelled weaker) | PROPOSED-APPROVED-NOT-IMPLEMENTED |
+| Recovery-possession proof unchanged (D5 declined) | Existing source-only proof; receiver not implemented |
+| Hardened runtime, environment allowlist, system libraries only | PROPOSED-APPROVED-NOT-IMPLEMENTED |
+| Post-exec self-hash handshake | PROPOSED-APPROVED-NOT-IMPLEMENTED |
+
+Native probe status, run once on one macOS 27.0.1 arm64 host with SIP enabled,
+five runs per racy probe, which cannot bound a rare race:
+
+| Probe | Result |
+| --- | --- |
+| 1 token pid equals the connector's | VERIFIED |
+| 2 exec changes `pidversion`, not pid; old token fails the lookup | VERIFIED |
+| 3 dead connector: token read fails, pid calls report the dead pid | VERIFIED; pid reuse not forced |
+| 4 `cdhash` requirement accepts the client, rejects a re-signed copy; ad-hoc hypervisor-entitled binary validates | VERIFIED; on-disk patch not detected |
+| 5 relay refused | VERIFIED for same UID |
+| 6 same-UID attach against the client | VERIFIED for default and hardened builds |
+| 7 exec by descriptor path | REFUTED; no fd-pinned exec |
+| 8 loader environment | VERIFIED; ignored only under hardened runtime |
+
+Still needed before any positive factory: a different-UID connector (needs a
+second account), a forced pid reuse, Developer ID or notarized artifacts, other
+macOS versions, anything needing root or a debugger-entitled caller, and the
+native test results recorded by an independent reviewer. The eight native tests
+are run and recorded before any positive factory is enabled.
+
+### Conditions that stay in force
+
+- Nothing activates without a fresh security reviewer who is neither the author
+  nor the implementer of the PS-06 key-holder operations.
+- The keyless operation set
+  ([#3716](https://github.com/tinylabscom/mvm/issues/3716)) remains out of scope
+  here and blocks the positive path; recovery connections refuse until it exists.
+- Both `@firecracker` documented-build gates stay until the real macOS HVF
+  scenarios pass.
+- No VM runs without an explicit slot authorization. Implementation proceeds in
+  small reviewed slices, starting with the native tests.

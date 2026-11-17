@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, bail};
 use mvm_runtime::machine::persist::{self as mp, MachineSpec, SpecReconcile};
 
-use super::machine_start::{MachineStart, MachineStartParams, StartHost, start_machine_spec};
+use super::machine_start::{MachineStart, MachineStartParams, StartHost};
 use crate::secret::MachineSecretRef;
 
 /// How long a boot command waits for the guest agent to answer before giving
@@ -113,18 +113,27 @@ pub fn machine_is_running(name: &str) -> bool {
 /// leases it held. Best-effort: the recreate proceeds either way, and the boot
 /// surfaces anything left behind.
 pub fn stop_running_machine(name: &str) {
-    let hypervisor = super::machine_start::resolve_effective_hypervisor("firecracker");
-    match crate::backend_stop_by_name(&hypervisor, name) {
-        Ok(()) => {
-            use crate::volume::VolumeService as _;
-            if let Err(err) = crate::volume::LocalVolumeService::new().release_owner_leases(name) {
-                tracing::warn!(error = %err, machine = name, "releasing volume leases after stop failed");
-            }
-        }
-        Err(err) => {
-            tracing::warn!(error = %err, machine = name, "stopping machine before recreate failed");
-        }
+    let result = (|| {
+        let lifecycle = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(name)?;
+        stop_running_machine_in_lifecycle(name, &lifecycle)
+    })();
+    if let Err(err) = result {
+        tracing::warn!(error = %err, machine = name, "stopping machine before recreate failed");
     }
+}
+
+/// Stop before recreation without releasing the caller's lifecycle transition.
+pub fn stop_running_machine_in_lifecycle(
+    name: &str,
+    lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+) -> Result<()> {
+    crate::local::LocalBackend::new()
+        .stop_machine_in_lifecycle(
+            &mvm_core::client::dto::MachineId(name.to_owned()),
+            lifecycle,
+            None,
+        )
+        .map_err(Into::into)
 }
 
 /// Decide what a run does with `name`'s definition.
@@ -177,21 +186,26 @@ pub struct DetachedBoot<'a> {
 /// boot it with `boot` unless it is already running. Returns whether this call
 /// booted it.
 ///
-/// `boot` is the caller's start: the CLI's carries receipts, init commands and
-/// banners; [`boot_recorded`] is the plain one.
-pub fn persist_and_boot(run: DetachedBoot<'_>, boot: impl FnOnce() -> Result<()>) -> Result<bool> {
+/// `boot` runs under `lifecycle` and must use the guarded start entry point
+/// rather than reacquiring the same lock.
+pub fn persist_and_boot(
+    run: DetachedBoot<'_>,
+    lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+    boot: impl FnOnce() -> Result<()>,
+) -> Result<bool> {
     let DetachedBoot {
         name,
         spec,
         action,
         secret_refs,
     } = run;
+    lifecycle.require_name(name)?;
     match action {
         SpecReconcile::Reuse => {}
         SpecReconcile::Create => mp::save_machine_spec(spec, false)?,
         SpecReconcile::Recreate { changed } => {
             tracing::info!(machine = name, %changed, "recreating a machine whose config changed");
-            stop_running_machine(name);
+            stop_running_machine_in_lifecycle(name, lifecycle)?;
             mp::overwrite_machine_spec(spec)?;
         }
     }
@@ -225,7 +239,19 @@ pub fn boot_recorded(
     host: &dyn StartHost,
     params: MachineStartParams<'_>,
 ) -> Result<MachineStart> {
-    let started = start_machine_spec(spec, host, params)?;
+    let lifecycle = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(&spec.name)?;
+    boot_recorded_in_lifecycle(spec, host, params, &lifecycle)
+}
+
+/// Boot and record metadata without releasing the caller's transition guard.
+pub fn boot_recorded_in_lifecycle(
+    spec: &mut MachineSpec,
+    host: &dyn StartHost,
+    params: MachineStartParams<'_>,
+    lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+) -> Result<MachineStart> {
+    let started =
+        super::machine_start::start_machine_spec_in_lifecycle(spec, host, params, lifecycle)?;
     super::machine_start::record_machine_started(spec, started.resolved_digest.clone());
     if let Err(err) = mp::overwrite_machine_spec(spec) {
         tracing::warn!(error = %err, machine = %spec.name, "updating machine start metadata failed (non-fatal)");
@@ -336,6 +362,7 @@ mod tests {
             name: name.to_string(),
             image: Some(image.to_string()),
             manifest: None,
+            policy_generation: None,
             deployment: None,
             resolved_digest: None,
             runtime_pack: false,
@@ -423,6 +450,8 @@ mod tests {
     fn persist_and_boot_saves_then_boots() {
         let (_env, _dir) = isolated();
         let desired = spec("web", "alpine", 1);
+        let lifecycle =
+            mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire("web").unwrap();
         let mut booted = 0;
         let ran = persist_and_boot(
             DetachedBoot {
@@ -431,6 +460,7 @@ mod tests {
                 action: SpecReconcile::Create,
                 secret_refs: None,
             },
+            &lifecycle,
             || {
                 booted += 1;
                 Ok(())
@@ -448,6 +478,8 @@ mod tests {
     fn a_failed_boot_is_reported_and_keeps_the_definition() {
         let (_env, _dir) = isolated();
         let desired = spec("web", "alpine", 1);
+        let lifecycle =
+            mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire("web").unwrap();
         let err = persist_and_boot(
             DetachedBoot {
                 name: "web",
@@ -455,6 +487,7 @@ mod tests {
                 action: SpecReconcile::Create,
                 secret_refs: None,
             },
+            &lifecycle,
             || bail!("no kernel"),
         )
         .unwrap_err();

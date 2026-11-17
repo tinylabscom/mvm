@@ -288,6 +288,11 @@ syntax. It depends on the transfer and crash-consistency proofs above.
 
 ### 5. Evidence and tracing
 
+The proposed [execution-history coverage contract](../contracts/execution-history-coverage.md)
+specifies capture boundaries, output commitments, append-only checkpoint
+verification, loss policies and replay limits. It does not promote this ADR's
+implementation status or amend ADR-035's nonblocking output policy.
+
 #### 5.1 Two tiers
 
 - **Host-witnessed events are evidence.** Admission, the epoch binding, spawn

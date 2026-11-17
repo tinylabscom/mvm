@@ -46,7 +46,7 @@ fn owned_process_helper() {
         let mut release = [0];
         wait_readable(
             std::io::stdin().as_raw_fd(),
-            Instant::now() + Duration::from_secs(30),
+            Instant::now() + wire::SHUTDOWN_BUDGET + Duration::from_secs(10),
         );
         std::io::stdin().read_exact(&mut release).unwrap();
     }
@@ -127,7 +127,8 @@ fn wait_readable(fd: libc::c_int, deadline: Instant) {
 #[ignore = "requires scoped control review before owned native execution"]
 fn native_owned_bridge_probes_release_the_serial_control_connection() {
     let mut env = TestEnv::new();
-    let home = tempfile::tempdir().unwrap();
+    // macOS's default temporary directory can exceed the Unix socket path limit.
+    let home = tempfile::tempdir_in("/tmp").unwrap();
     env.isolate_mvm_home(home.path());
     let vm = "owned-bridge-probes";
     let mut child = Some(spawn(vm, "bridge"));
@@ -203,10 +204,14 @@ fn native_ack_without_exit_times_out_and_retains_evidence() {
     let alive = child.try_wait().unwrap().is_none();
     let retained = wire::read_instance("ack-peer").is_ok();
     child.stdin.as_mut().unwrap().write_all(&[1]).unwrap();
-    child.wait().unwrap();
+    let released = child.wait().unwrap();
     assert!(result.is_err());
     assert!(alive);
     assert!(retained);
+    assert!(
+        released.success(),
+        "fixture must exit only after pipe release"
+    );
 }
 
 #[test]
@@ -285,4 +290,43 @@ fn native_concurrent_stop_does_not_block_an_expired_owned_wait() {
     assert!(expired.is_err());
     assert!(elapsed < Duration::from_secs(1));
     assert!(stopped.is_ok());
+}
+
+#[test]
+#[ignore = "requires scoped control review before owned native execution"]
+fn native_missing_control_endpoint_does_not_prove_owned_process_exit() {
+    let mut env = TestEnv::new();
+    let home = tempfile::tempdir().unwrap();
+    env.isolate_mvm_home(home.path());
+    let vm = "missing-control-peer";
+    let mut child = spawn(vm, "natural");
+    let mut release = child.stdin.take().unwrap();
+    let mut child = Some(child);
+    let owner = OwnedInstance::adopt(&mut child, vm).unwrap();
+    let instance = wire::read_instance(vm).unwrap();
+    let socket = wire::socket_path(vm).unwrap();
+    std::fs::rename(&socket, socket.with_extension("unreachable")).unwrap();
+
+    let started = Instant::now();
+    let refused = owner.stop();
+    let elapsed = started.elapsed();
+    let still_live = !owner.try_exited().unwrap();
+    let retained = wire::read_instance(vm).unwrap() == instance;
+    let finalized = wire::state_dir(vm)
+        .unwrap()
+        .join(wire::FINALIZED_FILE)
+        .exists();
+
+    // Only the test-owned pipe releases this process; endpoint loss cannot.
+    release.write_all(&[1]).unwrap();
+    let exited = owner.wait(Instant::now() + Duration::from_secs(5));
+    assert!(refused.is_err());
+    assert!(elapsed < wire::CONNECTION_BUDGET + Duration::from_secs(1));
+    assert!(still_live);
+    assert!(retained);
+    assert!(!finalized);
+    assert!(
+        exited.is_ok(),
+        "retained ownership must still prove later exit"
+    );
 }

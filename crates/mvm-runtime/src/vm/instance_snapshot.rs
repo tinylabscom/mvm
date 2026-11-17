@@ -310,6 +310,74 @@ pub fn lock_resume(vm_name: &str) -> Result<mvm_core::util::atomic_io::FileLock>
         .with_context(|| format!("locking resume of VM {vm_name:?}"))
 }
 
+/// A named guard for a complete machine transition, using the existing resume lock.
+///
+/// Passing the guard through nested start/stop operations avoids reacquiring
+/// the same non-reentrant file lock between an instance check and its replacement.
+pub struct MachineLifecycleLock {
+    name: String,
+    _lock: mvm_core::util::atomic_io::FileLock,
+}
+
+impl MachineLifecycleLock {
+    /// Serialize with start, stop, pause and checkpoint restore for this name.
+    pub fn acquire(name: &str) -> Result<Self> {
+        mvm_core::naming::validate_vm_name(name)?;
+        Ok(Self {
+            name: name.to_owned(),
+            _lock: lock_resume(name)?,
+        })
+    }
+
+    /// Refuse accidental use of one machine's guard for another machine.
+    pub fn require_name(&self, name: &str) -> Result<()> {
+        anyhow::ensure!(
+            self.name == name,
+            "lifecycle lock belongs to a different machine"
+        );
+        Ok(())
+    }
+
+    /// Reap stopped state without trying to acquire the already-held lock again.
+    pub fn reap_unowned_state(&self) -> Result<bool> {
+        crate::vm::reconcile::reap_unowned_state_dir_locked(&mvm_core::config::vm_state_dir(
+            &self.name,
+        ))
+        .map_err(anyhow::Error::msg)
+    }
+
+    /// Remove saved instance state without unlinking the lock other callers wait on.
+    pub fn remove_saved_state(&self) -> Result<()> {
+        remove_saved_state_in(&mvm_core::config::instance_dir(&self.name))
+    }
+}
+
+/// Clear instance payloads without replacing the inode used by lifecycle waiters.
+pub(crate) fn remove_saved_state_in(directory: &Path) -> Result<()> {
+    let lock_path = resume_lock_path(directory).with_extension("lock");
+    for entry in std::fs::read_dir(directory)
+        .with_context(|| format!("reading saved state {}", directory.display()))?
+    {
+        let entry =
+            entry.with_context(|| format!("listing saved state {}", directory.display()))?;
+        if entry.path() == lock_path {
+            continue;
+        }
+        if entry
+            .file_type()
+            .with_context(|| format!("inspecting saved state {}", entry.path().display()))?
+            .is_dir()
+        {
+            std::fs::remove_dir_all(entry.path())
+                .with_context(|| format!("removing saved directory {}", entry.path().display()))?;
+        } else {
+            std::fs::remove_file(entry.path())
+                .with_context(|| format!("removing saved file {}", entry.path().display()))?;
+        }
+    }
+    Ok(())
+}
+
 /// Take the per-machine resume lock only if no resume of the machine holds it.
 /// `None` means a resume is in progress.
 pub fn try_lock_resume(vm_name: &str) -> Result<Option<mvm_core::util::atomic_io::FileLock>> {
@@ -790,6 +858,30 @@ mod tests {
         );
         drop(held);
         assert!(try_lock_resume("vm-lock").expect("probe").is_some());
+    }
+
+    #[test]
+    fn a_named_transition_uses_the_resume_lock_and_reaps_without_relocking() {
+        let _g = DataDirGuard::new();
+        let state = mvm_core::config::vm_state_dir("transition");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("old-state"), b"stopped").unwrap();
+        let guard = MachineLifecycleLock::acquire("transition").unwrap();
+        assert!(guard.require_name("another-machine").is_err());
+        assert!(try_lock_resume("transition").unwrap().is_none());
+        assert!(guard.reap_unowned_state().unwrap());
+        assert!(!state.exists());
+        let saved = mvm_core::config::instance_dir("transition").join("snapshot");
+        std::fs::create_dir_all(&saved).unwrap();
+        std::fs::write(saved.join("old-snapshot"), b"old").unwrap();
+        guard.remove_saved_state().unwrap();
+        assert!(!saved.exists());
+        assert!(
+            try_lock_resume("transition").unwrap().is_none(),
+            "removal must not replace the lock inode"
+        );
+        drop(guard);
+        assert!(try_lock_resume("transition").unwrap().is_some());
     }
 
     #[test]

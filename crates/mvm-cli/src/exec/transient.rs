@@ -9,6 +9,139 @@
 use super::*;
 use std::io::Write as _;
 
+use mvm_runtime::vm::instance_snapshot::MachineLifecycleLock;
+
+/// A retained runtime directory prevents stale foreground work from acting on a
+/// replacement. This is a custody precondition, not permission to stop a VM.
+pub(crate) struct RuntimeRunCustody {
+    name: String,
+    directory: std::fs::File,
+    hvf: Option<mvm_core::protocol::hvf_control::HvfInstance>,
+    process: Option<mvm_vmm::host::process_identity::ProcessIdentity>,
+}
+
+impl RuntimeRunCustody {
+    /// Failed capture still owns the original launch gate, so abort before releasing it.
+    pub(super) fn capture_or_stop(
+        backend: &AnyBackend,
+        name: &str,
+        lifecycle: &MachineLifecycleLock,
+        exit_audit: Option<mvm_client::launch::TransientExitAudit<'_>>,
+        sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
+    ) -> Result<Self> {
+        lifecycle.require_name(name)?;
+        match Self::capture(backend, name, lifecycle) {
+            Ok(custody) => Ok(custody),
+            Err(error) => {
+                let stopped = teardown_transient_with(name, name, exit_audit, sub, || {
+                    backend.stop_transient(&VmId(name.to_owned()))
+                });
+                combine_run_and_stop(Err(error), stopped)
+            }
+        }
+    }
+
+    pub(crate) fn authenticated_hvf_instance(
+        &self,
+    ) -> Option<&mvm_core::protocol::hvf_control::HvfInstance> {
+        self.hvf.as_ref()
+    }
+
+    pub(crate) fn capture(
+        backend: &AnyBackend,
+        name: &str,
+        lifecycle: &MachineLifecycleLock,
+    ) -> Result<Self> {
+        lifecycle.require_name(name)?;
+        let directory = std::fs::File::open(mvm_core::config::vm_state_dir(name))
+            .context("retaining original runtime directory")?;
+        let process = if backend.kind() == mvm_core::vm_backend::BackendKind::Firecracker {
+            Some(Self::firecracker_identity(name)?)
+        } else {
+            None
+        };
+        #[cfg(unix)]
+        let hvf = if matches!(
+            backend.kind(),
+            mvm_core::vm_backend::BackendKind::Hvf
+                | mvm_core::vm_backend::BackendKind::AppleContainer
+        ) {
+            Some(
+                mvm_vmm::host::hvf_stop::ConnectedInstance::connect(name)?
+                    .instance()
+                    .clone(),
+            )
+        } else {
+            None
+        };
+        #[cfg(not(unix))]
+        let hvf = {
+            let _ = backend;
+            anyhow::bail!("runtime directory custody is unavailable on this platform");
+        };
+        Ok(Self {
+            name: name.to_owned(),
+            directory,
+            hvf,
+            process,
+        })
+    }
+
+    fn firecracker_identity(
+        name: &str,
+    ) -> Result<mvm_vmm::host::process_identity::ProcessIdentity> {
+        use mvm_vmm::driver::traits::VmmDriver as _;
+        mvm_backends::driver::FcDriver::new()
+            .attach(&VmId(name.to_owned()))?
+            .process_identity()?
+            .context("original runtime process identity is unavailable")
+    }
+
+    pub(crate) fn require_current(&self, lifecycle: &MachineLifecycleLock) -> Result<()> {
+        lifecycle.require_name(&self.name)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let held = self.directory.metadata()?;
+            let current = std::fs::symlink_metadata(mvm_core::config::vm_state_dir(&self.name))
+                .context("original runtime directory is no longer present")?;
+            anyhow::ensure!(
+                current.is_dir() && (held.dev(), held.ino()) == (current.dev(), current.ino()),
+                "runtime directory was replaced; refusing stale foreground cleanup"
+            );
+            if let Some(expected) = &self.hvf {
+                let current =
+                    mvm_vmm::host::hvf_stop::ConnectedInstance::connect_instance(expected.clone())?;
+                anyhow::ensure!(
+                    current.instance() == expected,
+                    "runtime instance was replaced; refusing stale foreground cleanup"
+                );
+            }
+            if let Some(expected) = &self.process {
+                anyhow::ensure!(
+                    &Self::firecracker_identity(&self.name)? == expected,
+                    "runtime process was replaced; refusing stale foreground cleanup"
+                );
+            }
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        anyhow::bail!("runtime directory custody is unavailable on this platform")
+    }
+
+    pub(crate) fn stop(
+        &self,
+        backend: &AnyBackend,
+        lifecycle: &MachineLifecycleLock,
+    ) -> Result<Option<mvm_runtime::workload_runner::StopTiming>> {
+        self.require_current(lifecycle)?;
+        match &self.hvf {
+            Some(expected) => backend.stop_hvf_instance(expected),
+            None => backend.stop_transient(&VmId(self.name.clone())),
+        }
+    }
+}
+
 /// Everything [`boot_transient_vm`] needs beyond the caller-varying
 /// `vm_name` / `use_snapshot`.
 pub(super) struct BootAttempt<'a> {
@@ -57,6 +190,8 @@ pub(super) struct BootedVm {
     pub(super) launch_mode: crate::commands::vm::phase_timing::LaunchMode,
     /// Why the launch booted cold, or `None` when it claimed a standby.
     pub(super) cold_reason: Option<crate::commands::pool::ColdStartReason>,
+    /// Warm children transfer the gate acquired before publication, never reacquire it.
+    pub(super) lifecycle: Option<MachineLifecycleLock>,
 }
 
 /// Boot the transient VM: try to claim a warm standby first, then a
@@ -126,19 +261,20 @@ pub(super) fn boot_transient_vm(
     // error: the launch boots cold, and says so when a standby could have
     // served it. Only a residency the operator set by name on a backend with
     // no pool is returned as an actionable error.
-    let (vm_name, cold_reason) = match claim_warm_standby(attempt) {
-        Ok(crate::commands::pool::WarmClaimOutcome::Claimed(id)) => {
+    let (vm_name, cold_reason, lifecycle) = match claim_warm_standby(attempt) {
+        Ok(crate::commands::pool::WarmClaimOutcome::Claimed(owned)) => {
+            let (id, lifecycle) = owned.into_parts();
             ui::info(&format!(
                 "Claimed a warm standby ({}) — skipping cold boot.",
                 id.0
             ));
-            (id.0, None)
+            (id.0, None, Some(lifecycle))
         }
         Ok(crate::commands::pool::WarmClaimOutcome::Cold(reason)) => {
             if let Some(declaration) = reason.declaration() {
                 ui::notice(declaration);
             }
-            (vm_name, Some(reason))
+            (vm_name, Some(reason), None)
         }
         Err(e) => return Err(e).context("claiming configured warm standby"),
     };
@@ -283,6 +419,7 @@ pub(super) fn boot_transient_vm(
         name: vm_name,
         launch_mode,
         cold_reason,
+        lifecycle,
     })
 }
 
@@ -347,25 +484,38 @@ pub(super) fn leave_standby_when(
 /// status. The global handler owns the signal; this only gives it work to do.
 /// Dropping the guard withdraws it once the normal teardown has finished.
 pub(super) fn arm_interrupt_teardown(
-    vm_name: &str,
-    requested_vm_name: &str,
+    custody: std::sync::Arc<RuntimeRunCustody>,
     backend_name: &str,
     signed_plan_json: Option<&str>,
 ) -> mvm_runtime::interrupt_cleanup::InterruptCleanup {
     let backend_name = backend_name.to_string();
-    arm_interrupt_teardown_with(
-        vm_name,
-        requested_vm_name,
-        backend_name.clone(),
-        signed_plan_json,
-        move |id| {
-            AnyBackend::from_hypervisor(&backend_name)
-                .stop_transient(id)
-                .map(|_| ())
+    let plan = signed_plan_json.map(str::to_owned);
+    mvm_runtime::interrupt_cleanup::on_interrupt(
+        &format!("transient VM {}", custody.name),
+        move || {
+            let audit =
+                plan.as_deref()
+                    .map(|signed_plan_json| mvm_client::launch::TransientExitAudit {
+                        signed_plan_json,
+                        vm_name: &custody.name,
+                        backend: &backend_name,
+                        exit_code: None,
+                        completed: false,
+                        posture: None,
+                    });
+            if let Err(error) = teardown_custodied_vm(
+                &AnyBackend::from_hypervisor(&backend_name),
+                &custody,
+                audit,
+                &mut crate::commands::vm::phase_timing::LaunchSubMarks::new(false),
+            ) {
+                let _ = writeln!(std::io::stderr(), "{error:#}");
+            }
         },
     )
 }
 
+#[cfg(test)]
 fn arm_interrupt_teardown_with(
     vm_name: &str,
     requested_vm_name: &str,
@@ -398,6 +548,7 @@ fn arm_interrupt_teardown_with(
 
 /// The interrupt teardown itself: stop, record the end, remove state. A failed
 /// stop retains the state and is returned, never swallowed.
+#[cfg(test)]
 fn stop_for_interrupt(
     vm_name: &str,
     requested_vm_name: &str,
@@ -481,7 +632,7 @@ pub(super) fn combine_run_and_flush<T>(run: Result<T>, flush: Result<()>) -> Res
 
 /// Failure evidence only: the backend did not establish that this run stopped.
 #[derive(Debug)]
-pub(crate) struct TransientStopFailure(anyhow::Error);
+pub(crate) struct TransientStopFailure(pub(super) anyhow::Error);
 
 impl std::fmt::Display for TransientStopFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -513,6 +664,7 @@ pub(crate) fn combine_run_and_stop<T>(
 /// command's `Result` in a local — there is no `?` between the backend
 /// start and this call, so teardown always runs on both the success and
 /// error paths.
+#[cfg(test)]
 pub(crate) fn teardown_transient_vm(
     backend: &AnyBackend,
     vm_name: &str,
@@ -520,10 +672,44 @@ pub(crate) fn teardown_transient_vm(
     exit_audit: Option<mvm_client::launch::TransientExitAudit<'_>>,
     sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
 ) -> std::result::Result<(), TransientStopFailure> {
+    teardown_transient_with(vm_name, requested_vm_name, exit_audit, sub, || {
+        backend.stop_transient(&VmId(vm_name.to_string()))
+    })
+}
+
+pub(super) fn teardown_custodied_vm(
+    backend: &AnyBackend,
+    custody: &RuntimeRunCustody,
+    exit_audit: Option<mvm_client::launch::TransientExitAudit<'_>>,
+    sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
+) -> std::result::Result<(), TransientStopFailure> {
+    let lifecycle = MachineLifecycleLock::acquire(&custody.name).map_err(TransientStopFailure)?;
+    teardown_custodied_in_lifecycle(backend, custody, &lifecycle, exit_audit, sub)
+}
+
+pub(super) fn teardown_custodied_in_lifecycle(
+    backend: &AnyBackend,
+    custody: &RuntimeRunCustody,
+    lifecycle: &MachineLifecycleLock,
+    exit_audit: Option<mvm_client::launch::TransientExitAudit<'_>>,
+    sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
+) -> std::result::Result<(), TransientStopFailure> {
+    teardown_transient_with(&custody.name, &custody.name, exit_audit, sub, || {
+        custody.stop(backend, lifecycle)
+    })
+}
+
+fn teardown_transient_with(
+    vm_name: &str,
+    requested_vm_name: &str,
+    exit_audit: Option<mvm_client::launch::TransientExitAudit<'_>>,
+    sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
+    stop: impl FnOnce() -> Result<Option<mvm_runtime::workload_runner::StopTiming>>,
+) -> std::result::Result<(), TransientStopFailure> {
     use crate::commands::vm::phase_timing::SubPhase;
 
     sub.start(SubPhase::StopTransient);
-    let stop_timing = match backend.stop_transient(&VmId(vm_name.to_string())) {
+    let stop_timing = match stop() {
         Ok(timing) => timing,
         Err(error) => {
             tracing::warn!(
@@ -686,6 +872,7 @@ mod tests {
         let ledger = mvm_client::admission::InMemoryNonceLedger::new();
         let context = mvm_client::admission::admit_plan_for_boot(
             mvm_client::admission::AdmitPlanForBootParams {
+                bundle_sizing: Default::default(),
                 mailbox: None,
                 gpu: false,
                 instructions: Default::default(),
@@ -892,6 +1079,184 @@ mod tests {
         let (env, _) = state_dirs(home.path());
         drop(env);
         let _next = TestEnv::new();
+    }
+
+    #[test]
+    fn warm_boot_gate_blocks_replacement_until_custody_is_captured() {
+        let home = tempfile::tempdir().unwrap();
+        let (_env, _) = state_dirs(home.path());
+        let backend = AnyBackend::Mock(mvm_runtime::MockBackend::new());
+        let booted = BootedVm {
+            name: "sig-vm".into(),
+            launch_mode: crate::commands::vm::phase_timing::LaunchMode::Warm,
+            cold_reason: None,
+            lifecycle: Some(MachineLifecycleLock::acquire("sig-vm").unwrap()),
+        };
+        let lifecycle = booted.lifecycle.unwrap();
+        std::thread::spawn(|| {
+            assert!(
+                mvm_runtime::vm::instance_snapshot::try_lock_resume("sig-vm")
+                    .unwrap()
+                    .is_none(),
+                "stop/replacement cannot enter the published child's handoff window"
+            );
+        })
+        .join()
+        .unwrap();
+        let custody = RuntimeRunCustody::capture(&backend, &booted.name, &lifecycle).unwrap();
+        custody.require_current(&lifecycle).unwrap();
+        drop(lifecycle);
+        assert!(
+            mvm_runtime::vm::instance_snapshot::try_lock_resume("sig-vm")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn failed_capture_stops_the_original_launch_before_releasing_its_gate() {
+        let home = tempfile::tempdir().unwrap();
+        let (_env, (effective, _)) = state_dirs(home.path());
+        let backend = AnyBackend::Mock(mvm_runtime::MockBackend::new());
+        let lifecycle = MachineLifecycleLock::acquire("sig-vm").unwrap();
+        backend
+            .start(&VmStartConfig {
+                name: "sig-vm".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        std::fs::remove_dir_all(&effective).unwrap();
+        let mut marks = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
+        let error = match RuntimeRunCustody::capture_or_stop(
+            &backend, "sig-vm", &lifecycle, None, &mut marks,
+        ) {
+            Ok(_) => panic!("missing directory must refuse custody"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("retaining original runtime directory")
+        );
+        let AnyBackend::Mock(mock) = &backend else {
+            unreachable!()
+        };
+        assert_eq!(
+            mock.count(),
+            0,
+            "capture failure must not leak a live launch"
+        );
+        assert!(
+            mvm_runtime::vm::instance_snapshot::try_lock_resume("sig-vm")
+                .unwrap()
+                .is_none()
+        );
+        assert!(marks.recorded(crate::commands::vm::phase_timing::SubPhase::StateRemove));
+    }
+
+    #[test]
+    fn failed_capture_reports_failed_stop_and_retains_state() {
+        let home = tempfile::tempdir().unwrap();
+        let (_env, (effective, _)) = state_dirs(home.path());
+        let backend = AnyBackend::Mock(mvm_runtime::MockBackend::new().with_failing_stop());
+        let lifecycle = MachineLifecycleLock::acquire("sig-vm").unwrap();
+        std::fs::remove_dir_all(&effective).unwrap();
+        let mut marks = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
+        let error = match RuntimeRunCustody::capture_or_stop(
+            &backend, "sig-vm", &lifecycle, None, &mut marks,
+        ) {
+            Ok(_) => panic!("missing directory must refuse custody"),
+            Err(error) => error,
+        };
+        assert!(error.is::<TransientStopFailure>());
+        assert!(format!("{error:#}").contains("retaining original runtime directory"));
+        assert!(!marks.recorded(crate::commands::vm::phase_timing::SubPhase::StateRemove));
+        assert!(
+            mvm_runtime::vm::instance_snapshot::try_lock_resume("sig-vm")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn stale_custody_preserves_successor_runtime_leases_and_registration() {
+        let home = tempfile::tempdir().unwrap();
+        let (_env, (effective, _)) = state_dirs(home.path());
+        let backend = AnyBackend::Mock(mvm_runtime::MockBackend::new().with_failing_stop());
+        let lifecycle = MachineLifecycleLock::acquire("sig-vm").unwrap();
+        let custody = RuntimeRunCustody::capture(&backend, "sig-vm", &lifecycle).unwrap();
+        drop(lifecycle);
+        std::fs::remove_dir_all(&effective).unwrap();
+        std::fs::create_dir_all(&effective).unwrap();
+        for file in ["plan.json", "writer-lease", "registration"] {
+            std::fs::write(effective.join(file), b"successor").unwrap();
+        }
+        let mut marks = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
+        let error = teardown_custodied_vm(&backend, &custody, None, &mut marks).unwrap_err();
+        assert!(error.to_string().contains("runtime directory was replaced"));
+        assert!(!error.to_string().contains("forced stop failure"));
+        for file in ["plan.json", "writer-lease", "registration"] {
+            assert_eq!(std::fs::read(effective.join(file)).unwrap(), b"successor");
+        }
+        assert!(!marks.recorded(crate::commands::vm::phase_timing::SubPhase::StateRemove));
+    }
+
+    #[test]
+    fn original_custody_cleans_state_and_holds_gate_through_cleanup() {
+        let home = tempfile::tempdir().unwrap();
+        let (_env, (effective, requested)) = state_dirs(home.path());
+        let backend = AnyBackend::Mock(mvm_runtime::MockBackend::new());
+        let lifecycle = MachineLifecycleLock::acquire("sig-vm").unwrap();
+        let custody = RuntimeRunCustody::capture(&backend, "sig-vm", &lifecycle).unwrap();
+        let mut marks = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
+        teardown_custodied_in_lifecycle(&backend, &custody, &lifecycle, None, &mut marks).unwrap();
+        assert!(!effective.exists());
+        assert!(
+            requested.exists(),
+            "delayed cleanup never deletes requested-name scratch"
+        );
+        assert!(
+            mvm_runtime::vm::instance_snapshot::try_lock_resume("sig-vm")
+                .unwrap()
+                .is_none()
+        );
+        drop(lifecycle);
+        assert!(
+            mvm_runtime::vm::instance_snapshot::try_lock_resume("sig-vm")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn stale_interrupt_custody_does_not_remove_successor() {
+        let home = tempfile::tempdir().unwrap();
+        let (_env, (effective, requested)) = state_dirs(home.path());
+        let backend = AnyBackend::Mock(mvm_runtime::MockBackend::new());
+        let lifecycle = MachineLifecycleLock::acquire("sig-vm").unwrap();
+        let custody = std::sync::Arc::new(
+            RuntimeRunCustody::capture(&backend, "sig-vm", &lifecycle).unwrap(),
+        );
+        drop(lifecycle);
+        let _armed = arm_interrupt_teardown(custody, "mock", None);
+        std::fs::remove_dir_all(&effective).unwrap();
+        std::fs::create_dir_all(&effective).unwrap();
+        std::fs::write(effective.join("lease"), b"successor").unwrap();
+        mvm_runtime::interrupt_cleanup::run_all();
+        assert_eq!(
+            std::fs::read(effective.join("lease")).unwrap(),
+            b"successor"
+        );
+        assert!(requested.exists());
+    }
+
+    #[test]
+    fn custody_refuses_a_different_names_gate() {
+        let home = tempfile::tempdir().unwrap();
+        let (_env, _) = state_dirs(home.path());
+        let backend = AnyBackend::Mock(mvm_runtime::MockBackend::new());
+        let lifecycle = MachineLifecycleLock::acquire("sig-requested").unwrap();
+        assert!(RuntimeRunCustody::capture(&backend, "sig-vm", &lifecycle).is_err());
     }
 
     #[test]
@@ -1203,12 +1568,12 @@ mod tests {
             user_named: true,
             writable_images: &mut images,
         };
-        assert_eq!(
+        assert!(matches!(
             claim_warm_standby(&mut attempt).unwrap(),
             crate::commands::pool::WarmClaimOutcome::Cold(
                 crate::commands::pool::ColdStartReason::Named
             )
-        );
+        ));
     }
 
     /// The strict-startup refusal is gone: the first unnamed run of an image
@@ -1244,12 +1609,12 @@ mod tests {
             user_named: false,
             writable_images: &mut images,
         };
-        assert_eq!(
+        assert!(matches!(
             claim_warm_standby(&mut attempt).unwrap(),
             crate::commands::pool::WarmClaimOutcome::Cold(
                 crate::commands::pool::ColdStartReason::NoStandbyReady
             )
-        );
+        ));
     }
 
     #[test]
@@ -1268,12 +1633,12 @@ mod tests {
             user_named: false,
             writable_images: &mut images,
         };
-        assert_eq!(
+        assert!(matches!(
             claim_warm_standby(&mut attempt).unwrap(),
             crate::commands::pool::WarmClaimOutcome::Cold(
                 crate::commands::pool::ColdStartReason::StandbysDisabled
             )
-        );
+        ));
     }
 
     #[test]

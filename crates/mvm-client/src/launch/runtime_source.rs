@@ -175,7 +175,7 @@ pub fn attach_runtime_overlay_if_cached_version_verified(
 /// The authenticated release behind the proof a start config already carries,
 /// or `None` when it carries none. A carried proof is never answered with
 /// `None`: it is verified or the launch is refused.
-fn verified_release_for_attached_proof(
+pub(crate) fn verified_release_for_attached_proof(
     start_config: &mvm_core::vm_backend::VmStartConfig,
 ) -> Result<Option<ReleaseRuntime>> {
     let Some(proof) = &start_config.runtime_release_proof else {
@@ -193,9 +193,9 @@ fn verified_release_for_attached_proof(
     Ok(Some(std::sync::Arc::new(release)))
 }
 
-/// A bundle that selected a release runtime must hand its verified evidence to
+/// A launch that selected a release runtime must hand its verified evidence to
 /// admission; one that selected none must not claim any.
-fn bundle_release_evidence(
+pub(crate) fn paired_release_evidence(
     start_config: &mvm_core::vm_backend::VmStartConfig,
     release: Option<ReleaseRuntime>,
 ) -> Result<Option<ReleaseRuntime>> {
@@ -203,17 +203,17 @@ fn bundle_release_evidence(
         (Some(proof), Some(release)) => {
             anyhow::ensure!(
                 release.proof() == proof,
-                "verified release runtime differs from the bundle's selected runtime proof"
+                "verified release runtime differs from the selected runtime proof"
             );
             Ok(Some(release))
         }
         (None, None) => Ok(None),
         (Some(_), None) => anyhow::bail!(
-            "bundle selected a release runtime but produced no verified launch evidence; \
+            "launch selected a release runtime but produced no verified launch evidence; \
              release runtime requires verified launch evidence"
         ),
         (None, Some(_)) => {
-            anyhow::bail!("bundle produced verified release evidence for no selected runtime proof")
+            anyhow::bail!("launch produced verified release evidence for no selected runtime proof")
         }
     }
 }
@@ -227,7 +227,7 @@ fn attach_runtime_overlay_selection(
     if let Some(attached) =
         super::bundle_runtime::attach_installed_bundle_with_release(start_config, hypervisor)?
     {
-        return bundle_release_evidence(start_config, attached.release);
+        return paired_release_evidence(start_config, attached.release);
     }
     anyhow::ensure!(
         start_config.bundle_boot_assets.is_none(),
@@ -877,7 +877,7 @@ mod runtime_overlay_attach_tests {
             runtime_release_proof: Some(mock_proof()),
             ..Default::default()
         };
-        let error = bundle_release_evidence(&config, None)
+        let error = paired_release_evidence(&config, None)
             .expect_err("a selected release proof with no verified evidence is refused");
         let message = format!("{error:#}");
         assert!(
@@ -893,7 +893,7 @@ mod runtime_overlay_attach_tests {
     #[test]
     fn a_bundle_that_selected_no_release_proof_carries_no_evidence() {
         let config = VmStartConfig::default();
-        assert!(bundle_release_evidence(&config, None).unwrap().is_none());
+        assert!(paired_release_evidence(&config, None).unwrap().is_none());
     }
 
     #[test]

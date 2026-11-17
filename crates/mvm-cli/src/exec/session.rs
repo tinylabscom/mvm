@@ -16,9 +16,25 @@ pub fn dispatch_in_session(
     code: String,
     timeout_secs: Option<u64>,
 ) -> Result<ExecOutput> {
-    if !wait_for_agent(&vm.vm_name, 30) {
+    let stream = connect_session(&vm.vm_name)?;
+    dispatch_on_session_stream(&vm.vm_name, stream, code, timeout_secs)
+}
+
+/// Pin the guest connection before releasing its machine lifecycle transition.
+pub(crate) fn connect_session(name: &str) -> Result<std::os::unix::net::UnixStream> {
+    if !wait_for_agent(name, 30) {
         anyhow::bail!("guest agent did not become reachable within 30s");
     }
+    vsock_transport::for_vm(name)?.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
+}
+
+/// Dispatch only on the retained connection, never reconnecting by machine name.
+pub(crate) fn dispatch_on_session_stream(
+    name: &str,
+    mut stream: std::os::unix::net::UnixStream,
+    code: String,
+    timeout_secs: Option<u64>,
+) -> Result<ExecOutput> {
     // Reuse build_guest_wrapper by constructing a minimal ExecRequest
     // with no directory shares (sessions do not attach host directories). The wrapper
     // emits `set -e\n<env exports>\n<argv>\n`.
@@ -51,14 +67,12 @@ pub fn dispatch_in_session(
         declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
     };
     let wrapper = build_guest_wrapper(&req);
-    let transport = vsock_transport::for_vm(&vm.vm_name)?;
-    let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
     // Inbound vsock RPC audit. Mirrors run_in_guest's emit; was lost when
     // this function migrated from send_request to send_exec_streaming.
     let verb = "exec";
     mvm_core::audit_emit!(
         NetworkPolicyAllow,
-        vm: &vm.vm_name,
+        vm: name,
         "scope=rpc,direction=in,kind=vsock,verb={verb}",
         verb = verb,
     );
