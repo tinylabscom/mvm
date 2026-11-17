@@ -213,6 +213,10 @@ pub(crate) const GATES: &[Gate] = &[
         crate::check_feature_closure_budget::run,
     ),
     ("check-duplicate-majors", crate::check_duplicate_majors::run),
+    (
+        "check-deny-ignore-expiry",
+        crate::check_deny_ignore_expiry::run,
+    ),
     ("check-spec-hygiene", crate::check_spec_hygiene::run),
     ("check-root-layout", crate::check_root_layout::run),
     ("check-workflow-paths", crate::check_workflow_paths::run),
