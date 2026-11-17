@@ -1624,7 +1624,7 @@ mod tests {
         let snapshot =
             open_sealed_output_at(&locator, OutputRequest::default(), &config::mvm_audit_dir())
                 .unwrap();
-        assert_eq!(snapshot.manifests, [manifest.clone()]);
+        assert_eq!(snapshot.manifests(), std::slice::from_ref(&manifest));
         let mut output = snapshot.stream;
         let deadline = manifest.retention_deadline().unwrap().unwrap();
         assert!(
