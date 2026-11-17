@@ -14,6 +14,40 @@ separately, the files that were not read. Absence from the "read" column is not 
 soundness. "Read" is taken from the fixing PR descriptions and the review notes for the lane; the
 line ranges are as recorded there and were not re-derived when this file was written.
 
+## Guest-runtime first-use publication
+
+Reviewed `mvm-build`'s `runtime_pieces`, `cache_install`, `runtime_overlay`,
+`initramfs`, `sdk_sidecar`, and the OCI installer in `guest_agent_build`, plus
+the CLI first-use caller through `mvm-client::release`. Archive verification
+and launch admission remain separate and unchanged.
+
+Each version/architecture artifact slot (also libc for a sidecar) has one
+stable sibling file lock. Builders own it from the reuse decision through
+construction, publication, final validation and provenance recording;
+standalone installers, explicit discard and initramfs eviction use the same
+owner. Locked internal installers do not reacquire it. Dropping the guard
+explicitly unlocks on success or error; this lock is not a process-lifetime
+or custody-transfer proof.
+SDK staging and stale-stage cleanup use the libc slot name under the shared
+architecture parent, so independently owned libc slots cannot share staging.
+An abandoned staging directory remains subject to the existing cleanup rule.
+The initramfs resolve-miss path no longer deletes a directory based on a
+stale observation before it has a candidate.
+
+The OCI installer owns its slot, prepares and validates all four candidate
+binaries before touching cached files, reuses identical regular files, and
+renames changed files without a remove/copy gap. Preparation failure leaves
+the previous valid binaries intact. This is not a multi-file transaction:
+an I/O failure during publication can still leave a mixed replacement.
+
+Filesystem/archive fixtures cover competing callers waiting for each slot,
+successful assembly and reuse, refused candidates preserving existing output,
+overlapping libc staging, and wrong-architecture OCI candidates preserving a valid set. The existing
+CLI concurrent first-use regression remains enabled. No live backend,
+hardware boundary, crash-durability or hostile-host guarantee was added.
+Read-only launch resolvers do not hold snapshot leases: explicit replacement
+or discard of a different generation remains outside this first-use repair.
+
 ## Compile-time AES-GCM boundary
 
 Reviewed `crates/mvm-crypto/src/aead.rs`,

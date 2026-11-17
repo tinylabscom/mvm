@@ -23,6 +23,14 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Own a cache slot through reuse, preparation and publication. The lock is a
+/// stable sibling, never part of the directory an installer replaces.
+pub(crate) fn lock_artifact_dir(
+    dir: &Path,
+) -> std::io::Result<mvm_core::util::atomic_io::FileLock> {
+    mvm_core::util::atomic_io::FileLock::acquire(dir).map_err(std::io::Error::other)
+}
+
 /// The cache root of the *default* mvm home (`$HOME/.mvm/cache`),
 /// deliberately ignoring the `MVM_HOME` override.
 ///
@@ -175,9 +183,8 @@ pub fn verify_digest_manifest(
 
 /// Name of this process's staging directory for `arch`.
 ///
-/// The pid disambiguates concurrent installs. Two installs in the same
-/// process race on the post-staging rename, where the second one wins —
-/// the same semantics as installing twice.
+/// The pid distinguishes processes; installers must also own the target slot
+/// through staging and publication to serialize threads in one process.
 pub(crate) fn staging_dir_name(arch: &str) -> String {
     format!("{}.tmp.{}", arch, std::process::id())
 }
