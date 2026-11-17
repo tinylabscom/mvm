@@ -33,11 +33,20 @@ pub struct CallKey {
 }
 
 /// How a call ended.
+///
+/// `TimedOut` and `Cancelled` are advisory. They say only that the caller
+/// stopped waiting. They are not evidence that the callee did not execute, not
+/// a release of the call's budget, and not permission to reuse the message id
+/// or correlation value for a new call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallOutcome {
+    /// The callee's reply arrived while the call was pending.
     Reply,
+    /// The caller's deadline passed. Advisory: the callee may have executed.
     TimedOut,
+    /// The caller withdrew. Advisory: the callee may have executed.
     Cancelled,
+    /// The call's epoch ended before a reply.
     Unavailable,
 }
 
@@ -245,6 +254,25 @@ mod tests {
             Err(RegisterError::ReusedCorrelation)
         );
         assert_eq!(t.pending_len(), 0);
+    }
+
+    #[test]
+    fn stopping_the_wait_never_frees_the_correlation_for_reuse() {
+        let mut t = table(4, 4);
+        t.register(key(1, 1, 1), 100).unwrap();
+        t.register(key(1, 1, 2), 100).unwrap();
+        t.expire(100);
+        assert_eq!(
+            t.register(key(1, 1, 1), 200),
+            Err(RegisterError::ReusedCorrelation)
+        );
+        let mut t = table(4, 4);
+        t.register(key(1, 1, 2), 100).unwrap();
+        assert!(t.cancel(key(1, 1, 2)));
+        assert_eq!(
+            t.register(key(1, 1, 2), 200),
+            Err(RegisterError::ReusedCorrelation)
+        );
     }
 
     #[test]
