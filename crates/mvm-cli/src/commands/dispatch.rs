@@ -6,6 +6,7 @@ use super::*;
 
 pub(super) trait TopLevelCommand {
     fn run(self, cli: &Cli, cfg: &MvmConfig) -> Result<()>;
+    fn is_offline_audit_command(&self) -> bool;
     fn is_early_command(&self) -> bool;
     fn try_run_early(&self) -> Option<Result<()>>;
 }
@@ -70,6 +71,18 @@ impl TopLevelCommand for Commands {
         }
     }
 
+    fn is_offline_audit_command(&self) -> bool {
+        matches!(
+            self,
+            Commands::Trust(trust::Args {
+                action: trust::TrustAction::Audit(ops::audit::Args {
+                    action: ops::audit::AuditAction::ProveConsistency { .. }
+                        | ops::audit::AuditAction::VerifyConsistency { .. },
+                }),
+            })
+        )
+    }
+
     fn is_early_command(&self) -> bool {
         // Uninstall runs before startup creates config, host signing keys and
         // the command audit envelope: it must not create the state directory
@@ -80,27 +93,29 @@ impl TopLevelCommand for Commands {
         // creates only its explicit reservation and native credential.
         // `backend detect` is install.sh's probe of a just-extracted mvmctl:
         // it must answer without creating any state.
-        matches!(
-            self,
-            Commands::QemuVsockBridge(_)
-                | Commands::Backend(backend::Args {
-                    action: backend::BackendCmd::Detect(_),
-                    ..
-                })
-                | Commands::Dev(build::group::Args {
-                    action: build::group::BuildCmd::GuestBins(build::guest_bins::Args {
-                        check_release_archive: Some(_),
+        // Consistency tooling must not mint a signer or append command events.
+        self.is_offline_audit_command()
+            || matches!(
+                self,
+                Commands::QemuVsockBridge(_)
+                    | Commands::Backend(backend::Args {
+                        action: backend::BackendCmd::Detect(_),
                         ..
-                    }),
-                    ..
-                })
-                | Commands::Env(env::group::Args {
-                    action: env::group::EnvCmd::Uninstall(_),
-                })
-                | Commands::Env(env::group::Args {
-                    action: env::group::EnvCmd::CallerIdentity(_),
-                })
-        )
+                    })
+                    | Commands::Dev(build::group::Args {
+                        action: build::group::BuildCmd::GuestBins(build::guest_bins::Args {
+                            check_release_archive: Some(_),
+                            ..
+                        }),
+                        ..
+                    })
+                    | Commands::Env(env::group::Args {
+                        action: env::group::EnvCmd::Uninstall(_),
+                    })
+                    | Commands::Env(env::group::Args {
+                        action: env::group::EnvCmd::CallerIdentity(_),
+                    })
+            )
     }
 
     fn try_run_early(&self) -> Option<Result<()>> {
@@ -109,6 +124,18 @@ impl TopLevelCommand for Commands {
         }
         match self {
             Commands::QemuVsockBridge(a) => Some(qemu_bridge::run(a)),
+            Commands::Trust(trust::Args {
+                action:
+                    trust::TrustAction::Audit(ops::audit::Args {
+                        action: ops::audit::AuditAction::ProveConsistency { roots },
+                    }),
+            }) => Some(ops::audit::prove_consistency(roots)),
+            Commands::Trust(trust::Args {
+                action:
+                    trust::TrustAction::Audit(ops::audit::Args {
+                        action: ops::audit::AuditAction::VerifyConsistency { proof, roots },
+                    }),
+            }) => Some(ops::audit::verify_consistency(proof, roots)),
             Commands::Backend(backend::Args {
                 action: backend::BackendCmd::Detect(args),
                 ..

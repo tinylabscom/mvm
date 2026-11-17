@@ -525,6 +525,28 @@ forward legs.
 | `mvmctl trust audit receipts export --archive <path> [--tenant <t>] [--plan-id <id>] [--full-chain]`     | Write a signed `.mvmev` evidence archive: the receipts, one RFC 6962 inclusion proof per leaf against the host-signed audit root, the raw chain lines, and a citation for every in-scope entry with no receipt mapping. `--full-chain` covers the whole tenant so a verifier can derive coverage; without it, scope completeness is host-attested and cannot be checked |
 | `mvmctl trust audit receipts verify <archive> [--json]`                                                  | Verify a [`.mvmev` evidence archive](/reference/mvmev-format/) offline. Reports integrity, inclusion, and scope completeness separately; exit code is a bitmask (1 integrity, 2 inclusion, 4 completeness). Completeness reports `attested` rather than a pass when the archive is plan-scoped                                                                          |
 
+### Signed-root extension
+
+| Command | Description |
+| --- | --- |
+| `mvmctl trust audit prove-consistency --old-root saved.json --new-root candidate.json [--pubkey trusted.pub] [--tenant local]` | Authenticate both explicit signed roots, read the verified tenant chain (including rotated segments), and emit an existing-format `ConsistencyProof` JSON to stdout only after verifying it against those exact roots |
+| `mvmctl trust audit verify-consistency --old-root saved.json --new-root candidate.json --proof proof.json [--pubkey trusted.pub] [--tenant local]` | Offline, read-only verification of both signatures, expected tenant, proof/root bindings, and append-only extension; nonzero exit on any refusal |
+
+Both commands require separate existing `SignedAuditRoot` JSON files. The trusted
+public key accepts raw 32-byte, hex, or base64 encoding and defaults to the existing
+`host-signer.pub` in the configured MVM keys directory. Neither command initializes
+keys or trusts a key embedded in an input. Verification does not read live audit
+files. Generation requires the retained chain; pruned or unavailable leaves can
+prevent proof generation.
+
+Retain the previously verified old root **outside the potentially rolled-back
+host**. Neither command updates that anchor, on success or error. A smaller
+candidate or same-size rewritten tree is refused; an identical nonempty tree with
+no growth is valid. Empty prefixes are refused by the existing proof format.
+This checks extension relative to the supplied anchor, not
+freshness, complete execution capture, payload availability, or future checkpoint
+schemas. See [the audit guide](/guides/audit-and-receipts/#verify-signed-root-extension).
+
 ### Protected forensic transcripts
 
 | Command | Description |

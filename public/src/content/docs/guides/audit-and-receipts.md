@@ -61,6 +61,44 @@ mvmctl trust receipt verify /tmp/run-receipt.json --pubkey ./host-signer.pub
 Verification should happen before a receipt is trusted by CI, copied into a
 release artifact bundle, or attached to an external audit record.
 
+## Verify signed-root extension
+
+Keep a previously verified signed root as `saved.json` on independent storage,
+not only on the host whose rollback you want to detect. Obtain a candidate
+published root as `candidate.json` and provision the trusted host public key
+independently as `trusted.pub`.
+
+On the host retaining the audit chain, generate the proof:
+
+```sh
+mvmctl trust audit prove-consistency \
+  --old-root saved.json --new-root candidate.json \
+  --pubkey trusted.pub --tenant local > proof.json
+```
+
+Copy the proof and candidate to the verifier holding the saved root. Verification
+needs only those three JSON files and the trusted public key, not a running
+host daemon, signing secret, or live audit files:
+
+```sh
+mvmctl trust audit verify-consistency \
+  --old-root saved.json --new-root candidate.json --proof proof.json \
+  --pubkey trusted.pub --tenant local
+```
+
+Both commands reject bad signatures, unexpected tenants, and proofs not bound
+to the exact signed roots. Verification rejects shrinking trees and rewritten
+prefixes; equal nonempty roots without growth are accepted, while empty prefixes
+are refused. Failures return nonzero and
+never reset the saved anchor. Neither command replaces it automatically.
+
+Success establishes append-only extension relative to that saved root, not
+freshness or complete execution history. It does not prove all real-world events
+were captured, recover deleted payloads, or detect every isolated split view.
+A compromised host holding the signer can fabricate new events. Existing signed
+root and consistency-proof formats are unchanged; this is not a new checkpoint
+schema or a runtime capture guarantee.
+
 ## Read the audit stream
 
 Show recent audit events:

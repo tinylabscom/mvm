@@ -6093,6 +6093,30 @@ fn a_transient_run_with_a_command_reserves_stdout_for_the_guest() {
     ]));
 }
 
+#[test]
+fn audit_consistency_bypasses_telemetry_and_interactive_update_notices() {
+    for verb in ["prove-consistency", "verify-consistency"] {
+        let mut args = vec![
+            "mvmctl",
+            "trust",
+            "audit",
+            verb,
+            "--old-root",
+            "saved.json",
+            "--new-root",
+            "candidate.json",
+        ];
+        if verb == "verify-consistency" {
+            args.extend(["--proof", "proof.json"]);
+        }
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert!(cli.command.is_offline_audit_command());
+        assert!(cli.command.is_early_command());
+    }
+    let publish = Cli::try_parse_from(["mvmctl", "trust", "audit", "publish-root"]).unwrap();
+    assert!(!publish.command.is_offline_audit_command());
+}
+
 fn exits_early(argv: &[&str]) -> bool {
     Cli::try_parse_from(argv)
         .unwrap()

@@ -604,6 +604,8 @@ const AUDIT_SUB: &[(&str, AuditPosture)] = &[
     ("publish-root", AuditPosture::ReadOnly),
     ("prove", AuditPosture::ReadOnly),
     ("verify-inclusion", AuditPosture::ReadOnly),
+    ("prove-consistency", AuditPosture::ReadOnly),
+    ("verify-consistency", AuditPosture::ReadOnly),
     // Aggregates the chain's `host.ai.usage` entries into a per-destination
     // metering view; a read over the verified chain, writes nothing.
     ("usage", AuditPosture::ReadOnly),

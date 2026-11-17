@@ -748,6 +748,50 @@ pub fn verify_consistency_against_roots(
     verify_consistency(proof)
 }
 
+/// Why [`verify_append_only`] refused a signed-root extension.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum AppendOnlyError {
+    /// The saved root did not authenticate under the trusted key.
+    #[error("old signed-root verification failed: {0}")]
+    OldRootSignature(#[source] MerkleError),
+    /// The candidate root did not authenticate under the trusted key.
+    #[error("new signed-root verification failed: {0}")]
+    NewRootSignature(#[source] MerkleError),
+    /// At least one authenticated root belongs to another tenant.
+    #[error("signed roots do not both belong to expected tenant '{0}'")]
+    TenantMismatch(String),
+    /// The proof does not establish extension of these exact roots.
+    #[error("append-only consistency verification failed: {0}")]
+    Consistency(#[source] MerkleError),
+}
+
+/// Authenticate both roots and verify their append-only extension for the expected tenant.
+///
+/// The caller supplies the trusted key and retains the old root independently of
+/// the potentially rolled-back host. Success establishes neither freshness nor
+/// complete capture of execution; equal nonempty roots with no growth are accepted.
+///
+/// # Errors
+/// Refuses invalid signatures, wrong tenants, proof binding mismatches, shrinking
+/// trees, empty prefixes, and rewritten prefixes.
+pub fn verify_append_only(
+    proof: &ConsistencyProof,
+    old: &SignedAuditRoot,
+    new: &SignedAuditRoot,
+    vk: &VerifyingKey,
+    expected_tenant: &str,
+) -> Result<(), AppendOnlyError> {
+    verify_signed_root(old, vk).map_err(AppendOnlyError::OldRootSignature)?;
+    verify_signed_root(new, vk).map_err(AppendOnlyError::NewRootSignature)?;
+    if old.tenant != expected_tenant || new.tenant != expected_tenant {
+        return Err(AppendOnlyError::TenantMismatch(String::from(
+            expected_tenant,
+        )));
+    }
+    verify_consistency_against_roots(proof, old, new).map_err(AppendOnlyError::Consistency)
+}
+
 /// The exact bytes an Ed25519 signature over a [`SignedAuditRoot`] covers.
 ///
 /// A fixed-field-order JSON object over the four signed fields, with no
@@ -1715,6 +1759,53 @@ mod tests {
             signature: B64.encode(sig.to_bytes()),
             signer_pubkey: encode_hex32(&key.verifying_key().to_bytes()),
         }
+    }
+
+    #[test]
+    fn append_only_authenticates_both_roots_and_binds_the_extension() {
+        let key = signing_key();
+        let other = SigningKey::from_bytes(&[12; 32]);
+        let leaves = lines(5);
+        let proof = build_consistency_proof(&leaves, 2, 5).unwrap();
+        let old = signed_root(&key, "local", 2, &proof.old_root);
+        let new = signed_root(&key, "local", 5, &proof.new_root);
+        let check = |p: &ConsistencyProof, o: &SignedAuditRoot, n: &SignedAuditRoot| {
+            verify_append_only(p, o, n, &key.verifying_key(), "local")
+        };
+        assert_eq!(check(&proof, &old, &new), Ok(()));
+        for (o, n) in [
+            (
+                signed_root(&other, "local", 2, &proof.old_root),
+                new.clone(),
+            ),
+            (
+                old.clone(),
+                signed_root(&other, "local", 5, &proof.new_root),
+            ),
+            (
+                signed_root(&key, "elsewhere", 2, &proof.old_root),
+                new.clone(),
+            ),
+            (
+                old.clone(),
+                signed_root(&key, "elsewhere", 5, &proof.new_root),
+            ),
+        ] {
+            assert!(check(&proof, &o, &n).is_err());
+        }
+        let mut altered = proof.clone();
+        altered.old_size = 1;
+        assert!(check(&altered, &old, &new).is_err());
+        let mut shrink = proof.clone();
+        core::mem::swap(&mut shrink.old_size, &mut shrink.new_size);
+        core::mem::swap(&mut shrink.old_root, &mut shrink.new_root);
+        assert!(check(&shrink, &new, &old).is_err());
+        let equal = build_consistency_proof(&leaves, 2, 2).unwrap();
+        assert_eq!(check(&equal, &old, &old), Ok(()));
+        let rewritten = signed_root(&key, "local", 2, &proof.new_root);
+        let mut rewrite = equal;
+        rewrite.new_root = rewritten.root_hash.clone();
+        assert!(check(&rewrite, &old, &rewritten).is_err());
     }
 
     #[test]
