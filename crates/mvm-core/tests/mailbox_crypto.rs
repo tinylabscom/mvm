@@ -473,7 +473,7 @@ fn local_journal_expiry_recovers_after_interrupted_anchor_commit() {
         }),
         Err(JournalError::Rollback)
     ));
-    assert_eq!(anchor.tip().cursor, 1, "no terminal receipt before anchor");
+    assert_eq!(anchor.tip().cursor, 2, "no terminal receipt before anchor");
     drop(journal);
     drop(anchor);
 
@@ -495,7 +495,7 @@ fn local_journal_expiry_recovers_after_interrupted_anchor_commit() {
         .expect("signed terminal outcome after restart");
     assert_eq!(expired.receipt.outcome, DeliveryOutcome::Expired);
     verify_receipt(&expired, &signer.verifying_key()).expect("signed expiry");
-    assert_eq!(anchor.tip().cursor, 2);
+    assert_eq!(anchor.tip().cursor, 3);
 }
 
 #[test]

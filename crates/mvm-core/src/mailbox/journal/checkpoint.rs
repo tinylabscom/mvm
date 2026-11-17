@@ -19,23 +19,23 @@ use super::{
 
 const CHECKPOINT_DOMAIN: &[u8] = b"mvm.mailbox.local-checkpoint.v1\0";
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CheckpointEntry {
-    identity: ReplayIdentity,
-    seen: Seen,
+pub(super) struct CheckpointEntry {
+    pub(super) identity: ReplayIdentity,
+    pub(super) seen: Seen,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CheckpointState {
-    source: JournalTip,
-    address: MailboxAddress,
-    history_key: HistoryKeyRef,
-    retention: MailboxRetentionPolicy,
-    created_at_unix_ms: i64,
-    entries: Vec<CheckpointEntry>,
-    used_challenges: Vec<([u8; 32], ReplayIdentity)>,
+    pub(super) source: JournalTip,
+    pub(super) address: MailboxAddress,
+    pub(super) history_key: HistoryKeyRef,
+    pub(super) retention: MailboxRetentionPolicy,
+    pub(super) created_at_unix_ms: i64,
+    pub(super) entries: Vec<CheckpointEntry>,
+    pub(super) used_challenges: Vec<([u8; 32], ReplayIdentity)>,
 }
 
 pub(super) fn checkpoint_path(root: &Path, cursor: u64) -> PathBuf {
@@ -43,6 +43,36 @@ pub(super) fn checkpoint_path(root: &Path, cursor: u64) -> PathBuf {
 }
 
 impl MailboxJournal {
+    pub(super) fn checkpoint_state(
+        &self,
+        now_unix_ms: i64,
+    ) -> Result<CheckpointState, JournalError> {
+        Ok(CheckpointState {
+            source: self.tip,
+            address: self.address,
+            history_key: self
+                .history_key
+                .ok_or(JournalError::HistoryKeyUnavailable)?,
+            retention: self.retention.ok_or(JournalError::InvalidLimits)?,
+            created_at_unix_ms: now_unix_ms,
+            entries: self
+                .order
+                .iter()
+                .map(|identity| {
+                    self.seen
+                        .get(identity)
+                        .cloned()
+                        .map(|seen| CheckpointEntry {
+                            identity: *identity,
+                            seen,
+                        })
+                        .ok_or(JournalError::Corrupt)
+                })
+                .collect::<Result<_, _>>()?,
+            used_challenges: self.used_challenges.iter().map(|(a, b)| (*a, *b)).collect(),
+        })
+    }
+
     pub(super) fn restore_checkpoint(
         &mut self,
         path: &Path,
@@ -69,7 +99,8 @@ impl MailboxJournal {
         );
         let record: Record =
             serde_json::from_slice(&plaintext).map_err(|_| JournalError::Corrupt)?;
-        if record.version != 3
+        if !matches!(record.version, 3 | 4)
+            || record.version < self.format_version
             || record.cursor != cursor
             || record.previous != previous
             || record.address != self.address
@@ -110,6 +141,9 @@ impl MailboxJournal {
             seen: entry,
         } in state.entries
         {
+            if record.version == 3 && entry.receipt_completion.is_some() {
+                return Err(JournalError::Corrupt);
+            }
             let receipt = &entry.accepted_receipt;
             if receipt.address != self.address
                 || receipt.outcome != DeliveryOutcome::AcceptedLocalDurable
@@ -171,6 +205,21 @@ impl MailboxJournal {
             } else if entry.signed_ack.is_some() {
                 return Err(JournalError::Corrupt);
             }
+            match &entry.receipt_completion {
+                Some(super::ReceiptCompletion::Pending { reserved_bytes }) => {
+                    if self.pending_receipt(identity, &entry.accepted_receipt)?
+                        != (super::ReceiptCompletion::Pending {
+                            reserved_bytes: *reserved_bytes,
+                        })
+                    {
+                        return Err(JournalError::Corrupt);
+                    }
+                }
+                Some(super::ReceiptCompletion::Retained { encoded_receipt }) => {
+                    self.decode_retained_receipt(identity, &entry, encoded_receipt)?;
+                }
+                None => {}
+            }
             if seen.insert(identity, entry).is_some() {
                 return Err(JournalError::Corrupt);
             }
@@ -194,6 +243,7 @@ impl MailboxJournal {
         };
         self.bytes = bytes.len() as u64;
         self.records = 1;
+        self.format_version = record.version;
         Ok(())
     }
 
@@ -235,14 +285,13 @@ impl MailboxJournal {
     ) -> Result<JournalTip, JournalError> {
         self.local_ready(anchor, &signer.verifying_key())?;
         let retention = self.retention.ok_or(JournalError::InvalidLimits)?;
-        let history_key = self
-            .history_key
-            .ok_or(JournalError::HistoryKeyUnavailable)?;
         if now_unix_ms < 0 {
             return Err(JournalError::InvalidLimits);
         }
         let mut retired = BTreeSet::new();
         for (identity, entry) in &self.seen {
+            // A terminal obligation includes a pending receipt, but neither
+            // extends the signed replay-retention horizon.
             if (entry.acknowledged || entry.expired_at_unix_ms.is_some())
                 && now_unix_ms
                     > retention
@@ -252,41 +301,20 @@ impl MailboxJournal {
                 retired.insert(*identity);
             }
         }
-        let state = CheckpointState {
-            source: self.tip,
-            address: self.address,
-            history_key,
-            retention,
-            created_at_unix_ms: now_unix_ms,
-            entries: self
-                .order
-                .iter()
-                .filter(|identity| !retired.contains(identity))
-                .map(|identity| {
-                    self.seen
-                        .get(identity)
-                        .cloned()
-                        .map(|seen| CheckpointEntry {
-                            identity: *identity,
-                            seen,
-                        })
-                })
-                .collect::<Option<Vec<_>>>()
-                .ok_or(JournalError::Corrupt)?,
-            used_challenges: self
-                .used_challenges
-                .iter()
-                .filter(|(_, identity)| !retired.contains(identity))
-                .map(|(challenge, identity)| (*challenge, *identity))
-                .collect(),
-        };
+        let mut state = self.checkpoint_state(now_unix_ms)?;
+        state
+            .entries
+            .retain(|entry| !retired.contains(&entry.identity));
+        state
+            .used_challenges
+            .retain(|(_, identity)| !retired.contains(identity));
         let signature = signer
             .sign(&canonical_bytes(CHECKPOINT_DOMAIN, &state)?)
             .to_bytes()
             .to_vec();
         let cursor = self.tip.cursor.checked_add(1).ok_or(JournalError::Full)?;
         let record = Record {
-            version: 3,
+            version: 4,
             cursor,
             previous: self.tip.head,
             address: self.address,
@@ -306,13 +334,10 @@ impl MailboxJournal {
             &[DOMAIN, &self.tip.head].concat(),
         );
         let size = (ciphertext.len() + 64) as u64;
-        if self
-            .bytes
-            .checked_add(size)
-            .is_none_or(|n| n > self.limits.max_bytes)
-        {
-            return Err(JournalError::Full);
-        }
+        let JournalEvent::Checkpoint { state, .. } = &record.event else {
+            return Err(JournalError::Corrupt);
+        };
+        self.check_checkpoint_capacity(state, size)?;
         let tag = self.mac(&ciphertext);
         let mut bytes = self.tip.head.to_vec();
         bytes.extend_from_slice(&tag);
@@ -348,6 +373,7 @@ impl MailboxJournal {
             .retain(|_, identity| !retired.contains(identity));
         self.bytes = size;
         self.records = 1;
+        self.format_version = 4;
         self.poisoned = false;
         Ok(next)
     }

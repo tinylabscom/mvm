@@ -81,12 +81,20 @@ missing or divergent anchored prefix, and may reconcile only an intact
 contiguous suffix written before an interrupted anchor commit.
 The original accepted receipt body and observation time are retained with
 deduplication state; V1 retries still use their existing `duplicate` outcome.
-The local opener and `admit_local` sign a distinct V2
-`accepted_local_durable` receipt only after the encrypted record and local
-anchor have been fsynced. An exact local retry re-verifies current admission
-and the committed local tip before re-signing the original body/time, yielding
-the same signed bytes after restart. Recovery refuses a local V2 receipt in an
-independently anchored journal or a V1 strong receipt in a local journal.
+Local admission commits the accepted body and local anchor before signing
+the distinct V2 `accepted_local_durable` receipt. It then durably commits a
+storage-version-4 `ReceiptCompleted` record containing the exact signed
+encoding before returning success. An exact local retry re-verifies current
+legacy admission and the committed tip, then returns that retained encoding
+without re-signing or another acceptance debit. A legacy version-3 accepted
+body does not prove that any signed encoding was retained: historical signing
+and response status remain unknown. A currently authorized exact retry may
+create its first retained completion from the original committed body.
+Local storage can extend a version-3 prefix with version-4 records, but cannot
+return to version 3; older readers refuse version 4. This is a storage-format
+extension, not an envelope-V3 or destination-authority upgrade. Recovery refuses
+a local V2 receipt in an independently anchored journal or a V1 strong receipt
+in a local journal.
 The production hostd helper binds the local journal to its existing endpoint
 only after verifying signed-plan custody, retained purpose keys, the journal
 anchor, the finite retention window, and the guest boot identity. Dev retains
@@ -97,8 +105,14 @@ recovery. Expired messages are not disclosed, and an uncertain expiry write
 cannot mint a terminal receipt. Local compaction fsyncs a destination-signed,
 encrypted checkpoint and advances the host-local anchor before pruning old
 entries. It preserves pending delivery and dedup state through expiry plus
-the signed window, retires terminal state only after that horizon, and
-refuses when a checkpoint cannot fit the bounded quota.
+the signed window, including pending and retained receipt-completion evidence.
+It retires terminal obligations only after that horizon. New local acceptance
+reserves logical record, byte and cursor capacity for receipt completion and
+checkpoint publication; subsequent writes preserve outstanding reservations.
+Compaction checks both its old-prefix-plus-checkpoint publication peak and its
+post-prune headroom. These are logical quota checks, not reserved filesystem
+blocks: disk-full or uncertain I/O can still prevent completion or require
+recovery. Neither condition proves that an accepted body was rolled back.
 Retained guest-reader controls are checked against the historical signed
 Receive capability, enrollment, lease and guest ACK before recovery accepts
 their delivery state. An exact ACK retry still needs current boot, session,

@@ -48,10 +48,14 @@ const MAX_JOURNAL_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_LEASE_RETRIES: u8 = 3;
 
 mod anchor;
+mod capacity;
 mod checkpoint;
+mod receipt;
 mod recovery;
 pub use anchor::FileJournalAnchor;
 use checkpoint::{CheckpointState, checkpoint_path};
+pub use receipt::EncodedDestinationReceipt;
+use receipt::ReceiptCompletion;
 
 /// Limits are checked both before admission and while reconstructing state.
 #[derive(Debug, Clone, Copy)]
@@ -217,6 +221,8 @@ pub enum JournalError {
     GuestAckRequired,
     #[error("journal cannot be used after an uncertain write")]
     Uncertain,
+    #[error("mailbox acceptance is committed but its receipt is not yet retained")]
+    ReceiptPending,
     #[error("independent rollback anchor and recoverable key custody are required")]
     DurableAuthorityUnavailable,
     #[error("mailbox history key is unavailable")]
@@ -274,6 +280,10 @@ enum JournalEvent {
         receipt: Box<DestinationReceipt>,
         authorization_signature: Vec<u8>,
     },
+    ReceiptCompleted {
+        identity: ReplayIdentity,
+        encoded_receipt: String,
+    },
     Acknowledged {
         identity: ReplayIdentity,
         acknowledged_at_unix_ms: i64,
@@ -323,6 +333,8 @@ struct Seen {
     expired_at_unix_ms: Option<i64>,
     lease: Option<LeaseState>,
     signed_ack: Option<SignedMailboxDeliveryAck>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    receipt_completion: Option<ReceiptCompletion>,
 }
 
 #[derive(Default)]
@@ -353,6 +365,11 @@ pub struct MailboxJournal {
     order: Vec<ReplayIdentity>,
     used_challenges: BTreeMap<[u8; 32], ReplayIdentity>,
     poisoned: bool,
+    format_version: u8,
+    #[cfg(test)]
+    receipt_fault: Option<receipt::ReceiptFault>,
+    #[cfg(test)]
+    receipt_sign_attempts: usize,
     _lock: FileLock,
 }
 
@@ -725,62 +742,26 @@ impl MailboxJournal {
     fn admit_verified(
         &mut self,
         request: JournalAdmission<'_>,
-        anchor: impl FnOnce(JournalTip) -> Result<(), JournalError>,
+        anchor: impl FnMut(JournalTip) -> Result<(), JournalError>,
     ) -> Result<SignedDestinationReceipt, JournalError> {
         self.admit_at_tier(request, AcceptanceTier::Independent, anchor)
+            .map(EncodedDestinationReceipt::into_signed)
     }
 
     fn admit_at_tier(
         &mut self,
         request: JournalAdmission<'_>,
         tier: AcceptanceTier,
-        anchor: impl FnOnce(JournalTip) -> Result<(), JournalError>,
-    ) -> Result<SignedDestinationReceipt, JournalError> {
+        mut anchor: impl FnMut(JournalTip) -> Result<(), JournalError>,
+    ) -> Result<EncodedDestinationReceipt, JournalError> {
+        let identity = self.verify_admission(&request, tier)?;
         let JournalAdmission {
             envelope,
             capability,
             context,
-            encryption_key,
-            sender_key,
             signer,
+            ..
         } = request;
-        if self.poisoned {
-            return Err(JournalError::Uncertain);
-        }
-        if self.tier != tier {
-            return Err(JournalError::DurableAuthorityUnavailable);
-        }
-        if self.address.tenant != context.expected_tenant
-            || self.address.authorization_domain != context.expected_authorization_domain
-            || self.address.mailbox != context.expected_mailbox
-            || self.address.recipient != context.expected_recipient
-            || signer.verifying_key() != self.authority
-        {
-            return Err(JournalError::WrongAuthority);
-        }
-        if self.history_key.is_some_and(|reference| {
-            reference.address != self.address
-                || reference.execution_epoch != context.current_execution_epoch
-        }) {
-            return Err(JournalError::HistoryKeyMismatch);
-        }
-        if tier == AcceptanceTier::Local {
-            self.retention
-                .ok_or(JournalError::DurableAuthorityUnavailable)?
-                .retained_until(envelope.routing.expires_at_unix_ms)
-                .map_err(|_| JournalError::InvalidLimits)?;
-        }
-        let mut probe = Probe::default();
-        let opened = open_authenticated_envelope(
-            envelope,
-            capability,
-            context,
-            encryption_key,
-            sender_key,
-            &self.authority,
-            &mut probe,
-        )?;
-        let identity = probe.0.ok_or(JournalError::Corrupt)?;
         let receipt = |outcome| DestinationReceipt {
             protocol_version: match tier {
                 AcceptanceTier::Independent => ProtocolVersion::V1,
@@ -788,9 +769,9 @@ impl MailboxJournal {
             },
             signature_algorithm: SignatureAlgorithm::ED25519,
             delivery_id: envelope.routing.delivery_id,
-            message_id: opened.header().message_id,
+            message_id: identity.message_id,
             address: self.address,
-            execution_epoch: opened.header().execution_epoch,
+            execution_epoch: identity.execution_epoch,
             outcome,
             observed_at_unix_ms: context.now_unix_ms,
             ciphertext_commitment: envelope.ciphertext_commitment,
@@ -808,20 +789,19 @@ impl MailboxJournal {
             };
             if previous.accepted_receipt.outcome != expected_outcome
                 || previous.accepted_receipt.address != self.address
-                || previous.accepted_receipt.message_id != opened.header().message_id
+                || previous.accepted_receipt.message_id != identity.message_id
                 || previous.accepted_receipt.ciphertext_commitment != envelope.ciphertext_commitment
             {
                 return Err(JournalError::Corrupt);
             }
-            return Ok(sign_receipt(
-                match tier {
-                    AcceptanceTier::Independent => receipt(DeliveryOutcome::Duplicate),
-                    AcceptanceTier::Local => previous.accepted_receipt.clone(),
-                },
-                signer,
-            )?);
+            return match tier {
+                AcceptanceTier::Independent => EncodedDestinationReceipt::from_signed(
+                    sign_receipt(receipt(DeliveryOutcome::Duplicate), signer)?,
+                ),
+                AcceptanceTier::Local => self.complete_local_receipt(identity, signer, anchor),
+            };
         }
-        if self.tip.cursor >= self.limits.max_records as u64 {
+        if self.records >= self.limits.max_records {
             return Err(JournalError::Full);
         }
         let accepted = receipt(match tier {
@@ -840,6 +820,11 @@ impl MailboxJournal {
             )?)
             .to_bytes()
             .to_vec();
+        let receipt_completion = if tier == AcceptanceTier::Local {
+            Some(self.pending_receipt(identity, &accepted)?)
+        } else {
+            None
+        };
         self.append(
             JournalEvent::Accepted {
                 identity,
@@ -847,7 +832,7 @@ impl MailboxJournal {
                 receipt: Box::new(accepted.clone()),
                 authorization_signature,
             },
-            anchor,
+            &mut anchor,
         )?;
         self.seen.insert(
             identity,
@@ -859,10 +844,16 @@ impl MailboxJournal {
                 expired_at_unix_ms: None,
                 lease: None,
                 signed_ack: None,
+                receipt_completion,
             },
         );
         self.order.push(identity);
-        sign_receipt(accepted, signer).map_err(JournalError::from)
+        match tier {
+            AcceptanceTier::Independent => {
+                EncodedDestinationReceipt::from_signed(sign_receipt(accepted, signer)?)
+            }
+            AcceptanceTier::Local => self.complete_local_receipt(identity, signer, anchor),
+        }
     }
 
     /// Admit only against the current independently anchored tip.
@@ -919,8 +910,8 @@ impl MailboxJournal {
         request: JournalAdmission<'_>,
         anchor: &FileJournalAnchor,
     ) -> Result<SignedDestinationReceipt, JournalError> {
-        self.local_ready(anchor, &request.signer.verifying_key())?;
-        self.admit_at_tier(request, AcceptanceTier::Local, |next| anchor.advance(next))
+        self.admit_local_encoded(request, anchor)
+            .map(EncodedDestinationReceipt::into_signed)
     }
 
     fn append(
@@ -936,13 +927,16 @@ impl MailboxJournal {
             return Err(JournalError::Full);
         }
         let record = Record {
-            version: if self.history_key.is_some() { 3 } else { 2 },
+            version: self.write_version(),
             cursor,
             previous: self.tip.head,
             address: self.address,
             history_key: self.history_key,
             event,
         };
+        if self.tier == AcceptanceTier::Local {
+            self.check_append_capacity(&record)?;
+        }
         let body = Zeroizing::new(serde_json::to_vec(&record).map_err(|_| JournalError::Corrupt)?);
         if body.len() + 32 + aead::NONCE_SIZE + aead::TAG_SIZE > MAX_RECORD_BYTES {
             return Err(JournalError::Full);
@@ -973,9 +967,24 @@ impl MailboxJournal {
         self.tip = tip;
         self.bytes += bytes.len() as u64;
         self.records += 1;
+        #[cfg(test)]
+        if matches!(record.event, JournalEvent::ReceiptCompleted { .. })
+            && self.receipt_fault == Some(receipt::ReceiptFault::AfterPublication)
+        {
+            self.poisoned = true;
+            return Err(JournalError::Uncertain);
+        }
         if let Err(error) = anchor(tip) {
             self.poisoned = true;
             return Err(error);
+        }
+        self.format_version = record.version;
+        #[cfg(test)]
+        if matches!(record.event, JournalEvent::ReceiptCompleted { .. })
+            && self.receipt_fault == Some(receipt::ReceiptFault::AfterAnchor)
+        {
+            self.poisoned = true;
+            return Err(JournalError::Uncertain);
         }
         Ok(tip)
     }
@@ -1466,6 +1475,8 @@ mod anchor_tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    mod receipt_tests;
+
     struct IndependentAnchor {
         address: MailboxAddress,
         tip: Mutex<JournalTip>,
@@ -1809,7 +1820,7 @@ mod anchor_tests {
             serde_jcs::to_vec(&duplicate).expect("signed retry bytes"),
             serde_jcs::to_vec(&accepted).expect("signed original bytes")
         );
-        assert_eq!(journal.tip().cursor, 1, "retry must not append");
+        assert_eq!(journal.tip().cursor, 2, "retry must not append");
         assert!(matches!(
             journal.admit_with_anchor(
                 admission(
@@ -1836,8 +1847,70 @@ mod anchor_tests {
                 &anchor,
                 local_retention(),
             ),
-            Err(JournalError::Rollback)
+            Err(JournalError::Rollback | JournalError::Corrupt)
         ));
+    }
+
+    #[test]
+    fn local_acceptance_commits_signed_completion_before_return() {
+        let dir = tempfile::tempdir().expect("test-purpose journal");
+        let root = dir.path().join("journal");
+        let anchor_path = dir.path().join("anchor").join("tip.json");
+        let (envelope, capability, context, payload_key, sender_key, signer) = message();
+        let (reference, custody) = versioned_custody();
+        let anchor = FileJournalAnchor::open(&anchor_path, address(), rand::random())
+            .expect("test-purpose anchor");
+        let mut journal = MailboxJournal::open_local_with_custody(
+            &root,
+            reference,
+            signer.verifying_key(),
+            JournalLimits {
+                max_records: 16,
+                max_bytes: 1024 * 1024,
+            },
+            &custody,
+            &anchor,
+            local_retention(),
+        )
+        .expect("test-purpose local journal");
+
+        let signed = journal
+            .admit_local(
+                admission(
+                    &envelope,
+                    &capability,
+                    &context,
+                    &payload_key,
+                    &sender_key,
+                    &signer,
+                ),
+                &anchor,
+            )
+            .expect("durable local acceptance");
+
+        assert_eq!(
+            journal.tip().cursor,
+            2,
+            "success requires acceptance and retained signed completion"
+        );
+        assert_eq!(journal.tip(), anchor.tip(), "completion must be anchored");
+        let previous = read_record(&record_path(&root, 1)).expect("accepted record");
+        let completed = read_record(&record_path(&root, 2)).expect("completed receipt record");
+        let body = aead::open(
+            &journal.record_key(),
+            &completed[32..],
+            &[DOMAIN, &previous[..32]].concat(),
+        )
+        .expect("authenticated completion ciphertext");
+        let record: serde_json::Value =
+            serde_json::from_slice(&body).expect("completion record JSON");
+        assert_eq!(record["version"], 4, "new local storage format");
+        assert_eq!(record["event"]["kind"], "receipt_completed");
+        assert_eq!(
+            record["event"]["encoded_receipt"],
+            STANDARD_NO_PAD.encode(serde_json::to_vec(&signed).expect("signed receipt encoding")),
+            "the returned signed encoding must already be retained"
+        );
     }
 
     #[test]
@@ -1928,7 +2001,7 @@ mod anchor_tests {
             "old prefix pruned after anchor"
         );
         assert!(
-            !fs::read(checkpoint_path(&root, 2))
+            !fs::read(checkpoint_path(&root, 3))
                 .expect("encrypted checkpoint")
                 .windows(b"hello".len())
                 .any(|window| window == b"hello"),
@@ -1973,13 +2046,13 @@ mod anchor_tests {
             serde_jcs::to_vec(&duplicate).expect("duplicate bytes"),
             serde_jcs::to_vec(&original).expect("original bytes")
         );
-        assert_eq!(recovered.tip().cursor, 2, "duplicate cannot append");
-        let first_checkpoint = checkpoint_path(&root, 2);
+        assert_eq!(recovered.tip().cursor, 3, "duplicate cannot append");
+        let first_checkpoint = checkpoint_path(&root, 3);
         recovered
             .compact_local(context.now_unix_ms, &signer, &anchor)
             .expect("subsequent generation can replace the first");
         assert!(!first_checkpoint.exists(), "superseded checkpoint pruned");
-        assert_eq!(recovered.tip().cursor, 3);
+        assert_eq!(recovered.tip().cursor, 4);
         drop(recovered);
         drop(anchor);
         let anchor =
@@ -2034,7 +2107,7 @@ mod anchor_tests {
             .expect("checkpoint anchored");
         drop(journal);
         drop(anchor);
-        let path = checkpoint_path(&root, 2);
+        let path = checkpoint_path(&root, 3);
         let original = fs::read(&path).expect("checkpoint bytes");
         let mut tampered = original.clone();
         let last = tampered.last_mut().expect("nonempty checkpoint");
@@ -2218,7 +2291,7 @@ mod anchor_tests {
             journal.expire_next(deadline, &signer, |_| Err(JournalError::Rollback)),
             Err(JournalError::Rollback)
         ));
-        assert_eq!(anchor.tip().cursor, 1, "no unanchored terminal receipt");
+        assert_eq!(anchor.tip().cursor, 2, "no unanchored terminal receipt");
         assert!(matches!(
             journal.expired_receipt(identity, &signer),
             Err(JournalError::Uncertain)
@@ -2238,7 +2311,7 @@ mod anchor_tests {
             local_retention(),
         )
         .expect("verify and reconcile terminal suffix");
-        assert_eq!(anchor.tip().cursor, 2);
+        assert_eq!(anchor.tip().cursor, 3);
         let expired = journal
             .expired_receipt(identity, &signer)
             .expect("terminal receipt after reconciliation");
@@ -2321,7 +2394,7 @@ mod anchor_tests {
             })
             .expect("expiry commit")
             .expect("terminal receipt");
-        let path = record_path(&root, 2);
+        let path = record_path(&root, accepted_tip.cursor + 1);
         let ciphertext = fs::read(&path).expect("expiry record");
         let plaintext = aead::open(
             &journal.record_key(),
@@ -2335,7 +2408,7 @@ mod anchor_tests {
             ..
         } = &mut record.event
         else {
-            panic!("the second record must be the terminal expiry");
+            panic!("the record after acceptance completion must be the terminal expiry");
         };
         authorization_signature[0] ^= 1;
         let forged = aead::seal(
@@ -2364,7 +2437,7 @@ mod anchor_tests {
             ),
             Err(JournalError::Corrupt)
         ));
-        assert_eq!(anchor.tip().cursor, 2, "recovery must not amend the anchor");
+        assert_eq!(anchor.tip().cursor, 3, "recovery must not amend the anchor");
     }
 
     #[test]

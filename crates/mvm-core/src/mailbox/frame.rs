@@ -24,7 +24,10 @@ use super::{decode_envelope, encode_envelope, verify_receipt};
 // closes or sends arbitrarily large error text.
 const MAX_VERDICT_BYTES: u64 = 4 * 1024;
 
-/// Why a frame was not queued. Sent back to the peer verbatim.
+/// A non-success exchange verdict, sent back to the peer verbatim.
+///
+/// In particular, `Unavailable` does not prove nonacceptance: a durable
+/// outcome may have committed before its signed receipt could be returned.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum Refusal {
     #[error("frame exceeds the {0}-byte limit")]
