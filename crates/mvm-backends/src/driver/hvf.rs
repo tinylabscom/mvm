@@ -17,9 +17,8 @@ use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT, dev_console_data_po
 use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_state_dir};
 use mvm_core::protocol::hvf_control::HvfInstance;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, HostDialRoute,
-    LayerCoverage, ResourceControls, StandbyError, StandbyHandle, VmCapabilities, VmExitStatus,
-    VmId, VmStatus,
+    BackendKind, BackendSecurityProfile, GuestChannelInfo, HostDialRoute, ResourceControls,
+    StandbyError, StandbyHandle, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
 use mvm_vmm::host::hvf_control_transport as stop_wire;
@@ -853,26 +852,10 @@ impl VmmDriver for HvfDriver {
         // surface and the data plane is vsock-only (no guest NIC; egress rides
         // the host gating endpoint). Claims 1-2/4-7 hold as on FC; claim 3
         // (verified boot) does not hold on the default path — the virtiofs-root
-        // serves a host directory that cannot be dm-verity-sealed.
-        BackendSecurityProfile {
-            claims: [
-                ClaimStatus::Holds,       // 1 — host-fs isolation via the VMM + admitted shares
-                ClaimStatus::Holds,       // 2 — uid-0 protections, guest-side (same as FC)
-                ClaimStatus::DoesNotHold, // 3 — virtiofs-root has no dm-verity; block+ext4 (FC/Option B) only
-                ClaimStatus::Holds,       // 4 — guest agent has no do_exec in prod
-                ClaimStatus::Holds,       // 5 — vsock framing fuzzed
-                ClaimStatus::Holds,       // 6 — dev image hash verified
-                ClaimStatus::Holds,       // 7 — cargo deps audited
-            ],
-            layer_coverage: LayerCoverage::all_layers(),
-            tier: "Tier 2",
-            notes: &[
-                "In-house Hypervisor.framework VMM on macOS 26+ Apple silicon (the default tier).",
-                "vsock-only data plane: no guest NIC; egress rides the host gating endpoint (auditable).",
-                "Claim 3 (verified boot) does not hold on the virtiofs-root path — dm-verity targets the block+ext4 backends (Firecracker + Option B).",
-                "Pause/resume + snapshot land as they are wired onto the primitive.",
-            ],
-        }
+        // serves a host directory that cannot be dm-verity-sealed. The
+        // canonical table entry lives in mvm-contract alongside the other
+        // backends.
+        BackendSecurityProfile::for_kind(BackendKind::Hvf).clone()
     }
 
     fn supports_resident_handoff(&self) -> bool {

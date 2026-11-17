@@ -17,9 +17,8 @@ use libkrun_sys::{BridgeRestartPolicy, KrunContext, SupervisorConfig};
 use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT};
 use mvm_core::config::{vm_libkrun_pid, vm_state_dir, vm_vsock_port_socket_at};
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, HostDialRoute,
-    LayerCoverage, ResourceControls, SnapshotCapability, VmCapabilities, VmExitStatus, VmId,
-    VmStatus,
+    BackendKind, BackendSecurityProfile, GuestChannelInfo, HostDialRoute, ResourceControls,
+    SnapshotCapability, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
 
@@ -482,30 +481,11 @@ impl VmmDriver for LibkrunDriver {
 
     fn security_profile(&self) -> BackendSecurityProfile {
         // Tier 2: hardware isolation via KVM (Linux) or Hypervisor.framework
-        // (macOS). Comparable VMM TCB to Firecracker — libkrun is rust-vmm
-        // based, ~80K LOC, no Firecracker-excluded features (so it passes
-        // the "fork test"). Claim 3 (verified boot) is partial
-        // because the dm-verity pipeline currently targets Firecracker;
-        // libkrun support is a follow-up.
-        BackendSecurityProfile {
-            claims: [
-                ClaimStatus::Holds,       // 1 — host-fs isolation via KVM/HVF
-                ClaimStatus::Holds,       // 2 — uid-0 protections same as FC
-                ClaimStatus::DoesNotHold, // 3 — verified boot for libkrun rootfs not yet wired
-                ClaimStatus::Holds,       // 4 — guest agent has no do_exec in prod
-                ClaimStatus::Holds,       // 5 — vsock framing is fuzzed
-                ClaimStatus::Holds,       // 6 — image hash verification
-                ClaimStatus::Holds,       // 7 — cargo deps audited
-            ],
-            layer_coverage: LayerCoverage::all_layers(),
-            tier: "Tier 2",
-            notes: &[
-                "Hardware isolation via KVM (Linux) or Hypervisor.framework (macOS).",
-                "Comparable VMM TCB to Firecracker; passes plan 53 \"fork test\".",
-                "Claim 3 (verified boot) is partial — dm-verity pipeline targets Firecracker today.",
-                "Supported on Linux KVM and macOS Apple Silicon; macOS Intel is not a supported local host.",
-            ],
-        }
+        // (macOS), comparable VMM TCB to Firecracker. Claim 3 (verified boot)
+        // is partial because the dm-verity pipeline currently targets
+        // Firecracker; libkrun support is a follow-up. The canonical table
+        // entry lives in mvm-contract alongside the other backends.
+        BackendSecurityProfile::for_kind(BackendKind::Libkrun).clone()
     }
 
     fn workload_base_bootargs(&self, has_disk: bool) -> String {

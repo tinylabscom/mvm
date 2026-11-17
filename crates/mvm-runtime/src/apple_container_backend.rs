@@ -228,28 +228,10 @@ impl VmBackend for AppleContainerBackend {
     fn security_profile(&self) -> BackendSecurityProfile {
         // The claims array is the HVF runner's verbatim: the boot, the
         // isolation boundary, and the activation stack are identical — only
-        // the kernel image differs, and the notes say so honestly.
-        let inner = self.runner.security_profile();
-        BackendSecurityProfile {
-            claims: inner.claims,
-            layer_coverage: inner.layer_coverage,
-            tier: inner.tier,
-            notes: &[
-                "This backend is the HVF workload runner booting Apple's prebuilt container \
-                 kernel: the same universal initramfs, guest agent, activation flow, egress \
-                 gate, and isolation boundary as the HVF backend — only the kernel image differs.",
-                "The kernel is a fetched binary artifact (Apple's container kernel), not an \
-                 mvm-built image: it is trusted only with a matching vmlinux.blake3 digest \
-                 sidecar in the artifact cache — resolution fails closed when the sidecar is \
-                 absent, malformed, or disagrees with the kernel bytes, and an unverified \
-                 kernel never makes this backend available.",
-                "The sealed block+ext4 boot path is live-proven on macOS HVF with this \
-                 kernel: dm-verity-verified rootfs and runtime-overlay mounts, activation \
-                 acknowledged by the guest agent, and the uid-901 privilege drop all observed \
-                 in the gated end-to-end boot test.",
-                "Opt-in only; never selected by auto-detect.",
-            ],
-        }
+        // the kernel image differs, and the notes say so honestly. Both
+        // this backend and the HVF runner read their posture from the same
+        // canonical table in mvm-contract.
+        BackendSecurityProfile::for_kind(BackendKind::AppleContainer).clone()
     }
 }
 

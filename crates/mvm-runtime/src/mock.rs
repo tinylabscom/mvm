@@ -27,10 +27,9 @@ use std::sync::Mutex;
 use anyhow::{Context, Result, bail};
 use mvm_core::checkpoint::CheckpointId;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
-    SnapshotCapability, StandbyClaim, StandbyError, StandbyHandle, StandbySpec, StandbyState,
-    StartMode, VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmNetworkInfo, VmStartConfig,
-    VmStatus,
+    BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, StandbyClaim,
+    StandbyError, StandbyHandle, StandbySpec, StandbyState, StartMode, VmBackend, VmCapabilities,
+    VmExitStatus, VmId, VmInfo, VmNetworkInfo, VmStartConfig, VmStatus,
 };
 
 use crate::checkpoint::{CaptureFsQuickParams, capture_fs_quick};
@@ -492,23 +491,17 @@ impl VmBackend for MockBackend {
         // The mock satisfies none of the seven security claims because
         // it doesn't run a guest at all. Operators selecting it via
         // `--hypervisor mock` get a loud Tier-3 banner so they
-        // can't accidentally land production traffic on it.
-        BackendSecurityProfile {
-            claims: [ClaimStatus::DoesNotHold; 7],
-            layer_coverage: LayerCoverage::default(),
-            tier: "Tier 3 (test-only)",
-            notes: &[
-                "MockBackend is in-process test infrastructure.",
-                "No guest, no rootfs, no isolation; never use in production.",
-            ],
-        }
+        // can't accidentally land production traffic on it. The canonical
+        // table entry lives in mvm-contract, shared with the driver-level
+        // mock so the two test doubles cannot drift apart.
+        BackendSecurityProfile::for_kind(BackendKind::Mock).clone()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_core::vm_backend::VmStartConfig;
+    use mvm_core::vm_backend::{ClaimStatus, VmStartConfig};
 
     fn cfg(name: &str) -> VmStartConfig {
         VmStartConfig {
