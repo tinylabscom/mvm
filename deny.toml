@@ -25,15 +25,26 @@ feature-depth = 1
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
-# No advisories are ignored. The transitive unmaintained/vulnerable deps
-# this list used to suppress (rsa, async-std, fxhash, instant,
-# number_prefix, proc-macro-error/2, rustls-pemfile, paste) were all
+# This list is empty by policy, and the history is why: the transitive
+# unmaintained/vulnerable deps it used to suppress (rsa, async-std, fxhash,
+# instant, number_prefix, proc-macro-error/2, rustls-pemfile, paste) were all
 # eliminated outright — by migrating `sigstore` → the modular
 # `sigstore-verify` stack, bumping inquire/indicatif/notify/httpmock/getset,
 # pinning `jiff < 0.2.29` (its optional `defmt` feature pulls
-# proc-macro-error2), and moving PEM parsing onto `rustls-pki-types`. Keep
-# this list empty: a new advisory must be fixed, not suppressed.
-ignore = []
+# proc-macro-error2), and moving PEM parsing onto `rustls-pki-types`.
+#
+# There is exactly one exception, and it is the first. RUSTSEC-2026-0543 says
+# chrono is unmaintained. That is an informational notice, not a
+# vulnerability, and no upgrade exists. Replacing chrono touches signed and
+# hashed timestamps across 11 crates, so it is tracked separately in #5670 and
+# does not ride along with a gate fix. The ignore is time-limited: the
+# `expires` date in its reason is checked by `xtask check-deny-ignore-expiry`
+# (part of `check-all`), which fails once that day has passed and for any
+# entry lacking an expiry or an issue. Any other advisory still fails the
+# build: a new advisory must be fixed, not suppressed.
+ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained (informational, no upgrade exists); replacement is tracked in #5670, expires 2026-12-01" },
+]
 
 # ── Licenses ──────────────────────────────────────────────────────
 [licenses]
