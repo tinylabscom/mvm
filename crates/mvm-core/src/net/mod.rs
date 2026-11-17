@@ -6,5 +6,6 @@
 //! is transport-independent machinery both sides need: the authenticated
 //! session protecting FlowMux/control channels and the typed telemetry workers.
 
+pub mod actor_session;
 pub mod session;
 pub mod telemetry;

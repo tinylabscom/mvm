@@ -369,6 +369,25 @@ pub trait RunningVm: Send {
     }
     /// Block until the VM exits; returns its status.
     fn wait(&self) -> Result<VmExitStatus>;
+    /// A separately owned kernel event observer, not stop or cleanup authority.
+    fn exit_observer(&self) -> Result<crate::host::process_exit::ProcessExitObserver> {
+        anyhow::bail!("original native exit observation is unsupported")
+    }
+    /// Known original-process observer descriptors, not a process-wide FD census.
+    fn retained_process_descriptor_count(&self) -> Result<u64> {
+        anyhow::bail!("original native process descriptor observation is unsupported")
+    }
+    /// Open a guest bridge pinned to this retained original native owner.
+    fn open_owned_agent_bridge(
+        &self,
+        _stream: &mut Option<std::os::unix::net::UnixStream>,
+    ) -> Result<()> {
+        anyhow::bail!("original native guest bridge is unsupported")
+    }
+    /// Revalidate an already retained original guest bridge without reconnecting.
+    fn validate_owned_agent_bridge(&self, _stream: &std::os::unix::net::UnixStream) -> Result<()> {
+        anyhow::bail!("original native guest bridge validation is unsupported")
+    }
     /// Prepare a cooperative stop while the guest is still responsive.
     fn prepare_stop(&self) -> Result<()> {
         Ok(())

@@ -52,6 +52,9 @@ pub struct SubprocessConfig {
     /// Exact typed capability bindings derived from the signed execution plan.
     #[serde(default)]
     pub capability_bindings: Vec<CapabilityBinding>,
+    /// Opaque actor routes; never contain keys or lifecycle authority.
+    #[serde(default)]
+    pub service_proxies: Vec<mvm_contract::protocol::broker_control::ServiceProxyBinding>,
 }
 
 fn default_max_frame_bytes() -> usize {
@@ -108,6 +111,7 @@ mod tests {
             parse_timeout: Duration::from_millis(50),
             services_bindings: vec![],
             capability_bindings: vec![],
+            service_proxies: vec![],
         };
         let bytes = serde_json::to_vec(&cfg).unwrap();
         let parsed: SubprocessConfig = parse(&bytes).unwrap();

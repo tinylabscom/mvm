@@ -319,6 +319,7 @@ pub(crate) mod tests {
 
     pub(crate) fn sample_plan() -> ExecutionPlan {
         ExecutionPlan {
+            workflow: None,
             execution_epoch: 1,
             mailbox: None,
             grants: None,

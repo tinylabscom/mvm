@@ -3,6 +3,7 @@
 //! transport I/O) stays in `mvm-core::protocol`, which re-exports these
 //! modules at their existing paths.
 
+pub mod actor_budget;
 pub mod agent_capability;
 pub mod agent_session;
 pub mod audit_signer;
@@ -35,5 +36,7 @@ pub mod signing;
 pub mod upstream_tools;
 pub mod vcpu_quota;
 pub mod vm_backend;
+/// Depth-one workload membership and exact lifecycle delegation.
+pub mod workload_actor;
 /// Typed application results and errors inside canonical mailbox casts.
 pub mod workload_report;

@@ -382,6 +382,61 @@ fn admit_and_start_admits_then_boots_on_mock() {
 }
 
 #[test]
+fn pre_reserved_admission_consumes_the_same_final_host_slot() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let config = mvm_core::user_config::MvmConfig {
+        host_budget_memory_mib: Some(256),
+        ..Default::default()
+    };
+    mvm_core::user_config::save(&config, None).unwrap();
+    let permit = crate::admission_budget::HostBudgetPermit::reserve(
+        "preheld",
+        crate::admission_budget::charge_for(256, &Default::default()),
+    )
+    .unwrap();
+    permit.bind_coordinator(&"a".repeat(64)).unwrap();
+    let id = permit.id().to_owned();
+    let plan = mvm_core::plan::synthesize_plan(&fixture_input("preheld")).unwrap();
+    let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+    let keys = tempfile::tempdir().unwrap();
+    let ledger = InMemoryNonceLedger::new();
+    let admitted = admit_plan_for_run_with_host_permit(HostPermitAdmission {
+        plan: &plan,
+        clock: &SystemClock,
+        ledger: &ledger,
+        host_signer_keys_dir: Some(keys.path()),
+        bundle_ctx: None,
+        extension_ctx: None,
+        posture: RunPosture::on_backend(Variant::Dev, backend.kind()),
+        host_permit: permit,
+    })
+    .expect("the existing hold, not a second charge, admits the child");
+    assert_eq!(admitted.host_budget_id(), id);
+    let started = start_admitted(StartAdmittedParams {
+        backend: &backend,
+        admitted,
+        config: VmStartConfig {
+            name: "preheld".into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            ..Default::default()
+        },
+        policy_bundle: None,
+        emitter: None,
+        assurance: None,
+    })
+    .unwrap();
+    assert_eq!(started.admitted.host_budget_id(), id);
+    assert!(
+        crate::admission_budget::HostBudgetPermit::reserve(
+            "ordinary",
+            crate::admission_budget::charge_for(256, &Default::default()),
+        )
+        .is_err(),
+        "ordinary launches see the actor's host hold"
+    );
+}
+
+#[test]
 fn one_signed_admission_cannot_start_a_second_backend() {
     // `start_admitted` hands the admitted plan back on `StartedMachine`.
     // Nothing may turn that into a second launch under the same admission.
@@ -1147,9 +1202,6 @@ fn an_admitted_boot_records_its_charge_for_the_host_budget() {
 #[test]
 fn a_boot_whose_charge_cannot_be_recorded_rolls_back() {
     let (_env, home) = host_with_ceiling(Default::default());
-    // A regular file where the vms dir must be: create_dir_all for the
-    // charge record's state dir then fails with NotADirectory.
-    std::fs::write(home.path().join("vms"), b"not a directory").expect("blocker file");
     let dir = tempfile::tempdir().unwrap();
     let audit = tempfile::tempdir().unwrap();
     let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
@@ -1165,23 +1217,28 @@ fn a_boot_whose_charge_cannot_be_recorded_rolls_back() {
         ..Default::default()
     };
 
-    admit_and_start(
-        &backend,
-        AdmitAndStartParams {
-            synthesis: &fixture_input("vm-charge-blocked"),
-            config,
-            clock: &SystemClock,
-            ledger: &ledger,
-            host_signer_keys_dir: Some(dir.path()),
-            bundle_ctx: None,
-            extension_ctx: None,
-            variant: Variant::Dev,
-            policy_bundle: None,
-            emitter: Some(&emitter),
-            audit_durability: crate::audit::durability::AuditDurability::BestEffort,
-            assurance: None,
-        },
+    let admitted = admit_for_run(
+        &fixture_input("vm-charge-blocked"),
+        &SystemClock,
+        &ledger,
+        Some(dir.path()),
+        None,
+        RunPosture::on_backend(Variant::Dev, backend.kind()),
     )
+    .expect("reserve host capacity before the write failure");
+    // Allow shared launch preparation to persist the plan, but block the
+    // post-start charge record: that failure must still stop the VM.
+    let record = mvm_core::config::vm_state_dir_at(home.path(), "vm-charge-blocked")
+        .join("admitted-charge.json");
+    std::fs::create_dir_all(&record).expect("charge record blocker");
+    start_admitted(StartAdmittedParams {
+        backend: &backend,
+        admitted,
+        config,
+        policy_bundle: None,
+        emitter: Some(&emitter),
+        assurance: None,
+    })
     .expect_err("a boot whose charge cannot be recorded must not proceed");
 
     // The whole point: no workload is left running behind the failure.

@@ -784,6 +784,19 @@ pub struct FileLock {
 }
 
 impl FileLock {
+    /// Lock an already-opened, caller-validated stable lock inode.
+    ///
+    /// This preserves descriptor custody for callers that must refuse symlinks
+    /// or validate ownership before taking the lock.
+    ///
+    /// # Errors
+    /// Returns the operating system's error when the inode cannot be locked.
+    pub fn acquire_opened(file: fs::File) -> Result<Self> {
+        file.lock()
+            .context("failed to acquire validated file lock")?;
+        Ok(Self { _file: file })
+    }
+
     /// Acquire an exclusive lock for operations on `path`.
     ///
     /// Creates `<path>.lock` if it doesn't exist, then acquires an exclusive
@@ -845,6 +858,22 @@ impl Drop for FileLock {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn opened_file_lock_excludes_another_descriptor_and_releases_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let lock_path = path.with_extension("lock");
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+            .unwrap();
+        let held = FileLock::acquire_opened(file).unwrap();
+        assert!(FileLock::try_acquire(&path).unwrap().is_none());
+        drop(held);
+        assert!(FileLock::try_acquire(&path).unwrap().is_some());
+    }
 
     #[test]
     fn test_atomic_write_creates_file() {

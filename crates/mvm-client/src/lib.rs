@@ -42,6 +42,7 @@
 //! # }
 //! ```
 
+pub mod actor;
 pub mod admission;
 pub mod agent_prompt;
 pub mod application_terminal;

@@ -66,11 +66,28 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 "workload audit context differs from admitted plan"
             );
         }
+        if reader_plan.as_ref().is_some_and(|plan| {
+            plan.services
+                .iter()
+                .any(|service| service.as_str() == "host.actor.v1")
+        }) {
+            anyhow::ensure!(
+                inputs.config.audit_context.is_some(),
+                "actor boot requires the exact admitted audit context"
+            );
+        }
+        let actor_bootstrap = reader_plan
+            .as_ref()
+            .map(mvm_vmm::host::actor_identity::ActorBootMaterial::for_plan)
+            .transpose()?
+            .flatten();
 
         // Spawn the per-child substitution endpoint through the shared
         // `ClaimGuards`, so a warm claim stands up the identical guarded endpoint
         // a cold boot does, keyed on this VM's own id. A deny-all, secret-free
         // workload receives no egress channel and therefore needs no process.
+        // Advance before the call: an error may conceal a partial helper spawn.
+        self.begin_dispatch();
         let guards = ClaimGuards::new(&self.spawner);
         let endpoint = guards.spawn_endpoint(
             &VmId(inputs.config.name.clone()),
@@ -84,6 +101,10 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 network_limits,
                 ingress: &ingress,
                 reader_plan: reader_plan.as_ref().filter(|plan| plan.mailbox.is_some()),
+                mailbox_conversation: inputs.config.mailbox_conversation.as_ref(),
+                actor: actor_bootstrap
+                    .as_ref()
+                    .map(|material| material.guest_projection()),
                 // A cold boot mints this guest's identity and hands it a drive.
                 identity: FlowMuxIdentitySource::Mint,
             },
@@ -129,6 +150,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             spec,
             socks,
             endpoint,
+            actor_bootstrap,
             trace: Some(trace),
         })
     }
@@ -157,8 +179,18 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             spec,
             socks,
             mut endpoint,
+            actor_bootstrap,
             trace,
         } = self.prepare_workload_boot(inputs)?;
+        if let Some(material) = actor_bootstrap {
+            let bootstrap = self
+                .actor_bootstrap
+                .lock()
+                .expect("actor bootstrap poisoned")
+                .take()
+                .context("actor controllers require an owned bootstrap consumer")?;
+            bootstrap(material).context("prepare original actor holder before native boot")?;
+        }
         let mut trace = trace.context("prepared workload launch trace missing")?;
         let state_dir = vm_state_dir(&inputs.config.name);
         // Unconditional and best-effort. The follower can wait for a console
@@ -221,33 +253,48 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 ));
             }
         };
-        if let Some(kernel) = kernel {
-            kernel.observe_booted(&*vm)?;
-        }
-        trace.mark("console_stream_start");
+        let completion = (|| -> Result<()> {
+            if let Some(kernel) = kernel {
+                kernel.observe_booted(&*vm)?;
+            }
+            trace.mark("console_stream_start");
 
-        // Universal initramfs path: the guest PID-1 agent waits for a signed
-        // ActivateEnvironment before exposing operational RPCs. Send it now,
-        // while the broker registration below still has a guard that rolls back
-        // on failure. A rootfs boot whose universal initramfs could not be
-        // resolved was refused at launch resolution, before the VMM started.
-        if crate::microvm::booted_with_universal_initramfs(inputs.config) {
-            durability::wait_for_activation(inputs.config, &*vm, &*self.console_streamer)?;
-            trace.mark("admission_durable");
-            crate::microvm::activate_workload(&*vm, inputs.config)
-                .context("activate workload after boot")?;
-        }
-        trace.mark("activate_workload");
+            // The guest's first entrypoint call must find its admitted host routes ready.
+            // Keep the guard armed until activation succeeds.
+            let (mut broker_guard, services) =
+                self.register_workload_broker(inputs.config, &socks)?;
+            trace.mark("broker_register");
 
-        // Register the per-VM broker for the exact admitted host-service set.
-        // The guard's Drop reaps on any early return until it is defused. A
-        // requested service whose broker cannot start fails the launch closed.
-        let (mut broker_guard, services) = self.register_workload_broker(inputs.config, &socks)?;
-        endpoint.defuse();
-        broker_guard.defuse();
-        trace.mark("broker_register");
-        trace.degrade_unless("host_services", broker_guard.services_healthy(&services));
-        trace.write_to(&state_dir);
+            // Universal initramfs path: the guest PID-1 agent waits for a signed
+            // ActivateEnvironment before exposing operational RPCs. Send it now,
+            // while the broker registration still has a guard that rolls back
+            // on failure. A rootfs boot whose universal initramfs could not be
+            // resolved was refused at launch resolution, before the VMM started.
+            if crate::microvm::booted_with_universal_initramfs(inputs.config) {
+                if self.actor_failed_vm.is_some() {
+                    durability::wait_for_owned_activation(inputs.config)?;
+                } else {
+                    durability::wait_for_activation(inputs.config, &*vm, &*self.console_streamer)?;
+                }
+                trace.mark("admission_durable");
+                crate::microvm::activate_workload(&*vm, inputs.config)
+                    .context("activate workload after boot")?;
+            }
+            trace.mark("activate_workload");
+
+            endpoint.defuse();
+            broker_guard.defuse();
+            trace.degrade_unless("host_services", broker_guard.services_healthy(&services));
+            trace.write_to(&state_dir);
+            Ok(())
+        })();
+        if let Err(error) = completion {
+            if let Some(slot) = &self.actor_failed_vm {
+                endpoint.defuse();
+                *slot.lock().expect("original actor VM custody poisoned") = Some(vm);
+            }
+            return Err(error);
+        }
         Ok(vm)
     }
 

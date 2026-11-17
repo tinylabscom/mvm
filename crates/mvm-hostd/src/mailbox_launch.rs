@@ -42,6 +42,8 @@ use zeroize::Zeroizing;
 
 use crate::mailbox_service::{GuestSealer, MailboxLimits, MailboxPolicy, MailboxService};
 
+pub mod actor_template;
+
 const SIGNER_SECRET: &str = "host-signer.ed25519";
 const SIGNER_PUBLIC: &str = "host-signer.pub";
 /// The host-held random root the encryption key derives from, beside the
@@ -81,7 +83,7 @@ fn sleep_unless_stopped(stop: &AtomicBool, delay: Duration) {
 }
 
 /// What the host seals a guest's message under, apart from keys.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MailboxTemplate {
     pub capability: MailboxCapabilityGrant,
@@ -380,6 +382,9 @@ fn template_for(
     grant: &MailboxGrant,
     now_ms: i64,
 ) -> Result<MailboxTemplate> {
+    if let Some(bound) = actor_template::load(keys_dir, grant)? {
+        return Ok(bound.template);
+    }
     match std::fs::read(keys_dir.join(TEMPLATE_FILE)) {
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map_err(|e| Error::new(ErrorKind::InvalidData, format!("mailbox template: {e}"))),

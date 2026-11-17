@@ -207,6 +207,10 @@ pub struct EndpointSpawnInputs<'a> {
     pub ingress: &'a [mvm_core::plan::IngressMapping],
     /// The admitted plan for a cold boot that grants a guest mailbox.
     pub reader_plan: Option<&'a mvm_core::plan::ExecutionPlan>,
+    /// Exact public mailbox target supplied by the admitted VM-scoped provider.
+    pub mailbox_conversation: Option<&'a mvm_core::mailbox::conversation_wire::ConversationTarget>,
+    /// Guest-only projection borrowed from this cold boot's actor owner.
+    pub actor: Option<mvm_vmm::host::actor_identity::ActorGuestProjection<'a>>,
     /// Where this boot's FlowMux identity comes from. A cold boot mints one; a
     /// warm claim inherits its parent's, because the restored child already
     /// holds the parent's signing key in memory.
@@ -316,6 +320,8 @@ impl<'a> ClaimGuards<'a> {
             network_limits: inputs.network_limits,
             ingress: inputs.ingress,
             reader_plan: inputs.reader_plan,
+            mailbox_conversation: inputs.mailbox_conversation,
+            actor: inputs.actor,
             identity: inputs.identity,
         };
         if inputs.secrets.is_empty()
@@ -526,6 +532,8 @@ mod tests {
             network_limits: mvm_core::plan::NetworkLimits::default(),
             ingress: &[],
             reader_plan: None,
+            mailbox_conversation: None,
+            actor: None,
         }
     }
 

@@ -78,6 +78,10 @@ pub struct IdentityDriveContents<'a> {
     pub mailbox_ack_key: Option<&'a MailboxAckKeyMaterial>,
     /// Public plan/boot binding accompanying the root-only ACK key.
     pub mailbox_reader_boot: Option<&'a MailboxReaderBootBinding>,
+    /// Exact provider target combined with the same fresh reader binding.
+    pub mailbox_conversation: Option<&'a mvm_core::mailbox::conversation_wire::ConversationBinding>,
+    /// Guest-only lifecycle identity. The host signing seed cannot enter this projection.
+    pub actor: Option<super::actor_identity::ActorGuestProjection<'a>>,
 }
 
 impl std::fmt::Debug for IdentityDriveContents<'_> {
@@ -90,6 +94,8 @@ impl std::fmt::Debug for IdentityDriveContents<'_> {
                 &self.mailbox_ack_key.map(|_| "<redacted>"),
             )
             .field("mailbox_reader_boot", &self.mailbox_reader_boot)
+            .field("mailbox_conversation", &self.mailbox_conversation)
+            .field("actor", &self.actor)
             .finish()
     }
 }
@@ -380,6 +386,52 @@ impl GuestIdentityMaterial {
                 owner: Owner::ROOT,
             });
         }
+        if let Some(conversation) = contents.mailbox_conversation {
+            use mvm_core::mailbox::conversation_wire::{
+                CONVERSATION_BINDING_FILE, MAX_BINDING_BYTES,
+            };
+            let reader = contents
+                .mailbox_reader_boot
+                .context("conversation requires a reader binding")?;
+            conversation.check_reader(reader).map_err(|_| {
+                anyhow::anyhow!("conversation differs from this boot's reader authority")
+            })?;
+            let data =
+                serde_json::to_vec(conversation).context("encode mailbox conversation binding")?;
+            anyhow::ensure!(
+                data.len() <= MAX_BINDING_BYTES,
+                "conversation binding exceeds bound"
+            );
+            nodes.push(Node::File {
+                path: format!("/{CONVERSATION_BINDING_FILE}"),
+                mode: HOST_SIGNER_PUB_MODE,
+                data,
+                xattrs: Vec::new(),
+                owner: Owner::ROOT,
+            });
+        }
+        if let Some(actor) = contents.actor {
+            use mvm_core::net::actor_session::{ACTOR_BINDING_FILE, ACTOR_GUEST_KEY_FILE};
+            if actor.binding().guest_public_key == self.verifying_key().to_bytes()
+                || actor.binding().host_public_key == self.host_signer_pub
+            {
+                bail!("actor identity must not reuse FlowMux or host audit keys");
+            }
+            nodes.push(Node::File {
+                path: format!("/{ACTOR_GUEST_KEY_FILE}"),
+                mode: GUEST_SIGNING_KEY_MODE,
+                data: actor.seed().to_vec(),
+                xattrs: Vec::new(),
+                owner: Owner::ROOT,
+            });
+            nodes.push(Node::File {
+                path: format!("/{ACTOR_BINDING_FILE}"),
+                mode: HOST_SIGNER_PUB_MODE,
+                data: serde_json::to_vec(actor.binding()).context("encode actor boot binding")?,
+                xattrs: Vec::new(),
+                owner: Owner::ROOT,
+            });
+        }
         let image = build_image(
             nodes,
             &BuildOptions::default().with_volume_name(IDENTITY_DRIVE_LABEL.as_bytes()),
@@ -555,9 +607,25 @@ mod tests {
             ack.verifying_key().to_bytes(),
         )
         .unwrap();
+        use mvm_contract::protocol::mailbox::{
+            AuthorizationDomainId, MailboxAddress, PrincipalId, TenantId,
+        };
+        use mvm_core::mailbox::conversation_wire::{CONVERSATION_BINDING_FILE, ConversationTarget};
+        let conversation = ConversationTarget {
+            address: MailboxAddress {
+                tenant: TenantId::from_bytes([11; 32]),
+                authorization_domain: AuthorizationDomainId::from_bytes([12; 32]),
+                mailbox: binding.mailbox,
+                recipient: PrincipalId::from_bytes([13; 32]),
+            },
+            policy_epoch: 14,
+        }
+        .bind(&binding)
+        .unwrap();
         let contents = IdentityDriveContents {
             mailbox_ack_key: Some(&ack),
             mailbox_reader_boot: Some(&binding),
+            mailbox_conversation: Some(&conversation),
             ..Default::default()
         };
         assert!(!format!("{ack:?}").contains(&hex::encode(ack.seed.as_slice())));
@@ -566,6 +634,30 @@ mod tests {
             .write_drive_with(&drive, &contents)
             .expect("mailbox identity drive");
         let enrolled = std::fs::read(&drive).expect("mailbox drive");
+        assert!(
+            enrolled
+                .windows(CONVERSATION_BINDING_FILE.len())
+                .any(|part| part == CONVERSATION_BINDING_FILE.as_bytes())
+        );
+        let projected = serde_json::to_vec(&conversation).unwrap();
+        assert!(
+            enrolled
+                .windows(projected.len())
+                .any(|part| part == projected.as_slice())
+        );
+        let mut stale = conversation.clone();
+        stale.reader.authority_key = [99; 32];
+        assert!(
+            guest
+                .write_drive_with(
+                    &drive,
+                    &IdentityDriveContents {
+                        mailbox_conversation: Some(&stale),
+                        ..contents
+                    }
+                )
+                .is_err()
+        );
         assert!(
             enrolled
                 .windows(MAILBOX_ACK_SIGNING_KEY_FILE.len())
@@ -800,6 +892,8 @@ mod tests {
                     egress_ca_cert_pem: Some(ca.cert_pem()),
                     mailbox_ack_key: None,
                     mailbox_reader_boot: None,
+                    mailbox_conversation: None,
+                    actor: None,
                 },
             )
             .expect("write drive");
@@ -837,6 +931,8 @@ mod tests {
                     egress_ca_cert_pem: Some(poisoned),
                     mailbox_ack_key: None,
                     mailbox_reader_boot: None,
+                    mailbox_conversation: None,
+                    actor: None,
                 },
             );
 

@@ -423,6 +423,12 @@ pub struct LeasedMailboxMessage {
 }
 
 impl LeasedMailboxMessage {
+    /// Original authenticated message metadata, unchanged by delivery or retry.
+    #[must_use]
+    pub fn header(&self) -> &mvm_contract::protocol::mailbox::MailboxEnvelopeHeader {
+        self.message.opened.header()
+    }
+
     #[must_use]
     pub fn payload(&self) -> &[u8] {
         self.message.payload()
@@ -915,6 +921,39 @@ impl MailboxJournal {
             .map(EncodedDestinationReceipt::into_signed)
     }
 
+    /// Recover existing local acceptance evidence for exact immutable bytes.
+    ///
+    /// This does not authorize new admission or payload disclosure. It is for
+    /// reconciling an endpoint's interrupted transaction against this journal.
+    pub fn accepted_local_receipt(
+        &self,
+        envelope: &MailboxEnvelope,
+        capability: &SignedMailboxCapability,
+        signer: &SigningKey,
+        anchor: &FileJournalAnchor,
+    ) -> Result<Option<SignedDestinationReceipt>, JournalError> {
+        self.local_ready(anchor, &signer.verifying_key())?;
+        self.seen
+            .values()
+            .find(|entry| entry.envelope == *envelope && entry.capability == *capability)
+            .map(|entry| sign_receipt(entry.accepted_receipt.clone(), signer).map_err(Into::into))
+            .transpose()
+    }
+
+    /// Whether exact immutable bytes have an application ACK in this local journal.
+    pub fn locally_acknowledged(
+        &self,
+        envelope: &MailboxEnvelope,
+        capability: &SignedMailboxCapability,
+        signer: &SigningKey,
+        anchor: &FileJournalAnchor,
+    ) -> Result<bool, JournalError> {
+        self.local_ready(anchor, &signer.verifying_key())?;
+        Ok(self.seen.values().any(|entry| {
+            entry.envelope == *envelope && entry.capability == *capability && entry.acknowledged
+        }))
+    }
+
     fn append(
         &mut self,
         event: JournalEvent,
@@ -1085,26 +1124,55 @@ impl MailboxJournal {
             return Err(JournalError::Uncertain);
         }
         for identity in &self.order {
-            let entry = self.seen.get(identity).ok_or(JournalError::Corrupt)?;
-            if entry.acknowledged
-                || entry.expired_at_unix_ms.is_some()
-                || request.context.now_unix_ms >= entry.envelope.routing.expires_at_unix_ms
-            {
-                continue;
+            if let Some(message) = self.receive_identity(*identity, request)? {
+                return Ok(Some(message));
             }
-            let opened = self.open_for_reader(*identity, entry, &request)?;
-            return Ok(Some(ReceivedMailboxMessage {
-                identity: *identity,
-                opened,
-            }));
         }
         Ok(None)
+    }
+
+    fn receive_identity(
+        &self,
+        identity: ReplayIdentity,
+        request: JournalReceive<'_>,
+    ) -> Result<Option<ReceivedMailboxMessage>, JournalError> {
+        let entry = self
+            .seen
+            .get(&identity)
+            .ok_or(JournalError::UnknownMessage)?;
+        if entry.acknowledged
+            || entry.expired_at_unix_ms.is_some()
+            || request.context.now_unix_ms >= entry.envelope.routing.expires_at_unix_ms
+        {
+            return Ok(None);
+        }
+        let opened = self.open_for_reader(identity, entry, &request)?;
+        Ok(Some(ReceivedMailboxMessage { identity, opened }))
     }
 
     /// Commit one signed lease and its one-time possession challenge before
     /// releasing plaintext to the authenticated guest reader.
     pub fn lease_next(
         &mut self,
+        request: JournalGuestLease<'_>,
+        anchor: impl FnOnce(JournalTip) -> Result<(), JournalError>,
+    ) -> Result<Option<LeasedMailboxMessage>, JournalError> {
+        self.lease_selected(None, request, anchor)
+    }
+
+    /// Lease an exact committed result without consuming an unrelated FIFO entry.
+    pub fn lease_message(
+        &mut self,
+        identity: ReplayIdentity,
+        request: JournalGuestLease<'_>,
+        anchor: impl FnOnce(JournalTip) -> Result<(), JournalError>,
+    ) -> Result<Option<LeasedMailboxMessage>, JournalError> {
+        self.lease_selected(Some(identity), request, anchor)
+    }
+
+    fn lease_selected(
+        &mut self,
+        identity: Option<ReplayIdentity>,
         request: JournalGuestLease<'_>,
         anchor: impl FnOnce(JournalTip) -> Result<(), JournalError>,
     ) -> Result<Option<LeasedMailboxMessage>, JournalError> {
@@ -1134,7 +1202,11 @@ impl MailboxJournal {
             request.possession_signature,
             &key,
         )?;
-        let Some(message) = self.receive_next(request.receive)? else {
+        let message = match identity {
+            Some(identity) => self.receive_identity(identity, request.receive)?,
+            None => self.receive_next(request.receive)?,
+        };
+        let Some(message) = message else {
             return Ok(None);
         };
         let identity = message.identity;
@@ -1295,6 +1367,34 @@ impl MailboxJournal {
         request: JournalGuestAck<'_>,
         anchor: impl FnOnce(JournalTip) -> Result<(), JournalError>,
     ) -> Result<JournalTip, JournalError> {
+        let identity = self.verify_guest_ack(request)?;
+        let entry = self
+            .seen
+            .get(&identity)
+            .ok_or(JournalError::UnknownMessage)?;
+        if entry.acknowledged {
+            return Ok(self.tip);
+        }
+        let tip = self.append(
+            JournalEvent::AcknowledgedSigned {
+                identity,
+                ack: Box::new(request.signed.clone()),
+            },
+            anchor,
+        )?;
+        let entry = self.seen.get_mut(&identity).ok_or(JournalError::Corrupt)?;
+        entry.acknowledged = true;
+        entry.signed_ack = Some(request.signed.clone());
+        Ok(tip)
+    }
+
+    /// Check exact current guest ACK authority without mutating journal state.
+    /// An endpoint may persist its ACK intent after this check, then must recheck
+    /// through `acknowledge_signed` before reporting completion.
+    pub fn verify_guest_ack(
+        &self,
+        request: JournalGuestAck<'_>,
+    ) -> Result<ReplayIdentity, JournalError> {
         if self.poisoned {
             return Err(JournalError::Uncertain);
         }
@@ -1353,24 +1453,10 @@ impl MailboxJournal {
             request.enrollment,
             &guest_key,
         )?;
-        if entry.acknowledged {
-            return if entry.signed_ack.as_ref() == Some(request.signed) {
-                Ok(self.tip)
-            } else {
-                Err(JournalError::ConflictingRetry)
-            };
+        if entry.acknowledged && entry.signed_ack.as_ref() != Some(request.signed) {
+            return Err(JournalError::ConflictingRetry);
         }
-        let tip = self.append(
-            JournalEvent::AcknowledgedSigned {
-                identity,
-                ack: Box::new(request.signed.clone()),
-            },
-            anchor,
-        )?;
-        let entry = self.seen.get_mut(&identity).ok_or(JournalError::Corrupt)?;
-        entry.acknowledged = true;
-        entry.signed_ack = Some(request.signed.clone());
-        Ok(tip)
+        Ok(identity)
     }
 
     fn open_for_reader(
@@ -1390,7 +1476,23 @@ impl MailboxJournal {
         let mut send_context = request.context.clone();
         send_context.acting_principal = entry.capability.grant.subject;
         send_context.expected_capability_issuer = entry.capability.grant.issuer;
-        send_context.required_operation = MailboxOperation::Send;
+        send_context.required_operation = if entry.capability.grant.message_kinds
+            == [mvm_contract::protocol::mailbox::MailboxMessageKind::Reply]
+            && entry
+                .capability
+                .grant
+                .operations
+                .allows(MailboxOperation::Reply)
+            && !entry
+                .capability
+                .grant
+                .operations
+                .allows(MailboxOperation::Send)
+        {
+            MailboxOperation::Reply
+        } else {
+            MailboxOperation::Send
+        };
         let opened = open_authenticated_envelope(
             &entry.envelope,
             &entry.capability,

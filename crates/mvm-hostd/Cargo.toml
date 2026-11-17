@@ -30,6 +30,14 @@ substrate_server_category = "host daemon roles substrate (supervisor + broker + 
 name = "mvm-broker"
 path = "src/bin/mvm-broker.rs"
 
+[[bin]]
+name = "mvm-actor-controller"
+path = "src/bin/mvm-actor-controller.rs"
+
+[[bin]]
+name = "mvm-actor-holder"
+path = "src/bin/mvm-actor-holder.rs"
+
 # Optional admitted extension-provider process. It owns the bounded MVEX
 # transport and loads one strict operator boot configuration from its explicit
 # private state root; ordinary launch never invokes it.
@@ -71,6 +79,11 @@ path = "src/bin/mvm-network-endpoint.rs"
 name = "network_perf_probe"
 path = "examples/network_perf_probe.rs"
 required-features = ["network-perf"]
+
+[[example]]
+name = "actor_live_hvf"
+path = "examples/actor_live_hvf/main.rs"
+required-features = ["hvf-live-validation"]
 
 # Per-VM supervisor host processes — one process per guest VM. libkrun VMM +
 # merged in-process bridge; libkrun-sys-gated so a host without libkrun.h

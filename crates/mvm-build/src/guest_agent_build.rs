@@ -908,8 +908,7 @@ pub(crate) fn run_zigbuild(
     let mut cmd = mvm_core::env_hygiene::helper_command(&cargo);
     cmd.args(zigbuild_args_for_output(args))
         .current_dir(&spec.workspace_root);
-    apply_zigbuild_env(&mut cmd, spec, rustc.as_deref())?;
-    cmd.envs(env.iter().map(|(key, value)| (key, value)));
+    apply_zigbuild_env(&mut cmd, spec, rustc.as_deref(), env)?;
     // Cargo inherits stdio. Quiet mode suppresses routine progress while still
     // surfacing compiler errors; the CLI's verbose mode preserves raw output.
     let status = cmd
@@ -974,7 +973,7 @@ pub fn build_guest_binaries(
     let mut cmd = mvm_core::env_hygiene::helper_command(&cargo);
     cmd.args(zigbuild_args_for_output(&argv[1..]))
         .current_dir(&spec.workspace_root);
-    apply_zigbuild_env(&mut cmd, spec, rustc.as_deref())?;
+    apply_zigbuild_env(&mut cmd, spec, rustc.as_deref(), &[])?;
     // Cargo inherits stdio. Quiet mode suppresses routine progress while still
     // surfacing compiler errors; the CLI's verbose mode preserves raw output.
     let status = cmd
@@ -1035,6 +1034,7 @@ fn apply_zigbuild_env(
     cmd: &mut std::process::Command,
     spec: &GuestAgentBuildSpec,
     rustc: Option<&Path>,
+    env: &[(String, String)],
 ) -> Result<(), GuestAgentBuildError> {
     if let Some(rustc) = rustc {
         cmd.env("RUSTC", rustc);
@@ -1051,6 +1051,11 @@ fn apply_zigbuild_env(
         // mask a target's own, then set the lowest-precedence default.
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env("CARGO_BUILD_RUSTFLAGS", ZIGBUILD_RUSTFLAGS);
+
+    // Recipe flags ride the per-target variables the recipes set for their
+    // own triple; cargo merges them with the build flags above for crates
+    // built for that triple and never applies them to host crates.
+    cmd.envs(env.iter().map(|(key, value)| (key, value)));
 
     // Keep cargo-zigbuild's own cache under the mvm cache root instead of
     // whatever platform-global default the host picks (for example
@@ -1674,7 +1679,7 @@ mod tests {
             let mut cmd = std::process::Command::new("cargo");
             cmd.env("RUSTFLAGS", "-Zthreads=8")
                 .env("CARGO_ENCODED_RUSTFLAGS", "-Zthreads=8");
-            apply_zigbuild_env(&mut cmd, &spec, None).expect("configure zigbuild env");
+            apply_zigbuild_env(&mut cmd, &spec, None, &[]).expect("configure zigbuild env");
             cmd.envs(build.env.iter().map(|(k, v)| (k, v)));
 
             let value = |name: &str| {
@@ -1702,6 +1707,78 @@ mod tests {
     }
 
     #[test]
+    fn zigbuild_command_combines_extra_target_flags_with_linker_suppression() {
+        use std::ffi::OsStr;
+
+        let tmp = tempfile::tempdir().unwrap();
+        for arch in [GuestArch::Aarch64, GuestArch::X86_64] {
+            let spec =
+                GuestAgentBuildSpec::new(tmp.path().to_path_buf(), arch, tmp.path().join("target"));
+            for build in crate::guest_bins::extras::extra_builds(arch).unwrap() {
+                let mut cmd = std::process::Command::new("cargo");
+                cmd.args(build.args())
+                    .env("RUSTFLAGS", "-Zthreads=8")
+                    .env("CARGO_ENCODED_RUSTFLAGS", "-Zthreads=8");
+                apply_zigbuild_env(
+                    &mut cmd,
+                    &spec,
+                    Some(Path::new("/pinned/rustc")),
+                    &build.env,
+                )
+                .unwrap();
+                let path = build.member.path();
+                let mut expected = vec!["-Alinker-messages".to_string()];
+                if path.contains("/lib/musl/") {
+                    expected.extend(["-C".to_string(), "target-feature=-crt-static".to_string()]);
+                } else if path.contains("/initramfs/") {
+                    expected.extend(["-C".to_string(), "target-feature=+crt-static".to_string()]);
+                }
+                if path.contains("/lib/") && !path.ends_with("/libmvm_host_services.so") {
+                    let soname = path.rsplit('/').next().unwrap();
+                    expected.extend(["-C".to_string(), format!("link-arg=-Wl,-soname,{soname}")]);
+                }
+                let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+                if expected.len() > 1 {
+                    let var = build
+                        .env
+                        .iter()
+                        .map(|(key, _)| key.as_str())
+                        .find(|key| key.starts_with("CARGO_TARGET_") && key.ends_with("_RUSTFLAGS"))
+                        .unwrap_or_else(|| {
+                            panic!("{path}: recipe sets no per-target rustflags")
+                        });
+                    let recipe_flags = envs
+                        .get(OsStr::new(var))
+                        .and_then(|value| *value)
+                        .map(|value| value.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    for flag in &expected[1..] {
+                        assert!(
+                            recipe_flags.split_whitespace().any(|part| part == flag),
+                            "{path}: {var} must carry {flag}"
+                        );
+                    }
+                }
+                assert_eq!(
+                    envs.get(OsStr::new("CARGO_BUILD_RUSTFLAGS")),
+                    Some(&Some(OsStr::new(ZIGBUILD_RUSTFLAGS))),
+                    "{path}: the lint allowance must stay, at the lowest precedence"
+                );
+                assert_eq!(
+                    envs.get(OsStr::new("CARGO_ENCODED_RUSTFLAGS")),
+                    None,
+                    "{path}: an encoded global flag would shadow the per-target merge"
+                );
+                assert_eq!(envs.get(OsStr::new("RUSTFLAGS")), Some(&None));
+                assert_eq!(
+                    envs.get(OsStr::new("RUSTC")),
+                    Some(&Some(OsStr::new("/pinned/rustc")))
+                );
+            }
+        }
+    }
+
+    #[test]
     fn apply_zigbuild_env_exports_explicit_cache_dir() {
         let spec = GuestAgentBuildSpec::new(
             PathBuf::from("/ws"),
@@ -1713,7 +1790,7 @@ mod tests {
             .env("CARGO_ENCODED_RUSTFLAGS", "-Zthreads=8")
             .env("RUSTC_WRAPPER", "outer-rustc-wrapper")
             .env("RUSTUP_TOOLCHAIN", "nightly");
-        apply_zigbuild_env(&mut cmd, &spec, Some(Path::new("/pinned/rustc")))
+        apply_zigbuild_env(&mut cmd, &spec, Some(Path::new("/pinned/rustc")), &[])
             .expect("configure zigbuild env");
 
         let envs: std::collections::HashMap<_, _> = cmd

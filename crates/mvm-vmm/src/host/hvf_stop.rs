@@ -269,6 +269,20 @@ impl OwnedInstance {
         Ok(())
     }
 
+    /// A separate kernel exit observer, without granting stop or cleanup authority.
+    pub fn exit_observer(&self) -> Result<ProcessExitObserver> {
+        let mut child = self
+            .child
+            .lock()
+            .map_err(|_| anyhow::anyhow!("owned child poisoned"))?;
+        Ok(ProcessExitObserver::for_owned_child(&mut child)?)
+    }
+
+    /// Actual retained original-lifetime observer descriptors.
+    pub fn retained_process_descriptor_count(&self) -> u64 {
+        self.observer.retained_descriptor_count()
+    }
+
     pub fn try_exited(&self) -> Result<bool> {
         require_owned_child_custody()?;
         let exited = {

@@ -16,11 +16,14 @@ use anyhow::{Context, Result};
 use mvm_core::policy::security::AgentProfile;
 use mvm_core::protocol::broker::{CorrelationId, ServiceCall, ServiceResponse};
 use mvm_core::protocol::handler::ServiceCallCtx;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, info, warn};
 
 use crate::broker::registry::{CancellationToken, Registry};
+
+// Includes clients that have not yet supplied a service selector.
+const MAX_BROKER_CONNECTIONS: usize = 64;
 
 /// Accept loop. Each accepted UDS connection runs to completion in its
 /// own `tokio::spawn`; one connection per supervisor-proxy call.
@@ -36,15 +39,21 @@ pub async fn serve(
         max_frame_bytes,
         "mvm-broker accept loop started"
     );
+    let connections = Arc::new(tokio::sync::Semaphore::new(MAX_BROKER_CONNECTIONS));
     loop {
         let (stream, _addr) = listener
             .accept()
             .await
             .context("mvm-broker UDS accept failed")?;
+        let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
+            drop(stream);
+            continue;
+        };
         let registry = registry.clone();
         let workload_id = workload_id.clone();
         let tenant_id = tenant_id.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             if let Err(e) =
                 handle_connection(stream, registry, workload_id, tenant_id, max_frame_bytes).await
             {
@@ -75,7 +84,22 @@ async fn handle_connection(
     tenant_id: String,
     max_frame_bytes: usize,
 ) -> Result<()> {
-    let call = read_frame::<ServiceCall>(&mut stream, max_frame_bytes).await?;
+    let mut prefix = [0; 4];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.read_exact(&mut prefix),
+    )
+    .await
+    .context("broker preface deadline")??;
+    if prefix == mvm_core::net::actor_session::ACTOR_ROUTE_PREFACE {
+        return forward_actor(stream, &registry).await;
+    }
+    let call: ServiceCall =
+        crate::framing::read_json_frame(&mut prefix.as_slice().chain(&mut stream), max_frame_bytes)
+            .await?;
+    if call.service.as_str() == "host.actor.v1" {
+        anyhow::bail!("actor lifecycle requires an encrypted session");
+    }
     // Reassign a server-authoritative correlation id at ingress: the
     // guest-supplied `call.correlation_id` is NEVER trusted — a workload could
     // otherwise choose an id that collides with or impersonates another entry
@@ -141,6 +165,35 @@ async fn handle_connection(
         .shutdown()
         .await
         .context("mvm-broker UDS shutdown failed")?;
+    Ok(())
+}
+
+async fn forward_actor(mut guest: UnixStream, registry: &Registry) -> Result<()> {
+    let _permit = registry
+        .actor_connections
+        .try_acquire()
+        .context("actor route saturated")?;
+    let endpoint = registry
+        .actor_endpoint
+        .as_ref()
+        .context("actor service not bound")?;
+    let exchange = async {
+        let mut holder = UnixStream::connect(endpoint).await?;
+        let (guest_read, mut guest_write) = guest.split();
+        let (holder_read, mut holder_write) = holder.split();
+        // One handshake and one request/reply. Relays never parse or retain tokens.
+        // The whole-stream bound includes the shared handshake's JSON framing.
+        let mut guest_read = guest_read.take(64 * 1024);
+        let mut holder_read = holder_read.take(64 * 1024);
+        tokio::try_join!(
+            tokio::io::copy(&mut guest_read, &mut holder_write),
+            tokio::io::copy(&mut holder_read, &mut guest_write),
+        )?;
+        Ok::<_, std::io::Error>(())
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(300), exchange)
+        .await
+        .context("actor route deadline")??;
     Ok(())
 }
 
@@ -219,6 +272,98 @@ mod tests {
 
     fn uds_path(dir: &tempfile::TempDir) -> PathBuf {
         dir.path().join("broker.sock")
+    }
+
+    #[tokio::test]
+    async fn actor_bare_call_is_refused_before_dispatch() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let task = tokio::spawn(handle_connection(
+            server,
+            Arc::new(Registry::new()),
+            "parent".into(),
+            "tenant".into(),
+            4096,
+        ));
+        write_call(
+            &mut client,
+            &ServiceCall {
+                service: ServiceId::parse("host.actor.v1").unwrap(),
+                verb: "launch_child".into(),
+                correlation_id: CorrelationId::new("untrusted"),
+                payload: serde_json::json!({}),
+                capability: None,
+            },
+        )
+        .await
+        .unwrap();
+        let error = task.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("encrypted session"));
+    }
+
+    #[tokio::test]
+    async fn actor_route_without_admitted_endpoint_is_refused() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let task = tokio::spawn(handle_connection(
+            server,
+            Arc::new(Registry::new()),
+            "parent".into(),
+            "tenant".into(),
+            4096,
+        ));
+        client
+            .write_all(&mvm_core::net::actor_session::ACTOR_ROUTE_PREFACE)
+            .await
+            .unwrap();
+        assert!(
+            task.await
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("not bound")
+        );
+    }
+
+    #[tokio::test]
+    async fn actor_route_is_opaque_and_separately_connection_bounded() {
+        let directory = tempdir().unwrap();
+        let endpoint = directory.path().join("holder.sock");
+        let listener = UnixListener::bind(&endpoint).unwrap();
+        let mut registry = Registry::new();
+        registry.actor_endpoint = Some(endpoint);
+        let registry = Arc::new(registry);
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let task = tokio::spawn(handle_connection(
+            server,
+            registry.clone(),
+            "parent".into(),
+            "tenant".into(),
+            4096,
+        ));
+        client
+            .write_all(&mvm_core::net::actor_session::ACTOR_ROUTE_PREFACE)
+            .await
+            .unwrap();
+        client.write_all(b"opaque sealed frame").await.unwrap();
+        client.shutdown().await.unwrap();
+        let (mut holder, _) = listener.accept().await.unwrap();
+        let mut received = [0; 19];
+        holder.read_exact(&mut received).await.unwrap();
+        assert_eq!(&received, b"opaque sealed frame");
+        holder.write_all(b"opaque response").await.unwrap();
+        holder.shutdown().await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        assert_eq!(response, b"opaque response");
+        task.await.unwrap().unwrap();
+        let _all = registry.actor_connections.acquire_many(4).await.unwrap();
+        let (_, server) = UnixStream::pair().unwrap();
+        assert!(
+            forward_actor(server, &registry)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("saturated")
+        );
     }
 
     struct TypedEchoHandler;

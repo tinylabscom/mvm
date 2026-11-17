@@ -6,10 +6,12 @@
 //! the destination signature being returned to the caller.
 
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -19,12 +21,17 @@ use mvm_contract::protocol::mailbox::{
     MailboxEnvelope, MailboxEnvelopeHeader, MailboxGrant, MailboxGuestReaderScope, RevocationId,
     SignedDestinationReceipt, SignedMailboxCapability, SignedMailboxGuestReaderEnrollment,
 };
+use mvm_core::mailbox::conversation_wire::{
+    self, ConversationBinding, ConversationRequest, ConversationResponse,
+};
 use mvm_core::mailbox::frame::{OutboxMessage, Refusal, decode_frame, send_receipted_frame};
 use mvm_core::mailbox::journal::{
     EncodedDestinationReceipt, FileJournalAnchor, JournalAdmission, JournalError, JournalGuestAck,
     JournalGuestLease, JournalReceive, JournalTip, MailboxJournal, ReceivedMailboxMessage,
 };
-use mvm_core::mailbox::reader::{MailboxReaderBootBinding, verify_guest_reader_enrollment};
+use mvm_core::mailbox::reader::{
+    MailboxReaderBootBinding, verify_guest_reader_enrollment, verify_reader_possession,
+};
 use mvm_core::mailbox::reader_wire::{
     ReaderRequest, ReaderResponse, decode_request_body, is_reader_frame, read_request,
     write_response,
@@ -69,12 +76,19 @@ impl Read for GuestDeadline<'_> {
 
 impl Write for GuestDeadline<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.stream.set_write_timeout(Some(self.remaining()?))?;
+        self.stream
+            .set_write_timeout(Some(self.remaining()?.min(GUEST_EXCHANGE_TIMEOUT)))?;
         self.stream.write(buf)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.stream.flush()
+    }
+}
+
+impl std::os::fd::AsRawFd for GuestDeadline<'_> {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.stream.as_raw_fd()
     }
 }
 
@@ -111,6 +125,113 @@ struct Shared {
     anchor: Box<dyn JournalAnchor>,
     local_anchor: Option<Arc<FileJournalAnchor>>,
     reader: OnceLock<GuestReaderAuthority>,
+    conversation: OnceLock<ConversationEndpoint>,
+    dispatch_wake: OnceLock<SyncSender<()>>,
+}
+
+/// One VM-scoped owner executes immediately after current guest authority verification.
+pub trait ConversationOperations: Send {
+    fn wait_deadline_unix_ms(&self, request: &ConversationRequest) -> Result<Option<i64>, Refusal>;
+
+    fn peer_for_route(
+        &self,
+        token: mvm_contract::protocol::mailbox::DestinationRouteToken,
+    ) -> Result<crate::mailbox_launch::actor_template::ActorPeerBinding, Refusal>;
+
+    fn pending_dispatches(
+        &mut self,
+    ) -> Result<Vec<super::actor_operations::ActorDispatch>, Refusal>;
+
+    fn record_dispatch_receipt(
+        &mut self,
+        message_id: mvm_contract::protocol::mailbox::MessageId,
+        receipt: mvm_contract::protocol::mailbox::SignedDestinationReceipt,
+    ) -> Result<(), Refusal>;
+
+    fn accept_peer(
+        &mut self,
+        frame: super::actor_operations::ActorPeerFrame,
+    ) -> Result<mvm_contract::protocol::mailbox::SignedDestinationReceipt, Refusal>;
+
+    fn execute(
+        &mut self,
+        authority: &CurrentBootAuthority,
+        request: ConversationRequest,
+    ) -> Result<ConversationResponse, Refusal>;
+}
+
+/// Immediate-dispatch verification snapshot, not reusable or transferable authority.
+/// Constructed only after exact session identity and current enrollment checks.
+///
+/// ```compile_fail
+/// use mvm_hostd::mailbox_service::durable::CurrentBootAuthority;
+/// let authority: CurrentBootAuthority = serde_json::from_str("{}").unwrap();
+/// ```
+#[derive(Debug)]
+pub struct CurrentBootAuthority {
+    binding: ConversationBinding,
+    now_unix_ms: i64,
+    grant: MailboxGrant,
+    capability: SignedMailboxCapability,
+    enrollment: SignedMailboxGuestReaderEnrollment,
+    challenge: [u8; 32],
+    possession_signature: Vec<u8>,
+}
+
+impl CurrentBootAuthority {
+    /// Verify a host-side authenticated session and the current canonical reader proof.
+    /// Admitted endpoint scope remains independently pinned by the operation owner.
+    pub(crate) fn verify(
+        session: &conversation_wire::ConversationSession,
+        reader: &GuestReaderAuthority,
+        now_unix_ms: i64,
+        revoked: &[RevocationId],
+        challenge: [u8; 32],
+        signature: Vec<u8>,
+    ) -> Result<Self, Refusal> {
+        let binding = session.authenticated_host_binding()?;
+        let guest_key = verify_bound_reader(binding, reader, now_unix_ms, revoked)?;
+        verify_reader_possession(&reader.enrollment, &challenge, &signature, &guest_key)
+            .map_err(|_| Refusal::NotAuthorized)?;
+        Ok(Self {
+            binding: binding.clone(),
+            now_unix_ms,
+            grant: reader.grant,
+            capability: reader.capability.clone(),
+            enrollment: reader.enrollment.clone(),
+            challenge,
+            possession_signature: signature,
+        })
+    }
+
+    pub fn binding(&self) -> &ConversationBinding {
+        &self.binding
+    }
+    pub fn now_unix_ms(&self) -> i64 {
+        self.now_unix_ms
+    }
+    pub fn grant(&self) -> &MailboxGrant {
+        &self.grant
+    }
+    pub fn capability(&self) -> &SignedMailboxCapability {
+        &self.capability
+    }
+    pub fn enrollment(&self) -> &SignedMailboxGuestReaderEnrollment {
+        &self.enrollment
+    }
+    pub fn challenge(&self) -> &[u8; 32] {
+        &self.challenge
+    }
+    pub fn possession_signature(&self) -> &[u8] {
+        &self.possession_signature
+    }
+}
+
+struct ConversationEndpoint {
+    binding: ConversationBinding,
+    operations: Mutex<Box<dyn ConversationOperations>>,
+    events: Mutex<UnixStream>,
+    notify: UnixStream,
 }
 
 /// Enrollment pinned to the signed grant and current guest boot by the launcher.
@@ -129,9 +250,67 @@ pub struct DurableMailboxService {
     path: PathBuf,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
+    delivery_worker: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl DurableMailboxService {
+    /// Install exactly one VM-scoped operation owner before publishing readiness.
+    /// The address and boot must agree with already-installed reader authority.
+    pub fn install_conversation(
+        &self,
+        binding: ConversationBinding,
+        operations: impl ConversationOperations + 'static,
+    ) -> std::io::Result<()> {
+        verify_conversation_enrollment(&self.shared, &binding).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "conversation binding refused",
+            )
+        })?;
+        let (events, notify) = UnixStream::pair()?;
+        events.set_nonblocking(true)?;
+        notify.set_nonblocking(true)?;
+        self.shared
+            .conversation
+            .set(ConversationEndpoint {
+                binding,
+                operations: Mutex::new(Box::new(operations)),
+                events: Mutex::new(events),
+                notify,
+            })
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "conversation owner already installed",
+                )
+            })?;
+        let (wake, events) = mpsc::sync_channel(1);
+        self.shared
+            .dispatch_wake
+            .set(wake)
+            .map_err(|_| std::io::Error::other("delivery worker already installed"))?;
+        let shared = Arc::clone(&self.shared);
+        let stop = Arc::clone(&self.stop);
+        let worker = std::thread::Builder::new()
+            .name("mailbox-delivery".into())
+            .spawn(move || {
+                delivery_loop(&events, &stop, || drain_dispatches(&shared, &stop));
+            });
+        match worker {
+            Ok(worker) => {
+                *self
+                    .delivery_worker
+                    .lock()
+                    .expect("mailbox worker lock poisoned") = Some(worker);
+                Ok(())
+            }
+            Err(error) => {
+                self.stop.store(true, Ordering::SeqCst);
+                Err(error)
+            }
+        }
+    }
+
     /// Install the verified, boot-bound Receive authority before advertising
     /// readiness to the guest. It cannot be replaced within this helper.
     pub(crate) fn install_guest_reader(&self, reader: GuestReaderAuthority) -> std::io::Result<()> {
@@ -258,6 +437,8 @@ impl DurableMailboxService {
             anchor,
             local_anchor,
             reader: OnceLock::new(),
+            conversation: OnceLock::new(),
+            dispatch_wake: OnceLock::new(),
         });
         let stop = Arc::new(AtomicBool::new(false));
         let worker = {
@@ -288,6 +469,7 @@ impl DurableMailboxService {
             path: path.to_owned(),
             stop,
             worker: Some(worker),
+            delivery_worker: Mutex::new(None),
         })
     }
 
@@ -336,6 +518,16 @@ impl DurableMailboxService {
         let body = read_frame(self.shared.limits.max_frame_bytes, &mut stream);
         let received = body.is_ok();
         let body = match body {
+            Ok(body) if conversation_wire::is_session_request(&body) => {
+                serve_conversation(&self.shared, &mut stream);
+                return Ok(true);
+            }
+            Ok(_) if self.shared.conversation.get().is_some() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "actor mailbox requires an encrypted conversation session",
+                ));
+            }
             Ok(body) if is_reader_frame(&body) => {
                 serve_reader(&self.shared, &mut stream, &body);
                 return Ok(true);
@@ -404,6 +596,264 @@ impl DurableMailboxService {
             },
             |tip| self.shared.anchor.commit(tip),
         )
+    }
+}
+
+fn verify_conversation_enrollment(
+    shared: &Shared,
+    binding: &ConversationBinding,
+) -> Result<i64, Refusal> {
+    let reader = shared.reader.get().ok_or(Refusal::NotAuthorized)?;
+    let state = shared.state.lock().expect("mailbox journal lock poisoned");
+    let context = guest_context(&state.policy, reader)?;
+    if binding.policy_epoch != context.current_policy_epoch {
+        return Err(Refusal::NotAuthorized);
+    }
+    verify_bound_reader(
+        binding,
+        reader,
+        context.now_unix_ms,
+        &context.revoked_capabilities,
+    )?;
+    Ok(context.now_unix_ms)
+}
+
+fn verify_bound_reader(
+    binding: &ConversationBinding,
+    reader: &GuestReaderAuthority,
+    now_unix_ms: i64,
+    revoked: &[RevocationId],
+) -> Result<VerifyingKey, Refusal> {
+    if binding.reader != reader.boot
+        || binding.address != reader.capability.grant.address
+        || binding.policy_epoch != reader.capability.grant.policy_epoch
+        || binding.address.mailbox != reader.grant.mailbox
+        || binding.reader.execution_epoch != reader.grant.epoch
+        || binding.reader.authority_key != reader.grant.authority_key
+        || reader.enrollment.enrollment.ack_public_key != reader.boot.ack_public_key
+    {
+        return Err(Refusal::NotAuthorized);
+    }
+    verify_guest_reader_enrollment(
+        &reader.enrollment,
+        &reader.capability,
+        &MailboxGuestReaderScope {
+            plan: &reader.grant,
+            plan_id: &reader.boot.plan_id,
+            plan_nonce: &reader.boot.plan_nonce,
+            receive: &reader.capability.grant,
+            current_boot: reader.boot.boot,
+            current_session: reader.enrollment.enrollment.consumer_session,
+            now_unix_ms,
+        },
+        &VerifyingKey::from_bytes(&reader.grant.authority_key)
+            .map_err(|_| Refusal::NotAuthorized)?,
+        revoked,
+    )
+    .map_err(|_| Refusal::NotAuthorized)
+}
+
+fn serve_conversation(shared: &Shared, stream: &mut GuestDeadline<'_>) {
+    let Some(endpoint) = shared.conversation.get() else {
+        return;
+    };
+    if verify_conversation_enrollment(shared, &endpoint.binding).is_err() {
+        return;
+    }
+    let Ok(mut session) =
+        conversation_wire::host_session(stream, &endpoint.binding, shared.signer.clone())
+    else {
+        return;
+    };
+    let response = (|| {
+        let received = Instant::now();
+        let invocation = conversation_wire::receive_invocation(stream, &mut session)?;
+        let caller_deadline = invocation.deadline(received)?;
+        stream.until = stream.until.min(caller_deadline);
+        let request = invocation.request;
+        if matches!(request, ConversationRequest::Possession { .. }) {
+            return Err(Refusal::NotAuthorized);
+        }
+        let reader = shared.reader.get().ok_or(Refusal::NotAuthorized)?;
+        let challenge: [u8; 32] = rand::random();
+        if challenge == [0; 32] {
+            return Err(Refusal::Unavailable);
+        }
+        conversation_wire::send_response(
+            stream,
+            &mut session,
+            &ConversationResponse::Challenge {
+                enrollment: Box::new(reader.enrollment.clone()),
+                capability: Box::new(reader.capability.clone()),
+                challenge,
+            },
+        )?;
+        let ConversationRequest::Possession { signature } =
+            conversation_wire::receive_request(stream, &mut session)?
+        else {
+            return Err(Refusal::NotAuthorized);
+        };
+        let now_unix_ms = verify_conversation_enrollment(shared, &endpoint.binding)?;
+        let revoked = reader_revocations(&reader.revocations_path)?;
+        CurrentBootAuthority::verify(
+            &session,
+            reader,
+            now_unix_ms,
+            &revoked,
+            challenge,
+            signature.clone(),
+        )?;
+        if matches!(
+            request,
+            ConversationRequest::Receive {} | ConversationRequest::ReceiveResult { .. }
+        ) {
+            stream.until = conversation_wire::bounded_wait_deadline(
+                caller_deadline,
+                reader
+                    .capability
+                    .grant
+                    .expires_at_unix_ms
+                    .min(reader.enrollment.enrollment.expires_at_unix_ms),
+                now_unix_ms,
+                Instant::now(),
+            );
+        }
+        execute_with_wait(
+            shared,
+            endpoint,
+            request,
+            ConversationExchange {
+                fd: stream.as_raw_fd(),
+                deadline: stream.until,
+                challenge,
+                signature,
+                session: &session,
+            },
+        )
+    })()
+    .unwrap_or_else(|reason| ConversationResponse::Refused { reason });
+    let _ = conversation_wire::send_response(stream, &mut session, &response);
+}
+
+struct ConversationExchange<'a> {
+    fd: std::os::fd::RawFd,
+    deadline: Instant,
+    challenge: [u8; 32],
+    signature: Vec<u8>,
+    session: &'a conversation_wire::ConversationSession,
+}
+
+fn execute_with_wait(
+    shared: &Shared,
+    endpoint: &ConversationEndpoint,
+    request: ConversationRequest,
+    exchange: ConversationExchange<'_>,
+) -> Result<ConversationResponse, Refusal> {
+    let read = matches!(
+        request,
+        ConversationRequest::Receive {} | ConversationRequest::ReceiveResult { .. }
+    );
+    let mut exhausted = false;
+    loop {
+        let (response, wait_until) = {
+            let mut operations = endpoint
+                .operations
+                .lock()
+                .expect("conversation owner lock poisoned");
+            let reader = shared.reader.get().ok_or(Refusal::NotAuthorized)?;
+            let context = {
+                let state = shared.state.lock().expect("mailbox journal lock poisoned");
+                guest_context(&state.policy, reader)?
+            };
+            let now_unix_ms = context.now_unix_ms;
+            let authority = CurrentBootAuthority::verify(
+                exchange.session,
+                reader,
+                now_unix_ms,
+                &context.revoked_capabilities,
+                exchange.challenge,
+                exchange.signature.clone(),
+            )?;
+            let mut expires = reader
+                .capability
+                .grant
+                .expires_at_unix_ms
+                .min(reader.enrollment.enrollment.expires_at_unix_ms);
+            if let Some(deadline) = operations.wait_deadline_unix_ms(&request)? {
+                expires = expires.min(deadline);
+            }
+            let remaining = u64::try_from(expires.saturating_sub(now_unix_ms)).unwrap_or(0);
+            let now = Instant::now();
+            let remaining = Duration::from_millis(remaining)
+                .min(exchange.deadline.saturating_duration_since(now));
+            let wait_until = now + remaining;
+            (operations.execute(&authority, request.clone())?, wait_until)
+        };
+        if !read {
+            signal_change(shared);
+            return Ok(response);
+        }
+        if !matches!(response, ConversationResponse::Pending) || exhausted {
+            return Ok(response);
+        }
+        if !wait_for_change(&endpoint.events, exchange.fd, wait_until)? {
+            if Instant::now() >= exchange.deadline {
+                return Err(Refusal::Expired);
+            }
+            exhausted = true;
+        }
+    }
+}
+
+fn wait_for_change(
+    events: &Mutex<UnixStream>,
+    guest_fd: std::os::fd::RawFd,
+    deadline: Instant,
+) -> Result<bool, Refusal> {
+    let mut events = events.try_lock().map_err(|_| Refusal::Unavailable)?;
+    loop {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Ok(false);
+        };
+        let timeout = libc::c_int::try_from(remaining.as_millis().saturating_add(1))
+            .unwrap_or(libc::c_int::MAX);
+        let mut descriptors = [
+            libc::pollfd {
+                fd: events.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: guest_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        // SAFETY: both descriptors remain borrowed and live throughout this bounded poll.
+        let count = unsafe { libc::poll(descriptors.as_mut_ptr(), 2, timeout) };
+        if count == 0 {
+            return Ok(false);
+        }
+        if count < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(Refusal::Unavailable);
+        }
+        if descriptors[1].revents != 0 {
+            return Err(Refusal::Unavailable);
+        }
+        if descriptors[0].revents & libc::POLLIN != 0 {
+            match events.read(&mut [0; 128]) {
+                Ok(0) => return Err(Refusal::Unavailable),
+                Ok(_) => return Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(_) => return Err(Refusal::Unavailable),
+            }
+        }
+        if descriptors[0].revents != 0 {
+            return Err(Refusal::Unavailable);
+        }
     }
 }
 
@@ -632,6 +1082,15 @@ fn reader_context(
 impl Drop for DurableMailboxService {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        signal_change(&self.shared);
+        if let Some(worker) = self
+            .delivery_worker
+            .lock()
+            .expect("mailbox worker lock poisoned")
+            .take()
+        {
+            let _ = worker.join();
+        }
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -642,6 +1101,35 @@ impl Drop for DurableMailboxService {
 fn serve(shared: &Shared, mut stream: UnixStream) {
     let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
+    if shared.conversation.get().is_some() {
+        let deadline = Instant::now() + IO_TIMEOUT;
+        let _ = mvm_agentd::vsock::run_with_stream_deadline(&mut stream, deadline, |stream| {
+            let body = read_frame(super::peer_transport::PREFACE_BYTES, stream)?;
+            let token = super::peer_transport::route_from_preface(&body)?;
+            let endpoint = shared.conversation.get().ok_or(Refusal::NotAuthorized)?;
+            let peer = endpoint
+                .operations
+                .lock()
+                .expect("conversation owner lock poisoned")
+                .peer_for_route(token)?;
+            super::peer_transport::receive_peer(stream, &peer, shared.signer.clone(), |frame| {
+                let receipt = {
+                    let mut operations = endpoint
+                        .operations
+                        .lock()
+                        .expect("conversation owner lock poisoned");
+                    if operations.peer_for_route(token)? != peer {
+                        return Err(Refusal::NotAuthorized);
+                    }
+                    operations.accept_peer(frame)?
+                };
+                signal_change(shared);
+                Ok(receipt)
+            })?;
+            Ok(())
+        });
+        return;
+    }
     let result = read_frame(shared.limits.max_frame_bytes, &mut stream)
         .and_then(|body| decode_frame(&body))
         .and_then(|(capability, envelope)| admit(shared, &capability, &envelope));
@@ -692,6 +1180,101 @@ fn admit_guest(
     }
     let (capability, envelope) = sealer.seal(message)?;
     admit(shared, &capability, &envelope)
+fn signal_change(shared: &Shared) {
+    if let Some(endpoint) = shared.conversation.get() {
+        let mut notify = &endpoint.notify;
+        // A full nonblocking event socket already carries a pending wake.
+        let _ = notify.write(&[1]);
+    }
+    if let Some(wake) = shared.dispatch_wake.get() {
+        let _ = wake.try_send(());
+    }
+}
+
+// Only the worker owns the timer; wakeups coalesce and never allocate retry jobs.
+pub(super) fn delivery_loop(
+    events: &mpsc::Receiver<()>,
+    stop: &AtomicBool,
+    mut drain: impl FnMut() -> bool,
+) {
+    use rand::RngExt as _;
+
+    const INITIAL_RETRY_MS: u64 = 100;
+    const MAX_RETRY_MS: u64 = 5_000;
+    let mut failures = 0_u32;
+    let mut rng = rand::rng();
+    while !stop.load(Ordering::SeqCst) {
+        let retry = drain();
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
+        let result = if retry {
+            // Equal jitter keeps retries spaced, with a total ceiling of five seconds.
+            let ceiling_ms = INITIAL_RETRY_MS
+                .saturating_mul(1_u64 << failures.min(16))
+                .min(MAX_RETRY_MS);
+            failures = failures.saturating_add(1);
+            events.recv_timeout(Duration::from_millis(
+                rng.random_range(ceiling_ms / 2..=ceiling_ms),
+            ))
+        } else {
+            failures = 0;
+            events
+                .recv()
+                .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+        };
+        if matches!(result, Err(mpsc::RecvTimeoutError::Disconnected)) {
+            break;
+        }
+    }
+}
+
+fn drain_dispatches(shared: &Shared, stop: &AtomicBool) -> bool {
+    let Some(endpoint) = shared.conversation.get() else {
+        return false;
+    };
+    dispatch_pending(&endpoint.operations, &shared.signer, stop, &endpoint.notify)
+}
+
+pub(super) fn dispatch_pending(
+    operations: &Mutex<Box<dyn ConversationOperations>>,
+    signer: &SigningKey,
+    stop: &AtomicBool,
+    notify: &UnixStream,
+) -> bool {
+    let pending = operations
+        .lock()
+        .expect("conversation owner lock poisoned")
+        .pending_dispatches();
+    let Ok(pending) = pending else {
+        return false;
+    };
+    let mut retry = false;
+    for dispatch in pending {
+        if stop.load(Ordering::SeqCst) {
+            return false;
+        }
+        // Both the network exchange and its receipt verification happen outside
+        // the endpoint transaction lock, preventing mutual-send deadlocks.
+        let receipt = match super::peer_transport::send_peer(&dispatch, signer.clone()) {
+            Ok(receipt) => receipt,
+            Err(Refusal::Unavailable) => {
+                retry = true;
+                continue;
+            }
+            Err(_) => continue,
+        };
+        let committed = operations
+            .lock()
+            .expect("conversation owner lock poisoned")
+            .record_dispatch_receipt(dispatch.message_id, receipt);
+        if committed.is_err() {
+            return false;
+        }
+        let mut notify = notify;
+        let _ = notify.write(&[1]);
+    }
+    retry
 }
 
 fn admit(
@@ -1034,6 +1617,58 @@ mod reader_tests {
                 "unavailable, lost and truncated replies must not remove or replace the request"
             );
         }
+    fn delivery_worker_shutdown_interrupts_backoff_without_another_dispatch() {
+        let (wake, events) = mpsc::sync_channel(1);
+        let (attempted, attempts) = mpsc::sync_channel(1);
+        let (finished, completion) = mpsc::sync_channel(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = std::thread::spawn(move || {
+            let mut count = 0;
+            delivery_loop(&events, &worker_stop, || {
+                count += 1;
+                if count == 1 {
+                    attempted.send(()).unwrap();
+                }
+                true
+            });
+            finished.send(count).unwrap();
+        });
+        attempts.recv_timeout(Duration::from_secs(1)).unwrap();
+        stop.store(true, Ordering::SeqCst);
+        wake.send(()).unwrap();
+        assert_eq!(completion.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn pending_read_waits_for_event_disconnect_or_deadline_without_polling_state() {
+        let (events, mut notify) = UnixStream::pair().unwrap();
+        events.set_nonblocking(true).unwrap();
+        let events = Mutex::new(events);
+        let (guest, peer) = UnixStream::pair().unwrap();
+        notify.write_all(&[1]).unwrap();
+        assert_eq!(
+            wait_for_change(
+                &events,
+                guest.as_raw_fd(),
+                Instant::now() + Duration::from_secs(1)
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            wait_for_change(&events, guest.as_raw_fd(), Instant::now()),
+            Ok(false)
+        );
+        drop(peer);
+        assert_eq!(
+            wait_for_change(
+                &events,
+                guest.as_raw_fd(),
+                Instant::now() + Duration::from_secs(1)
+            ),
+            Err(Refusal::Unavailable)
+        );
     }
 
     #[test]

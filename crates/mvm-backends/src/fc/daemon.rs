@@ -470,12 +470,13 @@ fn firecracker_launch_script(
     scope: &str,
     firecracker: &str,
 ) -> String {
+    let identity = format!("{abs_dir}/{}", super::idle_pool::FC_IDENTITY_FILE);
     launch_script(
         abs_dir,
         abs_socket,
         scope,
         effective_user_id(),
-        None,
+        Some(&identity),
         firecracker,
     )
 }
@@ -602,6 +603,7 @@ fn launch_script(
             (
                 format!(
                     "{umask}{write_marker}\ns=$(sed \"s/^.*) //\" /proc/$$/stat | cut -d\" \" -f20)\n\
+                     case \"$s\" in ''|*[!0-9]*) exit 1;; esac\n\
                      write_marker \"$3\" \"$$ $s\" \"{marker_mode}\" && \\\n\
                      write_marker \"$1\" \"$$\" \"{marker_mode}\" && \\\n\
                      exec {q_firecracker} --api-sock \"$2\"\n"
@@ -880,10 +882,9 @@ mod tests {
         }
     }
 
-    /// An idle process records its own pid and start time before it execs
-    /// Firecracker; a VM launch line records neither.
+    /// Both launch kinds publish original identity without changing the PID wire.
     #[test]
-    fn only_the_idle_launch_line_records_the_process_identity() {
+    fn both_launch_lines_record_original_identity_and_keep_the_bare_pid_wire() {
         let idle = launch_script(
             "/p/idle-1",
             "/p/idle-1/fc.socket",
@@ -915,12 +916,13 @@ mod tests {
             "{as_user}"
         );
         assert!(as_user.contains("(umask 077 && rm -f"), "{as_user}");
-        let vm = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", 0);
-        assert!(!vm.contains("/proc/$$/stat"), "{vm}");
+        let vm = firecracker_launch_script("/tmp/vm", "/tmp/vm/fc.socket", "", TEST_FIRECRACKER);
+        assert!(vm.contains("/proc/$$/stat"), "{vm}");
+        assert!(vm.contains("'/tmp/vm/fc.identity'"), "{vm}");
+        assert!(vm.contains(r#"write_marker "$3" "$$ $s""#), "{vm}");
+        assert!(vm.contains(r#"write_marker "$1" "$$""#), "{vm}");
         assert!(
-            vm.contains(&format!(
-                r#"write_marker "$1" "$$" "600" && exec '{TEST_FIRECRACKER}' --api-sock "$2""#
-            )),
+            vm.contains(r#"case "$s" in ''|*[!0-9]*) exit 1;; esac"#),
             "{vm}"
         );
     }

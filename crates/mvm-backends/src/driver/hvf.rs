@@ -1411,6 +1411,38 @@ impl RunningVm for HvfRunningVm {
         ))
     }
 
+    fn exit_observer(&self) -> Result<mvm_vmm::host::process_exit::ProcessExitObserver> {
+        self.owned
+            .as_ref()
+            .context("exit observation requires original native child custody")?
+            .exit_observer()
+    }
+
+    fn retained_process_descriptor_count(&self) -> Result<u64> {
+        Ok(self
+            .owned
+            .as_ref()
+            .context("descriptor observation requires original native child custody")?
+            .retained_process_descriptor_count())
+    }
+
+    fn open_owned_agent_bridge(
+        &self,
+        stream: &mut Option<std::os::unix::net::UnixStream>,
+    ) -> Result<()> {
+        self.owned
+            .as_ref()
+            .context("guest bridge requires original native child custody")?
+            .open_agent_bridge(&self.agent_socket, stream)
+    }
+
+    fn validate_owned_agent_bridge(&self, stream: &std::os::unix::net::UnixStream) -> Result<()> {
+        self.owned
+            .as_ref()
+            .context("guest bridge requires original native child custody")?
+            .validate_agent_bridge(stream)
+    }
+
     fn kill(&self) -> Result<()> {
         self.terminate_with_timing().map(|_| ())
     }
@@ -1460,13 +1492,9 @@ impl RunningVm for HvfRunningVm {
     }
 
     fn status(&self) -> Result<VmStatus> {
-        if let Some(owned) = &self.owned
-            && owned.try_exited()?
-        {
-            return Ok(VmStatus::Stopped);
-        }
-        let _ = ConnectedInstance::connect_instance(self.instance.clone())?;
-        Ok(VmStatus::Running)
+        observed_status(self.owned.as_ref().map(OwnedInstance::try_exited), || {
+            ConnectedInstance::connect_instance(self.instance.clone()).map(|_| ())
+        })
     }
 
     fn vsock_connect(&self, guest_port: u32) -> Result<Box<dyn DuplexStream>> {
@@ -1493,8 +1521,53 @@ impl RunningVm for HvfRunningVm {
     }
 }
 
+fn observed_status(
+    original_exited: Option<Result<bool>>,
+    attached_probe: impl FnOnce() -> Result<()>,
+) -> Result<VmStatus> {
+    if let Some(exited) = original_exited {
+        // Original custody must never be replaced by a fresh name-based probe.
+        return Ok(if exited? {
+            VmStatus::Stopped
+        } else {
+            VmStatus::Running
+        });
+    }
+    attached_probe()?;
+    Ok(VmStatus::Running)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn original_status_never_recaptures_a_named_owner() {
+        for (exited, expected) in [(false, VmStatus::Running), (true, VmStatus::Stopped)] {
+            let status = observed_status(Some(Ok(exited)), || {
+                panic!("original status must not resolve a replaced instance or PID file")
+            })
+            .unwrap();
+            assert_eq!(status, expected);
+        }
+    }
+
+    #[test]
+    fn unknown_original_status_cannot_be_replaced_by_a_live_attachment() {
+        let error = observed_status(
+            Some(Err(anyhow!("original exit proof unavailable"))),
+            || panic!("unknown original custody must not fall back to attachment"),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "original exit proof unavailable");
+    }
+
+    #[test]
+    fn attached_status_still_requires_its_authenticated_probe() {
+        assert_eq!(observed_status(None, || Ok(())).unwrap(), VmStatus::Running);
+        let error =
+            observed_status(None, || Err(anyhow!("HVF ownership generation changed"))).unwrap_err();
+        assert_eq!(error.to_string(), "HVF ownership generation changed");
+    }
+
     /// A workload that runs past the 300 s cap the file-polling backends use
     /// must still be waited for; the wait ends when the supervisor exits.
     #[test]
@@ -2997,6 +3070,35 @@ mod tests {
                 .console_data_sockets
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn relay_config_keeps_workload_mailbox_on_host_dial_without_builder_authority() {
+        let mut spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![
+                egress_port("/run/egress.sock"),
+                VsockPort {
+                    service: GuestService::Mailbox,
+                    direction: VsockDirection::HostDials,
+                    host_uds: "/run/mailbox.sock".into(),
+                },
+            ],
+            vec![],
+        );
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert_eq!(
+            cfg.console_data_sockets,
+            vec![HostDialSocket {
+                guest_port: GuestService::Mailbox.port(),
+                host_socket: "/run/mailbox.sock".into(),
+            }]
+        );
+        assert!(cfg.builder_control_sockets.is_empty());
+        spec.vsock.pop();
+        let without_mailbox = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert!(without_mailbox.console_data_sockets.is_empty());
+        assert!(without_mailbox.builder_control_sockets.is_empty());
     }
 
     #[test]

@@ -45,8 +45,14 @@ use mvm_core::mailbox::{
 use mvm_core::private_fs;
 use mvm_core::util::atomic_io::{FileLock, atomic_write_durable, atomic_write_new, sync_dir};
 
+/// VM-scoped actor call/reply storage and fixed-peer ingress.
+pub mod actor_operations;
+/// VM-scoped durable call correlation; never a shared scheduler key holder.
+pub mod conversation;
 /// Separate destination path that returns a signed, journal-backed verdict.
 pub mod durable;
+/// Scoped holder-to-holder encrypted transport over the existing mailbox endpoint.
+pub mod peer_transport;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_SOURCE_INTENTS: usize = 64;

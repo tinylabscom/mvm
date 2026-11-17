@@ -47,9 +47,7 @@ use crate::workload_runner::claim::{
 use crate::workload_runner::standby_boot::{factory_parent_config, slotted_factory_parent_spec};
 use mvm_vmm::host::cmdline;
 use mvm_vmm::host::egress_shared::{decode_plan_secrets_from_state, plan_stream_retention};
-use mvm_vmm::host::network_endpoint_spawn::{
-    EndpointTransport, SubstitutionSpawnParams, spawn_network_endpoint,
-};
+use mvm_vmm::host::network_endpoint_spawn::{EndpointTransport, SubstitutionSpawnParams};
 use mvm_vmm::host::spec_map::{WorkloadSpecInputs, workload_spec, workload_vsock_ports};
 use mvm_vmm::post_restore::{ChildIdentity, PostRestoreOutcome};
 
@@ -81,10 +79,12 @@ struct PreparedWorkloadBoot {
     spec: mvm_vmm::driver::spec::VmmSpec,
     socks: sockets::StandingSockets,
     endpoint: crate::workload_runner::claim::EndpointHandle,
+    actor_bootstrap: Option<mvm_vmm::host::actor_identity::ActorBootMaterial>,
     trace: Option<mvm_core::launch_trace::LaunchTraceRecorder>,
 }
 
 pub use super::console_stream::{ConsoleCapture, ConsoleStreamer, NoopConsoleStreamer};
+pub(crate) use broker::admitted_broker_bindings;
 pub use broker::{BrokerGuard, BrokerRegisterRequest, BrokerRegistrar, RealBrokerRegistrar};
 use claim_lease::WarmClaimLease;
 use console_boot::supervisor_owns_console;
@@ -174,6 +174,39 @@ pub struct WorkloadRunner<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegi
     spawner: S,
     broker: B,
     console_streamer: Arc<dyn ConsoleStreamer>,
+    actor_bootstrap: std::sync::Mutex<Option<crate::actor_teardown::BootstrapHook>>,
+    actor_failed_vm: Option<crate::actor_teardown::FailedVmSlot>,
+    dispatch: std::sync::Mutex<DispatchProgress>,
+}
+
+enum DispatchProgress {
+    BeforeDispatch,
+    DispatchPossible,
+}
+
+/// Original cold launch never reached helper or native dispatch.
+///
+/// Only the runtime launch path can mint this evidence. It is not reconstructed
+/// from process observations or durable state.
+#[derive(Debug)]
+pub struct ActorNoDispatchProof {
+    vm_name: String,
+    plan: mvm_core::plan::ExecutionPlan,
+    signed_plan: Option<mvm_core::plan::SignedExecutionPlan>,
+}
+
+impl ActorNoDispatchProof {
+    /// Verify the exact admitted attempt, including its nonce, and physical VM name.
+    pub fn matches_launch(&self, vm_name: &str, plan: &mvm_core::plan::ExecutionPlan) -> bool {
+        self.vm_name == vm_name && &self.plan == plan
+    }
+
+    /// Original signed envelope, only for the exact attempted physical VM.
+    pub fn signed_plan_for(&self, vm_name: &str) -> Option<&mvm_core::plan::SignedExecutionPlan> {
+        (self.vm_name == vm_name)
+            .then_some(self.signed_plan.as_ref())
+            .flatten()
+    }
 }
 
 /// Timings for the shared workload-runner stop sequence.
@@ -223,7 +256,45 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             spawner,
             broker,
             console_streamer: super::console_stream::active_console_streamer(),
+            actor_bootstrap: std::sync::Mutex::new(None),
+            actor_failed_vm: None,
+            dispatch: std::sync::Mutex::new(DispatchProgress::BeforeDispatch),
         }
+    }
+
+    pub(crate) fn no_dispatch_proof(&self, config: &VmStartConfig) -> Option<ActorNoDispatchProof> {
+        match *self.dispatch.lock().expect("launch dispatch poisoned") {
+            DispatchProgress::BeforeDispatch => Some(ActorNoDispatchProof {
+                vm_name: config.name.clone(),
+                plan: mvm_core::plan::plan_from_admitted_json(config.plan_json.as_deref()?).ok()?,
+                signed_plan: serde_json::from_str::<mvm_core::plan::SignedExecutionPlan>(
+                    config.plan_json.as_deref()?,
+                )
+                .ok(),
+            }),
+            DispatchProgress::DispatchPossible => None,
+        }
+    }
+
+    fn begin_dispatch(&self) {
+        *self.dispatch.lock().expect("launch dispatch poisoned") =
+            DispatchProgress::DispatchPossible;
+    }
+
+    pub(crate) fn with_actor_bootstrap(
+        self,
+        bootstrap: crate::actor_teardown::BootstrapHook,
+    ) -> Self {
+        *self
+            .actor_bootstrap
+            .lock()
+            .expect("actor bootstrap poisoned") = Some(bootstrap);
+        self
+    }
+
+    pub(crate) fn with_actor_custody(mut self, slot: crate::actor_teardown::FailedVmSlot) -> Self {
+        self.actor_failed_vm = Some(slot);
+        self
     }
 
     /// Override the console-streaming hook for this runner alone, ignoring

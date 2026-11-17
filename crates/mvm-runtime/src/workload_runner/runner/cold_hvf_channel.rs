@@ -137,6 +137,22 @@ impl NativeCompletion {
 }
 
 impl ColdHvfChannel {
+    /// Transfer this controller's actor bootstrap only after authenticated activation.
+    ///
+    /// The caller must retain the resulting holder with this native owner and
+    /// register its public binding before dispatching any workload entrypoint.
+    /// A direct workload returns `None`; a second transfer cannot recreate keys.
+    pub fn take_actor_bootstrap(
+        &mut self,
+    ) -> Result<Option<mvm_vmm::host::actor_identity::ActorBootMaterial>> {
+        let custody = self.custody()?;
+        anyhow::ensure!(
+            custody.phase == Phase::Activated,
+            "actor bootstrap requires authenticated activation before workload dispatch"
+        );
+        Ok(custody.preparation.prepared.actor_bootstrap.take())
+    }
+
     pub(super) fn new(preparation: ColdHvfPreparation) -> Self {
         Self {
             custody: Some(Custody {

@@ -4,7 +4,7 @@
 use super::assurance_runtime::AssuranceRuntimeBinding;
 use super::extension_packs::{validate_extension_bindings, verify_extension_packs};
 use super::grant_validation::{admit_grants, enforce_mailbox_retention};
-use super::host_gates::{admit_host_interface, admit_within_host_budget};
+use super::host_gates::admit_host_interface;
 use super::registry_pack::verify_registry_pack_assets;
 use super::{
     AdmittedExtension, AdmittedPlan, Clock, ExtensionAdmissionContext, InMemoryNonceLedger,
@@ -118,6 +118,47 @@ pub fn admit_plan_for_run(
 ) -> Result<AdmittedPlan> {
     let _activation_barrier =
         mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
+    let host_permit = reserve_plan_budget(plan)?;
+    admit_plan_for_run_with_host_permit(HostPermitAdmission {
+        plan,
+        clock,
+        ledger,
+        host_signer_keys_dir,
+        bundle_ctx,
+        extension_ctx,
+        posture,
+        host_permit,
+    })
+}
+
+/// Admission inputs carrying a host hold acquired before actor plan derivation.
+pub struct HostPermitAdmission<'a> {
+    pub plan: &'a ExecutionPlan,
+    pub clock: &'a dyn Clock,
+    pub ledger: &'a InMemoryNonceLedger,
+    pub host_signer_keys_dir: Option<&'a std::path::Path>,
+    pub bundle_ctx: Option<&'a BundleAdmissionContext<'a>>,
+    pub extension_ctx: Option<&'a ExtensionAdmissionContext<'a>>,
+    pub posture: RunPosture<'a>,
+    pub host_permit: crate::admission_budget::HostBudgetPermit,
+}
+
+/// Admit using the existing host hold, never reserving the same launch twice.
+pub fn admit_plan_for_run_with_host_permit(
+    params: HostPermitAdmission<'_>,
+) -> Result<AdmittedPlan> {
+    let HostPermitAdmission {
+        plan,
+        clock,
+        ledger,
+        host_signer_keys_dir,
+        bundle_ctx,
+        extension_ctx,
+        posture,
+        host_permit,
+    } = params;
+    host_permit.verify_plan_resources(plan)?;
+>>>>>>> 898f57a9de (feat: implement bounded native HVF workload actors)
     posture.verify_launch_runtime(plan)?;
     let assurance_runtime = posture.assurance_runtime(plan)?;
     validate_extension_bindings(plan)?;
@@ -140,7 +181,6 @@ pub fn admit_plan_for_run(
     // and both read host config rather than the plan. The total is measured
     // over live machines only — counting records instead would turn a single
     // crashed VM into a permanent refusal of every later boot.
-    admit_within_host_budget(plan)?;
     admit_host_interface(plan)?;
 
     // Load or generate the host signer. load_or_init refuses
@@ -159,6 +199,7 @@ pub fn admit_plan_for_run(
     let verified = verify_plan(&signed, &trusted).context("verifying just-signed plan")?;
 
     finish_admission(VerifiedAdmission {
+        host_permit,
         verified,
         signed,
         signer_id,
@@ -222,10 +263,11 @@ pub fn admit_signed_plan_for_run(
         verified.mailbox.as_ref(),
         mvm_core::user_config::load(None).max_mailbox_retention_ms,
     )?;
-    admit_within_host_budget(&verified)?;
+    let host_permit = reserve_plan_budget(&verified)?;
     admit_host_interface(&verified)?;
 
     finish_admission(VerifiedAdmission {
+        host_permit,
         verified,
         // The caller lends the envelope; the admitted plan owns a copy so
         // downstream consumers can re-verify without trusting this process.
@@ -246,6 +288,7 @@ pub fn admit_signed_plan_for_run(
 /// `signed`, and `signer_id` travel together from whichever path verified
 /// them, and a positional call could transpose them with nothing to catch it.
 struct VerifiedAdmission<'a> {
+    host_permit: crate::admission_budget::HostBudgetPermit,
     /// The plan body, already signature-verified against the trust root of
     /// the path that produced it (the host signer, or the operator's pinned
     /// external signer set).
@@ -275,6 +318,7 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
     let _activation_barrier =
         mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
     let VerifiedAdmission {
+        host_permit,
         verified,
         signed,
         signer_id,
@@ -382,9 +426,11 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
 
     // Spend the nonce only after every fallible descriptor and bundle check.
     // Refusal must not consume an externally signed plan's replay allowance.
+    host_permit.bind_plan(&verified)?;
     ledger.spend(&signer_id, &verified, now)?;
 
     Ok(AdmittedPlan {
+        host_budget: std::sync::Arc::new(host_permit),
         plan_id: verified.plan_id.clone(),
         variant: posture.variant(),
         signer_id,
@@ -396,6 +442,14 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
         backend,
         dispatched: false,
     })
+}
+
+fn reserve_plan_budget(plan: &ExecutionPlan) -> Result<crate::admission_budget::HostBudgetPermit> {
+    let charge = crate::admission_budget::charge_for(
+        plan.resources.mem_mib,
+        plan.grants.as_ref().unwrap_or(&Default::default()),
+    );
+    crate::admission_budget::HostBudgetPermit::reserve_ordinary(&plan.workload.0, charge)
 }
 
 /// Synthesize a plan and admit it for execution.

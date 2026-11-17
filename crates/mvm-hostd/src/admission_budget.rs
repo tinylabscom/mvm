@@ -1,34 +1,14 @@
-//! The host-wide side of admission: does the *sum* still fit.
+//! Host-wide memory/CPU admission using durable, one-dispatch capacity holds.
 //!
-//! The per-workload ceiling bounds one VM. Nothing bounded the total, so a
-//! host could be oversubscribed into thrashing by a sequence of individually
-//! well-formed grants. This module measures what is already committed and
-//! hands the decision to [`HostBudget`], which is pure arithmetic.
+//! [`HostBudgetPermit`] atomically counts pending holds and legacy live
+//! charges before reserving capacity. Its short ledger lock is released before
+//! boot. Charges use configured maxima, never current balloon usage.
 //!
-//! # Two properties this module exists to get right
-//!
-//! **It counts only what is live.** A total summed from every VM record on
-//! disk would refuse every subsequent boot forever the moment one VM crashed
-//! without cleanup — the safety check becoming a permanent lockout, which is a
-//! worse failure than the oversubscription it prevents. Liveness here is the
-//! same pid-marker probe the fork path trusts
-//! ([`state_dir_has_live_process`]), not a second notion of "running" that
-//! could disagree with it.
-//!
-//! **It counts the configured maximum, not current usage.** The charge is
-//! recorded once, at the boot admission granted it, and is never rewritten.
-//! The balloon controller moves a running VM's host commitment down under
-//! pressure and back up when the guest needs its pages; summing that figure
-//! would re-admit memory the host has already promised and discover the
-//! overcommit when both guests want their pages at once.
-//!
-//! # What it does not do
-//!
-//! Two admissions racing each other can both read the same total and both be
-//! admitted, overshooting by one boot. Closing that needs a host-wide lock
-//! held across measure-and-start, which is a larger change than the bound is
-//! worth: the failure it prevents is a slow slide into thrash across many
-//! boots, not a precise cliff at boot N.
+//! Possibly dispatched holds survive failure and launcher death. Ordinary
+//! running holds can reconcile only against their persisted original process
+//! identity; coordinated holds require explicit terminal reconciliation.
+//! The older `committed` queries are diagnostic legacy-record projections,
+//! not admission authority, and do not include pending holds.
 
 use std::path::{Path, PathBuf};
 
@@ -36,6 +16,10 @@ use anyhow::{Context, Result};
 use mvm_contract::grants::budget::{HostBudget, MachineCharge};
 use mvm_contract::grants::{CpuGrant, Grants};
 use mvm_vmm::host::process_liveness::state_dir_has_live_process;
+
+mod permit;
+pub use permit::{HostBudgetPermit, HostBudgetRelease};
+pub(crate) use permit::{acquire_lock, read_private};
 
 /// File name of the per-VM charge record, written into the VM's state dir at
 /// boot and read back by every later admission.
@@ -94,7 +78,7 @@ pub fn record_charge_at(mvm_home: &Path, vm_name: &str, charge: MachineCharge) -
     std::fs::create_dir_all(dir)
         .with_context(|| format!("creating the VM state dir {}", dir.display()))?;
     let json = serde_json::to_vec(&charge).context("serializing the admitted charge")?;
-    std::fs::write(&path, json)
+    mvm_core::atomic_io::atomic_write_durable(&path, &json)
         .with_context(|| format!("writing the admitted charge to {}", path.display()))
 }
 

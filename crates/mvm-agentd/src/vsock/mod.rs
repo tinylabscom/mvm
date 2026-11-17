@@ -70,7 +70,8 @@ pub use response_payloads::{
 pub use rpc::{
     AgentPromptCall, AgentServing, ControlSession, DriveOpenCall, RpcError, RunEntrypointCall,
     call_streaming, call_unary, check_response, negotiate_protocol, probe_agent_ready,
-    probe_agent_serving, read_exec_stream, require_capabilities, send_agent_prompt_while,
+    probe_agent_serving, read_entrypoint_on_authenticated_session, read_exec_stream,
+    require_capabilities, send_agent_prompt_while,
     send_cancel_extension, send_close_stream_input, send_display_input, send_drive_file,
     send_drive_open, send_entrypoint_on_authenticated_session, send_exec_on_authenticated_session,
     send_exec_streaming, send_run_code_streaming, send_run_detached, send_run_entrypoint,
