@@ -85,7 +85,13 @@ fn run_persistent(
     };
     let existing = load_machine_spec(&name).ok();
     let (spec, action) = resolve_persistent_spec(&args, &name, existing, resolved_flake_slot)?;
+    let barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
+    mvm_client::policy_profiles::coordinator::validate_machine_spec_generation(&spec, &barrier)?;
     let secret_refs = persistent_secret_refs(&args)?;
+    anyhow::ensure!(
+        spec.policy_generation.is_none() || secret_refs.as_ref().is_none_or(Vec::is_empty),
+        "committed persistent machines cannot add secret references outside their stored policy"
+    );
 
     if args.run.dry_run {
         let summary = machine_start_preflight_summary(
@@ -606,6 +612,12 @@ fn run_entrypoint_action(
         review_source,
         network_policy,
         hypervisor: args.run.hypervisor.clone(),
+        policy_generation: args
+            .run
+            .committed_generation
+            .as_ref()
+            .map(mvm_client::policy_profiles::coordinator::ProjectPolicyCandidate::plan_asset)
+            .transpose()?,
         portable_boot_assets: None,
     };
     if let Some(application) = args.run.resolved_application {
@@ -746,6 +758,10 @@ pub(in crate::commands) fn run_dispatch(
     // image of a machine that outlives the command from whatever directory it
     // was started in builds machines nobody chose.
     let cwd = std::env::current_dir().context("resolving the working directory")?;
+    if cfg!(target_os = "linux") && !args.run.dry_run && !args.attach {
+        mvm_client::policy_profiles::coordinator::ensure_if_activated()
+            .context("connecting to the host policy lifecycle coordinator")?;
+    }
     crate::commands::vm::run_policy::select_pack_image(&mut args.run)?;
     let inference = args.source_inference();
     crate::commands::vm::exec::resolve_run_source(&mut args.run, &cwd, inference)?.announce();
@@ -769,7 +785,10 @@ pub(in crate::commands) fn run_dispatch(
     // The manifest that policy came from, for reviewing the run's refusals.
     // Read now, while the arguments still name the flake directory; the
     // transient lanes carry it on the run arguments.
-    let review_source = ReviewSource::for_launch(&args.run)?;
+    let review_source = match &args.run.review_source {
+        Some(source) => source.clone(),
+        None => ReviewSource::for_launch(&args.run)?,
+    };
     args.run.review_source = Some(review_source.clone());
     check_pack_entrypoint(&args)?;
     // A dry run validates the plan without booting, so it builds nothing either.

@@ -713,6 +713,12 @@ fn allow_helper_builds_from_source(
 
 fn command_allows_helper_source_builds(command: &Commands) -> bool {
     command_allows_builder_auto_bootstrap(command)
+        || matches!(
+            command,
+            Commands::Policy(policy::Args {
+                action: policy::PolicyAction::Activate(_)
+            })
+        )
 }
 
 fn command_allows_builder_auto_bootstrap(command: &Commands) -> bool {
@@ -1070,6 +1076,16 @@ mod builder_bootstrap_policy_tests {
         ])));
         assert!(!command_allows_helper_source_builds(&command(&[
             "machine", "run", "--image", "alpine", "--", "true",
+        ])));
+    }
+
+    #[test]
+    fn initial_activation_can_build_its_resident_helper_without_bootstrapping_a_builder() {
+        let activate = command(&["policy", "activate", "."]);
+        assert!(command_allows_helper_source_builds(&activate));
+        assert!(!command_allows_builder_auto_bootstrap(&activate));
+        assert!(!command_allows_helper_source_builds(&command(&[
+            "policy", "show",
         ])));
     }
 }

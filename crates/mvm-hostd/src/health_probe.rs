@@ -639,6 +639,7 @@ mod tests {
             name: name.to_string(),
             image: Some("alpine:latest".to_string()),
             manifest: None,
+            policy_generation: None,
             deployment: None,
             runtime_pack: false,
             registry_pack_image: None,

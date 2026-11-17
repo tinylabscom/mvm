@@ -13,6 +13,7 @@ pub mod budget_charge;
 pub mod built_pack;
 pub mod bundle_runtime;
 pub mod canonical_linux;
+mod committed_policy;
 pub mod detached;
 pub mod grants_report;
 pub mod machine_start;
@@ -38,6 +39,8 @@ mod tests;
 mod transient;
 mod unbooted;
 
+use committed_policy::apply_committed_sdk_policy;
+use request::ensure_spec_bootable_in_process;
 use unbooted::DefinitionOrigin;
 
 pub use request::{
@@ -620,7 +623,32 @@ impl LocalBackend {
     /// requests boot immediately and are cleaned up on exit/TTL; persistent
     /// requests persist their definition first, then boot from it — both
     /// through the one canonical signed-admission seam.
-    pub async fn launch(&self, request: LaunchRequest) -> Result<LaunchOutcome> {
+    pub async fn launch(&self, mut request: LaunchRequest) -> Result<LaunchOutcome> {
+        let _barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()
+            .map_err(crate::local::backend_err)?;
+        if cfg!(target_os = "linux")
+            && self.backend.kind() != mvm_core::vm_backend::BackendKind::Mock
+        {
+            crate::policy_profiles::coordinator::ensure_if_activated()
+                .map_err(crate::local::backend_err)?;
+        }
+        if let LaunchSource::Built { slot_hash } = &request.source {
+            let candidate =
+                crate::policy_profiles::coordinator::activated_for_slot(slot_hash, &_barrier)
+                    .map_err(crate::local::backend_err)?;
+            if let Some(candidate) = candidate {
+                let selected = self.launch_backend(request.backend.as_deref())?;
+                if selected.kind() != mvm_core::vm_backend::BackendKind::Firecracker {
+                    return Err(crate::local::backend_err(
+                        "committed project launch requires Firecracker",
+                    ));
+                }
+                apply_committed_sdk_policy(&mut request, &candidate)
+                    .map_err(crate::local::backend_err)?;
+                request.policy_generation =
+                    Some(candidate.plan_asset().map_err(crate::local::backend_err)?);
+            }
+        }
         if let LaunchSource::PreparedImage { selection } = &request.source {
             if request.mode != LifecycleMode::Persistent {
                 return Err(MvmError::PreparedImage {
@@ -1020,56 +1048,6 @@ impl LocalBackend {
     }
 }
 
-/// Refusals for persisted-spec shapes a library start cannot honor (fail
-/// closed, never silently ignore a persisted field): the start path boots an
-/// image, a built manifest or a deployment, and its volumes arrive as typed
-/// attachments; the CLI-only shapes stay with `mvmctl machine start`.
-fn ensure_spec_bootable_in_process(spec: &mp::MachineSpec) -> Result<()> {
-    spec.validate_prepared_source()
-        .map_err(|error| MvmError::InvalidSpec {
-            reason: error.to_string(),
-        })?;
-    let unsupported = |what: &str| MvmError::InvalidSpec {
-        reason: format!(
-            "machine {:?} declares {what}, which a library start cannot honor; use the CLI's \
-             `machine start`",
-            spec.name
-        ),
-    };
-    if spec.runtime_pack {
-        return Err(unsupported("a runtime-pack source"));
-    }
-    if !spec.volumes.is_empty() {
-        return Err(unsupported(
-            "CLI-grammar volume strings (use typed attachments)",
-        ));
-    }
-    if !spec.init.is_empty() {
-        return Err(unsupported("init commands"));
-    }
-    if spec.registry_pack_image.is_some() {
-        machine_start::validate_registry_pack_source(spec).map_err(|error| {
-            MvmError::InvalidSpec {
-                reason: format!("invalid registry pack source: {error:#}"),
-            }
-        })?;
-    }
-    if spec.image.is_none()
-        && spec.prepared_image.is_none()
-        && spec.manifest.is_none()
-        && spec.deployment.is_none()
-        && spec.registry_pack_image.is_none()
-    {
-        return Err(MvmError::InvalidSpec {
-            reason: format!(
-                "machine {:?} has no image, manifest or deployment source",
-                spec.name
-            ),
-        });
-    }
-    Ok(())
-}
-
 fn prepared_client_error(error: anyhow::Error) -> MvmError {
     if let Some(refusal) = error.downcast_ref::<crate::prepared_image::PreparedImageError>() {
         return MvmError::PreparedImage {
@@ -1085,10 +1063,20 @@ impl LocalBackend {
     /// attachments re-resolved and leased, then the canonical admitted boot.
     /// Starting a machine that is already running returns its state.
     pub async fn start_persistent(&self, name: &str) -> Result<MachineState> {
+        let _barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()
+            .map_err(crate::local::backend_err)?;
+        if cfg!(target_os = "linux")
+            && self.backend.kind() != mvm_core::vm_backend::BackendKind::Mock
+        {
+            crate::policy_profiles::coordinator::ensure_if_activated()
+                .map_err(crate::local::backend_err)?;
+        }
         let lifecycle = crate::local::machine_lifecycle(name).await?;
         let spec = mp::load_machine_spec(name).map_err(|e| MvmError::NotFound {
             id: format!("{name}: {e}"),
         })?;
+        crate::policy_profiles::coordinator::validate_machine_spec_generation(&spec, &_barrier)
+            .map_err(crate::local::backend_err)?;
         if self.machine_running(name) {
             return Ok(MachineState {
                 id: MachineId(name.to_string()),

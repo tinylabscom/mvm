@@ -173,7 +173,9 @@ tracked by git from the current worktree, prepares the pinned
 Rust/Zig/Firecracker
 toolchain, runs the exact argument vector after `lab::gcp-kvm`, downloads a
 result archive under the printed `/tmp` path, and deletes the outer VM on
-success or failure. Put artifacts that must be downloaded in
+success or failure. Compute Engine also deletes it after a two-hour maximum
+runtime if the local runner disappears before its cleanup trap can run.
+Put artifacts that must be downloaded in
 `$MVM_GCP_KVM_RESULTS_DIR`. Use the direct
 `scripts/run-gcp-kvm-test.sh [options] -- PROGRAM [ARG ...]` entry point for
 project, zone, machine, result-directory, dry-run, or diagnostic options.

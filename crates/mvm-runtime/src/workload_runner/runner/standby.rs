@@ -32,6 +32,9 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
     where
         D: 'static,
     {
+        let _activation_barrier =
+            mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()
+                .map_err(|error| StandbyError::SpawnFailed(format!("{error:#}")))?;
         let launch = ctx.launch.ok_or_else(|| {
             StandbyError::SpawnFailed(format!(
                 "standby '{}' has no launch config to mirror: a warm parent boots the same \

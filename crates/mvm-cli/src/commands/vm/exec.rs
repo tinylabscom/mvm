@@ -66,6 +66,10 @@ pub(in crate::commands) struct Args {
     /// Internal (not a CLI flag): optional foreground transient VM identity.
     #[arg(skip)]
     pub vm_name: Option<String>,
+    /// Internal: the manifest argument is a validated committed slot address,
+    /// not a path that may be resolved from the working directory.
+    #[arg(skip)]
+    pub committed_manifest_slot: bool,
     /// vCPU cores (default: 2)
     #[arg(long, default_value_t = crate::commands::shared::default_vcpus())]
     pub cpus: u32,
@@ -400,6 +404,14 @@ pub(in crate::commands) struct RunArgs {
     /// surfaces cannot reopen something it denied.
     #[arg(skip)]
     pub applied_policy: Option<mvm_client::policy_profiles::PolicyBody>,
+    /// Internal: the project manifest selected when policy was resolved.
+    /// Later route and approval resolution must use the same parsed bytes.
+    #[arg(skip)]
+    pub(in crate::commands) project_manifest: Option<super::run_routes::ProjectManifestSnapshot>,
+    /// Internal: validated committed source closure, retained through admission.
+    #[arg(skip)]
+    pub(in crate::commands) committed_generation:
+        Option<mvm_client::policy_profiles::coordinator::ProjectPolicyCandidate>,
     /// Internal: effective AI limits retained from the ordinary policy fold.
     #[arg(skip)]
     pub applied_ai_policy: Option<mvm_core::network_policy::AiPolicy>,
@@ -539,6 +551,7 @@ impl RunArgs {
     fn into_exec_args(self) -> Args {
         Args {
             manifest: self.manifest,
+            committed_manifest_slot: self.committed_generation.is_some(),
             warm_pool_size: self.warm_pool_size,
             detected_libc: self.detected_libc,
             pty: self.pty,
@@ -561,6 +574,19 @@ impl RunArgs {
             gpu_device: self.gpu_device,
         }
     }
+}
+
+fn boots_oci_for_run(args: &RunArgs, resolved: Option<&crate::exec::ImageSource>) -> Result<bool> {
+    if args.committed_generation.is_some()
+        && let Some(slot) = &args.manifest
+    {
+        // A committed project carries the already-validated slot key, not a
+        // manifest path. Never let a same-named staged file shadow it.
+        return crate::exec::boots_oci_image(crate::exec::ImageNaming::Resolved(
+            &crate::exec::ImageSource::Template(slot.clone()),
+        ));
+    }
+    crate::exec::boots_oci_image(args.image_naming(resolved))
 }
 
 pub(in crate::commands) fn run_receipt(
@@ -720,7 +746,7 @@ pub(in crate::commands) fn run_secure_started(
     // rootfs + generated vm_name. cpus/mem are captured here because `args` is
     // consumed by `into_exec_args()` below.
     let selected_backend = crate::exec::select_exec_backend(
-        crate::exec::boots_oci_image(args.image_naming(source_override.as_ref()))?,
+        boots_oci_for_run(&args, source_override.as_ref())?,
         &network_policy,
         args.hypervisor.as_deref(),
     )?;
@@ -749,6 +775,11 @@ pub(in crate::commands) fn run_secure_started(
     let admit_network_policy = network_policy.clone();
     let admit_agent_verb = args.agent_verb.clone();
     let admit_caller_commitment = args.caller_commitment.clone();
+    let committed_policy_asset = args
+        .committed_generation
+        .as_ref()
+        .map(mvm_client::policy_profiles::coordinator::ProjectPolicyCandidate::plan_asset)
+        .transpose()?;
     let admit_host_services =
         super::host_services::parse_host_service_bindings(&args.host_service)?;
     let admit_pty = args.pty;
@@ -757,7 +788,11 @@ pub(in crate::commands) fn run_secure_started(
     let admit_has_argv = !args.argv.is_empty();
     let admit_is_dev = matches!(args.profile, RunProfile::Dev);
     let admit_prod = args.prod;
-    let admit_workload_dir = local_workload_dir(args.flake.as_deref(), args.manifest.as_deref());
+    let admit_workload_dir = args
+        .committed_generation
+        .as_ref()
+        .map(|candidate| candidate.project_dir().to_path_buf())
+        .or_else(|| local_workload_dir(args.flake.as_deref(), args.manifest.as_deref()));
     // A run of an installed bundle is bounded by the posture its publisher
     // signed. Read before boot, from the verified manifest; admission refuses
     // a launch that asks for more.
@@ -782,9 +817,9 @@ pub(in crate::commands) fn run_secure_started(
     let admit = move |inputs: crate::exec::AdmitInputs<'_>|
           -> Result<Option<crate::exec::SessionAuditSubstrate>> {
         let crate::exec::AdmitInputs {
+            backend_kind,
             rootfs,
             kernel,
-            backend_kind,
             vm_name,
             sdk_sidecar,
             assets,
@@ -864,7 +899,15 @@ pub(in crate::commands) fn run_secure_started(
                 rootfs,
                 admit_has_argv,
             ),
-            assets: assets.to_vec(),
+            assets: {
+                let mut bound = assets.to_vec();
+                if let Some(generation) = &committed_policy_asset {
+                    bound.push(mvm_client::admission::AssetSpec::CommittedPolicy(
+                        generation.clone(),
+                    ));
+                }
+                bound
+            },
         };
         let (c, durability) = match verified_runtime {
             Some(runtime) => {
@@ -1151,15 +1194,23 @@ fn build_exec_request(
         env_pairs.push(parse_env_pair(kv)?);
     }
     check_run_env(&args.allow_env, &env_pairs, env_args::launch_env(&target))?;
-    let boots_oci = crate::exec::boots_oci_image(
-        crate::exec::LaunchNames {
-            runtime_pack,
-            resolved: source_override.as_ref(),
-            manifest: args.manifest.as_deref(),
-            image: image_ref,
-        }
-        .into(),
-    )?;
+    let boots_oci = if args.committed_manifest_slot
+        && let Some(slot) = manifest_arg
+    {
+        crate::exec::boots_oci_image(crate::exec::ImageNaming::Resolved(
+            &crate::exec::ImageSource::Template(slot.to_string()),
+        ))?
+    } else {
+        crate::exec::boots_oci_image(
+            crate::exec::LaunchNames {
+                runtime_pack,
+                resolved: source_override.as_ref(),
+                manifest: args.manifest.as_deref(),
+                image: image_ref,
+            }
+            .into(),
+        )?
+    };
     let selected_backend =
         crate::exec::select_exec_backend(boots_oci, &network_policy, args.hypervisor.as_deref())?;
     let mut effective_env =
@@ -1189,6 +1240,9 @@ fn build_exec_request(
     } else {
         match (manifest_arg, image_ref) {
             (Some(_), Some(_)) => unreachable!("clap conflicts_with prevents --manifest + --image"),
+            (Some(slot), None) if args.committed_manifest_slot => {
+                crate::exec::ImageSource::Template(slot.to_string())
+            }
             (Some(arg), None) => match super::shared::resolve_manifest_arg(arg)? {
                 super::shared::ManifestArgRef::Slot { slot_hash } => {
                     crate::exec::ImageSource::Template(slot_hash)
@@ -1334,6 +1388,7 @@ struct RunReceiptSignature {
 pub(in crate::commands) mod env_args;
 pub(in crate::commands) mod environment_defaults;
 mod preflight;
+mod receipt_input;
 mod receipt_verify;
 mod run_args_default;
 use env_args::{check_run_env, parse_env_pair};
@@ -1341,93 +1396,6 @@ use env_args::{check_run_env, parse_env_pair};
 use preflight::RunPreflightImage;
 use preflight::{RunJsonSummary, RunPreflightSummary, print_run_preflight_human};
 use receipt_verify::verify_run_receipt;
-
-impl ReceiptInput {
-    fn from_run_args(args: &RunArgs, backend: &str) -> Result<Self> {
-        let policy = super::shared::resolve_run_network_policy(
-            args.net,
-            args.network_preset,
-            &args.allow_host,
-            &args.peer,
-        )?
-        .with_ai(super::shared::resolve_ai_policy(args.ai_token_budget));
-        let command = if let Some(path) = &args.launch_plan {
-            ReceiptCommand::LaunchPlan {
-                path_sha256: sha256_hex(path.as_bytes()),
-            }
-        } else {
-            let argv_bytes =
-                serde_json::to_vec(&args.argv).context("serializing argv for receipt hash")?;
-            ReceiptCommand::Inline {
-                argv_len: args.argv.len(),
-                argv_sha256: sha256_hex(&argv_bytes),
-            }
-        };
-
-        mvm_client::AnyBackend::require_hypervisor_selectable(backend)?;
-        let selected_backend = mvm_client::AnyBackend::from_hypervisor(backend);
-        let boots_oci = crate::exec::boots_oci_image(args.image_naming(None))?;
-        crate::exec::validate_image_egress_backend(&selected_backend, boots_oci, &policy)?;
-        let mut env_keys =
-            crate::exec::oci_proxy_env(boots_oci, &selected_backend.capabilities(), &policy)
-                .into_iter()
-                .map(|(key, _)| key)
-                .collect::<Vec<_>>();
-        env_keys.reserve(args.env.len());
-        for kv in &args.env {
-            let (key, _) = kv
-                .split_once('=')
-                .ok_or_else(|| anyhow::anyhow!("--env '{kv}': expected KEY=VALUE"))?;
-            env_keys.push(key.to_string());
-        }
-        env_keys.sort();
-        env_keys.dedup();
-
-        let mut mounts = Vec::with_capacity(args.mounts.len());
-        for spec in &args.mounts {
-            let parsed = super::shared::parse_volume_spec(spec)?;
-            let (host_path, guest_path, read_only) = match parsed {
-                super::shared::VolumeSpec::DirShare {
-                    host_dir,
-                    guest_mount,
-                    read_only,
-                    ..
-                } => (host_dir, guest_mount, read_only),
-                super::shared::VolumeSpec::Disk {
-                    host,
-                    guest,
-                    read_only,
-                    ..
-                } => (host, guest, read_only),
-            };
-            mounts.push(ReceiptMount {
-                host_path_sha256: sha256_hex(host_path.as_bytes()),
-                guest_path,
-                read_only,
-            });
-        }
-
-        Ok(Self {
-            manifest: args.manifest.clone(),
-            image: args.image.clone(),
-            cpus: args.cpus,
-            memory: args.memory.clone(),
-            profile: args
-                .profile
-                .to_possible_value()
-                .context("profile has no command-line name")?
-                .get_name()
-                .to_string(),
-            network_posture: policy.posture_label(),
-            egress_enforcement: super::shared::egress_enforcement_label(backend, &policy),
-            ai_token_budget: args.ai_token_budget,
-            command,
-            env_keys,
-            mounts,
-            timeout_secs: args.timeout.unwrap_or(60),
-        })
-    }
-}
 
 impl ReceiptCommand {
     fn describe(&self) -> String {

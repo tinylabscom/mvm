@@ -89,6 +89,14 @@ impl EntrypointAdmission {
         &self.backend_name
     }
 
+    /// Project-generation identity the caller intends to bind into the plan.
+    pub(crate) fn committed_policy_asset(&self) -> Option<&mvm_core::plan::AssetIdentity> {
+        self.assets.iter().find_map(|asset| match asset {
+            crate::admission::AssetSpec::CommittedPolicy(identity) => Some(identity),
+            _ => None,
+        })
+    }
+
     /// The egress policy the plan and the VM's start config carry.
     #[must_use]
     pub fn network_policy(&self) -> &NetworkPolicy {
@@ -118,7 +126,9 @@ impl EntrypointAdmission {
     /// that cannot be persisted ahead of the egress moat.
     pub fn admit(&self, inputs: AdmitInputs<'_>) -> Result<AdmittedEntrypoint> {
         anyhow::ensure!(
-            self.producer_identity.is_none() || self.backend_name == "hvf",
+            self.producer_identity.is_none()
+                || (self.backend_name == "hvf"
+                    && inputs.backend_kind == mvm_core::vm_backend::BackendKind::Hvf),
             "caller registration currently requires a cold HVF entrypoint launch"
         );
         // Unsupported builds/platforms refuse before admission or managed-state
@@ -513,8 +523,10 @@ mod tests {
             .producer_identity(identity)
             .build()
             .unwrap();
-        let Err(error) = admission.admit(inputs(std::path::Path::new("/unopened"), "refused"))
-        else {
+        let Err(error) = admission.admit(AdmitInputs {
+            backend_kind: mvm_core::vm_backend::BackendKind::Hvf,
+            ..inputs(std::path::Path::new("/unopened"), "refused")
+        }) else {
             panic!("unsupported native custody must refuse");
         };
         assert!(matches!(

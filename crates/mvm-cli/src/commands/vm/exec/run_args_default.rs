@@ -78,6 +78,8 @@ impl Default for RunArgs {
             plan: None,
             policy_routes: Vec::new(),
             applied_policy: None,
+            project_manifest: None,
+            committed_generation: None,
             applied_ai_policy: None,
             policy_backend: None,
             review_source: None,

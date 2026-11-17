@@ -803,7 +803,20 @@ pub(crate) fn apply_producer_revocations(
     (!output.status.success()).then_some(output)
 }
 
+/// Run a live-home command from an explicit caller directory.
+pub(crate) fn run_mvmctl_isolated_live_home_argv_in(
+    world: &mut CliWorld,
+    argv: Vec<String>,
+    directory: &Path,
+) {
+    run_live_home_in(world, argv, Terminal::Inherited, directory);
+}
+
 fn run_live_home(world: &mut CliWorld, argv: Vec<String>, terminal: Terminal) {
+    run_live_home_in(world, argv, terminal, &workspace_root());
+}
+
+fn run_live_home_in(world: &mut CliWorld, argv: Vec<String>, terminal: Terminal, directory: &Path) {
     // Like `run_mvmctl_isolated_home`, but for scenarios that boot a real
     // microVM. The working directory is the workspace root so relative flake
     // paths (e.g. `examples/exit_code`) resolve the same way as a manual run
@@ -830,14 +843,14 @@ fn run_live_home(world: &mut CliWorld, argv: Vec<String>, terminal: Terminal) {
     };
     super::live_home::use_seeded_runtime(&mut command);
     if let Some(path) = &producer
-        && let Some(refused) = apply_producer_revocations(Path::new(path), &workspace_root(), &home)
+        && let Some(refused) = apply_producer_revocations(Path::new(path), directory, &home)
     {
         world.last_live_home = Some(home);
         world.last_run = Some(refused);
         return;
     }
     command
-        .current_dir(workspace_root())
+        .current_dir(directory)
         .args(&argv)
         .isolated_home(&home);
     if argv.first().is_some_and(|arg| arg == "machine")

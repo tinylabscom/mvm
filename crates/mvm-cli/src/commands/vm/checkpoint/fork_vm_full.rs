@@ -49,6 +49,11 @@ pub(in crate::commands) struct ForkVmFullArmParams<'a> {
 pub(in crate::commands) fn fork_vm_full_arm(
     p: ForkVmFullArmParams<'_>,
 ) -> Result<mvm_core::checkpoint::CheckpointMeta> {
+    let _activation_barrier =
+        mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
+    if cfg!(target_os = "linux") {
+        mvm_client::policy_profiles::coordinator::ensure_if_activated()?;
+    }
     fork_vm_full_arm_inner(p)
 }
 
@@ -333,6 +338,17 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
     );
     let retained_runtime =
         mvm_client::checkpoint::verify_checkpoint_runtime(p.store, p.parent_meta)?;
+    let generation_assets =
+        mvm_client::policy_profiles::coordinator::restore_plan(&p.parent_meta.vm_name)?
+            .into_iter()
+            .flat_map(|parent| parent.asset_identities)
+            .filter(|asset| {
+                asset
+                    .name
+                    .starts_with(mvm_client::policy_profiles::coordinator::GENERATION_ASSET_PREFIX)
+            })
+            .map(mvm_client::admission::AssetSpec::CommittedPolicy)
+            .collect();
     let restrict_agent_verbs = fork_restrict_agent_verbs(p)?;
     let user_cfg = mvm_core::user_config::load(None);
     // A chunked checkpoint has no contiguous rootfs in its content directory.
@@ -400,7 +416,7 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
             bundle_posture: None,
             deps_volume: None,
             shares: Vec::new(),
-            assets: Vec::new(),
+            assets: generation_assets,
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: parent_agent_verbs.clone(),

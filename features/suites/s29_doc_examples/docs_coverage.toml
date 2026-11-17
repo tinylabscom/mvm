@@ -513,6 +513,7 @@ uncovered = [
     "mvmctl persistent-builder status",
     "mvmctl persistent-builder stop",
     "mvmctl persistent-builder submit --flake path:/work --attr packages.aarch64-linux.default",
+    "mvmctl policy activate ./my-project",
     "mvmctl policy resolve agent-apis -o agent.json",
     "mvmctl policy show",
     "mvmctl policy show agent-apis",

@@ -14,6 +14,33 @@ separately, the files that were not read. Absence from the "read" column is not 
 soundness. "Read" is taken from the fixing PR descriptions and the review notes for the lane; the
 line ranges are as recorded there and were not re-derived when this file was written.
 
+## Initial committed project policy generation
+
+The focused review in [#5654](https://github.com/tinylabscom/mvm/pull/5654)
+covers `mvm-core/src/host_interface/activation_barrier.rs`, the
+`mvm-hostd/src/policy_generation` coordinator/store, host plan admission,
+and their CLI/client launch, persistent-start, checkpoint and restore callers.
+The resident coordinator owns generation-one publication under the exclusive
+barrier; launch/restore callers retain shared guards through their transitions.
+Publication records durable intent, a no-clobber project closure and the active
+index. Missing or inconsistent activation state refuses reuse rather than
+falling back to staged files. Backend owners retain workload teardown custody.
+
+Review found relative IPC project identities could resolve against the resident
+process's working directory and ordinary pre-activation runs unnecessarily
+required that process. Regression tests cover requester-side canonicalization,
+server-side relative-path refusal, and absent-helper compatibility before
+activation. Host verification also rejects generation-bearing plans that omit
+or widen committed CPU-share grants. The CLI already refused CPU-share-limited
+entrypoints; this was not a demonstrated CLI bypass.
+
+This review does not establish live policy cutover, generation updates,
+deactivation, or other-backend support. No effect-fencing/route-transfer or
+fleet transaction is implemented. The live evidence is restricted to the
+Linux/Firecracker scenarios cited in the PR; it does not replace review of
+unrelated lifecycle paths or claim crash recovery can resume an incomplete
+publication automatically.
+
 ## Compile-time AES-GCM boundary
 
 Reviewed `crates/mvm-crypto/src/aead.rs`,

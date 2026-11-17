@@ -131,11 +131,29 @@ pub(in crate::commands) fn resolve_run_source(
         return Ok(ResolvedSource::BundledDefault);
     }
 
-    if let Some(manifest) = mvm_core::domain::manifest::discover_manifest_from_dir(cwd)
-        .context("looking for an mvm.toml in the working directory")?
-    {
-        args.manifest = Some(manifest.display().to_string());
-        return Ok(ResolvedSource::ProjectManifest(manifest));
+    // Removing the staged manifest must not make an activated project look
+    // like an unrelated directory and silently select the default image. Use
+    // the same nearest-project and .git-boundary walk as ordinary inference.
+    // The outer command guard prevents activation from racing this lookup.
+    let barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
+    let canonical = cwd
+        .canonicalize()
+        .with_context(|| format!("looking for a project in {}", cwd.display()))?;
+    for dir in canonical.ancestors() {
+        if let Some(candidate) =
+            mvm_client::policy_profiles::coordinator::read_if_activated(dir, &barrier)?
+        {
+            let (path, _) = candidate.manifest()?;
+            args.manifest = Some(path.display().to_string());
+            return Ok(ResolvedSource::ProjectManifest(path));
+        }
+        if let Some(manifest) = mvm_core::domain::manifest::manifest_in_dir(dir)? {
+            args.manifest = Some(manifest.display().to_string());
+            return Ok(ResolvedSource::ProjectManifest(manifest));
+        }
+        if dir.join(".git").exists() {
+            break;
+        }
     }
 
     let present = project_files_in(cwd);

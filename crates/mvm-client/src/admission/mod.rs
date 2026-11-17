@@ -86,6 +86,9 @@ pub enum AssetSpec {
     },
     /// An internally selected signed pack; never accepted from `--asset`.
     RegistryPack(mvm_core::registry_pack::PackPin),
+    /// The resident owner's exact project-policy generation and closure.
+    /// Host admission revalidates it before signing; it is not a host file.
+    CommittedPolicy(mvm_core::plan::AssetIdentity),
 }
 
 pub struct AdmitPlanForBootParams<'a> {
@@ -838,6 +841,16 @@ fn admit_with_runtime_evidence(
                     verified.reference().to_string(),
                     verified.manifest_sha256().as_str(),
                 )?);
+            }
+            AssetSpec::CommittedPolicy(identity) => {
+                anyhow::ensure!(
+                    identity.kind == mvm_core::plan::AssetKind::Policy
+                        && identity
+                            .name
+                            .starts_with(mvm_hostd::policy_generation::GENERATION_ASSET_PREFIX),
+                    "invalid committed project-policy asset"
+                );
+                caller_assets.push(identity.clone());
             }
         }
     }

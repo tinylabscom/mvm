@@ -998,6 +998,7 @@ async fn start_refuses_spec_shapes_the_in_process_backend_cannot_honor() {
         image: Some("alpine:latest".into()),
         prepared_image: None,
         manifest: None,
+        policy_generation: None,
         deployment: None,
         resolved_digest: None,
         runtime_pack: false,
