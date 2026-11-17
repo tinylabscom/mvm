@@ -59,11 +59,14 @@ pub use mvm_client::entrypoint::{AdmitInputs, SessionAdmit, SessionAuditSubstrat
 pub(crate) use oci_boot::{ImageNaming, LaunchNames, boots_oci_image, oci_proxy_env};
 use session::wait_for_agent_timed;
 pub use session::{SessionVm, dispatch_in_session, wait_for_agent};
+pub(crate) use session::{connect_session, dispatch_on_session_stream};
+#[cfg(test)]
+pub(crate) use transient::teardown_transient_vm;
 use transient::{
     BootAttempt, LeaveAt, arm_interrupt_teardown, boot_transient_vm, combine_run_and_flush,
     flush_writable_disks_before_teardown, leave_standby_when, standby_to_leave, start_mode,
 };
-pub(crate) use transient::{TransientStopFailure, combine_run_and_stop, teardown_transient_vm};
+pub(crate) use transient::{RuntimeRunCustody, TransientStopFailure, combine_run_and_stop};
 
 pub const EXEC_TIMEOUT_EXIT_CODE: i32 = 124;
 
@@ -604,6 +607,22 @@ fn run_inner(
     let mut sub_marks = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
     let t_start = timing.then(std::time::Instant::now);
 
+    let named_lifecycle = req
+        .name
+        .as_deref()
+        .map(mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire)
+        .transpose()?;
+    if let (Some(name), Some(lifecycle)) = (req.name.as_deref(), named_lifecycle.as_ref()) {
+        anyhow::ensure!(
+            !mvm_core::config::machine_spec_path(name).exists(),
+            "a persistent machine named {name:?} exists; use its persistent lifecycle verbs"
+        );
+        anyhow::ensure!(
+            lifecycle.reap_unowned_state()?,
+            "machine {name:?} still owns its runtime state"
+        );
+    }
+
     // Serialize materialization for this invocation. The runtime transfers
     // writer custody to the actual backend, so an uncertain-stop return does
     // not rely on these caller-side guards remaining alive.
@@ -659,6 +678,10 @@ fn run_inner(
     // snapshot-restore / cold boot. See `boot_transient_vm`.
     let mut warm_claim_marks = crate::commands::vm::phase_timing::WarmClaimMarks::default();
     let requested_vm_name = vm_name.clone();
+    let requested_lifecycle = match named_lifecycle {
+        Some(lifecycle) => lifecycle,
+        None => mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(&vm_name)?,
+    };
     if let Some(runtime) = &_built_runtime {
         runtime.verify_config(&start_config)?;
     }
@@ -687,6 +710,33 @@ fn run_inner(
         &mut sub_marks,
     )?;
     let vm_name = booted.name;
+    let effective_lifecycle = booted.lifecycle;
+    if vm_name != requested_vm_name {
+        // Admission-only scratch has no running instance. Retire it while its
+        // original launch still owns the name, never from delayed teardown.
+        remove_transient_state_dir(
+            &mvm_core::config::vm_state_dir(&requested_vm_name).to_string_lossy(),
+        );
+    }
+    let exit_audit = start_config.plan_json.as_deref().map(|signed_plan_json| {
+        mvm_client::launch::TransientExitAudit {
+            signed_plan_json,
+            vm_name: &vm_name,
+            backend: backend.name(),
+            exit_code: None,
+            completed: false,
+            posture: None,
+        }
+    });
+    let custody = std::sync::Arc::new(RuntimeRunCustody::capture_or_stop(
+        &backend,
+        &vm_name,
+        effective_lifecycle.as_ref().unwrap_or(&requested_lifecycle),
+        exit_audit,
+        &mut sub_marks,
+    )?);
+    drop(effective_lifecycle);
+    drop(requested_lifecycle);
     let launch_mode = booted.launch_mode;
     if let Some(sink) = posture {
         sink.set(mvm_client::admission::BootPosture {
@@ -733,8 +783,7 @@ fn run_inner(
 
     // A signal stops and removes the VM before the process exits.
     let interrupt_teardown = arm_interrupt_teardown(
-        &vm_name,
-        &requested_vm_name,
+        custody.clone(),
         backend.name(),
         start_config.plan_json.as_deref(),
     );
@@ -772,10 +821,15 @@ fn run_inner(
         Ok((either, vsock_ready)) => (Ok(either), vsock_ready),
         Err(e) => (Err(e), None),
     };
-    result = combine_run_and_flush(
-        result,
-        flush_writable_disks_before_teardown(&vm_name, &req.disk_volumes),
-    );
+    let cleanup_lifecycle =
+        mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(&vm_name);
+    let flush = match &cleanup_lifecycle {
+        Ok(lifecycle) => custody
+            .require_current(lifecycle)
+            .and_then(|()| flush_writable_disks_before_teardown(&vm_name, &req.disk_volumes)),
+        Err(error) => Err(anyhow::anyhow!("locking transient cleanup: {error:#}")),
+    };
+    result = combine_run_and_flush(result, flush);
     let warm_memory_result = warm_memory_start.map(|start| {
         start.and_then(|start| finish_warm_memory_measurement(&backend, &vm_name, start))
     });
@@ -799,13 +853,19 @@ fn run_inner(
             posture: posture.filter(|_| result.is_ok()).map(std::cell::Cell::get),
         }
     });
-    let stopped = teardown_transient_vm(
-        &backend,
-        &vm_name,
-        &requested_vm_name,
-        exit_audit,
-        &mut sub_marks,
-    );
+    let stopped = match &cleanup_lifecycle {
+        Ok(lifecycle) => transient::teardown_custodied_in_lifecycle(
+            &backend,
+            &custody,
+            lifecycle,
+            exit_audit,
+            &mut sub_marks,
+        ),
+        Err(error) => Err(transient::TransientStopFailure(anyhow::anyhow!(
+            "locking transient cleanup: {error:#}"
+        ))),
+    };
+    drop(cleanup_lifecycle);
     drop(interrupt_teardown);
     if stopped.is_err() {
         return combine_run_and_stop(result, stopped);

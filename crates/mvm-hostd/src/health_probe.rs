@@ -9,7 +9,8 @@
 //! Restart-on-crash rides the probe path: a crashed service is not stopped,
 //! so its daemon registration lingers and stays in the live set, where its
 //! probe hits an unreachable agent (`Unreachable` → `Fail`), flips
-//! `Unhealthy` after `retries`, and earns a bounded restart. A clean
+//! `Unhealthy` after `retries`, and earns a bounded restart only while its
+//! original HVF supervisor can authenticate its instance. A clean
 //! disappearance from the live set is treated as possibly-intentional (a
 //! `machine stop` early-deregisters and then erases the registry entry), so
 //! it triggers no restart. Health-state transitions and restart decisions are
@@ -28,6 +29,7 @@ use mvm_agentd::vsock::{ExecEvent, GUEST_AGENT_PORT, send_exec_streaming};
 use mvm_contract::ir::HealthCheck;
 use mvm_core::domain::instance::InstanceReadiness;
 use mvm_core::health::{HealthAction, HealthPolicy, HealthState, HealthTracker, ProbeResult, fold};
+use mvm_core::protocol::hvf_control::HvfInstance;
 use mvm_runtime::machine::persist::load_machine_spec;
 use mvm_runtime::vm::name_registry::record_readiness;
 use mvm_vmm::host::aux_bin::{CLI_BIN, CliSpawn, CliSpawnRefused, HostProcess};
@@ -56,6 +58,11 @@ pub enum ExecOutcome {
 /// ended." Exists so tests can substitute a fake without a live VM.
 pub trait GuestExec {
     fn exec(&self, vm_name: &str, cmd: &str, timeout_secs: u64) -> ExecOutcome;
+
+    /// Capture authenticated ownership before probing; absence forbids automatic restart.
+    fn instance(&self, _vm_name: &str) -> Option<HvfInstance> {
+        None
+    }
 }
 
 /// Real [`GuestExec`] impl: connects to the guest agent over vsock and runs
@@ -63,6 +70,20 @@ pub trait GuestExec {
 pub struct AgentExec;
 
 impl GuestExec for AgentExec {
+    fn instance(&self, vm_name: &str) -> Option<HvfInstance> {
+        #[cfg(unix)]
+        {
+            mvm_vmm::host::hvf_stop::ConnectedInstance::connect(vm_name)
+                .ok()
+                .map(|connected| connected.instance().clone())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = vm_name;
+            None
+        }
+    }
+
     fn exec(&self, vm_name: &str, cmd: &str, timeout_secs: u64) -> ExecOutcome {
         let transport = match mvm_vmm::vsock_transport::for_vm(vm_name) {
             Ok(t) => t,
@@ -124,7 +145,7 @@ pub fn probe_once(vm_name: &str, hc: &HealthCheck) -> ProbeResult {
 /// Seam over "restart this VM," so restart *decisions* stay unit-testable
 /// without ever spawning a real subprocess.
 pub trait Restarter {
-    fn restart(&self, vm_name: &str);
+    fn restart(&self, instance: &HvfInstance);
 }
 
 /// Seam over "record a chain-signed health-audit entry for this VM," so the
@@ -149,8 +170,9 @@ impl HealthAudit for NoAudit {
 pub struct MachineRestarter;
 
 impl Restarter for MachineRestarter {
-    fn restart(&self, vm_name: &str) {
-        let mut command = match restart_command_for(&HostProcess::current(), vm_name) {
+    fn restart(&self, instance: &HvfInstance) {
+        let vm_name = &instance.vm_id;
+        let mut command = match restart_command_for(&HostProcess::current(), instance) {
             Ok(command) => command,
             Err(refused) => {
                 tracing::warn!(vm = %vm_name, %refused, "not restarting");
@@ -160,7 +182,7 @@ impl Restarter for MachineRestarter {
         let spawned = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn();
         if let Err(err) = spawned {
             tracing::warn!(
@@ -175,9 +197,18 @@ impl Restarter for MachineRestarter {
 
 /// The `mvmctl machine restart <vm_name>` command for `host`, refused for a
 /// library embedder, which never runs `mvmctl`.
-fn restart_command_for(host: &HostProcess, vm_name: &str) -> Result<Command, CliSpawnRefused> {
+fn restart_command_for(
+    host: &HostProcess,
+    instance: &HvfInstance,
+) -> Result<Command, CliSpawnRefused> {
     let mut command = mvmctl_command_for(host, CliSpawn::HealthRestart)?;
-    command.args(["machine", "restart", vm_name]);
+    command.args([
+        "machine",
+        "restart",
+        &instance.vm_id,
+        "--if-hvf-boot-nonce",
+        &hex::encode(instance.boot_nonce),
+    ]);
     Ok(command)
 }
 
@@ -272,6 +303,7 @@ fn health_fields(event: &str, state: HealthState) -> serde_json::Value {
 #[derive(Default)]
 pub struct HealthProber {
     trackers: HashMap<String, (HealthTracker, u64)>,
+    pending_instances: HashMap<String, HvfInstance>,
 }
 
 impl HealthProber {
@@ -331,6 +363,8 @@ impl HealthProber {
                 false
             }
         });
+        self.pending_instances
+            .retain(|vm, _| self.trackers.contains_key(vm));
 
         let mut actions = Vec::new();
         for vm in live_vm_ids {
@@ -361,6 +395,11 @@ impl HealthProber {
             }
 
             let previous_state = entry.0.state;
+            let instance = exec.instance(vm);
+            if self.pending_instances.get(vm) != instance.as_ref() {
+                entry.0.next_restart_after_unix = None;
+                self.pending_instances.remove(vm);
+            }
             let result = probe_with(exec, vm, &hc);
             let action = fold(&mut entry.0, result, &policy, now_unix);
             entry.1 = now_unix;
@@ -374,6 +413,13 @@ impl HealthProber {
             match action {
                 HealthAction::None => {}
                 HealthAction::Restart => {
+                    let Some(instance) = instance else {
+                        entry.0.next_restart_after_unix = None;
+                        audit.record(vm, health_fields("health.restart_unbound", new_state));
+                        tracing::warn!(vm = %vm, "health restart refused: authenticated instance unavailable");
+                        continue;
+                    };
+                    self.pending_instances.insert(vm.clone(), instance);
                     tracing::warn!(
                         vm = %vm,
                         event = "health.restart",
@@ -384,6 +430,7 @@ impl HealthProber {
                     actions.push((vm.clone(), action));
                 }
                 HealthAction::GiveUp => {
+                    self.pending_instances.remove(vm);
                     tracing::warn!(
                         vm = %vm,
                         event = "health.give_up",
@@ -414,20 +461,24 @@ impl HealthProber {
     /// Firing is gated on liveness: a machine absent from `live_vm_ids` is never
     /// restarted, even with an elapsed gate. A deliberate `machine stop`
     /// deregisters a machine that may be Unhealthy with a pending gate, and
-    /// resurrecting it would be wrong; the gate is simply left pending (nothing
-    /// fires while absent) and only fires if the machine returns to the live set.
+    /// resurrecting it would be wrong; its pending instance and gate are cancelled,
+    /// but its retry budget remains intact if the machine later returns.
     /// During a genuine restart the machine is still live when the gate fires —
     /// its own stop hasn't deregistered it yet — so real restarts are unaffected.
     pub fn act(&mut self, live_vm_ids: &[String], now_unix: u64, restarter: &dyn Restarter) {
         for (vm, (tracker, _)) in self.trackers.iter_mut() {
             if !live_vm_ids.iter().any(|id| id == vm) {
+                tracker.next_restart_after_unix = None;
+                self.pending_instances.remove(vm);
                 continue;
             }
             let due = tracker
                 .next_restart_after_unix
                 .is_some_and(|gate| now_unix >= gate);
             if due {
-                restarter.restart(vm);
+                if let Some(instance) = self.pending_instances.remove(vm) {
+                    restarter.restart(&instance);
+                }
                 tracker.next_restart_after_unix = None;
             }
         }
@@ -438,23 +489,39 @@ impl HealthProber {
 mod restart_command_tests {
     use super::*;
 
+    fn instance() -> HvfInstance {
+        HvfInstance {
+            vm_id: "vm-a".into(),
+            boot_nonce: [1; 32],
+        }
+    }
+
     #[test]
     fn the_restart_runs_the_mvmctl_in_a_declared_host_binary_dir() {
         let declared = tempfile::tempdir().expect("tempdir");
         let host = HostProcess::undeclared().with_binary_dir(declared.path());
-        let absent = restart_command_for(&host, "vm-a").expect("mvmctl may restart");
+        let absent = restart_command_for(&host, &instance()).expect("mvmctl may restart");
         assert_eq!(absent.get_program(), CLI_BIN);
 
         std::fs::write(declared.path().join(CLI_BIN), b"bin").expect("write mvmctl");
-        let command = restart_command_for(&host, "vm-a").expect("mvmctl may restart");
+        let command = restart_command_for(&host, &instance()).expect("mvmctl may restart");
 
         assert_eq!(
             command.get_program(),
             declared.path().join(CLI_BIN).as_os_str()
         );
         assert_eq!(
-            command.get_args().collect::<Vec<_>>(),
-            ["machine", "restart", "vm-a"]
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            [
+                "machine".into(),
+                "restart".into(),
+                "vm-a".into(),
+                "--if-hvf-boot-nonce".into(),
+                "01".repeat(32)
+            ]
         );
     }
 
@@ -469,16 +536,19 @@ mod restart_command_tests {
             PathBuf::from(CLI_BIN)
         };
 
-        let command =
-            restart_command_for(&HostProcess::undeclared(), "vm-a").expect("mvmctl may restart");
+        let command = restart_command_for(&HostProcess::undeclared(), &instance())
+            .expect("mvmctl may restart");
 
         assert_eq!(command.get_program(), expected.as_os_str());
     }
 
     #[test]
     fn a_library_embedder_constructs_no_restart_command() {
-        let err = restart_command_for(&HostProcess::undeclared().as_library_embedder(), "vm-a")
-            .expect_err("an embedder never runs mvmctl");
+        let err = restart_command_for(
+            &HostProcess::undeclared().as_library_embedder(),
+            &instance(),
+        )
+        .expect_err("an embedder never runs mvmctl");
 
         assert_eq!(err.spawn(), &CliSpawn::HealthRestart);
     }
@@ -489,6 +559,13 @@ mod tests {
     use super::*;
     struct Fake(ExecOutcome);
     impl GuestExec for Fake {
+        fn instance(&self, vm_name: &str) -> Option<HvfInstance> {
+            Some(HvfInstance {
+                vm_id: vm_name.into(),
+                boot_nonce: [1; 32],
+            })
+        }
+
         fn exec(&self, _: &str, _: &str, _: u64) -> ExecOutcome {
             self.0.clone()
         }
@@ -832,9 +909,88 @@ mod tests {
         calls: Mutex<Vec<String>>,
     }
     impl Restarter for FakeRestarter {
-        fn restart(&self, vm_name: &str) {
-            self.calls.lock().unwrap().push(vm_name.to_string());
+        fn restart(&self, instance: &HvfInstance) {
+            self.calls.lock().unwrap().push(instance.vm_id.clone());
         }
+    }
+
+    #[test]
+    fn an_unbound_health_failure_never_dispatches_a_name_only_restart() {
+        struct Unbound;
+        impl GuestExec for Unbound {
+            fn exec(&self, _: &str, _: &str, _: u64) -> ExecOutcome {
+                ExecOutcome::Unreachable
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = data_env(tmp.path());
+        save_machine_spec(&spec_with_hc("web", Some(hc())), true).unwrap();
+        let mut prober = HealthProber::new();
+        let restarter = FakeRestarter::default();
+        let vms = vec!["web".to_string()];
+        for now in [1000, 1030, 1060, 1100] {
+            prober.tick(&vms, now, &Unbound, &NoAudit);
+            prober.act(&vms, now + 1, &restarter);
+        }
+        assert!(restarter.calls.lock().unwrap().is_empty());
+        assert!(prober.pending_instances.is_empty());
+    }
+
+    #[test]
+    fn a_probe_that_overlaps_replacement_keeps_the_original_instance_precondition() {
+        struct ReplacedDuringProbe(std::cell::Cell<u8>);
+        impl GuestExec for ReplacedDuringProbe {
+            fn instance(&self, vm: &str) -> Option<HvfInstance> {
+                Some(HvfInstance {
+                    vm_id: vm.into(),
+                    boot_nonce: [self.0.get(); 32],
+                })
+            }
+            fn exec(&self, _: &str, _: &str, _: u64) -> ExecOutcome {
+                self.0.set(2);
+                ExecOutcome::Unreachable
+            }
+        }
+        struct BoundRestarter(std::cell::RefCell<Vec<HvfInstance>>);
+        impl Restarter for BoundRestarter {
+            fn restart(&self, instance: &HvfInstance) {
+                self.0.borrow_mut().push(instance.clone());
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = data_env(tmp.path());
+        let mut check = hc();
+        check.retries = 1;
+        save_machine_spec(&spec_with_hc("web", Some(check)), true).unwrap();
+        let mut prober = HealthProber::new();
+        let exec = ReplacedDuringProbe(std::cell::Cell::new(1));
+        let restarter = BoundRestarter(std::cell::RefCell::new(Vec::new()));
+        let vms = vec!["web".to_owned()];
+        prober.tick(&vms, 1000, &exec, &NoAudit);
+        prober.act(&vms, 1002, &restarter);
+        let requests = restarter.0.borrow();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].boot_nonce, [1; 32]);
+        assert_eq!(exec.0.get(), 2, "replacement occurred inside the probe");
+    }
+
+    #[test]
+    fn cancelling_a_stopped_instances_request_preserves_its_retry_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = data_env(tmp.path());
+        let mut check = hc();
+        check.retries = 1;
+        save_machine_spec(&spec_with_hc("web", Some(check)), true).unwrap();
+        let mut prober = HealthProber::new();
+        let restarter = FakeRestarter::default();
+        let vms = vec!["web".to_owned()];
+        prober.tick(&vms, 1000, &Fake(ExecOutcome::Unreachable), &NoAudit);
+        let attempts = prober.trackers["web"].0.restart_attempts;
+        assert!(attempts > 0);
+        prober.act(&[], 1002, &restarter);
+        prober.act(&vms, 1003, &restarter);
+        assert!(restarter.calls.lock().unwrap().is_empty());
+        assert_eq!(prober.trackers["web"].0.restart_attempts, attempts);
     }
 
     #[test]
@@ -939,7 +1095,7 @@ mod tests {
         assert!(restarter.calls.lock().unwrap().is_empty());
 
         // Machine is stopped (absent from the live set) and the clock is well
-        // past the gate: no restart may fire, and the gate stays pending.
+        // past the gate: no restart may fire, and its stale gate is cancelled.
         prober.act(&[], gate + 100, &restarter);
         assert!(
             restarter.calls.lock().unwrap().is_empty(),
@@ -952,13 +1108,13 @@ mod tests {
                 .unwrap()
                 .0
                 .next_restart_after_unix,
-            Some(gate),
-            "an unfired gate for an absent machine is left pending"
+            None,
+            "an unfired gate for a stopped machine is cancelled"
         );
 
-        // Once the machine is live again the same elapsed gate fires exactly once.
+        // A new live instance never inherits the cancelled request.
         prober.act(&vms, gate + 100, &restarter);
-        assert_eq!(*restarter.calls.lock().unwrap(), vec!["web".to_string()]);
+        assert!(restarter.calls.lock().unwrap().is_empty());
     }
 
     #[test]

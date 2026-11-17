@@ -14,13 +14,15 @@
 //! MVM_LIFECYCLE_BENCH_RUNTIME_OVERLAY=/path/to/overlay.ext4 \
 //! MVM_LIFECYCLE_BENCH_RUNTIME_OVERLAY_VERITY=/path/to/overlay.verity \
 //! MVM_LIFECYCLE_BENCH_RUNTIME_OVERLAY_ROOTHASH=<64-lowercase-hex> \
-//! cargo test --test microvm_lifecycle_bench -- --exact --nocapture
+//! cargo test --test microvm_lifecycle_bench starts_and_stops_1000_microvms -- --exact --ignored --nocapture
 //! ```
 //!
 //! Use `MVM_LIFECYCLE_BENCH_BACKENDS=all` or a comma-separated list of
 //! `firecracker`, `hvf`, `libkrun`, `qemu`, and `apple-container` to compare
 //! backends. The benchmark measures the backend lifecycle calls themselves;
 //! guest-agent readiness is a separate measurement boundary.
+//! Each completed backend emits a JSON record with raw samples in milliseconds.
+//! Failed runs return an error, not a completed measurement record.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -56,10 +58,10 @@ const DEFAULT_MEMORY_MIB: u32 = 256;
 const ALL_MICROVM_BACKENDS: &[&str] = &["firecracker", "hvf", "libkrun", "qemu", "apple-container"];
 
 #[test]
+#[ignore = "live lifecycle benchmark; requires explicit enablement and verified guest assets"]
 fn starts_and_stops_1000_microvms() -> Result<()> {
     if std::env::var(ENABLE_VAR).as_deref() != Ok("1") {
-        eprintln!("[microvm_lifecycle_bench] skipped; set {ENABLE_VAR}=1 to launch real microVMs");
-        return Ok(());
+        bail!("set {ENABLE_VAR}=1 to launch real microVMs; no live measurement was performed");
     }
 
     let spec = BenchSpec::from_env()?;
@@ -284,8 +286,9 @@ fn stop_batch(backend: Arc<AnyBackend>, started: Vec<StartedVm>) -> Result<Vec<S
             handles.push(scope.spawn(move || {
                 let started_at = Instant::now();
                 let result = backend.stop(&vm.id);
+                let elapsed = started_at.elapsed();
                 let hvf_shutdown_timing = read_hvf_shutdown_timing(&vm.id);
-                (vm.id, started_at.elapsed(), result, hvf_shutdown_timing)
+                (vm.id, elapsed, result, hvf_shutdown_timing)
             }));
         }
 
@@ -357,6 +360,35 @@ struct LifecycleReport<'a> {
 impl<'a> LifecycleReport<'a> {
     fn builder() -> LifecycleReportBuilder<'a> {
         LifecycleReportBuilder::default()
+    }
+
+    fn evidence(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "benchmark": "backend_lifecycle",
+            "status": "completed",
+            "backend": self.backend,
+            "configuration": {
+                "count": self.spec.count,
+                "concurrency": self.spec.concurrency,
+                "memory_mib": self.spec.memory_mib,
+                "cpus": self.spec.cpus,
+            },
+            "boundaries": {
+                "start": "backend.start call",
+                "stop": "backend.stop call; excludes timing-artifact read",
+                "admitted_launch": "not_measured",
+                "agent_readiness": "not_measured",
+                "workload_readiness": "not_measured",
+                "density": "bounded batches; serial repetitions are not concurrent capacity",
+            },
+            "start_ms": self.starts.iter().copied().map(millis).collect::<Vec<_>>(),
+            "stop_ms": self.stops.iter().copied().map(millis).collect::<Vec<_>>(),
+            "start_batch_wall_ms": millis(self.start_wall),
+            "stop_batch_wall_ms": millis(self.stop_wall),
+            "stop_breakdown_samples": self.stop_timings.len(),
+            "hvf_shutdown_breakdown_samples": self.hvf_shutdown_timings.len(),
+        })
     }
 }
 
@@ -440,6 +472,7 @@ impl<'a> LifecycleReportBuilder<'a> {
 }
 
 fn print_report(report: LifecycleReport<'_>) {
+    println!("{}", report.evidence());
     let LifecycleReport {
         backend,
         spec,
@@ -934,6 +967,14 @@ fn lifecycle_report_builder_carries_every_measurement() {
     assert_eq!(report.stops, stops);
     assert_eq!(report.start_wall, Duration::from_millis(3));
     assert_eq!(report.stop_wall, Duration::from_millis(4));
+    let evidence = report.evidence();
+    assert_eq!(evidence["status"], "completed");
+    assert_eq!(evidence["start_ms"], serde_json::json!([1.0]));
+    assert_eq!(evidence["stop_ms"], serde_json::json!([2.0]));
+    assert_eq!(evidence["configuration"]["concurrency"], 1);
+    assert_eq!(evidence["boundaries"]["admitted_launch"], "not_measured");
+    assert_eq!(evidence["boundaries"]["agent_readiness"], "not_measured");
+    assert_eq!(evidence["hvf_shutdown_breakdown_samples"], 1);
 }
 
 #[test]

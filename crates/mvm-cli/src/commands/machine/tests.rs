@@ -2404,11 +2404,53 @@ fn restart_parses_names_and_flags() {
         MachineAction::Restart(cmd) => {
             assert_eq!(cmd.names, vec!["web"]);
             assert_eq!(cmd.hypervisor.as_deref(), Some("mock"));
+            assert!(
+                cmd.if_hvf_boot_nonce.is_none(),
+                "operator restart remains unconditional"
+            );
         }
         other => panic!("expected restart action, got {other:?}"),
     }
     let err = parse(&["restart"]).expect_err("a machine name is required");
     assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+}
+
+#[test]
+fn health_restart_preconditions_are_not_silently_ignored() {
+    let nonce = "01".repeat(32);
+    let MachineAction::Start(cmd) =
+        parse(&["start", "web", "--if-hvf-boot-nonce", &nonce]).unwrap()
+    else {
+        panic!("start action");
+    };
+    assert!(
+        run_start(cmd)
+            .unwrap_err()
+            .to_string()
+            .contains("requires machine restart")
+    );
+    let MachineAction::Restart(cmd) =
+        parse(&["restart", "web", "other", "--if-hvf-boot-nonce", &nonce]).unwrap()
+    else {
+        panic!("restart action");
+    };
+    assert!(
+        run_restart(cmd)
+            .unwrap_err()
+            .to_string()
+            .contains("exactly one")
+    );
+    let MachineAction::Restart(cmd) =
+        parse(&["restart", "web", "--if-hvf-boot-nonce", "01"]).unwrap()
+    else {
+        panic!("restart action");
+    };
+    assert!(
+        run_restart(cmd)
+            .unwrap_err()
+            .to_string()
+            .contains("32-byte")
+    );
 }
 
 #[test]
@@ -3185,9 +3227,10 @@ fn a_machine_recreated_under_a_removed_name_starts_with_no_volume_mounts() {
     remove_machine(rm_args(&["web"], false, true)).expect("remove");
 
     assert!(
-        !config::instance_dir("web").exists(),
+        !registry.exists(),
         "the removed machine's mount registry would be inherited by the next machine named web",
     );
+    assert!(config::instance_dir("web").join("resume.lock").is_file());
 }
 
 #[test]

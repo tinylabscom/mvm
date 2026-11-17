@@ -272,15 +272,22 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
     /// way out (a captured parent, a refused child) and have nothing better to do
     /// about it, but a VM that outlives its owner must stay visible.
     pub(super) fn force_stop(&self, vm_name: &str, role: &str) {
+        let _ = self.checked_force_stop(vm_name, role);
+    }
+
+    /// Stop a warm-pool VM without treating an unavailable handle as confirmed exit.
+    pub(super) fn checked_force_stop(&self, vm_name: &str, role: &str) -> Result<()> {
         let id = VmId(vm_name.to_string());
-        match self.driver.attach(&id).and_then(|vm| vm.kill()) {
-            Ok(()) => {}
-            Err(e) => tracing::warn!(
-                vm = vm_name,
-                role,
-                error = %e,
-                "stopping a warm-pool VM failed; it may still be running"
-            ),
-        }
+        self.driver
+            .attach(&id)
+            .and_then(|vm| vm.kill())
+            .inspect_err(|e| {
+                tracing::warn!(
+                    vm = vm_name,
+                    role,
+                    error = %e,
+                    "stopping a warm-pool VM failed; it may still be running"
+                );
+            })
     }
 }

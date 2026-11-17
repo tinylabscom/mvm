@@ -83,6 +83,21 @@ if args[:2] == ["machine", "run"]:
                     env=env, capture_output=True, text=True, timeout=20,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
+                metadata = json.loads((base / "out/metadata.json").read_text())
+                self.assertEqual(metadata["configuration"]["launch_mode"], mode)
+                self.assertEqual(metadata["status"], "metadata_only")
+                self.assertEqual(
+                    metadata["evidence"]["classification"], "non_native_or_fixture"
+                )
+                self.assertEqual(metadata["artifacts"]["mvmctl"]["status"], "measured")
+                self.assertEqual(
+                    metadata["boundaries"]["workload_readiness"], "not_measured_separately"
+                )
+                for phase in ("before", "settled", "after-cleanup"):
+                    memory = json.loads(
+                        (base / f"out/wave-1/physical-memory-{phase}.json").read_text()
+                    )
+                    self.assertIn(memory["status"], ("measured", "partial", "unavailable"))
                 commands = [
                     json.loads(line)
                     for line in (base / "out/commands.jsonl").read_text().splitlines()

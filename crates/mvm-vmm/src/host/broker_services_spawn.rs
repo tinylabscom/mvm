@@ -809,6 +809,12 @@ pub struct BrokerServicesGuard {
 }
 
 impl BrokerServicesGuard {
+    /// Arm only the reaper for a fixture directory, without starting any services.
+    #[cfg(feature = "test-support")]
+    pub fn armed_for_test(state_dir: &Path) -> Self {
+        Self::armed(state_dir)
+    }
+
     fn armed(state_dir: &Path) -> Self {
         Self {
             state_dir: Some(state_dir.to_path_buf()),

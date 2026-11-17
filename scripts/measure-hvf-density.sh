@@ -58,6 +58,11 @@ Useful overrides:
 Artifacts include command logs, VM names, launch failures, ps RSS snapshots,
 host memory snapshots, and cleanup results. All generated state is isolated under
 OUT_DIR unless an explicit override points elsewhere.
+metadata.json records source/host identity, binary hashes and measurement boundaries.
+It is not a successful-run receipt. RSS/idle samples include host-wide matching
+processes; receipt latency includes execution, not just boot or agent readiness.
+physical-memory-*.json records macOS per-process resident and physical-footprint
+bytes before, during and after each wave; unavailable/partial samples stay explicit.
 USAGE
 }
 
@@ -411,6 +416,7 @@ capture_host_memory() {
   else
     cp /proc/meminfo "${dir}/host-memory-${phase}.txt"
   fi
+  python3 "${ROOT}/scripts/density_memory.py" "${dir}" "${phase}"
 }
 
 capture_processes() {
@@ -580,6 +586,9 @@ cleanup_wave() {
   echo -e "supervisor\t${SUPERVISOR_BIN}"
   echo -e "network_endpoint\t${ENDPOINT_BIN}"
 } >"${SUMMARY}"
+
+python3 "${ROOT}/scripts/density_metadata.py" "${ROOT}" "${SUMMARY}" \
+  >"${OUT_DIR}/metadata.json"
 
 for wave in "${WAVES[@]}"; do
   wave_dir="${OUT_DIR}/wave-${wave}"

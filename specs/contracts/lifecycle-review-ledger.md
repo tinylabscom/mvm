@@ -123,6 +123,40 @@ or PID. Original-owner persistent Firecracker work remains subject to the
 deferral and process-model decision in
 [#5522](https://github.com/tinylabscom/mvm/issues/5522).
 
+## Instance-bound recovery and foreground completion
+
+The focused review for [#5621](https://github.com/tinylabscom/mvm/issues/5621)
+covers health-probe restart dispatch, the client launch/stop/remove paths,
+CLI initialization and transient teardown, and the warm-claim handoff.
+It does not qualify a new backend or establish live hardware behavior.
+
+The existing per-machine resume lock serializes named lifecycle transitions.
+Health recovery retains the authenticated HVF instance that triggered the
+probe and checks it before stop effects; replacement passes fresh admission.
+Library and CLI removal retain the transition through resource cleanup.
+An absent stop also takes the transition before name-based effects.
+Fresh definition creation and saved-state removal share payload cleanup that
+preserves the lock inode, including when discarding an earlier machine's
+orphaned snapshots and mount registry.
+
+Guest initialization runs on its original connected stream outside that lock.
+Completion reacquires the lock before metadata updates or rollback. Foreground
+transient cleanup likewise checks retained runtime-directory custody and,
+for backends with same-directory restore, the original HVF instance or
+Firecracker process identity. The retained directory handle is a negative
+replacement check on a trusted host, not an authorization credential.
+Warm claims transfer the child transition guard from preparation through
+foreground custody capture; failure rollback runs before that guard drops.
+An unconfirmed child stop retains its state and parent reservation instead
+of making the parent available or deleting control state.
+
+The regression fixtures cover stale completion, stopped/preparing transitions,
+failed-stop lease retention, and guarded warm handoff. Fixture results,
+workspace gates, and remaining live qualification are recorded on the issue;
+this source-review record does not turn those fixtures into a guest-boot
+witness. Other direct backend consumers and the broader restore lifecycle
+have not received an exhaustive new review here.
+
 ## Files NOT read
 
 None of the following was read for lifecycle, ownership or cancellation defects. Treat them as

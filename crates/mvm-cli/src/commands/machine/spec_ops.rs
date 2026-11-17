@@ -1,4 +1,4 @@
-use super::remove::{remove_machine_spec, resolve_remove_targets, rm_running_refusal};
+use super::remove::{remove_machine_spec_in_lifecycle, resolve_remove_targets, rm_running_refusal};
 use super::*;
 
 pub(super) fn persistent_workload_dir_for_run(args: &MachineRunArgs) -> Result<Option<String>> {
@@ -26,6 +26,7 @@ pub(super) fn create_machine(args: MachineCreateArgs) -> Result<()> {
     let json = args.json;
     let force = args.force;
     let spec = args.into_spec()?;
+    let _lifecycle = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(&spec.name)?;
     save_machine_spec(&spec, force)?;
     mvm_core::audit_emit!(
         ConfigChange,
@@ -205,10 +206,18 @@ pub(super) fn remove_machine(args: MachineRemoveArgs) -> Result<()> {
     }
     let mut summaries = Vec::with_capacity(targets.len());
     for name in &targets {
-        if args.force && lifecycle::machine_is_running(name) {
-            lifecycle::stop_running_machine(name);
+        let lifecycle = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(name)?;
+        if !args.force && lifecycle::machine_is_running(name) {
+            bail!("machine {name:?} is running; stop it first or use --force");
         }
-        let summary = remove_machine_spec(name, true)?;
+        if args.force || config::vm_state_dir(name).exists() {
+            mvm_client::LocalBackend::new().stop_machine_in_lifecycle(
+                &mvm_core::client::dto::MachineId(name.clone()),
+                &lifecycle,
+                None,
+            )?;
+        }
+        let summary = remove_machine_spec_in_lifecycle(name, &lifecycle)?;
         mvm_core::audit_emit!(ConfigChange, vm: &summary.name, "action=machine.rm");
         if !json {
             println!("removed machine {}", summary.name);
@@ -232,6 +241,7 @@ pub(super) fn remove_machine(args: MachineRemoveArgs) -> Result<()> {
 }
 
 pub(super) fn run_reconfigure(args: MachineReconfigureArgs) -> Result<()> {
+    let lifecycle = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(&args.name)?;
     let existing = load_machine_spec(&args.name)?;
     let patch = patch_from_args(&args)?;
     let desired = apply_patch(existing.clone(), &patch);
@@ -258,19 +268,24 @@ pub(super) fn run_reconfigure(args: MachineReconfigureArgs) -> Result<()> {
             "reconfiguring {:?} ({changed}): stopping the old instance and restarting",
             args.name
         );
-        lifecycle::stop_running_machine(&args.name);
-        lifecycle::start_machine(MachineStartArgs {
-            name: args.name.clone(),
-            create_flags: MachineStartCreateFlags::default(),
-            receipt: None,
-            json: false,
-            dry_run: false,
-            quiet: false,
-            hypervisor: args.hypervisor.clone(),
-            kernel_pin: None,
-            has_ad_hoc_argv: false,
-            mailbox: None,
-        })?;
+        mvm_client::launch::detached::stop_running_machine_in_lifecycle(&args.name, &lifecycle)?;
+        let pending = lifecycle::start_machine_in_lifecycle(
+            MachineStartArgs {
+                name: args.name.clone(),
+                create_flags: MachineStartCreateFlags::default(),
+                receipt: None,
+                json: false,
+                dry_run: false,
+                quiet: false,
+                hypervisor: args.hypervisor.clone(),
+                kernel_pin: None,
+                has_ad_hoc_argv: false,
+                mailbox: None,
+            },
+            &lifecycle,
+        )?;
+        drop(lifecycle);
+        lifecycle::complete_machine_start(pending)?;
     } else {
         println!(
             "machine {:?} reconfigured ({changed}); change applies on next `machine start`",

@@ -2072,6 +2072,34 @@ fn claim_with_scripted_handshake(driver: MockDriver) -> HandshakeClaimOutcome {
     claim_with_scripted_handshake_and_grant(driver, None, None)
 }
 
+struct GateCheckingConsoleStreamer(Arc<RecordingConsoleStreamer>);
+
+impl ConsoleStreamer for GateCheckingConsoleStreamer {
+    fn start(&self, capture: &ConsoleCapture<'_>) {
+        assert!(
+            crate::vm::instance_snapshot::try_lock_resume(capture.vm_name)
+                .unwrap()
+                .is_none(),
+            "child publication must hold the lifecycle gate"
+        );
+        self.0.start(capture);
+    }
+
+    fn stop(&self, name: &str) {
+        assert!(
+            crate::vm::instance_snapshot::try_lock_resume(name)
+                .unwrap()
+                .is_none(),
+            "failed-claim teardown must hold the lifecycle gate"
+        );
+        assert!(
+            vm_state_dir(name).exists(),
+            "cleanup has not yet removed child state"
+        );
+        self.0.stop(name);
+    }
+}
+
 fn claim_with_scripted_handshake_and_grant(
     driver: MockDriver,
     agent_verbs: Option<Vec<VerbId>>,
@@ -2107,7 +2135,7 @@ fn claim_with_scripted_handshake_and_grant(
         KeyingSpawner::default(),
         RecordingBrokerRegistrar::new(),
     )
-    .with_console_streamer(streamer.clone() as Arc<dyn ConsoleStreamer>);
+    .with_console_streamer(Arc::new(GateCheckingConsoleStreamer(streamer.clone())));
     let ctx = ClaimContext {
         pool: &pool,
         checkpoints: &checkpoints,
@@ -2118,7 +2146,41 @@ fn claim_with_scripted_handshake_and_grant(
         grant_issuer,
     };
 
-    let result = runner.claim_standby(&ctx, &handle, &claim);
+    let result = runner
+        .claim_standby_owned(&ctx, &handle, &claim)
+        .map(|owned| {
+            let (child, lifecycle) = owned.into_parts();
+            assert!(
+                crate::vm::instance_snapshot::try_lock_resume(&child.0)
+                    .unwrap()
+                    .is_none(),
+                "the returned child stays gated until caller custody capture"
+            );
+            lifecycle.require_name(&child.0).unwrap();
+            drop(lifecycle);
+            assert!(
+                crate::vm::instance_snapshot::try_lock_resume(&child.0)
+                    .unwrap()
+                    .is_some(),
+                "the caller releases the original gate"
+            );
+            child
+        });
+    if result.is_err() {
+        let retained = pool
+            .load("warm-parent")
+            .ok()
+            .is_some_and(|parent| parent.state == StandbyState::Claimed);
+        for fork in probe.forked_children() {
+            assert_eq!(vm_state_dir(&fork.child_vm_name).exists(), retained);
+            assert!(
+                crate::vm::instance_snapshot::try_lock_resume(&fork.child_vm_name)
+                    .unwrap()
+                    .is_some(),
+                "failed-claim cleanup must release the gate after rollback"
+            );
+        }
+    }
     HandshakeClaimOutcome {
         result,
         driver: probe,
@@ -2126,6 +2188,45 @@ fn claim_with_scripted_handshake_and_grant(
         orphan_child_dirs: orphan_child_dirs(),
         console_streamer: streamer,
     }
+}
+
+#[test]
+fn failed_handshake_and_failed_kill_retain_child_and_parent_reservation() {
+    let out = claim_with_scripted_handshake(
+        MockDriver::default()
+            .with_unreachable_child_agent()
+            .with_failing_kill(),
+    );
+    let error = out
+        .result
+        .expect_err("failed handshake must refuse the claim");
+    assert!(error.to_string().contains("child stop unconfirmed"));
+    assert!(error.to_string().contains("mock child termination failed"));
+    assert_eq!(out.parent_state, Some(StandbyState::Claimed));
+    assert_eq!(
+        out.orphan_child_dirs, 1,
+        "uncertain child state must remain"
+    );
+    assert!(out.driver.killed_vms().is_empty());
+    assert!(out.console_streamer.stopped.lock().unwrap().is_empty());
+}
+
+#[test]
+fn failed_handshake_and_unavailable_handle_retain_child_and_parent_reservation() {
+    let out = claim_with_scripted_handshake(
+        MockDriver::default()
+            .with_unreachable_child_agent()
+            .refusing_attach(),
+    );
+    assert!(
+        out.result
+            .expect_err("attach failure is unknown")
+            .to_string()
+            .contains("child stop unconfirmed")
+    );
+    assert_eq!(out.parent_state, Some(StandbyState::Claimed));
+    assert_eq!(out.orphan_child_dirs, 1);
+    assert!(out.driver.killed_vms().is_empty());
 }
 
 #[test]
@@ -2458,6 +2559,83 @@ fn claim_releases_reserved_parent_and_removes_child_dir_on_overlay_refusal() {
 /// checkpoint.
 #[test]
 fn a_failed_claim_demotes_a_preloaded_standby_instead_of_stranding_it() {
+    check_preloaded_refusal_cleanup(MockDriver::default(), false, false);
+}
+
+#[test]
+fn failed_preloaded_kill_retains_child_and_parent_without_demotion() {
+    check_preloaded_refusal_cleanup(MockDriver::default().with_failing_kill(), true, false);
+}
+
+#[test]
+fn unavailable_preloaded_handle_retains_child_and_parent_without_demotion() {
+    check_preloaded_refusal_cleanup(MockDriver::default().refusing_attach(), true, false);
+}
+
+#[test]
+fn confirmed_preloaded_handshake_cleanup_does_not_kill_twice() {
+    check_preloaded_refusal_cleanup(
+        MockDriver::default().with_unreachable_child_agent(),
+        false,
+        true,
+    );
+}
+
+#[test]
+fn failed_preloaded_resume_and_kill_retain_armed_resources() {
+    check_preloaded_refusal_cleanup(
+        MockDriver::default()
+            .refusing_fork_as_unrestorable("mock resume refused")
+            .with_failing_kill(),
+        true,
+        true,
+    );
+}
+
+#[test]
+fn failed_preloaded_handshake_kill_retains_child_without_retrying_cleanup() {
+    check_preloaded_refusal_cleanup(
+        MockDriver::default()
+            .with_unreachable_child_agent()
+            .with_failing_kill(),
+        true,
+        true,
+    );
+}
+
+struct CleanupWitnessSpawner;
+
+struct CleanupWitnessBroker;
+
+impl BrokerRegistrar for CleanupWitnessBroker {
+    fn register(&self, req: &BrokerRegisterRequest<'_>) -> Result<BrokerGuard> {
+        use mvm_vmm::host::broker_services_spawn::{BROKER_PID_FILE, BrokerServicesGuard};
+        // Deliberately unparseable: the real reaper removes the marker but cannot signal a process.
+        std::fs::write(req.state_dir.join(BROKER_PID_FILE), b"not-a-pid")?;
+        Ok(BrokerGuard::from_services_guard(
+            mvm_vmm::host::host_agent_spawn::ServicesGuard::Fork(
+                BrokerServicesGuard::armed_for_test(req.state_dir),
+            ),
+        ))
+    }
+}
+
+impl NetworkEndpointSpawner for CleanupWitnessSpawner {
+    fn prepare_identity(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<Option<PathBuf>> {
+        KeyingSpawner::default().prepare_identity(req)
+    }
+
+    fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<SpawnedEndpoint> {
+        // A real endpoint reaper removes this file; no process or socket is started.
+        std::fs::write(
+            mvm_core::config::vm_substitution_env_path(req.vm_name),
+            b"fixture",
+        )?;
+        KeyingSpawner::default().spawn(req)
+    }
+}
+
+fn check_preloaded_refusal_cleanup(driver: MockDriver, retained: bool, with_overlay: bool) {
     let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -2467,10 +2645,10 @@ fn a_failed_claim_demotes_a_preloaded_standby_instead_of_stranding_it() {
 
     let store_root = tempfile::tempdir().unwrap();
     let src = tempfile::tempdir().unwrap();
-    // No overlay sidecar → the claim fails the overlay-contract gate, which
-    // is a non-parent-fault failure reached after the child is tracked.
+    // Without the overlay the failure precedes resume; with it the scripted
+    // handshake fails after the child resumes.
     let (checkpoints, snapshots, parent_id, parent_meta) =
-        seed_audited_parent(store_root.path(), src.path(), false);
+        seed_audited_parent(store_root.path(), src.path(), with_overlay);
     let parent_digest = materialized_parent_rootfs_digest(&checkpoints, &parent_meta);
 
     let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
@@ -2497,9 +2675,9 @@ fn a_failed_claim_demotes_a_preloaded_standby_instead_of_stranding_it() {
         signed_child_plan_json(&parent_digest),
     );
     let runner = WorkloadRunner::new(
-        MockDriver::default(),
-        KeyingSpawner::default(),
-        RecordingBrokerRegistrar::new(),
+        driver.with_preloaded_standby(),
+        CleanupWitnessSpawner,
+        CleanupWitnessBroker,
     );
     let ctx = ClaimContext {
         pool: &pool,
@@ -2511,11 +2689,51 @@ fn a_failed_claim_demotes_a_preloaded_standby_instead_of_stranding_it() {
         grant_issuer: None,
     };
 
-    runner
+    let error = runner
         .claim_standby(&ctx, &handle, &claim)
-        .expect_err("the overlay-contract gate must refuse this claim");
+        .expect_err("the overlay or handshake gate must refuse this claim");
+    if with_overlay {
+        assert!(
+            error.to_string().contains("handshake")
+                || error.to_string().contains("mock resume refused"),
+            "{error}"
+        );
+    }
 
     let after = pool.load("warm-parent").unwrap();
+    assert!(
+        crate::vm::instance_snapshot::try_lock_resume(&child_name)
+            .unwrap()
+            .is_some(),
+        "rollback releases the lifecycle gate even when termination is unknown"
+    );
+    if retained {
+        assert_eq!(after.state, StandbyState::Claimed);
+        assert_eq!(
+            after.preloaded_child_vm_name.as_deref(),
+            Some(child_name.as_str())
+        );
+        assert_eq!(after.pid, handle.pid);
+        assert!(vm_state_dir(&child_name).join("rootfs.ext4").exists());
+        if with_overlay {
+            assert_eq!(
+                std::fs::read(mvm_core::config::vm_substitution_env_path(&child_name)).unwrap(),
+                b"fixture",
+                "unknown child termination must not run the armed endpoint reaper"
+            );
+            assert_eq!(
+                std::fs::read(
+                    vm_state_dir(&child_name)
+                        .join(mvm_vmm::host::broker_services_spawn::BROKER_PID_FILE)
+                )
+                .unwrap(),
+                b"not-a-pid",
+                "unknown child termination must not run the armed broker reaper"
+            );
+        }
+        assert!(runner.driver.killed_vms().is_empty());
+        return;
+    }
     assert_eq!(
         after.state,
         StandbyState::Idle,
@@ -2534,11 +2752,12 @@ fn a_failed_claim_demotes_a_preloaded_standby_instead_of_stranding_it() {
         SupervisorStandbyPool::is_live_or_saved(&after),
         "the demoted parent must remain usable capacity, not read as dead"
     );
-    assert!(
-        runner.driver.killed_vms().contains(&child_name),
-        "the destroyed child's VMM must be stopped, not orphaned: killed {:?}",
-        runner.driver.killed_vms()
+    assert_eq!(
+        runner.driver.killed_vms(),
+        [child_name.clone()],
+        "stop must be confirmed exactly once"
     );
+    assert!(!vm_state_dir(&child_name).exists());
 }
 
 /// An un-audited parent (no signed creation entry) is quarantined by removal,

@@ -4,6 +4,14 @@
 The smoke boots the CLI's current signed image pin, not a staged schema-3
 candidate. Linux ARM boot is unverified: no ARM Linux KVM runner is available.
 Only this workflow's successful two-lane aggregate is promotion evidence.
+
+For exact-version macOS qualification, lane additionally takes --lane-name,
+--expected-macos-major and --expected-backend (libkrun for 13–25, hvf for 26+).
+Aggregate --required-lane NAME:MACOS_MAJOR:BACKEND is repeatable and replaces
+the default two-lane requirement with a named macOS qualification matrix.
+That opt-in report is not the default release promotion witness. Backend
+evidence is the installed CLI's default-selection diagnostic in the same clean
+HOME/environment as the unoverridden boots, not a signed per-VM attestation.
 """
 import argparse
 import hashlib
@@ -301,10 +309,66 @@ def boot_checks(directory):
     return checks
 
 
+def qualification(name, major, backend):
+    """An explicit macOS lane is an expectation, never an observation."""
+    require(isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name),
+            "invalid qualification lane name")
+    require(type(major) is int and major >= 13, "macOS major must be at least 13")
+    require(backend == ("libkrun" if major < 26 else "hvf"),
+            "expected backend does not match macOS tier")
+    return {"name": name, "macos_major": major, "backend": backend}
+
+
+def lane_qualification(args):
+    values = [getattr(args, key, None) for key in
+              ("lane_name", "expected_macos_major", "expected_backend")]
+    if all(value is None for value in values):
+        return None
+    require(args.target == "aarch64-apple-darwin", "qualification requires macOS ARM")
+    return qualification(*values)
+
+
+def host_observation(target, expected=None):
+    _, _, system, machine = LANES[target]
+    require((platform.system(), platform.machine()) == (system, machine), "wrong runner")
+    host = {"system": system, "machine": machine}
+    if system == "Darwin":
+        version = subprocess.check_output(
+            ["/usr/bin/sw_vers", "-productVersion"], text=True).strip()
+        build = subprocess.check_output(
+            ["/usr/bin/sw_vers", "-buildVersion"], text=True).strip()
+        require(re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", version) and build,
+                "missing macOS version/build")
+        major = int(version.split(".")[0])
+        require(major >= 13, "unsupported macOS major")
+        host.update(macos_version=version, macos_major=major, macos_build=build)
+        if expected:
+            require(major == expected["macos_major"], "wrong macOS major")
+        else:
+            require(major >= 26, "default release lane requires macOS 26+ HVF")
+    return host
+
+
+def observed_backend(transcript, expected):
+    """Use the installed CLI's default-selection diagnostic, not the installer tier."""
+    begin, end = "MVM_BACKEND_DIAGNOSTICS_BEGIN\n", "MVM_BACKEND_DIAGNOSTICS_END"
+    require(transcript.count(begin) == 1 and transcript.count(end) == 1,
+            "missing or duplicate backend diagnostics")
+    raw = transcript.split(begin)[1].split(end)[0]
+    diagnostic = json.loads(raw)
+    require(diagnostic.get("all_ok") is True, "backend diagnostics did not pass")
+    actual = diagnostic.get("security_posture", {}).get("backend")
+    require(actual == expected, f"actual backend {actual!r} does not match {expected!r}")
+    return actual
+
+
 def lane(args):
     report = identity(args.tag)
-    arch, backend, system, machine = LANES[args.target]
-    require((platform.system(), platform.machine()) == (system, machine), "wrong runner")
+    arch, backend, _, _ = LANES[args.target]
+    expected = lane_qualification(args)
+    host = host_observation(args.target, expected)
+    if expected:
+        backend = expected["backend"]
     args.out.mkdir(parents=True, exist_ok=False)
     assets_dir = args.out / "authenticated"
     assets = authenticate(assets_dir, args.tag, [args.target])
@@ -312,8 +376,11 @@ def lane(args):
     env = {k: v for k, v in os.environ.items() if not k.startswith("MVM_")}
     state_file = args.out / "smoke-home.txt"
     env.update(MVM_SMOKE_KEEP="1", MVM_SMOKE_COLD_FIRST="1",
+               MVM_SMOKE_BACKEND_EVIDENCE="1",
                MVM_SMOKE_OUT=str(args.out / "smoke"),
                MVM_SMOKE_STATE_FILE=str(state_file))
+    if expected and expected["macos_major"] < 26:
+        env["MVM_SMOKE_NO_HOMEBREW"] = "1"
     transcript = args.out / "smoke/transcript.log"
     # Deletion authority comes only from this wrapper-created root, NEVER the
     # state file. A corrupted state cannot nominate another smoke for cleanup.
@@ -331,20 +398,58 @@ def lane(args):
             stop_owned(owned_root)
     text = transcript.read_text()
     require("\nPASS: " in text and "\nFAIL:" not in text, "smoke did not pass")
+    backend = observed_backend(text, backend)
     report.update(assets=assets, boots=[{
         "host_target": args.target, "guest_arch": arch, "backend": backend,
+        "diagnostics_selected_backend": backend,
+        "no_homebrew": env.get("MVM_SMOKE_NO_HOMEBREW") == "1",
+        "host": host,
         "result": "success", "installed": installed, "checks": checks,
         "transcript": {"path": "smoke/transcript.log", "sha256": sha(transcript)},
     }])
+    if expected:
+        report["boots"][0]["qualification"] = expected
     (args.out / "lane.json").write_text(json.dumps(report, indent=2) + "\n")
+
+
+def required_qualifications(values):
+    required = {}
+    for value in values or []:
+        parts = value.split(":")
+        require(len(parts) == 3 and parts[1].isdigit(),
+                "required lane must be NAME:MACOS_MAJOR:BACKEND")
+        entry = qualification(parts[0], int(parts[1]), parts[2])
+        require(entry["name"] not in required, "duplicate required lane")
+        required[entry["name"]] = entry
+    return required
+
+
+def validate_host(host, target, expected=None):
+    _, _, system, machine = LANES[target]
+    require((host.get("system"), host.get("machine")) == (system, machine),
+            "wrong runner evidence")
+    if system == "Darwin":
+        major = host.get("macos_major")
+        version = host.get("macos_version", "")
+        require(type(major) is int and major >= 13
+                and re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", version)
+                and int(version.split(".")[0]) == major
+                and isinstance(host.get("macos_build"), str) and host["macos_build"],
+                "missing or invalid macOS host evidence")
+        require(major == expected["macos_major"] if expected else major >= 26,
+                "wrong macOS major evidence")
 
 
 def aggregate(args):
     report = identity(args.tag)
-    assets = authenticate(args.assets, args.tag, list(LANES))
+    required = required_qualifications(getattr(args, "required_lane", None))
+    targets = ["aarch64-apple-darwin"] if required else list(LANES)
+    assets = authenticate(args.assets, args.tag, targets)
     boots = []
+    seen = set()
     files = sorted(args.lanes.glob("*/lane.json"))
-    require(len(files) == 2, "exactly two lane reports required")
+    require(len(files) == (len(required) if required else 2),
+            "exactly the required lane reports must be present")
     for path in files:
         record = json.loads(path.read_text())
         for key, value in report.items():
@@ -352,9 +457,24 @@ def aggregate(args):
         require(len(record["boots"]) == 1, "one boot per lane required")
         boot = record["boots"][0]
         target = boot["host_target"]
-        require(target in LANES and target not in [b["host_target"] for b in boots],
+        expected = boot.get("qualification")
+        key = expected.get("name") if isinstance(expected, dict) else target
+        require(target in targets and key not in seen,
                 "unexpected or duplicate lane")
+        if required:
+            require(key in required and expected == required[key],
+                    "qualification lane mismatch")
+        else:
+            require(expected is None, "qualification cannot replace a default release lane")
+        seen.add(key)
         arch, backend, _, _ = LANES[target]
+        if required:
+            backend = required[key]["backend"]
+            if required[key]["macos_major"] < 26:
+                require(boot.get("no_homebrew") is True, "older tier requires no Homebrew")
+        validate_host(boot.get("host", {}), target, expected)
+        require(boot.get("diagnostics_selected_backend") == backend,
+                "backend diagnostic evidence mismatch")
         require((boot["guest_arch"], boot["backend"], boot["result"]) ==
                 (arch, backend, "success"), "invalid boot result")
         require(boot["checks"] == boot_checks(path.parent / "smoke"),
@@ -363,6 +483,9 @@ def aggregate(args):
                            (f"mvmctl-{target}.tar.gz", f"mvm-guest-bins-{args.tag}.tar.gz")]
         require(record["assets"] == expected_assets, "lane asset mismatch")
         hashes = payload_hashes(args.assets / f"mvmctl-{target}.tar.gz", target)
+        pruned = pruned_payloads(
+            archive_components(args.assets / f"mvmctl-{target}.tar.gz", target), target, backend)
+        hashes = {n: h for n, h in hashes.items() if not is_pruned(n, pruned)}
         hashes[f"guest-runtime/mvm-guest-bins-{args.tag}.tar.gz"] = next(
             a["sha256"] for a in assets if a["name"] == f"mvm-guest-bins-{args.tag}.tar.gz")
         require(boot["installed"] == [{"path": n, "sha256": h} for n, h in sorted(hashes.items())],
@@ -373,12 +496,15 @@ def aggregate(args):
         transcript = (path.parent / "smoke/transcript.log").read_text()
         require("\nPASS: " in transcript and "\nFAIL:" not in transcript,
                 "missing successful smoke verdict")
+        observed_backend(transcript, backend)
         boot["transcript"]["path"] = f"{path.parent.name}/smoke/transcript.log"
         boots.append(boot)
     report.update(assets=assets, boots=sorted(boots, key=lambda b: b["host_target"]),
                   runtime_evidence="Installed archive bytes verified; guest runtime bytes are not measured.",
                   unverified=[{"host_target": "aarch64-unknown-linux-gnu",
                                "reason": "No ARM Linux KVM runner is available."}])
+    if required:
+        report["required_qualifications"] = list(required.values())
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=2) + "\n")
 
@@ -392,9 +518,15 @@ def main():
         sub.add_argument("--out", type=Path, required=True)
         if name == "lane":
             sub.add_argument("--target", choices=LANES, required=True)
+            sub.add_argument("--lane-name", help="Named macOS qualification (requires both expectations)")
+            sub.add_argument("--expected-macos-major", type=int)
+            sub.add_argument("--expected-backend", choices=("hvf", "libkrun"))
         else:
             sub.add_argument("--lanes", type=Path, required=True)
             sub.add_argument("--assets", type=Path, required=True)
+            sub.add_argument("--required-lane", action="append",
+                             help="Opt-in macOS qualification matrix: NAME:MACOS_MAJOR:BACKEND; "
+                                  "repeat for each required lane, instead of release defaults")
     args = parser.parse_args()
     (lane if args.command == "lane" else aggregate)(args)
 

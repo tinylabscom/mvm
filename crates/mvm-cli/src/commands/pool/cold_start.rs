@@ -6,13 +6,13 @@
 //! chain-signed log, so a slow start can be told apart from a broken one.
 
 use anyhow::Result;
-use mvm_core::vm_backend::{VmId, VmStartConfig, WarmClaimRefusal};
+use mvm_core::vm_backend::{VmStartConfig, WarmClaimRefusal};
 
 /// The result of trying to serve a launch from a standby.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) enum WarmClaimOutcome {
     /// A standby was claimed and the VM now runs under this id.
-    Claimed(VmId),
+    Claimed(mvm_runtime::backend::OwnedWarmClaim),
     /// The launch boots cold, for this reason.
     Cold(ColdStartReason),
 }

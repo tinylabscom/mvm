@@ -513,15 +513,15 @@ impl LocalBackend {
     /// The chain-signed `plan.admitted`/`plan.launched`/`plan.failed`
     /// entries are emitted inside the seam; any failure returns with no VM
     /// created.
-    pub(crate) async fn boot_admitted(&self, params: BootParams) -> Result<StartedMachine> {
+    pub(crate) async fn boot_admitted(
+        &self,
+        params: BootParams,
+        lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+    ) -> Result<StartedMachine> {
+        lifecycle
+            .require_name(&params.name)
+            .map_err(crate::local::backend_err)?;
         let backend = self.launch_backend(params.backend_override.as_deref())?;
-        // Crash/unclean-stop leftovers in the per-VM runtime dir (notably a
-        // stale substitution-endpoint socket) make the fresh endpoint die
-        // binding it before its ready handshake; a non-running machine owns
-        // no live state there, so recover by starting from an empty dir.
-        if !self.machine_running(&params.name) {
-            remove_vm_runtime_dirs(&params.name)?;
-        }
         let (rootfs, kernel_path, verity_path, roothash, registry_pack_image) = match &params.source
         {
             LaunchSource::Image(image) => {
@@ -562,6 +562,17 @@ impl LocalBackend {
                 });
             }
         };
+        if params.transient {
+            self.ensure_transient_name_free(&params.name)?;
+        }
+        if !lifecycle
+            .reap_unowned_state()
+            .map_err(crate::local::backend_err)?
+        {
+            return Err(MvmError::Conflict {
+                reason: format!("machine {:?} still owns its runtime state", params.name),
+            });
+        }
 
         let req = LocalRunRequest {
             name: params.name.clone(),
@@ -768,7 +779,11 @@ impl LocalBackend {
         &self,
         request: &LaunchRequest,
         name: &str,
+        lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
     ) -> Result<(mp::MachineSpec, DefinitionOrigin)> {
+        lifecycle
+            .require_name(name)
+            .map_err(crate::local::backend_err)?;
         let desired = persisted_spec_from_request(request, name);
         let existing = if machine_spec_path(name).exists() {
             Some(mp::load_machine_spec(name).map_err(crate::local::backend_err)?)
@@ -807,7 +822,7 @@ impl LocalBackend {
             )),
             mp::SpecReconcile::Recreate { changed } => {
                 if self.machine_running(name) {
-                    self.stop_for_recreate(name)?;
+                    self.stop_for_recreate(name, lifecycle)?;
                 }
                 mp::overwrite_machine_spec(&desired).map_err(crate::local::backend_err)?;
                 mvm_core::audit_emit!(
@@ -821,15 +836,22 @@ impl LocalBackend {
     }
 
     /// Refuse destructive follow-up when the existing instance cannot be stopped.
-    fn stop_for_recreate(&self, name: &str) -> Result<()> {
-        let vid = VmId(name.to_string());
+    fn stop_for_recreate(
+        &self,
+        name: &str,
+        lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+    ) -> Result<()> {
+        lifecycle
+            .require_name(name)
+            .map_err(crate::local::backend_err)?;
+        let id = VmId(name.to_owned());
         let result = match AnyBackend::for_started_vm(name) {
-            Some(owner) => owner.stop(&vid),
-            None => self.backend.stop(&vid),
+            Some(owner) => owner.stop(&id),
+            None => self.backend.stop(&id),
         };
-        result.map(|_| ()).map_err(|error| {
-            crate::local::backend_err(format!("stopping machine {name:?}: {error:#}"))
-        })
+        result.map_err(crate::local::backend_err)?;
+        self.release_stopped_leases(name)
+            .map_err(crate::local::backend_err)
     }
 
     /// Launch a machine from a fully-validated typed request. Transient
@@ -862,16 +884,21 @@ impl LocalBackend {
             LifecycleMode::Transient => self.launch_transient(request).await,
             LifecycleMode::Persistent => {
                 let name = persistent_name(&request)?;
-                let (_, origin) = self.create_definition(&request, &name)?;
-                let booted = self.boot_persistent(&name, &request).await;
-                let outcome = self.discard_definition_on_failure(&name, origin, booted)?;
-                match self.start_requested_command(outcome, &request) {
+                let lifecycle = crate::local::machine_lifecycle(&name).await?;
+                let (_, origin) = self.create_definition(&request, &name, &lifecycle)?;
+                let booted = self.boot_persistent(&name, &request, &lifecycle).await;
+                let outcome =
+                    self.discard_definition_on_failure(&name, origin, booted, &lifecycle)?;
+                match self.start_requested_command(outcome, &request, &lifecycle) {
                     Ok(outcome) => Ok(outcome),
                     // A later name-based observation cannot erase a known stop error.
                     Err(failure) if failure.stop.is_err() => Err(failure.into_error()),
-                    Err(failure) => {
-                        self.discard_definition_on_failure(&name, origin, Err(failure.into_error()))
-                    }
+                    Err(failure) => self.discard_definition_on_failure(
+                        &name,
+                        origin,
+                        Err(failure.into_error()),
+                        &lifecycle,
+                    ),
                 }
             }
         }
@@ -880,6 +907,17 @@ impl LocalBackend {
     /// Persist a machine definition (spec + secret-reference sidecar +
     /// typed volume attachments) without booting. Persistent mode only.
     pub fn create_from_request(&self, request: &LaunchRequest) -> Result<MachineState> {
+        let name = persistent_name(request)?;
+        let lifecycle = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(&name)
+            .map_err(crate::local::backend_err)?;
+        self.create_from_request_in_lifecycle(request, &lifecycle)
+    }
+
+    pub(crate) fn create_from_request_in_lifecycle(
+        &self,
+        request: &LaunchRequest,
+        lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+    ) -> Result<MachineState> {
         if request.mode != LifecycleMode::Persistent {
             return Err(MvmError::InvalidSpec {
                 reason: "create (persist without boot) requires a persistent request".into(),
@@ -895,7 +933,7 @@ impl LocalBackend {
             });
         }
         let name = persistent_name(request)?;
-        let (spec, _) = self.create_definition(request, &name)?;
+        let (spec, _) = self.create_definition(request, &name, lifecycle)?;
         Ok(MachineState {
             id: MachineId(name.clone()),
             name,
@@ -914,8 +952,9 @@ impl LocalBackend {
         &self,
         request: &LaunchRequest,
         name: &str,
+        lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
     ) -> Result<(mp::MachineSpec, DefinitionOrigin)> {
-        let (spec, origin) = self.persist_definition(request, name)?;
+        let (spec, origin) = self.persist_definition(request, name, lifecycle)?;
         let recorded = self
             .validate_and_record_secret_refs(name, &request.secret_refs)
             .and_then(|()| {
@@ -925,7 +964,12 @@ impl LocalBackend {
                     AdmittedProfile::from_profile_name(&request.profile),
                 )
             });
-        self.discard_definition_on_failure(name, origin, recorded.map(|()| (spec, origin)))
+        self.discard_definition_on_failure(
+            name,
+            origin,
+            recorded.map(|()| (spec, origin)),
+            lifecycle,
+        )
     }
 
     /// Boot a persistent definition that was just created/reconciled from
@@ -937,7 +981,12 @@ impl LocalBackend {
     /// secret references are re-validated fail-closed even when this
     /// request carries none. The request's mailbox is separate one-start
     /// authority, passed into admission without persisting it in the definition.
-    async fn boot_persistent(&self, name: &str, request: &LaunchRequest) -> Result<LaunchOutcome> {
+    async fn boot_persistent(
+        &self,
+        name: &str,
+        request: &LaunchRequest,
+        lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+    ) -> Result<LaunchOutcome> {
         if self.machine_running(name) {
             return Err(MvmError::Conflict {
                 reason: format!("machine {name:?} is already running"),
@@ -953,6 +1002,7 @@ impl LocalBackend {
                 request.backend.as_deref(),
                 !request.command.is_empty(),
                 request.mailbox,
+                lifecycle,
             )
             .await?;
         if let Some(ttl) = request.ttl_seconds {
@@ -994,13 +1044,11 @@ impl LocalBackend {
         backend_override: Option<&str>,
         has_ad_hoc_argv: bool,
         mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
+        lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
     ) -> Result<(machine_start::MachineStart, String)> {
         let backend = backend_override
             .map(str::to_string)
             .unwrap_or_else(|| self.backend.name().to_string());
-        if !self.machine_running(&spec.name) {
-            remove_vm_runtime_dirs(&spec.name)?;
-        }
         let image = match spec.image.clone() {
             Some(reference) => Some(
                 machine_start::resolve_boot_image(&reference, &spec.name)
@@ -1012,7 +1060,7 @@ impl LocalBackend {
         let host = machine_start::EmbedderStartHost::new(image, &spec.profile)
             .with_secret_service(self.secrets()?)
             .with_backend(&self.backend);
-        let started = detached::boot_recorded(
+        let started = detached::boot_recorded_in_lifecycle(
             spec,
             &host,
             machine_start::MachineStartParams {
@@ -1020,6 +1068,7 @@ impl LocalBackend {
                 has_ad_hoc_argv,
                 mailbox,
             },
+            lifecycle,
         )
         .map_err(prepared_client_error)?;
         Ok((started, backend))
@@ -1032,6 +1081,7 @@ impl LocalBackend {
         &self,
         mut outcome: LaunchOutcome,
         request: &LaunchRequest,
+        lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
     ) -> std::result::Result<LaunchOutcome, CommandStartFailure> {
         if request.command.is_empty() {
             return Ok(outcome);
@@ -1052,7 +1102,7 @@ impl LocalBackend {
             }
             Err(command) => Err(CommandStartFailure {
                 command,
-                stop: self.stop_for_recreate(&name),
+                stop: self.stop_for_recreate(&name, lifecycle),
             }),
         }
     }
@@ -1082,6 +1132,7 @@ impl LocalBackend {
         name: &str,
         request: &LaunchRequest,
         transient: bool,
+        lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
     ) -> Result<LaunchOutcome> {
         let launched_at = std::time::Instant::now();
         let profile = AdmittedProfile::from_profile_name(&request.profile);
@@ -1125,21 +1176,24 @@ impl LocalBackend {
                 .map_err(crate::local::backend_err)?
         };
         let started = self
-            .boot_admitted(BootParams {
-                name: name.to_string(),
-                source: request.source.clone(),
-                profile: request.profile.clone(),
-                cpus: request.cpus,
-                memory_mib: request.memory_mib,
-                backend_override: request.backend.clone(),
-                volumes,
-                transient,
-                grants: request.grants.clone(),
-                mailbox: request.mailbox,
-                signed_plan: request.signed_plan.clone(),
-                assurance_campaign: request.assurance_campaign.clone(),
-                secrets,
-            })
+            .boot_admitted(
+                BootParams {
+                    name: name.to_string(),
+                    source: request.source.clone(),
+                    profile: request.profile.clone(),
+                    cpus: request.cpus,
+                    memory_mib: request.memory_mib,
+                    backend_override: request.backend.clone(),
+                    volumes,
+                    transient,
+                    grants: request.grants.clone(),
+                    mailbox: request.mailbox,
+                    signed_plan: request.signed_plan.clone(),
+                    assurance_campaign: request.assurance_campaign.clone(),
+                    secrets,
+                },
+                lifecycle,
+            )
             .await?;
         preparation.commit();
 
@@ -1269,6 +1323,7 @@ impl LocalBackend {
     /// attachments re-resolved and leased, then the canonical admitted boot.
     /// Starting a machine that is already running returns its state.
     pub async fn start_persistent(&self, name: &str) -> Result<MachineState> {
+        let lifecycle = crate::local::machine_lifecycle(name).await?;
         let spec = mp::load_machine_spec(name).map_err(|e| MvmError::NotFound {
             id: format!("{name}: {e}"),
         })?;
@@ -1284,7 +1339,9 @@ impl LocalBackend {
         ensure_spec_bootable_in_process(&spec)?;
         self.validate_sidecar_refs(name)?;
         let mut spec = spec;
-        let (_, backend) = self.boot_spec(&mut spec, None, false, None).await?;
+        let (_, backend) = self
+            .boot_spec(&mut spec, None, false, None, &lifecycle)
+            .await?;
         let memory_mib = mvm_core::util::parse_human_size(&spec.memory).unwrap_or_default();
         Ok(MachineState {
             id: MachineId(name.to_string()),
@@ -1307,20 +1364,22 @@ impl LocalBackend {
     /// force does not bypass that failure.
     pub async fn remove_machine_with(&self, id: &MachineId, options: RemoveOptions) -> Result<()> {
         let name = id.0.as_str();
+        let lifecycle = crate::local::machine_lifecycle(name).await?;
         let has_spec = machine_spec_path(name).exists();
         if has_spec {
-            if self.machine_running(name) {
-                if !options.force {
-                    return Err(MvmError::Conflict {
-                        reason: format!(
-                            "machine {name:?} is running; stop it first, or explicitly \
-                             request the force removal flow"
-                        ),
-                    });
-                }
-                self.stop_for_recreate(name)?;
+            let running = self.machine_running(name);
+            if running && !options.force {
+                return Err(MvmError::Conflict {
+                    reason: format!(
+                        "machine {name:?} is running; stop it first, or explicitly \
+                         request the force removal flow"
+                    ),
+                });
             }
-            self.remove_definition(name)?;
+            if running || vm_state_dir(name).exists() {
+                self.stop_machine_in_lifecycle(id, &lifecycle, None)?;
+            }
+            self.remove_definition(name, &lifecycle)?;
             mvm_core::audit_emit!(
                 ConfigChange,
                 vm: name,
@@ -1330,7 +1389,7 @@ impl LocalBackend {
             return Ok(());
         }
         // Transient semantics: stop whatever is live, then idempotent cleanup.
-        self.cleanup_transient(name)
+        self.cleanup_transient_in_lifecycle(name, &lifecycle)
     }
 
     /// Release every session-owned resource `name` holds: registered volume
@@ -1367,8 +1426,21 @@ impl LocalBackend {
     /// while the receipt still describes the resources; otherwise they are
     /// retained, with the state that records them.
     pub fn cleanup_transient(&self, name: &str) -> Result<()> {
-        if self.machine_running(name) {
-            self.stop_for_recreate(name)?;
+        let lifecycle = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(name)
+            .map_err(crate::local::backend_err)?;
+        self.cleanup_transient_in_lifecycle(name, &lifecycle)
+    }
+
+    fn cleanup_transient_in_lifecycle(
+        &self,
+        name: &str,
+        lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+    ) -> Result<()> {
+        lifecycle
+            .require_name(name)
+            .map_err(crate::local::backend_err)?;
+        if self.machine_running(name) || vm_state_dir(name).exists() {
+            self.stop_machine_in_lifecycle(&MachineId(name.to_owned()), lifecycle, None)?;
         }
         let retained = if machine_spec_path(name).exists() {
             self.release_session_resources(name)?;
@@ -1376,7 +1448,14 @@ impl LocalBackend {
         } else {
             self.release_transient_resources(name)?
         };
-        remove_vm_runtime_dirs(name)?;
+        if !lifecycle
+            .reap_unowned_state()
+            .map_err(crate::local::backend_err)?
+        {
+            return Err(MvmError::Conflict {
+                reason: format!("machine {name:?} still owns its runtime state"),
+            });
+        }
         // The state dir under machines/ only carries session sidecars for a
         // transient (no machine.json); never touch a persistent definition.
         if !retained && !machine_spec_path(name).exists() {
@@ -1462,26 +1541,6 @@ impl LocalBackend {
         }
         Ok(ExitReport { exit_code })
     }
-}
-
-/// Drop a VM's runtime state *and* the directory its sockets live in; see
-/// [`mvm_runtime::vm::reconcile::remove_runtime_dirs`].
-fn remove_vm_runtime_dirs(name: &str) -> Result<()> {
-    mvm_runtime::vm::reconcile::remove_runtime_dirs(&vm_state_dir(name))
-        .map_err(|e| crate::local::backend_err(format!("removing runtime state of {name:?}: {e}")))
-}
-
-/// Clear a stopped machine's runtime dirs before it starts again, as
-/// [`LocalBackend`]'s own boot does. A launch that finds a stopped instance's
-/// leftovers refuses the name (HVF treats them as evidence it cannot discard
-/// itself), so every start path that is not that boot -- a restart, a
-/// reconfigure, a recreate -- has to clear them first. A machine that is still
-/// running owns its dirs and is left alone.
-fn discard_stopped_runtime_state(hypervisor: &str, name: &str) -> Result<()> {
-    if crate::backend_is_running(hypervisor, name) {
-        return Ok(());
-    }
-    remove_vm_runtime_dirs(name)
 }
 
 /// Remove a directory tree, treating "already absent" as success.

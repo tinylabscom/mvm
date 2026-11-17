@@ -3,6 +3,10 @@ use crate::commands::image;
 use crate::commands::vm::up;
 
 pub(super) fn run_start(cmd: MachineStartCmd) -> Result<()> {
+    anyhow::ensure!(
+        cmd.if_hvf_boot_nonce.is_none(),
+        "--if-hvf-boot-nonce requires machine restart"
+    );
     if cmd.names.len() > 1 && (cmd.receipt.is_some() || cmd.json || cmd.dry_run) {
         anyhow::bail!(
             "--receipt/--json/--dry-run report on a single machine; \
@@ -26,6 +30,31 @@ pub(super) fn run_start(cmd: MachineStartCmd) -> Result<()> {
 }
 
 pub(super) fn run_restart(cmd: MachineStartCmd) -> Result<()> {
+    if let Some(nonce) = &cmd.if_hvf_boot_nonce {
+        anyhow::ensure!(
+            cmd.names.len() == 1 && !cmd.dry_run,
+            "conditional health restart requires exactly one machine and cannot be a dry run"
+        );
+        let boot_nonce: [u8; 32] = hex::decode(nonce)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("expected a 32-byte HVF boot nonce"))?;
+        let name = &cmd.names[0];
+        let expected = mvm_core::protocol::hvf_control::HvfInstance {
+            vm_id: name.clone(),
+            boot_nonce,
+        };
+        let lifecycle = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(name)?;
+        mvm_client::LocalBackend::new()
+            .stop_machine_in_lifecycle(
+                &mvm_core::client::dto::MachineId(name.clone()),
+                &lifecycle,
+                Some(&expected),
+            )
+            .context("conditional health restart refused; no replacement launched")?;
+        let pending = start_machine_in_lifecycle(cmd.start_args_for(name), &lifecycle)?;
+        drop(lifecycle);
+        return complete_machine_start(pending);
+    }
     if cmd.names.len() > 1 && (cmd.receipt.is_some() || cmd.json || cmd.dry_run) {
         anyhow::bail!(
             "--receipt/--json/--dry-run report on a single machine; \
@@ -127,7 +156,95 @@ pub(super) fn resolve_start_spec(args: &MachineStartArgs) -> Result<(MachineSpec
 }
 
 pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
-    let (mut spec, action) = resolve_start_spec(&args)?;
+    if args.dry_run {
+        return complete_machine_start(start_machine_inner(args, None)?);
+    }
+    let lifecycle = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(&args.name)?;
+    let pending = start_machine_in_lifecycle(args, &lifecycle)?;
+    drop(lifecycle);
+    complete_machine_start(pending)
+}
+
+/// Boot and connect under the caller's gate; drop it before completing init.
+pub(super) fn start_machine_in_lifecycle(
+    args: MachineStartArgs,
+    lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+) -> Result<Option<PendingMachineStart>> {
+    lifecycle.require_name(&args.name)?;
+    start_machine_inner(args, Some(lifecycle))
+}
+
+pub(super) struct PendingMachineStart {
+    args: MachineStartArgs,
+    spec: MachineSpec,
+    boot_digest: String,
+    receipt_input: MachineStartReceiptInput,
+    stream: std::os::unix::net::UnixStream,
+    custody: crate::exec::RuntimeRunCustody,
+}
+
+pub(super) fn complete_machine_start(pending: Option<PendingMachineStart>) -> Result<()> {
+    let Some(pending) = pending else {
+        return Ok(());
+    };
+    let PendingMachineStart {
+        args,
+        spec,
+        boot_digest,
+        receipt_input,
+        stream,
+        custody,
+    } = pending;
+    let _lifecycle = init_then_reacquire(
+        &spec.name,
+        || run_machine_init_commands(&spec.name, &spec.init, stream),
+        |lifecycle| custody.require_current(lifecycle),
+        |lifecycle| stop_failed_init(&spec.name, &custody, lifecycle),
+    )?;
+    finish_machine_start(args, spec, boot_digest, receipt_input)
+}
+
+fn stop_failed_init(
+    name: &str,
+    custody: &crate::exec::RuntimeRunCustody,
+    lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+) -> Result<()> {
+    custody.require_current(lifecycle)?;
+    mvm_client::LocalBackend::new()
+        .stop_machine_in_lifecycle(
+            &mvm_core::client::dto::MachineId(name.to_owned()),
+            lifecycle,
+            custody.authenticated_hvf_instance(),
+        )
+        .map_err(Into::into)
+}
+
+fn init_then_reacquire(
+    name: &str,
+    init: impl FnOnce() -> Result<()>,
+    require_current: impl FnOnce(
+        &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+    ) -> Result<()>,
+    rollback: impl FnOnce(&mvm_runtime::vm::instance_snapshot::MachineLifecycleLock) -> Result<()>,
+) -> Result<mvm_runtime::vm::instance_snapshot::MachineLifecycleLock> {
+    let outcome = init();
+    let lifecycle = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(name)?;
+    require_current(&lifecycle)
+        .context("machine changed during dev.init; refusing stale start completion or rollback")?;
+    if let Err(err) = outcome {
+        rollback(&lifecycle).context(format!(
+            "dev.init failed ({err:#}); stopping its original machine failed"
+        ))?;
+        return Err(err);
+    }
+    Ok(lifecycle)
+}
+
+fn start_machine_inner(
+    args: MachineStartArgs,
+    lifecycle: Option<&mvm_runtime::vm::instance_snapshot::MachineLifecycleLock>,
+) -> Result<Option<PendingMachineStart>> {
+    let (spec, action) = resolve_start_spec(&args)?;
     if args.dry_run {
         let summary = machine_start_preflight_summary(
             &spec,
@@ -139,20 +256,23 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         } else {
             print_machine_start_preflight_human(&summary);
         }
-        return Ok(());
+        return Ok(None);
     }
+    let lifecycle = lifecycle.context("machine start requires its lifecycle transition")?;
     if machine_is_running(&args.name) {
         match action {
             SpecReconcile::Reuse => {
                 println!("{}", already_running_notice(&args.name, args.json));
-                return Ok(());
+                return Ok(None);
             }
             SpecReconcile::Recreate { ref changed } => {
                 eprintln!(
                     "machine {:?}: config changed ({changed}) — stopping the old instance and recreating it",
                     args.name
                 );
-                stop_running_machine(&args.name);
+                mvm_client::launch::detached::stop_running_machine_in_lifecycle(
+                    &args.name, lifecycle,
+                )?;
             }
             SpecReconcile::Create => {
                 // A freshly-created spec cannot already be running; proceed to save and boot.
@@ -168,7 +288,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
     enforce_persisted_volume_profile(&spec.profile, &spec.volumes)?;
     let effective_hypervisor = super::runtime::effective_hypervisor(args.hypervisor.as_deref());
     let receipt_input = machine_start_receipt_input(&spec, &effective_hypervisor)?;
-    let started = mvm_client::launch::machine_start::start_machine_spec(
+    let started = mvm_client::launch::machine_start::start_machine_spec_in_lifecycle(
         &spec,
         &CliStartHost::for_spec(&spec, args.kernel_pin.is_some()),
         mvm_client::launch::machine_start::MachineStartParams {
@@ -176,20 +296,65 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
             has_ad_hoc_argv: args.has_ad_hoc_argv,
             mailbox: args.mailbox,
         },
+        lifecycle,
     )?;
     let boot_digest = started.resolved_digest;
-    if !spec.init.is_empty()
-        && let Err(err) = run_machine_init_commands(&spec.name, &spec.init)
-    {
-        stop_failed_machine_start(&spec.name, &effective_hypervisor);
-        return Err(err);
+    if !spec.init.is_empty() {
+        let backend = mvm_runtime::backend::AnyBackend::from_hypervisor(&effective_hypervisor);
+        let custody =
+            match crate::exec::RuntimeRunCustody::capture(&backend, &spec.name, lifecycle) {
+                Ok(custody) => custody,
+                Err(error) => {
+                    // The launch has not released its transition, so no successor
+                    // can have acquired this name before rollback.
+                    mvm_client::LocalBackend::with_hypervisor(&effective_hypervisor)
+                    .stop_machine_in_lifecycle(
+                        &mvm_core::client::dto::MachineId(spec.name.clone()),
+                        lifecycle,
+                        None,
+                    )
+                    .with_context(|| format!(
+                        "retaining the launched instance failed ({error:#}); rollback failed"
+                    ))?;
+                    return Err(
+                        error.context("retaining the launched instance; dev.init not dispatched")
+                    );
+                }
+            };
+        let stream = match crate::exec::connect_session(&spec.name) {
+            Ok(stream) => stream,
+            Err(err) => {
+                stop_failed_init(&spec.name, &custody, lifecycle).context(format!(
+                    "connecting dev.init failed ({err:#}); stopping its original machine failed"
+                ))?;
+                return Err(err);
+            }
+        };
+        return Ok(Some(PendingMachineStart {
+            args,
+            spec,
+            boot_digest,
+            receipt_input,
+            stream,
+            custody,
+        }));
     }
+    finish_machine_start(args, spec, boot_digest, receipt_input)?;
+    Ok(None)
+}
+
+fn finish_machine_start(
+    args: MachineStartArgs,
+    mut spec: MachineSpec,
+    boot_digest: String,
+    receipt_input: MachineStartReceiptInput,
+) -> Result<()> {
     mark_machine_started(&mut spec, boot_digest);
     let started_at = spec
         .last_started_at
         .clone()
         .context("machine start did not stamp last_started_at")?;
-    if let Err(err) = overwrite_machine_spec(&spec) {
+    if let Err(err) = persist_start_metadata(&spec) {
         tracing::warn!(error = %err, machine = %spec.name, "updating machine start metadata failed (non-fatal)");
     }
     let outcome = MachineStartReceiptOutcome {
@@ -211,6 +376,14 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         println!("started machine {}", spec.name);
     }
     Ok(())
+}
+
+fn persist_start_metadata(started: &MachineSpec) -> Result<()> {
+    // Init runs without the gate, so preserve configuration edited during it.
+    let mut current = load_machine_spec(&started.name)?;
+    current.resolved_digest.clone_from(&started.resolved_digest);
+    current.last_started_at.clone_from(&started.last_started_at);
+    overwrite_machine_spec(&current)
 }
 
 /// How the CLI supplies a machine start with what differs by process: it may
@@ -509,6 +682,156 @@ pub(super) fn confirm_stop(
 }
 
 pub(super) use mvm_client::launch::detached::{machine_is_running, stop_running_machine};
+
+#[cfg(test)]
+mod init_tests {
+    use super::init_then_reacquire;
+    use mvm_core::util::test_env::TestEnv;
+    use mvm_runtime::vm::instance_snapshot::{MachineLifecycleLock, try_lock_resume};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn hung_init_permits_stop_and_delayed_failure_cannot_stop_successor() {
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", home.path());
+        let generation = AtomicU64::new(1);
+        let rolled_back = AtomicBool::new(false);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let init = scope.spawn(|| {
+                init_then_reacquire(
+                    "init-race",
+                    move || {
+                        entered_tx.send(()).unwrap();
+                        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                        anyhow::bail!("delayed init failure")
+                    },
+                    |_| {
+                        anyhow::ensure!(generation.load(Ordering::SeqCst) == 1, "replaced");
+                        Ok(())
+                    },
+                    |_| {
+                        rolled_back.store(true, Ordering::SeqCst);
+                        Ok(())
+                    },
+                )
+                .map(|_| ())
+            });
+            entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            // This is the same cross-process gate taken by operator stop/removal.
+            let operator = try_lock_resume("init-race").unwrap();
+            assert!(operator.is_some(), "hung guest init must not hold the gate");
+            generation.store(2, Ordering::SeqCst);
+            drop(operator);
+            release_tx.send(()).unwrap();
+            let err = init.join().unwrap().unwrap_err();
+            assert!(err.to_string().contains("refusing stale"), "{err:#}");
+        });
+        assert!(!rolled_back.load(Ordering::SeqCst));
+        assert_eq!(generation.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn happy_init_reacquires_gate_for_completion() {
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", home.path());
+        let gate = init_then_reacquire(
+            "init-happy",
+            || {
+                assert!(try_lock_resume("init-happy")?.is_some());
+                Ok(())
+            },
+            |gate| gate.require_name("init-happy"),
+            |_| panic!("successful init must not roll back"),
+        )
+        .unwrap();
+        assert!(try_lock_resume("init-happy").unwrap().is_none());
+        drop(gate);
+        assert!(MachineLifecycleLock::acquire("init-happy").is_ok());
+    }
+
+    #[test]
+    fn failed_current_init_rolls_back_under_gate() {
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", home.path());
+        let mut rolled_back = false;
+        let outcome = init_then_reacquire(
+            "init-failure",
+            || anyhow::bail!("init failed"),
+            |_| Ok(()),
+            |_| {
+                assert!(try_lock_resume("init-failure")?.is_none());
+                rolled_back = true;
+                Ok(())
+            },
+        );
+        assert!(outcome.is_err());
+        assert!(rolled_back);
+    }
+
+    #[test]
+    fn delayed_success_cannot_complete_for_successor() {
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", home.path());
+        let outcome = init_then_reacquire(
+            "init-stale-success",
+            || Ok(()),
+            |_| anyhow::bail!("original run replaced"),
+            |_| panic!("stale success must not roll back"),
+        );
+        assert!(outcome.is_err(), "stale success must not reach completion");
+        assert!(try_lock_resume("init-stale-success").unwrap().is_some());
+    }
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use mvm_core::util::test_env::TestEnv;
+    use mvm_runtime::vm::instance_snapshot::MachineLifecycleLock;
+
+    #[test]
+    fn init_completion_preserves_concurrently_updated_spec() {
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", home.path());
+        let mut started: super::MachineSpec = serde_json::from_value(serde_json::json!({
+            "schema_version": super::MACHINE_SPEC_SCHEMA_VERSION,
+            "name": "init-config",
+            "image": "alpine:latest",
+            "net": false,
+            "allow_host": [],
+            "cpus": 2,
+            "memory": "512M",
+            "profile": "dev",
+            "init": ["echo original"]
+        }))
+        .unwrap();
+        let mut edited = started.clone();
+        edited.cpus = 4;
+        edited.init = vec!["echo next-start".into(), "echo updated".into()];
+        super::save_machine_spec(&edited, false).unwrap();
+        super::mark_machine_started(&mut started, "sha256:original".into());
+
+        let _gate = MachineLifecycleLock::acquire(&started.name).unwrap();
+        super::persist_start_metadata(&started).unwrap();
+
+        edited.resolved_digest.clone_from(&started.resolved_digest);
+        edited.last_started_at.clone_from(&started.last_started_at);
+        assert_eq!(super::load_machine_spec(&started.name).unwrap(), edited);
+        assert_eq!(
+            started.init.len(),
+            1,
+            "receipt still describes executed init"
+        );
+    }
+}
 
 #[cfg(test)]
 mod replace_tests {

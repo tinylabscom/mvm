@@ -39,6 +39,20 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         handle: &StandbyHandle,
         claim: &StandbyClaim,
     ) -> std::result::Result<VmId, StandbyError> {
+        self.claim_standby_owned(ctx, handle, claim)
+            .map(|owned| owned.id)
+    }
+
+    /// Claim a child while retaining its lifecycle gate through caller custody capture.
+    ///
+    /// # Errors
+    /// Refuses invalid parents, admission failures, and failed child preparation or boot.
+    pub fn claim_standby_owned(
+        &self,
+        ctx: &ClaimContext<'_>,
+        handle: &StandbyHandle,
+        claim: &StandbyClaim,
+    ) -> std::result::Result<crate::backend::OwnedWarmClaim, StandbyError> {
         if claim
             .start_config
             .as_ref()
@@ -69,6 +83,8 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // the good parent to claimable (so a failed claim never strands warm
         // capacity) and removes a partial child dir. Only a booted child commits.
         let preloaded_child_name = handle.preloaded_child_vm_name.clone();
+        // Declared before cleanup so rollback completes before the gate unlocks.
+        let lifecycle;
         let mut cleanup = WarmClaimLease::new(ctx.pool, handle.id.as_str(), &self.driver);
         if parent.class != mvm_core::checkpoint::CheckpointClass::VmFull {
             return Err(StandbyError::ClaimFailed(
@@ -159,6 +175,11 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             }
             None => fresh_child_id(ctx)?,
         };
+        lifecycle = crate::vm::instance_snapshot::MachineLifecycleLock::acquire(&child.0).map_err(
+            |error| StandbyError::ClaimFailed(format!("acquire child lifecycle gate: {error:#}")),
+        )?;
+        // Selection precedes the gate; recheck under it before touching child state.
+        verify_preloaded_child_name_is_available(ctx, &child.0)?;
         let child_dir = vm_state_dir(&child.0);
         // Track it before creating or materializing anything so even a partial
         // claim is cleaned up.
@@ -278,7 +299,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 "workload audit context differs from admitted claim plan".into(),
             ));
         }
-        let mut endpoint = guards
+        let endpoint = guards
             .spawn_endpoint(
                 &child,
                 &EndpointSpawnInputs {
@@ -309,6 +330,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // booted, so it dials the instant its vCPUs run.
         let socks = standing_sockets(&child_dir, &child_cfg);
         let channels = workload_vsock_ports(&socks.with_egress(endpoint.egress_uds()));
+        cleanup.track_endpoint(endpoint);
 
         // Register the child's exact admitted host-service set before the fork,
         // because the restored guest can dial `BROKER_PORT` immediately. Any
@@ -318,7 +340,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             .iter()
             .flat_map(|extension| extension.capabilities.iter().cloned())
             .collect();
-        let mut broker_guard = self
+        let broker_guard = self
             .broker
             .register(&BrokerRegisterRequest {
                 vm_name: &child.0,
@@ -330,6 +352,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 service_proxies: &child_cfg.service_proxies,
             })
             .map_err(|e| StandbyError::ClaimFailed(format!("register child broker: {e:#}")))?;
+        cleanup.track_broker(broker_guard);
         claim_phase!("broker_registered");
 
         // (6b) Mint a fresh VMGenID bound to the child's content-address and fork
@@ -433,7 +456,13 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             // one place responsible for reaping it — after the teardown, so
             // whatever the refused child prints as it dies is in the record
             // of why it was refused.
-            self.force_stop(&child.0, "refused forked standby child");
+            if let Err(error) = self.checked_force_stop(&child.0, "refused forked standby child") {
+                cleanup.retain_unknown_child();
+                return Err(StandbyError::ClaimFailed(format!(
+                    "{refusal}; child stop unconfirmed: {error:#}; retaining child state and parent reservation"
+                )));
+            }
+            cleanup.confirm_child_stopped();
             self.console_streamer.stop(&child.0);
             return Err(refusal);
         }
@@ -442,8 +471,6 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // The child booted and proved a fresh identity: disarm the endpoint and
         // broker reapers (the stop path owns them now) and commit — the parent
         // stays reserved and the child dir is real state.
-        endpoint.defuse();
-        broker_guard.defuse();
         cleanup.commit();
         // Both handoff shapes consume the standby parent's state without being
         // able to remove it at claim time (resident: the child runs out of the
@@ -461,7 +488,10 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         if resident_handoff {
             schedule_resident_checkpoint_reclaim(ctx, &parent);
         }
-        Ok(child)
+        Ok(crate::backend::OwnedWarmClaim {
+            id: child,
+            lifecycle,
+        })
     }
 
     /// Deliver `token` to the forked child's guest agent and judge what it
@@ -505,15 +535,12 @@ fn claim_plan(claim: &StandbyClaim) -> std::result::Result<ExecutionPlan, Standb
 /// backstop, never a hot loop.
 pub(super) const MAX_CHILD_NAME_ATTEMPTS: usize = 8;
 
-/// Mint a fresh child [`VmId`] that collides with no existing VM registration.
+/// Select a fresh child [`VmId`] that collides with no existing VM registration.
 /// The name is a fresh random id (never the parent's), which — with the fresh
 /// VMGenID and per-child endpoint — is the identity scrub that stops a fork from
-/// inheriting the parent's identity. Uniqueness comes from the random suffix
-/// checked against the registry, not from mutual exclusion: the registry lock
-/// only serializes the read (nothing is persisted under it here — the boot path
-/// registers the name), so two truly-concurrent claims rely on the ~2^64 suffix
-/// space to not collide, which is what makes a re-check-and-redraw a backstop
-/// rather than a race.
+/// inheriting the parent's identity. Selection does not reserve the name: the
+/// caller acquires its lifecycle gate and rechecks the registry before creating
+/// child state. A concurrent registration then refuses rather than being adopted.
 fn fresh_child_id(ctx: &ClaimContext<'_>) -> std::result::Result<VmId, StandbyError> {
     let _lock = acquire_registry_lock(ctx.registry_path)
         .map_err(|e| StandbyError::ClaimFailed(format!("acquire registry lock: {e:#}")))?;

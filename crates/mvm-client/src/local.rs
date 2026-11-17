@@ -746,6 +746,19 @@ fn load_name_registry() -> Result<VmNameRegistry> {
     VmNameRegistry::load(&path).map_err(|e| backend_err(format!("loading VM name registry: {e}")))
 }
 
+/// Wait for a contended machine transition without blocking an async executor.
+pub(crate) async fn machine_lifecycle(
+    name: &str,
+) -> Result<mvm_runtime::vm::instance_snapshot::MachineLifecycleLock> {
+    let name = name.to_owned();
+    tokio::task::spawn_blocking(move || {
+        mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(&name)
+    })
+    .await
+    .map_err(backend_err)?
+    .map_err(backend_err)
+}
+
 /// Remove a stopped machine's runtime state directory.
 ///
 /// A stop that leaves it behind leaves whatever the last run put there, and a
@@ -766,6 +779,13 @@ fn load_name_registry() -> Result<VmNameRegistry> {
 /// A persistent machine — the restored-checkpoint case this exists for —
 /// reports no exit through the stop path, so it always reaps.
 pub(crate) fn remove_stopped_runtime_state(name: &str) -> Result<()> {
+    remove_stopped_runtime_state_with_lock(name, None)
+}
+
+fn remove_stopped_runtime_state_with_lock(
+    name: &str,
+    lifecycle: Option<&mvm_runtime::vm::instance_snapshot::MachineLifecycleLock>,
+) -> Result<()> {
     let state_dir = vm_state_dir(name);
     let transient_exit_pending = !mvm_core::config::machine_spec_path(name).exists()
         && mvm_core::exit_capture::exit_file_path(&state_dir).exists();
@@ -776,10 +796,13 @@ pub(crate) fn remove_stopped_runtime_state(name: &str) -> Result<()> {
         );
         return Ok(());
     }
-    let removed = mvm_runtime::vm::reconcile::reap_unowned_state_dir(
-        &state_dir,
-        &mvm_core::config::instance_dir(name),
-    )
+    let removed = match lifecycle {
+        Some(lifecycle) => lifecycle.reap_unowned_state().map_err(|e| format!("{e:#}")),
+        None => mvm_runtime::vm::reconcile::reap_unowned_state_dir(
+            &state_dir,
+            &mvm_core::config::instance_dir(name),
+        ),
+    }
     .map_err(|e| {
         backend_err(format!(
             "machine {name:?} stopped, but removing its state dir {} failed: {e}",
@@ -793,6 +816,57 @@ pub(crate) fn remove_stopped_runtime_state(name: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+impl LocalBackend {
+    /// Stop while the caller retains the machine's lifecycle transition.
+    ///
+    /// An automatic restart supplies the exact authenticated instance; a
+    /// mismatch refuses before helpers, volume leases or successor state change.
+    pub fn stop_machine_in_lifecycle(
+        &self,
+        id: &MachineId,
+        lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+        expected: Option<&mvm_core::protocol::hvf_control::HvfInstance>,
+    ) -> Result<()> {
+        lifecycle.require_name(&id.0).map_err(backend_err)?;
+        if let Some(expected) = expected
+            && expected.vm_id != id.0
+        {
+            return Err(backend_err(
+                "health restart instance names a different machine",
+            ));
+        }
+        let vid = VmId(id.0.clone());
+        let stopped_session = mvm_core::config::machine_spec_path(&id.0)
+            .exists()
+            .then(|| mvm_hostd::audit::plan_persist::read_plan(&id.0).ok())
+            .flatten();
+        let owner = AnyBackend::for_started_vm(&id.0);
+        let backend = owner.as_ref().unwrap_or(&self.backend);
+        let result = match expected {
+            Some(expected) => backend.stop_hvf_instance(expected),
+            None => backend.stop(&vid),
+        };
+        if result.is_ok() {
+            if let Some(plan) = &stopped_session {
+                crate::launch::seal_stopped_session(plan, &id.0);
+            }
+            deregister_from_name_registry(&id.0);
+            self.release_stopped_leases(&id.0).map_err(|error| {
+                backend_err(format!(
+                    "machine {:?} stopped, but volume lease cleanup failed: {error}",
+                    id.0
+                ))
+            })?;
+            remove_stopped_runtime_state_with_lock(&id.0, Some(lifecycle))?;
+        } else if expected.is_none()
+            && let (Err(e), Some(plan)) = (&result, &stopped_session)
+        {
+            crate::launch::record_session_stop_failure(Some(plan), &id.0, &format!("{e:#}"));
+        }
+        result.map(|_| ()).map_err(backend_err)
+    }
 }
 
 /// Best-effort removal of a machine name from the persistent VM name registry
@@ -1216,7 +1290,15 @@ impl MvmClient for LocalBackend {
         if let Some(path) = spec.assurance_campaign {
             builder = builder.assurance_campaign(path);
         }
-        self.create_from_request(&builder.build()?)
+        let request = builder.build()?;
+        let name = request
+            .name
+            .as_deref()
+            .ok_or_else(|| MvmError::InvalidSpec {
+                reason: "persistent machine requires a name".into(),
+            })?;
+        let lifecycle = machine_lifecycle(name).await?;
+        self.create_from_request_in_lifecycle(&request, &lifecycle)
     }
 
     async fn run_machine(&self, spec: MachineSpec) -> Result<MachineState> {
@@ -1251,48 +1333,8 @@ impl MvmClient for LocalBackend {
     }
 
     async fn stop_machine(&self, id: &MachineId) -> Result<()> {
-        let vid = VmId(id.0.clone());
-        // A persistent machine's session ends at its stop; a transient's ends
-        // when its exit is reported, which seals it. Read before the stop: the
-        // plan lives in the state dir the stop removes.
-        let stopped_session = mvm_core::config::machine_spec_path(&id.0)
-            .exists()
-            .then(|| mvm_hostd::audit::plan_persist::read_plan(&id.0).ok())
-            .flatten();
-        // Stop via the VMM that actually started this VM (resolved from its
-        // per-VM state-dir pid marker) so a QEMU/libkrun VM is torn down by its
-        // own hypervisor, not this client's default. A marker-less VM (mock or
-        // direct-boot) has no owning marker, so fall back to this client's
-        // configured backend — which keeps a `with_hypervisor("mock")` client
-        // hermetic rather than reaching a platform default.
-        let result = match AnyBackend::for_started_vm(&id.0) {
-            Some(owner) => owner.stop(&vid),
-            None => self.backend.stop(&vid),
-        };
-        // Deregister from the name registry only on a successful stop; on
-        // failure the entry (and any readiness the caller recorded) stays so
-        // the user can see what happened. A persistent machine's spec is
-        // never touched by stop — only remove deletes a definition.
-        if result.is_ok() {
-            // Seal first: the session ended with the stop, and nothing below
-            // may skip recording that.
-            if let Some(plan) = &stopped_session {
-                crate::launch::seal_stopped_session(plan, &id.0);
-            }
-            deregister_from_name_registry(&id.0);
-            // Release the stopped owner's volume-attachment leases (re-sealing
-            // any just-in-time unlocked volume). Best-effort: the stop itself
-            // already succeeded.
-            if let Err(e) = self.release_stopped_leases(&id.0) {
-                tracing::warn!(error = %e, machine = %id.0, "releasing volume leases after stop failed");
-            }
-            remove_stopped_runtime_state(&id.0)?;
-        } else if let (Err(e), Some(plan)) = (&result, &stopped_session) {
-            // The machine may still be running, so its session stays open; the
-            // failed stop is still put on the record under its plan.
-            crate::launch::record_session_stop_failure(Some(plan), &id.0, &format!("{e:#}"));
-        }
-        result.map(|_timing| ()).map_err(backend_err)
+        let lifecycle = machine_lifecycle(&id.0).await?;
+        self.stop_machine_in_lifecycle(id, &lifecycle, None)
     }
 
     async fn pause_machine(&self, id: &MachineId, opts: PauseOpts) -> Result<PauseOutcome> {
@@ -2750,7 +2792,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg(feature = "test-support")]
-    async fn stop_leaves_the_state_dir_of_a_restore_in_progress() {
+    async fn stop_waits_for_a_restore_transition_before_removing_its_state() {
         let data = IsolatedDataDir::new();
         let content = checkpoint_content(data.path());
         let be = LocalBackend::with_hypervisor("mock");
@@ -2758,24 +2800,74 @@ mod tests {
         restore_into(name, &content);
 
         let restore = mvm_runtime::vm::instance_snapshot::lock_resume(name).unwrap();
-        be.stop_machine(&MachineId(name.into()))
-            .await
-            .expect("stop");
-        assert!(
-            vm_state_dir(name).join("rootfs.ext4").is_file(),
-            "a restore holding the machine's lifecycle lock keeps its state dir"
-        );
-
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let stop = std::thread::spawn(move || {
+            entered_tx.send(()).unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let result = runtime.block_on(be.stop_machine(&MachineId(name.into())));
+            done_tx.send(result).unwrap();
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let completed_while_restoring = done_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .ok();
+        let preserved = vm_state_dir(name).join("rootfs.ext4").is_file();
         drop(restore);
-        be.stop_machine(&MachineId(name.into()))
-            .await
-            .expect("stop");
+        if completed_while_restoring.is_none() {
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+                .expect("stop after restore");
+        }
+        stop.join().unwrap();
+        assert!(
+            completed_while_restoring.is_none(),
+            "stop must serialize with restore"
+        );
+        assert!(
+            preserved,
+            "in-progress restore retains its state until releasing the transition"
+        );
         assert!(!vm_state_dir(name).exists());
     }
 
     #[tokio::test]
     #[cfg(feature = "test-support")]
-    async fn stopping_a_machine_with_no_state_creates_no_lifecycle_lock() {
+    async fn stopping_a_first_launch_waits_before_touching_its_preparing_state() {
+        let _data = IsolatedDataDir::new();
+        let be = LocalBackend::with_hypervisor("mock");
+        let name = "first-launch-stop";
+        let id = MachineId(name.into());
+        let launch = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(name)
+            .expect("first launch owns the transition");
+        let mut stop = Box::pin(be.stop_machine(&id));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), stop.as_mut())
+                .await
+                .is_err(),
+            "absence of runtime files does not let stop bypass first launch"
+        );
+        let state = vm_state_dir(name);
+        std::fs::create_dir_all(&state).expect("prepare runtime state");
+        std::fs::write(state.join("rootfs.ext4"), b"preparing").expect("prepare rootfs");
+        assert!(state.join("rootfs.ext4").is_file());
+        drop(launch);
+        tokio::time::timeout(std::time::Duration::from_secs(5), stop)
+            .await
+            .expect("stop completes after launch releases the transition")
+            .expect("stop");
+        assert!(!state.exists());
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "test-support")]
+    async fn stopping_a_machine_with_no_state_establishes_the_transition_lock() {
         let _data = IsolatedDataDir::new();
         let be = LocalBackend::with_hypervisor("mock");
 
@@ -2783,7 +2875,9 @@ mod tests {
             .await
             .expect("stop");
 
-        assert!(!mvm_core::config::instance_dir("never-started").exists());
+        assert!(mvm_core::config::instance_dir("never-started").exists());
+        assert!(!vm_state_dir("never-started").exists());
+        assert!(!mvm_core::config::machine_spec_path("never-started").exists());
     }
 
     #[test]
