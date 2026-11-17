@@ -5,8 +5,9 @@ use super::admit::admit_plan_for_run;
 use super::assurance_runtime::verify_selected_runtime;
 use super::rollback::{
     FailureAuditPolicy, UndoLaunch, UndoLaunchFailure, apply_admitted_grants_or_undo_launch,
-    apply_admitted_grants_with_rollback, record_charge_or_undo_launch,
-    record_charge_with_owned_rollback, undo_cli_launch, undo_launch, undo_launch_with,
+    apply_admitted_grants_with_rollback, apply_entrypoint_grants_or_undo_launch,
+    record_charge_or_undo_launch, record_charge_with_owned_rollback,
+    record_entrypoint_charge_or_undo_launch, undo_cli_launch, undo_launch, undo_launch_with,
 };
 use super::{AdmitAndStartParams, AdmittedPlan, RunPosture, final_gates, registry_pack};
 use anyhow::{Context, Result};
@@ -21,10 +22,102 @@ use mvm_core::policy::PolicyBundle;
 use mvm_core::vm_backend::{VmId, VmStartConfig};
 use mvm_runtime::AnyBackend;
 
+/// Dispatch an already admitted entrypoint on its original native channel.
+///
+/// The caller supplies slots inside its original custody group. The runtime
+/// slot is populated before activation, so even an uncertain activation error
+/// cannot discard the child or its admission and image owners.
+///
+/// # Errors
+/// Refuses an unsupported backend, spent admission, invalid runtime or host
+/// gate, or failed native preparation/activation. A post-preparation failure
+/// leaves the original runtime in `runtime` for its caller to stop.
+pub fn start_owned_entrypoint(
+    backend: &AnyBackend,
+    admitted: &mut AdmittedPlan,
+    config: &mut VmStartConfig,
+    policy_bundle: Option<&PolicyBundle>,
+    verified_runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
+    built_runtime: &mut Option<super::PreparedBuiltPackRuntime>,
+    runtime: &mut Option<mvm_runtime::workload_runner::runner::OwnedRuntimeLaunch>,
+) -> Result<()> {
+    anyhow::ensure!(
+        !admitted.dispatched,
+        "original admitted plan was already dispatched"
+    );
+    anyhow::ensure!(
+        runtime.is_none(),
+        "native runtime slot must be empty before dispatch"
+    );
+    anyhow::ensure!(
+        backend.kind() == mvm_core::vm_backend::BackendKind::Hvf,
+        "original-owner entrypoint requires HVF"
+    );
+    anyhow::ensure!(
+        admitted.backend == Some(backend.kind()),
+        "original-owner entrypoint backend differs from admitted backend"
+    );
+    mvm_runtime::workload_backend::require_workload_backend(backend)?;
+    if let Some(release) = verified_runtime {
+        release.verify_config(config)?;
+        admitted
+            .plan()
+            .require_runtime_identity(release.identity())?;
+    } else if admitted.plan().runtime_identity.is_none() {
+        verify_selected_runtime(config)?;
+    }
+    *built_runtime = final_gates::run_post_admission_gates_for_source(
+        config,
+        admitted,
+        backend.kind(),
+        policy_bundle,
+        final_gates::ImageSource::OwnedNative,
+    )
+    .map_err(|(stage, err)| err.context(format!("admission gate refused ({stage})")))?;
+    anyhow::ensure!(
+        admitted.plan().runtime_identity.is_none()
+            || verified_runtime.is_some()
+            || built_runtime.is_some(),
+        "admitted runtime identity has no retained verification"
+    );
+    if let Some(release) = verified_runtime {
+        release.verify_config(config)?;
+        admitted
+            .plan()
+            .require_runtime_identity(release.identity())?;
+    }
+    registry_pack::verify_runtime_at_dispatch(built_runtime.as_ref(), config, admitted, None)?;
+    crate::mailbox_process::require_servable(config, backend, admitted.mailbox_posture().as_ref())?;
+    if super::persists_plan_before_start(backend.name()) {
+        super::stash_plan_for_bridge(config)?;
+    }
+    // The one-use authority is spent before the first native side effect.
+    admitted.dispatched = true;
+    let images = built_runtime
+        .as_mut()
+        .context("owned native image preparation missing")?
+        .take_boot_images()?;
+    *runtime = Some(backend.prepare_owned_launch_with_verified_runtime(
+        config,
+        images,
+        verified_runtime,
+    )?);
+    let original = runtime
+        .as_mut()
+        .context("original native runtime missing")?;
+    if let Some(built) = built_runtime.as_ref() {
+        built.verify_config(original.config()?)?;
+    }
+    original.activate()
+}
+
 /// CLI transient boots keep their completion narrative with the caller.
 enum StartFinalization {
     /// Record launch and failures at the host dispatch boundary.
     Immediate,
+    /// Keep the ordinary launch/rollback tail, but persist the bridge
+    /// substrate before an entrypoint's backend opens its endpoint.
+    Entrypoint,
     /// Defer success until confirmed transient teardown.
     CliTransient {
         writable_images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
@@ -53,6 +146,14 @@ pub(super) fn cli_rollback_error(error: anyhow::Error) -> anyhow::Error {
         CliStartFailure::UncertainStop(error).into()
     } else {
         CliStartFailure::Unrecorded(error).into()
+    }
+}
+
+fn entrypoint_rollback_error(error: anyhow::Error) -> anyhow::Error {
+    if error.is::<UndoLaunchFailure>() {
+        CliStartFailure::UncertainStop(error).into()
+    } else {
+        error
     }
 }
 
@@ -204,6 +305,29 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
     start_admitted_with_verified_release(params, verified.as_ref())
 }
 
+/// Start an entrypoint with the release evidence retained by this admission.
+///
+/// Selection, signed-plan binding, host gates, budget rollback and launch
+/// audit all remain in the ordinary admitted tail.
+///
+/// # Errors
+/// A launch gate or backend refusal, or a post-start grant or charge that
+/// could not be applied and rolled back.
+pub fn start_entrypoint(
+    params: StartAdmittedParams<'_>,
+    verified_runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
+) -> Result<StartedMachine> {
+    let started =
+        start_admitted_with_finalization(params, verified_runtime, StartFinalization::Entrypoint)?;
+    Ok(StartedMachine {
+        vm_id: started.vm_id,
+        admitted: started.admitted,
+        enforced_grants: started
+            .enforced_grants
+            .expect("entrypoint host start checks enforced grants"),
+    })
+}
+
 /// Start a locally admitted release using this launch's authenticated archive.
 pub(crate) fn start_admitted_with_verified_release(
     params: StartAdmittedParams<'_>,
@@ -263,6 +387,7 @@ fn start_admitted_with_finalization(
     let cli_transient = matches!(finalization, StartFinalization::CliTransient { .. });
     let persistent = matches!(finalization, StartFinalization::Persistent { .. });
     let fork = matches!(finalization, StartFinalization::FsQuickFork);
+    let entrypoint = matches!(finalization, StartFinalization::Entrypoint);
     let backend = params.backend;
     let mut admitted = params.admitted;
     anyhow::ensure!(
@@ -305,7 +430,11 @@ fn start_admitted_with_finalization(
                 .plan()
                 .require_runtime_identity(runtime.identity())
                 .map_err(|error| ("guest-runtime", anyhow::Error::from(error)))?;
-        } else if !persistent {
+        } else if !persistent
+            && !(entrypoint
+                && verified_runtime.is_none()
+                && admitted.plan().runtime_identity.is_some())
+        {
             verify_selected_runtime(&params.config).map_err(|error| ("guest-runtime", error))?;
         }
         let (config, built_runtime) = final_gates::run_post_admission_gates(
@@ -314,6 +443,16 @@ fn start_admitted_with_finalization(
             backend.kind(),
             params.policy_bundle,
         )?;
+        if entrypoint
+            && verified_runtime.is_none()
+            && built_runtime.is_none()
+            && admitted.plan().runtime_identity.is_some()
+        {
+            return Err((
+                "release-runtime",
+                anyhow::anyhow!("admitted runtime identity has no retained verification"),
+            ));
+        }
         if persistent {
             if verified_runtime.is_none()
                 && built_runtime.is_none()
@@ -386,7 +525,7 @@ fn start_admitted_with_finalization(
     if let Err(err) =
         crate::mailbox_process::require_servable(&config, backend, mailbox_posture.as_ref())
     {
-        if persistent
+        if (persistent || entrypoint)
             && let Some(emitter) = params.emitter
             && let Err(e) =
                 emitter.emit_failed(admitted.plan(), "backend-start", &format!("{err:#}"))
@@ -395,7 +534,7 @@ fn start_admitted_with_finalization(
         }
         return Err(err);
     }
-    if (persistent || fork) && super::persists_plan_before_start(backend.name()) {
+    if (persistent || fork || entrypoint) && super::persists_plan_before_start(backend.name()) {
         super::stash_plan_for_bridge(&config).inspect_err(|err| {
             if !fork
                 && let Some(emitter) = params.emitter
@@ -520,6 +659,16 @@ fn start_admitted_with_finalization(
                 // after authenticated readiness. Fs-quick forks retain their
                 // previous launch-time audit without immediate grant acceptance.
                 None
+            } else if entrypoint {
+                Some(
+                    apply_entrypoint_grants_or_undo_launch(
+                        backend,
+                        &vm_id,
+                        &admitted,
+                        params.emitter,
+                    )
+                    .map_err(entrypoint_rollback_error)?,
+                )
             } else {
                 Some(apply_admitted_grants_or_undo_launch(
                     backend,
@@ -543,6 +692,15 @@ fn start_admitted_with_finalization(
                     params.emitter,
                     || stop_actor(&mut actor_owner),
                 )?;
+            } else if entrypoint {
+                record_entrypoint_charge_or_undo_launch(
+                    backend,
+                    &vm_id,
+                    &vm_name,
+                    &admitted,
+                    params.emitter,
+                )
+                .map_err(entrypoint_rollback_error)?;
             } else if !cli_transient && !persistent && !fork {
                 record_charge_or_undo_launch(backend, &vm_id, &vm_name, &admitted, params.emitter)?;
             }
@@ -602,6 +760,8 @@ fn start_admitted_with_finalization(
                 };
                 return Err(if cli_transient || fork {
                     cli_rollback_error(undo_cli_launch(undo))
+                } else if entrypoint {
+                    entrypoint_rollback_error(undo_cli_launch(undo))
                 } else {
                     undo_start(undo, &mut actor_owner)
                 });
@@ -650,10 +810,21 @@ fn start_admitted_with_finalization(
                     };
                     return Err(if cli_transient || fork {
                         cli_rollback_error(undo_cli_launch(undo))
+                    } else if entrypoint {
+                        entrypoint_rollback_error(undo_cli_launch(undo))
                     } else {
                         undo_start(undo, &mut actor_owner)
                     });
                 }
+            }
+            // Entrypoint callers previously persisted the plan after their
+            // successful boot, including QEMU (which has no bridge sidecar).
+            // Keep the lifecycle audit cache independent of bridge eligibility.
+            if entrypoint
+                && let Err(error) =
+                    crate::audit::plan_persist::write_plan(&vm_name, admitted.plan())
+            {
+                tracing::warn!(%error, "persisting entrypoint plan failed (non-fatal)");
             }
             Ok(StartTailResult {
                 vm_id,
