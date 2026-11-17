@@ -1039,6 +1039,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
     let ledger = mvm_client::admission::InMemoryNonceLedger::new();
     let configured_images_dir = mvm_build::image_source::configured_images_dir();
     let params = super::up::AdmitPlanForBootParams {
+        bundle_sizing: Default::default(),
         mailbox: None,
         gpu: false,
         instructions: Default::default(),

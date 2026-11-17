@@ -765,12 +765,11 @@ pub(in crate::commands) fn run_secure_started(
     // parsed back into a tier would be measuring against whatever was typed.
     let admit_backend_kind = selected_backend.kind();
     let admit_backend = selected_backend.name().to_string();
-    // The closure below moves `admit_backend`; keep a copy for the receipt's
-    // honest per-backend enforcement tier.
+    // The closure below moves `admit_backend`; the receipt keeps a copy.
     let receipt_backend = admit_backend.clone();
     let admit_network_mode = args.network_mode;
     let admit_grants = resolved_grants.plan_grants.clone();
-    let admit_cpus = args.cpus;
+    let (admit_cpus, admit_bundle_sizing) = (args.cpus, args.explicit_resources.bundle);
     let admit_mem_mib = u64::from(parse_human_size(&args.memory).context("Invalid --memory")?);
     let admit_network_policy = network_policy.clone();
     let admit_agent_verb = args.agent_verb.clone();
@@ -845,6 +844,7 @@ pub(in crate::commands) fn run_secure_started(
         // running beside the VMM boot, and activation waits for it.
         let configured_images_dir = mvm_build::image_source::configured_images_dir();
         let params = super::up::AdmitPlanForBootParams {
+            bundle_sizing: admit_bundle_sizing,
             mailbox: admit_mailbox,
             gpu: admit_gpu,
             instructions: InstructionSources::for_workload(admit_workload_dir.as_deref())

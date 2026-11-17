@@ -376,6 +376,7 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
     let ledger = mvm_client::admission::InMemoryNonceLedger::new();
     let admission = crate::commands::vm::up::admit_plan_for_boot_with_verified_retained(
         crate::commands::vm::up::AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             gpu: false,
             instructions: Default::default(),

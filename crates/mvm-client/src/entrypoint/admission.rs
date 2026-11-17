@@ -159,6 +159,7 @@ impl EntrypointAdmission {
         let materialized_mounts = crate::admission::instructions::materialized_mounts(volumes);
         let configured_images_dir = mvm_build::image_source::configured_images_dir();
         let params = AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             gpu: false,
             instructions: crate::admission::InstructionSources::for_workload(None)

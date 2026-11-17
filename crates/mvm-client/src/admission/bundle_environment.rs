@@ -33,6 +33,14 @@ pub fn installed_bundle_environment(
     mvm_runtime::vm::template::lifecycle::installed_bundle_environment(id_or_slot)
 }
 
+/// The recorded resources of the installed bundle `id_or_slot` names, its
+/// manifest signature checked again. `None` when there is none to read.
+pub fn installed_bundle_resources(
+    id_or_slot: &str,
+) -> anyhow::Result<Option<mvm_core::plan::BundleResources>> {
+    mvm_runtime::vm::template::lifecycle::installed_bundle_resources(id_or_slot)
+}
+
 /// What the launch provides, in the terms a descriptor can check.
 #[derive(Debug, Clone, Copy)]
 pub struct EnvironmentRequest<'a> {

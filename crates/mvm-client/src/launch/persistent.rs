@@ -377,6 +377,7 @@ fn prepare_persistent_boot(
                 .collect::<Vec<_>>();
             let configured_images_dir = mvm_build::image_source::configured_images_dir();
             let admission_params = AdmitPlanForBootParams {
+                bundle_sizing: Default::default(),
                 mailbox,
                 // What the backend will arm, so the admitted tier opens
                 // the GPU endpoint's vsock socket exactly when there is one.
