@@ -890,7 +890,7 @@ where
             Ok(LaunchDecision::Claimed(vm_id))
         }
         Err(e) => {
-            tracing::warn!(standby = %handle.id, error = %e, "standby claim failed");
+            tracing::warn!(standby = %handle.id, error = %format!("{e:#}"), "standby claim failed");
             if mvm_client::admission::cli_start_failure_kind(&e)
                 == Some(mvm_client::admission::CliStartFailureKind::UncertainStop)
             {
@@ -903,7 +903,7 @@ where
             Ok(decision_for_mode(
                 mode,
                 WarmClaimRefusal::ClaimRejected {
-                    reason: e.to_string(),
+                    reason: format!("{e:#}"),
                 },
             ))
         }
