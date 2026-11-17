@@ -331,6 +331,8 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     // Verify a signed `.mvmpkg` and preview its posture. Read-only: no
     // install, no boot, no audit-chain emission.
     ("check-artifact", AuditPosture::ReadOnly),
+    // Verified sealed readback additionally bypasses command signing/startup.
+    // Ordinary logs retain their existing startup and live-follow behavior.
     ("logs", AuditPosture::ReadOnly),
     // View-only by default. With `--input` it is an interactive control
     // surface whose audit channel is the display input gate's own chain

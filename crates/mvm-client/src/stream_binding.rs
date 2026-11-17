@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use ed25519_dalek::VerifyingKey;
+use mvm_core::audit_verify::PlanAuditEntry;
 use mvm_core::audit_verify::set::{SegmentSetError, verify_segment_entries};
 use mvm_core::transcript::evidence::{
     LABEL_CAPTURE_ID, LABEL_CHUNK_COUNT, LABEL_TRANSCRIPT_ROOT, LABEL_VM_NAME,
@@ -84,6 +85,17 @@ pub fn verify_output_audit_binding(
     plan_id: &str,
     vm_name: &str,
 ) -> Result<OutputBindingReport, VerifyOutputBindingError> {
+    validate_manifest(manifest, tenant, plan_id, vm_name)?;
+    let entries = verified_entries(audit_path, trusted_key)?;
+    evaluate_entries(manifest, entries.iter(), tenant, plan_id)
+}
+
+pub(crate) fn validate_manifest(
+    manifest: &TranscriptManifest,
+    tenant: &str,
+    plan_id: &str,
+    vm_name: &str,
+) -> Result<(), VerifyOutputBindingError> {
     verify_sealed_root(manifest)?;
     if tenant.is_empty()
         || plan_id.is_empty()
@@ -94,6 +106,13 @@ pub fn verify_output_audit_binding(
     {
         return Err(VerifyOutputBindingError::IdentityMismatch);
     }
+    Ok(())
+}
+
+pub(crate) fn verified_entries(
+    audit_path: &Path,
+    trusted_key: &VerifyingKey,
+) -> Result<Vec<PlanAuditEntry>, VerifyOutputBindingError> {
     let dir = audit_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -106,11 +125,19 @@ pub fn verify_output_audit_binding(
     if audit_path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
         return Err(VerifyOutputBindingError::InvalidAuditPath);
     }
-    let entries = match verify_segment_entries(dir, base, trusted_key) {
-        Ok(entries) => entries,
-        Err(SegmentSetError::NoChain { .. }) => Vec::new(),
-        Err(error) => return Err(error.into()),
-    };
+    match verify_segment_entries(dir, base, trusted_key) {
+        Ok(entries) => Ok(entries),
+        Err(SegmentSetError::NoChain { .. }) => Ok(Vec::new()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(crate) fn evaluate_entries<'a>(
+    manifest: &TranscriptManifest,
+    entries: impl IntoIterator<Item = &'a PlanAuditEntry>,
+    tenant: &str,
+    plan_id: &str,
+) -> Result<OutputBindingReport, VerifyOutputBindingError> {
     let chunk_count = manifest.chunks.len().to_string();
     let adopted = manifest.adopted.to_string();
     let mut binding = OutputAuditBinding::Unbound;

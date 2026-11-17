@@ -72,6 +72,12 @@ impl TopLevelCommand for Commands {
     }
 
     fn is_offline_audit_command(&self) -> bool {
+        if let Commands::Machine(machine::Args {
+            action: machine::MachineAction::Logs(args),
+        }) = self
+        {
+            return args.verified_plan_id.is_some();
+        }
         matches!(
             self,
             Commands::Trust(trust::Args {
@@ -123,6 +129,9 @@ impl TopLevelCommand for Commands {
             return None;
         }
         match self {
+            Commands::Machine(machine::Args {
+                action: machine::MachineAction::Logs(args),
+            }) => Some(vm::logs::execute(args.clone())),
             Commands::QemuVsockBridge(a) => Some(qemu_bridge::run(a)),
             Commands::Trust(trust::Args {
                 action:

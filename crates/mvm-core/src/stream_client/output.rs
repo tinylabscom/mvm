@@ -523,6 +523,110 @@ pub fn open_vm_output(vm: &str, request: OutputRequest) -> Result<VmOutputStream
     open_vm_output_at(&OutputLocator::for_vm(vm), request)
 }
 
+/// Why current-run sealed-only history is unavailable.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum SealedHistoryRefusal {
+    /// No current protected routing or retained generation exists.
+    #[error("missing current protected history")]
+    Missing,
+    /// A selected generation has not terminally sealed.
+    #[error("current protected history is incomplete or unsealed")]
+    Incomplete,
+    /// A selected manifest is not protected stream output.
+    #[error("legacy or non-output capture cannot be verified as protected history")]
+    Legacy,
+    /// Sealed history never follows live output.
+    #[error("sealed history cannot follow live output")]
+    Follow,
+}
+
+/// Immutable manifests and the exact sealed history read using them.
+///
+/// This proves payload integrity, not plan binding. A higher-level consumer must
+/// authenticate every manifest before exposing `stream`. No broker, console,
+/// recovery, or historical-run discovery is attempted.
+pub struct SealedOutputSnapshot {
+    run: String,
+    manifests: Vec<TranscriptManifest>,
+    retired_generations: usize,
+    stream: VmOutputStream,
+}
+
+impl SealedOutputSnapshot {
+    /// Current routing identifier, not a canonical epoch or signed plan identity.
+    pub fn run(&self) -> &str {
+        &self.run
+    }
+
+    /// Every immutable selected manifest, including retired and empty generations.
+    pub fn manifests(&self) -> &[TranscriptManifest] {
+        &self.manifests
+    }
+
+    /// Generations whose authenticated retention no longer permits payload reads.
+    pub fn retired_generations(&self) -> usize {
+        self.retired_generations
+    }
+
+    /// Consume the snapshot and discard its metadata pairing, retaining delivery checks.
+    pub fn into_stream(self) -> VmOutputStream {
+        self.stream
+    }
+}
+
+/// Read only the currently routed protected run's sealed retained generations.
+///
+/// Existing retention authentication may fsync audit files and directories, but
+/// does not create keys, append audit entries, or recover unsealed captures.
+///
+/// # Errors
+/// Refuses follow, missing, legacy, unsealed, malformed, or unreadable history.
+pub fn open_sealed_output_at(
+    locator: &OutputLocator,
+    request: OutputRequest,
+    audit_dir: &Path,
+) -> Result<SealedOutputSnapshot, StreamError> {
+    if request.opts.follow {
+        return Err(SealedHistoryRefusal::Follow.into());
+    }
+    let locator = OutputLocator {
+        transcript_dir: locator
+            .protected_transcript_dir
+            .as_ref()
+            .unwrap_or(&locator.transcript_dir)
+            .clone(),
+        ..locator.clone()
+    };
+    let run = super::protected::ProtectedRun::read(&locator.transcript_dir)?
+        .ok_or(SealedHistoryRefusal::Missing)?;
+    let mut snapshot = SnapshotContext {
+        manifests: Vec::new(),
+        retired_generations: 0,
+        audit_dir,
+    };
+    let history = read_protected_history(&locator, request, &run, Some(&mut snapshot))?
+        .ok_or(SealedHistoryRefusal::Missing)?;
+    Ok(SealedOutputSnapshot {
+        run: run.run,
+        manifests: snapshot.manifests,
+        retired_generations: snapshot.retired_generations,
+        stream: VmOutputStream {
+            history: history.records,
+            history_authorities: history.authorities,
+            protected: true,
+            tail: None,
+            availability: StreamAvailability::HistoryOnly,
+            truncation: history.truncation,
+            empty_history: history.empty,
+            history_high_water: None,
+            splice_detectable: false,
+            saw_live: false,
+            splice_gap: None,
+        },
+    })
+}
+
 /// Open a VM's output stream from explicitly-resolved locations.
 ///
 /// Fails only when *no* source answers. A live broker with no transcript, a
@@ -563,7 +667,7 @@ pub fn open_vm_output_at(
             .transpose()?
             .unwrap_or(false);
     let history = if let Some(run) = run {
-        read_protected_history(locator, request, &run)?
+        read_protected_history(locator, request, &run, None)?
     } else if protected {
         None
     } else {
@@ -841,10 +945,17 @@ fn invalid_history() -> StreamError {
     .into()
 }
 
+struct SnapshotContext<'a> {
+    manifests: Vec<TranscriptManifest>,
+    retired_generations: usize,
+    audit_dir: &'a Path,
+}
+
 fn read_protected_history(
     locator: &OutputLocator,
     request: OutputRequest,
     run: &super::protected::ProtectedRun,
+    mut snapshots: Option<&mut SnapshotContext<'_>>,
 ) -> Result<Option<History>, StreamError> {
     if !run.persists {
         return Ok(None);
@@ -883,7 +994,9 @@ fn read_protected_history(
             history_tail: None,
             ..request
         };
-        let Some(mut history) = read_history_mode(&generation, untrimmed, true)? else {
+        let Some(mut history) =
+            read_history_mode(&generation, untrimmed, true, snapshots.as_deref_mut())?
+        else {
             continue;
         };
         let all = combined.get_or_insert_with(|| History {
@@ -977,13 +1090,14 @@ fn read_history(
     locator: &OutputLocator,
     request: OutputRequest,
 ) -> Result<Option<History>, StreamError> {
-    read_history_mode(locator, request, false)
+    read_history_mode(locator, request, false, None)
 }
 
 fn read_history_mode(
     locator: &OutputLocator,
     request: OutputRequest,
     protected: bool,
+    mut snapshots: Option<&mut SnapshotContext<'_>>,
 ) -> Result<Option<History>, StreamError> {
     let manifest_path = locator.transcript_dir.join(MANIFEST_FILENAME);
     let exists = manifest_path.try_exists().map_err(|e| {
@@ -996,11 +1110,32 @@ fn read_history_mode(
         )
     })?;
     if !exists {
+        if snapshots.is_some() {
+            return Err(SealedHistoryRefusal::Incomplete.into());
+        }
         return Ok(None);
     }
     let Some(manifest) = load_manifest(locator, &manifest_path, protected)? else {
         return Ok(None);
     };
+    if let Some(snapshots) = &mut snapshots {
+        if manifest.at_rest.is_none()
+            || manifest.payload_encoding != transcript::PayloadEncoding::StreamRecordV1
+        {
+            return Err(SealedHistoryRefusal::Legacy.into());
+        }
+        if manifest.sealed_unix_secs.is_none() {
+            return Err(SealedHistoryRefusal::Incomplete.into());
+        }
+        transcript::verify_sealed_root(&manifest)
+            .map_err(|source| transcript_error(locator, source))?;
+        snapshots.manifests.push(manifest.clone());
+    }
+    let audit_dir = snapshots
+        .as_ref()
+        .map_or_else(config::mvm_audit_dir, |snapshot| {
+            snapshot.audit_dir.to_owned()
+        });
     if protected
         && (manifest.binding.vm_name != locator.vm
             || manifest.at_rest.is_none()
@@ -1024,12 +1159,15 @@ fn read_history_mode(
         std::io::Read::read_exact(&mut public_file, &mut public)?;
         let trusted =
             ed25519_dalek::VerifyingKey::from_bytes(&public).map_err(|_| invalid_history())?;
-        let retired = transcript::evidence::authenticated_retirement(
-            &config::mvm_audit_dir(),
-            &trusted,
-            &manifest,
-        )
-        .map_err(|_| invalid_history())?;
+        let retired =
+            transcript::evidence::authenticated_retirement(&audit_dir, &trusted, &manifest)
+                .map_err(|error| {
+                    if snapshots.is_some() {
+                        StreamError::ProtectedAuthorization(format!("{error:#}"))
+                    } else {
+                        invalid_history()
+                    }
+                })?;
         let now =
             transcript::retention_now().map_err(|source| transcript_error(locator, source))?;
         manifest
@@ -1040,6 +1178,9 @@ fn read_history_mode(
             .map_err(|source| transcript_error(locator, source))?
             .is_some_and(|deadline| now >= deadline);
         if retired || expired {
+            if let Some(snapshot) = &mut snapshots {
+                snapshot.retired_generations += 1;
+            }
             return Ok(Some(History {
                 authorities: Vec::new(),
                 records: VecDeque::new(),
@@ -1146,7 +1287,7 @@ fn read_history_mode(
                     first: first.seq,
                     last: last.seq,
                     manifest: manifest.clone(),
-                    audit_dir: config::mvm_audit_dir(),
+                    audit_dir: audit_dir.clone(),
                     keys_dir: locator.keys_dir.clone(),
                 })
                 .into_iter()
@@ -1480,7 +1621,11 @@ mod tests {
         );
         run.publish(locator.protected_transcript_dir.as_ref().unwrap())
             .unwrap();
-        let mut output = open_vm_output_at(&locator, OutputRequest::default()).unwrap();
+        let snapshot =
+            open_sealed_output_at(&locator, OutputRequest::default(), &config::mvm_audit_dir())
+                .unwrap();
+        assert_eq!(snapshot.manifests(), std::slice::from_ref(&manifest));
+        let mut output = snapshot.stream;
         let deadline = manifest.retention_deadline().unwrap().unwrap();
         assert!(
             output
