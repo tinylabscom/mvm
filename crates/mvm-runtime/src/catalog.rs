@@ -45,10 +45,10 @@ pub struct BackendDescriptor {
     /// in-process. False for every runner-driven backend — the runner takes the
     /// plan in-process — so no CLI-selectable backend sets it today.
     pub needs_plan_json: bool,
-    /// This backend runs real (non-mock, non-dev-substrate) workloads —
-    /// the admitted plan is stashed for its gateway/bridge audit path.
-    /// True for Firecracker, libkrun, and hvf; false for qemu (dev/test
-    /// substrate, no bridge) and mock.
+    /// This selector runs workloads rather than a dev/test substrate or mock.
+    /// It controls the CLI's bridge-plan persistence, not the security tier:
+    /// Wasm is a claim-free host interpreter, WebLinux is native-unavailable,
+    /// and AppleContainer delegates to the HVF workload runner.
     pub is_workload: bool,
 }
 

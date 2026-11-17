@@ -1453,6 +1453,60 @@ fn cli_transient_gate_refusal_leaves_cli_failure_audit_to_the_caller() {
 
 #[cfg(unix)]
 #[test]
+fn admitted_cli_cold_backends_refuse_unadmitted_shares_before_any_boot() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let dir = tempfile::tempdir().expect("test directory");
+    for selector in ["wasm", "web-linux", "apple-container", "qemu"] {
+        let backend = mvm_runtime::AnyBackend::from_hypervisor(selector);
+        let config = VmStartConfig {
+            name: format!("cli-cold-{selector}"),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            volumes: vec![mvm_core::vm_backend::VmVolume {
+                host: "/store/unadmitted-share".into(),
+                guest: "/mnt/unadmitted".into(),
+                read_only: true,
+                kind: mvm_core::vm_backend::VmVolumeKind::Disk,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let admitted = admit_for_run(
+            &fixture_input(&config.name),
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(dir.path()),
+            None,
+            RunPosture::on_backend(Variant::Dev, backend.kind()).with_runtime(Some(&config)),
+        )
+        .expect("signed admission");
+        let error = start_cli_transient(
+            StartAdmittedParams {
+                backend: &backend,
+                admitted,
+                config: config.clone(),
+                policy_bundle: None,
+                emitter: None,
+                assurance: None,
+            },
+            None,
+            Vec::new(),
+        )
+        .expect_err("unadmitted share must refuse before backend dispatch");
+        assert!(
+            format!("{error:#}").contains("admitted-shares"),
+            "{selector}: {error:#}"
+        );
+        assert!(
+            !mvm_core::config::vm_state_dir(&config.name)
+                .join("plan.json")
+                .exists(),
+            "{selector} must not reach bridge or backend start"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn cli_transient_backend_start_refusal_leaves_cli_failure_audit_to_the_caller() {
     let (_env, _home) = host_with_ceiling(Default::default());
     let dir = tempfile::tempdir().expect("test directory");

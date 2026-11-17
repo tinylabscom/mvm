@@ -89,6 +89,21 @@ impl AppleContainerBackend {
         Ok(kernel_override_config(config, &kernel))
     }
 
+    /// Delegate native writer and verified-release custody with the same kernel selection as start.
+    #[cfg(unix)]
+    pub(crate) fn start_custodied_verified_release(
+        &self,
+        config: &VmStartConfig,
+        images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
+        release: Option<&mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime>,
+    ) -> Result<VmId> {
+        self.runner.start_custodied_verified_release(
+            &self.config_with_kernel(config)?,
+            images,
+            release,
+        )
+    }
+
     pub(crate) fn stop_with_timing(&self, id: &VmId) -> Result<StopTiming> {
         self.runner.stop_with_timing(id)
     }
