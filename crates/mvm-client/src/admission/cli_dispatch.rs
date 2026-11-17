@@ -204,3 +204,31 @@ impl CliAdmission {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_start_failure_kind_preserves_host_outcomes() {
+        let cases = [
+            (
+                mvm_hostd::plan_admission::CliStartFailure::Recorded(anyhow::anyhow!("pack")),
+                CliStartFailureKind::Recorded,
+            ),
+            (
+                mvm_hostd::plan_admission::CliStartFailure::Unrecorded(anyhow::anyhow!("start")),
+                CliStartFailureKind::Unrecorded,
+            ),
+            (
+                mvm_hostd::plan_admission::CliStartFailure::UncertainStop(anyhow::anyhow!("stop")),
+                CliStartFailureKind::UncertainStop,
+            ),
+        ];
+        for (failure, expected) in cases {
+            let error = anyhow::Error::new(failure);
+            assert_eq!(cli_start_failure_kind(&error), Some(expected));
+        }
+        assert_eq!(cli_start_failure_kind(&anyhow::anyhow!("unrelated")), None);
+    }
+}
