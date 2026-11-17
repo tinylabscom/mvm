@@ -22,9 +22,6 @@ use std::io::{Read, Write};
 
 use anyhow::Result;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use mvm_contract::policy::control_negotiation::{
-    ControlMismatch, ControlOffer, ControlRange, refusal_without_host_range,
-};
 use mvm_contract::policy::security::{
     PROTOCOL_VERSION_AUTHENTICATED, SIG_ALG_ED25519, SessionHello, SessionHelloAck,
     SessionHelloConfirm,
@@ -84,10 +81,6 @@ pub enum SessionError {
     /// A handshake message was malformed or inconsistent.
     #[error("invalid handshake: {0}")]
     InvalidHandshake(String),
-    /// The control protocol ranges do not overlap, or a side offered no
-    /// advertisement. Typed so the caller can show the remedy.
-    #[error("control protocol refused: {0}")]
-    ControlRefused(ControlMismatch),
     /// I/O error reading or writing the handshake or frame.
     #[error("session i/o error: {0}")]
     Io(#[from] std::io::Error),
@@ -173,10 +166,6 @@ struct HandshakeMaterial {
     peer_verifying_key: VerifyingKey,
     session_id: String,
     shared_secret: [u8; 32],
-    /// Host side of a control session: what the guest advertised.
-    peer_offer: Option<ControlOffer>,
-    /// Guest side of a control session: why the host's range is refused.
-    control_refusal: Option<ControlMismatch>,
 }
 
 impl Zeroize for HandshakeMaterial {
@@ -279,32 +268,10 @@ impl Session {
         session_id: &str,
         signing_key: SigningKey,
     ) -> Result<(Self, VerifyingKey), SessionError> {
-        let material = secure_host_handshake(stream, session_id, &signing_key, None)?;
+        let material = secure_host_handshake(stream, session_id, &signing_key)?;
         let peer_key = material.peer_verifying_key;
         let session = Self::from_material(signing_key, material, SessionRole::Host);
         Ok((session, peer_key))
-    }
-
-    /// Establish a host session on the control plane. The guest must advertise
-    /// a protocol range and capability set that overlaps `range`; otherwise
-    /// the handshake is refused before the confirm is written.
-    ///
-    /// Returns the session, the guest's verifying key and the advertisement,
-    /// which is part of the signed transcript.
-    pub fn host_control<S: Read + Write>(
-        stream: &mut S,
-        session_id: &str,
-        signing_key: SigningKey,
-        range: &ControlRange,
-    ) -> Result<(Self, VerifyingKey, ControlOffer), SessionError> {
-        range.validate().map_err(SessionError::InvalidHandshake)?;
-        let mut material = secure_host_handshake(stream, session_id, &signing_key, Some(range))?;
-        let peer_key = material.peer_verifying_key;
-        let offer = material.peer_offer.take().ok_or_else(|| {
-            SessionError::InvalidHandshake("control handshake produced no advertisement".into())
-        })?;
-        let session = Self::from_material(signing_key, material, SessionRole::Host);
-        Ok((session, peer_key, offer))
     }
 
     /// Establish a guest session and require the host identity to match `anchor`.
@@ -315,28 +282,10 @@ impl Session {
         signing_key: SigningKey,
         anchor: &VerifyingKey,
     ) -> Result<(Self, String), SessionError> {
-        let material = secure_guest_handshake(stream, &signing_key, anchor, None)?;
+        let material = secure_guest_handshake(stream, &signing_key, anchor)?;
         let session_id = material.session_id.clone();
         let session = Self::from_material(signing_key, material, SessionRole::Guest);
         Ok((session, session_id))
-    }
-
-    /// Establish a guest session on the control plane, advertising `offer`.
-    ///
-    /// The session is returned even when the host's range is refused, together
-    /// with the refusal, so the caller can answer the first request with a
-    /// typed mismatch and close without dispatching anything.
-    pub fn guest_control<S: Read + Write>(
-        stream: &mut S,
-        signing_key: SigningKey,
-        anchor: &VerifyingKey,
-        offer: &ControlOffer,
-    ) -> Result<(Self, Option<ControlMismatch>), SessionError> {
-        offer.validate().map_err(SessionError::InvalidHandshake)?;
-        let mut material = secure_guest_handshake(stream, &signing_key, anchor, Some(offer))?;
-        let refusal = material.control_refusal.take();
-        let session = Self::from_material(signing_key, material, SessionRole::Guest);
-        Ok((session, refusal))
     }
 }
 
@@ -540,14 +489,8 @@ impl Session<ReceiveOnly> {
         S: Read + Write,
         F: FnOnce(&SessionHello, &SessionHelloAck) -> Result<Signature, SessionError>,
     {
-        let material = secure_host_handshake_signed(
-            stream,
-            session_id,
-            host_key,
-            Some(expected_guest),
-            None,
-            sign,
-        )?;
+        let material =
+            secure_host_handshake_signed(stream, session_id, host_key, Some(expected_guest), sign)?;
         Ok(Self::from_material(
             ReceiveOnly(()),
             material,
@@ -577,8 +520,6 @@ pub fn paired_sessions_for_test(
             peer_verifying_key: guest_key.verifying_key(),
             session_id: session_id.to_string(),
             shared_secret,
-            peer_offer: None,
-            control_refusal: None,
         },
         SessionRole::Host,
     );
@@ -588,8 +529,6 @@ pub fn paired_sessions_for_test(
             peer_verifying_key: host_key.verifying_key(),
             session_id: session_id.to_string(),
             shared_secret,
-            peer_offer: None,
-            control_refusal: None,
         },
         SessionRole::Guest,
     );
@@ -842,7 +781,7 @@ fn guest_challenge_message(
     ack: &SessionHelloAck,
 ) -> Result<Vec<u8>, SessionError> {
     serde_json::to_vec(&(
-        "mvm-vsock-guest-auth-v2",
+        "mvm-vsock-guest-auth-v1",
         &hello.version,
         &hello.session_id,
         &hello.challenge,
@@ -851,7 +790,6 @@ fn guest_challenge_message(
         &ack.guest_pubkey,
         &ack.guest_ephemeral_pubkey,
         &ack.guest_challenge,
-        &ack.control,
     ))
     .map_err(|e| SessionError::InvalidHandshake(e.to_string()))
 }
@@ -981,14 +919,12 @@ fn secure_host_handshake<S: Read + Write>(
     stream: &mut S,
     session_id: &str,
     host_signing_key: &SigningKey,
-    control: Option<&ControlRange>,
 ) -> Result<HandshakeMaterial, SessionError> {
     secure_host_handshake_signed(
         stream,
         session_id,
         &host_signing_key.verifying_key(),
         None,
-        control,
         |hello, ack| Ok(host_signing_key.sign(&session_transcript(hello, ack)?)),
     )
 }
@@ -998,7 +934,6 @@ fn secure_host_handshake_signed<S, F>(
     session_id: &str,
     host_key: &VerifyingKey,
     expected_guest: Option<&VerifyingKey>,
-    control: Option<&ControlRange>,
     sign: F,
 ) -> Result<HandshakeMaterial, SessionError>
 where
@@ -1016,8 +951,7 @@ where
     write_json_frame(stream, &hello, 1 << 16)?;
 
     let ack: SessionHelloAck = read_json_frame(stream, 1 << 16)?;
-    let (guest_key, guest_public, peer_offer) =
-        validate_host_ack(&hello, &ack, expected_guest, control)?;
+    let (guest_key, guest_public) = validate_host_ack(&hello, &ack, expected_guest)?;
     let transcript = session_transcript(&hello, &ack)?;
     let signature = sign(&hello, &ack)?;
     verify_signature(&signature.to_bytes(), &transcript, host_key, "host signer")?;
@@ -1027,7 +961,6 @@ where
             version: hello.version,
             session_id: hello.session_id.clone(),
             transcript_signature: signature.to_bytes().to_vec(),
-            control: control.copied(),
         },
         1 << 16,
     )?;
@@ -1035,24 +968,14 @@ where
         peer_verifying_key: guest_key,
         session_id: hello.session_id,
         shared_secret: host_secret.diffie_hellman(&guest_public).to_bytes(),
-        peer_offer,
-        control_refusal: None,
     })
 }
 
-/// Check a guest's ack and, on the control plane, its advertisement.
-///
-/// `control` is the host's range when this is a control session and `None` on
-/// every other plane, which must not receive an advertisement. A control
-/// session with no advertisement, a malformed one, or a range that shares no
-/// protocol with the host's is refused here, before the host signs or writes
-/// anything further.
 pub(crate) fn validate_host_ack(
     hello: &SessionHello,
     ack: &SessionHelloAck,
     expected_guest: Option<&VerifyingKey>,
-    control: Option<&ControlRange>,
-) -> Result<(VerifyingKey, PublicKey, Option<ControlOffer>), SessionError> {
+) -> Result<(VerifyingKey, PublicKey), SessionError> {
     if ack.version != hello.version || ack.session_id != hello.session_id {
         return Err(SessionError::InvalidHandshake(
             "invalid or mismatched HelloAck session".to_string(),
@@ -1077,31 +1000,13 @@ pub(crate) fn validate_host_ack(
         "guest handshake",
     )?;
     let guest_public = parse_public_key(&ack.guest_ephemeral_pubkey, "guest")?;
-    let offer = match (control, &ack.control) {
-        (None, None) => None,
-        (None, Some(_)) => {
-            return Err(SessionError::InvalidHandshake(
-                "guest advertised a control protocol on a session that is not a control session"
-                    .to_string(),
-            ));
-        }
-        (Some(range), None) => {
-            return Err(SessionError::ControlRefused(range.refusal_without_offer()));
-        }
-        (Some(range), Some(offer)) => {
-            offer.validate().map_err(SessionError::InvalidHandshake)?;
-            range.check(offer).map_err(SessionError::ControlRefused)?;
-            Some(offer.clone())
-        }
-    };
-    Ok((guest_key, guest_public, offer))
+    Ok((guest_key, guest_public))
 }
 
 fn secure_guest_handshake<S: Read + Write>(
     stream: &mut S,
     guest_signing_key: &SigningKey,
     expected_host_key: &VerifyingKey,
-    offer: Option<&ControlOffer>,
 ) -> Result<HandshakeMaterial, SessionError> {
     let hello: SessionHello = read_json_frame(stream, 1 << 16)?;
     if hello.version != PROTOCOL_VERSION_AUTHENTICATED
@@ -1126,7 +1031,6 @@ fn secure_guest_handshake<S: Read + Write>(
         guest_pubkey: guest_signing_key.verifying_key().to_bytes().to_vec(),
         guest_ephemeral_pubkey: PublicKey::from(&guest_secret).as_bytes().to_vec(),
         guest_challenge: random_bytes(),
-        control: offer.cloned(),
     };
     let proof = guest_challenge_message(&hello, &ack)?;
     ack.challenge_response = guest_signing_key.sign(&proof).to_bytes().to_vec();
@@ -1145,26 +1049,11 @@ fn secure_guest_handshake<S: Read + Write>(
         &host_key,
         "host handshake",
     )?;
-    let control_refusal = match (offer, &confirm.control) {
-        (None, None) => None,
-        (None, Some(_)) => {
-            return Err(SessionError::InvalidHandshake(
-                "host sent a control range on a session that is not a control session".to_string(),
-            ));
-        }
-        (Some(offer), None) => Some(refusal_without_host_range(offer)),
-        (Some(offer), Some(range)) => {
-            range.validate().map_err(SessionError::InvalidHandshake)?;
-            range.check(offer).err()
-        }
-    };
     let host_public = parse_public_key(&hello.host_ephemeral_pubkey, "host")?;
     Ok(HandshakeMaterial {
         peer_verifying_key: host_key,
         session_id: hello.session_id,
         shared_secret: guest_secret.diffie_hellman(&host_public).to_bytes(),
-        peer_offer: None,
-        control_refusal,
     })
 }
 
@@ -1556,8 +1445,6 @@ mod tests {
                 peer_verifying_key: test_keypair().verifying_key(),
                 session_id: "local-test".to_string(),
                 shared_secret: rand::random::<[u8; 32]>(),
-                peer_offer: None,
-                control_refusal: None,
             },
             SessionRole::Host,
         )
@@ -1607,338 +1494,5 @@ mod tests {
                 "{err} must not be reclassified as a hangup"
             );
         }
-    }
-
-    // ------------------------------------------------------------------
-    // Control-plane advertisement
-    // ------------------------------------------------------------------
-
-    use mvm_contract::policy::control_negotiation::{GuestCapability, ProtocolUpgradeAction};
-
-    const HOST_RANGE: ControlRange = ControlRange {
-        protocol_version: 3,
-        min_supported_version: 3,
-    };
-
-    fn offer_of(min: u32, max: u32, caps: &[GuestCapability]) -> ControlOffer {
-        ControlOffer {
-            protocol_version: max,
-            min_supported_version: min,
-            agent_version: "9.9.9".into(),
-            capabilities: caps.iter().copied().collect(),
-        }
-    }
-
-    /// A host that is honest about keys but sends whatever confirm range the
-    /// test wants, so the guest's own check can be driven without the host's.
-    fn forged_confirm_host(
-        stream: &mut std::net::TcpStream,
-        key: &SigningKey,
-        confirm_control: Option<ControlRange>,
-    ) -> SessionHelloAck {
-        let secret = StaticSecret::from(rand::random::<[u8; 32]>());
-        let hello = SessionHello {
-            version: PROTOCOL_VERSION_AUTHENTICATED,
-            session_id: "forged".into(),
-            challenge: random_bytes(),
-            host_pubkey: key.verifying_key().to_bytes().to_vec(),
-            host_ephemeral_pubkey: PublicKey::from(&secret).as_bytes().to_vec(),
-        };
-        write_json_frame(stream, &hello, 1 << 16).unwrap();
-        let ack: SessionHelloAck = read_json_frame(stream, 1 << 16).unwrap();
-        let signature = key.sign(&session_transcript(&hello, &ack).unwrap());
-        write_json_frame(
-            stream,
-            &SessionHelloConfirm {
-                version: hello.version,
-                session_id: hello.session_id.clone(),
-                transcript_signature: signature.to_bytes().to_vec(),
-                control: confirm_control,
-            },
-            1 << 16,
-        )
-        .unwrap();
-        ack
-    }
-
-    /// A guest that signs an honest proof over `offer`, then lets the test
-    /// alter the ack before it is sent.
-    fn forged_ack_guest(
-        stream: &mut std::net::TcpStream,
-        key: &SigningKey,
-        offer: &ControlOffer,
-        tamper: impl FnOnce(&mut SessionHelloAck),
-    ) {
-        let hello: SessionHello = read_json_frame(stream, 1 << 16).unwrap();
-        let secret = StaticSecret::from(rand::random::<[u8; 32]>());
-        let mut ack = SessionHelloAck {
-            version: hello.version,
-            session_id: hello.session_id.clone(),
-            challenge_response: Vec::new(),
-            guest_pubkey: key.verifying_key().to_bytes().to_vec(),
-            guest_ephemeral_pubkey: PublicKey::from(&secret).as_bytes().to_vec(),
-            guest_challenge: random_bytes(),
-            control: Some(offer.clone()),
-        };
-        let proof = guest_challenge_message(&hello, &ack).unwrap();
-        ack.challenge_response = key.sign(&proof).to_bytes().to_vec();
-        tamper(&mut ack);
-        write_json_frame(stream, &ack, 1 << 16).unwrap();
-    }
-
-    #[test]
-    fn a_control_handshake_hands_the_host_the_guests_signed_advertisement() {
-        let (mut host_stream, mut guest_stream) = pair();
-        let (host_key, guest_key) = (test_keypair(), test_keypair());
-        let offer = offer_of(3, 3, &[GuestCapability::Ping, GuestCapability::Readiness]);
-        std::thread::scope(|scope| {
-            let anchor = host_key.verifying_key();
-            let guest_offer = offer.clone();
-            scope.spawn(move || {
-                let (_, refusal) =
-                    Session::guest_control(&mut guest_stream, guest_key, &anchor, &guest_offer)
-                        .unwrap();
-                assert!(refusal.is_none());
-            });
-            let (_, _, received) =
-                Session::host_control(&mut host_stream, "ctl", host_key, &HOST_RANGE).unwrap();
-            assert_eq!(received, offer);
-        });
-    }
-
-    #[test]
-    fn a_guest_with_no_advertisement_is_refused_before_the_confirm() {
-        let (mut host_stream, mut guest_stream) = pair();
-        let (host_key, guest_key) = (test_keypair(), test_keypair());
-        std::thread::scope(|scope| {
-            let anchor = host_key.verifying_key();
-            let guest = scope.spawn(move || Session::guest(&mut guest_stream, guest_key, &anchor));
-            let error =
-                Session::host_control(&mut host_stream, "ctl", host_key, &HOST_RANGE).unwrap_err();
-            let SessionError::ControlRefused(mismatch) = error else {
-                panic!("expected a typed refusal, got {error}");
-            };
-            assert_eq!(
-                mismatch.required_action,
-                ProtocolUpgradeAction::RebuildGuest
-            );
-            assert!(mismatch.message.contains("mvmctl bootstrap"));
-            drop(host_stream);
-            // No confirm was ever written: the legacy guest saw the stream end.
-            let legacy = guest.join().unwrap().unwrap_err();
-            assert!(legacy.is_peer_hangup(), "{legacy}");
-        });
-    }
-
-    #[test]
-    fn a_range_outside_the_guests_is_refused_with_the_remedy_in_each_direction() {
-        for (min, max, action) in [
-            (4, 5, ProtocolUpgradeAction::UpgradeHost),
-            (1, 2, ProtocolUpgradeAction::RebuildGuest),
-        ] {
-            let (mut host_stream, mut guest_stream) = pair();
-            let (host_key, guest_key) = (test_keypair(), test_keypair());
-            std::thread::scope(|scope| {
-                let anchor = host_key.verifying_key();
-                let offer = offer_of(min, max, &[GuestCapability::Ping]);
-                let guest = scope.spawn(move || {
-                    Session::guest_control(&mut guest_stream, guest_key, &anchor, &offer)
-                });
-                let error = Session::host_control(&mut host_stream, "ctl", host_key, &HOST_RANGE)
-                    .unwrap_err();
-                let SessionError::ControlRefused(mismatch) = error else {
-                    panic!("expected a typed refusal, got {error}");
-                };
-                assert_eq!(mismatch.required_action, action);
-                drop(host_stream);
-                assert!(guest.join().unwrap().unwrap_err().is_peer_hangup());
-            });
-        }
-    }
-
-    #[test]
-    fn a_guest_refuses_a_host_range_it_does_not_overlap_and_a_missing_one() {
-        let offer = offer_of(3, 3, &[GuestCapability::Ping]);
-        for (confirm, action) in [
-            (
-                Some(ControlRange {
-                    protocol_version: 5,
-                    min_supported_version: 4,
-                }),
-                ProtocolUpgradeAction::RebuildGuest,
-            ),
-            (
-                Some(ControlRange {
-                    protocol_version: 2,
-                    min_supported_version: 1,
-                }),
-                ProtocolUpgradeAction::UpgradeHost,
-            ),
-            (None, ProtocolUpgradeAction::UpgradeHost),
-        ] {
-            let (mut host_stream, mut guest_stream) = pair();
-            let (host_key, guest_key) = (test_keypair(), test_keypair());
-            std::thread::scope(|scope| {
-                let signer = host_key.clone();
-                scope.spawn(move || forged_confirm_host(&mut host_stream, &signer, confirm));
-                let (_, refusal) = Session::guest_control(
-                    &mut guest_stream,
-                    guest_key,
-                    &host_key.verifying_key(),
-                    &offer,
-                )
-                .unwrap();
-                assert_eq!(refusal.expect("a refusal").required_action, action);
-            });
-        }
-    }
-
-    #[test]
-    fn a_contradictory_host_range_fails_the_guest_handshake() {
-        let (mut host_stream, mut guest_stream) = pair();
-        let (host_key, guest_key) = (test_keypair(), test_keypair());
-        std::thread::scope(|scope| {
-            let signer = host_key.clone();
-            scope.spawn(move || {
-                forged_confirm_host(
-                    &mut host_stream,
-                    &signer,
-                    Some(ControlRange {
-                        protocol_version: 1,
-                        min_supported_version: 9,
-                    }),
-                )
-            });
-            let error = Session::guest_control(
-                &mut guest_stream,
-                guest_key,
-                &host_key.verifying_key(),
-                &offer_of(3, 3, &[]),
-            )
-            .unwrap_err();
-            assert!(
-                matches!(error, SessionError::InvalidHandshake(_)),
-                "{error}"
-            );
-        });
-    }
-
-    #[test]
-    fn a_tampered_advertisement_fails_the_guests_own_proof() {
-        let offer = offer_of(3, 3, &[GuestCapability::Ping]);
-        type Tamper = fn(&mut SessionHelloAck);
-        let tampers: [Tamper; 3] = [
-            |ack| {
-                ack.control
-                    .as_mut()
-                    .unwrap()
-                    .capabilities
-                    .insert(GuestCapability::ProcessRpc);
-            },
-            |ack| ack.control = None,
-            |ack| ack.control.as_mut().unwrap().protocol_version = 9,
-        ];
-        for tamper in tampers {
-            let (mut host_stream, mut guest_stream) = pair();
-            let guest_key = test_keypair();
-            let host_key = test_keypair();
-            std::thread::scope(|scope| {
-                let offer = offer.clone();
-                scope
-                    .spawn(move || forged_ack_guest(&mut guest_stream, &guest_key, &offer, tamper));
-                let error = Session::host_control(&mut host_stream, "ctl", host_key, &HOST_RANGE)
-                    .unwrap_err();
-                // A stripped advertisement is a refusal of its own; the others
-                // break the proof the guest signed over the advertisement.
-                assert!(
-                    matches!(
-                        error,
-                        SessionError::SignatureVerificationFailed(_)
-                            | SessionError::ControlRefused(_)
-                    ),
-                    "{error}"
-                );
-            });
-        }
-    }
-
-    #[test]
-    fn an_advertisement_outside_the_control_plane_is_refused() {
-        let (mut host_stream, mut guest_stream) = pair();
-        let (host_key, guest_key) = (test_keypair(), test_keypair());
-        std::thread::scope(|scope| {
-            let anchor = host_key.verifying_key();
-            scope.spawn(move || {
-                let _ = Session::guest_control(
-                    &mut guest_stream,
-                    guest_key,
-                    &anchor,
-                    &offer_of(3, 3, &[GuestCapability::Ping]),
-                );
-            });
-            let error = Session::host(&mut host_stream, "plain", host_key).unwrap_err();
-            assert!(
-                matches!(error, SessionError::InvalidHandshake(_)),
-                "{error}"
-            );
-        });
-    }
-
-    #[test]
-    fn the_other_planes_handshake_is_unchanged() {
-        let (mut host_stream, mut guest_stream) = pair();
-        let (host_key, guest_key) = (test_keypair(), test_keypair());
-        std::thread::scope(|scope| {
-            let signer = host_key.clone();
-            let host = scope.spawn(move || forged_confirm_host(&mut host_stream, &signer, None));
-            Session::guest(&mut guest_stream, guest_key, &host_key.verifying_key()).unwrap();
-            // A guest that offers no advertisement sends an ack that parses
-            // with `control` absent; the field never appears on the wire.
-            assert!(host.join().unwrap().control.is_none());
-        });
-    }
-
-    #[test]
-    fn a_range_sent_to_a_guest_outside_the_control_plane_is_refused() {
-        let (mut host_stream, mut guest_stream) = pair();
-        let (host_key, guest_key) = (test_keypair(), test_keypair());
-        std::thread::scope(|scope| {
-            let signer = host_key.clone();
-            scope.spawn(move || {
-                forged_confirm_host(&mut host_stream, &signer, Some(HOST_RANGE));
-            });
-            let error = Session::guest(&mut guest_stream, guest_key, &host_key.verifying_key())
-                .unwrap_err();
-            assert!(
-                matches!(error, SessionError::InvalidHandshake(_)),
-                "{error}"
-            );
-        });
-    }
-
-    #[test]
-    fn the_guest_proof_label_is_versioned_for_the_advertisement() {
-        let hello = SessionHello {
-            version: PROTOCOL_VERSION_AUTHENTICATED,
-            session_id: "s".into(),
-            challenge: vec![1; 32],
-            host_pubkey: vec![2; 32],
-            host_ephemeral_pubkey: vec![3; 32],
-        };
-        let mut ack = SessionHelloAck {
-            version: hello.version,
-            session_id: "s".into(),
-            challenge_response: Vec::new(),
-            guest_pubkey: vec![4; 32],
-            guest_ephemeral_pubkey: vec![5; 32],
-            guest_challenge: vec![6; 32],
-            control: None,
-        };
-        let without = String::from_utf8(guest_challenge_message(&hello, &ack).unwrap()).unwrap();
-        assert!(without.contains("mvm-vsock-guest-auth-v2"), "{without}");
-        ack.control = Some(offer_of(3, 3, &[GuestCapability::Ping]));
-        let with = String::from_utf8(guest_challenge_message(&hello, &ack).unwrap()).unwrap();
-        assert_ne!(without, with, "the proof must cover the advertisement");
-        assert!(with.contains("\"ping\""), "{with}");
     }
 }

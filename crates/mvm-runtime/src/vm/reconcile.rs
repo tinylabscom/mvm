@@ -283,6 +283,14 @@ pub fn reap_unowned_state_dir(state_dir: &Path, instance_dir: &Path) -> Result<b
     let Some(_lifecycle) = lock else {
         return Ok(false);
     };
+    reap_unowned_state_dir_locked(state_dir)
+}
+
+/// Caller retains the existing per-machine lifecycle lock for this directory.
+pub(crate) fn reap_unowned_state_dir_locked(state_dir: &Path) -> Result<bool, String> {
+    if !state_dir.exists() {
+        return Ok(true);
+    }
     if state_dir_has_live_process(state_dir) {
         return Ok(false);
     }

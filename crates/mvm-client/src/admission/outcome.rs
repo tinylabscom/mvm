@@ -107,6 +107,24 @@ impl super::AuditContinuation {
     pub fn emit_failed(&self, class: &str, err: &anyhow::Error) {
         emit_failure(&self.emitter, self.plan(), class, err);
     }
+
+    /// Seal a registry-pack dispatch refusal whose chain failure was already written.
+    pub fn seal_recorded_boot_failure(&self) {
+        seal_recorded_failure(&self.emitter, self.plan());
+    }
+}
+
+pub(crate) fn seal_recorded_failure(emitter: &AuditEmitter, plan: &ExecutionPlan) {
+    if let Err(error) = emitter.seal_session(plan, mvm_hostd::audit::session::SealReason::Failed) {
+        crate::launch::record_unsealed_end(
+            Some((emitter, plan)),
+            crate::launch::UnsealedEnd::new(
+                &plan.workload.0,
+                crate::launch::UnsealedReason::SealFailed,
+            )
+            .error(format!("{error:#}")),
+        );
+    }
 }
 
 fn emit_failure(emitter: &AuditEmitter, plan: &ExecutionPlan, class: &str, err: &anyhow::Error) {
@@ -115,14 +133,5 @@ fn emit_failure(emitter: &AuditEmitter, plan: &ExecutionPlan, class: &str, err: 
         tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
     }
     // A failed boot is the end of its session.
-    if let Err(e) = emitter.seal_session(plan, mvm_hostd::audit::session::SealReason::Failed) {
-        crate::launch::record_unsealed_end(
-            Some((emitter, plan)),
-            crate::launch::UnsealedEnd::new(
-                &plan.workload.0,
-                crate::launch::UnsealedReason::SealFailed,
-            )
-            .error(format!("{e:#}")),
-        );
-    }
+    seal_recorded_failure(emitter, plan);
 }

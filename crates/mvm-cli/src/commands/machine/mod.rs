@@ -719,6 +719,12 @@ fn machine_run_spec(
         image,
         prepared_image: None,
         manifest,
+        policy_generation: args
+            .run
+            .committed_generation
+            .as_ref()
+            .map(mvm_client::policy_profiles::coordinator::ProjectPolicyCandidate::plan_asset)
+            .transpose()?,
         deployment,
         resolved_digest: None,
         runtime_pack: args.run.runtime_pack,
@@ -942,6 +948,9 @@ pub(in crate::commands) struct MachineStartCmd {
     /// image's own kernel. (Hidden — primarily threaded by `vm rekernel`.)
     #[arg(long = "kernel-pin", value_name = "PIN", hide = true)]
     pub kernel_pin: Option<String>,
+    /// Internal health-recovery precondition; never authorizes an unconditional restart.
+    #[arg(long, hide = true)]
+    pub if_hvf_boot_nonce: Option<String>,
 }
 
 impl MachineStartCmd {
@@ -1260,6 +1269,7 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         image: Some(image),
         prepared_image: None,
         manifest: None,
+        policy_generation: None,
         deployment: None,
         resolved_digest: None,
         runtime_pack: false,
@@ -1502,16 +1512,17 @@ fn build_machine_volume_cfg(
     Ok((volume_cfg, images))
 }
 
-fn run_machine_init_commands(name: &str, commands: &[String]) -> Result<()> {
+fn run_machine_init_commands(
+    name: &str,
+    commands: &[String],
+    stream: std::os::unix::net::UnixStream,
+) -> Result<()> {
     if commands.is_empty() {
         return Ok(());
     }
-    let session = crate::exec::SessionVm {
-        vm_name: name.to_string(),
-    };
     let mut script = "set -e\n".to_string();
     script.push_str(&commands.join("\n"));
-    let output = crate::exec::dispatch_in_session(&session, script, None)
+    let output = crate::exec::dispatch_on_session_stream(name, stream, script, None)
         .with_context(|| format!("running dev.init in machine {name:?}"))?;
     if output.exit_code != 0 {
         bail!(
@@ -1523,12 +1534,6 @@ fn run_machine_init_commands(name: &str, commands: &[String]) -> Result<()> {
         );
     }
     Ok(())
-}
-
-fn stop_failed_machine_start(name: &str, backend_name: &str) {
-    if let Err(err) = mvm_client::backend_stop_by_name(backend_name, name) {
-        tracing::warn!(error = %err, machine = name, "stopping machine after failed init failed");
-    }
 }
 
 pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {

@@ -27,8 +27,9 @@ pub use slots::{
 };
 pub use snapshot::{
     installed_bundle_arch, installed_bundle_archive, installed_bundle_environment,
-    installed_bundle_posture, template_artifacts_dispatched, template_artifacts_for_boot,
-    template_load_dispatched, template_snapshot_info_dispatched, template_snapshot_info_for_slot,
+    installed_bundle_posture, installed_bundle_resources, template_artifacts_dispatched,
+    template_artifacts_for_boot, template_load_dispatched, template_snapshot_info_dispatched,
+    template_snapshot_info_for_slot,
 };
 
 // `clone_rootfs_for_instance` moved to `crate::base::cow`.

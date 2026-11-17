@@ -442,6 +442,7 @@ fn wait_ready(mut stdout: impl std::io::Read + Send + 'static, timeout: Duration
 /// the guest's mailbox port. The guest would be told to serve a port nobody
 /// dials, so the launch fails instead.
 fn require_wired(plan: &ExecutionPlan, backend: &AnyBackend) -> Result<()> {
+    crate::mailbox_launch::require_legacy_launch(plan.mailbox.as_ref())?;
     if plan.mailbox.is_some() && !backend.capabilities().guest_mailbox {
         return Err(Error::new(
             ErrorKind::Unsupported,
@@ -456,10 +457,17 @@ fn require_wired(plan: &ExecutionPlan, backend: &AnyBackend) -> Result<()> {
 
 /// The plan `config` boots under, when it grants a mailbox. Read the way the
 /// guest's `mvm.mailbox=1` cmdline token reads it, so the two cannot disagree.
-fn granted_plan(config: &VmStartConfig) -> Option<ExecutionPlan> {
-    mvm_core::plan::plan_from_admitted_json(config.plan_json.as_deref()?)
-        .ok()
-        .filter(|plan| plan.mailbox.is_some())
+fn granted_plan(config: &VmStartConfig) -> Result<Option<ExecutionPlan>> {
+    let Some(json) = config.plan_json.as_deref() else {
+        return Ok(None);
+    };
+    let plan = mvm_core::plan::plan_from_admitted_json(json).map_err(|_| {
+        Error::new(
+            ErrorKind::InvalidData,
+            "mailbox launch plan is malformed or unsupported",
+        )
+    })?;
+    Ok(plan.mailbox.is_some().then_some(plan))
 }
 
 /// Refuse, before the VM boots, a config whose guest would be told to serve a
@@ -469,7 +477,7 @@ pub fn require_servable(
     backend: &AnyBackend,
     posture: Option<&MailboxLaunchPosture>,
 ) -> anyhow::Result<()> {
-    match granted_plan(config) {
+    match granted_plan(config)? {
         Some(plan) => {
             let posture = posture.ok_or_else(|| {
                 Error::new(
@@ -518,10 +526,10 @@ fn serve_started_with(
         Option<&MailboxLaunchPosture>,
     ) -> Result<Option<u32>>,
 ) -> anyhow::Result<()> {
-    let Some(plan) = granted_plan(config) else {
-        return Ok(());
-    };
     let outcome = (|| -> anyhow::Result<()> {
+        let Some(plan) = granted_plan(config)? else {
+            return Ok(());
+        };
         require_servable(config, backend, posture)?;
         spawn(&plan, backend, &id.0, posture)?;
         Ok(())
@@ -756,6 +764,7 @@ mod tests {
             epoch: ExecutionEpoch::new(1).unwrap(),
             report: None,
             retention: None,
+            service_blind: None,
         }
     }
 
@@ -948,8 +957,97 @@ mod tests {
 
     type Spawns = std::cell::RefCell<Vec<String>>;
 
+    #[test]
+    fn selector_malformed_present_plan_refuses_instead_of_becoming_no_mailbox() {
+        let backend = backend_named("mock");
+        for raw in ["not json".to_string(), "{}".to_string()] {
+            let config = VmStartConfig {
+                plan_json: Some(raw),
+                ..Default::default()
+            };
+            assert!(require_servable(&config, &backend, None).is_err());
+        }
+        require_servable(&VmStartConfig::default(), &backend, None).unwrap();
+        require_servable(&config_for(None), &backend, None).unwrap();
+    }
+
+    #[test]
+    fn selector_invalid_profile_refuses_at_bare_and_signed_plan_boundaries() {
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        let keys = keys_dir();
+        plan.mailbox = Some(grant(keys.path()));
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[8; 32]);
+        let backend = backend_named("mock");
+        for profile in [
+            serde_json::json!({"version": 3}),
+            serde_json::json!({
+                "version": 4,
+                "descriptor_commitment": vec![1; 32],
+                "owner_policy_commitment": vec![2; 32]
+            }),
+        ] {
+            let mut value = serde_json::to_value(&plan).unwrap();
+            value["mailbox"]["service_blind"] = profile;
+            let raw = value.to_string();
+            let mut signed = mvm_core::plan::sign_plan(&plan, &signer, "test");
+            signed.0.payload = raw.as_bytes().to_vec();
+            for json in [raw, serde_json::to_string(&signed).unwrap()] {
+                let config = VmStartConfig {
+                    plan_json: Some(json),
+                    ..Default::default()
+                };
+                assert!(require_servable(&config, &backend, None).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn selector_valid_shape_never_qualifies_a_legacy_mailbox_backend() {
+        let keys = keys_dir();
+        let mut selected = grant(keys.path());
+        selected.service_blind = Some(
+            mvm_contract::protocol::mailbox::service_blind::LaunchProfile::new([1; 32], [2; 32])
+                .unwrap(),
+        );
+        selected.retention =
+            Some(mvm_contract::protocol::mailbox::MailboxRetentionPolicy::new(10_000).unwrap());
+        let config = config_for(Some(selected));
+        for variant in [Variant::Dev, Variant::Prod] {
+            let posture = posture_for(&config, variant).unwrap();
+            for name in ["firecracker", "mock"] {
+                let error =
+                    require_servable(&config, &backend_named(name), Some(&posture)).unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    "service-blind V3 mailbox launch is unavailable"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn selector_invalid_started_plan_stops_without_spawning_mailbox() {
+        let backend = backend_named("mock");
+        let mut config = VmStartConfig {
+            name: "invalid-started-plan".into(),
+            ..Default::default()
+        };
+        let id = backend.start(&config).unwrap();
+        config.plan_json = Some("invalid".into());
+        let result = serve_started_with(&backend, &id, &config, None, |_, _, _, _| {
+            panic!("malformed plan cannot spawn a mailbox helper")
+        });
+        assert!(result.is_err());
+        assert!(!matches!(
+            backend.status(&id),
+            Ok(mvm_core::vm_backend::VmStatus::Running)
+        ));
+    }
+
     fn posture_for(config: &VmStartConfig, variant: Variant) -> Option<MailboxLaunchPosture> {
-        granted_plan(config).map(|plan| MailboxLaunchPosture::for_test(&plan, variant))
+        granted_plan(config)
+            .unwrap()
+            .map(|plan| MailboxLaunchPosture::for_test(&plan, variant))
     }
 
     fn serve_with(
@@ -1544,7 +1642,7 @@ mod tests {
         let mut forged = serde_json::to_value(dev.unwrap().handoff(None)).unwrap();
         forged["plan_id"] = serde_json::json!("sha256:wrong");
         let forged: MailboxPostureHandoff = serde_json::from_value(forged).unwrap();
-        let plan = granted_plan(&config).unwrap();
+        let plan = granted_plan(&config).unwrap().unwrap();
         assert!(forged.verify(&plan, &config.name, None).is_err());
         let stale_boot = posture_for(&config, Variant::Dev).unwrap().handoff(Some(
             mvm_contract::protocol::mailbox::BootId::from_bytes([8; 32]),
@@ -1594,7 +1692,7 @@ mod tests {
                 .expect("signed window"),
         );
         let start = config_for(Some(grant));
-        let plan = granted_plan(&start).expect("admitted plan");
+        let plan = granted_plan(&start).unwrap().expect("admitted plan");
         let state = tempfile::tempdir_in("/tmp").expect("VM state root");
         let vm_state_dir = state.path().join("vm-under-test");
         std::fs::create_dir(&vm_state_dir).expect("VM state");

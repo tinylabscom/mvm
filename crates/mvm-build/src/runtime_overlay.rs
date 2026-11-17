@@ -302,6 +302,7 @@ pub fn build_runtime_overlay_from_guest_runtime(
     }
     let resolver = RuntimeOverlayResolver::new(cache_root.to_path_buf(), version.to_string());
     let layout = resolver.layout(&arch.to_string());
+    let _owner = crate::cache_install::lock_artifact_dir(&layout.artifact_dir)?;
     if local_source_cache_is_fresh(&layout, &runtime.digest)?
         && let Ok(cached) = resolver.resolve(&arch.to_string())
         && verify_guest_runtime_overlay_verity(&cached).is_ok()
@@ -528,10 +529,11 @@ fn assemble_runtime_overlay(
     .collect::<Result<(), _>>()?;
 
     let built = read_overlay_artifact_from_dir(&artifact_dir, &arch.to_string())?;
-    install_overlay_into_cache(&built, cache_root, &InstallOptions { overwrite: true })?;
-    resolve_or_seed_from_default_cache(
-        &RuntimeOverlayResolver::new(cache_root.to_path_buf(), version.to_string()),
-        arch,
+    verify_guest_runtime_overlay_verity(&built)?;
+    install_overlay_into_cache_locked(&built, cache_root, &InstallOptions { overwrite: true })?;
+    Ok(
+        RuntimeOverlayResolver::new(cache_root.to_path_buf(), version.to_string())
+            .resolve(&arch.to_string())?,
     )
 }
 
@@ -743,6 +745,17 @@ pub fn install_overlay_into_cache(
     cache_root: &Path,
     options: &InstallOptions,
 ) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
+    let layout = RuntimeOverlayLayout::under(cache_root, &source.version, &source.arch);
+    let _owner = crate::cache_install::lock_artifact_dir(&layout.artifact_dir)?;
+    install_overlay_into_cache_locked(source, cache_root, options)
+}
+
+// The caller owns the target through any post-install validation and markers.
+fn install_overlay_into_cache_locked(
+    source: &RuntimeOverlayArtifact,
+    cache_root: &Path,
+    options: &InstallOptions,
+) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
     // The source VERSION file sits next to overlay.ext4 in the
     // build orchestrator's output. The `RuntimeOverlayArtifact`
     // type doesn't carry it as a separate path, so we derive it.
@@ -802,10 +815,7 @@ pub fn install_overlay_into_cache(
     })?;
     std::fs::create_dir_all(parent)?;
 
-    // Stage to a sibling temp directory whose name carries the
-    // PID + a small random suffix. Multiple concurrent installs
-    // for the same (version, arch) get distinct staging dirs and
-    // the last rename wins atomically.
+    // The target owner also owns its process's staging directory.
     let staging = parent.join(crate::cache_install::staging_dir_name(&source.arch));
     // Belt-and-braces: if a previous interrupted install left a
     // staging dir at the same name, blow it away.

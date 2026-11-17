@@ -7,9 +7,7 @@ use anyhow::{Context, Result};
 
 use mvm_core::domain::instance::InstanceReadiness;
 use mvm_core::naming::validate_vm_name;
-use mvm_hostd::plan_admission::{
-    InMemoryNonceLedger, populate_audit_substrate, stash_plan_for_bridge, thread_tenant_id,
-};
+use mvm_hostd::plan_admission::InMemoryNonceLedger;
 
 use crate::launch::start_params::VmStartParams;
 
@@ -22,7 +20,7 @@ use super::runtime_source::{
 use crate::admission::policy::shares_from_volume_cfg;
 use crate::admission::{
     AdmitPlanForBootParams, admit_plan_for_boot_configured_ingress, attach_guest_boot_config,
-    emit_failed, emit_launched, enforce_kernel, enforce_shares, guest_profile_for_boot,
+    emit_failed, emit_launched, guest_profile_for_boot,
 };
 
 fn preopen_console_for_profile(profile: &str) -> bool {
@@ -41,12 +39,7 @@ fn preopen_console_for_profile(profile: &str) -> bool {
 ///
 /// QEMU is excluded: it reads the in-memory config and must not overwrite the
 /// persisted plan.
-pub fn persists_plan_before_start(hypervisor: &str) -> bool {
-    matches!(
-        hypervisor,
-        "firecracker" | "libkrun" | "hvf" | "apple-container"
-    )
-}
+pub use mvm_hostd::plan_admission::persists_plan_before_start;
 
 pub use crate::admission::secrets::load_workload_ir;
 
@@ -80,6 +73,8 @@ pub struct PersistentImageStartParams<'a> {
     pub caller_commitment: Option<mvm_core::plan::CallerCommitment>,
     /// Publisher-verified image pack to bind on every start, if selected.
     pub registry_pack_image: Option<mvm_core::registry_pack::PackPin>,
+    /// Initial committed project generation restored from the machine spec.
+    pub policy_generation: Option<&'a mvm_core::plan::AssetIdentity>,
     /// True when the caller will run a trailing `-- argv` command after boot
     /// (i.e. the machine is booted only to exec an ad-hoc command). An ad-hoc
     /// command issues the DevOnly `Exec` verb, so the admitted plan must NOT
@@ -211,14 +206,13 @@ fn start_persistent_with_prepared(
         start_config,
         admission,
         prepared_volumes,
-        built_runtime: _built_runtime,
         verified_runtime,
     } = prepare_persistent_boot(params, prepared)?;
     let name_label = start_config.name.clone();
     let name = name_label.as_str();
     let backend_label = backend.name().to_string();
     let backend_name = backend_label.as_str();
-    finish_legacy_persistent(
+    finish_admitted_persistent(
         backend,
         start_config,
         admission,
@@ -234,7 +228,6 @@ struct PreparedPersistentBoot {
     start_config: mvm_core::vm_backend::VmStartConfig,
     admission: crate::admission::AdmissionContext,
     prepared_volumes: crate::volume::LaunchPreparation,
-    built_runtime: Option<mvm_hostd::plan_admission::PreparedBuiltPackRuntime>,
     verified_runtime: Option<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
 }
 
@@ -259,6 +252,7 @@ fn prepare_persistent_boot(
         agent_verb,
         caller_commitment,
         registry_pack_image,
+        policy_generation,
         has_ad_hoc_argv,
         grants,
         mailbox,
@@ -269,6 +263,12 @@ fn prepare_persistent_boot(
         backend,
     } = params;
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
+    if policy_generation.is_some() {
+        anyhow::ensure!(
+            resolved_secrets.secrets.is_empty(),
+            "committed persistent machines cannot start with secret references outside their stored policy"
+        );
+    }
     if let Some(granted) = crate::clamp_vcpus_for_backend(backend_name, cpus) {
         mvm_runtime::ui::warn(&format!(
             "{backend_name} supports at most {granted} vCPU(s); {cpus} requested, booting with {granted}"
@@ -377,6 +377,7 @@ fn prepare_persistent_boot(
                 .collect::<Vec<_>>();
             let configured_images_dir = mvm_build::image_source::configured_images_dir();
             let admission_params = AdmitPlanForBootParams {
+                bundle_sizing: Default::default(),
                 mailbox,
                 // What the backend will arm, so the admitted tier opens
                 // the GPU endpoint's vsock socket exactly when there is one.
@@ -414,6 +415,11 @@ fn prepare_persistent_boot(
                 assets: registry_pack_image
                     .into_iter()
                     .map(crate::admission::AssetSpec::RegistryPack)
+                    .chain(
+                        policy_generation
+                            .cloned()
+                            .map(crate::admission::AssetSpec::CommittedPolicy),
+                    )
                     .collect(),
                 redaction: mvm_core::policy::RedactionPolicy::default(),
                 network_policy: network_policy.clone(),
@@ -468,52 +474,13 @@ fn prepare_persistent_boot(
         }
     }
     emit_runtime_source_status(&start_config);
-    thread_tenant_id(&mut start_config, &admission.admitted);
-    populate_audit_substrate(
-        &mut start_config,
-        &admission.admitted,
-        admission.policy_bundle.as_ref(),
-    )?;
     let guest_profile = guest_profile_for_boot(profile == "dev", rootfs_path);
     attach_guest_boot_config(&mut start_config, &admission, guest_profile)?;
-    if persists_plan_before_start(backend_name) {
-        stash_plan_for_bridge(&start_config)?;
-    }
-    enforce_shares(&admission, &start_config.volumes)?;
-    // Against the config the backend is about to be handed, not the local the
-    // plan was synthesized from — that is what makes this a check rather than a
-    // restatement of what admission already believed.
-    enforce_kernel(
-        &admission,
-        start_config
-            .kernel_path
-            .as_deref()
-            .map(std::path::Path::new),
-    )?;
-    let _built_runtime = mvm_hostd::plan_admission::prepare_built_pack_start(
-        &admission.admitted,
-        &mut start_config,
-        crate::backend_kind_for(backend_name),
-    )
-    .inspect_err(|error| {
-        emit_failed(&admission, "registry-pack-boot", error);
-    })?;
-    if let Some(runtime) = &_built_runtime {
-        runtime.verify_config(&start_config).inspect_err(|error| {
-            emit_failed(&admission, "registry-pack-runtime", error);
-        })?;
-    }
-    if let Some(runtime) = &verified_runtime {
-        runtime.verify_config(&start_config).inspect_err(|error| {
-            emit_failed(&admission, "release-runtime", error);
-        })?;
-    }
     Ok(PreparedPersistentBoot {
         backend,
         start_config,
         admission,
         prepared_volumes,
-        built_runtime: _built_runtime,
         verified_runtime,
     })
 }
@@ -544,7 +511,7 @@ fn complete_writable_images(
     Ok(())
 }
 
-fn finish_legacy_persistent(
+fn finish_admitted_persistent(
     backend: mvm_runtime::backend::AnyBackend,
     start_config: mvm_core::vm_backend::VmStartConfig,
     admission: crate::admission::AdmissionContext,
@@ -553,47 +520,34 @@ fn finish_legacy_persistent(
     name: &str,
     backend_name: &str,
 ) -> Result<mvm_hostd::plan_admission::AdmittedPlan> {
-    let mailbox_posture = admission.admitted.mailbox_posture();
-    // VMM selection + workload-support check + start move behind the facade; the
-    // admission gate (above) and the launched/failed emits stay here.
     #[cfg(unix)]
-    let started = match (|| -> Result<_> {
+    let images = match (|| -> Result<_> {
         let mut images = prepared_volumes.take_writable_images();
         complete_writable_images(&start_config, &mut images)?;
-        mvm_hostd::mailbox_process::require_servable(
-            &start_config,
-            &backend,
-            mailbox_posture.as_ref(),
-        )?;
-        Ok(crate::boot::start_prepared_custodied_with_verified_runtime(
-            backend,
-            &start_config,
-            images,
-            verified_runtime.as_ref(),
-        )?)
+        Ok(images)
     })() {
-        Ok(started) => started,
+        Ok(images) => images,
         Err(err) => {
-            let err = anyhow::anyhow!("{err}");
             emit_failed(&admission, "backend-start", &err);
             return Err(err);
         }
     };
     #[cfg(not(unix))]
-    let started = match crate::start_prepared(backend, &start_config) {
-        Ok(started) => started,
-        Err(err) => {
-            let err = anyhow::anyhow!("{err}");
-            emit_failed(&admission, "backend-start", &err);
-            return Err(err);
-        }
-    };
+    let images = Vec::new();
+    let (started, admission, dispatched_config) = crate::boot::start_admitted_persistent(
+        backend,
+        start_config,
+        admission,
+        images,
+        verified_runtime.as_ref(),
+    )?;
+    let mailbox_posture = admission.admitted.mailbox_posture();
     // The guest asserts a mailbox exactly when the plan grants one, so the
     // host side starts here or the launch is rolled back.
     if let Err(error) = mvm_hostd::mailbox_process::serve_started(
         started.backend(),
         started.vm_id(),
-        &start_config,
+        &dispatched_config,
         mailbox_posture.as_ref(),
     ) {
         emit_failed(&admission, "mailbox-process", &error);

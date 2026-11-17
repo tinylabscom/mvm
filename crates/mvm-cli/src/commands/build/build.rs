@@ -167,6 +167,16 @@ fn build_manifest(
     json: bool,
     mode: mvm_build::pipeline::BuildMode,
 ) -> Result<String> {
+    let barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
+    if let Some(project) = mvm_core::manifest::project_dir_for_manifest_path(manifest_path)
+        && mvm_client::policy_profiles::coordinator::read_if_activated(project, &barrier)?.is_some()
+    {
+        anyhow::bail!(
+            "the project at {} has an active committed policy generation; \
+             rebuilding its manifest slot from staged bytes is refused",
+            project.display()
+        );
+    }
     let manifest = Manifest::read_file(manifest_path)?;
     let canonical = std::fs::canonicalize(manifest_path).with_context(|| {
         format!(

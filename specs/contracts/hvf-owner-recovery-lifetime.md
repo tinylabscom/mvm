@@ -221,6 +221,31 @@ Planned witnesses:
 - responses_cannot_be_converted_into_completion_or_cleanup_capabilities
 - cli_and_studio_reach_the_receiver_through_one_client_service
 
+## Peer binding and the approved owner design
+
+The approved design in
+[hvf-entrypoint-owner.md](hvf-entrypoint-owner.md#approved-owner-design-executable-verification-and-peer-binding)
+(**PROPOSED-APPROVED-NOT-IMPLEMENTED**) refines R4 and R9 without relaxing
+them. On macOS the receiver binds the connected peer by `getpeereid`, then the
+peer audit token, then a code-identity requirement on that token, at accept and
+again before the mutation commit, where the re-check compares (pid,
+pidversion). The proof remains the existing recovery-possession proof; the
+signed challenge does not change. A peer refusal consumes no nonce or sequence
+and moves no state. The owner executable is accepted only after the offline
+verification described there, and a source build without an exact-commit
+clean-tree signed bundle refuses.
+
+Planned witnesses (PLANNED, not existing; added by this edit and fixed like the
+others above):
+- peer_refusal_consumes_no_nonce_or_sequence_and_is_audited_as_a_peer_refusal
+- a_peer_that_execs_after_accept_is_refused_at_the_commit_recheck (HVF)
+- an_owner_with_a_missing_or_mismatched_proof_is_refused_before_it_runs
+- a_source_build_without_an_exact_commit_clean_tree_bundle_is_refused
+
+The conditions on activation (fresh independent reviewer, keyless operation set,
+both `@firecracker` gates, no VM without slot authorization) are unchanged and
+are listed there.
+
 ## Not covered here
 
 Key-holder operations for admission, audit and adoption; native resource

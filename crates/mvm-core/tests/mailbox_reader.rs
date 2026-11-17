@@ -44,6 +44,7 @@ fn fixture() -> (
         epoch,
         report: None,
         retention: None,
+        service_blind: None,
     };
     let plan_id = PlanId(format!("sha256:{}", "a".repeat(64)));
     let plan_nonce = Nonce::from_bytes([7; 16]);

@@ -421,6 +421,7 @@ mod tests {
             name: name.to_string(),
             image: Some("alpine:latest".to_string()),
             manifest: None,
+            policy_generation: None,
             deployment: None,
             resolved_digest: None,
             prepared_image: None,

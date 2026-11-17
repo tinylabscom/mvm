@@ -691,6 +691,12 @@ fn restore(id: &str, json: bool) -> Result<()> {
             id.as_str()
         );
     }
+    let _activation_barrier =
+        mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
+    if cfg!(target_os = "linux") {
+        mvm_client::policy_profiles::coordinator::ensure_if_activated()?;
+    }
+    let _prior_plan = mvm_client::policy_profiles::coordinator::restore_plan(&meta.vm_name)?;
     // Held until the restored supervisor is up. Until then the target's state
     // dir has no live owner and no registry record, so this lock is what keeps
     // a stop or reconcile in another process from deleting it mid-restore,
@@ -1033,6 +1039,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
     let ledger = mvm_client::admission::InMemoryNonceLedger::new();
     let configured_images_dir = mvm_build::image_source::configured_images_dir();
     let params = super::up::AdmitPlanForBootParams {
+        bundle_sizing: Default::default(),
         mailbox: None,
         gpu: false,
         instructions: Default::default(),
@@ -1463,6 +1470,13 @@ mod tests {
                 let key = mvm_hostd::audit::host_keypair::load_or_init().unwrap();
                 let emitter = mvm_hostd::audit::emitter::AuditEmitter::new(key.signing).unwrap();
                 mvm_client::checkpoint::bind_checkpoint_created(&emitter, &plan, &parent).unwrap();
+                // A fork-capable command needs its host-wide activation lock
+                // even when preparation refuses. Baseline that single
+                // coordination artifact so the assertion below still catches
+                // every other write (audit, keys, child state, and content).
+                let _barrier =
+                    mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()
+                        .unwrap();
                 Self { _env: env, home }
             }
 
@@ -1853,6 +1867,10 @@ mod tests {
             let mut env = mvm_core::util::test_env::TestEnv::new();
             let root = tempfile::tempdir().unwrap();
             env.isolate_mvm_home(root.path().join("missing"));
+            // Record the activation lock as pre-existing; the absent parent
+            // still must not cause any further durable effect.
+            let _barrier =
+                mvm_core::host_interface::activation_barrier::ActivationBarrier::shared().unwrap();
             for boot in [false, true] {
                 let mut args = vec![
                     "mvmctl",

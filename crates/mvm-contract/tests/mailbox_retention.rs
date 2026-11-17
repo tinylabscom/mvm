@@ -17,6 +17,7 @@ fn grant() -> MailboxGrant {
         epoch: ExecutionEpoch::new(3).expect("epoch"),
         report: None,
         retention: None,
+        service_blind: None,
     }
 }
 

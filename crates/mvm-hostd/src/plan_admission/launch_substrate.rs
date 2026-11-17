@@ -149,20 +149,25 @@ pub(crate) fn write_secret_file(path: &std::path::Path, body: &[u8]) -> Result<(
         .with_context(|| format!("write {}", path.display()))
 }
 
+/// Whether this backend consumes the persisted plan during endpoint setup.
+///
+/// QEMU reads the in-memory config instead; writing a bridge plan for it
+/// would overwrite state it does not consume.
+pub fn persists_plan_before_start(backend: &str) -> bool {
+    matches!(
+        backend,
+        "firecracker" | "libkrun" | "hvf" | "apple-container"
+    )
+}
+
 /// Stash the signed plan envelope + (optional) bundle pin in the
 /// per-VM state dir so the Firecracker bridge sidecar can read them
 /// at spawn time.
 ///
-/// Called from every `up.rs` producer site immediately after
-/// `populate_audit_substrate`, before `backend.start()`. No-op when
-/// `cfg.plan_json` is `None` (legacy / no-admission path). Files land
-/// at mode 0600 via [`write_secret_file`] — see that helper's doc for
-/// why `std::fs::write` is insufficient.
-///
-/// Lives in the producer (mvm-cli) rather than `microvm::run_from_build`
-/// because the producer is the only place that has the signed envelope
-/// in scope; `microvm` reads it back from disk inside the
-/// `target_os = "linux"` bridge-spawn block.
+/// Runs at the admitted dispatch boundary (or at the legacy CLI producer
+/// boundary for unmigrated launches), after audit-substrate population and
+/// before the bridge spawn reads the signed envelope back from disk. No-op
+/// without `cfg.plan_json`; files land at mode 0600 via [`write_secret_file`].
 pub fn stash_plan_for_bridge(cfg: &mvm_core::vm_backend::VmStartConfig) -> Result<()> {
     stash_plan_and_mint_verb_grant(cfg).map(|_| ())
 }

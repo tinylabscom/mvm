@@ -50,7 +50,7 @@ pub fn handshake_signing_bytes(
     if uuid.get_version_num() != 4 || uuid.to_string() != id {
         return Err(TelemetryError::Authentication);
     }
-    validate_host_ack(hello, ack, None, None).map_err(|_| TelemetryError::Authentication)?;
+    validate_host_ack(hello, ack, None).map_err(|_| TelemetryError::Authentication)?;
     session_transcript(hello, ack).map_err(|_| TelemetryError::Authentication)
 }
 

@@ -93,6 +93,13 @@ impl AppleContainerBackend {
         self.runner.stop_with_timing(id)
     }
 
+    pub(crate) fn stop_hvf_instance(
+        &self,
+        expected: &mvm_core::protocol::hvf_control::HvfInstance,
+    ) -> Result<StopTiming> {
+        self.runner.stop_hvf_instance(expected)
+    }
+
     pub(crate) fn abort_start_with_timing(&self, id: &VmId) -> Result<StopTiming> {
         self.runner.abort_start_with_timing(id)
     }
@@ -147,10 +154,14 @@ impl VmBackend for AppleContainerBackend {
     }
 
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
+        let _activation_barrier =
+            mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
         self.runner.start(&self.config_with_kernel(config)?)
     }
 
     fn start_in_mode(&self, config: &VmStartConfig, mode: StartMode) -> Result<VmId> {
+        let _activation_barrier =
+            mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
         self.runner
             .start_in_mode(&self.config_with_kernel(config)?, mode)
     }
@@ -164,6 +175,8 @@ impl VmBackend for AppleContainerBackend {
     }
 
     fn resume(&self, id: &VmId) -> Result<()> {
+        let _activation_barrier =
+            mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
         self.runner.resume(id)
     }
 

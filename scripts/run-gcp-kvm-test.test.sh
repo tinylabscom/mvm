@@ -14,6 +14,8 @@ run_case() {
   remote_status="$5"
   download_status="$6"
   expected_deletes="$7"
+  auth_status="${8:-0}"
+  remote_run_status="${9:-0}"
   case_dir="$scratch/$name"
   mkdir -p "$case_dir/results"
   log="$case_dir/gcloud.log"
@@ -26,6 +28,8 @@ run_case() {
     MVM_CVE_FAKE_UPLOAD_STATUS="$upload_status" \
     MVM_CVE_FAKE_REMOTE_STATUS="$remote_status" \
     MVM_CVE_FAKE_DOWNLOAD_STATUS="$download_status" \
+    MVM_CVE_FAKE_AUTH_STATUS="$auth_status" \
+    MVM_CVE_FAKE_REMOTE_RUN_STATUS="$remote_run_status" \
     bash "$repo_root/scripts/run-gcp-kvm-test.sh" \
       --project test-project \
       --zone us-central1-a \
@@ -47,17 +51,27 @@ run_case() {
     sed -n '1,200p' "$log" >&2
     exit 1
   }
-  grep -q -- '--no-service-account' "$log"
-  grep -q -- '--no-scopes' "$log"
-  grep -q -- '--metadata=block-project-ssh-keys=true' "$log"
+  if ((auth_status == 0)); then
+    grep -q -- '--no-service-account' "$log"
+    grep -q -- '--no-scopes' "$log"
+    grep -q -- '--max-run-duration=2h' "$log"
+    grep -q -- '--metadata=block-project-ssh-keys=true' "$log"
+  fi
 }
 
 run_case success 0 0 0 0 0 1
 run_case create-failure 13 13 0 0 0 1
 run_case upload-failure 17 0 17 0 0 1
 run_case remote-failure 23 0 0 23 0 1
+run_case remote-test-failure 23 0 0 0 0 1 0 23
 run_case results-failure 1 0 0 0 29 1
+run_case auth-failure 1 0 0 0 0 0 42
 
+if grep -q '^compute instances create ' "$scratch/auth-failure/gcloud.log"; then
+  echo "a failed auth refresh must not create a billable instance" >&2
+  exit 1
+fi
+grep -Fq 'mvm-command.argv /tmp/mvm-source.sha unprivileged' "$scratch/success/gcloud.log"
 argv_log="$scratch/success/gcloud.log.argv"
 grep -Fxq 'printf' "$argv_log"
 grep -Fxq '%s\n' "$argv_log"
@@ -82,6 +96,11 @@ grep -Fq "PROGRAM is required after '--'" "$scratch/missing.out"
 grep -Fq -- '--run-name must be' "$scratch/name.out"
 
 runner="$repo_root/scripts/run-gcp-kvm-test.sh"
+# shellcheck disable=SC2016 # Literal source fragment under test.
+grep -Fq 'results_dir="/tmp/mvm-gcp-kvm-results/$run_id"' "$runner"
+grep -Fq 'sudo systemd-run --unit=mvm-gcp-kvm-test --collect' "$runner"
+# shellcheck disable=SC2016 # Literal source fragment under test.
+grep -Fq 'deadline=$((SECONDS + 5400))' "$runner"
 # These are literal source fragments, not expressions for this test shell.
 # shellcheck disable=SC2016
 grep -Fq 'git -C "$repo_root" ls-files -z' "$runner"
@@ -89,8 +108,14 @@ grep -Fq 'git -C "$repo_root" ls-files -z' "$runner"
 grep -Fq -- '--from0 --files-from="$tracked_files"' "$runner"
 grep -Fq 'COPYFILE_DISABLE=1 tar' "$runner"
 remote_runner="$repo_root/scripts/run-gcp-kvm-test-remote.sh"
+grep -Fq 'export HOME=/root' "$remote_runner"
 grep -Fq 'selecting the canonical Ubuntu archive mirror' "$remote_runner"
 grep -Fq 'archive.ubuntu.com/ubuntu' "$remote_runner"
+grep -Fq 'dbus-user-session' "$remote_runner"
+# shellcheck disable=SC2016 # Literal source fragment under test.
+grep -Fq 'loginctl enable-linger "$run_user"' "$remote_runner"
+# shellcheck disable=SC2016 # Literal source fragment under test.
+grep -Fq 'systemctl start "user@$run_uid.service"' "$remote_runner"
 grep -Fq 'just_version=1.58.0' "$remote_runner"
 grep -Fq 'just_sha256=4a5cc2f53e6f0f8c59092a6cc38291eb729d46a7dd95d3ae582008881b84931d' "$remote_runner"
 # This is a literal source fragment, not an expression for this test shell.
@@ -98,21 +123,23 @@ grep -Fq 'just_sha256=4a5cc2f53e6f0f8c59092a6cc38291eb729d46a7dd95d3ae582008881b
 grep -Fq '[[ "$(just --version)" == "just $just_version" ]]' "$remote_runner"
 grep -Fq 'firecracker_sha256=06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558' "$remote_runner"
 grep -Fq '| sha256sum -c -' "$remote_runner"
+# shellcheck disable=SC2016 # Literal source fragments under test.
+grep -Fq 'runuser -u "$run_user" -- env' "$remote_runner"
+# shellcheck disable=SC2016 # Literal source fragments under test.
+grep -Fq 'runuser -u "$run_user" -- test -w /dev/kvm' "$remote_runner"
+grep -Fq -- '--run-as-root' "$repo_root/scripts/run-cve-2026-80521-gcp.sh"
 grep -Fq 'crates/mvm-core/firecracker.lock' "$remote_runner"
 grep -Fq 'MVM_FIRECRACKER_BIN=/usr/local/bin/firecracker' "$remote_runner"
-# The bootstrap is privileged, but Firecracker and the requested witness are not.
-# These are literal source fragments, not expressions for this test shell.
-# shellcheck disable=SC2016
-grep -Fq 'useradd -m -s /bin/bash -G "$kvm_group" mvm-test' "$remote_runner"
-grep -Fq 'runuser -u mvm-test -- test -r /dev/kvm -a -w /dev/kvm' "$remote_runner"
-grep -Fq 'runuser -u mvm-test -- env' "$remote_runner"
-# shellcheck disable=SC2016
+# shellcheck disable=SC2016 # Literal source fragments under test.
 grep -Fq 'RUSTUP_HOME="$repo/.mvm-test/rustup"' "$remote_runner"
-grep -Fq 'loginctl enable-linger mvm-test' "$remote_runner"
-# shellcheck disable=SC2016
-grep -Fq 'systemctl start "user@${test_uid}.service"' "$remote_runner"
-# shellcheck disable=SC2016
-grep -Fq 'DBUS_SESSION_BUS_ADDRESS="unix:path=$user_runtime_dir/bus"' "$remote_runner"
+# shellcheck disable=SC2016 # Literal source fragments under test.
+grep -Fq 'PATH="$CARGO_HOME/bin:/usr/local/bin:/usr/bin:/bin"' "$remote_runner"
+# shellcheck disable=SC2016 # Literal source fragments under test.
+grep -Fq 'loginctl enable-linger "$run_user"' "$remote_runner"
+# shellcheck disable=SC2016 # Literal source fragments under test.
+grep -Fq 'systemctl start "user@$run_uid.service"' "$remote_runner"
+# shellcheck disable=SC2016 # Literal source fragments under test.
+grep -Fq 'DBUS_SESSION_BUS_ADDRESS="unix:path=$run_dir/bus"' "$remote_runner"
 
 # A tracked-only upload has no .git directory. Recover the real, reachable
 # commit without changing any uploaded bytes, and reject malformed or

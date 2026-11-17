@@ -12,7 +12,6 @@ pub mod approval;
 pub mod approval_prompt;
 pub mod audit;
 pub mod bundle;
-pub mod control_negotiation;
 /// Strict DNS answer filtering for SSRF and rebinding defense.
 pub mod dns_guard;
 pub mod dns_pin;

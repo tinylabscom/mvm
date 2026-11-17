@@ -33,6 +33,8 @@ pub(in crate::commands) struct Args {
 
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum PolicyAction {
+    /// Commit the first policy generation for a quiescent local project.
+    Activate(ActivateArgs),
     /// Resolve a profile into the manifest `run --plan` accepts
     Resolve(ResolveArgs),
     /// Show the effective policy (toml, json, or the plan it yields)
@@ -43,6 +45,13 @@ pub(in crate::commands) enum PolicyAction {
     Diff(DiffArgs),
     /// List the built-in groups and profiles, and your own
     Groups(GroupsArgs),
+}
+
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct ActivateArgs {
+    /// Project directory with an already-built Firecracker manifest slot.
+    #[arg(value_name = "PROJECT")]
+    pub project: PathBuf,
 }
 
 /// Which policy a subcommand looks at.
@@ -130,6 +139,17 @@ fn parse_backend(raw: &str) -> Result<BackendKind, String> {
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     match args.action {
+        PolicyAction::Activate(a) => {
+            let committed = mvm_client::policy_profiles::coordinator::activate(&a.project)?;
+            println!(
+                "Activated generation {} for {} (closure sha256: {}, policy sha256: {})",
+                committed.generation(),
+                committed.project_dir().display(),
+                committed.closure_sha256(),
+                committed.policy_sha256()
+            );
+            Ok(())
+        }
         PolicyAction::Resolve(a) => resolve_cmd(a),
         PolicyAction::Show(a) => show(a),
         PolicyAction::Validate(a) => validate(a),

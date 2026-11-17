@@ -179,11 +179,8 @@ fn collect_cache_info() -> Result<CacheInfo> {
             }
         })
         .collect();
-    let stage0_dir = mvm_build::stage0::stage0_cache_dir();
-    let blob_filenames: Vec<&str> = mvm_build::stage0::assets_for_host_arch()
-        .iter()
-        .map(|a| a.cache_filename)
-        .collect();
+    let stage0_dir = mvm_client::maintenance::stage0_cache_dir();
+    let blob_filenames = mvm_client::maintenance::stage0_blob_filenames();
     let detail_lines = stage0_cache_report(path, &stage0_dir, &blob_filenames);
     Ok(CacheInfo {
         cache_dir,
@@ -327,10 +324,10 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             }
 
             let repair = if store_only {
-                mvm_build::builder_vm::clear_builder_store_image(dry_run)
+                mvm_client::maintenance::clear_builder_store_image(dry_run)
                     .map_err(|e| anyhow::anyhow!("clearing builder store image: {e}"))?
             } else {
-                mvm_build::builder_vm::clear_builder_store(dry_run)
+                mvm_client::maintenance::clear_builder_store(dry_run)
                     .map_err(|e| anyhow::anyhow!("clearing builder store: {e}"))?
             };
             if json {
@@ -488,7 +485,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // Builder images the retired HVF patcher baked. Every builder now
             // boots the image as built, with mvm's own binaries in the boot
             // payload, so nothing reads these copies any more.
-            let retired = mvm_build::builder_vm::builder_vm_cache_dir().join(RETIRED_HVF_IMAGE_DIR);
+            let retired =
+                mvm_client::maintenance::builder_vm_cache_dir().join(RETIRED_HVF_IMAGE_DIR);
             match sweep_retired_hvf_builder_images(&retired, dry_run) {
                 Ok((r, bytes)) => {
                     removed += r;
@@ -722,7 +720,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 
             match stage0_store_action {
                 Stage0StoreReclaim::Clear => {
-                    let repair = mvm_build::builder_vm::clear_stage0_store_image(dry_run)
+                    let repair = mvm_client::maintenance::clear_stage0_store_image(dry_run)
                         .map_err(|e| anyhow::anyhow!("removing the Stage 0 store image: {e}"))?;
                     if repair.existed {
                         ui::info(&format!(
@@ -1212,12 +1210,12 @@ fn builder_store_gc_report(cache_root: &std::path::Path) -> Vec<String> {
     // Surface the resolved cap (honours MVM_BUILDER_STORE_GC_GIB) and note
     // that GC is automatic — so the operator doesn't go hunting for a
     // `cache gc` verb that intentionally doesn't exist.
-    let cap_gib = mvm_build::builder_vm_runtime::builder_store_gc_cap_kib() / 1024 / 1024;
+    let cap_gib = mvm_client::maintenance::builder_store_gc_cap_kib() / 1024 / 1024;
     lines.push(format!(
         "  auto-GC cap: {cap_gib} GiB used (override {}). \
          Past the cap, `nix-collect-garbage --delete-older-than 14d` runs \
          automatically at the end of each in-VM build (#630).",
-        mvm_build::builder_vm_runtime::MVM_BUILDER_STORE_GC_GIB_ENV,
+        mvm_client::maintenance::MVM_BUILDER_STORE_GC_GIB_ENV,
     ));
     lines
 }
@@ -1978,7 +1976,7 @@ mod tests {
             "initramfs",
             "runtime-overlay",
             "runtime-overlay-bins",
-            mvm_build::runtime_overlay::RUNTIME_OVERLAY_TREE_CACHE_DIR,
+            mvm_client::maintenance::RUNTIME_OVERLAY_TREE_CACHE_DIR,
             "guest-agent-build",
             "verity-initrd",
             "sdk-sidecar",

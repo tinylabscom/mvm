@@ -68,7 +68,7 @@ pub(crate) struct ChecksumManifest<'a> {
     pub version: &'a str,
     /// Which release train published the manifest, and therefore which
     /// workflow identity may have signed it.
-    pub train: mvm_build::release_signature::ReleaseTrain,
+    pub train: mvm_client::release::ReleaseTrain,
 }
 
 impl ChecksumManifest<'_> {
@@ -148,15 +148,13 @@ pub(super) fn verify_manifest_signature(
     manifest: &ChecksumManifest<'_>,
     staged: &std::path::Path,
 ) -> Result<()> {
-    mvm_build::release_signature::verify_release_archive_signature(
-        &mvm_build::release_signature::ReleaseSignatureRequest {
-            base_url: manifest.base_url,
-            asset: manifest.asset,
-            archive_path: staged,
-            version: manifest.version,
-            train: manifest.train,
-        },
-    )
+    mvm_client::release::verify_archive_signature(&mvm_client::release::ReleaseSignatureRequest {
+        base_url: manifest.base_url,
+        asset: manifest.asset,
+        archive_path: staged,
+        version: manifest.version,
+        train: manifest.train,
+    })
     .map(|_| ())
     .map_err(|error| {
         bump_verify_outcome("sig_invalid");
@@ -275,10 +273,8 @@ fn download_failure_message() -> String {
 
 /// Acquire the image set this build pins, fetching through [`download_file`]
 /// so a large member resumes, retries, and reports progress on a terminal.
-pub(crate) fn acquire_image_set() -> Result<mvm_build::published_image_set::PublishedImageSet> {
-    mvm_build::published_image_set::PublishedImageSet::acquire_from(
-        mvm_build::published_image_set::ImageSetSource::locked().with_download(download_to),
-    )
+pub(crate) fn acquire_image_set() -> Result<mvm_client::release::PublishedImageSet> {
+    mvm_client::release::acquire_locked_image_set(download_to)
 }
 
 fn download_to(url: &str, dest: &std::path::Path) -> Result<()> {

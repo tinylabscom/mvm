@@ -6,10 +6,10 @@
 //! checkout when one is selected, and for the mvm checkout this binary was
 //! built from.
 
-use mvm_build::artifact_acquisition::{DistributionChannel, compiled_channel};
-use mvm_build::image_source::{
-    ImageSource, ImageSourceError, MVM_IMAGES_DIR_ENV, RepoIdentity, configured_images_dir,
-    mvm_source_checkout, probe_identity, resolve_current_source,
+use mvm_client::diagnostics::{
+    DistributionChannel, ImageSource, ImageSourceError, MVM_IMAGES_DIR_ENV, RepoIdentity,
+    compiled_distribution_channel, configured_images_dir, mvm_source_checkout, probe_repo_identity,
+    resolve_current_image_source,
 };
 
 use super::Check;
@@ -26,7 +26,7 @@ impl MvmOrigin {
     fn detect(channel: DistributionChannel) -> Self {
         match mvm_source_checkout(channel) {
             None => Self::ReleaseBuild,
-            Some(root) => match probe_identity(&root) {
+            Some(root) => match probe_repo_identity(&root) {
                 Ok(identity) => Self::Checkout(identity),
                 Err(detail) => Self::Unreadable(detail),
             },
@@ -43,9 +43,9 @@ impl MvmOrigin {
 }
 
 pub(super) fn image_source_check() -> Check {
-    let channel = compiled_channel();
+    let channel = compiled_distribution_channel();
     let configured = configured_images_dir();
-    let selected = resolve_current_source();
+    let selected = resolve_current_image_source();
     image_source_line(
         &selected,
         &MvmOrigin::detect(channel),

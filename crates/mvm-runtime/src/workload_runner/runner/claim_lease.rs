@@ -3,15 +3,24 @@
 
 use std::path::PathBuf;
 
+use super::BrokerGuard;
 use crate::driver::VmmDriver;
 use crate::standby_pool::SupervisorStandbyPool;
+use crate::workload_runner::claim::EndpointHandle;
 use mvm_core::vm_backend::VmId;
+
+enum ChildTermination {
+    Pending,
+    Confirmed,
+    Unknown,
+}
 
 /// Release-unless-committed lease for a reserved parent and a partially-built
 /// child. A claim reserves the parent (`mark_claimed`) and then materializes a
-/// child dir; if any later step fails, this guard returns the (verified, healthy)
-/// parent to claimable — so a failed claim never strands warm capacity — and
-/// removes the orphaned child dir. Only a claim that boots the child calls
+/// child dir; if a later step fails and the child is confirmed stopped, this guard
+/// returns the healthy parent to claimable and removes the orphaned child dir.
+/// Uncertain termination retains both the child state and the parent reservation.
+/// Only a claim that boots the child calls
 /// [`commit`](Self::commit), disarming both. A parent that failed VERIFICATION is
 /// quarantined by removal upstream and never reaches this guard, so releasing
 /// here only ever returns a parent that verified healthy.
@@ -22,7 +31,10 @@ pub(super) struct WarmClaimLease<'a> {
     child_dir: Option<PathBuf>,
     preloaded_child: Option<String>,
     committed: bool,
+    termination: ChildTermination,
     quarantined: bool,
+    endpoint: Option<EndpointHandle>,
+    broker: Option<BrokerGuard>,
 }
 
 impl<'a> WarmClaimLease<'a> {
@@ -38,7 +50,10 @@ impl<'a> WarmClaimLease<'a> {
             child_dir: None,
             preloaded_child: None,
             committed: false,
+            termination: ChildTermination::Pending,
             quarantined: false,
+            endpoint: None,
+            broker: None,
         }
     }
 
@@ -53,53 +68,70 @@ impl<'a> WarmClaimLease<'a> {
         self.preloaded_child = Some(vm_name);
     }
 
+    /// Resource rollback follows the child's termination decision, never precedes it.
+    pub(super) fn track_endpoint(&mut self, endpoint: EndpointHandle) {
+        self.endpoint = Some(endpoint);
+    }
+
+    pub(super) fn track_broker(&mut self, broker: BrokerGuard) {
+        self.broker = Some(broker);
+    }
+
+    fn retain_resources(&mut self) {
+        if let Some(endpoint) = &mut self.endpoint {
+            endpoint.defuse();
+        }
+        if let Some(broker) = &mut self.broker {
+            broker.defuse();
+        }
+    }
+
     /// The child booted: disarm. The parent stays `Claimed` (the stop/reaper path
     /// owns it) and the child dir is real state, not an orphan.
     pub(super) fn commit(&mut self) {
         self.committed = true;
     }
 
+    /// Preserve the reservation and child state until termination can be established.
+    pub(super) fn retain_unknown_child(&mut self) {
+        self.termination = ChildTermination::Unknown;
+    }
+
+    /// A successful explicit stop must not be retried through an already-gone handle.
+    pub(super) fn confirm_child_stopped(&mut self) {
+        self.termination = ChildTermination::Confirmed;
+    }
+
     /// The parent can never be restored on this host: drop it from the pool
     /// rather than return it to rotation, where every later claim would fail the
-    /// same way until its TTL. The child dir and any paused child are still
-    /// cleaned up on drop.
+    /// same way until its TTL. Removal waits until any paused child is confirmed
+    /// stopped; unknown termination keeps the reservation instead.
     pub(super) fn quarantine(&mut self) {
-        if let Err(e) = self.pool.remove(self.parent_id) {
-            tracing::warn!(
-                parent = %self.parent_id,
-                error = %e,
-                "failed to drop a standby parent this host cannot restore; it stays claimed (unclaimable) until the pool reaper"
-            );
-        }
+        // Defer removal until Drop establishes that no preloaded child remains live.
         self.quarantined = true;
     }
 }
 
 impl Drop for WarmClaimLease<'_> {
     fn drop(&mut self) {
-        if self.committed {
+        if self.committed || matches!(self.termination, ChildTermination::Unknown) {
+            self.retain_resources();
             return;
-        }
-        if self.quarantined {
-            // Already removed; releasing it would put it back in rotation.
-        } else if let Err(e) = self.pool.mark_idle(self.parent_id) {
-            tracing::warn!(
-                parent = %self.parent_id,
-                error = %e,
-                "returning reserved standby parent to claimable after a failed claim"
-            );
         }
         if let Some(vm_name) = &self.preloaded_child {
             let id = VmId(vm_name.clone());
-            if let Err(error) = self.driver.attach(&id).and_then(|vm| vm.kill()) {
+            if !matches!(self.termination, ChildTermination::Confirmed)
+                && let Err(error) = self.driver.attach(&id).and_then(|vm| vm.kill())
+            {
                 tracing::warn!(
                     vm = %vm_name,
                     %error,
-                    "stopping preloaded standby child after failed claim"
+                    "preloaded child stop unconfirmed; retaining child state and parent reservation"
                 );
+                self.retain_resources();
+                return;
             }
-            // The child is gone either way — killed above, or already dead and
-            // about to lose its state dir below. The record has to stop naming
+            // The child is confirmed stopped. The record has to stop naming
             // it: left alone it keeps advertising a paused VMM that no longer
             // exists, so every later claim refuses on a missing control socket
             // while the pool still counts the parent as usable capacity. The
@@ -114,6 +146,17 @@ impl Drop for WarmClaimLease<'_> {
                      destroyed; it will refuse every claim until reaped"
                 );
             }
+        }
+        // Reapers need the retained child directory. Run them after confirmed
+        // termination, before releasing the reservation or removing the directory.
+        drop(self.broker.take());
+        drop(self.endpoint.take());
+        if self.quarantined {
+            if let Err(error) = self.pool.remove(self.parent_id) {
+                tracing::warn!(parent = %self.parent_id, %error, "removing unrestorable parent after child stop");
+            }
+        } else if let Err(error) = self.pool.mark_idle(self.parent_id) {
+            tracing::warn!(parent = %self.parent_id, %error, "returning reserved standby parent to claimable after child stop");
         }
         if let Some(dir) = &self.child_dir {
             match std::fs::remove_dir_all(dir) {

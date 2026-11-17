@@ -41,6 +41,7 @@ impl Host {
         let keys = self.dir.path().join("keys");
         let audit = self.dir.path().join("audit");
         admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),

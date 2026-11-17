@@ -407,6 +407,13 @@ pub fn update_idle_timeout(vm_name: &str, secs: u64) -> Result<(u64, u64)> {
     let mut stream = transport
         .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
         .with_context(|| format!("Connecting to guest agent on {vm_name:?}"))?;
+    if let Err(err) = mvm_agentd::vsock::require_capabilities(
+        &mut stream,
+        &[mvm_agentd::vsock::GuestCapability::UpdateIdleTimeout],
+    ) {
+        super::verb_audit::audit_verb_refusal(vm_name, &err);
+        return Err(err);
+    }
     let req = mvm_agentd::vsock::GuestRequest::UpdateIdleTimeout { secs };
     crate::guest::emit_vsock_rpc_audit(vm_name, &req);
     let response = match mvm_agentd::vsock::call_unary(&mut stream, &req) {

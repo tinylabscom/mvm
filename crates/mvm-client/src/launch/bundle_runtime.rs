@@ -655,9 +655,8 @@ mod tests {
             overlay_verity_artifact: "overlay.verity".into(),
             initramfs_artifact: "initrd".into(),
             overlay_roothash: "a".repeat(64),
-            protocol_version: mvm_runtime::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION,
-            min_supported_protocol_version:
-                mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+            protocol_version: 2,
+            min_supported_protocol_version: 2,
         };
         let artifacts = [
             "runtime.tar.gz",
@@ -846,13 +845,8 @@ mod tests {
             )
             .into_manifest();
         // Deliberately not the running CLI's locked root or release.
-        manifest.compatibility.guest_agent_protocol = Some(
-            mvm_core::image_set::ProtocolRange::new(
-                mvm_runtime::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION,
-                mvm_runtime::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION,
-            )
-            .unwrap(),
-        );
+        manifest.compatibility.guest_agent_protocol =
+            Some(mvm_core::image_set::ProtocolRange::new(2, 2).unwrap());
         manifest.set_version = ImageSetVersion::new(version).unwrap();
         if let mvm_core::image_set::ImageSetProducer::Release(release) = &mut manifest.producer {
             release.release_tag =
@@ -1323,9 +1317,8 @@ mod tests {
             overlay_verity_artifact: "overlay.verity".into(),
             initramfs_artifact: "initrd".into(),
             overlay_roothash: "a".repeat(64),
-            protocol_version: mvm_runtime::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION,
-            min_supported_protocol_version:
-                mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+            protocol_version: 2,
+            min_supported_protocol_version: 2,
         };
         let mut payload: Vec<(String, Vec<u8>)> = vec![
             ("kernel".into(), kernel),

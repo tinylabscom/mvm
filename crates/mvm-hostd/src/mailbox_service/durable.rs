@@ -21,8 +21,8 @@ use mvm_contract::protocol::mailbox::{
 };
 use mvm_core::mailbox::frame::{OutboxMessage, Refusal, decode_frame, send_receipted_frame};
 use mvm_core::mailbox::journal::{
-    FileJournalAnchor, JournalAdmission, JournalError, JournalGuestAck, JournalGuestLease,
-    JournalReceive, JournalTip, MailboxJournal, ReceivedMailboxMessage,
+    EncodedDestinationReceipt, FileJournalAnchor, JournalAdmission, JournalError, JournalGuestAck,
+    JournalGuestLease, JournalReceive, JournalTip, MailboxJournal, ReceivedMailboxMessage,
 };
 use mvm_core::mailbox::reader::{MailboxReaderBootBinding, verify_guest_reader_enrollment};
 use mvm_core::mailbox::reader_wire::{
@@ -342,16 +342,15 @@ impl DurableMailboxService {
             }
             other => other,
         };
-        let verdict: Result<SignedDestinationReceipt, Refusal> = body
+        let verdict = body
             .and_then(|body| OutboxMessage::decode(&body))
-            .and_then(|message| sealer.seal(message))
-            .and_then(|(capability, envelope)| admit(&self.shared, &capability, &envelope));
-        let reply = if self.shared.local_anchor.is_some() {
-            serde_json::to_vec(&verdict)
+            .and_then(|message| admit_guest(&self.shared, sealer, message));
+        let format = if self.shared.local_anchor.is_some() {
+            ReplyFormat::Receipt
         } else {
-            serde_json::to_vec(&verdict.map(|_| ()))
+            ReplyFormat::LegacyUnit
         };
-        if let Ok(reply) = reply {
+        if let Ok(reply) = admission_reply(verdict, format) {
             let _ = stream.write_all(&reply);
         }
         Ok(received)
@@ -646,16 +645,74 @@ fn serve(shared: &Shared, mut stream: UnixStream) {
     let result = read_frame(shared.limits.max_frame_bytes, &mut stream)
         .and_then(|body| decode_frame(&body))
         .and_then(|(capability, envelope)| admit(shared, &capability, &envelope));
-    if let Ok(reply) = serde_json::to_vec(&result) {
+    if let Ok(reply) = admission_reply(result, ReplyFormat::Receipt) {
         let _ = stream.write_all(&reply);
     }
+}
+
+enum AdmissionReceipt {
+    Retained(EncodedDestinationReceipt),
+    Legacy(SignedDestinationReceipt),
+}
+
+enum ReplyFormat {
+    Receipt,
+    LegacyUnit,
+}
+
+fn admission_reply(
+    result: Result<AdmissionReceipt, Refusal>,
+    format: ReplyFormat,
+) -> Result<Vec<u8>, serde_json::Error> {
+    match result {
+        Ok(AdmissionReceipt::Retained(receipt)) => {
+            let mut reply = b"{\"Ok\":".to_vec();
+            reply.extend_from_slice(receipt.encoded());
+            reply.push(b'}');
+            Ok(reply)
+        }
+        Ok(AdmissionReceipt::Legacy(signed)) => match format {
+            ReplyFormat::Receipt => serde_json::to_vec(&Ok::<_, Refusal>(signed)),
+            ReplyFormat::LegacyUnit => serde_json::to_vec(&Ok::<_, Refusal>(())),
+        },
+        Err(reason) => serde_json::to_vec(&Err::<(), _>(reason)),
+    }
+}
+
+fn admit_guest(
+    shared: &Shared,
+    sealer: &mut GuestSealer,
+    message: OutboxMessage,
+) -> Result<AdmissionReceipt, Refusal> {
+    if shared.local_anchor.is_some()
+        && let Some((capability, envelope)) = sealer.retained_intent(&message)?
+        && let Some(receipt) = operate(shared, &capability, &envelope, AdmissionOperation::Recover)?
+    {
+        return Ok(receipt);
+    }
+    let (capability, envelope) = sealer.seal(message)?;
+    admit(shared, &capability, &envelope)
 }
 
 fn admit(
     shared: &Shared,
     capability: &SignedMailboxCapability,
     envelope: &MailboxEnvelope,
-) -> Result<SignedDestinationReceipt, Refusal> {
+) -> Result<AdmissionReceipt, Refusal> {
+    operate(shared, capability, envelope, AdmissionOperation::Send)?.ok_or(Refusal::Unavailable)
+}
+
+enum AdmissionOperation {
+    Send,
+    Recover,
+}
+
+fn operate(
+    shared: &Shared,
+    capability: &SignedMailboxCapability,
+    envelope: &MailboxEnvelope,
+    operation: AdmissionOperation,
+) -> Result<Option<AdmissionReceipt>, Refusal> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| Refusal::Unavailable)?
@@ -664,8 +721,7 @@ fn admit(
     let mut state = shared.state.lock().expect("mailbox journal lock poisoned");
     state.policy.context.now_unix_ms = now;
     let State { policy, journal } = &mut *state;
-    settle_expired(shared, journal, now).map_err(reader_refusal)?;
-    let request = JournalAdmission {
+    let request = || JournalAdmission {
         envelope,
         capability,
         context: &policy.context,
@@ -673,11 +729,32 @@ fn admit(
         sender_key: &policy.sender_key,
         signer: &shared.signer,
     };
+    if let Some(anchor) = &shared.local_anchor {
+        match journal.recover_local_encoded(request(), anchor) {
+            Ok(Some(receipt)) => return Ok(Some(AdmissionReceipt::Retained(receipt))),
+            Ok(None) => {}
+            Err(error) => return Err(admission_refusal(error, capability)),
+        }
+    }
+    if matches!(operation, AdmissionOperation::Recover) {
+        return Ok(None);
+    }
+    settle_expired(shared, journal, now).map_err(reader_refusal)?;
     let accepted = match &shared.local_anchor {
-        Some(anchor) => journal.admit_local(request, anchor),
-        None => journal.admit(request, |tip| shared.anchor.commit(tip)),
+        Some(anchor) => journal
+            .admit_local_encoded(request(), anchor)
+            .map(AdmissionReceipt::Retained),
+        None => journal
+            .admit(request(), |tip| shared.anchor.commit(tip))
+            .map(AdmissionReceipt::Legacy),
     };
-    accepted.map_err(|error| match error {
+    accepted
+        .map(Some)
+        .map_err(|error| admission_refusal(error, capability))
+}
+
+fn admission_refusal(error: JournalError, capability: &SignedMailboxCapability) -> Refusal {
+    match error {
         JournalError::Mailbox(MailboxError::WrongRecipient) => Refusal::NotAuthorized,
         JournalError::Mailbox(MailboxError::Expired) => Refusal::Expired,
         JournalError::Mailbox(MailboxError::CapabilityPayloadExceeded) => {
@@ -686,8 +763,10 @@ fn admit(
         JournalError::Mailbox(error) => Refusal::Mailbox(error.to_string()),
         JournalError::Full => Refusal::StorageFull,
         JournalError::ConflictingRetry => Refusal::Mailbox(error.to_string()),
+        // Unavailable does not assert nonacceptance. The sender keeps its
+        // original operation until a signed success can be recovered.
         _ => Refusal::Unavailable,
-    })
+    }
 }
 
 /// Send an immutable, already-sealed delivery to the local destination.
@@ -719,6 +798,243 @@ pub fn send(
 #[cfg(test)]
 mod reader_tests {
     use super::*;
+
+    #[test]
+    fn accepted_intent_recovers_after_attempt_exhaustion_without_charging_again() {
+        use mvm_contract::protocol::mailbox::{
+            ExecutionEpoch, MailboxAddress, MailboxId, MailboxRetentionPolicy, MessageId,
+        };
+        use mvm_core::crypto::aead::Key;
+        use mvm_core::mailbox::journal::{HistoryKeyCustody, HistoryKeyRef, JournalLimits};
+
+        struct TestCustody {
+            reference: HistoryKeyRef,
+            key: Key,
+        }
+        impl HistoryKeyCustody for TestCustody {
+            fn load_existing(&self, reference: &HistoryKeyRef) -> Result<Key, JournalError> {
+                if reference != &self.reference {
+                    return Err(JournalError::HistoryKeyMismatch);
+                }
+                Ok(Key::from_bytes(*self.key.expose_bytes()))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("test-purpose host custody");
+        crate::audit::host_keypair::load_or_init_at(dir.path()).expect("test-purpose signer");
+        let mailbox = MailboxId::from_bytes([21; 32]);
+        let epoch = ExecutionEpoch::new(1).expect("test epoch");
+        let retention = MailboxRetentionPolicy::new(10_000).expect("finite test retention");
+        let grant = MailboxGrant {
+            mailbox,
+            authority_key: crate::mailbox_launch::authority_key_for(dir.path(), &mailbox, epoch)
+                .expect("test mailbox authority")
+                .to_bytes(),
+            epoch,
+            report: None,
+            retention: Some(retention),
+            service_blind: None,
+        };
+        let keys = crate::mailbox_launch::derive_launch_keys(dir.path(), &grant, &Key::random())
+            .expect("test-purpose launch keys");
+        let (policy, sealer) = keys.trust();
+        let policy = policy.with_grant(&grant).expect("legacy test policy");
+        let mut sealer = sealer.with_grant(&grant).expect("legacy test sealer");
+        let intents = dir.path().join("intents");
+        sealer.intent_dir = Some(intents.clone());
+        let address = MailboxAddress {
+            tenant: policy.context.expected_tenant,
+            authorization_domain: policy.context.expected_authorization_domain,
+            mailbox,
+            recipient: policy.context.expected_recipient,
+        };
+        let reference =
+            HistoryKeyRef::new(address, epoch, rand::random(), 1).expect("test history identity");
+        let custody = TestCustody {
+            reference,
+            key: Key::random(),
+        };
+        let anchor = Arc::new(
+            FileJournalAnchor::open(
+                &dir.path().join("anchor").join("tip"),
+                address,
+                rand::random(),
+            )
+            .expect("test anchor"),
+        );
+        let (signer, _, _) = keys.durable_material();
+        let journal = MailboxJournal::open_local_with_custody(
+            &dir.path().join("journal"),
+            reference,
+            signer.verifying_key(),
+            JournalLimits {
+                max_records: 64,
+                max_bytes: 1024 * 1024,
+            },
+            &custody,
+            &anchor,
+            retention,
+        )
+        .expect("test journal");
+        let commit = Arc::clone(&anchor);
+        let shared = Shared {
+            limits: MailboxLimits {
+                max_depth: 64,
+                max_frame_bytes: 64 * 1024,
+            },
+            state: Mutex::new(State { policy, journal }),
+            signer,
+            anchor: Box::new(move |tip| commit.advance(tip)),
+            local_anchor: Some(anchor),
+            reader: OnceLock::new(),
+        };
+        let operation = OutboxMessage {
+            recipient: address.recipient,
+            message_id: MessageId::from_bytes([22; 32]),
+            body: b"test-purpose recovery".to_vec(),
+        };
+        let first = admission_reply(
+            admit_guest(&shared, &mut sealer, operation.clone()),
+            ReplyFormat::Receipt,
+        )
+        .expect("signed success bytes");
+        let parsed: Result<SignedDestinationReceipt, Refusal> =
+            serde_json::from_slice(&first).expect("unchanged success encoding");
+        assert!(parsed.is_ok(), "first operation must be accepted");
+        for _ in 1..super::super::MAX_SOURCE_ATTEMPTS {
+            sealer
+                .seal(operation.clone())
+                .expect("consume remaining source attempts");
+        }
+        assert!(matches!(
+            sealer.seal(operation.clone()),
+            Err(Refusal::RetriesExhausted)
+        ));
+        let attempts = intents.join(format!(
+            "{}.attempts",
+            hex::encode(operation.message_id.as_bytes())
+        ));
+        let before = std::fs::read(&attempts).expect("retained attempt count");
+        let recovered = admission_reply(
+            admit_guest(&shared, &mut sealer, operation.clone()),
+            ReplyFormat::Receipt,
+        )
+        .expect("recovered success encoding");
+        assert_eq!(
+            recovered, first,
+            "wire success must contain the exact retained encoding"
+        );
+        assert_eq!(std::fs::read(&attempts).expect("attempt count"), before);
+        {
+            let mut state = shared.state.lock().expect("test state");
+            assert_eq!(
+                state.journal.tip().cursor,
+                2,
+                "recovery must not append or debit"
+            );
+            state.policy.context.current_policy_epoch += 1;
+        }
+        assert!(
+            admit_guest(&shared, &mut sealer, operation.clone()).is_err(),
+            "known identity cannot bypass current authorization"
+        );
+        shared
+            .state
+            .lock()
+            .expect("test state")
+            .policy
+            .context
+            .current_policy_epoch -= 1;
+        let mut changed = operation.clone();
+        changed.body.push(b'!');
+        assert!(
+            admit_guest(&shared, &mut sealer, changed).is_err(),
+            "known identity cannot substitute different operation bytes"
+        );
+        assert_eq!(std::fs::read(&attempts).expect("attempt count"), before);
+
+        let mut unseen = operation;
+        unseen.message_id = MessageId::from_bytes([23; 32]);
+        for _ in 0..super::super::MAX_SOURCE_ATTEMPTS {
+            sealer
+                .seal(unseen.clone())
+                .expect("stage unseen bounded attempts");
+        }
+        assert!(
+            matches!(
+                admit_guest(&shared, &mut sealer, unseen),
+                Err(Refusal::RetriesExhausted)
+            ),
+            "healthy unseen state must still take the charged send path"
+        );
+        assert_eq!(
+            shared
+                .state
+                .lock()
+                .expect("test state")
+                .journal
+                .tip()
+                .cursor,
+            2
+        );
+    }
+
+    #[test]
+    fn local_outbox_preserves_unresolved_operation() {
+        use mvm_agentd::mailbox_outbox::{forward_local_outbox, write_outbox};
+        use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxId, MessageId, PrincipalId};
+
+        let signer = SigningKey::from_bytes(&rand::random());
+        let operation = OutboxMessage {
+            recipient: PrincipalId::from_bytes([1; 32]),
+            message_id: MessageId::from_bytes([2; 32]),
+            body: b"test-purpose operation".to_vec(),
+        };
+        let unavailable =
+            serde_json::to_vec(&Err::<SignedDestinationReceipt, _>(Refusal::Unavailable))
+                .expect("existing unavailable verdict");
+        for reply in [unavailable, Vec::new(), b"{\"Ok\":".to_vec()] {
+            let dir = tempfile::tempdir().expect("test-purpose outbox");
+            let path = dir.path().join("outbox-local");
+            write_outbox(&path, &operation).expect("retain original operation");
+            let original = std::fs::read(&path).expect("original request bytes");
+            let (mut guest, mut host) = UnixStream::pair().expect("mailbox exchange");
+            guest
+                .set_read_timeout(Some(IO_TIMEOUT))
+                .expect("bounded guest read");
+            host.set_read_timeout(Some(IO_TIMEOUT))
+                .expect("bounded host read");
+            let peer = std::thread::spawn(move || {
+                let mut length = [0; 4];
+                host.read_exact(&mut length).expect("request length");
+                let mut body = vec![0; u32::from_be_bytes(length) as usize];
+                host.read_exact(&mut body).expect("request body");
+                host.write_all(&reply)
+                    .expect("unavailable or incomplete reply");
+                body
+            });
+
+            let result = forward_local_outbox(
+                &mut guest,
+                &path,
+                &signer.verifying_key(),
+                MailboxId::from_bytes([3; 32]),
+                ExecutionEpoch::new(1).expect("test epoch"),
+            );
+
+            assert!(result.is_err(), "an unresolved operation is not success");
+            assert_eq!(
+                peer.join().expect("mailbox peer"),
+                operation.encode(),
+                "the exchange keeps the original operation identity and bytes"
+            );
+            assert_eq!(
+                std::fs::read(&path).expect("unresolved request remains pending"),
+                original,
+                "unavailable, lost and truncated replies must not remove or replace the request"
+            );
+        }
+    }
 
     #[test]
     fn an_expired_guest_exchange_refuses_more_reads_and_writes() {

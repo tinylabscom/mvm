@@ -82,9 +82,10 @@
 #                                  (for the release evidence wrapper's cleanup)
 #   MVM_SMOKE_TEMP_PARENT          wrapper-owned parent (wrapper handles cleanup)
 #   MVM_SMOKE_NO_HOMEBREW          set to 1 to leave Homebrew off the PATH
+#   MVM_SMOKE_BACKEND_EVIDENCE     set to 1 to require successful installed CLI
+#                                  default-backend diagnostics in the transcript
 #
-#   MVM_SMOKE_DOCTOR_BUDGET_SECS   `mvmctl doctor` budget, guest-runtime mode
-#                                  only; default 300
+#   MVM_SMOKE_DOCTOR_BUDGET_SECS   `mvmctl doctor` budget; default 300
 #
 # Exit status: 0 when all four boots printed their tokens in budget and the
 # second fetched nothing again, 1 when any of that failed, 2 on a usage error.
@@ -654,6 +655,20 @@ boot_pass egress
 # the image set, and doctor reads which archive each piece names.
 if [ -n "$GUEST_RUNTIME" ]; then
   check_doctor_names_runtime
+fi
+
+if [ "${MVM_SMOKE_BACKEND_EVIDENCE:-}" = "1" ]; then
+  section "installed default backend (mvmctl doctor --json --workflow cli-run)"
+  if bounded "$DOCTOR_BUDGET" "$ROOT/backend.out" "$ROOT/backend.err" \
+    mvmctl doctor --json --workflow cli-run; then
+    log "MVM_BACKEND_DIAGNOSTICS_BEGIN"
+    append "$ROOT/backend.out"
+    log "MVM_BACKEND_DIAGNOSTICS_END"
+  else
+    append "$ROOT/backend.out"
+    append "$ROOT/backend.err"
+    fail "installed backend diagnostics failed or unavailable"
+  fi
 fi
 
 section "timings"

@@ -1641,6 +1641,7 @@ mod tests {
             epoch: ExecutionEpoch::new(1).unwrap(),
             report: None,
             retention: None,
+            service_blind: None,
         };
         let mut inp = input("vm");
         inp.mailbox = Some(grant);

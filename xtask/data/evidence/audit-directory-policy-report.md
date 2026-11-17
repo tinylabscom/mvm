@@ -37,6 +37,21 @@ witness was run. Ignored tests were not enabled. Gated Linux compilation is
 not Linux execution evidence. Production mailbox audit publication remains
 outside this fixture-only checkpoint. Issue #5671 owns PR and CI status.
 
+### Integration with current main
+
+The PR candidate was subsequently integrated with `origin/main` at
+`8ca876efe16dbf7a17a4e08a126b8902fce9cb1d`. The only textual conflict was
+concurrent additions to the lifecycle review ledger; both sections were
+retained. The incoming policy-directory helpers and audit consistency-proof
+implementation were preserved.
+
+All commands in the table were rerun successfully on that integrated tree.
+The serialized workspace suite passed **21,719 tests, zero failures, 65
+ignored**, and `check-all` passed **89 gates**. The additional
+`cargo clippy -p mvm-core -p mvm-hostd -p xtask --all-targets -- -D warnings`
+also passed. This batch used `CARGO_BUILD_JOBS=2`, the same isolated state,
+`TMPDIR=/tmp`, `RUST_TEST_THREADS=1` and offline code-generation tooling.
+
 ## Recovery provenance
 
 Recovered for #5671 from the archived successful edit inputs in

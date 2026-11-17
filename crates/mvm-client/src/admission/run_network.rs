@@ -5,7 +5,7 @@
 //! Shared by the CLI and the host library so the same flags produce the same
 //! policy whoever launches the machine.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 pub fn parse_run_network_preset(
     value: &str,
@@ -136,22 +136,7 @@ pub fn parse_peer_binding(raw: &str) -> Result<mvm_contract::peer::PeerBinding> 
 /// `HOST` with no port defaults to `443` (https). Fails closed on a
 /// malformed port or empty host before any VM work.
 pub fn parse_allow_host(entry: &str) -> Result<mvm_core::network_policy::HostPort> {
-    use mvm_core::network_policy::{HostPort, is_banned_ssh_port};
-    let parsed = match entry.rsplit_once(':') {
-        // Has an explicit `:PORT` — strict parse (rejects empty host / bad port).
-        Some(_) => entry
-            .parse()
-            .with_context(|| format!("invalid --allow-host {entry:?}")),
-        // Bare host — default to the https port.
-        None if entry.is_empty() => anyhow::bail!("--allow-host cannot be empty"),
-        None => Ok(HostPort::new(entry, 443)),
-    }?;
-    if is_banned_ssh_port(parsed.port) {
-        anyhow::bail!(
-            "--allow-host {entry:?} requests TCP/22, but SSH sessions are banned in microVMs"
-        );
-    }
-    Ok(parsed)
+    mvm_policy::allow_host::parse_allow_host(entry)
 }
 
 #[cfg(test)]

@@ -33,7 +33,13 @@ yanked = "deny"
 # pinning `jiff < 0.2.29` (its optional `defmt` feature pulls
 # proc-macro-error2), and moving PEM parsing onto `rustls-pki-types`. Keep
 # this list empty: a new advisory must be fixed, not suppressed.
-ignore = []
+#
+# One time-boxed exception. There is no expiry mechanism in cargo-deny, so the
+# review date is in the reason: remove this entry by 2026-12-31. The date is
+# checked by `xtask check-deny-ignore-expiry`, which fails once it has passed.
+ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "chrono is flagged unmaintained, not vulnerable; accepted temporarily so releases can proceed. Replacing chrono is tracked in #5673. Remove or re-review; expires 2026-12-31." },
+]
 
 # ── Licenses ──────────────────────────────────────────────────────
 [licenses]

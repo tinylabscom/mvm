@@ -452,6 +452,20 @@ required_witness = "Host collector records process startup, VM/generation correl
 
 [[binary]]
 package = "mvm-hostd"
+name = "mvm-policy-coordinator"
+source = "crates/mvm-hostd/src/bin/mvm-policy-coordinator.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "host"
+owner = "Local policy lifecycle coordinator"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "The resident coordinator has no bounded host collector; detached stderr is discarded."
+required_witness = "Host collector records activation attempts and refusals after CLI detach without blocking admission."
+
+[[binary]]
+package = "mvm-hostd"
 name = "mvm-host-signer"
 source = "crates/mvm-hostd/src/bin/mvm-host-signer.rs"
 required_features = []

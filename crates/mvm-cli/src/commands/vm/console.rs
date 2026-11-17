@@ -494,10 +494,14 @@ impl SessionEnding {
     }
 }
 
-/// A control-channel connection. The session refuses a console verb the guest
-/// did not advertise, before the request is written.
+/// A control-channel connection that has confirmed the agent serves consoles.
 fn console_control(transport: &Arc<dyn VsockTransport>) -> Result<std::os::unix::net::UnixStream> {
-    transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
+    let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
+    mvm_agentd::vsock::require_capabilities(
+        &mut stream,
+        &[mvm_agentd::vsock::GuestCapability::Console],
+    )?;
+    Ok(stream)
 }
 
 /// Send one console request, audited through the same inbound-RPC record every

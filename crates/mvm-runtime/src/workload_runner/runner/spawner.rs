@@ -823,6 +823,7 @@ mod tests {
             epoch: ExecutionEpoch::new(3).unwrap(),
             report: None,
             retention: None,
+            service_blind: None,
         });
         plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
         let redaction = RedactionPolicy::default();

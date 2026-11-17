@@ -1527,6 +1527,7 @@ ProcWaitEvent = Union[
 class ProtocolUpgradeAction(Enum):
     upgrade_host = 'upgrade_host'
     rebuild_guest = 'rebuild_guest'
+    downgrade_host = 'downgrade_host'
 
 
 @dataclass

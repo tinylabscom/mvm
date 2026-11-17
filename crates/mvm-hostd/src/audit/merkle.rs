@@ -487,6 +487,22 @@ pub fn build_inclusion_in(
         .map_err(|e| anyhow::anyhow!("building inclusion proof for leaf {leaf_index}: {e}"))
 }
 
+/// Build a consistency proof over verified leaves, including rotated segments.
+///
+/// # Errors
+/// Refuses an invalid audit chain or sizes that cannot describe its extension.
+pub fn build_consistency_in(
+    audit_dir: &Path,
+    tenant: &str,
+    vk: &VerifyingKey,
+    old_size: usize,
+    new_size: usize,
+) -> Result<mvm_contract::merkle::ConsistencyProof> {
+    let leaves = read_leaves(audit_dir, tenant, vk)?;
+    mvm_contract::merkle::build_consistency_proof(&leaves, old_size, new_size)
+        .map_err(|e| anyhow::anyhow!("building consistency proof: {e}"))
+}
+
 /// Build and sign a transparency-log root over `tenant`'s chain, without
 /// writing anything.
 ///
@@ -990,6 +1006,21 @@ mod tests {
         assert_eq!(report.roots, 2);
         assert_eq!(report.transitions_checked, 1);
         assert_eq!(report.newest_tree_size, Some(after.tree_size));
+        let old_size = usize::try_from(before.tree_size).unwrap();
+        let new_size = usize::try_from(after.tree_size).unwrap();
+        let proof = build_consistency_in(dir.path(), "local", &vk, old_size, new_size).unwrap();
+        mvm_contract::merkle::verify_append_only(&proof, &before, &after, &vk, "local").unwrap();
+        assert!(build_consistency_in(dir.path(), "local", &vk, new_size, old_size).is_err());
+        assert!(
+            build_consistency_in(
+                dir.path(),
+                "local",
+                &fresh_key().verifying_key(),
+                old_size,
+                new_size,
+            )
+            .is_err()
+        );
     }
 
     #[test]

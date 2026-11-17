@@ -116,11 +116,14 @@ pub fn admit_plan_for_run(
     extension_ctx: Option<&ExtensionAdmissionContext<'_>>,
     posture: RunPosture,
 ) -> Result<AdmittedPlan> {
+    let _activation_barrier =
+        mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
     posture.verify_launch_runtime(plan)?;
     let assurance_runtime = posture.assurance_runtime(plan)?;
     validate_extension_bindings(plan)?;
     let extensions = verify_extension_packs(plan, extension_ctx)?;
     verify_registry_pack_assets(plan)?;
+    super::verify_project_generation(plan, posture)?;
     // Grants are checked in the pre-keystore window, and for the same
     // reason as synthesis: a plan we would refuse must never leave here with a
     // signature on it. A signed refused plan is indistinguishable from a
@@ -269,6 +272,8 @@ struct VerifiedAdmission<'a> {
 /// refuse runs before the nonce is spent, so a refused plan can be corrected
 /// and resubmitted, while an admitted one cannot be replayed.
 fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
+    let _activation_barrier =
+        mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
     let VerifiedAdmission {
         verified,
         signed,
@@ -286,6 +291,7 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
     // refuse a plan whose stored id doesn't match, so a run is only ever
     // admitted under an id that genuinely addresses its content.
     verify_plan_id(&verified).context("plan_id content-address check")?;
+    super::verify_project_generation(&verified, posture)?;
 
     verified
         .validate_ingress()
