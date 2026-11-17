@@ -304,6 +304,127 @@ fn one_signed_admission_cannot_start_a_second_backend() {
 }
 
 #[test]
+fn persistent_dispatch_defers_acceptance_and_spends_the_admission() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let dir = tempfile::tempdir().unwrap();
+    let audit = tempfile::tempdir().unwrap();
+    let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+    let second = mvm_runtime::AnyBackend::from_hypervisor("mock");
+    let config = VmStartConfig {
+        name: "persistent-dispatch".into(),
+        rootfs_path: "/store/rootfs.ext4".into(),
+        ..Default::default()
+    };
+    let admitted = admit_for_run(
+        &fixture_input(&config.name),
+        &SystemClock,
+        &InMemoryNonceLedger::new(),
+        Some(dir.path()),
+        None,
+        RunPosture::on_backend(Variant::Dev, backend.kind()),
+    )
+    .unwrap();
+    let emitter = crate::audit::emitter::AuditEmitter::with_dir(
+        ed25519_dalek::SigningKey::from_bytes(&[42; 32]),
+        audit.path(),
+    )
+    .unwrap();
+    let started = start_persistent(
+        StartAdmittedParams {
+            backend: &backend,
+            admitted,
+            config: config.clone(),
+            policy_bundle: None,
+            emitter: Some(&emitter),
+            assurance: None,
+        },
+        None,
+        Vec::new(),
+    )
+    .expect("persistent dispatch starts without accepting");
+    assert_eq!(started.vm_id.0, config.name);
+    assert!(matches!(
+        backend.status(&started.vm_id).unwrap(),
+        mvm_core::vm_backend::VmStatus::Running
+    ));
+    let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).unwrap_or_default();
+    assert!(!chain.contains("plan.launched"), "{chain}");
+
+    let error = match start_persistent(
+        StartAdmittedParams {
+            backend: &second,
+            admitted: started.admitted,
+            config,
+            policy_bundle: None,
+            emitter: Some(&emitter),
+            assurance: None,
+        },
+        None,
+        Vec::new(),
+    ) {
+        Ok(_) => panic!("a persistent admission cannot dispatch again"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("already dispatched"),
+        "{error:#}"
+    );
+    assert!(!matches!(
+        second.status(&started.vm_id),
+        Ok(mvm_core::vm_backend::VmStatus::Running)
+    ));
+}
+
+#[test]
+fn persistent_dispatch_refuses_a_share_added_after_admission() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let dir = tempfile::tempdir().unwrap();
+    let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+    let mut config = VmStartConfig {
+        name: "persistent-unadmitted-share".into(),
+        rootfs_path: "/store/rootfs.ext4".into(),
+        ..Default::default()
+    };
+    let admitted = admit_for_run(
+        &fixture_input(&config.name),
+        &SystemClock,
+        &InMemoryNonceLedger::new(),
+        Some(dir.path()),
+        None,
+        RunPosture::on_backend(Variant::Dev, backend.kind()),
+    )
+    .unwrap();
+    config.volumes.push(mvm_core::vm_backend::VmVolume {
+        host: "/store/unadmitted-share".into(),
+        guest: "/mnt/unadmitted".into(),
+        read_only: true,
+        kind: mvm_core::vm_backend::VmVolumeKind::Disk,
+        ..Default::default()
+    });
+    let vm_id = mvm_core::vm_backend::VmId(config.name.clone());
+    let error = match start_persistent(
+        StartAdmittedParams {
+            backend: &backend,
+            admitted,
+            config,
+            policy_bundle: None,
+            emitter: None,
+            assurance: None,
+        },
+        None,
+        Vec::new(),
+    ) {
+        Ok(_) => panic!("an unadmitted share must refuse before dispatch"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("admitted-shares"), "{error:#}");
+    assert!(!matches!(
+        backend.status(&vm_id),
+        Ok(mvm_core::vm_backend::VmStatus::Running)
+    ));
+}
+
+#[test]
 fn a_campaign_that_cannot_open_rolls_the_launch_back() {
     // The session opens *after* the backend start, so a failure there used
     // to return with the workload still running.

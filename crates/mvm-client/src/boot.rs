@@ -1,13 +1,9 @@
-//! Host-local VMM dispatch for a fully-prepared boot.
+//! Host-local dispatch for admitted boots and unmigrated prepared sources.
 //!
-//! The CLI resolves everything a workload needs (rootfs, kernel, verity,
-//! overlay, admission) into a `VmStartConfig`, then hands it here. This owns the
-//! VMM-selection + start dispatch so the CLI stays off
-//! `mvm_runtime::backend::AnyBackend`. The signed-plan admission gate (a
-//! mvm-hostd concern) and the launched/failed audit emits stay CLI-side — this
-//! seam is only the backend start. It is a host-local free function, not an
-//! `MvmClient` trait method: it carries a runtime `VmStartConfig`, which the
-//! REST-facing trait deliberately cannot.
+//! Persistent starts hand their one-use admitted plan to hostd while keeping
+//! post-readiness acceptance in the client. The prepared-start helpers below
+//! remain for sources not yet migrated to that executor; no serialized plan
+//! projection grants authority to either path.
 
 use crate::{MvmError, Result};
 use mvm_core::protocol::vm_backend::{VmId, VmStatus};
@@ -220,6 +216,46 @@ pub fn start_prepared_custodied_with_verified_runtime(
             reason: format!("{e:#}"),
         })?;
     Ok(StartedVm { backend, vm_id })
+}
+
+/// Spend a persistent admission through hostd while retaining its readiness owner.
+pub(crate) fn start_admitted_persistent(
+    backend: mvm_runtime::backend::AnyBackend,
+    config: mvm_core::vm_backend::VmStartConfig,
+    admission: crate::admission::AdmissionContext,
+    images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
+    runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
+) -> anyhow::Result<(StartedVm, crate::admission::AdmissionContext)> {
+    let crate::admission::AdmissionContext {
+        admitted,
+        emitter,
+        policy_bundle,
+        host_signer_public_path,
+    } = admission;
+    let dispatched = mvm_hostd::plan_admission::start_persistent(
+        mvm_hostd::plan_admission::StartAdmittedParams {
+            backend: &backend,
+            admitted,
+            config,
+            policy_bundle: policy_bundle.as_ref(),
+            emitter: Some(&emitter),
+            assurance: None,
+        },
+        runtime,
+        images,
+    )?;
+    Ok((
+        StartedVm {
+            backend,
+            vm_id: dispatched.vm_id,
+        },
+        crate::admission::AdmissionContext {
+            admitted: dispatched.admitted,
+            emitter,
+            policy_bundle,
+            host_signer_public_path,
+        },
+    ))
 }
 
 /// The host-only counterpart keeps original admission, volume and runtime
