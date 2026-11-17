@@ -76,8 +76,8 @@ impl TopLevelCommand for Commands {
             self,
             Commands::Trust(trust::Args {
                 action: trust::TrustAction::Audit(ops::audit::Args {
-                    action: ops::audit::AuditAction::ProveConsistency { .. }
-                        | ops::audit::AuditAction::VerifyConsistency { .. },
+                    action: ops::audit::AuditAction::ProveConsistency(_)
+                        | ops::audit::AuditAction::VerifyConsistency(_),
                 }),
             })
         )
@@ -127,15 +127,15 @@ impl TopLevelCommand for Commands {
             Commands::Trust(trust::Args {
                 action:
                     trust::TrustAction::Audit(ops::audit::Args {
-                        action: ops::audit::AuditAction::ProveConsistency { roots },
+                        action: ops::audit::AuditAction::ProveConsistency(roots),
                     }),
             }) => Some(ops::audit::prove_consistency(roots)),
             Commands::Trust(trust::Args {
                 action:
                     trust::TrustAction::Audit(ops::audit::Args {
-                        action: ops::audit::AuditAction::VerifyConsistency { proof, roots },
+                        action: ops::audit::AuditAction::VerifyConsistency(args),
                     }),
-            }) => Some(ops::audit::verify_consistency(proof, roots)),
+            }) => Some(ops::audit::verify_consistency(args)),
             Commands::Backend(backend::Args {
                 action: backend::BackendCmd::Detect(args),
                 ..

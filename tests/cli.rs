@@ -58,6 +58,7 @@ fn audit_consistency_real_commands_generate_verify_and_refuse_rollback() {
         let empty_home = dir.path().join(format!("empty-{verb}"));
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_mvmctl"));
         cmd.env("MVM_HOME", &empty_home)
+            .env("HOME", dir.path())
             .env("MVM_NO_LEGACY_BANNER", "1")
             .args(["trust", "audit", verb])
             .arg("--old-root")
@@ -82,6 +83,7 @@ fn audit_consistency_real_commands_generate_verify_and_refuse_rollback() {
     let command = |verb: &str, old: &std::path::Path, new: &std::path::Path| {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_mvmctl"));
         cmd.env("MVM_HOME", &home)
+            .env("HOME", dir.path())
             .env("MVM_NO_LEGACY_BANNER", "1")
             .args(["trust", "audit", verb])
             .arg("--old-root")

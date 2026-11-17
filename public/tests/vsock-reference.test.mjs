@@ -224,8 +224,8 @@ test("control schema roots still name every Rust request and response", () => {
 test("documented control bounds cannot regress to double JSON envelope accounting", () => {
   const source = readRepoFile("crates/mvm-agentd/src/vsock/mod.rs");
   for (const declaration of [
-    "pub const PROTOCOL_VERSION: u32 = 2;",
-    "pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 2;",
+    "pub const PROTOCOL_VERSION: u32 = 3;",
+    "pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 3;",
     "pub const MAX_FRAME_SIZE: usize = 256 * 1024;",
     "const JSON_BYTE_ARRAY_WORST_CASE: usize = 4;",
     "const SEALED_ENVELOPE_EXPANSION: usize = JSON_BYTE_ARRAY_WORST_CASE;",
