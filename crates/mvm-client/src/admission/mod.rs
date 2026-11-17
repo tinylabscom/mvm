@@ -346,6 +346,8 @@ pub enum CliAdmission {
     Dispatched(Box<AuditContinuation>),
 }
 
+pub use cli_dispatch::FsQuickBootAdmission;
+
 /// Private fields keep the pending authority one-shot.
 pub struct PendingCliAdmission {
     authority: AdmittedPlan,
@@ -1376,7 +1378,7 @@ pub(crate) mod admit_plan_tests {
     use super::*;
     use std::io::Write;
 
-    fn isolated_home() -> (mvm_core::util::test_env::TestEnv, tempfile::TempDir) {
+    pub(super) fn isolated_home() -> (mvm_core::util::test_env::TestEnv, tempfile::TempDir) {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let home = tempfile::tempdir().expect("tempdir");
         env.isolate_mvm_home(home.path());

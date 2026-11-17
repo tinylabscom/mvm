@@ -113,6 +113,18 @@ pub fn record_uncertain_restore_stop(ctx: &AdmissionContext, name: &str, err: &a
 }
 
 impl super::AuditContinuation {
+    /// Preserve the filesystem fork's launch record and best-effort plan persistence.
+    pub fn emit_fork_launched(&self, backend: &str) {
+        if let Err(error) = self.emitter.emit_launched(self.plan(), backend) {
+            tracing::warn!(%error, "audit emit_launched failed (non-fatal)");
+        }
+        if let Err(error) =
+            mvm_hostd::audit::plan_persist::write_plan(&self.plan().workload.0, self.plan())
+        {
+            tracing::warn!(%error, "persisting fork plan failed (non-fatal)");
+        }
+    }
+
     /// Record and seal a command, output or teardown failure on this plan's chain.
     pub fn emit_failed(&self, class: &str, err: &anyhow::Error) {
         emit_failure(&self.emitter, self.plan(), class, err);

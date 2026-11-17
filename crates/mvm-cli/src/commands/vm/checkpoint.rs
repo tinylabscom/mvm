@@ -1034,7 +1034,8 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
     }
     let verified_runtime = release
         .map(|release| super::up::verify_release_runtime_set(&start_config, release))
-        .transpose()?;
+        .transpose()?
+        .map(std::sync::Arc::new);
 
     let ledger = mvm_client::admission::InMemoryNonceLedger::new();
     let configured_images_dir = mvm_build::image_source::configured_images_dir();
@@ -1099,23 +1100,9 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         admission.policy_bundle.as_ref(),
     )?;
 
-    // Mint the child's verb-grant sidecar. The backend's cmdline builder
-    // reads it via verb_grant_cmdline_token at start time.
-    if super::up::persists_plan_before_start(&effective_hypervisor) {
-        mvm_client::admission::stash_plan_for_bridge(&start_config)?;
-    }
-
-    if let Err(error) = p.prepared.validate_admitted_plan(&admission.admitted) {
-        let error = anyhow::Error::new(error);
-        super::up::emit_failed(&admission, "fork-secret-policy", &error);
-        return Err(error);
-    }
     let backend = AnyBackend::from_hypervisor(&effective_hypervisor);
-    if let Err(e) = backend.start_with_verified_runtime(&start_config, verified_runtime.as_ref()) {
-        super::up::emit_failed(&admission, "backend-start", &e);
-        return Err(e);
-    }
-    super::up::emit_launched(&admission, &effective_hypervisor, true);
+    mvm_client::admission::FsQuickBootAdmission::new(admission, p.prepared, verified_runtime)?
+        .start(&backend, start_config)?;
 
     if p.emit_text {
         ui::success(&format!(

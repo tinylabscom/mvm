@@ -110,7 +110,7 @@ pub use shares::enforce_admitted_shares;
 pub use start::{
     CliStartFailure, DispatchedPersistent, StartAdmittedParams, StartedMachine, admit_and_start,
     start_admitted, start_admitted_owned_actor, start_admitted_owned_actor_with_bootstrap,
-    start_cli_transient, start_persistent,
+    start_cli_transient, start_fs_quick_fork, start_persistent,
 };
 pub(crate) use start::{
     admit_synthesized_with_verified_release, start_admitted_with_verified_release,

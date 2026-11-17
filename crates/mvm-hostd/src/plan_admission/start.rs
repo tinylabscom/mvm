@@ -33,6 +33,8 @@ enum StartFinalization {
     Persistent {
         writable_images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
     },
+    /// Fork launch/failure audit stays with the CLI; no immediate grant acceptance or charge.
+    FsQuickFork,
 }
 
 /// Distinguish an already-audited pack refusal, a CLI-owned failure, and an uncertain stop.
@@ -241,6 +243,15 @@ pub fn start_cli_transient(
     .map(|started| started.vm_id)
 }
 
+/// Dispatch a one-use admitted filesystem child through the common gates.
+pub fn start_fs_quick_fork(
+    params: StartAdmittedParams<'_>,
+    verified_runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
+) -> Result<VmId> {
+    start_admitted_with_finalization(params, verified_runtime, StartFinalization::FsQuickFork)
+        .map(|started| started.vm_id)
+}
+
 fn start_admitted_with_finalization(
     params: StartAdmittedParams<'_>,
     verified_runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
@@ -251,7 +262,7 @@ fn start_admitted_with_finalization(
 ) -> Result<StartTailResult> {
     let cli_transient = matches!(finalization, StartFinalization::CliTransient { .. });
     let persistent = matches!(finalization, StartFinalization::Persistent { .. });
-
+    let fork = matches!(finalization, StartFinalization::FsQuickFork);
     let backend = params.backend;
     let mut admitted = params.admitted;
     anyhow::ensure!(
@@ -334,6 +345,7 @@ fn start_admitted_with_finalization(
         Ok(prepared) => prepared,
         Err((stage, err)) => {
             if !cli_transient
+                && !fork
                 && let Some(emitter) = params.emitter
                 && let Err(e) = emitter.emit_failed(admitted.plan(), stage, &format!("{err:#}"))
             {
@@ -383,9 +395,10 @@ fn start_admitted_with_finalization(
         }
         return Err(err);
     }
-    if persistent && super::persists_plan_before_start(backend.name()) {
+    if (persistent || fork) && super::persists_plan_before_start(backend.name()) {
         super::stash_plan_for_bridge(&config).inspect_err(|err| {
-            if let Some(emitter) = params.emitter
+            if !fork
+                && let Some(emitter) = params.emitter
                 && let Err(e) =
                     emitter.emit_failed(admitted.plan(), "bridge-plan", &format!("{err:#}"))
             {
@@ -502,9 +515,10 @@ fn start_admitted_with_finalization(
                     || stop_actor(&mut actor_owner),
                     FailureAuditPolicy::OwnedAfterConfirmedRollback,
                 )?)
-            } else if cli_transient || persistent {
+            } else if cli_transient || persistent || fork {
                 // The CLI finalizes on teardown; persistent starts finalize
-                // after authenticated readiness. Neither accepts here.
+                // after authenticated readiness. Fs-quick forks retain their
+                // previous launch-time audit without immediate grant acceptance.
                 None
             } else {
                 Some(apply_admitted_grants_or_undo_launch(
@@ -529,11 +543,12 @@ fn start_admitted_with_finalization(
                     params.emitter,
                     || stop_actor(&mut actor_owner),
                 )?;
-            } else if !cli_transient && !persistent {
+            } else if !cli_transient && !persistent && !fork {
                 record_charge_or_undo_launch(backend, &vm_id, &vm_name, &admitted, params.emitter)?;
             }
             if !cli_transient
                 && !persistent
+                && !fork
                 && let Some(emitter) = params.emitter
             {
                 if let Err(e) = emitter.emit_launched(admitted.plan(), &backend_name) {
@@ -576,12 +591,16 @@ fn start_admitted_with_finalization(
                     backend,
                     vm_id: &vm_id,
                     admitted: &admitted,
-                    emitter: if cli_transient { None } else { params.emitter },
+                    emitter: if cli_transient || fork {
+                        None
+                    } else {
+                        params.emitter
+                    },
                     stage: "assurance-session",
                     reason: "the declared assurance campaign could not be opened",
                     err,
                 };
-                return Err(if cli_transient {
+                return Err(if cli_transient || fork {
                     cli_rollback_error(undo_cli_launch(undo))
                 } else {
                     undo_start(undo, &mut actor_owner)
@@ -624,12 +643,12 @@ fn start_admitted_with_finalization(
                         backend,
                         vm_id: &vm_id,
                         admitted: &admitted,
-                        emitter: if cli_transient { None } else { params.emitter },
+                        emitter: if cli_transient || fork { None } else { params.emitter },
                         stage: "mailbox-process",
                         reason: "the granted guest mailbox could not be served",
                         err,
                     };
-                    return Err(if cli_transient {
+                    return Err(if cli_transient || fork {
                         cli_rollback_error(undo_cli_launch(undo))
                     } else {
                         undo_start(undo, &mut actor_owner)
@@ -668,6 +687,7 @@ fn start_admitted_with_finalization(
                 };
             }
             if !cli_transient
+                && !fork
                 && let Some(emitter) = params.emitter
                 && let Err(e) =
                     emitter.emit_failed(admitted.plan(), "backend-start", &format!("{err:#}"))

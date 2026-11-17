@@ -1385,6 +1385,108 @@ fn cli_transient_defers_launch_narrative_without_readmitting() {
 
 #[cfg(unix)]
 #[test]
+fn fs_quick_fork_spends_one_admission_without_immediate_acceptance() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let dir = tempfile::tempdir().expect("test directory");
+    let backend = mvm_runtime::AnyBackend::Mock(
+        mvm_runtime::mock::MockBackend::new().with_failing_apply_grants(),
+    );
+    let config = VmStartConfig {
+        name: "fs-quick-one-use".into(),
+        rootfs_path: "/store/rootfs.ext4".into(),
+        ..Default::default()
+    };
+    let admitted = admit_for_run(
+        &fixture_input(&config.name),
+        &SystemClock,
+        &InMemoryNonceLedger::new(),
+        Some(dir.path()),
+        None,
+        RunPosture::on_backend(Variant::Dev, backend.kind()).with_runtime(Some(&config)),
+    )
+    .expect("one admission");
+    let vm_name = config.name.clone();
+    let started = start_fs_quick_fork(
+        StartAdmittedParams {
+            backend: &backend,
+            admitted,
+            config,
+            policy_bundle: None,
+            emitter: None,
+            assurance: None,
+        },
+        None,
+    )
+    .expect("fork reaches mock without calling immediate grant acceptance");
+    assert_eq!(started, VmId(vm_name.clone()));
+    assert!(
+        !mvm_core::config::vm_state_dir(&vm_name)
+            .join("admitted-charge.json")
+            .exists(),
+        "fork does not introduce immediate host budget charging"
+    );
+    backend.stop(&started).expect("stop mock VM");
+}
+
+#[cfg(unix)]
+#[test]
+fn fs_quick_fork_refuses_unadmitted_share_before_backend_start() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let dir = tempfile::tempdir().expect("test directory");
+    let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+    let config = VmStartConfig {
+        name: "fs-quick-refusal".into(),
+        rootfs_path: "/store/rootfs.ext4".into(),
+        ..Default::default()
+    };
+    let admitted = admit_for_run(
+        &fixture_input(&config.name),
+        &SystemClock,
+        &InMemoryNonceLedger::new(),
+        Some(dir.path()),
+        None,
+        RunPosture::on_backend(Variant::Dev, backend.kind()).with_runtime(Some(&config)),
+    )
+    .expect("one admission");
+    let changed = VmStartConfig {
+        volumes: vec![mvm_core::vm_backend::VmVolume {
+            host: "/store/unadmitted-share".into(),
+            guest: "/mnt/unadmitted".into(),
+            size: String::new(),
+            read_only: true,
+            kind: mvm_core::vm_backend::VmVolumeKind::Disk,
+            materialized_image: None,
+            volume_label: None,
+            encrypted: false,
+            share_include: Vec::new(),
+            share_exclude: Vec::new(),
+        }],
+        ..config
+    };
+    let error = start_fs_quick_fork(
+        StartAdmittedParams {
+            backend: &backend,
+            admitted,
+            config: changed,
+            policy_bundle: None,
+            emitter: None,
+            assurance: None,
+        },
+        None,
+    )
+    .expect_err("unadmitted share refuses before backend start");
+    assert!(
+        error.to_string().contains("admission gate refused"),
+        "{error:#}"
+    );
+    assert!(
+        backend.list().expect("mock list").is_empty(),
+        "refused fork must not start the backend"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn cli_transient_gate_refusal_leaves_cli_failure_audit_to_the_caller() {
     let (_env, _home) = host_with_ceiling(Default::default());
     let dir = tempfile::tempdir().expect("test directory");
