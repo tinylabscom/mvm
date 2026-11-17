@@ -13,7 +13,7 @@
 use clap::ArgMatches;
 use clap::parser::ValueSource;
 use mvm_client::admission::bundle_resources::{
-    AppliedSizing, NamedSizing, SizingDefaults, memory_cap_mib, seed,
+    AppliedSizing, NamedSizing, SizingDefaults, host_memory_cap_mib, seed,
 };
 
 use super::RunArgs;
@@ -98,16 +98,6 @@ pub(in crate::commands) fn installed_bundle_sizing(key: &str) -> anyhow::Result<
     })
 }
 
-/// What this host lets a defaulted memory size take, read from its own config.
-fn host_memory_cap() -> Option<u64> {
-    let config = mvm_core::user_config::load(None);
-    memory_cap_mib(
-        &config.grant_ceiling(),
-        &config.host_budget(),
-        mvm_hostd::admission_budget::committed().memory_mib,
-    )
-}
-
 /// Apply the defaults of the installed bundle `key` names, if it records any,
 /// and say so on stderr.
 pub(in crate::commands) fn apply_bundle_defaults(
@@ -115,7 +105,7 @@ pub(in crate::commands) fn apply_bundle_defaults(
     key: &str,
 ) -> anyhow::Result<()> {
     let defaults = installed_bundle_sizing(key)?;
-    if !apply(args, defaults, host_memory_cap()) {
+    if !apply(args, defaults, host_memory_cap_mib()) {
         return Ok(());
     }
     let applied = args.explicit_resources.bundle;

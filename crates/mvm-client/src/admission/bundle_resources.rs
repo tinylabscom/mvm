@@ -136,6 +136,19 @@ pub fn memory_cap_mib(
     }
 }
 
+/// What this host lets a defaulted memory size take right now: its own
+/// config's per-workload ceiling and host-wide budget, against its currently
+/// committed memory.
+#[must_use]
+pub fn host_memory_cap_mib() -> Option<u64> {
+    let config = mvm_core::user_config::load(None);
+    memory_cap_mib(
+        &config.grant_ceiling(),
+        &config.host_budget(),
+        mvm_hostd::admission_budget::committed().memory_mib,
+    )
+}
+
 /// Take from `defaults` what the caller did not name, capping memory at `cap`.
 ///
 /// A cap of zero lowers nothing: a zero-sized machine is not a smaller one, and
