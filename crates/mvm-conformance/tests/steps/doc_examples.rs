@@ -554,7 +554,7 @@ fn stage_audit_consistency(dir: &Path, home: &Path) {
     };
     let plan = PlanFixture::new()
         .tenant("local")
-        .plan_id(&format!(
+        .plan_id(format!(
             "doc-consistency-{}",
             dir.file_name()
                 .and_then(|n| n.to_str())
