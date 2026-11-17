@@ -109,6 +109,7 @@ pub mod standby;
 pub mod storage;
 pub mod stream;
 mod stream_binding;
+mod stream_history;
 #[cfg(feature = "tracing-bridge")]
 pub mod stream_tracing;
 pub mod telemetry;

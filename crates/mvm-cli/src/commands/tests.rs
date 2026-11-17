@@ -6117,6 +6117,26 @@ fn audit_consistency_bypasses_telemetry_and_interactive_update_notices() {
     assert!(!publish.command.is_offline_audit_command());
 }
 
+#[test]
+fn verified_logs_bypass_startup_but_ordinary_logs_do_not() {
+    let verified = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "logs",
+        "vm",
+        "--verified-plan-id",
+        "exact-plan",
+    ])
+    .unwrap();
+    assert!(verified.command.is_offline_audit_command());
+    assert!(verified.command.is_early_command());
+    let ordinary = Cli::try_parse_from(["mvmctl", "machine", "logs", "vm"]).unwrap();
+    assert!(!ordinary.command.is_offline_audit_command());
+    assert!(!ordinary.command.is_early_command());
+    // There is no top-level logs alias in the shipped command tree.
+    assert!(Cli::try_parse_from(["mvmctl", "logs", "vm"]).is_err());
+}
+
 fn exits_early(argv: &[&str]) -> bool {
     Cli::try_parse_from(argv)
         .unwrap()

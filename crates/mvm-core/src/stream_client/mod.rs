@@ -45,8 +45,9 @@ mod wire;
 pub use console::{ConsoleTail, ConsoleUnsupported};
 pub use opts::{KindFilter, StreamOpts, StreamOptsBuilder};
 pub use output::{
-    EmptyHistory, OutputLocator, OutputRecord, OutputRequest, RecordOrigin, SpliceGap,
-    StreamAvailability, Truncation, VmOutputStream, open_vm_output, open_vm_output_at,
+    EmptyHistory, OutputLocator, OutputRecord, OutputRequest, RecordOrigin, SealedHistoryRefusal,
+    SealedOutputSnapshot, SpliceGap, StreamAvailability, Truncation, VmOutputStream,
+    open_sealed_output_at, open_vm_output, open_vm_output_at,
 };
 pub use reader::{
     FramedStreamReader, StreamError, StreamReader, connect_stream, connect_stream_at,

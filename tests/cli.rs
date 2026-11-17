@@ -1244,6 +1244,189 @@ fn machine_logs_reads_host_state_without_dev_vm() {
     );
 }
 
+#[test]
+fn verified_machine_logs_are_reachable_and_never_initialize_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("absent-home");
+    let output = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", &home)
+        .env("HOME", temp.path())
+        .args([
+            "machine",
+            "logs",
+            "vm",
+            "--verified-plan-id",
+            "sha256:exact-plan",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("host-signer.pub"), "{stderr}");
+    assert!(!home.exists(), "read-only verification created host state");
+    for flag in ["--follow", "--hypervisor"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+            .env("MVM_HOME", &home)
+            .args(["machine", "logs", "vm", "--verified-plan-id", "plan", flag])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used"));
+        assert!(!home.exists());
+    }
+    let help = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["machine", "logs", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8_lossy(&help.stdout);
+    for flag in ["--verified-plan-id", "--tenant", "--pubkey"] {
+        assert!(help.contains(flag), "{help}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn verified_machine_logs_emit_bound_output_without_audit_or_console_side_effects() {
+    use mvm_core::stream_client::protected::ProtectedRun;
+    use mvm_core::transcript::{
+        self, CaptureBinding, CaptureBounds, Direction, PayloadEncoding, RetentionPolicy,
+        TranscriptWriter, TranscriptWriterConfig,
+    };
+    use mvm_hostd::supervisor::PlanAuditEntry;
+
+    let home = tempfile::tempdir().unwrap();
+    let keys = mvm_core::config::mvm_keys_dir_at(home.path());
+    let audit = home.path().join("audit");
+    let protected = audit.join("workload-output").join(hex::encode("vm"));
+    let run = ProtectedRun {
+        version: 1,
+        run: "123-456".into(),
+        persists: true,
+    };
+    let generation = run
+        .directory(&protected)
+        .unwrap()
+        .join("00000000000000000000");
+    mvm_core::config::create_private_dir(&generation).unwrap();
+    mvm_core::config::create_private_dir(&keys).unwrap();
+    run.publish(&protected).unwrap();
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[61; 32]);
+    let public = keys.join("host-signer.pub");
+    std::fs::write(&public, signing.verifying_key().as_bytes()).unwrap();
+    let kek = transcript::load_or_init_kek(&keys).unwrap();
+    let key = mvm_core::crypto::aead::Key::random();
+    let wrapped = transcript::wrap_data_key(&kek, &key);
+    let now = transcript::retention_now().unwrap();
+    let mut writer = TranscriptWriter::new(
+        &generation,
+        key,
+        TranscriptWriterConfig {
+            capture_id: "cli-capture".into(),
+            binding: CaptureBinding {
+                tenant_id: "local".into(),
+                vm_name: "vm".into(),
+                session_id: None,
+            },
+            bounds: CaptureBounds {
+                max_duration_secs: 60,
+                max_bytes: 8192,
+                max_chunks: 16,
+            },
+            retention: RetentionPolicy::FailClosed,
+            at_rest: Some(Default::default()),
+            generation_budget: None,
+            payload_encoding: PayloadEncoding::StreamRecordV1,
+            created_unix_secs: now,
+            recipient: "test".into(),
+            wrapped_data_key_b64: wrapped,
+        },
+    )
+    .unwrap();
+    let record = mvm_contract::stream::StreamRecord {
+        seq: 0,
+        source: mvm_contract::stream::StreamSource::Console,
+        kind: mvm_contract::stream::StreamKind::Stdout,
+        host_unix_nanos: now * 1_000_000_000,
+        prev_hash: [0; 32],
+        payload: b"verified-cli-output\n".to_vec(),
+    };
+    writer
+        .push(Direction::Stdout, &serde_json::to_vec(&record).unwrap())
+        .unwrap();
+    let manifest = writer.finalize_at(now).unwrap();
+    drop(writer);
+    std::fs::write(
+        generation.join(transcript::MANIFEST_FILENAME),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    let entry = PlanAuditEntry {
+        timestamp: chrono::Utc::now(),
+        tenant: mvm_core::plan::TenantId("local".into()),
+        plan_id: mvm_core::plan::PlanId("exact-plan".into()),
+        plan_version: 1,
+        bundle_id: None,
+        bundle_version: None,
+        image_name: "fixture".into(),
+        image_sha256: "00".repeat(32),
+        caller_commitment: None,
+        event: "gateway.transcript_sealed".into(),
+        labels: [
+            ("capture_id".into(), manifest.capture_id.clone()),
+            ("vm_name".into(), "vm".into()),
+            ("transcript_root".into(), manifest.sealed_root_hex),
+            ("chunk_count".into(), "1".into()),
+            ("adopted".into(), "false".into()),
+        ]
+        .into(),
+    };
+    let signed = mvm_contract::verify::seal(entry, [0; 32], &signing).unwrap();
+    let mut chain = serde_json::to_vec(&signed).unwrap();
+    chain.push(b'\n');
+    let audit_file = audit.join("local.jsonl");
+    std::fs::write(&audit_file, &chain).unwrap();
+    let state = mvm_core::config::vm_state_dir_at(home.path(), "vm");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(state.join("console.log"), b"forbidden-console").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", home.path())
+        .env("HOME", home.path())
+        .args([
+            "machine",
+            "logs",
+            "vm",
+            "--verified-plan-id",
+            "exact-plan",
+            "--pubkey",
+        ])
+        .arg(&public)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"verified-cli-output\n");
+    let notice = String::from_utf8_lossy(&output.stderr);
+    assert!(notice.contains("current routed protected run"), "{notice}");
+    assert!(notice.contains("Not historical discovery"), "{notice}");
+    assert_eq!(std::fs::read(&audit_file).unwrap(), chain);
+    assert!(!keys.join("host-signer.ed25519").exists());
+    assert!(!home.path().join("config.toml").exists());
+    let refused = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", home.path())
+        .env("HOME", home.path())
+        .args(["machine", "logs", "vm", "--verified-plan-id", "exact"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(refused.stdout.is_empty());
+    assert!(!String::from_utf8_lossy(&refused.stderr).contains("Verified exact"));
+    assert_eq!(std::fs::read(audit_file).unwrap(), chain);
+}
+
 /// Regression guard: the `ops bench` verb was removed — benchmarking is a
 /// dev/CI concern, not a shipped end-user command.
 #[test]

@@ -1521,6 +1521,32 @@ status remain runtime-local. Legacy recordings are not moved or enrolled.
 Restart publishes a fresh run selection without merging earlier sequence
 spaces; a retained family belonging to another tenant refuses name reuse.
 
+**Verified current-run readback.** `mvmctl machine logs VM --verified-plan-id PLAN`
+reads only the currently routed protected run's sealed retained generations.
+`PLAN` must match the exact signed plan ID: image aliases and ID prefixes are
+not resolved. `--tenant` defaults to `local`. `--pubkey PATH` selects a trusted
+Ed25519 public key (raw 32 bytes, hex, or base64); without it, the existing
+`$MVM_HOME/keys/host-signer.pub` is read, never initialized.
+
+All selected manifests must authenticate for the exact tenant, plan, VM and
+capture before output is exposed, including generations excluded by `--stream`
+or `-n`. `-n` still bounds the retained matching record window (default 50).
+The command refuses `--follow` and `--hypervisor`, unsealed or missing history,
+legacy captures, invalid evidence and unbound output. It never connects to the
+broker, recovers active captures, or falls back to console output, including for
+adopted captures. A scope notice precedes bytes on stderr; declared loss,
+adoption and retired/unavailable generations remain explicit. Authenticated
+empty capture is not missing or retired output.
+
+This mode runs before ordinary command signing, state initialization, telemetry
+and update notices. Existing retention/custody checks remain active at delivery
+and may fsync existing audit files/directories; no audit event or key is created.
+The verification authenticates the trusted host's assertion, not a malicious
+host boundary. It does not discover older runs, prove routing freshness or
+canonical epoch identity, detect every deleted generation, distinguish repeated
+executions of the same tenant/plan/VM, or establish complete execution output.
+Ordinary `machine logs` behavior is unchanged.
+
 Raw supervisor stderr is deliberately discarded on this path, including
 startup failures; it is not retained or exportable. Public errors retain exit
 status and sanitized guidance rather than raw helper output.

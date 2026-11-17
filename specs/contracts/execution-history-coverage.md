@@ -181,6 +181,46 @@ history, and must not replay acknowledgements as new authority. Any future
 deterministic replay mode substitutes recorded external responses rather than
 repeating real-world effects.
 
+### Initial readback: current routed run
+
+The initial verified-output consumer is scoped to the current protected run
+selected at open by a VM's routing record, under an explicit exact tenant,
+plan ID and VM identity. The routing record is a locator, not an authenticated
+execution epoch. A concurrent route change must not switch the selected run
+during readback. Reusing a VM name does not grant access to, or discover,
+earlier runs. Historical-run discovery remains separate from this readback mode.
+Neither the routing record nor directory enumeration authenticates a complete
+generation set or proves route freshness. Exact plan binding cannot distinguish
+repeated executions using the same tenant, plan and VM identities.
+
+The client takes a sealed protected-history snapshot through the existing
+output reader and binds the same immutable manifest metadata to authenticated
+audit entries before releasing any output. It authenticates the output-binding
+audit entries once per open rather than once per generation. Existing retention
+and custody checks may independently reread audit evidence and remain in force
+at delivery; opening a history view cannot extend a payload's authorized lifetime.
+
+The command surface is `machine logs VM --verified-plan-id PLAN`. It refuses
+live follow and hypervisor-log modes. Missing, unsealed, legacy, unbound or
+invalid history never falls back to a live broker or console. Authenticated
+retirement is reported as unavailable payload, not as an empty capture.
+Adopted recovery and truncation remain explicit even when retained bytes
+authenticate successfully. Filters and the output-record limit select a
+retained window; they do not establish complete-run coverage or authorize
+ignoring an invalid capture in the selected run.
+
+The verified mode must not create signing keys, append command events, start
+telemetry export or perform ambient update checks. Ordinary logs retain their
+existing behavior. The scope notice precedes output bytes and identifies the
+current-run limitation, the selected window and any loss or unavailability.
+Generation enumeration and storage bounds remain finite; this mode is not an
+unbounded archive search or a deep-paging index.
+
+Read-only here excludes logical mutation and execution, not all filesystem
+effects: existing protected readers take shared leases and synchronize audit
+evidence before relying on it. Those custody requirements are not bypassed
+when storage cannot support them.
+
 ## Acceptance witnesses required before claiming implementation
 
 - Backend-specific coverage tests exercise each required producer and refusal

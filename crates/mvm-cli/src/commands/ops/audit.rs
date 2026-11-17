@@ -1137,7 +1137,7 @@ fn run_verify_inclusion(
 
 /// Load a trusted Ed25519 verifying key from a file. Accepts the raw
 /// 32-byte form (`~/.mvm/keys/host-signer.pub`), 64-char hex, or base64.
-pub(super) fn load_verifying_key(path: &std::path::Path) -> Result<VerifyingKey> {
+pub(in crate::commands) fn load_verifying_key(path: &std::path::Path) -> Result<VerifyingKey> {
     let raw =
         std::fs::read(path).with_context(|| format!("reading pubkey file {}", path.display()))?;
     // Raw 32-byte key half — the on-disk host-signer.pub shape.

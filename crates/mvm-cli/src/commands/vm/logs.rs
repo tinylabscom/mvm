@@ -24,6 +24,7 @@ use std::io::Write;
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, ValueEnum};
 
+use mvm_client::stream::{VerifiedOutput, VerifiedOutputRequest, open_verified_output};
 use mvm_contract::stream::{DisplayFrame, StreamKind};
 use mvm_core::config;
 use mvm_core::naming::validate_vm_name;
@@ -91,6 +92,15 @@ pub(in crate::commands) struct Args {
     /// Show the hypervisor's own diagnostic log instead of workload output
     #[arg(long)]
     pub hypervisor: bool,
+    /// Authenticate the current protected run's sealed retained output for this exact plan
+    #[arg(long, conflicts_with_all = ["follow", "hypervisor"])]
+    pub verified_plan_id: Option<String>,
+    /// Expected tenant for verified readback
+    #[arg(long, default_value = "local", requires = "verified_plan_id")]
+    pub tenant: String,
+    /// Trusted public key (raw, hex, or base64); default existing host-signer.pub, never initialized
+    #[arg(long, requires = "verified_plan_id")]
+    pub pubkey: Option<std::path::PathBuf>,
 }
 
 /// Roughly how many bytes one recorded record is worth, for turning `-n` into
@@ -125,8 +135,28 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 
 /// The command proper. Split from [`run`] so a test drives it without
 /// assembling a whole parsed `Cli` for two parameters neither arm reads.
-fn execute(args: Args) -> Result<()> {
+pub(in crate::commands) fn execute(args: Args) -> Result<()> {
     validate_vm_name(&args.name).with_context(|| format!("Invalid VM name: {:?}", args.name))?;
+    if let Some(plan_id) = &args.verified_plan_id {
+        anyhow::ensure!(
+            !args.follow && !args.hypervisor,
+            "verified output cannot follow or read hypervisor logs"
+        );
+        let default_key = config::mvm_keys_dir().join("host-signer.pub");
+        let trusted_key = crate::commands::ops::audit::load_verifying_key(
+            args.pubkey.as_deref().unwrap_or(&default_key),
+        )?;
+        let verified = open_verified_output(
+            &args.name,
+            VerifiedOutputRequest {
+                tenant: &args.tenant,
+                plan_id,
+                trusted_key: &trusted_key,
+                output: args.request(),
+            },
+        )?;
+        return show_verified_into(&args, verified, &mut Sinks::inherited());
+    }
     if args.hypervisor {
         return show_hypervisor_log(&args);
     }
@@ -245,6 +275,9 @@ fn attach_args(name: &str) -> Args {
         lines: ATTACH_REPLAY_LINES,
         stream: StreamSelector::All,
         hypervisor: false,
+        verified_plan_id: None,
+        tenant: "local".into(),
+        pubkey: None,
     }
 }
 
@@ -258,6 +291,21 @@ fn show(args: &Args, mut stream: VmOutputStream) -> Result<()> {
 fn show_into(args: &Args, stream: &mut VmOutputStream, sinks: &mut Sinks<'_>) -> Result<()> {
     announce(args, stream, sinks);
     pump(stream, sinks).with_context(|| format!("Reading output for microVM {:?}", args.name))
+}
+
+fn show_verified_into(args: &Args, verified: VerifiedOutput, sinks: &mut Sinks<'_>) -> Result<()> {
+    writeln!(
+        sinks.err,
+        "Verified exact plan binding for current routed protected run {}: {} sealed generations; \
+         {} retired/unavailable generations; showing at most {} retained matching records. \
+         Not historical discovery, canonical epoch binding, or complete execution output.",
+        verified.report().run,
+        verified.report().generations,
+        verified.report().retired_generations,
+        args.lines,
+    )?;
+    sinks.err.flush()?;
+    show_into(args, &mut verified.into_stream(), sinks)
 }
 
 /// Where each channel's bytes go.
@@ -716,6 +764,20 @@ mod tests {
             }
         }
         Captured { out, err }
+    }
+
+    #[test]
+    fn verified_flags_use_existing_trust_and_refuse_live_or_hypervisor_modes() {
+        let args = parse(&["vm", "--verified-plan-id", "exact-plan"]).unwrap();
+        assert_eq!(args.tenant, "local");
+        assert!(args.pubkey.is_none());
+        assert_eq!(args.verified_plan_id.as_deref(), Some("exact-plan"));
+        for flag in ["--follow", "--hypervisor"] {
+            assert!(parse(&["vm", "--verified-plan-id", "exact-plan", flag]).is_err());
+        }
+        assert!(parse(&["vm", "--pubkey", "key.pub"]).is_err());
+        assert!(parse(&["vm", "--tenant", "other"]).is_err());
+        assert!(parse(&["vm"]).is_ok());
     }
 
     #[test]

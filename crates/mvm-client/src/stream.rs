@@ -41,6 +41,10 @@
 pub use crate::stream_binding::{
     OutputAuditBinding, OutputBindingReport, VerifyOutputBindingError, verify_output_audit_binding,
 };
+pub use crate::stream_history::{
+    VerifiedOutput, VerifiedOutputError, VerifiedOutputReport, VerifiedOutputRequest,
+    open_verified_output, open_verified_output_at,
+};
 
 pub use mvm_core::stream_client::{
     ConsoleUnsupported, EmptyHistory, FramedStreamReader, KindFilter, MAX_BATCH_PAYLOAD_BYTES,
