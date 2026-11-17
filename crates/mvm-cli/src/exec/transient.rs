@@ -16,12 +16,30 @@ pub(super) struct BootAttempt<'a> {
     pub(super) start_config: &'a VmStartConfig,
     pub(super) verified_release:
         Option<&'a mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime>,
+    pub(super) admission:
+        Option<&'a std::cell::RefCell<Option<mvm_client::admission::CliAdmission>>>,
     pub(super) mailbox_posture: Option<&'a mvm_hostd::plan_admission::MailboxLaunchPosture>,
     pub(super) resolved: &'a ResolvedImage,
     /// The caller named this VM. A named run has an identity a shared standby
     /// cannot take on, so it keeps its cold path instead of requiring a claim.
     pub(super) user_named: bool,
     pub(super) writable_images: &'a mut mvm_vmm::driver::prepared_disks::WritableVolumeImages,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColdDispatch {
+    HostAdmitted,
+    Legacy,
+}
+
+impl ColdDispatch {
+    fn select(backend: &AnyBackend, has_admission: bool) -> Self {
+        if has_admission && backend.uses_cli_admitted_cold_dispatch() {
+            Self::HostAdmitted
+        } else {
+            Self::Legacy
+        }
+    }
 }
 
 /// Claim a warm standby for this attempt, or learn why it boots cold.
@@ -168,13 +186,18 @@ pub(super) fn boot_transient_vm(
         };
 
     if !booted {
-        mvm_hostd::mailbox_process::require_servable(
-            attempt.start_config,
-            attempt.backend,
-            attempt.mailbox_posture,
-        )?;
+        let admitted_cold = ColdDispatch::select(attempt.backend, attempt.admission.is_some())
+            == ColdDispatch::HostAdmitted;
+        if !admitted_cold {
+            mvm_hostd::mailbox_process::require_servable(
+                attempt.start_config,
+                attempt.backend,
+                attempt.mailbox_posture,
+            )?;
+        }
         ui::info(&format!("Booting transient VM '{vm_name}'..."));
-        if mvm_runtime::catalog::descriptor(attempt.backend.kind()).is_workload
+        if !admitted_cold
+            && mvm_runtime::catalog::descriptor(attempt.backend.kind()).is_workload
             && let Err(error) =
                 mvm_hostd::plan_admission::stash_plan_for_bridge(attempt.start_config)
         {
@@ -187,24 +210,58 @@ pub(super) fn boot_transient_vm(
             attempt.backend.name()
         ));
         sub.start(SubPhase::VmmCreate);
-        if let Err(e) = attempt.backend.start_custodied_verified_release(
-            attempt.start_config,
-            std::mem::take(attempt.writable_images),
-            attempt.verified_release,
-        ) {
+        let start = if let Some(admission) = attempt.admission.filter(|_| admitted_cold) {
+            let owner = admission
+                .borrow_mut()
+                .take()
+                .context("CLI cold launch lost its admitted authority")?;
+            let (owner, result) = owner.start_cold(
+                attempt.backend,
+                attempt.start_config.clone(),
+                std::mem::take(attempt.writable_images),
+            );
+            *admission.borrow_mut() = Some(owner);
+            result
+        } else {
+            #[cfg(unix)]
+            let started = attempt.backend.start_custodied_verified_release(
+                attempt.start_config,
+                std::mem::take(attempt.writable_images),
+                attempt.verified_release,
+            );
+            #[cfg(not(unix))]
+            let started = {
+                anyhow::ensure!(
+                    attempt.writable_images.is_empty(),
+                    "writable image custody is unavailable on this host"
+                );
+                attempt.backend.start(attempt.start_config)
+            };
+            started.map(|_| ())
+        };
+        if let Err(e) = start {
             drop(phase);
             emit_guest_console_diagnostic(&vm_name);
-            remove_transient_state_dir(&mvm_core::config::vm_state_dir(&vm_name).to_string_lossy());
+            if !matches!(
+                e.downcast_ref::<mvm_hostd::plan_admission::CliStartFailure>(),
+                Some(mvm_hostd::plan_admission::CliStartFailure::UncertainStop(_))
+            ) {
+                remove_transient_state_dir(
+                    &mvm_core::config::vm_state_dir(&vm_name).to_string_lossy(),
+                );
+            }
             return Err(e).context("starting transient microVM");
         }
         // The guest was told to serve a mailbox iff the plan grants one, and
         // the host side of it starts here or the launch fails.
-        if let Err(e) = mvm_hostd::mailbox_process::serve_started(
-            attempt.backend,
-            &VmId(vm_name.clone()),
-            attempt.start_config,
-            attempt.mailbox_posture,
-        ) {
+        if !admitted_cold
+            && let Err(e) = mvm_hostd::mailbox_process::serve_started(
+                attempt.backend,
+                &VmId(vm_name.clone()),
+                attempt.start_config,
+                attempt.mailbox_posture,
+            )
+        {
             drop(phase);
             remove_transient_state_dir(&mvm_core::config::vm_state_dir(&vm_name).to_string_lossy());
             return Err(e).context("starting transient microVM");
@@ -594,6 +651,227 @@ mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
 
+    #[test]
+    fn unmigrated_admitted_backends_keep_legacy_cold_dispatch() {
+        let wasm = AnyBackend::from_hypervisor("wasm");
+        let qemu = AnyBackend::from_hypervisor("qemu");
+        let apple_container = AnyBackend::from_hypervisor("apple-container");
+        let firecracker = AnyBackend::from_hypervisor("firecracker");
+        assert_eq!(ColdDispatch::select(&wasm, true), ColdDispatch::Legacy);
+        assert_eq!(ColdDispatch::select(&qemu, true), ColdDispatch::Legacy);
+        assert_eq!(
+            ColdDispatch::select(&apple_container, true),
+            ColdDispatch::Legacy
+        );
+        assert_eq!(
+            ColdDispatch::select(&firecracker, false),
+            ColdDispatch::Legacy
+        );
+        assert_eq!(
+            ColdDispatch::select(&firecracker, true),
+            ColdDispatch::HostAdmitted
+        );
+        let mock = AnyBackend::Mock(mvm_runtime::mock::MockBackend::new());
+        assert_eq!(
+            ColdDispatch::select(&mock, true),
+            ColdDispatch::HostAdmitted
+        );
+    }
+
+    fn admitted_mock_cold(
+        name: &str,
+        rootfs: &Path,
+        home: &Path,
+    ) -> (mvm_client::admission::CliAdmission, VmStartConfig) {
+        let ledger = mvm_client::admission::InMemoryNonceLedger::new();
+        let context = mvm_client::admission::admit_plan_for_boot(
+            mvm_client::admission::AdmitPlanForBootParams {
+                mailbox: None,
+                gpu: false,
+                instructions: Default::default(),
+                outputs: Vec::new(),
+                network_mode: Default::default(),
+                tenant: "local",
+                vm_name: name,
+                runtime_config: None,
+                backend_name: "mock",
+                configured_images_dir: None,
+                rootfs_path: rootfs,
+                kernel_path: None,
+                precomputed_image_sha256: None,
+                boot_artifact_identity: None,
+                cpus: 1,
+                mem_mib: 128,
+                seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+                secret_release: mvm_core::plan::SecretReleasePolicy::None,
+                secrets: Vec::new(),
+                caller_commitment: None,
+                ledger: &ledger,
+                keys_dir: Some(&home.join("keys")),
+                audit_dir: Some(&home.join("audit")),
+                policy_dir: None,
+                bundle_pin: None,
+                bundle_posture: None,
+                deps_volume: None,
+                shares: Vec::new(),
+                redaction: Default::default(),
+                network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+                agent_verb_override: Vec::new(),
+                restrict_agent_verbs: false,
+                services: Vec::new(),
+                grants: None,
+                backend_kind: Some(mvm_core::vm_backend::BackendKind::Mock),
+                entrypoint:
+                    mvm_client::admission::entrypoint_resolve::ResolvedEntrypoint::unresolved(
+                        "mock launch order",
+                    ),
+                assets: Vec::new(),
+            },
+        )
+        .expect("one real signed admission");
+        let config = VmStartConfig {
+            name: name.into(),
+            rootfs_path: rootfs.display().to_string(),
+            cpus: 1,
+            memory_mib: 128,
+            plan_json: Some(serde_json::to_string(context.admitted.signed()).expect("signed plan")),
+            bundle_json: context
+                .policy_bundle
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .expect("policy bundle"),
+            ..Default::default()
+        };
+        (
+            mvm_client::admission::CliAdmission::new_for_rootfs(context, rootfs),
+            config,
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn admitted_cli_cold_uses_hostd_once_and_refuses_before_mock_start_on_bad_share() {
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().expect("home");
+        env.isolate_mvm_home(home.path());
+        env.remove("MVM_RESIDENCY");
+        let rootfs = home.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"mock rootfs").expect("rootfs");
+
+        for gate_refusal in [false, true] {
+            let name = if gate_refusal {
+                "admitted-cli-gate-refusal"
+            } else {
+                "admitted-cli-cold"
+            };
+            let (owner, mut config) = admitted_mock_cold(name, &rootfs, home.path());
+            let id = owner.plan().plan_id.0.clone();
+            let signed = config.plan_json.clone().expect("signed plan projection");
+            if gate_refusal {
+                config.volumes.push(VmVolume {
+                    host: "/unadmitted/share".into(),
+                    guest: "/mnt/unadmitted".into(),
+                    read_only: true,
+                    kind: mvm_core::vm_backend::VmVolumeKind::Disk,
+                    ..Default::default()
+                });
+            }
+            let admitted = std::cell::RefCell::new(Some(owner));
+            let backend =
+                AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_required_bridge_plan());
+            let resolved = resolved_image();
+            let writable = home.path().join(format!("{name}.img"));
+            let sidecar = home.path().join(format!("{name}.lock"));
+            std::fs::write(&writable, b"writable mock image").expect("writable image");
+            let locked =
+                mvm_core::util::writable_image::LockedWritableImage::open(&writable, &sidecar)
+                    .expect("original writer custody");
+            let mut images = vec![(writable.clone(), locked)];
+            let mut attempt = BootAttempt {
+                backend: &backend,
+                start_config: &config,
+                verified_release: None,
+                admission: Some(&admitted),
+                mailbox_posture: None,
+                resolved: &resolved,
+                user_named: true,
+                writable_images: &mut images,
+            };
+            let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::new(false);
+            let booted = boot_transient_vm(name.into(), false, &mut attempt, None, &mut sub);
+            let status = backend.status(&VmId(name.into())).expect("mock status");
+            let state = mvm_core::config::vm_state_dir(name);
+            if gate_refusal {
+                let error = booted.err().expect("hostd final share gate must refuse");
+                assert!(
+                    format!("{error:#}").contains("admitted-shares"),
+                    "{error:#}"
+                );
+                assert_eq!(status, mvm_core::vm_backend::VmStatus::Stopped);
+                assert!(
+                    !state.join("plan.json").exists(),
+                    "no bridge after gate refusal"
+                );
+                admitted
+                    .borrow_mut()
+                    .take()
+                    .expect("original audit owner")
+                    .finish_legacy()
+                    .emit_failed("launch", &error);
+            } else {
+                assert_eq!(booted.expect("hostd admitted mock start").name, name);
+                assert_eq!(status, mvm_core::vm_backend::VmStatus::Running);
+                assert_eq!(
+                    std::fs::read_to_string(state.join("plan.json")).expect("bridge plan"),
+                    signed,
+                    "hostd stashes the original signed plan before backend start"
+                );
+                assert!(
+                    admitted
+                        .borrow()
+                        .as_ref()
+                        .expect("audit continuation")
+                        .check_legacy_projection(&config)
+                        .is_err(),
+                    "cold authority was consumed once"
+                );
+                backend.stop(&VmId(name.into())).expect("stop mock");
+            }
+            let chain = std::fs::read_to_string(home.path().join("audit/local.jsonl"))
+                .expect("admission chain");
+            assert!(chain.contains(&id), "original plan id on chain");
+            assert_eq!(
+                chain.matches("plan.admitted").count(),
+                if gate_refusal { 2 } else { 1 }
+            );
+            assert_eq!(
+                chain.matches("plan.failed").count(),
+                usize::from(gate_refusal)
+            );
+            assert_eq!(
+                chain.matches("session.sealed").count(),
+                usize::from(gate_refusal),
+                "only the refused run has a terminal seal"
+            );
+            assert!(!chain.contains("plan.launched"), "{chain}");
+            if gate_refusal {
+                let failed: serde_json::Value = chain
+                    .lines()
+                    .map(|line| {
+                        serde_json::from_str::<serde_json::Value>(line).expect("audit entry")
+                    })
+                    .find(|entry| entry["entry"]["event"] == "plan.failed")
+                    .expect("one failed audit entry");
+                assert_eq!(failed["entry"]["labels"]["error_class"], "launch");
+            }
+            assert!(
+                !state.join("admitted-charge.json").exists(),
+                "CLI does not add ordinary hostd budget charge"
+            );
+        }
+    }
+
     fn state_dirs(home: &Path) -> (TestEnv, (std::path::PathBuf, std::path::PathBuf)) {
         let mut env = TestEnv::new();
         env.isolate_mvm_home(home);
@@ -840,6 +1118,7 @@ mod tests {
                 backend: &backend,
                 start_config: &start_config,
                 verified_release: None,
+                admission: None,
                 mailbox_posture: None,
                 resolved: &resolved,
                 user_named: true,
@@ -910,6 +1189,7 @@ mod tests {
             backend: &backend,
             start_config: &start_config,
             verified_release: None,
+            admission: None,
             mailbox_posture: None,
             resolved: &resolved,
             user_named: true,
@@ -950,6 +1230,7 @@ mod tests {
             backend: &backend,
             start_config: &start_config,
             verified_release: None,
+            admission: None,
             mailbox_posture: None,
             resolved: &resolved,
             user_named: false,
@@ -973,6 +1254,7 @@ mod tests {
             backend: &backend,
             start_config: &start_config,
             verified_release: None,
+            admission: None,
             mailbox_posture: None,
             resolved: &resolved,
             user_named: false,
@@ -1074,6 +1356,7 @@ mod tests {
             backend: &backend,
             start_config: &start_config,
             verified_release: None,
+            admission: None,
             mailbox_posture: None,
             resolved: &resolved,
             user_named: false,

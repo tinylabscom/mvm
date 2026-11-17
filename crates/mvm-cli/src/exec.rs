@@ -662,8 +662,8 @@ fn run_inner(
     if let Some(runtime) = &_built_runtime {
         runtime.verify_config(&start_config)?;
     }
-    let admission = audit_owner.map(std::cell::RefCell::borrow);
-    if let Some(admission) = admission.as_ref() {
+    if let Some(admission) = audit_owner {
+        let admission = admission.borrow();
         let owner = admission
             .as_ref()
             .context("CLI launch has no signed admission owner before warm/cold selection")?;
@@ -673,6 +673,7 @@ fn run_inner(
         backend: &backend,
         start_config: &start_config,
         verified_release: verified_runtime.as_ref().map(|runtime| runtime.release()),
+        admission: audit_owner,
         mailbox_posture: mailbox_posture.as_ref(),
         resolved: &resolved,
         user_named: req.name.is_some(),
@@ -685,7 +686,6 @@ fn run_inner(
         timing.then_some(&mut warm_claim_marks),
         &mut sub_marks,
     )?;
-    drop(admission);
     let vm_name = booted.name;
     let launch_mode = booted.launch_mode;
     if let Some(sink) = posture {
@@ -1411,6 +1411,7 @@ pub fn resolve_launch(
             bundle_archive: bundle_archive.as_deref(),
             runtime_config: Some(&start_config),
             verified_runtime: verified_runtime.as_deref(),
+            verified_runtime_owner: verified_runtime.as_ref(),
         })?
     {
         let mut sub = sub;

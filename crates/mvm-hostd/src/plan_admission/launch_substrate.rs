@@ -159,10 +159,9 @@ pub(crate) fn write_secret_file(path: &std::path::Path, body: &[u8]) -> Result<(
 /// at mode 0600 via [`write_secret_file`] — see that helper's doc for
 /// why `std::fs::write` is insufficient.
 ///
-/// Lives in the producer (mvm-cli) rather than `microvm::run_from_build`
-/// because the producer is the only place that has the signed envelope
-/// in scope; `microvm` reads it back from disk inside the
-/// `target_os = "linux"` bridge-spawn block.
+/// Runs at the admitted dispatch boundary (or at the legacy CLI producer
+/// boundary for unmigrated launches), before the Linux bridge spawn reads
+/// the signed envelope back from disk.
 pub fn stash_plan_for_bridge(cfg: &mvm_core::vm_backend::VmStartConfig) -> Result<()> {
     stash_plan_and_mint_verb_grant(cfg).map(|_| ())
 }
