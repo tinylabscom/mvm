@@ -2,6 +2,29 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.28.0-rc.10] — 2026-11-17
+
+### Added
+- **audit**: Verify output bindings and signed history extension
+- **logs**: Add verified current-run history readback
+- **policy**: Activate committed local project generations
+
+### Documentation
+- **adr-057**: Propose Call/Cast/Reply service decisions for acceptance
+- **contracts**: Record the approved HVF owner design and the native probe findings
+
+### Fixed
+- Bind lifecycle recovery and cleanup to original instances
+- **client**: Hand admission the verified release on the pack build health boot
+
+### Other
+- Route persistent machine starts through admitted hostd dispatch
+- Pure call/reply conversation core
+- Reach release verification and acquisition through mvm-client
+
+### Testing
+- **build**: Witness production checkout selection on the live compiled-from tree
+
 ## [0.28.0-rc.9] — 2026-11-17
 
 ### Added
