@@ -118,6 +118,7 @@ pub struct MockDriver {
     /// tests have no use for it; a test asserting that teardown does not
     /// throw those bytes away sets it.
     dying_console_output: Vec<u8>,
+    fail_kill: bool,
     /// Whether `attach` refuses. Models the ordinary teardown race — a VM
     /// whose supervisor is already gone by the time a `stop` reaches it — so
     /// a test can prove the teardown steps that must run regardless still do.
@@ -159,6 +160,7 @@ impl MockDriver {
             delivered_identities: Arc::new(Mutex::new(Vec::new())),
             killed: Arc::new(Mutex::new(Vec::new())),
             dying_console_output: Vec::new(),
+            fail_kill: false,
             refuse_attach: false,
             resident_handoff: false,
             preloaded_standby: false,
@@ -179,6 +181,13 @@ impl MockDriver {
     #[must_use]
     pub fn refusing_attach(mut self) -> Self {
         self.refuse_attach = true;
+        self
+    }
+
+    /// Make termination fail without recording the VM as killed.
+    #[must_use]
+    pub fn with_failing_kill(mut self) -> Self {
+        self.fail_kill = true;
         self
     }
 
@@ -368,6 +377,7 @@ impl VmmDriver for MockDriver {
             guest_ends: Arc::clone(&self.guest_ends),
             killed: Arc::clone(&self.killed),
             dying_console_output: self.dying_console_output.clone(),
+            fail_kill: self.fail_kill,
         }))
     }
 
@@ -473,6 +483,7 @@ impl VmmDriver for MockDriver {
             guest_ends: Arc::clone(&self.guest_ends),
             killed: Arc::clone(&self.killed),
             dying_console_output: self.dying_console_output.clone(),
+            fail_kill: self.fail_kill,
         }))
     }
 
@@ -542,6 +553,7 @@ pub struct MockRunningVm {
     guest_ends: GuestEnds,
     killed: Arc<Mutex<Vec<String>>>,
     dying_console_output: Vec<u8>,
+    fail_kill: bool,
 }
 
 impl MockRunningVm {
@@ -575,6 +587,9 @@ impl RunningVm for MockRunningVm {
         Ok(self.exit)
     }
     fn kill(&self) -> Result<()> {
+        if self.fail_kill {
+            bail!("mock child termination failed");
+        }
         self.killed.lock().unwrap().push(self.id.0.clone());
         self.print_dying_words();
         Ok(())

@@ -25,6 +25,28 @@ use mvm_backends::driver::hvf::HvfDriver;
 use mvm_backends::driver::{LibkrunDriver, QemuDriver};
 use mvm_vmm::host::drive_file::DriveFile;
 
+/// A warm child whose lifecycle gate remains held until the caller takes custody.
+#[must_use]
+pub struct OwnedWarmClaim {
+    pub(crate) id: VmId,
+    pub(crate) lifecycle: crate::vm::instance_snapshot::MachineLifecycleLock,
+}
+
+impl std::fmt::Debug for OwnedWarmClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnedWarmClaim")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl OwnedWarmClaim {
+    /// Transfer the child identity and its continuously held lifecycle gate.
+    pub fn into_parts(self) -> (VmId, crate::vm::instance_snapshot::MachineLifecycleLock) {
+        (self.id, self.lifecycle)
+    }
+}
+
 /// The hvf VMM driven through the unified workload-runner role over the driver
 /// seam — hvf's sole workload launch path (`--hypervisor hvf` and the macOS-26
 /// `auto_select` default). NIC-less: egress routes to the per-VM gating endpoint
@@ -774,15 +796,37 @@ impl AnyBackend {
         handle: &mvm_core::vm_backend::StandbyHandle,
         claim: &mvm_core::vm_backend::StandbyClaim,
     ) -> std::result::Result<VmId, mvm_core::vm_backend::StandbyError> {
+        self.claim_standby_owned_via_runner(ctx, handle, claim)
+            .map(|owned| owned.id)
+    }
+
+    /// Claim a warm child without releasing its lifecycle gate before caller custody.
+    ///
+    /// # Errors
+    /// Refuses unsupported backends, failed admission, or unavailable lifecycle custody.
+    pub fn claim_standby_owned_via_runner(
+        &self,
+        ctx: &crate::workload_runner::ClaimContext<'_>,
+        handle: &mvm_core::vm_backend::StandbyHandle,
+        claim: &mvm_core::vm_backend::StandbyClaim,
+    ) -> std::result::Result<OwnedWarmClaim, mvm_core::vm_backend::StandbyError> {
         match self {
-            AnyBackend::Firecracker(runner) => runner.claim_standby(ctx, handle, claim),
-            AnyBackend::Libkrun(runner) => runner.claim_standby(ctx, handle, claim),
-            AnyBackend::Hvf(runner) => runner.claim_standby(ctx, handle, claim),
+            AnyBackend::Firecracker(runner) => runner.claim_standby_owned(ctx, handle, claim),
+            AnyBackend::Libkrun(runner) => runner.claim_standby_owned(ctx, handle, claim),
+            AnyBackend::Hvf(runner) => runner.claim_standby_owned(ctx, handle, claim),
             // The mock is the hermetic lifecycle double the CLI drives through
             // the admitted path; it has no runner, so it services the claim from
             // its own in-memory state (the context is a runner detail it ignores).
             #[cfg(feature = "test-support")]
-            AnyBackend::Mock(backend) => backend.claim_standby(handle, claim),
+            AnyBackend::Mock(backend) => {
+                let lifecycle =
+                    crate::vm::instance_snapshot::MachineLifecycleLock::acquire(&handle.id)
+                        .map_err(|error| {
+                            mvm_core::vm_backend::StandbyError::ClaimFailed(error.to_string())
+                        })?;
+                let id = backend.claim_standby(handle, claim)?;
+                Ok(OwnedWarmClaim { id, lifecycle })
+            }
             // No warm pool on these backends: qemu and wasm are not
             // workload-bearing; apple-container is, but the HVF driver has no
             // standby support — all fail closed.
@@ -969,6 +1013,20 @@ impl AnyBackend {
         match self.stop_runner(id) {
             Some(timing) => timing.map(Some),
             None => self.inner().stop(id).map(|()| None),
+        }
+    }
+
+    /// Automatic recovery never falls back from an instance-bound stop to a name.
+    pub fn stop_hvf_instance(
+        &self,
+        expected: &mvm_core::protocol::hvf_control::HvfInstance,
+    ) -> Result<Option<StopTiming>> {
+        match self {
+            Self::Hvf(runner) => runner.stop_hvf_instance(expected).map(Some),
+            Self::AppleContainer(backend) => backend.stop_hvf_instance(expected).map(Some),
+            _ => {
+                anyhow::bail!("health restart cancelled: backend has no authenticated HVF instance")
+            }
         }
     }
 
@@ -2413,6 +2471,9 @@ mod tests {
         #[cfg(feature = "test-support")]
         #[test]
         fn reaches_the_mock_lifecycle_claim() {
+            let home = tempfile::tempdir().unwrap();
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            env.isolate_mvm_home(home.path());
             let s = Scaffold::new();
             let backend = AnyBackend::Mock(MockBackend::new().with_standby());
             let id = backend
@@ -2422,6 +2483,27 @@ mod tests {
                 id,
                 mvm_core::vm_backend::VmId("warm-parent".into()),
                 "the mock boots the claim under the standby id"
+            );
+            assert!(
+                crate::vm::instance_snapshot::try_lock_resume(&id.0)
+                    .unwrap()
+                    .is_some(),
+                "the legacy API releases its gate before returning the id"
+            );
+            let owned = backend
+                .claim_standby_owned_via_runner(&s.ctx(), &idle_handle(), &minimal_claim())
+                .expect("the owned API retains the child's gate");
+            let (id, lifecycle) = owned.into_parts();
+            assert!(
+                crate::vm::instance_snapshot::try_lock_resume(&id.0)
+                    .unwrap()
+                    .is_none()
+            );
+            drop(lifecycle);
+            assert!(
+                crate::vm::instance_snapshot::try_lock_resume(&id.0)
+                    .unwrap()
+                    .is_some()
             );
         }
     }

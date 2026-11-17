@@ -81,6 +81,7 @@ pub mod input_journal;
 pub mod instruction_trust;
 pub mod inventory;
 pub mod launch;
+pub mod lifecycle;
 pub mod linux_shell;
 pub mod local;
 pub mod mailbox;

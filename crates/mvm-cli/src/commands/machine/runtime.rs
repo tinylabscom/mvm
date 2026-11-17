@@ -78,6 +78,11 @@ fn run_persistent(
         );
     }
     let name = resolve_machine_run_name(&args)?;
+    let lifecycle = if args.run.dry_run {
+        None
+    } else {
+        Some(mvm_client::lifecycle::MachineLifecycleLock::acquire(&name)?)
+    };
     let existing = load_machine_spec(&name).ok();
     let (spec, action) = resolve_persistent_spec(&args, &name, existing, resolved_flake_slot)?;
     let secret_refs = persistent_secret_refs(&args)?;
@@ -95,6 +100,7 @@ fn run_persistent(
         }
         return Ok(());
     }
+    let lifecycle = lifecycle.context("persistent run requires its lifecycle transition")?;
 
     // Validate the selected immutable pack before a forced reconciliation can
     // stop an existing machine or persist a replacement definition.
@@ -114,6 +120,7 @@ fn run_persistent(
         );
     }
     let start = start_args_with_grant(&args, &name)?;
+    let mut pending = None;
     let booted = mvm_client::launch::detached::persist_and_boot(
         mvm_client::launch::detached::DetachedBoot {
             name: &name,
@@ -121,8 +128,14 @@ fn run_persistent(
             action,
             secret_refs: secret_refs.as_deref(),
         },
-        || lifecycle::start_machine(start),
+        &lifecycle,
+        || {
+            pending = lifecycle::start_machine_in_lifecycle(start, &lifecycle)?;
+            Ok(())
+        },
     )?;
+    drop(lifecycle);
+    lifecycle::complete_machine_start(pending)?;
     if !booted && !args.run.json && !args.up_json {
         println!("machine {name} already running");
     }

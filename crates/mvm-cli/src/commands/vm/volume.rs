@@ -497,12 +497,6 @@ fn unmount(vm_name: &str, guest_path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Release every attachment lease `vm_name` holds (the stop/down path),
-/// re-sealing any volume the service unlocked just in time. Idempotent.
-pub(in crate::commands) fn release_volume_leases_for_vm(vm_name: &str) -> Result<()> {
-    service().release_owner_leases(vm_name).map(|_| ())
-}
-
 /// The resolved, leased volume set handed to admission and the backend.
 /// Commit only after the backend start succeeds — dropping uncommitted rolls
 /// the leases back so a failed launch leaks nothing.
@@ -819,7 +813,7 @@ mod tests {
             "got: {error:#}"
         );
 
-        release_volume_leases_for_vm("vm-1").unwrap();
+        service().release_owner_leases("vm-1").unwrap();
         assert!(merge_registered_volumes_for_launch("vm-2", &[], dev()).is_ok());
     }
 

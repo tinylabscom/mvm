@@ -7,7 +7,7 @@
 
 /// Tagged union for the two return shapes `run` and `run_captured` share.
 /// Internal — the public API exposes the unboxed variants.
-pub(super) enum Either<L, R> {
+pub(crate) enum Either<L, R> {
     Left(L),
     Right(R),
 }

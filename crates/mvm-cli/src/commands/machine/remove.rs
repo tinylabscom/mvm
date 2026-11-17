@@ -6,6 +6,7 @@
 //! unit-tested in `tests.rs`.
 
 use super::*;
+use mvm_client::lifecycle::MachineLifecycleLock;
 
 #[derive(Debug, Serialize)]
 pub(super) struct MachineRemoveSummary {
@@ -19,37 +20,45 @@ pub(super) struct MachineRemoveSummary {
     pub(super) runtime_state_removed: bool,
 }
 
+#[cfg(test)]
 pub(super) fn remove_machine_runtime_state(name: &str) -> Result<bool> {
-    let dir = config::vm_state_dir(name);
-    if dir.exists() {
-        if mvm_vmm::host::process_liveness::state_dir_has_live_process(&dir) {
-            return Ok(false);
-        }
-        fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
+    let lifecycle = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(name)?;
+    if !lifecycle.reap_unowned_state()? {
+        return Ok(false);
     }
-    let instance = config::instance_dir(name);
-    if instance.exists() {
-        fs::remove_dir_all(&instance)
-            .with_context(|| format!("removing {}", instance.display()))?;
-    }
+    lifecycle.remove_saved_state()?;
     Ok(true)
 }
 
+#[cfg(test)]
 pub(super) fn remove_machine_spec(name: &str, yes: bool) -> Result<MachineRemoveSummary> {
     validate_machine_name(name)?;
     if !yes {
         bail!("refusing to remove machine {:?} without --yes", name);
     }
+    let lifecycle = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(name)?;
+    remove_machine_spec_in_lifecycle(name, &lifecycle)
+}
+
+pub(super) fn remove_machine_spec_in_lifecycle(
+    name: &str,
+    lifecycle: &MachineLifecycleLock,
+) -> Result<MachineRemoveSummary> {
+    lifecycle.require_name(name)?;
     let dir = config::machine_state_dir(name);
     if !dir.exists() {
         bail!("machine {:?} does not exist", name);
     }
+    anyhow::ensure!(
+        lifecycle.reap_unowned_state()?,
+        "machine {name:?} still owns its runtime state"
+    );
+    lifecycle.remove_saved_state()?;
     fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
-    let runtime_state_removed = remove_machine_runtime_state(name)?;
     Ok(MachineRemoveSummary {
         name: name.to_string(),
         removed: true,
-        runtime_state_removed,
+        runtime_state_removed: true,
     })
 }
 

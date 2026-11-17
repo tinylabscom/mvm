@@ -1336,6 +1336,210 @@ async fn launch_with_managed_volume_takes_and_releases_the_lease() {
     assert_eq!(record.attached_to, None, "lease released on stop");
 }
 
+#[tokio::test]
+async fn removal_cannot_erase_a_successor_during_a_locked_restart_gap() {
+    let home = Isolated::new();
+    let client = mock_client();
+    let rootfs = home.rootfs();
+    let launched = client
+        .launch(persistent_request(&rootfs, "remove-race").build().unwrap())
+        .await
+        .unwrap();
+    let guard =
+        mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire("remove-race").unwrap();
+    client
+        .stop_machine_in_lifecycle(&launched.machine.id, &guard, None)
+        .unwrap();
+    let mut removal =
+        Box::pin(client.remove_machine_with(&launched.machine.id, RemoveOptions { force: false }));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), removal.as_mut())
+            .await
+            .is_err()
+    );
+    let mut spec = mp::load_machine_spec("remove-race").unwrap();
+    let (successor, _) = client
+        .boot_spec(&mut spec, None, false, None, &guard)
+        .await
+        .unwrap();
+    assert_ne!(successor.admitted.plan().plan_id.0, launched.plan_id);
+    drop(guard);
+    let error = removal
+        .await
+        .expect_err("non-forced removal observes the new running instance");
+    assert!(error.to_string().contains("running"), "{error}");
+    assert!(client.machine_running("remove-race"));
+    assert!(mvm_core::config::machine_spec_path("remove-race").exists());
+    client.stop_machine(&launched.machine.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_queued_stop_waits_for_fresh_admission_and_stops_the_resulting_instance() {
+    let home = Isolated::new();
+    let client = mock_client();
+    let rootfs = home.rootfs();
+    let launched = client
+        .launch(persistent_request(&rootfs, "stop-race").build().unwrap())
+        .await
+        .unwrap();
+    let guard =
+        mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire("stop-race").unwrap();
+    client
+        .stop_machine_in_lifecycle(&launched.machine.id, &guard, None)
+        .unwrap();
+    let mut stop = Box::pin(client.stop_machine(&launched.machine.id));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), stop.as_mut())
+            .await
+            .is_err()
+    );
+    let mut spec = mp::load_machine_spec("stop-race").unwrap();
+    let (successor, _) = client
+        .boot_spec(&mut spec, None, false, None, &guard)
+        .await
+        .unwrap();
+    assert_ne!(successor.admitted.plan().plan_id.0, launched.plan_id);
+    drop(guard);
+    stop.await
+        .expect("queued stop acts after the fresh admitted start");
+    assert!(!client.machine_running("stop-race"));
+}
+
+#[tokio::test]
+async fn a_named_transient_waits_before_claiming_a_persistent_preparation() {
+    let home = Isolated::new();
+    let client = mock_client();
+    let rootfs = home.rootfs();
+    let name = "claim-race";
+    let guard = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(name).unwrap();
+    let request = transient_request(&rootfs).name(name).build().unwrap();
+    let mut launch = Box::pin(client.launch(request));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), launch.as_mut())
+            .await
+            .is_err()
+    );
+    assert!(
+        !mvm_core::config::machine_state_dir(name).exists(),
+        "no session side effects before the name claim"
+    );
+    let spec = super::persisted_spec_from_request(
+        &persistent_request(&rootfs, name).build().unwrap(),
+        name,
+    );
+    mp::save_machine_spec(&spec, false).unwrap();
+    let state = mvm_core::config::vm_state_dir(name);
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(state.join("preparing"), b"successor").unwrap();
+    drop(guard);
+    let error = launch.await.expect_err("persistent claim won");
+    assert!(error.to_string().contains("persistent machine"), "{error}");
+    assert_eq!(
+        std::fs::read(state.join("preparing")).unwrap(),
+        b"successor"
+    );
+}
+
+#[tokio::test]
+async fn writable_volume_blocks_replacement_until_the_predecessor_stop_succeeds() {
+    use crate::volume::VolumeService as _;
+
+    let home = Isolated::new();
+    let (mut client, cleanup) = client_with_failing_stop();
+    let volumes = work_volume_service();
+    let rootfs = home.rootfs();
+    let writable = LaunchVolumeSpec {
+        volume: "work".into(),
+        guest_path: "/data/work".into(),
+        access: AccessMode::ReadWrite,
+    };
+    let request = |name| {
+        persistent_request(&rootfs, name)
+            .volume(writable.clone())
+            .build()
+            .unwrap()
+    };
+    let predecessor = client
+        .launch(request("predecessor"))
+        .await
+        .expect("launch writable predecessor");
+    assert_eq!(
+        volumes.list_attachments("predecessor").unwrap()[0].access,
+        AccessMode::ReadWrite
+    );
+
+    let error = client
+        .launch(request("successor"))
+        .await
+        .expect_err("an active writer excludes another launch");
+    assert!(error.to_string().contains("already attached"), "{error}");
+    assert!(!client.machine_running("successor"));
+
+    let error = client
+        .stop_machine(&predecessor.machine.id)
+        .await
+        .expect_err("the injected stop failure is not termination proof");
+    assert!(error.to_string().contains("forced stop failure"), "{error}");
+
+    let replacement = persistent_request(&rootfs, "predecessor")
+        .cpus(4)
+        .force(true)
+        .volume(writable.clone())
+        .build()
+        .unwrap();
+    let error = client
+        .launch(replacement)
+        .await
+        .expect_err("force must not bypass a failed predecessor stop");
+    assert!(error.to_string().contains("forced stop failure"), "{error}");
+    assert!(client.machine_running("predecessor"));
+    assert_eq!(
+        volumes
+            .describe_volume("work")
+            .unwrap()
+            .attached_to
+            .as_deref(),
+        Some("predecessor"),
+        "failed stop and replacement must retain the original lease"
+    );
+
+    let error = client
+        .launch(request("successor"))
+        .await
+        .expect_err("a failed stop must not make the disk available");
+    assert!(error.to_string().contains("already attached"), "{error}");
+    assert!(!client.machine_running("successor"));
+
+    // The same mock instance now confirms stop; only this permits lease release.
+    client.backend = cleanup;
+    client
+        .stop_machine(&predecessor.machine.id)
+        .await
+        .expect("confirmed predecessor stop");
+    assert_eq!(volumes.describe_volume("work").unwrap().attached_to, None);
+    let successor = client
+        .launch(request("successor"))
+        .await
+        .expect("successor acquires the released writable volume");
+    assert_eq!(
+        volumes
+            .describe_volume("work")
+            .unwrap()
+            .attached_to
+            .as_deref(),
+        Some("successor")
+    );
+    assert_eq!(
+        volumes.list_attachments("successor").unwrap()[0].access,
+        AccessMode::ReadWrite
+    );
+    client
+        .stop_machine(&successor.machine.id)
+        .await
+        .expect("stop successor");
+    assert_eq!(volumes.describe_volume("work").unwrap().attached_to, None);
+}
+
 /// The library launch path attaches a managed volume read-write under the
 /// default `standard` profile, and refuses it under `restrictive`.
 #[tokio::test]
@@ -1537,8 +1741,10 @@ async fn a_restart_re_admits_under_the_persisted_grants_not_deny_all() {
     });
     mp::save_machine_spec(&spec, false).unwrap();
 
+    let lifecycle =
+        mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(&spec.name).unwrap();
     let (started, _) = client
-        .boot_spec(&mut spec, None, false, None)
+        .boot_spec(&mut spec, None, false, None, &lifecycle)
         .await
         .expect("the start boots");
     let admitted = started

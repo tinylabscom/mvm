@@ -7,8 +7,8 @@
 //! verified arm64 workload kernel, present in the kernel cache) and
 //! `MVM_E2E_ROOTFS` (a bootable ext4 workload rootfs), with
 //! `mvm-hvf-supervisor` built in the workspace target dir or named via
-//! `MVM_HVF_SUPERVISOR_PATH`. Without those the test skips cleanly so the
-//! suite stays green everywhere else.
+//! `MVM_HVF_SUPERVISOR_PATH`. An explicitly requested run fails if its
+//! prerequisites are missing; the default suite leaves this test ignored.
 
 #![cfg(all(target_os = "macos", target_arch = "aarch64"))]
 
@@ -16,20 +16,20 @@ use mvm_client::{LaunchRequest, LifecycleMode, LocalBackend, MvmClient, RemoveOp
 use mvm_core::client::dto::{MachineId, MachineStatus};
 use mvm_core::rootfs_source::RootfsSource;
 
-/// Resolve the live-lane prerequisites, or explain the clean skip.
-fn live_env() -> Option<(String, RootfsSource)> {
-    let kernel = std::env::var("MVM_E2E_KERNEL").ok()?;
-    let rootfs = std::env::var("MVM_E2E_ROOTFS").ok()?;
-    if !std::path::Path::new(&kernel).exists() || !std::path::Path::new(&rootfs).exists() {
-        eprintln!("skipping: MVM_E2E_KERNEL / MVM_E2E_ROOTFS do not name existing files");
-        return None;
-    }
+/// Resolve prerequisites without counting a missing live run as a pass.
+fn live_env() -> (String, RootfsSource) {
+    let kernel = std::env::var("MVM_E2E_KERNEL").expect("live HVF test requires MVM_E2E_KERNEL");
+    let rootfs = std::env::var("MVM_E2E_ROOTFS").expect("live HVF test requires MVM_E2E_ROOTFS");
+    assert!(
+        std::path::Path::new(&kernel).is_file() && std::path::Path::new(&rootfs).is_file(),
+        "MVM_E2E_KERNEL and MVM_E2E_ROOTFS must name existing files; no live witness was run"
+    );
     // Declared as a path outright: the env var may hold a relative one, which
     // the string grammar would (correctly) read as a registry reference.
-    Some((
+    (
         kernel,
         RootfsSource::LocalPath(std::path::PathBuf::from(rootfs)),
-    ))
+    )
 }
 
 /// Optional dwell between launch and stop (`MVM_E2E_LINGER_SECS`), so an
@@ -46,9 +46,7 @@ fn linger() {
 #[tokio::test]
 #[ignore = "live HVF E2E: needs Apple Silicon + mvm-hvf-supervisor + MVM_E2E_KERNEL/MVM_E2E_ROOTFS; run with -- --ignored"]
 async fn transient_and_persistent_lifecycle_over_hvf() {
-    let Some((_kernel, rootfs)) = live_env() else {
-        return;
-    };
+    let (_kernel, rootfs) = live_env();
     let client = LocalBackend::with_hypervisor("hvf");
 
     // Transient: boots through the signed admission path, then cleans up.

@@ -782,7 +782,7 @@ pub(crate) fn image_identity(rootfs_path: &Path) -> Result<String> {
 
 pub(crate) enum LaunchDecision {
     /// A standby was claimed and is booting under this VmId.
-    Claimed(VmId),
+    Claimed(mvm_client::standby::OwnedWarmClaim),
     /// No compatible warm standby — caller may cold-boot when its mode permits it.
     ColdBoot,
     /// The caller required warm service and must not cold-boot.
@@ -898,7 +898,7 @@ where
         registry_path: &registry_path,
         grant_issuer: Some(&grant_issuer),
     };
-    match backend.claim_standby_via_runner(&ctx, &handle, &claim) {
+    match backend.claim_standby_owned_via_runner(&ctx, &handle, &claim) {
         Ok(vm_id) => {
             // The standby has become the VM; drop its pool entry (the control UDS is
             // one-shot). The VM now lives under its vms/<id> state dir.
@@ -1265,10 +1265,10 @@ mod tests {
             Err(ColdStartReason::StandbysDisabled)
         );
         let b = AnyBackend::from_hypervisor("libkrun");
-        assert_eq!(
+        assert!(matches!(
             try_warm_claim(&b, &c, false).unwrap(),
             WarmClaimOutcome::Cold(ColdStartReason::StandbysDisabled)
-        );
+        ));
     }
 
     #[test]
@@ -1285,10 +1285,10 @@ mod tests {
     /// exists and cannot be claimed always does.
     #[test]
     fn a_missing_standby_is_a_declared_cold_boot_unless_a_claim_was_required() {
-        assert_eq!(
+        assert!(matches!(
             outcome_for_refusal(WarmClaimRefusal::NoCompatibleParent, false).unwrap(),
             WarmClaimOutcome::Cold(ColdStartReason::NoStandbyReady)
-        );
+        ));
         // A standby that exists and cannot be claimed is a broken warm path,
         // reported as such rather than hidden behind a cold boot.
         let broken = outcome_for_refusal(
@@ -1309,7 +1309,7 @@ mod tests {
             .is_err()
         );
         // Losing the parent to a concurrent launch is an absence, not a fault.
-        assert_eq!(
+        assert!(matches!(
             outcome_for_refusal(
                 WarmClaimRefusal::ClaimRejected {
                     reason: format!(
@@ -1321,8 +1321,8 @@ mod tests {
             )
             .unwrap(),
             WarmClaimOutcome::Cold(ColdStartReason::NoStandbyReady)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             outcome_for_refusal(
                 WarmClaimRefusal::BackendUnsupported {
                     backend: "qemu".into()
@@ -1331,7 +1331,7 @@ mod tests {
             )
             .unwrap(),
             WarmClaimOutcome::Cold(ColdStartReason::BackendUnsupported)
-        );
+        ));
         let required = outcome_for_refusal(WarmClaimRefusal::NoCompatibleParent, true)
             .expect_err("a required claim that finds nothing fails");
         assert!(required.is::<WarmClaimRefusal>());
@@ -1807,19 +1807,19 @@ mod tests {
         env.remove("MVM_RESIDENCY");
 
         let backend = AnyBackend::from_hypervisor("qemu");
-        assert_eq!(
+        assert!(matches!(
             try_warm_claim(&backend, &eligible_cfg(), false).unwrap(),
             WarmClaimOutcome::Cold(ColdStartReason::BackendUnsupported)
-        );
+        ));
     }
 
     #[test]
     fn try_warm_claim_cold_boots_a_user_named_transient() {
         let b = AnyBackend::from_hypervisor("libkrun");
-        assert_eq!(
+        assert!(matches!(
             try_warm_claim(&b, &eligible_cfg(), true).unwrap(),
             WarmClaimOutcome::Cold(ColdStartReason::Named)
-        );
+        ));
     }
 
     #[test]
@@ -1839,10 +1839,10 @@ mod tests {
             share_include: Vec::new(),
             share_exclude: Vec::new(),
         }];
-        assert_eq!(
+        assert!(matches!(
             try_warm_claim(&b, &c, false).unwrap(),
             WarmClaimOutcome::Cold(ColdStartReason::IneligibleShape)
-        );
+        ));
     }
 
     #[test]
@@ -1898,10 +1898,10 @@ mod tests {
         let b = AnyBackend::from_hypervisor("libkrun");
         let mut c = eligible_cfg();
         c.plan_json = None;
-        assert_eq!(
+        assert!(matches!(
             try_warm_claim(&b, &c, false).unwrap(),
             WarmClaimOutcome::Cold(ColdStartReason::Unadmitted)
-        );
+        ));
     }
 
     #[test]
@@ -1994,9 +1994,11 @@ mod tests {
                     "{why}"
                 );
             }
-            assert_eq!(
-                try_warm_claim(&b, &cfg, false).unwrap(),
-                WarmClaimOutcome::Cold(ColdStartReason::IneligibleShape),
+            assert!(
+                matches!(
+                    try_warm_claim(&b, &cfg, false).unwrap(),
+                    WarmClaimOutcome::Cold(ColdStartReason::IneligibleShape)
+                ),
                 "{why} must cold-boot rather than claim"
             );
         }
@@ -2091,9 +2093,11 @@ mod tests {
                     "{why}"
                 );
             }
-            assert_eq!(
-                try_warm_claim(&b, &cfg, false).unwrap(),
-                WarmClaimOutcome::Cold(ColdStartReason::IneligibleShape),
+            assert!(
+                matches!(
+                    try_warm_claim(&b, &cfg, false).unwrap(),
+                    WarmClaimOutcome::Cold(ColdStartReason::IneligibleShape)
+                ),
                 "{why} must cold-boot rather than claim"
             );
         }

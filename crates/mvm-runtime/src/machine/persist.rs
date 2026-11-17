@@ -215,7 +215,7 @@ fn discard_orphaned_instance_state(name: &str) -> Result<()> {
     {
         return Ok(());
     }
-    fs::remove_dir_all(&instance)
+    crate::vm::instance_snapshot::remove_saved_state_in(&instance)
         .with_context(|| format!("removing orphaned instance state {}", instance.display()))
 }
 
@@ -705,12 +705,28 @@ mod tests {
         let orphan = config::instance_dir("web");
         fs::create_dir_all(&orphan).expect("orphaned instance dir");
         fs::write(orphan.join("volume_mounts.json"), b"{\"mounts\":{}}").expect("registry");
+        fs::create_dir_all(orphan.join("snapshot")).expect("orphaned snapshot");
+        fs::write(orphan.join("snapshot/memory"), b"old saved state").expect("snapshot data");
+        let lifecycle = crate::vm::instance_snapshot::MachineLifecycleLock::acquire("web")
+            .expect("creation transition");
 
         save_machine_spec(&spec_fixture("web"), false).expect("create");
 
         assert!(
-            !orphan.exists(),
+            !orphan.join("volume_mounts.json").exists() && !orphan.join("snapshot").exists(),
             "a newly created machine inherited an earlier machine's instance state"
+        );
+        assert!(
+            crate::vm::instance_snapshot::try_lock_resume("web")
+                .expect("check original lock")
+                .is_none(),
+            "fresh persistence must not unlink the held lifecycle lock"
+        );
+        drop(lifecycle);
+        assert!(
+            crate::vm::instance_snapshot::try_lock_resume("web")
+                .expect("released transition")
+                .is_some()
         );
     }
 
