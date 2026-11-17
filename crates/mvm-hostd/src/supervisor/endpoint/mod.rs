@@ -2,11 +2,14 @@
 
 pub mod accept_loop;
 pub mod audit_start;
+pub mod flowmux;
 /// Host substitution endpoint request preparation (placeholder -> real
 /// credential, binding-checked). The forward leg + the guest-facing
 /// listener are separate transport steps.
-pub mod flowmux;
-pub mod ingress_transform;
+/// The witness-only egress-gate probe: asks the running gate to decide
+/// probe samples, observing enforcement without substituting or forwarding.
+pub(crate) mod gate_probe;
+mod ingress_transform;
 /// The per-VM substitution endpoint subprocess library half: the
 /// stdin config contract + store-opening/service assembly. The
 /// `mvm-network-endpoint` bin is the process wrapper.
