@@ -25,6 +25,7 @@ use std::time::Duration;
 
 /// Own a cache slot through reuse, preparation and publication. The lock is a
 /// stable sibling, never part of the directory an installer replaces.
+#[cfg(unix)]
 pub(crate) fn lock_artifact_dir(
     dir: &Path,
 ) -> std::io::Result<mvm_core::util::atomic_io::FileLock> {
