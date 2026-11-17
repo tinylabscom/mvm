@@ -412,11 +412,16 @@ pub struct BundleManifest {
     /// dm-verity binding, when the rootfs was built verified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verity: Option<VerityInfo>,
-    /// Advisory resource expectations recorded by the publisher at
-    /// build time. `Some(...)` in v2+ bundles; `None` for v1
-    /// bundles (handled via `#[serde(default)]`). No boot path reads
-    /// them as defaults today. The claim-9 re-verify
-    /// still re-hashes the field as part of the manifest.
+    /// Resource sizing recorded by the publisher at build time.
+    /// `Some(...)` in v2+ bundles; `None` for v1 bundles (handled via
+    /// `#[serde(default)]`). A launch that did not size itself starts from
+    /// these as defaults, after the environment descriptor's own resources:
+    /// a value the caller named wins, and the host's memory ceiling and
+    /// budget headroom cap the memory taken, recorded on `plan.admitted` when
+    /// they lower it. The vCPU count is not capped: the host's CPU bounds are
+    /// millicore shares, a different unit. They size the machine and grant
+    /// nothing. The claim-9
+    /// re-verify re-hashes the field as part of the manifest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<BundleResources>,
 }

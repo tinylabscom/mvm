@@ -261,6 +261,9 @@ pub(in crate::commands) struct RunArgs {
     /// Which of `--cpus` / `--memory` the command line named (not a flag).
     #[arg(skip)]
     pub explicit_resources: environment_defaults::ExplicitResources,
+    /// What the launch took from its bundle's recorded sizing (not a flag).
+    #[arg(skip)]
+    pub bundle_sizing: mvm_client::admission::bundle_resources::AppliedSizing,
     /// Forward the guest's CUDA/NVML calls to a host GPU over vsock.
     #[arg(long)]
     pub gpu: bool,
@@ -771,6 +774,7 @@ pub(in crate::commands) fn run_secure_started(
     let admit_network_mode = args.network_mode;
     let admit_grants = resolved_grants.plan_grants.clone();
     let admit_cpus = args.cpus;
+    let admit_bundle_sizing = args.bundle_sizing;
     let admit_mem_mib = u64::from(parse_human_size(&args.memory).context("Invalid --memory")?);
     let admit_network_policy = network_policy.clone();
     let admit_agent_verb = args.agent_verb.clone();
@@ -845,6 +849,7 @@ pub(in crate::commands) fn run_secure_started(
         // running beside the VMM boot, and activation waits for it.
         let configured_images_dir = mvm_build::image_source::configured_images_dir();
         let params = super::up::AdmitPlanForBootParams {
+            bundle_sizing: admit_bundle_sizing,
             mailbox: admit_mailbox,
             gpu: admit_gpu,
             instructions: InstructionSources::for_workload(admit_workload_dir.as_deref())

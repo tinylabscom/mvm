@@ -260,6 +260,15 @@ pub fn installed_bundle_environment(
         .and_then(|manifest| manifest.environment().cloned()))
 }
 
+/// The recorded resources of the installed bundle `id_or_slot` names, verified
+/// the same way as [`installed_bundle_posture`]. `None` when the key is a
+/// template slot, names no installed bundle, or the bundle records none.
+pub fn installed_bundle_resources(
+    id_or_slot: &str,
+) -> Result<Option<mvm_core::plan::BundleResources>> {
+    Ok(installed_bundle_verified_manifest(id_or_slot)?.and_then(|manifest| manifest.resources))
+}
+
 /// Dispatched variant of [`super::crud::template_load`] / [`super::slots::template_load_slot`].
 /// Returns a [`TemplateSpec`] regardless of which key shape was used.
 ///
@@ -541,7 +550,10 @@ mod tests {
                 BundleMember::Environment(environment.clone()),
             ],
             verity: None,
-            resources: None,
+            resources: Some(mvm_core::plan::BundleResources {
+                vcpus: 2,
+                mem_mib: 640,
+            }),
         };
         let archive = write_bundle(
             &manifest,
@@ -565,6 +577,11 @@ mod tests {
             Some(environment)
         );
         assert_eq!(installed_bundle_environment("not-a-key").unwrap(), None);
+        assert_eq!(
+            installed_bundle_resources(&installed.sha256).unwrap(),
+            manifest.resources
+        );
+        assert_eq!(installed_bundle_resources("not-a-key").unwrap(), None);
 
         let registry = BundleRegistry::default_path().unwrap();
         std::fs::remove_dir_all(&installed.root).unwrap();

@@ -872,6 +872,7 @@ mod tests {
         let ledger = mvm_client::admission::InMemoryNonceLedger::new();
         let context = mvm_client::admission::admit_plan_for_boot(
             mvm_client::admission::AdmitPlanForBootParams {
+                bundle_sizing: Default::default(),
                 mailbox: None,
                 gpu: false,
                 instructions: Default::default(),

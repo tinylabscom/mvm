@@ -68,6 +68,7 @@ fn share(host: &Path) -> mvm_core::plan::HostShareGrant {
 fn admit(f: &Fixture) -> Result<AdmissionContext> {
     let ledger = InMemoryNonceLedger::new();
     admit_plan_for_boot(AdmitPlanForBootParams {
+        bundle_sizing: Default::default(),
         mailbox: None,
         gpu: false,
         keys_dir: Some(&f.keys),
@@ -218,6 +219,7 @@ fn deny_scans_the_materialized_mount_root_not_the_live_source_tree() {
 
     let ledger = InMemoryNonceLedger::new();
     let err = admit_plan_for_boot(AdmitPlanForBootParams {
+        bundle_sizing: Default::default(),
         mailbox: None,
         gpu: false,
         keys_dir: Some(&f.keys),
@@ -257,6 +259,7 @@ fn legacy_scan_root_substitution_fails_before_plan_admitted() {
     let ledger = InMemoryNonceLedger::new();
 
     let error = admit_plan_for_boot(AdmitPlanForBootParams {
+        bundle_sizing: Default::default(),
         mailbox: None,
         gpu: false,
         keys_dir: Some(&f.keys),
@@ -288,6 +291,7 @@ fn legacy_ext4_file_scan_root_fails_before_plan_admitted() {
     let ledger = InMemoryNonceLedger::new();
 
     let error = admit_plan_for_boot(AdmitPlanForBootParams {
+        bundle_sizing: Default::default(),
         mailbox: None,
         gpu: false,
         keys_dir: Some(&f.keys),
@@ -319,6 +323,7 @@ fn deny_audits_and_refuses_an_unsigned_instruction_in_a_host_snapshot_image() {
     }];
     let ledger = InMemoryNonceLedger::new();
     let err = admit_plan_for_boot(AdmitPlanForBootParams {
+        bundle_sizing: Default::default(),
         mailbox: None,
         gpu: false,
         keys_dir: Some(&f.keys),
@@ -417,6 +422,7 @@ fn explicit_materialized_identity_signs_ro_and_refuses_the_requested_rw_attachme
     let shares = mvm_hostd::run::shares_from_vm_volumes(&[requested.clone(), managed.clone()]);
     let ledger = InMemoryNonceLedger::new();
     let admitted = admit_plan_for_boot(AdmitPlanForBootParams {
+        bundle_sizing: Default::default(),
         mailbox: None,
         gpu: false,
         keys_dir: Some(&f.keys),
@@ -454,6 +460,7 @@ fn malformed_materialized_identities_fail_before_plan_admitted() {
     let f = fixture(Some("deny"));
     let ledger = InMemoryNonceLedger::new();
     admit_plan_for_boot(AdmitPlanForBootParams {
+        bundle_sizing: Default::default(),
         mailbox: None,
         gpu: false,
         keys_dir: Some(&f.keys),
@@ -489,6 +496,7 @@ fn malformed_materialized_identities_fail_before_plan_admitted() {
         };
         let ledger = InMemoryNonceLedger::new();
         admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             gpu: false,
             keys_dir: Some(&f.keys),
@@ -526,6 +534,7 @@ fn deny_refuses_an_unsigned_instruction_in_a_transient_mount_image() {
     let mounts = super::instructions::materialized_mounts(&volumes);
     let ledger = InMemoryNonceLedger::new();
     let err = admit_plan_for_boot(AdmitPlanForBootParams {
+        bundle_sizing: Default::default(),
         mailbox: None,
         gpu: false,
         keys_dir: Some(&f.keys),
@@ -621,6 +630,7 @@ mod ps11_keyless_witness {
         let mut requested_share = share(&f.mount);
         requested_share.read_only = false;
         let result = admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             gpu: false,
             keys_dir: Some(&f.keys),

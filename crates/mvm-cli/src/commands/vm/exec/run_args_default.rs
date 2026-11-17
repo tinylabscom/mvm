@@ -51,6 +51,7 @@ impl Default for RunArgs {
             mailbox_retention_ms: None,
             memory: "512M".to_string(),
             explicit_resources: Default::default(),
+            bundle_sizing: Default::default(),
             profile: RunProfile::Dev,
             mounts: Vec::new(),
             env: Vec::new(),

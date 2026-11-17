@@ -75,10 +75,15 @@ pub(in crate::commands) fn environment(
 
 /// Signed sizing must be applied before the operator policy resource fold.
 pub(in crate::commands) fn apply_entrypoint_resource_defaults(args: &mut RunArgs) -> Result<()> {
-    if let Some(environment) = environment(args)? {
-        super::environment_defaults::apply(args, &environment);
+    let key = args
+        .resolved_application
+        .as_ref()
+        .map(|application| application.bundle_sha256.clone())
+        .or_else(|| args.manifest.clone());
+    match key {
+        Some(key) => super::environment_defaults::apply_bundle_defaults(args, &key),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Apply a signed subtractive request ceiling while retaining token-accounting flags.
