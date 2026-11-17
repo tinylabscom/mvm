@@ -343,6 +343,14 @@ fn persistent_dispatch_defers_acceptance_and_spends_the_admission() {
     )
     .expect("persistent dispatch starts without accepting");
     assert_eq!(started.vm_id.0, config.name);
+    assert!(
+        config.plan_json.is_none(),
+        "the source config is not yet bound to the admitted plan"
+    );
+    let dispatched_plan =
+        mvm_core::plan::plan_from_admitted_json(started.config.plan_json.as_deref().unwrap())
+            .expect("the backend and post-start mailbox receive the admitted envelope");
+    assert_eq!(dispatched_plan.plan_id, started.admitted.plan_id().clone());
     assert!(matches!(
         backend.status(&started.vm_id).unwrap(),
         mvm_core::vm_backend::VmStatus::Running

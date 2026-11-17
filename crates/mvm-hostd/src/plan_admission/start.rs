@@ -57,6 +57,7 @@ struct StartTailResult {
     vm_id: VmId,
     admitted: AdmittedPlan,
     enforced_grants: Option<EnforcedGrants>,
+    config: VmStartConfig,
 }
 
 /// Outcome of a successful admitted boot: the backend's VM id plus the
@@ -78,6 +79,9 @@ pub struct StartedMachine {
 pub struct DispatchedPersistent {
     pub vm_id: VmId,
     pub admitted: AdmittedPlan,
+    /// The exact admitted configuration handed to the backend, for post-start
+    /// mailbox setup; the caller's pre-gate config is not authoritative.
+    pub config: VmStartConfig,
 }
 
 /// Dispatch a persistent guest while its caller retains readiness-dependent finalization.
@@ -94,6 +98,7 @@ pub fn start_persistent(
     Ok(DispatchedPersistent {
         vm_id: started.vm_id,
         admitted: started.admitted,
+        config: started.config,
     })
 }
 
@@ -298,11 +303,6 @@ fn start_admitted_with_finalization(
         Ok(prepared) => prepared,
         Err((stage, err)) => {
             if !cli_transient
-                && (!persistent
-                    || matches!(
-                        stage,
-                        "registry-pack-boot" | "registry-pack-runtime" | "release-runtime"
-                    ))
                 && let Some(emitter) = params.emitter
                 && let Err(e) = emitter.emit_failed(admitted.plan(), stage, &format!("{err:#}"))
             {
@@ -353,7 +353,14 @@ fn start_admitted_with_finalization(
         return Err(err);
     }
     if persistent && super::persists_plan_before_start(backend.name()) {
-        super::stash_plan_for_bridge(&config)?;
+        super::stash_plan_for_bridge(&config).inspect_err(|err| {
+            if let Some(emitter) = params.emitter
+                && let Err(e) =
+                    emitter.emit_failed(admitted.plan(), "bridge-plan", &format!("{err:#}"))
+            {
+                tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
+            }
+        })?;
     }
     if persistent && let Err(err) = mvm_runtime::workload_backend::require_workload_backend(backend)
     {
@@ -519,6 +526,7 @@ fn start_admitted_with_finalization(
                 vm_id,
                 admitted,
                 enforced_grants,
+                config,
             })
         }
         Err(err) => {

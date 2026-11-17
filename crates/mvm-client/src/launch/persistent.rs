@@ -519,9 +519,9 @@ fn finish_admitted_persistent(
     };
     #[cfg(not(unix))]
     let images = Vec::new();
-    let (started, admission) = crate::boot::start_admitted_persistent(
+    let (started, admission, dispatched_config) = crate::boot::start_admitted_persistent(
         backend,
-        start_config.clone(),
+        start_config,
         admission,
         images,
         verified_runtime.as_ref(),
@@ -532,7 +532,7 @@ fn finish_admitted_persistent(
     if let Err(error) = mvm_hostd::mailbox_process::serve_started(
         started.backend(),
         started.vm_id(),
-        &start_config,
+        &dispatched_config,
         mailbox_posture.as_ref(),
     ) {
         emit_failed(&admission, "mailbox-process", &error);

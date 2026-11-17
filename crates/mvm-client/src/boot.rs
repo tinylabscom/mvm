@@ -225,13 +225,21 @@ pub(crate) fn start_admitted_persistent(
     admission: crate::admission::AdmissionContext,
     images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
     runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
-) -> anyhow::Result<(StartedVm, crate::admission::AdmissionContext)> {
+) -> anyhow::Result<(
+    StartedVm,
+    crate::admission::AdmissionContext,
+    mvm_core::vm_backend::VmStartConfig,
+)> {
     let crate::admission::AdmissionContext {
         admitted,
         emitter,
         policy_bundle,
         host_signer_public_path,
     } = admission;
+    // Read-only audit continuation: the one-use admitted owner still moves to
+    // hostd. A definitive pre-start refusal is already recorded there; seal
+    // its session here without re-emitting plan.failed.
+    let audit_plan = admitted.plan().clone();
     let dispatched = mvm_hostd::plan_admission::start_persistent(
         mvm_hostd::plan_admission::StartAdmittedParams {
             backend: &backend,
@@ -243,7 +251,10 @@ pub(crate) fn start_admitted_persistent(
         },
         runtime,
         images,
-    )?;
+    )
+    .inspect_err(|_error| {
+        crate::admission::seal_recorded_failure(&emitter, &audit_plan);
+    })?;
     Ok((
         StartedVm {
             backend,
@@ -255,6 +266,7 @@ pub(crate) fn start_admitted_persistent(
             policy_bundle,
             host_signer_public_path,
         },
+        dispatched.config,
     ))
 }
 
@@ -557,6 +569,46 @@ mod backend_select_tests {
 #[cfg(test)]
 mod tests {
     use super::ResumeBootLocalRequest;
+
+    #[test]
+    fn persistent_dispatch_refusal_seals_the_recorded_audit_failure() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let (admission, _keys, audit) =
+            crate::admission::admit_plan_tests::admitted_libkrun("persistent-refusal", None);
+        let config = mvm_core::vm_backend::VmStartConfig {
+            name: "persistent-refusal".into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            volumes: vec![mvm_core::vm_backend::VmVolume {
+                host: "/store/unadmitted".into(),
+                guest: "/mnt/unadmitted".into(),
+                read_only: true,
+                kind: mvm_core::vm_backend::VmVolumeKind::Disk,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let error = match super::start_admitted_persistent(
+            mvm_runtime::AnyBackend::from_hypervisor("mock"),
+            config,
+            admission,
+            Vec::new(),
+            None,
+        ) {
+            Ok(_) => panic!("a share absent from the plan must refuse"),
+            Err(error) => error,
+        };
+        assert!(
+            format!("{error:#}").contains("admitted-shares"),
+            "{error:#}"
+        );
+        let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).unwrap();
+        assert!(chain.contains("plan.failed"), "{chain}");
+        assert!(chain.contains("admitted-shares"), "{chain}");
+        assert!(chain.contains("session.sealed"), "{chain}");
+        assert!(!chain.contains("plan.launched"), "{chain}");
+    }
 
     /// An oversized request is granted the largest count the backend will
     /// actually boot — 32 for Firecracker, which is what `/machine-config`
