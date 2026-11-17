@@ -283,7 +283,13 @@ impl ProtectedPreloadedParent {
         let anchor = ClaimTestAnchor::audited(&self.parent_meta);
         let claim = admitted_child_claim(
             &self.src.path().join("rootfs.ext4"),
-            signed_child_plan_json(&parent_digest),
+            signed_child_plan_json_named(
+                &parent_digest,
+                self.handle
+                    .preloaded_child_vm_name
+                    .as_deref()
+                    .expect("preloaded child identity"),
+            ),
         );
         let ctx = ClaimContext {
             pool: &self.pool,
@@ -1075,6 +1081,15 @@ fn signed_child_plan_json(image_sha256: &str) -> String {
     signed_child_plan_json_with_verbs(image_sha256, None)
 }
 
+fn signed_child_plan_json_named(image_sha256: &str, name: &str) -> String {
+    let mut plan = mvm_core::plan::plan_from_admitted_json(&signed_child_plan_json(image_sha256))
+        .expect("signed child fixture");
+    plan.image.name = name.to_string();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+    serde_json::to_string(&mvm_core::plan::sign_plan(&plan, &key, "host:test"))
+        .expect("named signed child")
+}
+
 /// Record `policy` the way admission records a resolved network policy:
 /// as a policy asset identity carrying its content digest.
 fn record_policy_identity(plan: &mut ExecutionPlan, policy: &NetworkPolicy) {
@@ -1472,13 +1487,10 @@ fn claim_produces_fresh_identity_and_isolated_endpoint() {
         Some(vm_state_dir(&child.0).join("rootfs.ext4"))
     );
 
-    // Fresh identity: the child differs from the parent and gets a fresh name.
+    // The signed admission names the child; the generation handshake, not an
+    // independently generated VM name, supplies its fresh runtime identity.
     assert_ne!(child.0, handle.id, "child VmId must differ from the parent");
-    assert!(
-        child.0.starts_with("vm-"),
-        "child gets a fresh registry name: {}",
-        child.0
-    );
+    assert_eq!(child.0, plan.image.name);
 
     // Surface 5: the child's endpoint is keyed on its own fresh id, and the
     // factory parent never got one.
@@ -2694,7 +2706,7 @@ fn check_preloaded_refusal_cleanup(driver: MockDriver, retained: bool, with_over
 
     let claim = admitted_child_claim(
         &src.path().join("rootfs.ext4"),
-        signed_child_plan_json(&parent_digest),
+        signed_child_plan_json_named(&parent_digest, &child_name),
     );
     let runner = WorkloadRunner::new(
         driver.with_preloaded_standby(),
@@ -2780,6 +2792,84 @@ fn check_preloaded_refusal_cleanup(driver: MockDriver, retained: bool, with_over
         "stop must be confirmed exactly once"
     );
     assert!(!vm_state_dir(&child_name).exists());
+}
+
+#[test]
+fn preloaded_claim_refuses_a_different_signed_child_name() {
+    let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let runner = WorkloadRunner::new(
+        MockDriver::default().with_preloaded_standby(),
+        KeyingSpawner::default(),
+        RecordingBrokerRegistrar::new(),
+    );
+    let seeded = ProtectedPreloadedParent::seed(&runner);
+    let digest = materialized_parent_rootfs_digest(&seeded.checkpoints, &seeded.parent_meta);
+    let claim = admitted_child_claim(
+        &seeded.src.path().join("rootfs.ext4"),
+        signed_child_plan_json_named(&digest, "different-signed-child"),
+    );
+    let anchor = ClaimTestAnchor::audited(&seeded.parent_meta);
+    let registry_path = seeded.store_root.path().join("vm-names.json");
+    let ctx = ClaimContext {
+        pool: &seeded.pool,
+        checkpoints: &seeded.checkpoints,
+        snapshots: &seeded.snapshots,
+        anchor: &anchor,
+        parent_checkpoint: &seeded.parent_id,
+        registry_path: &registry_path,
+        grant_issuer: None,
+    };
+    let error = runner
+        .claim_standby(&ctx, &seeded.handle, &claim)
+        .expect_err("a different signed name must refuse before resuming");
+    assert!(
+        error.to_string().contains("differs from admitted name"),
+        "{error}"
+    );
+    assert_eq!(
+        seeded.pool.load("warm-parent").unwrap().state,
+        StandbyState::Idle
+    );
+    assert!(runner.driver.forked_children().is_empty());
+    assert!(runner.driver.killed_vms().is_empty());
+}
+
+#[test]
+fn failed_preloaded_child_stop_retains_parent_and_child_dir() {
+    let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let mut env = TestEnv::new();
+    env.set("MVM_HOME", home.path());
+    let store_root = tempfile::tempdir().unwrap();
+    let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
+    let mut handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
+    handle.preloaded_child_vm_name = Some("preloaded-child".into());
+    handle.pid = std::process::id();
+    pool.record(&handle).unwrap();
+    let child_dir = vm_state_dir("preloaded-child");
+    std::fs::create_dir_all(&child_dir).unwrap();
+    let driver = MockDriver::default().refusing_attach();
+    let mut lease = super::claim_lease::WarmClaimLease::new(&pool, "warm-parent", &driver);
+    pool.mark_claimed("warm-parent").unwrap();
+    lease.track_child_dir(child_dir.clone());
+    lease.track_preloaded_child("preloaded-child".into());
+    let error = lease.abort(StandbyError::ClaimFailed(
+        "post-materialization refusal".into(),
+    ));
+    assert!(matches!(error, StandbyError::StopUnconfirmed(_)), "{error}");
+    drop(lease);
+    assert_eq!(
+        pool.load("warm-parent").unwrap().state,
+        StandbyState::Claimed
+    );
+    assert!(
+        child_dir.exists(),
+        "an unconfirmed stop retains child state"
+    );
 }
 
 /// An un-audited parent (no signed creation entry) is quarantined by removal,

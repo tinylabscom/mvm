@@ -24,7 +24,7 @@ use mvm_client::AnyBackend;
 use mvm_client::checkpoint::CheckpointStore;
 use mvm_client::claim::ClaimRefusal;
 use mvm_client::standby::{STANDBY_POOL_TTL, SupervisorStandbyPool};
-use mvm_client::{ChildGrantIssuer, ClaimContext, PreloadContext, SpawnContext};
+use mvm_client::{ChildGrantIssuer, ClaimContext, SpawnContext};
 use mvm_core::checkpoint::CheckpointId;
 use mvm_core::user_config::MvmConfig;
 use mvm_core::vm_backend::{
@@ -661,33 +661,10 @@ pub(crate) fn warm_to_target(
                     .unwrap_or(STANDBY_PARENT_TENANT);
                 match audit_captured_parent(&checkpoints, &handle, p.backend.name(), tenant) {
                     Ok(()) => {
-                        let mut handle = handle;
-                        if p.backend.supports_preloaded_standby() {
-                            let snapshots =
-                                FsSnapshotStore::new(mvm_core::config::snapshots_dir())?;
-                            let anchor = SignedChainAnchor::load()?;
-                            let registry_path = mvm_client::name_registry::registry_path();
-                            let preload = PreloadContext {
-                                checkpoints: &checkpoints,
-                                snapshots: &snapshots,
-                                anchor: &anchor,
-                                registry_path: &registry_path,
-                            };
-                            if let Err(error) =
-                                p.backend.preload_standby_via_runner(&preload, &mut handle)
-                            {
-                                failures
-                                    .push(format!("preloading standby '{}': {error:#}", handle.id));
-                                tracing::warn!(
-                                    standby = %handle.id,
-                                    %error,
-                                    "could not preload paused child; discarding standby"
-                                );
-                                discard_preloaded_child(p.backend, &handle);
-                                failed += 1;
-                                continue;
-                            }
-                        }
+                        // An admission names its child only when a launch
+                        // arrives. A preloaded child has a different random
+                        // name and cannot take that signed identity, so CLI
+                        // parents stay saved-state until the claim.
                         if let Err(error) = pool.record(&handle) {
                             discard_preloaded_child(p.backend, &handle);
                             return Err(error);
@@ -806,7 +783,7 @@ fn claim_with_mode<F, G, T>(
     dispatch: G,
 ) -> Result<LaunchDecision>
 where
-    F: FnOnce(&StandbyHandle) -> Result<T>,
+    F: FnOnce(&StandbyHandle) -> Result<Option<T>>,
     G: FnOnce(&ClaimContext<'_>, &StandbyHandle, T) -> Result<VmId>,
 {
     if matches!(mode, WarmLaunchMode::Cold) {
@@ -846,7 +823,13 @@ where
         });
     };
     let claim = match make_claim(&handle) {
-        Ok(c) => c,
+        Ok(Some(claim)) => claim,
+        Ok(None) => {
+            return Ok(decision_for_mode(
+                mode,
+                WarmClaimRefusal::NoCompatibleParent,
+            ));
+        }
         Err(e) => {
             tracing::warn!(standby = %handle.id, error = %e, "build claim failed");
             return Ok(decision_for_mode(
@@ -1105,7 +1088,16 @@ pub(crate) fn try_warm_claim_with_admission(
         backend,
         &want,
         WarmLaunchMode::Required,
-        |_| Ok(()),
+        |handle| {
+            // A persisted preloaded child cannot be renamed to this launch's
+            // signed identity. Refuse it before consuming the admission, so
+            // an optional launch retains its ordinary cold path.
+            Ok(handle
+                .preloaded_child_vm_name
+                .as_deref()
+                .is_none_or(|name| name == cfg.name)
+                .then_some(()))
+        },
         |ctx, handle, ()| {
             // A loser of an already-reserved parent has not dispatched
             // anything. Keep the owner's one-use admission for cold fallback.
@@ -1926,7 +1918,7 @@ mod tests {
 
     #[test]
     fn try_warm_claim_cold_boots_without_an_admitted_plan() {
-        let b = AnyBackend::from_hypervisor("libkrun");
+        let b = AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_standby());
         let mut c = eligible_cfg();
         c.plan_json = None;
         assert!(matches!(
@@ -2570,7 +2562,7 @@ mod tests {
             &backend,
             &want,
             WarmLaunchMode::Required,
-            |_| -> Result<()> { panic!("pool miss cannot prepare a claim") },
+            |_| -> Result<Option<()>> { panic!("pool miss cannot prepare a claim") },
             |_, _, ()| {
                 dispatched.set(true);
                 anyhow::bail!("pool miss cannot spend admission")
@@ -2635,7 +2627,7 @@ mod tests {
             &backend,
             &want,
             WarmLaunchMode::Optional,
-            |handle| -> Result<()> {
+            |handle| -> Result<Option<()>> {
                 observed.set(Some(pool.load(&handle.id).unwrap().state));
                 // Stop here: the reservation state is the whole subject of this test.
                 anyhow::bail!("halt after inspecting the reservation state")

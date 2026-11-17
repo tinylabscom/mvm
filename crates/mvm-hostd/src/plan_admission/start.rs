@@ -437,7 +437,7 @@ pub fn claim_cli_transient(
         "warm claim cannot transfer writable volume custody"
     );
     let audit = mvm_vmm::host::audit_substrate::compute_audit_substrate(
-        &handle.id,
+        &config.name,
         prepared.tenant_id.as_deref(),
     )?;
     let plan_json = prepared
