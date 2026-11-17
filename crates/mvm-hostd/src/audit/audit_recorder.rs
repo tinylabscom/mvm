@@ -16,7 +16,7 @@
 //!   (`mvmctl trust audit tail` defaults to this).
 //!
 //! This module unifies them through a typed [`EventCategory`] taxonomy
-//! and a [`Recorder`] that wraps an [`crate::supervisor::AuditSigner`] +
+//! and a [`Recorder`] that wraps an [`crate::audit::signer::AuditSigner`] +
 //! routes every emit through the same chain-signed envelope. The
 //! per-stream files stay distinct on disk (operator-secret events
 //! shouldn't pollute the plan chain), but the **emit surface** is
@@ -56,8 +56,8 @@ use mvm_core::observability::metrics::Metrics;
 use mvm_core::plan::{ExecutionPlan, PlanId, TenantId};
 use mvm_core::policy::PolicyBundle;
 
-use crate::supervisor::audit::audit_mirror;
-use crate::supervisor::audit::signer::{AuditError, AuditSigner, PlanAuditEntry, for_plan};
+use crate::audit::audit_mirror;
+use crate::audit::signer::{AuditError, AuditSigner, PlanAuditEntry, for_plan};
 
 /// Canonical audit-event categories. The string form (the
 /// `event_name` field's prefix) is the wire-stable identifier
@@ -428,7 +428,7 @@ fn merge_extras(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::supervisor::audit::signer::CapturingAuditSigner;
+    use crate::audit::signer::CapturingAuditSigner;
 
     fn fixture_plan() -> ExecutionPlan {
         mvm_core::plan::test_support::PlanFixture::new()
@@ -804,7 +804,7 @@ pub(crate) mod tests {
     fn metrics_counter_not_bumped_when_signer_fails() {
         // If the signer rejects the entry, the metrics counter
         // should NOT bump — otherwise dashboards over-count.
-        use crate::supervisor::audit::signer::NoopAuditSigner;
+        use crate::audit::signer::NoopAuditSigner;
         let metrics = Arc::new(Metrics::new());
         let recorder = Recorder::new(Arc::new(NoopAuditSigner), TenantId("local".to_string()))
             .with_metrics(metrics.clone());

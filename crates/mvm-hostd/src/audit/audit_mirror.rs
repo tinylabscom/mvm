@@ -10,7 +10,7 @@
 //! subscriber cannot block, reorder, or fail a chain append, and cannot
 //! change what is signed.
 
-use crate::supervisor::audit::signer::PlanAuditEntry;
+use crate::audit::signer::PlanAuditEntry;
 
 /// Tracing target used for all audit-mirror events.
 pub const TARGET: &str = "mvm::audit";
@@ -141,8 +141,8 @@ mod tests {
     /// observed-count assertion stops the test passing by mirroring nothing.
     #[tokio::test]
     async fn chain_bytes_are_identical_with_and_without_a_mirror_subscriber() {
-        use crate::supervisor::audit::audit_file::FileAuditSigner;
-        use crate::supervisor::audit::signer::AuditSigner;
+        use crate::audit::audit_file::FileAuditSigner;
+        use crate::audit::signer::AuditSigner;
 
         async fn chain_bytes(observe: bool) -> (String, usize) {
             let dir = tempfile::tempdir().unwrap();
@@ -198,8 +198,8 @@ mod tests {
     /// failed, and no test would notice.
     #[tokio::test]
     async fn a_failed_append_emits_no_mirrored_event() {
-        use crate::supervisor::audit::audit_file::FileAuditSigner;
-        use crate::supervisor::audit::signer::AuditSigner;
+        use crate::audit::audit_file::FileAuditSigner;
+        use crate::audit::signer::AuditSigner;
 
         let dir = tempfile::tempdir().unwrap();
         let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
@@ -247,9 +247,9 @@ mod tests {
             }
         }
 
-        let signer: Arc<crate::supervisor::audit::signer::CapturingAuditSigner> =
-            Arc::new(crate::supervisor::audit::signer::CapturingAuditSigner::new());
-        let recorder = crate::supervisor::audit::audit_recorder::Recorder::new(
+        let signer: Arc<crate::audit::signer::CapturingAuditSigner> =
+            Arc::new(crate::audit::signer::CapturingAuditSigner::new());
+        let recorder = crate::audit::audit_recorder::Recorder::new(
             signer.clone(),
             mvm_contract::plan::TenantId("tenant-a".to_string()),
         );
@@ -263,9 +263,9 @@ mod tests {
                     .build()
                     .unwrap()
                     .block_on(recorder.record_plan_bound(
-                        crate::supervisor::audit::audit_recorder::EventCategory::Plan,
+                        crate::audit::audit_recorder::EventCategory::Plan,
                         "plan.launched",
-                        &crate::supervisor::audit::signer::tests::sample_plan(),
+                        &crate::audit::signer::tests::sample_plan(),
                         None,
                         [],
                     ))

@@ -27,8 +27,8 @@ use mvm_core::receipt::{
 use mvm_core::usage_capture::UsageCapture;
 use serde_json::Value;
 
-use crate::supervisor::audit::audit_file::verify_audit_chain_entries;
-use crate::supervisor::audit::signer::PlanAuditEntry;
+use crate::audit::audit_file::verify_audit_chain_entries;
+use crate::audit::signer::PlanAuditEntry;
 
 /// Export signed execution receipts from a tenant's chain-signed audit log.
 ///
@@ -540,16 +540,16 @@ fn build_context_map(entries: &[PlanAuditEntry]) -> BTreeMap<String, ReceiptCont
         // The seal is the last thing a run produces, so a later anchor for the
         // same plan supersedes an earlier one rather than being ignored: a
         // restarted capture seals again and the newest root is the live one.
-        if entry.event == crate::supervisor::audit::signer::TRANSCRIPT_SEALED_EVENT {
+        if entry.event == crate::audit::signer::TRANSCRIPT_SEALED_EVENT {
             if let Some(root) = entry
                 .labels
-                .get(crate::supervisor::audit::signer::LABEL_TRANSCRIPT_ROOT)
+                .get(crate::audit::signer::LABEL_TRANSCRIPT_ROOT)
             {
                 ctx.transcript_root = Some(root.clone());
             }
             ctx.transcript_adopted = entry
                 .labels
-                .get(crate::supervisor::audit::signer::LABEL_ADOPTED)
+                .get(crate::audit::signer::LABEL_ADOPTED)
                 .map(|v| v == "true");
         }
 
@@ -624,9 +624,9 @@ mod tests {
     use mvm_core::plan::{PlanId, TenantId};
     use mvm_core::receipt::ReceiptOutcome;
 
-    use crate::supervisor::AuditSigner;
-    use crate::supervisor::audit::audit_file::FileAuditSigner;
-    use crate::supervisor::audit::signer::PlanAuditEntry;
+    use crate::audit::audit_file::FileAuditSigner;
+    use crate::audit::signer::AuditSigner;
+    use crate::audit::signer::PlanAuditEntry;
 
     fn sample_plan_id() -> PlanId {
         PlanId("sha256:0000000000000000000000000000000000000000000000000000000000000001".into())
@@ -911,21 +911,15 @@ mod tests {
         let sealed = {
             let mut labels = BTreeMap::new();
             labels.insert(
-                crate::supervisor::audit::signer::LABEL_TRANSCRIPT_ROOT.into(),
+                crate::audit::signer::LABEL_TRANSCRIPT_ROOT.into(),
                 root.clone(),
             );
+            labels.insert(crate::audit::signer::LABEL_ADOPTED.into(), "false".into());
             labels.insert(
-                crate::supervisor::audit::signer::LABEL_ADOPTED.into(),
-                "false".into(),
-            );
-            labels.insert(
-                crate::supervisor::audit::signer::LABEL_CAPTURE_ID.into(),
+                crate::audit::signer::LABEL_CAPTURE_ID.into(),
                 "cap-1".into(),
             );
-            sample_audit_entry(
-                crate::supervisor::audit::signer::TRANSCRIPT_SEALED_EVENT,
-                labels,
-            )
+            sample_audit_entry(crate::audit::signer::TRANSCRIPT_SEALED_EVENT, labels)
         };
         let exited = {
             let mut labels = BTreeMap::new();
@@ -978,17 +972,11 @@ mod tests {
         let sealed = {
             let mut labels = BTreeMap::new();
             labels.insert(
-                crate::supervisor::audit::signer::LABEL_TRANSCRIPT_ROOT.into(),
+                crate::audit::signer::LABEL_TRANSCRIPT_ROOT.into(),
                 "cd".repeat(32),
             );
-            labels.insert(
-                crate::supervisor::audit::signer::LABEL_ADOPTED.into(),
-                "true".into(),
-            );
-            sample_audit_entry(
-                crate::supervisor::audit::signer::TRANSCRIPT_SEALED_EVENT,
-                labels,
-            )
+            labels.insert(crate::audit::signer::LABEL_ADOPTED.into(), "true".into());
+            sample_audit_entry(crate::audit::signer::TRANSCRIPT_SEALED_EVENT, labels)
         };
         for entry in [sample_audit_entry("plan.admitted", BTreeMap::new()), sealed] {
             rt.block_on(signer.sign_and_emit(&entry)).unwrap();

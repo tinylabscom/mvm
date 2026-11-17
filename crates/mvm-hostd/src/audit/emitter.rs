@@ -38,14 +38,14 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::audit::audit_file::FileAuditSigner;
+use crate::audit::audit_mirror;
 use crate::audit::decisions::DecisionStore;
 pub use crate::audit::evidence::EmittedEvidence;
 use crate::audit::evidence::{EvidenceReceipt, audit_entry_digest_hex};
 use crate::audit::receipt_export::audit_entry_to_receipt;
 use crate::audit::receipt_store::ReceiptStore;
-use crate::supervisor::{
-    AuditSigner, FileAuditSigner, PlanAuditEntry, audit::audit_mirror, for_plan, transcript_sealed,
-};
+use crate::audit::signer::{AuditSigner, PlanAuditEntry, for_plan, transcript_sealed};
 use anyhow::{Context, Result};
 use ed25519_dalek::SigningKey;
 use mvm_contract::merkle::SignedAuditRoot;
@@ -1298,7 +1298,7 @@ impl AuditEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::supervisor::verify_audit_chain;
+    use crate::audit::audit_file::verify_audit_chain;
     use mvm_core::usage_capture::{Mechanism, Metric};
     use rand::Rng;
 
@@ -2139,22 +2139,22 @@ mod tests {
             .unwrap();
 
         let path = dir.path().join("local.jsonl");
-        let entries = crate::supervisor::verify_audit_chain_entries(&path, &vk).unwrap();
+        let entries = crate::audit::audit_file::verify_audit_chain_entries(&path, &vk).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(
             entries[0].event,
-            crate::supervisor::audit::signer::TRANSCRIPT_SEALED_EVENT
+            crate::audit::signer::TRANSCRIPT_SEALED_EVENT
         );
         assert_eq!(
             entries[0]
                 .labels
-                .get(crate::supervisor::audit::signer::LABEL_TRANSCRIPT_ROOT),
+                .get(crate::audit::signer::LABEL_TRANSCRIPT_ROOT),
             Some(&root)
         );
         assert_eq!(
             entries[0]
                 .labels
-                .get(crate::supervisor::audit::signer::LABEL_CHUNK_COUNT),
+                .get(crate::audit::signer::LABEL_CHUNK_COUNT),
             Some(&"3".to_string())
         );
     }
@@ -2188,7 +2188,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                crate::supervisor::VerifyError::EntryCanonicalMismatch { .. }
+                crate::audit::audit_file::VerifyError::EntryCanonicalMismatch { .. }
             ),
             "expected EntryCanonicalMismatch, got {err:?}"
         );
@@ -2222,8 +2222,8 @@ mod tests {
         // The record of why a session ended unsealed is a terminal outcome and
         // must be on disk before the call returns.
         assert_eq!(
-            crate::supervisor::audit::audit_file::sync_policy_for("plan.teardown_failed"),
-            crate::supervisor::audit::audit_file::SyncPolicy::Barrier
+            crate::audit::audit_file::sync_policy_for("plan.teardown_failed"),
+            crate::audit::audit_file::SyncPolicy::Barrier
         );
     }
 

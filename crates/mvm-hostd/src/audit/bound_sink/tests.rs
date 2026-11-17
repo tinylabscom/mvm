@@ -2,10 +2,8 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::*;
-use crate::supervisor::audit::audit_file::FileAuditSigner;
-use crate::supervisor::audit::signer::{
-    AuditError, AuditSigner, CapturingAuditSigner, PlanAuditEntry,
-};
+use crate::audit::audit_file::FileAuditSigner;
+use crate::audit::signer::{AuditError, AuditSigner, CapturingAuditSigner, PlanAuditEntry};
 
 fn context() -> AuditContext {
     let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();

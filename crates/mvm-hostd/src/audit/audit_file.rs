@@ -46,7 +46,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signature, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
-use crate::supervisor::audit::signer::{AuditError, AuditSigner, PlanAuditEntry, SignedEnvelope};
+use crate::audit::signer::{AuditError, AuditSigner, PlanAuditEntry, SignedEnvelope};
 use mvm_contract::verify::{hash_line, seal, signed_bytes_for};
 
 /// Test-only, thread-scoped syscall failures; never enabled by environment.
@@ -665,14 +665,13 @@ impl FileAuditSigner {
             timestamp: chrono::Utc::now(),
             tenant: tenant.clone(),
             plan_id: mvm_core::plan::PlanId(
-                crate::supervisor::audit::audit_recorder::UNBOUND_PLAN_ID.to_string(),
+                crate::audit::audit_recorder::UNBOUND_PLAN_ID.to_string(),
             ),
             plan_version: 0,
             bundle_id: None,
             bundle_version: None,
-            image_name: crate::supervisor::audit::audit_recorder::UNBOUND_IMAGE_NAME.to_string(),
-            image_sha256: crate::supervisor::audit::audit_recorder::UNBOUND_IMAGE_SHA256
-                .to_string(),
+            image_name: crate::audit::audit_recorder::UNBOUND_IMAGE_NAME.to_string(),
+            image_sha256: crate::audit::audit_recorder::UNBOUND_IMAGE_SHA256.to_string(),
             event: event.to_string(),
             caller_commitment: None,
             labels,
