@@ -93,7 +93,7 @@ pub(in crate::commands) struct Args {
     #[arg(long)]
     pub hypervisor: bool,
     /// Authenticate the current protected run's sealed retained output for this exact plan
-    #[arg(long, conflicts_with_all = ["follow", "hypervisor"])]
+    #[arg(long, value_name = "PLAN", conflicts_with_all = ["follow", "hypervisor"])]
     pub verified_plan_id: Option<String>,
     /// Expected tenant for verified readback
     #[arg(long, default_value = "local", requires = "verified_plan_id")]
