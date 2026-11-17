@@ -81,6 +81,7 @@ required-features = ["libkrun-sys"]
 [[bin]]
 name = "mvm-hvf-supervisor"
 path = "src/bin/mvm-hvf-supervisor.rs"
+required-features = ["manifest-verify"]
 
 # Root-owned macOS APFS snapshot boundary. The client never elevates itself;
 # this binary is installed and launched by the host service manager with an
@@ -208,7 +209,8 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net"
 ctor = "0.2"
 
 [features]
-default = []
+# Host admission independently reauthenticates signed application descriptors.
+default = ["manifest-verify"]
 # macOS-only protected caller opt-in; other platforms return Unsupported.
 native-caller-identity = ["dep:core-foundation", "dep:security-framework"]
 manifest-verify = ["mvm-core/manifest-verify"]

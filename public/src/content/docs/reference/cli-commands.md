@@ -1165,6 +1165,16 @@ this order. The order is the contract:
    typed, the directory is where you happened to be standing.
 7. **The bundled default image.**
 
+Cold native HVF failures retain the original launch custody and include bounded
+startup error context when available. Early caller preparation and checked-input
+binding failures can also write `supervisor-failure.txt` in the existing private
+VM state directory. This optional diagnostic is disabled for unsuitable or
+symlinked directories; it never creates a missing parent. It is not a readiness,
+shutdown, or recovery receipt. Preserve retained invocation state rather than
+retrying consumed registration or deleting state based on an absent process.
+Diagnostic text is length-bounded, flattened, and has the MVM-home path removed;
+it is not a general-purpose credential redactor or a raw supervisor stderr log.
+
 | Runtime  | Image                | Commands                                     | Project files                                               |
 | -------- | -------------------- | -------------------------------------------- | ----------------------------------------------------------- |
 | `python` | `python:3.12-alpine` | `python`, `python3`, `pip`, `pip3`, `pytest` | `pyproject.toml`, `requirements.txt`, `Pipfile`, `setup.py` |

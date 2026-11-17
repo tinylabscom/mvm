@@ -19,6 +19,26 @@ pub fn failure_path(state_dir: &Path) -> PathBuf {
     state_dir.join(FAILURE_FILE)
 }
 
+/// Validate an existing managed directory without creating or repairing it.
+pub fn validate_directory(state_dir: &Path, expected: &Path) -> anyhow::Result<()> {
+    anyhow::ensure!(state_dir == expected, "supervisor state directory mismatch");
+    let metadata = std::fs::symlink_metadata(state_dir)?;
+    anyhow::ensure!(
+        metadata.is_dir(),
+        "supervisor state must be a real directory"
+    );
+    mvm_core::private_fs::require_current_owner(&metadata)?;
+    anyhow::ensure!(
+        mvm_core::private_fs::mode_bits(state_dir, &metadata)? == 0o700,
+        "supervisor state must have private mode 0700"
+    );
+    anyhow::ensure!(
+        state_dir.canonicalize()? == state_dir,
+        "supervisor state must not contain symlinks"
+    );
+    Ok(())
+}
+
 fn sanitize(text: &str, home: &str) -> String {
     let flat: String = text
         .replace(home, "<mvm-home>")
@@ -32,11 +52,18 @@ fn sanitize(text: &str, home: &str) -> String {
     flat[..end].to_string()
 }
 
+/// Borrow the startup error for bounded diagnostics without releasing its custody.
+pub fn summary(error: &anyhow::Error) -> String {
+    sanitize(&format!("{error:#}"), &mvm_core::config::mvm_home())
+}
+
 /// Record `error` for the launcher. Best effort: a supervisor that is already
 /// failing has no better place to report a failure to write.
 pub fn record(state_dir: &Path, error: &anyhow::Error) {
-    let text = sanitize(&format!("{error:#}"), &mvm_core::config::mvm_home());
-    let _ = mvm_core::util::atomic_io::atomic_write(&failure_path(state_dir), text.as_bytes());
+    let text = summary(error);
+    // The managed ancestors are trusted to remain stable during startup.
+    // Do not recreate a directory removed after recorder validation.
+    let _ = mvm_core::util::atomic_io::write_private(&failure_path(state_dir), text.as_bytes());
 }
 
 /// Forget a previous run's record so a new launch cannot report it.
@@ -63,6 +90,49 @@ pub fn detail(state_dir: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_diagnostics_require_an_existing_private_canonical_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().canonicalize().unwrap().join("vm");
+        assert!(validate_directory(&state, &state).is_err());
+        std::fs::create_dir(&state).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        validate_directory(&state, &state).unwrap();
+        assert!(validate_directory(&state, &state.with_file_name("other")).is_err());
+        let link = state.with_file_name("link");
+        std::os::unix::fs::symlink(&state, &link).unwrap();
+        assert!(validate_directory(&link, &link).is_err());
+        let child = state.join("child");
+        std::fs::create_dir(&child).unwrap();
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(validate_directory(&link.join("child"), &link.join("child")).is_err());
+        let file = state.join("not-a-directory");
+        std::fs::write(&file, b"unchanged").unwrap();
+        assert!(validate_directory(&file, &file).is_err());
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(validate_directory(&state, &state).is_err());
+        assert!(!failure_path(&state).exists());
+    }
+
+    #[test]
+    fn failure_recording_never_recreates_a_removed_namespace() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("removed");
+        record(&state, &anyhow::anyhow!("startup failed"));
+        assert!(!state.exists());
+    }
+
+    #[test]
+    fn borrowed_failure_summary_preserves_context_without_consuming_error() {
+        let error = anyhow::anyhow!("bind\nfailed").context("verify\tboot inputs");
+        assert_eq!(summary(&error), "verify boot inputs: bind failed");
+        assert_eq!(error.root_cause().to_string(), "bind\nfailed");
+        let long = anyhow::anyhow!("é".repeat(MAX_BYTES));
+        assert!(summary(&long).len() <= MAX_BYTES);
+    }
 
     #[test]
     fn a_recorded_failure_reaches_the_launcher_flattened_and_bounded() {
