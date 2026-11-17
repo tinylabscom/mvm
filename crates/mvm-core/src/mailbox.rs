@@ -26,6 +26,9 @@ const CAPABILITY_SIGNATURE_DOMAIN: &[u8] = b"mvm.mailbox.capability.v1\0";
 const RECEIPT_SIGNATURE_DOMAIN: &[u8] = b"mvm.mailbox.receipt.v1\0";
 const ENVELOPE_AEAD_DOMAIN: &[u8] = b"mvm.mailbox.payload.v1\0";
 
+/// Pure call/reply bookkeeping: pending calls, tombstones, epoch drops.
+pub mod conversation;
+
 /// The one-frame exchange the guest and the host mailbox service share.
 pub mod frame;
 
