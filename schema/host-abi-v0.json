@@ -254,6 +254,16 @@
       "title": "AttestationVerifyRequest",
       "type": "object"
     },
+    "AuthType": {
+      "description": "How a secret authenticates an outbound request, so the keyholder picks the right path: `Sigv4`/`Hmac` are *signed* (the key never leaves the signer); `Bearer`/`Basic` are *injected* credentials.",
+      "enum": [
+        "sigv4",
+        "hmac",
+        "bearer",
+        "basic"
+      ],
+      "type": "string"
+    },
     "BackendCapabilitiesReply": {
       "description": "Opaque report; the shape is owned by the capability negotiation module.",
       "type": "object"
@@ -1789,6 +1799,39 @@
       ],
       "title": "UpdateRequest",
       "type": "object"
+    },
+    "InjectionMode": {
+      "description": "Where an injected credential's placeholder may sit in a request, and so where its value is substituted.\n\nOnly injected credentials (`Bearer`, `Basic`) have a position; a signing scheme (`Sigv4`, `Hmac`) signs the whole request and is always `Header`.",
+      "oneOf": [
+        {
+          "description": "In a request header value (`Authorization: Bearer <placeholder>`).",
+          "enum": [
+            "header"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "In a query parameter's value (`?key=<placeholder>`), percent-encoded.",
+          "enum": [
+            "query_param"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "In a URL path segment (`/bot<placeholder>/send`), percent-encoded.",
+          "enum": [
+            "url_path"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "In the credential of `Authorization: Basic`, which the client base64-encodes (`user:<placeholder>`). Decoded, substituted and re-encoded. Requires `auth_type = Basic`.",
+          "enum": [
+            "basic_auth"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "InstanceReadiness": {
       "description": "Finer-grained \"is this VM usable?\" state, composed alongside the coarse [`InstanceStatus`] lifecycle.\n\n`InstanceStatus::Running` means the backend accepted the VM and it has not stopped. `InstanceReadiness` explains *whether* it is actually usable: did the agent answer? Are integration probes green? Is a streaming operation currently throttled?\n\nReadiness transitions are independent of lifecycle transitions — they do not gate or require `InstanceStatus` to move.",
@@ -3889,6 +3932,44 @@
       "title": "VerifyRequest",
       "type": "object"
     },
+    "OAuthBindingMeta": {
+      "description": "Non-secret OAuth metadata for a secret binding.\n\nThis metadata is enough for host-driven OAuth exchange/refresh logic while keeping the real token set and client secret in the secret value store.",
+      "properties": {
+        "authorization_url": {
+          "description": "OAuth authorization endpoint.",
+          "type": "string"
+        },
+        "client_id": {
+          "description": "Public OAuth client id.",
+          "type": "string"
+        },
+        "response_access_token_pointer": {
+          "description": "JSON pointer to the response field that carries the access token. Defaults to `/access_token` when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scopes": {
+          "default": [],
+          "description": "Scopes requested for this binding.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "token_url": {
+          "description": "OAuth token endpoint.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "authorization_url",
+        "client_id",
+        "token_url"
+      ],
+      "type": "object"
+    },
     "PlanArtifact": {
       "additionalProperties": false,
       "description": "Pin from an `ExecutionPlan` to a specific signed bundle. Captures the three quantities the supervisor needs to re-verify on admit:\n\n1. **`bundle_sha256`** — SHA-256 of the entire archive bytes. The plan's pin is \"I authorise launching this exact byte string.\" 2. **`manifest_sig_base64`** — the publisher's signature over the bundle's manifest. Held in the plan so the verifier can refuse the launch without trusting whatever copy of the manifest the archive on disk contains. 3. **`key_id`** — the publisher's key_id. Lets admission reject plans whose pinning publisher isn't in the local trust store *before* opening the archive.\n\n`serde(deny_unknown_fields)` keeps the wire format strict — a future field added in v2 fails closed in older builds.",
@@ -4285,6 +4366,161 @@
       ],
       "type": "object"
     },
+    "SecretApproval": {
+      "description": "Whether a secret's use needs a run-time approval.",
+      "oneOf": [
+        {
+          "description": "Substituted without asking.",
+          "enum": [
+            "never"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The first use in a session is put to an approval backend.",
+          "enum": [
+            "ask"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "SecretBindingMeta": {
+      "description": "Per-(tenant, name) binding metadata. No secret bytes — safe to print.",
+      "properties": {
+        "allowed_hosts": {
+          "description": "Destinations the substituted credential may reach (claim 12). `*.` subdomain wildcards per [`mvm_contract::ir::host_matches`].",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "approve": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/SecretApproval"
+            }
+          ],
+          "description": "Whether a use of this secret must be approved at run time. `ask` pauses the first request that would carry it until an approval backend answers; an approval can reach the rest of the session. Host-side policy, like `allowed_hosts`."
+        },
+        "auth_type": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AuthType"
+            }
+          ],
+          "description": "How the keyholder uses the secret on egress (signer vs injector)."
+        },
+        "inject": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/InjectionMode"
+            }
+          ],
+          "description": "The only request position in which this binding's placeholder may be substituted. Older binding records default to ordinary header injection."
+        },
+        "oauth": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OAuthBindingMeta"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional OAuth metadata for host-side token acquisition/refresh and response-token placeholder capture."
+        },
+        "provider": {
+          "default": null,
+          "description": "The catalog entry this binding was authored from, when it was authored with `--provider`. Display and audit only — enforcement reads `allowed_hosts`, which was resolved once at `set` time. Recording the name rather than consulting it later is what keeps a catalog edit from silently widening a binding that already exists.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sigv4": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Sigv4Params"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Non-secret SigV4 params (access-key id + credential scope), set only for `auth_type = Sigv4`. The secret-access-key (the signing key) stays in the value store; these are reconstructed onto the `SecretRef` at admission so the forward-path signer can name the credential scope. `None` otherwise."
+        }
+      },
+      "required": [
+        "allowed_hosts",
+        "auth_type"
+      ],
+      "type": "object"
+    },
+    "SecretGetReply": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/SecretMetadata"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Nullable_SecretMetadata"
+    },
+    "SecretGetRequest": {
+      "additionalProperties": false,
+      "description": "A scope and secret name only; no value, store override, or reveal option.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "tenant": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "tenant"
+      ],
+      "title": "GetRequest",
+      "type": "object"
+    },
+    "SecretMetadata": {
+      "description": "Non-secret description of one stored secret: name, scope, egress binding (auth type + destination allow-list + SigV4 scope), and the persistent machines that reference it. Serializable for UI consumption because it is structurally incapable of carrying a value.",
+      "properties": {
+        "binding": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SecretBindingMeta"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Egress binding, when one is recorded. `None` for value-only secrets."
+        },
+        "name": {
+          "type": "string"
+        },
+        "referenced_by": {
+          "description": "Names of existing persistent machines referencing this secret.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tenant": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "referenced_by",
+        "tenant"
+      ],
+      "type": "object"
+    },
     "SessionBinding": {
       "additionalProperties": false,
       "description": "The durable agent session a checkpoint is a resume point for.\n\n`generation` fences a resume: reopening a parked session increments it, so a frame addressed to an earlier generation is refused rather than delivered into a successor. `journal_cursor` is the session-journal position the capture is consistent with, and `approval_head` names the approval-ledger state the capture was admitted under — a resume bounds its fresh grants against that head rather than against whatever the ledger holds later. `replay_input_digest`, when present, commits the encrypted input artifact executed immediately before this step was captured.",
@@ -4554,6 +4790,30 @@
         "session_id"
       ],
       "title": "SessionRef",
+      "type": "object"
+    },
+    "Sigv4Params": {
+      "additionalProperties": false,
+      "description": "The non-secret half of a SigV4 credential: the public access-key id and the credential scope (`region`/`service`). The signing key (the AWS secret-access-key) is **not** here — it lives in the secret store and never leaves the signer. Identifying but not secret, so Debug is safe.",
+      "properties": {
+        "access_key_id": {
+          "description": "The AWS access-key id (e.g. `AKIA…`). Public; pairs with the secret-access-key the signer holds.",
+          "type": "string"
+        },
+        "region": {
+          "description": "Credential-scope region (e.g. `us-east-1`).",
+          "type": "string"
+        },
+        "service": {
+          "description": "Credential-scope service (e.g. `s3`, `execute-api`).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "access_key_id",
+        "region",
+        "service"
+      ],
       "type": "object"
     },
     "StreamEvent": {
@@ -5619,6 +5879,23 @@
       "title": "ManifestVerify",
       "type": "object"
     },
+    "secret_get": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/SecretGetReply"
+        },
+        "request": {
+          "$ref": "#/definitions/SecretGetRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "SecretGet",
+      "type": "object"
+    },
     "session_call": {
       "additionalProperties": false,
       "properties": {
@@ -5760,6 +6037,7 @@
     "session_info",
     "session_start",
     "session_stop",
+    "secret_get",
     "guest_cp",
     "guest_fs_list",
     "guest_fs_mkdir",

@@ -126,6 +126,7 @@ Addons contribute their own hooks, merged at compile time:
 | `mv.network(...)`, `mv.egress(...)` | egress policy (default-deny) |
 | `mv.python_deps(...)`, `mv.node_deps(...)` | dependencies, installed into a sealed, audited volume |
 | `mv.secret("name")`, `mv.literal("v")` | env values — secrets resolve on the host, never baked into the image |
+| `mv.secrets.get("name", tenant="local")` | host-local metadata or `None` if absent; never reads the value |
 
 ## Runtime SDK
 

@@ -1,6 +1,6 @@
 {
   "abi_major": 1,
-  "abi_minor": 14,
+  "abi_minor": 15,
   "methods": [
     {
       "classification": "prod_safe",
@@ -223,6 +223,12 @@
       "key": "session_stop",
       "name": "session.stop",
       "summary": "Stops a session and tears down its microVM."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "secret_get",
+      "name": "secret.get",
+      "summary": "Reads host-local secret metadata without exposing the value."
     },
     {
       "classification": "dev_only",

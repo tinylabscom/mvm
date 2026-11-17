@@ -54,8 +54,9 @@ clap = ["dep:clap"]
 manifest-verify = ["mvm-core/manifest-verify"]
 # Derive schemas for authored policy and instruction trust policy, and build
 # their emitters. Off by default so no shipped closure carries schemars;
-# mvm-contract/schema covers policy endpoint routes and backend kinds.
-schema = ["dep:schemars", "mvm-contract/schema", "mvm-policy/schema"]
+# mvm-contract/schema covers policy endpoint routes and backend kinds;
+# mvm-core/schema covers secret binding metadata.
+schema = ["dep:schemars", "mvm-contract/schema", "mvm-core/schema", "mvm-policy/schema"]
 
 [dependencies]
 mvm-core = { workspace = true, features = ["client", "host-state", "os-keyring"] }

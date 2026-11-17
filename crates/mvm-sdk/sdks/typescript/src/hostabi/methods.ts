@@ -7,7 +7,7 @@
  * Owned by the Rust registry; the C ABI answers exactly these methods.
  */
 export const ABI_MAJOR = 1;
-export const ABI_MINOR = 14;
+export const ABI_MINOR = 15;
 
 export type Classification = "prod_safe" | "dev_only";
 
@@ -165,6 +165,9 @@ export const SESSION_START = "session.start";
 /** Stops a session and tears down its microVM. */
 export const SESSION_STOP = "session.stop";
 
+/** Reads host-local secret metadata without exposing the value. */
+export const SECRET_GET = "secret.get";
+
 /** Copies a file between the host and the guest. */
 export const GUEST_CP = "guest.cp";
 
@@ -266,6 +269,7 @@ export const METHODS: Readonly<Record<string, HostAbiMethod>> = {
   "session.info": { key: "session_info", classification: "prod_safe", summary: "Reports a session's record." },
   "session.start": { key: "session_start", classification: "prod_safe", summary: "Boots a warm session for a workload, admitted under a signed plan." },
   "session.stop": { key: "session_stop", classification: "prod_safe", summary: "Stops a session and tears down its microVM." },
+  "secret.get": { key: "secret_get", classification: "prod_safe", summary: "Reads host-local secret metadata without exposing the value." },
   "guest.cp": { key: "guest_cp", classification: "dev_only", summary: "Copies a file between the host and the guest." },
   "guest.fs.list": { key: "guest_fs_list", classification: "dev_only", summary: "Lists a directory in the guest." },
   "guest.fs.mkdir": { key: "guest_fs_mkdir", classification: "dev_only", summary: "Creates a directory in the guest." },

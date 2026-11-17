@@ -203,6 +203,21 @@ export type MachineListReply = MachineState2[]
 export type RunMode = ("transient" | "persistent")
 export type ManifestListReply = SlotRow[]
 export type ManifestPruneReply = OrphanSlot[]
+export type Nullable_SecretMetadata = (SecretMetadata | null)
+/**
+ * Whether a secret's use needs a run-time approval.
+ */
+export type SecretApproval = ("never" | "ask")
+/**
+ * How a secret authenticates an outbound request, so the keyholder picks the right path: `Sigv4`/`Hmac` are *signed* (the key never leaves the signer); `Bearer`/`Basic` are *injected* credentials.
+ */
+export type AuthType = ("sigv4" | "hmac" | "bearer" | "basic")
+/**
+ * Where an injected credential's placeholder may sit in a request, and so where its value is substituted.
+ *
+ * Only injected credentials (`Bearer`, `Basic`) have a position; a signing scheme (`Sigv4`, `Hmac`) signs the whole request and is always `Header`.
+ */
+export type InjectionMode = ("header" | "query_param" | "url_path" | "basic_auth")
 
 export interface HostAbi {
 attestation_export: AttestationExport
@@ -255,6 +270,7 @@ manifest_list: ManifestList
 manifest_prune: ManifestPrune
 manifest_remove: ManifestRemove
 manifest_verify: ManifestVerify
+secret_get: SecretGet
 session_call: SessionCall
 session_info: SessionInfo
 session_start: SessionStart
@@ -1925,6 +1941,109 @@ export interface VerifyRequest {
 check_signature?: boolean
 path?: (string | null)
 revision?: (string | null)
+}
+export interface SecretGet {
+reply: Nullable_SecretMetadata
+request: GetRequest
+}
+/**
+ * Non-secret description of one stored secret: name, scope, egress binding (auth type + destination allow-list + SigV4 scope), and the persistent machines that reference it. Serializable for UI consumption because it is structurally incapable of carrying a value.
+ */
+export interface SecretMetadata {
+/**
+ * Egress binding, when one is recorded. `None` for value-only secrets.
+ */
+binding?: (SecretBindingMeta | null)
+name: string
+/**
+ * Names of existing persistent machines referencing this secret.
+ */
+referenced_by: string[]
+tenant: string
+}
+/**
+ * Per-(tenant, name) binding metadata. No secret bytes — safe to print.
+ */
+export interface SecretBindingMeta {
+/**
+ * Destinations the substituted credential may reach (claim 12). `*.` subdomain wildcards per [`mvm_contract::ir::host_matches`].
+ */
+allowed_hosts: string[]
+/**
+ * Whether a use of this secret must be approved at run time. `ask` pauses the first request that would carry it until an approval backend answers; an approval can reach the rest of the session. Host-side policy, like `allowed_hosts`.
+ */
+approve?: SecretApproval
+/**
+ * How the keyholder uses the secret on egress (signer vs injector).
+ */
+auth_type: AuthType
+/**
+ * The only request position in which this binding's placeholder may be substituted. Older binding records default to ordinary header injection.
+ */
+inject?: InjectionMode
+/**
+ * Optional OAuth metadata for host-side token acquisition/refresh and response-token placeholder capture.
+ */
+oauth?: (OAuthBindingMeta | null)
+/**
+ * The catalog entry this binding was authored from, when it was authored with `--provider`. Display and audit only — enforcement reads `allowed_hosts`, which was resolved once at `set` time. Recording the name rather than consulting it later is what keeps a catalog edit from silently widening a binding that already exists.
+ */
+provider?: (string | null)
+/**
+ * Non-secret SigV4 params (access-key id + credential scope), set only for `auth_type = Sigv4`. The secret-access-key (the signing key) stays in the value store; these are reconstructed onto the `SecretRef` at admission so the forward-path signer can name the credential scope. `None` otherwise.
+ */
+sigv4?: (Sigv4Params | null)
+}
+/**
+ * Non-secret OAuth metadata for a secret binding.
+ *
+ * This metadata is enough for host-driven OAuth exchange/refresh logic while keeping the real token set and client secret in the secret value store.
+ */
+export interface OAuthBindingMeta {
+/**
+ * OAuth authorization endpoint.
+ */
+authorization_url: string
+/**
+ * Public OAuth client id.
+ */
+client_id: string
+/**
+ * JSON pointer to the response field that carries the access token. Defaults to `/access_token` when absent.
+ */
+response_access_token_pointer?: (string | null)
+/**
+ * Scopes requested for this binding.
+ */
+scopes?: string[]
+/**
+ * OAuth token endpoint.
+ */
+token_url: string
+}
+/**
+ * The non-secret half of a SigV4 credential: the public access-key id and the credential scope (`region`/`service`). The signing key (the AWS secret-access-key) is **not** here — it lives in the secret store and never leaves the signer. Identifying but not secret, so Debug is safe.
+ */
+export interface Sigv4Params {
+/**
+ * The AWS access-key id (e.g. `AKIA…`). Public; pairs with the secret-access-key the signer holds.
+ */
+access_key_id: string
+/**
+ * Credential-scope region (e.g. `us-east-1`).
+ */
+region: string
+/**
+ * Credential-scope service (e.g. `s3`, `execute-api`).
+ */
+service: string
+}
+/**
+ * A scope and secret name only; no value, store override, or reveal option.
+ */
+export interface GetRequest {
+name: string
+tenant: string
 }
 export interface SessionCall {
 reply: EntrypointCallReply1

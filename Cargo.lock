@@ -4158,6 +4158,7 @@ dependencies = [
  "mvm-core",
  "mvm-vmm",
  "schemars",
+ "secrecy",
  "serde",
  "serde_json",
  "tempfile",
