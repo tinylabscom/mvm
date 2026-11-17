@@ -184,6 +184,15 @@ brokers for cell reads only, and refused for writes, mailbox receipt and
 egress. Promotion makes it the current epoch. That is an amendment to
 ADR-062 section 3.
 
+Epoch authority is decided in one place. A single gate answers whether an
+epoch may perform an operation, and every host service calls it: the mailbox,
+the egress gate, the cell service and the host-service broker. No service
+compares epochs itself, and a build check fails if one does. The gate's rule
+is one table with a default of refusal: a current epoch may do what its plan
+grants, a standby epoch may read its unit's cells, and every other epoch is
+refused. Fencing a failed epoch and promoting its standby are therefore one
+update to the gate's input, not a message to each service.
+
 Failure is detected by the host, never by the guest: process exit, a missed
 heartbeat deadline declared in the topology, or the wall-clock bound. The unit
 heartbeat is per unit, over its vsock channel, and separate from the host
@@ -225,16 +234,24 @@ is built on the host:
 - The writer updates the cell through a host service on its vsock channel.
   The host accepts a write only from the current epoch of the declared writer
   unit, and only with a version greater than the stored one.
-- Readers, including the writer's standby, read or follow the cell through the
-  same service. They cannot write.
-- On failover, write authority moves in step 2 of section 5. The promoted
-  standby already holds the last committed value.
+- Readers read the cell through the same service. They cannot write.
+- A failover standby reads the cell once, when it is promoted. Nothing is
+  delivered to it before that, so a standby costs no cell traffic and no
+  wakeups, and resident and warm standbys behave alike. The read is part of
+  the recovery bound.
+- A unit whose standby must track state to be useful at once may declare
+  **follow**. The host then signals that the cell changed and the standby
+  reads the latest value when it next runs. Signals coalesce: a slow standby
+  skips intermediate values, and there is no queue to fall behind on.
+- On failover, write authority moves in step 2 of section 5.
 
 The controller's cell follows the same rule. A backup controller gains write
 authority only by promotion; there is no separate recovery-mode write path.
 
-Authority changes are always audited. Per-write audit is a topology setting:
-every write, or a periodic signed digest of the cell. A cell costs one copy per
+Authority changes are always audited. Per-write audit is a topology setting.
+The default is a periodic signed digest of the cell. A topology may ask for an
+entry per write, and admission refuses it when the declared write rate exceeds
+what the host's measured audit budget sustains. A cell costs one copy per
 update, and its update latency is part of the published report (section 9).
 
 This uses the host-service broker, so claim 12's rule applies unchanged: a
@@ -357,8 +374,8 @@ establishment, then hybrid signatures on long-lived artifacts. This ADR adds:
 
 - The topology names its signature algorithm from version one.
 - A topology selects a suite. A CNSA 2.0 suite uses ML-KEM-1024 and ML-DSA-87
-  with AES-256 and SHA-384 or SHA-512, in hybrid with the existing classical
-  algorithms during transition. ADR-062 proposes ML-KEM-768 and ML-DSA-65 as
+  with AES-256 and SHA-384 or SHA-512, always in hybrid with the existing
+  classical algorithms; a suite without the classical half is refused. ADR-062 proposes ML-KEM-768 and ML-DSA-65 as
   the general default; both parameter sets must be selectable, and admission
   refuses a suite the build does not implement.
 - An algorithm identifier provides no protection by itself. None of this is
@@ -412,14 +429,14 @@ establishment, then hybrid signatures on long-lived artifacts. This ADR adds:
 
 ## Open decisions
 
-- Whether a resident standby's cell reads are pushed or polled, given the
-  wakeup budget of section 10.
 - The heartbeat mechanism and its minimum deadline per backend.
-- Whether per-write cell audit is permitted at all on the densest hosts.
 - The partition driver's contract with a third-party hypervisor, which needs a
   concrete target before it can be written.
-- Whether the CNSA 2.0 suite is hybrid-only or may run without the classical
-  algorithm once verified.
+- When, if ever, the CNSA 2.0 suite may run without the classical algorithm.
+  It is hybrid-only until that is decided.
+- How the two existing epoch types, the mailbox contract's and the host
+  interface's, are unified behind the single gate of section 5. About thirty
+  production sites compare epochs inline today, most of them in mailbox code.
 
 ## Evidence before acceptance
 
@@ -430,9 +447,11 @@ Each item needs a test or CI lane named in the implementing issue:
 - Each refused post-admission mutation in section 3 is refused and audited.
 - A unit admitted with exclusive cores runs only on them, and a second unit is
   refused those cores; a backend with no mechanism refuses the requirement.
-- A write to a cell from a fenced epoch, from a reader, or with a stale
-  version is refused; after failover the promoted standby reads the last
-  committed value and can write.
+- A write to a cell from a fenced epoch, from a reader, from a standby epoch,
+  or with a stale version is refused; after failover the promoted standby
+  reads the last committed value and can write.
+- No host service other than the epoch gate compares epochs, enforced by a
+  build check.
 - Killing an active unit promotes its standby within the declared bound, and a
   next standby is provisioned; an exceeded bound is recorded as exceeded.
 - With every controller killed, the host applies the static restart policy.
