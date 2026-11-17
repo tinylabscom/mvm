@@ -195,7 +195,6 @@ pub fn handshake_as_guest(
         guest_pubkey,
         guest_ephemeral_pubkey: PublicKey::from(&guest_ephemeral_secret).as_bytes().to_vec(),
         guest_challenge: vec![0u8; 32],
-        control: None,
     };
 
     write_frame(stream, &ack)?;
@@ -209,23 +208,33 @@ pub fn handshake_as_guest(
 /// Frames go on the wire through `SealedFrame`'s binary encoding, the same one
 /// the FlowMux networking path uses, so both planes share the cryptographic
 /// session machinery *and* the envelope rather than only the former.
-///
-/// This is the guest end of the control plane. The host never holds one: it
-/// holds a [`HostControlSession`], whose only request writer checks the guest's
-/// advertisement first.
 pub struct AuthenticatedSession {
     inner: Session,
 }
 
 impl AuthenticatedSession {
-    /// Establish a guest session, advertising `offer`, and require the host
-    /// identity to match `anchor`.
-    ///
-    /// A host whose protocol range shares nothing with `offer`, or that sent
-    /// no range, is refused here: the host's first request is read and
-    /// discarded, answered with a sealed `ProtocolMismatch` naming the remedy,
-    /// and the typed refusal is returned so the caller closes the connection.
-    /// Nothing the host sent is dispatched.
+    /// Establish a host session using the host's long-lived signing identity.
+    pub fn host<S: Read + Write>(
+        stream: &mut S,
+        session_id: &str,
+        signing_key: SigningKey,
+    ) -> Result<Self> {
+        Self::host_retaining_peer(stream, session_id, signing_key).map(|(session, _)| session)
+    }
+
+    /// Retain the actual handshake key. This is peer authentication, not a
+    /// claim that the transport belongs to a particular native generation.
+    pub fn host_retaining_peer<S: Read + Write>(
+        stream: &mut S,
+        session_id: &str,
+        signing_key: SigningKey,
+    ) -> Result<(Self, VerifyingKey)> {
+        let (inner, peer_key) = Session::host(stream, session_id, signing_key)
+            .context("host session handshake failed")?;
+        Ok((Self { inner }, peer_key))
+    }
+
+    /// Establish a guest session and require the host identity to match `anchor`.
     ///
     /// The error is returned typed rather than flattened into `anyhow`, because
     /// one of its cases is not a failure to authenticate: a peer that hangs up
@@ -237,34 +246,9 @@ impl AuthenticatedSession {
         stream: &mut S,
         signing_key: SigningKey,
         anchor: &VerifyingKey,
-        offer: &ControlOffer,
     ) -> std::result::Result<Self, SessionError> {
-        let (inner, refusal) = Session::guest_control(stream, signing_key, anchor, offer)?;
-        let mut session = Self { inner };
-        match refusal {
-            None => Ok(session),
-            Some(mismatch) => {
-                session.refuse(stream, &mismatch);
-                Err(SessionError::ControlRefused(mismatch))
-            }
-        }
-    }
-
-    /// Consume the first request without interpreting it, answer it with the
-    /// typed mismatch, and stop. Best effort: the host may already be gone.
-    fn refuse<S: Read + Write>(&mut self, stream: &mut S, mismatch: &ControlMismatch) {
-        if self.read::<serde::de::IgnoredAny>(stream).is_err() {
-            return;
-        }
-        let _ = self.write(
-            stream,
-            &GuestResponse::ProtocolMismatch {
-                host_protocol_version: mismatch.host_protocol_version,
-                agent_protocol_version: mismatch.agent_protocol_version,
-                required_action: mismatch.required_action,
-                message: mismatch.message.clone(),
-            },
-        );
+        let (inner, _session_id) = Session::guest(stream, signing_key, anchor)?;
+        Ok(Self { inner })
     }
 
     /// Write one encrypted, signed control frame.
@@ -310,93 +294,21 @@ impl AuthenticatedSession {
     }
 }
 
-/// The host end of a control session, with the guest's signed advertisement
-/// bound to it for the life of the connection.
-///
-/// This is the single place the host writes a request. It has no generic
-/// writer: [`send`](Self::send) takes a [`GuestRequest`] and refuses, before
-/// sealing anything, a verb whose capability the guest did not advertise. The
-/// advertisement is read once off the authenticated handshake, is never
-/// persisted or shared, and dies with the connection, so a restored guest is
-/// renegotiated rather than trusted from a cache.
-///
-/// The check only narrows what the host sends. It is not authorization: the
-/// guest's profile gate, signed grants and seccomp tier decide what runs and
-/// never read the advertisement.
-pub struct HostControlSession {
-    inner: AuthenticatedSession,
-    offer: ControlOffer,
+impl From<Session> for AuthenticatedSession {
+    fn from(inner: Session) -> Self {
+        Self { inner }
+    }
 }
 
-impl HostControlSession {
-    /// Establish the host side of a control session using the host's
-    /// long-lived signing identity. A guest that advertises nothing, or a
-    /// range this host does not speak, is refused before the confirm is
-    /// written, with a typed [`SessionError::ControlRefused`] in the chain.
-    pub fn host<S: Read + Write>(
-        stream: &mut S,
-        session_id: &str,
-        signing_key: SigningKey,
-    ) -> Result<Self> {
-        Self::host_retaining_peer(stream, session_id, signing_key).map(|(session, _)| session)
-    }
-
-    /// Retain the actual handshake key. This is peer authentication, not a
-    /// claim that the transport belongs to a particular native generation.
-    pub fn host_retaining_peer<S: Read + Write>(
-        stream: &mut S,
-        session_id: &str,
-        signing_key: SigningKey,
-    ) -> Result<(Self, VerifyingKey)> {
-        let (inner, peer_key, offer) =
-            Session::host_control(stream, session_id, signing_key, &control_range())
-                .context("host session handshake failed")?;
-        Ok((
-            Self {
-                inner: AuthenticatedSession { inner },
-                offer,
-            },
-            peer_key,
-        ))
-    }
-
-    /// What the guest advertised in the signed handshake.
-    pub fn offer(&self) -> &ControlOffer {
-        &self.offer
-    }
-
-    /// Write one request, after checking the guest advertised the capability
-    /// its verb needs. A refused verb writes nothing and spends no sequence
-    /// number, so the session stays usable.
-    pub fn send<S: Write>(
-        &mut self,
-        stream: &mut S,
-        request: &GuestRequest,
-    ) -> std::result::Result<(), RpcError> {
-        let verb = request.verb();
-        if let Some(capability) = verb
-            .capability()
-            .filter(|capability| !self.offer.advertises(*capability))
-        {
-            return Err(RpcError::CapabilityNotAdvertised {
-                capability,
-                verb: verb.name(),
-            });
-        }
-        self.inner.write(stream, request)?;
-        Ok(())
-    }
-
-    /// Read, authenticate, decrypt, and deserialize one control frame.
-    pub fn read<T: serde::de::DeserializeOwned>(&mut self, stream: &mut impl Read) -> Result<T> {
-        self.inner.read(stream)
+impl From<AuthenticatedSession> for Session {
+    fn from(session: AuthenticatedSession) -> Self {
+        session.inner
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_core::net::session::paired_sessions_for_test;
     use rand::Rng;
     use std::io::Cursor;
 
@@ -439,161 +351,20 @@ mod tests {
         let expected = guest_key.verifying_key();
         let anchor = host_key.verifying_key();
         let peer = std::thread::spawn(move || {
-            let mut session =
-                AuthenticatedSession::guest(&mut guest, guest_key, &anchor, &control_offer())
-                    .unwrap();
-            for _ in 0..3 {
-                assert!(matches!(
-                    session.read::<GuestRequest>(&mut guest).unwrap(),
-                    GuestRequest::Ping
-                ));
-                session.write(&mut guest, &GuestResponse::Pong).unwrap();
+            let mut session = AuthenticatedSession::guest(&mut guest, guest_key, &anchor).unwrap();
+            for value in [1_u32, 2, 3] {
+                assert_eq!(session.read::<u32>(&mut guest).unwrap(), value);
+                session.write(&mut guest, &value).unwrap();
             }
         });
         let (mut session, key) =
-            HostControlSession::host_retaining_peer(&mut host, "retained-key", host_key).unwrap();
+            AuthenticatedSession::host_retaining_peer(&mut host, "retained-key", host_key).unwrap();
         assert_eq!(key, expected);
-        assert_eq!(session.offer(), &control_offer());
-        for _ in 0..3 {
-            session.send(&mut host, &GuestRequest::Ping).unwrap();
-            assert!(matches!(
-                session.read::<GuestResponse>(&mut host).unwrap(),
-                GuestResponse::Pong
-            ));
+        for value in [1_u32, 2, 3] {
+            session.write(&mut host, &value).unwrap();
+            assert_eq!(session.read::<u32>(&mut host).unwrap(), value);
         }
         peer.join().unwrap();
-    }
-
-    fn guest_offering(first: u32, last: u32) -> ControlOffer {
-        ControlOffer {
-            protocol_version: last,
-            min_supported_version: first,
-            ..control_offer()
-        }
-    }
-
-    #[test]
-    fn a_legacy_guest_with_no_advertisement_is_refused_with_rebuild_guest_before_the_confirm() {
-        let (mut host, mut guest) = UnixStream::pair().unwrap();
-        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        guest
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let host_key = test_keypair();
-        let anchor = host_key.verifying_key();
-        let legacy = std::thread::spawn(move || {
-            // The pre-advertisement handshake: no `control` in the ack.
-            Session::guest(&mut guest, test_keypair(), &anchor).map(|_| ())
-        });
-        let Err(error) = HostControlSession::host(&mut host, "legacy-guest", host_key) else {
-            panic!("a guest that advertises nothing must be refused");
-        };
-        let Some(SessionError::ControlRefused(mismatch)) = error
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<SessionError>())
-        else {
-            panic!("the refusal must stay typed in the error chain: {error:#}");
-        };
-        assert_eq!(
-            mismatch.required_action,
-            ProtocolUpgradeAction::RebuildGuest
-        );
-        assert!(mismatch.message.contains("mvmctl bootstrap"));
-        drop(host);
-        // No confirm and no request reached the legacy guest.
-        assert!(legacy.join().unwrap().unwrap_err().is_peer_hangup());
-    }
-
-    #[test]
-    fn a_host_range_outside_the_guests_is_refused_at_handshake_and_names_the_remedy() {
-        for (first, last, action) in [
-            (
-                control_range().protocol_version + 1,
-                control_range().protocol_version + 2,
-                ProtocolUpgradeAction::UpgradeHost,
-            ),
-            (
-                0,
-                control_range().min_supported_version - 1,
-                ProtocolUpgradeAction::RebuildGuest,
-            ),
-        ] {
-            let (mut host, mut guest) = UnixStream::pair().unwrap();
-            host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-            guest
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let host_key = test_keypair();
-            let anchor = host_key.verifying_key();
-            let peer = std::thread::spawn(move || {
-                AuthenticatedSession::guest(
-                    &mut guest,
-                    test_keypair(),
-                    &anchor,
-                    &guest_offering(first, last),
-                )
-                .map(|_| ())
-            });
-            let Err(error) = HostControlSession::host(&mut host, "range", host_key) else {
-                panic!("disjoint ranges must be refused");
-            };
-            let Some(SessionError::ControlRefused(mismatch)) = error
-                .chain()
-                .find_map(|cause| cause.downcast_ref::<SessionError>())
-            else {
-                panic!("expected a typed mismatch: {error:#}");
-            };
-            assert_eq!(mismatch.required_action, action);
-            drop(host);
-            assert!(peer.join().unwrap().unwrap_err().is_peer_hangup());
-        }
-    }
-
-    #[test]
-    fn a_refused_host_gets_one_typed_mismatch_for_its_first_request_and_nothing_is_dispatched() {
-        let host_key = test_keypair();
-        let guest_key = test_keypair();
-        let (mut host_session, guest_session) = paired_sessions_for_test(
-            host_key,
-            guest_key,
-            rand::random::<[u8; 32]>(),
-            "refused-host",
-        );
-        let (mut host_stream, mut guest_stream) = UnixStream::pair().unwrap();
-        host_stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        guest_stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let mismatch = ControlRange {
-            protocol_version: control_range().min_supported_version - 1,
-            min_supported_version: 1,
-        }
-        .check(&control_offer())
-        .unwrap_err();
-        let guest = std::thread::spawn(move || {
-            AuthenticatedSession {
-                inner: guest_session,
-            }
-            .refuse(&mut guest_stream, &mismatch);
-        });
-
-        // The host's first request is sealed and sent as usual.
-        let plaintext = serde_json::to_vec(&GuestRequest::Ping).unwrap();
-        let sealed = host_session.seal(&plaintext).unwrap();
-        write_sealed_frame(&mut host_stream, &sealed).unwrap();
-        let reply = read_sealed_frame(&mut host_stream, MAX_SEALED_FRAME_SIZE).unwrap();
-        let reply: GuestResponse =
-            serde_json::from_slice(&host_session.open(&reply).unwrap()).unwrap();
-        guest.join().unwrap();
-        assert!(matches!(
-            reply,
-            GuestResponse::ProtocolMismatch {
-                required_action: ProtocolUpgradeAction::UpgradeHost,
-                ..
-            }
-        ));
     }
 
     struct WouldBlockReader;
@@ -719,7 +490,8 @@ mod tests {
         let (mut host_stream, guest_stream) = UnixStream::pair().unwrap();
         drop(guest_stream);
 
-        let Err(error) = HostControlSession::host(&mut host_stream, "peer-hangup", test_keypair())
+        let Err(error) =
+            AuthenticatedSession::host(&mut host_stream, "peer-hangup", test_keypair())
         else {
             panic!("a vanished guest must fail the host handshake");
         };
@@ -745,7 +517,7 @@ mod tests {
     /// Build a host/guest session pair over a socketpair, as a completed
     /// handshake would leave them.
     fn confidential_pair() -> (
-        (UnixStream, HostControlSession),
+        (UnixStream, AuthenticatedSession),
         (UnixStream, AuthenticatedSession),
     ) {
         let (mut host_stream, mut guest_stream) = UnixStream::pair().unwrap();
@@ -760,17 +532,12 @@ mod tests {
         let host_anchor = host_key.verifying_key();
 
         let guest_thread = std::thread::spawn(move || {
-            let session = AuthenticatedSession::guest(
-                &mut guest_stream,
-                guest_key,
-                &host_anchor,
-                &control_offer(),
-            )
-            .unwrap();
+            let session =
+                AuthenticatedSession::guest(&mut guest_stream, guest_key, &host_anchor).unwrap();
             (guest_stream, session)
         });
         let host_session =
-            HostControlSession::host(&mut host_stream, "chunk-cap-test", host_key).unwrap();
+            AuthenticatedSession::host(&mut host_stream, "chunk-cap-test", host_key).unwrap();
         let guest = guest_thread.join().unwrap();
         ((host_stream, host_session), guest)
     }
@@ -874,13 +641,13 @@ mod tests {
             confidential_pair();
 
         host_session
-            .send(&mut DeadTransport, &GuestRequest::Ping)
+            .write(&mut DeadTransport, &GuestRequest::Ping)
             .expect_err("the transport is dead");
 
         // Without the poison this write would succeed and land as sequence 2
         // against a peer still expecting 1.
         let err = host_session
-            .send(&mut host_stream, &GuestRequest::Ping)
+            .write(&mut host_stream, &GuestRequest::Ping)
             .expect_err("the session must be finished, not one frame ahead");
         assert!(err.to_string().contains("session poisoned"), "got {err}");
 
@@ -907,21 +674,16 @@ mod tests {
         let host_anchor = host_key.verifying_key();
 
         let guest_thread = std::thread::spawn(move || {
-            let session = AuthenticatedSession::guest(
-                &mut guest_stream,
-                guest_key,
-                &host_anchor,
-                &control_offer(),
-            )
-            .unwrap();
+            let session =
+                AuthenticatedSession::guest(&mut guest_stream, guest_key, &host_anchor).unwrap();
             (guest_stream, session)
         });
         let mut host_session =
-            HostControlSession::host(&mut host_stream, "confidential-test", host_key).unwrap();
+            AuthenticatedSession::host(&mut host_stream, "confidential-test", host_key).unwrap();
         let (mut guest_stream, mut guest_session) = guest_thread.join().unwrap();
 
         host_session
-            .send(&mut host_stream, &GuestRequest::Ping)
+            .write(&mut host_stream, &GuestRequest::Ping)
             .unwrap();
         let request: GuestRequest = guest_session.read(&mut guest_stream).unwrap();
         assert!(matches!(request, GuestRequest::Ping));
@@ -934,7 +696,7 @@ mod tests {
 
         let (mut tamper_writer, mut tamper_reader) = UnixStream::pair().unwrap();
         host_session
-            .send(&mut host_stream, &GuestRequest::Ping)
+            .write(&mut host_stream, &GuestRequest::Ping)
             .unwrap();
         let frame = read_sealed_frame(&mut guest_stream, MAX_SEALED_FRAME_SIZE).unwrap();
         assert!(
@@ -954,7 +716,7 @@ mod tests {
         assert!(replay.is_err(), "replayed control frame must be rejected");
 
         host_session
-            .send(&mut host_stream, &GuestRequest::Ping)
+            .write(&mut host_stream, &GuestRequest::Ping)
             .unwrap();
         let next_frame = read_sealed_frame(&mut guest_stream, MAX_SEALED_FRAME_SIZE).unwrap();
         assert_eq!(next_frame.sequence, 3);
@@ -993,7 +755,6 @@ mod tests {
             guest_pubkey: wrong_key.verifying_key().to_bytes().to_vec(),
             guest_ephemeral_pubkey: vec![0u8; 32],
             guest_challenge: vec![0u8; 32],
-            control: None,
         };
         write_frame(&mut guest_stream, &ack).unwrap();
 
@@ -1023,12 +784,7 @@ mod tests {
         let mut vanished = Cursor::new(Vec::new());
         // `AuthenticatedSession` holds key material and deliberately has no
         // `Debug`, so unwrap the Result by hand rather than deriving one.
-        let err = match AuthenticatedSession::guest(
-            &mut vanished,
-            guest_key,
-            &host_anchor,
-            &control_offer(),
-        ) {
+        let err = match AuthenticatedSession::guest(&mut vanished, guest_key, &host_anchor) {
             Ok(_) => panic!("no handshake can complete against a peer that sent nothing"),
             Err(e) => e,
         };

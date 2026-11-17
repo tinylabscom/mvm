@@ -505,7 +505,7 @@ pub fn send_request_stream<S: std::io::Read + std::io::Write + Send>(
     req: &GuestRequest,
 ) -> Result<GuestResponse> {
     let mut session = open_authenticated_session_stream(stream)?;
-    session.send(stream, req)?;
+    session.write(stream, req)?;
     session.read(stream)
 }
 
@@ -514,13 +514,13 @@ pub fn send_request_stream<S: std::io::Read + std::io::Write + Send>(
 /// `/run/mvm/host-signer.pub` trust anchor.
 pub(crate) fn open_authenticated_session(
     stream: &mut UnixStream,
-) -> Result<crate::vsock::HostControlSession> {
+) -> Result<crate::vsock::AuthenticatedSession> {
     open_authenticated_session_stream(stream)
 }
 
 pub(crate) fn open_authenticated_session_stream<S: std::io::Read + std::io::Write + Send>(
     stream: &mut S,
-) -> Result<crate::vsock::HostControlSession> {
+) -> Result<crate::vsock::AuthenticatedSession> {
     open_peer_authenticated_session(stream).map(|(session, _)| session)
 }
 
@@ -529,7 +529,7 @@ pub(crate) fn open_authenticated_session_stream<S: std::io::Read + std::io::Writ
 pub fn open_peer_authenticated_session<S: std::io::Read + std::io::Write + Send>(
     stream: &mut S,
 ) -> Result<(
-    crate::vsock::HostControlSession,
+    crate::vsock::AuthenticatedSession,
     ed25519_dalek::VerifyingKey,
 )> {
     let key_path = mvm_core::config::mvm_keys_dir().join("host-signer.ed25519");
@@ -540,7 +540,7 @@ pub fn open_peer_authenticated_session<S: std::io::Read + std::io::Write + Send>
         .map_err(|_| anyhow::anyhow!("host signer key must be exactly 32 bytes"))?;
     let signing_key = SigningKey::from_bytes(&key_bytes);
     let session_id = format!("vsock-{:032x}", rand::random::<u128>());
-    crate::vsock::HostControlSession::host_retaining_peer(stream, &session_id, signing_key)
+    crate::vsock::AuthenticatedSession::host_retaining_peer(stream, &session_id, signing_key)
 }
 
 #[cfg(test)]
