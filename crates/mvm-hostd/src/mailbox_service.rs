@@ -901,6 +901,7 @@ mod accept_loop_tests {
             epoch: ExecutionEpoch::new(1).unwrap(),
             report: None,
             retention: None,
+            service_blind: None,
         };
         let (trust, _) = crate::mailbox_launch::host_trust(dir, &grant, &test_secret()).unwrap();
         let limits = MailboxLimits {
@@ -1080,6 +1081,7 @@ mod tests {
             epoch,
             report: None,
             retention: None,
+            service_blind: None,
         }
     }
 

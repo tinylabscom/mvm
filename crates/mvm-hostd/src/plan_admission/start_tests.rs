@@ -6,6 +6,137 @@ use super::test_support::*;
 use super::*;
 
 #[test]
+fn selector_original_admission_refuses_before_host_launch_preparation() {
+    assert_selector_refuses_before_host_launch_preparation(false);
+}
+
+#[test]
+fn selector_original_admission_refuses_before_persistent_readiness() {
+    assert_selector_refuses_before_host_launch_preparation(true);
+}
+
+fn assert_selector_refuses_before_host_launch_preparation(persistent: bool) {
+    use crate::assurance_session::{CampaignDeclaration, CampaignRequest, default_policy_ceiling};
+    use mvm_contract::assurance::{ApprovalSet, AssuranceId, RequestedAuthority, Sha256Digest};
+    let (_env, home) = host_with_ceiling(Default::default());
+    let keys = mvm_core::config::mvm_keys_dir_at(home.path());
+    std::fs::create_dir_all(&keys).unwrap();
+    let key_names = || {
+        std::fs::read_dir(&keys)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let selector =
+        mvm_contract::protocol::mailbox::service_blind::LaunchProfile::new([1; 32], [2; 32])
+            .unwrap();
+    for projection in 0..4 {
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let mut plan = plan_binding(&[]);
+        plan.mailbox = Some(MailboxGrant {
+            mailbox: MailboxId::from_bytes([4; 32]),
+            authority_key: [8; 32],
+            epoch: ExecutionEpoch::new(1).unwrap(),
+            report: None,
+            retention: None,
+            service_blind: Some(selector),
+        });
+        let signed = sign_plan(&plan, &SigningKey::from_bytes(&[7; 32]), "test");
+        let plan = verify_plan(
+            &signed,
+            &[("test", &SigningKey::from_bytes(&[7; 32]).verifying_key())],
+        )
+        .unwrap();
+        let admitted = AdmittedPlan::for_test(plan.clone(), "test".into(), signed);
+        let mut stripped = plan.clone();
+        stripped.mailbox.as_mut().unwrap().service_blind = None;
+        let mut replaced = plan.clone();
+        replaced.mailbox = None;
+        let config = VmStartConfig {
+            name: plan.image.name.clone(),
+            plan_json: match projection {
+                0 => None,
+                1 => Some(serde_json::to_string(&stripped).unwrap()),
+                2 => Some(serde_json::to_string(&replaced).unwrap()),
+                _ => Some("malformed".into()),
+            },
+            ..Default::default()
+        };
+        let audit = tempfile::tempdir().unwrap();
+        let emitter = std::sync::Arc::new(
+            crate::audit::emitter::AuditEmitter::with_dir(
+                SigningKey::from_bytes(&[41; 32]),
+                audit.path(),
+            )
+            .unwrap(),
+        );
+        let campaign = CampaignRequest {
+            declaration: CampaignDeclaration {
+                request_id: AssuranceId::parse("selector-request").unwrap(),
+                idempotency_key: AssuranceId::parse("selector-retry").unwrap(),
+                campaign_id: AssuranceId::parse("selector-campaign").unwrap(),
+                trial_id: AssuranceId::parse("selector-trial").unwrap(),
+                source_run_id: AssuranceId::parse("selector-source").unwrap(),
+                source_digest: Sha256Digest::parse(format!("sha256:{}", "5".repeat(64))).unwrap(),
+                artifact_digest: Sha256Digest::parse(format!("sha256:{}", "6".repeat(64))).unwrap(),
+                edges: Vec::new(),
+                approvals: ApprovalSet::none(),
+                requested: RequestedAuthority {
+                    allowed_tools: Vec::new(),
+                    observation_scopes: Vec::new(),
+                    max_steps: 1,
+                    max_output_bytes: 1024,
+                    deadline_unix_ms: 0,
+                },
+                grant_ttl_ms: 1000,
+            },
+            emitter: std::sync::Arc::clone(&emitter),
+            policy_ceiling: default_policy_ceiling(),
+            policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            backend: "mock".into(),
+            now_unix_ms: 1_800_000_000_000,
+        };
+        let original_keys = key_names();
+        super::start::TRAP_LAUNCH_PREPARATION.set(true);
+        let params = StartAdmittedParams {
+            backend: &backend,
+            admitted,
+            config,
+            policy_bundle: None,
+            emitter: Some(&emitter),
+            assurance: Some(&campaign),
+        };
+        let result = if persistent {
+            start_persistent(params, None, Vec::new()).map(|_| ())
+        } else {
+            start_admitted(params).map(|_| ())
+        };
+        let error = result.unwrap_err();
+        super::start::TRAP_LAUNCH_PREPARATION.set(false);
+        assert_eq!(
+            error.to_string(),
+            "admission gate refused (mailbox-profile)"
+        );
+        assert!(format!("{error:#}").contains("service-blind V3 mailbox launch is unavailable"));
+        assert!(!matches!(
+            backend.status(&VmId(plan.image.name.clone())),
+            Ok(mvm_core::vm_backend::VmStatus::Running)
+        ));
+        let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).unwrap();
+        assert_eq!(
+            chain
+                .lines()
+                .filter(|line| line.contains("\"plan.failed\""))
+                .count(),
+            1
+        );
+        assert!(!chain.contains("\"plan.launched\""));
+        assert!(chain.contains("mailbox-profile"));
+        assert_eq!(key_names(), original_keys, "no legacy key material minted");
+    }
+}
+
+#[test]
 fn assurance_proxy_attachment_refuses_a_duplicate_service() {
     let proxy = mvm_contract::protocol::broker_control::ServiceProxyBinding {
         service: mvm_contract::protocol::broker::ServiceId::parse(

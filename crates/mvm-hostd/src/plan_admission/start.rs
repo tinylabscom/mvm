@@ -60,6 +60,11 @@ struct StartTailResult {
     config: VmStartConfig,
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static TRAP_LAUNCH_PREPARATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Outcome of a successful admitted boot: the backend's VM id plus the
 /// `AdmittedPlan` (for the caller's audit chain / typed result).
 #[derive(Debug)]
@@ -245,6 +250,15 @@ fn start_admitted_with_finalization(
     // `plan.admitted` already fired, so a gate refusal emits `plan.failed`
     // carrying the refusing stage rather than leaving a dangling admission.
     let gated = (|| {
+        crate::mailbox_launch::require_legacy_launch(admitted.plan().mailbox.as_ref())
+            .map_err(|error| ("mailbox-profile", anyhow::Error::from(error)))?;
+        #[cfg(test)]
+        if TRAP_LAUNCH_PREPARATION.get() {
+            return Err((
+                "test-preparation",
+                anyhow::anyhow!("launch preparation reached"),
+            ));
+        }
         if params.assurance.is_some() {
             admitted
                 .bind_assurance_runtime(&params.config, verified_runtime)

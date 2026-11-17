@@ -543,6 +543,7 @@ fn verify_recovered_lease(
         epoch: lease.lease.execution_epoch,
         report: None,
         retention: None,
+        service_blind: None,
     };
     let scope = MailboxGuestReaderScope {
         plan: &plan,

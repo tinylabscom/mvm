@@ -189,6 +189,7 @@ fn perform_exchange(
                 epoch: boot.execution_epoch,
                 report: None,
                 retention: None,
+                service_blind: None,
             };
             let authority = VerifyingKey::from_bytes(&boot.authority_key)
                 .map_err(|_| Refusal::NotAuthorized)?;

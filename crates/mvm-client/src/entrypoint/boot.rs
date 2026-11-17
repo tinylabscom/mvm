@@ -43,6 +43,11 @@ pub struct OwnedClientBoot {
     custody: Option<Box<ClientCustody>>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static TRAP_OWNED_PREPARATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 impl OwnedClientBoot {
     pub(crate) fn start(
         resources: ClientBootResources,
@@ -56,6 +61,13 @@ impl OwnedClientBoot {
         let result = (|| {
             let group = owner.custody.as_mut().expect("new client custody");
             let resources = group.resources.as_mut().expect("original client resources");
+            mvm_hostd::mailbox_launch::require_legacy_launch(
+                resources.admission.admitted.plan().mailbox.as_ref(),
+            )?;
+            #[cfg(test)]
+            if TRAP_OWNED_PREPARATION.get() {
+                anyhow::bail!("owned image/native preparation reached");
+            }
             mvm_runtime::workload_backend::require_workload_backend(&resources.backend)?;
             if let Some(runtime) = &resources.built_runtime {
                 runtime.verify_config(&resources.config)?;
@@ -944,6 +956,98 @@ mod caller_registration_live_hvf;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selector_original_admission_refuses_before_owned_images_and_native_preparation() {
+        use mvm_contract::protocol::mailbox::{
+            ExecutionEpoch, MailboxGrant, MailboxId, service_blind::LaunchProfile,
+        };
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let keys = mvm_core::config::mvm_keys_dir();
+        mvm_hostd::audit::host_keypair::load_or_init_at(&keys).unwrap();
+        let rootfs = home.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"test rootfs").unwrap();
+        let selected = LaunchProfile::new([1; 32], [2; 32]).unwrap();
+        for projection in 0..4 {
+            let audit = tempfile::tempdir().unwrap();
+            let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::new();
+            let admission =
+                crate::admission::admit_plan_for_boot(crate::admission::AdmitPlanForBootParams {
+                    mailbox: Some(MailboxGrant {
+                        mailbox: MailboxId::from_bytes([4; 32]),
+                        authority_key: [9; 32],
+                        epoch: ExecutionEpoch::new(1).unwrap(),
+                        report: None,
+                        retention: None,
+                        service_blind: Some(selected),
+                    }),
+                    keys_dir: Some(&keys),
+                    audit_dir: Some(audit.path()),
+                    ..crate::admission::admit_plan_tests::pinning_params(&rootfs, &ledger)
+                })
+                .unwrap();
+            let original = admission.admitted.plan().clone();
+            assert_eq!(
+                original.mailbox.unwrap().service_blind,
+                Some(selected),
+                "client admission must preserve selected intent"
+            );
+            let roundtrip = mvm_core::plan::plan_from_admitted_json(
+                &serde_json::to_string(admission.admitted.signed()).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(roundtrip.mailbox, original.mailbox);
+            let mut stripped = original.clone();
+            stripped.mailbox.as_mut().unwrap().service_blind = None;
+            let mut replaced = original.clone();
+            replaced.mailbox = None;
+            let config = VmStartConfig {
+                name: original.image.name.clone(),
+                plan_json: match projection {
+                    0 => None,
+                    1 => Some(serde_json::to_string(&stripped).unwrap()),
+                    2 => Some(serde_json::to_string(&replaced).unwrap()),
+                    _ => Some("malformed".into()),
+                },
+                ..Default::default()
+            };
+            TRAP_OWNED_PREPARATION.set(true);
+            let mut failure = OwnedClientBoot::start(ClientBootResources {
+                backend: AnyBackend::from_hypervisor("libkrun"),
+                config,
+                admission,
+                _volumes: None,
+                built_runtime: None,
+                verified_runtime: None,
+            })
+            .err()
+            .expect("selected launch refuses");
+            TRAP_OWNED_PREPARATION.set(false);
+            let expected = "service-blind V3 mailbox launch is unavailable";
+            assert_eq!(failure.error().to_string(), expected);
+            {
+                let owner = failure.owner.lock().unwrap();
+                let owner = owner.as_ref().unwrap();
+                assert_eq!(owner.resources().admission.admitted.plan(), &original);
+                assert!(owner.custody.as_ref().unwrap().runtime.is_none());
+            }
+            failure.emit_failed("backend-start");
+            failure.emit_failed("backend-start");
+            failure.retry_stop().unwrap();
+            assert_eq!(failure.into_released_error().unwrap().to_string(), expected);
+            let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).unwrap();
+            assert_eq!(
+                chain
+                    .lines()
+                    .filter(|line| line.contains("\"plan.failed\""))
+                    .count(),
+                1
+            );
+            assert!(!chain.contains("\"plan.launched\""));
+        }
+    }
 
     #[test]
     fn legacy_hvf_refuses_before_launch_but_owned_hvf_passes_gate() {

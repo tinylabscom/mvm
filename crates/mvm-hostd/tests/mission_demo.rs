@@ -846,6 +846,7 @@ fn plan_and_trust(channel: &Channel, granted: bool) -> (ExecutionPlan, MailboxPo
             epoch: MbEpoch::new(1).unwrap(),
             report: None,
             retention: None,
+            service_blind: None,
         });
     }
     let trust = MailboxPolicy {
@@ -988,6 +989,7 @@ fn granted_plan(authority_key: [u8; 32]) -> ExecutionPlan {
         epoch: MbEpoch::new(1).unwrap(),
         report: None,
         retention: None,
+        service_blind: None,
     });
     plan
 }
@@ -1650,6 +1652,7 @@ fn signed_guest_lease_and_exact_ack_survive_mock_anchored_restart() {
         epoch: MbEpoch::new(1).unwrap(),
         report: None,
         retention: None,
+        service_blind: None,
     };
     let mut reader_grant = grant(&[MailboxOperation::Receive]);
     reader_grant.subject = aircraft_principal();

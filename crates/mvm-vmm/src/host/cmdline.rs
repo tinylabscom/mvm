@@ -553,6 +553,7 @@ mod tests {
             epoch: ExecutionEpoch::new(1).unwrap(),
             report: None,
             retention: None,
+            service_blind: None,
         }));
         let absent = build(None);
         let tokens = |c: &str| c.split_whitespace().map(str::to_owned).collect::<Vec<_>>();

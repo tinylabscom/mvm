@@ -833,6 +833,7 @@ mod reader_tests {
             epoch,
             report: None,
             retention: Some(retention),
+            service_blind: None,
         };
         let keys = crate::mailbox_launch::derive_launch_keys(dir.path(), &grant, &Key::random())
             .expect("test-purpose launch keys");

@@ -426,6 +426,7 @@ mod tests {
             epoch: ExecutionEpoch::new(1).expect("epoch"),
             report: None,
             retention: Some(MailboxRetentionPolicy::new(10_000).expect("signed retention")),
+            service_blind: None,
         });
         plan.plan_id = compute_plan_id(&plan);
         let (policy, _) =

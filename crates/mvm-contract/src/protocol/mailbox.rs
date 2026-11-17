@@ -12,6 +12,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::plan::{Nonce, PlanId};
 
+pub mod service_blind;
+
 /// Dedicated mailbox vsock service. Its own port, so mailbox traffic never
 /// shares a queue or credit with machine control (5252), `NetworkFlow` (5253),
 /// telemetry (5254), display (5255) or GPU (5256).
@@ -328,6 +330,9 @@ pub struct MailboxGrant {
     /// unchanged and do not authorize this stronger acceptance tier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention: Option<MailboxRetentionPolicy>,
+    /// Signed requested V3 intent, not runtime qualification or Send/Receive authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_blind: Option<service_blind::LaunchProfile>,
 }
 
 impl MailboxGrant {
