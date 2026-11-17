@@ -8,10 +8,9 @@
 //! deciding they should.
 //!
 //! This gate fails when production code names one of those crates, unless the
-//! file is in [`ALLOWLIST`] for that crate. `mvm_hostd` and `mvm_runtime` are
-//! checked under `crates/mvm-cli/src/commands`; `mvm_build` is checked across
-//! all of `crates/mvm-cli/src`, because builds are reached from `doctor`,
-//! `exec`, `bootstrap` and the helper modules as well as from commands.
+//! file is in [`ALLOWLIST`] for that crate. All three crates are checked across
+//! all of `crates/mvm-cli/src`, because they are reached from `doctor`, `exec`,
+//! `ui`, `update`, `bootstrap` and the helper modules as well as from commands.
 //! The allowlist was seeded with every file that reached a crate when the
 //! crate was added to the gate: it records debt, not approval. It counts
 //! files that reach, never lines of code, and sets no size ceiling. It only shrinks —
@@ -54,30 +53,19 @@ impl Below {
             Below::Build => "mvm_build",
         }
     }
-
-    /// Whether a file (relative to `crates/mvm-cli/src`) is under this
-    /// crate's gate.
-    fn covers(self, rel: &str) -> bool {
-        match self {
-            Below::Hostd | Below::Runtime => rel.starts_with("commands/"),
-            Below::Build => true,
-        }
-    }
 }
 
-#[cfg(test)]
 const HOSTD: &[Below] = &[Below::Hostd];
-#[cfg(test)]
 const RUNTIME: &[Below] = &[Below::Runtime];
 const BUILD: &[Below] = &[Below::Build];
-#[cfg(test)]
 const BOTH: &[Below] = &[Below::Hostd, Below::Runtime];
+const BUILD_RUNTIME: &[Below] = &[Below::Build, Below::Runtime];
+const ALL_THREE: &[Below] = &[Below::Hostd, Below::Runtime, Below::Build];
 
 /// Files under `crates/mvm-cli/src` (paths relative to it) that still reach a
 /// crate below the client, and which. Every entry is existing debt; remove it
 /// when the logic moves into `mvm-client`. Entries only ever leave: a new one
-/// must not be added to admit a new reach, and the `mvm_hostd` and
-/// `mvm_runtime` debt is already zero.
+/// must not be added to admit a new reach.
 const ALLOWLIST: &[(&str, &[Below])] = &[
     ("commands/build/build.rs", BUILD),
     ("commands/build/guest_bins.rs", BUILD),
@@ -116,34 +104,30 @@ const ALLOWLIST: &[(&str, &[Below])] = &[
     ("commands/vm/exec/composition.rs", BUILD),
     ("commands/vm/exec/image_source.rs", BUILD),
     ("commands/vm/up/kernel.rs", BUILD),
-    ("exec.rs", BUILD),
+    ("doctor/nix_checks.rs", RUNTIME),
+    ("doctor/platform_checks.rs", RUNTIME),
+    ("doctor/registry.rs", RUNTIME),
+    ("doctor/security.rs", RUNTIME),
+    ("doctor/security_checks.rs", BOTH),
+    ("doctor/toolchain.rs", RUNTIME),
+    ("doctor/warm_start.rs", RUNTIME),
+    ("exec.rs", ALL_THREE),
+    ("exec/guest_command.rs", RUNTIME),
+    ("exec/guest_run.rs", BOTH),
+    ("exec/image_artifacts.rs", RUNTIME),
+    ("exec/mounts.rs", HOSTD),
     ("exec/sidecar_selection.rs", BUILD),
-    ("exec/transient.rs", BUILD),
+    ("exec/transient.rs", ALL_THREE),
     ("host_binaries/manifest.rs", BUILD),
     ("host_binaries/mod.rs", BUILD),
-    ("host_binaries/source.rs", BUILD),
+    ("host_binaries/source.rs", BUILD_RUNTIME),
     ("lib.rs", BUILD),
+    ("ui.rs", RUNTIME),
+    ("update.rs", RUNTIME),
 ];
 
 pub(crate) fn run(workspace: &Path) -> Result<()> {
-    let root = workspace.join("crates/mvm-cli/src");
-    let mut found: BTreeMap<String, Vec<Reach>> = BTreeMap::new();
-    for_each_file(&root, Some("rs"), &mut |path, src| {
-        let rel = path
-            .strip_prefix(&root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        if is_test_path(&rel) {
-            return;
-        }
-        let mut reaches = reaches_in(src);
-        reaches.retain(|reach| reach.below.covers(&rel));
-        if !reaches.is_empty() {
-            found.insert(rel, reaches);
-        }
-    })?;
-
+    let found = scan(&workspace.join("crates/mvm-cli/src"))?;
     let verdict = judge(&found, ALLOWLIST);
     if verdict.is_clean() {
         eprintln!(
@@ -154,6 +138,27 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
         return Ok(());
     }
     bail!("check-thin-cli:\n{}", verdict.report());
+}
+
+/// Every reach in the production code under `root`, keyed by the file's path
+/// relative to it. All three crates are gated across the whole tree.
+fn scan(root: &Path) -> Result<BTreeMap<String, Vec<Reach>>> {
+    let mut found = BTreeMap::new();
+    for_each_file(root, Some("rs"), &mut |path, src| {
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if is_test_path(&rel) {
+            return;
+        }
+        let reaches = reaches_in(src);
+        if !reaches.is_empty() {
+            found.insert(rel, reaches);
+        }
+    })?;
+    Ok(found)
 }
 
 /// One reach: the crate and the 1-based line it is named on.
@@ -397,24 +402,46 @@ mod tests {
         assert!(verdict.unlisted.is_empty());
     }
 
-    /// `mvm_build` is gated across the whole CLI source; the other two only
-    /// under `commands/`.
+    /// All three crates are gated across the whole CLI source, including the
+    /// root `exec` tree and `doctor`, not only `commands/`.
     #[test]
-    fn scope_is_per_crate() {
-        assert!(Below::Build.covers("doctor/nix_checks.rs"));
-        assert!(Below::Build.covers("commands/vm/up.rs"));
-        assert!(!Below::Hostd.covers("doctor/security.rs"));
-        assert!(Below::Runtime.covers("commands/vm/up.rs"));
-        assert_eq!(reaches_in("use mvm_build::x;\n")[0].below, Below::Build);
-        let verdict = judge(&found(&[("doctor/a.rs", "use mvm_build::x;\n")]), &[]);
-        assert_eq!(verdict.unlisted, ["doctor/a.rs:1: mvm_build"]);
-        assert!(
-            judge(
-                &found(&[("doctor/a.rs", "use mvm_build::x;\n")]),
-                &[("doctor/a.rs", BUILD)]
-            )
-            .is_clean()
-        );
+    fn every_crate_is_gated_across_all_of_cli_src() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (rel, src) in [
+            ("exec.rs", "use mvm_runtime::x;\n"),
+            ("exec/new_file.rs", "use mvm_hostd::x;\n"),
+            ("doctor/a.rs", "use mvm_build::x;\n"),
+            ("doctor/tests.rs", "use mvm_build::x;\n"),
+        ] {
+            let path = tmp.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, src).unwrap();
+        }
+        let found = scan(tmp.path()).unwrap();
+        let files: Vec<&str> = found.keys().map(String::as_str).collect();
+        assert_eq!(files, ["doctor/a.rs", "exec.rs", "exec/new_file.rs"]);
+        assert_eq!(found["exec/new_file.rs"][0].below, Below::Hostd);
+    }
+
+    #[test]
+    fn a_root_exec_reach_with_no_entry_fails() {
+        let verdict = judge(&found(&[("exec.rs", "use mvm_runtime::x;\n")]), &[]);
+        assert_eq!(verdict.unlisted, ["exec.rs:1: mvm_runtime"]);
+        let verdict = judge(&found(&[("exec/new.rs", "use mvm_hostd::x;\n")]), &[]);
+        assert_eq!(verdict.unlisted, ["exec/new.rs:1: mvm_hostd"]);
+    }
+
+    #[test]
+    fn a_root_exec_doc_comment_and_test_reach_do_not_count() {
+        let src =
+            "/// see mvm_runtime::x\nfn f() {}\n#[cfg(test)]\nmod t { use mvm_runtime::y; }\n";
+        assert!(found(&[("exec.rs", src)]).is_empty());
+    }
+
+    #[test]
+    fn a_stale_root_entry_fails() {
+        let verdict = judge(&found(&[]), &[("exec.rs", RUNTIME)]);
+        assert_eq!(verdict.stale, ["exec.rs: mvm_runtime"]);
     }
 
     #[test]
