@@ -14,6 +14,31 @@ separately, the files that were not read. Absence from the "read" column is not 
 soundness. "Read" is taken from the fixing PR descriptions and the review notes for the lane; the
 line ranges are as recorded there and were not re-derived when this file was written.
 
+## Signed application HVF startup diagnostics
+
+Reviewed in [#5681](https://github.com/tinylabscom/mvm/pull/5681): standalone
+`mvm-hostd` verifier feature selection, supervisor descriptor preflight and
+early caller/input binding, `ColdHvfChannel` failure retention, and the private
+failure-record writer. Default helper builds now include registry signature
+verification; explicitly feature-stripped builds cannot produce the HVF binary.
+
+The startup transition remains prepared → uncertain → activated. A failed
+activation retains the original `ColdHvfBootFailure` and supporting guards;
+formatting borrows diagnostic text and grants no stop or release authority.
+Optional diagnostic recording follows namespace validation and precedes caller
+preparation. It does not create missing parent directories or turn an unsuitable
+diagnostic path into a new launch refusal. Writes assume trusted, stable
+ancestors; this is not descriptor-pinned confinement. Text is bounded and
+home-path/control-character sanitized, not general credential redaction.
+
+Focused tests cover genuine descriptor verification and tamper refusal,
+standalone build features, private paths, missing-parent preservation, and a
+never-launched failure retaining its supporting guard until explicit release.
+A source-order tripwire covers recorder placement. Actual native startup
+failure recording, unconfirmed-child recovery, confirmed rollback, and a
+successful public Claude boot/stop remain outside this source-only witness.
+No retained runtime state or native credential was changed by the patch.
+
 ## Guest-runtime first-use publication
 
 Reviewed `mvm-build`'s `runtime_pieces`, `cache_install`, `runtime_overlay`,

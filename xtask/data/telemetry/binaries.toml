@@ -482,7 +482,7 @@ required_witness = "Host collector records process startup, VM/generation correl
 package = "mvm-hostd"
 name = "mvm-hvf-supervisor"
 source = "crates/mvm-hostd/src/bin/mvm-hvf-supervisor.rs"
-required_features = []
+required_features = ["manifest-verify"]
 [binary.capture]
 kind = "runtime-gap"
 role = "host"
