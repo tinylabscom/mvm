@@ -245,11 +245,12 @@ not an invented cross-version raw JSON or signature-byte equality rule.
 Lost commit responses require reconciliation, not a new identity.
 
 As proposed in [ADR-060](060-mailbox-rebuild-handoff.md#proposed-boundary), a
-proven never-dispatched intent may be freshly sealed by its authorized sender
-for an admitted replacement. That fact must be established at the actual
-source handoff boundary: a missing receipt or locally absent dispatch marker
-does not prove no disclosure occurred. Partial or lost handoff is possibly
-dispatched/`Unknown`, not permission to reseal or retry with a new message ID.
+never-dispatched intent may be freshly sealed by its authorized sender for an
+admitted replacement. Eligibility requires evidence of no prior disclosure at
+the actual source handoff boundary: a missing receipt or locally absent
+dispatch marker does not prove no disclosure occurred. Partial or lost handoff
+is possibly dispatched/`Unknown`, not permission to reseal or retry with a new
+message ID.
 
 Still open under #5126: transfer representation and eligibility, cancellation
 scope and timeout/expiry races, context revisions/retention and key recovery,
