@@ -384,7 +384,7 @@ struct ColdNativeCustody {
 struct ColdBridge {
     state: ColdChannelState,
     stream: Option<std::os::unix::net::UnixStream>,
-    session: Option<mvm_agentd::vsock::HostControlSession>,
+    session: Option<mvm_agentd::vsock::AuthenticatedSession>,
     first_guest_key: Option<ed25519_dalek::VerifyingKey>,
 }
 
@@ -613,7 +613,7 @@ impl ColdNativeCustody {
                 .checked_add(std::time::Duration::from_secs(30))
                 .context("cold guest unary deadline overflow")?,
             |stream| {
-                session.send(stream, request)?;
+                session.write(stream, request)?;
                 Ok(mvm_agentd::vsock::check_response(
                     request,
                     session.read(stream)?,

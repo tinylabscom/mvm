@@ -24,9 +24,7 @@ use ed25519_dalek::SigningKey;
 use mvm_agentd::entrypoint::ProcessResourceLimits;
 use mvm_agentd::entrypoint::{CallCaps, CancellationToken, EntrypointCall, ValidatedEntrypoint};
 use mvm_agentd::entrypoint_stream::stream_call;
-use mvm_agentd::vsock::{
-    AuthenticatedSession, EntrypointEvent, GuestResponse, HostControlSession, RunEntrypointError,
-};
+use mvm_agentd::vsock::{AuthenticatedSession, EntrypointEvent, GuestResponse, RunEntrypointError};
 
 /// `env_clear()` leaves the script with no `PATH`, so anything it runs that
 /// is not a shell builtin has to be findable through this.
@@ -45,7 +43,7 @@ const HOST_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct HostStream {
     stream: UnixStream,
-    session: Option<HostControlSession>,
+    session: Option<AuthenticatedSession>,
 }
 
 fn host_key() -> SigningKey {
@@ -99,7 +97,6 @@ fn serve_with_caps(mut guest: UnixStream, script: &str, timeout: Duration, caps:
         &mut guest,
         SigningKey::from_bytes(&[22; 32]),
         &host_key().verifying_key(),
-        &mvm_agentd::vsock::control_offer(),
     )
     .expect("authenticated guest session");
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -129,7 +126,7 @@ fn serve_with_caps(mut guest: UnixStream, script: &str, timeout: Duration, caps:
 fn next_frame(host: &mut HostStream) -> Option<GuestResponse> {
     if host.session.is_none() {
         host.session = Some(
-            HostControlSession::host(&mut host.stream, "stream-capture-test", host_key())
+            AuthenticatedSession::host(&mut host.stream, "stream-capture-test", host_key())
                 .expect("authenticated host session"),
         );
     }

@@ -951,11 +951,27 @@ fn wait_for_hvf_guest_agent(name: &str) -> Result<()> {
     while Instant::now() < deadline {
         match transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT) {
             Ok(mut stream) => {
-                // The authenticated handshake carries the guest's protocol
-                // range and capability set, so a completed handshake plus a
-                // contracted `Ping` is the readiness signal.
-                match mvm_agentd::vsock::probe_agent_ready(&mut stream) {
-                    Ok(()) => return Ok(()),
+                // Hard cutover: the guest requires hello
+                // before any operational request, so a raw `Ping`
+                // probe no longer works. Treat a successful hello
+                // negotiation (with the `Ping` capability acknowledged)
+                // as the readiness signal.
+                match mvm_agentd::vsock::negotiate_protocol(
+                    &mut stream,
+                    vec![mvm_agentd::vsock::GuestCapability::Ping],
+                ) {
+                    Ok(negotiated)
+                        if negotiated
+                            .capabilities
+                            .contains(&mvm_agentd::vsock::GuestCapability::Ping) =>
+                    {
+                        return Ok(());
+                    }
+                    Ok(_) => {
+                        last_err = Some(anyhow::anyhow!(
+                            "guest agent did not advertise the Ping capability"
+                        ))
+                    }
                     Err(e) => last_err = Some(e),
                 }
             }
@@ -990,6 +1006,16 @@ fn guest_agent_socket_path(backend: &str, name: &str) -> Result<PathBuf> {
 
 fn ping_guest_agent(uds_path: &Path) -> Result<()> {
     let mut stream = mvm_agentd::vsock::connect_to(&uds_path.to_string_lossy(), 1)?;
+    let negotiated = mvm_agentd::vsock::negotiate_protocol(
+        &mut stream,
+        vec![mvm_agentd::vsock::GuestCapability::Ping],
+    )?;
+    if !negotiated
+        .capabilities
+        .contains(&mvm_agentd::vsock::GuestCapability::Ping)
+    {
+        bail!("guest agent did not advertise the Ping capability");
+    }
     let response = mvm_agentd::vsock::send_request(&mut stream, &GuestRequest::Ping)?;
     match response {
         GuestResponse::Pong => Ok(()),

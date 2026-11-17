@@ -60,14 +60,6 @@ test = false
 doc = false
 bench = false
 
-# Handshake frames that carry the guest's control advertisement.
-[[bin]]
-name = "fuzz_session_handshake"
-path = "fuzz_targets/fuzz_session_handshake.rs"
-test = false
-doc = false
-bench = false
-
 [[bin]]
 name = "fuzz_sealed_frame"
 path = "fuzz_targets/fuzz_sealed_frame.rs"

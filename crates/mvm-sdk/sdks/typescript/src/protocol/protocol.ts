@@ -628,7 +628,7 @@ DisplayInputResult: DisplayInputResult
 /**
  * Required remediation for a host/guest protocol mismatch.
  */
-export type ProtocolUpgradeAction = ("upgrade_host" | "rebuild_guest")
+export type ProtocolUpgradeAction = ("upgrade_host" | "rebuild_guest" | "downgrade_host")
 /**
  * Profile baked into an mvm guest image. Determines the set of vsock verbs the guest agent's dispatcher will accept; dev-only verbs (`Exec`, `ConsoleOpen`, `ProcStart`, `RunCode`, filesystem RPC, port forwarding) are rejected pre-handler when the image declares `SealedProd`.
  *
