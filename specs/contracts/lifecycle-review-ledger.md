@@ -14,6 +14,37 @@ separately, the files that were not read. Absence from the "read" column is not 
 soundness. "Read" is taken from the fixing PR descriptions and the review notes for the lane; the
 line ranges are as recorded there and were not re-derived when this file was written.
 
+## Audit-chain module ownership
+
+The ADR-061 prerequisite relocates the existing chain signer, file writer,
+checkpoint cache, recorder, mirror, dedup and transcript/bound sinks into
+`crates/mvm-hostd/src/audit/`. Supervisor module and flattened exports retain
+the same concrete identities. This changes Rust source ownership, not runtime
+resource ownership or the security claims of ADR-001.
+
+The archived focused review read module declarations/imports, file-signer
+batch/Drop and sidecar-lock ownership, and the bound recorder's direct journal
+path, weak sink binding, health persistence and expiry refusal. The direct
+journal operation stays restricted to the common audit module
+(`pub(in crate::audit)`). The bound sink moves with the recorder rather than
+widening this method to crate visibility.
+
+Existing transition owners remain: the host caller supplies signing authority;
+the file signer serializes append/rotation with the sidecar lock; callers own
+batch durability waits; Drop best-effort flushes deferred entries; endpoint
+startup owns registration and the bound sink owns its epoch-local health.
+An expired weak binding still refuses instead of falling back to unbound
+recording. No cancellation, lock, key, event, serialization, recovery or
+retirement transition is changed by the mechanical move.
+
+The [implementation report](../../xtask/data/evidence/adr-061/audit-chain-implementation-report.md)
+separates historical review/checks from recovery evidence at `d772741916`.
+Recovery compared current source modulo imports/visibility; it did not repeat
+the historical runtime validation. Combined checks and the separately owned
+file/checkpoint/emitter directory-policy changes require integration validation.
+This is not a new review of producer adapters, native completion, the combined
+signer helper, mailbox features or backend isolation.
+
 ## Compile-time AES-GCM boundary
 
 Reviewed `crates/mvm-crypto/src/aead.rs`,
