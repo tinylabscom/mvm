@@ -528,10 +528,73 @@ fn stage_fixture(name: &str, dir: &Path, home: &Path) {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
+        // `trust audit prove-consistency|verify-consistency` name two signed
+        // roots, the trusted key and, for verification, the proof. Grow the
+        // home's own chain between two published roots so both commands run
+        // against genuine, host-signed evidence.
+        "audit-consistency" => stage_audit_consistency(dir, home),
         // These commands read the project in the working directory.
         "project-policy" => stage_project_policy(dir),
         other => panic!("unknown fixture {other:?} in the tier manifest"),
     }
+}
+
+/// Write `saved.json`, `candidate.json`, `trusted.pub` and `proof.json` into
+/// `dir`, from a chain in `home` that grew by a sealed session in between.
+fn stage_audit_consistency(dir: &Path, home: &Path) {
+    use mvm_core::plan::test_support::PlanFixture;
+    use mvm_hostd::audit::{emitter::AuditEmitter, host_keypair, merkle, session::SealReason};
+
+    let signer = host_keypair::load_or_init_at(&home.join("keys")).expect("load host signer");
+    let audit_dir = home.join("audit");
+    let emitter = AuditEmitter::with_dir(signer.signing.clone(), &audit_dir)
+        .expect("open consistency fixture audit emitter");
+    let write = |name: &str, bytes: Vec<u8>| {
+        std::fs::write(dir.join(name), bytes).expect("write consistency fixture file")
+    };
+    let plan = PlanFixture::new()
+        .tenant("local")
+        .plan_id(&format!(
+            "doc-consistency-{}",
+            dir.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("fixture")
+        ))
+        .build();
+    emitter
+        .emit_admitted(&plan, "host:test")
+        .expect("record fixture admission");
+    let saved = emitter.publish_root("local").expect("publish saved root");
+    emitter
+        .emit_launched(&plan, "fixture")
+        .expect("record fixture launch");
+    emitter
+        .seal_session(&plan, SealReason::Exited)
+        .expect("seal fixture session");
+    let candidate = emitter
+        .publish_root("local")
+        .expect("publish candidate root");
+    let proof = merkle::build_consistency_in(
+        &audit_dir,
+        "local",
+        &signer.verifying,
+        usize::try_from(saved.tree_size).expect("saved size fits usize"),
+        usize::try_from(candidate.tree_size).expect("candidate size fits usize"),
+    )
+    .expect("build consistency proof");
+    write(
+        "saved.json",
+        serde_json::to_vec(&saved).expect("serialize saved root"),
+    );
+    write(
+        "candidate.json",
+        serde_json::to_vec(&candidate).expect("serialize candidate root"),
+    );
+    write("trusted.pub", signer.verifying.to_bytes().to_vec());
+    write(
+        "proof.json",
+        serde_json::to_vec(&proof).expect("serialize proof"),
+    );
 }
 
 /// Give side-effect-free policy commands an offline, built-in project profile.
