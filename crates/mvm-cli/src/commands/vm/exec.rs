@@ -261,9 +261,6 @@ pub(in crate::commands) struct RunArgs {
     /// Which of `--cpus` / `--memory` the command line named (not a flag).
     #[arg(skip)]
     pub explicit_resources: environment_defaults::ExplicitResources,
-    /// What the launch took from its bundle's recorded sizing (not a flag).
-    #[arg(skip)]
-    pub bundle_sizing: mvm_client::admission::bundle_resources::AppliedSizing,
     /// Forward the guest's CUDA/NVML calls to a host GPU over vsock.
     #[arg(long)]
     pub gpu: bool,
@@ -768,13 +765,11 @@ pub(in crate::commands) fn run_secure_started(
     // parsed back into a tier would be measuring against whatever was typed.
     let admit_backend_kind = selected_backend.kind();
     let admit_backend = selected_backend.name().to_string();
-    // The closure below moves `admit_backend`; keep a copy for the receipt's
-    // honest per-backend enforcement tier.
+    // The closure below moves `admit_backend`; the receipt keeps a copy.
     let receipt_backend = admit_backend.clone();
     let admit_network_mode = args.network_mode;
     let admit_grants = resolved_grants.plan_grants.clone();
-    let admit_cpus = args.cpus;
-    let admit_bundle_sizing = args.bundle_sizing;
+    let (admit_cpus, admit_bundle_sizing) = (args.cpus, args.explicit_resources.bundle);
     let admit_mem_mib = u64::from(parse_human_size(&args.memory).context("Invalid --memory")?);
     let admit_network_policy = network_policy.clone();
     let admit_agent_verb = args.agent_verb.clone();

@@ -12,7 +12,9 @@
 
 use clap::ArgMatches;
 use clap::parser::ValueSource;
-use mvm_client::admission::bundle_resources::{NamedSizing, SizingDefaults, memory_cap_mib, seed};
+use mvm_client::admission::bundle_resources::{
+    AppliedSizing, NamedSizing, SizingDefaults, memory_cap_mib, seed,
+};
 
 use super::RunArgs;
 
@@ -23,6 +25,8 @@ use super::RunArgs;
 pub(in crate::commands) struct ExplicitResources {
     pub cpus: bool,
     pub memory: bool,
+    /// What the launch took from its bundle's manifest sizing; not a flag.
+    pub bundle: AppliedSizing,
 }
 
 impl ExplicitResources {
@@ -37,6 +41,7 @@ impl ExplicitResources {
         Self {
             cpus: named("cpus"),
             memory: named("memory"),
+            bundle: AppliedSizing::default(),
         }
     }
 }
@@ -54,7 +59,7 @@ pub(in crate::commands) struct RecordedSizing {
 /// Fill the resources `args` left at their defaults: the descriptor's first,
 /// then the manifest's for what the descriptor did not record, with the
 /// manifest's memory capped at `cap`. Returns whether anything was taken. Only
-/// the manifest's share is kept in `args.bundle_sizing` for the audit labels.
+/// the manifest's share is kept in `args.explicit_resources.bundle` for the audit labels.
 pub(in crate::commands) fn apply(
     args: &mut RunArgs,
     recorded: RecordedSizing,
@@ -76,7 +81,7 @@ pub(in crate::commands) fn apply(
             args.memory = format!("{mib}M");
         }
     }
-    args.bundle_sizing = from_manifest;
+    args.explicit_resources.bundle = from_manifest;
     !(from_descriptor.is_empty() && from_manifest.is_empty())
 }
 
@@ -113,7 +118,7 @@ pub(in crate::commands) fn apply_bundle_defaults(
     if !apply(args, defaults, host_memory_cap()) {
         return Ok(());
     }
-    let applied = args.bundle_sizing;
+    let applied = args.explicit_resources.bundle;
     tracing::info!(
         cpus = ?applied.cpus,
         memory_mib = ?applied.memory_mib,
@@ -175,7 +180,19 @@ mod tests {
             mvm_core::util::parse_human_size(&args.memory).unwrap(),
             1536
         );
-        assert_eq!(args.bundle_sizing.memory_mib, Some(1536));
+        assert_eq!(args.explicit_resources.bundle.memory_mib, Some(1536));
+    }
+
+    #[test]
+    fn a_bundle_size_wins_over_a_smaller_unnamed_default() {
+        // A smaller built-in default is still a default, not a typed value.
+        let mut args = RunArgs {
+            cpus: 1,
+            memory: "128M".to_string(),
+            ..RunArgs::default()
+        };
+        assert!(apply(&mut args, manifest_only(2, 512), None));
+        assert_eq!((args.cpus, args.memory.as_str()), (2, "512M"));
     }
 
     #[test]
@@ -186,6 +203,7 @@ mod tests {
             explicit_resources: ExplicitResources {
                 cpus: true,
                 memory: false,
+                ..Default::default()
             },
             ..RunArgs::default()
         };
@@ -197,7 +215,7 @@ mod tests {
         args.memory = "4G".to_string();
         assert!(!apply(&mut args, manifest_only(2, 1024), None));
         assert_eq!(args.memory, "4G");
-        assert!(args.bundle_sizing.is_empty());
+        assert!(args.explicit_resources.bundle.is_empty());
     }
 
     #[test]
@@ -205,8 +223,11 @@ mod tests {
         let mut args = RunArgs::default();
         assert!(apply(&mut args, manifest_only(2, 4096), Some(1024)));
         assert_eq!(args.memory, "1024M");
-        assert_eq!(args.bundle_sizing.memory_requested_mib, Some(4096));
-        let labels = args.bundle_sizing.audit_labels();
+        assert_eq!(
+            args.explicit_resources.bundle.memory_requested_mib,
+            Some(4096)
+        );
+        let labels = args.explicit_resources.bundle.audit_labels();
         assert_eq!(labels["sizing_memory_requested_mib"], "4096");
         assert_eq!(labels["sizing_memory_mib"], "1024");
         assert_eq!(labels["sizing_clamped"], "true");
@@ -219,6 +240,7 @@ mod tests {
             explicit_resources: ExplicitResources {
                 cpus: false,
                 memory: true,
+                ..Default::default()
             },
             ..RunArgs::default()
         };
@@ -240,7 +262,7 @@ mod tests {
         assert_eq!(args.memory, "4096M", "left for admission to refuse");
         assert_eq!(args.cpus, 6, "the manifest fills what the descriptor left");
         assert!(
-            args.bundle_sizing.memory_mib.is_none(),
+            args.explicit_resources.bundle.memory_mib.is_none(),
             "no manifest memory was taken, so nothing is labelled"
         );
     }
@@ -251,7 +273,7 @@ mod tests {
         let before = (args.cpus, args.memory.clone());
         assert!(!apply(&mut args, RecordedSizing::default(), Some(1)));
         assert_eq!((args.cpus, args.memory.clone()), before);
-        assert!(args.bundle_sizing.audit_labels().is_empty());
+        assert!(args.explicit_resources.bundle.audit_labels().is_empty());
     }
 
     #[test]
@@ -271,7 +293,8 @@ mod tests {
             ExplicitResources::from_matches(&typed),
             ExplicitResources {
                 cpus: true,
-                memory: false
+                memory: false,
+                ..Default::default()
             }
         );
         let bare = command.try_get_matches_from(["run"]).unwrap();
