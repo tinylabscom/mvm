@@ -714,26 +714,43 @@ pub fn install_into_cache(
     arch: GuestArch,
 ) -> Result<MvmRuntimeBinaries, GuestAgentBuildError> {
     let layout = GuestAgentLayout::under(cache_root, cache_key, arch);
+    let _owner = crate::cache_install::lock_artifact_dir(&layout.dir)?;
     std::fs::create_dir_all(&layout.dir)?;
-    install_one(src.agent, &layout.agent)?;
-    install_one(src.netinit, &layout.netinit)?;
-    install_one(src.egress_client, &layout.egress_client)?;
-    install_one(src.entrypoint_runner, &layout.entrypoint_runner)?;
+    let staging = tempfile::tempdir_in(&layout.dir)?;
+    let candidates = [
+        (src.agent, &layout.agent),
+        (src.netinit, &layout.netinit),
+        (src.egress_client, &layout.egress_client),
+        (src.entrypoint_runner, &layout.entrypoint_runner),
+    ];
 
-    // Validate on the way into the cache — once per build, rather than on every
-    // invocation. A wrong-architecture or dynamically linked artifact cached
-    // here would otherwise be injected into a rootfs that has no dynamic
-    // loader, and surface as a guest that boots to a silent PID 1.
-    let binaries = layout.binaries();
-    for (name, path) in binaries.artifacts() {
-        let bytes = std::fs::read(path)?;
-        crate::guest_elf::validate_static_guest_elf(&bytes, path, arch).map_err(|e| {
+    // Prepare and verify the whole candidate before touching a valid cached set.
+    for (source, target) in candidates {
+        let name = target.file_name().expect("cache binary has a filename");
+        let staged = staging.path().join(name);
+        install_one(source, &staged)?;
+        let bytes = std::fs::read(&staged)?;
+        crate::guest_elf::validate_static_guest_elf(&bytes, &staged, arch).map_err(|e| {
             GuestAgentBuildError::BuildFailed {
-                reason: format!("{name}: {e}"),
+                reason: format!("{}: {e}", target.display()),
             }
         })?;
     }
-    Ok(binaries)
+    for (_, target) in candidates {
+        let staged = staging
+            .path()
+            .join(target.file_name().expect("cache binary has a filename"));
+        let bytes = std::fs::read(&staged)?;
+        if std::fs::symlink_metadata(target).is_ok_and(|meta| meta.file_type().is_file())
+            && std::fs::read(target).is_ok_and(|cached| cached == bytes)
+        {
+            set_exec(target)?;
+        } else {
+            // Keep readers' paths present even during an explicit replacement.
+            std::fs::rename(staged, target)?;
+        }
+    }
+    Ok(layout.binaries())
 }
 
 /// The cached guest binaries if a complete set is already present, else `None`.
@@ -1001,6 +1018,19 @@ fn zigbuild_args_for_output(args: &[String]) -> Vec<String> {
     quiet
 }
 
+/// The flags every guest build carries unless a target sets its own. rustc asks
+/// the linker for `-Wl,-O1` on an optimized build, and zig's linker answers
+/// every link with "ignoring deprecated linker optimization setting '1'", which
+/// rustc's `linker_messages` lint reprints as a warning under each of the
+/// dozens of guest binaries. That message is zig's, not a problem in the code,
+/// so it is allowed here; the workspace's own builds keep the lint on.
+///
+/// Passed as `CARGO_BUILD_RUSTFLAGS`, never as `RUSTFLAGS` or
+/// `CARGO_ENCODED_RUSTFLAGS`: cargo lets either of those override the
+/// per-target `CARGO_TARGET_<TRIPLE>_RUSTFLAGS` that a musl shared object sets
+/// to turn static linking off, and with it back on the `cdylib` is not built.
+const ZIGBUILD_RUSTFLAGS: &str = "-Alinker-messages";
+
 fn apply_zigbuild_env(
     cmd: &mut std::process::Command,
     spec: &GuestAgentBuildSpec,
@@ -1017,7 +1047,10 @@ fn apply_zigbuild_env(
         .env("RUSTC_WORKSPACE_WRAPPER", "")
         .env_remove("RUSTUP_TOOLCHAIN")
         .env_remove("RUSTFLAGS")
-        .env_remove("CARGO_ENCODED_RUSTFLAGS");
+        // Scrub the outer session's overriding flags, so none can ride along or
+        // mask a target's own, then set the lowest-precedence default.
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env("CARGO_BUILD_RUSTFLAGS", ZIGBUILD_RUSTFLAGS);
 
     // Keep cargo-zigbuild's own cache under the mvm cache root instead of
     // whatever platform-global default the host picks (for example
@@ -1312,7 +1345,8 @@ mod tests {
             )
         };
 
-        install(cache.path()).expect("a valid static set must install");
+        let installed = install(cache.path()).expect("a valid static set must install");
+        let original = std::fs::read(&installed.netinit).unwrap();
 
         // Now make one artifact the wrong architecture.
         std::fs::write(
@@ -1325,6 +1359,12 @@ mod tests {
         assert!(
             err.to_string().contains("agent"),
             "the refusal should name the artifact: {err}"
+        );
+        assert!(install(cache.path()).is_err());
+        assert_eq!(
+            std::fs::read(&installed.netinit).unwrap(),
+            original,
+            "a refused candidate must preserve the previous valid set",
         );
 
         // And a plain script is not an ELF at all.
@@ -1609,6 +1649,58 @@ mod tests {
         );
     }
 
+    /// Cargo reads one rustflags source and never merges them, so a global
+    /// override would hide the `-crt-static` a musl shared object sets for
+    /// itself and cargo would drop the cdylib.
+    #[test]
+    fn a_musl_cdylib_keeps_its_target_flags_under_the_zigbuild_env() {
+        for (arch, so) in [
+            (GuestArch::X86_64, "x86_64/lib/musl/libmvm_host_services.so"),
+            (
+                GuestArch::Aarch64,
+                "aarch64/lib/musl/libmvm_host_services.so",
+            ),
+        ] {
+            let build = crate::guest_bins::extras::extra_builds(arch)
+                .unwrap()
+                .into_iter()
+                .find(|b| b.member.path() == so)
+                .unwrap_or_else(|| panic!("no build produces {so}"));
+            let spec = GuestAgentBuildSpec::new(
+                PathBuf::from("/ws"),
+                arch,
+                std::env::temp_dir().join("mvm-rustflags-precedence-target"),
+            );
+            let mut cmd = std::process::Command::new("cargo");
+            cmd.env("RUSTFLAGS", "-Zthreads=8")
+                .env("CARGO_ENCODED_RUSTFLAGS", "-Zthreads=8");
+            apply_zigbuild_env(&mut cmd, &spec, None).expect("configure zigbuild env");
+            cmd.envs(build.env.iter().map(|(k, v)| (k, v)));
+
+            let value = |name: &str| {
+                cmd.get_envs()
+                    .find(|(k, _)| *k == std::ffi::OsStr::new(name))
+                    .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+            };
+            let target_var = format!(
+                "CARGO_TARGET_{}_RUSTFLAGS",
+                build.target.to_uppercase().replace('-', "_")
+            );
+            assert!(
+                value(&target_var).is_some_and(|f| f.contains("-C target-feature=-crt-static")),
+                "{so}: {target_var} must carry -crt-static"
+            );
+            for global in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"] {
+                assert_eq!(value(global), None, "{so}: {global} would shadow it");
+            }
+            assert_eq!(
+                value("CARGO_BUILD_RUSTFLAGS").as_deref(),
+                Some(ZIGBUILD_RUSTFLAGS),
+                "{so}: the lint allowance must stay, at the lowest precedence"
+            );
+        }
+    }
+
     #[test]
     fn apply_zigbuild_env_exports_explicit_cache_dir() {
         let spec = GuestAgentBuildSpec::new(
@@ -1662,6 +1754,13 @@ mod tests {
             envs.get(std::ffi::OsStr::new("RUSTC_WORKSPACE_WRAPPER")),
             Some(&Some(std::ffi::OsString::new()))
         );
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("CARGO_BUILD_RUSTFLAGS")),
+            Some(&Some(std::ffi::OsString::from("-Alinker-messages"))),
+            "the guest build carries only the flag that silences zig's linker notice, not the outer session's"
+        );
+        // An overriding flag set would replace a target's own flags, such as the
+        // `-crt-static` a musl shared object needs.
         for removed in ["RUSTUP_TOOLCHAIN", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"] {
             assert_eq!(
                 envs.get(std::ffi::OsStr::new(removed)),

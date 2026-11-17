@@ -187,6 +187,10 @@ pub(crate) const GATES: &[Gate] = &[
     ),
     ("check-no-cli-shellout", crate::check_no_cli_shellout::run),
     (
+        "check-no-mvmd-dependency",
+        crate::check_no_mvmd_dependency::run,
+    ),
+    (
         "check-sdk-transport-free",
         crate::check_sdk_transport_free::run,
     ),

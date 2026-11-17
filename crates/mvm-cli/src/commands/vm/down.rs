@@ -46,8 +46,7 @@ fn stop_one(client: &LocalBackend, runtime: &tokio::runtime::Runtime, name: &str
     record_vm_readiness(name, InstanceReadiness::Stopping);
     let result = runtime
         .block_on(client.stop_machine(&MachineId(name.to_string())))
-        .map_err(|error| anyhow::anyhow!(error))
-        .and_then(|_| super::volume::release_volume_leases_for_vm(name));
+        .map_err(|error| anyhow::anyhow!(error));
     // A state-changing CLI verb emits an audit entry regardless of outcome; the
     // matching `VmStart` lives in `vm/up.rs`.
     let outcome = if result.is_ok() { "ok" } else { "stop_failed" };
@@ -70,8 +69,7 @@ fn stop_all(client: &LocalBackend, runtime: &tokio::runtime::Runtime) -> Result<
         record_vm_readiness(&m.name, InstanceReadiness::Stopping);
         let stopped = runtime
             .block_on(client.stop_machine(&m.id))
-            .map_err(|error| anyhow::anyhow!(error))
-            .and_then(|_| super::volume::release_volume_leases_for_vm(&m.name));
+            .map_err(|error| anyhow::anyhow!(error));
         if let Err(error) = stopped {
             last_err = Some(error);
         }

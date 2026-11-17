@@ -16,21 +16,28 @@
 
 mod capture_recovery;
 pub(crate) mod oci;
+mod resume;
+mod rootfs;
+#[cfg(test)]
+mod rootfs_tests;
 mod state;
 
-use oci::pull_image_to_dir;
+pub use rootfs::materialize_image_rootfs;
+#[cfg(test)]
+pub(crate) use rootfs::{RootfsPlan, materialize_from_dir, plan_rootfs_source, run_rootfs_output};
+pub(crate) use rootfs::{
+    TreeMaterializeOptions, UnpackedLayers, host_verity_sidecars, materialize_tree,
+    resolve_local_rootfs, unpack_one_layer,
+};
 pub(crate) use state::map_status;
 use state::{registered_vm_info, to_state};
 
-use std::collections::HashSet;
-use std::io::Cursor;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 
 use async_trait::async_trait;
-use flate2::read::GzDecoder;
 use mvm_core::protocol::vm_backend::{BackendKind, VmId, VmInfo, VmStatus};
-use mvm_core::rootfs_source::RootfsSource;
-use mvm_fs::oci::{ImageReference, LayerDescriptor, UnpackOptions, UnpackReport, unpack_layer};
 use mvm_runtime::AnyBackend;
 
 use mvm_core::client::dto::{
@@ -42,7 +49,6 @@ use mvm_core::client::{
     MvmClient, MvmError, Result, TelemetryReadRequest, TelemetryReadResponse, TelemetryStatus,
 };
 use mvm_core::config::vm_state_dir;
-use mvm_core::vm_backend::{SnapshotCapability, VmStartConfig, WarmStartError};
 #[cfg(feature = "test-support")]
 use mvm_runtime::vm::instance_snapshot::CannedIO;
 use mvm_runtime::vm::instance_snapshot::{
@@ -218,90 +224,6 @@ impl LocalBackend {
         mvm_runtime::microvm::ensure_fc_sockets_in_state_dir(&vm_dir, "a sealed snapshot")
             .map_err(|e| backend_err(format!("{e:#}")))?;
         Ok(Box::new(FirecrackerIO::new(firecracker_socket(&vm_dir))))
-    }
-
-    /// Warm-resume through the backend's live-memory `warm_start` path: mint a
-    /// fresh VMGenID, load + resume live memory, reseed. Fails closed with the
-    /// typed `WarmStartError::Unsupported` recovery hint on a disk-only backend
-    /// rather than silently cold-booting.
-    fn warm_resume(&self, backend: &AnyBackend, name: &str) -> Result<ResumeOutcome> {
-        require_registry_paused(name)?;
-        let config = VmStartConfig {
-            name: name.to_string(),
-            ..Default::default()
-        };
-        match backend.warm_start(&config, SnapshotCapability::LiveMemory) {
-            Ok(outcome) => {
-                let reseed = match warm_resume_reseed_verdict(outcome.reseed) {
-                    Ok(summary) => summary,
-                    Err(why) => {
-                        return Err(refuse_resume(name, &why, || {
-                            backend.stop(&VmId(name.to_string())).map(|_timing| ())
-                        }));
-                    }
-                };
-                // A warm start resumes the paused process itself, so the pause
-                // marker still names it and would keep reporting it paused.
-                if let Err(error) = mvm_runtime::vm::admission::clear_paused(&vm_state_dir(name)) {
-                    tracing::warn!(vm = %name, error = %format!("{error:#}"), "could not clear the pause marker");
-                }
-                mark_resumed_after_restore(name, "")?;
-                // A warm resume restores live memory, not a sealed snapshot, so it
-                // carries no epoch/lengths — only the reseed summary.
-                Ok(ResumeOutcome {
-                    reseed: Some(reseed),
-                    ..Default::default()
-                })
-            }
-            // Name the tier mismatch + recovery hint verbatim (its `Display` is
-            // the actionable message); other failures keep a locating context.
-            Err(e @ WarmStartError::Unsupported { .. }) => Err(backend_err(format!("{e}"))),
-            Err(e) => Err(backend_err(format!("warm-starting VM {name:?}: {e}"))),
-        }
-    }
-
-    /// Plain resume: verify the sealed snapshot envelope — **refusing a replayed
-    /// older-epoch snapshot** — load it back and resume vCPUs, then finish
-    /// bringing the guest back with a fresh-VMGenID PostRestore (skipped for the
-    /// mock, which has no guest agent).
-    fn plain_resume(&self, backend: &AnyBackend, name: &str) -> Result<ResumeOutcome> {
-        require_registry_paused(name)?;
-        if !Self::uses_sealed_snapshot(backend) {
-            backend
-                .resume(&VmId(name.to_string()))
-                .map_err(|e| backend_err(format!("resuming VM {name:?}: {e:#}")))?;
-            mark_resumed_after_restore(name, "")?;
-            return Ok(ResumeOutcome::default());
-        }
-
-        let io = self.snapshot_io_for(backend, name)?;
-        if !Self::is_mock_backend(backend) {
-            let (sidecar, reseed) =
-                resume_sealed(name, &*io, post_restore_signal(name), RESUME_ADMISSION)?;
-            // Report the verified snapshot's epoch + artifact lengths so the
-            // caller's WorkloadWake audit entry carries the same detail the
-            // pause did.
-            return Ok(ResumeOutcome {
-                epoch: sidecar.epoch,
-                vmstate_len: sidecar.vmstate_len,
-                mem_len: sidecar.mem_len,
-                reseed: Some(reseed),
-            });
-        }
-        // The mock has no guest agent to reseed, so its restore is the whole
-        // resume.
-        let sidecar = verify_and_resume(name, &*io)
-            .map_err(|e| backend_err(format!("resuming VM {name:?}: {e:#}")))?;
-        let reseed = None;
-        mark_resumed_after_restore(name, "")?;
-        // Report the verified snapshot's epoch + artifact lengths so the caller's
-        // WorkloadWake audit entry carries the same detail the pause did.
-        Ok(ResumeOutcome {
-            epoch: sidecar.epoch,
-            vmstate_len: sidecar.vmstate_len,
-            mem_len: sidecar.mem_len,
-            reseed,
-        })
     }
 }
 
@@ -746,6 +668,19 @@ fn load_name_registry() -> Result<VmNameRegistry> {
     VmNameRegistry::load(&path).map_err(|e| backend_err(format!("loading VM name registry: {e}")))
 }
 
+/// Wait for a contended machine transition without blocking an async executor.
+pub(crate) async fn machine_lifecycle(
+    name: &str,
+) -> Result<mvm_runtime::vm::instance_snapshot::MachineLifecycleLock> {
+    let name = name.to_owned();
+    tokio::task::spawn_blocking(move || {
+        mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(&name)
+    })
+    .await
+    .map_err(backend_err)?
+    .map_err(backend_err)
+}
+
 /// Remove a stopped machine's runtime state directory.
 ///
 /// A stop that leaves it behind leaves whatever the last run put there, and a
@@ -766,6 +701,13 @@ fn load_name_registry() -> Result<VmNameRegistry> {
 /// A persistent machine — the restored-checkpoint case this exists for —
 /// reports no exit through the stop path, so it always reaps.
 pub(crate) fn remove_stopped_runtime_state(name: &str) -> Result<()> {
+    remove_stopped_runtime_state_with_lock(name, None)
+}
+
+fn remove_stopped_runtime_state_with_lock(
+    name: &str,
+    lifecycle: Option<&mvm_runtime::vm::instance_snapshot::MachineLifecycleLock>,
+) -> Result<()> {
     let state_dir = vm_state_dir(name);
     let transient_exit_pending = !mvm_core::config::machine_spec_path(name).exists()
         && mvm_core::exit_capture::exit_file_path(&state_dir).exists();
@@ -776,10 +718,13 @@ pub(crate) fn remove_stopped_runtime_state(name: &str) -> Result<()> {
         );
         return Ok(());
     }
-    let removed = mvm_runtime::vm::reconcile::reap_unowned_state_dir(
-        &state_dir,
-        &mvm_core::config::instance_dir(name),
-    )
+    let removed = match lifecycle {
+        Some(lifecycle) => lifecycle.reap_unowned_state().map_err(|e| format!("{e:#}")),
+        None => mvm_runtime::vm::reconcile::reap_unowned_state_dir(
+            &state_dir,
+            &mvm_core::config::instance_dir(name),
+        ),
+    }
     .map_err(|e| {
         backend_err(format!(
             "machine {name:?} stopped, but removing its state dir {} failed: {e}",
@@ -793,6 +738,57 @@ pub(crate) fn remove_stopped_runtime_state(name: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+impl LocalBackend {
+    /// Stop while the caller retains the machine's lifecycle transition.
+    ///
+    /// An automatic restart supplies the exact authenticated instance; a
+    /// mismatch refuses before helpers, volume leases or successor state change.
+    pub fn stop_machine_in_lifecycle(
+        &self,
+        id: &MachineId,
+        lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+        expected: Option<&mvm_core::protocol::hvf_control::HvfInstance>,
+    ) -> Result<()> {
+        lifecycle.require_name(&id.0).map_err(backend_err)?;
+        if let Some(expected) = expected
+            && expected.vm_id != id.0
+        {
+            return Err(backend_err(
+                "health restart instance names a different machine",
+            ));
+        }
+        let vid = VmId(id.0.clone());
+        let stopped_session = mvm_core::config::machine_spec_path(&id.0)
+            .exists()
+            .then(|| mvm_hostd::audit::plan_persist::read_plan(&id.0).ok())
+            .flatten();
+        let owner = AnyBackend::for_started_vm(&id.0);
+        let backend = owner.as_ref().unwrap_or(&self.backend);
+        let result = match expected {
+            Some(expected) => backend.stop_hvf_instance(expected),
+            None => backend.stop(&vid),
+        };
+        if result.is_ok() {
+            if let Some(plan) = &stopped_session {
+                crate::launch::seal_stopped_session(plan, &id.0);
+            }
+            deregister_from_name_registry(&id.0);
+            self.release_stopped_leases(&id.0).map_err(|error| {
+                backend_err(format!(
+                    "machine {:?} stopped, but volume lease cleanup failed: {error}",
+                    id.0
+                ))
+            })?;
+            remove_stopped_runtime_state_with_lock(&id.0, Some(lifecycle))?;
+        } else if expected.is_none()
+            && let (Err(e), Some(plan)) = (&result, &stopped_session)
+        {
+            crate::launch::record_session_stop_failure(Some(plan), &id.0, &format!("{e:#}"));
+        }
+        result.map(|_| ()).map_err(backend_err)
+    }
 }
 
 /// Best-effort removal of a machine name from the persistent VM name registry
@@ -810,69 +806,6 @@ pub(crate) fn deregister_from_name_registry(name: &str) {
 pub(crate) fn backend_err(e: impl std::fmt::Display) -> MvmError {
     MvmError::Backend {
         reason: e.to_string(),
-    }
-}
-
-/// The work a declared rootfs source implies. One variant per verification
-/// path: a materialized blob is booted as-is, a tree is injected and
-/// materialized, and a reference is fetched from a registry first.
-#[derive(Debug, PartialEq, Eq)]
-enum RootfsPlan {
-    /// An already-materialized `rootfs.ext4` — boot it directly.
-    Materialized(PathBuf),
-    /// An unpacked OCI rootfs directory — inject runtime + materialize.
-    UnpackedDir(PathBuf),
-    /// A registry reference — pull + unpack + inject + materialize.
-    Pull(ImageReference),
-}
-
-/// Turn a caller-declared rootfs source into the work it implies.
-///
-/// The declaration arrives parsed, so a mistyped path stops here instead of
-/// falling through to the registry arm: the arms differ in how the bytes they
-/// produce are verified, and which one runs must not depend on the caller's
-/// working directory.
-fn plan_rootfs_source(source: RootfsSource) -> Result<RootfsPlan> {
-    match source {
-        // The filesystem is consulted only to tell a blob from a tree, and
-        // only once the caller has declared the source local.
-        RootfsSource::LocalPath(path) if path.is_file() => Ok(RootfsPlan::Materialized(path)),
-        RootfsSource::LocalPath(path) if path.is_dir() => Ok(RootfsPlan::UnpackedDir(path)),
-        RootfsSource::LocalPath(path) => Err(MvmError::InvalidSpec {
-            reason: format!(
-                "declared local rootfs path does not exist: {} — no registry fetch was \
-                 attempted; write `oci:<reference>` to boot a registry image instead",
-                path.display()
-            ),
-        }),
-        RootfsSource::Oci { image_ref } => image_ref
-            .parse::<ImageReference>()
-            .map(RootfsPlan::Pull)
-            .map_err(|e| MvmError::InvalidSpec {
-                reason: format!(
-                    "not a usable OCI reference: {image_ref:?}: {e}{}",
-                    path_collision_hint(&image_ref)
-                ),
-            }),
-        RootfsSource::Flake { flake_ref, attr } => Err(MvmError::InvalidSpec {
-            reason: format!(
-                "a flake source is built, not booted: build {flake_ref}#{attr} first, then \
-                 declare the resulting rootfs path"
-            ),
-        }),
-    }
-}
-
-/// A bare name is a registry reference by declaration, so a same-named file in
-/// the caller's working directory is not silently preferred — but it is almost
-/// certainly what they meant, so say so once the reference has failed to parse.
-fn path_collision_hint(image_ref: &str) -> String {
-    if Path::new(image_ref).exists() {
-        format!(
-            " (a filesystem entry named {image_ref:?} exists — write `./{image_ref}` or `path:{image_ref}` to boot it)"
-        )
-    } else {
-        String::new()
     }
 }
 
@@ -902,164 +835,6 @@ pub fn set_machine_expiry(name: &str, expires_at: Option<String>) -> Result<()> 
             path.display()
         ))
     })
-}
-
-/// Materialize an OCI reference into a host `rootfs.ext4`, for a caller that
-/// wants the artifact rather than a running machine.
-///
-/// The build path uses this so an image-backed `mvm.toml` is materialized by
-/// exactly the code a `run --image` boots through — same pull, same hardened
-/// unpack, same runtime injection, and the same `mvm-meta.json` sidecar written
-/// beside the rootfs. A second materializer would be a second answer to "what
-/// does this image become", and the two would drift.
-///
-/// `cache_key` names the cache slot under `~/.mvm/cache/local-run/`.
-pub async fn materialize_image_rootfs(image_ref: &str, cache_key: &str) -> Result<PathBuf> {
-    resolve_local_rootfs(
-        &RootfsSource::Oci {
-            image_ref: image_ref.to_string(),
-        },
-        cache_key,
-    )
-    .await
-}
-
-/// Resolve `spec.image` to a host `rootfs.ext4` path, materializing in-process
-/// as needed (no subprocess, no CLI). Registry pulls are async; the dir +
-/// pre-materialized cases are synchronous.
-pub(crate) async fn resolve_local_rootfs(image: &RootfsSource, name: &str) -> Result<PathBuf> {
-    match plan_rootfs_source(image.clone())? {
-        RootfsPlan::Materialized(path) => Ok(path),
-        // An already-unpacked tree carries no unpack report, so there is
-        // nothing the host filesystem deferred to merge back in.
-        RootfsPlan::UnpackedDir(dir) => materialize_from_dir(&dir, name, UnpackedLayers::default()),
-        RootfsPlan::Pull(image_ref) => {
-            let staging = tempfile::tempdir().map_err(backend_err)?;
-            let pulled = pull_image_to_dir(&image_ref, staging.path()).await?;
-            let output = run_rootfs_output(name);
-            materialize_tree(
-                staging.path(),
-                &output,
-                name,
-                pulled.layers,
-                TreeMaterializeOptions {
-                    config: Some(&pulled.config),
-                    ..TreeMaterializeOptions::default()
-                },
-            )?;
-            Ok(output)
-        }
-    }
-}
-
-/// Cache location for a locally-materialized run rootfs, keyed by machine name.
-fn run_rootfs_output(name: &str) -> PathBuf {
-    let key: String = name
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
-    PathBuf::from(mvm_core::config::mvm_cache_dir())
-        .join("local-run")
-        .join(key)
-        .join("rootfs.ext4")
-}
-
-/// What unpacking an image's layers produced beyond the host tree: the nodes
-/// the host filesystem could not hold, and the owners it could not apply.
-#[derive(Default)]
-struct UnpackedLayers {
-    deferred_nodes: Vec<mvm_fs::ext4::Node>,
-    owners: mvm_fs::ownership::OwnerTable,
-}
-
-/// Inject the mvm runtime into an unpacked tree and materialize it into the
-/// run-rootfs cache, reusing the CLI's shared `run_image` orchestration.
-fn materialize_from_dir(dir: &Path, name: &str, layers: UnpackedLayers) -> Result<PathBuf> {
-    let output = run_rootfs_output(name);
-    materialize_tree(
-        dir,
-        &output,
-        name,
-        layers,
-        TreeMaterializeOptions::default(),
-    )?;
-    Ok(output)
-}
-
-#[derive(Default)]
-struct TreeMaterializeOptions<'a> {
-    config: Option<&'a mvm_build::oci_runtime_inject::ImageRuntimeConfig>,
-    sealed: bool,
-    runtime_binaries: Option<&'a mvm_build::oci_runtime_inject::MvmRuntimeBinaries>,
-    policy: mvm_build::run_image::RootfsMaterializationPolicy,
-}
-
-fn materialize_tree(
-    dir: &Path,
-    output: &Path,
-    name: &str,
-    layers: UnpackedLayers,
-    options: TreeMaterializeOptions<'_>,
-) -> Result<()> {
-    let cache_root = mvm_core::config::oci_cache_dir(); // where the CLI prepares runtimes
-    if options.runtime_binaries.is_none() {
-        crate::launch::runtime_overlay::require_prepared_oci_guest_runtime(&cache_root)
-            .map_err(|e| backend_err(format!("{e:#}")))?;
-    }
-    mvm_build::run_image::inject_and_materialize(
-        mvm_build::run_image::InjectAndMaterializeRequest::builder(&cache_root, dir, output, name)
-            .sealed(options.sealed)
-            .entrypoint(options.config)
-            .runtime_binaries(options.runtime_binaries)
-            .materialization_policy(options.policy)
-            .reuse_published(false)
-            .deferred_nodes(layers.deferred_nodes)
-            .owners(layers.owners)
-            .build(),
-    )
-    .map_err(|e| backend_err(format!("{e:#}")))
-}
-
-/// Unpack one layer's bytes into `dest`, decompressing gzip layers first.
-fn unpack_one_layer(
-    layer: &LayerDescriptor,
-    bytes: &[u8],
-    dest: &Path,
-    prior_layer_paths: &HashSet<PathBuf>,
-) -> Result<UnpackReport> {
-    let mt = &layer.media_type;
-    let report = if mt.ends_with("+gzip") || mt.ends_with(".gzip") || mt.contains("tar.gzip") {
-        unpack_layer(
-            GzDecoder::new(Cursor::new(bytes)),
-            dest,
-            &UnpackOptions::default(),
-            Some(prior_layer_paths),
-        )
-    } else {
-        unpack_layer(
-            Cursor::new(bytes),
-            dest,
-            &UnpackOptions::default(),
-            Some(prior_layer_paths),
-        )
-    }
-    .map_err(|e| backend_err(format!("unpack layer {}: {e}", layer.digest)))?;
-    if !report.refused.is_empty() {
-        return Err(backend_err(format!(
-            "layer {} unpack refused entries: {:?}",
-            layer.digest, report.refused
-        )));
-    }
-    Ok(report)
-}
-
-/// Probe the dm-verity sidecars the pure materializer writes beside the image
-/// (`rootfs.verity` + `rootfs.roothash`) from the host filesystem. Returns
-/// `(verity_path, roothash)` when both are present and the hash is well-formed
-/// (64-hex); `(None, None)` for an unverified image. A `&Path` adapter over
-/// `mvm_runtime::microvm::probe_verity_sidecar`, which does the host-side read.
-pub(crate) fn host_verity_sidecars(rootfs: &Path) -> (Option<String>, Option<String>) {
-    mvm_runtime::microvm::probe_verity_sidecar(&rootfs.to_string_lossy())
 }
 
 /// A telemetry read failure as the facade reports it: a stale cursor is the
@@ -1216,7 +991,15 @@ impl MvmClient for LocalBackend {
         if let Some(path) = spec.assurance_campaign {
             builder = builder.assurance_campaign(path);
         }
-        self.create_from_request(&builder.build()?)
+        let request = builder.build()?;
+        let name = request
+            .name
+            .as_deref()
+            .ok_or_else(|| MvmError::InvalidSpec {
+                reason: "persistent machine requires a name".into(),
+            })?;
+        let lifecycle = machine_lifecycle(name).await?;
+        self.create_from_request_in_lifecycle(&request, &lifecycle)
     }
 
     async fn run_machine(&self, spec: MachineSpec) -> Result<MachineState> {
@@ -1251,48 +1034,8 @@ impl MvmClient for LocalBackend {
     }
 
     async fn stop_machine(&self, id: &MachineId) -> Result<()> {
-        let vid = VmId(id.0.clone());
-        // A persistent machine's session ends at its stop; a transient's ends
-        // when its exit is reported, which seals it. Read before the stop: the
-        // plan lives in the state dir the stop removes.
-        let stopped_session = mvm_core::config::machine_spec_path(&id.0)
-            .exists()
-            .then(|| mvm_hostd::audit::plan_persist::read_plan(&id.0).ok())
-            .flatten();
-        // Stop via the VMM that actually started this VM (resolved from its
-        // per-VM state-dir pid marker) so a QEMU/libkrun VM is torn down by its
-        // own hypervisor, not this client's default. A marker-less VM (mock or
-        // direct-boot) has no owning marker, so fall back to this client's
-        // configured backend — which keeps a `with_hypervisor("mock")` client
-        // hermetic rather than reaching a platform default.
-        let result = match AnyBackend::for_started_vm(&id.0) {
-            Some(owner) => owner.stop(&vid),
-            None => self.backend.stop(&vid),
-        };
-        // Deregister from the name registry only on a successful stop; on
-        // failure the entry (and any readiness the caller recorded) stays so
-        // the user can see what happened. A persistent machine's spec is
-        // never touched by stop — only remove deletes a definition.
-        if result.is_ok() {
-            // Seal first: the session ended with the stop, and nothing below
-            // may skip recording that.
-            if let Some(plan) = &stopped_session {
-                crate::launch::seal_stopped_session(plan, &id.0);
-            }
-            deregister_from_name_registry(&id.0);
-            // Release the stopped owner's volume-attachment leases (re-sealing
-            // any just-in-time unlocked volume). Best-effort: the stop itself
-            // already succeeded.
-            if let Err(e) = self.release_stopped_leases(&id.0) {
-                tracing::warn!(error = %e, machine = %id.0, "releasing volume leases after stop failed");
-            }
-            remove_stopped_runtime_state(&id.0)?;
-        } else if let (Err(e), Some(plan)) = (&result, &stopped_session) {
-            // The machine may still be running, so its session stays open; the
-            // failed stop is still put on the record under its plan.
-            crate::launch::record_session_stop_failure(Some(plan), &id.0, &format!("{e:#}"));
-        }
-        result.map(|_timing| ()).map_err(backend_err)
+        let lifecycle = machine_lifecycle(&id.0).await?;
+        self.stop_machine_in_lifecycle(id, &lifecycle, None)
     }
 
     async fn pause_machine(&self, id: &MachineId, opts: PauseOpts) -> Result<PauseOutcome> {
@@ -1355,12 +1098,21 @@ impl MvmClient for LocalBackend {
     }
 
     async fn resume_machine(&self, id: &MachineId, opts: ResumeOpts) -> Result<ResumeOutcome> {
+        let _barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()
+            .map_err(backend_err)?;
+        if cfg!(target_os = "linux") && self.backend.kind() != BackendKind::Mock {
+            crate::policy_profiles::coordinator::ensure_if_activated().map_err(backend_err)?;
+        }
         let backend = self.lifecycle_backend_for(&id.0);
         // One resume of a machine at a time, held until its guest is admitted
         // or refused: a second resume must not restore over a guest the first
         // is still admitting, or stop the VMM the first is waiting on.
         let _resuming = mvm_runtime::vm::instance_snapshot::lock_resume(&id.0)
             .map_err(|e| backend_err(format!("{e:#}")))?;
+        if backend.kind() == BackendKind::Firecracker {
+            let _prior_plan =
+                crate::policy_profiles::coordinator::restore_plan(&id.0).map_err(backend_err)?;
+        }
         // `warm` routes through the backend's live-memory warm-start path (fails
         // closed on a disk-only backend); the default plain path verifies +
         // restores the sealed snapshot and signals the guest.
@@ -2271,157 +2023,6 @@ mod tests {
         assert!(!path.exists());
     }
 
-    /// `std::env::set_current_dir` is process-wide; this Mutex stops
-    /// `cargo test`'s thread pool from racing between two cwd-mutating tests.
-    /// The lock is held for the lifetime of [`CwdGuard`].
-    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    struct CwdGuard {
-        _guard: std::sync::MutexGuard<'static, ()>,
-        prev: PathBuf,
-    }
-
-    impl CwdGuard {
-        fn enter(dir: &Path) -> Self {
-            let guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let prev = std::env::current_dir().expect("cwd");
-            std::env::set_current_dir(dir).expect("chdir");
-            CwdGuard {
-                _guard: guard,
-                prev,
-            }
-        }
-    }
-
-    impl Drop for CwdGuard {
-        fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.prev);
-        }
-    }
-
-    fn reference(s: &str) -> ImageReference {
-        s.parse().expect("parses as an OCI reference")
-    }
-
-    /// Both steps a caller takes with a declaration string — parse it, then
-    /// plan the work — so these tests keep exercising the grammar rather than
-    /// hand-building the parsed value.
-    fn plan_rootfs(image: &str) -> Result<RootfsPlan> {
-        let source: RootfsSource = image.parse().map_err(|e| MvmError::InvalidSpec {
-            reason: format!("{e}"),
-        })?;
-        plan_rootfs_source(source)
-    }
-
-    #[test]
-    fn plan_rootfs_routes_file_dir_and_registry() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("rootfs.ext4");
-        std::fs::write(&file, b"x").unwrap();
-
-        // An existing file → a materialized rootfs.
-        assert_eq!(
-            plan_rootfs(&file.to_string_lossy()).unwrap(),
-            RootfsPlan::Materialized(file.clone())
-        );
-        // An existing directory → an unpacked tree.
-        assert_eq!(
-            plan_rootfs(&dir.path().to_string_lossy()).unwrap(),
-            RootfsPlan::UnpackedDir(dir.path().to_path_buf())
-        );
-        // A reference → a pull (no network touched here).
-        assert_eq!(
-            plan_rootfs("docker.io/library/alpine:3.20").unwrap(),
-            RootfsPlan::Pull(reference("docker.io/library/alpine:3.20"))
-        );
-    }
-
-    #[test]
-    fn a_mistyped_local_path_is_refused_and_never_planned_as_a_pull() {
-        let dir = tempfile::tempdir().unwrap();
-        // The user meant `rootfs.ext4`; nothing exists at what they typed.
-        let typo = dir.path().join("rootfs.ext5");
-
-        let planned = plan_rootfs(&typo.to_string_lossy());
-
-        // `Pull` is the only variant that reaches a registry, so refusing to
-        // produce one is what "no fetch was attempted" means here.
-        assert!(
-            !matches!(planned, Ok(RootfsPlan::Pull(_))),
-            "a typo'd local path must not be planned as a registry pull: {planned:?}"
-        );
-        let err = planned.expect_err("an absent declared path is an error");
-        assert!(
-            matches!(err, MvmError::InvalidSpec { .. }),
-            "expected a spec error naming the path, got {err:?}"
-        );
-        assert!(
-            err.to_string().contains(&typo.display().to_string()),
-            "the error must name the path the caller typed: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn resolve_local_rootfs_refuses_a_mistyped_path_before_any_fetch() {
-        let dir = tempfile::tempdir().unwrap();
-        let typo = dir.path().join("rootfs.ext5");
-
-        let declared: RootfsSource = typo.to_string_lossy().parse().expect("a path parses");
-        let err = crate::local::resolve_local_rootfs(&declared, "m")
-            .await
-            .expect_err("an absent declared path is an error");
-
-        assert!(matches!(err, MvmError::InvalidSpec { .. }), "got {err:?}");
-        assert!(err.to_string().contains(&typo.display().to_string()));
-    }
-
-    #[test]
-    fn a_registry_reference_survives_a_colliding_working_directory_entry() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("alpine:3.20"), b"decoy").unwrap();
-        std::fs::create_dir(dir.path().join("busybox")).unwrap();
-        let _cwd = CwdGuard::enter(dir.path());
-
-        // Both names exist in the cwd; neither is a declared path, so both
-        // stay references.
-        assert_eq!(
-            plan_rootfs("alpine:3.20").unwrap(),
-            RootfsPlan::Pull(reference("alpine:3.20"))
-        );
-        assert_eq!(
-            plan_rootfs("busybox").unwrap(),
-            RootfsPlan::Pull(reference("busybox"))
-        );
-        // The explicitly-relative form is how the caller asks for the file.
-        assert_eq!(
-            plan_rootfs("./alpine:3.20").unwrap(),
-            RootfsPlan::Materialized(PathBuf::from("./alpine:3.20"))
-        );
-    }
-
-    #[test]
-    fn an_unbootable_declaration_names_what_is_wrong() {
-        let empty = plan_rootfs("").expect_err("empty is not a source");
-        assert!(matches!(empty, MvmError::InvalidSpec { .. }), "{empty:?}");
-
-        let flake = plan_rootfs_source(RootfsSource::Flake {
-            flake_ref: "./nix".into(),
-            attr: "rootfs".into(),
-        })
-        .expect_err("a flake is built, not booted");
-        assert!(flake.to_string().contains("./nix#rootfs"), "{flake}");
-    }
-
-    #[test]
-    fn run_rootfs_output_is_name_sanitized_and_under_cache() {
-        let out = run_rootfs_output("my/app:1.2");
-        assert!(out.ends_with("rootfs.ext4"));
-        let s = out.to_string_lossy();
-        assert!(s.contains("local-run"));
-        // Path-hostile characters in the name are replaced.
-        assert!(s.contains("my_app_1_2"));
-    }
-
     #[tokio::test]
     #[cfg(feature = "test-support")]
     async fn run_boots_admitted_plan_from_materialized_rootfs() {
@@ -2750,7 +2351,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg(feature = "test-support")]
-    async fn stop_leaves_the_state_dir_of_a_restore_in_progress() {
+    async fn stop_waits_for_a_restore_transition_before_removing_its_state() {
         let data = IsolatedDataDir::new();
         let content = checkpoint_content(data.path());
         let be = LocalBackend::with_hypervisor("mock");
@@ -2758,24 +2359,74 @@ mod tests {
         restore_into(name, &content);
 
         let restore = mvm_runtime::vm::instance_snapshot::lock_resume(name).unwrap();
-        be.stop_machine(&MachineId(name.into()))
-            .await
-            .expect("stop");
-        assert!(
-            vm_state_dir(name).join("rootfs.ext4").is_file(),
-            "a restore holding the machine's lifecycle lock keeps its state dir"
-        );
-
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let stop = std::thread::spawn(move || {
+            entered_tx.send(()).unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let result = runtime.block_on(be.stop_machine(&MachineId(name.into())));
+            done_tx.send(result).unwrap();
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let completed_while_restoring = done_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .ok();
+        let preserved = vm_state_dir(name).join("rootfs.ext4").is_file();
         drop(restore);
-        be.stop_machine(&MachineId(name.into()))
-            .await
-            .expect("stop");
+        if completed_while_restoring.is_none() {
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+                .expect("stop after restore");
+        }
+        stop.join().unwrap();
+        assert!(
+            completed_while_restoring.is_none(),
+            "stop must serialize with restore"
+        );
+        assert!(
+            preserved,
+            "in-progress restore retains its state until releasing the transition"
+        );
         assert!(!vm_state_dir(name).exists());
     }
 
     #[tokio::test]
     #[cfg(feature = "test-support")]
-    async fn stopping_a_machine_with_no_state_creates_no_lifecycle_lock() {
+    async fn stopping_a_first_launch_waits_before_touching_its_preparing_state() {
+        let _data = IsolatedDataDir::new();
+        let be = LocalBackend::with_hypervisor("mock");
+        let name = "first-launch-stop";
+        let id = MachineId(name.into());
+        let launch = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(name)
+            .expect("first launch owns the transition");
+        let mut stop = Box::pin(be.stop_machine(&id));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), stop.as_mut())
+                .await
+                .is_err(),
+            "absence of runtime files does not let stop bypass first launch"
+        );
+        let state = vm_state_dir(name);
+        std::fs::create_dir_all(&state).expect("prepare runtime state");
+        std::fs::write(state.join("rootfs.ext4"), b"preparing").expect("prepare rootfs");
+        assert!(state.join("rootfs.ext4").is_file());
+        drop(launch);
+        tokio::time::timeout(std::time::Duration::from_secs(5), stop)
+            .await
+            .expect("stop completes after launch releases the transition")
+            .expect("stop");
+        assert!(!state.exists());
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "test-support")]
+    async fn stopping_a_machine_with_no_state_establishes_the_transition_lock() {
         let _data = IsolatedDataDir::new();
         let be = LocalBackend::with_hypervisor("mock");
 
@@ -2783,27 +2434,9 @@ mod tests {
             .await
             .expect("stop");
 
-        assert!(!mvm_core::config::instance_dir("never-started").exists());
-    }
-
-    #[test]
-    fn host_verity_sidecars_reads_well_formed_pair() {
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"x").unwrap();
-        // No sidecars yet → unverified.
-        assert_eq!(host_verity_sidecars(&rootfs), (None, None));
-
-        std::fs::write(dir.path().join("rootfs.verity"), b"tree").unwrap();
-        let hex = "a".repeat(64);
-        std::fs::write(dir.path().join("rootfs.roothash"), format!("{hex}\n")).unwrap();
-        let (v, h) = host_verity_sidecars(&rootfs);
-        assert!(v.unwrap().ends_with("rootfs.verity"));
-        assert_eq!(h.unwrap(), hex);
-
-        // A malformed (non-hex / wrong-length) roothash is rejected.
-        std::fs::write(dir.path().join("rootfs.roothash"), "nothex\n").unwrap();
-        assert_eq!(host_verity_sidecars(&rootfs), (None, None));
+        assert!(mvm_core::config::instance_dir("never-started").exists());
+        assert!(!vm_state_dir("never-started").exists());
+        assert!(!mvm_core::config::machine_spec_path("never-started").exists());
     }
 
     // ---------------------------------------------------------------------------
@@ -3119,6 +2752,7 @@ mod tests {
             name: name.to_string(),
             image: Some("alpine:latest".to_string()),
             manifest: None,
+            policy_generation: None,
             runtime_pack: false,
             registry_pack_image: None,
             resolved_digest: None,

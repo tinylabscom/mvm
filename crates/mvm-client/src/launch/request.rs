@@ -102,6 +102,27 @@ impl LaunchSource {
     /// the command that builds it.
     pub fn from_manifest(manifest: &str) -> Result<Self> {
         let invalid = |reason: String| MvmError::InvalidSpec { reason };
+        let path = std::path::Path::new(manifest);
+        let project_dir = if path.is_dir() {
+            Some(path)
+        } else if path.extension().is_some_and(|ext| ext == "toml") {
+            mvm_core::manifest::project_dir_for_manifest_path(path)
+        } else {
+            None
+        };
+        if let Some(project_dir) = project_dir.filter(|dir| dir.is_dir()) {
+            let barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()
+                .map_err(|error| invalid(error.to_string()))?;
+            if let Some(candidate) =
+                crate::policy_profiles::coordinator::read_if_activated(project_dir, &barrier)
+                    .map_err(|error| invalid(error.to_string()))?
+            {
+                let slot_hash = candidate
+                    .built_manifest_slot()
+                    .map_err(|error| invalid(format!("{error:#}")))?;
+                return Ok(Self::Built { slot_hash });
+            }
+        }
         match crate::launch::manifest_ref::resolve_manifest_arg(manifest)
             .map_err(|e| invalid(format!("manifest {manifest:?}: {e:#}")))?
         {
@@ -155,6 +176,7 @@ pub struct LaunchRequest {
     pub(crate) name: Option<String>,
     pub(crate) mode: LifecycleMode,
     pub(crate) source: LaunchSource,
+    pub(crate) policy_generation: Option<mvm_core::plan::AssetIdentity>,
     /// The command to start once the machine is up, with its environment and
     /// working directory. Empty when the machine boots without one.
     pub(crate) command: Vec<String>,
@@ -224,6 +246,7 @@ pub(crate) fn persisted_spec_from_request(
             | LaunchSource::PreparedImage { .. } => None,
             LaunchSource::Built { slot_hash } => Some(slot_hash.clone()),
         },
+        policy_generation: request.policy_generation.clone(),
         deployment: None,
         resolved_digest: None,
         runtime_pack: false,
@@ -661,6 +684,7 @@ impl LaunchRequestBuilder {
             name: self.name,
             mode: self.mode,
             source: self.source,
+            policy_generation: None,
             command,
             env,
             cwd,
@@ -746,6 +770,58 @@ struct ValidatedCommand {
     argv: Vec<String>,
     env: BTreeMap<String, String>,
     cwd: Option<String>,
+}
+
+/// Refusals for persisted-spec shapes a library start cannot honor (fail
+/// closed, never silently ignore a persisted field): the start path boots an
+/// image, a built manifest or a deployment, and its volumes arrive as typed
+/// attachments; the CLI-only shapes stay with `mvmctl machine start`.
+pub(super) fn ensure_spec_bootable_in_process(
+    spec: &mvm_runtime::machine::persist::MachineSpec,
+) -> Result<()> {
+    spec.validate_prepared_source()
+        .map_err(|error| MvmError::InvalidSpec {
+            reason: error.to_string(),
+        })?;
+    let unsupported = |what: &str| MvmError::InvalidSpec {
+        reason: format!(
+            "machine {:?} declares {what}, which a library start cannot honor; use the CLI's \
+             `machine start`",
+            spec.name
+        ),
+    };
+    if spec.runtime_pack {
+        return Err(unsupported("a runtime-pack source"));
+    }
+    if !spec.volumes.is_empty() {
+        return Err(unsupported(
+            "CLI-grammar volume strings (use typed attachments)",
+        ));
+    }
+    if !spec.init.is_empty() {
+        return Err(unsupported("init commands"));
+    }
+    if spec.registry_pack_image.is_some() {
+        super::machine_start::validate_registry_pack_source(spec).map_err(|error| {
+            MvmError::InvalidSpec {
+                reason: format!("invalid registry pack source: {error:#}"),
+            }
+        })?;
+    }
+    if spec.image.is_none()
+        && spec.prepared_image.is_none()
+        && spec.manifest.is_none()
+        && spec.deployment.is_none()
+        && spec.registry_pack_image.is_none()
+    {
+        return Err(MvmError::InvalidSpec {
+            reason: format!(
+                "machine {:?} has no image, manifest or deployment source",
+                spec.name
+            ),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

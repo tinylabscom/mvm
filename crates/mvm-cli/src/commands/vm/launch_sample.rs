@@ -237,10 +237,10 @@ pub enum LaunchRootStrategy {
     BlockExt4,
 }
 
-impl From<mvm_build::run_image::RootStrategy> for LaunchRootStrategy {
-    fn from(strategy: mvm_build::run_image::RootStrategy) -> Self {
+impl From<mvm_client::build_types::RootStrategy> for LaunchRootStrategy {
+    fn from(strategy: mvm_client::build_types::RootStrategy) -> Self {
         match strategy {
-            mvm_build::run_image::RootStrategy::BlockExt4 => Self::BlockExt4,
+            mvm_client::build_types::RootStrategy::BlockExt4 => Self::BlockExt4,
         }
     }
 }
@@ -593,7 +593,7 @@ mod tests {
     #[test]
     fn root_strategy_mapping_preserves_the_security_tier() {
         assert_eq!(
-            LaunchRootStrategy::from(mvm_build::run_image::RootStrategy::BlockExt4),
+            LaunchRootStrategy::from(mvm_client::build_types::RootStrategy::BlockExt4),
             LaunchRootStrategy::BlockExt4
         );
     }

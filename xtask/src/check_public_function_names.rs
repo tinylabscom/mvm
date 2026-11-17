@@ -21,8 +21,16 @@ struct SiblingPair {
 // because those variants thread the launch-verified runtime set through
 // admission and start: the retained audit evidence must match the runtime
 // that was actually verified, and conflating the names would hide that
-// verification boundary at call sites.
+// verification boundary at call sites. The CLI admission owner keeps its
+// `new_for_rootfs_with_runtime` sibling for the same reason: cold dispatch
+// must retain the exact launch-owned verified set the admission ran against.
 const EXCEPTIONS: &[(&str, &str, &str, &str)] = &[
+    (
+        "crates/mvm-client/src/admission/cli_dispatch.rs",
+        "impl CliAdmission",
+        "new_for_rootfs",
+        "new_for_rootfs_with_runtime",
+    ),
     (
         "crates/mvm-core/src/mailbox/journal.rs",
         "impl MailboxJournal",

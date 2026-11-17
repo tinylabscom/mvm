@@ -42,15 +42,35 @@ pub fn installed_archive_for_rootfs(rootfs: &Path) -> Result<Option<PathBuf>> {
 
 /// False means an ordinary source or a legacy bundle without boot assets.
 pub fn attach_if_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<bool> {
+    Ok(attach_installed_bundle_with_release(config, backend)?.is_some())
+}
+
+/// What an installed bundle selected for a launch. `release` is the single
+/// authenticated snapshot of the CLI release runtime the bundle selected, and
+/// is `Some` exactly when the config now carries that release's proof.
+pub struct InstalledBundleAttachment {
+    pub release: Option<super::runtime_source::ReleaseRuntime>,
+}
+
+/// [`attach_if_installed_bundle`], also handing back the verified release
+/// runtime the selection was authenticated against. `None` means an ordinary
+/// source or a legacy bundle without boot assets.
+pub fn attach_installed_bundle_with_release(
+    config: &mut VmStartConfig,
+    backend: &str,
+) -> Result<Option<InstalledBundleAttachment>> {
     let mut selected = config.clone();
     let attached = attach_installed_bundle(&mut selected, backend)?;
     *config = selected;
     Ok(attached)
 }
 
-fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<bool> {
+fn attach_installed_bundle(
+    config: &mut VmStartConfig,
+    backend: &str,
+) -> Result<Option<InstalledBundleAttachment>> {
     let Some(archive) = installed_archive_for_rootfs(Path::new(&config.rootfs_path))? else {
-        return Ok(false);
+        return Ok(None);
     };
     let registry = BundleRegistry::default_path()?;
     let release = mvm_core::registry_pack::application_bundle::trust_for_installed_archive(
@@ -121,7 +141,7 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
     );
     attach_workload_verity(config, &installed)?;
     let Some(boot) = &verified.boot_assets else {
-        return Ok(false);
+        return Ok(None);
     };
     if let Some(runtime) = &boot.cli_runtime {
         ensure!(
@@ -152,7 +172,7 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
             &support,
             &mvm_build::stage0_kernel::current_image_set_protocol_support(),
         )?;
-        attach_cli_runtime(config, &installed, runtime)?;
+        let release = attach_cli_runtime(config, &installed, runtime)?;
         if needs_owner {
             let owner = std::sync::Arc::new(mvm_core::canonical_linux::prepare_canonical_linux(
                 &archive,
@@ -163,7 +183,9 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
             )?);
             owner.bind_to_config(config)?;
         }
-        return Ok(true);
+        return Ok(Some(InstalledBundleAttachment {
+            release: Some(release),
+        }));
     }
     ensure!(
         config.legacy_bundle_runtime.is_none()
@@ -274,7 +296,7 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
         config,
         mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
     )?;
-    Ok(true)
+    Ok(Some(InstalledBundleAttachment { release: None }))
 }
 
 /// Reuse the canonical release verifier; a bundle publisher cannot authorize
@@ -284,10 +306,8 @@ fn attach_cli_runtime(
     config: &mut VmStartConfig,
     installed: &mvm_core::plan::bundle::InstalledBundle,
     runtime: &mvm_core::plan::bundle::EmbeddedCliBootAssets,
-) -> Result<()> {
-    use mvm_build::guest_runtime::evidence::{
-        RuntimeArtifactSelection, verify_runtime_release_proof,
-    };
+) -> Result<super::runtime_source::ReleaseRuntime> {
+    use mvm_build::guest_runtime::evidence::{RuntimeArtifactSelection, verify_release_runtime};
     use mvm_core::protocol::runtime_release::{
         CliRuntimeLaunchBinding, RuntimeBindingProvenance, RuntimeLaunchBinding,
         RuntimeReleaseProof,
@@ -333,8 +353,11 @@ fn attach_cli_runtime(
     let overlay_path = artifact(&runtime.overlay_artifact)?;
     let overlay_verity_path = artifact(&runtime.overlay_verity_artifact)?;
     let initramfs_path = artifact(&runtime.initramfs_artifact)?;
-    let verified = verify_runtime_release_proof(&proof, &runtime.version, proof.arch)
-        .context("verifying retained portable CLI runtime release proof")?;
+    let release = std::sync::Arc::new(
+        verify_release_runtime(proof.clone(), &runtime.version, proof.arch)
+            .context("verifying retained portable CLI runtime release proof")?,
+    );
+    let verified = release.manifest();
     let declaration = verified.declaration(proof.arch)?;
     ensure!(
         declaration.protocol_version == runtime.protocol_version
@@ -364,7 +387,7 @@ fn attach_cli_runtime(
     // The portable closure is selected for this cold launch, not a substitute
     // for the runtime of an independently prepared standby parent.
     config.warm_pool_size = 0;
-    Ok(())
+    Ok(release)
 }
 
 fn attach_workload_verity(

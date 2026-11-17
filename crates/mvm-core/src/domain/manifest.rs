@@ -334,6 +334,24 @@ impl Manifest {
         Self::from_project_toml_str(&text, path)
     }
 
+    /// Parse captured project text without rereading the root manifest.
+    ///
+    /// Local launch-default includes are refused because their bytes are not
+    /// part of this captured root. Ordinary project parsing supports includes.
+    ///
+    /// # Errors
+    ///
+    /// The text includes mutable files or the resulting manifest fails validation.
+    pub fn from_file_text(path: &Path, text: &str) -> Result<Self> {
+        let mut table: toml::Table =
+            toml::from_str(text).context("Failed to parse manifest TOML")?;
+        anyhow::ensure!(
+            include_paths(&mut table, path)?.is_empty(),
+            "committed project manifests do not support local launch-default includes"
+        );
+        Self::from_project_toml_str(text, path)
+    }
+
     /// Parse a project manifest, resolving its local launch defaults relative to `path`.
     ///
     /// This also validates proposed edits before they are written to disk.
@@ -961,6 +979,19 @@ pub fn manifest_in_dir(dir: &Path) -> Result<Option<PathBuf>> {
     }
 }
 
+/// The directory an explicitly named manifest belongs to. A bare relative
+/// filename belongs to the current directory, not an unopenable empty path.
+#[must_use]
+pub fn project_dir_for_manifest_path(path: &Path) -> Option<&Path> {
+    path.parent().map(|parent| {
+        if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        }
+    })
+}
+
 /// Walk upward from `start` looking for a manifest. Stops at the
 /// first directory containing one, at a `.git` boundary, or at the
 /// filesystem root. Returns the (canonicalised) manifest path or
@@ -1347,6 +1378,18 @@ mod tests {
     use super::*;
     use crate::util::test_env::TestEnv;
     use tempfile::TempDir;
+
+    #[test]
+    fn a_bare_manifest_filename_names_the_current_project_directory() {
+        assert_eq!(
+            project_dir_for_manifest_path(Path::new("mvm.toml")),
+            Some(Path::new("."))
+        );
+        assert_eq!(
+            project_dir_for_manifest_path(Path::new("/project/mvm.toml")),
+            Some(Path::new("/project"))
+        );
+    }
 
     fn write(dir: &Path, name: &str, body: &str) {
         std::fs::write(dir.join(name), body).expect("write fixture");
@@ -2131,6 +2174,31 @@ mod tests {
     }
 
     #[test]
+    fn file_text_parses_like_the_file_without_rereading_it() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("mvm.toml");
+        let first = minimal_manifest_toml();
+        std::fs::write(&path, first).unwrap();
+        let manifest = Manifest::read_file(&path).unwrap();
+        std::fs::write(&path, first.replace("flake = \".\"", "flake = \"changed\"")).unwrap();
+        assert_eq!(manifest, Manifest::from_file_text(&path, first).unwrap());
+        assert_ne!(manifest, Manifest::read_file(&path).unwrap());
+    }
+
+    #[test]
+    fn captured_manifest_refuses_includes_before_reading_any_dependency() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("mvm.toml");
+        let text = "flake = \".\"\ninclude = [\"missing.toml\"]\n";
+        let error = Manifest::from_file_text(&path, text).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("do not support local launch-default includes")
+        );
+    }
+
+    #[test]
     fn read_file_propagates_validation_error() {
         let tmp = TempDir::new().unwrap();
         write(
@@ -2356,6 +2424,13 @@ mod tests {
             .expect("composed proposed edit");
         assert_eq!(manifest.cpus, 1);
         assert_eq!(manifest.mem, "512M");
+        let captured_error = Manifest::from_file_text(&tmp.path().join("mvm.toml"), proposed)
+            .expect_err("captured text must not reread mutable includes");
+        assert!(
+            captured_error
+                .to_string()
+                .contains("do not support local launch-default includes")
+        );
         let on_disk = Manifest::read_file(&tmp.path().join("mvm.toml")).expect("original");
         assert_eq!(on_disk.cpus, 2);
     }

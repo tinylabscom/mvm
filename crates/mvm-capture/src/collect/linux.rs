@@ -4,6 +4,7 @@ use crate::CaptureError;
 use crate::collect::package::all_providers;
 use crate::collect::{TraverseLimits, inspect_executable, obs_id};
 use crate::report::{CaptureReportV1, Confidence, Evidence, Observation, ObservationKind};
+use std::path::Path;
 
 /// Resolve PATH executables and their native package ownership.
 pub(super) fn collect_path_executables(
@@ -88,12 +89,13 @@ pub(super) fn collect_packages(report: &mut CaptureReportV1) -> Result<(), Captu
 pub(super) fn trace_explicit_commands(
     report: &mut CaptureReportV1,
     commands: &[String],
+    project_dir: &Path,
 ) -> Result<(), CaptureError> {
     let tracer =
         crate::collect::trace::StraceTracer::new(crate::collect::trace::StraceLimits::default());
     for cmd in commands {
         let argv: Vec<String> = cmd.split_whitespace().map(str::to_owned).collect();
-        match tracer.trace_command(&argv) {
+        match tracer.trace_command(&argv, project_dir) {
             Ok(events) => {
                 record_trace_events(report, &argv, events);
             }

@@ -1116,6 +1116,43 @@ identity leaves the generation retained and the VM name blocked. This
 narrows nothing in claims 3 or 8; it states what the Firecracker release
 mechanism rests on.
 
+**HVF kernel-descriptor-only boot — limits.** The HVF supervisor starts a
+config that carries a kernel descriptor and neither frozen boot images nor a
+caller registration as a legacy-policy boot (`startup_mode_for`). Frozen images
+and a caller registration must arrive together with the kernel; any other mix
+is refused, and `only_a_complete_checked_set_or_a_kernel_alone_may_start`
+checks all eight combinations. What that boot does and does not rest on:
+
+- **Admission happens in the launcher, not the supervisor.** A signed bundle's
+  kernel owner reaches the launch config only through admission:
+  `AdmittedKernel::capture` requires the owner's pin to equal the verified
+  plan's bundle, and `bind_canonical_kernel` refuses an owner admission never
+  verified. The supervisor does not re-verify the plan on a cold boot —
+  `plan_to_arm` verifies only a restored child's — so it trusts the process
+  that spawned it, as every legacy-policy HVF boot already did. A consumed
+  caller registration (the checked boot) is the only form that makes the
+  supervisor itself verify the plan, and it is not required for a kernel alone.
+- **No plan, no boot.** A workload boot with no admitted plan is refused unless
+  it is a builder or a standby (`CaptureAuthority::select`, tested by
+  `a_launch_with_no_plan_and_no_operational_role_is_refused`), so a kernel
+  descriptor cannot start a planless workload.
+- **Seccomp and the audit chain do not depend on the startup mode.** The
+  `mvm.seccomp=<tier>` token is derived from the launch config's admitted plan
+  in `seccomp_cmdline_token`, before any supervisor starts; `plan.admitted` and
+  `plan.launched` are written by the launcher's emitter. The claim-1 limits
+  above (an older guest agent ignores the token) apply unchanged.
+- **The signed bundle is not the only source of the descriptor.** The producer
+  byte-continuity path (`kernel_read_sha256`) also hands the HVF supervisor a
+  kernel descriptor with no images. It is a data-continuity check, not an
+  admission capability, and a launch on it relies on the launcher's admission
+  in the same way.
+- **Limits.** No test boots a signed bundle on HVF end to end and then reads
+  back the audit chain and the guest's seccomp state; the guarantees above are
+  established per component. Whether the signed-bundle case should get its own
+  explicit startup mode rather than reuse the legacy one is a design decision
+  this note does not make; the legacy path is still used by every cold HVF
+  launch that carries no caller registration.
+
 **Claim 20 boundaries — five refusing paths and the installer trust root.** The
 four consuming paths inside `mvmctl` verify the Sigstore bundle in-process
 against the embedded trust root and refuse a missing, unparseable, or
@@ -1125,6 +1162,7 @@ bootstrap path.
 - **Build path — refuses.** `crates/mvm-build/src/release_signature.rs` fails the build on a missing or malformed bundle and names the asset, and accepts only the versioned release-workflow identity.
 - **Fetch path — refuses.** `crates/mvm-cli/src/commands/env/artifact_verify.rs` rejects an unsigned manifest before parsing it, and the documented hash-skip hatch does not waive the manifest signature.
 - **Self-update path — refuses.** `verify_signature` in `crates/mvm-cli/src/update.rs` used to shell out to `cosign` and return `Ok` when it was not on `PATH`. It now calls the build path's verifier with the CLI release train, so a host without cosign gets the same verdict as one with it. `a_real_release_bundle_verifies_under_its_tag` verifies a committed release bundle under its real tag and refuses it under another, which is what shows the tag and the identity template agree. The `checksums-sha256.txt` the archive is compared against goes through the fetch path's manifest check first, under the same tag-bound identity: an unsigned manifest is refused before it is parsed (`self_update_refuses_an_unsigned_checksum_manifest_before_parsing`), as are edited bytes and another release's genuine manifest (`self_update_refuses_a_checksum_manifest_signed_for_another_tag`). Neither `MVM_SKIP_HASH_VERIFY` nor `--skip-verify` waives it; `--skip-verify` waives only the archive's own bundle, so the archive stays authenticated through the manifest.
+- **Guest-runtime launch check — shared within one launch.** A release launch asks several times whether the signed guest-runtime archive is authentic (admission, overlay, initramfs, dispatch, lifecycle bind). Within one launch those asks share one verification: a successful result is remembered, for that launch on that thread only, under the content of everything it read (archive digest, checksum, both signature bundles, version, architecture), so a changed byte of any of them verifies in full. A failure is never remembered, nothing is written for a later process to trust, and the next launch verifies from scratch (ADR-112).
 - **Install path — refuses.** An installed `mvmctl` remains the preferred
   verifier and host `cosign` remains the fallback. On a host with neither,
   `install.sh` compares the archive with the target-specific SHA-256 carried by

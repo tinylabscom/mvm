@@ -105,6 +105,8 @@ pub(in crate::commands) struct EntrypointCall {
     /// Explicit hypervisor/backend selector passed through from `--hypervisor`.
     /// When `None` the platform-default auto-selection is used.
     pub hypervisor: Option<String>,
+    /// Committed project generation bound into the entrypoint's signed plan.
+    pub policy_generation: Option<mvm_core::plan::AssetIdentity>,
     /// Same producer-owned release closure used for health and export.
     pub portable_boot_assets:
         Option<std::sync::Arc<mvm_client::portable_boot_assets::PreparedPortableBootAssets>>,
@@ -275,7 +277,7 @@ fn boot_entrypoint_with_application(
     let producer_identity = native
         .then(crate::commands::load_enrolled_identity)
         .transpose()?;
-    let assets = application
+    let mut assets: Vec<mvm_client::admission::AssetSpec> = application
         .as_ref()
         .map(|application| -> Result<_> {
             Ok(mvm_client::admission::AssetSpec::RegistryPack(
@@ -288,6 +290,11 @@ fn boot_entrypoint_with_application(
         .transpose()?
         .into_iter()
         .collect();
+    if let Some(generation) = call.policy_generation {
+        assets.push(mvm_client::admission::AssetSpec::CommittedPolicy(
+            generation,
+        ));
+    }
     let bundle_posture = mvm_client::installed_bundle_posture(&call.source)?;
     let lifecycle_label = if call.keep_alive {
         "warm session"
@@ -2134,6 +2141,7 @@ mod streamed_stdin_tests {
             review_source: ReviewSource::admitted_elsewhere(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             hypervisor: None,
+            policy_generation: None,
             portable_boot_assets: None,
         }
     }

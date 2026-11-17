@@ -273,12 +273,12 @@ fn runtime_pack_image_source(dir: &mvm_core::pack_cache::VerifiedPackDir) -> Ima
     ImageSource::Prebuilt {
         kernel_path: dir
             .root
-            .join(mvm_build::builder_pack::KERNEL_FILE)
+            .join(mvm_client::build_types::KERNEL_FILE)
             .display()
             .to_string(),
         rootfs_path: dir
             .root
-            .join(mvm_build::builder_pack::ROOTFS_FILE)
+            .join(mvm_client::build_types::ROOTFS_FILE)
             .display()
             .to_string(),
         initrd_path: None,

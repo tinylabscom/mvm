@@ -133,16 +133,29 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
 {
     /// Stop a VM and expose timings for each runner-owned teardown phase.
     pub fn stop_with_timing(&self, id: &VmId) -> Result<StopTiming> {
-        self.terminate_with_timing(id, true)
+        self.terminate_with_timing(id, true, None)
+    }
+
+    /// Stop only the authenticated instance named by an automatic recovery request.
+    pub fn stop_hvf_instance(
+        &self,
+        expected: &mvm_core::protocol::hvf_control::HvfInstance,
+    ) -> Result<StopTiming> {
+        self.terminate_with_timing(&VmId(expected.vm_id.clone()), true, Some(expected))
     }
 
     /// Abort a launch that never reached readiness, without asking the guest
     /// to flush or otherwise cooperate.
     pub fn abort_start_with_timing(&self, id: &VmId) -> Result<StopTiming> {
-        self.terminate_with_timing(id, false)
+        self.terminate_with_timing(id, false, None)
     }
 
-    fn terminate_with_timing(&self, id: &VmId, prepare_guest: bool) -> Result<StopTiming> {
+    fn terminate_with_timing(
+        &self,
+        id: &VmId,
+        prepare_guest: bool,
+        expected: Option<&mvm_core::protocol::hvf_control::HvfInstance>,
+    ) -> Result<StopTiming> {
         mvm_core::naming::validate_vm_name(&id.0)?;
         let lifecycle = crate::runtime_evidence::RuntimeLifecycleLease::acquire(&id.0)?;
         // Measurement is diagnostic, never permission to terminate or delete.
@@ -153,11 +166,17 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
         let vm = match self.driver.attach(id) {
             Ok(vm) => vm,
             Err(err) => {
-                self.console_streamer.stop(&id.0);
+                if expected.is_none() {
+                    self.console_streamer.stop(&id.0);
+                }
                 return Err(err);
             }
         };
         let attach = attach_started.elapsed();
+
+        if let Some(expected) = expected {
+            require_restart_instance(vm.as_ref(), expected)?;
+        }
 
         let endpoint_started = Instant::now();
         let state_dir = vm_state_dir(&id.0);
@@ -246,6 +265,93 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
     }
 }
 
+fn require_restart_instance(
+    vm: &dyn RunningVm,
+    expected: &mvm_core::protocol::hvf_control::HvfInstance,
+) -> Result<()> {
+    #[cfg(unix)]
+    {
+        anyhow::ensure!(
+            vm.authenticated_hvf_instance()?.as_ref() == Some(expected),
+            "health restart cancelled: workload instance changed or cannot be authenticated"
+        );
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (vm, expected);
+        anyhow::bail!("health restart cancelled: instance-bound control is unavailable")
+    }
+}
+
+#[cfg(all(test, unix))]
+mod restart_instance_tests {
+    use super::*;
+    use mvm_core::protocol::hvf_control::HvfInstance;
+
+    struct IdentityOnlyVm {
+        id: VmId,
+        instance: Option<HvfInstance>,
+    }
+
+    impl RunningVm for IdentityOnlyVm {
+        fn id(&self) -> &VmId {
+            &self.id
+        }
+        fn authenticated_hvf_instance(&self) -> Result<Option<HvfInstance>> {
+            Ok(self.instance.clone())
+        }
+        fn wait(&self) -> Result<VmExitStatus> {
+            panic!("identity check must not wait")
+        }
+        fn kill(&self) -> Result<()> {
+            panic!("identity check must not kill")
+        }
+        fn pause(&self) -> Result<()> {
+            panic!("identity check must not pause")
+        }
+        fn resume(&self) -> Result<()> {
+            panic!("identity check must not resume")
+        }
+        fn status(&self) -> Result<VmStatus> {
+            panic!("status is not authenticated identity")
+        }
+        fn vsock_connect(&self, _: u32) -> Result<Box<dyn mvm_vmm::driver::DuplexStream>> {
+            panic!("identity check must not enter the guest")
+        }
+    }
+
+    #[test]
+    fn conditional_stop_requires_the_entire_authenticated_instance_before_effects() {
+        let expected = HvfInstance {
+            vm_id: "health-vm".into(),
+            boot_nonce: [1; 32],
+        };
+        for observed in [
+            None,
+            Some(HvfInstance {
+                vm_id: "successor".into(),
+                ..expected.clone()
+            }),
+            Some(HvfInstance {
+                boot_nonce: [2; 32],
+                ..expected.clone()
+            }),
+        ] {
+            let vm = IdentityOnlyVm {
+                id: VmId(expected.vm_id.clone()),
+                instance: observed,
+            };
+            assert!(require_restart_instance(&vm, &expected).is_err());
+        }
+        let vm = IdentityOnlyVm {
+            id: VmId(expected.vm_id.clone()),
+            instance: Some(expected.clone()),
+        };
+        require_restart_instance(&vm, &expected).expect("same authenticated instance");
+    }
+}
+
 /// The runner is the workload backend: lifecycle operations run through the
 /// `VmmDriver` seam rather than being copied into each backend. State is
 /// disk-backed under the per-VM `vm_state_dir`, so a stateless CLI invocation
@@ -267,6 +373,8 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
         release: Option<&mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime>,
     ) -> Result<VmId> {
+        let _activation_barrier =
+            mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
         let state_dir = vm_state_dir(&config.name);
         std::fs::create_dir_all(&state_dir)
             .with_context(|| format!("create state dir {}", state_dir.display()))?;
@@ -449,6 +557,8 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
     }
 
     fn resume(&self, id: &VmId) -> Result<()> {
+        let _activation_barrier =
+            mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
         self.driver.attach(id)?.resume()
     }
 
@@ -469,15 +579,19 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
             Err(e) => return Err(anyhow::anyhow!("read {}: {e}", root.display())),
         };
         let mut vms = Vec::new();
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = entry.with_context(|| format!("listing VM state in {}", root.display()))?;
             if !has_vm_marker(&entry.path()) {
                 continue;
             }
-            let Ok(name) = entry.file_name().into_string() else {
-                continue;
-            };
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("non-UTF8 VM state entry in {}", root.display()))?;
             let id = VmId(name.clone());
-            let status = self.status(&id).unwrap_or(VmStatus::Stopped);
+            let status = self
+                .status(&id)
+                .with_context(|| format!("probing VM status for {name}"))?;
             vms.push(VmInfo {
                 id,
                 name,

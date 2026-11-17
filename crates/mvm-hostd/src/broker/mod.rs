@@ -21,7 +21,7 @@
 //!   backend-specific listener and hands an FD; this crate consumes the
 //!   FD via [`server::serve_on_listener`])
 
-pub mod audit_client;
+pub use crate::audit::audit_client;
 pub mod config;
 pub mod controller_proxy;
 pub mod daemon;

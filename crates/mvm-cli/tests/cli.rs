@@ -3,6 +3,61 @@
 use mvm_cli::commands::cli_command;
 
 #[test]
+fn policy_activation_requires_an_explicit_project_and_is_listed() {
+    cli_command()
+        .try_get_matches_from(["mvmctl", "policy", "activate", "/project"])
+        .expect("the activation command accepts a project path");
+    assert!(
+        cli_command()
+            .try_get_matches_from(["mvmctl", "policy", "activate"])
+            .is_err(),
+        "activation cannot guess which project to commit"
+    );
+    let help = mvm_cli::commands::help_text_for(&["policy".into(), "--help".into()])
+        .expect("policy --help renders");
+    assert!(
+        help.contains("activate"),
+        "policy help must list the activation command"
+    );
+}
+
+#[test]
+fn audit_consistency_requires_explicit_roots_and_exposes_help() {
+    for verb in ["prove-consistency", "verify-consistency"] {
+        let mut args = vec!["mvmctl", "trust", "audit", verb];
+        if verb == "verify-consistency" {
+            args.extend(["--proof", "proof.json"]);
+        }
+        assert!(cli_command().try_get_matches_from(&args).is_err());
+        args.extend(["--old-root", "saved.json"]);
+        assert!(cli_command().try_get_matches_from(&args).is_err());
+        args.extend(["--new-root", "candidate.json", "--pubkey", "trusted.pub"]);
+        assert!(cli_command().try_get_matches_from(&args).is_ok());
+        let help = cli_command()
+            .try_get_matches_from(["mvmctl", "trust", "audit", verb, "--help"])
+            .unwrap_err();
+        assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+        for flag in ["--old-root", "--new-root", "--pubkey", "--tenant"] {
+            assert!(help.to_string().contains(flag));
+        }
+    }
+    assert!(
+        cli_command()
+            .try_get_matches_from([
+                "mvmctl",
+                "trust",
+                "audit",
+                "verify-consistency",
+                "--old-root",
+                "saved.json",
+                "--new-root",
+                "candidate.json",
+            ])
+            .is_err()
+    );
+}
+
+#[test]
 fn application_run_accepts_the_joke_workflow_without_launch_flags() {
     for command in [
         vec!["mvmctl", "run", "agent/claude"],

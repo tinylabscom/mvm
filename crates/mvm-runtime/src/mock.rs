@@ -24,7 +24,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use mvm_core::checkpoint::CheckpointId;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
@@ -75,6 +75,8 @@ pub struct MockBackend {
     /// Test knob: make `apply_grants` fail, the way a backend does when the
     /// control it reads back cannot be resolved for a VM it just started.
     fail_apply_grants: bool,
+    /// Test knob: refuse start unless the original signed bridge plan is on disk.
+    require_bridge_plan: bool,
 }
 
 impl MockBackend {
@@ -112,6 +114,12 @@ impl MockBackend {
     /// to bound the VM and could not say whether it did.
     pub fn with_failing_apply_grants(mut self) -> Self {
         self.fail_apply_grants = true;
+        self
+    }
+
+    /// Test builder: require the signed bridge plan before backend start.
+    pub fn with_required_bridge_plan(mut self) -> Self {
+        self.require_bridge_plan = true;
         self
     }
 
@@ -192,6 +200,16 @@ impl VmBackend for MockBackend {
     }
 
     fn start_in_mode(&self, config: &VmStartConfig, _mode: StartMode) -> Result<VmId> {
+        if self.require_bridge_plan {
+            let persisted = std::fs::read_to_string(
+                mvm_core::config::vm_state_dir(&config.name).join("plan.json"),
+            )
+            .context("bridge plan must be stashed before mock start")?;
+            anyhow::ensure!(
+                config.plan_json.as_deref() == Some(persisted.as_str()),
+                "bridge plan differs from the admitted start config"
+            );
+        }
         let mut state = self
             .state
             .lock()

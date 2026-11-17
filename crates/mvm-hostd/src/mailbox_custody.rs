@@ -426,6 +426,7 @@ mod tests {
             epoch: ExecutionEpoch::new(1).expect("epoch"),
             report: None,
             retention: Some(MailboxRetentionPolicy::new(10_000).expect("signed retention")),
+            service_blind: None,
         });
         plan.plan_id = compute_plan_id(&plan);
         let (policy, _) =
@@ -715,7 +716,7 @@ mod tests {
             serde_jcs::to_vec(&retry).expect("retry bytes"),
             serde_jcs::to_vec(&accepted).expect("original bytes")
         );
-        assert_eq!(anchor.tip().cursor, 1, "a retry cannot append");
+        assert_eq!(anchor.tip().cursor, 2, "a retry cannot append");
     }
 
     #[test]

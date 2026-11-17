@@ -1,4 +1,4 @@
-//! Clap flags that resolve to a [`mvm_build::pipeline::BuildMode`].
+//! Clap flags that resolve to a [`mvm_client::build_types::BuildMode`].
 //!
 //! The architectural rule (auto-memory: "image composition is
 //! transparent to the user") makes `BuildMode::Prod` the default
@@ -15,7 +15,7 @@
 //! The two are mutually exclusive (clap enforces).
 
 use clap::Args as ClapArgs;
-use mvm_build::pipeline::BuildMode;
+use mvm_client::build_types::BuildMode;
 
 /// Mutually-exclusive build-mode override flags.
 ///

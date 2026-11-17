@@ -14,6 +14,67 @@ separately, the files that were not read. Absence from the "read" column is not 
 soundness. "Read" is taken from the fixing PR descriptions and the review notes for the lane; the
 line ranges are as recorded there and were not re-derived when this file was written.
 
+## Guest-runtime first-use publication
+
+Reviewed `mvm-build`'s `runtime_pieces`, `cache_install`, `runtime_overlay`,
+`initramfs`, `sdk_sidecar`, and the OCI installer in `guest_agent_build`, plus
+the CLI first-use caller through `mvm-client::release`. Archive verification
+and launch admission remain separate and unchanged.
+
+Each version/architecture artifact slot (also libc for a sidecar) has one
+stable sibling file lock. Builders own it from the reuse decision through
+construction, publication, final validation and provenance recording;
+standalone installers, explicit discard and initramfs eviction use the same
+owner. Locked internal installers do not reacquire it. Dropping the guard
+explicitly unlocks on success or error; this lock is not a process-lifetime
+or custody-transfer proof.
+SDK staging and stale-stage cleanup use the libc slot name under the shared
+architecture parent, so independently owned libc slots cannot share staging.
+An abandoned staging directory remains subject to the existing cleanup rule.
+The initramfs resolve-miss path no longer deletes a directory based on a
+stale observation before it has a candidate.
+
+The OCI installer owns its slot, prepares and validates all four candidate
+binaries before touching cached files, reuses identical regular files, and
+renames changed files without a remove/copy gap. Preparation failure leaves
+the previous valid binaries intact. This is not a multi-file transaction:
+an I/O failure during publication can still leave a mixed replacement.
+
+Filesystem/archive fixtures cover competing callers waiting for each slot,
+successful assembly and reuse, refused candidates preserving existing output,
+overlapping libc staging, and wrong-architecture OCI candidates preserving a valid set. The existing
+CLI concurrent first-use regression remains enabled. No live backend,
+hardware boundary, crash-durability or hostile-host guarantee was added.
+Read-only launch resolvers do not hold snapshot leases: explicit replacement
+or discard of a different generation remains outside this first-use repair.
+
+## Initial committed project policy generation
+
+The focused review in [#5654](https://github.com/tinylabscom/mvm/pull/5654)
+covers `mvm-core/src/host_interface/activation_barrier.rs`, the
+`mvm-hostd/src/policy_generation` coordinator/store, host plan admission,
+and their CLI/client launch, persistent-start, checkpoint and restore callers.
+The resident coordinator owns generation-one publication under the exclusive
+barrier; launch/restore callers retain shared guards through their transitions.
+Publication records durable intent, a no-clobber project closure and the active
+index. Missing or inconsistent activation state refuses reuse rather than
+falling back to staged files. Backend owners retain workload teardown custody.
+
+Review found relative IPC project identities could resolve against the resident
+process's working directory and ordinary pre-activation runs unnecessarily
+required that process. Regression tests cover requester-side canonicalization,
+server-side relative-path refusal, and absent-helper compatibility before
+activation. Host verification also rejects generation-bearing plans that omit
+or widen committed CPU-share grants. The CLI already refused CPU-share-limited
+entrypoints; this was not a demonstrated CLI bypass.
+
+This review does not establish live policy cutover, generation updates,
+deactivation, or other-backend support. No effect-fencing/route-transfer or
+fleet transaction is implemented. The live evidence is restricted to the
+Linux/Firecracker scenarios cited in the PR; it does not replace review of
+unrelated lifecycle paths or claim crash recovery can resume an incomplete
+publication automatically.
+
 ## Compile-time AES-GCM boundary
 
 Reviewed `crates/mvm-crypto/src/aead.rs`,
@@ -122,6 +183,40 @@ qualified lifecycle ownership and confirmed rollback, not a new lookup by name
 or PID. Original-owner persistent Firecracker work remains subject to the
 deferral and process-model decision in
 [#5522](https://github.com/tinylabscom/mvm/issues/5522).
+
+## Instance-bound recovery and foreground completion
+
+The focused review for [#5621](https://github.com/tinylabscom/mvm/issues/5621)
+covers health-probe restart dispatch, the client launch/stop/remove paths,
+CLI initialization and transient teardown, and the warm-claim handoff.
+It does not qualify a new backend or establish live hardware behavior.
+
+The existing per-machine resume lock serializes named lifecycle transitions.
+Health recovery retains the authenticated HVF instance that triggered the
+probe and checks it before stop effects; replacement passes fresh admission.
+Library and CLI removal retain the transition through resource cleanup.
+An absent stop also takes the transition before name-based effects.
+Fresh definition creation and saved-state removal share payload cleanup that
+preserves the lock inode, including when discarding an earlier machine's
+orphaned snapshots and mount registry.
+
+Guest initialization runs on its original connected stream outside that lock.
+Completion reacquires the lock before metadata updates or rollback. Foreground
+transient cleanup likewise checks retained runtime-directory custody and,
+for backends with same-directory restore, the original HVF instance or
+Firecracker process identity. The retained directory handle is a negative
+replacement check on a trusted host, not an authorization credential.
+Warm claims transfer the child transition guard from preparation through
+foreground custody capture; failure rollback runs before that guard drops.
+An unconfirmed child stop retains its state and parent reservation instead
+of making the parent available or deleting control state.
+
+The regression fixtures cover stale completion, stopped/preparing transitions,
+failed-stop lease retention, and guarded warm handoff. Fixture results,
+workspace gates, and remaining live qualification are recorded on the issue;
+this source-review record does not turn those fixtures into a guest-boot
+witness. Other direct backend consumers and the broader restore lifecycle
+have not received an exhaustive new review here.
 
 ## Files NOT read
 

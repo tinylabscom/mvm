@@ -17,10 +17,16 @@ spec.loader.exec_module(demo)
 
 class PreflightTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(dir="/tmp")
+        self.temp = tempfile.TemporaryDirectory(dir=os.environ.get("DELTA_SCRATCH_DIR", "/tmp"))
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name).resolve()
         self.home.chmod(0o700)
+        self.account = self.home / "account"
+        self.account.mkdir(mode=0o755)
+        account_lookup = patch.object(demo.pwd, "getpwuid",
+                                      return_value=SimpleNamespace(pw_dir=str(self.account)))
+        self.account_lookup = account_lookup.start()
+        self.addCleanup(account_lookup.stop)
         self.mvm = self.home / "mvm"
         self.mvm.mkdir(mode=0o700)
         self.cli = self.home / "mvmctl"
@@ -81,12 +87,114 @@ class PreflightTests(unittest.TestCase):
                     "DYLD_INSERT_LIBRARIES"):
             self.assertNotIn(key, env)
 
+    def test_native_home_changes_only_child_home(self):
+        isolated = demo.consumer_environment(self.home, self.mvm)
+        self.assertEqual(isolated["HOME"], str(self.home))
+        self.assertEqual(isolated["XDG_STATE_HOME"], str(self.home / ".state"))
+        ambient = {"HOME": "/ambient/not-the-account", "ANTHROPIC_API_KEY": "fake",
+                   "HTTP_PROXY": "http://bad", "HTTPS_PROXY": "http://bad",
+                   "ALL_PROXY": "http://bad", "MVM_HOME": "/bad/.mvm",
+                   "MVM_PACK_REGISTRY": "file:///bad", "XDG_CONFIG_HOME": "/bad"}
+        with patch.object(demo.platform, "system", return_value="Darwin"), \
+                patch.dict(os.environ, ambient):
+            native = demo.consumer_environment(self.home, self.mvm, self.account)
+        self.assertEqual(native, {**isolated, "HOME": str(self.account)})
+        self.account_lookup.assert_called_with(os.getuid())
+        self.assertEqual(self.account.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(list(self.account.iterdir()), [])
+
+    def test_native_home_refusals(self):
+        link = self.home / "account-link"
+        link.symlink_to(self.account)
+        wrong = self.home / "wrong-account"
+        wrong.mkdir()
+        for native in (link, link / "missing", wrong, Path("relative"),
+                       self.account / ".." / "account", self.home / "missing", self.cli):
+            with self.subTest(native=native), \
+                    patch.object(demo.platform, "system", return_value="Darwin"), \
+                    self.assertRaises(demo.Blocked):
+                demo.consumer_environment(self.home, self.mvm, native)
+        with patch.object(demo.platform, "system", return_value="Linux"), \
+                self.assertRaises(demo.Blocked):
+            demo.consumer_environment(self.home, self.mvm, self.account)
+
+    def test_native_home_wrong_owner_and_not_directory(self):
+        original_stat = Path.stat
+
+        def wrong_owner(path, *args, **kwargs):
+            info = original_stat(path, *args, **kwargs)
+            if path == self.account:
+                return SimpleNamespace(st_mode=info.st_mode, st_uid=os.getuid() + 1)
+            return info
+
+        with patch.object(demo.platform, "system", return_value="Darwin"), \
+                patch.object(Path, "stat", wrong_owner), self.assertRaises(demo.Blocked):
+            demo.consumer_environment(self.home, self.mvm, self.account)
+        self.account_lookup.return_value.pw_dir = str(self.cli)
+        with patch.object(demo.platform, "system", return_value="Darwin"), \
+                self.assertRaises(demo.Blocked):
+            demo.consumer_environment(self.home, self.mvm, self.cli)
+
+    def test_account_home_cannot_be_private_home_even_with_spoofed_home(self):
+        self.account_lookup.return_value.pw_dir = str(self.home)
+        with patch.dict(os.environ, {"HOME": "/unrelated"}), self.assertRaises(demo.Blocked):
+            demo.consumer_environment(self.home, self.mvm)
+
+    def test_mvm_home_must_be_strictly_beneath_private_home(self):
+        for mvm in (self.home, self.home.parent):
+            with self.subTest(mvm=mvm), self.assertRaises(demo.Blocked):
+                demo.consumer_environment(self.home, mvm)
+
+    def test_xdg_roots_must_be_absent_in_both_modes(self):
+        for relative in (".config", ".cache", ".state"):
+            for kind in ("directory", "file", "symlink"):
+                path = self.home / relative
+                if kind == "directory":
+                    path.mkdir()
+                elif kind == "file":
+                    path.touch()
+                else:
+                    path.symlink_to(self.home / "missing")
+                for native in (None, self.account):
+                    with self.subTest(relative=relative, kind=kind, native=native), \
+                            patch.object(demo.platform, "system", return_value="Darwin"), \
+                            self.assertRaises(demo.Blocked):
+                        demo.consumer_environment(self.home, self.mvm, native)
+                path.rmdir() if kind == "directory" else path.unlink()
+
+    def test_state_parent_symlinks_refused_without_traversing_stores(self):
+        for relative in ("cache", "registry"):
+            path = self.mvm / relative
+            path.symlink_to(self.account)
+            with self.subTest(relative=relative), self.assertRaises(demo.Blocked):
+                demo.consumer_environment(self.home, self.mvm)
+            path.unlink()
+        for relative in ("trust", "bindings", "identity"):
+            (self.mvm / relative).symlink_to(self.home / "missing")
+        demo.consumer_environment(self.home, self.mvm)
+
+    def test_preflight_threads_native_home_to_every_command(self):
+        self.args.native_home = self.account
+        environments = []
+
+        def command(label, argv, env):
+            environments.append(env)
+            return self.run_command(label, argv, env)
+
+        with patch.dict(os.environ, {"MVM_TEST_CLAUDE_DEMO": "1"}), \
+                patch.object(demo.platform, "system", return_value="Darwin"):
+            env = demo.preflight(self.args, SimpleNamespace(run=command), {})
+        self.assertEqual(len(environments), 4)
+        self.assertTrue(all(value is env for value in environments))
+        self.assertEqual(env["HOME"], str(self.account))
+        self.assertEqual(env["MVM_HOME"], str(self.mvm))
+
     def test_pristine_state_refusals(self):
         for relative in ("bundles", "cache/registry-packs", "registry/packs.lock.toml",
                          "audit", "sessions", "vms"):
             with self.subTest(relative=relative):
                 path = self.mvm / relative
-                path.parent.mkdir(parents=True, exist_ok=True)
+                path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 path.touch()
                 with self.assertRaises(demo.Blocked):
                     demo.consumer_environment(self.home, self.mvm)

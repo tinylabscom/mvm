@@ -65,6 +65,10 @@ machine_spec_fields! {
     /// image-backed machines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest: Option<String>,
+    /// Initial committed project-policy generation bound into every start.
+    /// Absent on machines created before an explicit project activation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_generation: Option<mvm_core::plan::AssetIdentity>,
     /// Local attested deployment directory containing `deploy.json` and
     /// `rootfs.ext4`. Present for machines created with `--deployment`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -215,7 +219,7 @@ fn discard_orphaned_instance_state(name: &str) -> Result<()> {
     {
         return Ok(());
     }
-    fs::remove_dir_all(&instance)
+    crate::vm::instance_snapshot::remove_saved_state_in(&instance)
         .with_context(|| format!("removing orphaned instance state {}", instance.display()))
 }
 
@@ -322,6 +326,7 @@ pub fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
     a.image == b.image
         && a.prepared_image == b.prepared_image
         && a.manifest == b.manifest
+        && a.policy_generation == b.policy_generation
         && a.deployment == b.deployment
         && a.runtime_pack == b.runtime_pack
         && a.registry_pack_image == b.registry_pack_image
@@ -353,6 +358,7 @@ pub fn machine_config_diff(current: &MachineSpec, desired: &MachineSpec) -> Stri
     if current.image != desired.image
         || current.prepared_image != desired.prepared_image
         || current.manifest != desired.manifest
+        || current.policy_generation != desired.policy_generation
         || current.deployment != desired.deployment
         || current.runtime_pack != desired.runtime_pack
         || current.registry_pack_image != desired.registry_pack_image
@@ -509,6 +515,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn generation_pin_round_trips_and_legacy_specs_stay_unpinned() {
+        let original = spec_fixture("project");
+        let original_json = serde_json::to_value(&original).unwrap();
+        assert!(original_json.get("policy_generation").is_none());
+        assert_eq!(
+            serde_json::from_value::<MachineSpec>(original_json).unwrap(),
+            original
+        );
+        let mut pinned = original.clone();
+        pinned.policy_generation = Some(
+            mvm_core::plan::AssetIdentity::new(
+                mvm_core::plan::AssetKind::Policy,
+                format!("mvm:project-policy:g1:{}", "a".repeat(64)),
+                "b".repeat(64),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            serde_json::from_str::<MachineSpec>(&serde_json::to_string(&pinned).unwrap()).unwrap(),
+            pinned
+        );
+        assert!(!machine_config_matches(&original, &pinned));
+        assert!(machine_config_diff(&original, &pinned).contains("source"));
+    }
+
+    #[test]
     fn a_bare_host_and_its_port_443_form_are_the_same_allow_list() {
         assert!(same_allow_host(
             &["api.example.com".into(), "b.test:8443".into()],
@@ -550,6 +582,7 @@ mod tests {
             name: name.to_string(),
             image: Some("alpine:latest".to_string()),
             manifest: None,
+            policy_generation: None,
             deployment: None,
             resolved_digest: None,
             runtime_pack: false,
@@ -705,12 +738,28 @@ mod tests {
         let orphan = config::instance_dir("web");
         fs::create_dir_all(&orphan).expect("orphaned instance dir");
         fs::write(orphan.join("volume_mounts.json"), b"{\"mounts\":{}}").expect("registry");
+        fs::create_dir_all(orphan.join("snapshot")).expect("orphaned snapshot");
+        fs::write(orphan.join("snapshot/memory"), b"old saved state").expect("snapshot data");
+        let lifecycle = crate::vm::instance_snapshot::MachineLifecycleLock::acquire("web")
+            .expect("creation transition");
 
         save_machine_spec(&spec_fixture("web"), false).expect("create");
 
         assert!(
-            !orphan.exists(),
+            !orphan.join("volume_mounts.json").exists() && !orphan.join("snapshot").exists(),
             "a newly created machine inherited an earlier machine's instance state"
+        );
+        assert!(
+            crate::vm::instance_snapshot::try_lock_resume("web")
+                .expect("check original lock")
+                .is_none(),
+            "fresh persistence must not unlink the held lifecycle lock"
+        );
+        drop(lifecycle);
+        assert!(
+            crate::vm::instance_snapshot::try_lock_resume("web")
+                .expect("released transition")
+                .is_some()
         );
     }
 
@@ -930,6 +979,7 @@ mod tests {
             name: "web".into(),
             image: Some("img:1".into()),
             manifest: None,
+            policy_generation: None,
             deployment: None,
             resolved_digest: None,
             runtime_pack: false,

@@ -30,9 +30,9 @@ jobs:
     env:
       IMAGE: ghcr.io/${{ github.repository_owner }}/mvm-mission-node
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       - name: Log in to ghcr.io
         env:

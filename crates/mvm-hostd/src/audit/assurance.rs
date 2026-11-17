@@ -544,7 +544,7 @@ pub fn audit_citations_resolve(binding: &MvmBinding, chain_path: &Path) -> Resul
 /// sink; session open and trial completion carry receipts and stay with the
 /// supervisor.
 pub struct SignerSink {
-    client: crate::broker::audit_client::AuditClient,
+    client: crate::audit::audit_client::AuditClient,
     workload_id: String,
     tenant_id: String,
     session_id: String,
@@ -554,7 +554,7 @@ impl SignerSink {
     /// Bind a sink to one workload's audit route.
     #[must_use]
     pub fn new(
-        client: crate::broker::audit_client::AuditClient,
+        client: crate::audit::audit_client::AuditClient,
         workload_id: impl Into<String>,
         tenant_id: impl Into<String>,
         session_id: impl Into<String>,
@@ -653,7 +653,7 @@ mod sink_tests {
     fn sink() -> SignerSink {
         // The path is never dialled: `Required` is refused before any I/O.
         SignerSink::new(
-            crate::broker::audit_client::AuditClient::new("/nonexistent/audit.sock"),
+            crate::audit::audit_client::AuditClient::new("/nonexistent/audit.sock"),
             "workload",
             "local",
             "session-1",

@@ -13,6 +13,13 @@ use mvm_client::admission::run_routes::{RunRoutes, resolve_run_routes};
 use super::exec::RunArgs;
 use crate::approval::{ApprovalChoice, ApprovalInputs};
 
+/// The project manifest observed at policy resolution, including absence.
+#[derive(Debug, Clone)]
+pub(in crate::commands) enum ProjectManifestSnapshot {
+    Absent,
+    Present(std::path::PathBuf, Box<mvm_core::manifest::Manifest>),
+}
+
 /// Resolve the launch's routes before anything boots.
 pub(in crate::commands) fn launch_routes(args: &RunArgs) -> Result<RunRoutes> {
     let mut routes = project_manifest(args)?
@@ -37,6 +44,19 @@ pub(in crate::commands) fn launch_approval(args: &RunArgs) -> Result<ApprovalCho
 /// directory, with its path. A registered manifest name or a remote flake has
 /// no local file.
 pub(in crate::commands) fn project_manifest(
+    args: &RunArgs,
+) -> Result<Option<(std::path::PathBuf, mvm_core::manifest::Manifest)>> {
+    match &args.project_manifest {
+        Some(ProjectManifestSnapshot::Absent) => Ok(None),
+        Some(ProjectManifestSnapshot::Present(path, manifest)) => {
+            Ok(Some((path.clone(), manifest.as_ref().clone())))
+        }
+        None => read_project_manifest(args),
+    }
+}
+
+/// Read the authored input once, before policy is folded into launch arguments.
+pub(in crate::commands) fn read_project_manifest(
     args: &RunArgs,
 ) -> Result<Option<(std::path::PathBuf, mvm_core::manifest::Manifest)>> {
     let path = match (args.manifest.as_deref(), args.flake.as_deref()) {
@@ -107,6 +127,77 @@ mod tests {
             [crate::approval::ApprovalSpec::Webhook(
                 "https://a.example/h".into()
             )]
+        );
+    }
+
+    #[test]
+    fn launch_uses_the_manifest_that_policy_resolution_read() {
+        let project = tempfile::tempdir().unwrap();
+        let path = project.path().join("mvm.toml");
+        std::fs::write(
+            &path,
+            "flake = \".\"\n[network]\nallow_hosts = [\"api.example.com:443\"]\n\
+             [[network.routes]]\nid = \"first\"\nhost = \"api.example.com\"\nintercept = true\n\
+             rules = [{ method = \"GET\", path = \"/first\", outcome = \"allow\" }]\n\
+             [approval]\nbackends = [\"deny\"]\n",
+        )
+        .unwrap();
+        let mut args = RunArgs {
+            flake: Some(project.path().display().to_string()),
+            ..RunArgs::default()
+        };
+        super::super::run_policy::apply_run_policy(&mut args).unwrap();
+
+        std::fs::write(&path, "flake = \".\"\n").unwrap();
+
+        let routes = launch_routes(&args).unwrap();
+        assert_eq!(routes.routes.len(), 1);
+        assert_eq!(routes.routes[0].id, "first");
+        assert_eq!(args.allow_host, ["api.example.com:443"]);
+        assert_eq!(
+            launch_approval(&args).unwrap().backends(),
+            [crate::approval::ApprovalSpec::Deny]
+        );
+    }
+
+    #[test]
+    fn a_manifest_created_after_policy_resolution_adds_no_authority() {
+        let project = tempfile::tempdir().unwrap();
+        let mut args = RunArgs {
+            flake: Some(project.path().display().to_string()),
+            ..RunArgs::default()
+        };
+        super::super::run_policy::apply_run_policy(&mut args).unwrap();
+        std::fs::write(
+            project.path().join("mvm.toml"),
+            "flake = \".\"\n[[network.routes]]\nid = \"late\"\nhost = \"example.com\"\nintercept = true\n\
+             rules = [{ method = \"GET\", path = \"/\", outcome = \"allow\" }]\n",
+        )
+        .unwrap();
+        assert!(launch_routes(&args).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_project_directory_created_after_policy_resolution_adds_no_authority() {
+        let parent = tempfile::tempdir().unwrap();
+        let project = parent.path().join("later");
+        let mut args = RunArgs {
+            flake: Some(project.display().to_string()),
+            ..RunArgs::default()
+        };
+        super::super::run_policy::apply_run_policy(&mut args).unwrap();
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(
+            project.join("mvm.toml"),
+            "flake = \".\"\n[[network.routes]]\nid = \"late\"\nhost = \"example.com\"\nintercept = true\n\
+             rules = [{ method = \"GET\", path = \"/\", outcome = \"allow\" }]\n",
+        )
+        .unwrap();
+        assert!(launch_routes(&args).unwrap().is_empty());
+        assert!(
+            super::super::run_secrets::project_secret_specs(&args)
+                .unwrap()
+                .is_empty()
         );
     }
 

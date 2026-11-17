@@ -3,14 +3,18 @@
 //! `mvmctl`'s commands are meant to be thin callers over `mvm-client`: a
 //! capability lands in the library first, and the CLI, the host library the
 //! SDKs load, and the MCP adapter all call it there. A command that reaches
-//! past the client into `mvm_hostd` or `mvm_runtime` holds logic no other
-//! surface can reach, and the SDKs lose parity without anyone deciding they
-//! should.
+//! past the client into `mvm_hostd`, `mvm_runtime` or `mvm_build` holds logic
+//! no other surface can reach, and the SDKs lose parity without anyone
+//! deciding they should.
 //!
-//! This gate fails when production code under `crates/mvm-cli/src/commands`
-//! names either crate, unless the file is in [`ALLOWLIST`] for that crate.
-//! The allowlist was seeded with every file that reached either crate when
-//! the gate was introduced: it records debt, not approval. It only shrinks —
+//! This gate fails when production code names one of those crates, unless the
+//! file is in [`ALLOWLIST`] for that crate. `mvm_hostd` and `mvm_runtime` are
+//! checked under `crates/mvm-cli/src/commands`; `mvm_build` is checked across
+//! all of `crates/mvm-cli/src`, because builds are reached from `doctor`,
+//! `exec`, `bootstrap` and the helper modules as well as from commands.
+//! The allowlist was seeded with every file that reached a crate when the
+//! crate was added to the gate: it records debt, not approval. It counts
+//! files that reach, never lines of code, and sets no size ceiling. It only shrinks —
 //! an entry whose file no longer reaches the crate it is listed for fails the
 //! gate too, so the entry is removed in the change that pays the debt down
 //! and cannot quietly re-admit the reach later.
@@ -37,15 +41,26 @@ use crate::rust_source::{blank_comments_and_strings, strip_cfg_test_items};
 enum Below {
     Hostd,
     Runtime,
+    Build,
 }
 
 impl Below {
-    const ALL: [Below; 2] = [Below::Hostd, Below::Runtime];
+    const ALL: [Below; 3] = [Below::Hostd, Below::Runtime, Below::Build];
 
     fn crate_name(self) -> &'static str {
         match self {
             Below::Hostd => "mvm_hostd",
             Below::Runtime => "mvm_runtime",
+            Below::Build => "mvm_build",
+        }
+    }
+
+    /// Whether a file (relative to `crates/mvm-cli/src`) is under this
+    /// crate's gate.
+    fn covers(self, rel: &str) -> bool {
+        match self {
+            Below::Hostd | Below::Runtime => rel.starts_with("commands/"),
+            Below::Build => true,
         }
     }
 }
@@ -54,17 +69,64 @@ impl Below {
 const HOSTD: &[Below] = &[Below::Hostd];
 #[cfg(test)]
 const RUNTIME: &[Below] = &[Below::Runtime];
+const BUILD: &[Below] = &[Below::Build];
 #[cfg(test)]
 const BOTH: &[Below] = &[Below::Hostd, Below::Runtime];
 
-/// Files under `crates/mvm-cli/src/commands` that still reach a crate below
-/// the client, and which. Every entry is existing debt; remove it when the
-/// logic moves into `mvm-client`. Currently empty: no command file may reach
-/// below `mvm-client`, and any new entry must land with its extraction.
-const ALLOWLIST: &[(&str, &[Below])] = &[];
+/// Files under `crates/mvm-cli/src` (paths relative to it) that still reach a
+/// crate below the client, and which. Every entry is existing debt; remove it
+/// when the logic moves into `mvm-client`. Entries only ever leave: a new one
+/// must not be added to admit a new reach, and the `mvm_hostd` and
+/// `mvm_runtime` debt is already zero.
+const ALLOWLIST: &[(&str, &[Below])] = &[
+    ("commands/build/build.rs", BUILD),
+    ("commands/build/guest_bins.rs", BUILD),
+    ("commands/build/image_set.rs", BUILD),
+    ("commands/build/kernel.rs", BUILD),
+    ("commands/build/persistent_builder.rs", BUILD),
+    ("commands/build/runtime_overlay.rs", BUILD),
+    ("commands/build/sdk_sidecar.rs", BUILD),
+    ("commands/build/validate.rs", BUILD),
+    ("commands/builder_shell_job.rs", BUILD),
+    ("commands/deps/audit.rs", BUILD),
+    ("commands/deps/capture.rs", BUILD),
+    ("commands/deps/inspect.rs", BUILD),
+    ("commands/deps/install.rs", BUILD),
+    ("commands/deps/live_capture.rs", BUILD),
+    ("commands/env/bootstrap.rs", BUILD),
+    ("commands/env/builder_vm.rs", BUILD),
+    ("commands/env/builder_vm/bootstrap.rs", BUILD),
+    ("commands/env/builder_vm/default_microvm.rs", BUILD),
+    ("commands/env/builder_vm/kernel.rs", BUILD),
+    ("commands/env/builder_vm/local_pair.rs", BUILD),
+    ("commands/env/builder_vm/shell_job.rs", BUILD),
+    ("commands/env/builder_vm/stage0_artifact.rs", BUILD),
+    ("commands/env/builder_vm/stage0_cache.rs", BUILD),
+    ("commands/env/cleanup.rs", BUILD),
+    ("commands/env/verify_runtime.rs", BUILD),
+    ("commands/image/boot/verify.rs", BUILD),
+    ("commands/image/build_layer.rs", BUILD),
+    ("commands/image/dev.rs", BUILD),
+    ("commands/mod.rs", BUILD),
+    ("commands/pack/build.rs", BUILD),
+    ("commands/shared/parse.rs", BUILD),
+    ("commands/vm/checkpoint.rs", BUILD),
+    ("commands/vm/checkpoint/fork_vm_full.rs", BUILD),
+    ("commands/vm/exec.rs", BUILD),
+    ("commands/vm/exec/composition.rs", BUILD),
+    ("commands/vm/exec/image_source.rs", BUILD),
+    ("commands/vm/up/kernel.rs", BUILD),
+    ("exec.rs", BUILD),
+    ("exec/sidecar_selection.rs", BUILD),
+    ("exec/transient.rs", BUILD),
+    ("host_binaries/manifest.rs", BUILD),
+    ("host_binaries/mod.rs", BUILD),
+    ("host_binaries/source.rs", BUILD),
+    ("lib.rs", BUILD),
+];
 
 pub(crate) fn run(workspace: &Path) -> Result<()> {
-    let root = workspace.join("crates/mvm-cli/src/commands");
+    let root = workspace.join("crates/mvm-cli/src");
     let mut found: BTreeMap<String, Vec<Reach>> = BTreeMap::new();
     for_each_file(&root, Some("rs"), &mut |path, src| {
         let rel = path
@@ -75,7 +137,8 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
         if is_test_path(&rel) {
             return;
         }
-        let reaches = reaches_in(src);
+        let mut reaches = reaches_in(src);
+        reaches.retain(|reach| reach.below.covers(&rel));
         if !reaches.is_empty() {
             found.insert(rel, reaches);
         }
@@ -204,8 +267,15 @@ fn judge(found: &BTreeMap<String, Vec<Reach>>, allowlist: &[(&str, &[Below])]) -
     verdict
 }
 
+/// A file only compiled into test builds, by the naming the CLI uses for the
+/// `#[cfg(test)] mod` files its parents declare.
 fn is_test_path(rel: &str) -> bool {
-    rel.ends_with("_test.rs") || rel.split('/').any(|seg| seg == "tests")
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    name.ends_with("_test.rs")
+        || name.ends_with("_tests.rs")
+        || name == "tests.rs"
+        || name.starts_with("test_")
+        || rel.split('/').any(|seg| seg == "tests")
 }
 
 /// A file gated entirely to test builds by an inner `#![cfg(test)]`.
@@ -279,6 +349,9 @@ mod tests {
         assert!(reaches_in("#![cfg(test)]\nuse mvm_hostd::x;\n").is_empty());
         assert!(is_test_path("vm/tests/fixture.rs"));
         assert!(is_test_path("vm/explain_test.rs"));
+        assert!(is_test_path("env/builder_vm/tests.rs"));
+        assert!(is_test_path("env/published_fetch_tests.rs"));
+        assert!(is_test_path("test_boot_payload.rs"));
         assert!(!is_test_path("vm/explain.rs"));
     }
 
@@ -322,6 +395,26 @@ mod tests {
             ["vm/old.rs: mvm_runtime", "vm/gone.rs: mvm_runtime"]
         );
         assert!(verdict.unlisted.is_empty());
+    }
+
+    /// `mvm_build` is gated across the whole CLI source; the other two only
+    /// under `commands/`.
+    #[test]
+    fn scope_is_per_crate() {
+        assert!(Below::Build.covers("doctor/nix_checks.rs"));
+        assert!(Below::Build.covers("commands/vm/up.rs"));
+        assert!(!Below::Hostd.covers("doctor/security.rs"));
+        assert!(Below::Runtime.covers("commands/vm/up.rs"));
+        assert_eq!(reaches_in("use mvm_build::x;\n")[0].below, Below::Build);
+        let verdict = judge(&found(&[("doctor/a.rs", "use mvm_build::x;\n")]), &[]);
+        assert_eq!(verdict.unlisted, ["doctor/a.rs:1: mvm_build"]);
+        assert!(
+            judge(
+                &found(&[("doctor/a.rs", "use mvm_build::x;\n")]),
+                &[("doctor/a.rs", BUILD)]
+            )
+            .is_clean()
+        );
     }
 
     #[test]

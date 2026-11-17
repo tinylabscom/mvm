@@ -157,7 +157,8 @@ pub fn attach_runtime_overlay_if_cached_version(
 }
 
 /// Attach a prepared runtime and return the launch-owned authenticated release.
-/// `None` means the selected path is source, legacy, bundle, or kernel-less.
+/// `None` means the selected path is source, legacy, a bundle with no CLI
+/// runtime, or kernel-less.
 pub fn attach_runtime_overlay_if_cached_version_verified(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     hypervisor: &str,
@@ -171,14 +172,62 @@ pub fn attach_runtime_overlay_if_cached_version_verified(
     Ok(release)
 }
 
+/// The authenticated release behind the proof a start config already carries,
+/// or `None` when it carries none. A carried proof is never answered with
+/// `None`: it is verified or the launch is refused.
+pub(crate) fn verified_release_for_attached_proof(
+    start_config: &mvm_core::vm_backend::VmStartConfig,
+) -> Result<Option<ReleaseRuntime>> {
+    let Some(proof) = &start_config.runtime_release_proof else {
+        return Ok(None);
+    };
+    let version = start_config
+        .runtime_overlay_version
+        .as_deref()
+        .context("selected guest runtime has no version")?;
+    let release = mvm_build::guest_runtime::evidence::verify_release_runtime(
+        proof.clone(),
+        version,
+        mvm_core::arch::GuestArch::host(),
+    )?;
+    Ok(Some(std::sync::Arc::new(release)))
+}
+
+/// A launch that selected a release runtime must hand its verified evidence to
+/// admission; one that selected none must not claim any.
+pub(crate) fn paired_release_evidence(
+    start_config: &mvm_core::vm_backend::VmStartConfig,
+    release: Option<ReleaseRuntime>,
+) -> Result<Option<ReleaseRuntime>> {
+    match (start_config.runtime_release_proof.as_ref(), release) {
+        (Some(proof), Some(release)) => {
+            anyhow::ensure!(
+                release.proof() == proof,
+                "verified release runtime differs from the selected runtime proof"
+            );
+            Ok(Some(release))
+        }
+        (None, None) => Ok(None),
+        (Some(_), None) => anyhow::bail!(
+            "launch selected a release runtime but produced no verified launch evidence; \
+             release runtime requires verified launch evidence"
+        ),
+        (None, Some(_)) => {
+            anyhow::bail!("launch produced verified release evidence for no selected runtime proof")
+        }
+    }
+}
+
 fn attach_runtime_overlay_selection(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     hypervisor: &str,
     expected_version: Option<&str>,
     pair: Option<&mut PairArtifactSource<'_>>,
 ) -> Result<Option<ReleaseRuntime>> {
-    if super::bundle_runtime::attach_if_installed_bundle(start_config, hypervisor)? {
-        return Ok(None);
+    if let Some(attached) =
+        super::bundle_runtime::attach_installed_bundle_with_release(start_config, hypervisor)?
+    {
+        return paired_release_evidence(start_config, attached.release);
     }
     anyhow::ensure!(
         start_config.bundle_boot_assets.is_none(),
@@ -190,17 +239,8 @@ fn attach_runtime_overlay_selection(
         || start_config.source_runtime_archive_sha256.is_some()
         || start_config.unsigned_runtime_development
     {
-        if let Some(proof) = &start_config.runtime_release_proof {
-            let version = start_config
-                .runtime_overlay_version
-                .as_deref()
-                .context("selected guest runtime has no version")?;
-            let release = mvm_build::guest_runtime::evidence::verify_release_runtime(
-                proof.clone(),
-                version,
-                mvm_core::arch::GuestArch::host(),
-            )?;
-            return Ok(Some(std::sync::Arc::new(release)));
+        if let Some(release) = verified_release_for_attached_proof(start_config)? {
+            return Ok(Some(release));
         }
         mvm_runtime::runtime_evidence::verify_runtime_for_launch(
             start_config,
@@ -832,6 +872,31 @@ mod runtime_overlay_attach_tests {
     }
 
     #[test]
+    fn a_bundle_that_selected_a_release_proof_must_hand_back_verified_evidence() {
+        let config = VmStartConfig {
+            runtime_release_proof: Some(mock_proof()),
+            ..Default::default()
+        };
+        let error = paired_release_evidence(&config, None)
+            .expect_err("a selected release proof with no verified evidence is refused");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("requires verified launch evidence"),
+            "{message}"
+        );
+        // The proof is unverifiable (its files do not exist). Reaching the
+        // verifier here would surface its I/O error instead, which is the
+        // bundle path verifying a proof `attach_cli_runtime` already verified.
+        assert!(!message.contains("No such file"), "{message}");
+    }
+
+    #[test]
+    fn a_bundle_that_selected_no_release_proof_carries_no_evidence() {
+        let config = VmStartConfig::default();
+        assert!(paired_release_evidence(&config, None).unwrap().is_none());
+    }
+
+    #[test]
     fn selected_runtime_proof_handoff_is_not_cryptographic_verification() {
         let mut config = VmStartConfig::default();
         apply_acquired_runtime_overlay(
@@ -859,6 +924,30 @@ mod runtime_overlay_attach_tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_carried_release_proof_is_verified_or_refused_never_answered_with_none() {
+        let none = VmStartConfig::default();
+        assert!(
+            verified_release_for_attached_proof(&none)
+                .unwrap()
+                .is_none()
+        );
+
+        let unversioned = VmStartConfig {
+            runtime_release_proof: Some(mock_proof()),
+            ..Default::default()
+        };
+        assert!(verified_release_for_attached_proof(&unversioned).is_err());
+
+        // A synthetic locator is not a verifiable release, so it must refuse.
+        let unverifiable = VmStartConfig {
+            runtime_release_proof: Some(mock_proof()),
+            runtime_overlay_version: Some("selected-release".into()),
+            ..Default::default()
+        };
+        assert!(verified_release_for_attached_proof(&unverifiable).is_err());
     }
 
     #[test]

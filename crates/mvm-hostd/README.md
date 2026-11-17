@@ -51,9 +51,14 @@ The production helper verifies this custody and the guest boot binding before
 binding its listener. This is trusted-host local crash recovery only: it
 cannot detect whole-host rollback or provide host-blind confidentiality.
 The journal-backed service can bind a V2 local receipt to its existing endpoint
-and recover an exact retry after restart; on Send and Receive it settles at most
-eight expired entries per request, returning unavailable when maintenance
-remains rather than reporting an uncommitted terminal state. A separate guest
+and recover its exact retained signed encoding after restart. A known outcome
+is recovered only after current legacy authorization and exact request checks,
+before expiry maintenance or another source-attempt charge. A genuinely unseen
+operation still uses the existing charged Send path. New Send and Receive settle
+at most eight expired entries per request, returning unavailable when maintenance
+remains rather than reporting an uncommitted terminal state. `Unavailable` is
+non-success, not proof of nonacceptance; pending receipt completion and uncertain
+writes retain the original operation for reconciliation. A separate guest
 `outbox-local` path now requires a boot-pinned authority and a verified signed
 V2 receipt before removing the pending message. The old `outbox` spool is for
 the ephemeral unit-verdict path; an unexpected V2-shaped reply cannot silently
@@ -61,7 +66,10 @@ delete its pending operation. Expired submissions receive a typed
 terminal refusal and retain a bounded guest-side rejection record. Production
 mailboxes require a signed retention window under the host's configured ceiling;
 the local helper returns only `accepted_local_durable` after anchoring and
-retains signed guest ACK and dedup state across checkpoint and restart.
+durably retaining the exact signed receipt. It retains receipt-completion,
+signed guest ACK and dedup state across checkpoint and restart. This remains
+the existing trusted-host profile and unchanged V2 receipt meaning, not
+service-blind destination allocation or independent attachment authority.
 The source retry spool holds at most 64 immutable intents per admitted mailbox
 scope; saturation refuses further sends rather than discarding uncertain
 operations or inventing fresh envelopes for their IDs.

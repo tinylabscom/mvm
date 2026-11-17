@@ -130,7 +130,7 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine run --entrypoint --attach --name <name> --apply` | Apply the machine's workspace changes when the run ends without asking, through the same snapshot, journal, protected-path gate and signed audit entries as `machine apply`. Requires `--attach`; cannot be combined with `--json` |
 | `mvmctl machine run -d`                                                                                                 | Boot a **persistent** machine detached; return after the machine is running and its guest control channel answers, or fail after the bounded startup wait and cleanup                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `mvmctl machine run --port HOST:GUEST`                                                                                  | Boot a persistent machine and forward the host loopback port to the guest while the command remains attached (repeatable; conflicts with `--detach`; Ctrl-C closes the forwards)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `mvmctl machine run --healthcheck '<cmd>'`                                                                              | Declare the workload a long-running service: presence alone promotes the run to the **persistent** lifecycle (registered, shows in `machine ps`, torn down via `machine stop <name>`). Runs in the foreground unless combined with `-d`. `<cmd>` is exec'd in the guest by the resident host-agent daemon as its liveness check (exit 0 = healthy), actively probed on `--health-interval`; an unhealthy or crashed service is restarted with bounded exponential backoff. A run whose entrypoint exits still tears down on that exit code — a healthcheck on a run-to-completion task is a no-op                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `mvmctl machine run --healthcheck '<cmd>'` | Declare a long-running service, promoting the run to the persistent lifecycle. The host-agent probes the command on `--health-interval` (exit 0 = healthy). Automatic recovery uses bounded backoff and requires an authenticated HVF instance that still matches at the restart transition; it never falls back to name-only recovery. The entrypoint's own exit still terminates the machine. See the healthcheck details below. |
 | `mvmctl machine run --health-interval <secs> --health-timeout <secs> --health-retries <n> --health-start-period <secs>` | Tune the healthcheck cadence: seconds between checks (default `30`), per-check timeout (default `5`), consecutive failures before unhealthy (default `3`), and grace period after start before checks count (default `0`). Recorded on the machine spec and actively enforced by the host-agent daemon's probe loop                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `mvmctl machine run --cpus N --memory SIZE`                                                                             | vCPU count the guest sees, and memory (supports 512M, 4G, etc.)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `mvmctl machine run --cpu-limit MILLICORES`                                                                             | Cap the workload's share of **host CPU time**, in thousandths of a core (`1500` = 1.5 cores). A different control from `--cpus`, which sets how many vCPUs the guest sees — a workload can hold four vCPUs and be bounded to half a core. Recorded on the signed execution plan and refused when it exceeds the host's `max_cpu_millicores` ceiling                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
@@ -525,6 +525,28 @@ forward legs.
 | `mvmctl trust audit receipts export --archive <path> [--tenant <t>] [--plan-id <id>] [--full-chain]`     | Write a signed `.mvmev` evidence archive: the receipts, one RFC 6962 inclusion proof per leaf against the host-signed audit root, the raw chain lines, and a citation for every in-scope entry with no receipt mapping. `--full-chain` covers the whole tenant so a verifier can derive coverage; without it, scope completeness is host-attested and cannot be checked |
 | `mvmctl trust audit receipts verify <archive> [--json]`                                                  | Verify a [`.mvmev` evidence archive](/reference/mvmev-format/) offline. Reports integrity, inclusion, and scope completeness separately; exit code is a bitmask (1 integrity, 2 inclusion, 4 completeness). Completeness reports `attested` rather than a pass when the archive is plan-scoped                                                                          |
 
+### Signed-root extension
+
+| Command | Description |
+| --- | --- |
+| `mvmctl trust audit prove-consistency --old-root saved.json --new-root candidate.json [--pubkey trusted.pub] [--tenant local]` | Authenticate both explicit signed roots, read the verified tenant chain (including rotated segments), and emit an existing-format `ConsistencyProof` JSON to stdout only after verifying it against those exact roots |
+| `mvmctl trust audit verify-consistency --old-root saved.json --new-root candidate.json --proof proof.json [--pubkey trusted.pub] [--tenant local]` | Offline, read-only verification of both signatures, expected tenant, proof/root bindings, and append-only extension; nonzero exit on any refusal |
+
+Both commands require separate existing `SignedAuditRoot` JSON files. The trusted
+public key accepts raw 32-byte, hex, or base64 encoding and defaults to the existing
+`host-signer.pub` in the configured MVM keys directory. Neither command initializes
+keys or trusts a key embedded in an input. Verification does not read live audit
+files. Generation requires the retained chain; pruned or unavailable leaves can
+prevent proof generation.
+
+Retain the previously verified old root **outside the potentially rolled-back
+host**. Neither command updates that anchor, on success or error. A smaller
+candidate or same-size rewritten tree is refused; an identical nonempty tree with
+no growth is valid. Empty prefixes are refused by the existing proof format.
+This checks extension relative to the supplied anchor, not
+freshness, complete execution capture, payload availability, or future checkpoint
+schemas. See [the audit guide](/guides/audit-and-receipts/#verify-signed-root-extension).
+
 ### Protected forensic transcripts
 
 | Command | Description |
@@ -708,9 +730,21 @@ for precedence and application-policy interaction.
 | `mvmctl policy validate [PROFILE\|PATH...] [--strict]` | Check a profile, or one profile or group file. `--strict` refuses every warning and every secret the store would not bind |
 | `mvmctl policy diff A B [--json] [--backend KIND]` | What each profile allows or denies that the other does not |
 | `mvmctl policy groups [--json]` | List built-in and user groups and profiles |
+| `mvmctl policy activate PROJECT` | Commit generation 1 for an explicit local flake project on Linux/Firecracker. Requires a matching prebuilt manifest slot and whole-host quiescence; starts or connects to the resident policy coordinator automatically. Not policy apply or live rollover |
 | `mvmctl why --host H[:P] [--method METHOD --request-path PATH] \| --path P \| --secret S [--profile NAME\|PATH... \| --plan FILE] [--project DIR] [--json]` | Resolve policy without booting and explain one allow/deny answer. Defaults to the current project's `mvm.toml`; `--profile` selects an authored profile and `--plan` reads `policy resolve` output. A routed host needs method and path for a request-level decision |
 | `mvmctl run --policy NAME\|PATH\|ns/name[@version]... -- <cmd>` | Run under authored profiles or groups (repeatable; TOML or JSON documents). Each entry names a profile or a group — a group composes as one layer — and later entries take precedence over earlier ones — a later deny beats an earlier allow; allows union. Also on `machine run`, `machine create` and `machine start`. Replaces the project's `[policy]` table; the project's `[network] allow_hosts` still applies, and applies on every verb even with no policy. Flags add to its allows and cannot reach its denies, blocks or ceilings. Pack references require an installed, pinned, publisher-verified signed pack; pack-authored references cannot import local policy files |
 | `mvmctl run --plan FILE -- <cmd>` | Run under a resolved manifest. Mutually exclusive with `--policy`, `--net`, `--network-preset`, `--allow-host`, `--allow-endpoint`, `--peer`, `--cpu-limit`, `--grants-file`, `--mount`, `--allow-env` and `--secret`. The file is re-validated, and a plan or signature in it is refused: admission signs the plan itself |
+
+After `policy activate`, launches and restores for that project use the
+captured manifest and policy closure, not staged edits. Missing or corrupt
+committed state refuses execution rather than falling back to authored files.
+Activation refuses running, paused, starting, restoring, or uncertain workloads
+anywhere on the host. It does not build a slot, update an existing generation,
+or roll over a running workload. Image/Wasm projects, signed-pack policy
+sources, and non-Firecracker backends are not supported by this operation.
+Top-level manifest launch-default includes are likewise refused.
+See [committed project policy](/guides/policy-and-profiles/#committed-project-policy)
+for source restrictions and operational limits.
 
 For `run` and `machine run`, a root `--policy` pack that declares a signed
 image supplies the boot source when no explicit image, manifest, flake,
@@ -1311,15 +1345,28 @@ of:
 - `unhealthy` — `--health-retries` consecutive probes have failed.
 - `-`/`unknown` — no readiness signal (including when the daemon is disabled).
 
-When a service goes `unhealthy`, the daemon restarts it (the same stop→start
-`mvmctl machine restart` does) under a bounded exponential backoff: 1s base,
-doubling per attempt, capped at 5 minutes, up to 5 attempts. Once the cap is
-hit the service is left `unhealthy` rather than crash-looping forever; a
-sustained-healthy period afterward resets the restart budget back to zero. A
-crashed service — the guest process gone, the agent unreachable — is caught by
-the same probe path (an unreachable agent counts as a failed probe) and
-restarted under the identical policy, so there's no separate crash-detection
-mechanism to reason about.
+When a service goes `unhealthy`, the daemon schedules recovery under bounded
+exponential backoff: 1s base, doubling per attempt, capped at 5 minutes, up to
+5 attempts. A request carries the authenticated HVF instance observed before
+the probe. The restart checks that instance under the machine's lifecycle lock
+before stopping it, and retains the lock through a fresh admitted start.
+
+If stop or replacement takes effect first, stale recovery is refused without
+stopping a successor. If recovery takes effect first, a later stop waits for
+that transition and stops the resulting instance. Disappearance from the live
+set cancels a pending request without resetting the retry budget. Explicit
+operator `machine restart` remains an unconditional request.
+
+Automatic recovery currently requires an authenticated HVF supervisor.
+Missing or unverifiable identity, including a supervisor that has already
+exited, refuses automatic recovery; other backends continue health monitoring
+but do not fall back to a name-only restart. Failed or unconfirmed stop never
+starts a replacement. A crashed guest service whose supervisor remains
+available can be recovered through the same probe path.
+
+Once the retry cap is hit the service stays `unhealthy` rather than
+crash-looping forever. A sustained-healthy period resets the budget; changing
+the instance alone does not.
 
 This is a dev/accessible-tier feature: the check runs inside the guest via the
 host agent, so it only applies to backends where that agent is reachable.
@@ -1495,6 +1542,32 @@ orphan reaping do not delete these captures. Live sockets and fixed supervisor
 status remain runtime-local. Legacy recordings are not moved or enrolled.
 Restart publishes a fresh run selection without merging earlier sequence
 spaces; a retained family belonging to another tenant refuses name reuse.
+
+**Verified current-run readback.** `mvmctl machine logs VM --verified-plan-id PLAN`
+reads only the currently routed protected run's sealed retained generations.
+`PLAN` must match the exact signed plan ID: image aliases and ID prefixes are
+not resolved. `--tenant` defaults to `local`. `--pubkey PATH` selects a trusted
+Ed25519 public key (raw 32 bytes, hex, or base64); without it, the existing
+`$MVM_HOME/keys/host-signer.pub` is read, never initialized.
+
+All selected manifests must authenticate for the exact tenant, plan, VM and
+capture before output is exposed, including generations excluded by `--stream`
+or `-n`. `-n` still bounds the retained matching record window (default 50).
+The command refuses `--follow` and `--hypervisor`, unsealed or missing history,
+legacy captures, invalid evidence and unbound output. It never connects to the
+broker, recovers active captures, or falls back to console output, including for
+adopted captures. A scope notice precedes bytes on stderr; declared loss,
+adoption and retired/unavailable generations remain explicit. Authenticated
+empty capture is not missing or retired output.
+
+This mode runs before ordinary command signing, state initialization, telemetry
+and update notices. Existing retention/custody checks remain active at delivery
+and may fsync existing audit files/directories; no audit event or key is created.
+The verification authenticates the trusted host's assertion, not a malicious
+host boundary. It does not discover older runs, prove routing freshness or
+canonical epoch identity, detect every deleted generation, distinguish repeated
+executions of the same tenant/plan/VM, or establish complete execution output.
+Ordinary `machine logs` behavior is unchanged.
 
 Raw supervisor stderr is deliberately discarded on this path, including
 startup failures; it is not retained or exportable. Public errors retain exit
@@ -1754,7 +1827,12 @@ persists the manifest's `net`, `[network].allow_hosts`, `cpus`, `mem`,
 machine spec; relative manifest volume paths are resolved against the manifest
 directory when persisted. `dev.init` currently requires
 `--profile dev` or `--profile permissive`; standard/prod-like profiles refuse
-it. `machine start --dry-run` reports the
+it. Initialization uses the original guest connection without holding the
+machine's lifecycle lock, so operator stop is not blocked by a hung init
+script. Completion and failure cleanup recheck the original run under that
+lock; a delayed init result cannot update or stop a replacement. Initialization
+does not acquire a new timeout through this behavior.
+`machine start --dry-run` reports the
 effective network posture, enforcement tier, dev-init hash/count,
 and redacted volume policy without resolving or booting the image; the signed
 machine-start receipt carries the same policy summary plus the resolved digest
@@ -2989,7 +3067,7 @@ Inspect a project directory and emit a versioned capture report.
 | ----------------- | --------------------------------------------------------------------- |
 | `<path>`          | Project directory to inspect                                          |
 | `--output <path>` | Output file for the capture report (required)                         |
-| `--run "<cmd>"`   | Explicit command to record for later tracing/verification; repeatable |
+| `--run "<cmd>"`   | Explicit command to record for later tracing/verification; repeatable. On Linux it is traced with its working directory set to `<path>`, not the directory you ran `mvmctl` from; a `<path>` that is not a directory refuses the trace |
 
 ### `mvmctl capture resolve`
 

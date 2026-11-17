@@ -531,6 +531,16 @@ tier = "parse"
 reason = "publishes a host-signed root into the caller's audit history"
 
 [[command]]
+path = "trust audit prove-consistency"
+tier = "exec"
+fixture = "audit-consistency"
+
+[[command]]
+path = "trust audit verify-consistency"
+tier = "exec"
+fixture = "audit-consistency"
+
+[[command]]
 path = "trust audit sessions"
 tier = "parse"
 reason = "reports session history from the caller's audit chain, which an isolated home does not contain"
@@ -699,6 +709,11 @@ tier = "exec"
 path = "policy show"
 tier = "exec"
 fixture = "project-policy"
+
+[[command]]
+path = "policy activate"
+tier = "parse"
+reason = "commits a policy generation for a built Firecracker project slot on a Linux host with every workload stopped; the isolated home has neither a built slot nor a quiescent Firecracker host, and the verb changes host state"
 
 [[command]]
 path = "policy validate"

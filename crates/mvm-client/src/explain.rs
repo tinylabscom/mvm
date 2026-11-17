@@ -418,7 +418,28 @@ mod tests {
     /// Record a refusal the way the per-VM endpoint does: unbound, attributed
     /// to the machine by name, into the same tenant chain.
     fn endpoint_refusal(dir: &Path, key: &SigningKey, vm: &str, target: &str, reason: &str) {
-        use mvm_hostd::supervisor::audit::audit_recorder::{EventCategory, Recorder};
+        use mvm_hostd::supervisor::audit::audit_recorder::EventCategory;
+        endpoint_event(
+            dir,
+            key,
+            vm,
+            EventCategory::Host,
+            "host.flow.denied",
+            &[("class", "tcp"), ("target", target), ("reason", reason)],
+        );
+    }
+
+    /// Record any endpoint event, stamped with its stage as the endpoint
+    /// stamps it.
+    fn endpoint_event(
+        dir: &Path,
+        key: &SigningKey,
+        vm: &str,
+        category: mvm_hostd::supervisor::audit::audit_recorder::EventCategory,
+        event: &str,
+        labels: &[(&str, &str)],
+    ) {
+        use mvm_hostd::supervisor::audit::audit_recorder::Recorder;
         let signer = mvm_hostd::supervisor::audit::audit_file::FileAuditSigner::open(
             key.clone(),
             dir.to_path_buf(),
@@ -429,18 +450,15 @@ mod tests {
             mvm_core::plan::TenantId("local".into()),
         )
         .with_vm_name(vm);
+        let mut labels: BTreeMap<String, String> = labels
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        mvm_hostd::supervisor::audit::denial_stage::stamp(event, &mut labels);
         tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap()
-            .block_on(recorder.record_unbound(
-                EventCategory::Host,
-                "host.flow.denied",
-                [
-                    ("class".to_string(), "tcp".to_string()),
-                    ("target".to_string(), target.to_string()),
-                    ("reason".to_string(), reason.to_string()),
-                ],
-            ))
+            .block_on(recorder.record_unbound(category, event, labels))
             .unwrap();
     }
 
@@ -701,6 +719,70 @@ mod tests {
         let later = collect_run(&path, &vk, "local", "plan-denied-2").unwrap();
         assert_eq!(later.egress_denials.len(), 1);
         assert_eq!(later.egress_denials[0].destination, "later.example:443");
+    }
+
+    /// The same destination refused at lookup, connect and datagram reads back
+    /// as one host with a stage each, so a caller asserts "denied, host X"
+    /// without knowing which step the host refused it at.
+    #[test]
+    fn a_refusal_reads_as_one_denied_host_whichever_stage_refused_it() {
+        use mvm_hostd::supervisor::audit::audit_recorder::EventCategory;
+        use mvm_hostd::supervisor::audit::denial_stage::DenialStage;
+        let dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[12; 32]);
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key.clone(), dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-stages-1");
+        emitter.emit_admitted(&plan, "host:test").unwrap();
+        emitter.emit_launched(&plan, "firecracker").unwrap();
+        let at = |category, event, labels: &[(&str, &str)]| {
+            endpoint_event(dir.path(), &key, "vm-test", category, event, labels)
+        };
+        at(
+            EventCategory::Dns,
+            "dns.refused",
+            &[("qname", "blocked.example"), ("reason", "policy_denied")],
+        );
+        at(
+            EventCategory::Host,
+            "host.flow.denied",
+            &[
+                ("class", "tcp"),
+                ("target", "blocked.example:443"),
+                ("reason", "policy_denied"),
+            ],
+        );
+        at(
+            EventCategory::Host,
+            "host.flow.denied",
+            &[
+                ("class", "udp"),
+                ("target", "blocked.example:53"),
+                ("reason", "policy_denied"),
+            ],
+        );
+        emitter.emit_exited(&plan, 0, "firecracker").unwrap();
+
+        let path = dir.path().join("local.jsonl");
+        let explanation = collect_run(&path, &vk, "local", "plan-stages-1").unwrap();
+        let denied = &explanation.egress_denials;
+        assert_eq!(denied.len(), 3, "{denied:?}");
+        assert!(
+            denied.iter().all(|d| d.host == "blocked.example"),
+            "{denied:?}"
+        );
+        let stages: Vec<_> = denied.iter().map(|d| d.stage).collect();
+        assert_eq!(
+            stages,
+            [
+                DenialStage::Lookup,
+                DenialStage::Connect,
+                DenialStage::Datagram
+            ]
+        );
+        let json = serde_json::to_value(&explanation).unwrap();
+        assert_eq!(json["egress_denials"][0]["stage"], "lookup");
+        assert_eq!(json["egress_denials"][1]["host"], "blocked.example");
     }
 
     #[test]

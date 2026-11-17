@@ -43,6 +43,8 @@ mod boot_config;
 mod bundle_binding;
 pub mod bundle_environment;
 pub mod bundle_posture;
+pub mod bundle_resources;
+mod cli_dispatch;
 mod durability;
 mod enforce;
 pub mod entrypoint_resolve;
@@ -64,14 +66,15 @@ pub use boot_config::{
     guest_profile_for_boot,
 };
 pub use bundle_binding::{BundlePin, InheritedBundle};
+pub use cli_dispatch::{CliStartFailureKind, cli_start_failure_kind};
 pub use durability::{
     admit_plan_for_boot_syncing_beside_boot,
     admit_plan_for_boot_with_verified_runtime_syncing_beside_boot,
 };
 pub use enforce::{enforce_kernel, enforce_shares, enforce_shares_for_claim};
 pub use instructions::InstructionSources;
-pub(crate) use outcome::record_boot;
 pub use outcome::{BootPosture, StartMode, emit_failed, emit_launched};
+pub(crate) use outcome::{record_boot, seal_recorded_failure};
 
 /// A content-bound asset. Operator-declared files and internally selected
 /// signed packs are recorded in the plan without sharing them with the guest.
@@ -84,9 +87,16 @@ pub enum AssetSpec {
     },
     /// An internally selected signed pack; never accepted from `--asset`.
     RegistryPack(mvm_core::registry_pack::PackPin),
+    /// The resident owner's exact project-policy generation and closure.
+    /// Host admission revalidates it before signing; it is not a host file.
+    CommittedPolicy(mvm_core::plan::AssetIdentity),
 }
 
 pub struct AdmitPlanForBootParams<'a> {
+    /// What this launch took from its bundle's recorded sizing. Recorded in
+    /// the `plan.admitted` labels, with the requested figure beside the applied
+    /// one when a cap lowered it. `cpus` and `mem_mib` already hold the result.
+    pub bundle_sizing: bundle_resources::AppliedSizing,
     /// Mailbox this launch grants, minted into the plan before signing.
     pub mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
     pub tenant: &'a str,
@@ -325,12 +335,22 @@ pub struct AdmissionContext {
 
 /// The admitted CLI run before it chooses warm claim or cold boot.
 ///
-/// The authority cannot be cloned or built from signed-plan JSON. The legacy
-/// warm and cold paths only borrow it; dispatch will consume it when migrated.
-pub struct CliAdmission {
+/// The authority cannot be cloned or built from signed-plan JSON. A cold
+/// dispatch consumes it; the unmigrated warm path borrows it until completion.
+pub enum CliAdmission {
+    /// One-use authority before warm/cold selection.
+    Pending(Box<PendingCliAdmission>),
+    /// Dispatch spent the authority; only the audit continuation remains.
+    Dispatched(Box<AuditContinuation>),
+}
+
+/// Private fields keep the pending authority one-shot.
+pub struct PendingCliAdmission {
     authority: AdmittedPlan,
     policy_bundle: Option<PolicyBundle>,
     audit: AuditContinuation,
+    source_rootfs: Option<std::path::PathBuf>,
+    verified_runtime: Option<std::sync::Arc<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>>,
 }
 
 /// Read-only admitted plan and its original signer for post-run accounting.
@@ -349,77 +369,23 @@ impl std::fmt::Debug for AuditContinuation {
     }
 }
 
-impl CliAdmission {
-    /// Retain the actual admission and audit owner, never a decoded plan JSON.
-    #[must_use]
-    pub fn new(context: AdmissionContext) -> Self {
-        let audit = AuditContinuation {
-            plan: context.admitted.plan().clone(),
-            emitter: context.emitter,
-        };
-        Self {
-            authority: context.admitted,
-            policy_bundle: context.policy_bundle,
-            audit,
-        }
-    }
-
-    /// The signed plan that owns this run's single admission.
-    #[must_use]
-    pub fn plan(&self) -> &mvm_core::plan::ExecutionPlan {
-        self.authority.plan()
-    }
-
-    /// Compare the legacy VM name, signed-plan JSON and policy-bundle JSON.
-    ///
-    /// Kernel, rootfs, volume and network enforcement remain in their existing
-    /// admission and runner gates; this comparison does not replace them.
-    ///
-    /// # Errors
-    /// Refuses a changed name or different signed-plan or policy-bundle JSON.
-    /// The JSON is compared with the typed owner, never used as authority.
-    pub fn check_legacy_projection(
-        &self,
-        config: &mvm_core::vm_backend::VmStartConfig,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            config.name == self.authority.plan().image.name,
-            "launch identity differs from admitted plan"
-        );
-        let expected = serde_json::to_string(self.authority.signed())?;
-        anyhow::ensure!(
-            config.plan_json.as_deref() == Some(expected.as_str()),
-            "legacy launch plan projection differs from admitted authority"
-        );
-        let policy = self
-            .policy_bundle
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-        anyhow::ensure!(
-            config.bundle_json == policy,
-            "legacy launch policy projection differs from admitted authority"
-        );
-        Ok(())
-    }
-
-    /// Retire the one-use authority after the unmigrated warm or cold path.
-    #[must_use]
-    pub fn finish_legacy(self) -> AuditContinuation {
-        let Self {
-            authority: _,
-            policy_bundle: _,
-            audit,
-        } = self;
-        audit
-    }
-}
-
 impl AuditContinuation {
     /// The exact plan admitted for this run, not one decoded from boot JSON.
     #[must_use]
     pub fn plan(&self) -> &mvm_core::plan::ExecutionPlan {
         &self.plan
+    }
+
+    /// Record an unresolved host rollback without sealing a possibly live VM.
+    pub fn record_uncertain_stop(&self, error: &anyhow::Error) {
+        mvm_hostd::audit::unsealed::record_unsealed_end(
+            Some((&self.emitter, &self.plan)),
+            mvm_hostd::audit::unsealed::UnsealedEnd::new(
+                &self.plan.workload.0,
+                mvm_hostd::audit::unsealed::UnsealedReason::StopFailed,
+            )
+            .error(format!("{error:#}")),
+        );
     }
 
     /// Record an output against an actual signed grant.
@@ -881,6 +847,16 @@ fn admit_with_runtime_evidence(
                     verified.manifest_sha256().as_str(),
                 )?);
             }
+            AssetSpec::CommittedPolicy(identity) => {
+                anyhow::ensure!(
+                    identity.kind == mvm_core::plan::AssetKind::Policy
+                        && identity
+                            .name
+                            .starts_with(mvm_hostd::policy_generation::GENERATION_ASSET_PREFIX),
+                    "invalid committed project-policy asset"
+                );
+                caller_assets.push(identity.clone());
+            }
         }
     }
 
@@ -905,7 +881,7 @@ fn admit_with_runtime_evidence(
         &p.services,
         p.gpu,
     );
-    let mut bundle_audit_labels = std::collections::BTreeMap::new();
+    let mut bundle_audit_labels = p.bundle_sizing.audit_labels();
     if let Some(prepared) = prepared {
         bundle_audit_labels.extend(prepared.audit_labels());
     }
@@ -1465,6 +1441,7 @@ pub(crate) mod admit_plan_tests {
         ledger: &'a InMemoryNonceLedger,
     ) -> AdmitPlanForBootParams<'a> {
         AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             gpu: false,
             instructions: Default::default(),
@@ -1518,6 +1495,7 @@ pub(crate) mod admit_plan_tests {
         std::fs::write(&rootfs, b"rootfs bytes").expect("write rootfs");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             vm_name,
             backend_name: "libkrun",
@@ -1550,6 +1528,83 @@ pub(crate) mod admit_plan_tests {
 
         let admitted = admit_plan_for_boot(params).expect("admission succeeds");
         assert_eq!(admitted.admitted.plan().caller_commitment, Some(commitment));
+    }
+
+    #[test]
+    fn a_clamped_bundle_default_is_recorded_on_plan_admitted() {
+        let _home = isolated_home();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rootfs = write_rootfs(dir.path(), b"sized rootfs");
+        let keys_dir = dir.path().join("keys");
+        let audit_dir = dir.path().join("audit");
+        let ledger = InMemoryNonceLedger::new();
+        let mut params = pinning_params(&rootfs, &ledger);
+        params.keys_dir = Some(&keys_dir);
+        params.audit_dir = Some(&audit_dir);
+        params.mem_mib = 1024;
+        params.bundle_sizing = bundle_resources::seed(
+            bundle_resources::SizingDefaults {
+                cpus: Some(2),
+                memory_mib: Some(4096),
+            },
+            bundle_resources::NamedSizing::default(),
+            Some(1024),
+        );
+
+        let admitted = admit_plan_for_boot(params).expect("admission succeeds");
+        let labels = &admitted.admitted.plan().audit_labels;
+        assert_eq!(labels["sizing_memory_requested_mib"], "4096");
+        assert_eq!(labels["sizing_memory_mib"], "1024");
+        assert_eq!(labels["sizing_clamped"], "true");
+        let chain = std::fs::read_to_string(audit_dir.join("local.jsonl")).expect("chain");
+        assert!(chain.contains("sizing_memory_requested_mib"), "{chain}");
+    }
+
+    #[test]
+    fn a_launch_the_bundle_did_not_size_carries_no_sizing_labels() {
+        let _home = isolated_home();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rootfs = write_rootfs(dir.path(), b"unsized rootfs");
+        let keys_dir = dir.path().join("keys");
+        let audit_dir = dir.path().join("audit");
+        let ledger = InMemoryNonceLedger::new();
+        let mut params = pinning_params(&rootfs, &ledger);
+        params.keys_dir = Some(&keys_dir);
+        params.audit_dir = Some(&audit_dir);
+
+        let admitted = admit_plan_for_boot(params).expect("admission succeeds");
+        assert!(
+            !admitted
+                .admitted
+                .plan()
+                .audit_labels
+                .keys()
+                .any(|key| key.starts_with("sizing_"))
+        );
+    }
+
+    #[test]
+    fn a_typed_memory_over_the_host_ceiling_is_still_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path().join("home"));
+        let config = mvm_core::user_config::MvmConfig {
+            max_memory_mib: Some(128),
+            ..Default::default()
+        };
+        mvm_core::user_config::save(&config, None).expect("host config");
+        let rootfs = write_rootfs(dir.path(), b"typed rootfs");
+        let keys_dir = dir.path().join("keys");
+        let audit_dir = dir.path().join("audit");
+        let ledger = InMemoryNonceLedger::new();
+        let mut params = pinning_params(&rootfs, &ledger);
+        params.keys_dir = Some(&keys_dir);
+        params.audit_dir = Some(&audit_dir);
+        params.mem_mib = 4096;
+
+        let err = admit_plan_for_boot(params)
+            .expect_err("a typed value over the ceiling is refused, not clamped");
+        assert!(err.to_string().contains("memory_mib"), "{err:#}");
     }
 
     /// Admission that leaves its sync beside the boot still writes the whole
@@ -1748,6 +1803,7 @@ pub(crate) mod admit_plan_tests {
         let mut substrate = crate::entrypoint::SessionAuditSubstrate {
             tenant_id: admitted.admitted.plan().tenant.0.clone(),
             plan_json: serde_json::to_string(admitted.admitted.signed()).unwrap(),
+            audit_context: admitted.admitted.workload_audit_context(),
             mailbox_posture: admitted.admitted.mailbox_posture(),
             caller_registration: None,
             bundle_json: None,
@@ -1808,6 +1864,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             gpu: false,
             instructions: Default::default(),
@@ -1858,6 +1915,7 @@ pub(crate) mod admit_plan_tests {
         let admit = |kind| {
             let ledger = InMemoryNonceLedger::new();
             admit_plan_for_boot(AdmitPlanForBootParams {
+                bundle_sizing: Default::default(),
                 mailbox: None,
                 gpu: false,
                 instructions: Default::default(),
@@ -1898,6 +1956,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             gpu: false,
             instructions: Default::default(),
@@ -1932,6 +1991,7 @@ pub(crate) mod admit_plan_tests {
         let boot_artifact = mvm_core::deploy_record::digest_boot_artifact(&rootfs).unwrap();
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             vm_name: "vm-happy",
             boot_artifact_identity: Some(&boot_artifact),
@@ -1975,6 +2035,7 @@ pub(crate) mod admit_plan_tests {
         let audit_dir = tempfile::tempdir().unwrap();
         let ledger = InMemoryNonceLedger::new();
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             vm_name: "vm-missing",
             cpus: 1,
@@ -2032,6 +2093,7 @@ pub(crate) mod admit_plan_tests {
         ] {
             let ledger = InMemoryNonceLedger::new();
             let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+                bundle_sizing: Default::default(),
                 mailbox: None,
                 network_mode: mode,
                 vm_name: "vm-transport",
@@ -2077,6 +2139,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let a1 = admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             vm_name: "vm-1",
             cpus: 1,
@@ -2087,6 +2150,7 @@ pub(crate) mod admit_plan_tests {
         })
         .unwrap();
         let a2 = admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             vm_name: "vm-2",
             cpus: 1,
@@ -2111,6 +2175,7 @@ pub(crate) mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), vm_name.as_bytes());
         let ledger = InMemoryNonceLedger::new();
         admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             vm_name,
             cpus: 1,
@@ -2191,6 +2256,52 @@ pub(crate) mod admit_plan_tests {
             .expect("admission was recorded");
         assert_eq!(chain.matches("plan.admitted").count(), 1, "{chain}");
         assert!(!chain.contains("plan.launched"), "{chain}");
+    }
+
+    #[test]
+    fn cli_cold_refuses_a_changed_source_projection_without_spending_authority() {
+        let _home = isolated_home();
+        let keys_dir = tempfile::tempdir().expect("keys dir");
+        let audit_dir = tempfile::tempdir().expect("audit dir");
+        let context = admitted_into(keys_dir.path(), audit_dir.path(), "vm-source-owner");
+        let original_nonce = context.admitted.plan().nonce.clone();
+        let signed = serde_json::to_string(context.admitted.signed()).expect("signed plan");
+        let bundle = context
+            .policy_bundle
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .expect("policy");
+        let owner = CliAdmission::new_for_rootfs(context, std::path::Path::new("/admitted/rootfs"));
+        let config = mvm_core::vm_backend::VmStartConfig {
+            name: "vm-source-owner".into(),
+            rootfs_path: "/substituted/rootfs".into(),
+            plan_json: Some(signed),
+            bundle_json: bundle,
+            ..Default::default()
+        };
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let (owner, result) = owner.start_cold(&backend, config, Vec::new());
+        assert!(result.is_err(), "altered projection must not dispatch");
+        assert_eq!(owner.plan().nonce, original_nonce);
+        let chain = std::fs::read_to_string(audit_dir.path().join("local.jsonl"))
+            .expect("admission record");
+        assert_eq!(chain.matches("plan.admitted").count(), 1, "{chain}");
+        assert!(!chain.contains("plan.launched"), "{chain}");
+    }
+
+    #[test]
+    fn cli_cold_cannot_dispatch_a_legacy_owner_without_source_binding() {
+        let _home = isolated_home();
+        let keys_dir = tempfile::tempdir().expect("keys dir");
+        let audit_dir = tempfile::tempdir().expect("audit dir");
+        let context = admitted_into(keys_dir.path(), audit_dir.path(), "vm-no-source");
+        let nonce = context.admitted.plan().nonce.clone();
+        let owner = CliAdmission::new(context);
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let (owner, result) = owner.start_cold(&backend, Default::default(), Vec::new());
+        assert!(result.is_err(), "a plan without its source cannot dispatch");
+        assert_eq!(owner.plan().nonce, nonce);
     }
 
     #[test]
@@ -2308,6 +2419,7 @@ pub(crate) mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), b"local-default-payload");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             vm_name: "vm-local-default",
             cpus: 1,
@@ -2346,6 +2458,7 @@ pub(crate) mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), b"allow-list-payload");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             vm_name: "vm-allow-list",
             backend_name: "libkrun",
@@ -2408,6 +2521,7 @@ pub(crate) mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), b"unrestricted-payload");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             vm_name: "vm-unrestricted",
             backend_name: "hvf",
@@ -2504,6 +2618,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             gpu: false,
             instructions: Default::default(),
@@ -2573,6 +2688,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             vm_name: "vm-non-shell-granted",
             cpus: 1,
@@ -2624,6 +2740,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             vm_name: "vm-shell-ungranted",
             cpus: 1,
@@ -2666,6 +2783,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             vm_name: "vm-shell-granted",
             cpus: 1,
@@ -2736,6 +2854,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             vm_name: "vm-entrypoint-unknown",
             cpus: 1,
@@ -2783,6 +2902,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             vm_name: "vm-entrypoint-unknown-ungranted",
             cpus: 1,
@@ -2824,6 +2944,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             vm_name: "vm-dev-shell",
             cpus: 1,
@@ -2890,6 +3011,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             gpu: false,
             instructions: Default::default(),
@@ -2922,6 +3044,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             gpu: false,
             instructions: Default::default(),
@@ -2944,6 +3067,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             gpu: false,
             instructions: Default::default(),
@@ -3006,6 +3130,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             gpu: false,
             instructions: Default::default(),
@@ -3030,6 +3155,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             gpu: false,
             instructions: Default::default(),
@@ -3232,6 +3358,7 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             vm_name: "vm-shares",
             cpus: 1,
@@ -3319,6 +3446,7 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             vm_name: "vm-granted",
             cpus: 4,
@@ -3476,6 +3604,7 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             vm_name: "vm-over-ceiling",
             cpus: 4,
@@ -3527,6 +3656,7 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            bundle_sizing: Default::default(),
             mailbox: None,
             vm_name: "vm-ungranted",
             keys_dir: Some(keys_dir.path()),

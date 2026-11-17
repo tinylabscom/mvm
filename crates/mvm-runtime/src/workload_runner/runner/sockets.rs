@@ -190,6 +190,7 @@ mod tests {
             epoch: mvm_contract::protocol::mailbox::ExecutionEpoch::new(1).unwrap(),
             report: None,
             retention: None,
+            service_blind: None,
         });
         let config = VmStartConfig {
             plan_json: Some(serde_json::to_string(&plan).unwrap()),

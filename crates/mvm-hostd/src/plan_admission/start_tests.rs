@@ -1,7 +1,140 @@
 #![cfg(test)]
 
+use super::rollback::{UndoLaunch, undo_cli_launch};
+use super::start::cli_rollback_error;
 use super::test_support::*;
 use super::*;
+
+#[test]
+fn selector_original_admission_refuses_before_host_launch_preparation() {
+    assert_selector_refuses_before_host_launch_preparation(false);
+}
+
+#[test]
+fn selector_original_admission_refuses_before_persistent_readiness() {
+    assert_selector_refuses_before_host_launch_preparation(true);
+}
+
+fn assert_selector_refuses_before_host_launch_preparation(persistent: bool) {
+    use crate::assurance_session::{CampaignDeclaration, CampaignRequest, default_policy_ceiling};
+    use mvm_contract::assurance::{ApprovalSet, AssuranceId, RequestedAuthority, Sha256Digest};
+    let (_env, home) = host_with_ceiling(Default::default());
+    let keys = mvm_core::config::mvm_keys_dir_at(home.path());
+    std::fs::create_dir_all(&keys).unwrap();
+    let key_names = || {
+        std::fs::read_dir(&keys)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let selector =
+        mvm_contract::protocol::mailbox::service_blind::LaunchProfile::new([1; 32], [2; 32])
+            .unwrap();
+    for projection in 0..4 {
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let mut plan = plan_binding(&[]);
+        plan.mailbox = Some(MailboxGrant {
+            mailbox: MailboxId::from_bytes([4; 32]),
+            authority_key: [8; 32],
+            epoch: ExecutionEpoch::new(1).unwrap(),
+            report: None,
+            retention: None,
+            service_blind: Some(selector),
+        });
+        let signed = sign_plan(&plan, &SigningKey::from_bytes(&[7; 32]), "test");
+        let plan = verify_plan(
+            &signed,
+            &[("test", &SigningKey::from_bytes(&[7; 32]).verifying_key())],
+        )
+        .unwrap();
+        let admitted = AdmittedPlan::for_test(plan.clone(), "test".into(), signed);
+        let mut stripped = plan.clone();
+        stripped.mailbox.as_mut().unwrap().service_blind = None;
+        let mut replaced = plan.clone();
+        replaced.mailbox = None;
+        let config = VmStartConfig {
+            name: plan.image.name.clone(),
+            plan_json: match projection {
+                0 => None,
+                1 => Some(serde_json::to_string(&stripped).unwrap()),
+                2 => Some(serde_json::to_string(&replaced).unwrap()),
+                _ => Some("malformed".into()),
+            },
+            ..Default::default()
+        };
+        let audit = tempfile::tempdir().unwrap();
+        let emitter = std::sync::Arc::new(
+            crate::audit::emitter::AuditEmitter::with_dir(
+                SigningKey::from_bytes(&[41; 32]),
+                audit.path(),
+            )
+            .unwrap(),
+        );
+        let campaign = CampaignRequest {
+            declaration: CampaignDeclaration {
+                request_id: AssuranceId::parse("selector-request").unwrap(),
+                idempotency_key: AssuranceId::parse("selector-retry").unwrap(),
+                campaign_id: AssuranceId::parse("selector-campaign").unwrap(),
+                trial_id: AssuranceId::parse("selector-trial").unwrap(),
+                source_run_id: AssuranceId::parse("selector-source").unwrap(),
+                source_digest: Sha256Digest::parse(format!("sha256:{}", "5".repeat(64))).unwrap(),
+                artifact_digest: Sha256Digest::parse(format!("sha256:{}", "6".repeat(64))).unwrap(),
+                edges: Vec::new(),
+                approvals: ApprovalSet::none(),
+                requested: RequestedAuthority {
+                    allowed_tools: Vec::new(),
+                    observation_scopes: Vec::new(),
+                    max_steps: 1,
+                    max_output_bytes: 1024,
+                    deadline_unix_ms: 0,
+                },
+                grant_ttl_ms: 1000,
+            },
+            emitter: std::sync::Arc::clone(&emitter),
+            policy_ceiling: default_policy_ceiling(),
+            policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            backend: "mock".into(),
+            now_unix_ms: 1_800_000_000_000,
+        };
+        let original_keys = key_names();
+        super::start::TRAP_LAUNCH_PREPARATION.set(true);
+        let params = StartAdmittedParams {
+            backend: &backend,
+            admitted,
+            config,
+            policy_bundle: None,
+            emitter: Some(&emitter),
+            assurance: Some(&campaign),
+        };
+        let result = if persistent {
+            start_persistent(params, None, Vec::new()).map(|_| ())
+        } else {
+            start_admitted(params).map(|_| ())
+        };
+        let error = result.unwrap_err();
+        super::start::TRAP_LAUNCH_PREPARATION.set(false);
+        assert_eq!(
+            error.to_string(),
+            "admission gate refused (mailbox-profile)"
+        );
+        assert!(format!("{error:#}").contains("service-blind V3 mailbox launch is unavailable"));
+        assert!(!matches!(
+            backend.status(&VmId(plan.image.name.clone())),
+            Ok(mvm_core::vm_backend::VmStatus::Running)
+        ));
+        let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).unwrap();
+        assert_eq!(
+            chain
+                .lines()
+                .filter(|line| line.contains("\"plan.failed\""))
+                .count(),
+            1
+        );
+        assert!(!chain.contains("\"plan.launched\""));
+        assert!(chain.contains("mailbox-profile"));
+        assert_eq!(key_names(), original_keys, "no legacy key material minted");
+    }
+}
 
 #[test]
 fn assurance_proxy_attachment_refuses_a_duplicate_service() {
@@ -297,6 +430,135 @@ fn one_signed_admission_cannot_start_a_second_backend() {
     );
     assert!(!matches!(
         second.status(&started.vm_id),
+        Ok(mvm_core::vm_backend::VmStatus::Running)
+    ));
+}
+
+#[test]
+fn persistent_dispatch_defers_acceptance_and_spends_the_admission() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let dir = tempfile::tempdir().unwrap();
+    let audit = tempfile::tempdir().unwrap();
+    let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+    let second = mvm_runtime::AnyBackend::from_hypervisor("mock");
+    let config = VmStartConfig {
+        name: "persistent-dispatch".into(),
+        rootfs_path: "/store/rootfs.ext4".into(),
+        ..Default::default()
+    };
+    let admitted = admit_for_run(
+        &fixture_input(&config.name),
+        &SystemClock,
+        &InMemoryNonceLedger::new(),
+        Some(dir.path()),
+        None,
+        RunPosture::on_backend(Variant::Dev, backend.kind()),
+    )
+    .unwrap();
+    let emitter = crate::audit::emitter::AuditEmitter::with_dir(
+        ed25519_dalek::SigningKey::from_bytes(&[42; 32]),
+        audit.path(),
+    )
+    .unwrap();
+    let started = start_persistent(
+        StartAdmittedParams {
+            backend: &backend,
+            admitted,
+            config: config.clone(),
+            policy_bundle: None,
+            emitter: Some(&emitter),
+            assurance: None,
+        },
+        None,
+        Vec::new(),
+    )
+    .expect("persistent dispatch starts without accepting");
+    assert_eq!(started.vm_id.0, config.name);
+    assert!(
+        config.plan_json.is_none(),
+        "the source config is not yet bound to the admitted plan"
+    );
+    let dispatched_plan =
+        mvm_core::plan::plan_from_admitted_json(started.config.plan_json.as_deref().unwrap())
+            .expect("the backend and post-start mailbox receive the admitted envelope");
+    assert_eq!(dispatched_plan.plan_id, started.admitted.plan_id().clone());
+    assert!(matches!(
+        backend.status(&started.vm_id).unwrap(),
+        mvm_core::vm_backend::VmStatus::Running
+    ));
+    let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).unwrap_or_default();
+    assert!(!chain.contains("plan.launched"), "{chain}");
+
+    let error = match start_persistent(
+        StartAdmittedParams {
+            backend: &second,
+            admitted: started.admitted,
+            config,
+            policy_bundle: None,
+            emitter: Some(&emitter),
+            assurance: None,
+        },
+        None,
+        Vec::new(),
+    ) {
+        Ok(_) => panic!("a persistent admission cannot dispatch again"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("already dispatched"),
+        "{error:#}"
+    );
+    assert!(!matches!(
+        second.status(&started.vm_id),
+        Ok(mvm_core::vm_backend::VmStatus::Running)
+    ));
+}
+
+#[test]
+fn persistent_dispatch_refuses_a_share_added_after_admission() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let dir = tempfile::tempdir().unwrap();
+    let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+    let mut config = VmStartConfig {
+        name: "persistent-unadmitted-share".into(),
+        rootfs_path: "/store/rootfs.ext4".into(),
+        ..Default::default()
+    };
+    let admitted = admit_for_run(
+        &fixture_input(&config.name),
+        &SystemClock,
+        &InMemoryNonceLedger::new(),
+        Some(dir.path()),
+        None,
+        RunPosture::on_backend(Variant::Dev, backend.kind()),
+    )
+    .unwrap();
+    config.volumes.push(mvm_core::vm_backend::VmVolume {
+        host: "/store/unadmitted-share".into(),
+        guest: "/mnt/unadmitted".into(),
+        read_only: true,
+        kind: mvm_core::vm_backend::VmVolumeKind::Disk,
+        ..Default::default()
+    });
+    let vm_id = mvm_core::vm_backend::VmId(config.name.clone());
+    let error = match start_persistent(
+        StartAdmittedParams {
+            backend: &backend,
+            admitted,
+            config,
+            policy_bundle: None,
+            emitter: None,
+            assurance: None,
+        },
+        None,
+        Vec::new(),
+    ) {
+        Ok(_) => panic!("an unadmitted share must refuse before dispatch"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("admitted-shares"), "{error:#}");
+    assert!(!matches!(
+        backend.status(&vm_id),
         Ok(mvm_core::vm_backend::VmStatus::Running)
     ));
 }
@@ -998,6 +1260,262 @@ fn an_admitted_boot_writes_the_achieved_tier_to_the_audit_chain() {
     assert!(
         !chain.contains("grants_memory_max_bytes") && !chain.contains("grants_tasks_max"),
         "a declared ceiling must not carry a value: {chain}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_transient_defers_launch_narrative_without_readmitting() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let dir = tempfile::tempdir().expect("test directory");
+    let backend = mvm_runtime::AnyBackend::Mock(
+        mvm_runtime::mock::MockBackend::new().with_failing_apply_grants(),
+    );
+    let config = VmStartConfig {
+        name: "cli-transient-deferred".into(),
+        rootfs_path: "/store/rootfs.ext4".into(),
+        ..Default::default()
+    };
+    let admitted = admit_for_run(
+        &fixture_input(&config.name),
+        &SystemClock,
+        &InMemoryNonceLedger::new(),
+        Some(dir.path()),
+        None,
+        RunPosture::on_backend(Variant::Dev, backend.kind()).with_runtime(Some(&config)),
+    )
+    .expect("one admission");
+    let vm_name = config.name.clone();
+    let audit_dir = dir.path().join("audit");
+    let emitter = crate::audit::emitter::AuditEmitter::with_dir(
+        ed25519_dalek::SigningKey::from_bytes(&[42; 32]),
+        &audit_dir,
+    )
+    .expect("emitter");
+    crate::audit::durability::record_admission(
+        Some(&emitter),
+        admitted.plan(),
+        admitted.signer_id(),
+        crate::audit::durability::AuditDurability::BestEffort,
+    )
+    .expect("admission record");
+    let started = start_cli_transient(
+        StartAdmittedParams {
+            backend: &backend,
+            admitted,
+            config,
+            policy_bundle: None,
+            emitter: Some(&emitter),
+            assurance: None,
+        },
+        None,
+        Vec::new(),
+    )
+    .expect("start without another admission");
+    assert_eq!(started, VmId(vm_name.clone()));
+    let chain = std::fs::read_to_string(audit_dir.join("local.jsonl")).expect("audit chain");
+    assert_eq!(chain.matches("plan.admitted").count(), 1, "{chain}");
+    assert!(!chain.contains("plan.launched"), "{chain}");
+    assert!(!chain.contains("plan.grants_enforced"), "{chain}");
+    assert!(
+        !mvm_core::config::vm_state_dir(&vm_name)
+            .join("admitted-charge.json")
+            .exists(),
+        "CLI cold start does not add a host-budget charge"
+    );
+    backend.stop(&started).expect("stop mock VM");
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_transient_gate_refusal_leaves_cli_failure_audit_to_the_caller() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let dir = tempfile::tempdir().expect("test directory");
+    let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+    let config = VmStartConfig {
+        name: "cli-transient-refusal".into(),
+        rootfs_path: "/store/rootfs.ext4".into(),
+        ..Default::default()
+    };
+    let admitted = admit_for_run(
+        &fixture_input(&config.name),
+        &SystemClock,
+        &InMemoryNonceLedger::new(),
+        Some(dir.path()),
+        None,
+        RunPosture::on_backend(Variant::Dev, backend.kind()).with_runtime(Some(&config)),
+    )
+    .expect("one admission");
+    let audit_dir = dir.path().join("audit");
+    let emitter = crate::audit::emitter::AuditEmitter::with_dir(
+        ed25519_dalek::SigningKey::from_bytes(&[43; 32]),
+        &audit_dir,
+    )
+    .expect("emitter");
+    crate::audit::durability::record_admission(
+        Some(&emitter),
+        admitted.plan(),
+        admitted.signer_id(),
+        crate::audit::durability::AuditDurability::BestEffort,
+    )
+    .expect("admission record");
+    let changed = VmStartConfig {
+        volumes: vec![mvm_core::vm_backend::VmVolume {
+            host: "/store/unadmitted-share".into(),
+            guest: "/mnt/unadmitted".into(),
+            size: String::new(),
+            read_only: true,
+            kind: mvm_core::vm_backend::VmVolumeKind::Disk,
+            materialized_image: None,
+            volume_label: None,
+            encrypted: false,
+            share_include: Vec::new(),
+            share_exclude: Vec::new(),
+        }],
+        ..config
+    };
+    let error = start_cli_transient(
+        StartAdmittedParams {
+            backend: &backend,
+            admitted,
+            config: changed,
+            policy_bundle: None,
+            emitter: Some(&emitter),
+            assurance: None,
+        },
+        None,
+        Vec::new(),
+    )
+    .expect_err("unadmitted share must refuse");
+    assert!(error.is::<CliStartFailure>(), "{error:#}");
+    let chain = std::fs::read_to_string(audit_dir.join("local.jsonl")).expect("audit chain");
+    assert_eq!(chain.matches("plan.admitted").count(), 1, "{chain}");
+    assert_eq!(chain.matches("plan.failed").count(), 0, "{chain}");
+    assert!(!chain.contains("plan.launched"), "{chain}");
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_transient_backend_start_refusal_leaves_cli_failure_audit_to_the_caller() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let dir = tempfile::tempdir().expect("test directory");
+    let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+    let config = VmStartConfig {
+        name: "cli-transient-start-refusal".into(),
+        rootfs_path: "/store/rootfs.ext4".into(),
+        ..Default::default()
+    };
+    let already_running = backend.start(&config).expect("mock occupied name");
+    let admitted = admit_for_run(
+        &fixture_input(&config.name),
+        &SystemClock,
+        &InMemoryNonceLedger::new(),
+        Some(dir.path()),
+        None,
+        RunPosture::on_backend(Variant::Dev, backend.kind()).with_runtime(Some(&config)),
+    )
+    .expect("one admission");
+    let audit_dir = dir.path().join("audit");
+    let emitter = crate::audit::emitter::AuditEmitter::with_dir(
+        ed25519_dalek::SigningKey::from_bytes(&[45; 32]),
+        &audit_dir,
+    )
+    .expect("emitter");
+    crate::audit::durability::record_admission(
+        Some(&emitter),
+        admitted.plan(),
+        admitted.signer_id(),
+        crate::audit::durability::AuditDurability::BestEffort,
+    )
+    .expect("admission record");
+    let error = start_cli_transient(
+        StartAdmittedParams {
+            backend: &backend,
+            admitted,
+            config,
+            policy_bundle: None,
+            emitter: Some(&emitter),
+            assurance: None,
+        },
+        None,
+        Vec::new(),
+    )
+    .expect_err("backend duplicate start must refuse");
+    assert!(
+        matches!(
+            error.downcast_ref::<CliStartFailure>(),
+            Some(CliStartFailure::Unrecorded(_))
+        ),
+        "{error:#}"
+    );
+    let chain = std::fs::read_to_string(audit_dir.join("local.jsonl")).expect("audit chain");
+    assert_eq!(chain.matches("plan.admitted").count(), 1, "{chain}");
+    assert_eq!(chain.matches("plan.failed").count(), 0, "{chain}");
+    assert!(!chain.contains("plan.launched"), "{chain}");
+    backend.stop(&already_running).expect("stop mock VM");
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_transient_uncertain_rollback_never_records_completed_failure() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let dir = tempfile::tempdir().expect("test directory");
+    let backend =
+        mvm_runtime::AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_failing_stop());
+    let config = VmStartConfig {
+        name: "cli-transient-uncertain".into(),
+        rootfs_path: "/store/rootfs.ext4".into(),
+        ..Default::default()
+    };
+    let admitted = admit_for_run(
+        &fixture_input(&config.name),
+        &SystemClock,
+        &InMemoryNonceLedger::new(),
+        Some(dir.path()),
+        None,
+        RunPosture::on_backend(Variant::Dev, backend.kind()).with_runtime(Some(&config)),
+    )
+    .expect("one admission");
+    let audit_dir = dir.path().join("audit");
+    let emitter = crate::audit::emitter::AuditEmitter::with_dir(
+        ed25519_dalek::SigningKey::from_bytes(&[44; 32]),
+        &audit_dir,
+    )
+    .expect("emitter");
+    crate::audit::durability::record_admission(
+        Some(&emitter),
+        admitted.plan(),
+        admitted.signer_id(),
+        crate::audit::durability::AuditDurability::BestEffort,
+    )
+    .expect("admission record");
+    let vm_id = backend.start(&config).expect("mock started");
+    let error = cli_rollback_error(undo_cli_launch(UndoLaunch {
+        backend: &backend,
+        vm_id: &vm_id,
+        admitted: &admitted,
+        emitter: None,
+        stage: "mailbox-process",
+        reason: "mailbox could not be served",
+        err: anyhow::anyhow!("mock mailbox refusal"),
+    }));
+    assert!(
+        matches!(
+            error.downcast_ref::<CliStartFailure>(),
+            Some(CliStartFailure::UncertainStop(_))
+        ),
+        "{error:#}"
+    );
+    let chain = std::fs::read_to_string(audit_dir.join("local.jsonl")).expect("audit chain");
+    assert_eq!(chain.matches("plan.admitted").count(), 1, "{chain}");
+    assert!(!chain.contains("plan.failed"), "{chain}");
+    assert!(!chain.contains("plan.launched"), "{chain}");
+    assert!(
+        matches!(
+            backend.status(&VmId(config.name)),
+            Ok(mvm_core::vm_backend::VmStatus::Running)
+        ),
+        "failed rollback retains the VM for custody"
     );
 }
 

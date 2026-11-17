@@ -307,6 +307,16 @@ pub fn mvm_config_dir_at(mvm_home: impl AsRef<std::path::Path>) -> std::path::Pa
     mvm_home.as_ref().join("config")
 }
 
+/// Durable committed project generations beneath the current MVM home.
+pub fn policy_generations_dir() -> std::path::PathBuf {
+    policy_generations_dir_at(mvm_home())
+}
+
+/// Durable committed project generations beneath an explicit MVM home.
+pub fn policy_generations_dir_at(home: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    home.as_ref().join("policy-generations")
+}
+
 /// The user's authored policy files: `<mvm_home>/config/policy`.
 ///
 /// Profiles live in `profiles/<name>.toml` and groups in `groups/<name>.toml`
@@ -2366,6 +2376,10 @@ mod tests {
         assert_eq!(
             mvm_config_dir_at(root),
             std::path::PathBuf::from("/isolated/mvm/config")
+        );
+        assert_eq!(
+            policy_generations_dir_at(root),
+            std::path::PathBuf::from("/isolated/mvm/policy-generations")
         );
         assert_eq!(
             mvm_keys_dir_at(root),

@@ -65,7 +65,7 @@ pub(crate) fn verify_release_files(archive: &Path, bundle: &Path, tag: &str) -> 
         )
     })?;
     let version = tag.strip_prefix('v').unwrap_or(tag);
-    mvm_build::release_signature::verify_release_archive_bytes(
+    mvm_client::release::verify_archive_bytes(
         &archive_bytes,
         &bundle_bytes,
         asset,

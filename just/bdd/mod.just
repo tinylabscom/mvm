@@ -53,9 +53,10 @@ live-ci TAG="ci_live":
     #
     # A launch boots only what its home already holds, so the live home is
     # prepared from bytes built here: the workload kernel below, and the host
-    # helpers mvmctl spawns per VM, built beside it so no launch compiles one.
+    # helpers mvmctl spawns, including the resident policy coordinator, built
+    # beside it so no launch compiles one.
     cargo build --bin mvmctl --features user,embed-host-bins
-    cargo build -p mvm-hostd --bin mvm-host-agent --bin mvm-signer-helper --bin mvm-network-endpoint
+    cargo build -p mvm-hostd --bin mvm-host-agent --bin mvm-policy-coordinator --bin mvm-signer-helper --bin mvm-network-endpoint
     "${CARGO_TARGET_DIR:-target}/debug/mvmctl" kernel build --which workload --source download
     @allowed_skips=outside-selected-tag; \
     if [ "${MVM_BDD_ALLOW_RUNTIME_CANDIDATE_SKIP:-false}" = true ] && [ -z "${MVM_E2E_RUNTIME_CANDIDATE_DIR:-}" ]; then allowed_skips="$allowed_skips,needs-runtime-candidate"; fi; \

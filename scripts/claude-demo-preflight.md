@@ -14,13 +14,33 @@ required options with independently obtained nonsecret release assertions:
 - `--release-commit`: full 40-character release commit assertion. This is
   recorded, not authenticated against a release tag by the script.
 - `--home` and `--mvm-home`: absolute isolated directories owned by the operator,
-  mode 0700, without symlinks. MVM_HOME must be inside HOME. Prepare only public
+  mode 0700, without symlinks. MVM_HOME must be strictly beneath `--home`, never
+  the ordinary account's `.mvm`. Prepare only public
   trust/configuration and the already-enrolled identity for the final executable.
   Enrollment and host-held binding readiness are not proved by this preflight.
 - `--descriptor-sha256`, `--archive-sha256`, `--archive-size`, `--key-id`:
   exact public `agent/claude@2.0.1` descriptor and independently trusted bundle
   assertions. No draft or local artifact is acceptable.
 - `--endpoint api.anthropic.com:443`: assertion only, not enforcement evidence.
+
+There are three distinct locations when opting into `--native-home`:
+
+- `--home` remains the private isolated state root, distinct from the account
+  home. `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_STATE_HOME` point to its
+  `.config`, `.cache` and `.state` children. All three must be absent, including
+  dangling symlinks, before preflight; prepared trust/binding stores are not traversed.
+- `--mvm-home` remains the private MVM state directory strictly beneath that root.
+  Existing cache/registry parent directories must also be private and non-symlink.
+- Optional `--native-home` is the existing macOS account home, obtained from the
+  current user's account database rather than ambient `HOME`. It must be absolute,
+  canonical, non-symlink and owned by that user; its permissions are not changed.
+  It changes **only the child process's `HOME`**, allowing the native adapter's
+  user-keychain discovery. Without this option, child `HOME` stays `--home`.
+
+This is opt-in discovery, not native ACL proof, enrollment, or permission to
+launch. It does not inspect or reconfigure the keychain, mount the host home
+into a guest, forward ambient secrets/proxies/registry overrides, or authorize
+cleanup. The canonical CLI admission path remains unchanged.
 
 Optional `--check-readiness` additionally requires `--caller-installation`,
 `--caller-public-key-sha256` (SHA-256 of the 32 raw public-key bytes) and

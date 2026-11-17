@@ -361,3 +361,39 @@ fn blocked_owner_callback_does_not_block_clients_or_control_worker_shutdown() {
     assert!(stop.load(Ordering::Acquire));
     assert_eq!(wire::read_instance("blocked-parent").unwrap(), instance);
 }
+
+#[test]
+fn stalled_authenticated_client_does_not_prevent_bounded_owner_shutdown() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let _home = home();
+    let (owner, stop) = control("stalled-client");
+    let instance = wire::read_instance("stalled-client").unwrap();
+    // Receiving the challenge proves the worker entered the exchange. Keep
+    // the socket open without sending a request while the owner shuts down.
+    let (stream, _) = challenge("stalled-client");
+    let (dropped, dropped_rx) = mpsc::sync_channel(1);
+    let shutdown = std::thread::spawn(move || {
+        drop(owner);
+        dropped.send(()).unwrap();
+    });
+    let bounded = dropped_rx
+        .recv_timeout(wire::CONNECTION_BUDGET + Duration::from_secs(1))
+        .is_ok();
+    // Release the stalled peer before joining even if the deadline failed.
+    drop(stream);
+    shutdown.join().unwrap();
+    assert!(
+        bounded,
+        "shutdown must not wait indefinitely for a stop frame"
+    );
+    assert!(stop.load(Ordering::Acquire));
+    assert_eq!(wire::read_instance("stalled-client").unwrap(), instance);
+    assert!(
+        !wire::state_dir("stalled-client")
+            .unwrap()
+            .join(wire::FINALIZED_FILE)
+            .exists()
+    );
+}

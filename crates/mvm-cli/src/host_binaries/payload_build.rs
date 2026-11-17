@@ -294,7 +294,11 @@ pub(crate) fn apply_nested_rust_env(
         // The outer nightly's frontend flags are incompatible with the pinned
         // stable compiler used for reproducible embedded binaries.
         .env_remove("RUSTFLAGS")
-        .env_remove("CARGO_ENCODED_RUSTFLAGS");
+        // Only the flag that silences zig's "ignoring deprecated linker
+        // optimization setting '1'" notice, which rustc reprints as a warning
+        // under every binary: it is zig's message about the `-Wl,-O1` rustc
+        // passes, not a problem in the code.
+        .env("CARGO_ENCODED_RUSTFLAGS", "-Alinker-messages");
     // Empty values normally prevent a global compiler wrapper from leaking
     // into the reproducible nested build. On macOS the pinned rust-objcopy
     // binary needs the sysroot loader wrapper after nested Cargo reconstructs
@@ -573,7 +577,10 @@ mod tests {
             Some(&Some(String::new()))
         );
         assert_eq!(env.get("RUSTFLAGS"), Some(&None));
-        assert_eq!(env.get("CARGO_ENCODED_RUSTFLAGS"), Some(&None));
+        assert_eq!(
+            env.get("CARGO_ENCODED_RUSTFLAGS"),
+            Some(&Some("-Alinker-messages".to_string()))
+        );
         assert_eq!(env.get("RUSTUP_TOOLCHAIN"), Some(&None));
     }
 

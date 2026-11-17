@@ -74,6 +74,8 @@ pub mod panic_hook;
 /// spawn-side `PR_SET_PDEATHSIG` attach leaves open.
 pub mod parent_death;
 pub mod plan_admission;
+/// Candidate and committed local project-policy generation validation.
+pub mod policy_generation;
 /// The prelaunched-supervisor attach verify+merge. Pure (no VM, no
 /// `start_enter`) so the rejection ladder is unit-testable.
 pub mod prelaunch;

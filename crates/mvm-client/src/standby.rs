@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use mvm_core::vm_backend::{StandbyHandle, StandbyState};
+pub use mvm_runtime::backend::OwnedWarmClaim;
 pub use mvm_runtime::standby_pool::{STANDBY_POOL_TTL, SupervisorStandbyPool};
 
 /// How often the idle watcher looks at the pool.

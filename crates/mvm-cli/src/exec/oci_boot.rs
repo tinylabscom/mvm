@@ -11,13 +11,13 @@
 //!
 //! The answer is read off what the run boots, not off which flag named it: a
 //! rootfs materialized from an image carries a sidecar that says so
-//! ([`mvm_build::builder_vm::GuestSidecar::is_oci_materialized`]), whether it
+//! ([`mvm_client::build_types::GuestSidecar::is_oci_materialized`]), whether it
 //! came from `--image`, a manifest's `image`, or a slot a pack installed.
 
 use std::path::Path;
 
 use anyhow::Result;
-use mvm_build::builder_vm::GuestSidecar;
+use mvm_client::build_types::GuestSidecar;
 
 use super::ImageSource;
 
@@ -224,7 +224,7 @@ mod tests {
                 kernel: project.join("vmlinux"),
                 image_ref: "alpine:3.20".into(),
             },
-            mvm_build::pipeline::BuildMode::Dev,
+            mvm_client::build_types::BuildMode::Dev,
         )
         .unwrap();
         manifest_path.display().to_string()

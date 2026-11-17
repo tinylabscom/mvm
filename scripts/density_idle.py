@@ -155,15 +155,19 @@ class Libproc:
         fd_bytes = self.lib.proc_pidinfo(pid, PROC_PIDLISTFDS, 0, None, 0)
         if fd_bytes < 0:
             raise OSError(ctypes.get_errno(), "proc_pidinfo listfds")
-        usage = ctypes.create_string_buffer(1024)
-        if self.lib.proc_pid_rusage(pid, RUSAGE_INFO_V4, usage) != 0:
-            raise OSError(ctypes.get_errno(), "proc_pid_rusage")
         return (
             task.threads,
             fd_bytes // FD_INFO_BYTES,
             round((task.user + task.system) * self.nanoseconds_per_tick),
-            wakeups_from_rusage(usage.raw),
+            wakeups_from_rusage(self.rusage(pid)),
         )
+
+    def rusage(self, pid: int) -> bytes:
+        """Return the kernel's rusage_info_v4 bytes, shared by idle and memory sampling."""
+        usage = ctypes.create_string_buffer(1024)
+        if self.lib.proc_pid_rusage(pid, RUSAGE_INFO_V4, usage) != 0:
+            raise OSError(ctypes.get_errno(), "proc_pid_rusage")
+        return usage.raw
 
 
 def wakeups_from_rusage(raw: bytes) -> int:

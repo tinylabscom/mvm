@@ -39,9 +39,19 @@ pub(super) fn undo_launch(undo: UndoLaunch<'_>) -> anyhow::Error {
     )
 }
 
+pub(super) fn undo_cli_launch(undo: UndoLaunch<'_>) -> anyhow::Error {
+    let backend = undo.backend;
+    let vm_id = undo.vm_id;
+    undo_launch_with(
+        undo,
+        || backend.stop(vm_id).map(|_| ()),
+        FailureAuditPolicy::OwnedAfterConfirmedRollback,
+    )
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("{primary:#}; rollback remains unconfirmed: {stop:#}")]
-struct UndoLaunchFailure {
+pub(super) struct UndoLaunchFailure {
     #[source]
     primary: anyhow::Error,
     stop: anyhow::Error,

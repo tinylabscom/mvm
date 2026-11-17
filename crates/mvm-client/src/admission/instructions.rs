@@ -144,7 +144,7 @@ fn boot_inputs(
             .iter()
             .filter_map(|asset| match asset {
                 AssetSpec::File { host_path, .. } => Some(PathBuf::from(host_path)),
-                AssetSpec::RegistryPack(_) => None,
+                AssetSpec::RegistryPack(_) | AssetSpec::CommittedPolicy(_) => None,
             })
             .collect(),
         workload_dir: sources.workload_dir.map(Path::to_path_buf),

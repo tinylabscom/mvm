@@ -198,7 +198,9 @@ pub fn discard_local_piece(
     arch: GuestArch,
     piece: RuntimePiece,
 ) -> std::io::Result<()> {
-    match std::fs::remove_dir_all(piece.local_dir(cache_root, version, arch)) {
+    let dir = piece.local_dir(cache_root, version, arch);
+    let _owner = crate::cache_install::lock_artifact_dir(&dir)?;
+    match std::fs::remove_dir_all(dir) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
         _ => Ok(()),
     }
@@ -369,6 +371,107 @@ mod tests {
 
     fn digest(byte: char) -> String {
         byte.to_string().repeat(64)
+    }
+
+    #[test]
+    fn assembly_waits_for_each_target_owner() {
+        use mvm_core::util::atomic_io::FileLock;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        const VERSION: &str = "9.9.9";
+        let installed = tempfile::tempdir().unwrap();
+        let archive =
+            crate::guest_runtime::release_fixture::write_release_archive(installed.path(), VERSION);
+        let store = tempfile::tempdir().unwrap();
+        let arch = GuestArch::host();
+        let runtime = crate::guest_runtime::install_release_guest_runtime(
+            store.path(),
+            &archive,
+            VERSION,
+            arch,
+        )
+        .unwrap();
+
+        for piece in RuntimePiece::ALL {
+            let cache = tempfile::tempdir().unwrap();
+            let target = piece.local_dir(cache.path(), VERSION, arch);
+            let assemble = |runtime: &GuestRuntime| -> Result<(), AssembleError> {
+                match piece {
+                    RuntimePiece::RuntimeOverlay => {
+                        crate::runtime_overlay::build_runtime_overlay_from_guest_runtime(
+                            cache.path(),
+                            VERSION,
+                            arch,
+                            runtime,
+                        )?;
+                    }
+                    RuntimePiece::Initramfs => {
+                        crate::initramfs::build_initramfs_from_guest_runtime(
+                            &initramfs_cache_root(cache.path()),
+                            VERSION,
+                            arch,
+                            runtime,
+                        )?;
+                    }
+                    RuntimePiece::SdkSidecar(libc) => {
+                        crate::sdk_sidecar::build_sdk_sidecar_from_guest_runtime(
+                            cache.path(),
+                            VERSION,
+                            arch,
+                            libc,
+                            runtime,
+                        )?;
+                    }
+                }
+                Ok(())
+            };
+            let owner = FileLock::acquire(&target).unwrap();
+            let (started, starts) = mpsc::channel();
+            let (completed, completions) = mpsc::channel();
+            let (early, a, b) = std::thread::scope(|scope| {
+                let caller = || {
+                    started.send(()).unwrap();
+                    let result = assemble(&runtime);
+                    completed.send(()).unwrap();
+                    result
+                };
+                let a = scope.spawn(caller);
+                let b = scope.spawn(caller);
+                for _ in 0..2 {
+                    starts.recv_timeout(Duration::from_secs(30)).unwrap();
+                }
+                let early = completions.recv_timeout(Duration::from_secs(1));
+                drop(owner);
+                (early, a.join().unwrap(), b.join().unwrap())
+            });
+            assert!(
+                matches!(early, Err(mpsc::RecvTimeoutError::Timeout)),
+                "{} assembled while another caller owned its target: {early:?}",
+                piece.label(),
+            );
+            a.unwrap();
+            b.unwrap();
+            assert_eq!(
+                archive_origin(&target).unwrap(),
+                Some(runtime.digest.clone()),
+                "{} lost its provenance",
+                piece.label(),
+            );
+
+            // Reuse must not replace the directory a successful caller returned.
+            let retained = target.join("retained");
+            std::fs::write(&retained, b"existing generation").unwrap();
+            assemble(&runtime).unwrap();
+            assert_eq!(std::fs::read(&retained).unwrap(), b"existing generation");
+
+            let mut invalid = runtime.clone();
+            invalid.digest = digest('e');
+            invalid.manifest.files.clear();
+            assert!(assemble(&invalid).is_err());
+            assemble(&runtime).unwrap();
+            assert_eq!(std::fs::read(&retained).unwrap(), b"existing generation");
+        }
     }
 
     #[test]

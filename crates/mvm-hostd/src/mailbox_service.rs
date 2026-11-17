@@ -178,6 +178,21 @@ impl GuestSealer {
         Ok((capability, envelope))
     }
 
+    pub(super) fn retained_intent(
+        &self,
+        message: &OutboxMessage,
+    ) -> Result<Option<(SignedMailboxCapability, MailboxEnvelope)>, Refusal> {
+        let Some(dir) = &self.intent_dir else {
+            return Ok(None);
+        };
+        let path = dir.join(hex::encode(message.message_id.as_bytes()));
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => self.read_intent(&path, message).map(Some),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(Refusal::Unavailable),
+        }
+    }
+
     fn read_intent(
         &self,
         path: &Path,
@@ -382,6 +397,15 @@ impl Shared {
         let message = state.queue.pop_front();
         state.read += u64::from(message.is_some());
         (message, state.accepted, state.read)
+    }
+
+    /// Put a taken message back at the head, as if it had never been read.
+    /// A concurrent admission may have used the freed slot, so the queue can
+    /// briefly hold one past `max_depth`.
+    fn restore(&self, message: Vec<u8>) {
+        let mut state = self.state.lock().unwrap();
+        state.queue.push_front(message);
+        state.read -= 1;
     }
 }
 
@@ -727,25 +751,33 @@ fn serve_peer(shared: &Shared, mut stream: UnixStream) {
     };
     match frame {
         Ok(body) if body.first() == Some(&b'{') => {
-            let reply = serde_json::from_slice::<HostRequest>(&body)
-                .map(
-                    |HostRequest {
-                         request: RequestKind::Recv,
-                     }| {
-                        let (message, accepted, read) = shared.take();
-                        Received {
-                            message: message.map(hex::encode),
-                            accepted,
-                            read,
-                        }
-                    },
-                )
-                .map_err(|_| Refusal::Malformed);
-            reply_with(&mut stream, &reply);
+            match serde_json::from_slice::<HostRequest>(&body) {
+                Ok(HostRequest {
+                    request: RequestKind::Recv,
+                }) => serve_recv(shared, &mut stream),
+                Err(_) => {
+                    let _ = reply_with(&mut stream, &Err::<Received, _>(Refusal::Malformed));
+                }
+            }
         }
         frame => {
             let _ = answer(shared, &mut stream, frame, decode_frame);
         }
+    }
+}
+
+/// Hand out the oldest message, keeping it queued unless the reply was written.
+fn serve_recv(shared: &Shared, out: &mut impl Write) {
+    let (message, accepted, read) = shared.take();
+    let reply = Received {
+        message: message.as_deref().map(hex::encode),
+        accepted,
+        read,
+    };
+    if reply_with(out, &Ok::<_, Refusal>(reply)).is_err()
+        && let Some(message) = message
+    {
+        shared.restore(message);
     }
 }
 
@@ -763,14 +795,15 @@ fn answer(
     let verdict = frame
         .and_then(|body| prepare(&body))
         .and_then(|(capability, envelope)| admit(shared, &capability, &envelope));
-    reply_with(stream, &verdict);
+    let _ = reply_with(stream, &verdict);
     verdict
 }
 
-fn reply_with<T: serde::Serialize>(stream: &mut UnixStream, reply: &Result<T, Refusal>) {
-    if let Ok(reply) = serde_json::to_vec(reply) {
-        let _ = stream.write_all(&reply);
-    }
+fn reply_with<T: serde::Serialize>(
+    out: &mut impl Write,
+    reply: &Result<T, Refusal>,
+) -> std::io::Result<()> {
+    out.write_all(&serde_json::to_vec(reply)?)
 }
 
 /// `None` means the peer sent not one byte (hung up, reset or timed out), so
@@ -868,6 +901,7 @@ mod accept_loop_tests {
             epoch: ExecutionEpoch::new(1).unwrap(),
             report: None,
             retention: None,
+            service_blind: None,
         };
         let (trust, _) = crate::mailbox_launch::host_trust(dir, &grant, &test_secret()).unwrap();
         let limits = MailboxLimits {
@@ -975,6 +1009,55 @@ mod accept_loop_tests {
         let got = exchange(&framed, |s| serve_peer(&service.shared, s));
         assert!(!got.is_empty());
     }
+
+    struct FailingWriter;
+    impl Write for FailingWriter {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn queue_two(service: &MailboxService) {
+        let mut state = service.shared.state.lock().unwrap();
+        state.queue.extend([b"one".to_vec(), b"two".to_vec()]);
+        state.accepted = 2;
+    }
+
+    fn recv_via(service: &MailboxService, out: &mut impl Write) {
+        serve_recv(&service.shared, out);
+    }
+
+    #[test]
+    fn a_failed_recv_reply_leaves_the_message_queued_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = service(dir.path());
+        queue_two(&service);
+        recv_via(&service, &mut FailingWriter);
+        {
+            let state = service.shared.state.lock().unwrap();
+            assert_eq!((state.accepted, state.read), (2, 0));
+        }
+        assert_eq!(service.receive().as_deref(), Some(&b"one"[..]));
+        assert_eq!(service.receive().as_deref(), Some(&b"two"[..]));
+    }
+
+    #[test]
+    fn a_delivered_recv_reply_consumes_the_message_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = service(dir.path());
+        queue_two(&service);
+        let mut out = Vec::new();
+        recv_via(&service, &mut out);
+        let got: Result<Received, Refusal> = serde_json::from_slice(&out).unwrap();
+        let got = got.unwrap();
+        assert_eq!(got.message, Some(hex::encode(b"one")));
+        assert_eq!((got.accepted, got.read), (2, 1));
+        assert_eq!(service.receive().as_deref(), Some(&b"two"[..]));
+        assert_eq!(service.receive(), None);
+    }
 }
 
 #[cfg(test)]
@@ -998,6 +1081,7 @@ mod tests {
             epoch,
             report: None,
             retention: None,
+            service_blind: None,
         }
     }
 

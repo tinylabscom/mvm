@@ -67,7 +67,7 @@ pub(super) fn stage0_status_check() -> Check {
 pub(super) fn builder_store_check() -> Check {
     // The repair dry-run is a pure read: it returns (existed, bytes, path)
     // without removing anything.
-    let info = match mvm_build::builder_vm::clear_builder_store(true) {
+    let info = match mvm_client::diagnostics::builder_store_footprint() {
         Ok(s) if s.existed => format!(
             "present ({:.1} GiB) at {} — if `mvmctl bootstrap` fails with a dangling-store \
              error, run `mvmctl cache repair`",
@@ -95,8 +95,10 @@ const BUILDER_EGRESS_POSTURE: &str = "egress is locked on the deps-install arm (
 /// Map a parsed network-bootstrap outcome to its `Check` body.
 /// Pure so the classification → report mapping is unit-testable without
 /// touching the filesystem.
-fn builder_egress_check_from_outcome(outcome: mvm_build::guest_net::BuilderNetBootstrap) -> Check {
-    use mvm_build::guest_net::BuilderNetBootstrap;
+fn builder_egress_check_from_outcome(
+    outcome: mvm_client::diagnostics::BuilderNetBootstrap,
+) -> Check {
+    use mvm_client::diagnostics::BuilderNetBootstrap;
     // The check name is already "builder egress", and the renderer prints
     // it as `builder egress: <status> (<info>)` — so the info body omits
     // the redundant prefix and leads with the outcome.
@@ -149,7 +151,7 @@ pub(super) fn builder_egress_check() -> Check {
             info: "no builder VM yet (run `mvmctl bootstrap`)".to_string(),
         };
     };
-    let outcome = mvm_build::guest_net::classify_builder_net_bootstrap(&contents);
+    let outcome = mvm_client::diagnostics::classify_builder_net_bootstrap(&contents);
     builder_egress_check_from_outcome(outcome)
 }
 
@@ -175,18 +177,12 @@ fn builderd_daemon_summary(vms_root: &std::path::Path, timeout: std::time::Durat
         // A builder VM may be libkrun (`<dir>/vsock-<port>.sock`) or HVF
         // (`<dir>/vsock/vsock-<port>.sock`); probe whichever socket the
         // backend actually created.
-        let Some(sock) = mvm_build::builderd_client::builderd_control_socket_candidates(&dir)
-            .into_iter()
-            .find(|p| p.exists())
+        let Some(summary) = mvm_client::diagnostics::builderd_readiness_summary(&dir, timeout)
         else {
             continue;
         };
         let name = entry.file_name().to_string_lossy().into_owned();
-        let readiness = mvm_build::builderd_client::probe_builderd_readiness(&sock, timeout);
-        lines.push(format!(
-            "{name}: {}",
-            mvm_build::builderd_client::readiness_summary(&readiness)
-        ));
+        lines.push(format!("{name}: {summary}"));
     }
     lines.sort();
     if lines.is_empty() {
@@ -197,7 +193,7 @@ fn builderd_daemon_summary(vms_root: &std::path::Path, timeout: std::time::Durat
 
 /// Resident builder-daemon readiness. Informational.
 pub(super) fn builderd_daemon_check() -> Check {
-    let vms_root = mvm_build::builder_vm::builder_vm_cache_dir().join("vms");
+    let vms_root = mvm_client::maintenance::builder_vm_cache_dir().join("vms");
     Check {
         name: "builder daemon",
         category: "platform",
@@ -213,8 +209,8 @@ pub(super) fn builderd_daemon_check() -> Check {
 /// It also marks the remaining guest-NIC-based paths as legacy/unsupported for
 /// the production vsock-only architecture.
 pub(super) fn builder_transport_check(plat: Platform) -> Check {
-    use mvm_build::builder_backend_select::BuilderBackendChoice;
-    let choice = mvm_build::builder_backend_select::resolve_choice(None);
+    use mvm_client::diagnostics::BuilderBackendChoice;
+    let choice = mvm_client::diagnostics::resolved_builder_backend();
     let info = match choice {
         BuilderBackendChoice::Hvf | BuilderBackendChoice::Firecracker => {
             "vsock-only host/guest transport; no builder guest NIC, no DHCP or gateway bootstrap"
@@ -270,19 +266,19 @@ fn builder_backend_check_for(
     is_macos_apple_silicon: bool,
     is_hvf_default_tier: bool,
 ) -> Check {
-    use mvm_build::builder_backend_select::{
+    use mvm_client::diagnostics::{
         BuilderBackendChoice, MVM_BUILDER_BACKEND_ENV, MVM_LINUX_BUILDER_VM_ENV,
-        auto_detect_default_for, linux_builder_vm_requested, resolve_env_override,
+        auto_detected_builder_backend, builder_backend_env_override, linux_builder_vm_requested,
     };
 
-    let env_override = resolve_env_override();
+    let env_override = builder_backend_env_override();
     // Derive the whole line from the `plat` we were handed, not from a second,
     // independent probe of the live host. `auto_detect_default()` re-probes;
     // using it here made the backend half of this line describe the real host
     // while the availability half described `plat`, so the two could disagree
     // and the report would be internally inconsistent. It also made the
     // function untestable for any platform other than the one running it.
-    let auto = auto_detect_default_for(plat, is_macos_apple_silicon, is_hvf_default_tier);
+    let auto = auto_detected_builder_backend(plat, is_macos_apple_silicon, is_hvf_default_tier);
     let resolved = env_override.unwrap_or(auto);
 
     // Best-effort: detect whether the override came from the
@@ -370,8 +366,8 @@ pub(super) fn boot_image_acquisition_check() -> Check {
 }
 
 fn boot_image_acquisition_check_with(pair_selected: Option<String>, source_build: bool) -> Check {
-    use mvm_build::boot_image_select::{BootImageAcquisition, resolve};
-    let resolved = resolve(None, source_build);
+    use mvm_client::diagnostics::{BootImageAcquisition, resolved_boot_image};
+    let resolved = resolved_boot_image(source_build);
 
     // The arm can be chosen and still be unsatisfiable: `build` without an
     // image checkout has nothing to build from. Say so here rather than
@@ -420,7 +416,7 @@ fn boot_image_acquisition_check_with(pair_selected: Option<String>, source_build
 /// Read from each backend's own `capabilities()`, so this table cannot
 /// disagree with what the backend will do.
 pub(super) fn builder_capabilities_check() -> Check {
-    use mvm_build::builder_backend_select::{BuilderBackendChoice, declared_capabilities};
+    use mvm_client::diagnostics::{BuilderBackendChoice, declared_builder_capabilities};
 
     let rows: Vec<String> = [
         BuilderBackendChoice::Libkrun,
@@ -430,7 +426,7 @@ pub(super) fn builder_capabilities_check() -> Check {
     ]
     .into_iter()
     .map(|choice| {
-        let caps = declared_capabilities(choice);
+        let caps = declared_builder_capabilities(choice);
         format!(
             "{}: bootstrap={} deps-install={}",
             choice.name(),
@@ -466,10 +462,10 @@ pub(super) fn builder_residency_check() -> Check {
     } else {
         "ephemeral per build (cold)"
     };
-    let vms_root = mvm_build::builder_vm::builder_vm_cache_dir().join("vms");
+    let vms_root = mvm_client::maintenance::builder_vm_cache_dir().join("vms");
     let session = builder_residency_session_summary(
         policy.kind(),
-        mvm_build::persistent_builder::read_active_session().is_some(),
+        mvm_client::diagnostics::builder_session_is_active(),
         builder_parked_snapshot_present(&vms_root),
     );
     Check {
@@ -565,7 +561,7 @@ mod tests {
 
     #[test]
     fn builder_egress_lease_is_ok_and_names_ip() {
-        use mvm_build::guest_net::BuilderNetBootstrap;
+        use mvm_client::diagnostics::BuilderNetBootstrap;
         let c = builder_egress_check_from_outcome(BuilderNetBootstrap::Lease {
             ip: "192.168.127.3".to_string(),
         });
@@ -579,7 +575,7 @@ mod tests {
 
     #[test]
     fn builder_egress_static_fallback_is_ok_but_degraded() {
-        use mvm_build::guest_net::BuilderNetBootstrap;
+        use mvm_client::diagnostics::BuilderNetBootstrap;
         let c = builder_egress_check_from_outcome(BuilderNetBootstrap::StaticFallback {
             ip: "192.168.127.3".to_string(),
         });
@@ -590,7 +586,7 @@ mod tests {
 
     #[test]
     fn builder_egress_failed_is_not_ok() {
-        use mvm_build::guest_net::BuilderNetBootstrap;
+        use mvm_client::diagnostics::BuilderNetBootstrap;
         let c = builder_egress_check_from_outcome(BuilderNetBootstrap::Failed);
         assert!(!c.ok);
         assert!(c.info.contains("FAILED"));
@@ -599,7 +595,7 @@ mod tests {
 
     #[test]
     fn builder_egress_unknown_is_ok() {
-        use mvm_build::guest_net::BuilderNetBootstrap;
+        use mvm_client::diagnostics::BuilderNetBootstrap;
         let c = builder_egress_check_from_outcome(BuilderNetBootstrap::Unknown);
         assert!(c.ok);
         assert!(c.info.contains("not yet recorded"));

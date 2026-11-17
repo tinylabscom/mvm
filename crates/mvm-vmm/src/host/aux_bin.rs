@@ -192,15 +192,130 @@ pub(crate) fn resolve_verified_in(
         };
     }
     let resolved = resolve_from(spec, lookup)?;
+    if probe_memo_accepts(env, spec, &resolved) {
+        return Ok(resolved);
+    }
     match probe_contract(&resolved, env.probe_timeout) {
         ProbeOutcome::Answered(version)
             if version == helper_contract::HOST_HELPER_CONTRACT_VERSION =>
         {
+            record_probe_memo(env, spec, &resolved);
             Ok(resolved)
         }
         stale => recover_stale_helper(spec, lookup, env, &resolved, &stale),
     }
 }
+
+/// A remembered outcome of executing a helper's contract probe: the exact
+/// file that answered, the version it answered with, and an identity stamp of
+/// its bytes. The probe's answer is a property of the file alone (env hygiene
+/// gives the probe a scrubbed environment, and the probe flag is handled
+/// before anything else in the helper), so the same bytes answer the same
+/// version every time. Remembering the outcome turns a per-launch exec of a
+/// multi-megabyte binary into a stat comparison; any drift in the stamp —
+/// including the contract version this build expects changing — re-probes.
+///
+/// This memoizes a compatibility check, never an authorization decision: a
+/// mismatch or a missing memo falls back to executing the probe exactly as
+/// before, and a file that would fail the probe cannot be made to pass by a
+/// memo, because changing its bytes changes the stamp.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct ProbeMemo {
+    memo_version: u32,
+    path: PathBuf,
+    contract_version: u32,
+    stamp: FileStamp,
+}
+
+/// What identifies one exact state of a file's bytes for memo matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct FileStamp {
+    len: u64,
+    /// Nanoseconds since the Unix epoch; epoch-ns fits an `i64` until 2262.
+    mtime_ns: i64,
+    ctime_ns: i64,
+    inode: Option<u64>,
+}
+
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let ns_since_epoch = |time: std::io::Result<std::time::SystemTime>| {
+        time.ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
+    };
+    let mtime_ns = ns_since_epoch(metadata.modified())?;
+    #[cfg(unix)]
+    let (ctime_ns, inode) =
+        unix_stamp_ext(&metadata).map(|(ctime_ns, inode)| (ctime_ns, Some(inode)))?;
+    #[cfg(not(unix))]
+    let (ctime_ns, inode) = (mtime_ns, None);
+    Some(FileStamp {
+        len: metadata.len(),
+        mtime_ns,
+        ctime_ns,
+        inode,
+    })
+}
+
+#[cfg(unix)]
+fn unix_stamp_ext(metadata: &std::fs::Metadata) -> Option<(i64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let ctime_ns = metadata
+        .ctime()
+        .checked_mul(1_000_000_000)?
+        .checked_add(metadata.ctime_nsec())?;
+    Some((ctime_ns, metadata.ino()))
+}
+
+fn probe_memo_path(memo_dir: &Path, bin: &str) -> PathBuf {
+    memo_dir.join(format!("{bin}.json"))
+}
+
+fn probe_memo_accepts(env: &VerifyEnv, spec: &AuxBin<'_>, resolved: &Path) -> bool {
+    let Some(memo_dir) = &env.probe_memo_dir else {
+        return false;
+    };
+    let Ok(bytes) = std::fs::read(probe_memo_path(memo_dir, spec.bin)) else {
+        return false;
+    };
+    let Ok(memo) = serde_json::from_slice::<ProbeMemo>(&bytes) else {
+        return false;
+    };
+    memo.memo_version == PROBE_MEMO_VERSION
+        && memo.contract_version == helper_contract::HOST_HELPER_CONTRACT_VERSION
+        && memo.path == resolved
+        && Some(memo.stamp) == file_stamp(resolved)
+}
+
+/// Remember a probe that just succeeded, best effort: the memo is a cache,
+/// so a write failure only means the next launch re-probes.
+fn record_probe_memo(env: &VerifyEnv, spec: &AuxBin<'_>, resolved: &Path) {
+    let (Some(memo_dir), Some(stamp)) = (&env.probe_memo_dir, file_stamp(resolved)) else {
+        return;
+    };
+    let memo = ProbeMemo {
+        memo_version: PROBE_MEMO_VERSION,
+        path: resolved.to_path_buf(),
+        contract_version: helper_contract::HOST_HELPER_CONTRACT_VERSION,
+        stamp,
+    };
+    let Ok(bytes) = serde_json::to_vec(&memo) else {
+        return;
+    };
+    if std::fs::create_dir_all(memo_dir).is_err() {
+        return;
+    }
+    let temp = memo_dir.join(format!(".{}.{}.tmp", spec.bin, std::process::id()));
+    if std::fs::write(&temp, bytes).is_ok() {
+        let _ = std::fs::rename(&temp, probe_memo_path(memo_dir, spec.bin));
+    } else {
+        let _ = std::fs::remove_file(&temp);
+    }
+}
+
+const PROBE_MEMO_VERSION: u32 = 1;
 
 /// How a helper answered (or failed to answer) the contract probe.
 enum ProbeOutcome {
@@ -355,6 +470,9 @@ pub(crate) struct VerifyEnv {
     /// `cargo` used for an automatic build.
     cargo: PathBuf,
     probe_timeout: Duration,
+    /// Where remembered contract-probe outcomes live; `None` disables the
+    /// memo (every resolution executes the probe).
+    probe_memo_dir: Option<PathBuf>,
     signer: Box<dyn HelperSigner>,
     /// Where the line announcing a helper build goes.
     notice: Box<dyn Fn(&str)>,
@@ -376,6 +494,9 @@ impl VerifyEnv {
                 .filter(|cargo| !cargo.is_empty())
                 .map_or_else(|| PathBuf::from("cargo"), PathBuf::from),
             probe_timeout: PROBE_TIMEOUT,
+            probe_memo_dir: Some(
+                PathBuf::from(mvm_core::config::mvm_cache_dir()).join("aux-bin-probe"),
+            ),
             signer: Box::new(Codesign),
             // Stderr, above any live status line, so neither a JSON verb's
             // stdout nor the spinner of the phase that needed the helper is
@@ -970,6 +1091,7 @@ mod tests {
             source_builds: false,
             cargo: PathBuf::from("cargo"),
             probe_timeout: PROBE_TIMEOUT,
+            probe_memo_dir: None,
             signer: Box::new(RecordingSigner::default()),
             notice: Box::new(|_| {}),
         }
@@ -1094,6 +1216,147 @@ mod tests {
         )
         .unwrap();
         assert_eq!(got, bin);
+    }
+
+    /// A helper that answers the probe and records every execution in `log`,
+    /// so a test can tell a probe exec from a memo hit.
+    fn counting_helper(bin: &str, version: u32, log: &Path) -> String {
+        format!(
+            "#!/bin/sh\necho ran >> '{log}'\nprintf '%s\\n' '{bin} contract-version={version}'\n",
+            log = log.display(),
+        )
+    }
+
+    fn probe_runs(log: &Path) -> usize {
+        std::fs::read_to_string(log)
+            .map(|text| text.lines().count())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn a_successful_probe_is_remembered_and_reused_while_the_helper_is_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let probe_log = tmp.path().join("probe-ran");
+        let bin = tmp.path().join("mvm-hvf-supervisor");
+        write_exe(
+            &bin,
+            &counting_helper(
+                "mvm-hvf-supervisor",
+                helper_contract::HOST_HELPER_CONTRACT_VERSION,
+                &probe_log,
+            ),
+        );
+        let lookup = Lookup {
+            override_path: None,
+            dirs: vec![tmp.path().to_path_buf()],
+        };
+        let mut env = test_env(None);
+        env.probe_memo_dir = Some(tmp.path().join("memo"));
+
+        let first = resolve_verified_in(&hvf_spec(), &lookup, &env).unwrap();
+        assert_eq!(first, bin);
+        assert_eq!(probe_runs(&probe_log), 1, "the first resolve must probe");
+
+        let second = resolve_verified_in(&hvf_spec(), &lookup, &env).unwrap();
+        assert_eq!(second, bin);
+        assert_eq!(
+            probe_runs(&probe_log),
+            1,
+            "an unchanged helper must be answered from the memo"
+        );
+    }
+
+    #[test]
+    fn a_changed_helper_is_reprobed_despite_a_remembered_outcome() {
+        let tmp = tempfile::tempdir().unwrap();
+        let probe_log = tmp.path().join("probe-ran");
+        let bin = tmp.path().join("mvm-hvf-supervisor");
+        write_exe(
+            &bin,
+            &counting_helper(
+                "mvm-hvf-supervisor",
+                helper_contract::HOST_HELPER_CONTRACT_VERSION,
+                &probe_log,
+            ),
+        );
+        let lookup = Lookup {
+            override_path: None,
+            dirs: vec![tmp.path().to_path_buf()],
+        };
+        let mut env = test_env(None);
+        env.probe_memo_dir = Some(tmp.path().join("memo"));
+
+        resolve_verified_in(&hvf_spec(), &lookup, &env).unwrap();
+        assert_eq!(probe_runs(&probe_log), 1);
+
+        // Same name, different-length bytes, so the length half of the stamp
+        // differs even on filesystems whose timestamp granularity would let
+        // two quick rewrites share a tick: the stamp must not match, and the
+        // stale answer must be discovered by a fresh probe rather than
+        // trusted from the memo.
+        write_exe(
+            &bin,
+            &counting_helper("mvm-hvf-supervisor", 100, &probe_log),
+        );
+        let err = resolve_verified_in(&hvf_spec(), &lookup, &env)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(probe_runs(&probe_log), 2, "changed bytes must re-probe");
+        assert!(err.contains("contract version 100"), "{err}");
+    }
+
+    #[test]
+    fn a_remembered_outcome_for_another_contract_version_is_not_accepted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let memo_dir = tmp.path().join("memo");
+        std::fs::create_dir_all(&memo_dir).unwrap();
+        let bin = tmp.path().join("mvm-hvf-supervisor");
+        write_exe(
+            &bin,
+            &answering_helper(
+                "mvm-hvf-supervisor",
+                helper_contract::HOST_HELPER_CONTRACT_VERSION,
+            ),
+        );
+        let stamp = file_stamp(&bin).unwrap();
+        let memo = ProbeMemo {
+            memo_version: PROBE_MEMO_VERSION,
+            path: bin.clone(),
+            // A memo left by a build that expected a different contract must
+            // not satisfy this one even when the bytes are unchanged.
+            contract_version: helper_contract::HOST_HELPER_CONTRACT_VERSION + 1,
+            stamp,
+        };
+        std::fs::write(
+            probe_memo_path(&memo_dir, "mvm-hvf-supervisor"),
+            serde_json::to_vec(&memo).unwrap(),
+        )
+        .unwrap();
+
+        let mut env = test_env(None);
+        env.probe_memo_dir = Some(memo_dir);
+        let got = resolve_verified_in(
+            &hvf_spec(),
+            &Lookup {
+                override_path: None,
+                dirs: vec![tmp.path().to_path_buf()],
+            },
+            &env,
+        )
+        .unwrap();
+        assert_eq!(got, bin);
+        // The probe ran and replaced the memo with one naming this build's
+        // contract version.
+        let bytes = std::fs::read(probe_memo_path(
+            &env.probe_memo_dir.unwrap(),
+            "mvm-hvf-supervisor",
+        ))
+        .unwrap();
+        let recorded = serde_json::from_slice::<ProbeMemo>(&bytes).unwrap();
+        assert_eq!(
+            recorded.contract_version,
+            helper_contract::HOST_HELPER_CONTRACT_VERSION
+        );
     }
 
     #[test]

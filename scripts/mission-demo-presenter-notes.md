@@ -115,20 +115,23 @@ profile on a signed image has not been run (#5353).
 
 ### Reading the shell script's verdict
 
-`DRIVER=entrypoint` observes the workload's own staging/action markers through
-`machine logs` and reads its messages through `machine mailbox recv`; it does
-not use `machine exec`. Markers are workload reports, not host authorization
-receipts. A missing marker, failed read or launch, or unexpected message fails
-the run rather than being treated as an empty mailbox.
+`DRIVER=entrypoint` receives the workload's own staging/action reports through
+`machine mailbox recv`, in order with its observations. It does not use
+`machine exec` or depend on application stdout capture (`machine logs` did not
+expose the persistent command's markers in the rc.2 HVF rehearsal). Reports are
+workload statements, not host authorization receipts. A missing report, failed
+read or launch, or unexpected message fails the run.
 
 Both drivers finish with `DEMO_RESULT=partial` when the observed lifecycle
 checks complete. Exit status 0 means that subset completed, not that the full
 mission scenario passed. The script prints two remaining evidence gaps:
 
-- An empty mailbox does not establish that the host processed and refused the
-  other-recipient frame.
-- Staging an unread frame does not establish host acceptance before quarantine;
-  not seeing it after replacement therefore does not prove its erasure.
+- Neither a workload report nor an empty mailbox establishes a host refusal
+  receipt for the other-recipient frame.
+- The entrypoint driver reads its final pre-containment sample to prove delivery;
+  it does not leave that sample unread or prove unread-message erasure. The exec
+  driver stages an unread frame without proving host acceptance before quarantine,
+  so not seeing it after replacement likewise does not prove its erasure.
 
 Do not describe those findings as successful security checks. A nonzero exit
 means an observed check failed; there is no final demo verdict on that path.

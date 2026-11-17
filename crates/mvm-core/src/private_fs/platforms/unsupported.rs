@@ -48,3 +48,8 @@ pub fn create_owned_private_dir(dir: impl AsRef<Path>) -> io::Result<()> {
 pub fn sync_managed_directory_chain(root: &Path, _directory: &Path) -> io::Result<()> {
     Err(unsupported_platform_error(root))
 }
+
+/// Refuse managed-directory sync on hosts without Unix permission bits.
+pub fn submit_managed_directory_chain(root: &Path, _directory: &Path) -> io::Result<()> {
+    Err(unsupported_platform_error(root))
+}

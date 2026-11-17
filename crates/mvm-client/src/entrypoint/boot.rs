@@ -43,6 +43,11 @@ pub struct OwnedClientBoot {
     custody: Option<Box<ClientCustody>>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static TRAP_OWNED_PREPARATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 impl OwnedClientBoot {
     pub(crate) fn start(
         resources: ClientBootResources,
@@ -56,6 +61,13 @@ impl OwnedClientBoot {
         let result = (|| {
             let group = owner.custody.as_mut().expect("new client custody");
             let resources = group.resources.as_mut().expect("original client resources");
+            mvm_hostd::mailbox_launch::require_legacy_launch(
+                resources.admission.admitted.plan().mailbox.as_ref(),
+            )?;
+            #[cfg(test)]
+            if TRAP_OWNED_PREPARATION.get() {
+                anyhow::bail!("owned image/native preparation reached");
+            }
             mvm_runtime::workload_backend::require_workload_backend(&resources.backend)?;
             if let Some(runtime) = &resources.built_runtime {
                 runtime.verify_config(&resources.config)?;
@@ -443,6 +455,9 @@ pub struct SessionAuditSubstrate {
     pub tenant_id: String,
     /// The signed plan, serialized.
     pub plan_json: String,
+    /// The admitted workload's audit identity. The host endpoint refuses to
+    /// start without it, so a boot that applies this substrate must carry it.
+    pub audit_context: mvm_core::audit_sink::AuditContext,
     /// Verified launch posture retained outside caller-authored plan JSON.
     pub mailbox_posture: Option<mvm_hostd::plan_admission::MailboxLaunchPosture>,
     /// Trusted admission's optional caller registration, never a producer ACK.
@@ -471,6 +486,7 @@ impl SessionAuditSubstrate {
     pub fn apply_to(self, start_config: &mut mvm_core::vm_backend::VmStartConfig) -> Vec<String> {
         start_config.tenant_id = Some(self.tenant_id);
         start_config.plan_json = Some(self.plan_json);
+        start_config.audit_context = Some(self.audit_context);
         start_config.caller_registration = self.caller_registration;
         start_config.bundle_json = self.bundle_json;
         start_config.config_files.extend(self.config_files);
@@ -532,6 +548,9 @@ pub struct AdmitInputs<'a> {
     pub runtime_config: Option<&'a VmStartConfig>,
     /// Launch-owned archive verification, carried beside the cloneable config.
     pub verified_runtime: Option<&'a mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
+    /// The launch-owned handle, when a caller must retain this exact set after admission.
+    pub verified_runtime_owner:
+        Option<&'a std::sync::Arc<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>>,
 }
 
 /// Identity policy for a session-style VM boot.
@@ -725,6 +744,16 @@ fn require_native_owner(backend: mvm_core::vm_backend::BackendKind, has_owner: b
     Ok(())
 }
 
+/// The launch-owned verified set for the runtime this session config selected.
+fn session_runtime_set(
+    config: &VmStartConfig,
+    release: Option<crate::launch::runtime_source::ReleaseRuntime>,
+) -> Result<Option<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>> {
+    crate::launch::runtime_source::paired_release_evidence(config, release)?
+        .map(|release| mvm_runtime::runtime_evidence::verify_release_runtime_set(config, release))
+        .transpose()
+}
+
 fn boot_session_core(
     boot: SessionBoot<'_>,
     admit: impl FnOnce(AdmitInputs<'_>) -> Result<BootAdmission>,
@@ -774,13 +803,12 @@ fn boot_session_core(
     // The runtime overlay is the single source of the guest agent and its
     // helpers here, as on the transient path; a missing required overlay is
     // built or acquired, never replaced by a copy baked into the rootfs.
-    let verified_runtime = if let Some(assets) = portable_boot_assets {
+    let release = if let Some(assets) = portable_boot_assets {
         anyhow::ensure!(
             bundle_archive.is_none(),
             "producer health cannot replace an installed bundle's boot closure"
         );
-        assets.apply_for_health(&mut start_config)?;
-        None
+        Some(assets.apply_for_health(&mut start_config)?)
     } else {
         let release = attach_runtime_overlay_if_cached_version_verified(
             &mut start_config,
@@ -788,21 +816,18 @@ fn boot_session_core(
             None,
             pair,
         )?;
-        if let Some(release) = release {
+        if let Some(release) = &release {
             attach_universal_initramfs_with_verified_release(
                 &mut start_config,
                 backend.name(),
-                &release,
-            )?;
-            Some(mvm_runtime::runtime_evidence::verify_release_runtime_set(
-                &start_config,
                 release,
-            )?)
+            )?;
         } else {
             attach_universal_initramfs_if_cached(&mut start_config, backend.name())?;
-            None
         }
+        release
     };
+    let verified_runtime = session_runtime_set(&start_config, release)?;
 
     // Admission starts the plan and verb-grant validity windows. All boot
     // preparation therefore completes before this point, immediately before
@@ -824,6 +849,7 @@ fn boot_session_core(
         bundle_archive: bundle_archive.as_deref(),
         runtime_config: Some(&start_config),
         verified_runtime: verified_runtime.as_ref(),
+        verified_runtime_owner: None,
     })?;
     let (mut substrate, context) = match admitted {
         BootAdmission::Legacy(substrate) => (*substrate, None),
@@ -938,6 +964,129 @@ mod tests {
     use super::*;
 
     #[test]
+    fn selector_original_admission_refuses_before_owned_images_and_native_preparation() {
+        use mvm_contract::protocol::mailbox::{
+            ExecutionEpoch, MailboxGrant, MailboxId, service_blind::LaunchProfile,
+        };
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let keys = mvm_core::config::mvm_keys_dir();
+        mvm_hostd::audit::host_keypair::load_or_init_at(&keys).unwrap();
+        let rootfs = home.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"test rootfs").unwrap();
+        let selected = LaunchProfile::new([1; 32], [2; 32]).unwrap();
+        for projection in 0..4 {
+            let audit = tempfile::tempdir().unwrap();
+            let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::new();
+            let admission =
+                crate::admission::admit_plan_for_boot(crate::admission::AdmitPlanForBootParams {
+                    mailbox: Some(MailboxGrant {
+                        mailbox: MailboxId::from_bytes([4; 32]),
+                        authority_key: [9; 32],
+                        epoch: ExecutionEpoch::new(1).unwrap(),
+                        report: None,
+                        retention: None,
+                        service_blind: Some(selected),
+                    }),
+                    keys_dir: Some(&keys),
+                    audit_dir: Some(audit.path()),
+                    ..crate::admission::admit_plan_tests::pinning_params(&rootfs, &ledger)
+                })
+                .unwrap();
+            let original = admission.admitted.plan().clone();
+            assert_eq!(
+                original.mailbox.unwrap().service_blind,
+                Some(selected),
+                "client admission must preserve selected intent"
+            );
+            let roundtrip = mvm_core::plan::plan_from_admitted_json(
+                &serde_json::to_string(admission.admitted.signed()).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(roundtrip.mailbox, original.mailbox);
+            let mut stripped = original.clone();
+            stripped.mailbox.as_mut().unwrap().service_blind = None;
+            let mut replaced = original.clone();
+            replaced.mailbox = None;
+            let config = VmStartConfig {
+                name: original.image.name.clone(),
+                plan_json: match projection {
+                    0 => None,
+                    1 => Some(serde_json::to_string(&stripped).unwrap()),
+                    2 => Some(serde_json::to_string(&replaced).unwrap()),
+                    _ => Some("malformed".into()),
+                },
+                ..Default::default()
+            };
+            TRAP_OWNED_PREPARATION.set(true);
+            let mut failure = OwnedClientBoot::start(ClientBootResources {
+                backend: AnyBackend::from_hypervisor("libkrun"),
+                config,
+                admission,
+                _volumes: None,
+                built_runtime: None,
+                verified_runtime: None,
+            })
+            .err()
+            .expect("selected launch refuses");
+            TRAP_OWNED_PREPARATION.set(false);
+            let expected = "service-blind V3 mailbox launch is unavailable";
+            assert_eq!(failure.error().to_string(), expected);
+            {
+                let owner = failure.owner.lock().unwrap();
+                let owner = owner.as_ref().unwrap();
+                assert_eq!(owner.resources().admission.admitted.plan(), &original);
+                assert!(owner.custody.as_ref().unwrap().runtime.is_none());
+            }
+            failure.emit_failed("backend-start");
+            failure.emit_failed("backend-start");
+            failure.retry_stop().unwrap();
+            assert_eq!(failure.into_released_error().unwrap().to_string(), expected);
+            let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).unwrap();
+            assert_eq!(
+                chain
+                    .lines()
+                    .filter(|line| line.contains("\"plan.failed\""))
+                    .count(),
+                1
+            );
+            assert!(!chain.contains("\"plan.launched\""));
+        }
+    }
+
+    #[test]
+    fn a_session_config_carrying_a_release_proof_must_carry_verified_evidence() {
+        let config = VmStartConfig {
+            runtime_release_proof: Some(mvm_core::protocol::runtime_release::RuntimeReleaseProof {
+                archive: "/mock/archive".into(),
+                checksum: "/mock/checksum".into(),
+                signature_bundle: "/mock/signature".into(),
+                archive_sha256: "a".repeat(64),
+                version: "selected-release".into(),
+                arch: mvm_core::arch::GuestArch::host(),
+            }),
+            runtime_overlay_version: Some("selected-release".into()),
+            ..Default::default()
+        };
+        let error = session_runtime_set(&config, None)
+            .expect_err("a selected release proof with no verified evidence is refused");
+        assert!(
+            format!("{error:#}").contains("requires verified launch evidence"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_session_config_with_no_release_proof_carries_no_evidence() {
+        assert!(
+            session_runtime_set(&VmStartConfig::default(), None)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn legacy_hvf_refuses_before_launch_but_owned_hvf_passes_gate() {
         use mvm_core::vm_backend::BackendKind;
         let launched = std::cell::Cell::new(false);
@@ -991,6 +1140,13 @@ mod tests {
         // proof, uncertain deferral, or a synthesized ConfirmedExit.
     }
 
+    fn test_audit_context() -> mvm_core::audit_sink::AuditContext {
+        mvm_core::audit_sink::AuditContext::Builder {
+            tenant: mvm_core::plan::TenantId("tenant".into()),
+            name: "vm".into(),
+        }
+    }
+
     #[test]
     fn applying_admission_preserves_durability_and_materialized_images() {
         for outcome in [Ok(()), Err(anyhow::anyhow!("audit sync refused"))] {
@@ -998,6 +1154,7 @@ mod tests {
             let mut substrate = SessionAuditSubstrate {
                 tenant_id: "tenant".into(),
                 plan_json: "signed-plan".into(),
+                audit_context: test_audit_context(),
                 mailbox_posture: None,
                 caller_registration: None,
                 bundle_json: Some("policy-bundle".into()),
@@ -1016,6 +1173,11 @@ mod tests {
             assert_eq!(images, vec!["image.ext4"]);
             assert_eq!(config.tenant_id.as_deref(), Some("tenant"));
             assert_eq!(config.plan_json.as_deref(), Some("signed-plan"));
+            assert_eq!(
+                config.audit_context,
+                Some(test_audit_context()),
+                "the endpoint refuses to start without the admitted audit identity"
+            );
             assert_eq!(config.bundle_json.as_deref(), Some("policy-bundle"));
             assert_eq!(
                 config.admission_durability.as_ref().unwrap().wait().is_ok(),

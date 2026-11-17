@@ -1766,7 +1766,23 @@ mod tests {
             poll_interval: Duration::from_millis(10),
             ..CallCaps::default()
         };
-        let mut child = sh("trap '' TERM; while :; do printf aaaaaaaaaaaaaaaa; done");
+        let ready_dir = tempfile::tempdir_in("/tmp").expect("readiness directory");
+        let ready = ready_dir.path().join("ready");
+        let mut child = sh(&format!(
+            "trap '' TERM; : > '{}'; while :; do printf aaaaaaaaaaaaaaaa; done",
+            ready.display()
+        ));
+        // Start the deadline only after the child has installed its signal
+        // handler, not while a loaded host may still be scheduling its startup.
+        let ready_deadline = Instant::now() + Duration::from_secs(10);
+        while !ready.exists() && Instant::now() < ready_deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !ready.exists() {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("child did not install its signal handler before the readiness deadline");
+        }
 
         let started = Instant::now();
         let mut arrivals = Vec::new();

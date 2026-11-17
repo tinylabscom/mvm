@@ -1,5 +1,5 @@
 use crate::catalog;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, HostDialRoute, SnapshotCapability, VmBackend,
     VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus, WarmStartOutcome,
@@ -24,6 +24,28 @@ use crate::workload_runner::{
 use mvm_backends::driver::hvf::HvfDriver;
 use mvm_backends::driver::{LibkrunDriver, QemuDriver};
 use mvm_vmm::host::drive_file::DriveFile;
+
+/// A warm child whose lifecycle gate remains held until the caller takes custody.
+#[must_use]
+pub struct OwnedWarmClaim {
+    pub(crate) id: VmId,
+    pub(crate) lifecycle: crate::vm::instance_snapshot::MachineLifecycleLock,
+}
+
+impl std::fmt::Debug for OwnedWarmClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnedWarmClaim")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl OwnedWarmClaim {
+    /// Transfer the child identity and its continuously held lifecycle gate.
+    pub fn into_parts(self) -> (VmId, crate::vm::instance_snapshot::MachineLifecycleLock) {
+        (self.id, self.lifecycle)
+    }
+}
 
 /// The hvf VMM driven through the unified workload-runner role over the driver
 /// seam — hvf's sole workload launch path (`--hypervisor hvf` and the macOS-26
@@ -477,6 +499,41 @@ impl AnyBackend {
         dedup_by_owning_backend(rows, |name| Self::for_started_vm(name).map(|b| b.kind()))
     }
 
+    /// Enumerate every backend's observations without hiding a failed probe.
+    ///
+    /// A required input to proving quiescence, not proof by itself: other
+    /// launch paths and a racing start must also be serialized with the
+    /// decision. Unlike the best-effort UI listing, it retains duplicate
+    /// observations: a non-owning backend may say `Stopped` while the owning
+    /// backend says `Running`, and an unknown owner must not erase the latter.
+    ///
+    /// # Errors
+    ///
+    /// Any backend's VM listing fails.
+    pub fn list_all_checked() -> Result<Vec<VmInfo>> {
+        collect_checked(
+            catalog::list_all_descriptors()
+                .map(|descriptor| (descriptor.kind, descriptor.instantiate().list())),
+        )
+    }
+
+    /// Refuse if any observed VM is not stopped or has a paused registration.
+    ///
+    /// This probe is **not** activation authority: the resident coordinator
+    /// must serialize it with all local starts and restores, including
+    /// transient sessions that have not appeared in a backend listing yet.
+    ///
+    /// # Errors
+    ///
+    /// A backend probe or registry read fails, or a workload may still be live.
+    pub fn probe_host_quiescence() -> Result<()> {
+        let observed = Self::list_all_checked()?;
+        let registry = crate::vm::name_registry::VmNameRegistry::load(
+            &crate::vm::name_registry::registry_path(),
+        )?;
+        require_observed_quiescence(&observed, &registry)
+    }
+
     /// The typed discriminant for this backend. Lets callers branch on
     /// `BackendKind::Hvf` etc. instead of string-matching `name()`. Delegates
     /// to the wrapped backend's own `VmBackend::kind()` — the HVF variant holds
@@ -621,6 +678,10 @@ impl AnyBackend {
         spec: &mvm_core::vm_backend::StandbySpec,
     ) -> std::result::Result<mvm_core::vm_backend::StandbyHandle, mvm_core::vm_backend::StandbyError>
     {
+        let _barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()
+            .map_err(|error| {
+                mvm_core::vm_backend::StandbyError::SpawnFailed(format!("{error:#}"))
+            })?;
         self.inner().spawn_standby(spec)
     }
 
@@ -630,6 +691,10 @@ impl AnyBackend {
         handle: &mvm_core::vm_backend::StandbyHandle,
         claim: &mvm_core::vm_backend::StandbyClaim,
     ) -> std::result::Result<VmId, mvm_core::vm_backend::StandbyError> {
+        let _barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()
+            .map_err(|error| {
+                mvm_core::vm_backend::StandbyError::ClaimFailed(format!("{error:#}"))
+            })?;
         self.inner().claim_standby(handle, claim)
     }
 
@@ -640,6 +705,7 @@ impl AnyBackend {
         ctx: &crate::workload_runner::SpawnContext<'_>,
         spec: &mvm_core::vm_backend::StandbySpec,
     ) -> Result<mvm_core::vm_backend::StandbyHandle> {
+        let _barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
         match self {
             AnyBackend::Firecracker(runner) => {
                 runner.spawn_standby_captured(ctx, spec).map_err(Into::into)
@@ -774,15 +840,41 @@ impl AnyBackend {
         handle: &mvm_core::vm_backend::StandbyHandle,
         claim: &mvm_core::vm_backend::StandbyClaim,
     ) -> std::result::Result<VmId, mvm_core::vm_backend::StandbyError> {
+        self.claim_standby_owned_via_runner(ctx, handle, claim)
+            .map(|owned| owned.id)
+    }
+
+    /// Claim a warm child without releasing its lifecycle gate before caller custody.
+    ///
+    /// # Errors
+    /// Refuses unsupported backends, failed admission, or unavailable lifecycle custody.
+    pub fn claim_standby_owned_via_runner(
+        &self,
+        ctx: &crate::workload_runner::ClaimContext<'_>,
+        handle: &mvm_core::vm_backend::StandbyHandle,
+        claim: &mvm_core::vm_backend::StandbyClaim,
+    ) -> std::result::Result<OwnedWarmClaim, mvm_core::vm_backend::StandbyError> {
+        let _barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()
+            .map_err(|error| {
+                mvm_core::vm_backend::StandbyError::ClaimFailed(format!("{error:#}"))
+            })?;
         match self {
-            AnyBackend::Firecracker(runner) => runner.claim_standby(ctx, handle, claim),
-            AnyBackend::Libkrun(runner) => runner.claim_standby(ctx, handle, claim),
-            AnyBackend::Hvf(runner) => runner.claim_standby(ctx, handle, claim),
+            AnyBackend::Firecracker(runner) => runner.claim_standby_owned(ctx, handle, claim),
+            AnyBackend::Libkrun(runner) => runner.claim_standby_owned(ctx, handle, claim),
+            AnyBackend::Hvf(runner) => runner.claim_standby_owned(ctx, handle, claim),
             // The mock is the hermetic lifecycle double the CLI drives through
             // the admitted path; it has no runner, so it services the claim from
             // its own in-memory state (the context is a runner detail it ignores).
             #[cfg(feature = "test-support")]
-            AnyBackend::Mock(backend) => backend.claim_standby(handle, claim),
+            AnyBackend::Mock(backend) => {
+                let lifecycle =
+                    crate::vm::instance_snapshot::MachineLifecycleLock::acquire(&handle.id)
+                        .map_err(|error| {
+                            mvm_core::vm_backend::StandbyError::ClaimFailed(error.to_string())
+                        })?;
+                let id = backend.claim_standby(handle, claim)?;
+                Ok(OwnedWarmClaim { id, lifecycle })
+            }
             // No warm pool on these backends: qemu and wasm are not
             // workload-bearing; apple-container is, but the HVF driver has no
             // standby support — all fail closed.
@@ -803,6 +895,8 @@ impl AnyBackend {
         config: &VmStartConfig,
         requested: SnapshotCapability,
     ) -> std::result::Result<WarmStartOutcome, mvm_core::vm_backend::WarmStartError> {
+        let _barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()
+            .map_err(|error| mvm_core::vm_backend::WarmStartError::Failed(format!("{error:#}")))?;
         self.inner().warm_start(config, requested)
     }
 
@@ -819,10 +913,31 @@ impl AnyBackend {
     /// has no activation step to hold the workload behind, so it waits before
     /// it starts anything.
     pub fn start(&self, config: &VmStartConfig) -> Result<VmId> {
+        let _barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
         if !self.activation_waits_for_admission() {
             config.wait_for_admission_durability()?;
         }
         self.inner().start(config)
+    }
+
+    /// Whether this backend is migrated to the CLI admitted-cold host tail.
+    ///
+    /// This is migration scope, not a statement of isolation or runner support:
+    /// QEMU and AppleContainer still keep their existing CLI start behavior.
+    pub fn uses_cli_admitted_cold_dispatch(&self) -> bool {
+        if !cfg!(unix) {
+            return false;
+        }
+        matches!(self, Self::Firecracker(_) | Self::Libkrun(_) | Self::Hvf(_)) || {
+            #[cfg(feature = "test-support")]
+            {
+                matches!(self, Self::Mock(_))
+            }
+            #[cfg(not(feature = "test-support"))]
+            {
+                false
+            }
+        }
     }
 
     /// Start with one launch-owned release verification when one was selected.
@@ -866,6 +981,7 @@ impl AnyBackend {
         if images.is_empty() && release.is_none() {
             return self.start(config);
         }
+        let _barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
         if !self.activation_waits_for_admission() {
             config.wait_for_admission_durability()?;
         }
@@ -952,6 +1068,20 @@ impl AnyBackend {
         }
     }
 
+    /// Automatic recovery never falls back from an instance-bound stop to a name.
+    pub fn stop_hvf_instance(
+        &self,
+        expected: &mvm_core::protocol::hvf_control::HvfInstance,
+    ) -> Result<Option<StopTiming>> {
+        match self {
+            Self::Hvf(runner) => runner.stop_hvf_instance(expected).map(Some),
+            Self::AppleContainer(backend) => backend.stop_hvf_instance(expected).map(Some),
+            _ => {
+                anyhow::bail!("health restart cancelled: backend has no authenticated HVF instance")
+            }
+        }
+    }
+
     /// Abort a launch that never reached guest readiness. Unlike graceful
     /// stop, this never waits for guest cooperation.
     pub fn abort_start(&self, id: &VmId) -> Result<Option<StopTiming>> {
@@ -1020,6 +1150,7 @@ impl AnyBackend {
 
     /// Resume a paused VM. See [`VmBackend::resume`].
     pub fn resume(&self, id: &VmId) -> Result<()> {
+        let _barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
         self.inner().resume(id)
     }
 
@@ -1097,10 +1228,104 @@ fn dedup_by_owning_backend(
         .collect()
 }
 
+fn collect_checked(
+    observations: impl IntoIterator<Item = (BackendKind, Result<Vec<VmInfo>>)>,
+) -> Result<Vec<VmInfo>> {
+    let mut rows = Vec::new();
+    for (kind, observed) in observations {
+        rows.extend(observed.with_context(|| format!("listing {} workloads", kind.as_str()))?);
+    }
+    Ok(rows)
+}
+
+fn require_observed_quiescence(
+    observed: &[VmInfo],
+    registry: &crate::vm::name_registry::VmNameRegistry,
+) -> Result<()> {
+    if let Some(vm) = observed
+        .iter()
+        .find(|vm| !matches!(&vm.status, VmStatus::Stopped))
+    {
+        anyhow::bail!(
+            "cannot activate policy while VM {:?} may still be live",
+            vm.name
+        );
+    }
+    if let Some(name) = registry
+        .vms
+        .iter()
+        .find_map(|(name, registration)| registration.paused.then_some(name))
+    {
+        anyhow::bail!("cannot activate policy while VM {name:?} has a paused snapshot");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use mvm_core::vm_backend::ClaimStatus;
+
+    #[test]
+    fn empty_native_host_can_prove_quiescence_without_probing_browser_only_stub() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        AnyBackend::probe_host_quiescence()
+            .expect("browser-only WebLinux cannot block native-host quiescence");
+    }
+
+    #[test]
+    fn checked_listing_refuses_a_failed_probe_and_keeps_duplicate_observations() {
+        let rows = collect_checked([
+            (BackendKind::Firecracker, Ok(vec![stopped("shared")])),
+            (BackendKind::Hvf, Ok(vec![vm_named("shared", 2)])),
+        ])
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|row| row.status == VmStatus::Running));
+
+        let error = collect_checked([
+            (BackendKind::Firecracker, Ok(Vec::new())),
+            (
+                BackendKind::Hvf,
+                Err(anyhow::anyhow!("cannot inspect backend state")),
+            ),
+        ])
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("listing hvf workloads"));
+        assert!(format!("{error:#}").contains("cannot inspect backend state"));
+    }
+
+    #[test]
+    fn quiescence_observation_rejects_live_failed_and_paused_rows() {
+        let registry = crate::vm::name_registry::VmNameRegistry::default();
+        assert!(require_observed_quiescence(&[stopped("idle")], &registry).is_ok());
+        for status in [
+            VmStatus::Starting,
+            VmStatus::Running,
+            VmStatus::Paused,
+            VmStatus::Failed {
+                reason: "unknown".into(),
+            },
+        ] {
+            let mut vm = stopped("unknown");
+            vm.status = status;
+            assert!(require_observed_quiescence(&[vm], &registry).is_err());
+        }
+        let mut registry = registry;
+        registry
+            .register(crate::vm::name_registry::RegisterParams::minimal(
+                "paused",
+                "/tmp/paused",
+                "",
+            ))
+            .unwrap();
+        registry.set_paused("paused", true).unwrap();
+        assert!(require_observed_quiescence(&[], &registry).is_err());
+        registry.set_paused("paused", false).unwrap();
+        assert!(require_observed_quiescence(&[], &registry).is_ok());
+    }
 
     /// A backend with no activation step has nothing to hold the workload
     /// behind, so a config whose admission sync failed starts nothing on it.
@@ -1843,7 +2068,7 @@ mod tests {
                     BackendTier::Tier3,
                     None,
                     None,
-                    true,
+                    false,
                     false,
                     false,
                 ),
@@ -2393,6 +2618,9 @@ mod tests {
         #[cfg(feature = "test-support")]
         #[test]
         fn reaches_the_mock_lifecycle_claim() {
+            let home = tempfile::tempdir().unwrap();
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            env.isolate_mvm_home(home.path());
             let s = Scaffold::new();
             let backend = AnyBackend::Mock(MockBackend::new().with_standby());
             let id = backend
@@ -2402,6 +2630,27 @@ mod tests {
                 id,
                 mvm_core::vm_backend::VmId("warm-parent".into()),
                 "the mock boots the claim under the standby id"
+            );
+            assert!(
+                crate::vm::instance_snapshot::try_lock_resume(&id.0)
+                    .unwrap()
+                    .is_some(),
+                "the legacy API releases its gate before returning the id"
+            );
+            let owned = backend
+                .claim_standby_owned_via_runner(&s.ctx(), &idle_handle(), &minimal_claim())
+                .expect("the owned API retains the child's gate");
+            let (id, lifecycle) = owned.into_parts();
+            assert!(
+                crate::vm::instance_snapshot::try_lock_resume(&id.0)
+                    .unwrap()
+                    .is_none()
+            );
+            drop(lifecycle);
+            assert!(
+                crate::vm::instance_snapshot::try_lock_resume(&id.0)
+                    .unwrap()
+                    .is_some()
             );
         }
     }

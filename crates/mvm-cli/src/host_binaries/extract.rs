@@ -7,7 +7,7 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use mvm_build::builder_boot::{BootPayloadError, BootPayloadSource, BuilderBootPayload};
+use mvm_client::build_types::{BootPayloadError, BootPayloadSource, BuilderBootPayload};
 
 use super::source::{PayloadBinary, host_payload};
 
