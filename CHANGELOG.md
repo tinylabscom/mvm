@@ -2,6 +2,67 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.28.0-rc.9] — 2026-11-17
+
+### Added
+- **hostlib**: Expose manifest remove and prune through the client
+- Expose prepared-only OCI launch through the client
+- **client**: Retain app-session process stdout and stderr
+- **agentd**: Ship a mailbox client in the signed runtime overlay
+- **audit**: One denial shape across lookup, connect and datagram
+
+### Changed
+- Embed the host binaries only with the embed-host-bins feature
+- Keep the guest runtime's compiled output in the checkout, not the home
+- Stop zig's linker notice from showing as a warning under every guest binary
+
+### Documentation
+- Presenter notes use the agreed post-quantum and CNSA wording
+- **mailbox**: Reconcile actor security boundaries
+- **actors**: Consolidate function and continuation references
+
+### Fixed
+- **release**: Reuse the package producer attempt on rerun
+- **install**: Prewarm launch artifacts by default
+- **demo**: Require observed mission entrypoint evidence
+- **audit**: Require bound flow decision recording
+- **ci,demo**: Pin the mission-node workflow's actions and report mission progress through the mailbox
+- **client**: Hand admission the verified release for a bundle's CLI runtime
+- **client**: Carry the admitted audit context onto session and transient launches
+- Separate native home discovery from Claude runner state
+- **fc**: Bind the claim-time layout check to descriptors the VMM holds
+- **build**: Keep VERSION and seed modes stable under any umask
+- **capture**: Trace explicit commands in the project directory
+- **mailbox**: Keep a message queued when its recv reply cannot be written
+- **build**: Keep a target's own rustflags when silencing zig's linker notice
+
+### Other
+- Grant the mission demo's workload an allow-host so the host's refusal is audited
+- Show preparation errors, refuse root on Linux, record the machines tested
+- Check the Mac and mvmctl up front and drop the python3 dependency
+- The mission demo runs after cargo build --release --locked
+- Reduce runtime dependencies and isolate supply-chain signing
+- Gate mvm_build reaches in mvm-cli with a shrink-only allowlist
+- Reach build types and constants through mvm-client
+- Add check-no-mvmd-dependency
+
+### Performance
+- Verify the signed runtime release once per launch
+- **client**: Verify a bundle's CLI runtime release once per launch
+- **launch**: Submit launch-path fsyncs and remember the helper contract probe
+
+### Refactored
+- **core**: Lower neutral signer-helper client
+- **client**: Retain CLI admission through launch selection
+- **hostd**: Rehome audit client under audit
+- **cli**: Dispatch admitted cold runs through hostd
+
+### Testing
+- Witness the isolated test child's failure and cleanup paths
+- Make the isolated test child's observer and cleanup paths injectable
+- **hvf**: State and witness what a kernel-descriptor-only boot rests on
+- **build**: Pin that a musl cdylib keeps its per-target rustflags
+
 ## [0.28.0-rc.8] — 2026-11-16
 
 ### Added
