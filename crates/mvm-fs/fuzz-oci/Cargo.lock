@@ -866,7 +866,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-contract"
-version = "0.28.0-rc.9"
+version = "0.28.0-rc.10"
 dependencies = [
  "anyhow",
  "base64",
@@ -882,7 +882,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-core"
-version = "0.28.0-rc.9"
+version = "0.28.0-rc.10"
 dependencies = [
  "anyhow",
  "base64",
@@ -914,14 +914,14 @@ dependencies = [
 
 [[package]]
 name = "mvm-crypto"
-version = "0.28.0-rc.9"
+version = "0.28.0-rc.10"
 dependencies = [
  "aes-gcm",
 ]
 
 [[package]]
 name = "mvm-fs"
-version = "0.28.0-rc.9"
+version = "0.28.0-rc.10"
 dependencies = [
  "async-trait",
  "ed25519-dalek",
@@ -956,7 +956,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-http"
-version = "0.28.0-rc.9"
+version = "0.28.0-rc.10"
 dependencies = [
  "base64",
  "bytes",
@@ -975,7 +975,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-macho-sign"
-version = "0.28.0-rc.9"
+version = "0.28.0-rc.10"
 dependencies = [
  "plist",
  "sha1",
