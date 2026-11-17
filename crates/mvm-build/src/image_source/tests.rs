@@ -483,6 +483,35 @@ fn a_contributor_build_knows_its_own_checkout() {
     assert!(root.join("crates").join("mvm-build").is_dir());
 }
 
+/// Production root selection reaches the same identity code the synthetic
+/// fixtures use: the checkout this binary was compiled from opens as the root
+/// of its own git work tree and probes to a full commit id. The worktree state
+/// is deliberately not pinned, because a contributor's tree may be dirty.
+///
+/// This does not witness cache-key derivation: that needs an mvm-images
+/// checkout as well, and no cheap bounded call exists without one.
+#[test]
+fn the_compiled_from_checkout_yields_a_probeable_identity() {
+    let selected = mvm_source_checkout(DistributionChannel::Source).expect("tests run from source");
+    let (root, opened) = super::local_set::open_mvm_checkout(&selected)
+        .expect("the compiled-from tree is a git checkout");
+    assert_eq!(root, std::fs::canonicalize(&selected).unwrap());
+
+    let probed = probe_identity(&root).expect("the live checkout probes");
+    let commit = probed.commit.to_string();
+    assert_eq!(commit.len(), 40, "{commit}");
+    assert!(
+        commit
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        "{commit}"
+    );
+    match probed.worktree {
+        WorktreeState::Clean | WorktreeState::Dirty { .. } => {}
+    }
+    assert_eq!(opened.commit, probed.commit);
+}
+
 /// The fingerprint is a wire format shared with the image repository's
 /// manifest emitter, which computes it in Python. Both pin this value for the
 /// same tree: one tracked edit, one untracked file, one untracked link.
