@@ -292,22 +292,31 @@ impl CliAdmission {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "test-support"))]
     #[test]
     fn filesystem_fork_facade_spends_admission_once_and_audits_mock_launch() {
         let _home = super::super::admit_plan_tests::isolated_home();
         let keys = tempfile::tempdir().expect("keys");
         let audit = tempfile::tempdir().expect("audit");
-        let context = super::super::admit_plan_tests::admitted_into(
-            keys.path(),
-            audit.path(),
-            "fs-quick-facade-mock",
-        );
+        let rootfs_dir = tempfile::tempdir().expect("mock rootfs");
+        let rootfs = rootfs_dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"mock rootfs").expect("mock rootfs bytes");
+        let ledger = super::super::InMemoryNonceLedger::new();
+        let context = super::super::admit_plan_for_boot(super::super::AdmitPlanForBootParams {
+            vm_name: "fs-quick-facade-mock",
+            backend_name: "mock",
+            keys_dir: Some(keys.path()),
+            audit_dir: Some(audit.path()),
+            ..super::super::admit_plan_tests::pinning_params(&rootfs, &ledger)
+        })
+        .expect("fresh child admission");
         let signed = serde_json::to_string(context.admitted.signed()).expect("signed plan");
         let config = mvm_core::vm_backend::VmStartConfig {
             name: "fs-quick-facade-mock".into(),
-            rootfs_path: "/admitted/rootfs".into(),
+            rootfs_path: rootfs.display().to_string(),
             plan_json: Some(signed),
+            cpus: 2,
+            memory_mib: 512,
             ..Default::default()
         };
         let source = FsQuickBootAdmission(CliAdmission::new_for_rootfs(
@@ -325,7 +334,7 @@ mod tests {
         assert_eq!(chain.matches("plan.failed").count(), 0, "{chain}");
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "test-support"))]
     #[test]
     fn filesystem_fork_facade_refuses_substituted_child_rootfs() {
         let _home = super::super::admit_plan_tests::isolated_home();
