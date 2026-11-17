@@ -30,6 +30,7 @@ mod assembly;
 mod audit;
 mod classify;
 mod forward;
+mod gate_probe;
 mod ingress;
 mod listen;
 pub(crate) mod pinned_dns;
