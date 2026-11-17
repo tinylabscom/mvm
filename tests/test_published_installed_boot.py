@@ -35,6 +35,13 @@ def archive(path, target, content=b"test CLI bytes"):
         tar.addfile(member, io.BytesIO(content))
 
 
+def diagnostic_text(backend):
+    """The transcript the smoke script writes: the CLI's backend diagnostic, then a verdict."""
+    return ("TEST FIXTURE ONLY\nMVM_BACKEND_DIAGNOSTICS_BEGIN\n" +
+            json.dumps({"all_ok": True, "security_posture": {"backend": backend}}) +
+            "\nMVM_BACKEND_DIAGNOSTICS_END\nPASS: simulated validator input\n")
+
+
 class BootEvidenceTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -54,11 +61,14 @@ class BootEvidenceTests(unittest.TestCase):
             [{"name": p.name, "sha256": boot.sha(p)} for p in self.assets.iterdir()],
             key=lambda a: a["name"])
         self.records = []
-        for target, (arch, backend, _, _) in boot.LANES.items():
+        for target, (arch, backend, system, machine) in boot.LANES.items():
+            host = {"system": system, "machine": machine}
+            if system == "Darwin":
+                host.update(macos_version="26.1", macos_major=26, macos_build="25B78")
             lane_dir = self.lanes / f"installed-boot-lane-{target}"
             (lane_dir / "smoke").mkdir(parents=True)
             transcript = lane_dir / "smoke/transcript.log"
-            transcript.write_text("TEST FIXTURE ONLY\nPASS: simulated validator input\n")
+            transcript.write_text(diagnostic_text(backend))
             (lane_dir / "smoke/boot-results.jsonl").write_text(
                 "".join(json.dumps(check) + "\n" for check in boot.BOOT_CHECKS))
             installed = boot.payload_hashes(self.assets / f"mvmctl-{target}.tar.gz", target)
@@ -69,6 +79,7 @@ class BootEvidenceTests(unittest.TestCase):
                 assets=[a for a in self.asset_records if a["name"] in (
                     f"mvmctl-{target}.tar.gz", f"mvm-guest-bins-{TAG}.tar.gz")],
                 boots=[dict(host_target=target, guest_arch=arch, backend=backend,
+                            diagnostics_selected_backend=backend, host=host,
                             result="success", checks=copy.deepcopy(boot.BOOT_CHECKS),
                             installed=[{"path": n, "sha256": h}
                                        for n, h in sorted(installed.items())],
@@ -130,6 +141,18 @@ class BootEvidenceTests(unittest.TestCase):
         (self.records[0].parent / "smoke/transcript.log").write_text("tampered")
         with self.assertRaises(ValueError):
             self.aggregate()
+
+    def test_lane_without_host_or_backend_evidence_is_refused(self):
+        original = json.loads(self.records[0].read_text())
+        for field, message in (("host", "wrong runner evidence"),
+                               ("diagnostics_selected_backend", "backend diagnostic")):
+            with self.subTest(field=field):
+                altered = copy.deepcopy(original)
+                altered["boots"][0].pop(field)
+                self.records[0].write_text(json.dumps(altered))
+                with self.assertRaisesRegex(ValueError, message):
+                    self.aggregate()
+                self.assertFalse(self.args.out.exists())
 
     def test_missing_success_verdict_even_with_matching_transcript_hash(self):
         path = self.records[0]
