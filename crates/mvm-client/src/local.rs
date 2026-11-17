@@ -16,10 +16,10 @@
 
 mod capture_recovery;
 pub(crate) mod oci;
+mod resume;
 mod rootfs;
 #[cfg(test)]
 mod rootfs_tests;
-mod resume;
 mod state;
 
 pub use rootfs::materialize_image_rootfs;

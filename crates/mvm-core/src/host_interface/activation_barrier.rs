@@ -122,11 +122,10 @@ impl ActivationBarrier {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn shared_launches_can_overlap_but_exclusive_activation_waits() {
         let dir = tempfile::tempdir().unwrap();
