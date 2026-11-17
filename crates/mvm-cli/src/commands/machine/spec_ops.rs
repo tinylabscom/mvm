@@ -1,5 +1,6 @@
 use super::remove::{remove_machine_spec_in_lifecycle, resolve_remove_targets, rm_running_refusal};
 use super::*;
+use mvm_client::lifecycle::MachineLifecycleLock;
 
 pub(super) fn persistent_workload_dir_for_run(args: &MachineRunArgs) -> Result<Option<String>> {
     mvm_client::instruction_trust::gate::local_workload_dir(
@@ -26,7 +27,7 @@ pub(super) fn create_machine(args: MachineCreateArgs) -> Result<()> {
     let json = args.json;
     let force = args.force;
     let spec = args.into_spec()?;
-    let _lifecycle = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(&spec.name)?;
+    let _lifecycle = MachineLifecycleLock::acquire(&spec.name)?;
     save_machine_spec(&spec, force)?;
     mvm_core::audit_emit!(
         ConfigChange,
@@ -206,7 +207,7 @@ pub(super) fn remove_machine(args: MachineRemoveArgs) -> Result<()> {
     }
     let mut summaries = Vec::with_capacity(targets.len());
     for name in &targets {
-        let lifecycle = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(name)?;
+        let lifecycle = MachineLifecycleLock::acquire(name)?;
         if !args.force && lifecycle::machine_is_running(name) {
             bail!("machine {name:?} is running; stop it first or use --force");
         }
@@ -241,7 +242,7 @@ pub(super) fn remove_machine(args: MachineRemoveArgs) -> Result<()> {
 }
 
 pub(super) fn run_reconfigure(args: MachineReconfigureArgs) -> Result<()> {
-    let lifecycle = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(&args.name)?;
+    let lifecycle = MachineLifecycleLock::acquire(&args.name)?;
     let existing = load_machine_spec(&args.name)?;
     let patch = patch_from_args(&args)?;
     let desired = apply_patch(existing.clone(), &patch);

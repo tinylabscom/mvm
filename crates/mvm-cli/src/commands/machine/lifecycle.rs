@@ -1,6 +1,7 @@
 use super::*;
 use crate::commands::image;
 use crate::commands::vm::up;
+use mvm_client::lifecycle::MachineLifecycleLock;
 
 pub(super) fn run_start(cmd: MachineStartCmd) -> Result<()> {
     anyhow::ensure!(
@@ -43,7 +44,7 @@ pub(super) fn run_restart(cmd: MachineStartCmd) -> Result<()> {
             vm_id: name.clone(),
             boot_nonce,
         };
-        let lifecycle = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(name)?;
+        let lifecycle = MachineLifecycleLock::acquire(name)?;
         mvm_client::LocalBackend::new()
             .stop_machine_in_lifecycle(
                 &mvm_core::client::dto::MachineId(name.clone()),
@@ -159,7 +160,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
     if args.dry_run {
         return complete_machine_start(start_machine_inner(args, None)?);
     }
-    let lifecycle = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(&args.name)?;
+    let lifecycle = MachineLifecycleLock::acquire(&args.name)?;
     let pending = start_machine_in_lifecycle(args, &lifecycle)?;
     drop(lifecycle);
     complete_machine_start(pending)
@@ -168,7 +169,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
 /// Boot and connect under the caller's gate; drop it before completing init.
 pub(super) fn start_machine_in_lifecycle(
     args: MachineStartArgs,
-    lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+    lifecycle: &MachineLifecycleLock,
 ) -> Result<Option<PendingMachineStart>> {
     lifecycle.require_name(&args.name)?;
     start_machine_inner(args, Some(lifecycle))
@@ -207,7 +208,7 @@ pub(super) fn complete_machine_start(pending: Option<PendingMachineStart>) -> Re
 fn stop_failed_init(
     name: &str,
     custody: &crate::exec::RuntimeRunCustody,
-    lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+    lifecycle: &MachineLifecycleLock,
 ) -> Result<()> {
     custody.require_current(lifecycle)?;
     mvm_client::LocalBackend::new()
@@ -222,13 +223,11 @@ fn stop_failed_init(
 fn init_then_reacquire(
     name: &str,
     init: impl FnOnce() -> Result<()>,
-    require_current: impl FnOnce(
-        &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
-    ) -> Result<()>,
-    rollback: impl FnOnce(&mvm_runtime::vm::instance_snapshot::MachineLifecycleLock) -> Result<()>,
-) -> Result<mvm_runtime::vm::instance_snapshot::MachineLifecycleLock> {
+    require_current: impl FnOnce(&MachineLifecycleLock) -> Result<()>,
+    rollback: impl FnOnce(&MachineLifecycleLock) -> Result<()>,
+) -> Result<MachineLifecycleLock> {
     let outcome = init();
-    let lifecycle = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(name)?;
+    let lifecycle = MachineLifecycleLock::acquire(name)?;
     require_current(&lifecycle)
         .context("machine changed during dev.init; refusing stale start completion or rollback")?;
     if let Err(err) = outcome {
@@ -242,7 +241,7 @@ fn init_then_reacquire(
 
 fn start_machine_inner(
     args: MachineStartArgs,
-    lifecycle: Option<&mvm_runtime::vm::instance_snapshot::MachineLifecycleLock>,
+    lifecycle: Option<&MachineLifecycleLock>,
 ) -> Result<Option<PendingMachineStart>> {
     let (spec, action) = resolve_start_spec(&args)?;
     if args.dry_run {
@@ -300,7 +299,7 @@ fn start_machine_inner(
     )?;
     let boot_digest = started.resolved_digest;
     if !spec.init.is_empty() {
-        let backend = mvm_runtime::backend::AnyBackend::from_hypervisor(&effective_hypervisor);
+        let backend = mvm_client::AnyBackend::from_hypervisor(&effective_hypervisor);
         let custody =
             match crate::exec::RuntimeRunCustody::capture(&backend, &spec.name, lifecycle) {
                 Ok(custody) => custody,

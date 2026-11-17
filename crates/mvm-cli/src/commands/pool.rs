@@ -782,7 +782,7 @@ pub(crate) fn image_identity(rootfs_path: &Path) -> Result<String> {
 
 pub(crate) enum LaunchDecision {
     /// A standby was claimed and is booting under this VmId.
-    Claimed(mvm_runtime::backend::OwnedWarmClaim),
+    Claimed(mvm_client::standby::OwnedWarmClaim),
     /// No compatible warm standby — caller may cold-boot when its mode permits it.
     ColdBoot,
     /// The caller required warm service and must not cold-boot.

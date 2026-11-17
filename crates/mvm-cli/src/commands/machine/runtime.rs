@@ -81,7 +81,7 @@ fn run_persistent(
     let lifecycle = if args.run.dry_run {
         None
     } else {
-        Some(mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(&name)?)
+        Some(mvm_client::lifecycle::MachineLifecycleLock::acquire(&name)?)
     };
     let existing = load_machine_spec(&name).ok();
     let (spec, action) = resolve_persistent_spec(&args, &name, existing, resolved_flake_slot)?;

@@ -6,6 +6,7 @@
 //! unit-tested in `tests.rs`.
 
 use super::*;
+use mvm_client::lifecycle::MachineLifecycleLock;
 
 #[derive(Debug, Serialize)]
 pub(super) struct MachineRemoveSummary {
@@ -41,7 +42,7 @@ pub(super) fn remove_machine_spec(name: &str, yes: bool) -> Result<MachineRemove
 
 pub(super) fn remove_machine_spec_in_lifecycle(
     name: &str,
-    lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+    lifecycle: &MachineLifecycleLock,
 ) -> Result<MachineRemoveSummary> {
     lifecycle.require_name(name)?;
     let dir = config::machine_state_dir(name);

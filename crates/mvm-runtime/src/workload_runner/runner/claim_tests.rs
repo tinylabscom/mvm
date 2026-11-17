@@ -2754,7 +2754,7 @@ fn check_preloaded_refusal_cleanup(driver: MockDriver, retained: bool, with_over
     );
     assert_eq!(
         runner.driver.killed_vms(),
-        [child_name.clone()],
+        [child_name.as_str()],
         "stop must be confirmed exactly once"
     );
     assert!(!vm_state_dir(&child_name).exists());

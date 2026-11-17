@@ -16,21 +16,27 @@
 
 mod capture_recovery;
 pub(crate) mod oci;
+mod rootfs;
+#[cfg(test)]
+mod rootfs_tests;
 mod state;
 
-use oci::pull_image_to_dir;
+pub use rootfs::materialize_image_rootfs;
+#[cfg(test)]
+pub(crate) use rootfs::{RootfsPlan, materialize_from_dir, plan_rootfs_source, run_rootfs_output};
+pub(crate) use rootfs::{
+    TreeMaterializeOptions, UnpackedLayers, host_verity_sidecars, materialize_tree,
+    resolve_local_rootfs, unpack_one_layer,
+};
 pub(crate) use state::map_status;
 use state::{registered_vm_info, to_state};
 
-use std::collections::HashSet;
-use std::io::Cursor;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 
 use async_trait::async_trait;
-use flate2::read::GzDecoder;
 use mvm_core::protocol::vm_backend::{BackendKind, VmId, VmInfo, VmStatus};
-use mvm_core::rootfs_source::RootfsSource;
-use mvm_fs::oci::{ImageReference, LayerDescriptor, UnpackOptions, UnpackReport, unpack_layer};
 use mvm_runtime::AnyBackend;
 
 use mvm_core::client::dto::{
@@ -887,69 +893,6 @@ pub(crate) fn backend_err(e: impl std::fmt::Display) -> MvmError {
     }
 }
 
-/// The work a declared rootfs source implies. One variant per verification
-/// path: a materialized blob is booted as-is, a tree is injected and
-/// materialized, and a reference is fetched from a registry first.
-#[derive(Debug, PartialEq, Eq)]
-enum RootfsPlan {
-    /// An already-materialized `rootfs.ext4` — boot it directly.
-    Materialized(PathBuf),
-    /// An unpacked OCI rootfs directory — inject runtime + materialize.
-    UnpackedDir(PathBuf),
-    /// A registry reference — pull + unpack + inject + materialize.
-    Pull(ImageReference),
-}
-
-/// Turn a caller-declared rootfs source into the work it implies.
-///
-/// The declaration arrives parsed, so a mistyped path stops here instead of
-/// falling through to the registry arm: the arms differ in how the bytes they
-/// produce are verified, and which one runs must not depend on the caller's
-/// working directory.
-fn plan_rootfs_source(source: RootfsSource) -> Result<RootfsPlan> {
-    match source {
-        // The filesystem is consulted only to tell a blob from a tree, and
-        // only once the caller has declared the source local.
-        RootfsSource::LocalPath(path) if path.is_file() => Ok(RootfsPlan::Materialized(path)),
-        RootfsSource::LocalPath(path) if path.is_dir() => Ok(RootfsPlan::UnpackedDir(path)),
-        RootfsSource::LocalPath(path) => Err(MvmError::InvalidSpec {
-            reason: format!(
-                "declared local rootfs path does not exist: {} — no registry fetch was \
-                 attempted; write `oci:<reference>` to boot a registry image instead",
-                path.display()
-            ),
-        }),
-        RootfsSource::Oci { image_ref } => image_ref
-            .parse::<ImageReference>()
-            .map(RootfsPlan::Pull)
-            .map_err(|e| MvmError::InvalidSpec {
-                reason: format!(
-                    "not a usable OCI reference: {image_ref:?}: {e}{}",
-                    path_collision_hint(&image_ref)
-                ),
-            }),
-        RootfsSource::Flake { flake_ref, attr } => Err(MvmError::InvalidSpec {
-            reason: format!(
-                "a flake source is built, not booted: build {flake_ref}#{attr} first, then \
-                 declare the resulting rootfs path"
-            ),
-        }),
-    }
-}
-
-/// A bare name is a registry reference by declaration, so a same-named file in
-/// the caller's working directory is not silently preferred — but it is almost
-/// certainly what they meant, so say so once the reference has failed to parse.
-fn path_collision_hint(image_ref: &str) -> String {
-    if Path::new(image_ref).exists() {
-        format!(
-            " (a filesystem entry named {image_ref:?} exists — write `./{image_ref}` or `path:{image_ref}` to boot it)"
-        )
-    } else {
-        String::new()
-    }
-}
-
 /// Record when `name` expires on its host name-registry entry, or clear it
 /// with `None`; the TTL reaper stops a machine past it. Synchronous, so a
 /// caller already inside a runtime (the host library) sets a TTL without
@@ -976,164 +919,6 @@ pub fn set_machine_expiry(name: &str, expires_at: Option<String>) -> Result<()> 
             path.display()
         ))
     })
-}
-
-/// Materialize an OCI reference into a host `rootfs.ext4`, for a caller that
-/// wants the artifact rather than a running machine.
-///
-/// The build path uses this so an image-backed `mvm.toml` is materialized by
-/// exactly the code a `run --image` boots through — same pull, same hardened
-/// unpack, same runtime injection, and the same `mvm-meta.json` sidecar written
-/// beside the rootfs. A second materializer would be a second answer to "what
-/// does this image become", and the two would drift.
-///
-/// `cache_key` names the cache slot under `~/.mvm/cache/local-run/`.
-pub async fn materialize_image_rootfs(image_ref: &str, cache_key: &str) -> Result<PathBuf> {
-    resolve_local_rootfs(
-        &RootfsSource::Oci {
-            image_ref: image_ref.to_string(),
-        },
-        cache_key,
-    )
-    .await
-}
-
-/// Resolve `spec.image` to a host `rootfs.ext4` path, materializing in-process
-/// as needed (no subprocess, no CLI). Registry pulls are async; the dir +
-/// pre-materialized cases are synchronous.
-pub(crate) async fn resolve_local_rootfs(image: &RootfsSource, name: &str) -> Result<PathBuf> {
-    match plan_rootfs_source(image.clone())? {
-        RootfsPlan::Materialized(path) => Ok(path),
-        // An already-unpacked tree carries no unpack report, so there is
-        // nothing the host filesystem deferred to merge back in.
-        RootfsPlan::UnpackedDir(dir) => materialize_from_dir(&dir, name, UnpackedLayers::default()),
-        RootfsPlan::Pull(image_ref) => {
-            let staging = tempfile::tempdir().map_err(backend_err)?;
-            let pulled = pull_image_to_dir(&image_ref, staging.path()).await?;
-            let output = run_rootfs_output(name);
-            materialize_tree(
-                staging.path(),
-                &output,
-                name,
-                pulled.layers,
-                TreeMaterializeOptions {
-                    config: Some(&pulled.config),
-                    ..TreeMaterializeOptions::default()
-                },
-            )?;
-            Ok(output)
-        }
-    }
-}
-
-/// Cache location for a locally-materialized run rootfs, keyed by machine name.
-fn run_rootfs_output(name: &str) -> PathBuf {
-    let key: String = name
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
-    PathBuf::from(mvm_core::config::mvm_cache_dir())
-        .join("local-run")
-        .join(key)
-        .join("rootfs.ext4")
-}
-
-/// What unpacking an image's layers produced beyond the host tree: the nodes
-/// the host filesystem could not hold, and the owners it could not apply.
-#[derive(Default)]
-struct UnpackedLayers {
-    deferred_nodes: Vec<mvm_fs::ext4::Node>,
-    owners: mvm_fs::ownership::OwnerTable,
-}
-
-/// Inject the mvm runtime into an unpacked tree and materialize it into the
-/// run-rootfs cache, reusing the CLI's shared `run_image` orchestration.
-fn materialize_from_dir(dir: &Path, name: &str, layers: UnpackedLayers) -> Result<PathBuf> {
-    let output = run_rootfs_output(name);
-    materialize_tree(
-        dir,
-        &output,
-        name,
-        layers,
-        TreeMaterializeOptions::default(),
-    )?;
-    Ok(output)
-}
-
-#[derive(Default)]
-struct TreeMaterializeOptions<'a> {
-    config: Option<&'a mvm_build::oci_runtime_inject::ImageRuntimeConfig>,
-    sealed: bool,
-    runtime_binaries: Option<&'a mvm_build::oci_runtime_inject::MvmRuntimeBinaries>,
-    policy: mvm_build::run_image::RootfsMaterializationPolicy,
-}
-
-fn materialize_tree(
-    dir: &Path,
-    output: &Path,
-    name: &str,
-    layers: UnpackedLayers,
-    options: TreeMaterializeOptions<'_>,
-) -> Result<()> {
-    let cache_root = mvm_core::config::oci_cache_dir(); // where the CLI prepares runtimes
-    if options.runtime_binaries.is_none() {
-        crate::launch::runtime_overlay::require_prepared_oci_guest_runtime(&cache_root)
-            .map_err(|e| backend_err(format!("{e:#}")))?;
-    }
-    mvm_build::run_image::inject_and_materialize(
-        mvm_build::run_image::InjectAndMaterializeRequest::builder(&cache_root, dir, output, name)
-            .sealed(options.sealed)
-            .entrypoint(options.config)
-            .runtime_binaries(options.runtime_binaries)
-            .materialization_policy(options.policy)
-            .reuse_published(false)
-            .deferred_nodes(layers.deferred_nodes)
-            .owners(layers.owners)
-            .build(),
-    )
-    .map_err(|e| backend_err(format!("{e:#}")))
-}
-
-/// Unpack one layer's bytes into `dest`, decompressing gzip layers first.
-fn unpack_one_layer(
-    layer: &LayerDescriptor,
-    bytes: &[u8],
-    dest: &Path,
-    prior_layer_paths: &HashSet<PathBuf>,
-) -> Result<UnpackReport> {
-    let mt = &layer.media_type;
-    let report = if mt.ends_with("+gzip") || mt.ends_with(".gzip") || mt.contains("tar.gzip") {
-        unpack_layer(
-            GzDecoder::new(Cursor::new(bytes)),
-            dest,
-            &UnpackOptions::default(),
-            Some(prior_layer_paths),
-        )
-    } else {
-        unpack_layer(
-            Cursor::new(bytes),
-            dest,
-            &UnpackOptions::default(),
-            Some(prior_layer_paths),
-        )
-    }
-    .map_err(|e| backend_err(format!("unpack layer {}: {e}", layer.digest)))?;
-    if !report.refused.is_empty() {
-        return Err(backend_err(format!(
-            "layer {} unpack refused entries: {:?}",
-            layer.digest, report.refused
-        )));
-    }
-    Ok(report)
-}
-
-/// Probe the dm-verity sidecars the pure materializer writes beside the image
-/// (`rootfs.verity` + `rootfs.roothash`) from the host filesystem. Returns
-/// `(verity_path, roothash)` when both are present and the hash is well-formed
-/// (64-hex); `(None, None)` for an unverified image. A `&Path` adapter over
-/// `mvm_runtime::microvm::probe_verity_sidecar`, which does the host-side read.
-pub(crate) fn host_verity_sidecars(rootfs: &Path) -> (Option<String>, Option<String>) {
-    mvm_runtime::microvm::probe_verity_sidecar(&rootfs.to_string_lossy())
 }
 
 /// A telemetry read failure as the facade reports it: a stale cursor is the
@@ -2313,157 +2098,6 @@ mod tests {
         assert!(!path.exists());
     }
 
-    /// `std::env::set_current_dir` is process-wide; this Mutex stops
-    /// `cargo test`'s thread pool from racing between two cwd-mutating tests.
-    /// The lock is held for the lifetime of [`CwdGuard`].
-    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    struct CwdGuard {
-        _guard: std::sync::MutexGuard<'static, ()>,
-        prev: PathBuf,
-    }
-
-    impl CwdGuard {
-        fn enter(dir: &Path) -> Self {
-            let guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let prev = std::env::current_dir().expect("cwd");
-            std::env::set_current_dir(dir).expect("chdir");
-            CwdGuard {
-                _guard: guard,
-                prev,
-            }
-        }
-    }
-
-    impl Drop for CwdGuard {
-        fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.prev);
-        }
-    }
-
-    fn reference(s: &str) -> ImageReference {
-        s.parse().expect("parses as an OCI reference")
-    }
-
-    /// Both steps a caller takes with a declaration string — parse it, then
-    /// plan the work — so these tests keep exercising the grammar rather than
-    /// hand-building the parsed value.
-    fn plan_rootfs(image: &str) -> Result<RootfsPlan> {
-        let source: RootfsSource = image.parse().map_err(|e| MvmError::InvalidSpec {
-            reason: format!("{e}"),
-        })?;
-        plan_rootfs_source(source)
-    }
-
-    #[test]
-    fn plan_rootfs_routes_file_dir_and_registry() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("rootfs.ext4");
-        std::fs::write(&file, b"x").unwrap();
-
-        // An existing file → a materialized rootfs.
-        assert_eq!(
-            plan_rootfs(&file.to_string_lossy()).unwrap(),
-            RootfsPlan::Materialized(file.clone())
-        );
-        // An existing directory → an unpacked tree.
-        assert_eq!(
-            plan_rootfs(&dir.path().to_string_lossy()).unwrap(),
-            RootfsPlan::UnpackedDir(dir.path().to_path_buf())
-        );
-        // A reference → a pull (no network touched here).
-        assert_eq!(
-            plan_rootfs("docker.io/library/alpine:3.20").unwrap(),
-            RootfsPlan::Pull(reference("docker.io/library/alpine:3.20"))
-        );
-    }
-
-    #[test]
-    fn a_mistyped_local_path_is_refused_and_never_planned_as_a_pull() {
-        let dir = tempfile::tempdir().unwrap();
-        // The user meant `rootfs.ext4`; nothing exists at what they typed.
-        let typo = dir.path().join("rootfs.ext5");
-
-        let planned = plan_rootfs(&typo.to_string_lossy());
-
-        // `Pull` is the only variant that reaches a registry, so refusing to
-        // produce one is what "no fetch was attempted" means here.
-        assert!(
-            !matches!(planned, Ok(RootfsPlan::Pull(_))),
-            "a typo'd local path must not be planned as a registry pull: {planned:?}"
-        );
-        let err = planned.expect_err("an absent declared path is an error");
-        assert!(
-            matches!(err, MvmError::InvalidSpec { .. }),
-            "expected a spec error naming the path, got {err:?}"
-        );
-        assert!(
-            err.to_string().contains(&typo.display().to_string()),
-            "the error must name the path the caller typed: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn resolve_local_rootfs_refuses_a_mistyped_path_before_any_fetch() {
-        let dir = tempfile::tempdir().unwrap();
-        let typo = dir.path().join("rootfs.ext5");
-
-        let declared: RootfsSource = typo.to_string_lossy().parse().expect("a path parses");
-        let err = crate::local::resolve_local_rootfs(&declared, "m")
-            .await
-            .expect_err("an absent declared path is an error");
-
-        assert!(matches!(err, MvmError::InvalidSpec { .. }), "got {err:?}");
-        assert!(err.to_string().contains(&typo.display().to_string()));
-    }
-
-    #[test]
-    fn a_registry_reference_survives_a_colliding_working_directory_entry() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("alpine:3.20"), b"decoy").unwrap();
-        std::fs::create_dir(dir.path().join("busybox")).unwrap();
-        let _cwd = CwdGuard::enter(dir.path());
-
-        // Both names exist in the cwd; neither is a declared path, so both
-        // stay references.
-        assert_eq!(
-            plan_rootfs("alpine:3.20").unwrap(),
-            RootfsPlan::Pull(reference("alpine:3.20"))
-        );
-        assert_eq!(
-            plan_rootfs("busybox").unwrap(),
-            RootfsPlan::Pull(reference("busybox"))
-        );
-        // The explicitly-relative form is how the caller asks for the file.
-        assert_eq!(
-            plan_rootfs("./alpine:3.20").unwrap(),
-            RootfsPlan::Materialized(PathBuf::from("./alpine:3.20"))
-        );
-    }
-
-    #[test]
-    fn an_unbootable_declaration_names_what_is_wrong() {
-        let empty = plan_rootfs("").expect_err("empty is not a source");
-        assert!(matches!(empty, MvmError::InvalidSpec { .. }), "{empty:?}");
-
-        let flake = plan_rootfs_source(RootfsSource::Flake {
-            flake_ref: "./nix".into(),
-            attr: "rootfs".into(),
-        })
-        .expect_err("a flake is built, not booted");
-        assert!(flake.to_string().contains("./nix#rootfs"), "{flake}");
-    }
-
-    #[test]
-    fn run_rootfs_output_is_name_sanitized_and_under_cache() {
-        let out = run_rootfs_output("my/app:1.2");
-        assert!(out.ends_with("rootfs.ext4"));
-        let s = out.to_string_lossy();
-        assert!(s.contains("local-run"));
-        // Path-hostile characters in the name are replaced.
-        assert!(s.contains("my_app_1_2"));
-    }
-
     #[tokio::test]
     #[cfg(feature = "test-support")]
     async fn run_boots_admitted_plan_from_materialized_rootfs() {
@@ -2878,26 +2512,6 @@ mod tests {
         assert!(mvm_core::config::instance_dir("never-started").exists());
         assert!(!vm_state_dir("never-started").exists());
         assert!(!mvm_core::config::machine_spec_path("never-started").exists());
-    }
-
-    #[test]
-    fn host_verity_sidecars_reads_well_formed_pair() {
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"x").unwrap();
-        // No sidecars yet → unverified.
-        assert_eq!(host_verity_sidecars(&rootfs), (None, None));
-
-        std::fs::write(dir.path().join("rootfs.verity"), b"tree").unwrap();
-        let hex = "a".repeat(64);
-        std::fs::write(dir.path().join("rootfs.roothash"), format!("{hex}\n")).unwrap();
-        let (v, h) = host_verity_sidecars(&rootfs);
-        assert!(v.unwrap().ends_with("rootfs.verity"));
-        assert_eq!(h.unwrap(), hex);
-
-        // A malformed (non-hex / wrong-length) roothash is rejected.
-        std::fs::write(dir.path().join("rootfs.roothash"), "nothex\n").unwrap();
-        assert_eq!(host_verity_sidecars(&rootfs), (None, None));
     }
 
     // ---------------------------------------------------------------------------
