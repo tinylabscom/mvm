@@ -6,10 +6,10 @@
 //! `mvmctl env update`, for the version it is about to install, before the
 //! running binary is touched. The acquisition itself — installed copy, cache,
 //! or download held to its digest and then its signature — is
-//! [`mvm_build::guest_bins::release`]. Bootstrap then assembles the runtime
+//! [`mvm_client::release`]. Bootstrap then assembles the runtime
 //! overlay, the initramfs, both SDK sidecars and the OCI guest runtime from
 //! the archive it acquired
-//! ([`mvm_build::runtime_pieces::assemble_release_runtime_pieces`]).
+//! ([`mvm_client::release::assemble_release_pieces`]).
 //!
 //! A source build assembles its guest runtime from its tree when
 //! `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build` asks for that. Otherwise it uses
@@ -21,10 +21,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use mvm_build::artifact_acquisition::{DistributionChannel, compiled_channel};
-use mvm_build::guest_bins::release::{
-    ReleaseGuestRuntime, ReleaseGuestRuntimeRequest, acquire_release_guest_runtime,
-    installed_guest_runtime_dirs,
+use mvm_client::release::{
+    DistributionChannel, ReleaseGuestRuntime, ReleaseGuestRuntimeRequest,
+    acquire_release_guest_runtime, compiled_channel, installed_guest_runtime_dirs,
 };
 
 use crate::ui;
@@ -92,7 +91,7 @@ fn unpublished_source_build_hint(channel: DistributionChannel, version: &str) ->
             "a source build of mvmctl {version} uses a published guest runtime only when that \
              version was released; assemble this checkout's with \
              `{}=build mvmctl bootstrap`",
-            mvm_build::artifact_acquisition::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV
+            mvm_client::release::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV
         ),
     }
 }
@@ -103,9 +102,9 @@ fn unpublished_source_build_hint(channel: DistributionChannel, version: &str) ->
 pub(crate) fn installed_for_running_binary(
     cache_root: &Path,
     arch: mvm_core::arch::GuestArch,
-) -> Result<mvm_build::guest_runtime::GuestRuntime> {
+) -> Result<mvm_client::release::GuestRuntime> {
     let release = prepare_for_running_binary()?;
-    mvm_build::guest_runtime::install_release_guest_runtime(
+    mvm_client::release::install_guest_runtime(
         cache_root,
         &release.archive,
         crate::update::current_version(),
@@ -124,14 +123,14 @@ pub(crate) fn prepare_oci_for_running_binary(cache_root: &Path) -> Result<()> {
     let version = crate::update::current_version();
     let arch = mvm_core::arch::GuestArch::host();
     let runtime = installed_for_running_binary(cache_root, arch)?;
-    mvm_build::runtime_pieces::install_oci_guest_runtime(cache_root, version, arch, &runtime)
+    mvm_client::release::install_oci_guest_runtime(cache_root, version, arch, &runtime)
         .context("installing OCI guest shims from the verified release runtime")
 }
 
 /// Assemble the version-locked launch artifacts from the authenticated release.
 pub(crate) fn prepare_launch_pieces_for_running_binary(cache_root: &Path) -> Result<()> {
     let release = prepare_for_running_binary()?;
-    mvm_build::runtime_pieces::assemble_release_runtime_pieces(
+    mvm_client::release::assemble_release_pieces(
         cache_root,
         crate::update::current_version(),
         mvm_core::arch::GuestArch::host(),
@@ -151,10 +150,9 @@ fn release_pieces_ready(
     arch: mvm_core::arch::GuestArch,
 ) -> bool {
     matches!(
-        mvm_build::runtime_pieces::adopted_release_archive(cache_root, version, arch),
+        mvm_client::release::adopted_release_archive(cache_root, version, arch),
         Ok(Some(_))
-    ) && mvm_build::guest_agent_build::cached_guest_binaries(oci_cache_root, version, arch)
-        .is_some()
+    ) && mvm_client::release::oci_guest_binaries_cached(oci_cache_root, version, arch)
 }
 
 /// First use of a release binary: assemble this version's guest-runtime pieces
@@ -200,16 +198,14 @@ fn ensure_prepared_with(
         "Preparing the guest runtime of mvmctl {version} from its release archive (first use only, about a minute)..."
     ));
     let release = acquire().with_context(|| {
-        let name = mvm_build::guest_bins::guest_bins_archive_name(version);
+        let name = mvm_client::release::guest_runtime_archive_name(version);
         let places: Vec<String> = searched
             .iter()
             .map(|dir| dir.display().to_string())
             .chain([
-                mvm_build::guest_bins::release::release_guest_runtime_cache_dir(
-                    cache_root, version,
-                )
-                .display()
-                .to_string(),
+                mvm_client::release::guest_runtime_cache_dir(cache_root, version)
+                    .display()
+                    .to_string(),
             ])
             .collect();
         format!(
@@ -218,18 +214,13 @@ fn ensure_prepared_with(
             places.join(", ")
         )
     })?;
-    mvm_build::runtime_pieces::assemble_release_runtime_pieces(
-        cache_root,
-        version,
-        arch,
-        &release.archive,
-    )
-    .with_context(|| {
-        format!(
-            "assembling the release guest runtime {} for first launch",
-            release.archive.display()
-        )
-    })?;
+    mvm_client::release::assemble_release_pieces(cache_root, version, arch, &release.archive)
+        .with_context(|| {
+            format!(
+                "assembling the release guest runtime {} for first launch",
+                release.archive.display()
+            )
+        })?;
     Ok(())
 }
 

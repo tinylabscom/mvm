@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::http;
 use crate::ui;
-use mvm_build::published_image_set::github_download_base;
+use mvm_client::release::github_download_base;
 use mvm_core::release_version::{ReleaseVersion, VersionSyntax};
 use mvm_runtime::shell::run_host;
 
@@ -181,7 +181,7 @@ fn signed_archive_digest(tag: &str, archive_name: &str) -> Result<String> {
         base_url: &base,
         asset: CHECKSUM_MANIFEST,
         version: strip_v_prefix(tag),
-        train: mvm_build::release_signature::ReleaseTrain::Cli,
+        train: mvm_client::release::ReleaseTrain::Cli,
     };
     let mut digests =
         crate::commands::env::artifact_verify::fetch_expected_hashes(&manifest, &[archive_name])
@@ -323,9 +323,9 @@ fn publish_downloaded_kernel(download: tempfile::TempPath, dest: &Path) -> Resul
         .persist(dest)
         .map_err(|error| error.error)
         .with_context(|| format!("publishing downloaded kernel to {}", dest.display()))?;
-    if let Err(error) = mvm_build::kernel_fetch::record_kernel_digest(dest) {
+    if let Err(error) = mvm_client::release::record_kernel_digest(dest) {
         let _ = std::fs::remove_file(dest);
-        let _ = std::fs::remove_file(mvm_build::kernel_fetch::kernel_digest_sidecar(dest));
+        let _ = std::fs::remove_file(mvm_client::release::kernel_digest_sidecar(dest));
         return Err(error).context("recording downloaded kernel digest");
     }
     Ok(())
@@ -651,7 +651,7 @@ pub(crate) fn published_host_helpers_match_current_build() -> Result<bool> {
 
 fn source_helper_commit() -> Result<Option<String>> {
     source_helper_commit_for(
-        mvm_build::artifact_acquisition::compiled_channel(),
+        mvm_client::release::compiled_channel(),
         env!("MVM_SOURCE_COMMIT"),
         env!("MVM_SOURCE_DIRTY"),
     )
@@ -660,11 +660,11 @@ fn source_helper_commit() -> Result<Option<String>> {
 /// The commit a source build's host helpers must match, or `None` for a
 /// release build, whose helpers come from its own signed release.
 fn source_helper_commit_for(
-    channel: mvm_build::artifact_acquisition::DistributionChannel,
+    channel: mvm_client::release::DistributionChannel,
     commit: &str,
     dirty: &str,
 ) -> Result<Option<String>> {
-    if channel == mvm_build::artifact_acquisition::DistributionChannel::Release {
+    if channel == mvm_client::release::DistributionChannel::Release {
         return Ok(None);
     }
     validate_source_helper_identity(commit, dirty).map(Some)
@@ -712,13 +712,13 @@ fn prepare_source_host_binaries(
                  `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap`"
         )
     })?;
-    let proof = mvm_build::release_signature::verify_release_archive_signature(
-        &mvm_build::release_signature::ReleaseSignatureRequest {
+    let proof = mvm_client::release::verify_archive_signature(
+        &mvm_client::release::ReleaseSignatureRequest {
             base_url: &base_url,
             asset: &archive_name,
             archive_path: &archive_path,
             version: &commit,
-            train: mvm_build::release_signature::ReleaseTrain::SourceHelpers,
+            train: mvm_client::release::ReleaseTrain::SourceHelpers,
         },
     )
     .context("verify the source helper bundle")?;
@@ -901,15 +901,13 @@ fn verify_archive_signature_at(
     archive_name: &str,
     archive_path: &Path,
 ) -> Result<()> {
-    mvm_build::release_signature::verify_release_archive_signature(
-        &mvm_build::release_signature::ReleaseSignatureRequest {
-            base_url: release_base,
-            asset: archive_name,
-            archive_path,
-            version: strip_v_prefix(tag),
-            train: mvm_build::release_signature::ReleaseTrain::Cli,
-        },
-    )
+    mvm_client::release::verify_archive_signature(&mvm_client::release::ReleaseSignatureRequest {
+        base_url: release_base,
+        asset: archive_name,
+        archive_path,
+        version: strip_v_prefix(tag),
+        train: mvm_client::release::ReleaseTrain::Cli,
+    })
     .map(|_| ())
     .with_context(|| {
         format!(
