@@ -4118,6 +4118,7 @@ dependencies = [
  "mvm-fs",
  "mvm-http",
  "mvm-net",
+ "mvm-policy",
  "mvm-runtime",
  "mvm-vmm",
  "rand",
@@ -4205,9 +4206,10 @@ dependencies = [
 
 [[package]]
 name = "mvm-policy"
-version = "0.28.0-rc.2"
+version = "0.28.0-rc.8"
 dependencies = [
  "anyhow",
+ "libc",
  "mvm-contract",
  "mvm-core",
  "schemars",

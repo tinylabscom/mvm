@@ -730,9 +730,21 @@ for precedence and application-policy interaction.
 | `mvmctl policy validate [PROFILE\|PATH...] [--strict]` | Check a profile, or one profile or group file. `--strict` refuses every warning and every secret the store would not bind |
 | `mvmctl policy diff A B [--json] [--backend KIND]` | What each profile allows or denies that the other does not |
 | `mvmctl policy groups [--json]` | List built-in and user groups and profiles |
+| `mvmctl policy activate PROJECT` | Commit generation 1 for an explicit local flake project on Linux/Firecracker. Requires a matching prebuilt manifest slot and whole-host quiescence; starts or connects to the resident policy coordinator automatically. Not policy apply or live rollover |
 | `mvmctl why --host H[:P] [--method METHOD --request-path PATH] \| --path P \| --secret S [--profile NAME\|PATH... \| --plan FILE] [--project DIR] [--json]` | Resolve policy without booting and explain one allow/deny answer. Defaults to the current project's `mvm.toml`; `--profile` selects an authored profile and `--plan` reads `policy resolve` output. A routed host needs method and path for a request-level decision |
 | `mvmctl run --policy NAME\|PATH\|ns/name[@version]... -- <cmd>` | Run under authored profiles or groups (repeatable; TOML or JSON documents). Each entry names a profile or a group — a group composes as one layer — and later entries take precedence over earlier ones — a later deny beats an earlier allow; allows union. Also on `machine run`, `machine create` and `machine start`. Replaces the project's `[policy]` table; the project's `[network] allow_hosts` still applies, and applies on every verb even with no policy. Flags add to its allows and cannot reach its denies, blocks or ceilings. Pack references require an installed, pinned, publisher-verified signed pack; pack-authored references cannot import local policy files |
 | `mvmctl run --plan FILE -- <cmd>` | Run under a resolved manifest. Mutually exclusive with `--policy`, `--net`, `--network-preset`, `--allow-host`, `--allow-endpoint`, `--peer`, `--cpu-limit`, `--grants-file`, `--mount`, `--allow-env` and `--secret`. The file is re-validated, and a plan or signature in it is refused: admission signs the plan itself |
+
+After `policy activate`, launches and restores for that project use the
+captured manifest and policy closure, not staged edits. Missing or corrupt
+committed state refuses execution rather than falling back to authored files.
+Activation refuses running, paused, starting, restoring, or uncertain workloads
+anywhere on the host. It does not build a slot, update an existing generation,
+or roll over a running workload. Image/Wasm projects, signed-pack policy
+sources, and non-Firecracker backends are not supported by this operation.
+Top-level manifest launch-default includes are likewise refused.
+See [committed project policy](/guides/policy-and-profiles/#committed-project-policy)
+for source restrictions and operational limits.
 
 For `run` and `machine run`, a root `--policy` pack that declares a signed
 image supplies the boot source when no explicit image, manifest, flake,

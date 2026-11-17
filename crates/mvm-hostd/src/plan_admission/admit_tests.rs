@@ -196,3 +196,26 @@ fn caller_audit_labels_flow_through_admission() {
     assert!(!admitted.plan().audit_labels["admission_profile"].is_empty());
     assert_eq!(admitted.plan().audit_labels["seccomp_tier"], "standard");
 }
+
+#[test]
+fn a_project_generation_cannot_be_admitted_on_another_backend() {
+    let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+    plan.asset_identities.push(
+        mvm_core::plan::AssetIdentity::new(
+            mvm_core::plan::AssetKind::Policy,
+            format!(
+                "{}{}",
+                crate::policy_generation::GENERATION_ASSET_PREFIX,
+                "a".repeat(64)
+            ),
+            "b".repeat(64),
+        )
+        .unwrap(),
+    );
+    let err = verify_project_generation(
+        &plan,
+        RunPosture::on_backend(Variant::Dev, BackendKind::Qemu),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("Linux Firecracker"), "{err:#}");
+}

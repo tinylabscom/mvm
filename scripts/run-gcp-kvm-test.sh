@@ -4,6 +4,8 @@
 # results are
 # downloaded, and the VM is deleted on every exit unless explicitly retained.
 set -euo pipefail
+# Never hold a billable instance open waiting for an interactive auth prompt.
+export CLOUDSDK_CORE_DISABLE_PROMPTS=1
 
 usage() {
   printf '%s\n' \
@@ -15,6 +17,7 @@ usage() {
     '  --machine-type TYPE     Compute Engine type (default: c3-standard-4)' \
     '  --run-name NAME         Short instance/result label (default: test)' \
     '  --results-dir DIR       Local result destination (default: /tmp/...)' \
+    '  --run-as-root           Keep root for explicitly root-owned lab setup' \
     '  --keep-instance         Leave the instance running for diagnosis' \
     '  --dry-run               Validate and print the plan without cloud changes' \
     '  -h, --help              Show this help' \
@@ -32,6 +35,7 @@ machine_type="${MVM_GCP_KVM_MACHINE_TYPE:-c3-standard-4}"
 run_name="${MVM_GCP_KVM_RUN_NAME:-test}"
 keep_instance=0
 dry_run=0
+run_mode=unprivileged
 results_dir="${MVM_GCP_KVM_RESULTS_DIR:-}"
 
 while (($#)); do
@@ -63,6 +67,10 @@ while (($#)); do
       ;;
     --keep-instance)
       keep_instance=1
+      shift
+      ;;
+    --run-as-root)
+      run_mode=root
       shift
       ;;
     --dry-run)
@@ -132,7 +140,9 @@ run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 # `${var,,}` expansion, which macOS's stock bash 3.2 rejects.
 instance="mvm-${run_name}-$(printf '%s' "$run_id" | tr '[:upper:]' '[:lower:]')"
 if [[ -z "$results_dir" ]]; then
-  results_dir="${TMPDIR:-/tmp}/mvm-gcp-kvm-results/$run_id"
+  # Terminal scratch directories can disappear when an agent turn ends.
+  # Keep downloaded failure evidence in the machine's durable /tmp instead.
+  results_dir="/tmp/mvm-gcp-kvm-results/$run_id"
 fi
 mkdir -p "$results_dir"
 
@@ -143,6 +153,7 @@ create_args=(
   --machine-type="$machine_type"
   --provisioning-model=SPOT
   --instance-termination-action=DELETE
+  --max-run-duration=2h
   --maintenance-policy=TERMINATE
   --enable-nested-virtualization
   --no-service-account
@@ -163,6 +174,7 @@ echo "  machine:       $machine_type (Spot, nested KVM)"
 echo "  instance:      $instance"
 echo "  results:       $results_dir"
 echo "  source:        $repo_root"
+echo "  execution:     $run_mode"
 printf '  command:'
 printf ' %q' "${remote_command[@]}"
 printf '\n'
@@ -172,6 +184,11 @@ if ((dry_run)); then
   printf ' %q' gcloud "${create_args[@]}"
   printf '\n'
   exit 0
+fi
+
+if ! gcloud auth print-access-token >/dev/null; then
+  echo "error: refresh gcloud authentication before creating a billable test instance" >&2
+  exit 1
 fi
 
 instance_created=0
@@ -255,25 +272,69 @@ gcloud compute scp \
   "$local_stage/mvm-source.sha" \
   "$instance:/tmp/" --project="$project" --zone="$zone" --quiet
 
-echo ">> preparing the host and running the requested test"
-set +e
+echo ">> starting the requested test on the host"
+# The test can spend half an hour preparing guest artifacts without writing
+# output. A single SSH stream is not its owner: local connectivity can drop
+# while the remote job is still making progress. systemd owns the job until
+# its EXIT trap publishes the result bundle, and short SSH reads reconcile it.
 gcloud compute ssh "$instance" --project="$project" --zone="$zone" --quiet \
-  --command='sudo rm -rf /opt/mvm && sudo mkdir -p /opt/mvm && sudo tar -xzf /tmp/mvm-source.tar.gz -C /opt/mvm --strip-components=1 && sudo bash /opt/mvm/scripts/run-gcp-kvm-test-remote.sh /tmp/mvm-command.argv /tmp/mvm-source.sha'
-run_status=$?
-set -e
+  --ssh-flag=-oConnectTimeout=15 \
+  --command="sudo rm -rf /opt/mvm && sudo mkdir -p /opt/mvm && sudo tar -xzf /tmp/mvm-source.tar.gz -C /opt/mvm --strip-components=1 && sudo systemd-run --unit=mvm-gcp-kvm-test --collect /bin/bash /opt/mvm/scripts/run-gcp-kvm-test-remote.sh /tmp/mvm-command.argv /tmp/mvm-source.sha $run_mode"
+
+deadline=$((SECONDS + 5400))
+checks=0
+run_status=
+echo ">> waiting for the remote result (at most 90 minutes)"
+while ((SECONDS < deadline)); do
+  # A nonzero test status is file CONTENT, not this SSH command's exit status.
+  # Both the exit-status file and archive must exist: the remote EXIT trap
+  # writes the former before closing the latter.
+  if observed="$(gcloud compute ssh "$instance" --project="$project" --zone="$zone" \
+    --quiet --ssh-flag=-oConnectTimeout=15 \
+    --command="sudo sh -c 'test -f /var/tmp/mvm-gcp-kvm-results.tar.gz && cat /var/tmp/mvm-gcp-kvm-results/exit-status'" \
+    2>/dev/null)" && [[ "$observed" =~ ^[0-9]+$ ]]; then
+    run_status="$observed"
+    break
+  fi
+  checks=$((checks + 1))
+  if ((checks % 6 == 0)); then
+    echo ">> remote result still pending; keeping the test host under its deletion trap"
+  fi
+  sleep 20
+done
+if [[ -z "$run_status" ]]; then
+  echo "error: the remote test did not publish a result within 90 minutes" >&2
+  exit 1
+fi
 
 echo ">> downloading the result bundle"
-set +e
-gcloud compute scp "$instance:/var/tmp/mvm-gcp-kvm-results.tar.gz" \
-  "$results_dir/" --project="$project" --zone="$zone" --quiet
-copy_status=$?
-set -e
+copy_status=1
+for delay in 0 1 3 5; do
+  if ((delay)); then
+    sleep "$delay"
+  fi
+  if gcloud compute scp "$instance:/var/tmp/mvm-gcp-kvm-results.tar.gz" \
+    "$results_dir/" --project="$project" --zone="$zone" --quiet; then
+    copy_status=0
+    break
+  fi
+done
 if ((copy_status != 0)); then
   echo "error: remote run status $run_status and result download failed" >&2
   exit 1
 fi
 
 echo "results: $results_dir/mvm-gcp-kvm-results.tar.gz"
+if tar -tzf "$results_dir/mvm-gcp-kvm-results.tar.gz" >/dev/null 2>&1; then
+  if tar -tzf "$results_dir/mvm-gcp-kvm-results.tar.gz" \
+    mvm-gcp-kvm-results/command.log >/dev/null 2>&1; then
+    tar -xOzf "$results_dir/mvm-gcp-kvm-results.tar.gz" \
+      mvm-gcp-kvm-results/command.log || true
+  else
+    tar -xOzf "$results_dir/mvm-gcp-kvm-results.tar.gz" \
+      mvm-gcp-kvm-results/bootstrap.log || true
+  fi
+fi
 if ((run_status != 0)); then
   echo "remote test did not pass; inspect the downloaded result bundle" >&2
 fi

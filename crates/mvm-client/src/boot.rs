@@ -482,6 +482,22 @@ pub fn validate_image_egress_backend(
     );
 }
 
+/// Inspect a named backend's image-egress capabilities without probing or booting it.
+///
+/// # Errors
+///
+/// The backend is not selectable or cannot enforce the requested image egress.
+pub fn image_egress_capabilities(
+    backend_name: &str,
+    image_requested: bool,
+    network_policy: &NetworkPolicy,
+) -> anyhow::Result<mvm_core::vm_backend::VmCapabilities> {
+    AnyBackend::require_hypervisor_selectable(backend_name)?;
+    let backend = AnyBackend::from_hypervisor(backend_name);
+    validate_image_egress_backend(&backend, image_requested, network_policy)?;
+    Ok(backend.capabilities())
+}
+
 pub fn validate_image_egress_backend_name(
     backend_name: &str,
     image_requested: bool,
@@ -495,6 +511,22 @@ pub fn validate_image_egress_backend_name(
 mod backend_select_tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
+
+    #[test]
+    fn image_egress_capability_inspection_preserves_offline_and_refusal_paths() {
+        let offline = NetworkPolicy::deny_all();
+        image_egress_capabilities("qemu", true, &offline).unwrap();
+        let allowed = NetworkPolicy::allow_list(vec![mvm_core::network_policy::HostPort::new(
+            "example.com",
+            443,
+        )]);
+        assert!(image_egress_capabilities("docker", true, &allowed).is_err());
+        assert!(
+            image_egress_capabilities("firecracker", true, &allowed)
+                .unwrap()
+                .host_vsock_proxy
+        );
+    }
 
     #[test]
     fn validate_backend_for_egress_refuses_unavailable_hvf_before_boot_work() {

@@ -300,6 +300,9 @@ impl Supervisor {
         signed: &SignedExecutionPlan,
         trusted_keys: &[(&str, &VerifyingKey)],
     ) -> Result<(), SupervisorError> {
+        let _activation_barrier =
+            mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()
+                .map_err(|error| SupervisorError::PlanVerify(error.to_string()))?;
         // Step 1: signature + schema + version pin. Done first
         // because nothing in the payload is trusted until the
         // signature checks out; the validity-window field below
@@ -331,6 +334,17 @@ impl Supervisor {
             self.emit_audit_then_fail(&plan, "plan.rejected.plan_id_mismatch", &e.to_string())
                 .await?;
             return Err(SupervisorError::PlanVerify(e.to_string()));
+        }
+        if plan.asset_identities.iter().any(|asset| {
+            asset
+                .name
+                .starts_with(crate::policy_generation::GENERATION_ASSET_PREFIX)
+        }) {
+            let reason =
+                "this supervisor has no Firecracker-only committed-generation admission path";
+            self.emit_audit_then_fail(&plan, "plan.rejected.policy_generation", reason)
+                .await?;
+            return Err(SupervisorError::PlanVerify(reason.into()));
         }
 
         // Step 1.5: time-window + nonce-replay

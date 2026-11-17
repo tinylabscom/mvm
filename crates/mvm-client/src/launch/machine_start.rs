@@ -251,6 +251,23 @@ pub fn start_machine_spec_in_lifecycle(
     lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
 ) -> Result<MachineStart> {
     lifecycle.require_name(&spec.name)?;
+    let _activation_barrier =
+        mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
+    if cfg!(target_os = "linux")
+        && crate::backend_kind_for(params.hypervisor) != mvm_core::vm_backend::BackendKind::Mock
+    {
+        crate::policy_profiles::coordinator::ensure_if_activated()?;
+    }
+    crate::policy_profiles::coordinator::validate_machine_spec_generation(
+        spec,
+        &_activation_barrier,
+    )?;
+    anyhow::ensure!(
+        spec.policy_generation.is_none()
+            || crate::backend_kind_for(params.hypervisor)
+                == mvm_core::vm_backend::BackendKind::Firecracker,
+        "a committed project machine requires Firecracker"
+    );
     spec.validate_prepared_source()?;
     AnyBackend::require_hypervisor_selectable(params.hypervisor)?;
     anyhow::ensure!(
@@ -348,6 +365,7 @@ pub fn start_machine_spec_in_lifecycle(
         agent_verb: spec.agent_verb.clone(),
         caller_commitment: spec.caller_commitment.clone(),
         registry_pack_image: spec.registry_pack_image.clone(),
+        policy_generation: spec.policy_generation.as_ref(),
         has_ad_hoc_argv: params.has_ad_hoc_argv,
         grants: spec.grants.clone(),
         mailbox: params.mailbox,
@@ -549,6 +567,7 @@ mod tests {
             name: name.to_string(),
             image: None,
             manifest: None,
+            policy_generation: None,
             deployment: None,
             resolved_digest: None,
             runtime_pack: false,

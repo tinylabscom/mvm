@@ -38,7 +38,8 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// feature enabled, excluding dev-dependencies.
 // Includes dev-only tools: Cucumber's existing closure is now counted when
 // conformance's optional bdd dependency is enabled, not in ordinary tests.
-const FEATURE_CLOSURE_BUDGET: usize = 578;
+// The shared authored-policy extraction adds one first-party package only.
+const FEATURE_CLOSURE_BUDGET: usize = 579;
 
 /// The two gates measure nested sets — everything in the default closure is
 /// reachable with all features on — so a feature budget at or below the default

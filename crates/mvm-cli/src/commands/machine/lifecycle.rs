@@ -244,6 +244,8 @@ fn start_machine_inner(
     lifecycle: Option<&MachineLifecycleLock>,
 ) -> Result<Option<PendingMachineStart>> {
     let (spec, action) = resolve_start_spec(&args)?;
+    let barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
+    mvm_client::policy_profiles::coordinator::validate_machine_spec_generation(&spec, &barrier)?;
     if args.dry_run {
         let summary = machine_start_preflight_summary(
             &spec,

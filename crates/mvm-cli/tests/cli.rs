@@ -3,6 +3,25 @@
 use mvm_cli::commands::cli_command;
 
 #[test]
+fn policy_activation_requires_an_explicit_project_and_is_listed() {
+    cli_command()
+        .try_get_matches_from(["mvmctl", "policy", "activate", "/project"])
+        .expect("the activation command accepts a project path");
+    assert!(
+        cli_command()
+            .try_get_matches_from(["mvmctl", "policy", "activate"])
+            .is_err(),
+        "activation cannot guess which project to commit"
+    );
+    let help = mvm_cli::commands::help_text_for(&["policy".into(), "--help".into()])
+        .expect("policy --help renders");
+    assert!(
+        help.contains("activate"),
+        "policy help must list the activation command"
+    );
+}
+
+#[test]
 fn audit_consistency_requires_explicit_roots_and_exposes_help() {
     for verb in ["prove-consistency", "verify-consistency"] {
         let mut args = vec!["mvmctl", "trust", "audit", verb];

@@ -57,6 +57,14 @@ pub const PER_VM_HOST_BINARIES: &[PerVmBinary] = &[
         features: "",
         scope: PerVmScope::Always,
     },
+    // The owner-only local policy-generation coordinator. Started on demand;
+    // unlike mvm-host-agent it never parses guest traffic or holds signer keys.
+    PerVmBinary {
+        package: "mvm-hostd",
+        name: "mvm-policy-coordinator",
+        features: "",
+        scope: PerVmScope::Always,
+    },
     // Resolved by mvm-host-agent adjacent to *itself*, so it travels
     // wherever mvm-host-agent does.
     PerVmBinary {

@@ -10,7 +10,9 @@
 //! exactly as if they had been typed, which is what makes a profile and the
 //! equivalent flags produce the same signed plan.
 
-use anyhow::{Context, Result};
+use std::path::Path;
+
+use anyhow::{Context, Result, ensure};
 use mvm_client::policy_profiles::{
     LaunchFlags, Platform, PolicyRef, ProjectPolicy, ResolvedPolicy, SelectedPolicy, fold,
 };
@@ -126,6 +128,26 @@ fn select(args: &RunArgs) -> Result<Option<SelectedPolicy>> {
     )
 }
 
+fn named_project_dir(args: &RunArgs) -> Option<std::path::PathBuf> {
+    if let Some(flake) = args.flake.as_deref()
+        && Path::new(flake).is_dir()
+    {
+        return Some(Path::new(flake).to_path_buf());
+    }
+    let manifest = Path::new(args.manifest.as_deref()?);
+    if manifest.is_dir() {
+        Some(manifest.to_path_buf())
+    } else if manifest.extension().is_some_and(|ext| ext == "toml") {
+        mvm_core::manifest::project_dir_for_manifest_path(manifest).map(Path::to_path_buf)
+    } else if !manifest.exists()
+        && mvm_core::manifest::is_slot_hash_dirname(args.manifest.as_deref()?)
+    {
+        mvm_client::policy_profiles::coordinator::project_dir_for_slot(args.manifest.as_deref()?)
+    } else {
+        None
+    }
+}
+
 /// This host, and the backend the run asks for or the host would pick.
 fn run_platform(args: &RunArgs) -> Platform {
     let requested = args.hypervisor.clone().or_else(|| {
@@ -221,7 +243,31 @@ fn launch_flags(args: &RunArgs) -> Result<LaunchFlags> {
 /// A policy that does not resolve, or a flag that asks for something the
 /// policy denies, blocks, or bounds — named.
 pub(in crate::commands) fn apply_run_policy(args: &mut RunArgs) -> Result<()> {
-    let project = super::run_routes::read_project_manifest(args)?;
+    // In an activated project the committed manifest must be read before
+    // consulting the staged file. The CLI command owns the outer shared
+    // barrier through boot; a nested guard also protects direct callers.
+    let barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
+    let committed = named_project_dir(args)
+        .as_deref()
+        .map(|project| {
+            mvm_client::policy_profiles::coordinator::read_if_activated(project, &barrier)
+        })
+        .transpose()?
+        .flatten();
+    let project = if let Some(candidate) = &committed {
+        ensure!(
+            args.policy.is_empty() && args.plan.is_none(),
+            "an activated project cannot replace its committed policy with --policy or --plan"
+        );
+        ensure!(
+            run_platform(args).backend
+                == Some(mvm_contract::protocol::vm_backend::BackendKind::Firecracker),
+            "an activated project requires the Firecracker backend"
+        );
+        Some(candidate.manifest()?)
+    } else {
+        super::run_routes::read_project_manifest(args)?
+    };
     // Snapshot absence for any named project source, even when its directory
     // does not exist yet. A later-created manifest must not add authority.
     args.project_manifest = match project {
@@ -234,7 +280,40 @@ pub(in crate::commands) fn apply_run_policy(args: &mut RunArgs) -> Result<()> {
         }
         None => None,
     };
-    let selected = select(args)?;
+    if let Some(candidate) = &committed
+        && (args.manifest.is_some() || args.flake.is_some())
+    {
+        ensure!(
+            args.flake_profile.is_none(),
+            "an activated project cannot select a different flake profile"
+        );
+        let (path, _) = candidate.manifest()?;
+        args.review_source = Some(super::denial_review::ReviewSource::Manifest(path));
+        args.manifest = Some(
+            mvm_client::policy_profiles::coordinator::built_manifest_slot(candidate)
+                .context("resolving the committed project boot source")?,
+        );
+        // A `--flake PROJECT` launch is still a project launch. Building the
+        // staged flake here would discard the generation's captured boot
+        // declaration while keeping only its policy ceiling.
+        args.flake = None;
+    }
+    let selected = if let Some(candidate) = &committed {
+        let mut resolved = ResolvedPolicy::empty();
+        resolved.policy = candidate.policy().clone();
+        resolved.backend_conditioned = true;
+        Some(SelectedPolicy {
+            label: format!(
+                "committed generation {} ({})",
+                candidate.generation(),
+                candidate.closure_sha256()
+            ),
+            resolved,
+        })
+    } else {
+        select(args)?
+    };
+    args.committed_generation = committed;
     let environment = super::exec::application_source::environment(args)?;
     apply_selected_policy(args, selected, environment)
 }
@@ -292,6 +371,46 @@ mod tests {
     use super::*;
     use mvm_client::policy_profiles::ResolvedManifest;
     use mvm_core::util::test_env::TestEnv;
+
+    #[test]
+    fn a_deleted_staged_manifest_still_names_its_project_for_committed_lookup() {
+        let project = tempfile::tempdir().unwrap();
+        let path = project.path().join("mvm.toml");
+        let args = RunArgs {
+            manifest: Some(path.display().to_string()),
+            ..RunArgs::default()
+        };
+        assert_eq!(named_project_dir(&args), Some(project.path().to_path_buf()));
+    }
+
+    #[test]
+    fn a_built_slot_still_names_the_project_after_staged_manifest_removal() {
+        let (_env, _home) = isolated();
+        let project = tempfile::tempdir().unwrap();
+        let path = project.path().join("mvm.toml");
+        std::fs::write(&path, "flake = \".\"\n").unwrap();
+        let persisted = mvm_core::manifest::PersistedManifest::from_manifest(
+            &mvm_core::manifest::Manifest::read_file(&path).unwrap(),
+            &path.canonicalize().unwrap(),
+            "firecracker",
+            mvm_core::manifest::Provenance::current(),
+        )
+        .unwrap();
+        persisted
+            .write_to_slot(Path::new(&mvm_core::manifest::slot_dir(
+                &persisted.manifest_hash,
+            )))
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let args = RunArgs {
+            manifest: Some(persisted.manifest_hash),
+            ..RunArgs::default()
+        };
+        assert_eq!(
+            named_project_dir(&args),
+            Some(project.path().canonicalize().unwrap())
+        );
+    }
 
     #[test]
     fn configured_policy_applies_without_sources_and_flags_or_plan_replace_it() {

@@ -537,7 +537,19 @@ pub fn boot_entrypoint_vm_owned(
     vm: EntrypointVm<'_>,
     pair: Option<&mut PairArtifactSource<'_>>,
 ) -> Result<super::boot::OwnedClientBoot> {
+    let _activation_barrier =
+        mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
     let backend_name = vm.admission.backend_name().to_string();
+    if cfg!(target_os = "linux")
+        && crate::backend_kind_for(&backend_name) != mvm_core::vm_backend::BackendKind::Mock
+    {
+        crate::policy_profiles::coordinator::ensure_if_activated()?;
+    }
+    crate::policy_profiles::coordinator::verify_slot_generation(
+        vm.slot,
+        vm.admission.committed_policy_asset(),
+        &_activation_barrier,
+    )?;
     let boot = SessionBoot::builder(vm.slot, vm.vm_name)
         .cpus(vm.cpus)
         .memory_mib(vm.memory_mib)
@@ -580,6 +592,8 @@ pub fn boot_entrypoint_vm(
     vm: EntrypointVm<'_>,
     pair: Option<&mut PairArtifactSource<'_>>,
 ) -> Result<BootedEntrypoint> {
+    let _activation_barrier =
+        mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
     let EntrypointVm {
         slot,
         vm_name,
@@ -589,6 +603,16 @@ pub fn boot_entrypoint_vm(
         portable_boot_assets,
     } = vm;
     let backend_name = admission.backend_name().to_string();
+    if cfg!(target_os = "linux")
+        && crate::backend_kind_for(&backend_name) != mvm_core::vm_backend::BackendKind::Mock
+    {
+        crate::policy_profiles::coordinator::ensure_if_activated()?;
+    }
+    crate::policy_profiles::coordinator::verify_slot_generation(
+        slot,
+        admission.committed_policy_asset(),
+        &_activation_barrier,
+    )?;
     let admitted: RefCell<Option<AdmissionContext>> = RefCell::new(None);
     let admit = |inputs: AdmitInputs<'_>| -> Result<Option<SessionAuditSubstrate>> {
         let entry = admission.admit(inputs)?;

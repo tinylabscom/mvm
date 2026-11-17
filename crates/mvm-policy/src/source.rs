@@ -10,13 +10,48 @@
 //! - a **pack** — `namespace/name[@version]`, resolved from an installed,
 //!   pinned, publisher-verified signed pack.
 
-use std::path::{Path, PathBuf};
+use std::{
+    cell::RefCell,
+    collections::VecDeque,
+    io::Read,
+    path::{Path, PathBuf},
+};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::builtin;
 use super::model::{GroupFile, ProfileFile};
+use super::resolve::{CapturedSource, SourceKind};
+
+pub(crate) const MAX_SOURCE_BYTES: usize = 64 * 1024;
+
+#[cfg(unix)]
+fn open_captured_source(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    mvm_core::private_fs::require_current_owner(&metadata)?;
+    if !metadata.is_file() || metadata.nlink() != 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is not an owned regular policy file without aliases",
+                path.display()
+            ),
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn open_captured_source(path: &Path) -> std::io::Result<std::fs::File> {
+    Err(mvm_core::private_fs::unsupported_platform_error(path))
+}
 
 /// A policy document on disk: TOML (`.toml`, or any other extension) or
 /// JSON (`.json`). Both serialize the same types, so one loader serves both
@@ -55,7 +90,7 @@ impl DocFormat {
 /// layers.
 ///
 /// [`User`]: LayerOrigin::User
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LayerOrigin {
     /// Shipped inside `mvmctl`.
@@ -226,6 +261,8 @@ pub struct Loaded<T> {
     pub origin: LayerOrigin,
     /// Digest of the exact document bytes parsed; absent for virtual layers.
     pub(crate) source_sha256: Option<[u8; 32]>,
+    /// The exact UTF-8 bytes parsed, retained for a captured resolution.
+    pub(crate) source_text: Option<String>,
     /// The lookup spelling, so a named source cannot switch to a different file.
     pub(crate) reference_key: Option<String>,
 }
@@ -239,6 +276,8 @@ pub(crate) fn source_sha256(text: &str) -> [u8; 32] {
 pub struct PolicyStore {
     profiles_dir: PathBuf,
     groups_dir: PathBuf,
+    captured: Option<RefCell<VecDeque<CapturedSource>>>,
+    capture_bytes: bool,
 }
 
 impl PolicyStore {
@@ -248,6 +287,8 @@ impl PolicyStore {
         Self {
             profiles_dir: mvm_core::config::policy_profiles_dir(),
             groups_dir: mvm_core::config::policy_groups_dir(),
+            captured: None,
+            capture_bytes: false,
         }
     }
 
@@ -257,7 +298,31 @@ impl PolicyStore {
         Self {
             profiles_dir: dir.as_ref().join("profiles"),
             groups_dir: dir.as_ref().join("groups"),
+            captured: None,
+            capture_bytes: false,
         }
+    }
+
+    pub(crate) fn capturing(&self) -> Self {
+        let mut store = self.clone();
+        store.capture_bytes = true;
+        store
+    }
+
+    pub(crate) fn replaying(&self, sources: Vec<CapturedSource>) -> Self {
+        let mut store = self.clone();
+        store.captured = Some(RefCell::new(VecDeque::from(sources)));
+        store
+    }
+
+    pub(crate) fn replay_is_complete(&self) -> bool {
+        self.captured
+            .as_ref()
+            .is_some_and(|sources| sources.borrow().is_empty())
+    }
+
+    pub(crate) fn is_replaying(&self) -> bool {
+        self.captured.is_some()
     }
 
     /// The directory user profiles live in.
@@ -330,6 +395,15 @@ impl PolicyStore {
         referrer: &str,
         builtin: fn(&str) -> Option<&'static str>,
     ) -> Result<Loaded<T>, PolicyError> {
+        if self.captured.is_some() {
+            return self.load_captured(kind, reference, base, path_origin, referrer);
+        }
+        if self.capture_bytes && matches!(reference, PolicyRef::Pack { .. }) {
+            return Err(PolicyError::new(
+                referrer,
+                "committed local project policy does not yet support signed pack references",
+            ));
+        }
         match reference {
             PolicyRef::Pack {
                 namespace,
@@ -411,6 +485,7 @@ impl PolicyStore {
                     ),
                     origin: LayerOrigin::Pack,
                     source_sha256: Some(source_sha256(&text)),
+                    source_text: self.capture_bytes.then_some(text),
                     reference_key: Some(format!("{noun}:{spelling}")),
                 })
             }
@@ -429,7 +504,7 @@ impl PolicyStore {
                     .unwrap_or_else(|_| path.clone())
                     .display()
                     .to_string();
-                let (doc, digest) = read_doc(&path, kind, referrer)?;
+                let (doc, text, digest) = read_doc(&path, kind, referrer, self.capture_bytes)?;
                 Ok(Loaded {
                     doc,
                     label: format!("{} {}", kind.noun(), path.display()),
@@ -437,6 +512,7 @@ impl PolicyStore {
                     identity,
                     origin: path_origin,
                     source_sha256: Some(digest),
+                    source_text: self.capture_bytes.then_some(text),
                     reference_key: None,
                 })
             }
@@ -454,7 +530,8 @@ impl PolicyStore {
                             ),
                         ));
                     }
-                    let (doc, digest) = read_doc(&user_file, kind, referrer)?;
+                    let (doc, text, digest) =
+                        read_doc(&user_file, kind, referrer, self.capture_bytes)?;
                     return Ok(Loaded {
                         doc,
                         label: format!("{} `{name}`", kind.noun()),
@@ -462,6 +539,7 @@ impl PolicyStore {
                         identity: format!("user:{}:{name}", kind.noun()),
                         origin: LayerOrigin::User,
                         source_sha256: Some(digest),
+                        source_text: self.capture_bytes.then_some(text),
                         reference_key: Some(format!("{}:{name}", kind.noun())),
                     });
                 }
@@ -486,10 +564,114 @@ impl PolicyStore {
                     identity: format!("builtin:{}:{name}", kind.noun()),
                     origin: LayerOrigin::Builtin,
                     source_sha256: Some(source_sha256(text)),
+                    source_text: self.capture_bytes.then(|| text.to_string()),
                     reference_key: Some(format!("{}:{name}", kind.noun())),
                 })
             }
         }
+    }
+
+    fn load_captured<T: serde::de::DeserializeOwned>(
+        &self,
+        kind: Kind,
+        reference: &PolicyRef,
+        base: Option<&Path>,
+        path_origin: LayerOrigin,
+        referrer: &str,
+    ) -> Result<Loaded<T>, PolicyError> {
+        if matches!(reference, PolicyRef::Pack { .. }) || path_origin == LayerOrigin::Pack {
+            return Err(PolicyError::new(
+                referrer,
+                "a committed local project cannot follow a signed pack policy reference",
+            ));
+        }
+        let next = self
+            .captured
+            .as_ref()
+            .expect("captured lookup requires a replay store")
+            .borrow()
+            .front()
+            .cloned()
+            .ok_or_else(|| {
+                PolicyError::new(referrer, "the captured source closure is incomplete")
+            })?;
+        let expected_kind = match kind {
+            Kind::Profile => SourceKind::Profile,
+            Kind::Group => SourceKind::Group,
+        };
+        if next.kind != expected_kind {
+            return Err(PolicyError::new(
+                referrer,
+                format!("the captured source is not a {}", kind.noun()),
+            ));
+        }
+        let matches_reference = match reference {
+            PolicyRef::Name(name) => {
+                next.reference_key.as_deref() == Some(format!("{}:{name}", kind.noun()).as_str())
+                    && matches!(next.origin, LayerOrigin::Builtin | LayerOrigin::User)
+                    && (next.origin != LayerOrigin::Builtin || next.file.is_none())
+                    && (next.origin != LayerOrigin::User || next.file.is_some())
+            }
+            PolicyRef::Path(path) => {
+                let path = if path.is_relative() {
+                    base.map_or_else(|| path.clone(), |base| base.join(path))
+                } else {
+                    path.clone()
+                };
+                next.reference_key.is_none()
+                    && next.file.as_deref() == Some(path.as_path())
+                    && next.origin == path_origin
+            }
+            PolicyRef::Pack { .. } => false,
+        };
+        if !matches_reference {
+            return Err(PolicyError::new(
+                referrer,
+                "the requested policy source is not the next captured lookup",
+            ));
+        }
+        if next.sha256 != source_sha256(&next.text) {
+            return Err(PolicyError::new(
+                referrer,
+                "the captured policy source digest does not match its bytes",
+            ));
+        }
+        let doc = match next.file.as_deref() {
+            Some(path) => parse_document(&next.text, path, kind)?,
+            None => toml::from_str(&next.text).map_err(|error| {
+                PolicyError::new(referrer, format!("captured built-in: {error}"))
+            })?,
+        };
+        self.captured
+            .as_ref()
+            .expect("captured lookup requires a replay store")
+            .borrow_mut()
+            .pop_front();
+        let label = match reference {
+            PolicyRef::Name(name) if next.origin == LayerOrigin::Builtin => {
+                format!("{} `{name}` (built-in)", kind.noun())
+            }
+            PolicyRef::Name(name) => format!("{} `{name}`", kind.noun()),
+            PolicyRef::Path(_) => format!(
+                "{} {}",
+                kind.noun(),
+                next.file
+                    .as_ref()
+                    .expect("captured path matched a file")
+                    .display()
+            ),
+            PolicyRef::Pack { .. } => unreachable!("pack references are refused above"),
+        };
+        Ok(Loaded {
+            doc,
+            file: next.file,
+            label,
+            identity: next.identity,
+            origin: next.origin,
+            source_sha256: Some(next.sha256),
+            source_text: self.capture_bytes.then_some(next.text),
+            reference_key: next.reference_key,
+        })
     }
 }
 
@@ -520,14 +702,40 @@ fn read_doc<T: serde::de::DeserializeOwned>(
     path: &Path,
     kind: Kind,
     referrer: &str,
-) -> Result<(T, [u8; 32]), PolicyError> {
-    let text = std::fs::read_to_string(path).map_err(|error| {
+    capture_bytes: bool,
+) -> Result<(T, String, [u8; 32]), PolicyError> {
+    let read_error = |error: std::io::Error| {
         PolicyError::new(
             referrer,
             format!("reading {} {}: {error}", kind.noun(), path.display()),
         )
-    })?;
-    Ok((parse_document(&text, path, kind)?, source_sha256(&text)))
+    };
+    let text = if capture_bytes {
+        let mut bytes = Vec::new();
+        open_captured_source(path)
+            .map_err(read_error)?
+            .take((MAX_SOURCE_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(read_error)?;
+        if bytes.len() > MAX_SOURCE_BYTES {
+            return Err(
+                PolicyError::new(referrer, "the source closure exceeds its size limit")
+                    .in_file(Some(path)),
+            );
+        }
+        String::from_utf8(bytes).map_err(|error| {
+            PolicyError::new(
+                referrer,
+                format!("reading {} {}: {error}", kind.noun(), path.display()),
+            )
+            .in_file(Some(path))
+        })?
+    } else {
+        std::fs::read_to_string(path).map_err(read_error)?
+    };
+    let doc = parse_document(&text, path, kind)?;
+    let digest = source_sha256(&text);
+    Ok((doc, text, digest))
 }
 
 pub(crate) fn parse_document<T: serde::de::DeserializeOwned>(

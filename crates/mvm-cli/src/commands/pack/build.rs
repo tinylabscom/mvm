@@ -472,6 +472,7 @@ fn health_call(slot: &str, spec: &PackSpec, args: &BuildArgs) -> EntrypointCall 
         review_source: ReviewSource::Unavailable(NoManifest::NotNamed),
         network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         hypervisor: args.hypervisor.clone(),
+        policy_generation: None,
         portable_boot_assets: None,
     }
 }

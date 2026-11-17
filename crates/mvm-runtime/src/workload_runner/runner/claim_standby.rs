@@ -53,6 +53,9 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         handle: &StandbyHandle,
         claim: &StandbyClaim,
     ) -> std::result::Result<crate::backend::OwnedWarmClaim, StandbyError> {
+        let _activation_barrier =
+            mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()
+                .map_err(|error| StandbyError::ClaimFailed(format!("{error:#}")))?;
         if claim
             .start_config
             .as_ref()

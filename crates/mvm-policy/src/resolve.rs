@@ -16,20 +16,51 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use anyhow::Context;
 use mvm_contract::protocol::vm_backend::BackendKind;
+use serde::{Deserialize, Serialize};
 
 use super::merge::{Layer, ResolvedPolicy, merge_layers};
 use super::model::{GroupFile, HostArch, HostOs, PolicyBody, ProfileFile, WhenBlock};
 use super::source::{
-    DocFormat, Kind, LayerOrigin, Loaded, PolicyError, PolicyRef, PolicyStore, parse_document,
-    source_sha256,
+    DocFormat, Kind, LayerOrigin, Loaded, MAX_SOURCE_BYTES, PolicyError, PolicyRef, PolicyStore,
+    parse_document, source_sha256,
 };
 
 /// The deepest `extends` chain accepted.
 pub const MAX_EXTENDS_DEPTH: usize = 10;
 
+const MAX_CAPTURED_SOURCES: usize = 256;
+const MAX_CLOSURE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Whether the captured source was parsed as a profile or a group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceKind {
+    Profile,
+    Group,
+}
+
+/// Exact text and lookup identity observed during one policy resolution.
+///
+/// A captured source is not an admitted or committed policy: the project
+/// manifest, selection, and platform must also be bound, and a host owner must
+/// validate the complete closure before publishing it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapturedSource {
+    pub kind: SourceKind,
+    pub identity: String,
+    pub reference_key: Option<String>,
+    pub file: Option<PathBuf>,
+    pub origin: LayerOrigin,
+    pub text: String,
+    pub sha256: [u8; 32],
+}
+
 /// What `[[when]]` predicates are matched against.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Platform {
     pub os: Option<HostOs>,
     pub arch: Option<HostArch>,
@@ -139,6 +170,30 @@ impl PolicySelection {
     }
 }
 
+/// Select launch policy with operator-configured fallbacks.
+///
+/// Explicit flags or a project's `[policy]` table replace defaults; project
+/// network hosts remain attached to the selected policy.
+///
+/// # Errors
+///
+/// A selected policy reference is malformed.
+pub fn select_launch_policy(
+    cli: &[String],
+    project: Option<ProjectPolicy>,
+    defaults: &[String],
+) -> anyhow::Result<Option<PolicySelection>> {
+    let project_selects = project
+        .as_ref()
+        .is_some_and(|policy| policy.profile.is_some() || !policy.include.is_empty());
+    if cli.is_empty() && !project_selects {
+        PolicySelection::for_launch(defaults, project)
+            .context("selecting configured default_policy")
+    } else {
+        PolicySelection::for_launch(cli, project).map_err(Into::into)
+    }
+}
+
 /// Resolve `selection` on `platform`.
 ///
 /// # Errors
@@ -151,7 +206,75 @@ pub fn resolve(
     selection: &PolicySelection,
     platform: Platform,
 ) -> Result<ResolvedPolicy, PolicyError> {
-    let mut walker = Walker::new(store, platform);
+    resolve_inner(store, selection, platform, false).map(|(resolved, _)| resolved)
+}
+
+/// Resolve while retaining the exact text of every inspected profile and group.
+///
+/// Includes groups inspected only to determine whether exclusion is allowed;
+/// the caller must separately capture the project manifest and selectors.
+///
+/// # Errors
+///
+/// The same errors as [`resolve`].
+pub fn resolve_capturing_sources(
+    store: &PolicyStore,
+    selection: &PolicySelection,
+    platform: Platform,
+) -> Result<(ResolvedPolicy, Vec<CapturedSource>), PolicyError> {
+    resolve_inner(&store.capturing(), selection, platform, true)
+}
+
+/// Re-resolve a captured local source sequence without reading authored files.
+///
+/// The caller must separately bind the project manifest, selection, platform,
+/// and expected effective policy; this checks the captured profile/group
+/// closure and rejects missing, reordered, extra, or edited sources.
+///
+/// # Errors
+///
+/// A captured source is missing, malformed, inconsistent, too large, or fails
+/// the usual policy merge.
+pub fn resolve_from_captured_sources(
+    store: &PolicyStore,
+    selection: &PolicySelection,
+    platform: Platform,
+    sources: &[CapturedSource],
+) -> Result<ResolvedPolicy, PolicyError> {
+    if sources.len() > MAX_CAPTURED_SOURCES {
+        return Err(PolicyError::new(
+            "captured policy",
+            "the source closure exceeds its size limit",
+        ));
+    }
+    let mut total_bytes = 0usize;
+    for source in sources {
+        total_bytes = total_bytes.saturating_add(source.text.len());
+        if source.text.len() > MAX_SOURCE_BYTES || total_bytes > MAX_CLOSURE_BYTES {
+            return Err(PolicyError::new(
+                "captured policy",
+                "the source closure exceeds its size limit",
+            ));
+        }
+    }
+    let replay = store.replaying(sources.to_vec());
+    let resolved = resolve(&replay, selection, platform)?;
+    if !replay.replay_is_complete() {
+        return Err(PolicyError::new(
+            "captured policy",
+            "the source closure contains unused entries",
+        ));
+    }
+    Ok(resolved)
+}
+
+fn resolve_inner(
+    store: &PolicyStore,
+    selection: &PolicySelection,
+    platform: Platform,
+    capture: bool,
+) -> Result<(ResolvedPolicy, Vec<CapturedSource>), PolicyError> {
+    let mut walker = Walker::new(store, platform, capture);
     for reference in &selection.profiles {
         match store.load_profile(reference, None, LayerOrigin::User, "--policy") {
             Ok(root) => walker.walk(root, 0)?,
@@ -162,7 +285,7 @@ pub fn resolve(
             Err(profile_error) => {
                 match store.load_group(reference, None, LayerOrigin::User, "--policy") {
                     Ok(group) => {
-                        walker.record_source(&group)?;
+                        walker.record_source(&group, SourceKind::Group)?;
                         if !walker.groups.iter().any(|g| g.identity == group.identity) {
                             walker.groups.push(SelectedGroup {
                                 identity: group.identity.clone(),
@@ -212,6 +335,7 @@ pub fn resolve(
                 identity: format!("project:{}", project.manifest.display()),
                 origin: LayerOrigin::Project,
                 source_sha256: None,
+                source_text: None,
                 reference_key: None,
             },
             0,
@@ -249,7 +373,7 @@ fn resolve_file_text(
         .display()
         .to_string();
     if let Ok(doc) = DocFormat::for_path(path).parse::<ProfileFile>(text) {
-        let mut walker = Walker::new(store, platform);
+        let mut walker = Walker::new(store, platform, false);
         walker.walk(
             Loaded {
                 doc,
@@ -258,11 +382,12 @@ fn resolve_file_text(
                 identity,
                 origin: LayerOrigin::User,
                 source_sha256: Some(source_sha256(text)),
+                source_text: None,
                 reference_key: None,
             },
             0,
         )?;
-        return walker.finish();
+        return walker.finish().map(|(resolved, _)| resolved);
     }
     let doc = parse_document::<GroupFile>(text, path, Kind::Group)?;
     merge_layers(&[group_layer(&Loaded {
@@ -272,6 +397,7 @@ fn resolve_file_text(
         identity,
         origin: LayerOrigin::User,
         source_sha256: Some(source_sha256(text)),
+        source_text: None,
         reference_key: None,
     })])
 }
@@ -290,6 +416,8 @@ struct Walker<'a> {
     visited: Vec<String>,
     seen_sources: BTreeMap<String, [u8; 32]>,
     seen_lookups: BTreeMap<String, (String, [u8; 32])>,
+    captured_sources: Option<Vec<CapturedSource>>,
+    captured_bytes: usize,
     groups: Vec<SelectedGroup>,
     overrides: Vec<Layer>,
     backend_conditioned: bool,
@@ -309,7 +437,7 @@ fn base_dir(file: Option<&Path>) -> Option<&Path> {
 }
 
 impl<'a> Walker<'a> {
-    fn new(store: &'a PolicyStore, platform: Platform) -> Self {
+    fn new(store: &'a PolicyStore, platform: Platform, capture: bool) -> Self {
         Self {
             store,
             platform,
@@ -317,21 +445,27 @@ impl<'a> Walker<'a> {
             visited: Vec::new(),
             seen_sources: BTreeMap::new(),
             seen_lookups: BTreeMap::new(),
+            captured_sources: capture.then(Vec::new),
+            captured_bytes: 0,
             groups: Vec::new(),
             overrides: Vec::new(),
             backend_conditioned: false,
         }
     }
 
-    fn finish(self) -> Result<ResolvedPolicy, PolicyError> {
+    fn finish(self) -> Result<(ResolvedPolicy, Vec<CapturedSource>), PolicyError> {
         let mut layers: Vec<Layer> = self.groups.into_iter().map(|g| g.layer).collect();
         layers.extend(self.overrides);
         let mut resolved = merge_layers(&layers)?;
         resolved.backend_conditioned = self.backend_conditioned;
-        Ok(resolved)
+        Ok((resolved, self.captured_sources.unwrap_or_default()))
     }
 
-    fn record_source<T>(&mut self, loaded: &Loaded<T>) -> Result<(), PolicyError> {
+    fn record_source<T>(
+        &mut self,
+        loaded: &Loaded<T>,
+        kind: SourceKind,
+    ) -> Result<(), PolicyError> {
         let Some(digest) = loaded.source_sha256 else {
             return Ok(());
         };
@@ -348,13 +482,17 @@ impl<'a> Walker<'a> {
                     .in_file(loaded.file.as_deref()),
             );
         }
-        let identity = loaded.file.as_ref().map_or_else(
-            || loaded.identity.clone(),
-            |path| {
-                let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-                format!("file:{}", path.display())
-            },
-        );
+        let identity = if self.store.is_replaying() {
+            loaded.identity.clone()
+        } else {
+            loaded.file.as_ref().map_or_else(
+                || loaded.identity.clone(),
+                |path| {
+                    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+                    format!("file:{}", path.display())
+                },
+            )
+        };
         if self
             .seen_sources
             .get(&identity)
@@ -370,11 +508,43 @@ impl<'a> Walker<'a> {
             self.seen_lookups
                 .insert(key.clone(), (loaded.identity.clone(), digest));
         }
+        if let Some(captured) = &mut self.captured_sources {
+            if loaded.origin == LayerOrigin::Pack {
+                return Err(PolicyError::new(
+                    &loaded.label,
+                    "committed local project policy does not yet support signed pack references",
+                ));
+            }
+            let text = loaded.source_text.as_ref().ok_or_else(|| {
+                PolicyError::new(&loaded.label, "source bytes were not retained")
+                    .in_file(loaded.file.as_deref())
+            })?;
+            self.captured_bytes = self.captured_bytes.saturating_add(text.len());
+            if text.len() > MAX_SOURCE_BYTES
+                || self.captured_bytes > MAX_CLOSURE_BYTES
+                || captured.len() >= MAX_CAPTURED_SOURCES
+            {
+                return Err(PolicyError::new(
+                    &loaded.label,
+                    "the source closure exceeds its size limit",
+                )
+                .in_file(loaded.file.as_deref()));
+            }
+            captured.push(CapturedSource {
+                kind,
+                identity: loaded.identity.clone(),
+                reference_key: loaded.reference_key.clone(),
+                file: loaded.file.clone(),
+                origin: loaded.origin,
+                text: text.clone(),
+                sha256: digest,
+            });
+        }
         Ok(())
     }
 
     fn walk(&mut self, profile: Loaded<ProfileFile>, depth: usize) -> Result<(), PolicyError> {
-        self.record_source(&profile)?;
+        self.record_source(&profile, SourceKind::Profile)?;
         if let Some(position) = self
             .stack
             .iter()
@@ -473,7 +643,7 @@ impl<'a> Walker<'a> {
         for raw in include {
             let group =
                 self.load_group(profile, raw, base.as_deref(), &format!("{key}.include"))?;
-            self.record_source(&group)?;
+            self.record_source(&group, SourceKind::Group)?;
             if self.groups.iter().any(|g| g.identity == group.identity) {
                 continue;
             }
@@ -487,7 +657,7 @@ impl<'a> Walker<'a> {
         for raw in exclude {
             let group =
                 self.load_group(profile, raw, base.as_deref(), &format!("{key}.exclude"))?;
-            self.record_source(&group)?;
+            self.record_source(&group, SourceKind::Group)?;
             let Some(position) = self
                 .groups
                 .iter()

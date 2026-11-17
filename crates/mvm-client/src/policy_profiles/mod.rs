@@ -22,8 +22,7 @@
 
 use std::path::Path;
 
-use anyhow::Context;
-
+pub mod coordinator;
 pub mod environment;
 pub mod manifest;
 pub mod preview;
@@ -32,33 +31,12 @@ pub mod resolve;
 pub use mvm_policy::{builtin, merge, model, source};
 
 pub use manifest::{FoldedLaunch, LaunchFlags, ResolvedManifest, fold};
+pub use mvm_policy::select_launch_policy;
 pub use mvm_policy::{
     GroupFile, LayerOrigin, LayerSummary, MAX_EXTENDS_DEPTH, Platform, PolicyBody, PolicyError,
     PolicyRef, PolicySelection, PolicyStore, ProfileFile, ProjectPolicy, ResolvedPolicy,
 };
 pub use resolve::resolve;
-
-/// Select launch policy with operator-configured fallbacks. Explicit CLI or
-/// project selection replaces defaults; project network hosts remain attached.
-///
-/// # Errors
-///
-/// A selected policy reference is malformed.
-pub fn select_launch_policy(
-    cli: &[String],
-    project: Option<ProjectPolicy>,
-    defaults: &[String],
-) -> anyhow::Result<Option<PolicySelection>> {
-    let project_selects = project
-        .as_ref()
-        .is_some_and(|policy| policy.profile.is_some() || !policy.include.is_empty());
-    if cli.is_empty() && !project_selects {
-        PolicySelection::for_launch(defaults, project)
-            .context("selecting configured default_policy")
-    } else {
-        PolicySelection::for_launch(cli, project).map_err(Into::into)
-    }
-}
 
 /// The policy selected for a launch, before application and plan admission.
 #[derive(Debug)]

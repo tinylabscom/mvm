@@ -535,10 +535,13 @@ fn spawn_broker_with_timeout(
 
 /// Spawn `bin` detached (`setsid`), write `cfg` JSON to its stdin then close it
 /// (EOF), and hand back the child. The shared core of the audit-signer + broker
-/// spawns so the detach/pipe moat can't drift between them. stdout/stderr are
-/// nulled — both subprocesses log structured JSON to the supervisor's capture,
-/// and neither emits a stdout handshake (readiness is detected by UDS-poll).
-pub(crate) fn spawn_detached_with_config(
+/// spawns and the owner-only policy coordinator so the detach/pipe moat cannot
+/// drift between them. stdout/stderr are nulled; readiness is UDS-polling.
+///
+/// # Errors
+///
+/// The process or its config pipe could not be started.
+pub fn spawn_detached_with_config(
     bin: &Path,
     cfg: &serde_json::Value,
     what: &str,

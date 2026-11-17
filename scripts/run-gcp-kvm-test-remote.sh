@@ -3,11 +3,19 @@
 # by run-gcp-kvm-test.sh. This script is not an interactive entry point.
 set -euo pipefail
 
+# systemd services do not inherit an SSH login's HOME. Provisioning runs as
+# root and rustup's environment file expands HOME under `set -u`.
+export HOME=/root
 repo=/opt/mvm
 request=${1:?command argv file is required}
 source_identity=${2:?source identity file is required}
+run_mode=${3:?execution mode is required}
 results=/var/tmp/mvm-gcp-kvm-results
 bundle=/var/tmp/mvm-gcp-kvm-results.tar.gz
+[[ "$run_mode" == root || "$run_mode" == unprivileged ]] || {
+  echo "error: unknown execution mode $run_mode" >&2
+  exit 64
+}
 
 rm -rf "$results"
 mkdir -p "$results"
@@ -65,7 +73,7 @@ done
 timeout 240 apt-get "${apt_opts[@]}" update
 timeout 300 apt-get "${apt_opts[@]}" install -y --no-install-recommends \
   build-essential ca-certificates clang cmake curl file git lld \
-  libcap-ng-dev libssl-dev musl-tools pkg-config protobuf-compiler \
+  dbus-user-session libcap-ng-dev libssl-dev musl-tools pkg-config protobuf-compiler \
   qemu-system-x86 qemu-utils xz-utils zstd dpkg-dev cpio gzip perl \
   coreutils busybox-static
 
@@ -161,6 +169,41 @@ if ! cargo zigbuild --version 2>/dev/null | grep -q "$zigbuild_version"; then
   cargo install cargo-zigbuild --version "$zigbuild_version" --locked
 fi
 
+runner=()
+if [[ "$run_mode" == unprivileged ]]; then
+  # Provisioning needs root; the workload builder and Firecracker refuse it.
+  # Keep root only for the explicit destructive-lab opt-in.
+  run_user=mvm-lab
+  kvm_group="$(stat -c %G /dev/kvm)"
+  if [[ "$kvm_group" == UNKNOWN ]]; then
+    echo "error: /dev/kvm has no named access group" >&2
+    exit 1
+  fi
+  if [[ "$kvm_group" == root ]]; then
+    # Do not grant a workload-capable user general root-group access.
+    kvm_group=mvm-kvm
+    groupadd --system "$kvm_group"
+    chgrp "$kvm_group" /dev/kvm
+    chmod g+rw /dev/kvm
+  fi
+  useradd --create-home --shell /bin/bash --groups "$kvm_group" "$run_user"
+  chown -R "$run_user:$run_user" "$repo" "$results"
+  runuser -u "$run_user" -- test -r /dev/kvm
+  runuser -u "$run_user" -- test -w /dev/kvm
+  # runuser alone switches UID but never opens a PAM login session. The
+  # Firecracker cgroup scope needs a real systemd user manager and bus; an
+  # environment variable naming a nonexistent bus would only defer refusal.
+  run_uid="$(id -u "$run_user")"
+  loginctl enable-linger "$run_user"
+  systemctl start "user@$run_uid.service"
+  run_dir="/run/user/$run_uid"
+  test -S "$run_dir/bus"
+  runuser -u "$run_user" -- env \
+    XDG_RUNTIME_DIR="$run_dir" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=$run_dir/bus" \
+    systemctl --user show-environment >/dev/null
+fi
+
 command_argv=()
 while IFS= read -r -d '' argument; do
   command_argv+=("$argument")
@@ -170,49 +213,30 @@ if ((${#command_argv[@]} == 0)); then
   exit 1
 fi
 
-# Firecracker refuses a root caller even when nested KVM is available. Give the
-# test user only the device's group, not root or a privileged host service.
-kvm_group="$(stat -c %G /dev/kvm)"
-if [[ "$kvm_group" == UNKNOWN ]]; then
-  echo "error: /dev/kvm has no named access group" >&2
-  exit 1
-fi
-useradd -m -s /bin/bash -G "$kvm_group" mvm-test
-chown -R mvm-test:mvm-test "$repo" "$results"
-if ! runuser -u mvm-test -- test -r /dev/kvm -a -w /dev/kvm; then
-  echo "error: unprivileged test user cannot access /dev/kvm" >&2
-  exit 1
-fi
-# Firecracker's resource limits require a real user-manager bus and delegated
-# systemd scope. A bare runuser process has neither, even with /dev/kvm access.
-loginctl enable-linger mvm-test
-test_uid="$(id -u mvm-test)"
-systemctl start "user@${test_uid}.service"
-user_runtime_dir="/run/user/$test_uid"
-if [[ ! -S "$user_runtime_dir/bus" ]] \
-  || ! runuser -u mvm-test -- env \
-    XDG_RUNTIME_DIR="$user_runtime_dir" \
-    DBUS_SESSION_BUS_ADDRESS="unix:path=$user_runtime_dir/bus" \
-    systemctl --user is-active --quiet default.target; then
-  echo "error: unprivileged test user has no active systemd session bus" >&2
-  exit 1
+cd "$repo"
+# Repository-owned worktree isolation helper.
+# shellcheck source=/dev/null
+source scripts/dev-env.sh
+if [[ "$run_mode" == unprivileged ]]; then
+  runner=(
+    runuser -u "$run_user" -- env
+    HOME="/home/$run_user"
+    RUSTUP_HOME="$RUSTUP_HOME"
+    PATH="$CARGO_HOME/bin:/usr/local/bin:/usr/bin:/bin"
+    MVM_FIRECRACKER_BIN=/usr/local/bin/firecracker
+    XDG_RUNTIME_DIR="$run_dir"
+    DBUS_SESSION_BUS_ADDRESS="unix:path=$run_dir/bus"
+    MVM_GCP_KVM_RESULTS_DIR="$results"
+    MVM_HOME="$MVM_HOME"
+    CARGO_HOME="$CARGO_HOME"
+    CARGO_TARGET_DIR="$CARGO_TARGET_DIR"
+  )
 fi
 printf '>> running:'
 printf ' %q' "${command_argv[@]}"
 printf '\n'
 set +e
-runuser -u mvm-test -- env \
-  HOME=/home/mvm-test \
-  XDG_RUNTIME_DIR="$user_runtime_dir" \
-  DBUS_SESSION_BUS_ADDRESS="unix:path=$user_runtime_dir/bus" \
-  PATH="$CARGO_HOME/bin:/usr/local/bin:/usr/bin:/bin" \
-  RUSTUP_HOME="$RUSTUP_HOME" \
-  CARGO_HOME="$CARGO_HOME" \
-  CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-  MVM_HOME="$MVM_HOME" \
-  MVM_FIRECRACKER_BIN=/usr/local/bin/firecracker \
-  MVM_GCP_KVM_RESULTS_DIR="$results" \
-  "${command_argv[@]}" 2>&1 | tee "$results/command.log"
+"${runner[@]}" "${command_argv[@]}" 2>&1 | tee "$results/command.log"
 run_status=${PIPESTATUS[0]}
 set -e
 exit "$run_status"

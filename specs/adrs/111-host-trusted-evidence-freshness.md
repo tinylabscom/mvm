@@ -5,11 +5,28 @@ Validation: none
 
 ## Status
 
-Proposed for review in [#5386](https://github.com/tinylabscom/mvm/issues/5386).
-The operator has selected the separate, automatically managed local lifecycle
-coordinator described below; the other transitions remain proposed. This
-record defines a design boundary, not a shipped re-attestation capability
-or an amendment to the claims in ADR-001.
+Accepted for the initial local project generation design in
+[#5391](https://github.com/tinylabscom/mvm/issues/5391); broader evidence
+freshness, atomic apply, and live rollover remain proposed under
+[#5386](https://github.com/tinylabscom/mvm/issues/5386). The implementation
+is local and unmerged, not a shipped re-attestation capability or an amendment
+to ADR-001's security claims.
+
+The initial slice uses a separate, automatically managed
+`mvm-policy-coordinator` within the `mvm-hostd` boundary. It supports only
+Linux/Firecracker local flake projects with a matching prebuilt manifest slot
+and whole-host quiescence. It captures generation 1, binds it into signed
+admission, and refuses missing or corrupt state rather than reading staged
+inputs. Updates, deactivation, running-workload cutover, signed-pack policy
+sources, and other backends remain outside this slice.
+
+The live `policy_generation` witness on 2026-11-17 passed two scenarios and
+all seventeen steps: activation, staged CPU-widening refusal, committed
+entrypoint and relative flake runs returning exit 7, and refusal of an
+entrypoint policy requiring an unsupported CPU-share grant. Its 469 unselected
+scenarios did not run. This is targeted Linux/Firecracker evidence, not
+all-backend or rollover evidence. Final repository gates and publication
+remain separate.
 
 ## Context
 
@@ -114,6 +131,25 @@ happen to be on disk. The operation cannot report success until every
 affected live instance is replaced or safely bound to the new signed
 admission and the new generation is durable.
 
+The first project generation is published by an explicit
+`mvmctl policy activate PROJECT` operation, not by the first launch or by
+editing `mvm.toml`. For generation 1 the operator chose **whole-host
+quiescence** rather than inferring an affected project from legacy VM names:
+activation refuses if any workload may be starting, running, paused, or
+restoring. It durably binds the exact source closure and effective policy
+before any opted-in launch can use that generation. Once activated, later
+edits remain staged and cannot disable the committed-policy path by
+changing the project manifest. `policy apply` and live rollover remain
+separate transitions; activation is not a substitute for either.
+The coordinator must serialize activation with **all** local launch and
+restore paths, including ordinary runs, before checking for live work. A
+best-effort VM listing that skips backend errors cannot prove quiescence;
+an unknown probe or untracked transient session refuses activation rather
+than being counted as stopped. A checked listing alone is not a complete
+live-workload inventory. Source-bound per-project activation can relax this
+restriction only after every launch/restore records authoritative source
+identity and unknown legacy workloads remain a refusal.
+
 The host-side admission owner must serialize apply with launches, resumes,
 and other applies. It needs a durable binding from each live workload to
 the policy inputs and effective generation it was admitted under. An apply
@@ -126,9 +162,9 @@ cannot silently opt out of live policy updates.
 
 This owner is local to MVM, not `mvmd`. Today the CLI calls
 `mvm-hostd::plan_admission` and the selected backend directly rather than
-handing the whole boot to a resident supervisor (ADR-014). `mvmctl policy`
-only resolves, shows, validates and compares authoring inputs; a
-`ResolvedPolicy` lists contributing files but carries no committed
+handing the whole boot to a resident supervisor (ADR-014). Initial activation
+now has a resident publication owner and generation-bound admission, while
+`ResolvedPolicy` itself remains an authored-input result, not a committed
 generation. The per-VM network endpoint creates a static egress projection.
 The supervisor's `hot_revision_replaces_firewall_for_same_workload` is a
 mock test that resets its state machine between two launches; it is not
@@ -164,6 +200,12 @@ if launch still follows mutable names or filesystem links. The first
 versioned format must preserve these identities and refuse unknown
 fields or an incomplete closure; its concrete encoding and migration
 belong to the implementing contract.
+The first Linux/Firecracker candidate reader currently bounds and retains
+parsed local policy text and refuses signed-pack policy references, direct
+symlinks and multiply linked sources instead of claiming to commit those
+inputs. The initial activation implementation publishes this closure and
+launch/restore consume it for activated projects; ordinary unactivated runs
+still read authored files as before.
 
 The selected owner is the existing **local host-service boundary**:
 move lifecycle policy admission and cutover coordination behind
@@ -314,12 +356,13 @@ An offline lease is an explicit signed exception only for the operations
 and expiry it already permits. The plan's short validity window gates
 *launch admission*; checking its `valid_until` again on resume would
 incorrectly turn it into a workload lease. Arbitrary external edits to
-project `mvm.toml`, named profiles, and tenant bundles are currently read
-at launch, without a common resident file-to-instance binding. A watcher
+project `mvm.toml`, named profiles, and tenant bundles are still read
+at launch outside the explicitly activated project path, without a common
+resident file-to-instance binding for live cutover. A watcher
 learns of an edit after it happens and cannot substitute for the atomic
-apply owner. There is no current `policy apply` command or committed policy
-generation; adoption requires a reviewed public command, provenance and
-crash-recovery design before any security claim can change.
+apply owner. Initial committed generations do not provide `policy apply`:
+live cutover still requires effect fencing, ownership transfer and
+crash-recovery witnesses before any security claim can change.
 
 Before implementing the resume preflight, trace whether its endpoint and
 signed plan survive pause on each supported backend, and which policy or

@@ -362,6 +362,7 @@ mod tests {
             name: name.to_string(),
             image: Some(image.to_string()),
             manifest: None,
+            policy_generation: None,
             deployment: None,
             resolved_digest: None,
             runtime_pack: false,

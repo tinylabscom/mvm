@@ -13,6 +13,7 @@ schema = ["dep:schemars", "mvm-contract/schema"]
 [dependencies]
 mvm-contract.workspace = true
 mvm-core = { workspace = true, features = ["host-state"] }
+libc.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

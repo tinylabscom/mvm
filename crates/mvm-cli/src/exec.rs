@@ -58,9 +58,7 @@ use baked_entrypoint::{
 #[cfg(test)]
 use baked_entrypoint::{baked_entrypoint_timeout_secs, dispatched_exit_status};
 use guest_run::{emit_guest_console_diagnostic, run_in_guest, run_wasm_module};
-pub(crate) use mvm_client::boot::{
-    select_exec_backend, validate_image_egress_backend, validate_image_egress_backend_name,
-};
+pub(crate) use mvm_client::boot::{select_exec_backend, validate_image_egress_backend_name};
 pub use mvm_client::entrypoint::{AdmitInputs, SessionAdmit, SessionAuditSubstrate};
 pub(crate) use oci_boot::{ImageNaming, LaunchNames, boots_oci_image, oci_proxy_env};
 use session::wait_for_agent_timed;

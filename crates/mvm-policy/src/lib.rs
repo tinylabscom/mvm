@@ -16,5 +16,8 @@ pub mod source;
 pub use manifest::ResolvedManifest;
 pub use merge::{LayerSummary, ResolvedPolicy};
 pub use model::{GroupFile, PolicyBody, ProfileFile};
-pub use resolve::{MAX_EXTENDS_DEPTH, Platform, PolicySelection, ProjectPolicy, resolve};
+pub use resolve::{
+    CapturedSource, MAX_EXTENDS_DEPTH, Platform, PolicySelection, ProjectPolicy, SourceKind,
+    resolve, resolve_capturing_sources, resolve_from_captured_sources, select_launch_policy,
+};
 pub use source::{LayerOrigin, PolicyError, PolicyRef, PolicyStore};

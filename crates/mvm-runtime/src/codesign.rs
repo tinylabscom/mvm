@@ -63,7 +63,7 @@ mod tests {
     #[test]
     fn collect_sign_targets_includes_current_exe() {
         let targets = collect_sign_targets();
-        let exe = std::env::current_exe().unwrap();
+        let exe = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
         assert!(targets.iter().any(|target| target.path == exe));
     }
 }

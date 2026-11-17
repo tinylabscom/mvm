@@ -13,6 +13,24 @@ pub(super) trait TopLevelCommand {
 
 impl TopLevelCommand for Commands {
     fn run(self, cli: &Cli, cfg: &MvmConfig) -> Result<()> {
+        // A command can initiate a launch through a build, pool, restore, or
+        // SDK path. Hold the host-wide shared barrier for those commands
+        // through boot; pure readers must not initialize lifecycle state.
+        let _launch_barrier = if matches!(
+            self,
+            Commands::Policy(_)
+                | Commands::Trust(_)
+                | Commands::Explain(_)
+                | Commands::Why(_)
+                | Commands::Completions(_)
+                | Commands::ShellInit(_)
+                | Commands::Search(_)
+                | Commands::Catalog(_)
+        ) {
+            None
+        } else {
+            Some(mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?)
+        };
         match self {
             Commands::Env(a) => env::group::run(cli, a, cfg),
             Commands::Bootstrap(a) => bootstrap::run(cli, a, cfg),

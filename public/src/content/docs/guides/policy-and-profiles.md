@@ -96,8 +96,73 @@ For a single `run` or `machine run`, the project's `mvm.toml` is parsed once
 for its authored policy, endpoint routes, approval backends, and secret
 declarations. Editing it after policy resolution starts does not change those
 choices partway through that launch. This is launch-time consistency, **not**
-an atomic policy apply: later launches still read authored files, and running
-workloads are not rolled over by an edit.
+an atomic policy apply: unless the project is explicitly activated as below,
+later launches still read authored files. Running workloads are not rolled
+over by an edit.
+
+## Committed project policy
+
+On a Linux Firecracker host, an explicit activation commits the first policy
+generation for a local flake project:
+
+```sh
+mvmctl policy activate ./my-project
+```
+
+`PROJECT` is required. Build the project's Firecracker manifest slot before
+activation; this command does not build it. The slot and its current revision
+must match the captured manifest's boot declaration. Image-reference and Wasm
+projects are refused. HVF, libkrun, QEMU, and other backends are not supported
+by this activation path; there is no automatic backend fallback.
+
+Activation requires **whole-host quiescence**, not just an idle project. Stop
+all workloads first, including paused instances. The coordinator serializes
+activation against local launches and restores and refuses a live workload,
+an unknown backend probe, or an untracked transient session. It does not stop
+workloads for you. The separate resident `mvm-policy-coordinator` helper is
+started or contacted automatically; no second daemon-start command is needed.
+
+Generation 1 captures the parsed manifest, selected defaults, contributing
+profile/group text, platform predicates, and effective policy. This initial
+source format supports local policy files and built-in references, not
+signed-pack policy references. Top-level manifest `include` files for launch
+defaults are also refused: their mutable bytes are not captured by generation 1.
+Policy profile/group includes remain part of the captured policy closure. Manifest and local policy files must satisfy
+the owned regular-file checks; direct symlinks and multiply linked files are
+refused. The captured closure is independently revalidated by the host owner
+and its generation identity is bound into signed admission.
+
+After activation, project launches and restores consume the committed manifest
+and policy rather than staged edits. Editing a CPU ceiling or deleting a
+policy selection from `mvm.toml` does not widen the committed authority.
+Missing, corrupt, mismatched, or incomplete activation state refuses execution
+instead of reverting to authored files. A slot rebuilt from a different boot
+declaration is also refused; activation does not freeze the whole source tree
+or replace normal artifact verification.
+
+A committed `cpu_millicores` ceiling requires a CPU-share grant in the signed
+plan. The entrypoint path does not yet carry that grant and therefore refuses
+such a policy before boot; `max_cpus` is a separate vCPU-count ceiling.
+
+Persistent machine starts recheck the stored generation and resource bounds.
+That path refuses committed shares, environment grants, secret bindings, and
+network routes that its stored spec cannot retain, as well as extra machine
+routes, peers, or ports. Once any project is activated, Firecracker restore
+requires the original admitted plan on disk; a missing plan is no longer
+accepted as a legacy cache miss. These host-wide restore prerequisites also
+matter for otherwise unactivated projects on the same host.
+
+This is **initial activation only**, not `policy apply`, policy-file watching,
+or live rollover. Repeating activation cannot publish staged changes as a new
+generation. There is no supported deactivation or generation-update workflow
+in this slice; do not delete coordinator state to bypass it. Ordinary projects
+that have never been activated retain their existing authored-policy behavior.
+`policy show`, `policy resolve`, and `why` inspect authored inputs; their output
+is not proof of the generation admitted for an activated run.
+
+The trust boundary remains a trusted Linux host enforcing policy against an
+untrusted workload. This does not add malicious-host protection or expand
+other backends' security guarantees.
 
 ## Groups
 

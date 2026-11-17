@@ -52,6 +52,127 @@ fn cli(raw: &[&str]) -> Vec<String> {
     raw.iter().map(ToString::to_string).collect()
 }
 
+#[test]
+fn source_capture_keeps_inspected_bytes_including_excluded_groups_and_builtins() {
+    let dir = Dir::new();
+    let profile_text =
+        "extends = \"default\"\n[groups]\ninclude = [\"candidate\"]\nexclude = [\"candidate\"]\n";
+    dir.profile("selected", profile_text);
+    let group_text = "[network]\nallow = [\"candidate.test\"]\n";
+    dir.group("candidate", group_text);
+    let selection = PolicySelection::profile(PolicyRef::Name("selected".into()));
+    let (resolved, sources) =
+        resolve_capturing_sources(&dir.store, &selection, Platform::default()).unwrap();
+    assert_eq!(
+        resolve_from_captured_sources(&dir.store, &selection, Platform::default(), &sources)
+            .unwrap(),
+        resolved
+    );
+    assert!(resolved.policy.network.allow.is_empty());
+    assert!(sources.iter().any(|source| {
+        source.kind == SourceKind::Profile
+            && source.origin == LayerOrigin::User
+            && source.text == profile_text
+    }));
+    assert!(sources.iter().any(|source| {
+        source.kind == SourceKind::Profile
+            && source.origin == LayerOrigin::Builtin
+            && source.reference_key.as_deref() == Some("profile:default")
+    }));
+    let inspected: Vec<_> = sources
+        .iter()
+        .filter(|source| source.reference_key.as_deref() == Some("group:candidate"))
+        .collect();
+    assert_eq!(
+        inspected.len(),
+        2,
+        "include and exclude both inspect the group"
+    );
+    assert!(
+        inspected.iter().all(|source| {
+            source.text == group_text && source.sha256 == source_sha256(group_text)
+        })
+    );
+
+    dir.group("candidate", "required = true\n");
+    dir.profile("default", "[network]\nblock = true\n");
+    assert!(inspected.iter().all(|source| source.text == group_text));
+    assert_eq!(
+        resolve_from_captured_sources(&dir.store, &selection, Platform::default(), &sources)
+            .unwrap(),
+        resolved,
+        "replay must never read staged profile or group edits"
+    );
+    assert!(sources.iter().any(|source| {
+        source.origin == LayerOrigin::Builtin
+            && source.reference_key.as_deref() == Some("profile:default")
+    }));
+    let mut tampered = sources.clone();
+    tampered[0].text.push('\n');
+    assert!(
+        resolve_from_captured_sources(&dir.store, &selection, Platform::default(), &tampered)
+            .is_err(),
+        "changed bytes must not pass the captured digest"
+    );
+    assert!(
+        resolve_from_captured_sources(&dir.store, &selection, Platform::default(), &sources[..2])
+            .is_err(),
+        "missing inspected groups must refuse"
+    );
+    let mut extra = sources.clone();
+    extra.push(sources[0].clone());
+    assert!(
+        resolve_from_captured_sources(&dir.store, &selection, Platform::default(), &extra).is_err(),
+        "unused sources must not be accepted"
+    );
+}
+
+#[test]
+fn captured_root_group_replays_without_looking_up_a_later_profile() {
+    let dir = Dir::new();
+    dir.group("top", "[network]\nallow = [\"old.test\"]\n");
+    let selection = PolicySelection::profile(PolicyRef::Name("top".into()));
+    let (resolved, sources) =
+        resolve_capturing_sources(&dir.store, &selection, Platform::default()).unwrap();
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].kind, SourceKind::Group);
+    dir.profile("top", "[overrides.network]\nallow = [\"new.test\"]\n");
+    assert_eq!(
+        resolve_from_captured_sources(&dir.store, &selection, Platform::default(), &sources)
+            .unwrap(),
+        resolved
+    );
+}
+
+#[test]
+fn capture_refuses_oversized_sources_without_changing_ordinary_resolution() {
+    let dir = Dir::new();
+    dir.profile(
+        "large",
+        &format!("description = \"{}\"\n", "x".repeat(MAX_SOURCE_BYTES)),
+    );
+    let selection = PolicySelection::profile(PolicyRef::Name("large".into()));
+    let error = resolve_capturing_sources(&dir.store, &selection, Platform::default()).unwrap_err();
+    assert!(error.to_string().contains("size limit"), "{error}");
+    assert!(dir.resolve("large").is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn capture_refuses_symlinked_and_hardlinked_policy_sources() {
+    let dir = Dir::new();
+    let original = dir.profile("original", "[overrides.network]\nblock = true\n");
+    let symlink = dir.store.profiles_dir().join("linked.toml");
+    std::os::unix::fs::symlink(&original, &symlink).unwrap();
+    let selection = PolicySelection::profile(PolicyRef::Name("linked".into()));
+    assert!(resolve_capturing_sources(&dir.store, &selection, Platform::default()).is_err());
+    assert!(resolve(&dir.store, &selection, Platform::default()).is_ok());
+
+    std::fs::remove_file(&symlink).unwrap();
+    std::fs::hard_link(&original, &symlink).unwrap();
+    assert!(resolve_capturing_sources(&dir.store, &selection, Platform::default()).is_err());
+}
+
 // ---- built-ins ------------------------------------------------------------
 
 #[test]
@@ -544,7 +665,7 @@ fn the_same_profile_cannot_change_between_reads_in_one_resolution() {
     let dir = Dir::new();
     let path = dir.profile("candidate", "[overrides.network]\nallow = [\"old.test\"]\n");
     let reference = PolicyRef::Name("candidate".into());
-    let mut walker = Walker::new(&dir.store, Platform::default());
+    let mut walker = Walker::new(&dir.store, Platform::default(), false);
     let first = dir
         .store
         .load_profile(&reference, None, LayerOrigin::User, "test")
@@ -571,9 +692,10 @@ fn an_excluded_group_cannot_change_between_reads_in_one_resolution() {
         identity: "test profile".into(),
         origin: LayerOrigin::User,
         source_sha256: None,
+        source_text: None,
         reference_key: None,
     };
-    let mut walker = Walker::new(&dir.store, Platform::default());
+    let mut walker = Walker::new(&dir.store, Platform::default(), false);
     walker
         .select(&profile, &["candidate".into()], &[], "groups")
         .unwrap();
@@ -592,7 +714,7 @@ fn an_excluded_group_cannot_change_between_reads_in_one_resolution() {
 fn a_new_user_profile_cannot_shadow_a_built_in_during_resolution() {
     let dir = Dir::new();
     let reference = PolicyRef::Name("offline".into());
-    let mut walker = Walker::new(&dir.store, Platform::default());
+    let mut walker = Walker::new(&dir.store, Platform::default(), false);
     let builtin = dir
         .store
         .load_profile(&reference, None, LayerOrigin::User, "test")

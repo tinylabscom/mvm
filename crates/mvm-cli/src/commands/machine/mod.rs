@@ -719,6 +719,12 @@ fn machine_run_spec(
         image,
         prepared_image: None,
         manifest,
+        policy_generation: args
+            .run
+            .committed_generation
+            .as_ref()
+            .map(mvm_client::policy_profiles::coordinator::ProjectPolicyCandidate::plan_asset)
+            .transpose()?,
         deployment,
         resolved_digest: None,
         runtime_pack: args.run.runtime_pack,
@@ -1263,6 +1269,7 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         image: Some(image),
         prepared_image: None,
         manifest: None,
+        policy_generation: None,
         deployment: None,
         resolved_digest: None,
         runtime_pack: false,
