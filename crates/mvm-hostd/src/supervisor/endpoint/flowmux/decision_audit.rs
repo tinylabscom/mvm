@@ -11,8 +11,9 @@ use super::{FlowMuxError, FlowMuxSession, registry::FlowClass};
 pub(super) fn record(
     sink: &dyn AuditSink,
     event: &str,
-    labels: BTreeMap<String, String>,
+    mut labels: BTreeMap<String, String>,
 ) -> std::io::Result<()> {
+    crate::supervisor::audit::denial_stage::stamp(event, &mut labels);
     sink.record(event, labels).inspect_err(|error| {
         tracing::warn!(%error, event, "FlowMux audit write failed; epoch marked incomplete");
     })
@@ -111,5 +112,43 @@ impl FlowMuxSession {
         if record(self.audit_sink.as_ref(), event, labels).is_err() {
             tracing::debug!(event, "FlowMux preserves denial after audit failure");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::audit_tests::CapturingSink;
+    use super::*;
+
+    fn stage_recorded(event: &str, class: Option<&str>) -> Option<String> {
+        let sink = CapturingSink::default();
+        let labels = class
+            .map(|c| BTreeMap::from([("class".to_string(), c.to_string())]))
+            .unwrap_or_default();
+        record(&sink, event, labels).unwrap();
+        let records = sink.records.lock().unwrap();
+        records[0].1.get("stage").cloned()
+    }
+
+    #[test]
+    fn a_connect_a_datagram_and_a_lookup_refusal_each_record_their_stage() {
+        assert_eq!(
+            stage_recorded("host.flow.denied", Some("tcp")).as_deref(),
+            Some("connect")
+        );
+        assert_eq!(
+            stage_recorded("host.flow.denied", Some("udp")).as_deref(),
+            Some("datagram")
+        );
+        assert_eq!(
+            stage_recorded("dns.refused", None).as_deref(),
+            Some("lookup")
+        );
+    }
+
+    #[test]
+    fn an_admitted_flow_records_no_stage() {
+        assert_eq!(stage_recorded("host.flow.allowed", Some("tcp")), None);
+        assert_eq!(stage_recorded("dns.resolved", None), None);
     }
 }

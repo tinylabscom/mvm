@@ -156,6 +156,13 @@ while [ "$SECONDS" -lt 60 ]; do
   sleep 1
 done
 $mvm explain "$m" | sed -n '/^outcome:/,$p'
+# The refusal reads the same whether the host refused the lookup or the
+# connect: a denied host and the step that refused it.
+denial_json="$($mvm explain "$m" --json | tr -d '\n ')"
+{ grep -Fq '"host":"example.com"' <<<"$denial_json" \
+  && grep -Eq '"stage":"(lookup|connect|datagram)"' <<<"$denial_json"; } \
+  || { echo "explain did not report a normalized denial of example.com" >&2; exit 1; }
+echo "explain reports example.com denied (normalized: host and stage)"
 
 echo; echo "== 4. The inspection workloads are unaffected"
 for n in "$a" "$b"; do

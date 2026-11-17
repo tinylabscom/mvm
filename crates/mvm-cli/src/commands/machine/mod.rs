@@ -1493,7 +1493,7 @@ fn build_machine_volume_cfg(
             .with_context(|| format!("volume {volume:?}"))?;
         if let Some(image) = super::shared::materialize_disk_volume(&vmv)
             .with_context(|| format!("volume {volume:?}"))?
-            .and_then(mvm_build::volume_image::VolumeImageLock::into_image)
+            .and_then(mvm_client::build_types::VolumeImageLock::into_image)
         {
             images.push(image);
         }

@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use mvm_hostd::supervisor::audit::denial_stage::DenialStage;
+
 use super::denial::{EgressDenial, Subject};
 use super::reason::{DenialKind, Remedy};
 
@@ -21,6 +23,12 @@ pub struct DeniedDestination {
     /// What was refused, as the notice names it (`api.example.com:443`,
     /// `DNS lookup of pypi.org`, `POST api.github.com:443`).
     pub destination: String,
+    /// The refused host with any port removed, the same for a lookup of a name
+    /// and a connect to it, so a caller can ask "was X denied" whichever step
+    /// refused it.
+    pub host: String,
+    /// Which step the host refused: `lookup`, `connect` or `datagram`.
+    pub stage: DenialStage,
     /// The audit event that recorded the refusal.
     pub event: String,
     /// The reason label exactly as the chain recorded it.
@@ -123,6 +131,8 @@ impl DenialTally {
             .into_iter()
             .map(|seen| DeniedDestination {
                 destination: seen.denial.subject.to_string(),
+                host: seen.denial.subject.host().unwrap_or_default().to_string(),
+                stage: seen.denial.stage,
                 event: seen.denial.event.clone(),
                 reason: seen.denial.reason.clone(),
                 description: seen.denial.kind.describe(),
@@ -358,6 +368,8 @@ mod tests {
             json,
             serde_json::json!([{
                 "destination": "api.example.com:443",
+                "host": "api.example.com",
+                "stage": "connect",
                 "event": "host.flow.denied",
                 "reason": "policy_denied",
                 "description": "not in the allow-list",
