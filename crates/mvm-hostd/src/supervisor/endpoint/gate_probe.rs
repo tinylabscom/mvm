@@ -8,23 +8,22 @@
 //! effect. It performs no substitution, opens no forward leg, and writes no
 //! audit record: the probe observes the gate; it is not workload egress.
 
+use mvm_contract::peer::PeerName;
 use mvm_core::substitution_wire::{
     GateProbeOutcome, GateProbeRequest, GateProbeResponse, GateProbeSample, GateProbeVerdict,
 };
 
-use super::SubstitutionService;
+use super::network_endpoint_proxy::SubstitutionService;
 
 impl SubstitutionService {
     /// Decide every probe sample against the running egress gate, in request
     /// order, one outcome per sample.
     ///
-    /// A sample the gate would answer is passed to
-    /// [`mvm_runtime::vmm::egress_gate::EgressGate::decide_target`] verbatim —
-    /// no substitution, no forward leg, no audit recorder write. A malformed
-    /// sample (an empty host or port 0) never reaches the gate: it reports a
-    /// `Malformed` outcome for that sample, so one bad sample fails only
-    /// itself, never the whole probe. A request with zero samples answers
-    /// with zero results.
+    /// A peer-shaped sample is refused by name without entering the peer
+    /// namespace: peer routes are decided by the flow multiplexer, never by
+    /// this endpoint. Everything else — including malformed samples — is
+    /// decided by [`Self::decide_probe_sample`]. A request with zero samples
+    /// answers with zero results.
     pub(crate) fn process_gate_probe(&self, request: GateProbeRequest) -> GateProbeResponse {
         let results = request
             .samples
@@ -35,32 +34,17 @@ impl SubstitutionService {
     }
 
     fn probe_one(&self, sample: &GateProbeSample) -> GateProbeOutcome {
-        if sample.host.is_empty() || sample.port == 0 {
+        if PeerName::is_peer_target(&sample.host) {
             return GateProbeOutcome {
                 host: sample.host.clone(),
                 port: sample.port,
-                verdict: GateProbeVerdict::Malformed,
-                reason: Some("probe sample needs a non-empty host and a non-zero port".into()),
+                verdict: GateProbeVerdict::Deny,
+                reason: Some(
+                    "peer routes are decided by the flow multiplexer, not by this endpoint".into(),
+                ),
             };
         }
-        let decision = self.egress_gate.decide_target(&sample.host, sample.port);
-        let (verdict, reason) = match decision.verdict {
-            mvm_runtime::vmm::egress_gate::EgressVerdict::Allow { .. } => {
-                (GateProbeVerdict::Admit, None)
-            }
-            mvm_runtime::vmm::egress_gate::EgressVerdict::Deny(deny) => {
-                (GateProbeVerdict::Deny, Some(deny.to_string()))
-            }
-            mvm_runtime::vmm::egress_gate::EgressVerdict::Malformed => {
-                (GateProbeVerdict::Malformed, None)
-            }
-        };
-        GateProbeOutcome {
-            host: sample.host.clone(),
-            port: sample.port,
-            verdict,
-            reason,
-        }
+        self.decide_probe_sample(sample)
     }
 }
 
@@ -70,7 +54,9 @@ mod tests {
         GateProbeExpect, GateProbeRequest, GateProbeSample, GateProbeVerdict,
     };
 
-    use super::super::test_support::{gate_admitting, service_with_gate};
+    use crate::supervisor::endpoint::network_endpoint_proxy::test_support::{
+        gate_admitting, service_with_gate,
+    };
 
     fn sample(host: &str, port: u16, expect: GateProbeExpect) -> GateProbeSample {
         GateProbeSample {
@@ -161,14 +147,23 @@ mod tests {
     }
 
     #[test]
-    fn a_peer_shaped_name_the_gate_cannot_parse_is_malformed() {
-        // `not a peer!.mvm.peer` carries the peer suffix, so the gate routes
-        // it to the peer namespace, where the name fails to parse.
+    fn a_peer_shaped_sample_is_refused_by_name_without_entering_the_peer_namespace() {
+        // The peer suffix is refused by name before any decision: peer routes
+        // belong to the flow multiplexer, and this endpoint never resolves
+        // through the peer namespace.
         let outcomes = probe(
             &service(),
-            vec![sample("not a peer!.mvm.peer", 443, GateProbeExpect::Deny)],
+            vec![sample("db.mvm.peer", 443, GateProbeExpect::Deny)],
         );
-        assert_eq!(outcomes[0].verdict, GateProbeVerdict::Malformed);
+        assert_eq!(outcomes[0].verdict, GateProbeVerdict::Deny);
+        assert!(
+            outcomes[0]
+                .reason
+                .as_deref()
+                .is_some_and(|r| r.contains("flow multiplexer")),
+            "the refusal names why: {:?}",
+            outcomes[0].reason
+        );
     }
 
     #[test]

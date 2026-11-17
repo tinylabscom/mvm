@@ -30,7 +30,6 @@ mod assembly;
 mod audit;
 mod classify;
 mod forward;
-mod gate_probe;
 mod ingress;
 mod listen;
 pub(crate) mod pinned_dns;
@@ -125,6 +124,49 @@ pub struct SubstitutionService {
     /// The upstream proxy the forward leg was built with, kept only so the
     /// audit entry can say whether a destination went through it.
     proxy: Option<Arc<mvm_http::ProxyConfig>>,
+}
+
+impl SubstitutionService {
+    /// Decide one gate-probe sample against the running egress gate — the
+    /// witness-only probe path. No substitution, no forward leg, no audit
+    /// recorder write: the probe observes the gate; it is not workload
+    /// egress. The caller refuses peer-shaped samples by name before calling
+    /// this, so the peer namespace is never entered here.
+    pub(crate) fn decide_probe_sample(
+        &self,
+        sample: &mvm_core::substitution_wire::GateProbeSample,
+    ) -> mvm_core::substitution_wire::GateProbeOutcome {
+        if sample.host.is_empty() || sample.port == 0 {
+            return mvm_core::substitution_wire::GateProbeOutcome {
+                host: sample.host.clone(),
+                port: sample.port,
+                verdict: mvm_core::substitution_wire::GateProbeVerdict::Malformed,
+                reason: Some("probe sample needs a non-empty host and a non-zero port".into()),
+            };
+        }
+        let verdict = self
+            .egress_gate
+            .decide_request(&format!("{}:{}", sample.host, sample.port));
+        let (verdict, reason) = match verdict {
+            mvm_runtime::vmm::egress_gate::EgressVerdict::Allow { .. } => {
+                (mvm_core::substitution_wire::GateProbeVerdict::Admit, None)
+            }
+            mvm_runtime::vmm::egress_gate::EgressVerdict::Deny(deny) => (
+                mvm_core::substitution_wire::GateProbeVerdict::Deny,
+                Some(deny.to_string()),
+            ),
+            mvm_runtime::vmm::egress_gate::EgressVerdict::Malformed => (
+                mvm_core::substitution_wire::GateProbeVerdict::Malformed,
+                None,
+            ),
+        };
+        mvm_core::substitution_wire::GateProbeOutcome {
+            host: sample.host.clone(),
+            port: sample.port,
+            verdict,
+            reason,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

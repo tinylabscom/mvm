@@ -195,13 +195,13 @@ impl SubstitutionService {
         })
         .await
         .map_err(std::io::Error::other)??;
-        if let EndpointRequest::GateProbe(probe) = &request {
-            if probe.samples.len() > MAX_GATE_PROBE_SAMPLES {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "gate probe carries too many samples",
-                ));
-            }
+        if let EndpointRequest::GateProbe(probe) = &request
+            && probe.samples.len() > MAX_GATE_PROBE_SAMPLES
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "gate probe carries too many samples",
+            ));
         }
         match request {
             EndpointRequest::Forward(wire) => {

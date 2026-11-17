@@ -84,7 +84,7 @@ pub(super) fn hmac_ref(name: &str, hosts: &[&str]) -> SecretRef {
 
 /// Records the request it was handed so a test can prove the destination
 /// (not the guest) received the real credential — without a network call.
-pub(super) struct MockForwarder {
+pub(crate) struct MockForwarder {
     pub(super) seen: Mutex<Option<PreparedRequest>>,
 }
 
@@ -118,7 +118,7 @@ impl Forwarder for RedirectForwarder {
 
 /// A test service, the placeholder it minted, its recording forwarder, and the
 /// directory holding its secret store.
-pub(super) type TestService = (
+pub(crate) type TestService = (
     Arc<SubstitutionService>,
     String,
     Arc<MockForwarder>,
@@ -134,7 +134,7 @@ pub(super) fn service_with(value: &str, hosts: &[&str]) -> TestService {
 }
 
 /// [`service_with`] under a caller-chosen gate.
-pub(super) fn service_with_gate(value: &str, hosts: &[&str], gate: Arc<EgressGate>) -> TestService {
+pub(crate) fn service_with_gate(value: &str, hosts: &[&str], gate: Arc<EgressGate>) -> TestService {
     build_service(value, hosts, None, None, gate)
 }
 
