@@ -72,8 +72,8 @@ pub use durability::{
 };
 pub use enforce::{enforce_kernel, enforce_shares, enforce_shares_for_claim};
 pub use instructions::InstructionSources;
-pub(crate) use outcome::record_boot;
 pub use outcome::{BootPosture, StartMode, emit_failed, emit_launched};
+pub(crate) use outcome::{record_boot, seal_recorded_failure};
 
 /// A content-bound asset. Operator-declared files and internally selected
 /// signed packs are recorded in the plan without sharing them with the guest.

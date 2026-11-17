@@ -93,8 +93,8 @@ pub use admit::{
 pub use bundle_environment::BundleEnvironmentRefused;
 pub use extension_packs::{AdmittedExtension, ExtensionAdmissionContext};
 pub use launch_substrate::{
-    populate_audit_substrate, stash_plan_and_mint_verb_grant, stash_plan_for_bridge,
-    thread_cpu_grant, thread_tenant_id,
+    persists_plan_before_start, populate_audit_substrate, stash_plan_and_mint_verb_grant,
+    stash_plan_for_bridge, thread_cpu_grant, thread_tenant_id,
 };
 pub use mailbox_posture::{MailboxLaunchPosture, MailboxPostureHandoff};
 pub use mvm_core::time::{Clock, SystemClock};
@@ -106,8 +106,8 @@ pub use rollback::{
 };
 pub use shares::enforce_admitted_shares;
 pub use start::{
-    CliStartFailure, StartAdmittedParams, StartedMachine, admit_and_start, start_admitted,
-    start_cli_transient,
+    CliStartFailure, DispatchedPersistent, StartAdmittedParams, StartedMachine, admit_and_start,
+    start_admitted, start_cli_transient, start_persistent,
 };
 pub(crate) use start::{
     admit_synthesized_with_verified_release, start_admitted_with_verified_release,
