@@ -377,7 +377,7 @@ pub fn pull(reference_arg: &str) -> Result<PullOutcome> {
                 })
                 .context("resolved version is missing catalog digest")?;
             if let Some(warning) =
-                index_arch_warning(entry, advertised, mvm_build::builder_vm::host_arch_tag())
+                index_arch_warning(entry, advertised, mvm_client::build_types::host_arch_tag())
             {
                 crate::ui::warn(&warning);
             }
@@ -525,7 +525,7 @@ where
             )
         })?;
     let reference =
-        resolve_version_for_arch(entry, requested, mvm_build::builder_vm::host_arch_tag())?;
+        resolve_version_for_arch(entry, requested, mvm_client::build_types::host_arch_tag())?;
     if !register_dependency(seen, &reference)? {
         if active.contains(&reference) {
             bail!("signed pack dependency cycle at {reference}");

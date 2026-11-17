@@ -52,7 +52,7 @@ pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result
     let mut backend_compatibility_checked = false;
     if let Some(name) = args.backend.as_deref() {
         let support = backend_image_support(name)?;
-        let host_protocols = mvm_build::stage0_kernel::current_image_set_protocol_support();
+        let host_protocols = mvm_client::build_types::current_image_set_protocol_support();
         for embedded in &verified.embedded_image_sets {
             check_embedded_image_set_for_backend(embedded, host_arch, &support, &host_protocols)
                 .map_err(|error| {

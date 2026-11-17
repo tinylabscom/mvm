@@ -50,6 +50,7 @@ pub mod artifacts;
 pub mod attestation;
 pub mod audit;
 pub mod boot;
+pub mod build_types;
 pub mod builder_bundle;
 pub mod bundle;
 pub mod bundle_preview;

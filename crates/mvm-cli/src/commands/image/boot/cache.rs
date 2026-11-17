@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use mvm_build::builder_vm::GuestSidecar;
+use mvm_client::build_types::GuestSidecar;
 
 use crate::commands::env::builder_vm::default_microvm::DefaultMicrovmVariant;
 
@@ -168,7 +168,7 @@ pub(crate) fn stamp_provenance(dir: &Path, provenance: &AcquiredProvenance) -> R
                 "{} carries no {} sidecar; refusing to boot-tag an image that did not \
                  declare what it is",
                 dir.display(),
-                mvm_build::builder_vm::SIDECAR_FILENAME
+                mvm_client::build_types::SIDECAR_FILENAME
             )
         })?;
     sidecar.image_tag = provenance.image_tag.clone();
