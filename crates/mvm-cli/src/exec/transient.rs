@@ -179,7 +179,12 @@ impl ColdDispatch {
 fn claim_warm_standby(
     attempt: &mut BootAttempt<'_>,
 ) -> Result<crate::commands::pool::WarmClaimOutcome> {
-    crate::commands::pool::try_warm_claim(attempt.backend, attempt.start_config, attempt.user_named)
+    crate::commands::pool::try_warm_claim_with_admission(
+        attempt.backend,
+        attempt.start_config,
+        attempt.user_named,
+        attempt.admission,
+    )
 }
 
 /// The VM a transient boot produced.
@@ -256,8 +261,8 @@ pub(super) fn boot_transient_vm(
     // returned name diverges from `vm_name` — the caller rebinds it for the
     // Ctrl-C handler, run_in_guest, and teardown. try_warm_claim gates
     // internally (an auto-named launch of a shape a shared parent can serve,
-    // a non-zero standby target, admitted tenant + signed plan threaded into
-    // start_config, backend supports the pool). Finding no standby is not an
+    // a non-zero standby target, a one-use CLI admission, and backend pool
+    // support). Finding no standby is not an
     // error: the launch boots cold, and says so when a standby could have
     // served it. Only a residency the operator set by name on a backend with
     // no pool is returned as an actionable error.

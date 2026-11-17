@@ -23,16 +23,15 @@ use mvm_runtime::standby_pool::SupervisorStandbyPool;
 use mvm_runtime::{AcquireSpec, WarmLease};
 
 fn main() -> Result<()> {
-    // --- setup: a backend + a standby pool + the admitted workload to attach.
-    // In production these come from the launch path; here they are a mock VM and
-    // an empty pool so the example runs on any host.
+    // --- setup: a mock backend + an empty pool. Workload claims require the
+    // host's one-use admission and cannot use this generic lease API.
     let pool_dir = tempfile::tempdir()?;
     let pool = SupervisorStandbyPool::at(pool_dir.path());
     let backend: Arc<dyn VmBackend> = Arc::new(MockBackend::new());
     let spec = AcquireSpec {
         want: standby_compat(),
         mode: WarmLaunchMode::Optional,
-        claim: admitted_claim("verify-vm"),
+        claim: mock_claim("verify-vm"),
     };
 
     // ======================================================================
@@ -85,9 +84,8 @@ fn standby_compat() -> StandbyCompat {
     }
 }
 
-/// The admitted, signed workload to attach. `start_config` doubles as the
-/// cold-boot config used on a pool miss.
-fn admitted_claim(name: &str) -> StandbyClaim {
+/// Non-workload mock lease. No plan or workload authority is represented here.
+fn mock_claim(name: &str) -> StandbyClaim {
     StandbyClaim {
         start_config: Some(VmStartConfig {
             name: name.to_string(),
@@ -97,12 +95,12 @@ fn admitted_claim(name: &str) -> StandbyClaim {
             ..Default::default()
         }),
         rootfs_path: "/var/lib/mvm/rootfs.ext4".to_string(),
-        tenant_id: "local".to_string(),
+        tenant_id: String::new(),
         audit_dir: std::path::PathBuf::from("/var/lib/mvm/audit"),
         gateway_audit_socket: std::path::PathBuf::from("/run/mvm/gw-audit.sock"),
         gateway_events_socket: None,
-        plan_json: "{}".to_string(),
-        // MockBackend starts no guest or endpoint, so there is no admitted audit identity.
+        plan_json: String::new(),
+        // MockBackend starts no guest or endpoint.
         audit_context: None,
         bundle_json: None,
         network_policy: NetworkPolicy::deny_all(),

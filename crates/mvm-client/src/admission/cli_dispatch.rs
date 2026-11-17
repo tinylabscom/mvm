@@ -278,7 +278,69 @@ impl CliAdmission {
         (Self::Dispatched(Box::new(audit)), result)
     }
 
-    /// Retire the one-use authority after the unmigrated warm or cold path.
+    /// Spend the CLI's one-use admission on a selected, verified warm parent.
+    ///
+    /// The pool miss is resolved before calling this method, so the caller
+    /// retains the pending owner for the existing admitted cold path.
+    pub fn claim_warm(
+        self,
+        backend: &mvm_runtime::AnyBackend,
+        config: mvm_core::vm_backend::VmStartConfig,
+        ctx: &mvm_runtime::workload_runner::ClaimContext<'_>,
+        handle: &mvm_core::vm_backend::StandbyHandle,
+    ) -> (Self, anyhow::Result<mvm_core::vm_backend::VmId>) {
+        if !matches!(&self, Self::Pending(pending) if pending.source_rootfs.is_some()) {
+            return (
+                self,
+                Err(anyhow::anyhow!(
+                    "CLI warm claim has no pending source binding"
+                )),
+            );
+        }
+        if let Err(error) = self.check_legacy_projection(&config) {
+            return (self, Err(error));
+        }
+        let Self::Pending(pending) = self else {
+            return (
+                self,
+                Err(anyhow::anyhow!("CLI admission was already dispatched")),
+            );
+        };
+        let PendingCliAdmission {
+            authority,
+            policy_bundle,
+            audit,
+            source_rootfs,
+            verified_runtime,
+        } = *pending;
+        let result = mvm_hostd::plan_admission::claim_cli_transient(
+            backend,
+            authority,
+            config,
+            policy_bundle.as_ref(),
+            verified_runtime.as_deref(),
+            ctx,
+            handle,
+        );
+        match result {
+            Ok(mvm_hostd::plan_admission::WarmClaimDispatch::Claimed(id)) => {
+                (Self::Dispatched(Box::new(audit)), Ok(id))
+            }
+            Ok(mvm_hostd::plan_admission::WarmClaimDispatch::ReservationLost(authority)) => (
+                Self::Pending(Box::new(PendingCliAdmission {
+                    authority: *authority,
+                    policy_bundle,
+                    audit,
+                    source_rootfs,
+                    verified_runtime,
+                })),
+                Err(mvm_core::vm_backend::StandbyError::ReservationLost.into()),
+            ),
+            Err(error) => (Self::Dispatched(Box::new(audit)), Err(error)),
+        }
+    }
+
+    /// Return the original audit continuation after a warm or cold dispatch.
     #[must_use]
     pub fn finish_legacy(self) -> AuditContinuation {
         match self {

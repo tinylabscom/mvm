@@ -19,7 +19,7 @@ use mvm_contract::provenance::{
 };
 use mvm_core::plan::{ExecutionPlan, synthesize_plan};
 use mvm_core::policy::PolicyBundle;
-use mvm_core::vm_backend::{VmId, VmStartConfig};
+use mvm_core::vm_backend::{StandbyClaim, StandbyError, StandbyHandle, VmId, VmStartConfig};
 use mvm_runtime::AnyBackend;
 
 /// Dispatch an already admitted entrypoint on its original native channel.
@@ -374,6 +374,117 @@ pub fn start_fs_quick_fork(
 ) -> Result<VmId> {
     start_admitted_with_finalization(params, verified_runtime, StartFinalization::FsQuickFork)
         .map(|started| started.vm_id)
+}
+
+/// Outcome of a selected warm claim. A lost reservation never spent its
+/// authority, so the caller can cold-dispatch that same admission.
+pub enum WarmClaimDispatch {
+    Claimed(VmId),
+    ReservationLost(Box<AdmittedPlan>),
+}
+
+/// Dispatch a CLI's already-admitted transient as a separately admitted warm child.
+///
+/// The parent is a planless, verified boot substrate; the child receives this
+/// one-use admission. Pool selection is done before this call so a miss keeps
+/// the caller's authority available for the ordinary cold dispatch.
+pub fn claim_cli_transient(
+    backend: &AnyBackend,
+    admitted: AdmittedPlan,
+    config: VmStartConfig,
+    policy_bundle: Option<&mvm_core::policy::PolicyBundle>,
+    verified_runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
+    ctx: &mvm_runtime::workload_runner::ClaimContext<'_>,
+    handle: &StandbyHandle,
+) -> Result<WarmClaimDispatch> {
+    let mut admitted = admitted;
+    anyhow::ensure!(!admitted.dispatched, "CLI admission was already dispatched");
+    anyhow::ensure!(
+        admitted.plan().image.name == config.name,
+        "warm claim identity differs from admitted plan"
+    );
+    anyhow::ensure!(
+        admitted.plan().runtime_identity.is_none() == verified_runtime.is_none(),
+        "CLI release admission and its launch-owned verification set differ"
+    );
+    if let Some(runtime) = verified_runtime {
+        runtime.verify_config(&config)?;
+        admitted
+            .plan()
+            .require_runtime_identity(runtime.identity())?;
+    } else {
+        verify_selected_runtime(&config)?;
+    }
+    let (mut prepared, built_runtime) = final_gates::run_post_admission_gates(
+        config.clone(),
+        &admitted,
+        backend.kind(),
+        policy_bundle,
+    )
+    .map_err(|(stage, error)| error.context(format!("warm admission gate refused ({stage})")))?;
+    anyhow::ensure!(
+        prepared.rootfs_path == config.rootfs_path,
+        "warm claim cannot replace the selected parent image"
+    );
+    registry_pack::verify_runtime_at_dispatch(built_runtime.as_ref(), &prepared, &admitted, None)?;
+    crate::mailbox_process::require_servable(
+        &prepared,
+        backend,
+        admitted.mailbox_posture().as_ref(),
+    )?;
+    anyhow::ensure!(
+        prepared.volumes.iter().all(|volume| volume.read_only),
+        "warm claim cannot transfer writable volume custody"
+    );
+    let audit = mvm_vmm::host::audit_substrate::compute_audit_substrate(
+        &handle.id,
+        prepared.tenant_id.as_deref(),
+    )?;
+    let plan_json = prepared
+        .plan_json
+        .clone()
+        .context("warm claim missing admitted plan")?;
+    let tenant_id = prepared
+        .tenant_id
+        .clone()
+        .context("warm claim missing admitted tenant")?;
+    let rootfs_path = prepared.rootfs_path.clone();
+    let bundle_json = prepared.bundle_json.clone();
+    let audit_context = prepared.audit_context.clone();
+    let network_policy = prepared.network_policy.clone();
+    prepared.name = handle.id.clone();
+    let claim = StandbyClaim {
+        start_config: Some(prepared),
+        rootfs_path,
+        tenant_id,
+        audit_dir: audit
+            .audit_dir
+            .context("warm claim missing audit directory")?,
+        gateway_audit_socket: audit
+            .gateway_audit_socket
+            .context("warm claim missing gateway audit socket")?,
+        gateway_events_socket: audit.gateway_events_socket,
+        plan_json,
+        audit_context,
+        bundle_json,
+        network_policy,
+    };
+    // No plan JSON can create this authority: only admission owns this value.
+    // Spend it before the runner can fork or resume the child.
+    admitted.dispatched = true;
+    match backend.claim_standby_via_runner(ctx, handle, &claim) {
+        Ok(id) => Ok(WarmClaimDispatch::Claimed(id)),
+        Err(StandbyError::ReservationLost) => {
+            admitted.dispatched = false;
+            Ok(WarmClaimDispatch::ReservationLost(Box::new(admitted)))
+        }
+        Err(error) => Err(match error {
+            StandbyError::StopUnconfirmed(_) => {
+                CliStartFailure::UncertainStop(anyhow::Error::new(error)).into()
+            }
+            other => anyhow::Error::new(other).context("admitted warm claim"),
+        }),
+    }
 }
 
 fn start_admitted_with_finalization(

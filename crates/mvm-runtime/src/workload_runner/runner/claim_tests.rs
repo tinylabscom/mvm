@@ -2253,6 +2253,28 @@ fn a_parent_this_host_cannot_restore_is_dropped_not_returned_to_rotation() {
 }
 
 #[test]
+fn refused_child_with_unconfirmed_stop_keeps_its_state_and_parent_reserved() {
+    let out = claim_with_scripted_handshake(
+        MockDriver::default()
+            .with_unreachable_child_agent()
+            .refusing_attach(),
+    );
+    let err = out
+        .result
+        .expect_err("an unconfirmed stop must refuse the claim");
+    assert!(matches!(err, StandbyError::StopUnconfirmed(_)), "{err}");
+    assert_eq!(
+        out.parent_state,
+        Some(StandbyState::Claimed),
+        "the parent cannot be returned while its child may still run"
+    );
+    assert_eq!(
+        out.orphan_child_dirs, 1,
+        "the child's state must remain for operator recovery"
+    );
+}
+
+#[test]
 fn claim_refuses_a_grant_bearing_plan_before_fork_when_no_issuer_is_configured() {
     let out = claim_with_scripted_handshake_and_grant(
         MockDriver::default(),
