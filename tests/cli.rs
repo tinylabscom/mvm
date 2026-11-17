@@ -4,6 +4,155 @@ use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;
 
 #[test]
+fn audit_consistency_real_commands_generate_verify_and_refuse_rollback() {
+    use mvm_client::audit::chain::{
+        merkle::sign_root_in,
+        supervisor::{AuditSigner, FileAuditSigner, PlanAuditEntry},
+    };
+    use rand::Rng;
+    use std::collections::BTreeMap;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let audit = home.join("audit");
+    std::fs::create_dir_all(&audit).unwrap();
+    let mut seed = [0; 32];
+    rand::rng().fill_bytes(&mut seed);
+    let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let signer = FileAuditSigner::open(key.clone(), &audit).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let old_path = dir.path().join("saved.json");
+    let new_path = dir.path().join("candidate.json");
+    for i in 0..4 {
+        rt.block_on(signer.sign_and_emit(&PlanAuditEntry {
+            timestamp: chrono::Utc::now(),
+            tenant: mvm_core::plan::TenantId("local".into()),
+            plan_id: mvm_core::plan::PlanId(format!("plan-{i}")),
+            plan_version: 1,
+            bundle_id: None,
+            bundle_version: None,
+            image_name: "fixture".into(),
+            image_sha256: "abc".into(),
+            event: "fixture".into(),
+            caller_commitment: None,
+            labels: BTreeMap::new(),
+        }))
+        .unwrap();
+        if i == 1 || i == 3 {
+            let root = sign_root_in(&audit, "local", &key).unwrap();
+            std::fs::write(
+                if i == 1 { &old_path } else { &new_path },
+                serde_json::to_vec(&root).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+    drop(signer);
+    let pubkey = dir.path().join("trusted.pub");
+    std::fs::write(&pubkey, key.verifying_key().as_bytes()).unwrap();
+    let proof_path = dir.path().join("proof.json");
+    for verb in ["prove-consistency", "verify-consistency"] {
+        let empty_home = dir.path().join(format!("empty-{verb}"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_mvmctl"));
+        cmd.env("MVM_HOME", &empty_home)
+            .env("HOME", dir.path())
+            .env("MVM_NO_LEGACY_BANNER", "1")
+            .args(["trust", "audit", verb])
+            .arg("--old-root")
+            .arg(&old_path)
+            .arg("--new-root")
+            .arg(&new_path);
+        if verb == "verify-consistency" {
+            cmd.arg("--proof").arg(&proof_path);
+        }
+        let missing_default = cmd.output().unwrap();
+        assert!(!missing_default.status.success());
+        assert!(
+            String::from_utf8_lossy(&missing_default.stderr).contains("pubkey"),
+            "{}",
+            String::from_utf8_lossy(&missing_default.stderr),
+        );
+        assert!(
+            !empty_home.exists(),
+            "missing default key must not initialize state"
+        );
+    }
+    let command = |verb: &str, old: &std::path::Path, new: &std::path::Path| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_mvmctl"));
+        cmd.env("MVM_HOME", &home)
+            .env("HOME", dir.path())
+            .env("MVM_NO_LEGACY_BANNER", "1")
+            .args(["trust", "audit", verb])
+            .arg("--old-root")
+            .arg(old)
+            .arg("--new-root")
+            .arg(new)
+            .arg("--pubkey")
+            .arg(&pubkey)
+            .args(["--tenant", "local"]);
+        cmd
+    };
+    let generated = command("prove-consistency", &old_path, &new_path)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let mut proof: mvm_contract::merkle::ConsistencyProof =
+        serde_json::from_slice(&generated.stdout).unwrap();
+    assert_eq!(proof.old_size, 2);
+    assert_eq!(
+        proof.new_size, 4,
+        "proof generation must not append command audit events"
+    );
+    assert_eq!(
+        mvm_client::audit::chain::merkle::read_leaves(&audit, "local", &key.verifying_key())
+            .unwrap()
+            .len(),
+        4,
+    );
+    assert!(
+        !home.join("keys").exists(),
+        "proof generation must not initialize keys"
+    );
+    std::fs::write(&proof_path, &generated.stdout).unwrap();
+    std::fs::remove_dir_all(&audit).unwrap();
+    let verified = command("verify-consistency", &old_path, &new_path)
+        .arg("--proof")
+        .arg(&proof_path)
+        .output()
+        .unwrap();
+    assert!(
+        verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    assert!(
+        !audit.exists(),
+        "offline verification must not initialize the audit store"
+    );
+    assert!(
+        !home.join("keys").exists(),
+        "verification must not initialize signing keys"
+    );
+    std::mem::swap(&mut proof.old_size, &mut proof.new_size);
+    std::mem::swap(&mut proof.old_root, &mut proof.new_root);
+    std::fs::write(&proof_path, serde_json::to_vec(&proof).unwrap()).unwrap();
+    let refused = command("verify-consistency", &new_path, &old_path)
+        .arg("--proof")
+        .arg(&proof_path)
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("consistency"));
+}
+
+#[test]
 fn config_file_is_global_and_malformed_file_fails_before_command_dispatch() {
     let home = tempfile::tempdir().expect("isolated CLI home");
     let path = home.path().join("options.toml");

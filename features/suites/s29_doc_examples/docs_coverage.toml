@@ -577,6 +577,12 @@ uncovered = [
     "mvmctl trust audit decisions export --tenant local",
     "mvmctl trust audit decisions export --tenant local --format tibet",
     "mvmctl trust audit decisions export --tenant local --format tibet -o decisions.tibet.json",
+    # No BDD scenario yet. Both consistency commands have a real subprocess
+    # witness in tests/cli.rs:
+    # audit_consistency_real_commands_generate_verify_and_refuse_rollback.
+    # It checks proof JSON, offline verification, rollback refusal, unchanged
+    # audit leaves, and no key/state initialization, including missing defaults.
+    "mvmctl trust audit prove-consistency --old-root saved.json --new-root candidate.json --pubkey trusted.pub --tenant local > proof.json",
     "mvmctl trust audit provenance export --tenant local -o provenance.ttl",
     "mvmctl trust audit sessions --since 2026-09-01 --until 2026-09-02T12:00:00Z",
     "mvmctl trust audit sessions --since 7d --json",
@@ -584,6 +590,7 @@ uncovered = [
     "mvmctl trust audit show 1e9fca73063e --kind 'plan.*' --since 1h --json",
     "mvmctl trust audit tail --chain --tenant local -n 20",
     "mvmctl trust audit tail -f",
+    "mvmctl trust audit verify-consistency --old-root saved.json --new-root candidate.json --proof proof.json --pubkey trusted.pub --tenant local",
     "mvmctl trust instructions verify . --policy mvm-instructions.toml",
     "mvmctl trust list",
     "mvmctl trust receipt verify /tmp/agent-run-receipt.json",

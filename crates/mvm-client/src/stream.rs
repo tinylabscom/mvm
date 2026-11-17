@@ -27,11 +27,20 @@
 //! died — reads through [`open_vm_output`] instead, which resolves the durable
 //! transcript alongside the broker.
 //!
+//! [`verify_output_audit_binding`] separately checks a supplied sealed manifest
+//! against a trusted host's audit anchor for an exact run. Output reads alone
+//! do not establish this binding, and binding alone does not establish payload
+//! availability or complete-run coverage.
+//!
 //! The implementation lives in `mvm-core` and is re-exported here. That is
 //! the same split the `MvmClient` facade already uses, and it is what lets
 //! `mvm-sdk` (which sits *below* `mvm-hostd`, which this crate depends on)
 //! expose the identical reader without a dependency cycle. Callers depend on
 //! `mvm-client` and never name the lower crate.
+
+pub use crate::stream_binding::{
+    OutputAuditBinding, OutputBindingReport, VerifyOutputBindingError, verify_output_audit_binding,
+};
 
 pub use mvm_core::stream_client::{
     ConsoleUnsupported, EmptyHistory, FramedStreamReader, KindFilter, MAX_BATCH_PAYLOAD_BYTES,

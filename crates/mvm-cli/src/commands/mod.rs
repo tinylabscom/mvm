@@ -347,9 +347,6 @@ pub fn run() -> Result<()> {
     // Emitted after the command settles so the profile covers teardown as well.
     // A no-op unless MVM_SPAN_TIMINGS is set.
     mvm_core::observability::span_timing::emit_report();
-    // Best-effort ambient "update available" line on interactive terminals;
-    // never changes the command's result.
-    crate::update_notice::maybe_notify();
     result
 }
 
@@ -395,6 +392,7 @@ fn run_command() -> Result<()> {
             ) =>
         {
             print!("{}", constrain_help_output(&error.to_string()));
+            crate::update_notice::maybe_notify();
             return Ok(());
         }
         Err(error) => {
@@ -413,6 +411,22 @@ fn run_command() -> Result<()> {
             crate::observability::exit(exit_code);
         }
     };
+    // Offline proof tooling bypasses telemetry and interactive update checks,
+    // not just the command recorder and signer initialization.
+    if cli.command.is_offline_audit_command() {
+        return cli
+            .command
+            .try_run_early()
+            .expect("offline audit command dispatch");
+    }
+    let result = run_configured_command(cli);
+    // Best-effort ambient "update available" line on interactive terminals;
+    // never changes the command's result.
+    crate::update_notice::maybe_notify();
+    result
+}
+
+fn run_configured_command(cli: Cli) -> Result<()> {
     apply_startup_env(&cli);
     refuse_local_image_source_in_release_build(
         mvm_build::artifact_acquisition::compiled_channel(),

@@ -1,9 +1,13 @@
 //! `mvmctl trust audit` subcommand handlers.
 
+mod consistency;
 mod inspect;
 mod prune;
 mod sessions;
 mod usage;
+pub(in crate::commands) use consistency::{
+    ConsistencyRoots, VerifyConsistencyArgs, prove_consistency, verify_consistency,
+};
 #[cfg(test)]
 pub(in crate::commands) use sessions::{SessionsArgs, ShowArgs, VerifyArgs};
 
@@ -220,6 +224,10 @@ pub(in crate::commands) enum AuditAction {
         #[arg(long, default_value = "local")]
         tenant: String,
     },
+    /// Emit consistency-proof JSON for two explicitly supplied signed roots.
+    ProveConsistency(ConsistencyRoots),
+    /// Verify signed-root extension offline without reading the live audit chain.
+    VerifyConsistency(VerifyConsistencyArgs),
     /// Export audit events as W3C PROV-O Turtle for compliance reporting.
     /// Read-only: does not emit new audit events.
     Provenance {
@@ -508,6 +516,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             pubkey,
             tenant,
         } => audit_verify_inclusion(&proof, root.as_deref(), pubkey.as_deref(), &tenant),
+        AuditAction::ProveConsistency(roots) => prove_consistency(&roots),
+        AuditAction::VerifyConsistency(args) => verify_consistency(&args),
     }
 }
 
@@ -1845,7 +1855,7 @@ mod merkle_verb_tests {
     };
     use rand::Rng;
 
-    fn fresh_key() -> SigningKey {
+    pub(super) fn fresh_key() -> SigningKey {
         let mut seed = [0u8; 32];
         rand::rng().fill_bytes(&mut seed);
         SigningKey::from_bytes(&seed)
@@ -1856,7 +1866,7 @@ mod merkle_verb_tests {
     }
 
     /// Sign a root over `leaves` exactly the way `publish_root` does.
-    fn sign_root(key: &SigningKey, tenant: &str, leaves: &[String]) -> SignedAuditRoot {
+    pub(super) fn sign_root(key: &SigningKey, tenant: &str, leaves: &[String]) -> SignedAuditRoot {
         sign_root_fields(
             key,
             tenant,
@@ -2017,13 +2027,19 @@ mod merkle_verb_tests {
     /// Seed a real chain of SignedEnvelope lines via `FileAuditSigner`,
     /// returning the verified leaf set. `plan_ids` names each entry's plan_id.
     fn seed_leaves(plan_ids: &[&str]) -> (tempfile::TempDir, Vec<String>) {
+        seed_leaves_with_key(plan_ids, fresh_key())
+    }
+
+    pub(super) fn seed_leaves_with_key(
+        plan_ids: &[&str],
+        key: SigningKey,
+    ) -> (tempfile::TempDir, Vec<String>) {
         use mvm_client::audit::chain::supervisor::{AuditSigner, FileAuditSigner, PlanAuditEntry};
         use std::collections::BTreeMap;
 
         let dir = tempfile::tempdir().unwrap();
         let chain_dir = dir.path().join("audit");
         std::fs::create_dir_all(&chain_dir).unwrap();
-        let key = fresh_key();
         let vk = key.verifying_key();
         let signer = FileAuditSigner::open(key, &chain_dir).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
