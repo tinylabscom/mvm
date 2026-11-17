@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Final
 
 ABI_MAJOR: Final = 1
-ABI_MINOR: Final = 14
+ABI_MINOR: Final = 15
 
 
 class Classification(str, Enum):
@@ -190,6 +190,10 @@ SESSION_START: Final = "session.start"
 SESSION_STOP: Final = "session.stop"
 
 
+#: Reads host-local secret metadata without exposing the value.
+SECRET_GET: Final = "secret.get"
+
+
 #: Copies a file between the host and the guest.
 GUEST_CP: Final = "guest.cp"
 
@@ -306,6 +310,7 @@ METHODS: dict[str, Method] = {
     "session.info": Method(key="session_info", classification=Classification.PROD_SAFE, summary="Reports a session's record."),
     "session.start": Method(key="session_start", classification=Classification.PROD_SAFE, summary="Boots a warm session for a workload, admitted under a signed plan."),
     "session.stop": Method(key="session_stop", classification=Classification.PROD_SAFE, summary="Stops a session and tears down its microVM."),
+    "secret.get": Method(key="secret_get", classification=Classification.PROD_SAFE, summary="Reads host-local secret metadata without exposing the value."),
     "guest.cp": Method(key="guest_cp", classification=Classification.DEV_ONLY, summary="Copies a file between the host and the guest."),
     "guest.fs.list": Method(key="guest_fs_list", classification=Classification.DEV_ONLY, summary="Lists a directory in the guest."),
     "guest.fs.mkdir": Method(key="guest_fs_mkdir", classification=Classification.DEV_ONLY, summary="Creates a directory in the guest."),
@@ -365,6 +370,7 @@ __all__ = [
     "SESSION_INFO",
     "SESSION_START",
     "SESSION_STOP",
+    "SECRET_GET",
     "GUEST_CP",
     "GUEST_FS_LIST",
     "GUEST_FS_MKDIR",

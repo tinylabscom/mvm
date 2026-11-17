@@ -45,7 +45,8 @@
 //! in [`entrypoint::METHODS`], the guest methods in
 //! [`guest::METHODS`], and the stream methods in [`stream::METHODS`] and
 //! [`stream::LOG_METHODS`], plus local registry inspection in [`manifest::METHODS`]
-//! and host-local checkpoint operations in [`checkpoint::METHODS`].
+//! and host-local checkpoint operations in [`checkpoint::METHODS`], plus
+//! metadata-only secret lookup in [`secret::METHODS`].
 //! Each call builds a single-threaded runtime and drops it before returning.
 //! The one thing that outlives a call is a process stream's reader, which
 //! lives until the process ends or its wait times out; see [`stream`].
@@ -80,6 +81,7 @@ pub mod manifest;
 pub mod owned_context;
 #[cfg(feature = "schema")]
 pub mod registry;
+pub mod secret;
 pub mod status;
 pub mod stream;
 
@@ -107,7 +109,8 @@ pub const MVM_HOSTLIB_ABI_MAJOR: u16 = 1;
 /// 12 added host-local signed-chain checkpoint lineage verification.
 /// 13 added opt-in prompt-step checkpointing.
 /// 14 added `manifest.remove` and `manifest.prune`.
-pub const MVM_HOSTLIB_ABI_MINOR: u16 = 14;
+/// 15 added metadata-only `secret.get`.
+pub const MVM_HOSTLIB_ABI_MINOR: u16 = 15;
 
 pub use approval::mvm_hostlib_set_approval_callback;
 
@@ -320,6 +323,9 @@ fn handle(negotiated: bool, method: &[u8], request: &[u8], services: &dyn Servic
     }
     if manifest::is_known(method) {
         return manifest::dispatch(method, request);
+    }
+    if secret::is_known(method) {
+        return secret::dispatch(method, request);
     }
     if guest::is_known(method) {
         return match services.guest() {
@@ -687,7 +693,7 @@ mod tests {
 
     #[test]
     fn recovery_status_and_c_buffer_do_not_depend_on_last_negotiated_minor() {
-        assert_eq!((MVM_HOSTLIB_ABI_MAJOR, MVM_HOSTLIB_ABI_MINOR), (1, 14));
+        assert_eq!((MVM_HOSTLIB_ABI_MAJOR, MVM_HOSTLIB_ABI_MINOR), (1, 15));
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 7), 1);
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 8), 1);
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 9), 1);
@@ -696,7 +702,8 @@ mod tests {
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 12), 1);
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 13), 1);
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 14), 1);
-        assert_eq!(mvm_hostlib_abi_is_compatible(1, 15), 0);
+        assert_eq!(mvm_hostlib_abi_is_compatible(1, 15), 1);
+        assert_eq!(mvm_hostlib_abi_is_compatible(1, 16), 0);
         for minor in [7, 8, 9, 7] {
             assert_eq!(mvm_hostlib_abi_is_compatible(1, minor), 1);
             let outcome = Outcome::from(mvm_core::client::MvmError::RecoveryRequired {

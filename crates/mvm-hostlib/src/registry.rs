@@ -43,6 +43,7 @@ use crate::manifest::{
     INFO as MANIFEST_INFO, LIST as MANIFEST_LIST, PRUNE as MANIFEST_PRUNE,
     REMOVE as MANIFEST_REMOVE, VERIFY as MANIFEST_VERIFY,
 };
+use crate::secret::GET as SECRET_GET;
 use crate::stream::{
     CloseRequest, Empty as StreamEmpty, LOGS_CLOSE, LOGS_NEXT, LOGS_OPEN, LogsOpenRequest,
     NextReply, NextRequest, OpenReply, OpenRequest, STREAM_CLOSE, STREAM_NEXT, STREAM_OPEN,
@@ -504,6 +505,14 @@ pub const REGISTRY: &[MethodDef] = &[
         reply: schema_of::<crate::guest::Empty>,
     },
     MethodDef {
+        name: SECRET_GET,
+        key: "secret_get",
+        summary: "Reads host-local secret metadata without exposing the value.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<crate::secret::GetRequest>,
+        reply: schema_of::<Option<mvm_client::secret::SecretMetadata>>,
+    },
+    MethodDef {
         name: CP,
         key: "guest_cp",
         summary: "Copies a file between the host and the guest.",
@@ -776,6 +785,7 @@ mod tests {
             .chain(crate::attestation::METHODS.iter())
             .chain(crate::image_admin::METHODS.iter())
             .chain(crate::checkpoint::METHODS.iter())
+            .chain(crate::secret::METHODS.iter())
             .chain(crate::entrypoint::METHODS.iter())
             .chain(crate::stream::METHODS.iter())
             .chain(crate::stream::LOG_METHODS.iter())

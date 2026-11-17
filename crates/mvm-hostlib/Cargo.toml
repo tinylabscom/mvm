@@ -46,6 +46,7 @@ schemars = { version = "0.8", optional = true }
 mvm-client = { workspace = true, features = ["test-support"] }
 mvm-core = { workspace = true, features = ["client", "test-support"] }
 tempfile.workspace = true
+secrecy.workspace = true
 
 [features]
 # Derives JsonSchema on the ABI request/reply types so the emitters can write

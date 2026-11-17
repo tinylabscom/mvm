@@ -31,6 +31,7 @@ use crate::crypto::keystore::validate_shell_id;
 /// This metadata is enough for host-driven OAuth exchange/refresh logic while
 /// keeping the real token set and client secret in the secret value store.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct OAuthBindingMeta {
     /// OAuth authorization endpoint.
     pub authorization_url: String,
@@ -52,6 +53,7 @@ pub struct OAuthBindingMeta {
 // secret value lives in `SecretStore`, never here; Debug prints the
 // destination policy, which `mvmctl secret ls` already shows in cleartext.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SecretBindingMeta {
     /// How the keyholder uses the secret on egress (signer vs injector).
     pub auth_type: AuthType,
@@ -92,6 +94,7 @@ pub struct SecretBindingMeta {
 // allow(secret-debug): a two-valued policy flag (`never` / `ask`) that
 // `mvmctl secret ls` prints; it carries no part of the secret.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum SecretApproval {
     /// Substituted without asking.

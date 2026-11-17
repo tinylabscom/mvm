@@ -79,6 +79,13 @@ class AttestationVerifyRequest:
     trust: AttestationTrust
 
 
+class AuthType(Enum):
+    sigv4 = 'sigv4'
+    hmac = 'hmac'
+    bearer = 'bearer'
+    basic = 'basic'
+
+
 @dataclass
 class BackendCapabilitiesReply:
     pass
@@ -501,6 +508,25 @@ class ImageRevocationsUpdateRequest:
     document_path: str
 
 
+class InjectionMode1(Enum):
+    header = 'header'
+
+
+class InjectionMode2(Enum):
+    query_param = 'query_param'
+
+
+class InjectionMode3(Enum):
+    url_path = 'url_path'
+
+
+class InjectionMode4(Enum):
+    basic_auth = 'basic_auth'
+
+
+InjectionMode = Union[InjectionMode1, InjectionMode2, InjectionMode3, InjectionMode4]
+
+
 class InstanceReadiness1(Enum):
     launch_accepted = 'launch_accepted'
 
@@ -809,6 +835,15 @@ class ManifestVerifyRequest:
 
 
 @dataclass
+class OAuthBindingMeta:
+    authorization_url: str
+    client_id: str
+    token_url: str
+    response_access_token_pointer: Optional[str] = None
+    scopes: Optional[List[str]] = field(default_factory=lambda: [])
+
+
+@dataclass
 class PlanArtifact:
     bundle_sha256: str
     key_id: str
@@ -947,6 +982,23 @@ class RuntimeReleaseProof:
     version: str
 
 
+class SecretApproval1(Enum):
+    never = 'never'
+
+
+class SecretApproval2(Enum):
+    ask = 'ask'
+
+
+SecretApproval = Union[SecretApproval1, SecretApproval2]
+
+
+@dataclass
+class SecretGetRequest:
+    name: str
+    tenant: str
+
+
 @dataclass
 class SessionBinding:
     approval_head: ApprovalHead
@@ -1005,6 +1057,13 @@ class SessionStopReply:
 @dataclass
 class SessionStopRequest:
     session_id: str
+
+
+@dataclass
+class Sigv4Params:
+    access_key_id: str
+    region: str
+    service: str
 
 
 class StreamName1(Enum):
@@ -1667,6 +1726,25 @@ RuntimeLaunchBinding = Union[
 
 
 @dataclass
+class SecretBindingMeta:
+    allowed_hosts: List[str]
+    auth_type: AuthType
+    approve: Optional[SecretApproval] = None
+    inject: Optional[InjectionMode] = None
+    oauth: Optional[OAuthBindingMeta] = None
+    provider: Optional[str] = None
+    sigv4: Optional[Sigv4Params] = None
+
+
+@dataclass
+class SecretMetadata:
+    name: str
+    referenced_by: List[str]
+    tenant: str
+    binding: Optional[SecretBindingMeta] = None
+
+
+@dataclass
 class SessionCallReply:
     exit_code: int
     output_truncated: bool
@@ -1807,6 +1885,9 @@ class MachineRunReply:
     process: Optional[str] = None
 
 
+SecretGetReply = Optional[SecretMetadata]
+
+
 @dataclass
 class CheckpointList:
     reply: CheckpointListReply
@@ -1829,6 +1910,12 @@ class MachineLogsStreamNext:
 class MachineRun:
     reply: MachineRunReply
     request: MachineRunRequest
+
+
+@dataclass
+class SecretGet:
+    reply: SecretGetReply
+    request: SecretGetRequest
 
 
 @dataclass
@@ -1883,6 +1970,7 @@ class HostAbi:
     manifest_prune: ManifestPrune
     manifest_remove: ManifestRemove
     manifest_verify: ManifestVerify
+    secret_get: SecretGet
     session_call: SessionCall
     session_info: SessionInfo
     session_start: SessionStart

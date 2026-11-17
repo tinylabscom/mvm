@@ -209,11 +209,13 @@ impl SecretStore for FileSecretStore {
 
     fn list(&self, tenant: &str) -> Result<Vec<String>> {
         let dir = self.tenant_dir(tenant)?;
-        if !dir.exists() {
-            return Ok(Vec::new());
-        }
         let mut names = Vec::new();
-        for entry in fs::read_dir(&dir).with_context(|| format!("listing {}", dir.display()))? {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(names),
+            Err(e) => return Err(e).with_context(|| format!("listing {}", dir.display())),
+        };
+        for entry in entries {
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_string_lossy().to_string();
@@ -386,11 +388,13 @@ impl KeyringSecretStore {
 
     fn load_index(&self, tenant: &str) -> Result<Vec<String>> {
         let path = self.index_path(tenant)?;
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let raw =
-            fs::read(&path).with_context(|| format!("reading secret index {}", path.display()))?;
+        let raw = match fs::read(&path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => {
+                return Err(e).with_context(|| format!("reading secret index {}", path.display()));
+            }
+        };
         serde_json::from_slice(&raw)
             .with_context(|| format!("parsing secret index {}", path.display()))
     }
@@ -511,8 +515,8 @@ impl SecretStore for AutoSecretStore {
     }
 
     fn list(&self, tenant: &str) -> Result<Vec<String>> {
-        let mut names = self.keyring.list(tenant).unwrap_or_default();
-        names.extend(self.file.list(tenant).unwrap_or_default());
+        let mut names = self.keyring.list(tenant)?;
+        names.extend(self.file.list(tenant)?);
         names.sort();
         names.dedup();
         Ok(names)
@@ -758,6 +762,35 @@ mod tests {
         };
         store.file.put("acme", "k", &mk_value("v")).unwrap();
         assert_eq!(store.list("acme").unwrap(), vec!["k"]);
+    }
+
+    #[test]
+    #[cfg(feature = "os-keyring")]
+    fn auto_store_refuses_file_and_index_faults_instead_of_reporting_absence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index = tmp.path().join("index");
+        let file = tmp.path().join("file");
+        fs::create_dir_all(&index).unwrap();
+        fs::create_dir_all(&file).unwrap();
+        let store = AutoSecretStore {
+            keyring: KeyringSecretStore::with_dir(&index),
+            file: FileSecretStore::with_dir(&file),
+        };
+
+        fs::write(file.join("acme"), b"not a directory").unwrap();
+        let err = store.list("acme").unwrap_err();
+        assert!(err.to_string().contains("listing"), "got: {err:#}");
+        fs::remove_file(file.join("acme")).unwrap();
+
+        fs::write(index.join("acme.json"), b"not json").unwrap();
+        let err = store.list("acme").unwrap_err();
+        assert!(
+            err.to_string().contains("parsing secret index"),
+            "got: {err:#}"
+        );
+        fs::remove_file(index.join("acme.json")).unwrap();
+
+        assert!(store.list("acme").unwrap().is_empty());
     }
 
     #[test]

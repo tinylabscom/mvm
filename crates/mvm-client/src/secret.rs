@@ -148,6 +148,7 @@ pub enum PutOutcome {
 // referencing machine names. The value lives in `SecretStore` and no field
 // here can hold it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SecretMetadata {
     pub tenant: String,
     pub name: String,

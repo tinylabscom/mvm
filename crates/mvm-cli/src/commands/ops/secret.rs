@@ -1812,6 +1812,19 @@ mod tests {
         let f = fixture();
         let err = cmd_get(&f.service, "acme".into(), "absent".into()).unwrap_err();
         assert!(err.to_string().contains("not set"), "got: {err}");
+        assert!(audit_text(&f).contains("\"outcome\":\"miss\""));
+    }
+
+    #[test]
+    fn cmd_get_storage_failure_is_not_reported_as_absence() {
+        let f = fixture();
+        std::fs::create_dir_all(&f.secrets_dir).unwrap();
+        std::fs::write(f.secrets_dir.join("acme"), "not a directory").unwrap();
+        let err = cmd_get(&f.service, "acme".into(), "api_token".into()).unwrap_err();
+        assert!(!err.to_string().contains("not set"), "got: {err}");
+        let log = audit_text(&f);
+        assert!(log.contains("\"outcome\":\"err\""), "got: {log}");
+        assert!(!log.contains("\"outcome\":\"miss\""), "got: {log}");
     }
 
     fn stored_token_set(f: &Fixture) -> mvm_client::secret::keyholder::resolver::OAuthTokenSet {
