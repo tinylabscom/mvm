@@ -1453,7 +1453,14 @@ mod tests {
             cpus: 2,
             memory_mib: 1024,
             tenant_id: Some("tenant-a".into()),
-            plan_json: Some("{}".into()),
+            plan_json: Some(
+                serde_json::to_string(
+                    &mvm_core::plan::test_support::PlanFixture::new()
+                        .tenant("tenant-a")
+                        .build(),
+                )
+                .unwrap(),
+            ),
             ..Default::default()
         }
     }
@@ -1498,6 +1505,7 @@ mod tests {
             epoch: ExecutionEpoch::new(1).unwrap(),
             report: None,
             retention: None,
+            service_blind: None,
         };
         let error = boot(Some(granted)).err().expect("the grant is refused");
         assert!(format!("{error:#}").contains("mailbox"), "{error:#}");

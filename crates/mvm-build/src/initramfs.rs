@@ -104,6 +104,17 @@ pub fn record_source_fingerprint(
     arch: GuestArch,
     fingerprint: &str,
 ) -> std::io::Result<()> {
+    let dir = InitramfsResolver::new(cache_root, version).artifact_dir(&arch.to_string());
+    let _owner = crate::cache_install::lock_artifact_dir(&dir)?;
+    record_source_fingerprint_locked(cache_root, version, arch, fingerprint)
+}
+
+fn record_source_fingerprint_locked(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    fingerprint: &str,
+) -> std::io::Result<()> {
     let dir = cache_root.join(version).join(arch.to_string());
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join(LOCAL_SOURCE_FINGERPRINT_FILE), fingerprint)
@@ -119,6 +130,8 @@ pub fn evict_if_source_changed(
     arch: GuestArch,
     fingerprint: &str,
 ) -> std::io::Result<bool> {
+    let dir = InitramfsResolver::new(cache_root, version).artifact_dir(&arch.to_string());
+    let _owner = crate::cache_install::lock_artifact_dir(&dir)?;
     if cached_artifact_matches_source(cache_root, version, arch, fingerprint) {
         return Ok(false);
     }
@@ -168,7 +181,9 @@ fn seed_from_default_cache(
                 .map(|_| resolver.artifact_dir(&arch_dir))
         },
         |source_dir| {
-            install_initramfs_into_cache(&source_dir, cache_root, version, arch)?;
+            let target = InitramfsResolver::new(cache_root, version).artifact_dir(&arch_dir);
+            let _owner = crate::cache_install::lock_artifact_dir(&target)?;
+            install_initramfs_into_cache_locked(&source_dir, cache_root, version, arch)?;
             carry_source_fingerprint(&source_dir, cache_root, version, arch)?;
             carry_archive_origin(&source_dir, cache_root, version, arch)
         },
@@ -186,7 +201,7 @@ fn carry_source_fingerprint(
     arch: GuestArch,
 ) -> Result<(), InitramfsBuildError> {
     match std::fs::read_to_string(donor_dir.join(LOCAL_SOURCE_FINGERPRINT_FILE)) {
-        Ok(fingerprint) => Ok(record_source_fingerprint(
+        Ok(fingerprint) => Ok(record_source_fingerprint_locked(
             cache_root,
             version,
             arch,
@@ -254,14 +269,6 @@ pub fn resolve_or_build_local_initramfs(
     if !is_recoverable_resolve_miss(&initial) {
         return Err(initial);
     }
-    // A partial version-keyed dir (a lone recorded fingerprint, an
-    // interrupted install) shadows the ladder as a corrupt entry; remove it
-    // so the ladder's install is the only writer to that directory.
-    let versioned_dir = cache_root.join(version).join(arch.to_string());
-    if versioned_dir.is_dir() {
-        std::fs::remove_dir_all(&versioned_dir)?;
-    }
-
     if !crate::artifact_acquisition::compiled_channel().permits_automatic_builds() {
         return Err(InitramfsBuildError::CargoBuildFailed {
             reason: format!(
@@ -343,6 +350,7 @@ pub fn build_initramfs_from_guest_runtime(
         });
     }
     let artifact_dir = InitramfsResolver::new(cache_root, version).artifact_dir(&arch.to_string());
+    let _owner = crate::cache_install::lock_artifact_dir(&artifact_dir)?;
     if cached_artifact_matches_source(cache_root, version, arch, &runtime.digest)
         && let Ok(cached) = InitramfsResolver::new(cache_root, version).resolve(&arch.to_string())
     {
@@ -353,8 +361,8 @@ pub fn build_initramfs_from_guest_runtime(
     }
     let staging = tempfile::tempdir()?;
     assemble_initramfs_artifact(&agent_bytes, version, staging.path())?;
-    let installed = install_initramfs_into_cache(staging.path(), cache_root, version, arch)?;
-    record_source_fingerprint(cache_root, version, arch, &runtime.digest)?;
+    let installed = install_initramfs_into_cache_locked(staging.path(), cache_root, version, arch)?;
+    record_source_fingerprint_locked(cache_root, version, arch, &runtime.digest)?;
     crate::runtime_pieces::record_archive_origin(&artifact_dir, &runtime.digest)?;
     Ok(installed)
 }
@@ -420,6 +428,18 @@ use mvm_contract::hash::sha256_hex;
 
 /// Install a prebuilt initramfs directory into the cache atomically.
 pub fn install_initramfs_into_cache(
+    source_dir: &Path,
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+) -> Result<InitramfsArtifact, InitramfsBuildError> {
+    let target = InitramfsResolver::new(cache_root, version).artifact_dir(&arch.to_string());
+    let _owner = crate::cache_install::lock_artifact_dir(&target)?;
+    install_initramfs_into_cache_locked(source_dir, cache_root, version, arch)
+}
+
+// The caller owns the slot until the returned artifact and its markers are ready.
+fn install_initramfs_into_cache_locked(
     source_dir: &Path,
     cache_root: &Path,
     version: &str,

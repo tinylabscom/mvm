@@ -65,6 +65,11 @@ impl MailboxJournal {
             order: Vec::new(),
             used_challenges: BTreeMap::new(),
             poisoned: false,
+            format_version: if key.reference.is_some() { 3 } else { 2 },
+            #[cfg(test)]
+            receipt_fault: None,
+            #[cfg(test)]
+            receipt_sign_attempts: 0,
             _lock: lock,
         };
         let mut paths = Vec::new();
@@ -152,8 +157,13 @@ impl MailboxJournal {
             );
             let record: Record =
                 serde_json::from_slice(&plaintext).map_err(|_| JournalError::Corrupt)?;
-            let expected_version = if journal.history_key.is_some() { 3 } else { 2 };
-            if record.version != expected_version
+            let version_valid = match journal.tier {
+                AcceptanceTier::Independent => record.version == journal.format_version,
+                AcceptanceTier::Local => {
+                    matches!(record.version, 3 | 4) && record.version >= journal.format_version
+                }
+            };
+            if !version_valid
                 || record.cursor != cursor
                 || record.previous != journal.tip.head
                 || record.address != address
@@ -205,6 +215,11 @@ impl MailboxJournal {
                         .map_err(|_| JournalError::Corrupt)?;
                     let (capability, envelope) =
                         frame::decode_frame(&raw).map_err(|_| JournalError::Corrupt)?;
+                    let receipt_completion = if record.version == 4 {
+                        Some(journal.pending_receipt(identity, &receipt)?)
+                    } else {
+                        None
+                    };
                     if receipt.delivery_id != envelope.routing.delivery_id
                         || receipt.ciphertext_commitment != envelope.ciphertext_commitment
                         || journal.retention.is_some_and(|policy| {
@@ -224,6 +239,7 @@ impl MailboxJournal {
                                     expired_at_unix_ms: None,
                                     lease: None,
                                     signed_ack: None,
+                                    receipt_completion,
                                 },
                             )
                             .is_some()
@@ -231,6 +247,28 @@ impl MailboxJournal {
                         return Err(JournalError::Corrupt);
                     }
                     journal.order.push(identity);
+                }
+                JournalEvent::ReceiptCompleted {
+                    identity,
+                    encoded_receipt,
+                } => {
+                    if record.version != 4 || journal.tier != AcceptanceTier::Local {
+                        return Err(JournalError::Corrupt);
+                    }
+                    let entry = journal.seen.get(&identity).ok_or(JournalError::Corrupt)?;
+                    if matches!(
+                        entry.receipt_completion,
+                        Some(super::ReceiptCompletion::Retained { .. })
+                    ) {
+                        return Err(JournalError::Corrupt);
+                    }
+                    journal.decode_retained_receipt(identity, entry, &encoded_receipt)?;
+                    journal
+                        .seen
+                        .get_mut(&identity)
+                        .ok_or(JournalError::Corrupt)?
+                        .receipt_completion =
+                        Some(super::ReceiptCompletion::Retained { encoded_receipt });
                 }
                 JournalEvent::Acknowledged {
                     identity,
@@ -406,6 +444,7 @@ impl MailboxJournal {
                 }
                 reconcile(next)?;
             }
+            journal.format_version = record.version;
             journal.tip = next;
         }
         if journal.tip.cursor < expected.cursor {

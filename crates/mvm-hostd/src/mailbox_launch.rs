@@ -298,6 +298,20 @@ impl DerivedMailboxKeys {
     }
 }
 
+/// Refuse selected service-blind intent on the current legacy launch paths.
+///
+/// # Errors
+/// Returns `Unsupported` for V3 selection, regardless of profile shape or backend.
+pub fn require_legacy_launch(grant: Option<&MailboxGrant>) -> Result<()> {
+    if grant.is_some_and(|grant| grant.service_blind.is_some()) {
+        return Err(Error::new(
+            ErrorKind::Unsupported,
+            "service-blind V3 mailbox launch is unavailable",
+        ));
+    }
+    Ok(())
+}
+
 /// The launcher half: read the host key directory and derive what serving
 /// `grant` needs.
 ///
@@ -310,6 +324,7 @@ pub fn derive_launch_keys(
     grant: &MailboxGrant,
     secret: &Key,
 ) -> Result<DerivedMailboxKeys> {
+    require_legacy_launch(Some(grant))?;
     let derived = derived_keys(keys_dir, &grant.mailbox, grant.epoch)?;
     // After the signing seed above, so a wrong directory never mints a root.
     let encryption_root = Key::load_or_create(&keys_dir.join(ENCRYPTION_ROOT))?;
@@ -588,11 +603,40 @@ mod tests {
             epoch: epoch(n),
             report: None,
             retention: None,
+            service_blind: None,
         }
     }
 
     fn grant(dir: &Path, mailbox: [u8; 32]) -> MailboxGrant {
         grant_at(dir, mailbox, 1)
+    }
+
+    #[test]
+    fn selector_refuses_derivation_before_any_legacy_key_access() {
+        let empty = tempfile::tempdir().unwrap();
+        let selected = MailboxGrant {
+            mailbox: MailboxId::from_bytes([4; 32]),
+            authority_key: [9; 32],
+            epoch: epoch(1),
+            report: None,
+            retention: None,
+            service_blind: Some(
+                mvm_contract::protocol::mailbox::service_blind::LaunchProfile::new(
+                    [1; 32], [2; 32],
+                )
+                .unwrap(),
+            ),
+        };
+        for directory in [empty.path().to_path_buf(), empty.path().join("missing")] {
+            let error = derive_launch_keys(&directory, &selected, &test_secret())
+                .expect_err("selected launch must refuse");
+            assert_eq!(error.kind(), ErrorKind::Unsupported);
+            assert_eq!(
+                error.to_string(),
+                "service-blind V3 mailbox launch is unavailable"
+            );
+        }
+        assert_eq!(std::fs::read_dir(empty.path()).unwrap().count(), 0);
     }
 
     #[test]

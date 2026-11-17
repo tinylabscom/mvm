@@ -714,26 +714,43 @@ pub fn install_into_cache(
     arch: GuestArch,
 ) -> Result<MvmRuntimeBinaries, GuestAgentBuildError> {
     let layout = GuestAgentLayout::under(cache_root, cache_key, arch);
+    let _owner = crate::cache_install::lock_artifact_dir(&layout.dir)?;
     std::fs::create_dir_all(&layout.dir)?;
-    install_one(src.agent, &layout.agent)?;
-    install_one(src.netinit, &layout.netinit)?;
-    install_one(src.egress_client, &layout.egress_client)?;
-    install_one(src.entrypoint_runner, &layout.entrypoint_runner)?;
+    let staging = tempfile::tempdir_in(&layout.dir)?;
+    let candidates = [
+        (src.agent, &layout.agent),
+        (src.netinit, &layout.netinit),
+        (src.egress_client, &layout.egress_client),
+        (src.entrypoint_runner, &layout.entrypoint_runner),
+    ];
 
-    // Validate on the way into the cache — once per build, rather than on every
-    // invocation. A wrong-architecture or dynamically linked artifact cached
-    // here would otherwise be injected into a rootfs that has no dynamic
-    // loader, and surface as a guest that boots to a silent PID 1.
-    let binaries = layout.binaries();
-    for (name, path) in binaries.artifacts() {
-        let bytes = std::fs::read(path)?;
-        crate::guest_elf::validate_static_guest_elf(&bytes, path, arch).map_err(|e| {
+    // Prepare and verify the whole candidate before touching a valid cached set.
+    for (source, target) in candidates {
+        let name = target.file_name().expect("cache binary has a filename");
+        let staged = staging.path().join(name);
+        install_one(source, &staged)?;
+        let bytes = std::fs::read(&staged)?;
+        crate::guest_elf::validate_static_guest_elf(&bytes, &staged, arch).map_err(|e| {
             GuestAgentBuildError::BuildFailed {
-                reason: format!("{name}: {e}"),
+                reason: format!("{}: {e}", target.display()),
             }
         })?;
     }
-    Ok(binaries)
+    for (_, target) in candidates {
+        let staged = staging
+            .path()
+            .join(target.file_name().expect("cache binary has a filename"));
+        let bytes = std::fs::read(&staged)?;
+        if std::fs::symlink_metadata(target).is_ok_and(|meta| meta.file_type().is_file())
+            && std::fs::read(target).is_ok_and(|cached| cached == bytes)
+        {
+            set_exec(target)?;
+        } else {
+            // Keep readers' paths present even during an explicit replacement.
+            std::fs::rename(staged, target)?;
+        }
+    }
+    Ok(layout.binaries())
 }
 
 /// The cached guest binaries if a complete set is already present, else `None`.
@@ -1328,7 +1345,8 @@ mod tests {
             )
         };
 
-        install(cache.path()).expect("a valid static set must install");
+        let installed = install(cache.path()).expect("a valid static set must install");
+        let original = std::fs::read(&installed.netinit).unwrap();
 
         // Now make one artifact the wrong architecture.
         std::fs::write(
@@ -1341,6 +1359,12 @@ mod tests {
         assert!(
             err.to_string().contains("agent"),
             "the refusal should name the artifact: {err}"
+        );
+        assert!(install(cache.path()).is_err());
+        assert_eq!(
+            std::fs::read(&installed.netinit).unwrap(),
+            original,
+            "a refused candidate must preserve the previous valid set",
         );
 
         // And a plain script is not an ELF at all.

@@ -11,6 +11,7 @@ fn local_retention_requires_a_configured_host_ceiling() {
         epoch: ExecutionEpoch::new(1).expect("epoch"),
         report: None,
         retention: None,
+        service_blind: None,
     };
     assert!(enforce_mailbox_retention(Some(&grant), None).is_ok());
     grant.retention = Some(MailboxRetentionPolicy::new(10_000).expect("window"));
@@ -355,6 +356,7 @@ fn mailbox_retention_above_or_without_host_ceiling_refuses_before_signing() {
         epoch: ExecutionEpoch::new(1).expect("epoch"),
         report: None,
         retention: Some(MailboxRetentionPolicy::new(10_000).expect("window")),
+        service_blind: None,
     });
     let attempt = || {
         admit_for_run(

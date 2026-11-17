@@ -173,7 +173,7 @@ fn extract_sidecar_archive(
 /// layout, replacing any existing entry for `(version, arch)` wholesale.
 ///
 /// Staging and promotion are separate steps: a crash before the rename leaves
-/// only a `<arch>.tmp.<pid>/` directory that a later install reaps, never a
+/// only a `<libc>.tmp.<pid>/` directory that a later install reaps, never a
 /// half-written entry a resolver could pick up.
 pub fn install_sidecar_into_cache(
     source: &Path,
@@ -182,6 +182,9 @@ pub fn install_sidecar_into_cache(
     arch: &str,
     libc: GuestLibc,
 ) -> Result<SdkSidecarLayout, SdkSidecarBuildError> {
+    let layout = SdkSidecarLayout::under(cache_root, version, arch, libc);
+    let _owner = crate::cache_install::lock_artifact_dir(&layout.artifact_dir)
+        .map_err(io_at("locking", &layout.artifact_dir))?;
     install_sidecar_with_markers(source, cache_root, version, arch, libc, &[])
 }
 
@@ -199,11 +202,15 @@ pub fn install_source_built_sidecar(
     libc: GuestLibc,
     fingerprint: &str,
 ) -> Result<SdkSidecarArtifact, SdkSidecarBuildError> {
+    let layout = SdkSidecarLayout::under(cache_root, version, &arch.to_string(), libc);
+    let _owner = crate::cache_install::lock_artifact_dir(&layout.artifact_dir)
+        .map_err(io_at("locking", &layout.artifact_dir))?;
     install_source_built_sidecar_from(source, cache_root, version, arch, libc, fingerprint, None)
 }
 
 /// [`install_source_built_sidecar`], also recording the guest-runtime archive
-/// the sidecar was packed from inside the same staging rename.
+/// the sidecar was packed from inside the same staging rename. The caller owns
+/// the target slot through this install and its final resolve.
 fn install_source_built_sidecar_from(
     source: &Path,
     cache_root: &Path,
@@ -231,6 +238,7 @@ fn install_source_built_sidecar_from(
             ),
         });
     }
+    mvm_fs::sdk_sidecar::validate_sidecar_payload(&source.join(SDK_SIDECAR_IMAGE_FILE), libc)?;
     let arch_dir = arch.to_string();
     let mut markers = vec![(LOCAL_SOURCE_FINGERPRINT_FILE, fingerprint.trim())];
     if let Some(digest) = archive_digest {
@@ -299,6 +307,8 @@ pub fn build_sdk_sidecar_from_guest_runtime(
     let source_fingerprint = runtime.manifest.sdk_cdylib_source_fingerprint.as_str();
     let resolver = SdkSidecarResolver::new(cache_root.to_path_buf(), version.to_string());
     let layout = resolver.layout(&arch.to_string(), libc);
+    let _owner = crate::cache_install::lock_artifact_dir(&layout.artifact_dir)
+        .map_err(io_at("locking", &layout.artifact_dir))?;
     if std::fs::read_to_string(layout.artifact_dir.join(LOCAL_SOURCE_FINGERPRINT_FILE))
         .is_ok_and(|fingerprint| fingerprint.trim() == source_fingerprint)
         && let Ok(cached) = resolver.resolve(&arch.to_string(), libc)
@@ -373,7 +383,7 @@ fn require_canonical_sidecar_files(source: &Path) -> Result<(), SdkSidecarBuildE
 }
 
 /// Install `source`'s canonical files, plus each `(file name, value)` marker,
-/// as one staged directory published by a single rename.
+/// as one staged directory published by a single rename. The caller owns the slot.
 fn install_sidecar_with_markers(
     source: &Path,
     cache_root: &Path,
@@ -383,18 +393,7 @@ fn install_sidecar_with_markers(
     markers: &[(&str, &str)],
 ) -> Result<SdkSidecarLayout, SdkSidecarBuildError> {
     let layout = SdkSidecarLayout::under(cache_root, version, arch, libc);
-    let parent =
-        layout
-            .artifact_dir
-            .parent()
-            .ok_or_else(|| SdkSidecarBuildError::InstallInvalid {
-                reason: format!(
-                    "computed artifact dir {} has no parent",
-                    layout.artifact_dir.display()
-                ),
-            })?;
-    std::fs::create_dir_all(parent).map_err(io_at("creating", parent))?;
-    let staging = stage_sidecar_artifact(parent, arch, source)?;
+    let staging = stage_sidecar_artifact(&layout, source)?;
     for (name, value) in markers {
         let marker = staging.join(name);
         std::fs::write(&marker, format!("{value}\n")).map_err(io_at("writing", &marker))?;
@@ -408,11 +407,22 @@ fn install_sidecar_with_markers(
 /// unpublished. Split from [`promote_staging`] so the window a crash can land
 /// in is a real boundary a test can stop inside.
 fn stage_sidecar_artifact(
-    parent: &Path,
-    arch: &str,
+    layout: &SdkSidecarLayout,
     source: &Path,
 ) -> Result<PathBuf, SdkSidecarBuildError> {
-    let staging = parent.join(crate::cache_install::staging_dir_name(arch));
+    let parent =
+        layout
+            .artifact_dir
+            .parent()
+            .ok_or_else(|| SdkSidecarBuildError::InstallInvalid {
+                reason: format!(
+                    "computed artifact dir {} has no parent",
+                    layout.artifact_dir.display()
+                ),
+            })?;
+    std::fs::create_dir_all(parent).map_err(io_at("creating", parent))?;
+    let slot = layout.libc.as_str();
+    let staging = parent.join(crate::cache_install::staging_dir_name(slot));
     // A previous interrupted install of our own pid would otherwise be merged
     // into rather than replaced.
     if staging.exists() {
@@ -420,7 +430,7 @@ fn stage_sidecar_artifact(
     }
     // A run killed before its rename orphans a staging dir under another pid
     // that nothing else would ever clean up.
-    crate::cache_install::reap_stale_staging(parent, arch);
+    crate::cache_install::reap_stale_staging(parent, slot);
     std::fs::create_dir(&staging).map_err(io_at("creating", &staging))?;
 
     for name in SIDECAR_ARCHIVE_MEMBERS {
@@ -482,6 +492,7 @@ pub fn record_source_fingerprint(
     fingerprint: &str,
 ) -> std::io::Result<()> {
     let layout = SdkSidecarLayout::under(cache_root, version, &arch.to_string(), libc);
+    let _owner = crate::cache_install::lock_artifact_dir(&layout.artifact_dir)?;
     std::fs::create_dir_all(&layout.artifact_dir)?;
     std::fs::write(
         layout.artifact_dir.join(LOCAL_SOURCE_FINGERPRINT_FILE),
@@ -1017,6 +1028,28 @@ pub(crate) mod tests {
             std::fs::read(layout_of(cache.path(), GuestLibc::Musl).image).unwrap(),
             old_image
         );
+
+        stage_sidecar_dir(
+            candidate.path(),
+            FIXTURE_VERSION,
+            &sidecar_ext4_bytes(GuestLibc::Glibc),
+        );
+        assert!(
+            install_source_built_sidecar(
+                candidate.path(),
+                cache.path(),
+                FIXTURE_VERSION,
+                GuestArch::host(),
+                GuestLibc::Musl,
+                "source-digest",
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read(layout_of(cache.path(), GuestLibc::Musl).image).unwrap(),
+            old_image,
+            "a wrong-libc candidate must also be rejected before promotion",
+        );
     }
 
     /// A directory holding the sidecar under other names — a pair cache
@@ -1370,8 +1403,7 @@ pub(crate) mod tests {
 
         let parent = layout.artifact_dir.parent().unwrap().to_path_buf();
         std::fs::create_dir_all(&parent).unwrap();
-        let staging = stage_sidecar_artifact(&parent, &layout.arch, source.path())
-            .expect("staging must succeed");
+        let staging = stage_sidecar_artifact(&layout, source.path()).expect("staging must succeed");
 
         assert!(
             !layout.artifact_dir.exists(),
@@ -1382,7 +1414,7 @@ pub(crate) mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(residue.len(), 1, "unexpected residue: {residue:?}");
-        assert!(residue[0].starts_with(&format!("{}.tmp.", layout.arch)));
+        assert!(residue[0].starts_with(&format!("{}.tmp.", layout.libc)));
         assert_eq!(staging.file_name().unwrap().to_string_lossy(), residue[0]);
 
         // Promotion is what makes it visible, and it is atomic from the
@@ -1391,6 +1423,40 @@ pub(crate) mod tests {
         SdkSidecarResolver::new(cache.path().to_path_buf(), FIXTURE_VERSION.to_string())
             .resolve(&layout.arch, GuestLibc::Glibc)
             .expect("the promoted entry resolves");
+    }
+
+    #[test]
+    fn overlapping_libc_stages_keep_both_candidates_intact() {
+        let cache = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let glibc = layout_of(cache.path(), GuestLibc::Glibc);
+        let musl = layout_of(cache.path(), GuestLibc::Musl);
+        let _glibc_owner = crate::cache_install::lock_artifact_dir(&glibc.artifact_dir).unwrap();
+        let _musl_owner = crate::cache_install::lock_artifact_dir(&musl.artifact_dir).unwrap();
+
+        // Force the overlap: the second slot stages before the first publishes.
+        stage_sidecar_dir(
+            source.path(),
+            FIXTURE_VERSION,
+            &sidecar_ext4_bytes(GuestLibc::Glibc),
+        );
+        let glibc_stage = stage_sidecar_artifact(&glibc, source.path()).unwrap();
+        stage_sidecar_dir(
+            source.path(),
+            FIXTURE_VERSION,
+            &sidecar_ext4_bytes(GuestLibc::Musl),
+        );
+        let musl_stage = stage_sidecar_artifact(&musl, source.path()).unwrap();
+        assert_ne!(
+            glibc_stage, musl_stage,
+            "different owners must not share staging"
+        );
+        promote_staging(&glibc_stage, &glibc.artifact_dir).unwrap();
+        promote_staging(&musl_stage, &musl.artifact_dir).unwrap();
+        let resolver = SdkSidecarResolver::new(cache.path().to_path_buf(), FIXTURE_VERSION.into());
+        for libc in [GuestLibc::Glibc, GuestLibc::Musl] {
+            resolver.resolve(&glibc.arch, libc).unwrap();
+        }
     }
 
     /// A second download over a populated cache replaces it wholesale rather

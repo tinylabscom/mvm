@@ -543,6 +543,7 @@ mod tests {
             epoch: ExecutionEpoch::new(3).unwrap(),
             report: None,
             retention: None,
+            service_blind: None,
         }
     }
 
@@ -585,6 +586,95 @@ mod tests {
             verify_plan(&forged, &[("test-signer", &vk)]),
             Err(PlanVerifyError::SignatureInvalid(_))
         ));
+    }
+
+    #[test]
+    fn selector_survives_real_plan_roundtrip_and_changes_signed_content_identity() {
+        use mvm_contract::protocol::mailbox::service_blind::LaunchProfile;
+        let (sk, vk) = fresh_key();
+        let mut legacy = sample_plan();
+        legacy.mailbox = Some(mailbox_grant());
+        let old = sign_plan(&legacy, &sk, "test-signer");
+        assert!(!String::from_utf8_lossy(&old.0.payload).contains("service_blind"));
+        let mut selected = legacy.clone();
+        selected.mailbox.as_mut().unwrap().service_blind =
+            Some(LaunchProfile::new([1; 32], [2; 32]).unwrap());
+        let signed = sign_plan(&selected, &sk, "test-signer");
+        let verified = verify_plan(&signed, &[("test-signer", &vk)]).unwrap();
+        assert_eq!(verified.mailbox, selected.mailbox);
+        for raw in [
+            serde_json::to_string(&signed).unwrap(),
+            String::from_utf8(signed.0.payload.clone()).unwrap(),
+        ] {
+            assert_eq!(plan_from_admitted_json(&raw).unwrap(), verified);
+        }
+        assert_ne!(
+            verified.plan_id,
+            verify_plan(&old, &[("test-signer", &vk)]).unwrap().plan_id
+        );
+        for selection in [
+            None,
+            Some(LaunchProfile::new([3; 32], [2; 32]).unwrap()),
+            Some(LaunchProfile::new([1; 32], [3; 32]).unwrap()),
+        ] {
+            let mut changed = selected.clone();
+            changed.mailbox.as_mut().unwrap().service_blind = selection;
+            let rebound = sign_plan(&changed, &sk, "test-signer");
+            assert_ne!(rebound.0.payload, signed.0.payload);
+            assert_ne!(
+                verify_plan(&rebound, &[("test-signer", &vk)])
+                    .unwrap()
+                    .plan_id,
+                verified.plan_id
+            );
+            let mut forged = signed.clone();
+            forged.0.payload = rebound.0.payload;
+            assert!(matches!(
+                verify_plan(&forged, &[("test-signer", &vk)]),
+                Err(PlanVerifyError::SignatureInvalid(_))
+            ));
+        }
+        let mut forged = old;
+        forged.0.payload = signed.0.payload;
+        assert!(matches!(
+            verify_plan(&forged, &[("test-signer", &vk)]),
+            Err(PlanVerifyError::SignatureInvalid(_))
+        ));
+    }
+
+    #[test]
+    fn selector_invalid_signed_payload_is_not_normalized_by_plan_decoding() {
+        use mvm_contract::protocol::mailbox::service_blind::LaunchProfile;
+        let (sk, vk) = fresh_key();
+        let mut plan = sample_plan();
+        let mut grant = mailbox_grant();
+        grant.service_blind = Some(LaunchProfile::new([1; 32], [2; 32]).unwrap());
+        plan.mailbox = Some(grant);
+        let signed = sign_plan(&plan, &sk, "test-signer");
+        let raw = String::from_utf8(signed.0.payload.clone()).unwrap();
+        for replacement in [
+            r#""version":3.0"#,
+            r#""version":"3""#,
+            r#""version":4"#,
+            r#""version":3,"unknown":true"#,
+            r#""version":3,"version":3"#,
+            r#""version":3,"ver\u0073ion":3"#,
+        ] {
+            let malformed = raw.replace(
+                r#""service_blind":{"version":3"#,
+                &format!(r#""service_blind":{{{replacement}"#),
+            );
+            assert_ne!(malformed, raw);
+            let mut signed = signed.clone();
+            signed.0.payload = malformed.as_bytes().to_vec();
+            signed.0.signature = sk.sign(&signed.0.payload).to_bytes().to_vec();
+            assert!(matches!(
+                verify_plan(&signed, &[("test-signer", &vk)]),
+                Err(PlanVerifyError::Parse(_))
+            ));
+            assert!(plan_from_admitted_json(&malformed).is_err());
+            assert!(plan_from_admitted_json(&serde_json::to_string(&signed).unwrap()).is_err());
+        }
     }
 
     #[test]

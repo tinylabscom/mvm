@@ -34,6 +34,7 @@ pub fn grant_for(
         epoch,
         report: None,
         retention: None,
+        service_blind: None,
     }
 }
 
@@ -53,6 +54,7 @@ pub fn at_workload_epoch(grant: MailboxGrant, workload: &str) -> Result<MailboxG
     let mut current = grant_for(grant.mailbox, &authority, epoch);
     current.report = grant.report;
     current.retention = grant.retention;
+    current.service_blind = grant.service_blind;
     Ok(current)
 }
 
