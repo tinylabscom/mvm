@@ -93,7 +93,6 @@ const ALLOWLIST: &[(&str, &[Below])] = &[
     ("commands/deps/inspect.rs", BUILD),
     ("commands/deps/install.rs", BUILD),
     ("commands/deps/live_capture.rs", BUILD),
-    ("commands/env/artifact_verify.rs", BUILD),
     ("commands/env/bootstrap.rs", BUILD),
     ("commands/env/builder_vm.rs", BUILD),
     ("commands/env/builder_vm/bootstrap.rs", BUILD),
@@ -104,7 +103,6 @@ const ALLOWLIST: &[(&str, &[Below])] = &[
     ("commands/env/builder_vm/stage0_artifact.rs", BUILD),
     ("commands/env/builder_vm/stage0_cache.rs", BUILD),
     ("commands/env/cleanup.rs", BUILD),
-    ("commands/env/verify_release.rs", BUILD),
     ("commands/env/verify_runtime.rs", BUILD),
     ("commands/image/boot/verify.rs", BUILD),
     ("commands/image/build_layer.rs", BUILD),
@@ -125,8 +123,6 @@ const ALLOWLIST: &[(&str, &[Below])] = &[
     ("host_binaries/mod.rs", BUILD),
     ("host_binaries/source.rs", BUILD),
     ("lib.rs", BUILD),
-    ("release_guest_runtime.rs", BUILD),
-    ("update.rs", BUILD),
 ];
 
 pub(crate) fn run(workspace: &Path) -> Result<()> {

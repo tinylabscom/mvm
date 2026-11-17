@@ -99,6 +99,7 @@ pub mod reconcile;
 pub mod registration;
 pub mod registry_application;
 pub mod registry_pack_local;
+pub mod release;
 pub mod replay;
 pub mod secret;
 pub mod session_store;
