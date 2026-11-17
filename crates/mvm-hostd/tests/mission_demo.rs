@@ -1286,7 +1286,7 @@ fn local_mailbox_service_returns_exact_signed_v2_receipt_after_restart() {
         .expect("versioned history identity");
     let custody = Custody(reference);
     let limits = JournalLimits {
-        max_records: 4,
+        max_records: 5,
         max_bytes: 64 * 1024,
     };
     let mut message_header = header(1, 3);
@@ -1453,8 +1453,8 @@ fn local_mailbox_service_returns_exact_signed_v2_receipt_after_restart() {
         .expect("anchor after service teardown");
     assert_eq!(
         anchor.tip().cursor,
-        2,
-        "exact retries append nothing; guest Send commits once"
+        4,
+        "two acceptance/completion pairs; exact retries append nothing"
     );
     drop(anchor);
 

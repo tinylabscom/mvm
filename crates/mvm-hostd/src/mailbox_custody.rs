@@ -716,7 +716,7 @@ mod tests {
             serde_jcs::to_vec(&retry).expect("retry bytes"),
             serde_jcs::to_vec(&accepted).expect("original bytes")
         );
-        assert_eq!(anchor.tip().cursor, 1, "a retry cannot append");
+        assert_eq!(anchor.tip().cursor, 2, "a retry cannot append");
     }
 
     #[test]
