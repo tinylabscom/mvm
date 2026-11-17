@@ -271,13 +271,12 @@ fn last_line(tail: &[u8], at_file_start: bool) -> TailScan<'_> {
 }
 
 impl FileAuditSigner {
-    /// Create the signer rooted at `audit_dir`. The directory is
-    /// created if missing (mode 0700-equivalent — `OpenOptions` later
-    /// applies platform defaults, callers wanting tighter perms should
-    /// pre-create the dir).
+    /// Create the signer rooted at a dedicated private `audit_dir`.
+    /// Missing directories are created privately; existing owned directories
+    /// from the MVM home through the audit root are repaired to private mode.
     pub fn open(signing_key: SigningKey, audit_dir: impl Into<PathBuf>) -> std::io::Result<Self> {
         let audit_dir = audit_dir.into();
-        std::fs::create_dir_all(&audit_dir)?;
+        mvm_core::config::create_private_dir_resolved(&audit_dir)?;
         Ok(Self {
             signing_key,
             audit_dir,
@@ -301,14 +300,15 @@ impl FileAuditSigner {
     /// Create a signer rooted at one exact JSONL file instead of a
     /// per-tenant directory. This is used for policy
     /// `file:///.../audit.jsonl` stream destinations where the
-    /// operator supplied a literal stream path.
+    /// operator supplied a literal stream path. Parent directories within the
+    /// resolved MVM home are private; external parents retain caller permissions.
     pub fn open_file(
         signing_key: SigningKey,
         audit_file: impl Into<PathBuf>,
     ) -> std::io::Result<Self> {
         let audit_file = audit_file.into();
         if let Some(parent) = audit_file.parent() {
-            std::fs::create_dir_all(parent)?;
+            mvm_core::config::create_output_parent(parent)?;
         }
         Ok(Self {
             signing_key,
@@ -1005,7 +1005,12 @@ impl AuditSigner for FileAuditSigner {
         // sign / append section, so a rotation is atomic against a concurrent
         // writer too — two processes cannot both seal the same segment.
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| AuditError::Io(e.to_string()))?;
+            let prepared = if self.fixed_file.is_some() {
+                mvm_core::config::create_output_parent(parent)
+            } else {
+                mvm_core::config::create_private_dir_resolved(parent)
+            };
+            prepared.map_err(|e| AuditError::Io(e.to_string()))?;
         }
         let _lock = Self::acquire_lock(&path)?;
 

@@ -53,7 +53,7 @@ pub fn load(chain_path: &Path) -> Option<ChainCheckpoint> {
 pub fn store(chain_path: &Path, checkpoint: &ChainCheckpoint) {
     let path = checkpoint_path(chain_path);
     let Some(parent) = path.parent() else { return };
-    if std::fs::create_dir_all(parent).is_err() {
+    if mvm_core::config::create_private_dir(parent).is_err() {
         return;
     }
     let Ok(encoded) = serde_json::to_string(checkpoint) else {

@@ -240,10 +240,9 @@ impl AuditEmitter {
     }
 
     /// Test seam — caller supplies the audit directory. Production
-    /// callers use `new`. The directory is created if missing;
-    /// `FileAuditSigner::open` enforces mode 0700-ish via the
-    /// OS-default umask, but for hard guarantees the caller should
-    /// pre-create it.
+    /// callers use `new`. The dedicated audit directory is private even at
+    /// an explicit external location; existing ancestors outside the MVM home
+    /// retain their permissions.
     pub fn with_dir(signing_key: SigningKey, audit_dir: &Path) -> Result<Self> {
         // The audit chain inherits the same 0700 posture as the rest of
         // ~/.mvm, since its contents bind to plan-signed entries.
@@ -254,7 +253,7 @@ impl AuditEmitter {
         // archive, was left exactly as found, which is the one case the mode
         // mattered. It also chmodded this leaf alone while `create_dir_all`
         // made its ancestors at the umask.
-        mvm_core::config::create_private_dir(audit_dir)
+        mvm_core::config::create_private_dir_resolved(audit_dir)
             .with_context(|| format!("creating audit dir at {} privately", audit_dir.display()))?;
         let signer = Arc::new(
             FileAuditSigner::open(signing_key.clone(), audit_dir)
@@ -290,7 +289,7 @@ impl AuditEmitter {
         audit_dir: &Path,
         signer: Arc<FileAuditSigner>,
     ) -> Result<Self> {
-        mvm_core::config::create_private_dir(audit_dir)
+        mvm_core::config::create_private_dir_resolved(audit_dir)
             .with_context(|| format!("creating audit dir at {} privately", audit_dir.display()))?;
         Ok(Self {
             signers: vec![signer],
