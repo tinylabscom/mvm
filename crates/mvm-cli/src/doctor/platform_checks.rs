@@ -84,7 +84,7 @@ pub(super) fn nested_kvm_check(plat: Platform) -> Check {
 }
 
 fn linux_builder_vm_requested_for_doctor() -> bool {
-    mvm_build::builder_backend_select::linux_builder_vm_requested()
+    mvm_client::diagnostics::linux_builder_vm_requested()
 }
 
 pub(super) fn kvm_check(plat: Platform, in_vm: bool) -> Check {
