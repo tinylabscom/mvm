@@ -1625,6 +1625,58 @@ mod tests {
         );
     }
 
+    /// Cargo reads one rustflags source and never merges them, so a global
+    /// override would hide the `-crt-static` a musl shared object sets for
+    /// itself and cargo would drop the cdylib.
+    #[test]
+    fn a_musl_cdylib_keeps_its_target_flags_under_the_zigbuild_env() {
+        for (arch, so) in [
+            (GuestArch::X86_64, "x86_64/lib/musl/libmvm_host_services.so"),
+            (
+                GuestArch::Aarch64,
+                "aarch64/lib/musl/libmvm_host_services.so",
+            ),
+        ] {
+            let build = crate::guest_bins::extras::extra_builds(arch)
+                .unwrap()
+                .into_iter()
+                .find(|b| b.member.path() == so)
+                .unwrap_or_else(|| panic!("no build produces {so}"));
+            let spec = GuestAgentBuildSpec::new(
+                PathBuf::from("/ws"),
+                arch,
+                std::env::temp_dir().join("mvm-rustflags-precedence-target"),
+            );
+            let mut cmd = std::process::Command::new("cargo");
+            cmd.env("RUSTFLAGS", "-Zthreads=8")
+                .env("CARGO_ENCODED_RUSTFLAGS", "-Zthreads=8");
+            apply_zigbuild_env(&mut cmd, &spec, None).expect("configure zigbuild env");
+            cmd.envs(build.env.iter().map(|(k, v)| (k, v)));
+
+            let value = |name: &str| {
+                cmd.get_envs()
+                    .find(|(k, _)| *k == std::ffi::OsStr::new(name))
+                    .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+            };
+            let target_var = format!(
+                "CARGO_TARGET_{}_RUSTFLAGS",
+                build.target.to_uppercase().replace('-', "_")
+            );
+            assert!(
+                value(&target_var).is_some_and(|f| f.contains("-C target-feature=-crt-static")),
+                "{so}: {target_var} must carry -crt-static"
+            );
+            for global in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"] {
+                assert_eq!(value(global), None, "{so}: {global} would shadow it");
+            }
+            assert_eq!(
+                value("CARGO_BUILD_RUSTFLAGS").as_deref(),
+                Some(ZIGBUILD_RUSTFLAGS),
+                "{so}: the lint allowance must stay, at the lowest precedence"
+            );
+        }
+    }
+
     #[test]
     fn apply_zigbuild_env_exports_explicit_cache_dir() {
         let spec = GuestAgentBuildSpec::new(
