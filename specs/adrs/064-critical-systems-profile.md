@@ -75,7 +75,7 @@ per VM cannot express them. A **topology** names the whole system:
 
 | Element | Content |
 | --- | --- |
-| Units | Workload ID, role (controller or worker), recipe hash (the image or bundle digest, never a plan ID), resources, and which of sleep, wake, pause and checkpoint it permits (none by default) |
+| Units | Workload ID, role (controller or worker), recipe hash (the image or bundle digest, never a plan ID), resources, and which of sleep, wake, pause and checkpoint it permits (none by default), and an optional liveness period |
 | Placement | A set of host core IDs with an exclusive flag, or floating |
 | Standby | Class (resident, warm, cold or none), its placement, recovery bound |
 | State cells | ID, size, the one writer unit, the reader units |
@@ -196,10 +196,51 @@ grants, a standby epoch may read its unit's cells, and every other epoch is
 refused. Fencing a failed epoch and promoting its standby are therefore one
 update to the gate's input, not a message to each service.
 
-Failure is detected by the host, never by the guest: process exit, a missed
-heartbeat deadline declared in the topology, or the wall-clock bound. The unit
-heartbeat is per unit, over its vsock channel, and separate from the host
-interface's per-node heartbeat.
+Two epoch types exist today, the mailbox contract's and the host interface's,
+and about thirty production sites compare epochs inline, most of them in
+mailbox code. They become one type, owned by the gate. That work lands with
+the state cells of section 6, which are the gate's first new caller.
+
+Failure is detected by the host, never by the guest, in two layers.
+
+The first is always on and costs nothing while a unit is healthy. The host
+process that owns a unit learns from the operating system when the unit's
+process exits or a vCPU faults, and the wall-clock bound fires from the same
+process. No message, timer or wakeup is involved, and nothing waits for a
+missed beat.
+
+The second detects a unit that is alive but stuck, and is opt-in. A unit may
+declare a liveness period in the topology. The host holds one deadline for
+that unit and resets it on any traffic the epoch gate accepts from the unit's
+current epoch: a cell write, a mailbox send, or an explicit liveness signal.
+A unit sends the explicit signal only when it has had nothing else to say for
+a period, so a busy unit pays nothing extra. When the deadline passes, the
+host applies the same failover sequence as for a crash. A unit that declares
+no period has the first layer only.
+
+The rules that keep this safe:
+
+- Only traffic on the unit's own vsock channel, under its current epoch,
+  resets its deadline. A standby epoch, another unit and the controller
+  cannot.
+- The deadline is held by the host process that owns the unit, not by the
+  controller, so a failed controller does not blind detection. Detecting a
+  failed host is the fleet's job, through the host lease.
+- The period is part of the sealed topology and cannot change after
+  admission.
+- The deadline runs on a monotonic clock. A host that can suspend refuses a
+  liveness period, because every deadline would expire at once on resume.
+- An early expiry on a loaded host fails in the safe direction: the old epoch
+  is fenced before the standby is promoted, so there are never two writers.
+- Expiry and promotion are audited. Individual liveness signals are not.
+- A recovery bound shorter than the liveness period plus the measured
+  promotion time is refused at admission.
+
+Liveness here means the unit can still send. Whether what it sends is correct
+is the application's concern. On the microcontroller tier the deadline maps to
+the hardware or task watchdog, and on a third-party partition hypervisor to
+its health monitor. This is separate from the host interface's per-node
+heartbeat.
 
 Failover is one host-applied sequence, each step a host-witnessed event:
 
@@ -423,6 +464,10 @@ establishment, then hybrid signatures on long-lived artifacts. This ADR adds:
   outside vsock, with its own device and its own audit story.
 - **The controller as a privileged VM that drives the hypervisor.** A guest
   with hypervisor authority is a second trusted computing base.
+- **A periodic heartbeat from every unit.** It costs a wakeup per unit per
+  period whether or not anything is wrong, which works against section 10,
+  and it detects a crash only after a missed beat. Exit events detect a crash
+  at once for nothing, and a deadline reset by ordinary traffic covers hangs.
 - **Election among core-bound units.** A unit that cannot move cannot be
   elected elsewhere, and a partitioned device must not produce two writers.
 - **A single "critical" switch.** Deployments differ in which requirements
@@ -432,14 +477,13 @@ establishment, then hybrid signatures on long-lived artifacts. This ADR adds:
 
 ## Open decisions
 
-- The heartbeat mechanism and its minimum deadline per backend.
+- The shortest liveness period each backend can hold without false failovers
+  under load. It needs the failover measurements; until then a period is
+  refused wherever no measured figure exists.
 - The partition driver's contract with a third-party hypervisor, which needs a
   concrete target before it can be written.
 - When, if ever, the CNSA 2.0 suite may run without the classical algorithm.
   It is hybrid-only until that is decided.
-- How the two existing epoch types, the mailbox contract's and the host
-  interface's, are unified behind the single gate of section 5. About thirty
-  production sites compare epochs inline today, most of them in mailbox code.
 
 ## Evidence before acceptance
 
