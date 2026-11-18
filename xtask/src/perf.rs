@@ -47,6 +47,8 @@
 //!   the release-build configuration; this module focuses on
 //!   runtime behaviour.
 
+mod resource;
+
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -99,9 +101,10 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
         Some("filesystem") => filesystem_subcommand(&args[1..]),
         Some("boot") => boot_subcommand(&args[1..]),
         Some("budgets") => budgets_subcommand(&args[1..]),
+        Some("resource-compare") => resource::compare_subcommand(&args[1..]),
         Some(other) => {
             bail!(
-                "Unknown perf subcommand {other:?}. Available: rootfs-size, footprint, filesystem, boot, budgets"
+                "Unknown perf subcommand {other:?}. Available: rootfs-size, footprint, filesystem, boot, budgets, resource-compare"
             )
         }
         None => {
@@ -124,6 +127,9 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
             );
             eprintln!(
                 "  budgets [--json]               Print every documented perf budget as a table"
+            );
+            eprintln!(
+                "  resource-compare <A> <B> --tolerance <PERCENT>  Fail on the first resource figure that differs"
             );
             std::process::exit(1);
         }
@@ -173,10 +179,20 @@ fn filesystem_baseline(root: &Path) -> Result<mvm_fs::rootfs::Ext4Materializatio
 fn budgets_subcommand(args: &[String]) -> Result<()> {
     let json = args.iter().any(|a| a == "--json");
     let budgets = all_budgets();
+    let observed =
+        resource::observed_rows(&resource::committed_reports(&resource::committed_dir())?);
     if json {
-        println!("{}", serde_json::to_string_pretty(&budgets)?);
+        if observed.is_empty() {
+            println!("{}", serde_json::to_string_pretty(&budgets)?);
+        } else {
+            let both = serde_json::json!({ "budgets": budgets, "observed": observed });
+            println!("{}", serde_json::to_string_pretty(&both)?);
+        }
     } else {
         render_budgets_human(&budgets);
+        if !observed.is_empty() {
+            resource::render_observed_human(&observed);
+        }
     }
     Ok(())
 }
