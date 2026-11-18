@@ -12,7 +12,9 @@
 pub mod cold_launch;
 pub mod cold_launch_runner;
 pub mod doc_table;
+pub mod fit;
 pub mod harness;
+pub mod host_probe;
 pub mod report;
 pub mod resource_report;
 pub mod stats;
