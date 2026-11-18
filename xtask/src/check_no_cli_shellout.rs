@@ -35,6 +35,13 @@
 //!   `MVM_MVM_BIN`, and the `resolve_cli_bin`/`resolveCliBin` helpers that
 //!   located the CLI to execute it.
 //!
+//! Beyond that, the client and the library may start only the processes
+//! named in `CLIENT_SPAWN_ALLOWED`, by exact path, each with a reason. Any
+//! other non-test file in either tree that builds a process fails, whatever
+//! it runs: a new spawn site in the embedder-facing surface is a decision,
+//! not a side effect. `#[cfg(test)]` items and test-only files are exempt.
+//! The scan sees spawn constructors in source; it does not see what runs.
+//!
 //! Locating the installed bundle directory to load the library from is not
 //! execution and is not flagged: the loaders look beside `mvmctl` on `PATH`
 //! for `libmvm_hostlib`, and never run the binary they find.
@@ -261,6 +268,17 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
     for surface in SURFACES {
         findings.extend(scan_surface(workspace, surface)?);
     }
+    let unsanctioned = client_spawn_findings(workspace)?;
+    if !unsanctioned.is_empty() {
+        bail!(
+            "check-no-cli-shellout: {} process spawn(s) in mvm-client/mvm-hostlib outside the \
+             sanctioned files:\n  {}\n\nThe embedder-facing crates may spawn only what \
+             CLIENT_SPAWN_ALLOWED names. Move the work behind an existing seam, or add the \
+             file there with the reason it must spawn.",
+            unsanctioned.len(),
+            unsanctioned.join("\n  ")
+        );
+    }
     let structural = crate::cli_self_reach::findings(workspace)?;
     if !structural.is_empty() {
         bail!(
@@ -295,6 +313,111 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
          method, add the method to crates/mvm-hostlib. There is no exemption.",
         findings.len()
     )
+}
+
+/// The only non-test files in the client and library trees that may build a
+/// process, each with why. Exact paths: a sibling file is not covered.
+const CLIENT_SPAWN_ALLOWED: &[(&str, &str)] = &[
+    (
+        "crates/mvm-client/src/image_cache/trust.rs",
+        "runs `cosign verify` with fixed argv for production OCI policy",
+    ),
+    (
+        "crates/mvm-client/src/secret/source.rs",
+        "runs the user's configured password-manager CLI, bounded and env-scrubbed",
+    ),
+];
+
+const CLIENT_SPAWN_ROOTS: &[&str] = &["crates/mvm-client/src", "crates/mvm-hostlib/src"];
+
+/// Every production spawn in the client and library trees outside
+/// `CLIENT_SPAWN_ALLOWED`, as `path:line: matched`.
+fn client_spawn_findings(workspace: &Path) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for root in CLIENT_SPAWN_ROOTS {
+        let mut files = Vec::new();
+        collect(&workspace.join(root), &["rs"], &mut files)?;
+        files.sort();
+        let texts = files
+            .iter()
+            .map(|p| {
+                Ok((
+                    p.clone(),
+                    std::fs::read_to_string(p).with_context(|| p.display().to_string())?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for (path, text) in &texts {
+            let rel = path
+                .strip_prefix(workspace)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if CLIENT_SPAWN_ALLOWED
+                .iter()
+                .any(|(allowed, _)| *allowed == rel)
+                || is_test_only_file(path, text, &texts)
+            {
+                continue;
+            }
+            let blanked = crate::rust_source::blank_comments_and_strings(text);
+            let production = crate::rust_source::blank_ranges(
+                text,
+                &crate::rust_source::cfg_test_item_ranges(&blanked),
+            );
+            for f in scan_text(path, &production, Lang::Rust, false) {
+                out.push(format!("{rel}:{}: `{}` {}", f.line, f.matched, f.why));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// A file that only compiles under test: named like one, under `tests/`,
+/// opened with `#![cfg(test)]`, or declared `#[cfg(test)] mod name;` by a
+/// sibling or parent module file.
+fn is_test_only_file(path: &Path, text: &str, all: &[(PathBuf, String)]) -> bool {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    if stem == "tests"
+        || stem == "test_support"
+        || stem.starts_with("test_")
+        || stem.ends_with("_tests")
+        || stem.ends_with("_test")
+        || path.components().any(|c| c.as_os_str() == "tests")
+        || text.lines().any(|l| l.trim() == "#![cfg(test)]")
+    {
+        return true;
+    }
+    static DECL: OnceLock<Regex> = OnceLock::new();
+    let decl = DECL.get_or_init(|| {
+        Regex::new(r"#\[cfg\((?:all\()?test\b[^\]]*\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;")
+            .expect("valid pattern")
+    });
+    let dir = path.parent();
+    all.iter().any(|(other, body)| {
+        let other_dir = other.parent();
+        let other_stem = other
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        let sibling = other_dir == dir;
+        let child_of = other_dir
+            .and_then(|d| d.file_name())
+            .is_some_and(|n| n == other_stem)
+            || dir
+                .and_then(|d| d.file_name())
+                .is_some_and(|n| n == other_stem)
+                && other_dir == dir.and_then(Path::parent);
+        (sibling || child_of)
+            && decl.captures_iter(body).any(|c| {
+                c[1] == *stem
+                    || (stem == "mod"
+                        && dir.and_then(|d| d.file_name()).is_some_and(|n| n == &c[1]))
+            })
+    })
 }
 
 /// Scan one surface, refusing a root that is missing or holds no source.
@@ -528,6 +651,77 @@ mod tests {
     }
 
     #[test]
+    fn a_client_file_that_spawns_git_outside_the_sanctioned_files_fails() {
+        for root in ["mvm-client", "mvm-hostlib"] {
+            let tmp = clean_workspace();
+            write(
+                tmp.path(),
+                &format!("crates/{root}/src/vcs.rs"),
+                "fn f() { let _ = mvm_core::env_hygiene::helper_command(\"git\"); }\n",
+            );
+            let message = failure(tmp.path());
+            assert!(message.contains("vcs.rs:1"), "{root}: {message}");
+        }
+    }
+
+    #[test]
+    fn the_two_sanctioned_client_files_may_spawn() {
+        let tmp = clean_workspace();
+        for (path, _) in CLIENT_SPAWN_ALLOWED {
+            write(
+                tmp.path(),
+                path,
+                "fn f() { let _ = helper_command(\"op\"); }\n",
+            );
+        }
+        run(tmp.path()).expect("sanctioned by exact path");
+        // A sibling of a sanctioned file is not sanctioned.
+        write(
+            tmp.path(),
+            "crates/mvm-client/src/secret/other.rs",
+            "fn f() { let _ = helper_command(\"op\"); }\n",
+        );
+        assert!(run(tmp.path()).is_err());
+    }
+
+    #[test]
+    fn a_test_only_client_spawn_passes_and_a_doc_mention_does_not_count() {
+        let tmp = clean_workspace();
+        write(
+            tmp.path(),
+            "crates/mvm-client/src/a.rs",
+            "/// Runs `Command::new(\"git\")`? No.\npub fn p() {}\n#[cfg(test)]\nmod tests {\n    fn t() { std::process::Command::new(\"sleep\"); }\n}\npub fn q() {}\n",
+        );
+        write(
+            tmp.path(),
+            "crates/mvm-client/src/b_tests.rs",
+            "fn t() { std::process::Command::new(\"mkfifo\"); }\n",
+        );
+        write(
+            tmp.path(),
+            "crates/mvm-client/src/c.rs",
+            "#[cfg(test)]\nmod live;\n",
+        );
+        write(
+            tmp.path(),
+            "crates/mvm-client/src/live.rs",
+            "fn t() { std::process::Command::new(\"sleep\"); }\n",
+        );
+        run(tmp.path()).expect("test-only spawns and comments are exempt");
+    }
+
+    #[test]
+    fn a_spawn_after_an_inline_test_module_is_still_caught() {
+        let tmp = clean_workspace();
+        write(
+            tmp.path(),
+            "crates/mvm-client/src/a.rs",
+            "#[cfg(test)]\nmod tests { fn t() {} }\nfn f() { std::process::Command::new(\"git\"); }\n",
+        );
+        assert!(failure(tmp.path()).contains("a.rs:3"));
+    }
+
+    #[test]
     fn a_wrapped_or_nested_client_constructor_naming_the_cli_is_flagged() {
         for body in [
             "fn f() {\n    Command::new(\n        bin_dir.join(\"mvmctl\"),\n    );\n}\n",
@@ -535,7 +729,7 @@ mod tests {
             "fn f() { std::process::Command :: new(\"mvmctl\"); }\n",
         ] {
             let tmp = clean_workspace();
-            write(tmp.path(), "crates/mvm-client/src/x.rs", body);
+            write(tmp.path(), "crates/mvm-client/src/secret/source.rs", body);
             assert!(run(tmp.path()).is_err(), "not flagged: {body}");
         }
     }
@@ -545,7 +739,7 @@ mod tests {
         let tmp = clean_workspace();
         write(
             tmp.path(),
-            "crates/mvm-client/src/x.rs",
+            "crates/mvm-client/src/secret/source.rs",
             "fn f() { Command::new(\"op\"); }\nfn g() { let _ = \"mvmctl\"; }\n",
         );
         run(tmp.path()).expect("statement-bounded");
@@ -676,11 +870,11 @@ mod tests {
     }
 
     #[test]
-    fn the_client_may_spawn_helpers_but_never_the_cli() {
+    fn a_sanctioned_client_file_may_spawn_helpers_but_never_the_cli() {
         let tmp = clean_workspace();
         write(
             tmp.path(),
-            "crates/mvm-client/src/secret.rs",
+            "crates/mvm-client/src/secret/source.rs",
             "fn f() { let _ = helper_command(\"op\"); Command::new(\"mkfifo\"); }\n",
         );
         run(tmp.path()).expect("a non-CLI helper is allowed in the client");
@@ -691,7 +885,7 @@ mod tests {
             "const E: &str = \"MVM_CLI_BIN\";\n",
         ] {
             let tmp = clean_workspace();
-            write(tmp.path(), "crates/mvm-client/src/x.rs", body);
+            write(tmp.path(), "crates/mvm-client/src/secret/source.rs", body);
             assert!(run(tmp.path()).is_err(), "not flagged: {body}");
         }
     }
