@@ -54,8 +54,18 @@ pub fn ensure() -> Result<PathBuf> {
 ///
 /// Activation state is incomplete, or the required coordinator is unavailable.
 pub fn ensure_if_activated() -> Result<()> {
+    recover_interrupted_publication()?;
     if mvm_hostd::policy_generation::has_active_generation()? {
         ensure()?;
+    }
+    Ok(())
+}
+
+/// Ask the coordinator to resolve an interrupted publication before the
+/// caller's own state check, which still refuses if recovery could not run.
+fn recover_interrupted_publication() -> Result<()> {
+    if mvm_hostd::policy_generation::has_unresolved_publication()? {
+        call(&ensure()?, &Request::Recover)?;
     }
     Ok(())
 }
@@ -295,6 +305,7 @@ fn validate_spec_against_policy(
 /// The plan is absent after activation, corrupt, or pins a stale generation.
 pub fn restore_plan(vm_name: &str) -> Result<Option<mvm_core::plan::ExecutionPlan>> {
     let _barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
+    recover_interrupted_publication()?;
     let active = mvm_hostd::policy_generation::has_active_generation()?;
     let path = mvm_hostd::audit::plan_persist::plan_path(vm_name)?;
     let plan = match mvm_hostd::audit::plan_persist::read_plan(vm_name) {

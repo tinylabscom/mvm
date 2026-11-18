@@ -61,6 +61,20 @@ pub fn has_active_generation() -> Result<bool> {
     GenerationStore::open(home)?.has_active_generation()
 }
 
+/// Whether a publication was interrupted and still awaits recovery.
+///
+/// # Errors
+///
+/// The generation state cannot be inspected.
+pub fn has_unresolved_publication() -> Result<bool> {
+    let home = PathBuf::from(mvm_core::config::mvm_home());
+    let root = mvm_core::config::policy_generations_dir_at(&home);
+    if !root.try_exists()? {
+        return Ok(false);
+    }
+    GenerationStore::open(home)?.has_obligation()
+}
+
 /// Initial local project policy candidate, not yet a committed authority.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

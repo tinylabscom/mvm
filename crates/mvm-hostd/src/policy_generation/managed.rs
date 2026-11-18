@@ -827,8 +827,11 @@ mod tests {
             let identity =
                 ManagedIdentity::for_home(rustix::process::geteuid().as_raw(), &home).unwrap();
             let status = CoordinatorStatus::of_this_process(&home, lifetime(&identity));
-            let (listener, store) = bind(&home).unwrap();
-            std::thread::spawn(move || serve_on(&listener, &Arc::clone(&store), &status));
+            let (listener, store, owner) = bind(&home).unwrap();
+            std::thread::spawn(move || {
+                let _owner = owner;
+                serve_on(&listener, &Arc::clone(&store), &status)
+            });
             Service {
                 _environment: environment,
                 _root: root,

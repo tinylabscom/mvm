@@ -269,14 +269,14 @@ real-socket tests supply the manager's answers, so they are component
 evidence, not a witness that a unit was provisioned and run on a host.
 
 Publishing a project's first generation is ordered so that a crash can never
-leave a reader authorizing from an unconfirmed index. After the activation
-marker, the coordinator durably writes a small bounded `pending.json` naming
-the project and its closure, then the record, then the index, and only then
-removes `pending.json`. While `pending.json` exists, every reader and every
+leave a reader authorizing from an unconfirmed index. The coordinator first
+durably writes a small bounded `pending.json` naming the project and its
+closure, then the activation marker, then the record, then the index, and only
+then removes `pending.json`. While `pending.json` exists, every reader and every
 activation refuses, even if the index already names the project. A failure
 after the obligation is written is reported as an unresolved outcome rather than
-a refusal, and the coordinator recovers at startup and before the next
-activation. Recovery only removes files: an index that names the project with
+a refusal, and the coordinator recovers at startup, before the next
+activation, and when a launch or restore finds the obligation and asks it to. Recovery only removes files: an index that names the project with
 the matching closure and a matching record is a committed publication and the
 obligation is dropped; an index that does not name the project means the
 publication never committed, so a matching record and the obligation are

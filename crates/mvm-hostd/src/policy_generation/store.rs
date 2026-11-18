@@ -104,10 +104,7 @@ impl GenerationStore {
     /// The index every reader and activation goes through. It refuses while a
     /// publication is unresolved, even if the index already names the project.
     fn index(&self) -> Result<ActiveIndex> {
-        ensure!(
-            !self.has_obligation()?,
-            "an unresolved policy publication requires recovery"
-        );
+        self.refuse_unresolved()?;
         let marker = self.root.join("activated.marker");
         let marker_present = match open_record(&marker) {
             Ok(file) => {
@@ -125,7 +122,12 @@ impl GenerationStore {
                     .with_context(|| format!("opening activation marker {}", marker.display()));
             }
         };
-        let Some(index) = self.read_index_file()? else {
+        let index_file = self.read_index_file()?;
+        // The obligation exists before the index rename and is removed only
+        // after the index is durable, so its absence after the read means the
+        // index read is durable.
+        self.refuse_unresolved()?;
+        let Some(index) = index_file else {
             ensure!(
                 !marker_present,
                 "activation marker exists without an active index; recovery is required"
@@ -137,6 +139,15 @@ impl GenerationStore {
             "active policy index has no activation marker"
         );
         Ok(index)
+    }
+
+    fn refuse_unresolved(&self) -> Result<()> {
+        if self.has_obligation()? {
+            return Err(anyhow::Error::new(PublicationUnresolved(
+                "an unresolved policy publication requires recovery".to_owned(),
+            )));
+        }
+        Ok(())
     }
 
     /// The index file alone, with none of the marker or obligation checks;
@@ -223,15 +234,27 @@ impl GenerationStore {
             !index.generations.contains_key(&key),
             "project already has a committed policy generation"
         );
-        ensure!(
-            !path.try_exists()?,
-            "project has an unindexed policy record that requires recovery"
-        );
+        match fs::symlink_metadata(&path) {
+            Ok(_) => anyhow::bail!("project has an unindexed policy record that requires recovery"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("checking {}", path.display()));
+            }
+        }
         let bytes = serde_json::to_vec(candidate).context("serializing initial project policy")?;
         ensure!(
             bytes.len() as u64 <= MAX_RECORD_BYTES,
             "committed project policy exceeds its size limit"
         );
+        self.write_obligation(&key, &candidate.closure_sha256)?;
+        self.write_marker()
+            .and_then(|()| self.write_record(&path, &bytes))
+            .and_then(|()| self.write_index(&key, &candidate.closure_sha256))
+            .and_then(|()| self.clear_obligation())
+            .map_err(|error| anyhow::Error::new(PublicationUnresolved(format!("{error:#}"))))
+    }
+
+    fn write_marker(&self) -> Result<()> {
         let marker = self.root.join("activated.marker");
         if !marker.try_exists()? {
             mvm_core::util::atomic_io::atomic_write_new(&marker, b"policy-generation-v1\n")
@@ -239,14 +262,10 @@ impl GenerationStore {
             mvm_core::util::atomic_io::sync_dir(&self.root)
                 .context("making activation intent durable")?;
         }
-        self.write_obligation(&key, &candidate.closure_sha256)?;
-        self.write_record(&path, &bytes)
-            .and_then(|()| self.write_index(&key, &candidate.closure_sha256))
-            .and_then(|()| self.clear_obligation())
-            .map_err(|error| anyhow::Error::new(PublicationUnresolved(format!("{error:#}"))))
+        Ok(())
     }
 
-    fn write_obligation(&self, key: &str, closure: &str) -> Result<()> {
+    pub(super) fn write_obligation(&self, key: &str, closure: &str) -> Result<()> {
         let path = self.obligation_path();
         let bytes = serde_json::to_vec(&Obligation {
             project: key.to_owned(),
@@ -286,6 +305,11 @@ impl GenerationStore {
     /// Resolve an interrupted publication from what is durably on disk. It
     /// only ever removes files; it never writes an index or a record.
     pub(crate) fn recover(&self) -> Result<()> {
+        self.recover_inner()
+            .map_err(|error| anyhow::Error::new(PublicationUnresolved(format!("{error:#}"))))
+    }
+
+    fn recover_inner(&self) -> Result<()> {
         let Some(pending) = self.read_obligation()? else {
             return Ok(());
         };
@@ -564,19 +588,20 @@ mod tests {
             self.store.root.join(format!("{}.json", self.key))
         }
 
-        /// The first publication steps up to, and including, the obligation
-        /// and the activation marker.
+        /// The first publication step: the obligation alone.
         fn through_obligation(&self) {
-            let marker = self.store.root.join("activated.marker");
-            mvm_core::util::atomic_io::atomic_write_new(&marker, b"policy-generation-v1\n")
-                .unwrap();
             self.store
                 .write_obligation(&self.key, &self.closure())
                 .unwrap();
         }
 
-        fn through_record(&self) {
+        fn through_marker(&self) {
             self.through_obligation();
+            self.store.write_marker().unwrap();
+        }
+
+        fn through_record(&self) {
+            self.through_marker();
             self.store
                 .write_record(&self.record_path(), &self.bytes())
                 .unwrap();
@@ -585,6 +610,30 @@ mod tests {
         fn through_index(&self) {
             self.through_record();
             self.store.write_index(&self.key, &self.closure()).unwrap();
+        }
+
+        /// A second project's key, closure and record bytes.
+        fn second_project(&self) -> (String, String, Vec<u8>) {
+            let other = self._root.path().join("project2");
+            fs::create_dir_all(&other).unwrap();
+            fs::write(
+                other.join("mvm.toml"),
+                "flake = \".\"\n[policy]\nprofile = \"one\"\n",
+            )
+            .unwrap();
+            let platform = self.candidate.platform;
+            let candidate =
+                super::super::prepare_with(&other, &[], platform, &self.source).unwrap();
+            let key = self
+                .store
+                .path(&other)
+                .unwrap()
+                .file_stem()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            let bytes = serde_json::to_vec(&candidate).unwrap();
+            (key, candidate.closure_sha256, bytes)
         }
 
         fn load(&self) -> Result<Option<ProjectPolicyCandidate>> {
@@ -613,6 +662,19 @@ mod tests {
         assert!(!f.store.root.join("activated.marker").exists());
         assert!(f.load().unwrap().is_none());
         assert!(!f.store.has_active_generation().unwrap());
+        f.store.publish_initial(&f.candidate, &f.source).unwrap();
+        assert!(f.load().unwrap().is_some());
+    }
+
+    #[test]
+    fn a_publication_stopped_after_its_marker_recovers_clean() {
+        let f = fixture();
+        f.through_marker();
+        assert!(refused_for_recovery(f.load().unwrap_err()));
+        f.store.recover().unwrap();
+        assert!(!f.store.has_obligation().unwrap());
+        assert!(!f.store.root.join("activated.marker").exists());
+        assert!(f.load().unwrap().is_none());
         f.store.publish_initial(&f.candidate, &f.source).unwrap();
         assert!(f.load().unwrap().is_some());
     }
@@ -684,13 +746,50 @@ mod tests {
     }
 
     #[test]
+    fn a_dangling_symlink_at_the_record_path_is_an_ordinary_refusal() {
+        let f = fixture();
+        std::os::unix::fs::symlink(f.store.root.join("nowhere"), f.record_path()).unwrap();
+        let error = f
+            .store
+            .publish_initial(&f.candidate, &f.source)
+            .unwrap_err();
+        assert!(error.downcast_ref::<PublicationUnresolved>().is_none());
+        assert!(!f.store.has_obligation().unwrap());
+    }
+
+    #[test]
+    fn an_unresolved_obligation_is_reported_as_unresolved_on_read_and_recover() {
+        let f = fixture();
+        f.through_obligation();
+        assert!(
+            f.load()
+                .unwrap_err()
+                .downcast_ref::<PublicationUnresolved>()
+                .is_some()
+        );
+        fs::remove_file(f.store.obligation_path()).unwrap();
+        mvm_core::util::atomic_io::atomic_write_new(&f.store.obligation_path(), b"not json")
+            .unwrap();
+        assert!(
+            f.store
+                .recover()
+                .unwrap_err()
+                .downcast_ref::<PublicationUnresolved>()
+                .is_some()
+        );
+    }
+
+    #[test]
     fn a_rolled_back_second_publication_leaves_the_first_generation_readable() {
         let f = fixture();
         f.store.publish_initial(&f.candidate, &f.source).unwrap();
+        let second = f.second_project();
+        f.store.write_obligation(&second.0, &second.1).unwrap();
         f.store
-            .write_obligation(&"1".repeat(64), &"2".repeat(64))
+            .write_record(&f.store.root.join(format!("{}.json", second.0)), &second.2)
             .unwrap();
         f.store.recover().unwrap();
+        assert!(!f.store.root.join(format!("{}.json", second.0)).exists());
         assert!(!f.store.has_obligation().unwrap());
         assert!(f.store.root.join("activated.marker").exists());
         assert!(f.load().unwrap().is_some());

@@ -43,6 +43,8 @@ pub enum Request {
     Activate { project: PathBuf },
     /// Return a validated committed generation, if one exists.
     Read { project: PathBuf },
+    /// Resolve an interrupted publication if no activation is running now.
+    Recover,
 }
 
 /// Response from the owner. An absent `Read` result is an ordinary,
@@ -196,6 +198,14 @@ mod unix {
                     status: status.clone(),
                 });
             }
+            Request::Recover => {
+                // Never wait: the caller may hold the shared barrier an
+                // activation is waiting on.
+                if let Ok(_one_activation) = ACTIVATIONS.try_lock() {
+                    store.recover()?;
+                }
+                return Ok(Response::Ready);
+            }
             Request::Activate { project } => {
                 ensure!(
                     cfg!(target_os = "linux"),
@@ -269,7 +279,7 @@ mod unix {
         let dir = mvm_core::config::policy_generations_dir_at(home);
         mvm_core::private_fs::create_owned_private_dir(home)?;
         mvm_core::private_fs::create_owned_private_dir(&dir)?;
-        let (listener, store) = {
+        let (listener, store, _owner) = {
             let _spawn_lock = mvm_core::util::atomic_io::FileLock::acquire(&dir.join("spawn"))?;
             bind(home)?
         };
@@ -281,7 +291,7 @@ mod unix {
     }
 
     pub(super) fn serve(home: &Path, lifetime: Lifetime) -> Result<()> {
-        let (listener, store) = bind(home)?;
+        let (listener, store, _owner) = bind(home)?;
         serve_on(
             &listener,
             &store,
@@ -291,7 +301,11 @@ mod unix {
 
     pub(in crate::policy_generation) fn bind(
         home: &Path,
-    ) -> Result<(UnixListener, Arc<GenerationStore>)> {
+    ) -> Result<(
+        UnixListener,
+        Arc<GenerationStore>,
+        mvm_core::util::atomic_io::FileLock,
+    )> {
         ensure!(
             home.is_absolute(),
             "policy coordinator home must be absolute"
@@ -306,6 +320,10 @@ mod unix {
             .parent()
             .context("policy coordinator socket has no parent")?;
         mvm_core::private_fs::create_owned_private_dir(dir)?;
+        // Held for the listener's lifetime: recovery is only safe for the one
+        // process that owns the store, and the socket probe below can race.
+        let owner = mvm_core::util::atomic_io::FileLock::try_acquire(&dir.join("owner"))?
+            .context("policy coordinator is already running")?;
         if let Ok(meta) = std::fs::symlink_metadata(&socket) {
             mvm_core::private_fs::require_current_owner(&meta)?;
             ensure!(
@@ -328,7 +346,7 @@ mod unix {
         if let Err(error) = store.recover() {
             tracing::warn!(%error, "policy coordinator could not recover an interrupted publication");
         }
-        Ok((listener, store))
+        Ok((listener, store, owner))
     }
 
     /// An in-flight slot, returned when dropped so a panicking handler
@@ -430,9 +448,12 @@ mod unix {
             let home = root.path().canonicalize().unwrap();
             environment.isolate_mvm_home(&home);
             let status = CoordinatorStatus::of_this_process(&home, Lifetime::Detached);
-            let (listener, store) = bind(&home).unwrap();
+            let (listener, store, owner) = bind(&home).unwrap();
             let served = status.clone();
-            std::thread::spawn(move || serve_on(&listener, &store, &served));
+            std::thread::spawn(move || {
+                let _owner = owner;
+                serve_on(&listener, &store, &served)
+            });
 
             let socket = socket_path(&home);
             let mut stream = UnixStream::connect(&socket).unwrap();
@@ -441,10 +462,81 @@ mod unix {
                 call(&socket, &Request::Ping).unwrap(),
                 Response::Ready
             ));
-            assert!(
-                bind(&home).is_err(),
-                "a second coordinator must not take over a live socket"
-            );
+            let error = bind(&home)
+                .err()
+                .expect("a second coordinator must not bind");
+            assert!(error.to_string().contains("already running"), "{error}");
+        }
+
+        #[test]
+        fn binding_recovers_a_publication_that_can_be_rolled_back() {
+            use mvm_core::util::test_env::TestEnv;
+
+            let mut environment = TestEnv::new();
+            let root = tempfile::tempdir().unwrap();
+            let home = root.path().canonicalize().unwrap();
+            environment.isolate_mvm_home(&home);
+            let store = GenerationStore::open(home.clone()).unwrap();
+            store
+                .write_obligation(&"a".repeat(64), &"b".repeat(64))
+                .unwrap();
+            assert!(store.has_obligation().unwrap());
+            let _bound = bind(&home).unwrap();
+            assert!(!store.has_obligation().unwrap());
+        }
+
+        /// The two tests below contend for the process-wide activation mutex.
+        static MUTEX_TESTS: Mutex<()> = Mutex::new(());
+
+        #[test]
+        fn recover_clears_a_roll_back_able_obligation_and_replies_ready() {
+            let _serial = MUTEX_TESTS.lock().unwrap();
+            let home = tempfile::tempdir().unwrap();
+            let store = GenerationStore::open(home.path().to_path_buf()).unwrap();
+            store
+                .write_obligation(&"a".repeat(64), &"b".repeat(64))
+                .unwrap();
+            let status = CoordinatorStatus::of_this_process(home.path(), Lifetime::Detached);
+            let reply = handle(Request::Recover, &store, &status).unwrap();
+            assert!(matches!(reply, Response::Ready));
+            assert!(!store.has_obligation().unwrap());
+        }
+
+        #[test]
+        fn a_read_with_an_obligation_never_waits_on_an_activation() {
+            let _serial = MUTEX_TESTS.lock().unwrap();
+            let home = tempfile::tempdir().unwrap();
+            let project = home.path().join("project");
+            std::fs::create_dir(&project).unwrap();
+            let store = GenerationStore::open(home.path().join("state")).unwrap();
+            store
+                .write_obligation(&"a".repeat(64), &"b".repeat(64))
+                .unwrap();
+            let status = CoordinatorStatus::of_this_process(home.path(), Lifetime::Detached);
+            let (held, release) = std::sync::mpsc::channel::<()>();
+            let (ready, acquired) = std::sync::mpsc::channel::<()>();
+            let holder = std::thread::spawn(move || {
+                let _activation = ACTIVATIONS.lock().unwrap();
+                ready.send(()).unwrap();
+                let _ = release.recv();
+            });
+            acquired.recv().unwrap();
+            let error = handle(Request::Read { project }, &store, &status).unwrap_err();
+            assert!(matches!(
+                error_response(&error),
+                Response::Unresolved { .. }
+            ));
+            held.send(()).unwrap();
+            holder.join().unwrap();
+        }
+
+        #[test]
+        fn a_recover_request_round_trips() {
+            let bytes = serde_json::to_vec(&Request::Recover).unwrap();
+            assert!(matches!(
+                serde_json::from_slice::<Request>(&bytes).unwrap(),
+                Request::Recover
+            ));
         }
 
         #[test]

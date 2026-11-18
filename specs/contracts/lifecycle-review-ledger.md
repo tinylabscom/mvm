@@ -254,15 +254,24 @@ limits, and any commit, migration or signing path.
 Covers `GenerationStore::publish_initial` and `GenerationStore::recover` in
 `mvm-hostd/src/policy_generation/store.rs`, for
 [#5255](https://github.com/tinylabscom/mvm/issues/5255). A durable
-`pending.json` is written before the record and index and removed after them;
-readers and activations refuse while it exists, and recovery removes files
-only: a rolled-back first publication also removes the activation marker.
-Still open: an activation marker with no index and no obligation is still
-refused with no automatic recovery. A failure after the obligation is written
-is exercised only by stopping between the store's own step functions, not
-through a real failing `fsync`, and the unresolved-error wrapping inside
-`publish_initial` has no test of its own. Migration exclusion and
-prepared-head signing custody are untouched.
+`pending.json` is written first, then the activation marker, the record and
+the index, and removed last; readers and activations refuse while it exists,
+and recovery removes files only. A rolled-back first publication also removes
+the activation marker. Launch and restore ask the coordinator to recover when
+they find an obligation, and the coordinator holds an exclusive owner lock so
+only one process recovers.
+Still open: an activation marker with no index and no obligation can no longer
+be produced by publication, only by outside damage, and is still refused with
+no automatic recovery. Recovery in the same boot after a failed directory sync
+relies on the later successful sync of the obligation's removal to cover the
+earlier rename, and a filesystem that reports a writeback error only once could
+make that sync succeed without the rename being durable. On a filesystem
+without no-replace rename the record is published by link then unlink, and a
+crash between them leaves a record that recovery refuses. A failure after the
+obligation is written is exercised only by stopping between the store's own
+step functions, not through a real failing `fsync`, and the unresolved-error
+wrapping inside `publish_initial` has no test driven by a real failure.
+Migration exclusion and prepared-head signing custody are untouched.
 
 ## Compile-time AES-GCM boundary
 
