@@ -3,9 +3,9 @@
 //! cells only one unit may write, the controller succession and the
 //! cryptographic suite.
 //!
-//! This module is the format and its structural rules only. Signing,
-//! verification, host capability and enforcement live elsewhere; nothing here
-//! knows what a host or backend can do.
+//! This module is the format, its structural rules and, in [`signing`], its
+//! signed envelope. Host capability, admission and enforcement live elsewhere;
+//! nothing here knows what a host or backend can do.
 //!
 //! ## Determinism
 //!
@@ -28,10 +28,20 @@ use serde::{Deserialize, Serialize};
 use crate::assurance::Sha256Digest;
 use crate::plan::types::{TenantId, WorkloadId};
 
+pub mod signing;
+pub use signing::{SignedTopology, TopologySignatureError, sign_topology, verify_topology};
+
+/// The topology wire-format version this build writes and the newest it
+/// verifies.
+pub const TOPOLOGY_SCHEMA_VERSION: u32 = 1;
+
 /// A signed description of a whole deployment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Topology {
+    /// Wire-format version, inside the signed body as a plan's is. See
+    /// [`TOPOLOGY_SCHEMA_VERSION`].
+    pub schema_version: u32,
     /// The one tenant every unit and cell belongs to.
     pub tenant: TenantId,
     /// Monotonic generation. A host refuses a generation lower than the last
