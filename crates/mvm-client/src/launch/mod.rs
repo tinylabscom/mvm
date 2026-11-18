@@ -15,6 +15,7 @@ pub mod bundle_runtime;
 pub mod canonical_linux;
 mod committed_policy;
 pub mod detached;
+pub mod egress_gate_probe;
 pub mod grants_report;
 pub mod machine_start;
 pub mod manifest_ref;

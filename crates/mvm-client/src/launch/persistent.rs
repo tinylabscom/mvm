@@ -201,26 +201,8 @@ fn start_persistent_with_prepared(
     // The steps of this one launch share a single check of the signed runtime
     // release; the next launch checks again.
     let _runtime_proofs = mvm_build::guest_runtime::evidence::LaunchProofScope::begin();
-    let PreparedPersistentBoot {
-        backend,
-        start_config,
-        admission,
-        prepared_volumes,
-        verified_runtime,
-    } = prepare_persistent_boot(params, prepared)?;
-    let name_label = start_config.name.clone();
-    let name = name_label.as_str();
-    let backend_label = backend.name().to_string();
-    let backend_name = backend_label.as_str();
-    finish_admitted_persistent(
-        backend,
-        start_config,
-        admission,
-        prepared_volumes,
-        verified_runtime,
-        name,
-        backend_name,
-    )
+    let prepared_boot = prepare_persistent_boot(params, prepared)?;
+    finish_admitted_persistent(prepared_boot)
 }
 
 struct PreparedPersistentBoot {
@@ -229,6 +211,9 @@ struct PreparedPersistentBoot {
     admission: crate::admission::AdmissionContext,
     prepared_volumes: crate::volume::LaunchPreparation,
     verified_runtime: Option<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
+    /// The resolved policy the start config carries and the endpoint builds
+    /// its gate from — the probe witnesses the gate this exact value admits.
+    network_policy: mvm_core::network_policy::NetworkPolicy,
 }
 
 fn prepare_persistent_boot(
@@ -482,6 +467,7 @@ fn prepare_persistent_boot(
         admission,
         prepared_volumes,
         verified_runtime,
+        network_policy,
     })
 }
 
@@ -512,14 +498,20 @@ fn complete_writable_images(
 }
 
 fn finish_admitted_persistent(
-    backend: mvm_runtime::backend::AnyBackend,
-    start_config: mvm_core::vm_backend::VmStartConfig,
-    admission: crate::admission::AdmissionContext,
-    mut prepared_volumes: crate::volume::LaunchPreparation,
-    verified_runtime: Option<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
-    name: &str,
-    backend_name: &str,
+    prepared_boot: PreparedPersistentBoot,
 ) -> Result<mvm_hostd::plan_admission::AdmittedPlan> {
+    let PreparedPersistentBoot {
+        backend,
+        start_config,
+        admission,
+        mut prepared_volumes,
+        verified_runtime,
+        network_policy,
+    } = prepared_boot;
+    let name_label = start_config.name.clone();
+    let name = name_label.as_str();
+    let backend_label = backend.name().to_string();
+    let backend_name = backend_label.as_str();
     #[cfg(unix)]
     let images = match (|| -> Result<_> {
         let mut images = prepared_volumes.take_writable_images();
@@ -541,6 +533,47 @@ fn finish_admitted_persistent(
         images,
         verified_runtime.as_ref(),
     )?;
+    // Admission proves the signed policy verified; the probe proves the gate
+    // the endpoint actually built from it took effect. It runs before the
+    // guest-readiness wait and fails closed: a gate that cannot be witnessed
+    // is rolled back exactly like a guest that never became ready.
+    if let Err(error) = super::egress_gate_probe::require_running_gate(
+        name,
+        &started,
+        admission.admitted.plan(),
+        &network_policy,
+    ) {
+        let error = anyhow::Error::new(error);
+        // The backend owns the abort. A failed abort means the VMM may still
+        // hold block-device file descriptors, so the owner leases and
+        // registry stay committed for recovery — the same unresolved-abort
+        // shape the guest-readiness failure uses.
+        let abort_is_unresolved = started.backend().abort_start(started.vm_id()).is_err();
+        if abort_is_unresolved {
+            prepared_volumes.commit();
+        } else {
+            crate::local::deregister_from_name_registry(name);
+        }
+        audit_detached_readiness_failure(
+            &admission,
+            name,
+            "egress-gate",
+            &error,
+            abort_is_unresolved,
+        );
+        if !abort_is_unresolved {
+            // The failure record and session seal live under the runtime
+            // state directory, so cleanup must follow audit finalization.
+            if let Err(cleanup_error) = crate::local::remove_stopped_runtime_state(name) {
+                tracing::warn!(
+                    error = %cleanup_error,
+                    machine = name,
+                    "removing runtime state after a failed egress-gate probe failed"
+                );
+            }
+        }
+        return Err(error);
+    }
     let mailbox_posture = admission.admitted.mailbox_posture();
     // The guest asserts a mailbox exactly when the plan grants one, so the
     // host side starts here or the launch is rolled back.
@@ -564,14 +597,21 @@ fn finish_admitted_persistent(
         super::detached::require_serving_guest(name, &started, std::time::Duration::from_secs(30))
     {
         let abort_is_unresolved = error.abort_is_unresolved();
+        let error = anyhow::Error::new(error);
         if abort_is_unresolved {
             // The VMM may still hold block-device file descriptors. Preserve
             // the owner leases and registry for recovery; releasing or
             // re-sealing here could admit a second attachment while it lives.
             prepared_volumes.commit();
-            audit_detached_readiness_failure(&admission, name, &error);
-        } else {
-            audit_detached_readiness_failure(&admission, name, &error);
+        }
+        audit_detached_readiness_failure(
+            &admission,
+            name,
+            "guest-readiness",
+            &error,
+            abort_is_unresolved,
+        );
+        if !abort_is_unresolved {
             // The failure record and session seal live under the runtime
             // state directory, so cleanup must follow audit finalization.
             if let Err(cleanup_error) = crate::local::remove_stopped_runtime_state(name) {
@@ -582,7 +622,7 @@ fn finish_admitted_persistent(
                 );
             }
         }
-        return Err(anyhow::Error::new(error));
+        return Err(error);
     }
     // After the start, because a cgroup quota is read back off a process that
     // does not exist until then. This is the call that puts the backend's
@@ -604,19 +644,26 @@ fn finish_admitted_persistent(
     Ok(admission.admitted)
 }
 
+/// Audit a detached launch whose post-start readiness stage failed and the
+/// partial start is being rolled back. `stage` names the failed stage
+/// ("guest-readiness", "egress-gate"); a resolved abort is a `plan.failed`
+/// under that stage, an unresolved abort a `plan.teardown_failed` that keeps
+/// the session unsealed for recovery.
 fn audit_detached_readiness_failure(
     admission: &crate::admission::AdmissionContext,
     name: &str,
-    error: &super::detached::DetachedReadinessError,
+    stage: &str,
+    error: &anyhow::Error,
+    abort_is_unresolved: bool,
 ) {
-    if error.abort_is_unresolved() {
+    if abort_is_unresolved {
         crate::launch::record_unsealed_end(
             Some((&admission.emitter, admission.admitted.plan())),
             crate::launch::UnsealedEnd::new(name, crate::launch::UnsealedReason::StopFailed)
                 .error(format!("{error:#}")),
         );
     } else {
-        emit_failed(admission, "guest-readiness", &anyhow::anyhow!("{error:#}"));
+        emit_failed(admission, stage, error);
     }
 }
 
@@ -635,13 +682,18 @@ mod persistent_oci_boot_tests {
         env.isolate_mvm_home(home.path());
 
         let (resolved, _resolved_keys, resolved_audit) = admitted_libkrun("resolved-abort", None);
-        super::audit_detached_readiness_failure(
-            &resolved,
-            "resolved-abort",
-            &crate::launch::detached::DetachedReadinessError::RolledBack {
+        let resolved_error = anyhow::Error::new(
+            crate::launch::detached::DetachedReadinessError::RolledBack {
                 name: "resolved-abort".into(),
                 timeout_secs: 1,
             },
+        );
+        super::audit_detached_readiness_failure(
+            &resolved,
+            "resolved-abort",
+            "guest-readiness",
+            &resolved_error,
+            false,
         );
         let resolved_chain = std::fs::read_to_string(resolved_audit.path().join("local.jsonl"))
             .expect("resolved chain");
@@ -661,14 +713,19 @@ mod persistent_oci_boot_tests {
 
         let (unresolved, _unresolved_keys, unresolved_audit) =
             admitted_libkrun("unresolved-abort", None);
-        super::audit_detached_readiness_failure(
-            &unresolved,
-            "unresolved-abort",
-            &crate::launch::detached::DetachedReadinessError::AbortUnresolved {
+        let unresolved_error = anyhow::Error::new(
+            crate::launch::detached::DetachedReadinessError::AbortUnresolved {
                 name: "unresolved-abort".into(),
                 timeout_secs: 1,
                 source: anyhow::anyhow!("VMM still alive"),
             },
+        );
+        super::audit_detached_readiness_failure(
+            &unresolved,
+            "unresolved-abort",
+            "guest-readiness",
+            &unresolved_error,
+            true,
         );
         let unresolved_chain = std::fs::read_to_string(unresolved_audit.path().join("local.jsonl"))
             .expect("unresolved chain");
@@ -690,6 +747,78 @@ mod persistent_oci_boot_tests {
         );
         assert!(
             !unresolved_chain.contains("plan.launched"),
+            "{unresolved_chain}"
+        );
+    }
+
+    /// The gate probe's failure audits under its own stage label, sibling to
+    /// "guest-readiness", with the same resolved/unresolved abort semantics.
+    #[test]
+    fn egress_gate_failure_audits_under_its_own_stage() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+
+        let probe_error = || {
+            anyhow::Error::new(
+                super::super::egress_gate_probe::EgressGateProbeError::VerdictMismatch {
+                    host: "192.0.2.1".into(),
+                    port: 9,
+                    expected: mvm_core::substitution_wire::GateProbeExpect::Deny,
+                    actual: mvm_core::substitution_wire::GateProbeVerdict::Admit,
+                    reason: None,
+                },
+            )
+        };
+
+        let (resolved, _resolved_keys, resolved_audit) =
+            admitted_libkrun("egress-gate-resolved", None);
+        super::audit_detached_readiness_failure(
+            &resolved,
+            "egress-gate-resolved",
+            "egress-gate",
+            &probe_error(),
+            false,
+        );
+        let resolved_chain = std::fs::read_to_string(resolved_audit.path().join("local.jsonl"))
+            .expect("resolved chain");
+        assert!(resolved_chain.contains("plan.failed"), "{resolved_chain}");
+        assert!(resolved_chain.contains("egress-gate"), "{resolved_chain}");
+        assert!(
+            !resolved_chain.contains("guest-readiness"),
+            "the probe failure is not audited as a guest-readiness failure: {resolved_chain}"
+        );
+        assert!(
+            resolved_chain.contains("session.sealed"),
+            "{resolved_chain}"
+        );
+        assert!(
+            !resolved_chain.contains("plan.launched"),
+            "{resolved_chain}"
+        );
+
+        let (unresolved, _unresolved_keys, unresolved_audit) =
+            admitted_libkrun("egress-gate-unresolved", None);
+        super::audit_detached_readiness_failure(
+            &unresolved,
+            "egress-gate-unresolved",
+            "egress-gate",
+            &probe_error(),
+            true,
+        );
+        let unresolved_chain = std::fs::read_to_string(unresolved_audit.path().join("local.jsonl"))
+            .expect("unresolved chain");
+        assert!(
+            unresolved_chain.contains("plan.teardown_failed"),
+            "{unresolved_chain}"
+        );
+        assert!(
+            !unresolved_chain.contains("plan.failed"),
+            "{unresolved_chain}"
+        );
+        assert!(
+            !unresolved_chain.contains("session.sealed"),
             "{unresolved_chain}"
         );
     }

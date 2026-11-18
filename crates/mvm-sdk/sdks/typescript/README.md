@@ -119,6 +119,7 @@ mvm.app({
 | `mvm.resources({ cpu, memory_mb, rootfs_size_mb })` | per-VM budget |
 | `mvm.network({ mode, ports })` | egress policy (default `none`) |
 | `mvm.secret("name")`, `mvm.literal("v")` | env values — secrets resolve on the host, never baked into the image |
+| `mvm.secrets.get("name", "local")` | host-local metadata or `null` if absent; never reads the value |
 | `mvm.entrypoint({...})`, `mvm.entrypoint_function({...})` | explicit / multi-function entrypoints |
 
 The IR types (`Workload`, `App`, `Resources`, …) are re-exported, so

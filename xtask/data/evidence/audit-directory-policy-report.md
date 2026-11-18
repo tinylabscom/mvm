@@ -52,6 +52,17 @@ ignored**, and `check-all` passed **89 gates**. The additional
 also passed. This batch used `CARGO_BUILD_JOBS=2`, the same isolated state,
 `TMPDIR=/tmp`, `RUST_TEST_THREADS=1` and offline code-generation tooling.
 
+Main advanced again to `86d0c280b9` before CI could start. The second
+integration preserved both new ledger entries and placed this prerequisite's
+entry below the incoming entry to avoid the shared top insertion point.
+All the same gates passed again. The first serialized workspace attempt hit
+the unchanged shell-stand-in test's five-second marker deadline
+(`a_systemd_that_rewrites_dollars_still_yields_a_numeric_pid`).
+That test passed alone, then the complete serialized workspace run passed:
+**21,777 tests, zero failures, 65 ignored**, with `CARGO_BUILD_JOBS=1`.
+The intermittent backend-test observations are tracked in #5698; no assertion
+was weakened, test skipped, or root cause claimed from a passing retry.
+
 ## Recovery provenance
 
 Recovered for #5671 from the archived successful edit inputs in

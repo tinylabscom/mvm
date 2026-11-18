@@ -267,8 +267,7 @@ impl ColdHvfChannel {
             Err(failure) => {
                 // Keep the real primary error and any actual rollback proof
                 // for kernel cleanup. Neither is replaced by a text summary.
-                custody.failed_boot = Some(failure);
-                anyhow::bail!("cold native boot failed; original launch custody retained");
+                return Err(retain_boot_failure(&mut custody.failed_boot, failure));
             }
         }
         let native = custody.native.as_mut().context("native owner missing")?;
@@ -674,6 +673,15 @@ fn release_terminal_custody<T>(custody: &mut Option<T>) {
     drop(custody.take());
 }
 
+fn retain_boot_failure(
+    retained: &mut Option<ColdHvfBootFailure>,
+    failure: ColdHvfBootFailure,
+) -> anyhow::Error {
+    let detail = mvm_vmm::host::hvf_supervisor::failure_record::summary(failure.error());
+    *retained = Some(failure);
+    anyhow::anyhow!("cold native boot failed; original launch custody retained: {detail}")
+}
+
 pub(super) fn require_cold_start_config(config: &VmStartConfig) -> Result<()> {
     anyhow::ensure!(
         config.warm_pool_size == 0,
@@ -692,6 +700,58 @@ mod tests {
     use super::*;
     use std::io::Read;
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn reporting_boot_failure_keeps_original_error_and_supporting_custody() {
+        use mvm_vmm::driver::spec::{KernelImage, VmmSpec};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let spec = VmmSpec {
+            name: "../invalid".into(),
+            kernel: KernelImage::Bundled,
+            initramfs: None,
+            cmdline: String::new(),
+            vcpus: 1,
+            cpu_grant: None,
+            memory_mib: 64,
+            mem_initial_mib: None,
+            blocks: vec![],
+            vsock: vec![],
+            console: mvm_vmm::driver::spec::ConsoleCapture {
+                log_path: "/unused".into(),
+            },
+            shares: vec![],
+            trusted_builder: false,
+            builder_egress_endpoint: None,
+            plan_binding: None,
+        };
+        // Invalid naming refuses before any state directory or process creation.
+        let failure = HvfDriver::new()
+            .boot_cold_owned_verified(&spec, None, None)
+            .err()
+            .expect("invalid name must fail before launch");
+        struct Guard(std::sync::Arc<AtomicUsize>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let drops = std::sync::Arc::new(AtomicUsize::new(0));
+        let expected = format!("{:#}", failure.error());
+        let failure = failure.retain_support(Guard(std::sync::Arc::clone(&drops)));
+        let mut retained = None;
+        let reported = retain_boot_failure(&mut retained, failure);
+        assert!(
+            reported
+                .to_string()
+                .contains("original launch custody retained")
+        );
+        assert!(reported.to_string().contains(&expected));
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        let original = retained.take().unwrap();
+        assert_eq!(format!("{:#}", original.error()), expected);
+        assert!(original.into_released_error().is_ok());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn readonly_entrypoint_requires_original_terminal_lane_and_storage_barrier() {

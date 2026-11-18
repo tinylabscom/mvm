@@ -89,6 +89,13 @@ install -m 0755 \
   ~/.local/bin/
 ```
 
+The default `mvm-hostd` build includes `manifest-verify`: the HVF supervisor
+independently verifies signed application descriptors rather than trusting the
+CLI's earlier verification. The HVF binary requires this feature. If building
+with `--no-default-features`, explicitly enable `--features manifest-verify`;
+otherwise Cargo refuses to build that binary. Do not substitute a helper built
+without verification support into an existing release installation.
+
 ### From source
 
 `mvmctl` is not published to crates.io; only the public `mvm-contract` library

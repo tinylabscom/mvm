@@ -463,6 +463,25 @@ mod tests {
     }
 
     #[test]
+    fn startup_recording_precedes_fallible_caller_and_binding_steps() {
+        // Source-order tripwire: these startup operations cannot be exercised
+        // in a unit test without native signing and caller authority.
+        let source = include_str!("mvm-hvf-supervisor.rs");
+        let run = source
+            .rsplit_once("fn run() -> anyhow::Result<()> {")
+            .unwrap()
+            .1;
+        let preflight = run.find("::preflight_startup_files(&cfg)").unwrap();
+        let validation = run.find("failure_record::validate_directory(").unwrap();
+        let recorder = run.find("FAILURE_RECORD_DIR.set(").unwrap();
+        let caller = run.find("::prepare_startup(&cfg)").unwrap();
+        let binding = run.find(".bind(startup.launch, &cfg)").unwrap();
+        assert!(preflight < validation && validation < recorder);
+        assert!(recorder < caller && caller < binding);
+        assert_eq!(run.matches("FAILURE_RECORD_DIR.set(").count(), 1);
+    }
+
+    #[test]
     fn replay_hints_and_partial_checked_configs_fail_closed() {
         use std::os::fd::AsRawFd;
         use std::os::unix::ffi::OsStringExt;
@@ -653,6 +672,26 @@ fn run() -> anyhow::Result<()> {
     // The entire startup namespace is validated before diagnostics, replay,
     // signing re-exec, or any descriptor ownership conversion.
     mvm_hostd::supervisor::admission::caller_registration::preflight_startup_files(&cfg)?;
+    let state_dir = cfg
+        .pid_file
+        .parent()
+        .context("supervisor state directory missing")?;
+    mvm_core::naming::validate_vm_name(&cfg.vm_name)?;
+    let expected_state_dir = mvm_core::config::vm_state_dir(&cfg.vm_name);
+    anyhow::ensure!(
+        state_dir == expected_state_dir,
+        "supervisor instance does not match its managed state directory"
+    );
+    // Early caller/input failures need diagnostics too, but never in an
+    // unvalidated namespace. Optional diagnostics cannot refuse a valid boot.
+    if mvm_vmm::host::hvf_supervisor::failure_record::validate_directory(
+        state_dir,
+        &expected_state_dir,
+    )
+    .is_ok()
+    {
+        let _ = FAILURE_RECORD_DIR.set(state_dir.to_path_buf());
+    }
     let mut diagnostics;
     let mut files = match mode {
         StartupMode::Checked => {
@@ -709,7 +748,8 @@ fn run() -> anyhow::Result<()> {
     diagnostics.stage(StartupStage::ConfigParse);
     mvm_core::launch_trace::lap("adopt_and_sign");
     let registered_startup =
-        mvm_hostd::supervisor::admission::caller_registration::prepare_startup(&cfg)?;
+        mvm_hostd::supervisor::admission::caller_registration::prepare_startup(&cfg)
+            .context("prepare caller startup")?;
     // Declared before the disk devices so reverse drop order flushes and destroys
     // every disk before either lock description can be released.
     let mut writable_files = files.take_writable();
@@ -719,7 +759,10 @@ fn run() -> anyhow::Result<()> {
         StartupMode::Checked => {
             let startup =
                 registered_startup.context("checked boot requires actual consumed caller")?;
-            let (launch, kernel, images) = files.bind(startup.launch, &cfg)?.into_startup();
+            let (launch, kernel, images) = files
+                .bind(startup.launch, &cfg)
+                .context("bind checked boot inputs")?
+                .into_startup();
             (
                 Some(kernel),
                 Some(images),
@@ -738,23 +781,13 @@ fn run() -> anyhow::Result<()> {
         "canonical kernel descriptor cannot enter a restore/warm boot"
     );
     use mvm_vmm::host::hvf_supervisor::ProtectedSupervisorStatus as CaptureStatus;
-    let state_dir = cfg
-        .pid_file
-        .parent()
-        .context("supervisor state directory missing")?;
-    mvm_core::naming::validate_vm_name(&cfg.vm_name)?;
     mvm_core::launch_trace::lap("caller_registration");
-    anyhow::ensure!(
-        state_dir == mvm_core::config::vm_state_dir(&cfg.vm_name),
-        "supervisor instance does not match its managed state directory"
-    );
     // Only a planless resident standby may be reassigned. An admitted
     // workload already has bounds tied to its original owner.
     if cfg.handoff_socket.is_some() && (cfg.plan.is_some() || !cfg.vsock) {
         anyhow::bail!("protected handoff requires a planless vsock standby");
     }
 
-    let _ = FAILURE_RECORD_DIR.set(state_dir.to_path_buf());
     diagnostics.stage(StartupStage::StartupInputs);
     // Startup already owns the exact files; never readopt their locator numbers.
     let restore = restore_image_from(&cfg, restore_files)?;
