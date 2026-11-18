@@ -589,9 +589,12 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
                 .into_string()
                 .map_err(|_| anyhow::anyhow!("non-UTF8 VM state entry in {}", root.display()))?;
             let id = VmId(name.clone());
-            let status = self
-                .status(&id)
-                .with_context(|| format!("probing VM status for {name}"))?;
+            // A machine whose state cannot be probed is reported, never
+            // presumed stopped and never allowed to hide the others. Callers
+            // that need proof of quiescence refuse on a failed row.
+            let status = self.status(&id).unwrap_or_else(|error| VmStatus::Failed {
+                reason: format!("state unreadable: {error:#}"),
+            });
             vms.push(VmInfo {
                 id,
                 name,
