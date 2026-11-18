@@ -74,9 +74,10 @@ impl<T> Default for Figure<T> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WakeupQuantity {
-    /// Context switches read from procfs.
+    /// Voluntary context switches, summed over a process's tasks, read from
+    /// procfs.
     LinuxProcfs,
-    /// Interrupt wakeups read through libproc.
+    /// `ri_pkg_idle_wkups + ri_interrupt_wkups` from libproc rusage.
     MacosLibproc,
 }
 
@@ -113,7 +114,7 @@ impl Wakeups {
 #[serde(deny_unknown_fields)]
 pub struct FixedHostCost {
     pub memory_bytes: Figure<u64>,
-    pub idle_cpu_percent: Figure<f64>,
+    pub idle_cpu_millicores: Figure<f64>,
     pub wakeups: Wakeups,
     pub disk_bytes: Figure<u64>,
 }
@@ -123,7 +124,7 @@ impl FixedHostCost {
     pub fn unmeasured(wakeups: WakeupQuantity) -> Self {
         Self {
             memory_bytes: Figure::default(),
-            idle_cpu_percent: Figure::default(),
+            idle_cpu_millicores: Figure::default(),
             wakeups: Wakeups::unmeasured(wakeups),
             disk_bytes: Figure::default(),
         }
@@ -131,15 +132,29 @@ impl FixedHostCost {
 }
 
 /// Marginal cost of one unit in one state.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UnitCost {
     pub memory_bytes: Figure<u64>,
-    pub cpu_percent: Figure<f64>,
+    pub cpu_millicores: Figure<f64>,
+    pub wakeups: Wakeups,
+    pub disk_bytes: Figure<u64>,
+}
+
+impl UnitCost {
+    #[must_use]
+    pub fn unmeasured(wakeups: WakeupQuantity) -> Self {
+        Self {
+            memory_bytes: Figure::default(),
+            cpu_millicores: Figure::default(),
+            wakeups: Wakeups::unmeasured(wakeups),
+            disk_bytes: Figure::default(),
+        }
+    }
 }
 
 /// Per-unit cost by residency.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResidencyCosts {
     pub running: UnitCost,
@@ -147,12 +162,33 @@ pub struct ResidencyCosts {
     pub parked: UnitCost,
 }
 
+impl ResidencyCosts {
+    #[must_use]
+    pub fn unmeasured(wakeups: WakeupQuantity) -> Self {
+        Self {
+            running: UnitCost::unmeasured(wakeups),
+            idle: UnitCost::unmeasured(wakeups),
+            parked: UnitCost::unmeasured(wakeups),
+        }
+    }
+}
+
 /// Per-unit cost by standby class.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StandbyCosts {
     pub resident: UnitCost,
     pub warm: UnitCost,
+}
+
+impl StandbyCosts {
+    #[must_use]
+    pub fn unmeasured(wakeups: WakeupQuantity) -> Self {
+        Self {
+            resident: UnitCost::unmeasured(wakeups),
+            warm: UnitCost::unmeasured(wakeups),
+        }
+    }
 }
 
 /// Latency summaries in milliseconds, reusing the launch benchmark's
@@ -205,8 +241,8 @@ impl Section {
             backend: backend.into(),
             architecture: architecture.into(),
             fixed_host_cost: FixedHostCost::unmeasured(wakeups),
-            by_residency: ResidencyCosts::default(),
-            by_standby: StandbyCosts::default(),
+            by_residency: ResidencyCosts::unmeasured(wakeups),
+            by_standby: StandbyCosts::unmeasured(wakeups),
             latencies: Latencies::default(),
         }
     }
@@ -259,9 +295,11 @@ fn ms_cell(v: Option<f64>) -> String {
 
 fn unit_row(name: &str, cost: &UnitCost) -> String {
     format!(
-        "| {name} | {} | {} |\n",
+        "| {name} | {} | {} | {} | {} |\n",
         bytes_cell(&cost.memory_bytes),
-        float_cell(&cost.cpu_percent, "%")
+        float_cell(&cost.cpu_millicores, " m"),
+        float_cell(&cost.wakeups.per_second, ""),
+        bytes_cell(&cost.disk_bytes)
     )
 }
 
@@ -289,14 +327,16 @@ fn render_section(out: &mut String, s: &Section) {
     out.push_str(&format!(
         "| {} | {} | {} | {} | {} |\n\n",
         bytes_cell(&fixed.memory_bytes),
-        float_cell(&fixed.idle_cpu_percent, "%"),
+        float_cell(&fixed.idle_cpu_millicores, " m"),
         float_cell(&fixed.wakeups.per_second, ""),
         fixed.wakeups.quantity.label(),
         bytes_cell(&fixed.disk_bytes),
     ));
 
     out.push_str("Per-unit cost:\n\n");
-    out.push_str("| State | Memory | CPU |\n| --- | --- | --- |\n");
+    out.push_str(
+        "| State | Memory | CPU | Wakeups per second | Disk |\n| --- | --- | --- | --- | --- |\n",
+    );
     out.push_str(&unit_row("running", &s.by_residency.running));
     out.push_str(&unit_row("idle", &s.by_residency.idle));
     out.push_str(&unit_row("parked", &s.by_residency.parked));
@@ -365,6 +405,10 @@ mod tests {
         let mut v = serde_json::to_value(report_with(empty_section())).unwrap();
         v["sections"][0]["fixed_host_cost"]["extra"] = serde_json::json!(1);
         assert!(serde_json::from_value::<ResourceReport>(v).is_err());
+
+        let mut v = serde_json::to_value(report_with(empty_section())).unwrap();
+        v["sections"][0]["by_residency"]["running"]["extra"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<ResourceReport>(v).is_err());
     }
 
     #[test]
@@ -395,9 +439,13 @@ mod tests {
     fn a_measured_figure_renders_its_value() {
         let mut section = empty_section();
         section.fixed_host_cost.memory_bytes = Figure::measured(123_456);
+        section.by_residency.running.cpu_millicores = Figure::measured(12.5);
+        section.by_standby.warm.disk_bytes = Figure::measured(777);
         section.latencies.warm_launch_ms = Figure::measured(SpanStats::from_samples(&[50.0, 60.0]));
         let md = render_markdown(&report_with(section));
         assert!(md.contains("123456 B"));
+        assert!(md.contains("12.50 m"));
+        assert!(md.contains("777 B"));
         assert!(md.contains("| warm launch | 2 |"));
     }
 
