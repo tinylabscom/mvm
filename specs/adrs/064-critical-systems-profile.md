@@ -75,7 +75,7 @@ per VM cannot express them. A **topology** names the whole system:
 
 | Element | Content |
 | --- | --- |
-| Units | Workload ID, role (controller or worker), recipe hash, resources |
+| Units | Workload ID, role (controller or worker), recipe hash (the image or bundle digest, never a plan ID), resources, and which of sleep, wake, pause and checkpoint it permits (none by default) |
 | Placement | A set of host core IDs with an exclusive flag, or floating |
 | Standby | Class (resident, warm, cold or none), its placement, recovery bound |
 | State cells | ID, size, the one writer unit, the reader units |
@@ -100,8 +100,8 @@ change. Under this profile the host refuses, and audits the refusal of:
 - balloon target changes and any other change to configured memory;
 - volume mount or unmount after boot, and any refresh of an attached volume;
 - idle-timeout updates;
-- sleep, wake, pause and checkpoint, unless the topology declares them for
-  that unit;
+- sleep, wake, pause and checkpoint, unless that unit's entry in the topology
+  declares them;
 - any grant or verb-grant change;
 - policy rollover onto a running unit, should live rollover be built. Today a
   policy generation activates only on an idle host.
@@ -118,9 +118,12 @@ A critical unit is not parked for being idle. ADR-062's residency rules apply
 to it only if the topology declares a residency policy for that unit.
 
 A change to anything in the topology is a new topology generation: a new
-signature, a new admission, and new epochs for the units it touches. Promotion
-of a standby is not a change. The standby, its plan and its authority were
-admitted with the topology; promotion selects among admitted alternatives.
+signature, a new admission, and new epochs for the units it touches. The
+topology carries its generation number and a validity window; a host refuses a
+topology outside its window and a generation lower than the last one it
+admitted. Promotion of a standby is not a change. The standby, its plan and its
+authority were admitted with the topology; promotion selects among admitted
+alternatives.
 
 A warm standby is created before it has an identity: today its verb grant,
 seccomp tier and volumes are delivered when it is claimed. Under this profile
@@ -212,10 +215,10 @@ The crashed guest's memory is never resumed (ADR-062 section 4). A failover
 that cannot complete step 3 leaves the unit running without a standby; that is
 a reported condition that goes to the escalation mailbox, not a silent state.
 
-The recovery bound is checked twice. Admission refuses a bound tighter than
-the measured figure for that backend and standby class in the performance
-budget registry. At run time, a failover that exceeds its bound is recorded as
-exceeded.
+The recovery bound is checked twice. Admission refuses a bound when the
+performance budget registry holds no measured failover figure for that host,
+backend and standby class, and a bound tighter than the figure it holds. At
+run time, a failover that exceeds its bound is recorded as exceeded.
 
 MVM does not claim that a unit never fails. It claims that failure is detected
 by the host, that recovery is bounded by a measured figure, and that an
