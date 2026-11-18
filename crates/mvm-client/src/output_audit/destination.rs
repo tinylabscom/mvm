@@ -79,104 +79,111 @@ pub fn validate_destination(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_core::util::test_env::TestEnv;
+    use mvm_core::util::test_env::{TestEnv, isolated_env_probe};
+
+    fn isolated_destination_test(test: impl FnOnce(&Path, &mut TestEnv)) {
+        isolated_env_probe(|| {
+            let home = tempfile::tempdir().unwrap();
+            let mut env = TestEnv::new();
+            env.isolate_mvm_home(home.path());
+            test(home.path(), &mut env);
+        });
+    }
 
     #[test]
     fn missing_parents_are_only_path_intent_and_never_initialize_storage() {
-        let home = tempfile::tempdir().unwrap();
-        let mut env = TestEnv::new();
-        env.isolate_mvm_home(home.path());
-        let destination = home.path().join("missing/parents/receipt.json");
-        assert!(
-            validate_destination(&destination)
+        isolated_destination_test(|home, _env| {
+            let destination = home.join("missing/parents/receipt.json");
+            assert!(
+                validate_destination(&destination)
+                    .unwrap()
+                    .ends_with("missing/parents/receipt.json")
+            );
+            let entries: Vec<_> = std::fs::read_dir(home)
                 .unwrap()
-                .ends_with("missing/parents/receipt.json")
-        );
-        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert!(entries.is_empty(), "unexpected state entries: {entries:?}");
+        });
     }
 
     #[test]
     fn absent_user_home_refuses_instead_of_substituting_the_state_root() {
-        let home = tempfile::tempdir().unwrap();
-        let mut env = TestEnv::new();
-        env.isolate_mvm_home(home.path());
-        env.remove("HOME");
-        assert!(validate_destination(&home.path().join("receipt.json")).is_err());
-        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+        isolated_destination_test(|home, env| {
+            env.remove("HOME");
+            assert!(validate_destination(&home.join("receipt.json")).is_err());
+            assert_eq!(std::fs::read_dir(home).unwrap().count(), 0);
+        });
     }
 
     #[test]
     fn protected_roots_refuse_before_creating_or_loading_any_keys() {
-        let home = tempfile::tempdir().unwrap();
-        let mut env = TestEnv::new();
-        env.isolate_mvm_home(home.path());
-        let roots = protected_host_roots().unwrap();
-        for root in roots {
-            assert!(validate_destination(&root.join("receipt.json")).is_err());
-        }
-        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+        isolated_destination_test(|home, _env| {
+            let roots = protected_host_roots().unwrap();
+            for root in roots {
+                assert!(validate_destination(&root.join("receipt.json")).is_err());
+            }
+            assert_eq!(std::fs::read_dir(home).unwrap().count(), 0);
+        });
     }
 
     #[test]
     fn existing_regular_file_is_checked_without_reading_or_changing_its_bytes() {
-        let home = tempfile::tempdir().unwrap();
-        let mut env = TestEnv::new();
-        env.isolate_mvm_home(home.path());
-        let path = home.path().join("existing");
-        std::fs::write(&path, b"unchanged").unwrap();
-        let before = std::fs::metadata(&path).unwrap().permissions();
-        assert_eq!(
-            validate_destination(&path).unwrap(),
-            std::fs::canonicalize(&path).unwrap()
-        );
-        assert_eq!(std::fs::read(&path).unwrap(), b"unchanged");
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions(), before);
-        assert!(validate_destination(&path.join("receipt")).is_err());
-        assert!(validate_destination(home.path()).is_err());
-        assert!(!mvm_core::config::mvm_keys_dir().exists());
+        isolated_destination_test(|home, _env| {
+            let path = home.join("existing");
+            std::fs::write(&path, b"unchanged").unwrap();
+            let before = std::fs::metadata(&path).unwrap().permissions();
+            assert_eq!(
+                validate_destination(&path).unwrap(),
+                std::fs::canonicalize(&path).unwrap()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), b"unchanged");
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions(), before);
+            assert!(validate_destination(&path.join("receipt")).is_err());
+            assert!(validate_destination(home).is_err());
+            assert!(!mvm_core::config::mvm_keys_dir().exists());
+        });
     }
 
     #[cfg(unix)]
     #[test]
     fn aliases_and_dangling_links_do_not_bypass_protected_roots_or_create_parents() {
         use std::os::unix::fs::symlink;
-        let home = tempfile::tempdir().unwrap();
-        let mut env = TestEnv::new();
-        env.isolate_mvm_home(home.path());
-        let keys = mvm_core::config::mvm_keys_dir();
-        std::fs::create_dir(&keys).unwrap();
-        let alias = home.path().join("alias");
-        symlink(&keys, &alias).unwrap();
-        assert!(validate_destination(&alias.join("receipt")).is_err());
-        assert_eq!(std::fs::read_dir(&keys).unwrap().count(), 0);
-        let dangling = home.path().join("dangling");
-        symlink(home.path().join("absent"), &dangling).unwrap();
-        assert!(validate_destination(&dangling.join("receipt")).is_err());
-        assert!(validate_destination(&dangling).is_err());
-        assert!(!home.path().join("absent").exists());
-        let file = home.path().join("file");
-        std::fs::write(&file, b"original").unwrap();
-        let link = home.path().join("link");
-        symlink(&file, &link).unwrap();
-        assert!(validate_destination(&link).is_err());
-        assert_eq!(std::fs::read(&file).unwrap(), b"original");
+        isolated_destination_test(|home, _env| {
+            let keys = mvm_core::config::mvm_keys_dir();
+            std::fs::create_dir(&keys).unwrap();
+            let alias = home.join("alias");
+            symlink(&keys, &alias).unwrap();
+            assert!(validate_destination(&alias.join("receipt")).is_err());
+            assert_eq!(std::fs::read_dir(&keys).unwrap().count(), 0);
+            let dangling = home.join("dangling");
+            symlink(home.join("absent"), &dangling).unwrap();
+            assert!(validate_destination(&dangling.join("receipt")).is_err());
+            assert!(validate_destination(&dangling).is_err());
+            assert!(!home.join("absent").exists());
+            let file = home.join("file");
+            std::fs::write(&file, b"original").unwrap();
+            let link = home.join("link");
+            symlink(&file, &link).unwrap();
+            assert!(validate_destination(&link).is_err());
+            assert_eq!(std::fs::read(&file).unwrap(), b"original");
+        });
     }
 
     #[cfg(unix)]
     #[test]
     fn fifo_destination_refuses_without_opening_it() {
-        let home = tempfile::tempdir().unwrap();
-        let mut env = TestEnv::new();
-        env.isolate_mvm_home(home.path());
-        let path = home.path().join("fifo");
-        assert!(
-            std::process::Command::new("mkfifo")
-                .arg(&path)
-                .status()
-                .unwrap()
-                .success()
-        );
-        assert!(validate_destination(&path).is_err());
-        assert!(!mvm_core::config::mvm_keys_dir().exists());
+        isolated_destination_test(|home, _env| {
+            let path = home.join("fifo");
+            assert!(
+                std::process::Command::new("mkfifo")
+                    .arg(&path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            assert!(validate_destination(&path).is_err());
+            assert!(!mvm_core::config::mvm_keys_dir().exists());
+        });
     }
 }
