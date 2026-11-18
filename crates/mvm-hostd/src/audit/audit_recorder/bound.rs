@@ -52,7 +52,7 @@ impl Recorder {
 
     /// The bound sink's underlying journal leg, bypassing only the delegation
     /// back to itself, never signing, validation, or durability.
-    pub(in crate::supervisor::audit) async fn record_audit_context_direct(
+    pub(in crate::audit) async fn record_audit_context_direct(
         &self,
         context: &AuditContext,
         category: EventCategory,

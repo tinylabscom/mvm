@@ -1,6 +1,6 @@
 use super::*;
 use crate::audit::emitter::{AuditEmitter, audit_path_for_tenant};
-use crate::supervisor::audit::signer::for_plan;
+use crate::audit::signer::for_plan;
 use ed25519_dalek::SigningKey;
 use mvm_core::plan::ExecutionPlan;
 use mvm_core::plan::test_support::PlanFixture;
@@ -343,7 +343,7 @@ fn a_checkpoint_without_a_digest_cannot_be_sealed() {
 /// describes survive would read, afterwards, as a truncation it never was.
 #[test]
 fn session_and_segment_boundaries_are_sync_barriers() {
-    use crate::supervisor::audit::audit_file::{SyncPolicy, sync_policy_for};
+    use crate::audit::audit_file::{SyncPolicy, sync_policy_for};
     use mvm_core::audit_verify::segment::{CHAIN_CONTINUED, CHAIN_PRUNED, CHAIN_SEALED};
     for event in [
         SESSION_SEALED_EVENT,
@@ -827,9 +827,9 @@ fn the_verification_report_has_a_stable_json_shape() {
 fn a_seal_survives_rotation_between_its_entries() {
     let dir = tempfile::tempdir().unwrap();
     let key = key(7);
-    let signer = crate::supervisor::FileAuditSigner::open(key.clone(), dir.path())
+    let signer = crate::audit::audit_file::FileAuditSigner::open(key.clone(), dir.path())
         .unwrap()
-        .with_rotation(crate::supervisor::RotationPolicy::at_bytes(1024));
+        .with_rotation(crate::audit::audit_file::RotationPolicy::at_bytes(1024));
     let emitter =
         AuditEmitter::with_primary_signer(key.clone(), dir.path(), std::sync::Arc::new(signer))
             .expect("emitter with a rotating signer");
@@ -877,9 +877,9 @@ fn sealing_twice_with_nothing_new_writes_one_seal() {
 /// An emitter whose chain rotates every `bytes`, so a test decides when the
 /// chain splits.
 fn rotating_emitter(dir: &std::path::Path, bytes: u64) -> AuditEmitter {
-    let signer = crate::supervisor::FileAuditSigner::open(key(7), dir)
+    let signer = crate::audit::audit_file::FileAuditSigner::open(key(7), dir)
         .unwrap()
-        .with_rotation(crate::supervisor::RotationPolicy::at_bytes(bytes));
+        .with_rotation(crate::audit::audit_file::RotationPolicy::at_bytes(bytes));
     AuditEmitter::with_primary_signer(key(7), dir, std::sync::Arc::new(signer))
         .expect("emitter with a rotating signer")
 }

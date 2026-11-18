@@ -41,7 +41,7 @@
 //! stale cache commits to the leaves the log actually had, so nothing here ever
 //! signs a statement blessing altered content.
 //!
-//! [`ChainCheckpoint`]: crate::supervisor::audit::audit_file::ChainCheckpoint
+//! [`ChainCheckpoint`]: crate::audit::audit_file::ChainCheckpoint
 
 use std::path::{Path, PathBuf};
 

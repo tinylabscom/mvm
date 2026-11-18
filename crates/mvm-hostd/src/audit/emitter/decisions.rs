@@ -8,7 +8,7 @@
 use super::AuditEmitter;
 use super::runtime_identity_labels;
 use super::stream_audit;
-use crate::supervisor::for_plan;
+use crate::audit::signer::for_plan;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use mvm_contract::provenance::{
@@ -204,7 +204,7 @@ impl AuditEmitter {
 mod tests {
     use super::super::tests::{fixture_plan, only_entry};
     use super::*;
-    use crate::supervisor::verify_audit_chain;
+    use crate::audit::audit_file::verify_audit_chain;
     use ed25519_dalek::SigningKey;
     use rand::Rng;
 

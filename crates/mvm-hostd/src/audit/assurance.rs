@@ -26,7 +26,7 @@ use sha2::{Digest, Sha256};
 
 use super::emitter::AuditEmitter;
 use super::evidence::{EmittedEvidence, EvidenceReceipt, audit_entry_digest_hex};
-use crate::supervisor::PlanAuditEntry;
+use crate::audit::signer::PlanAuditEntry;
 
 /// Audit event emitted when a session is opened against an admitted plan.
 pub const EVENT_SESSION_OPENED: &str = "assurance.session_opened";

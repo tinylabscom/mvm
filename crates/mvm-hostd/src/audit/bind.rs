@@ -136,8 +136,8 @@ pub fn bind_checkpoint_forked(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::audit_file::verify_audit_chain;
     use crate::audit::emitter::AuditEmitter;
-    use crate::supervisor::verify_audit_chain;
     use ed25519_dalek::SigningKey;
     use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta, ContentBlob};
     use rand::Rng;

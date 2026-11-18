@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 
-use crate::supervisor::FileAuditSigner;
+use crate::audit::audit_file::FileAuditSigner;
 
 struct Registered {
     audit_dir: PathBuf,

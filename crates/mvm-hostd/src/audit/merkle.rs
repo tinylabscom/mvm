@@ -1,7 +1,7 @@
 //! Host-side Merkle transparency-log root + inclusion-proof builder.
 //!
 //! The chain-signed audit log (`<audit_dir>/<tenant>.jsonl`) is a stream of
-//! [`SignedEnvelope`](crate::supervisor::SignedEnvelope) JSON lines. This
+//! [`SignedEnvelope`](crate::audit::signer::SignedEnvelope) JSON lines. This
 //! module turns that stream into RFC 6962 transparency-log artifacts: a
 //! Merkle root over the whole log and an `O(log n)` inclusion proof for a
 //! single line. All the tree math lives in
@@ -19,7 +19,7 @@
 //! ## Fail-closed
 //!
 //! A root is only ever built over a chain that
-//! [`verify_audit_chain`](crate::supervisor::verify_audit_chain) accepts.
+//! [`verify_audit_chain`](crate::audit::audit_file::verify_audit_chain) accepts.
 //! A tampered, reordered, or truncated chain refuses here rather than
 //! publishing a root that would attest a corrupt log.
 //!
@@ -38,7 +38,7 @@
 //! walking. That is what
 //! `leaves_over_attested_prefix` does, and the seed it rests on is a host
 //! signature rather than a stored integer — a stronger anchor than the
-//! [`ChainCheckpoint`](crate::supervisor::audit::audit_file::ChainCheckpoint) that
+//! [`ChainCheckpoint`](crate::audit::audit_file::ChainCheckpoint) that
 //! `doctor` resumes from, and the reason this one is not confined to a health
 //! check.
 //!
@@ -55,9 +55,9 @@ use mvm_contract::merkle::{
     merkle_root_of_leaf_hashes, verify_signed_root,
 };
 
+use crate::audit::audit_file::verify_chain_bytes_resuming;
 use crate::audit::emitter;
 use crate::audit::leaf_cache;
-use crate::supervisor::audit::audit_file::verify_chain_bytes_resuming;
 use mvm_contract::verify::{hash_line, verify_audit_chain_bytes};
 use mvm_core::audit_verify::set::{SegmentContent, read_topology_verified_set};
 
@@ -159,7 +159,7 @@ fn read_leaves_from_genesis(
 /// tell those apart — so this path never accuses, it only declines, and every
 /// refusal the caller ever emits stays anchored at genesis.
 ///
-/// [`ChainCheckpoint`]: crate::supervisor::audit::audit_file::ChainCheckpoint
+/// [`ChainCheckpoint`]: crate::audit::audit_file::ChainCheckpoint
 fn leaves_over_attested_prefix(
     audit_dir: &Path,
     tenant: &str,
@@ -540,7 +540,8 @@ pub fn sign_root_in(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::supervisor::{AuditSigner, FileAuditSigner, PlanAuditEntry};
+    use crate::audit::audit_file::FileAuditSigner;
+    use crate::audit::signer::{AuditSigner, PlanAuditEntry};
     use ed25519_dalek::SigningKey;
     use mvm_contract::merkle::{verify_inclusion, verify_signed_root};
     use mvm_core::plan::{PlanId, TenantId};
@@ -617,7 +618,7 @@ mod tests {
         key: &ed25519_dalek::SigningKey,
         n: usize,
         tag: &str,
-        rotation: crate::supervisor::RotationPolicy,
+        rotation: crate::audit::audit_file::RotationPolicy,
     ) {
         let signer = FileAuditSigner::open(key.clone(), dir)
             .unwrap()
@@ -705,7 +706,7 @@ mod tests {
             &key,
             2,
             "after",
-            crate::supervisor::RotationPolicy::never(),
+            crate::audit::audit_file::RotationPolicy::never(),
         );
 
         tamper_line(&dir.path().join("local.jsonl"), 5);
@@ -730,7 +731,7 @@ mod tests {
             &key,
             2,
             "after",
-            crate::supervisor::RotationPolicy::never(),
+            crate::audit::audit_file::RotationPolicy::never(),
         );
 
         tamper_line(&dir.path().join("local.jsonl"), 1);
@@ -790,7 +791,7 @@ mod tests {
             &key,
             4,
             "post",
-            crate::supervisor::RotationPolicy::at_bytes(256),
+            crate::audit::audit_file::RotationPolicy::at_bytes(256),
         );
         assert!(segment_count(dir.path()) > 0, "the fixture must rotate");
 
@@ -832,7 +833,7 @@ mod tests {
             &key,
             2,
             "after",
-            crate::supervisor::RotationPolicy::never(),
+            crate::audit::audit_file::RotationPolicy::never(),
         );
 
         let cached = root_over_cached_prefix(dir.path(), "local", &vk)
@@ -853,7 +854,7 @@ mod tests {
             &key,
             4,
             "post",
-            crate::supervisor::RotationPolicy::at_bytes(256),
+            crate::audit::audit_file::RotationPolicy::at_bytes(256),
         );
         grow_and_publish(dir.path(), &key, 1, "published");
         assert!(root_over_cached_prefix(dir.path(), "local", &vk).is_some());
@@ -882,7 +883,7 @@ mod tests {
             &key,
             4,
             "post",
-            crate::supervisor::RotationPolicy::at_bytes(256),
+            crate::audit::audit_file::RotationPolicy::at_bytes(256),
         );
         grow_and_publish(dir.path(), &key, 1, "published");
         assert!(root_over_cached_prefix(dir.path(), "local", &vk).is_some());
@@ -926,7 +927,7 @@ mod tests {
             &key,
             4,
             "post",
-            crate::supervisor::RotationPolicy::at_bytes(256),
+            crate::audit::audit_file::RotationPolicy::at_bytes(256),
         );
         grow_and_publish(dir.path(), &key, 1, "published");
 
@@ -972,7 +973,7 @@ mod tests {
         let key = fresh_key();
         let vk = key.verifying_key();
 
-        use crate::supervisor::RotationPolicy;
+        use crate::audit::audit_file::RotationPolicy;
         grow_with_rotation(dir.path(), &key, 4, "pre", RotationPolicy::never());
         let before = crate::audit::emitter::AuditEmitter::with_dir(key.clone(), dir.path())
             .unwrap()

@@ -228,8 +228,8 @@ pub(crate) fn commit_boundary() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::supervisor::audit::audit_file::{FileAuditSigner, RotationPolicy};
-    use crate::supervisor::audit::signer::{AuditSigner, PlanAuditEntry};
+    use crate::audit::audit_file::{FileAuditSigner, RotationPolicy};
+    use crate::audit::signer::{AuditSigner, PlanAuditEntry};
     use mvm_core::plan::{PlanId, TenantId};
     use std::sync::{
         Arc,
