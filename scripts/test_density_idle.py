@@ -10,6 +10,7 @@ from scripts.density_idle import (
     component_of,
     cpu_ticks,
     render,
+    render_per_standby,
     sample,
     sample_macos,
     wakeups_from_rusage,
@@ -178,6 +179,41 @@ class DensityIdleMacosTests(unittest.TestCase):
         after = {1: ProcessSample("mvm-hvf-supervisor", 4, 10, 1_050_000_000, 600)}
         rows = summarize(before, after, 10.0, 1_000_000_000)
         self.assertEqual(rows, [("mvm-hvf-supervisor", 1, 4, 10, 5.0, 50.0)])
+
+
+class DensityIdleBaselineTests(unittest.TestCase):
+    def sampled_rows(self, programs: dict[int, str]) -> list:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            for pid, program in programs.items():
+                write_process(root, pid, program, (10, 0), [5], 2)
+            before = sample(root)
+            for pid, program in programs.items():
+                write_process(root, pid, program, (20, 0), [15], 2)
+            return summarize(before, sample(root), 10.0, 100)
+
+    def test_the_zero_unit_sample_keys_its_figures_as_wave_zero(self) -> None:
+        rows = self.sampled_rows({7: "/usr/bin/mvm-mailbox"})
+        _, summary = render(rows, 0)
+        self.assertIn("wave_0_idle_mvm-mailbox_threads\t1\n", summary)
+        self.assertIn("wave_0_idle_mvm-mailbox_wakeups_per_second\t1.0\n", summary)
+
+    def test_a_component_absent_from_the_baseline_emits_no_keys(self) -> None:
+        rows = self.sampled_rows({})
+        self.assertEqual(rows, [])
+        self.assertEqual(render(rows, 0)[1], "")
+
+    def test_the_standby_summary_divides_cost_by_the_held_count(self) -> None:
+        rows = [("mvm-hvf-supervisor", 4, 16, 40, 8.0, 20.0)]
+        self.assertEqual(
+            render_per_standby(rows, 4, 4),
+            "wave_4_idle_mvm-hvf-supervisor_cpu_millicores_per_standby\t2.00\n"
+            "wave_4_idle_mvm-hvf-supervisor_wakeups_per_second_per_standby\t5.00\n",
+        )
+
+    def test_a_standby_summary_for_no_standbys_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            render_per_standby([], 0, 0)
 
 
 if __name__ == "__main__":
