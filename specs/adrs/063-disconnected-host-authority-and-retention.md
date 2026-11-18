@@ -143,7 +143,7 @@ Unrelated nodes do not share one workload-ownership epoch.
 
 Kuramoto-derived replay state is a checkpoint and logical step, not a
 security timestamp. Physical synchronization, if added, is a separate
-estimate with uncertainty. Neither phase agreement nor logical replay proves
+estimate with uncertainty. Neither phase agreement nor logical replay is evidence of
 current authorization, global ordering or exclusive ownership.
 
 Within a controller lifetime, use monotonic expiry deadlines derived
@@ -162,7 +162,7 @@ may instead require stop on dependency loss, or explicitly permit replacement
 within the still-valid offline lease and finite restart budget.
 
 The local controller fences the old incarnation and all effect holders,
-confirms termination, advances the epoch, verifies the same signed package
+checks termination, advances the epoch, verifies the same signed package
 digest, and admits a clean replacement with fresh boot/session keys. Package
 verification is not admission or readiness. Ordinary workloads stop at lease
 expiry; explicitly authorized isolated computation requires its own finite
@@ -176,7 +176,7 @@ prove old-owner retirement refuses activation of a replacement.
 
 Cross-host relocation is a separate operation: the destination verifies its
 own backend/capacity/data availability and cannot become an effectful owner
-until source fencing is proven. Timeout alone is insufficient. Lease-based
+until source fencing is verified. Timeout alone is insufficient. Lease-based
 takeover would require validated clock/expiry assumptions and enforcement at
 every relevant effect boundary. Without that evidence, relocation refuses.
 A new epoch number cannot remotely stop an unreachable device.
@@ -184,7 +184,7 @@ A new epoch number cannot remotely stop an unreachable device.
 ### 6. Connectivity observations and reconciliation
 
 Heartbeats are small authenticated, encrypted observations with session and
-sequence freshness, not proof that a workload is healthy or dead. Piggyback
+sequence freshness, not evidence that a workload is healthy or dead. Piggyback
 when practical. Retry uses exponential backoff with jitter, finite attempts,
 attempt deadlines and cancellation. Retry exhaustion reports unreachable or
 uncertain; it is not a fleet-wide terminal fact.
