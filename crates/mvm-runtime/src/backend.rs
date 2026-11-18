@@ -1238,7 +1238,7 @@ fn collect_checked(
     Ok(rows)
 }
 
-fn require_observed_quiescence(
+pub(crate) fn require_observed_quiescence(
     observed: &[VmInfo],
     registry: &crate::vm::name_registry::VmNameRegistry,
 ) -> Result<()> {
