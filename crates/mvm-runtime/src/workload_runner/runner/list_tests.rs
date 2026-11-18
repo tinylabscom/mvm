@@ -20,6 +20,12 @@ fn an_unprobeable_machine_is_listed_failed_beside_the_machines_that_probe() {
     std::fs::create_dir_all(&unknown).unwrap();
     std::fs::write(unknown.join("hvf.pid"), "4242").unwrap();
     // A console log alone is a machine HVF never launched: plainly stopped.
+    // The shape a real run left behind: a warm-pool standby whose launch lock
+    // exists with no authenticated control identity.
+    let standby = vm_state_dir("standby-6364723eb56ad227");
+    std::fs::create_dir_all(&standby).unwrap();
+    std::fs::write(standby.join("hvf-launch.lock"), "").unwrap();
+    std::fs::write(standby.join("hvf.pid"), "4243").unwrap();
     let idle = vm_state_dir("never-launched");
     std::fs::create_dir_all(&idle).unwrap();
     std::fs::write(idle.join("console.log"), "").unwrap();
@@ -40,8 +46,17 @@ fn an_unprobeable_machine_is_listed_failed_beside_the_machines_that_probe() {
             .clone()
     };
     assert_eq!(status_of("never-launched"), VmStatus::Stopped);
+    for name in ["unknown-identity", "standby-6364723eb56ad227"] {
+        let status = status_of(name);
+        assert!(
+            matches!(status, VmStatus::Failed { .. }),
+            "{name} is reported failed, never presumed stopped: {status:?}"
+        );
+    }
+    // Unknown is never stopped: the listing still refuses policy activation.
+    let registry = crate::vm::name_registry::VmNameRegistry::default();
     assert!(
-        matches!(status_of("unknown-identity"), VmStatus::Failed { .. }),
-        "an unprobeable machine is reported, never presumed stopped"
+        crate::backend::require_observed_quiescence(&listed, &registry).is_err(),
+        "an unprobeable machine still refuses host quiescence"
     );
 }
