@@ -161,8 +161,9 @@ fn footprint(path: &Path) -> Result<std::result::Result<u64, String>> {
         Some("measured") => {}
         Some("unavailable") => {
             return Ok(Err(format!(
-                "{} has status `unavailable` on this host",
-                path.display()
+                "{} has status `unavailable` on this host ({})",
+                path.display(),
+                json["reason"].as_str().unwrap_or("no reason recorded")
             )));
         }
         other => bail!("{} has status {other:?}", path.display()),
@@ -196,6 +197,29 @@ fn wave_memory(wave_dir: &Path, units: u64) -> Result<Figure<u64>> {
         }
         (Err(reason), _) | (_, Err(reason)) => Ok(Figure::unmeasured(reason)),
     }
+}
+
+/// Fixed host memory: the summed physical footprint of the MVM host processes
+/// the zero-unit capture found. Runs recorded before wave 0 captured memory
+/// stay unmeasured.
+fn baseline_memory(dir: &Path) -> Result<Figure<u64>> {
+    let path = dir.join("wave-0/physical-memory-settled.json");
+    if !path.exists() {
+        return Ok(Figure::unmeasured("the run has no wave-0 memory capture"));
+    }
+    Ok(match footprint(&path)? {
+        Ok(bytes) => Figure::measured(bytes),
+        Err(reason) => Figure::unmeasured(reason),
+    })
+}
+
+/// Fixed host disk: blocks held by the run's isolated MVM home with zero units.
+fn baseline_disk(s: &Summary) -> Result<Figure<u64>> {
+    const KEY: &str = "wave_0_mvm_home_du_kib";
+    if s.get(KEY).is_none() {
+        return Ok(Figure::unmeasured("the run has no wave-0 storage capture"));
+    }
+    Ok(Figure::measured(s.count(KEY)?.saturating_mul(1024)))
 }
 
 fn unit_cost(
@@ -346,10 +370,8 @@ pub fn from_density_dir(dir: &Path) -> Result<Section> {
                 Figure::unmeasured(format!("idle sampler: {m}"));
         }
     }
-    section.fixed_host_cost.memory_bytes =
-        Figure::unmeasured("the zero-unit wave records no memory capture");
-    section.fixed_host_cost.disk_bytes =
-        Figure::unmeasured("the zero-unit wave records no storage figure");
+    section.fixed_host_cost.memory_bytes = baseline_memory(dir)?;
+    section.fixed_host_cost.disk_bytes = baseline_disk(&summary)?;
 
     let cost = unit_cost(quantity, &baseline, &wave, memory, standby)?;
     if standby {
@@ -438,9 +460,11 @@ mod tests {
     fn edited(edit: impl FnOnce(String) -> String) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
         let from = fixture();
+        std::fs::create_dir(tmp.path().join("wave-0")).unwrap();
         std::fs::create_dir(tmp.path().join("wave-2")).unwrap();
         for file in [
             "metadata.json",
+            "wave-0/physical-memory-settled.json",
             "wave-2/physical-memory-before.json",
             "wave-2/physical-memory-settled.json",
         ] {
@@ -468,11 +492,8 @@ mod tests {
         );
         assert_eq!(measured(&s.fixed_host_cost.idle_cpu_millicores), 10.0);
         assert_eq!(measured(&s.fixed_host_cost.wakeups.per_second), 5.0);
-        let reason = match &s.fixed_host_cost.memory_bytes {
-            Figure::Unmeasured { reason } => reason.clone(),
-            Figure::Measured { .. } => panic!("no zero-unit memory capture exists"),
-        };
-        assert!(reason.contains("zero-unit"));
+        assert_eq!(measured(&s.fixed_host_cost.memory_bytes), 7_000_000);
+        assert_eq!(measured(&s.fixed_host_cost.disk_bytes), 4096 * 1024);
 
         // Wave 2: (6 + 12) - 10 baseline = 8 millicores over 2 observed units.
         let run = &s.by_residency.running;
@@ -690,6 +711,47 @@ mod tests {
             Figure::Unmeasured { reason } => assert!(reason.contains("shrank")),
             Figure::Measured { .. } => panic!("a shrink cannot be a measurement"),
         }
+    }
+
+    fn reason_of<T>(f: &Figure<T>) -> &str {
+        match f {
+            Figure::Unmeasured { reason } => reason,
+            Figure::Measured { .. } => panic!("figure must stay unmeasured"),
+        }
+    }
+
+    #[test]
+    fn a_run_without_wave_0_captures_leaves_fixed_memory_and_disk_unmeasured() {
+        let dir = edited(|s| s.replace("wave_0_mvm_home_du_kib\t4096\n", ""));
+        std::fs::remove_file(dir.path().join("wave-0/physical-memory-settled.json")).unwrap();
+        let s = from_density_dir(dir.path()).unwrap();
+        assert_eq!(
+            reason_of(&s.fixed_host_cost.memory_bytes),
+            "the run has no wave-0 memory capture"
+        );
+        assert_eq!(
+            reason_of(&s.fixed_host_cost.disk_bytes),
+            "the run has no wave-0 storage capture"
+        );
+    }
+
+    #[test]
+    fn an_unavailable_wave_0_capture_carries_its_own_reason() {
+        let dir = edited(|s| s);
+        std::fs::write(
+            dir.path().join("wave-0/physical-memory-settled.json"),
+            r#"{"schema_version": 1, "status": "unavailable", "reason": "unsupported_platform"}"#,
+        )
+        .unwrap();
+        let s = from_density_dir(dir.path()).unwrap();
+        assert!(reason_of(&s.fixed_host_cost.memory_bytes).contains("unsupported_platform"));
+        assert_eq!(measured(&s.fixed_host_cost.disk_bytes), 4096 * 1024);
+    }
+
+    #[test]
+    fn an_unparseable_wave_0_disk_figure_is_an_error() {
+        let dir = edited(|s| s.replace("wave_0_mvm_home_du_kib\t4096", "wave_0_mvm_home_du_kib\t"));
+        assert!(error_of(&dir).contains("wave_0_mvm_home_du_kib"));
     }
 
     #[test]

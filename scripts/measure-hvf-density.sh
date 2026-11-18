@@ -64,6 +64,7 @@ It is not a successful-run receipt. RSS/idle samples include host-wide matching
 processes; receipt latency includes execution, not just boot or agent readiness.
 physical-memory-*.json records macOS per-process resident and physical-footprint
 bytes before, during and after each wave; unavailable/partial samples stay explicit.
+wave-0 holds the zero-unit baseline: one settled memory and storage capture.
 USAGE
 }
 
@@ -479,6 +480,8 @@ capture_storage() {
   else
     printf '0\t%s\n' "${DATA_DIR}/vms" >"${dir}/vm-state-blocks-${phase}.txt"
   fi
+  # The whole isolated MVM_HOME: images, kernels and caches as well as VM state.
+  du -sk "${DATA_DIR}" >"${dir}/mvm-home-blocks-${phase}.txt"
 }
 
 capture_matching_processes() {
@@ -625,6 +628,10 @@ fi
   # The sampler counts every matching process on the host, other sessions' VMs included.
   printf 'wave_0_sampler_scope\thost_wide_matching_processes\n'
 } >>"${SUMMARY}"
+capture_host_memory "settled" "${zero_dir}"
+capture_storage "settled" "${zero_dir}"
+printf 'wave_0_mvm_home_du_kib\t%s\n' \
+  "$(awk 'NR == 1 { print $1 }' "${zero_dir}/mvm-home-blocks-settled.txt")" >>"${SUMMARY}"
 capture_idle "${zero_dir}" 0
 
 for wave in "${WAVES[@]}"; do

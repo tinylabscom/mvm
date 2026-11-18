@@ -98,6 +98,18 @@ if args[:2] == ["machine", "run"]:
                         (base / f"out/wave-1/physical-memory-{phase}.json").read_text()
                     )
                     self.assertIn(memory["status"], ("measured", "partial", "unavailable"))
+                zero = base / "out/wave-0"
+                memory = json.loads((zero / "physical-memory-settled.json").read_text())
+                self.assertIn(memory["status"], ("measured", "partial", "unavailable"))
+                for name in ("host-memory", "filesystem", "vm-state-blocks", "mvm-home-blocks"):
+                    self.assertTrue((zero / f"{name}-settled.txt").is_file(), name)
+                home_kib = (zero / "mvm-home-blocks-settled.txt").read_text().split()[0]
+                self.assertRegex(home_kib, r"^[0-9]+$")
+                self.assertIn(
+                    f"wave_0_mvm_home_du_kib\t{home_kib}\n",
+                    (base / "out/summary.tsv").read_text(),
+                )
+                self.assertTrue((base / "out/wave-1/mvm-home-blocks-settled.txt").is_file())
                 commands = [
                     json.loads(line)
                     for line in (base / "out/commands.jsonl").read_text().splitlines()
