@@ -2621,6 +2621,7 @@ running microVM.
 | `mvmctl bench --runs <n> --warmup <n>` | Sample counts. Below 20 measured runs the report is indicative only, not publication-grade                                                                                |
 | `mvmctl bench --json`                  | Emit the versioned report JSON — the same shape the CI gate produces, so the two are comparable                                                                           |
 | `mvmctl bench -- <launch>`             | Measure a specific launch instead of the reproducible default (`run --no-detect -- /bin/true`)                                                                            |
+| `mvmctl bench report --density-dir <DIR> [--launch-report <FILE>]... [--json] [--out <FILE>]` | Assemble the resource report from a density run directory (`summary.tsv`, `metadata.json`) and launch reports written by `mvmctl bench`: fixed host cost, per-unit and per-standby cost, cold and warm launch latency. A missing baseline or a partial wave is an error; anything the run did not record is shown as unmeasured. Writes `resource-latest.json` beside the report |
 
 When a completed launch writes a sample that violates the selected lane,
 `mvmctl bench` exits nonzero and stores its full sample at `--out` (or under

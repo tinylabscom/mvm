@@ -75,7 +75,10 @@ impl From<LaneArg> for LaunchLane {
 }
 
 #[derive(ClapArgs, Debug, Clone)]
+#[command(args_conflicts_with_subcommands = true)]
 pub(in crate::commands) struct Args {
+    #[command(subcommand)]
+    pub command: Option<BenchCommand>,
     /// Which launch lane to measure.
     #[arg(long, value_enum, default_value = "prepared-cold")]
     pub lane: LaneArg,
@@ -100,6 +103,44 @@ pub(in crate::commands) struct Args {
     pub launch: Vec<String>,
 }
 
+#[derive(clap::Subcommand, Debug, Clone)]
+pub(in crate::commands) enum BenchCommand {
+    /// Assemble the resource report from a density run and launch reports.
+    Report(ReportArgs),
+}
+
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct ReportArgs {
+    /// Density run directory holding `summary.tsv` and `metadata.json`.
+    #[arg(long, value_name = "DIR")]
+    pub density_dir: std::path::PathBuf,
+    /// A launch report JSON written by `mvmctl bench`; repeat for cold and warm.
+    #[arg(long, value_name = "FILE")]
+    pub launch_report: Vec<std::path::PathBuf>,
+    /// Print the report as JSON instead of a markdown table.
+    #[arg(long)]
+    pub json: bool,
+    /// Write the report here instead of under `~/.mvm/state/bench/`.
+    #[arg(long, value_name = "FILE")]
+    pub out: Option<std::path::PathBuf>,
+}
+
+fn run_report(args: ReportArgs) -> Result<()> {
+    let report = crate::bench::resource_ingest::assemble(&args.density_dir, &args.launch_report)?;
+    let path = crate::bench::write_report_with_latest(&report, args.out, "resource")
+        .context("writing the resource report")?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!(
+            "{}",
+            crate::bench::resource_report::render_markdown(&report)
+        );
+        ui::info(&format!("\nReport: {}", path.display()));
+    }
+    Ok(())
+}
+
 /// The launch measured when the caller names none.
 ///
 /// Chosen to be the same on every host rather than to be representative: the
@@ -110,6 +151,9 @@ pub(in crate::commands) struct Args {
 const DEFAULT_LAUNCH: [&str; 4] = ["run", "--no-detect", "--", "/bin/true"];
 
 pub(in crate::commands) fn run(args: Args) -> Result<()> {
+    if let Some(BenchCommand::Report(report)) = args.command {
+        return run_report(report);
+    }
     // A debug binary is 5-10x slower on the same work, so its percentiles are
     // not this host's latency — they are this build profile's. Publishing or
     // comparing them would be worse than having no number, so refuse by
@@ -464,6 +508,8 @@ mod tests {
                         .to_string(),
             }),
             startup_requirement: None,
+            backend: None,
+            architecture: None,
             raw: Vec::new(),
         }
     }

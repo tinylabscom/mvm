@@ -159,3 +159,47 @@ fn backend_help_names_every_verb() {
     .expect("backend detect --help renders");
     assert!(detect_help.contains("--plain"), "{detect_help}");
 }
+
+#[test]
+fn bench_report_takes_a_density_dir_and_the_lane_form_still_parses() {
+    assert!(
+        cli_command()
+            .try_get_matches_from(["mvmctl", "bench", "report"])
+            .is_err(),
+        "the report needs a density directory"
+    );
+    cli_command()
+        .try_get_matches_from([
+            "mvmctl",
+            "bench",
+            "report",
+            "--density-dir",
+            "/run",
+            "--launch-report",
+            "a.json",
+            "--launch-report",
+            "b.json",
+            "--json",
+            "--out",
+            "r.json",
+        ])
+        .expect("the report form parses");
+    cli_command()
+        .try_get_matches_from(["mvmctl", "bench", "--lane", "warm-claim", "--runs", "5"])
+        .expect("the lane form still parses");
+    cli_command()
+        .try_get_matches_from([
+            "mvmctl",
+            "bench",
+            "--",
+            "run",
+            "--no-detect",
+            "--",
+            "/bin/true",
+        ])
+        .expect("a launch after `--` still parses");
+    let help =
+        mvm_cli::commands::help_text_for(&["bench".into(), "report".into(), "--help".into()])
+            .expect("bench report --help renders");
+    assert!(help.contains("--density-dir") && help.contains("--launch-report"));
+}
