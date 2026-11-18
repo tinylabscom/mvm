@@ -109,7 +109,7 @@ if args[:2] == ["machine", "run"]:
                     f"wave_0_mvm_home_du_kib\t{home_kib}\n",
                     (base / "out/summary.tsv").read_text(),
                 )
-                self.assertTrue((base / "out/wave-1/mvm-home-blocks-settled.txt").is_file())
+                self.assertFalse((base / "out/wave-1/mvm-home-blocks-settled.txt").exists())
                 commands = [
                     json.loads(line)
                     for line in (base / "out/commands.jsonl").read_text().splitlines()

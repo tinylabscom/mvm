@@ -480,8 +480,6 @@ capture_storage() {
   else
     printf '0\t%s\n' "${DATA_DIR}/vms" >"${dir}/vm-state-blocks-${phase}.txt"
   fi
-  # The whole isolated MVM_HOME: images, kernels and caches as well as VM state.
-  du -sk "${DATA_DIR}" >"${dir}/mvm-home-blocks-${phase}.txt"
 }
 
 capture_matching_processes() {
@@ -630,6 +628,9 @@ fi
 } >>"${SUMMARY}"
 capture_host_memory "settled" "${zero_dir}"
 capture_storage "settled" "${zero_dir}"
+# The whole isolated MVM_HOME: images, kernels and caches. Taken only here, where
+# no unit is running to change the tree under du.
+du -sk "${DATA_DIR}" >"${zero_dir}/mvm-home-blocks-settled.txt"
 printf 'wave_0_mvm_home_du_kib\t%s\n' \
   "$(awk 'NR == 1 { print $1 }' "${zero_dir}/mvm-home-blocks-settled.txt")" >>"${SUMMARY}"
 capture_idle "${zero_dir}" 0
