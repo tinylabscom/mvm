@@ -7,6 +7,10 @@
 //! fresh challenge, a node that is still `Active`, and a policy no older than
 //! the floor. [`CommandGate`] rejects replayed, reordered and wrong-epoch
 //! commands from either side of the partition.
+//!
+//! Bounded recovery decisions use the separately verified companion in
+//! [`super::offline`] and the pure [`super::recovery`] consumer. These primitives
+//! do not enable automatic recovery or change this lease's signed bytes.
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
