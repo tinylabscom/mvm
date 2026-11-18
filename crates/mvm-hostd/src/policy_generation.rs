@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 mod store;
 pub(crate) use store::GenerationStore;
 pub mod coordinator;
+pub mod managed;
 
 const SCHEMA_VERSION: u32 = 1;
 const MAX_MANIFEST_BYTES: usize = 64 * 1024;

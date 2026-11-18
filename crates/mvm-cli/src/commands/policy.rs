@@ -35,6 +35,8 @@ pub(in crate::commands) struct Args {
 pub(in crate::commands) enum PolicyAction {
     /// Commit the first policy generation for a quiescent local project.
     Activate(ActivateArgs),
+    /// Identify the manager-owned policy coordinator (read-only)
+    Coordinator(CoordinatorArgs),
     /// Resolve a profile into the manifest `run --plan` accepts
     Resolve(ResolveArgs),
     /// Show the effective policy (toml, json, or the plan it yields)
@@ -52,6 +54,13 @@ pub(in crate::commands) struct ActivateArgs {
     /// Project directory with an already-built Firecracker manifest slot.
     #[arg(value_name = "PROJECT")]
     pub project: PathBuf,
+}
+
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct CoordinatorArgs {
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Which policy a subcommand looks at.
@@ -150,12 +159,33 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             );
             Ok(())
         }
+        PolicyAction::Coordinator(a) => coordinator(&a),
         PolicyAction::Resolve(a) => resolve_cmd(a),
         PolicyAction::Show(a) => show(a),
         PolicyAction::Validate(a) => validate(a),
         PolicyAction::Diff(a) => diff(a),
         PolicyAction::Groups(a) => groups(a),
     }
+}
+
+/// Report the coordinator the systemd user manager runs for this home. A
+/// refusal is the answer when there is none; nothing is installed or started.
+fn coordinator(args: &CoordinatorArgs) -> Result<()> {
+    let managed = mvm_client::policy_profiles::coordinator::managed_status()?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&managed)?);
+        return Ok(());
+    }
+    println!("Policy coordinator: {}", managed.unit);
+    println!("  invocation  {}", managed.invocation);
+    println!("  pid         {}", managed.pid);
+    println!("  uid         {}", managed.uid);
+    println!("  home        {}", managed.home.display());
+    println!(
+        "Identity only, checked against the systemd user manager and the socket's kernel \
+         credentials. Not readiness, current authority, or permission to commit."
+    );
+    Ok(())
 }
 
 fn platform(backend: Option<BackendKind>) -> Platform {

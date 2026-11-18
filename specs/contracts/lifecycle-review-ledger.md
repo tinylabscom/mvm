@@ -233,6 +233,22 @@ extra-owner rejection rule. This does not identify the cause of a particular
 live EOF, nor prove guest application readiness. No guest execution or broad
 supervisor/lifecycle review is implied by this focused change.
 
+## Manager-owned policy coordinator identification
+
+Covers `mvm-hostd/src/policy_generation/managed.rs`, the `Status` request and
+connection handling in `policy_generation/coordinator.rs`, and the
+`mvmctl policy coordinator` caller, for
+[#5255](https://github.com/tinylabscom/mvm/issues/5255). A systemd user
+manager owns the process: it creates, restarts and reaps the unit, and the
+coordinator only refuses to serve when it is not that unit. The client owns
+nothing but one connection, which it drops on every outcome. Deadlines are the
+manager query bound, a non-waiting connect and an exchange bounded per read and per write (five
+seconds each, not five seconds in total); there is no retry. No durable state is written, so there is nothing to recover: a
+restart between the two manager observations is reported as unknown. The
+detached spawn path, activation and generation storage are unchanged and not
+re-reviewed here. Not reviewed: a provisioned unit on a real host, restart
+limits, and any commit, migration or signing path.
+
 ## Compile-time AES-GCM boundary
 
 Reviewed `crates/mvm-crypto/src/aead.rs`,
