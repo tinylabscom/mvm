@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "host": {"os": "Darwin", "architecture": "arm64", "memory_mib": 16384},
+  "configuration": {"backend": "hvf", "launch_mode": "cold", "waves": "1 2"}
+}

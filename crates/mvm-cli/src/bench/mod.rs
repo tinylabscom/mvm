@@ -14,6 +14,7 @@ pub mod cold_launch_runner;
 pub mod doc_table;
 pub mod harness;
 pub mod report;
+pub mod resource_ingest;
 pub mod resource_report;
 pub mod stats;
 

@@ -1,0 +1,3 @@
+{"schema_version": 1, "status": "measured", "processes": [
+  {"pid": 1, "component": "mvm-hvf-supervisor", "status": "measured", "physical_footprint_bytes": 50000000}
+]}
