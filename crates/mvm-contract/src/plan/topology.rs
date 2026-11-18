@@ -26,7 +26,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::assurance::Sha256Digest;
-use crate::plan::types::{Resources, TenantId, WorkloadId};
+use crate::plan::types::{TenantId, WorkloadId};
 
 /// A signed description of a whole deployment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,7 +69,7 @@ pub struct Unit {
     /// the plan names the topology digest, so a plan ID here would be
     /// circular.
     pub recipe: Sha256Digest,
-    pub resources: Resources,
+    pub resources: UnitResources,
     #[serde(default, skip_serializing_if = "CorePlacement::is_floating")]
     pub placement: CorePlacement,
     /// The weakest isolation tier the unit may run under. Absent places no
@@ -79,6 +79,16 @@ pub struct Unit {
     /// The post-admission transitions this unit permits. None by default.
     #[serde(default, skip_serializing_if = "SealedTransitions::is_none")]
     pub permits: SealedTransitions,
+}
+
+/// What a unit is sized at. The wall-clock bound is not here: it is a grant
+/// in the unit's plan, and a second statement of it could disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnitResources {
+    pub cpus: u32,
+    pub mem_mib: u64,
+    pub disk_mib: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -6,7 +6,6 @@ use core::num::{NonZeroU32, NonZeroU64};
 use chrono::TimeZone;
 
 use super::*;
-use crate::plan::types::TimeoutSpec;
 
 fn id(name: &str) -> WorkloadId {
     WorkloadId(name.to_string())
@@ -21,14 +20,10 @@ fn unit(name: &str, role: UnitRole, cores: &[u32]) -> Unit {
         workload: id(name),
         role,
         recipe: recipe(name.len() as u8),
-        resources: Resources {
+        resources: UnitResources {
             cpus: 1,
             mem_mib: 256,
             disk_mib: 512,
-            timeouts: TimeoutSpec {
-                boot_secs: 5,
-                exec_secs: 0,
-            },
         },
         placement: if cores.is_empty() {
             CorePlacement::Floating
@@ -184,7 +179,7 @@ fn unknown_fields_are_rejected_at_every_level() {
 fn the_digest_of_a_fixed_topology_is_pinned() {
     assert_eq!(
         full().digest().as_str(),
-        "sha256:5ddae7085bd72b97e2c4760d91fe0823ee33e35290103d72fc9de9629dee4dba"
+        "sha256:e245be86f3aefce9f18c38a5fb484beaee20774389c3c60be4348fe880fb7dfe"
     );
 }
 
