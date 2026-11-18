@@ -182,12 +182,7 @@ fn budgets_subcommand(args: &[String]) -> Result<()> {
     let observed =
         resource::observed_rows(&resource::committed_reports(&resource::committed_dir())?);
     if json {
-        if observed.is_empty() {
-            println!("{}", serde_json::to_string_pretty(&budgets)?);
-        } else {
-            let both = serde_json::json!({ "budgets": budgets, "observed": observed });
-            println!("{}", serde_json::to_string_pretty(&both)?);
-        }
+        println!("{}", resource::budgets_json(&budgets, &observed)?);
     } else {
         render_budgets_human(&budgets);
         if !observed.is_empty() {

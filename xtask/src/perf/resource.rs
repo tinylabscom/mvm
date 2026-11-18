@@ -268,6 +268,14 @@ pub(super) fn compare(a: &Report, b: &Report, tolerance: f64) -> Result<()> {
         else {
             bail!("section {id} is present in A only");
         };
+        if let Some(fb) = sb
+            .figures
+            .iter()
+            .filter(|f| f.compared)
+            .find(|f| !sa.figures.iter().any(|x| x.path == f.path))
+        {
+            bail!("{id} {}: present in B only", fb.path);
+        }
         for fa in sa.figures.iter().filter(|f| f.compared) {
             let Some(fb) = sb.figures.iter().find(|f| f.path == fa.path) else {
                 bail!("{id} {}: present in A only", fa.path);
@@ -332,6 +340,20 @@ pub(super) fn compare_subcommand(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// The `--json` body: the bare budget array unless observed rows exist.
+pub(super) fn budgets_json<B: serde::Serialize>(
+    budgets: &B,
+    observed: &[Observed],
+) -> Result<String> {
+    Ok(if observed.is_empty() {
+        serde_json::to_string_pretty(budgets)?
+    } else {
+        serde_json::to_string_pretty(
+            &serde_json::json!({ "budgets": budgets, "observed": observed }),
+        )?
+    })
+}
+
 pub(super) fn committed_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("data/evidence/performance/resource")
 }
@@ -390,6 +412,18 @@ mod tests {
             .unwrap();
         assert_eq!(p99.status, "unmeasured");
         assert!(rows.iter().all(|x| x.source == "t.json"));
+    }
+
+    #[test]
+    fn budgets_json_is_the_bare_array_without_reports() {
+        let budgets = ["a", "b"];
+        assert_eq!(
+            budgets_json(&budgets, &[]).unwrap(),
+            serde_json::to_string_pretty(&budgets).unwrap()
+        );
+        let rows = observed_rows(&[("t.json".into(), parse(&fixture(1, 1.0, "")))]);
+        let v: Value = serde_json::from_str(&budgets_json(&budgets, &rows).unwrap()).unwrap();
+        assert!(v["budgets"].is_array() && v["observed"].is_array());
     }
 
     #[test]
@@ -469,6 +503,19 @@ mod tests {
                 .to_string()
                 .contains("schema_version")
         );
+    }
+
+    #[test]
+    fn compare_fails_on_a_figure_only_in_b() {
+        let a = parse(&fixture(1, 1.0, ""));
+        let mut b = parse(&fixture(1, 1.0, ""));
+        b.sections[0].figures.push(Figure {
+            path: "fixed_host_cost.disk_bytes".into(),
+            reading: Reading::Measured(1.0),
+            compared: true,
+        });
+        let e = compare(&a, &b, 100.0).unwrap_err().to_string();
+        assert!(e.contains("disk_bytes") && e.contains("B only"), "{e}");
     }
 
     #[test]
