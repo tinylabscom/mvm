@@ -74,6 +74,7 @@ fn actor_fixture(home: &std::path::Path) -> ActorFixture {
         epoch,
         report: None,
         retention: Some(MailboxRetentionPolicy::new(10_000).unwrap()),
+        service_blind: None,
     });
     let owner = LocalActorMailboxes::new(
         keys_dir.clone(),

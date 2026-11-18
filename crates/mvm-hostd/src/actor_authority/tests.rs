@@ -295,6 +295,7 @@ fn signed_mailbox(
         epoch,
         report: None,
         retention: None,
+        service_blind: None,
     });
     mvm_core::mailbox::sign_capability(
         MailboxCapabilityGrant {

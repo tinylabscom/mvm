@@ -150,6 +150,9 @@ fn audit_consistency_real_commands_generate_verify_and_refuse_rollback() {
         .unwrap();
     assert!(!refused.status.success());
     assert!(String::from_utf8_lossy(&refused.stderr).contains("consistency"));
+}
+
+#[test]
 fn actor_launch_help_requires_a_manifest_without_initializing_workflow_state() {
     let home = tempfile::tempdir().expect("isolated CLI home");
     let state = home.path().join("state");

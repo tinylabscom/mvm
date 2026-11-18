@@ -158,7 +158,6 @@ pub fn admit_plan_for_run_with_host_permit(
         host_permit,
     } = params;
     host_permit.verify_plan_resources(plan)?;
->>>>>>> 898f57a9de (feat: implement bounded native HVF workload actors)
     posture.verify_launch_runtime(plan)?;
     let assurance_runtime = posture.assurance_runtime(plan)?;
     validate_extension_bindings(plan)?;

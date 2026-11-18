@@ -1180,6 +1180,8 @@ fn admit_guest(
     }
     let (capability, envelope) = sealer.seal(message)?;
     admit(shared, &capability, &envelope)
+}
+
 fn signal_change(shared: &Shared) {
     if let Some(endpoint) = shared.conversation.get() {
         let mut notify = &endpoint.notify;
@@ -1470,6 +1472,8 @@ mod reader_tests {
             anchor: Box::new(move |tip| commit.advance(tip)),
             local_anchor: Some(anchor),
             reader: OnceLock::new(),
+            conversation: OnceLock::new(),
+            dispatch_wake: OnceLock::new(),
         };
         let operation = OutboxMessage {
             recipient: address.recipient,
@@ -1617,6 +1621,8 @@ mod reader_tests {
                 "unavailable, lost and truncated replies must not remove or replace the request"
             );
         }
+    }
+    #[test]
     fn delivery_worker_shutdown_interrupts_backoff_without_another_dispatch() {
         let (wake, events) = mpsc::sync_channel(1);
         let (attempted, attempts) = mpsc::sync_channel(1);
@@ -1670,7 +1676,6 @@ mod reader_tests {
             Err(Refusal::Unavailable)
         );
     }
-
     #[test]
     fn an_expired_guest_exchange_refuses_more_reads_and_writes() {
         let (mut socket, _peer) = UnixStream::pair().unwrap();

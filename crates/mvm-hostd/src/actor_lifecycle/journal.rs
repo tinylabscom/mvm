@@ -278,6 +278,7 @@ mod tests {
             epoch,
             report: None,
             retention: None,
+            service_blind: None,
         };
         let derived =
             crate::mailbox_launch::derive_launch_keys(keys, &grant, &Key::random()).unwrap();

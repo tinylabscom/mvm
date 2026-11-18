@@ -296,6 +296,7 @@ fn grant(keys: &Path) -> Result<MailboxGrant> {
             .to_bytes(),
         report: None,
         retention: Some(MailboxRetentionPolicy::new(60_000)?),
+        service_blind: None,
     })
 }
 

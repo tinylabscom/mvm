@@ -1,5 +1,5 @@
 use super::*;
-use mvm_agentd::vsock::{EntrypointEvent, GuestRequest, AuthenticatedSession};
+use mvm_agentd::vsock::{AuthenticatedSession, EntrypointEvent, GuestRequest};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
@@ -182,7 +182,7 @@ fn authenticate_and_send(
             anyhow::bail!("actor dispatch requires the exact image entrypoint");
         };
         *timeout_secs = (*timeout_secs).min(remaining_secs);
-        session.send(stream, request).map_err(Into::into)
+        session.write(stream, request)
     })?;
     Ok(session)
 }
@@ -203,13 +203,9 @@ mod tests {
             peer.set_write_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
             let anchor = SigningKey::from_bytes(&[7; 32]).verifying_key();
-            let mut session = AuthenticatedSession::guest(
-                &mut peer,
-                SigningKey::from_bytes(&[9; 32]),
-                &anchor,
-                &mvm_agentd::vsock::control_offer(),
-            )
-            .unwrap();
+            let mut session =
+                AuthenticatedSession::guest(&mut peer, SigningKey::from_bytes(&[9; 32]), &anchor)
+                    .unwrap();
             let request: GuestRequest = session.read(&mut peer).unwrap();
             let GuestRequest::RunEntrypoint {
                 stdin,
@@ -294,13 +290,8 @@ mod tests {
             peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
             let anchor = SigningKey::from_bytes(&[7; 32]).verifying_key();
             assert!(
-                AuthenticatedSession::guest(
-                    &mut peer,
-                    SigningKey::from_bytes(&[9; 32]),
-                    &anchor,
-                    &mvm_agentd::vsock::control_offer(),
-                )
-                .is_err(),
+                AuthenticatedSession::guest(&mut peer, SigningKey::from_bytes(&[9; 32]), &anchor,)
+                    .is_err(),
                 "expired handshake cannot reach request decoding"
             );
         });
@@ -335,13 +326,9 @@ mod tests {
         let guest = std::thread::spawn(move || {
             peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             let anchor = SigningKey::from_bytes(&[7; 32]).verifying_key();
-            let mut session = AuthenticatedSession::guest(
-                &mut peer,
-                SigningKey::from_bytes(&[9; 32]),
-                &anchor,
-                &mvm_agentd::vsock::control_offer(),
-            )
-            .unwrap();
+            let mut session =
+                AuthenticatedSession::guest(&mut peer, SigningKey::from_bytes(&[9; 32]), &anchor)
+                    .unwrap();
             let request: GuestRequest = session.read(&mut peer).unwrap();
             assert!(matches!(
                 request,

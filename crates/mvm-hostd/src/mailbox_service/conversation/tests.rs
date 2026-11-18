@@ -691,6 +691,7 @@ fn exact_guest_lease_and_signed_ack_settle_result_durably() {
         epoch: f.header.execution_epoch,
         report: None,
         retention: None,
+        service_blind: None,
     };
     let enrollment = sign_guest_reader_enrollment(
         MailboxGuestReaderEnrollment {

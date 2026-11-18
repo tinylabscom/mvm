@@ -251,61 +251,7 @@ fn start_admitted_with_finalization(
 ) -> Result<StartTailResult> {
     let cli_transient = matches!(finalization, StartFinalization::CliTransient { .. });
     let persistent = matches!(finalization, StartFinalization::Persistent { .. });
-    start_admitted_inner(params, verified_runtime, None, None, || Ok(()))
-}
 
-/// Start through the ordinary gates while retaining original actor teardown custody.
-///
-/// The owner slot remains populated after a post-start error. Callers must retain
-/// it until cleanup is proved; an error never authorizes a capacity refund.
-pub fn start_admitted_owned_actor(
-    params: StartAdmittedParams<'_>,
-    owner: &mut Option<mvm_runtime::actor_teardown::ActorOwner>,
-    before_dispatch: impl FnOnce() -> Result<()>,
-) -> Result<StartedMachine> {
-    start_owned_admitted_impl(params, owner, None, before_dispatch)
-}
-
-/// Start an admitted controller with its original per-boot holder provisioned before activation.
-pub fn start_admitted_owned_actor_with_bootstrap(
-    params: StartAdmittedParams<'_>,
-    owner: &mut Option<mvm_runtime::actor_teardown::ActorOwner>,
-    bootstrap: mvm_runtime::actor_teardown::ActorBootstrap,
-    before_dispatch: impl FnOnce() -> Result<()>,
-) -> Result<StartedMachine> {
-    start_owned_admitted_impl(params, owner, Some(bootstrap), before_dispatch)
-}
-
-fn start_owned_admitted_impl(
-    params: StartAdmittedParams<'_>,
-    owner: &mut Option<mvm_runtime::actor_teardown::ActorOwner>,
-    bootstrap: Option<mvm_runtime::actor_teardown::ActorBootstrap>,
-    before_dispatch: impl FnOnce() -> Result<()>,
-) -> Result<StartedMachine> {
-    anyhow::ensure!(owner.is_none(), "actor owner slot is already occupied");
-    anyhow::ensure!(
-        params.emitter.is_some(),
-        "actor launch requires durable audit"
-    );
-    mvm_runtime::actor_teardown::supports_actor_backend(params.backend)?;
-    let verified =
-        mvm_runtime::runtime_evidence::verify_selected_release_runtime_set(&params.config)?;
-    let started = start_admitted_with_finalization(
-        params,
-        verified.as_ref(),
-        StartFinalization::Immediate,
-        Some(owner),
-        bootstrap,
-        before_dispatch,
-    )?;
-    Ok(StartedMachine {
-        vm_id: started.vm_id,
-        admitted: started.admitted,
-        enforced_grants: started
-            .enforced_grants
-            .expect("actor host start always checks enforced grants"),
-    })
-}
     let backend = params.backend;
     let mut admitted = params.admitted;
     anyhow::ensure!(
@@ -645,33 +591,34 @@ fn start_owned_admitted_impl(
             // A grant that cannot be served is refused rather than booting a
             // guest whose mailbox port nobody answers.
             if !persistent {
-                let mailbox = if let Some(owner) = actor_owner.as_mut().and_then(|slot| slot.as_mut()) {
-                    let mut child = crate::mailbox_process::spawn_for_launch_owned(
-                        admitted.plan(),
-                        backend,
-                        &vm_name,
-                        mailbox_posture.as_ref(),
-                    )
-                    .context("actor mailbox helper spawn/readiness failed")?;
-                    let state_dir = mvm_core::config::vm_state_dir(&vm_name);
-                    owner.attach_helper(
-                        "mailbox",
-                        &mut child,
-                        &[
-                            state_dir.join(mvm_vmm::host::vm_helpers::MAILBOX_PID_FILE),
-                            mvm_core::config::vm_mailbox_secret_at(&state_dir),
-                        ],
-                    )
-                } else {
-                    crate::mailbox_process::spawn_for_launch(
-                        admitted.plan(),
-                        backend,
-                        &vm_name,
-                        mailbox_posture.as_ref(),
-                    )
-                    .map(|_| ())
-                    .map_err(anyhow::Error::from)
-                };
+                let mailbox =
+                    if let Some(owner) = actor_owner.as_mut().and_then(|slot| slot.as_mut()) {
+                        let mut child = crate::mailbox_process::spawn_for_launch_owned(
+                            admitted.plan(),
+                            backend,
+                            &vm_name,
+                            mailbox_posture.as_ref(),
+                        )
+                        .context("actor mailbox helper spawn/readiness failed")?;
+                        let state_dir = mvm_core::config::vm_state_dir(&vm_name);
+                        owner.attach_helper(
+                            "mailbox",
+                            &mut child,
+                            &[
+                                state_dir.join(mvm_vmm::host::vm_helpers::MAILBOX_PID_FILE),
+                                mvm_core::config::vm_mailbox_secret_at(&state_dir),
+                            ],
+                        )
+                    } else {
+                        crate::mailbox_process::spawn_for_launch(
+                            admitted.plan(),
+                            backend,
+                            &vm_name,
+                            mailbox_posture.as_ref(),
+                        )
+                        .map(|_| ())
+                        .map_err(anyhow::Error::from)
+                    };
                 if let Err(err) = mailbox {
                     let undo = UndoLaunch {
                         backend,
@@ -734,6 +681,59 @@ fn start_owned_admitted_impl(
             })
         }
     }
+}
+
+/// Start through the ordinary gates while retaining original actor teardown custody.
+///
+/// The owner slot remains populated after a post-start error. Callers must retain
+/// it until cleanup is proved; an error never authorizes a capacity refund.
+pub fn start_admitted_owned_actor(
+    params: StartAdmittedParams<'_>,
+    owner: &mut Option<mvm_runtime::actor_teardown::ActorOwner>,
+    before_dispatch: impl FnOnce() -> Result<()>,
+) -> Result<StartedMachine> {
+    start_owned_admitted_impl(params, owner, None, before_dispatch)
+}
+
+/// Start an admitted controller with its original per-boot holder provisioned before activation.
+pub fn start_admitted_owned_actor_with_bootstrap(
+    params: StartAdmittedParams<'_>,
+    owner: &mut Option<mvm_runtime::actor_teardown::ActorOwner>,
+    bootstrap: mvm_runtime::actor_teardown::ActorBootstrap,
+    before_dispatch: impl FnOnce() -> Result<()>,
+) -> Result<StartedMachine> {
+    start_owned_admitted_impl(params, owner, Some(bootstrap), before_dispatch)
+}
+
+fn start_owned_admitted_impl(
+    params: StartAdmittedParams<'_>,
+    owner: &mut Option<mvm_runtime::actor_teardown::ActorOwner>,
+    bootstrap: Option<mvm_runtime::actor_teardown::ActorBootstrap>,
+    before_dispatch: impl FnOnce() -> Result<()>,
+) -> Result<StartedMachine> {
+    anyhow::ensure!(owner.is_none(), "actor owner slot is already occupied");
+    anyhow::ensure!(
+        params.emitter.is_some(),
+        "actor launch requires durable audit"
+    );
+    mvm_runtime::actor_teardown::supports_actor_backend(params.backend)?;
+    let verified =
+        mvm_runtime::runtime_evidence::verify_selected_release_runtime_set(&params.config)?;
+    let started = start_admitted_with_finalization(
+        params,
+        verified.as_ref(),
+        StartFinalization::Immediate,
+        Some(owner),
+        bootstrap,
+        before_dispatch,
+    )?;
+    Ok(StartedMachine {
+        vm_id: started.vm_id,
+        admitted: started.admitted,
+        enforced_grants: started
+            .enforced_grants
+            .expect("actor host start always checks enforced grants"),
+    })
 }
 
 fn stop_actor(

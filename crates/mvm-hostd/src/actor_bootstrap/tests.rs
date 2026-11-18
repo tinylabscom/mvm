@@ -35,6 +35,7 @@ pub(crate) fn authored() -> ActorBootstrap {
             epoch: ExecutionEpoch::new(1).unwrap(),
             report: None,
             retention: Some(MailboxRetentionPolicy::new(60_000).unwrap()),
+            service_blind: None,
         })
         .build();
     parent.environment = Some(mvm_contract::plan::types::EnvironmentRef {

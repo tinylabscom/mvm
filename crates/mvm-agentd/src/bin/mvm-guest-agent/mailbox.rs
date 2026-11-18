@@ -464,6 +464,7 @@ mod tests {
             epoch: ExecutionEpoch::new(plan.execution_epoch).unwrap(),
             report: None,
             retention: None,
+            service_blind: None,
         });
         plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
         let boot = MailboxReaderBootBinding::mint(

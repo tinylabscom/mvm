@@ -302,6 +302,7 @@ mod tests {
                 )
                 .unwrap()
                 .to_bytes(),
+                service_blind: None,
             };
             crate::mailbox_launch::host_trust(keys.path(), &grant, &Key::from_bytes([41; 32]))
                 .unwrap()

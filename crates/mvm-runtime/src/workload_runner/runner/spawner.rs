@@ -1119,6 +1119,7 @@ mod tests {
             epoch: ExecutionEpoch::new(plan.execution_epoch).unwrap(),
             report: None,
             retention: None,
+            service_blind: None,
         });
         let target = ConversationTarget {
             address: MailboxAddress {

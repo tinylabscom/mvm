@@ -1744,9 +1744,7 @@ mod tests {
                         .iter()
                         .map(|(key, _)| key.as_str())
                         .find(|key| key.starts_with("CARGO_TARGET_") && key.ends_with("_RUSTFLAGS"))
-                        .unwrap_or_else(|| {
-                            panic!("{path}: recipe sets no per-target rustflags")
-                        });
+                        .unwrap_or_else(|| panic!("{path}: recipe sets no per-target rustflags"));
                     let recipe_flags = envs
                         .get(OsStr::new(var))
                         .and_then(|value| *value)

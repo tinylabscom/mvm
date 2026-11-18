@@ -245,6 +245,7 @@ impl LocalActorMailboxes {
             authority_key: authority_key_for(&self.keys_dir, &mailbox, epoch)?.to_bytes(),
             report: template_grant.report,
             retention: template_grant.retention,
+            service_blind: None,
         };
         let mut endpoint = self.endpoint(child, grant)?;
         endpoint.parent = Some(parent_endpoint.grant);
@@ -396,6 +397,7 @@ pub(crate) mod tests {
             epoch,
             report: None,
             retention: Some(MailboxRetentionPolicy::new(10_000).unwrap()),
+            service_blind: None,
         });
         let owner = LocalActorMailboxes::new(dir.path().to_owned(), policy, [5; 32]).unwrap();
         parent.mailbox = Some(owner.install_controller(&parent).unwrap());

@@ -116,6 +116,7 @@ mod tests {
             epoch: ExecutionEpoch::new(1).unwrap(),
             report: None,
             retention: None,
+            service_blind: None,
         });
         assert!(
             !sdk_sidecar_required(&plan),
