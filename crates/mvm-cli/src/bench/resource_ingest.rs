@@ -14,7 +14,9 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use super::cold_launch::{ColdLaunchReport, LaunchLane, SpanStats};
-use super::resource_report::{Figure, ResourceReport, Section, UnitCost, WakeupQuantity, Wakeups};
+use super::resource_report::{
+    Figure, MemoryQuantity, ResourceReport, Section, UnitCost, WakeupQuantity, Wakeups,
+};
 
 /// Launch mode the harness records in `metadata.json`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,7 +154,24 @@ fn read_wave(s: &Summary, wave: u32, standby: bool) -> Result<Wave> {
     })
 }
 
-fn footprint(path: &Path) -> Result<std::result::Result<u64, String>> {
+/// The capture's quantity; a capture that names none predates Linux support and
+/// is a physical footprint.
+fn capture_quantity(json: &Value, path: &Path) -> Result<MemoryQuantity> {
+    match json["quantity"].as_str() {
+        None | Some("physical_footprint") => Ok(MemoryQuantity::PhysicalFootprint),
+        Some("proportional_set_size") => Ok(MemoryQuantity::ProportionalSetSize),
+        Some(other) => bail!("{} has unknown memory quantity `{other}`", path.display()),
+    }
+}
+
+fn bytes_key(quantity: MemoryQuantity) -> &'static str {
+    match quantity {
+        MemoryQuantity::PhysicalFootprint => "physical_footprint_bytes",
+        MemoryQuantity::ProportionalSetSize => "proportional_set_size_bytes",
+    }
+}
+
+fn footprint(path: &Path, expected: MemoryQuantity) -> Result<std::result::Result<u64, String>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading {}; the harness always writes it", path.display()))?;
     let json: Value = serde_json::from_str(&text)
@@ -168,23 +187,36 @@ fn footprint(path: &Path) -> Result<std::result::Result<u64, String>> {
         }
         other => bail!("{} has status {other:?}", path.display()),
     }
+    let quantity = capture_quantity(&json, path)?;
+    if quantity != expected {
+        bail!(
+            "{} measured {}, but this host reports {}",
+            path.display(),
+            quantity.label(),
+            expected.label()
+        );
+    }
     let processes = json["processes"]
         .as_array()
         .with_context(|| format!("{} is measured but has no processes array", path.display()))?;
     let mut total = 0u64;
     for process in processes {
-        total += process["physical_footprint_bytes"]
-            .as_u64()
-            .with_context(|| format!("{} has a process without a footprint", path.display()))?;
+        total += process[bytes_key(quantity)].as_u64().with_context(|| {
+            format!(
+                "{} has a process without a {}",
+                path.display(),
+                quantity.label()
+            )
+        })?;
     }
     Ok(Ok(total))
 }
 
 /// Per-unit physical footprint: what the wave added between its `before` and
 /// `settled` captures, divided by the units it launched.
-fn wave_memory(wave_dir: &Path, units: u64) -> Result<Figure<u64>> {
-    let before = footprint(&wave_dir.join("physical-memory-before.json"))?;
-    let settled = footprint(&wave_dir.join("physical-memory-settled.json"))?;
+fn wave_memory(wave_dir: &Path, units: u64, quantity: MemoryQuantity) -> Result<Figure<u64>> {
+    let before = footprint(&wave_dir.join("physical-memory-before.json"), quantity)?;
+    let settled = footprint(&wave_dir.join("physical-memory-settled.json"), quantity)?;
     match (before, settled) {
         (Ok(before), Ok(settled)) => {
             // The captures are host-wide, so a shrink is other processes' doing.
@@ -202,12 +234,12 @@ fn wave_memory(wave_dir: &Path, units: u64) -> Result<Figure<u64>> {
 /// Fixed host memory: the summed physical footprint of the MVM host processes
 /// the zero-unit capture found. Runs recorded before wave 0 captured memory
 /// stay unmeasured.
-fn baseline_memory(dir: &Path) -> Result<Figure<u64>> {
+fn baseline_memory(dir: &Path, quantity: MemoryQuantity) -> Result<Figure<u64>> {
     let path = dir.join("wave-0/physical-memory-settled.json");
     if !path.exists() {
         return Ok(Figure::unmeasured("the run has no wave-0 memory capture"));
     }
-    Ok(match footprint(&path)? {
+    Ok(match footprint(&path, quantity)? {
         Ok(bytes) => Figure::measured(bytes),
         Err(reason) => Figure::unmeasured(reason),
     })
@@ -291,6 +323,13 @@ fn quantity_of(os: &str) -> Result<WakeupQuantity> {
     }
 }
 
+fn memory_quantity_of(os: &str) -> MemoryQuantity {
+    match os {
+        "Linux" => MemoryQuantity::ProportionalSetSize,
+        _ => MemoryQuantity::PhysicalFootprint,
+    }
+}
+
 fn architecture_of(raw: &str) -> &str {
     match raw {
         "arm64" => "aarch64",
@@ -341,7 +380,9 @@ pub fn from_density_dir(dir: &Path) -> Result<Section> {
         bail!("warm-mode density runs are not ingested yet");
     }
     let standby = mode == Mode::Standby;
+    let memory_quantity = memory_quantity_of(string_at(&meta, &["host", "os"])?);
     let mut section = Section::unmeasured(backend, architecture, quantity);
+    section.memory_quantity = memory_quantity;
 
     summary
         .count("wave_0_matching_processes")
@@ -356,7 +397,11 @@ pub fn from_density_dir(dir: &Path) -> Result<Section> {
         }
     }
     let wave = chosen.context("the largest wave was not read")?;
-    let memory = wave_memory(&dir.join(format!("wave-{largest}")), wave.units)?;
+    let memory = wave_memory(
+        &dir.join(format!("wave-{largest}")),
+        wave.units,
+        memory_quantity,
+    )?;
 
     match &baseline {
         Idle::Measured(b) => {
@@ -370,7 +415,7 @@ pub fn from_density_dir(dir: &Path) -> Result<Section> {
                 Figure::unmeasured(format!("idle sampler: {m}"));
         }
     }
-    section.fixed_host_cost.memory_bytes = baseline_memory(dir)?;
+    section.fixed_host_cost.memory_bytes = baseline_memory(dir, memory_quantity)?;
     section.fixed_host_cost.disk_bytes = baseline_disk(&summary)?;
 
     let cost = unit_cost(quantity, &baseline, &wave, memory, standby)?;
@@ -644,6 +689,11 @@ mod tests {
         let unavailable = r#"{"status": "unavailable", "processes": []}"#;
         write_capture(&dir, "physical-memory-before.json", unavailable);
         write_capture(&dir, "physical-memory-settled.json", unavailable);
+        std::fs::write(
+            dir.path().join("wave-0/physical-memory-settled.json"),
+            unavailable,
+        )
+        .unwrap();
         let s = from_density_dir(dir.path()).unwrap();
         assert_eq!(s.backend, "firecracker");
         assert_eq!(
@@ -654,6 +704,56 @@ mod tests {
             Figure::Unmeasured { reason } => assert!(reason.contains("unavailable")),
             Figure::Measured { .. } => panic!("memory must stay unmeasured"),
         }
+    }
+
+    fn linux_run(wave_0: &str, before: &str, settled: &str) -> tempfile::TempDir {
+        let dir = with_meta(|m| {
+            m.replace("Darwin", "Linux")
+                .replace("arm64", "x86_64")
+                .replace("\"hvf\"", "\"firecracker\"")
+        });
+        std::fs::write(
+            dir.path().join("wave-0/physical-memory-settled.json"),
+            wave_0,
+        )
+        .unwrap();
+        write_capture(&dir, "physical-memory-before.json", before);
+        write_capture(&dir, "physical-memory-settled.json", settled);
+        dir
+    }
+
+    fn pss_capture(bytes: u64) -> String {
+        format!(
+            r#"{{"status": "measured", "quantity": "proportional_set_size", "processes": [{{"proportional_set_size_bytes": {bytes}}}]}}"#
+        )
+    }
+
+    #[test]
+    fn a_linux_run_reports_proportional_set_size_and_says_so() {
+        let dir = linux_run(&pss_capture(5000), &pss_capture(1000), &pss_capture(5000));
+        let s = from_density_dir(dir.path()).unwrap();
+        assert_eq!(s.memory_quantity, MemoryQuantity::ProportionalSetSize);
+        assert_eq!(s.fixed_host_cost.memory_bytes, Figure::measured(5000));
+        assert_eq!(s.by_residency.running.memory_bytes, Figure::measured(2000));
+        let md = crate::bench::resource_report::render_markdown(&ResourceReport {
+            sections: vec![s],
+            ..ResourceReport::default()
+        });
+        assert!(md.contains("proportional set size"));
+    }
+
+    #[test]
+    fn a_capture_of_the_other_quantity_is_refused() {
+        let footprint = r#"{"status": "measured", "processes": [{"physical_footprint_bytes": 1}]}"#;
+        let dir = linux_run(&pss_capture(5000), footprint, &pss_capture(5000));
+        assert!(error_of(&dir).contains("measured physical footprint"));
+    }
+
+    #[test]
+    fn a_macos_run_with_an_unlabelled_capture_is_a_physical_footprint() {
+        let s = from_density_dir(&fixture()).unwrap();
+        assert_eq!(s.memory_quantity, MemoryQuantity::PhysicalFootprint);
+        assert_eq!(s.fixed_host_cost.memory_bytes, Figure::measured(7_000_000));
     }
 
     #[test]
