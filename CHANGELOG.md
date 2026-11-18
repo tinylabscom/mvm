@@ -2,6 +2,20 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.28.0-rc.11] — 2026-11-17
+
+### Added
+- **client**: Fail closed when the running egress gate cannot verify
+- **hostlib**: Expose metadata-only secret.get for PS-21
+
+### Changed
+- **xtask**: Fail check-all once the cargo-deny ignore's expiry date passes
+- **xtask**: Gate mvm_runtime and mvm_hostd reaches across all of mvm-cli
+
+### Fixed
+- **release**: Bring the published installed-boot evidence test back in step with its script
+- **hvf**: Include signed descriptor verification in standalone helpers
+
 ## [0.28.0-rc.10] — 2026-11-17
 
 ### Added

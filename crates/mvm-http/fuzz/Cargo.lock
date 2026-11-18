@@ -350,7 +350,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-http"
-version = "0.28.0-rc.10"
+version = "0.28.0-rc.11"
 dependencies = [
  "base64",
  "bytes",
