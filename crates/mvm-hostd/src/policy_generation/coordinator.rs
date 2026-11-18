@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use super::managed::CoordinatorStatus;
 #[cfg(unix)]
 use super::managed::Lifetime;
+#[cfg(unix)]
+use super::store::PublicationUnresolved;
 use super::{GenerationStore, ProjectPolicyCandidate, prepare_initial};
 
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
@@ -56,6 +58,11 @@ pub enum Response {
         candidate: Option<Box<ProjectPolicyCandidate>>,
     },
     Refused {
+        message: String,
+    },
+    /// An activation's outcome is unknown; reads stay refused until the
+    /// coordinator recovers the interrupted publication.
+    Unresolved {
         message: String,
     },
 }
@@ -142,7 +149,7 @@ mod unix {
             Response::Refused { message } => {
                 anyhow::bail!("policy coordinator refused a status request: {message}")
             }
-            Response::Ready | Response::Policy { .. } => {
+            Response::Ready | Response::Policy { .. } | Response::Unresolved { .. } => {
                 anyhow::bail!("policy coordinator answered a status request with something else")
             }
         }
@@ -200,6 +207,7 @@ mod unix {
                 let _one_activation = ACTIVATIONS
                     .lock()
                     .expect("policy activation mutex poisoned");
+                store.recover()?;
                 let _barrier =
                     mvm_core::host_interface::activation_barrier::ActivationBarrier::exclusive()?;
                 mvm_runtime::AnyBackend::probe_host_quiescence()?;
@@ -216,6 +224,14 @@ mod unix {
                 )
             }
             Request::Read { project } => {
+                // Never wait here: the caller may hold the shared barrier an
+                // activation is waiting on. If recovery cannot run now, the
+                // load below refuses.
+                if store.has_obligation()?
+                    && let Ok(_one_activation) = ACTIVATIONS.try_lock()
+                {
+                    store.recover()?;
+                }
                 let loaded = store.load(&project, &source)?;
                 if let Some(candidate) = &loaded {
                     ensure!(
@@ -232,6 +248,17 @@ mod unix {
         Ok(Response::Policy {
             candidate: candidate.map(Box::new),
         })
+    }
+
+    /// A handler error as the wire reply: an ambiguous publication is
+    /// reported as such rather than as an ordinary refusal.
+    fn error_response(error: &anyhow::Error) -> Response {
+        let message = format!("{error:#}");
+        if error.downcast_ref::<PublicationUnresolved>().is_some() {
+            Response::Unresolved { message }
+        } else {
+            Response::Refused { message }
+        }
     }
 
     /// Bind under the spawn lock a detached launcher holds while it waits for
@@ -294,6 +321,13 @@ mod unix {
         let listener = UnixListener::bind(&socket)
             .with_context(|| format!("binding policy coordinator {}", socket.display()))?;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
+        // Only the process that holds the socket may recover: an obligation
+        // seen before that point can belong to a coordinator still publishing.
+        // A failed recovery leaves the store refusing through its index; the
+        // coordinator still serves so the refusal is reported, not a dead socket.
+        if let Err(error) = store.recover() {
+            tracing::warn!(%error, "policy coordinator could not recover an interrupted publication");
+        }
         Ok((listener, store))
     }
 
@@ -350,9 +384,7 @@ mod unix {
                     .and_then(|request| handle(request, &store, &status))
                 {
                     Ok(response) => response,
-                    Err(error) => Response::Refused {
-                        message: format!("{error:#}"),
-                    },
+                    Err(error) => error_response(&error),
                 };
                 if let Err(error) = write_frame(&mut stream, &reply, MAX_RESPONSE_BYTES) {
                     tracing::warn!(%error, "policy coordinator could not return a response");
@@ -413,6 +445,32 @@ mod unix {
                 bind(&home).is_err(),
                 "a second coordinator must not take over a live socket"
             );
+        }
+
+        #[test]
+        fn an_unresolved_publication_is_reported_apart_from_an_ordinary_refusal() {
+            let unresolved = anyhow::Error::new(PublicationUnresolved::new("index write failed"))
+                .context("activating");
+            assert!(matches!(
+                error_response(&unresolved),
+                Response::Unresolved { .. }
+            ));
+            assert!(matches!(
+                error_response(&anyhow::anyhow!("plain failure")),
+                Response::Refused { .. }
+            ));
+        }
+
+        #[test]
+        fn the_unresolved_response_round_trips() {
+            let reply = Response::Unresolved {
+                message: "unknown".into(),
+            };
+            let bytes = serde_json::to_vec(&reply).unwrap();
+            assert!(matches!(
+                serde_json::from_slice::<Response>(&bytes).unwrap(),
+                Response::Unresolved { message } if message == "unknown"
+            ));
         }
 
         #[test]

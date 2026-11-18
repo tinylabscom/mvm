@@ -268,6 +268,23 @@ nothing; and no confinement between processes of one user is claimed. The
 real-socket tests supply the manager's answers, so they are component
 evidence, not a witness that a unit was provisioned and run on a host.
 
+Publishing a project's first generation is ordered so that a crash can never
+leave a reader authorizing from an unconfirmed index. After the activation
+marker, the coordinator durably writes a small bounded `pending.json` naming
+the project and its closure, then the record, then the index, and only then
+removes `pending.json`. While `pending.json` exists, every reader and every
+activation refuses, even if the index already names the project. A failure
+after the obligation is written is reported as an unresolved outcome rather than
+a refusal, and the coordinator recovers at startup and before the next
+activation. Recovery only removes files: an index that names the project with
+the matching closure and a matching record is a committed publication and the
+obligation is dropped; an index that does not name the project means the
+publication never committed, so a matching record and the obligation are
+removed, and when no index exists at all the activation marker is removed as
+well, since only this publication can have written it, so a rolled-back first
+publication leaves a clean store; anything that does not match is left in place
+and keeps refusing.
+
 This coordinator is an implementation of [#5097](https://github.com/tinylabscom/mvm/issues/5097)'s
 local host-interface responsibilities, not a second authority alongside
 `HostInterface`. Local mode resolves and applies locally without central

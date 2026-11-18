@@ -378,6 +378,9 @@ fn request(mut request: Request) -> Result<Option<ProjectPolicyCandidate>> {
             Ok(candidate.map(|candidate| *candidate))
         }
         Response::Refused { message } => bail!("policy coordinator refused: {message}"),
+        Response::Unresolved { message } => bail!(
+            "the outcome of the policy activation is unknown and the coordinator refuses policy reads until it recovers: {message}"
+        ),
         Response::Ready | Response::Status { .. } => {
             bail!("unexpected policy coordinator response to a project request")
         }
@@ -464,7 +467,7 @@ mod unix {
             Response::Refused { message } => {
                 bail!("policy coordinator refused readiness: {message}")
             }
-            Response::Policy { .. } | Response::Status { .. } => {
+            Response::Policy { .. } | Response::Status { .. } | Response::Unresolved { .. } => {
                 bail!("policy coordinator answered a ping with something else")
             }
         }

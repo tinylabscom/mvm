@@ -249,6 +249,21 @@ detached spawn path, activation and generation storage are unchanged and not
 re-reviewed here. Not reviewed: a provisioned unit on a real host, restart
 limits, and any commit, migration or signing path.
 
+## Publication obligation and recovery
+
+Covers `GenerationStore::publish_initial` and `GenerationStore::recover` in
+`mvm-hostd/src/policy_generation/store.rs`, for
+[#5255](https://github.com/tinylabscom/mvm/issues/5255). A durable
+`pending.json` is written before the record and index and removed after them;
+readers and activations refuse while it exists, and recovery removes files
+only: a rolled-back first publication also removes the activation marker.
+Still open: an activation marker with no index and no obligation is still
+refused with no automatic recovery. A failure after the obligation is written
+is exercised only by stopping between the store's own step functions, not
+through a real failing `fsync`, and the unresolved-error wrapping inside
+`publish_initial` has no test of its own. Migration exclusion and
+prepared-head signing custody are untouched.
+
 ## Compile-time AES-GCM boundary
 
 Reviewed `crates/mvm-crypto/src/aead.rs`,
