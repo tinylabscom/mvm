@@ -122,6 +122,16 @@ impl Drop for TestEnv {
 /// running the fixture so the fixture may acquire its own non-reentrant guard.
 #[cfg(unix)]
 pub fn isolated_lock_probe(probe: impl FnOnce()) {
+    isolated_env_probe(probe);
+}
+
+/// Run an environment-sensitive fixture in its own exact-test process.
+///
+/// A [`TestEnv`] serializes cooperating tests, but cannot stop other threads
+/// from reading its temporary environment and creating state there. Use process
+/// isolation when observing the absence of such side effects. Call without
+/// holding a [`TestEnv`]; the fixture may acquire its own guard in the child.
+pub fn isolated_env_probe(probe: impl FnOnce()) {
     let env = TestEnv::new();
     const CHILD_ENV: &str = "MVM_TEST_ISOLATED_PRE_EXEC_LOCK_PROBE";
     let thread = std::thread::current();
@@ -152,7 +162,6 @@ pub fn isolated_lock_probe(probe: impl FnOnce()) {
     assert_isolated_probe_completed(name, &output);
 }
 
-#[cfg(unix)]
 fn assert_isolated_probe_completed(name: &str, output: &std::process::Output) {
     let completed = format!("completed isolated pre-exec lock probe: {name}");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -244,7 +253,26 @@ mod isolated_lock_probe_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::TestEnv;
+    use super::{TestEnv, isolated_env_probe};
+
+    #[test]
+    fn isolated_environment_fixture_runs_only_in_the_child_process() {
+        let is_child = {
+            let _env = TestEnv::new();
+            std::env::var_os("MVM_TEST_ISOLATED_PRE_EXEC_LOCK_PROBE").is_some()
+        };
+        let ran = std::cell::Cell::new(false);
+        isolated_env_probe(|| {
+            let _env = TestEnv::new();
+            assert_eq!(std::env::var_os("HOME"), std::env::var_os("MVM_HOME"));
+            ran.set(true);
+        });
+        assert_eq!(
+            ran.get(),
+            is_child,
+            "the fixture must execute in the selected child, never in its parent"
+        );
+    }
 
     fn unique_key(suffix: &str) -> String {
         format!("MVM_TEST_ENV_GUARD_{suffix}_{}", std::process::id())
