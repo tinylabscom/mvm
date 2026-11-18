@@ -32,7 +32,8 @@ Default image: ${IMAGE_REF}
 Useful overrides:
   MVM_HVF_DENSITY_OUT_DIR=/tmp/path          artifact directory outside the repo
   MVM_HVF_DENSITY_BACKEND=firecracker        Linux/KVM instead of macOS HVF
-  MVM_HVF_DENSITY_MODE=cold|warm             cold (default) or sequential warm claims
+  MVM_HVF_DENSITY_MODE=cold|warm|standby     cold (default), sequential warm claims, or
+                                             N standbys held unclaimed and idle-sampled
   MVM_HVF_DENSITY_WAVES="1 5 10 25 50 100"  wave sizes to run
   MVM_HVF_DENSITY_IMAGE=alpine              OCI image reference
   MVM_HVF_DENSITY_GUEST_SLEEP_SECONDS=240   in-guest sleep duration
@@ -149,11 +150,11 @@ if [[ "${MAILBOX}" != "0" && "${MAILBOX}" != "1" ]]; then
   echo "refusing: MVM_HVF_DENSITY_MAILBOX must be 0 or 1" >&2
   exit 70
 fi
-if [[ "${MODE}" != "cold" && "${MODE}" != "warm" ]]; then
-  echo "refusing: MVM_HVF_DENSITY_MODE must be cold or warm" >&2
+if [[ "${MODE}" != "cold" && "${MODE}" != "warm" && "${MODE}" != "standby" ]]; then
+  echo "refusing: MVM_HVF_DENSITY_MODE must be cold, warm or standby" >&2
   exit 70
 fi
-if [[ "${MODE}" == "warm" && "${MAILBOX}" == "1" ]]; then
+if [[ "${MODE}" != "cold" && "${MAILBOX}" == "1" ]]; then
   echo "refusing: mailbox grants are not warm-claim eligible" >&2
   exit 70
 fi
@@ -273,11 +274,16 @@ if [[ "${MVM_HVF_DENSITY_ALLOW_BUSY_HOST:-0}" != "1" ]]; then
   : >"${busy_host_processes}"
 fi
 
+# Standby holds are warmed through the warm residency; "standby" is not a residency.
+RESIDENCY="${MODE}"
+if [[ "${MODE}" == "standby" ]]; then
+  RESIDENCY="warm"
+fi
 run_env=(
   env
   "MVM_HOME=${DATA_DIR}"
   "CARGO_TARGET_DIR=${TARGET_DIR}"
-  "MVM_RESIDENCY=${MODE}"
+  "MVM_RESIDENCY=${RESIDENCY}"
 )
 
 host_kernel_arch() {
@@ -451,13 +457,14 @@ capture_mailbox_threads() {
 capture_idle() {
   local dir="$1"
   local wave="$2"
+  local standbys="${3:-}"
   if awk -v idle="${IDLE_SAMPLE_SECONDS}" 'BEGIN { exit !(idle == 0) }'; then
     printf 'wave_%s_idle_sampler\tnot_requested\n' "${wave}" >>"${SUMMARY}"
     return 0
   fi
   # A failed sample is recorded and never fails the wave it was observing.
   if ! python3 "${ROOT}/scripts/density_idle.py" "${dir}" "${wave}" "${IDLE_SAMPLE_SECONDS}" \
-    >>"${SUMMARY}" 2>"${dir}/idle-sample.stderr"; then
+    ${standbys:+"${standbys}"} >>"${SUMMARY}" 2>"${dir}/idle-sample.stderr"; then
     printf 'wave_%s_idle_sampler\tunavailable:sample_failed\n' "${wave}" >>"${SUMMARY}"
   fi
 }
@@ -493,6 +500,19 @@ capture_matching_processes() {
     (owned[$1] || index($0, pat) > 0 || index($0, home) > 0) &&
       $0 !~ /awk -v pat/ && $0 !~ /measure-hvf-density.sh/ { print }
   ' "${pids}" - >"${dir}/matching-${phase}.txt"
+}
+
+# Pool records outlive the machines they name (a stopped standby parent stays recorded as
+# idle), so a later wave would warm fewer than asked. DATA_DIR is the fresh MVM_HOME this
+# run created; refuse to delete anywhere else.
+clear_standby_pool() {
+  case "${DATA_DIR}" in
+    "" | "/" | "${HOME}" | "${HOME}/.mvm")
+      echo "refusing: will not clear pool state under ${DATA_DIR:-<empty>}" >&2
+      return 1
+      ;;
+  esac
+  rm -rf "${DATA_DIR:?}/pool"
 }
 
 check_launches() {
@@ -590,6 +610,23 @@ cleanup_wave() {
 python3 "${ROOT}/scripts/density_metadata.py" "${ROOT}" "${SUMMARY}" \
   >"${OUT_DIR}/metadata.json"
 
+# Wave 0: the host with no unit launched, so fixed cost can be told from per-unit cost.
+zero_dir="${OUT_DIR}/wave-0"
+mkdir -p "${zero_dir}"
+sleep "${SETTLE_SECONDS}"
+capture_matching_processes "settled" "${zero_dir}"
+zero_owned="$(wc -l <"${zero_dir}/matching-settled.txt" | tr -d ' ')"
+if [[ "${zero_owned}" -ne 0 ]]; then
+  echo "refusing: ${zero_owned} harness-owned VMM process(es) remain before the zero-unit sample; see ${zero_dir}/matching-settled.txt" >&2
+  exit 71
+fi
+{
+  printf 'wave_0_matching_processes\t%s\n' "${zero_owned}"
+  # The sampler counts every matching process on the host, other sessions' VMs included.
+  printf 'wave_0_sampler_scope\thost_wide_matching_processes\n'
+} >>"${SUMMARY}"
+capture_idle "${zero_dir}" 0
+
 for wave in "${WAVES[@]}"; do
   wave_dir="${OUT_DIR}/wave-${wave}"
   mkdir -p "${wave_dir}"
@@ -603,7 +640,21 @@ for wave in "${WAVES[@]}"; do
   capture_mailbox_threads "before" "${wave_dir}"
   capture_storage "before" "${wave_dir}"
 
-  for i in $(seq 1 "${wave}"); do
+  if [[ "${MODE}" == "standby" ]]; then
+    # Hold the standbys unclaimed: no machine run, so only the pool's own cost shows.
+    if ! "${run_env[@]}" "${MVMCTL_BIN}" pool warm "${wave}" \
+      --image "${IMAGE_REF}" --cpus "${CPUS}" --memory "${MEMORY}" \
+      >"${wave_dir}/standby.warm.stdout" 2>"${wave_dir}/standby.warm.stderr"; then
+      echo "refusing: standby warm failed for wave ${wave}; see ${wave_dir}/standby.warm.stderr" >&2
+      exit 71
+    fi
+  fi
+
+  launch_count="${wave}"
+  if [[ "${MODE}" == "standby" ]]; then
+    launch_count=0 # BSD seq counts down for `seq 1 0`, so the loop needs a real bound
+  fi
+  for ((i = 1; i <= launch_count; i++)); do
     name="${RUN_ID}-w${wave}-$(printf "%03d" "${i}")"
     stdout="${wave_dir}/${name}.stdout"
     stderr="${wave_dir}/${name}.stderr"
@@ -651,13 +702,12 @@ for wave in "${WAVES[@]}"; do
   done
 
   sleep "${SETTLE_SECONDS}"
-  check_launches "${wave_dir}" "${entries[@]}"
+  check_launches "${wave_dir}" "${entries[@]+"${entries[@]}"}"
   capture_host_memory "settled" "${wave_dir}"
   capture_processes "settled" "${wave_dir}"
   capture_mailbox_threads "settled" "${wave_dir}"
   capture_storage "settled" "${wave_dir}"
   capture_matching_processes "settled" "${wave_dir}"
-  capture_idle "${wave_dir}" "${wave}"
   read -r mailbox_count mailbox_rss_kib < <(
     awk -F '\t' '$1 == "mvm-mailbox" { count = $2; rss = $3 }
       END { print count+0, rss+0 }' "${wave_dir}/rss-settled.tsv"
@@ -669,6 +719,11 @@ for wave in "${WAVES[@]}"; do
   vmm_count="$(awk -F '\t' -v component="${vmm_component}" \
     '$1 == component { print $2; found = 1; exit }
       END { if (!found) print 0 }' "${wave_dir}/rss-settled.tsv")"
+  if [[ "${MODE}" == "standby" && "${vmm_count}" -gt 0 ]]; then
+    capture_idle "${wave_dir}" "${wave}" "${vmm_count}"
+  else
+    capture_idle "${wave_dir}" "${wave}"
+  fi
   mailbox_threads="$(awk -F '\t' 'NR > 1 { n += $2 } END { print n+0 }' \
     "${wave_dir}/mailbox-threads-settled.tsv")"
   vm_state_kib="$(awk 'NR == 1 { print $1 }' "${wave_dir}/vm-state-blocks-settled.txt")"
@@ -685,10 +740,13 @@ for wave in "${WAVES[@]}"; do
   } >>"${SUMMARY}"
 
   cleanup_ok=0
-  if cleanup_wave "${wave_dir}" "${pids[@]}"; then
+  if cleanup_wave "${wave_dir}" "${pids[@]+"${pids[@]}"}"; then
     cleanup_ok=1
   fi
   : >"${active_pids_file}"
+  if [[ "${MODE}" == "standby" ]] && ! clear_standby_pool; then
+    cleanup_ok=0
+  fi
   capture_host_memory "after-cleanup" "${wave_dir}"
   capture_processes "after-cleanup" "${wave_dir}"
   capture_mailbox_threads "after-cleanup" "${wave_dir}"
@@ -702,7 +760,9 @@ for wave in "${WAVES[@]}"; do
     echo "wave ${wave} failed; see ${wave_dir}" >&2
     exit 71
   fi
-  if compgen -G "${wave_dir}/*.receipt.json" >/dev/null; then
+  if [[ "${MODE}" == "standby" ]]; then
+    printf 'wave_%s_boot_receipt_p50_ms\tnot_applicable:standby_hold\n' "${wave}" >>"${SUMMARY}"
+  elif compgen -G "${wave_dir}/*.receipt.json" >/dev/null; then
     python3 "${ROOT}/scripts/density_timings.py" "${wave_dir}" "${wave}" "${MODE}" \
       "${IMAGE_REF}" "${CPUS}" "${MEMORY}" >>"${SUMMARY}"
   else

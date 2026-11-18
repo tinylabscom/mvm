@@ -1,6 +1,8 @@
 """Offline checks for the density wave's idle sampler, against a built procfs tree."""
 
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +12,7 @@ from scripts.density_idle import (
     component_of,
     cpu_ticks,
     render,
+    render_per_standby,
     sample,
     sample_macos,
     wakeups_from_rusage,
@@ -178,6 +181,53 @@ class DensityIdleMacosTests(unittest.TestCase):
         after = {1: ProcessSample("mvm-hvf-supervisor", 4, 10, 1_050_000_000, 600)}
         rows = summarize(before, after, 10.0, 1_000_000_000)
         self.assertEqual(rows, [("mvm-hvf-supervisor", 1, 4, 10, 5.0, 50.0)])
+
+
+class DensityIdleBaselineTests(unittest.TestCase):
+    def run_main(self, *arguments: str) -> subprocess.CompletedProcess:
+        root = Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory() as raw:
+            return subprocess.run(
+                [sys.executable, "-m", "scripts.density_idle", raw, *arguments],
+                cwd=root, capture_output=True, text=True, timeout=30,
+            )
+
+    def test_main_accepts_wave_zero_as_the_zero_unit_baseline(self) -> None:
+        result = self.run_main("0", "0.1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("wave_0_idle_window_seconds\t", result.stdout)
+
+    def test_main_still_refuses_a_negative_wave(self) -> None:
+        self.assertEqual(self.run_main("-1", "0.1").returncode, 71)
+
+    def test_main_accepts_the_optional_standby_count(self) -> None:
+        result = self.run_main("4", "0.1", "4")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("wave_4_idle_window_seconds\t", result.stdout)
+
+    def test_main_refuses_a_sixth_argument(self) -> None:
+        self.assertEqual(self.run_main("4", "0.1", "4", "x").returncode, 64)
+
+    def test_a_component_absent_from_a_fake_procfs_emits_no_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            write_process(root, 7, "/bin/sleep 1", (10, 0), [5], 2)
+            before = sample(root)
+            write_process(root, 7, "/bin/sleep 1", (20, 0), [15], 2)
+            rows = summarize(before, sample(root), 10.0, 100)
+        self.assertEqual(render(rows, 0)[1], "")
+
+    def test_the_standby_summary_divides_cost_by_the_held_count(self) -> None:
+        rows = [("mvm-hvf-supervisor", 4, 16, 40, 8.0, 20.0)]
+        self.assertEqual(
+            render_per_standby(rows, 4, 4),
+            "wave_4_idle_mvm-hvf-supervisor_cpu_millicores_per_standby\t2.00\n"
+            "wave_4_idle_mvm-hvf-supervisor_wakeups_per_second_per_standby\t5.00\n",
+        )
+
+    def test_a_standby_summary_for_no_standbys_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            render_per_standby([], 0, 0)
 
 
 if __name__ == "__main__":

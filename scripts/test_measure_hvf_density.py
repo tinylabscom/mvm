@@ -157,5 +157,87 @@ if args[:2] == ["machine", "run"]:
                 self.assertFalse((base / "out-fail/wave-1").exists())
 
 
+class StandbyHoldTests(unittest.TestCase):
+    FAKE = """#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+
+args = sys.argv[1:]
+home = Path(os.environ["MVM_HOME"])
+with (home.parent / "commands.jsonl").open("a") as log:
+    log.write(json.dumps([args, os.environ.get("MVM_RESIDENCY"),
+                          os.environ.get("MVM_HVF_WARM_REQUIRE_CLAIM")]) + "\\n")
+if args[:2] == ["pool", "warm"]:
+    (home / "pool" / "standby-1").mkdir(parents=True)
+"""
+
+    def run_standby(self, base: Path, extra: dict) -> subprocess.CompletedProcess:
+        ctl = base / "mvmctl"
+        ctl.write_text(self.FAKE)
+        ctl.chmod(0o755)
+        env = dict(os.environ)
+        env.update({
+            "MVM_HVF_DENSITY_BACKEND": "hvf" if platform.system() == "Darwin" else "firecracker",
+            "MVM_HVF_DENSITY_MODE": "standby",
+            "MVM_HVF_DENSITY_OUT_DIR": str(base / "out"),
+            "MVM_HVF_DENSITY_MVMCTL": str(ctl),
+            "MVM_SUBSTITUTION_ENDPOINT_PATH": str(ctl),
+            "MVM_HVF_SUPERVISOR_PATH": str(ctl),
+            "MVM_HVF_DENSITY_ALLOW_UNSUPPORTED": "1",
+            "MVM_HVF_DENSITY_ALLOW_BUSY_HOST": "1",
+            "MVM_HVF_DENSITY_SKIP_BUILD": "1",
+            "MVM_HVF_DENSITY_SKIP_PREPULL": "1",
+            "MVM_HVF_DENSITY_SEED_HOST_KERNEL": "0",
+            "MVM_HVF_DENSITY_WAVES": "1",
+            "MVM_HVF_DENSITY_GUEST_SLEEP_SECONDS": "61",
+            "MVM_HVF_DENSITY_SETTLE_SECONDS": "0",
+            "MVM_HVF_DENSITY_IDLE_SAMPLE_SECONDS": "0",
+            "MVM_HVF_DENSITY_LAUNCH_SPACING_SECONDS": "0",
+            "MVM_HVF_DENSITY_CLEANUP_GRACE_SECONDS": "0",
+        })
+        env.update(extra)
+        return subprocess.run(
+            ["/bin/bash" if platform.system() == "Darwin" else "bash",
+             str(ROOT / "scripts/measure-hvf-density.sh")],
+            env=env, capture_output=True, text=True, timeout=20,
+        )
+
+    def test_standby_warms_holds_and_clears_its_own_pool(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            base = Path(tmp)
+            result = self.run_standby(base, {})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            commands = [
+                json.loads(line)
+                for line in (base / "out/commands.jsonl").read_text().splitlines()
+            ]
+            warm = next(c for c in commands if c[0][:2] == ["pool", "warm"])
+            self.assertEqual(warm[0][2], "1")
+            self.assertEqual(warm[1], "warm")  # standby is not a residency value
+            self.assertFalse(any(c[2] for c in commands))  # nothing is claimed
+            self.assertEqual(
+                [c[0] for c in commands if c[0][:2] == ["machine", "run"]],
+                [c[0] for c in commands[:1]],  # only the unmeasured prime launch
+            )
+            self.assertFalse((base / "out/mvm-data/pool").exists())
+            summary = (base / "out/summary.tsv").read_text()
+            self.assertIn("launch_mode\tstandby", summary)
+            self.assertIn("wave_0_matching_processes\t0", summary)
+            self.assertIn("wave_0_sampler_scope\thost_wide_matching_processes", summary)
+
+    def test_pool_is_never_cleared_under_the_default_mvm_home(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            base = Path(tmp)
+            (base / "home").mkdir()
+            result = self.run_standby(
+                base,
+                {"HOME": str(base / "home"),
+                 "MVM_HVF_DENSITY_DATA_DIR": str(base / "home/.mvm")},
+            )
+            self.assertEqual(result.returncode, 71, result.stderr)
+            self.assertIn("will not clear pool state", result.stderr)
+            self.assertTrue((base / "home/.mvm/pool/standby-1").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

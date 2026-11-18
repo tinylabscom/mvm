@@ -264,14 +264,35 @@ def render(rows: list[tuple[str, int, int, int, float, float]], wave: int) -> tu
     return table, summary
 
 
+def render_per_standby(
+    rows: list[tuple[str, int, int, int, float, float]], wave: int, standbys: int
+) -> str:
+    """Held-standby cost: each component's CPU and wakeups divided by the standby count."""
+    if standbys < 1:
+        raise ValueError("standby count must be positive")
+    summary = ""
+    for name, _processes, _threads, _descriptors, millicores, wakeups in rows:
+        key = f"wave_{wave}_idle_{name}"
+        summary += (
+            f"{key}_cpu_millicores_per_standby\t{millicores / standbys:.2f}\n"
+            f"{key}_wakeups_per_second_per_standby\t{wakeups / standbys:.2f}\n"
+        )
+    return summary
+
+
 def main() -> int:
-    if len(sys.argv) != 4:
-        print("usage: density_idle.py WAVE_DIR WAVE_COUNT WINDOW_SECONDS", file=sys.stderr)
+    if len(sys.argv) not in (4, 5):
+        print(
+            "usage: density_idle.py WAVE_DIR WAVE_COUNT WINDOW_SECONDS [STANDBY_COUNT]",
+            file=sys.stderr,
+        )
         return 64
     try:
         wave_dir, wave, seconds = Path(sys.argv[1]), int(sys.argv[2]), float(sys.argv[3])
-        if wave < 1:
-            raise ValueError("wave count must be positive")
+        # Wave 0 is the zero-unit baseline taken before any unit exists.
+        if wave < 0:
+            raise ValueError("wave count must not be negative")
+        standbys = int(sys.argv[4]) if len(sys.argv) == 5 else 0
         proc_root = Path("/proc")
         own = frozenset({os.getpid()})
         if (proc_root / "self" / "stat").is_file():
@@ -290,6 +311,8 @@ def main() -> int:
         rows = summarize(before, after, elapsed, ticks_per_second)
         table, summary = render(rows, wave)
         (wave_dir / "idle-settled.tsv").write_text(table)
+        if standbys:
+            summary += render_per_standby(rows, wave, standbys)
         print(f"wave_{wave}_idle_window_seconds\t{elapsed:.1f}\n{summary}", end="")
     except (OSError, ValueError) as error:
         print(f"density idle sample unavailable: {error}", file=sys.stderr)
