@@ -1980,9 +1980,13 @@ mod tests {
         );
         assert_eq!(cargo_invocations(&log).len(), 1);
 
+        // The tampered helper must differ in byte length: the memo stamp is
+        // length plus filesystem times, and a same-length rewrite can land in
+        // the same timestamp tick on filesystems with coarse mtime
+        // granularity, leaving the stamp unchanged.
         write_exe(
             &built,
-            "#!/bin/sh\necho 'mvm-actor-holder contract-version=0'\n",
+            "#!/bin/sh\necho 'mvm-actor-holder contract-version=0' # stale\n",
         );
         assert!(!probe_memo_accepts(&fixture.env, &spec, &built));
         // A stale recovery which leaves wrong bytes must still refuse.
