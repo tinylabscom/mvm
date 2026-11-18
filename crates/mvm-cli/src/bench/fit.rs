@@ -128,10 +128,10 @@ pub fn check_fit(
     let running = &section.by_residency.running;
 
     let (fixed_mem, fixed_memory) = measured_mib(&section.fixed_host_cost.memory_bytes, Some(0));
-    let (unit_over, unit_overhead) = measured_mib(
-        &running.memory_bytes,
-        Some(u128::from(VMM_MEMORY_OVERHEAD_MIB)),
-    );
+    // A measured running footprint includes guest pages, so it cannot be added to
+    // configured memory; admission charges configured memory plus this same margin.
+    let unit_over = u128::from(VMM_MEMORY_OVERHEAD_MIB);
+    let unit_overhead = Source::Fallback;
     let (fixed_disk_mib, fixed_disk) = measured_mib(&section.fixed_host_cost.disk_bytes, Some(0));
     let (measured_unit_disk, _) = measured_mib(&running.disk_bytes, None);
 
@@ -150,7 +150,7 @@ pub fn check_fit(
 
     let memory = Headroom {
         required: fixed_mem.unwrap_or(0)
-            + n * (u128::from(deployment.memory_mib_per_unit) + unit_over.unwrap_or(0)),
+            + n * (u128::from(deployment.memory_mib_per_unit) + unit_over),
         available: u128::from(host.total_mem_mib),
     };
     let vcpu = Headroom {
@@ -283,8 +283,11 @@ mod tests {
             Figure::measured(50 * mib),
             Figure::measured(20 * mib),
         );
-        let fit = check_fit(&dep(2, 1, 90, None), &host(4, 1000, 1), &s).unwrap();
-        assert_eq!(fit.memory.required, 100 + 2 * (90 + 10));
+        let fit = check_fit(&dep(2, 1, 90, None), &host(4, 4096, 1), &s).unwrap();
+        assert_eq!(
+            fit.memory.required,
+            100 + 2 * (90 + u128::from(VMM_MEMORY_OVERHEAD_MIB))
+        );
         assert_eq!(
             fit.disk,
             DiskCheck::Checked(Headroom {
@@ -293,8 +296,24 @@ mod tests {
             })
         );
         assert_eq!(fit.provenance.fixed_memory, Source::Measured);
-        assert_eq!(fit.provenance.unit_overhead, Source::Measured);
+        assert_eq!(fit.provenance.unit_overhead, Source::Fallback);
         assert_eq!(fit.provenance.unit_disk, Some(Source::Measured));
+    }
+
+    #[test]
+    fn measured_running_memory_never_replaces_the_constant_overhead() {
+        let s = section(
+            Figure::default(),
+            Figure::measured(900 * BYTES_PER_MIB),
+            Figure::default(),
+            Figure::default(),
+        );
+        let fit = check_fit(&dep(3, 1, 512, Some(1)), &host(8, 10_000, 10), &s).unwrap();
+        assert_eq!(
+            fit.memory.required,
+            3 * (512 + u128::from(VMM_MEMORY_OVERHEAD_MIB))
+        );
+        assert_eq!(fit.provenance.unit_overhead, Source::Fallback);
     }
 
     #[test]
