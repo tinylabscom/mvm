@@ -558,6 +558,7 @@ supports; `mvmctl doctor` renders this matrix per host with the active
 backend highlighted, and the CLI surfaces a loud banner when the active
 backend falls below Tier 1.
 
+<!-- tier-matrix:begin -->
 | Backend | L1 | L2 | L3 | L4 | L5 | Notes |
 |---|---|---|---|---|---|---|
 | Firecracker (Linux + KVM) | ✅ | ✅ | ✅ | ✅ | ✅ | **Tier 1** — the production workload runtime, selected automatically whenever native KVM is available. Every numbered claim holds. |
@@ -565,6 +566,12 @@ backend falls below Tier 1.
 | libkrun (Linux KVM, macOS Hypervisor.framework) | ✅ | ✅ | ⚠️ block+ext4 verified boot only | ✅ | ✅ | Tier 2 — comparable VMM TCB to Firecracker. The macOS 13–25 default and the Linux `--builder libkrun` / opt-in workload path; the release archive does not yet include it, so build from source for now (tracked in #4577). |
 | QEMU (Linux KVM/TCG) | ✅ KVM where available | ⚠️ larger device-model TCB | ⚠️ partial verified boot | ✅ | ✅ | Tier 2 — a `mvm`-only Linux dev/test substrate, opt-in only, never reachable from the fleet orchestrator. It carries no untrusted multi-tenant workload, so claim-10 egress enforcement is deliberately not wired into its start path. This carve-out is type-enforced: a `WorkloadBackend` marker trait gates the admitted workload-launch path, and QEMU does not implement it, so it cannot reach that path regardless of prose. The test-only mock backend does implement the marker — it is a hermetic lifecycle test double that carries no real workload, so permitting it costs nothing. |
 | `wasm-sandbox` (browser / WASI preview) | ❌ | ❌ | ❌ | ❌ | ❌ | **Off the isolation scale.** No KVM, no real kernel, no TAP/virtio/vsock. Asserts none of the numbered claims and declares its own non-virtualization honestly; fails closed on any kernel/TAP/vsock request. Opt-in only; auto-detection never selects it. It is safe *because* it is single-principal — a developer's own code in their own browser sandbox, where the "malicious guest" adversary class does not apply — not because it holds any isolation claim. Promotion to a real, claim-bearing microVM re-materializes the workload from recorded intent through the audited build and admission pipeline; nothing produced in this claims-free tier carries authority into a claim-bearing one. |
+<!-- tier-matrix:end -->
+
+The `check-tier-matrix` gate derives the L1–L5 symbols in this table
+from each backend's `security_profile()`; the Notes column is prose and
+is deliberately outside derivation scope — the gate asserts nothing
+about it.
 
 **Matrix scope — networking.** Every claim-bearing workload backend is
 NIC-less. The former `l3-vsock` compatibility mode and its guest TUN, packet
