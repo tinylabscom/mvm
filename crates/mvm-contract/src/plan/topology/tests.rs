@@ -36,7 +36,7 @@ fn unit(name: &str, role: UnitRole, cores: &[u32]) -> Unit {
 }
 
 /// A topology that exercises every element and passes validation.
-fn full() -> Topology {
+pub(super) fn full() -> Topology {
     let mut ctl_a = unit("ctl-a", UnitRole::Controller, &[0]);
     ctl_a.min_isolation = Some(IsolationTier::Vm);
     let mut w2 = unit("w2", UnitRole::Worker, &[]);
@@ -47,6 +47,7 @@ fn full() -> Topology {
         checkpoint: false,
     };
     Topology {
+        schema_version: TOPOLOGY_SCHEMA_VERSION,
         tenant: TenantId("acme".to_string()),
         generation: 7,
         valid_from: Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap(),
@@ -179,7 +180,7 @@ fn unknown_fields_are_rejected_at_every_level() {
 fn the_digest_of_a_fixed_topology_is_pinned() {
     assert_eq!(
         full().digest().as_str(),
-        "sha256:e245be86f3aefce9f18c38a5fb484beaee20774389c3c60be4348fe880fb7dfe"
+        "sha256:2c973eeab3374206c79e63dd6022fdeae8197114b0cadfc482697dd1a4ae541d"
     );
 }
 
@@ -187,6 +188,7 @@ fn the_digest_of_a_fixed_topology_is_pinned() {
 fn the_digest_changes_when_any_field_changes() {
     type Mutation = fn(&mut Topology);
     let mutations: Vec<(&str, Mutation)> = vec![
+        ("schema_version", |t| t.schema_version += 1),
         ("tenant", |t| t.tenant.0.push('x')),
         ("generation", |t| t.generation += 1),
         ("valid_from", |t| {

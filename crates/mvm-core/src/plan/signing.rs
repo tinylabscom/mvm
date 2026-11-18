@@ -12,7 +12,8 @@
 //! carry plans, keeping the audit + transport surface uniform.
 
 use crate::protocol::signing::SignedPayload;
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use mvm_contract::protocol::signing::{SignedPayloadError, verify_signed_payload};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -45,6 +46,19 @@ pub enum PlanVerifyError {
 
     #[error("no trusted key matched signer_id {signer_id}")]
     UnknownSigner { signer_id: String },
+}
+
+impl From<SignedPayloadError> for PlanVerifyError {
+    fn from(error: SignedPayloadError) -> Self {
+        match error {
+            SignedPayloadError::UnknownSigner { signer_id } => Self::UnknownSigner { signer_id },
+            SignedPayloadError::SignatureInvalid(reason) => Self::SignatureInvalid(reason),
+            SignedPayloadError::UnsupportedSchema { found, supported } => {
+                Self::UnsupportedSchema { found, supported }
+            }
+            SignedPayloadError::Parse(reason) => Self::Parse(reason),
+        }
+    }
 }
 
 /// Sign an `ExecutionPlan` with the given key.
@@ -147,7 +161,8 @@ pub fn plan_from_admitted_json(plan_json: &str) -> Result<ExecutionPlan, serde_j
 /// Verify a signed plan against a set of trusted keys, returning the
 /// parsed `ExecutionPlan` on success.
 ///
-/// The verification order is signature → schema version → JSON
+/// Delegates to [`verify_signed_payload`], the routine topologies verify
+/// through too. The verification order is signature → schema version → JSON
 /// parse. Older verifiers fail closed on a future schema version
 /// rather than parsing unknown bytes — the `schema_version` field
 /// is read separately *after* the signature check, before
@@ -162,45 +177,11 @@ pub fn verify_plan(
     signed: &SignedExecutionPlan,
     trusted_keys: &[(&str, &VerifyingKey)],
 ) -> Result<ExecutionPlan, PlanVerifyError> {
-    let envelope = &signed.0;
-
-    // Pick the trusted key matching the envelope's signer_id. If
-    // none matches, the envelope is signed by an unknown party —
-    // fail before exposing the payload bytes to a verifier.
-    let key = trusted_keys
-        .iter()
-        .find_map(|(id, k)| (*id == envelope.signer_id).then_some(*k))
-        .ok_or_else(|| PlanVerifyError::UnknownSigner {
-            signer_id: envelope.signer_id.clone(),
-        })?;
-
-    let signature = Signature::from_slice(&envelope.signature).map_err(|e| {
-        PlanVerifyError::SignatureInvalid(format!("malformed signature bytes: {e}"))
-    })?;
-
-    key.verify(&envelope.payload, &signature)
-        .map_err(|e| PlanVerifyError::SignatureInvalid(e.to_string()))?;
-
-    // Schema-version sniff before full parse. We read just
-    // `{"schema_version": N, ...}` to see if the rest is something
-    // this build understands. A future v2 plan will error with
-    // UnsupportedSchema even though its signature is valid.
-    #[derive(Deserialize)]
-    struct VersionProbe {
-        schema_version: u32,
-    }
-    let probe: VersionProbe = serde_json::from_slice(&envelope.payload)
-        .map_err(|e| PlanVerifyError::Parse(format!("schema_version probe failed: {e}")))?;
-    if probe.schema_version > SCHEMA_VERSION {
-        return Err(PlanVerifyError::UnsupportedSchema {
-            found: probe.schema_version,
-            supported: SCHEMA_VERSION,
-        });
-    }
-
-    let plan: ExecutionPlan = serde_json::from_slice(&envelope.payload)
-        .map_err(|e| PlanVerifyError::Parse(e.to_string()))?;
-    Ok(plan)
+    Ok(verify_signed_payload(
+        &signed.0,
+        trusted_keys,
+        SCHEMA_VERSION,
+    )?)
 }
 
 /// Test-support fixtures shared across crates. Gated so it never ships in a
