@@ -1147,6 +1147,12 @@ pub struct ColdLaunchReport {
     /// Present on lanes governed by the startup-from-invocation ceiling.
     #[serde(default)]
     pub startup_requirement: Option<HardBootRequirement>,
+    /// Backend every sample ran on; absent when the samples disagree or none exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    /// Architecture every sample ran on, with the same absence rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architecture: Option<String>,
     pub raw: Vec<ColdLaunchSample>,
 }
 
@@ -1197,10 +1203,16 @@ pub fn build_cold_launch_report(
         .filter_map(|s| s.phases.startup_ms)
         .reduce(f64::max);
     let startup_requirement = HardBootRequirement::startup_for_lane(lane, startup_max_ms);
+    let common = |f: fn(&ColdLaunchSample) -> &str| {
+        let first = f(raw.first()?);
+        raw.iter().all(|s| f(s) == first).then(|| first.to_string())
+    };
     ColdLaunchReport {
         schema_version: COLD_LAUNCH_SCHEMA_VERSION,
         lane,
         warmup,
+        backend: common(|s| &s.context.backend),
+        architecture: common(|s| &s.context.arch),
         stats: LaneStats {
             dispatch_window_ms,
             command_lifecycle_ms: col(|s| s.command_lifecycle_ms),

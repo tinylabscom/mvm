@@ -508,6 +508,8 @@ mod tests {
                         .to_string(),
             }),
             startup_requirement: None,
+            backend: None,
+            architecture: None,
             raw: Vec::new(),
         }
     }

@@ -347,8 +347,14 @@ fn render_section(out: &mut String, s: &Section) {
     out.push_str("\nLatency (ms):\n\n");
     out.push_str("| Operation | Samples | p50 | p95 | p99 | max |\n");
     out.push_str("| --- | --- | --- | --- | --- | --- |\n");
-    out.push_str(&latency_row("cold launch", &l.cold_launch_ms));
-    out.push_str(&latency_row("warm launch", &l.warm_launch_ms));
+    out.push_str(&latency_row(
+        "cold launch (plan admitted to dispatch)",
+        &l.cold_launch_ms,
+    ));
+    out.push_str(&latency_row(
+        "warm launch (plan admitted to dispatch)",
+        &l.warm_launch_ms,
+    ));
     out.push_str(&latency_row("failover", &l.failover_ms));
     out.push_str(&latency_row("state-cell update", &l.state_cell_update_ms));
     out.push_str(&latency_row("mailbox round trip", &l.mailbox_round_trip_ms));
@@ -446,7 +452,7 @@ mod tests {
         assert!(md.contains("123456 B"));
         assert!(md.contains("12.50 m"));
         assert!(md.contains("777 B"));
-        assert!(md.contains("| warm launch | 2 |"));
+        assert!(md.contains("| warm launch (plan admitted to dispatch) | 2 |"));
     }
 
     #[test]
