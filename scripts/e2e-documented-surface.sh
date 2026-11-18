@@ -106,9 +106,25 @@ echo "    profile: $E2E_PROFILE"
 SNAPSHOT="$E2E_HOME/.e2e-machines-before"
 CLEANUP_BLOCKED=0
 
+# The listing's stderr is kept (not discarded) so a failed listing can say why.
+MACHINE_LS_ERR="$E2E_HOME/.e2e-machine-ls.err"
+
+# Prints the sorted machine names. Returns mvmctl's own exit status when the
+# listing fails, so a caller can report it.
 machine_names() {
-  MVM_HOME="$E2E_HOME" "$MVMCTL" machine ls 2>/dev/null \
-    | awk 'NR>1 && NF {print $1}' | sort
+  local listing rc=0
+  listing="$(MVM_HOME="$E2E_HOME" "$MVMCTL" machine ls 2>"$MACHINE_LS_ERR")" || rc=$?
+  [[ $rc == 0 ]] || return "$rc"
+  printf '%s\n' "$listing" | awk 'NR>1 && NF {print $1}' | sort
+}
+
+# Evidence for a listing that kept failing: the exit code, the first lines of
+# its stderr, and the names (never contents) under the machine state directory.
+report_listing_failure() {
+  printf '    machine ls exited %s; stderr (first 40 lines):\n' "$1" >&2
+  head -n 40 "$MACHINE_LS_ERR" 2>/dev/null | sed 's/^/      /' >&2 || true
+  printf '    machine state directory entries:\n' >&2
+  ls -1 "$E2E_HOME/vms" 2>&1 | head -n 40 | sed 's/^/      /' >&2 || true
 }
 
 cleanup_failure() {
@@ -158,8 +174,15 @@ reap() {
     return 1
   fi
 
-  local current created
-  if ! current="$(machine_names)"; then
+  local current created ls_rc=0 ls_attempt
+  for ls_attempt in 1 2 3; do
+    ls_rc=0
+    current="$(machine_names)" || ls_rc=$?
+    [[ $ls_rc == 0 ]] && break
+    [[ $ls_attempt == 3 ]] || sleep "$ls_attempt"
+  done
+  if [[ $ls_rc != 0 ]]; then
+    report_listing_failure "$ls_rc"
     cleanup_failure "$phase cleanup could not list machines; leaving machines alone"
     return 1
   fi
