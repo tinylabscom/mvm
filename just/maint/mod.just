@@ -15,6 +15,10 @@ hooks:
     git config core.hooksPath .githooks
     @echo "core.hooksPath -> .githooks/"
 
+# Delete idle cargo target dirs across all worktrees (dry run; pass --apply to delete)
+prune-targets *ARGS:
+    ./scripts/prune-targets.sh {{ARGS}}
+
 # ── VMM setup ────────────────────────────────────────────────────────────
 
 # Install libkrun (the macOS VMM mvm targets)
