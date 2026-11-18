@@ -475,6 +475,7 @@ mod tests {
     use mvm_contract::protocol::mailbox::{
         AuthorizationDomainId, BootId, ExecutionEpoch, MailboxId, PrincipalId, TenantId,
     };
+    #[cfg(unix)]
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
 
@@ -548,6 +549,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn sockets() -> (UnixStream, UnixStream) {
         let (a, b) = UnixStream::pair().unwrap();
         for stream in [&a, &b] {
@@ -570,6 +572,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn invocation_budget_roundtrips_inside_the_authenticated_session() {
         let (mut guest, mut host) = sockets();
@@ -602,6 +605,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn actual_session_roundtrip_is_sealed_and_replay_checked() {
         let (mut guest, mut host) = sockets();
@@ -634,6 +638,7 @@ mod tests {
         worker.join().unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn wrong_complete_binding_never_sends_application_payload() {
         let (mut guest, mut host) = sockets();
@@ -663,6 +668,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn encrypted_request_and_response_helpers_roundtrip() {
         let (mut guest, mut host) = sockets();
