@@ -63,6 +63,32 @@ That test passed alone, then the complete serialized workspace run passed:
 The intermittent backend-test observations are tracked in #5698; no assertion
 was weakened, test skipped, or root cause claimed from a passing retry.
 
+### Linux confinement integration
+
+The first PR CI run exposed a regression missed by macOS execution and
+cross-compilation: resolved directory preparation reaches x86_64 `readlink`,
+which the confined-role filter did not permit. Eight endpoint tests failed;
+the diagnostic reported syscall 89 and SIGSYS. This is a defect in this
+correction, not an intermittent failure covered by #5698.
+
+After security review, the canonical syscall table now includes `readlink`
+on x86_64 and its existing `readlinkat` equivalent on aarch64. The audit
+self-test calls the actual resolved-directory helper. A new x86_64 negative
+witness removes only `readlink`, retains `readlinkat`, and requires SIGSYS
+attributed to `file-append`. Child fixtures isolate both HOME and MVM_HOME.
+The existing positive witness still requires no probe errors.
+
+The syscall addition affects all consumers of the shared confined-role table,
+including the collector. It does not widen Landlock content grants or change
+trap behavior or confinement ordering. Seccomp cannot constrain these path
+strings, and Landlock is not comprehensive symlink-metadata confidentiality;
+the jailer documents now state that limit explicitly.
+
+Fresh source review accepted the implementation. Formatting, workspace clippy,
+the gated x86_64 Linux targets and aarch64 Linux hostd/self-test compilation
+passed. Runtime verification of this Linux-only correction is recorded in
+PR #5683; compilation is not a live-filter witness.
+
 ## Recovery provenance
 
 Recovered for #5671 from the archived successful edit inputs in

@@ -33,6 +33,7 @@ fn run_as_child_when_asked() {
     match scenario.as_str() {
         "real-filter" => self_test_under_filter(&dir, None),
         "without-flock" => self_test_under_filter(&dir, Some("flock")),
+        "without-readlink" => self_test_under_filter(&dir, Some("readlink")),
         "refusal-outside-a-probe" => refusal_outside_a_probe(&dir),
         "thread-before-seccomp" => thread_started_before_the_filter(&dir),
         "thread-before-confinement" => thread_started_before_confinement(&dir),
@@ -228,6 +229,8 @@ fn run_scenario(scenario: &str) -> (Output, tempfile::TempDir) {
     let output = Command::new(std::env::current_exe().expect("current_exe"))
         .env(CHILD_ENV, scenario)
         .env(DIR_ENV, dir.path())
+        .env("MVM_HOME", dir.path())
+        .env("HOME", dir.path())
         .output()
         .expect("run the scenario child");
     (output, dir)
@@ -288,6 +291,31 @@ fn a_filter_missing_a_required_syscall_is_named_with_the_probe() {
     );
     assert!(stderr.contains("CONFINED_ROLE_SYSCALLS"), "{report}");
     // Killed inside the probe: it never reported finishing.
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("ran="),
+        "{report}"
+    );
+}
+
+/// The legacy syscall must be covered even when its newer equivalent is allowed.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn audit_directory_resolution_requires_readlink_under_the_real_filter() {
+    let (output, _dir) = run_scenario("without-readlink");
+    let report = describe(&output);
+    assert_eq!(output.status.signal(), Some(libc::SIGSYS), "{report}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "seccomp refused x86_64 syscall {}",
+            libc::SYS_readlink
+        )),
+        "{report}"
+    );
+    assert!(
+        stderr.contains("during self-test probe \"file-append\""),
+        "{report}"
+    );
     assert!(
         !String::from_utf8_lossy(&output.stdout).contains("ran="),
         "{report}"

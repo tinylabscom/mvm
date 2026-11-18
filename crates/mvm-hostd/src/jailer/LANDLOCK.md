@@ -29,7 +29,12 @@
   asserts these absences as defense-in-depth against a future
   contributor swapping back to `from_all`.
 
-Everything else returns EACCES at the kernel level. Sockets are
+Handled filesystem accesses outside these grants return EACCES. This is not
+comprehensive pathname-metadata confidentiality: a confined role may observe
+symlink target text through `readlink`/`readlinkat` outside its content-access
+grants, subject to other kernel permissions. That observation does not grant
+permission to open the target's contents or write outside the existing rules.
+Sockets are
 inherited fds or opened by the endpoint itself, not opened by name from
 the ruleset, so no network paths appear in it.
 

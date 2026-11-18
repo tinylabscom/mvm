@@ -339,12 +339,12 @@ fn walk_certificate_dirs(dirs: &[PathBuf]) -> io::Result<()> {
 }
 
 /// The audit recorder's write path, on a scratch file in the audit directory
-/// that is removed again: create the directory if needed, open for append,
+/// that is removed again: resolve and prepare its private directory, open for append,
 /// take the exclusive lock, sync, rename as segment rotation does, unlink.
 fn append_sync_and_rotate_in(dir: &Path) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt as _;
 
-    std::fs::create_dir_all(dir)?;
+    mvm_core::config::create_private_dir_resolved(dir)?;
     let pid = std::process::id();
     let scratch = dir.join(format!(".confinement-self-test-{pid}"));
     let rotated = dir.join(format!(".confinement-self-test-{pid}.rotated"));

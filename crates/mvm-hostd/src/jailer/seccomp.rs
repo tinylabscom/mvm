@@ -146,6 +146,8 @@ pub(crate) const CONFINED_ROLE_SYSCALLS: &[(&str, libc::c_long)] = &[
     ("recvmmsg", libc::SYS_recvmmsg),     // glibc DNS resolver
     ("sendmmsg", libc::SYS_sendmmsg),     // glibc DNS resolver
     ("getdents64", libc::SYS_getdents64), // read /etc/ssl/certs dir
+    // Audit directory canonicalization uses the legacy entry point on x86_64.
+    ("readlink", libc::SYS_readlink),
     ("readlinkat", libc::SYS_readlinkat), // cert symlink resolution
     // glibc's NSS hostname path (getaddrinfo → nscd/files fallback, then
     // `_uname` for the canonical host name) calls `uname` on the FIRST egress
@@ -281,6 +283,8 @@ pub(crate) const CONFINED_ROLE_SYSCALLS: &[(&str, libc::c_long)] = &[
     ("recvmmsg", libc::SYS_recvmmsg),
     ("sendmmsg", libc::SYS_sendmmsg),
     ("getdents64", libc::SYS_getdents64),
+    // aarch64 folds the legacy pathname operation into readlinkat.
+    ("readlink", libc::SYS_readlinkat),
     ("readlinkat", libc::SYS_readlinkat),
     // glibc's NSS hostname path (getaddrinfo → nscd/files fallback, then
     // `_uname` for the canonical host name) calls `uname` on the FIRST egress

@@ -614,6 +614,8 @@ mod tests {
         );
         assert!(spec.allowed_syscalls.contains(&"splice"));
         assert!(spec.allowed_syscalls.contains(&"fsync"));
+        assert!(spec.allowed_syscalls.contains(&"readlink"));
+        assert!(spec.allowed_syscalls.contains(&"readlinkat"));
     }
 
     #[cfg(target_os = "linux")]
