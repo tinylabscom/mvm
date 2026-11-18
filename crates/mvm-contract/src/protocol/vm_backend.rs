@@ -1168,6 +1168,19 @@ impl LayerCoverage {
         }
     }
 
+    /// No layer enforced — the claim-free / shared-kernel shape. The
+    /// `Default` derive returns the same value; this const form exists so
+    /// canonical per-backend profiles can be `const` items.
+    pub const fn no_layers() -> Self {
+        Self {
+            l1_host_hypervisor: false,
+            l2_vmm: false,
+            l3_guest_kernel: false,
+            l4_guest_agent: false,
+            l5_workload: false,
+        }
+    }
+
     /// Whether this backend provides hardware-isolated microVM execution
     /// (L1+L2+L3 all enforced). When `false`, the backend is a Tier 3
     /// shared-kernel container — `mvmctl run` emits a loud banner.
@@ -1231,7 +1244,33 @@ impl BackendSecurityProfile {
             .map(|(i, _)| (i + 1) as u8)
             .collect()
     }
+
+    /// The canonical security profile for a backend kind.
+    ///
+    /// This table is the single source of truth for per-backend claim
+    /// coverage and tier: every `VmBackend` implementation's
+    /// `security_profile()` returns `Self::for_kind(self.kind()).clone()`,
+    /// so a backend cannot drift from the matrix rendered by `mvmctl
+    /// doctor` — and the `check-tier-matrix` gate derives the published
+    /// per-backend tier matrix from exactly this table.
+    pub const fn for_kind(kind: BackendKind) -> &'static BackendSecurityProfile {
+        match kind {
+            BackendKind::Firecracker => &security_profile_table::FIRECRACKER_SECURITY_PROFILE,
+            BackendKind::Libkrun => &security_profile_table::LIBKRUN_SECURITY_PROFILE,
+            BackendKind::Qemu => &security_profile_table::QEMU_SECURITY_PROFILE,
+            BackendKind::Mock => &security_profile_table::MOCK_SECURITY_PROFILE,
+            BackendKind::Hvf => &security_profile_table::HVF_SECURITY_PROFILE,
+            BackendKind::Wasm => &security_profile_table::WASM_SECURITY_PROFILE,
+            BackendKind::WebLinux => &security_profile_table::WEB_LINUX_SECURITY_PROFILE,
+            BackendKind::AppleContainer => {
+                &security_profile_table::APPLE_CONTAINER_SECURITY_PROFILE
+            }
+        }
+    }
 }
+
+mod security_profile_table;
+
 // ---------------------------------------------------------------------------
 pub mod portable;
 
@@ -2262,6 +2301,48 @@ mod tests {
         };
         assert!(profile.dropped_claims().is_empty());
         assert!(profile.na_claims().is_empty());
+    }
+
+    #[test]
+    fn test_for_kind_covers_every_backend_kind_without_duplicates() {
+        let mut distinct: Vec<*const BackendSecurityProfile> = Vec::new();
+        for kind in BackendKind::ALL {
+            let profile = BackendSecurityProfile::for_kind(*kind);
+            assert!(
+                profile.tier.starts_with("Tier"),
+                "{kind:?}: tier label must lead with `Tier`"
+            );
+            assert!(
+                !profile.notes.is_empty(),
+                "{kind:?}: notes must not be empty"
+            );
+            assert!(
+                !distinct.contains(&std::ptr::from_ref(profile)),
+                "{kind:?}: profile table entry is shared with another kind"
+            );
+            distinct.push(std::ptr::from_ref(profile));
+        }
+        assert_eq!(
+            distinct.len(),
+            BackendKind::ALL.len(),
+            "one canonical profile per BackendKind::ALL variant"
+        );
+    }
+
+    #[test]
+    fn test_for_kind_apple_container_mirrors_hvf_posture() {
+        let apple = BackendSecurityProfile::for_kind(BackendKind::AppleContainer);
+        let hvf = BackendSecurityProfile::for_kind(BackendKind::Hvf);
+        assert_eq!(apple.claims, hvf.claims);
+        assert_eq!(apple.layer_coverage, hvf.layer_coverage);
+        assert_eq!(apple.tier, hvf.tier);
+        assert!(
+            apple
+                .notes
+                .iter()
+                .any(|n| n.contains("prebuilt container kernel")),
+            "apple-container keeps its own kernel-provenance notes"
+        );
     }
 
     /// The audit label is what the chain-signed log records for the boot's

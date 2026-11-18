@@ -22,8 +22,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT};
 use mvm_core::config::{vm_state_dir, vm_vsock_port_socket_at};
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, HostDialRoute,
-    LayerCoverage, ResourceControls, VmCapabilities, VmExitStatus, VmId, VmStatus,
+    BackendKind, BackendSecurityProfile, GuestChannelInfo, HostDialRoute, ResourceControls,
+    VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
 
@@ -531,31 +531,9 @@ impl VmmDriver for QemuDriver {
         // claim 3 (verified boot) targeting Firecracker — with the notes
         // updated for the converged boot path. The TCG (no-KVM) mode is a
         // runtime Tier-3 degradation surfaced by the boot banner + doctor,
-        // not by this compile-time tier.
-        BackendSecurityProfile {
-            claims: [
-                ClaimStatus::Holds,       // 1
-                ClaimStatus::Holds,       // 2
-                ClaimStatus::DoesNotHold, // 3 — verified boot targets Firecracker
-                ClaimStatus::Holds,       // 4
-                ClaimStatus::Holds,       // 5
-                ClaimStatus::Holds,       // 6
-                ClaimStatus::Holds,       // 7
-            ],
-            layer_coverage: LayerCoverage::all_layers(),
-            tier: "Tier 2",
-            notes: &[
-                "QEMU workload runtime; dev/test tier only, opt-in via --hypervisor qemu, never auto-selected.",
-                "Boots through the unified workload runner: attaches the universal initramfs and \
-                 receives ActivateEnvironment over vsock, exactly like Firecracker/libkrun/HVF — \
-                 QEMU's vhost-vsock speaks AF_VSOCK, so the channels ride the per-VM \
-                 AF_VSOCK↔UNIX bridge into the same per-port UNIX-socket convention.",
-                "KVM-accelerated where /dev/kvm is present; TCG software-emulation fallback \
-                 otherwise (runtime Tier-3, banner-flagged).",
-                "Larger device model than Firecracker → higher L2 audit cost; outside the \
-                 CI-enforced claim set. Never a production runtime.",
-            ],
-        }
+        // not by this compile-time tier. The canonical table entry lives in
+        // mvm-contract alongside the other backends.
+        BackendSecurityProfile::for_kind(BackendKind::Qemu).clone()
     }
 
     fn workload_base_bootargs(&self, has_disk: bool) -> String {
@@ -755,7 +733,7 @@ impl RunningVm for QemuRunningVm {
 mod tests {
     use super::*;
     use mvm_agentd::vsock::{BROKER_PORT, EGRESS_PORT};
-    use mvm_core::vm_backend::SnapshotCapability;
+    use mvm_core::vm_backend::{ClaimStatus, SnapshotCapability};
     use mvm_vmm::driver::spec::{BlockDev, ConsoleCapture, VirtioFsShare};
 
     #[test]

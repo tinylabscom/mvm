@@ -10,9 +10,8 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow, bail};
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
-    SnapshotCapability, StandbyError, StandbyHandle, StandbyState, VmCapabilities, VmExitStatus,
-    VmId, VmStatus,
+    BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, StandbyError,
+    StandbyHandle, StandbyState, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 
 use mvm_core::crypto::vmgenid::{GENID_BYTES, GenerationToken};
@@ -316,16 +315,9 @@ impl VmmDriver for MockDriver {
     }
     fn security_profile(&self) -> BackendSecurityProfile {
         // Mirrors `MockBackend::security_profile` — the mock runs no guest and
-        // holds none of the seven CI-enforced claims.
-        BackendSecurityProfile {
-            claims: [ClaimStatus::DoesNotHold; 7],
-            layer_coverage: LayerCoverage::default(),
-            tier: "Tier 3 (test-only)",
-            notes: &[
-                "MockDriver is in-process test infrastructure.",
-                "No guest, no rootfs, no isolation; never use in production.",
-            ],
-        }
+        // holds none of the seven CI-enforced claims. Both read the same
+        // canonical table entry in mvm-contract.
+        BackendSecurityProfile::for_kind(BackendKind::Mock).clone()
     }
 
     fn supports_resident_handoff(&self) -> bool {
@@ -707,6 +699,7 @@ impl mvm_vmm::checkpoint::VmFullControl for MockVmFullControl {
 mod tests {
     use super::*;
 
+    use mvm_core::vm_backend::ClaimStatus;
     use mvm_vmm::driver::spec::{ConsoleCapture, KernelImage};
 
     fn sample_spec(name: &str) -> VmmSpec {

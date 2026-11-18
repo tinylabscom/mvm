@@ -17,9 +17,8 @@
 
 use anyhow::Result;
 use mvm_contract::protocol::vm_backend::{
-    AttestationTier, BackendCapabilityDimensions, BackendSecurityProfile, ClaimStatus,
-    CpuExecution, GuestEnvironment, IsolationBoundary, LayerCoverage, LifecycleScope,
-    SnapshotCapability,
+    AttestationTier, BackendCapabilityDimensions, BackendSecurityProfile, CpuExecution,
+    GuestEnvironment, IsolationBoundary, LifecycleScope, SnapshotCapability,
 };
 use mvm_core::vm_backend::{
     BackendKind, ResourceControls, StartMode, VmBackend, VmCapabilities, VmExitStatus, VmId,
@@ -138,23 +137,18 @@ impl VmBackend for WebLinuxBackend {
     }
 
     fn security_profile(&self) -> BackendSecurityProfile {
-        BackendSecurityProfile {
-            claims: [ClaimStatus::DoesNotHold; 7],
-            layer_coverage: LayerCoverage::default(),
-            tier: "Tier3-fallback",
-            notes: &[
-                "Browser-hosted WebLinux backend (QEMU-Wasm + Nix-built Linux kernel).",
-                "Runs only inside a WebAssembly browser environment; the native stub \
-                 is selectable for catalog/help parity but cannot boot a VM.",
-                "Claim-free software-emulation tier; opt-in only; never auto-selected.",
-            ],
-        }
+        // Claim-free browser-hosted tier, same posture shape as the wasm
+        // tier; the label is normalized to the shared portability wording
+        // so every claim-free backend renders one consistent tier string.
+        // The canonical table entry lives in mvm-contract.
+        BackendSecurityProfile::for_kind(BackendKind::WebLinux).clone()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_contract::protocol::vm_backend::{ClaimStatus, LayerCoverage};
     use mvm_core::vm_backend::VmBackend;
 
     #[test]

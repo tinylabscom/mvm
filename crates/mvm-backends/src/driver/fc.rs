@@ -24,9 +24,9 @@ use mvm_agentd::vsock::{
 use mvm_core::config::vm_state_dir;
 use mvm_core::launch_trace::LaunchTraceRecorder;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, HostDialRoute,
-    LayerCoverage, ResourceControls, SnapshotCapability, StandbyError, StandbyHandle, StandbyState,
-    VmCapabilities, VmExitStatus, VmId, VmStatus,
+    BackendKind, BackendSecurityProfile, GuestChannelInfo, HostDialRoute, ResourceControls,
+    SnapshotCapability, StandbyError, StandbyHandle, StandbyState, VmCapabilities, VmExitStatus,
+    VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
 
@@ -982,18 +982,11 @@ impl VmmDriver for FcDriver {
     }
 
     fn security_profile(&self) -> BackendSecurityProfile {
-        // Tier 1: full security posture. All seven CI-enforced claims
-        // hold. Hardware isolation via KVM; verified boot via
-        // dm-verity.
-        BackendSecurityProfile {
-            claims: [ClaimStatus::Holds; 7],
-            layer_coverage: LayerCoverage::all_layers(),
-            tier: "Tier 1",
-            notes: &[
-                "Full ADR-002 — all seven CI-enforced claims hold.",
-                "Hardware isolation via KVM. Verified boot via dm-verity (W3).",
-            ],
-        }
+        // Tier 1, full posture: all seven CI-enforced claims hold, hardware
+        // isolation via KVM, verified boot via dm-verity. The canonical
+        // table entry lives in mvm-contract so this profile cannot drift
+        // from the matrix `mvmctl doctor` renders.
+        BackendSecurityProfile::for_kind(BackendKind::Firecracker).clone()
     }
 
     fn workload_base_bootargs(&self, has_disk: bool) -> String {

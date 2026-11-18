@@ -54,9 +54,8 @@ use anyhow::Result;
 use mvm_contract::grants::{CpuGrant, Grants, WallClockGrant};
 use mvm_contract::protocol::resource_controls::EnforcedGrants;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, ClaimStatus, LayerCoverage, ResourceControls,
-    SnapshotCapability, StartMode, VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo,
-    VmStartConfig, VmStatus,
+    BackendKind, BackendSecurityProfile, ResourceControls, SnapshotCapability, StartMode,
+    VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
 };
 use thiserror::Error;
 
@@ -591,19 +590,9 @@ impl VmBackend for WasmBackend {
         // `DoesNotHold`, matching the mock test double's framing rather
         // than a real microVM's partial-claim profile. There is no
         // guest, no rootfs block device, and no hardware isolation
-        // boundary — nothing here approximates the security posture's threat model.
-        BackendSecurityProfile {
-            claims: [ClaimStatus::DoesNotHold; 7],
-            layer_coverage: LayerCoverage::default(),
-            tier: "Tier 3 (portability, claim-free)",
-            notes: &[
-                "Runs a user-supplied WASI module under host wasmtime — no hardware virt, \
-                 no guest kernel, no TAP/virtio/vsock, no verified boot, no snapshot.",
-                "Opt-in only; never selected by auto-detect.",
-                "Carries none of the numbered security claims; never a production or \
-                 untrusted-workload path.",
-            ],
-        }
+        // boundary — nothing here approximates the security posture's threat
+        // model. The canonical table entry lives in mvm-contract.
+        BackendSecurityProfile::for_kind(BackendKind::Wasm).clone()
     }
 }
 
@@ -1424,6 +1413,7 @@ mod engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::vm_backend::{ClaimStatus, LayerCoverage};
 
     /// The uniform negotiation entry point, exercised through the real trait
     /// on a real backend rather than a hand-built capability matrix. This is
