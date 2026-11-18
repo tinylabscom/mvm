@@ -14,6 +14,32 @@ separately, the files that were not read. Absence from the "read" column is not 
 soundness. "Read" is taken from the fixing PR descriptions and the review notes for the lane; the
 line ranges are as recorded there and were not re-derived when this file was written.
 
+## Endpoint gate-probe control transport
+
+Reviewed the client launch probe, endpoint config projection, listener binding
+and dispatch, and ordinary/owned endpoint spawn evidence. Gate probes use a
+separate host-only Unix socket for both Wire and FlowMux endpoints; the guest
+data protocol remains fixed by admission. The endpoint binds the control
+socket before reporting process readiness, with the existing private-directory
+and mode-0600 listener discipline. Only `GateProbeRequest` is accepted there,
+and the existing projected gate answers without forwarding, granting egress,
+recording workload audit, or authenticating a guest session.
+
+The control listener accepts at most four concurrent probes with no queued
+task waiters, limits each request body to 8 KiB before allocation, and gives
+the entire request/response exchange five seconds. These limits apply only
+to probes, not guest or connector traffic. Four DNS-sized samples fit the
+request cap, while a normal launch uses one connection and performs no
+external I/O in its probe. Focused tests cover over-cap prefixes, stalled
+prefixes/bodies, a nonreading response peer and connection saturation.
+
+The existing endpoint process owns the listener. Reaping removes its path;
+ordinary restart reconciles stale sockets, while owned spawn refuses existing
+evidence. A failed probe still refuses launch. The added subprocess witness
+covers both modes, admitted HTTPS and refused ports, forward-request refusal,
+private permissions, unchanged guest authentication, and teardown. This does
+not witness a native VM boot or Linux confinement; those remain live CI checks.
+
 ## Signed application HVF startup diagnostics
 
 Reviewed in [#5681](https://github.com/tinylabscom/mvm/pull/5681): standalone

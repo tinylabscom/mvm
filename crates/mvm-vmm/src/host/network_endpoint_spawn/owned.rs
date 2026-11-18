@@ -306,6 +306,7 @@ fn refuse_existing_evidence(params: &SubstitutionSpawnParams<'_>, env: &Path) ->
         params.state_dir.join(SUBST_SESSION_FILE),
         session_ready_socket_path(params.state_dir),
         connector_socket_path(params.state_dir),
+        mvm_core::config::vm_network_gate_probe_socket_at(params.state_dir),
         endpoint_stderr_log_path(params.state_dir),
         env.to_owned(),
     ];

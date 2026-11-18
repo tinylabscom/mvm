@@ -170,7 +170,7 @@ pub fn require_egress_gate(
     timeout: Duration,
 ) -> Result<(), EgressGateProbeError> {
     require_egress_gate_at(
-        &mvm_core::config::vm_network_endpoint_socket(name),
+        &mvm_core::config::vm_network_gate_probe_socket_at(&mvm_core::config::vm_state_dir(name)),
         policy,
         timeout,
     )
@@ -578,6 +578,37 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn launch_probe_uses_control_socket_not_guest_data_socket() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let state = mvm_core::config::vm_state_dir("gate-control");
+        let control = mvm_core::config::vm_network_gate_probe_socket_at(&state);
+        std::fs::create_dir_all(control.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&control).unwrap();
+        let data = std::os::unix::net::UnixListener::bind(
+            mvm_core::config::vm_network_endpoint_socket("gate-control"),
+        )
+        .unwrap();
+        data.set_nonblocking(true).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = serde_json::from_slice(&read_frame(&mut stream).unwrap()).unwrap();
+            write_frame(
+                &mut stream,
+                &serde_json::to_vec(&echo_expected(&request)).unwrap(),
+            )
+            .unwrap();
+        });
+        require_egress_gate("gate-control", &allowlist_policy(), Duration::from_secs(5)).unwrap();
+        worker.join().unwrap();
+        assert_eq!(
+            data.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 
     #[test]
