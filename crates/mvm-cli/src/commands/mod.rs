@@ -1,6 +1,7 @@
 mod agent_session;
 mod backend;
 mod bench;
+mod bench_fit;
 mod bootstrap;
 mod build;
 mod builder_shell_job;

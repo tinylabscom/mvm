@@ -107,6 +107,8 @@ pub(in crate::commands) struct Args {
 pub(in crate::commands) enum BenchCommand {
     /// Assemble the resource report from a density run and launch reports.
     Report(ReportArgs),
+    /// Check whether a declared deployment fits on this host.
+    Fit(super::bench_fit::FitArgs),
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -151,8 +153,10 @@ fn run_report(args: ReportArgs) -> Result<()> {
 const DEFAULT_LAUNCH: [&str; 4] = ["run", "--no-detect", "--", "/bin/true"];
 
 pub(in crate::commands) fn run(args: Args) -> Result<()> {
-    if let Some(BenchCommand::Report(report)) = args.command {
-        return run_report(report);
+    match args.command {
+        Some(BenchCommand::Report(report)) => return run_report(report),
+        Some(BenchCommand::Fit(fit)) => return super::bench_fit::run_fit(fit),
+        None => {}
     }
     // A debug binary is 5-10x slower on the same work, so its percentiles are
     // not this host's latency — they are this build profile's. Publishing or
