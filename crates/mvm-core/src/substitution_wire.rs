@@ -1,8 +1,9 @@
 //! The guest↔host substitution-endpoint wire contract.
 //!
 //! The guest's SDK routes a secret-bearing request to the host substitution
-//! endpoint over a host-local socket as a length-prefixed JSON `WireRequest`;
-//! the endpoint replies with a `WireResponse`. The contract lives in
+//! endpoint as a length-prefixed JSON `WireRequest` over the configured
+//! Wire-mode transport (host-local Unix socket or Linux vsock); the endpoint
+//! replies with a `WireResponse`. The contract lives in
 //! `mvm-core` so the in-guest client (`mvm-guest`) and the host server
 //! (`mvm-hostd`) serialize the **exact same** bytes — a drifted copy on either
 //! side would silently break substitution.
@@ -133,6 +134,26 @@ impl fmt::Debug for ResolveWireResponse {
             }
         }
     }
+}
+
+/// A Wire-mode endpoint request over a host-local socket or Linux vsock. The
+/// substitution request shares the listener with a gate probe, so the serve
+/// loop demultiplexes on the frame body instead of binding one type per listener.
+///
+/// `untagged` keeps the wire backward-compatible: every frame a previous
+/// client sent is exactly a [`WireRequest`], so `Forward` is tried first and
+/// only a frame without `method`/`url`/`headers` falls through to
+/// [`GateProbeRequest`]. A frame matching neither fails the parse, which
+/// fails the connection closed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum EndpointRequest {
+    /// A secret-bearing substitution request, forwarded toward the bound
+    /// destination.
+    Forward(WireRequest),
+    /// A witness-only probe of the running egress gate (see
+    /// [`GateProbeRequest`]).
+    GateProbe(GateProbeRequest),
 }
 
 /// Cap on the samples one gate probe carries. The launcher sends at most a

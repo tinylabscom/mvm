@@ -42,6 +42,15 @@ export const families = {
       ]],
     ],
   },
+  endpoint_wire: {
+    sources: [
+      ["crates/mvm-core/src/substitution_wire.rs", [
+        "EndpointRequest", "WireRequest", "WireResponse", "GateProbeRequest",
+        "GateProbeSample", "GateProbeExpect", "GateProbeResponse",
+        "GateProbeOutcome", "GateProbeVerdict",
+      ]],
+    ],
+  },
   telemetry: {
     sources: [
       ["crates/mvm-core/src/protocol/telemetry/record.rs", ["Format", "TelemetryRecord"]],

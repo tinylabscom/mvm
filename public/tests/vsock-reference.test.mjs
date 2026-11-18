@@ -139,9 +139,7 @@ test("new serialized types in dedicated wire modules need a catalogue dispositio
   paths.delete("crates/mvm-contract/src/policy/security.rs");
   const exclusions = new Set([
     "LoopbackBinding",
-    "WireRequest", "WireResponse", "ResolveWireRequest", "ResolveWireResponse",
-    "EndpointRequest", "GateProbeRequest", "GateProbeSample", "GateProbeExpect",
-    "GateProbeResponse", "GateProbeOutcome", "GateProbeVerdict",
+    "ResolveWireRequest", "ResolveWireResponse",
   ]);
   const page = readRepoFile(pagePath);
   for (const name of exclusions) assert.ok(page.includes(`\`${name}\``), name);
