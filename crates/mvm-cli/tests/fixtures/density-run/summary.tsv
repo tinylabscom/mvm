@@ -5,6 +5,7 @@ launch_mode	cold
 waves	1 2
 wave_0_matching_processes	0
 wave_0_sampler_scope	host_wide_matching_processes
+wave_0_mvm_home_du_kib	4096
 wave_0_idle_window_seconds	10.0
 wave_0_idle_mvm-host-agent_threads	3
 wave_0_idle_mvm-host-agent_descriptors	9
