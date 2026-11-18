@@ -1,6 +1,8 @@
 """Offline checks for the density wave's idle sampler, against a built procfs tree."""
 
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -182,25 +184,37 @@ class DensityIdleMacosTests(unittest.TestCase):
 
 
 class DensityIdleBaselineTests(unittest.TestCase):
-    def sampled_rows(self, programs: dict[int, str]) -> list:
+    def run_main(self, *arguments: str) -> subprocess.CompletedProcess:
+        root = Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory() as raw:
+            return subprocess.run(
+                [sys.executable, "-m", "scripts.density_idle", raw, *arguments],
+                cwd=root, capture_output=True, text=True, timeout=30,
+            )
+
+    def test_main_accepts_wave_zero_as_the_zero_unit_baseline(self) -> None:
+        result = self.run_main("0", "0.1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("wave_0_idle_window_seconds\t", result.stdout)
+
+    def test_main_still_refuses_a_negative_wave(self) -> None:
+        self.assertEqual(self.run_main("-1", "0.1").returncode, 71)
+
+    def test_main_accepts_the_optional_standby_count(self) -> None:
+        result = self.run_main("4", "0.1", "4")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("wave_4_idle_window_seconds\t", result.stdout)
+
+    def test_main_refuses_a_sixth_argument(self) -> None:
+        self.assertEqual(self.run_main("4", "0.1", "4", "x").returncode, 64)
+
+    def test_a_component_absent_from_a_fake_procfs_emits_no_keys(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            for pid, program in programs.items():
-                write_process(root, pid, program, (10, 0), [5], 2)
+            write_process(root, 7, "/bin/sleep 1", (10, 0), [5], 2)
             before = sample(root)
-            for pid, program in programs.items():
-                write_process(root, pid, program, (20, 0), [15], 2)
-            return summarize(before, sample(root), 10.0, 100)
-
-    def test_the_zero_unit_sample_keys_its_figures_as_wave_zero(self) -> None:
-        rows = self.sampled_rows({7: "/usr/bin/mvm-mailbox"})
-        _, summary = render(rows, 0)
-        self.assertIn("wave_0_idle_mvm-mailbox_threads\t1\n", summary)
-        self.assertIn("wave_0_idle_mvm-mailbox_wakeups_per_second\t1.0\n", summary)
-
-    def test_a_component_absent_from_the_baseline_emits_no_keys(self) -> None:
-        rows = self.sampled_rows({})
-        self.assertEqual(rows, [])
+            write_process(root, 7, "/bin/sleep 1", (20, 0), [15], 2)
+            rows = summarize(before, sample(root), 10.0, 100)
         self.assertEqual(render(rows, 0)[1], "")
 
     def test_the_standby_summary_divides_cost_by_the_held_count(self) -> None:

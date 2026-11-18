@@ -274,11 +274,16 @@ if [[ "${MVM_HVF_DENSITY_ALLOW_BUSY_HOST:-0}" != "1" ]]; then
   : >"${busy_host_processes}"
 fi
 
+# Standby holds are warmed through the warm residency; "standby" is not a residency.
+RESIDENCY="${MODE}"
+if [[ "${MODE}" == "standby" ]]; then
+  RESIDENCY="warm"
+fi
 run_env=(
   env
   "MVM_HOME=${DATA_DIR}"
   "CARGO_TARGET_DIR=${TARGET_DIR}"
-  "MVM_RESIDENCY=${MODE}"
+  "MVM_RESIDENCY=${RESIDENCY}"
 )
 
 host_kernel_arch() {
@@ -497,6 +502,19 @@ capture_matching_processes() {
   ' "${pids}" - >"${dir}/matching-${phase}.txt"
 }
 
+# Pool records outlive the machines they name (a stopped standby parent stays recorded as
+# idle), so a later wave would warm fewer than asked. DATA_DIR is the fresh MVM_HOME this
+# run created; refuse to delete anywhere else.
+clear_standby_pool() {
+  case "${DATA_DIR}" in
+    "" | "/" | "${HOME}" | "${HOME}/.mvm")
+      echo "refusing: will not clear pool state under ${DATA_DIR:-<empty>}" >&2
+      return 1
+      ;;
+  esac
+  rm -rf "${DATA_DIR:?}/pool"
+}
+
 check_launches() {
   local dir="$1"
   shift
@@ -595,6 +613,18 @@ python3 "${ROOT}/scripts/density_metadata.py" "${ROOT}" "${SUMMARY}" \
 # Wave 0: the host with no unit launched, so fixed cost can be told from per-unit cost.
 zero_dir="${OUT_DIR}/wave-0"
 mkdir -p "${zero_dir}"
+sleep "${SETTLE_SECONDS}"
+capture_matching_processes "settled" "${zero_dir}"
+zero_owned="$(wc -l <"${zero_dir}/matching-settled.txt" | tr -d ' ')"
+if [[ "${zero_owned}" -ne 0 ]]; then
+  echo "refusing: ${zero_owned} harness-owned VMM process(es) remain before the zero-unit sample; see ${zero_dir}/matching-settled.txt" >&2
+  exit 71
+fi
+{
+  printf 'wave_0_matching_processes\t%s\n' "${zero_owned}"
+  # The sampler counts every matching process on the host, other sessions' VMs included.
+  printf 'wave_0_sampler_scope\thost_wide_matching_processes\n'
+} >>"${SUMMARY}"
 capture_idle "${zero_dir}" 0
 
 for wave in "${WAVES[@]}"; do
@@ -678,11 +708,6 @@ for wave in "${WAVES[@]}"; do
   capture_mailbox_threads "settled" "${wave_dir}"
   capture_storage "settled" "${wave_dir}"
   capture_matching_processes "settled" "${wave_dir}"
-  if [[ "${MODE}" == "standby" ]]; then
-    capture_idle "${wave_dir}" "${wave}" "${wave}"
-  else
-    capture_idle "${wave_dir}" "${wave}"
-  fi
   read -r mailbox_count mailbox_rss_kib < <(
     awk -F '\t' '$1 == "mvm-mailbox" { count = $2; rss = $3 }
       END { print count+0, rss+0 }' "${wave_dir}/rss-settled.tsv"
@@ -694,6 +719,11 @@ for wave in "${WAVES[@]}"; do
   vmm_count="$(awk -F '\t' -v component="${vmm_component}" \
     '$1 == component { print $2; found = 1; exit }
       END { if (!found) print 0 }' "${wave_dir}/rss-settled.tsv")"
+  if [[ "${MODE}" == "standby" && "${vmm_count}" -gt 0 ]]; then
+    capture_idle "${wave_dir}" "${wave}" "${vmm_count}"
+  else
+    capture_idle "${wave_dir}" "${wave}"
+  fi
   mailbox_threads="$(awk -F '\t' 'NR > 1 { n += $2 } END { print n+0 }' \
     "${wave_dir}/mailbox-threads-settled.tsv")"
   vm_state_kib="$(awk 'NR == 1 { print $1 }' "${wave_dir}/vm-state-blocks-settled.txt")"
@@ -714,6 +744,9 @@ for wave in "${WAVES[@]}"; do
     cleanup_ok=1
   fi
   : >"${active_pids_file}"
+  if [[ "${MODE}" == "standby" ]] && ! clear_standby_pool; then
+    cleanup_ok=0
+  fi
   capture_host_memory "after-cleanup" "${wave_dir}"
   capture_processes "after-cleanup" "${wave_dir}"
   capture_mailbox_threads "after-cleanup" "${wave_dir}"
