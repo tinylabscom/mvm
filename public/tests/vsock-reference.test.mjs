@@ -140,6 +140,8 @@ test("new serialized types in dedicated wire modules need a catalogue dispositio
   const exclusions = new Set([
     "LoopbackBinding",
     "WireRequest", "WireResponse", "ResolveWireRequest", "ResolveWireResponse",
+    "EndpointRequest", "GateProbeRequest", "GateProbeSample", "GateProbeExpect",
+    "GateProbeResponse", "GateProbeOutcome", "GateProbeVerdict",
   ]);
   const page = readRepoFile(pagePath);
   for (const name of exclusions) assert.ok(page.includes(`\`${name}\``), name);
