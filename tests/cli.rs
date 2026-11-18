@@ -3410,3 +3410,39 @@ fn pool_refill_is_hidden_from_help() {
         assert!(refill.contains(flag), "{refill}");
     }
 }
+
+#[test]
+fn bench_fit_exit_status_follows_the_verdict() {
+    let home = tempfile::tempdir().unwrap();
+    let inventory = home.path().join("host.json");
+    std::fs::write(
+        &inventory,
+        r#"{"total_vcpus": 8, "total_mem_mib": 4096, "total_disk_gib": 50}"#,
+    )
+    .unwrap();
+    let fit = |units: &str| {
+        mvmctl_isolated(home.path())
+            .args([
+                "bench",
+                "fit",
+                "--vcpus",
+                "1",
+                "--memory-mib",
+                "256",
+                "--units",
+                units,
+            ])
+            .arg("--inventory")
+            .arg(&inventory)
+            .output()
+            .expect("run mvmctl bench fit")
+    };
+    let ok = fit("2");
+    let stdout = String::from_utf8_lossy(&ok.stdout);
+    assert!(ok.status.success(), "{stdout}");
+    assert!(stdout.trim_end().ends_with("fits"), "{stdout}");
+    let no = fit("100");
+    let stdout = String::from_utf8_lossy(&no.stdout);
+    assert!(!no.status.success(), "{stdout}");
+    assert!(stdout.contains("does not fit: memory"), "{stdout}");
+}

@@ -202,4 +202,37 @@ fn bench_report_takes_a_density_dir_and_the_lane_form_still_parses() {
         mvm_cli::commands::help_text_for(&["bench".into(), "report".into(), "--help".into()])
             .expect("bench report --help renders");
     assert!(help.contains("--density-dir") && help.contains("--launch-report"));
+    cli_command()
+        .try_get_matches_from([
+            "mvmctl",
+            "bench",
+            "fit",
+            "--units",
+            "4",
+            "--vcpus",
+            "2",
+            "--memory-mib",
+            "512",
+            "--disk-mib",
+            "1024",
+            "--report",
+            "r.json",
+            "--backend",
+            "hvf",
+            "--architecture",
+            "aarch64",
+            "--inventory",
+            "h.json",
+            "--json",
+        ])
+        .expect("the fit form parses");
+    assert!(
+        cli_command()
+            .try_get_matches_from(["mvmctl", "bench", "fit", "--units", "4"])
+            .is_err(),
+        "fit needs vcpus and memory"
+    );
+    let help = mvm_cli::commands::help_text_for(&["bench".into(), "--help".into()])
+        .expect("bench --help renders");
+    assert!(help.contains("fit"), "{help}");
 }
