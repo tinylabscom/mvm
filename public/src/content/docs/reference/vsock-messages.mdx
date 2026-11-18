@@ -525,6 +525,17 @@ message:
   `ResolveWireRequest`/`ResolveWireResponse` also use separate host-local
   sockets. Only the derived `HttpFlowHead`/`HttpFlowResponseHead` values above
   are typed FlowMux payloads; raw secret values never become a new vsock DTO.
+  The same endpoint socket also carries `EndpointRequest`, an untagged choice
+  between a substitution `WireRequest` (tried first) and a `GateProbeRequest`
+  (tried second); a frame matching neither fails the connection closed. A gate
+  probe is witness-only: it never substitutes, opens no forward leg and writes
+  no audit record. `GateProbeRequest` carries at most four `GateProbeSample`
+  values (`MAX_GATE_PROBE_SAMPLES`), each a `host`, a `port` and a
+  `GateProbeExpect` (`admit` or `deny`) taken from the admitted policy, and
+  rejects unknown fields. `GateProbeResponse` returns one `GateProbeOutcome`
+  per sample in request order, carrying the running gate's `GateProbeVerdict`
+  (`admit`, `deny` or `malformed`) and, for a `deny`, the gate's own reason.
+  These are host-local too and not FlowMux payloads.
 - `LoopbackBinding` is addon configuration, not a transmitted addon prelude.
   Local addon DNS is UDP; FlowMux DNS is a raw DNS payload, not another
   DNS-vsock JSON service.
