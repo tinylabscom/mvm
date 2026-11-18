@@ -62,8 +62,8 @@ OUT_DIR unless an explicit override points elsewhere.
 metadata.json records source/host identity, binary hashes and measurement boundaries.
 It is not a successful-run receipt. RSS/idle samples include host-wide matching
 processes; receipt latency includes execution, not just boot or agent readiness.
-physical-memory-*.json records macOS per-process resident and physical-footprint
-bytes before, during and after each wave; unavailable/partial samples stay explicit.
+physical-memory-*.json records per-process resident bytes and a named quantity
+(macOS physical footprint, Linux proportional set size) before, during and after each wave; unavailable/partial samples stay explicit.
 wave-0 holds the zero-unit baseline: one settled memory and storage capture.
 USAGE
 }

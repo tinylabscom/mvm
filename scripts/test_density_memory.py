@@ -76,12 +76,16 @@ class DensityMemoryTests(unittest.TestCase):
 
     def test_unsupported_platform_is_not_reported_as_zero_memory(self):
         with tempfile.TemporaryDirectory() as directory, \
-                patch("density_memory.sys.platform", "linux"), \
+                patch("density_memory.sys.platform", "freebsd"), \
                 patch("density_memory.sys.argv", ["density_memory.py", directory, "before"]):
             self.assertEqual(density_memory.main(), 0)
             report = json.loads((Path(directory) / "physical-memory-before.json").read_text())
         self.assertEqual(report["status"], "unavailable")
+        self.assertEqual(report["reason"], "unsupported_platform")
         self.assertNotIn("processes", report)
+
+    def test_macos_capture_names_physical_footprint(self):
+        self.assertEqual(density_memory.collect(FakeLibproc())["quantity"], "physical_footprint")
 
     def test_empty_success_and_failed_enumeration_are_distinct(self):
         reader = FakeLibproc()
@@ -96,6 +100,59 @@ class DensityMemoryTests(unittest.TestCase):
             self.assertEqual(density_memory.main(), 0)
             report = json.loads((Path(directory) / "physical-memory-settled.json").read_text())
         self.assertEqual(report["status"], "unavailable")
+
+
+def fake_proc(root, pid, program, rollup="Rss:    2000 kB\nPss:    1500 kB\n"):
+    directory = Path(root) / str(pid)
+    directory.mkdir()
+    (directory / "cmdline").write_bytes(program.encode() + b"\0--arg\0")
+    if rollup is not None:
+        (directory / "smaps_rollup").write_text(rollup)
+
+
+class DensityMemoryLinuxTests(unittest.TestCase):
+    def test_reads_pss_in_bytes_and_names_the_quantity(self):
+        with tempfile.TemporaryDirectory() as root:
+            fake_proc(root, 10, "/x/mvm-hvf-supervisor")
+            fake_proc(root, 11, "sleep")
+            (Path(root) / "self").mkdir()
+            report = density_memory.collect_linux(Path(root))
+        self.assertEqual(report["status"], "measured")
+        self.assertEqual(report["quantity"], "proportional_set_size")
+        (row,) = report["processes"]
+        self.assertEqual(row["proportional_set_size_bytes"], 1500 * 1024)
+        self.assertEqual(row["resident_bytes"], 2000 * 1024)
+        self.assertNotIn("physical_footprint_bytes", row)
+
+    def test_unreadable_rollup_makes_the_capture_partial(self):
+        with tempfile.TemporaryDirectory() as root:
+            fake_proc(root, 10, "mvmctl")
+            fake_proc(root, 11, "mvmctl", rollup=None)
+            fake_proc(root, 12, "mvmctl", rollup="Rss: 1 kB\n")
+            report = density_memory.collect_linux(Path(root))
+        self.assertEqual(report["status"], "partial")
+        by_pid = {row["pid"]: row for row in report["processes"]}
+        self.assertEqual(by_pid[10]["status"], "measured")
+        for pid in (11, 12):
+            self.assertEqual(by_pid[pid]["status"], "unavailable")
+            self.assertIsNone(by_pid[pid]["proportional_set_size_bytes"])
+
+    def test_unreadable_cmdline_is_counted_unclassified(self):
+        with tempfile.TemporaryDirectory() as root:
+            (Path(root) / "20").mkdir()
+            report = density_memory.collect_linux(Path(root))
+        self.assertEqual(report["status"], "partial")
+        self.assertEqual(report["unclassified_processes"], 1)
+
+    def test_main_uses_the_injectable_root_and_reports_missing_procfs(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("density_memory.sys.platform", "linux"), \
+                patch("density_memory.PROC_ROOT", Path(directory) / "absent"), \
+                patch("density_memory.sys.argv", ["density_memory.py", directory, "before"]):
+            self.assertEqual(density_memory.main(), 0)
+            report = json.loads((Path(directory) / "physical-memory-before.json").read_text())
+        self.assertEqual(report["status"], "unavailable")
+        self.assertEqual(report["reason"], "procfs_unreadable")
 
 
 if __name__ == "__main__":
