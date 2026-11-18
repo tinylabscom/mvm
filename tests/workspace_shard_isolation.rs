@@ -11,9 +11,11 @@ fn cold_runners_fetch_cross_target_sources_before_offline_graph_tests() {
     let shard = fs::read_to_string(".github/workflows/workspace-shard.yml").unwrap();
     let main = fs::read_to_string(".github/workflows/ci-main.yml").unwrap();
     let arm = main.split("\n  test-workspace-aarch64:\n").nth(1).unwrap();
-    for workflow in [&shard[..], arm] {
+    // The release-profile lane runs mvm-hostd's graph test for the macOS target.
+    let witness = main.split("\n  test-release-witness:\n").nth(1).unwrap();
+    for workflow in [&shard[..], arm, witness] {
         let fetch = workflow.find("run: cargo fetch --locked").unwrap();
-        let tests = workflow.find("cargo nextest run --workspace").unwrap();
+        let tests = workflow.find("cargo nextest run ").unwrap();
         assert!(
             fetch < tests,
             "offline graph tests need the full locked source cache"
