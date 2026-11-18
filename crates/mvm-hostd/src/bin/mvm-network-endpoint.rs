@@ -95,7 +95,8 @@ fn main() -> Result<()> {
     // the moment it reads the ready line — no listen/connect race at boot.
     let bound = bind_transport(&cfg.transport)?;
     let session_readiness = bind_session_readiness(cfg.session_ready_socket.as_deref())?;
-    let connector = bind_connector(cfg.connector_uds_path.as_deref())?;
+    let connector = bind_private_listener(cfg.connector_uds_path.as_deref())?;
+    let gate_probe = bind_private_listener(cfg.gate_probe_socket.as_deref())?;
     // Always assembled. The one mode that skipped it was `raw`, which is gone:
     // a FlowMux guest can open a typed HTTP flow at any point in its life, and
     // deciding at boot that it will not is the kind of guess that leaves a
@@ -227,6 +228,7 @@ fn main() -> Result<()> {
                 .ingress(ingress)
                 .session_readiness(session_readiness)
                 .connector(connector)
+                .gate_probe(gate_probe)
                 .network_projection(network_projection)
                 .forward_timeout(forward_timeout)
                 .oauth_refresh(oauth_refresh)
@@ -774,31 +776,30 @@ fn bind_session_readiness(path: Option<&std::path::Path>) -> Result<Option<Bound
     Ok(Some(BoundSessionReadiness(listener)))
 }
 
-/// Bind the host-local typed connector before reporting process readiness.
-/// Broker/tool code connects here, but the endpoint remains the only process
-/// that resolves and dials the external destination.
-struct BoundConnector(std::os::unix::net::UnixListener);
+/// Bind host-only listeners before reporting process readiness.
+struct BoundPrivateListener(std::os::unix::net::UnixListener);
 
-fn bind_connector(path: Option<&std::path::Path>) -> Result<Option<BoundConnector>> {
+fn bind_private_listener(path: Option<&std::path::Path>) -> Result<Option<BoundPrivateListener>> {
     let Some(path) = path else {
         return Ok(None);
     };
     if let Some(parent) = path.parent() {
         mvm_core::private_fs::ensure_private_dir(parent)
-            .with_context(|| format!("create connector socket parent {}", parent.display()))?;
+            .with_context(|| format!("create private socket parent {}", parent.display()))?;
     }
     let listener = std::os::unix::net::UnixListener::bind(path)
-        .with_context(|| format!("typed connector bind on {} failed", path.display()))?;
+        .with_context(|| format!("private listener bind on {} failed", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("restrict typed connector {} to mode 0600", path.display()))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).with_context(
+            || format!("restrict private listener {} to mode 0600", path.display()),
+        )?;
     }
     listener
         .set_nonblocking(true)
-        .context("set typed connector listener nonblocking")?;
-    Ok(Some(BoundConnector(listener)))
+        .context("set private listener nonblocking")?;
+    Ok(Some(BoundPrivateListener(listener)))
 }
 
 /// Run the primary substitution accept loop until a listener errors (or the
@@ -813,7 +814,8 @@ struct ServeParams<'a> {
     bound: Bound,
     ingress: BoundIngress,
     session_readiness: Option<BoundSessionReadiness>,
-    connector: Option<BoundConnector>,
+    connector: Option<BoundPrivateListener>,
+    gate_probe: Option<BoundPrivateListener>,
     network_projection: EndpointNetworkProjection,
     forward_timeout: std::time::Duration,
     oauth_refresh: Option<mvm_hostd::keyholder::OAuthRefreshDriver>,
@@ -829,7 +831,8 @@ struct ServeParamsBuilder<'a> {
     bound: Option<Bound>,
     ingress: Option<BoundIngress>,
     session_readiness: Option<BoundSessionReadiness>,
-    connector: Option<BoundConnector>,
+    connector: Option<BoundPrivateListener>,
+    gate_probe: Option<BoundPrivateListener>,
     network_projection: Option<EndpointNetworkProjection>,
     forward_timeout: Option<std::time::Duration>,
     oauth_refresh: Option<mvm_hostd::keyholder::OAuthRefreshDriver>,
@@ -844,6 +847,7 @@ impl<'a> ServeParams<'a> {
             ingress: None,
             session_readiness: None,
             connector: None,
+            gate_probe: None,
             network_projection: None,
             forward_timeout: None,
             oauth_refresh: None,
@@ -884,8 +888,13 @@ impl<'a> ServeParamsBuilder<'a> {
         self
     }
 
-    fn connector(mut self, connector: Option<BoundConnector>) -> Self {
+    fn connector(mut self, connector: Option<BoundPrivateListener>) -> Self {
         self.connector = connector;
+        self
+    }
+
+    fn gate_probe(mut self, listener: Option<BoundPrivateListener>) -> Self {
+        self.gate_probe = listener;
         self
     }
 
@@ -912,6 +921,7 @@ impl<'a> ServeParamsBuilder<'a> {
             ingress: self.ingress.context("ServeParams missing ingress")?,
             session_readiness: self.session_readiness,
             connector: self.connector,
+            gate_probe: self.gate_probe,
             network_projection: self
                 .network_projection
                 .context("ServeParams missing network_projection")?,
@@ -931,6 +941,7 @@ async fn serve(params: ServeParams<'_>) -> Result<()> {
         ingress,
         session_readiness,
         connector,
+        gate_probe,
         network_projection,
         forward_timeout,
         oauth_refresh,
@@ -947,7 +958,7 @@ async fn serve(params: ServeParams<'_>) -> Result<()> {
         tokio::spawn(serve_session_readiness(std_listener, session_ready_rx))
     });
     let connector_task = match connector {
-        Some(BoundConnector(std_listener)) => {
+        Some(BoundPrivateListener(std_listener)) => {
             let service = service
                 .as_ref()
                 .context("typed connector configured without a substitution service")?;
@@ -955,6 +966,19 @@ async fn serve(params: ServeParams<'_>) -> Result<()> {
                 .context("adopting typed connector listener into the tokio runtime")?;
             Some(tokio::spawn(
                 std::sync::Arc::clone(service).serve_connector(listener),
+            ))
+        }
+        None => None,
+    };
+    let gate_probe_task = match gate_probe {
+        Some(BoundPrivateListener(std_listener)) => {
+            let service = service
+                .as_ref()
+                .context("gate probe configured without a substitution service")?;
+            let listener = tokio::net::UnixListener::from_std(std_listener)
+                .context("adopting gate probe listener into the tokio runtime")?;
+            Some(tokio::spawn(
+                std::sync::Arc::clone(service).serve_gate_probes(listener),
             ))
         }
         None => None,
@@ -984,6 +1008,9 @@ async fn serve(params: ServeParams<'_>) -> Result<()> {
         task.abort();
     }
     if let Some(task) = connector_task {
+        task.abort();
+    }
+    if let Some(task) = gate_probe_task {
         task.abort();
     }
     Ok(())
@@ -1424,6 +1451,7 @@ mod tests {
             resolver: ResolverBackend::default(),
             session_marker: None,
             session_ready_socket: None,
+            gate_probe_socket: None,
             connector_uds_path: None,
             approval_socket: None,
             flowmux_identity: None,
@@ -1460,6 +1488,7 @@ mod tests {
             flowmux_identity: None,
             session_marker: None,
             session_ready_socket: None,
+            gate_probe_socket: None,
             connector_uds_path: None,
             approval_socket: None,
         }
@@ -1631,7 +1660,9 @@ mod tests {
     fn typed_connector_is_bound_before_readiness() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("connector.sock");
-        let bound = bind_connector(Some(&path)).unwrap().expect("configured");
+        let bound = bind_private_listener(Some(&path))
+            .unwrap()
+            .expect("configured");
         assert!(path.exists());
         use std::os::unix::fs::PermissionsExt as _;
         assert_eq!(
@@ -1656,7 +1687,7 @@ mod tests {
         let ready = dir.path().join("ready-ns").join("ready.sock");
         drop(bind_session_readiness(Some(&ready)).unwrap());
         let connector = dir.path().join("conn-ns").join("conn.sock");
-        drop(bind_connector(Some(&connector)).unwrap());
+        drop(bind_private_listener(Some(&connector)).unwrap());
         for path in [
             &parent,
             ready.parent().unwrap(),
@@ -1672,8 +1703,21 @@ mod tests {
     }
 
     #[test]
+    fn private_listener_refuses_existing_file_or_socket_without_replacing_it() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let file = dir.path().join("probe-file");
+        std::fs::write(&file, b"existing evidence").unwrap();
+        assert!(bind_private_listener(Some(&file)).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), b"existing evidence");
+        let socket = dir.path().join("probe.sock");
+        let _listener = bind_private_listener(Some(&socket)).unwrap();
+        assert!(bind_private_listener(Some(&socket)).is_err());
+        assert!(std::os::unix::net::UnixStream::connect(&socket).is_ok());
+    }
+
+    #[test]
     fn absent_typed_connector_does_not_bind_a_socket() {
-        assert!(bind_connector(None).unwrap().is_none());
+        assert!(bind_private_listener(None).unwrap().is_none());
     }
 
     #[test]
@@ -1976,6 +2020,7 @@ mod tests {
             resolver: ResolverBackend::default(),
             session_marker: None,
             session_ready_socket: None,
+            gate_probe_socket: None,
             connector_uds_path: Some(PathBuf::from("/tmp/mvm-flowmux-connector.sock")),
             approval_socket: None,
             flowmux_identity: Some(

@@ -906,6 +906,7 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
         },
         "network_limits": params.network_limits,
         "ingress": params.ingress,
+        "gate_probe_socket": mvm_core::config::vm_network_gate_probe_socket_at(params.state_dir),
     });
     if params.telemetry {
         // The embedded collector's inputs, derived here so the spawner's one
@@ -1020,6 +1021,9 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
         clear_stale_socket(path);
     }
     clear_stale_socket(&connector_socket_path(params.state_dir));
+    clear_stale_socket(&mvm_core::config::vm_network_gate_probe_socket_at(
+        params.state_dir,
+    ));
     params.session_marker = Some(session_marker);
     let mut cfg = build_endpoint_config_json(&params);
     if params.telemetry {
@@ -1293,6 +1297,7 @@ pub fn reap_network_endpoint(state_dir: &Path, vm_name: &str) {
     }
     let _ = std::fs::remove_file(state_dir.join(SUBST_PID_FILE));
     let _ = std::fs::remove_file(session_ready_socket_path(state_dir));
+    let _ = std::fs::remove_file(mvm_core::config::vm_network_gate_probe_socket_at(state_dir));
     let _ = std::fs::remove_file(state_dir.join(SUBST_CONNECTOR_SOCKET));
     let _ = std::fs::remove_file(mvm_core::config::vm_substitution_env_path(vm_name));
     // The only reason the per-VM egress CA key outlives the endpoint process is
@@ -2605,6 +2610,12 @@ mod tests {
         );
         assert_eq!(cfg["egress_mode"], "wire");
         // Base fields carried through the extraction.
+        assert_eq!(
+            cfg["gate_probe_socket"],
+            serde_json::json!(mvm_core::config::vm_network_gate_probe_socket_at(
+                Path::new("/tmp")
+            ))
+        );
         assert_eq!(cfg["tenant_id"], "tenant-x");
         assert_eq!(
             cfg["instance_id"], "cfg-vm",
@@ -2738,6 +2749,12 @@ mod tests {
         let id = cfg["flowmux_identity"]
             .as_object()
             .expect("flowmux_identity object");
+        assert_eq!(
+            cfg["gate_probe_socket"],
+            serde_json::json!(mvm_core::config::vm_network_gate_probe_socket_at(
+                params.state_dir
+            ))
+        );
         assert_eq!(id["session_id"], "vm-123-boot-456");
         assert_eq!(id["host_signing_key_base64"], "aG9zdC1rZXktYnl0ZXM");
         assert_eq!(id["guest_verifying_key_base64"], "Z3Vlc3Qta2V5LWJ5dGVz");

@@ -356,6 +356,133 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
 }
 
 #[test]
+fn gate_probe_control_serves_wire_and_flowmux_without_creating_a_guest_session() {
+    use base64::Engine as _;
+    use mvm_core::substitution_wire::{
+        GateProbeExpect, GateProbeRequest, GateProbeResponse, GateProbeSample, GateProbeVerdict,
+    };
+    use mvm_hostd::supervisor::endpoint::network_endpoint::FlowMuxIdentity;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    for mode in [EgressMode::Wire, EgressMode::FlowMux] {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let _environment = audit_environment(dir.path());
+        let sock = dir.path().join("network.sock");
+        let probe = mvm_core::config::vm_network_gate_probe_socket_at(dir.path());
+        let marker = dir.path().join("session.marker");
+        let host = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        let guest = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let cfg = EndpointConfig {
+            egress_mode: mode,
+            gate_probe_socket: Some(probe.clone()),
+            session_marker: Some(marker.clone()),
+            network_policy: Some(mvm_core::network_policy::NetworkPolicy::allow_list(vec![
+                mvm_core::network_policy::HostPort::new("example.com", 443),
+            ])),
+            flowmux_identity: Some(FlowMuxIdentity {
+                session_id: "gate-probe".into(),
+                host_signing_key_base64: b64.encode(host.to_bytes()),
+                guest_verifying_key_base64: b64.encode(guest.verifying_key().to_bytes()),
+            }),
+            ..test_config(EndpointTransport::Uds { path: sock.clone() })
+        };
+        let mut child = Command::new(BIN)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&serde_json::to_vec(&cfg).unwrap())
+            .unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        let mut guard = Kill(child);
+        let mut line = String::new();
+        stdout.read_line(&mut line).unwrap();
+        assert!(!line.is_empty(), "endpoint must report readiness");
+
+        let metadata = std::fs::metadata(&probe).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(metadata.uid(), std::fs::metadata(dir.path()).unwrap().uid());
+        assert_eq!(
+            std::fs::metadata(probe.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        let request = GateProbeRequest {
+            samples: vec![
+                GateProbeSample {
+                    host: "example.com".into(),
+                    port: 443,
+                    expect: GateProbeExpect::Admit,
+                },
+                GateProbeSample {
+                    host: "example.com".into(),
+                    port: 80,
+                    expect: GateProbeExpect::Deny,
+                },
+            ],
+        };
+        let mut conn = UnixStream::connect(&probe).unwrap();
+        conn.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        write_frame(&mut conn, &request);
+        let response: GateProbeResponse = read_frame(&mut conn);
+        assert_eq!(response.results[0].verdict, GateProbeVerdict::Admit);
+        assert_eq!(response.results[1].verdict, GateProbeVerdict::Deny);
+        assert!(
+            !marker.exists(),
+            "a probe must not authenticate a guest session"
+        );
+
+        // Forward-shaped data is never dispatched from this control listener.
+        let mut invalid = UnixStream::connect(&probe).unwrap();
+        invalid
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        write_frame(
+            &mut invalid,
+            &WireRequest {
+                method: "GET".into(),
+                url: "https://example.com/".into(),
+                headers: vec![],
+                body_b64: String::new(),
+            },
+        );
+        match invalid.read(&mut [0]) {
+            Ok(0) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+            result => panic!("control listener must close a forward request, got {result:?}"),
+        }
+
+        if matches!(mode, EgressMode::FlowMux) {
+            let mut data = UnixStream::connect(&sock).unwrap();
+            data.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let (mut session, _) =
+                mvm_core::net::session::Session::guest(&mut data, guest, &host.verifying_key())
+                    .unwrap();
+            complete_flowmux_hello(&mut data, &mut session);
+        }
+        guard.0.kill().unwrap();
+        guard.0.wait().unwrap();
+        assert!(UnixStream::connect(&probe).is_err());
+        mvm_vmm::host::network_endpoint_spawn::reap_network_endpoint(dir.path(), "test");
+        assert!(
+            !probe.exists(),
+            "endpoint lifecycle removes the control socket"
+        );
+    }
+}
+
+#[test]
 fn a_flowmux_endpoint_keeps_serving_sessions_after_one_ends() {
     use base64::Engine as _;
     use mvm_core::net::session::Session;
@@ -623,6 +750,7 @@ fn test_config(transport: EndpointTransport) -> EndpointConfig {
         resolver: ResolverBackend::default(),
         session_marker: None,
         session_ready_socket: None,
+        gate_probe_socket: None,
         connector_uds_path: None,
         approval_socket: None,
         flowmux_identity: None,
@@ -647,16 +775,20 @@ fn connector_only_config(connector: &std::path::Path, sock: &std::path::Path) ->
 /// for the ready line, and exits while the endpoint is meant to keep serving.
 /// Returns the pid the launcher recorded, which is what the stop path signals.
 fn launch_from_a_launcher_that_exits(dir: &std::path::Path, args: &[&std::ffi::OsStr]) -> i32 {
-    let config = dir.join("config.json");
-    std::fs::write(
-        &config,
-        serde_json::to_vec(&connector_only_config(
-            &dir.join("connector.sock"),
-            &dir.join("network.sock"),
-        ))
-        .unwrap(),
+    launch_config_from_a_launcher_that_exits(
+        dir,
+        args,
+        &connector_only_config(&dir.join("connector.sock"), &dir.join("network.sock")),
     )
-    .unwrap();
+}
+
+fn launch_config_from_a_launcher_that_exits(
+    dir: &std::path::Path,
+    args: &[&std::ffi::OsStr],
+    cfg: &EndpointConfig,
+) -> i32 {
+    let config = dir.join("config.json");
+    std::fs::write(&config, serde_json::to_vec(cfg).unwrap()).unwrap();
     let ready = dir.join("ready.line");
     let pid_file = dir.join("endpoint.pid");
     let status = Command::new("sh")
@@ -719,6 +851,75 @@ impl Drop for KillPid {
             libc::kill(self.0, libc::SIGKILL);
         }
     }
+}
+
+#[test]
+fn detached_allow_host_flowmux_endpoint_keeps_gate_control_until_stop() {
+    use base64::Engine as _;
+    use mvm_core::substitution_wire::{
+        GateProbeExpect, GateProbeRequest, GateProbeResponse, GateProbeSample, GateProbeVerdict,
+    };
+    use mvm_hostd::supervisor::endpoint::network_endpoint::FlowMuxIdentity;
+
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let _environment = audit_environment(dir.path());
+    let state = dir.path().join("vm");
+    std::fs::create_dir(&state).unwrap();
+    let vm = Command::new("sleep").arg("60").spawn().unwrap();
+    let mut vm = Kill(vm);
+    std::fs::write(state.join("fc.pid"), vm.0.id().to_string()).unwrap();
+    let control = mvm_core::config::vm_network_gate_probe_socket_at(&state);
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let cfg = EndpointConfig {
+        egress_mode: EgressMode::FlowMux,
+        gate_probe_socket: Some(control.clone()),
+        network_policy: Some(mvm_core::network_policy::NetworkPolicy::allow_list(vec![
+            mvm_core::network_policy::HostPort::new("example.com", 443),
+        ])),
+        flowmux_identity: Some(FlowMuxIdentity {
+            session_id: "detached-gate".into(),
+            host_signing_key_base64: b64.encode([7; 32]),
+            guest_verifying_key_base64: b64.encode(
+                ed25519_dalek::SigningKey::from_bytes(&[9; 32])
+                    .verifying_key()
+                    .to_bytes(),
+            ),
+        }),
+        ..test_config(EndpointTransport::Uds {
+            path: state.join("network.sock"),
+        })
+    };
+    let pid = launch_config_from_a_launcher_that_exits(
+        dir.path(),
+        &[
+            std::ffi::OsStr::new(mvm_hostd::vm_lifetime::VM_LIFETIME_FLAG),
+            state.as_os_str(),
+        ],
+        &cfg,
+    );
+    let _keeper = KillPid(pid);
+    let mut stream = UnixStream::connect(&control).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    write_frame(
+        &mut stream,
+        &GateProbeRequest {
+            samples: vec![GateProbeSample {
+                host: "example.com".into(),
+                port: 443,
+                expect: GateProbeExpect::Admit,
+            }],
+        },
+    );
+    let response: GateProbeResponse = read_frame(&mut stream);
+    assert_eq!(response.results[0].verdict, GateProbeVerdict::Admit);
+    vm.0.kill().unwrap();
+    vm.0.wait().unwrap();
+    assert!(!connector_serving_settles_to(&control, false));
+    assert!(!process_liveness_settles_to(pid, false));
+    mvm_vmm::host::network_endpoint_spawn::reap_network_endpoint(&state, "test");
+    assert!(!control.exists());
 }
 
 #[test]

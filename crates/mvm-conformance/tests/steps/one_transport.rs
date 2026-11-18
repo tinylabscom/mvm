@@ -566,6 +566,7 @@ fn secret_bearing_config() -> mvm_hostd::supervisor::endpoint::network_endpoint:
         egress_mode: Default::default(),
         session_marker: None,
         session_ready_socket: None,
+        gate_probe_socket: None,
         resolver: Default::default(),
         connector_uds_path: None,
         approval_socket: None,

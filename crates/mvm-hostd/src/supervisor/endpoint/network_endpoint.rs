@@ -282,6 +282,9 @@ pub struct EndpointConfig {
     /// identity or secret data; the marker remains the durable evidence.
     #[serde(default)]
     pub session_ready_socket: Option<std::path::PathBuf>,
+    /// Host-only read-only gate probes, independent of the guest transport.
+    #[serde(default)]
+    pub gate_probe_socket: Option<std::path::PathBuf>,
     /// Host-local typed connector ingress. This listener is owned by the same
     /// endpoint process and uses the same signed policy projection, secret
     /// registry, redaction engine, audit sink, and hardened forwarder as guest
@@ -1145,6 +1148,7 @@ mod tests {
             flowmux_identity: None,
             session_marker: None,
             session_ready_socket: None,
+            gate_probe_socket: None,
             connector_uds_path: None,
             approval_socket: None,
         }

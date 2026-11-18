@@ -1082,6 +1082,11 @@ pub fn vm_network_endpoint_socket(name: &str) -> std::path::PathBuf {
     vm_socket_dir(name).join("substitution-endpoint.sock")
 }
 
+/// Host-only, read-only gate-probe socket owned by the per-VM endpoint.
+pub fn vm_network_gate_probe_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf {
+    vm_socket_dir_at(state_dir).join("network-gate-probe.sock")
+}
+
 /// Filename of the hvf VMM's host→guest agent-RPC bridge socket:
 /// `hvf-agent.sock`. Single source of truth for the name; callers that hold the
 /// per-VM state dir join it via [`vm_hvf_agent_socket_at`], callers that hold

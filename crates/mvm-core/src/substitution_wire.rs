@@ -135,27 +135,6 @@ impl fmt::Debug for ResolveWireResponse {
     }
 }
 
-/// The one kind of request a host-internal endpoint connection carries. The
-/// guest SDK's substitution request shares the socket with a witness-only
-/// gate probe, so the serve loop demultiplexes on the frame body instead of
-/// binding one request type per listener.
-///
-/// `untagged` keeps the wire backward-compatible: every frame a previous
-/// client sent is exactly a [`WireRequest`], so `Forward` is tried first and
-/// only a frame without `method`/`url`/`headers` falls through to
-/// [`GateProbeRequest`]. A frame matching neither fails the parse, which
-/// fails the connection closed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum EndpointRequest {
-    /// A secret-bearing substitution request, forwarded toward the bound
-    /// destination.
-    Forward(WireRequest),
-    /// A witness-only probe of the running egress gate (see
-    /// [`GateProbeRequest`]).
-    GateProbe(GateProbeRequest),
-}
-
 /// Cap on the samples one gate probe carries. The launcher sends at most a
 /// deny sample and an admit sample; the cap bounds a hostile or broken peer's
 /// frame before the gate is asked anything.
@@ -167,7 +146,9 @@ pub const MAX_GATE_PROBE_SAMPLES: usize = 4;
 /// live gate gives, so a launch can tell "the policy was admitted" apart from
 /// "the running gate actually enforces it".
 ///
-/// `deny_unknown_fields` fails closed on an unexpected field.
+/// This request is accepted only on the private host control listener, never
+/// on the guest data transport. `deny_unknown_fields` fails closed on an
+/// unexpected field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GateProbeRequest {
@@ -486,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_request_untagged_parses_forward_first() {
+    fn gate_probe_and_forward_requests_are_distinct() {
         let wire = WireRequest {
             method: "POST".into(),
             url: "https://api.openai.com/v1".into(),
@@ -494,28 +475,9 @@ mod tests {
             body_b64: String::new(),
         };
         let json = serde_json::to_string(&wire).unwrap();
-        assert_eq!(
-            serde_json::from_str::<EndpointRequest>(&json).unwrap(),
-            EndpointRequest::Forward(wire)
-        );
-    }
-
-    #[test]
-    fn endpoint_request_untagged_parses_gate_probe_second() {
-        let req = probe_request();
-        let json = serde_json::to_string(&req).unwrap();
-        assert_eq!(
-            serde_json::from_str::<EndpointRequest>(&json).unwrap(),
-            EndpointRequest::GateProbe(req)
-        );
-    }
-
-    #[test]
-    fn endpoint_request_untagged_rejects_garbage() {
-        // Neither a WireRequest (no method/url/headers) nor a probe (no
-        // samples): the frame must fail the parse, closing the connection.
-        let garbage = r#"{"question":{"tool":"shell"}}"#;
-        assert!(serde_json::from_str::<EndpointRequest>(garbage).is_err());
+        assert!(serde_json::from_str::<GateProbeRequest>(&json).is_err());
+        let json = serde_json::to_string(&probe_request()).unwrap();
+        assert!(serde_json::from_str::<WireRequest>(&json).is_err());
     }
 
     #[test]
