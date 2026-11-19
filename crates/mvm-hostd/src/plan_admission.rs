@@ -78,6 +78,7 @@ mod restore;
 mod rollback;
 mod shares;
 mod start;
+mod topology_binding;
 mod verb_grant_sidecar;
 
 use assurance_runtime::AssuranceRuntimeBinding;
@@ -116,6 +117,7 @@ pub use start::{
 pub(crate) use start::{
     admit_synthesized_with_verified_release, start_admitted_with_verified_release,
 };
+pub use topology_binding::TOPOLOGY_BINDING_STAGE;
 
 /// Result of a successful admission. Carries everything the caller
 /// needs to hand to the backend (the plan + its id), to the audit
@@ -443,3 +445,5 @@ mod signed_plan_admission_tests;
 mod start_tests;
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+mod topology_binding_tests;

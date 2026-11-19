@@ -1160,6 +1160,9 @@ pub(crate) fn admit_synthesized_with_verified_release(
         Ok(admitted) => admitted,
         Err(err) => {
             if let Some(emitter) = params.emitter
+                && err
+                    .downcast_ref::<super::topology_binding::TopologyRefusalAudited>()
+                    .is_none()
                 && let Err(e) =
                     emitter.emit_refused(&plan, "admit_plan_for_run", &format!("{err:#}"))
             {
