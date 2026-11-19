@@ -194,6 +194,26 @@ pub(super) struct BootedVm {
     pub(super) lifecycle: Option<MachineLifecycleLock>,
 }
 
+/// Check the admitted plan still describes `start_config`, before warm or
+/// cold selection.
+///
+/// The borrow ends here. The admitted cold path takes the owner out of the
+/// cell for the duration of the boot, so a borrow that outlived this check
+/// would turn every admitted cold launch into a panic.
+pub(super) fn check_admitted_projection(
+    admission: Option<&std::cell::RefCell<Option<mvm_client::admission::CliAdmission>>>,
+    start_config: &mvm_core::vm_backend::VmStartConfig,
+) -> Result<()> {
+    let Some(admission) = admission else {
+        return Ok(());
+    };
+    admission
+        .borrow()
+        .as_ref()
+        .context("CLI launch has no signed admission owner before warm/cold selection")?
+        .check_legacy_projection(start_config)
+}
+
 /// Boot the transient VM: try to claim a warm standby first, then a
 /// snapshot restore (when eligible), then fall back to a cold boot from
 /// `attempt.start_config`. Reaps expired standbys first — best-effort TTL
@@ -937,6 +957,29 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn the_projection_check_leaves_the_admission_free_for_the_cold_boot() {
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().expect("home");
+        env.isolate_mvm_home(home.path());
+        let rootfs = home.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"mock rootfs").expect("rootfs");
+        let (owner, config) = admitted_mock_cold("projection-borrow", &rootfs, home.path());
+        let admitted = std::cell::RefCell::new(Some(owner));
+
+        check_admitted_projection(Some(&admitted), &config).expect("projection matches");
+        assert!(
+            admitted.try_borrow_mut().is_ok(),
+            "the cold path takes the owner mutably, so the check must hold no borrow"
+        );
+
+        admitted.borrow_mut().take();
+        let error = check_admitted_projection(Some(&admitted), &config)
+            .expect_err("an emptied owner is refused");
+        assert!(format!("{error:#}").contains("no signed admission owner"));
+        check_admitted_projection(None, &config).expect("no admission, nothing to check");
+    }
+
     #[test]
     fn admitted_cli_cold_uses_hostd_once_and_refuses_before_mock_start_on_bad_share() {
         let mut env = TestEnv::new();
