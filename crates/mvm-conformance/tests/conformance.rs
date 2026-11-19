@@ -187,10 +187,16 @@ fn stop_launched_vms_when_interrupted() {
         };
         let report = tokio::task::spawn_blocking(mvm_conformance::vmm_reaper::reap_launched_homes)
             .await
-            .unwrap_or_default();
+            .unwrap_or_else(|_| mvm_conformance::vmm_reaper::ReapReport {
+                unknown: vec![mvm_conformance::vmm_reaper::UnknownCleanup {
+                    pid: None,
+                    category: mvm_conformance::vmm_reaper::CleanupUnknown::StopUnavailable,
+                }],
+                ..Default::default()
+            });
         if !report.found.is_empty() {
             eprintln!(
-                "\nconformance: interrupted; stopped {} process(es) live steps started:\n{}",
+                "\nconformance: interrupted; found {} process(es) live steps started:\n{}",
                 report.found.len(),
                 mvm_conformance::vmm_reaper::ReapReport::describe(&report.found)
             );
@@ -198,7 +204,7 @@ fn stop_launched_vms_when_interrupted() {
         if !report.is_clean() {
             eprintln!(
                 "conformance: could not stop:\n{}",
-                mvm_conformance::vmm_reaper::ReapReport::describe(&report.survivors)
+                report.describe_failure()
             );
         }
         std::process::exit(code);
@@ -219,15 +225,15 @@ fn stop_what_the_scenario_left_running(scenario: &str, world: &CliWorld) {
     let report = world.reap_scenario_processes();
     if !report.found.is_empty() {
         eprintln!(
-            "[bdd] scenario {scenario:?} left {} process(es) running; stopped:\n{}",
+            "[bdd] scenario {scenario:?} left {} process(es) running:\n{}",
             report.found.len(),
             mvm_conformance::vmm_reaper::ReapReport::describe(&report.found)
         );
     }
     assert!(
         report.is_clean(),
-        "scenario {scenario:?} left processes running that SIGTERM and SIGKILL did not stop:\n{}",
-        mvm_conformance::vmm_reaper::ReapReport::describe(&report.survivors)
+        "scenario {scenario:?} cleanup was not confirmed:\n{}",
+        report.describe_failure()
     );
 }
 
