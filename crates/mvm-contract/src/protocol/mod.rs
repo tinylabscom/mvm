@@ -22,6 +22,7 @@ pub mod host_kv;
 pub mod host_signer;
 pub mod host_time;
 pub mod hvf_control;
+pub mod hvf_entrypoint_owner;
 pub mod hvf_owner;
 pub mod hvf_owner_lifecycle;
 /// Capability-bound, transport-neutral mailbox identities and wire DTOs.
