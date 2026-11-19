@@ -166,8 +166,8 @@ enum ColdDispatch {
 }
 
 impl ColdDispatch {
-    fn select(backend: &AnyBackend, has_admission: bool) -> Self {
-        if has_admission && backend.uses_cli_admitted_cold_dispatch() {
+    fn select(has_admission: bool) -> Self {
+        if has_admission {
             Self::HostAdmitted
         } else {
             Self::Legacy
@@ -179,7 +179,12 @@ impl ColdDispatch {
 fn claim_warm_standby(
     attempt: &mut BootAttempt<'_>,
 ) -> Result<crate::commands::pool::WarmClaimOutcome> {
-    crate::commands::pool::try_warm_claim(attempt.backend, attempt.start_config, attempt.user_named)
+    crate::commands::pool::try_warm_claim_with_admission(
+        attempt.backend,
+        attempt.start_config,
+        attempt.user_named,
+        attempt.admission,
+    )
 }
 
 /// The VM a transient boot produced.
@@ -276,8 +281,8 @@ pub(super) fn boot_transient_vm(
     // returned name diverges from `vm_name` — the caller rebinds it for the
     // Ctrl-C handler, run_in_guest, and teardown. try_warm_claim gates
     // internally (an auto-named launch of a shape a shared parent can serve,
-    // a non-zero standby target, admitted tenant + signed plan threaded into
-    // start_config, backend supports the pool). Finding no standby is not an
+    // a non-zero standby target, a one-use CLI admission, and backend pool
+    // support). Finding no standby is not an
     // error: the launch boots cold, and says so when a standby could have
     // served it. Only a residency the operator set by name on a backend with
     // no pool is returned as an actionable error.
@@ -342,8 +347,12 @@ pub(super) fn boot_transient_vm(
         };
 
     if !booted {
-        let admitted_cold = ColdDispatch::select(attempt.backend, attempt.admission.is_some())
-            == ColdDispatch::HostAdmitted;
+        let admitted_cold =
+            ColdDispatch::select(attempt.admission.is_some()) == ColdDispatch::HostAdmitted;
+        anyhow::ensure!(
+            admitted_cold || !mvm_runtime::catalog::descriptor(attempt.backend.kind()).is_workload,
+            "workload cold boot requires signed CLI admission"
+        );
         if !admitted_cold {
             mvm_hostd::mailbox_process::require_servable(
                 attempt.start_config,
@@ -858,30 +867,65 @@ mod tests {
     use mvm_core::util::test_env::TestEnv;
 
     #[test]
-    fn unmigrated_admitted_backends_keep_legacy_cold_dispatch() {
-        let wasm = AnyBackend::from_hypervisor("wasm");
-        let qemu = AnyBackend::from_hypervisor("qemu");
-        let apple_container = AnyBackend::from_hypervisor("apple-container");
-        let firecracker = AnyBackend::from_hypervisor("firecracker");
-        assert_eq!(ColdDispatch::select(&wasm, true), ColdDispatch::Legacy);
-        assert_eq!(ColdDispatch::select(&qemu, true), ColdDispatch::Legacy);
-        assert_eq!(
-            ColdDispatch::select(&apple_container, true),
-            ColdDispatch::Legacy
-        );
-        assert_eq!(
-            ColdDispatch::select(&firecracker, false),
-            ColdDispatch::Legacy
-        );
-        assert_eq!(
-            ColdDispatch::select(&firecracker, true),
-            ColdDispatch::HostAdmitted
-        );
-        let mock = AnyBackend::Mock(mvm_runtime::mock::MockBackend::new());
-        assert_eq!(
-            ColdDispatch::select(&mock, true),
-            ColdDispatch::HostAdmitted
-        );
+    fn every_admitted_cold_backend_uses_the_host_tail() {
+        assert_eq!(ColdDispatch::select(true), ColdDispatch::HostAdmitted);
+        assert_eq!(ColdDispatch::select(false), ColdDispatch::Legacy);
+        for selector in [
+            "wasm",
+            "web-linux",
+            "apple-container",
+            "firecracker",
+            "libkrun",
+            "hvf",
+        ] {
+            assert!(
+                mvm_runtime::catalog::descriptor(AnyBackend::from_hypervisor(selector).kind())
+                    .is_workload,
+                "{selector} must not use the planless cold path"
+            );
+        }
+        for selector in ["qemu", "mock"] {
+            assert!(
+                !mvm_runtime::catalog::descriptor(AnyBackend::from_hypervisor(selector).kind())
+                    .is_workload,
+                "{selector} is a dev/test exception, not a security-tier claim"
+            );
+        }
+    }
+
+    #[test]
+    fn planless_workload_cold_boot_refuses_before_backend_start() {
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().expect("home");
+        env.isolate_mvm_home(home.path());
+        env.remove("MVM_RESIDENCY");
+        for selector in ["wasm", "web-linux"] {
+            let backend = AnyBackend::from_hypervisor(selector);
+            let config = VmStartConfig {
+                name: format!("planless-{selector}"),
+                ..Default::default()
+            };
+            let resolved = resolved_image();
+            let mut images = Vec::new();
+            let mut attempt = BootAttempt {
+                backend: &backend,
+                start_config: &config,
+                verified_release: None,
+                admission: None,
+                mailbox_posture: None,
+                resolved: &resolved,
+                user_named: true,
+                writable_images: &mut images,
+            };
+            let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::new(false);
+            let error = boot_transient_vm(config.name.clone(), false, &mut attempt, None, &mut sub)
+                .err()
+                .expect("planless workload cold boot must refuse");
+            assert!(
+                format!("{error:#}").contains("workload cold boot requires signed CLI admission"),
+                "{selector}: {error:#}"
+            );
+        }
     }
 
     fn admitted_mock_cold(
@@ -1621,7 +1665,9 @@ mod tests {
 
     /// The strict-startup refusal is gone: the first unnamed run of an image
     /// on a host with an empty pool boots cold rather than failing and
-    /// telling the operator to prepare a standby first.
+    /// telling the operator to prepare a standby first. Without a one-use CLI
+    /// admission the claim never reaches the pool: the launch keeps its
+    /// authority and boots cold as unadmitted.
     #[test]
     fn an_unnamed_run_with_no_standby_ready_boots_cold_instead_of_refusing() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
@@ -1655,7 +1701,7 @@ mod tests {
         assert!(matches!(
             claim_warm_standby(&mut attempt).unwrap(),
             crate::commands::pool::WarmClaimOutcome::Cold(
-                crate::commands::pool::ColdStartReason::NoStandbyReady
+                crate::commands::pool::ColdStartReason::Unadmitted
             )
         ));
     }

@@ -58,45 +58,19 @@ impl OwnedClientBoot {
                 runtime: None,
             })),
         };
-        let result = (|| {
+        let result = {
             let group = owner.custody.as_mut().expect("new client custody");
             let resources = group.resources.as_mut().expect("original client resources");
-            mvm_hostd::mailbox_launch::require_legacy_launch(
-                resources.admission.admitted.plan().mailbox.as_ref(),
-            )?;
-            #[cfg(test)]
-            if TRAP_OWNED_PREPARATION.get() {
-                anyhow::bail!("owned image/native preparation reached");
-            }
-            mvm_runtime::workload_backend::require_workload_backend(&resources.backend)?;
-            if let Some(runtime) = &resources.built_runtime {
-                runtime.verify_config(&resources.config)?;
-            }
-            // Store the prepared runtime BEFORE the first native side effect.
-            let images = resources
-                .built_runtime
-                .as_mut()
-                .context("owned native image preparation missing")?
-                .take_boot_images()?;
-            resources
-                .admission
-                .admitted
-                .mark_host_budget_dispatching(&resources.config.name)?;
-            group.runtime = Some(
-                resources
-                    .backend
-                    .prepare_owned_launch_with_verified_runtime(
-                        &resources.config,
-                        images,
-                        resources.verified_runtime.as_ref(),
-                    )?,
-            );
-            let runtime = group.runtime.as_mut().expect("prepared runtime");
-            if let Some(built) = &resources.built_runtime {
-                built.verify_config(runtime.config()?)?;
-            }
-            runtime.activate()
-        })();
+            mvm_hostd::plan_admission::start_owned_entrypoint(
+                &resources.backend,
+                &mut resources.admission.admitted,
+                &mut resources.config,
+                resources.admission.policy_bundle.as_ref(),
+                resources.verified_runtime.as_ref(),
+                &mut resources.built_runtime,
+                &mut group.runtime,
+            )
+        };
         match result {
             Ok(()) => Ok(owner),
             Err(error) => Err(owner.failure(error)),
@@ -693,42 +667,23 @@ pub fn resolve_backend(hypervisor: Option<&str>) -> Result<AnyBackend> {
     }
 }
 
-/// Boot a session microVM from a built workload slot, under the plan `admit`
-/// produces.
+/// Compatibility entrypoint for callers holding only a serialized boot substrate.
 ///
-/// `admit` must admit: a callback that returns `None` is refused before the
-/// backend is touched, because a VM these calls dispatch into is one whose
-/// egress and secrets the host has to be able to enforce. That is also why
-/// there is no snapshot-resume here — a restored VM skips the endpoint spawn
-/// an admitted plan exists to drive.
-///
-/// `pair` is where the runtime overlay comes from when a local image checkout
-/// is selected; a caller that offers none gets the cached or published
-/// overlay.
+/// The substrate alone is not admission authority: without the original
+/// `AdmittedPlan`, this API refuses before backend dispatch. Use the
+/// entrypoint admission path for a boot that can actually run.
 ///
 /// # Errors
-/// An unknown slot, an admission refusal, a missing runtime overlay, or a
-/// backend that would not start.
+/// Always refuses: a serialized substrate cannot prove original admission.
 pub fn boot_session_vm(
-    boot: SessionBoot<'_>,
-    admit: &SessionAdmit<'_>,
-    pair: Option<&mut PairArtifactSource<'_>>,
+    _boot: SessionBoot<'_>,
+    _admit: &SessionAdmit<'_>,
+    _pair: Option<&mut PairArtifactSource<'_>>,
 ) -> Result<SessionVm> {
-    match boot_session_core(
-        boot,
-        |inputs| {
-            admit(inputs)?
-                .map(Box::new)
-                .map(BootAdmission::Legacy)
-                .context("refusing to boot an entrypoint VM without an admitted plan")
-        },
-        pair,
-    )? {
-        SessionBootResult::Legacy(vm) => Ok(vm),
-        SessionBootResult::Owned(owner) => Err(anyhow::Error::new(
-            owner.failure(anyhow::anyhow!("owning receiver required")),
-        )),
-    }
+    anyhow::bail!(
+        "boot_session_vm requires an original EntrypointAdmission; use boot_session_vm_owned \
+         for native ownership or the admitted entrypoint/session API for supported backends"
+    )
 }
 
 /// Host-owned admission and resources, with no DTO/name downgrade on success.
@@ -748,17 +703,41 @@ pub fn boot_session_vm_owned(
         pair,
     )? {
         SessionBootResult::Owned(owner) => Ok(owner),
-        SessionBootResult::Legacy(_) => anyhow::bail!("owned boot did not return native custody"),
+        SessionBootResult::Admitted(..) => {
+            anyhow::bail!("owned boot did not return native custody")
+        }
+    }
+}
+
+pub(crate) fn boot_session_vm_admitted(
+    boot: SessionBoot<'_>,
+    admission: &super::admission::EntrypointAdmission,
+    pair: Option<&mut PairArtifactSource<'_>>,
+) -> Result<(SessionVm, crate::admission::AdmissionContext)> {
+    match boot_session_core(
+        boot,
+        |inputs| {
+            admission
+                .admit(inputs)
+                .map(Box::new)
+                .map(BootAdmission::Admitted)
+        },
+        pair,
+    )? {
+        SessionBootResult::Admitted(vm, context) => Ok((vm, *context)),
+        SessionBootResult::Owned(owner) => Err(anyhow::Error::new(
+            owner.failure(anyhow::anyhow!("owning receiver required")),
+        )),
     }
 }
 
 enum BootAdmission {
-    Legacy(Box<SessionAuditSubstrate>),
+    Admitted(Box<super::admission::AdmittedEntrypoint>),
     Owned(Box<super::admission::AdmittedEntrypoint>),
 }
 
 enum SessionBootResult {
-    Legacy(SessionVm),
+    Admitted(SessionVm, Box<crate::admission::AdmissionContext>),
     Owned(OwnedClientBoot),
 }
 
@@ -778,6 +757,17 @@ fn session_runtime_set(
     crate::launch::runtime_source::paired_release_evidence(config, release)?
         .map(|release| mvm_runtime::runtime_evidence::verify_release_runtime_set(config, release))
         .transpose()
+}
+
+fn require_portable_without_installed_bundle(
+    portable: bool,
+    bundle_archive: Option<&std::path::Path>,
+) -> Result<()> {
+    anyhow::ensure!(
+        !portable || bundle_archive.is_none(),
+        "producer health cannot replace an installed bundle's boot closure"
+    );
+    Ok(())
 }
 
 fn boot_session_core(
@@ -830,10 +820,7 @@ fn boot_session_core(
     // helpers here, as on the transient path; a missing required overlay is
     // built or acquired, never replaced by a copy baked into the rootfs.
     let release = if let Some(assets) = portable_boot_assets {
-        anyhow::ensure!(
-            bundle_archive.is_none(),
-            "producer health cannot replace an installed bundle's boot closure"
-        );
+        require_portable_without_installed_bundle(true, bundle_archive.as_deref())?;
         Some(assets.apply_for_health(&mut start_config)?)
     } else {
         let release = attach_runtime_overlay_if_cached_version_verified(
@@ -877,49 +864,40 @@ fn boot_session_core(
         verified_runtime: verified_runtime.as_ref(),
         verified_runtime_owner: None,
     })?;
-    let (mut substrate, context) = match admitted {
-        BootAdmission::Legacy(substrate) => (*substrate, None),
-        BootAdmission::Owned(admitted) => {
+    let native_owned = matches!(&admitted, BootAdmission::Owned(_));
+    let (substrate, context) = match admitted {
+        BootAdmission::Admitted(admitted) | BootAdmission::Owned(admitted) => {
             let admitted = *admitted;
-            (admitted.substrate, Some(admitted.context))
+            (admitted.substrate, admitted.context)
         }
     };
-    let host_budget = std::sync::Arc::clone(&substrate.host_budget);
-    require_native_owner(backend.kind(), context.is_some())?;
-    let built_pack_check = substrate.built_pack_check.take();
+    require_native_owner(backend.kind(), native_owned).inspect_err(|error| {
+        crate::admission::emit_failed(&context, "backend-start", error);
+    })?;
     substrate.apply_to(&mut start_config);
-    let _built_runtime = built_pack_check
-        .map(|check| {
-            if context.is_some() && backend.kind() == mvm_core::vm_backend::BackendKind::Hvf {
-                check.freeze_native_boot(&mut start_config, backend.kind())
-            } else {
-                check.prepare(&mut start_config, backend.kind())
-            }
-        })
-        .transpose()?
-        .flatten();
-    if let Some(runtime) = &_built_runtime {
-        runtime.verify_config(&start_config)?;
-    }
-    if let Some(runtime) = &verified_runtime {
-        runtime.verify_config(&start_config)?;
-    }
-    if mvm_runtime::catalog::descriptor(backend.kind()).is_workload {
-        mvm_hostd::plan_admission::stash_plan_for_bridge(&start_config)
-            .context("persisting admitted session plan before backend start")?;
-    }
-    if let Some(assets) = portable_boot_assets {
-        assets.verify_health_config(&start_config)?;
-    }
+    // The admitted executor prepares or freezes the selected pack's original
+    // closure at dispatch, after all of its post-admission checks.
+    let prepared = (|| {
+        if let Some(runtime) = &verified_runtime {
+            runtime.verify_config(&start_config)?;
+        }
+        if let Some(assets) = portable_boot_assets {
+            assets.verify_health_config(&start_config)?;
+        }
+        Ok::<(), anyhow::Error>(())
+    })();
+    prepared.inspect_err(|error| {
+        crate::admission::emit_failed(&context, "guest-runtime", error);
+    })?;
 
     tracing::info!(vm = %vm_name, slot, "booting session VM");
-    if let Some(admission) = context {
+    if native_owned {
         let mut owner = crate::boot::start_prepared_owned(ClientBootResources {
             backend,
             config: start_config,
-            admission,
+            admission: context,
             _volumes: None,
-            built_runtime: _built_runtime,
+            built_runtime: None,
             verified_runtime,
         })
         .map_err(|mut failure| {
@@ -933,33 +911,56 @@ fn boot_session_core(
         }
         return Ok(SessionBootResult::Owned(owner));
     }
-    let plan = mvm_core::plan::plan_from_admitted_json(
-        start_config
-            .plan_json
-            .as_deref()
-            .context("session plan missing")?,
-    )?;
-    host_budget.mark_dispatching_for(&plan, &vm_name)?;
-    let vm_id = backend
-        .start_with_verified_runtime(&start_config, verified_runtime.as_ref())
-        .with_context(|| format!("starting session microVM '{vm_name}'"))?;
-    // The budget gate this boot admitted under counts only what is recorded:
-    // a session boot that skipped the charge would be invisible to every
-    // later admission the way a CLI boot on the old tail was. Fatal, not
-    // logged — a VM running without its charge recorded is the undercount
-    // the budget exists to prevent, so the boot stops rather than stay up
-    // uncounted. Session plans declare no resource grants, so the charge is
-    // the configured memory and no CPU millicores.
-    if let Err(err) = host_budget.record_started(&vm_name) {
-        if let Err(stop_err) = backend.stop(&vm_id) {
-            tracing::warn!(
-                error = %stop_err,
-                "stopping a session VM whose admitted charge could not be recorded;                  it may still be running",
-            );
-        }
-        return Err(err).context("recording the session boot's admitted charge");
+    let crate::admission::AdmissionContext {
+        admitted,
+        emitter,
+        policy_bundle,
+        host_signer_public_path,
+    } = context;
+    let audit_plan = admitted.plan().clone();
+    let result = mvm_hostd::plan_admission::start_entrypoint(
+        mvm_hostd::plan_admission::StartAdmittedParams {
+            backend: &backend,
+            admitted,
+            config: start_config,
+            policy_bundle: policy_bundle.as_ref(),
+            emitter: Some(&emitter),
+            assurance: None,
+        },
+        verified_runtime.as_ref(),
+    );
+    let started = result.inspect_err(|error| {
+        audit_entrypoint_dispatch_failure(&emitter, &audit_plan, &vm_name, error);
+    })?;
+    Ok(SessionBootResult::Admitted(
+        SessionVm { vm_name },
+        Box::new(crate::admission::AdmissionContext {
+            admitted: started.admitted,
+            emitter,
+            policy_bundle,
+            host_signer_public_path,
+        }),
+    ))
+}
+
+fn audit_entrypoint_dispatch_failure(
+    emitter: &mvm_hostd::audit::emitter::AuditEmitter,
+    plan: &mvm_core::plan::ExecutionPlan,
+    name: &str,
+    error: &anyhow::Error,
+) {
+    if matches!(
+        error.downcast_ref::<mvm_hostd::plan_admission::CliStartFailure>(),
+        Some(mvm_hostd::plan_admission::CliStartFailure::UncertainStop(_))
+    ) {
+        crate::launch::record_unsealed_end(
+            Some((emitter, plan)),
+            crate::launch::UnsealedEnd::new(name, crate::launch::UnsealedReason::StopFailed)
+                .error(format!("{error:#}")),
+        );
+    } else {
+        crate::admission::seal_recorded_failure(emitter, plan);
     }
-    Ok(SessionBootResult::Legacy(SessionVm { vm_name }))
 }
 
 /// Tear down a session VM. Best-effort: a failure (already stopped, backend
@@ -1127,6 +1128,18 @@ mod tests {
     }
 
     #[test]
+    fn portable_selection_cannot_override_an_installed_bundle() {
+        let archive = std::path::Path::new("/installed/bundle.mvmpkg");
+        let refused = require_portable_without_installed_bundle(true, Some(archive))
+            .expect_err("portable producer selection must not displace bundle custody");
+        assert!(refused.to_string().contains("installed bundle"));
+        require_portable_without_installed_bundle(false, Some(archive))
+            .expect("the installed bundle alone is a distinct selection");
+        require_portable_without_installed_bundle(true, None)
+            .expect("portable assets without an installed bundle may proceed");
+    }
+
+    #[test]
     fn child_free_failure_audits_once_and_keeps_original_error_through_retry() {
         let home = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
@@ -1171,6 +1184,79 @@ mod tests {
         );
         // No original Child ever existed. This does not test native terminal
         // proof, uncertain deferral, or a synthesized ConfirmedExit.
+    }
+
+    #[test]
+    fn native_dispatch_refusal_keeps_the_original_client_custody() {
+        let keys = tempfile::tempdir().unwrap();
+        let audit = tempfile::tempdir().unwrap();
+        let admission = crate::admission::admit_plan_tests::admitted_into(
+            keys.path(),
+            audit.path(),
+            "native-refused",
+        );
+        let original_id = admission.admitted.plan_id().clone();
+        let resources = ClientBootResources {
+            backend: AnyBackend::from_hypervisor("libkrun"),
+            config: VmStartConfig {
+                name: "native-refused".into(),
+                ..Default::default()
+            },
+            admission,
+            _volumes: None,
+            built_runtime: None,
+            verified_runtime: None,
+        };
+        let mut failure = match OwnedClientBoot::start(resources) {
+            Ok(_) => panic!("non-HVF backend must not create an owned native child"),
+            Err(failure) => failure,
+        };
+        assert!(failure.error().to_string().contains("requires HVF"));
+        let owner = failure
+            .owner
+            .get_mut()
+            .expect("test owns failure exclusively")
+            .as_ref()
+            .expect("the original client group stays with the failure");
+        assert_eq!(owner.resources().admission.admitted.plan_id(), &original_id);
+        assert!(
+            owner
+                .custody
+                .as_ref()
+                .expect("original custody")
+                .runtime
+                .is_none(),
+            "pre-start refusal cannot invent an owner"
+        );
+        failure.emit_failed("backend-start");
+        failure.retry_stop().expect("no child needs stopping");
+        assert!(failure.into_released_error().is_ok());
+    }
+
+    #[test]
+    fn entrypoint_uncertain_dispatch_stop_keeps_audit_unsealed() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let keys = tempfile::tempdir().unwrap();
+        let audit = tempfile::tempdir().unwrap();
+        let admission = crate::admission::admit_plan_tests::admitted_into(
+            keys.path(),
+            audit.path(),
+            "entrypoint-uncertain",
+        );
+        let error = anyhow::Error::new(mvm_hostd::plan_admission::CliStartFailure::UncertainStop(
+            anyhow::anyhow!("mock child stop unconfirmed"),
+        ));
+        audit_entrypoint_dispatch_failure(
+            &admission.emitter,
+            admission.admitted.plan(),
+            "entrypoint-uncertain",
+            &error,
+        );
+        let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).unwrap();
+        assert!(!chain.contains("plan.failed"), "{chain}");
+        assert!(!chain.contains("session.sealed"), "{chain}");
     }
 
     fn test_audit_context() -> mvm_core::audit_sink::AuditContext {
@@ -1268,19 +1354,44 @@ mod tests {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let home = tempfile::tempdir().expect("tempdir");
         env.isolate_mvm_home(home.path());
-        let admit = |_: AdmitInputs<'_>| -> Result<Option<SessionAuditSubstrate>> {
+        let admit = |_: AdmitInputs<'_>| -> Result<BootAdmission> {
             panic!("admission must not run for a slot that does not exist")
         };
         let slot = "0".repeat(64);
-        let error = boot_session_vm(
+        let Err(error) = boot_session_core(
             SessionBoot::builder(&slot, SessionVmName::Prefixed("t")).build(),
-            &admit,
+            admit,
             None,
-        )
-        .expect_err("an unknown slot has nothing to boot");
+        ) else {
+            panic!("an unknown slot has nothing to boot");
+        };
         assert!(
             format!("{error:#}").contains("Loading template"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn legacy_substrate_callback_refuses_before_it_can_admit_or_start() {
+        let invoked = std::cell::Cell::new(false);
+        let callback = |_: AdmitInputs<'_>| -> Result<Option<SessionAuditSubstrate>> {
+            invoked.set(true);
+            Ok(None)
+        };
+        let error = boot_session_vm(
+            SessionBoot::builder("irrelevant-slot", SessionVmName::Exact("unstarted")).build(),
+            &callback,
+            None,
+        )
+        .expect_err("serialized substrate cannot prove signed admission");
+        assert!(
+            error.to_string().contains("EntrypointAdmission"),
+            "{error:#}"
+        );
+        assert!(
+            error.to_string().contains("boot_session_vm_owned"),
+            "{error:#}"
+        );
+        assert!(!invoked.get(), "legacy callback may not mint an authority");
     }
 }

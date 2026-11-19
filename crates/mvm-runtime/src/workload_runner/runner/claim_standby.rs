@@ -424,7 +424,19 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             );
             cleanup.quarantine();
         }
-        forked?;
+        if let Err(error) = forked {
+            // A driver can fail after it has created a child VMM. Do not
+            // release its parent's reservation and remove its state dir while
+            // that child might still be running.
+            if let Err(stop) = self.driver.attach(&child).and_then(|vm| vm.kill()) {
+                cleanup.retain_uncertain_child();
+                return Err(StandbyError::StopUnconfirmed(format!(
+                    "fork failed ({error}); stopping child {} failed: {stop:#}",
+                    child.0
+                )));
+            }
+            return Err(error);
+        }
         claim_phase!("child_forked");
 
         // Unconditional and best-effort, mirroring `start_workload`: started

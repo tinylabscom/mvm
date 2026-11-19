@@ -132,6 +132,9 @@ mod tests {
 
     #[test]
     fn launch_uses_the_manifest_that_policy_resolution_read() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
         let project = tempfile::tempdir().unwrap();
         let path = project.path().join("mvm.toml");
         std::fs::write(
@@ -162,6 +165,9 @@ mod tests {
 
     #[test]
     fn a_manifest_created_after_policy_resolution_adds_no_authority() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
         let project = tempfile::tempdir().unwrap();
         let mut args = RunArgs {
             flake: Some(project.path().display().to_string()),
@@ -179,6 +185,9 @@ mod tests {
 
     #[test]
     fn a_project_directory_created_after_policy_resolution_adds_no_authority() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
         let parent = tempfile::tempdir().unwrap();
         let project = parent.path().join("later");
         let mut args = RunArgs {

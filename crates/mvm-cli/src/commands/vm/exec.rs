@@ -917,12 +917,6 @@ pub(in crate::commands) fn run_secure_started(
             }
             None => super::up::admit_plan_for_boot_syncing_beside_boot(params)?,
         };
-        // Persist the bare plan so the pre-start moat / endpoint can read it
-        // on the backends that consume it from disk (mirrors the invoke path).
-        if super::up::persists_plan_before_start(&admit_backend) {
-            mvm_client::audit::chain::plan_persist::write_plan(vm_name, c.admitted.plan())
-                .context("persisting admitted plan for the transient run")?;
-        }
         let guest_profile = super::up::guest_profile_for_boot(admit_is_dev, rootfs);
         let mut start_config = mvm_core::vm_backend::VmStartConfig::default();
         super::up::attach_guest_boot_config_for_plan(

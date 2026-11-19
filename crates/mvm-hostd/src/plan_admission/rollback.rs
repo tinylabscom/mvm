@@ -153,6 +153,22 @@ pub fn apply_admitted_grants_or_undo_launch(
     )
 }
 
+pub(super) fn apply_entrypoint_grants_or_undo_launch(
+    backend: &AnyBackend,
+    vm_id: &VmId,
+    admitted: &AdmittedPlan,
+    emitter: Option<&crate::audit::emitter::AuditEmitter>,
+) -> Result<EnforcedGrants> {
+    apply_admitted_grants_with_rollback(
+        backend,
+        vm_id,
+        admitted,
+        emitter,
+        || backend.stop(vm_id).map(|_| ()),
+        FailureAuditPolicy::OwnedAfterConfirmedRollback,
+    )
+}
+
 pub(super) fn apply_admitted_grants_with_rollback(
     backend: &AnyBackend,
     vm_id: &VmId,
@@ -199,6 +215,24 @@ pub fn record_charge_or_undo_launch(
         emitter,
         || backend.stop(vm_id).map(|_| ()),
         FailureAuditPolicy::LegacyImmediate,
+    )
+}
+
+pub(super) fn record_entrypoint_charge_or_undo_launch(
+    backend: &AnyBackend,
+    vm_id: &VmId,
+    vm_name: &str,
+    admitted: &AdmittedPlan,
+    emitter: Option<&crate::audit::emitter::AuditEmitter>,
+) -> Result<()> {
+    record_charge_with_rollback(
+        backend,
+        vm_id,
+        vm_name,
+        admitted,
+        emitter,
+        || backend.stop(vm_id).map(|_| ()),
+        FailureAuditPolicy::OwnedAfterConfirmedRollback,
     )
 }
 

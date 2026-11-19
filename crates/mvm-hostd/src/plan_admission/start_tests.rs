@@ -341,6 +341,85 @@ fn portable_assurance_capability_binds_original_proof_and_manifest_after_admissi
 }
 
 #[test]
+fn entrypoint_portable_selection_rechecks_original_closure_before_mock_dispatch() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let directory = tempfile::tempdir().unwrap();
+    let keys = tempfile::tempdir().unwrap();
+    let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+    let mut config = mvm_runtime::signed_legacy_portable_runtime_fixture(directory.path());
+    config.name = "entrypoint-portable".into();
+    let image_sha =
+        mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&config.rootfs_path))
+            .expect("fixture rootfs");
+    let mut synthesis = fixture_input(&config.name);
+    synthesis.image_sha256 = &image_sha;
+    let admitted = admit_for_run(
+        &synthesis,
+        &SystemClock,
+        &InMemoryNonceLedger::new(),
+        Some(keys.path()),
+        None,
+        RunPosture::on_backend(Variant::Dev, backend.kind()).with_runtime(Some(&config)),
+    )
+    .expect("portable closure admitted");
+    let started = start_entrypoint(
+        StartAdmittedParams {
+            backend: &backend,
+            admitted,
+            config: config.clone(),
+            policy_bundle: None,
+            emitter: None,
+            assurance: None,
+        },
+        None,
+    )
+    .expect("original portable selection starts through admitted executor");
+    assert_eq!(started.vm_id.0, config.name);
+    backend.stop(&started.vm_id).expect("stop mock");
+
+    config.name = "entrypoint-portable-tampered".into();
+    let mut synthesis = fixture_input(&config.name);
+    synthesis.image_sha256 = &image_sha;
+    let admitted = admit_for_run(
+        &synthesis,
+        &SystemClock,
+        &InMemoryNonceLedger::new(),
+        Some(keys.path()),
+        None,
+        RunPosture::on_backend(Variant::Dev, backend.kind()).with_runtime(Some(&config)),
+    )
+    .expect("second portable closure admitted");
+    config
+        .legacy_portable_runtime
+        .as_mut()
+        .expect("portable proof")
+        .manifest_sha256 = "0".repeat(64);
+    let refused = start_entrypoint(
+        StartAdmittedParams {
+            backend: &backend,
+            admitted,
+            config: config.clone(),
+            policy_bundle: None,
+            emitter: None,
+            assurance: None,
+        },
+        None,
+    )
+    .expect_err("tampered portable manifest must refuse before mock start");
+    assert!(
+        format!("{refused:#}").contains("guest-runtime"),
+        "{refused:#}"
+    );
+    assert!(
+        !matches!(
+            backend.status(&VmId(config.name)),
+            Ok(mvm_core::vm_backend::VmStatus::Running)
+        ),
+        "refusal cannot boot an unverified portable selection"
+    );
+}
+
+#[test]
 fn admit_and_start_admits_then_boots_on_mock() {
     let (_env, _home) = host_with_ceiling(Default::default());
     let dir = tempfile::tempdir().unwrap();
@@ -458,15 +537,21 @@ fn one_signed_admission_cannot_start_a_second_backend() {
         RunPosture::on_backend(Variant::Dev, first.kind()),
     )
     .unwrap();
-    let started = start_admitted(StartAdmittedParams {
-        backend: &first,
-        admitted,
-        config: config.clone(),
-        policy_bundle: None,
-        emitter: None,
-        assurance: None,
-    })
-    .expect("the original admission starts the first backend");
+    let started = start_entrypoint(
+        StartAdmittedParams {
+            backend: &first,
+            admitted,
+            config: config.clone(),
+            policy_bundle: None,
+            emitter: None,
+            assurance: None,
+        },
+        None,
+    )
+    .expect("the entrypoint consumes the original admission on the first backend");
+    let persisted = crate::audit::plan_persist::read_plan(&config.name)
+        .expect("entrypoint lifecycle plan is persisted even without a bridge");
+    assert_eq!(persisted.plan_id, started.admitted.plan_id().clone());
 
     // A different backend instance, so a duplicate-name refusal cannot
     // mask a second dispatch under the original admission.
@@ -487,6 +572,109 @@ fn one_signed_admission_cannot_start_a_second_backend() {
         second.status(&started.vm_id),
         Ok(mvm_core::vm_backend::VmStatus::Running)
     ));
+}
+
+#[test]
+fn entrypoint_failed_grant_rollback_remains_unsealed_when_stop_is_unconfirmed() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let keys = tempfile::tempdir().unwrap();
+    let audit = tempfile::tempdir().unwrap();
+    let backend = mvm_runtime::AnyBackend::Mock(
+        mvm_runtime::mock::MockBackend::new()
+            .with_failing_apply_grants()
+            .with_failing_stop(),
+    );
+    let config = VmStartConfig {
+        name: "entrypoint-uncertain-stop".into(),
+        rootfs_path: "/store/rootfs.ext4".into(),
+        ..Default::default()
+    };
+    let admitted = admit_for_run(
+        &fixture_input(&config.name),
+        &SystemClock,
+        &InMemoryNonceLedger::new(),
+        Some(keys.path()),
+        None,
+        RunPosture::on_backend(Variant::Dev, backend.kind()),
+    )
+    .unwrap();
+    let emitter = crate::audit::emitter::AuditEmitter::with_dir(
+        ed25519_dalek::SigningKey::from_bytes(&[51; 32]),
+        audit.path(),
+    )
+    .unwrap();
+    let error = start_entrypoint(
+        StartAdmittedParams {
+            backend: &backend,
+            admitted,
+            config: config.clone(),
+            policy_bundle: None,
+            emitter: Some(&emitter),
+            assurance: None,
+        },
+        None,
+    )
+    .expect_err("grant application and rollback both fail");
+    assert!(matches!(
+        error.downcast_ref::<CliStartFailure>(),
+        Some(CliStartFailure::UncertainStop(_))
+    ));
+    assert!(matches!(
+        backend.status(&mvm_core::vm_backend::VmId(config.name)),
+        Ok(mvm_core::vm_backend::VmStatus::Running)
+    ));
+    let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).unwrap_or_default();
+    assert!(!chain.contains("plan.failed"), "{chain}");
+    assert!(!chain.contains("session.sealed"), "{chain}");
+    assert!(!chain.contains("plan.launched"), "{chain}");
+}
+
+#[test]
+fn owned_entrypoint_refuses_a_mock_without_spending_or_losing_admission() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let dir = tempfile::tempdir().unwrap();
+    let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+    let mut config = VmStartConfig {
+        name: "owned-refuses-mock".into(),
+        rootfs_path: "/store/rootfs.ext4".into(),
+        ..Default::default()
+    };
+    let mut admitted = admit_for_run(
+        &fixture_input(&config.name),
+        &SystemClock,
+        &InMemoryNonceLedger::new(),
+        Some(dir.path()),
+        None,
+        RunPosture::on_backend(Variant::Dev, backend.kind()),
+    )
+    .expect("mock admission");
+    let original_id = admitted.plan_id().clone();
+    let mut built = None;
+    let mut runtime = None;
+    let error = start_owned_entrypoint(
+        &backend,
+        &mut admitted,
+        &mut config,
+        None,
+        None,
+        &mut built,
+        &mut runtime,
+    )
+    .expect_err("a mock backend cannot impersonate an owned HVF runtime");
+    assert!(error.to_string().contains("requires HVF"), "{error:#}");
+    assert_eq!(admitted.plan_id(), &original_id);
+    assert!(runtime.is_none(), "refusal must not create a native child");
+    assert!(built.is_none(), "refusal must not freeze an image");
+    let started = start_admitted(StartAdmittedParams {
+        backend: &backend,
+        admitted,
+        config,
+        policy_bundle: None,
+        emitter: None,
+        assurance: None,
+    })
+    .expect("pre-dispatch refusal must not spend the original admission");
+    assert_eq!(started.vm_id.0, "owned-refuses-mock");
 }
 
 #[test]
@@ -1385,6 +1573,108 @@ fn cli_transient_defers_launch_narrative_without_readmitting() {
 
 #[cfg(unix)]
 #[test]
+fn fs_quick_fork_spends_one_admission_without_immediate_acceptance() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let dir = tempfile::tempdir().expect("test directory");
+    let backend = mvm_runtime::AnyBackend::Mock(
+        mvm_runtime::mock::MockBackend::new().with_failing_apply_grants(),
+    );
+    let config = VmStartConfig {
+        name: "fs-quick-one-use".into(),
+        rootfs_path: "/store/rootfs.ext4".into(),
+        ..Default::default()
+    };
+    let admitted = admit_for_run(
+        &fixture_input(&config.name),
+        &SystemClock,
+        &InMemoryNonceLedger::new(),
+        Some(dir.path()),
+        None,
+        RunPosture::on_backend(Variant::Dev, backend.kind()).with_runtime(Some(&config)),
+    )
+    .expect("one admission");
+    let vm_name = config.name.clone();
+    let started = start_fs_quick_fork(
+        StartAdmittedParams {
+            backend: &backend,
+            admitted,
+            config,
+            policy_bundle: None,
+            emitter: None,
+            assurance: None,
+        },
+        None,
+    )
+    .expect("fork reaches mock without calling immediate grant acceptance");
+    assert_eq!(started, VmId(vm_name.clone()));
+    assert!(
+        !mvm_core::config::vm_state_dir(&vm_name)
+            .join("admitted-charge.json")
+            .exists(),
+        "fork does not introduce immediate host budget charging"
+    );
+    backend.stop(&started).expect("stop mock VM");
+}
+
+#[cfg(unix)]
+#[test]
+fn fs_quick_fork_refuses_unadmitted_share_before_backend_start() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let dir = tempfile::tempdir().expect("test directory");
+    let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+    let config = VmStartConfig {
+        name: "fs-quick-refusal".into(),
+        rootfs_path: "/store/rootfs.ext4".into(),
+        ..Default::default()
+    };
+    let admitted = admit_for_run(
+        &fixture_input(&config.name),
+        &SystemClock,
+        &InMemoryNonceLedger::new(),
+        Some(dir.path()),
+        None,
+        RunPosture::on_backend(Variant::Dev, backend.kind()).with_runtime(Some(&config)),
+    )
+    .expect("one admission");
+    let changed = VmStartConfig {
+        volumes: vec![mvm_core::vm_backend::VmVolume {
+            host: "/store/unadmitted-share".into(),
+            guest: "/mnt/unadmitted".into(),
+            size: String::new(),
+            read_only: true,
+            kind: mvm_core::vm_backend::VmVolumeKind::Disk,
+            materialized_image: None,
+            volume_label: None,
+            encrypted: false,
+            share_include: Vec::new(),
+            share_exclude: Vec::new(),
+        }],
+        ..config
+    };
+    let error = start_fs_quick_fork(
+        StartAdmittedParams {
+            backend: &backend,
+            admitted,
+            config: changed,
+            policy_bundle: None,
+            emitter: None,
+            assurance: None,
+        },
+        None,
+    )
+    .expect_err("unadmitted share refuses before backend start");
+    assert!(
+        error.to_string().contains("admission gate refused"),
+        "{error:#}"
+    );
+    assert!(
+        backend.list().expect("mock list").is_empty(),
+        "refused fork must not start the backend"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn cli_transient_gate_refusal_leaves_cli_failure_audit_to_the_caller() {
     let (_env, _home) = host_with_ceiling(Default::default());
     let dir = tempfile::tempdir().expect("test directory");
@@ -1449,6 +1739,60 @@ fn cli_transient_gate_refusal_leaves_cli_failure_audit_to_the_caller() {
     assert_eq!(chain.matches("plan.admitted").count(), 1, "{chain}");
     assert_eq!(chain.matches("plan.failed").count(), 0, "{chain}");
     assert!(!chain.contains("plan.launched"), "{chain}");
+}
+
+#[cfg(unix)]
+#[test]
+fn admitted_cli_cold_backends_refuse_unadmitted_shares_before_any_boot() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let dir = tempfile::tempdir().expect("test directory");
+    for selector in ["wasm", "web-linux", "apple-container", "qemu"] {
+        let backend = mvm_runtime::AnyBackend::from_hypervisor(selector);
+        let config = VmStartConfig {
+            name: format!("cli-cold-{selector}"),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            volumes: vec![mvm_core::vm_backend::VmVolume {
+                host: "/store/unadmitted-share".into(),
+                guest: "/mnt/unadmitted".into(),
+                read_only: true,
+                kind: mvm_core::vm_backend::VmVolumeKind::Disk,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let admitted = admit_for_run(
+            &fixture_input(&config.name),
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(dir.path()),
+            None,
+            RunPosture::on_backend(Variant::Dev, backend.kind()).with_runtime(Some(&config)),
+        )
+        .expect("signed admission");
+        let error = start_cli_transient(
+            StartAdmittedParams {
+                backend: &backend,
+                admitted,
+                config: config.clone(),
+                policy_bundle: None,
+                emitter: None,
+                assurance: None,
+            },
+            None,
+            Vec::new(),
+        )
+        .expect_err("unadmitted share must refuse before backend dispatch");
+        assert!(
+            format!("{error:#}").contains("admitted-shares"),
+            "{selector}: {error:#}"
+        );
+        assert!(
+            !mvm_core::config::vm_state_dir(&config.name)
+                .join("plan.json")
+                .exists(),
+            "{selector} must not reach bridge or backend start"
+        );
+    }
 }
 
 #[cfg(unix)]

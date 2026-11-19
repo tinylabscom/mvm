@@ -46,7 +46,7 @@ pub(super) fn reserve_and_verify_parent(
             .map_err(|e| StandbyError::ClaimFailed(format!("load standby {}: {e:#}", handle.id)))?;
         if !current.state.is_claimable() {
             // Not yet reserved (no `mark_claimed`), so nothing to release.
-            return Err(refuse(ClaimRefusal::ParentNotClaimable));
+            return Err(StandbyError::ReservationLost);
         }
         ctx.pool.mark_claimed(&handle.id).map_err(|e| {
             StandbyError::ClaimFailed(format!("reserve standby {}: {e:#}", handle.id))

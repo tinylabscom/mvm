@@ -17,9 +17,7 @@ pub(super) use mvm_client::admission::{
 pub(in crate::commands) use kernel::resolve_kernel_pin_path;
 pub(super) use kernel::resolve_workload_kernel;
 
-pub(crate) use mvm_client::launch::persistent::{
-    persistent_oci_effective_initrd, persists_plan_before_start,
-};
+pub(crate) use mvm_client::launch::persistent::persistent_oci_effective_initrd;
 
 pub(crate) use mvm_client::launch::runtime_source::{
     SdkSidecarAttachment, attach_runtime_overlay_if_cached_version_verified,

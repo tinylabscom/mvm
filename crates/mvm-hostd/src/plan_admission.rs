@@ -74,6 +74,7 @@ mod launch_substrate;
 mod mailbox_posture;
 mod nonce_ledger;
 mod registry_pack;
+mod restore;
 mod rollback;
 mod shares;
 mod start;
@@ -100,15 +101,17 @@ pub use mailbox_posture::{MailboxLaunchPosture, MailboxPostureHandoff};
 pub use mvm_core::time::{Clock, SystemClock};
 pub use nonce_ledger::InMemoryNonceLedger;
 pub use registry_pack::{BuiltPackBootCheck, PreparedBuiltPackRuntime, prepare_built_pack_start};
+pub use restore::dispatch_vm_full_fork;
 pub use rollback::{
     apply_admitted_grants_or_undo_launch, record_charge_or_undo_launch,
     record_charge_with_owned_rollback,
 };
 pub use shares::enforce_admitted_shares;
 pub use start::{
-    CliStartFailure, DispatchedPersistent, StartAdmittedParams, StartedMachine, admit_and_start,
-    start_admitted, start_admitted_owned_actor, start_admitted_owned_actor_with_bootstrap,
-    start_cli_transient, start_persistent,
+    CliStartFailure, DispatchedPersistent, StartAdmittedParams, StartedMachine, WarmClaimDispatch,
+    admit_and_start, claim_cli_transient, start_admitted, start_admitted_owned_actor,
+    start_admitted_owned_actor_with_bootstrap, start_cli_transient, start_entrypoint,
+    start_fs_quick_fork, start_owned_entrypoint, start_persistent,
 };
 pub(crate) use start::{
     admit_synthesized_with_verified_release, start_admitted_with_verified_release,
