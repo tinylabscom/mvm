@@ -4,10 +4,6 @@
 //! The ledger lives beside the node record. Absent means no workload has been
 //! contained, so a plain local run is unaffected. Like the node record, a
 //! malformed ledger fails closed.
-//!
-//! shortcut: read-modify-write without a file lock; two operators racing on one
-//! node could lose an update. Add an advisory lock when a second writer exists
-//! (the `mvmd` implementation).
 
 use std::{collections::BTreeMap, path::Path};
 
@@ -15,16 +11,17 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     ExecutionEpoch,
-    error::{Denial, HostInterfaceError},
+    error::{Denial, HostInterfaceError, OfflineRefusal},
+    recovery_custody::{ManagedRecoveryHistory, RecoveryCustodyError},
 };
 
-const FILE: &str = "workloads.json";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkloadEntry {
     pub epoch: ExecutionEpoch,
     pub quarantined: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) recovery: Option<ManagedRecoveryHistory>,
 }
 
 impl Default for WorkloadEntry {
@@ -32,6 +29,7 @@ impl Default for WorkloadEntry {
         Self {
             epoch: ExecutionEpoch(1),
             quarantined: false,
+            recovery: None,
         }
     }
 }
@@ -42,21 +40,11 @@ pub struct WorkloadLedger(BTreeMap<String, WorkloadEntry>);
 
 impl WorkloadLedger {
     pub fn load_at(home: &Path) -> Result<Self, HostInterfaceError> {
-        let path = home.join("host-interface").join(FILE);
-        match std::fs::read(&path) {
-            Ok(b) => serde_json::from_slice(&b).map_err(|e| unreadable(&path, &e.to_string())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(unreadable(&path, &e.to_string())),
-        }
+        super::recovery_custody::load_ordinary_at(home)
     }
 
     pub fn save_at(&self, home: &Path) -> std::io::Result<()> {
-        let dir = home.join("host-interface");
-        crate::private_fs::ensure_private_dir(&dir)?;
-        let tmp = dir.join("workloads.json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
-        crate::private_fs::set_mode(&tmp, 0o600)?;
-        std::fs::rename(tmp, dir.join(FILE))
+        super::recovery_custody::save_legacy_at(home, self).map_err(std::io::Error::other)
     }
 
     /// Has containment ever recorded `workload`?
@@ -65,7 +53,63 @@ impl WorkloadLedger {
     }
 
     pub fn entry(&self, workload: &str) -> WorkloadEntry {
-        self.0.get(workload).copied().unwrap_or_default()
+        self.0.get(workload).cloned().unwrap_or_default()
+    }
+
+    /// Quarantine through the shared durable ledger transaction.
+    ///
+    /// # Errors
+    /// Refuses unreadable/protected state or a failed durable publication.
+    pub fn quarantine_at(home: &Path, workload: &str) -> Result<WorkloadEntry, HostInterfaceError> {
+        super::recovery_custody::mutate_ordinary_at(home, workload, |ledger| {
+            let entry = ledger.0.entry(workload.to_owned()).or_default();
+            entry.quarantined = true;
+            Ok(entry.clone())
+        })
+        .map_err(custody_error)
+    }
+
+    /// Replace a local-only workload through the shared durable transaction.
+    ///
+    /// Managed entries must use recovery reservation/activation and are refused.
+    ///
+    /// # Errors
+    /// Refuses managed entries, epoch exhaustion, unreadable state, or a failed
+    /// durable publication.
+    pub fn replace_at(home: &Path, workload: &str) -> Result<ExecutionEpoch, HostInterfaceError> {
+        Self::replace_at_with::<RecoveryCustodyError>(home, workload, |_, _| Ok(()))
+            .map_err(custody_error)
+    }
+
+    /// Run a required check under the shared ledger lock, then publish the
+    /// local replacement only after that check succeeds.
+    ///
+    /// # Errors
+    /// Returns the check error before mutation, or a converted custody error.
+    pub fn replace_at_with<E>(
+        home: &Path,
+        workload: &str,
+        before_publish: impl FnOnce(ExecutionEpoch, ExecutionEpoch) -> Result<(), E>,
+    ) -> Result<ExecutionEpoch, E>
+    where
+        E: From<RecoveryCustodyError>,
+    {
+        super::recovery_custody::mutate_ordinary_at(home, workload, |ledger| {
+            let entry = ledger.0.entry(workload.to_owned()).or_default();
+            if entry.recovery.is_some() {
+                return Err(E::from(RecoveryCustodyError::Conflict));
+            }
+            let next = entry
+                .epoch
+                .0
+                .checked_add(1)
+                .map(ExecutionEpoch)
+                .ok_or_else(|| E::from(RecoveryCustodyError::Limit))?;
+            before_publish(entry.epoch, next)?;
+            entry.epoch = next;
+            entry.quarantined = false;
+            Ok(next)
+        })
     }
 
     /// Contain one workload: it may not launch again until it is replaced.
@@ -93,6 +137,9 @@ impl WorkloadLedger {
     /// refuse; only the current epoch of a contained-free workload passes.
     pub fn authorize(&self, workload: &str, epoch: ExecutionEpoch) -> Result<(), Denial> {
         let e = self.entry(workload);
+        if e.recovery.is_some() {
+            return Err(OfflineRefusal::ManagedAdmissionRequired.into());
+        }
         if epoch != e.epoch {
             return Err(Denial::StaleEpoch {
                 got: epoch.0,
@@ -104,9 +151,28 @@ impl WorkloadLedger {
         }
         Ok(())
     }
+
+    pub(super) fn entries(&self) -> &BTreeMap<String, WorkloadEntry> {
+        &self.0
+    }
+
+    pub(super) fn entries_mut(&mut self) -> &mut BTreeMap<String, WorkloadEntry> {
+        &mut self.0
+    }
 }
 
-fn unreadable(path: &Path, why: &str) -> HostInterfaceError {
+fn custody_error(error: RecoveryCustodyError) -> HostInterfaceError {
+    match error {
+        RecoveryCustodyError::CommitUnknown { workload_id, .. } => {
+            HostInterfaceError::StateCommitUnknown {
+                workload: workload_id,
+            }
+        }
+        error => HostInterfaceError::Denied(Denial::StateUnreadable(error.to_string())),
+    }
+}
+
+pub(super) fn unreadable(path: &Path, why: &str) -> HostInterfaceError {
     HostInterfaceError::Denied(Denial::StateUnreadable(format!(
         "{}: {why}",
         path.display()

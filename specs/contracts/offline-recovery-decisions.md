@@ -5,9 +5,9 @@ Validation: `just tests::scoped mvm-core host_interface --lib`
 
 This is the bounded A1 contract for [#5120](https://github.com/tinylabscom/mvm/issues/5120)
 and [#5097](https://github.com/tinylabscom/mvm/issues/5097). It adopts the
-local-recovery direction of ADR-063 in unmerged PR #5676, not that PR's
-repository adoption or any runtime/security claim. ADR-001 and ADR-057
-remain authoritative. No production caller enables automatic recovery.
+local-recovery direction of ADR-063, merged through PR #5676, without treating
+architecture adoption as a runtime/security claim. ADR-001 and ADR-057 remain
+authoritative. No production caller enables automatic recovery.
 
 ## Signed representation and verification gate
 
@@ -146,6 +146,8 @@ request and disposition; persist activation only after retirement; and retain
 idempotency through the authority lifetime. `WorkloadLedger::replace` is not
 a reservation operation. Reconstructing this in-memory reducer from guessed,
 default, or lost history is forbidden. Unknown dispatch burns the reservation.
+The implemented storage boundary is specified separately in
+[durable recovery custody](durable-recovery-custody.md).
 
 A2 must define crash restoration at every persistence/dispatch edge before
 connecting a real owner. A1 tests do not prove durable history, rollback

@@ -97,9 +97,8 @@ fn quarantine_with(
     workload: &str,
     reason: &str,
 ) -> Result<()> {
-    let mut ledger = WorkloadLedger::load_at(home)?;
-    ledger.quarantine(workload);
-    ledger.save_at(home).context("saving the workload ledger")?;
+    let entry =
+        WorkloadLedger::quarantine_at(home, workload).context("saving the workload quarantine")?;
     emit_operator_event(
         emitter,
         plan,
@@ -107,10 +106,7 @@ fn quarantine_with(
         "workload.quarantined",
         [
             ("workload".to_string(), workload.to_owned()),
-            (
-                "epoch".to_string(),
-                ledger.entry(workload).epoch.0.to_string(),
-            ),
+            ("epoch".to_string(), entry.epoch.0.to_string()),
             ("reason".to_string(), bounded(reason)),
         ],
     )
@@ -134,24 +130,20 @@ fn replace_with(
     tenant: &str,
     workload: &str,
 ) -> Result<ExecutionEpoch> {
-    let mut ledger = WorkloadLedger::load_at(home)?;
-    let previous = ledger.entry(workload).epoch;
-    let next = previous.next();
-    emit_operator_event(
-        emitter,
-        plan,
-        tenant,
-        "workload.replaced",
-        [
-            ("workload".to_string(), workload.to_owned()),
-            ("previous_epoch".to_string(), previous.0.to_string()),
-            ("epoch".to_string(), next.0.to_string()),
-        ],
-    )?;
-    let granted = ledger.replace(workload);
-    debug_assert_eq!(granted, next);
-    ledger.save_at(home).context("saving the workload ledger")?;
-    Ok(granted)
+    WorkloadLedger::replace_at_with(home, workload, |previous, next| {
+        emit_operator_event(
+            emitter,
+            plan,
+            tenant,
+            "workload.replaced",
+            [
+                ("workload".to_string(), workload.to_owned()),
+                ("previous_epoch".to_string(), previous.0.to_string()),
+                ("epoch".to_string(), next.0.to_string()),
+            ],
+        )
+    })
+    .context("auditing and durably advancing the workload epoch")
 }
 
 #[cfg(test)]
@@ -322,5 +314,23 @@ mod tests {
             !audit.path().join("local.jsonl").exists(),
             "nothing audited as granted"
         );
+    }
+
+    #[test]
+    fn replace_does_not_grant_authority_when_its_required_audit_fails() {
+        let (home, audit) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let emitter =
+            AuditEmitter::with_dir(SigningKey::from_bytes(&[9; 32]), audit.path()).unwrap();
+        let plan = plan();
+        quarantine_workload(home.path(), &emitter, &plan, "test containment").unwrap();
+        let before = WorkloadLedger::load_at(home.path()).unwrap();
+        let journal = audit.path().join("local.jsonl");
+        std::fs::remove_file(&journal).unwrap();
+        std::fs::create_dir(&journal).unwrap();
+
+        assert!(replace_workload(home.path(), &emitter, &plan).is_err());
+        let after = WorkloadLedger::load_at(home.path()).unwrap();
+        assert_eq!(after, before, "failed audit cannot publish replacement");
+        assert!(after.authorize_local_start("suspect").is_err());
     }
 }

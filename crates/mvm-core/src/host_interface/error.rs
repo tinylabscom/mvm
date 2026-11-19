@@ -90,6 +90,8 @@ pub enum OfflineRefusal {
     Cancelled,
     #[error("required dependency was lost")]
     DependencyLost,
+    #[error("managed workload requires the verified managed admission path")]
+    ManagedAdmissionRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -102,4 +104,7 @@ pub enum HostInterfaceError {
         from: super::state::NodeState,
         to: super::state::NodeState,
     },
+    /// A durable workload-ledger rename may have committed before sync failed.
+    #[error("workload state commit for {workload} is unknown; reload before retry")]
+    StateCommitUnknown { workload: String },
 }
