@@ -1392,6 +1392,9 @@ fn usable_resume(checkpoint: Option<&ChainCheckpoint>, total_lines: usize) -> Op
 mod tests {
     use super::*;
 
+    // Signer fixtures hold one outer home guard through all appends and worker joins:
+    // private-directory classification reads MVM_HOME even for explicit audit roots.
+
     #[test]
     fn a_zero_line_checkpoint_cannot_replace_the_genesis_anchor() {
         let checkpoint = ChainCheckpoint::new(0, [0_u8; 32]);
@@ -1584,6 +1587,7 @@ mod tests {
     /// barrier carries the deferred writes before it.
     #[tokio::test]
     async fn a_barrier_leaves_nothing_pending_on_its_file() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let dir = tempfile::tempdir().unwrap();
         let signer = FileAuditSigner::open(fresh_key(), dir.path()).unwrap();
 
@@ -1627,6 +1631,7 @@ mod tests {
     /// silently never syncs.
     #[tokio::test]
     async fn a_barrier_on_one_tenant_does_not_flush_another() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let dir = tempfile::tempdir().unwrap();
         let signer = FileAuditSigner::open(fresh_key(), dir.path()).unwrap();
 
@@ -1653,6 +1658,7 @@ mod tests {
     /// deferring changes durability, never content or ordering.
     #[tokio::test]
     async fn deferred_entries_are_still_written_and_chain_correctly() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let dir = tempfile::tempdir().unwrap();
         let signer = FileAuditSigner::open(fresh_key(), dir.path()).unwrap();
         let events = [
@@ -1685,6 +1691,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_the_signer_flushes_every_deferred_file() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let dir = tempfile::tempdir().unwrap();
         let pending = {
             let signer = FileAuditSigner::open(fresh_key(), dir.path()).unwrap();
@@ -1706,6 +1713,7 @@ mod tests {
 
     #[tokio::test]
     async fn first_entry_uses_genesis_prev_hash() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let dir = tempfile::tempdir().unwrap();
         let signer = FileAuditSigner::open(fresh_key(), dir.path()).unwrap();
         signer
@@ -1721,6 +1729,7 @@ mod tests {
 
     #[tokio::test]
     async fn second_entry_chains_to_first() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let dir = tempfile::tempdir().unwrap();
         let signer = FileAuditSigner::open(fresh_key(), dir.path()).unwrap();
         signer
@@ -1745,6 +1754,7 @@ mod tests {
 
     #[tokio::test]
     async fn full_chain_verifies() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let dir = tempfile::tempdir().unwrap();
         let key = fresh_key();
         let vk = key.verifying_key();
@@ -1900,6 +1910,7 @@ mod tests {
 
         #[tokio::test]
         async fn frozen_chain_matches_what_the_signer_produces_and_the_host_verifier_accepts() {
+            let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
             let dir = tempfile::tempdir().unwrap();
             let (content, vk_hex) = build_chain(dir.path()).await;
 
@@ -1943,6 +1954,7 @@ mod tests {
 
     #[tokio::test]
     async fn mvm_verify_matches_supervisor_chain() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let dir = tempfile::tempdir().unwrap();
         let key = fresh_key();
         let vk = key.verifying_key();
@@ -2028,6 +2040,7 @@ mod tests {
 
     #[tokio::test]
     async fn tampering_with_entry_breaks_signature() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let dir = tempfile::tempdir().unwrap();
         let key = fresh_key();
         let vk = key.verifying_key();
@@ -2062,6 +2075,7 @@ mod tests {
     /// boundary — the signature is.
     #[tokio::test]
     async fn a_consistently_rewritten_line_still_fails_the_signature() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let dir = tempfile::tempdir().unwrap();
         let key = fresh_key();
         let vk = key.verifying_key();
@@ -2091,6 +2105,7 @@ mod tests {
 
     #[tokio::test]
     async fn deleting_a_middle_line_breaks_chain() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let dir = tempfile::tempdir().unwrap();
         let key = fresh_key();
         let vk = key.verifying_key();
@@ -2118,6 +2133,7 @@ mod tests {
 
     #[tokio::test]
     async fn restart_resumes_chain_from_disk() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let dir = tempfile::tempdir().unwrap();
         let key = fresh_key();
         let vk = key.verifying_key();
@@ -2143,6 +2159,7 @@ mod tests {
 
     #[tokio::test]
     async fn separate_tenants_have_independent_chains() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let dir = tempfile::tempdir().unwrap();
         let key = fresh_key();
         let vk = key.verifying_key();
@@ -2169,6 +2186,7 @@ mod tests {
 
     #[tokio::test]
     async fn fixed_file_destination_writes_exact_path() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("custom-audit.jsonl");
         let key = fresh_key();
@@ -2192,6 +2210,7 @@ mod tests {
 
     #[tokio::test]
     async fn verifier_rejects_wrong_public_key() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let dir = tempfile::tempdir().unwrap();
         let signer = FileAuditSigner::open(fresh_key(), dir.path()).unwrap();
         signer
@@ -2218,6 +2237,7 @@ mod tests {
     /// chain tail under an exclusive lock — the chain stays valid.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn flock_serializes_two_signer_instances_on_same_tenant_file() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let dir = tempfile::tempdir().unwrap();
         let key = fresh_key();
         let vk = key.verifying_key();
@@ -2264,6 +2284,7 @@ mod tests {
     /// could have been verified against a key that signed nothing.
     #[test]
     fn the_published_verifying_key_is_the_one_the_chain_was_signed_with() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let tmp = tempfile::tempdir().expect("tempdir");
         let key = fresh_key();
         let expected = key.verifying_key();
@@ -2295,6 +2316,8 @@ mod tests {
     /// than a coincidence of the last entry's content.
     #[tokio::test]
     async fn every_append_lands_terminated() {
+        // Private-directory classification reads MVM_HOME even for this explicit root.
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let dir = tempfile::tempdir().unwrap();
         let signer = FileAuditSigner::open(fresh_key(), dir.path()).unwrap();
         for event in ["plan.verified", "plan.admitted", "plan.launched"] {
@@ -2321,6 +2344,7 @@ mod tests {
     /// deterministically reproducible.
     #[tokio::test]
     async fn a_torn_tail_is_refused_not_chained_onto() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let dir = tempfile::tempdir().unwrap();
         let key = fresh_key();
         let verifying = key.verifying_key();
@@ -2361,6 +2385,7 @@ mod tests {
     /// would refuse every append and the test above would pass vacuously.
     #[tokio::test]
     async fn an_intact_chain_still_verifies_and_extends() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let dir = tempfile::tempdir().unwrap();
         let key = fresh_key();
         let verifying = key.verifying_key();
@@ -2389,6 +2414,7 @@ mod tests {
         use super::*;
 
         fn cursor_of(bytes: &[u8]) -> Result<[u8; 32], AuditError> {
+            let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
             let dir = tempfile::tempdir().expect("tempdir");
             let path = dir.path().join("chain.jsonl");
             std::fs::write(&path, bytes).expect("write chain");
@@ -2466,6 +2492,7 @@ mod tests {
 
         #[test]
         fn a_batch_writes_every_record_and_leaves_none_unsynced() {
+            let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
             let dir = tempfile::tempdir().expect("tempdir");
             let signer = FileAuditSigner::open(fresh_key(), dir.path()).unwrap();
             let path = dir.path().join("local.jsonl");
@@ -2498,6 +2525,7 @@ mod tests {
 
         #[test]
         fn a_batch_chain_still_verifies_end_to_end() {
+            let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
             // The records are written the same way and chained the same way;
             // only the fsync count changes. If batching perturbed the chain at
             // all, the verifier is what would notice.
@@ -2520,6 +2548,7 @@ mod tests {
 
         #[test]
         fn a_barrier_outside_a_batch_still_syncs_immediately() {
+            let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
             // The batch is a scope, not a mode switch. Once it closes, the
             // default is back to syncing every barrier as it lands.
             let dir = tempfile::tempdir().expect("tempdir");
@@ -2543,6 +2572,7 @@ mod tests {
 
         #[test]
         fn a_deferrable_event_is_unaffected_by_batching() {
+            let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
             let dir = tempfile::tempdir().expect("tempdir");
             let signer = FileAuditSigner::open(fresh_key(), dir.path()).unwrap();
             let path = dir.path().join("local.jsonl");
