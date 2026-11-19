@@ -440,6 +440,22 @@ this source-review record does not turn those fixtures into a guest-boot
 witness. Other direct backend consumers and the broader restore lifecycle
 have not received an exhaustive new review here.
 
+## Mailbox journal fence
+
+`JournalFence::fence` (`crates/mvm-core/src/mailbox/journal/fence.rs`) writes a durable
+`journal.fence` marker into a journal store. Journal open, which is what the mailbox
+helper's start path calls, now refuses a fenced store with `JournalError::Fenced` before
+it scans the directory. Fencing takes the same writer lock open takes, so it returns
+`Busy` and writes nothing while any writer has the store open, and it cannot succeed under
+a running helper. While the returned guard lives no writer can open the store, and
+dropping it leaves the store fenced. Presence of anything at the marker path decides; its
+content is never parsed. Fencing twice succeeds, and the directory sync runs on a repeat
+so a retry after a failed sync becomes durable.
+
+What it does not do: nothing calls it yet. It does not stop a helper that already has the
+store open. The locks are advisory, so a process that writes the files without the journal
+API is not excluded. It does not fence the anchor or the source-intent directory.
+
 ## Files NOT read
 
 None of the following was read for lifecycle, ownership or cancellation defects. Treat them as
