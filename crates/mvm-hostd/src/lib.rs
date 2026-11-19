@@ -98,6 +98,8 @@ pub mod supervisor;
 pub mod telemetry_collector;
 #[cfg(test)]
 mod test_fixtures;
+/// Host admission of a signed critical-systems topology generation.
+pub mod topology_admission;
 /// Keeps a per-VM endpoint alive for exactly as long as its VM, for machines
 /// that outlive the `mvmctl` that started them.
 pub mod vm_lifetime;
