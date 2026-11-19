@@ -247,7 +247,7 @@ home in `systemd-escape --path` form. Started with `--managed-home` it serves
 only when its `MVM_HOME` names that home, an invocation ID is present and
 well-formed, and its own control group names that unit. The server does not
 check that the ID is the manager's for this unit; the client's comparison
-with the manager establishes that; it binds its own socket, so a client's
+with the manager is the check that decides that; it binds its own socket, so a client's
 `SO_PEERCRED` is the service and not the manager.
 
 A client identifies that service without trusting what it says: it asks the
