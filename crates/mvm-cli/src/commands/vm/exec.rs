@@ -36,7 +36,7 @@ mod standby_refill;
 mod transient_mounts;
 
 pub(in crate::commands) use image_source::resolve_launch_image_source;
-use launch_handoff::{ImageSelection, same_launch_runtime};
+use launch_handoff::ImageSelection;
 use network_access::NetworkAccess;
 pub(in crate::commands) use review_source::build_flake_slot;
 use review_source::offer_review;
@@ -814,7 +814,7 @@ pub(in crate::commands) fn run_secure_started(
     let denials = super::egress_denials::PendingWatch::for_run(args.json, args.pty);
     let denials_for_admit = std::rc::Rc::clone(&denials);
     let admit = move |inputs: crate::exec::AdmitInputs<'_>|
-          -> Result<Option<crate::exec::SessionAuditSubstrate>> {
+          -> Result<mvm_client::admission::CliColdAdmissionResult> {
         let crate::exec::AdmitInputs {
             backend_kind,
             rootfs,
@@ -826,12 +826,8 @@ pub(in crate::commands) fn run_secure_started(
             bundle_archive,
             runtime_config,
             verified_runtime,
-            verified_runtime_owner,
+            verified_runtime_owner: _,
         } = inputs;
-        anyhow::ensure!(
-            same_launch_runtime(verified_runtime_owner, verified_runtime),
-            "CLI admission must retain the same launch-owned runtime set it verified"
-        );
         anyhow::ensure!(
             backend_kind == admit_backend_kind,
             "launch backend changed after transient admission preflight"
@@ -970,13 +966,17 @@ pub(in crate::commands) fn run_secure_started(
                 .context("recording OCI image provenance on the admitted plan")?;
         }
 
-        // Keep this authority alive until the selected legacy boot returns.
-        *ctx_sink.borrow_mut() = Some(mvm_client::admission::CliAdmission::new_for_rootfs_with_runtime(
-            c,
-            rootfs,
-            verified_runtime_owner.cloned(),
+        anyhow::ensure!(
+            ctx_sink.borrow().is_none(),
+            "CLI launch already has an admission owner"
+        );
+        *ctx_sink.borrow_mut() = Some(mvm_client::admission::CliAdmission::new_for_rootfs(
+            c, rootfs,
         ));
-        Ok(Some(substrate))
+        Ok(mvm_client::admission::CliColdAdmissionResult {
+            admission: std::rc::Rc::clone(&ctx_sink),
+            substrate,
+        })
     };
 
     let receipt_path = args.receipt.clone();
@@ -999,7 +999,7 @@ pub(in crate::commands) fn run_secure_started(
         let posture = crate::exec::PostureSink::new(mvm_client::admission::BootPosture::block());
         let result = crate::exec::run_captured_started(
             req,
-            Some(&admit),
+            Some(crate::exec::LaunchAdmit::CliCold(&admit)),
             Some(&admit_ctx),
             Some(&posture),
             startup_started,
@@ -1074,7 +1074,7 @@ pub(in crate::commands) fn run_secure_started(
 /// selection and later command/output audit.
 struct RunAudit<'a> {
     startup_started: std::time::Instant,
-    admit: Option<&'a crate::exec::SessionAdmit<'a>>,
+    admit: Option<&'a crate::exec::CliColdAdmit<'a>>,
     ctx: &'a std::cell::RefCell<Option<mvm_client::admission::CliAdmission>>,
     /// Filled by image resolution, read by the admission that boots it.
     oci_provenance: &'a OciProvenanceSink,
@@ -1122,7 +1122,7 @@ fn run_run_args(
     // records as launched; only a failure to run at all records as failed.
     let result = crate::exec::run_started(
         req,
-        audit.admit,
+        audit.admit.map(crate::exec::LaunchAdmit::CliCold),
         Some(audit.ctx),
         Some(&posture),
         audit.startup_started,

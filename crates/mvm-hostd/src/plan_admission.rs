@@ -64,6 +64,7 @@ mod admit;
 mod assurance_runtime;
 mod bundle_environment;
 mod canonical_kernel;
+mod cli_cold;
 mod composition;
 mod display_grants;
 mod extension_packs;
@@ -92,6 +93,10 @@ pub use admit::{
     admit_plan_for_run, admit_plan_for_run_with_host_permit, admit_signed_plan_for_run,
 };
 pub use bundle_environment::BundleEnvironmentRefused;
+pub use cli_cold::{
+    DispatchedCliCold, PrepareCliColdParams, PreparedCliCold, PreparedCliWarmClaim,
+    abandon_prepared_cli_cold, claim_prepared_cli_cold, prepare_cli_cold, start_prepared_cli_cold,
+};
 pub use extension_packs::{AdmittedExtension, ExtensionAdmissionContext};
 pub use launch_substrate::{
     persists_plan_before_start, populate_audit_substrate, stash_plan_and_mint_verb_grant,
@@ -109,7 +114,7 @@ pub use rollback::{
 };
 pub use shares::enforce_admitted_shares;
 pub use start::{
-    CliStartFailure, DispatchedPersistent, PersistentAdmission, PreparePersistentParams,
+    CliStartFailure, DispatchedPersistent, LaunchAdmission, PreparePersistentParams,
     PreparedPersistent, StartAdmittedParams, StartedMachine, WarmClaimDispatch, admit_and_start,
     boot_vm, claim_cli_transient, start_admitted, start_admitted_owned_actor,
     start_admitted_owned_actor_with_bootstrap, start_cli_transient, start_entrypoint,

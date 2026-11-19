@@ -213,8 +213,8 @@ pub struct PreparePersistentParams<'a> {
     pub lifecycle: &'a MachineLifecycleLock,
 }
 
-/// One signed persistent admission plus caller-owned post-dispatch state.
-pub struct PersistentAdmission<C> {
+/// One signed fresh-cold admission plus source-owned post-dispatch state.
+pub struct LaunchAdmission<C> {
     /// The one-use authority created for this exact persistent config.
     pub admitted: AdmittedPlan,
     /// The signer that records later readiness acceptance or refusal.
@@ -230,9 +230,71 @@ pub struct PreparedPersistent<C> {
     /// Backend identity of the dispatched but not yet accepted child.
     pub vm_id: VmId,
     /// Original admitted authority and audit continuation for readiness.
-    pub admission: PersistentAdmission<C>,
+    pub admission: LaunchAdmission<C>,
     /// Exact post-gate config handed to the backend and mailbox owner.
     pub config: VmStartConfig,
+}
+
+pub(super) enum LaunchSource<'a> {
+    Persistent {
+        lifecycle: &'a MachineLifecycleLock,
+    },
+    CliCold {
+        backend_kind: mvm_core::vm_backend::BackendKind,
+    },
+}
+
+pub(super) struct PreparedLaunch<A> {
+    pub(super) config: VmStartConfig,
+    pub(super) verified_runtime:
+        Option<std::sync::Arc<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>>,
+    pub(super) admission: A,
+}
+
+pub(super) fn prepare_launch<A>(
+    source: LaunchSource<'_>,
+    mut config: VmStartConfig,
+    attach: impl FnOnce(
+        &mut VmStartConfig,
+    ) -> Result<
+        Option<std::sync::Arc<mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime>>,
+    >,
+    admit: impl FnOnce(
+        &mut VmStartConfig,
+        Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
+    ) -> Result<A>,
+) -> Result<PreparedLaunch<A>> {
+    match source {
+        LaunchSource::Persistent { lifecycle } => {
+            lifecycle
+                .require_name(&config.name)
+                .map_err(CliStartFailure::StateNotOwned)?;
+            lifecycle
+                .require_cold_state()
+                .map_err(CliStartFailure::StateNotOwned)?;
+        }
+        LaunchSource::CliCold { backend_kind } => {
+            tracing::trace!(
+                backend = backend_kind.as_str(),
+                "preparing selected CLI cold source"
+            );
+        }
+    }
+
+    let release = attach(&mut config)?;
+    let verified_runtime = match release {
+        Some(release) => Some(std::sync::Arc::new(
+            mvm_runtime::runtime_evidence::verify_release_runtime_set(&config, release)?,
+        )),
+        None => mvm_runtime::runtime_evidence::verify_selected_release_runtime_set(&config)?
+            .map(std::sync::Arc::new),
+    };
+    let admission = admit(&mut config, verified_runtime.as_deref())?;
+    Ok(PreparedLaunch {
+        config,
+        verified_runtime,
+        admission,
+    })
 }
 
 /// Attach, verify, admit and dispatch a persistent cold boot in that order.
@@ -255,30 +317,25 @@ pub fn boot_vm<C>(
     admit: impl FnOnce(
         &mut VmStartConfig,
         Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
-    ) -> Result<PersistentAdmission<C>>,
+    ) -> Result<LaunchAdmission<C>>,
 ) -> Result<PreparedPersistent<C>> {
     let PreparePersistentParams {
         backend,
-        mut config,
+        config,
         writable_images,
         lifecycle,
     } = params;
-    lifecycle
-        .require_name(&config.name)
-        .map_err(CliStartFailure::StateNotOwned)?;
-    lifecycle
-        .require_cold_state()
-        .map_err(CliStartFailure::StateNotOwned)?;
-
-    let release = attach(&mut config)?;
-    let verified_runtime = match release {
-        Some(release) => Some(mvm_runtime::runtime_evidence::verify_release_runtime_set(
-            &config, release,
-        )?),
-        None => mvm_runtime::runtime_evidence::verify_selected_release_runtime_set(&config)?,
-    };
-    let admission = admit(&mut config, verified_runtime.as_ref())?;
-    let PersistentAdmission {
+    let PreparedLaunch {
+        config,
+        verified_runtime,
+        admission,
+    } = prepare_launch(
+        LaunchSource::Persistent { lifecycle },
+        config,
+        attach,
+        admit,
+    )?;
+    let LaunchAdmission {
         admitted,
         emitter,
         policy_bundle,
@@ -294,7 +351,7 @@ pub fn boot_vm<C>(
             emitter: Some(&emitter),
             assurance: None,
         },
-        verified_runtime.as_ref(),
+        verified_runtime.as_deref(),
         StartFinalization::Persistent { writable_images },
         None,
         None,
@@ -315,7 +372,7 @@ pub fn boot_vm<C>(
     })?;
     Ok(PreparedPersistent {
         vm_id: started.vm_id,
-        admission: PersistentAdmission {
+        admission: LaunchAdmission {
             admitted: started.admitted,
             emitter,
             policy_bundle,
