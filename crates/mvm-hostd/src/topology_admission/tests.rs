@@ -152,6 +152,7 @@ fn unit(name: &str, role: UnitRole) -> Unit {
         },
         placement: CorePlacement::Floating,
         min_isolation: None,
+        liveness_period_ms: None,
         permits: SealedTransitions::default(),
     }
 }
@@ -392,6 +393,10 @@ fn each_unmet_requirement_is_refused_named_and_persists_nothing() {
     }];
     cases.push((cell, BackendKind::Firecracker, None));
 
+    let mut liveness = topology(1);
+    liveness.units[0].liveness_period_ms = NonZeroU32::new(50);
+    cases.push((liveness, BackendKind::Firecracker, None));
+
     let mut suite = topology(1);
     suite.suite.key_establishment = KeyEstablishmentSuite::X25519MlKem768;
     cases.push((suite, BackendKind::Firecracker, None));
@@ -425,7 +430,7 @@ fn each_unmet_requirement_is_refused_named_and_persists_nothing() {
         );
     }
     kinds.dedup();
-    assert_eq!(kinds.len(), 7, "every requirement kind is covered once");
+    assert_eq!(kinds.len(), 8, "every requirement kind is covered once");
 }
 
 #[test]
