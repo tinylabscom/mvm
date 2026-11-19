@@ -414,6 +414,15 @@ phase boundary, record decisions, files touched, blocker, and exact next step.
 After roughly 50 tool calls without reaching the session goal, stop and
 re-plan; close finished sessions and split long multi-part efforts.
 
+**Do not end a turn with a progress report while the requested goal still has
+actionable work.** Continue through validation, review, commit, push, PR and
+authorized tracker updates without asking routine permission or handing the
+next step back to the user. End silently when waiting on an owned background
+task that will notify the thread. Pause only for a genuinely unresolved
+product/security/design decision, required authorization for a destructive,
+billable or shared-branch action, unavailable credentials, or a blocker that
+cannot be resolved from the repository and available tools.
+
 Before launching a subagent, declare its exact workspace paths, environment
 setup, read-only or write scope and tools, and a denial/missing-path fallback.
 If any pre-flight item is unknown, do not launch it.

@@ -14,6 +14,31 @@ separately, the files that were not read. Absence from the "read" column is not 
 soundness. "Read" is taken from the fixing PR descriptions and the review notes for the lane; the
 line ranges are as recorded there and were not re-derived when this file was written.
 
+## Offline recovery decision boundary
+
+The A1 slice under [#5120](https://github.com/tinylabscom/mvm/issues/5120)
+reviews `host_interface::{lease,policy,error,offline,recovery,workload,state}`
+and the unchanged local adapter against the
+[offline decision contract](offline-recovery-decisions.md).
+The separate companion preserves legacy signed bytes. Verification binds
+the exact issuer, lease, host policy, workload/package, expiry, operations
+and finite restart/range constraints; a private immutable context feeds a
+single-transition consumer with injected clocks and ownership observations.
+
+Reservation/debit, fencing, activation and launch eligibility are separate.
+Duplicate input cannot redispatch; stale or conflicting bindings refuse.
+Cancellation retains charges and pending cleanup; possible dispatch becomes
+unknown rather than reusable. Expiry or uncertain time takes precedence even
+after readiness/cancellation and requests closure plus exact-owner
+reconciliation. A heartbeat never supplies retirement evidence.
+
+The review is of pure decisions and deterministic tests only. The reducer
+owns no native resource and performs no I/O. Existing ledger persistence,
+allocator convergence, native stop custody, authenticated channels, actual
+effect closure and crash restoration are not qualified here. A2 remains
+owned with #5543; A3–A5 must establish native lifecycle evidence before any
+production recovery caller is connected.
+
 ## Endpoint gate-probe control transport
 
 Reviewed the client launch probe, endpoint config projection, listener binding
