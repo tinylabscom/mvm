@@ -67,8 +67,9 @@ pub(crate) use session::{connect_session, dispatch_on_session_stream};
 #[cfg(test)]
 pub(crate) use transient::teardown_transient_vm;
 use transient::{
-    BootAttempt, LeaveAt, arm_interrupt_teardown, boot_transient_vm, combine_run_and_flush,
-    flush_writable_disks_before_teardown, leave_standby_when, standby_to_leave, start_mode,
+    BootAttempt, LeaveAt, arm_interrupt_teardown, boot_transient_vm, check_admitted_projection,
+    combine_run_and_flush, flush_writable_disks_before_teardown, leave_standby_when,
+    standby_to_leave, start_mode,
 };
 pub(crate) use transient::{RuntimeRunCustody, TransientStopFailure, combine_run_and_stop};
 
@@ -443,16 +444,7 @@ fn run_inner(
     if let Some(runtime) = &_built_runtime {
         runtime.verify_config(&start_config)?;
     }
-    // Hold the admission borrow across boot so no nested launch can re-enter
-    // the owner while the transient host charge is being recorded.
-    let admission = audit_owner.map(std::cell::RefCell::borrow);
-    if let Some(admission) = audit_owner {
-        let admission = admission.borrow();
-        let owner = admission
-            .as_ref()
-            .context("CLI launch has no signed admission owner before warm/cold selection")?;
-        owner.check_legacy_projection(&start_config)?;
-    }
+    check_admitted_projection(audit_owner, &start_config)?;
     let mut boot_attempt = BootAttempt {
         backend: &backend,
         start_config: &start_config,
@@ -489,7 +481,6 @@ fn run_inner(
             ))),
         };
     }
-    drop(admission);
     let vm_name = booted.name;
     let effective_lifecycle = booted.lifecycle;
     if vm_name != requested_vm_name {
