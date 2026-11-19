@@ -703,6 +703,44 @@ mod tests {
         assert!(bridge.is_host_dial_stream(conn_id));
     }
 
+    #[test]
+    fn a_quiet_mailbox_wait_survives_idle_eviction_but_not_peer_eof() {
+        use mvm_contract::protocol::mailbox::MAILBOX_PORT;
+
+        let mut bridge = HostDialBridge::new();
+        bridge.set_long_lived_ports([MAILBOX_PORT]);
+        let now = Instant::now();
+        let mut peers = Vec::new();
+        for (offset, port) in [MAILBOX_PORT, 20_001].into_iter().enumerate() {
+            let (stream, peer) = UnixStream::pair().unwrap();
+            stream.set_nonblocking(true).unwrap();
+            peers.push(peer);
+            bridge.conns.insert(
+                FIRST_HOST_DIAL_PORT + u32::try_from(offset).unwrap(),
+                HostDialConn {
+                    stream,
+                    guest_port: port,
+                    established: true,
+                    last_activity: now,
+                    backlog: HostWriteBacklog::default(),
+                },
+            );
+        }
+        bridge.evict_idle_at(now + Duration::from_secs(120));
+        assert!(bridge.is_host_dial_stream(FIRST_HOST_DIAL_PORT));
+        assert_eq!(
+            bridge.take_host_closed(),
+            vec![(FIRST_HOST_DIAL_PORT + 1, 20_001)]
+        );
+        drop(peers);
+        bridge.drain_host();
+        assert_eq!(
+            bridge.take_host_closed(),
+            vec![(FIRST_HOST_DIAL_PORT, MAILBOX_PORT)]
+        );
+        assert!(!bridge.is_host_dial_stream(FIRST_HOST_DIAL_PORT));
+    }
+
     /// The exemption is per port, not global: a console on the same bridge is
     /// still reclaimed, which is the case idle eviction exists for.
     #[test]

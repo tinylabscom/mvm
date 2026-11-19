@@ -1801,6 +1801,7 @@ pub(crate) mod admit_plan_tests {
         assert_eq!(asset.digest, digest.as_str());
 
         let mut substrate = crate::entrypoint::SessionAuditSubstrate {
+            host_budget: admitted.admitted.host_budget_permit(),
             tenant_id: admitted.admitted.plan().tenant.0.clone(),
             plan_json: serde_json::to_string(admitted.admitted.signed()).unwrap(),
             audit_context: admitted.admitted.workload_audit_context(),

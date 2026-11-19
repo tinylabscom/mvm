@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::plan::topology::IsolationTier;
 use crate::protocol::vm_backend::BackendKind;
 
 /// How a backend bounds CPU, if it can.
@@ -55,18 +56,76 @@ pub enum WallClockControl {
     WasmEpoch,
 }
 
+/// How a backend keeps a unit's vCPUs on cores no other unit uses, if it can.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementControl {
+    /// Scheduling is left to the host; exclusive placement cannot be served.
+    #[default]
+    None,
+}
+
+/// How a backend keeps a failover standby, if it can.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StandbyControl {
+    /// No standby of any class is kept, so only a pair of class `None` can be
+    /// served.
+    #[default]
+    None,
+}
+
+/// How a backend holds a single-writer state cell, if it can.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateCellControl {
+    /// No host-held cell exists on this tier.
+    #[default]
+    None,
+}
+
+/// Which cryptographic suites a backend's admission path implements.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuiteControl {
+    /// Only [`CryptoSuite::CLASSICAL`](crate::plan::topology::CryptoSuite::CLASSICAL).
+    #[default]
+    ClassicalOnly,
+}
+
 /// The controls one backend offers.
+///
+/// The fields after `wall_clock` answer the critical-profile requirements a
+/// topology can state. Each defaults to the answer that serves nothing, so an
+/// encoding from a peer that predates them decodes fail-closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceControls {
     pub cpu: CpuControl,
     pub wall_clock: WallClockControl,
+    #[serde(default)]
+    pub placement: PlacementControl,
+    #[serde(default)]
+    pub standby: StandbyControl,
+    #[serde(default)]
+    pub state_cells: StateCellControl,
+    /// The strongest isolation tier the backend provides on every run, or
+    /// `None` where it provides none at all.
+    #[serde(default)]
+    pub isolation: Option<IsolationTier>,
+    #[serde(default)]
+    pub suite: SuiteControl,
 }
 
 impl ResourceControls {
     /// The controls each backend has. Exhaustive on purpose: a new
     /// `BackendKind` must answer this question rather than inherit a default
     /// that might silently claim or silently drop enforcement.
+    ///
+    /// No backend pins cores exclusively, keeps a standby, holds a state cell
+    /// or implements a suite beyond the classical one, so every arm answers
+    /// `None` / `ClassicalOnly` for those. They are spelled out per arm anyway:
+    /// when one backend gains a mechanism, its arm changes and no other does.
     #[must_use]
     pub const fn for_backend(kind: BackendKind) -> Self {
         match kind {
@@ -89,6 +148,13 @@ impl ResourceControls {
                     CpuControl::None
                 },
                 wall_clock: WallClockControl::SupervisorTimer,
+                // KVM on Linux, Hypervisor.framework on macOS: hardware
+                // virtualization either way.
+                placement: PlacementControl::None,
+                standby: StandbyControl::None,
+                state_cells: StateCellControl::None,
+                isolation: Some(IsolationTier::Vm),
+                suite: SuiteControl::ClassicalOnly,
             },
             // A cgroup can bound any Linux process — including one we never
             // forked — so on Linux these tiers carry a real CPU quota. Their
@@ -99,13 +165,36 @@ impl ResourceControls {
             // `SupervisorTimer` here would be the same overstatement the macOS
             // CPU arm below exists to avoid — a bound accepted at admission and
             // enforced by nothing.
-            BackendKind::Firecracker | BackendKind::Qemu => Self {
+            //
+            // The two part on isolation. Firecracker refuses to start without
+            // `/dev/kvm`. QEMU falls back to TCG software emulation when KVM is
+            // absent, which leaves only the host process boundary, and the
+            // kind alone cannot say which of the two a launch will get.
+            BackendKind::Firecracker => Self {
                 cpu: if cfg!(target_os = "linux") {
                     CpuControl::CgroupShare
                 } else {
                     CpuControl::None
                 },
                 wall_clock: WallClockControl::None,
+                placement: PlacementControl::None,
+                standby: StandbyControl::None,
+                state_cells: StateCellControl::None,
+                isolation: Some(IsolationTier::Vm),
+                suite: SuiteControl::ClassicalOnly,
+            },
+            BackendKind::Qemu => Self {
+                cpu: if cfg!(target_os = "linux") {
+                    CpuControl::CgroupShare
+                } else {
+                    CpuControl::None
+                },
+                wall_clock: WallClockControl::None,
+                placement: PlacementControl::None,
+                standby: StandbyControl::None,
+                state_cells: StateCellControl::None,
+                isolation: Some(IsolationTier::Task),
+                suite: SuiteControl::ClassicalOnly,
             },
             // macOS has no cgroup equivalent; thread QoS is priority, not quota.
             // `mvm-hvf-supervisor` is a per-VM process that outlives the
@@ -120,24 +209,49 @@ impl ResourceControls {
                     CpuControl::None
                 },
                 wall_clock: WallClockControl::SupervisorTimer,
+                placement: PlacementControl::None,
+                standby: StandbyControl::None,
+                state_cells: StateCellControl::None,
+                isolation: Some(IsolationTier::Vm),
+                suite: SuiteControl::ClassicalOnly,
             },
             // Fuel bounds instructions; epoch preempts a module parked in a
-            // host call, which fuel alone would never stop.
+            // host call, which fuel alone would never stop. The module runs
+            // inside our own process, confined by wasmtime's linear-memory
+            // bounds and nothing beneath them: memory protection without
+            // virtualization.
             BackendKind::Wasm => Self {
                 cpu: CpuControl::WasmFuel,
                 wall_clock: WallClockControl::WasmEpoch,
+                placement: PlacementControl::None,
+                standby: StandbyControl::None,
+                state_cells: StateCellControl::None,
+                isolation: Some(IsolationTier::Task),
+                suite: SuiteControl::ClassicalOnly,
             },
+            // Mock boots nothing, so it isolates nothing.
             BackendKind::Mock => Self {
                 cpu: CpuControl::None,
                 wall_clock: WallClockControl::None,
+                placement: PlacementControl::None,
+                standby: StandbyControl::None,
+                state_cells: StateCellControl::None,
+                isolation: None,
+                suite: SuiteControl::ClassicalOnly,
             },
             // Browser-hosted software emulation. CPU and wall-clock bounds are
             // declared in the plan but cannot be enforced by the host OS; the
             // browser runtime refuses rather than claiming an unenforceable
-            // control.
+            // control. The emulated guest is confined by the browser's process
+            // sandbox, not by hardware virtualization.
             BackendKind::WebLinux => Self {
                 cpu: CpuControl::None,
                 wall_clock: WallClockControl::None,
+                placement: PlacementControl::None,
+                standby: StandbyControl::None,
+                state_cells: StateCellControl::None,
+                isolation: Some(IsolationTier::Task),
+                suite: SuiteControl::ClassicalOnly,
             },
         }
     }
@@ -149,6 +263,11 @@ impl Default for ResourceControls {
         Self {
             cpu: CpuControl::None,
             wall_clock: WallClockControl::None,
+            placement: PlacementControl::None,
+            standby: StandbyControl::None,
+            state_cells: StateCellControl::None,
+            isolation: None,
+            suite: SuiteControl::ClassicalOnly,
         }
     }
 }
@@ -965,10 +1084,56 @@ mod tests {
         let default = ResourceControls::default();
         assert_eq!(default.cpu, CpuControl::None);
         assert_eq!(default.wall_clock, WallClockControl::None);
+        assert_eq!(default.isolation, None);
         let json = serde_json::to_string(&default).expect("serialize");
         assert_eq!(
             serde_json::from_str::<ResourceControls>(&json).expect("deserialize"),
             default
         );
+    }
+
+    #[test]
+    fn a_controls_encoding_without_the_critical_fields_decodes_serving_nothing() {
+        let decoded: ResourceControls =
+            serde_json::from_str(r#"{"cpu":"wasm_fuel","wall_clock":"wasm_epoch"}"#)
+                .expect("deserialize");
+        assert_eq!(
+            decoded,
+            ResourceControls {
+                cpu: CpuControl::WasmFuel,
+                wall_clock: WallClockControl::WasmEpoch,
+                ..ResourceControls::default()
+            }
+        );
+    }
+
+    #[test]
+    fn no_backend_serves_a_critical_requirement_yet() {
+        for &kind in BackendKind::ALL {
+            let c = ResourceControls::for_backend(kind);
+            assert_eq!(c.placement, PlacementControl::None, "{kind:?}");
+            assert_eq!(c.standby, StandbyControl::None, "{kind:?}");
+            assert_eq!(c.state_cells, StateCellControl::None, "{kind:?}");
+            assert_eq!(c.suite, SuiteControl::ClassicalOnly, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn microvm_tiers_provide_vm_isolation() {
+        use crate::plan::topology::IsolationTier;
+        let tier = |kind| ResourceControls::for_backend(kind).isolation;
+        for kind in [
+            BackendKind::Firecracker,
+            BackendKind::Libkrun,
+            BackendKind::Hvf,
+            BackendKind::AppleContainer,
+        ] {
+            assert_eq!(tier(kind), Some(IsolationTier::Vm), "{kind:?}");
+        }
+        // QEMU may run under TCG, so it cannot promise hardware virtualization.
+        for kind in [BackendKind::Qemu, BackendKind::Wasm, BackendKind::WebLinux] {
+            assert_eq!(tier(kind), Some(IsolationTier::Task), "{kind:?}");
+        }
+        assert_eq!(tier(BackendKind::Mock), None);
     }
 }

@@ -103,6 +103,34 @@ enum ObserverKind {
 }
 
 impl ProcessExitObserver {
+    /// Number of kernel descriptors actually retained by this observer.
+    pub fn retained_descriptor_count(&self) -> u64 {
+        match &self.kind {
+            ObserverKind::AlreadyExited => 0,
+            #[cfg(target_os = "macos")]
+            ObserverKind::Kqueue { .. } => 1,
+            #[cfg(target_os = "linux")]
+            ObserverKind::PidFd { .. } => 1,
+        }
+    }
+
+    /// Arm a separate observation handle while exclusive child custody pins the PID.
+    ///
+    /// The caller must prevent competing reapers and disposition changes. A
+    /// collected original child returns an already-exited observer without
+    /// inspecting or registering whatever may now occupy its former PID.
+    pub fn for_owned_child(child: &mut std::process::Child) -> Result<Self, ProcessExitError> {
+        require_owned_child_custody().map_err(ProcessExitError::Io)?;
+        let pid = libc::pid_t::try_from(child.id()).map_err(|_| ProcessExitError::Unsupported)?;
+        if child.try_wait().map_err(ProcessExitError::Io)?.is_some() {
+            return Ok(Self {
+                pid,
+                kind: ObserverKind::AlreadyExited,
+            });
+        }
+        Self::arm(pid)
+    }
+
     /// Arm an observer for `pid`.
     ///
     /// The registration happens before the caller sends SIGTERM, closing the
@@ -573,6 +601,32 @@ mod tests {
             assert_eq!(waited.unwrap().unwrap().code(), Some(code));
             require_owned_child_custody().expect("waiting must preserve child custody");
         }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn separate_owned_observers_do_not_consume_each_others_events_or_reap() {
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let first = ProcessExitObserver::for_owned_child(&mut child).unwrap();
+        let second = ProcessExitObserver::for_owned_child(&mut child).unwrap();
+        assert_eq!(
+            first.wait_event(Instant::now()).unwrap(),
+            ProcessExitWait::TimedOut
+        );
+        child.kill().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        assert_eq!(first.wait_event(deadline).unwrap(), ProcessExitWait::Exited);
+        assert_eq!(
+            second.wait_event(deadline).unwrap(),
+            ProcessExitWait::Exited
+        );
+        child.wait().unwrap();
+        let after_reap = ProcessExitObserver::for_owned_child(&mut child).unwrap();
+        assert!(matches!(after_reap.kind, ObserverKind::AlreadyExited));
+        assert_eq!(
+            after_reap.wait_event(Instant::now()).unwrap(),
+            ProcessExitWait::Exited
+        );
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]

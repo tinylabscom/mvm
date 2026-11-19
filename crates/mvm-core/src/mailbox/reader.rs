@@ -248,7 +248,6 @@ pub fn verify_guest_reader_enrollment(
         return Err(MailboxError::CapabilityRevoked);
     }
     verify_capability_signature(capability, authority)?;
-    signed.check_scope(scope)?;
     signed.encode()?;
     let signature: [u8; 64] = signed
         .signature
@@ -261,8 +260,11 @@ pub fn verify_guest_reader_enrollment(
             &Signature::from_bytes(&signature),
         )
         .map_err(|_| MailboxError::ReaderEnrollmentSignatureInvalid)?;
-    VerifyingKey::from_bytes(&signed.enrollment.ack_public_key)
-        .map_err(|_| MailboxError::ReaderKeyInvalid)
+    let key = VerifyingKey::from_bytes(&signed.enrollment.ack_public_key)
+        .map_err(|_| MailboxError::ReaderKeyInvalid)?;
+    // A not-yet-valid result must describe authenticated material, never an unsigned timestamp.
+    signed.check_scope(scope)?;
+    Ok(key)
 }
 
 fn possession_bytes(

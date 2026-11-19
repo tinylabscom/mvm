@@ -1132,6 +1132,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_quiet_mailbox_wait_retains_credit_while_console_credit_expires() {
+        use mvm_contract::protocol::mailbox::MAILBOX_PORT;
+
+        let mut core = transport();
+        let now = Instant::now();
+        core.set_long_lived_ports([MAILBOX_PORT]);
+        for port in [MAILBOX_PORT, 20_001] {
+            assert!(core.record_tx_credit_at(
+                &VsockHdr {
+                    dst_port: 9000,
+                    src_port: port,
+                    buf_alloc: 64,
+                    ..Default::default()
+                },
+                now,
+            ));
+        }
+        let expired = core.evict_idle_connections_at(now + Duration::from_secs(120));
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].guest_port, 20_001);
+        assert_eq!(core.tx_credit_available(9000, MAILBOX_PORT), 64);
+    }
+
     /// The agent stream is a request/response channel that is silent for as
     /// long as the guest command it carries runs, so this layer must not reset
     /// it for being quiet either.

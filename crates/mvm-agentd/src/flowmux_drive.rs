@@ -329,6 +329,11 @@ mod linux {
     pub fn provision_identity_from_drive_for_uid(
         signing_key_uid: u32,
     ) -> Result<(), IdentityDriveError> {
+        crate::actor_identity::clear(Path::new(RUN_MVM_DIR))
+            .map_err(|_| IdentityDriveError::Unreadable("retire stale actor identity".into()))?;
+        crate::conversation_identity::clear(Path::new(RUN_MVM_DIR)).map_err(|_| {
+            IdentityDriveError::Unreadable("retire stale mailbox conversation".into())
+        })?;
         let Some(device) =
             find_labeled_ext4_disk_among(virtio_block_devices(), IDENTITY_DRIVE_LABEL)
         else {
@@ -387,6 +392,14 @@ mod linux {
                 "mailbox ACK key and boot binding must be provisioned together".into(),
             ));
         }
+        crate::conversation_identity::install_from_drive(Path::new(MOUNTPOINT), run_dir)
+            .map_err(|_| IdentityDriveError::Unreadable("provision mailbox conversation".into()))?;
+        crate::actor_identity::install_from_drive(
+            Path::new(MOUNTPOINT),
+            run_dir,
+            crate::guest_mount::WORKLOAD_UID,
+        )
+        .map_err(|_| IdentityDriveError::Unreadable("provision actor boot identity".into()))?;
         Ok(())
     }
 

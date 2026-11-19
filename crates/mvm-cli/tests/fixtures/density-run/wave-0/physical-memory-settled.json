@@ -1,0 +1,3 @@
+{"schema_version": 1, "status": "measured", "processes": [
+  {"pid": 1, "component": "mvm-host-agent", "status": "measured", "physical_footprint_bytes": 7000000}
+]}

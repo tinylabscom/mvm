@@ -69,7 +69,7 @@ from mvm._dsl import (
 # `mvm.host.cost()`. These speak vsock to the per-VM broker from inside a
 # microVM; on the host they raise a clear transport error. Imported here so
 # `mvm.audit` / `mvm.host` resolve as attributes (no connection at import).
-from mvm import audit, host, kv
+from mvm import actor, audit, host, kv, mailbox
 
 # The typed failures `mvm.audit.emit(...)` / `mvm.host.time()` raise. They live
 # in a private module, but a caller has to be able to name what it catches, so
@@ -175,9 +175,11 @@ __all__ = [
     "attestation",
     "image_revocations",
     "RecoveryRequiredDetails",
+    "actor",
     "audit",
     "host",
     "kv",
+    "mailbox",
     "manifest",
     "checkpoint",
     "secrets",

@@ -186,6 +186,7 @@ pub(crate) fn resolve_verified_in(
             ProbeOutcome::Answered(version)
                 if version == helper_contract::HOST_HELPER_CONTRACT_VERSION =>
             {
+                record_probe_memo(env, spec, &built.path);
                 Ok(built.path)
             }
             stale => Err(build_did_not_fix(spec, &built.path, &stale, &built.command)),
@@ -579,6 +580,7 @@ fn recover_stale_helper(
         ProbeOutcome::Answered(version)
             if version == helper_contract::HOST_HELPER_CONTRACT_VERSION =>
         {
+            record_probe_memo(env, spec, &rebuilt);
             Ok(rebuilt)
         }
         still_stale => Err(build_did_not_fix(
@@ -1956,6 +1958,41 @@ mod tests {
             *fixture.signed.0.borrow(),
             vec![(built, RequiredEntitlement::Hypervisor)]
         );
+    }
+
+    #[test]
+    fn prepared_build_is_reused_by_controller_but_changed_bytes_are_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = scratch_checkout(tmp.path());
+        let log = tmp.path().join("cargo.log");
+        let mut fixture = source_fixture(tmp.path(), &root, "release", &building_cargo(&log));
+        fixture.env.probe_memo_dir = Some(tmp.path().join("probe-memo"));
+        let spec = AuxBin::new("mvm-actor-holder", "MVM_ACTOR_HOLDER_PATH", "mvm-hostd");
+        let lookup = checkout_lookup(&root);
+        let built = resolve_verified_in(&spec, &lookup, &fixture.env).unwrap();
+        assert!(probe_memo_accepts(&fixture.env, &spec, &built));
+
+        // The independently launched controller cannot initiate source builds.
+        fixture.env.source_builds = false;
+        assert_eq!(
+            resolve_verified_in(&spec, &lookup, &fixture.env).unwrap(),
+            built
+        );
+        assert_eq!(cargo_invocations(&log).len(), 1);
+
+        // The tampered helper must differ in byte length: the memo stamp is
+        // length plus filesystem times, and a same-length rewrite can land in
+        // the same timestamp tick on filesystems with coarse mtime
+        // granularity, leaving the stamp unchanged.
+        write_exe(
+            &built,
+            "#!/bin/sh\necho 'mvm-actor-holder contract-version=0' # stale\n",
+        );
+        assert!(!probe_memo_accepts(&fixture.env, &spec, &built));
+        // A stale recovery which leaves wrong bytes must still refuse.
+        write_exe(&fixture.env.cargo, &fresh_cargo(&log));
+        assert!(resolve_verified_in(&spec, &lookup, &fixture.env).is_err());
+        assert_eq!(cargo_invocations(&log).len(), 2);
     }
 
     /// Set `path`'s modification time `age` before now.

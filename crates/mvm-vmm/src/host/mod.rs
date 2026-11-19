@@ -3,6 +3,7 @@
 //! Keeping these helpers in `mvm-vmm` lets `mvm-backends` depend on them
 //! without creating a dependency cycle with `mvm-runtime` or `mvm-build`.
 
+pub mod actor_identity;
 pub mod audit_substrate;
 pub mod aux_bin;
 pub mod boot_config;
@@ -35,6 +36,7 @@ pub mod process_identity;
 pub mod process_liveness;
 pub mod process_usage;
 pub mod restore_image;
+pub mod retained_spawn;
 pub mod runtime_meta;
 pub mod shell;
 pub mod snapshot_publish;

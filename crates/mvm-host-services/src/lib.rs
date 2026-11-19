@@ -408,6 +408,16 @@ pub unsafe extern "C" fn mvm_hsvc_call(
         // SAFETY: `request`/`request_len` satisfy `mvm_hsvc_call`'s contract, as for `method`.
         let request = unsafe { borrow(request, request_len) };
 
+        if method.starts_with("host.mailbox.") {
+            let outcome = mailbox_call(method, request, timeout_secs);
+            // SAFETY: `out` is non-null and writable, as checked above.
+            return unsafe { write_outcome(out, outcome) };
+        }
+        if method == "host.actor.call" {
+            let outcome = actor_call(request, timeout_secs);
+            // SAFETY: `out` is non-null and writable, as checked above.
+            return unsafe { write_outcome(out, outcome) };
+        }
         let mut stream = match connect_host_vsock(BROKER_PORT, timeout_secs) {
             Ok(s) => s,
             Err(e) => {
@@ -427,6 +437,111 @@ pub unsafe extern "C" fn mvm_hsvc_call(
         unsafe { call_with_stream(&mut stream, method, request, out) }
     }));
     result.unwrap_or(MVM_HSVC_TRANSPORT)
+}
+
+fn mailbox_call(method: &str, request: &[u8], timeout_secs: u64) -> Outcome {
+    if !(1..=300).contains(&timeout_secs) {
+        return Outcome {
+            status: MVM_HSVC_INVALID_INPUT,
+            body: error_json("invalid_input", "invalid mailbox deadline"),
+        };
+    }
+    let request = match mvm_agentd::host_mailbox::parse_request(method, request) {
+        Ok(request) => request,
+        Err(_) => {
+            return Outcome {
+                status: MVM_HSVC_INVALID_INPUT,
+                body: error_json("invalid_input", "invalid mailbox operation"),
+            };
+        }
+    };
+    match mvm_agentd::host_mailbox::call(&request, std::time::Duration::from_secs(timeout_secs)) {
+        Ok(mvm_core::mailbox::conversation_wire::ConversationResponse::Refused { .. }) => Outcome {
+            status: MVM_HSVC_SERVICE,
+            body: error_json("service_error", "mailbox operation refused"),
+        },
+        Ok(response) => ok_json(&response),
+        Err(_) => Outcome {
+            status: MVM_HSVC_TRANSPORT,
+            body: error_json(
+                "transport",
+                "mailbox exchange unavailable; preserve original operation IDs",
+            ),
+        },
+    }
+}
+
+fn actor_call(request: &[u8], timeout_secs: u64) -> Outcome {
+    let request = match mvm_contract::protocol::workload_actor::ActorRequest::decode(request) {
+        Ok(request) => request,
+        Err(_) => {
+            return Outcome {
+                status: MVM_HSVC_INVALID_INPUT,
+                body: error_json("invalid_input", "invalid actor request"),
+            };
+        }
+    };
+    match mvm_agentd::host_actor::call(&request, std::time::Duration::from_secs(timeout_secs)) {
+        Ok(response) => ok_json(&response),
+        Err(_) => Outcome {
+            status: MVM_HSVC_TRANSPORT,
+            body: error_json(
+                "transport",
+                "actor channel unavailable; outcome may be unknown",
+            ),
+        },
+    }
+}
+
+#[cfg(test)]
+mod mailbox_tests {
+    use super::*;
+
+    #[test]
+    fn mailbox_ffi_rejects_bad_input_before_any_broker_dial() {
+        let method = b"host.mailbox.receive";
+        let request = br#"{"payload_b64":"secret-do-not-echo"}"#;
+        let mut out = MvmHsvcBuf::empty();
+        // SAFETY: live slices and a writable output are retained through the call.
+        let status = unsafe {
+            mvm_hsvc_call(
+                method.as_ptr(),
+                method.len(),
+                request.as_ptr(),
+                request.len(),
+                1,
+                &mut out,
+            )
+        };
+        assert_eq!(status, MVM_HSVC_INVALID_INPUT);
+        // SAFETY: successful ABI allocation is retained until the paired free.
+        let bytes = unsafe { slice::from_raw_parts(out.data, out.len) };
+        assert!(!String::from_utf8_lossy(bytes).contains("secret-do-not-echo"));
+        // SAFETY: this buffer was allocated by the ABI and has not been freed.
+        unsafe { mvm_hsvc_free(out) };
+        assert_eq!(
+            mailbox_call("host.mailbox.receive", b"{}", 0).status,
+            MVM_HSVC_INVALID_INPUT
+        );
+        assert_eq!(
+            mailbox_call("host.mailbox.unknown", b"{}", 1).status,
+            MVM_HSVC_INVALID_INPUT
+        );
+    }
+}
+
+#[cfg(test)]
+mod actor_tests {
+    #[test]
+    fn actor_ffi_rejects_plain_service_envelopes_and_oversize_requests() {
+        let result = super::actor_call(br#"{"service":"host.actor.v1","verb":"launch_child"}"#, 1);
+        assert_eq!(result.status, super::MVM_HSVC_INVALID_INPUT);
+        let result = super::actor_call(
+            &vec![b' '; mvm_contract::protocol::workload_actor::MAX_ACTOR_REQUEST_BYTES + 1],
+            1,
+        );
+        assert_eq!(result.status, super::MVM_HSVC_INVALID_INPUT);
+    }
 }
 
 /// Release a buffer produced by [`mvm_hsvc_call`]. A zeroed buffer

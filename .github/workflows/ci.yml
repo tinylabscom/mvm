@@ -376,6 +376,8 @@ jobs:
                      scripts/dev-run-guard.test.sh \
                      scripts/cargo-target-dir-guard.sh \
                      scripts/cargo-target-dir-guard.test.sh \
+                     scripts/prune-targets.sh \
+                     scripts/prune-targets.test.sh \
                      scripts/run-gcp-kvm-test.sh \
                      scripts/run-gcp-kvm-test-remote.sh \
                      scripts/run-gcp-kvm-test.test.sh \
@@ -610,6 +612,9 @@ jobs:
 
       - name: Cargo target dir guard tests
         run: bash scripts/cargo-target-dir-guard.test.sh
+
+      - name: Prune targets tests
+        run: bash scripts/prune-targets.test.sh
 
       - name: Dev-run guard tests
         run: bash scripts/dev-run-guard.test.sh

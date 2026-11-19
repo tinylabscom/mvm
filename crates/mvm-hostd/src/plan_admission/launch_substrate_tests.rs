@@ -130,6 +130,77 @@ fn bundle_json_carries_a_policy_bundle_not_the_artifact_pin() {
 
 // ───────────────────────────────────────────────────────────────
 // write_secret_file + stash_plan_for_bridge
+
+#[test]
+fn shared_launch_preparation_persists_exact_admitted_envelope_and_guest_grant() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let keys = mvm_core::config::mvm_keys_dir();
+    let mut input = fixture_input("prepared-owned-actor");
+    input.agent_verbs = Some(vec![mvm_core::plan::VerbId::new("run-entrypoint").unwrap()]);
+    let admitted = admit_for_run(
+        &input,
+        &SystemClock,
+        &InMemoryNonceLedger::new(),
+        Some(&keys),
+        None,
+        RunPosture::without_backend(Variant::Dev),
+    )
+    .unwrap();
+    let expected = serde_json::to_vec(admitted.signed()).unwrap();
+    let state = mvm_core::config::vm_state_dir(input.vm_name);
+    assert!(!state.join("plan.json").exists());
+    let config = VmStartConfig {
+        name: input.vm_name.into(),
+        rootfs_path: "/store/rootfs.ext4".into(),
+        // Caller-supplied bytes must never replace the admitted envelope.
+        plan_json: Some("untrusted caller bytes".into()),
+        ..Default::default()
+    };
+    let (config, _) = super::final_gates::run_post_admission_gates(
+        config,
+        &admitted,
+        mvm_core::vm_backend::BackendKind::Mock,
+        None,
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(state.join("plan.json")).unwrap(), expected);
+    assert_eq!(config.plan_json.unwrap().as_bytes(), expected);
+    let grant: mvm_core::protocol::vm_backend::VerbGrantEnvelope =
+        serde_json::from_slice(&std::fs::read(state.join("verb-grant.json")).unwrap()).unwrap();
+    assert_eq!(grant.plan_nonce_hex, admitted.plan().nonce.as_hex());
+    assert_eq!(config.audit_context.unwrap().plan(), Some(admitted.plan()));
+}
+
+#[test]
+fn shared_launch_preparation_refuses_unwritable_plan_before_dispatch() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let keys = tempfile::tempdir().unwrap();
+    let admitted = admit_for_run(
+        &fixture_input("blocked-plan"),
+        &SystemClock,
+        &InMemoryNonceLedger::new(),
+        Some(keys.path()),
+        None,
+        RunPosture::without_backend(Variant::Dev),
+    )
+    .unwrap();
+    let state = mvm_core::config::vm_state_dir("blocked-plan");
+    std::fs::create_dir_all(state.join("plan.json")).unwrap();
+    let result = super::final_gates::run_post_admission_gates(
+        VmStartConfig {
+            name: "blocked-plan".into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            ..Default::default()
+        },
+        &admitted,
+        mvm_core::vm_backend::BackendKind::Mock,
+        None,
+    );
+    let Err((stage, _)) = result else {
+        panic!("plan persistence failure must refuse launch preparation");
+    };
+    assert_eq!(stage, "launch-substrate");
+}
 // ───────────────────────────────────────────────────────────────
 
 #[test]

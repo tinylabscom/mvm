@@ -72,7 +72,8 @@ trip, a required check that a runtime worker and a blocking-pool thread
 it starts are both inside the filter and the Landlock ruleset (a failure
 here stops the launch), clock and entropy, resolver set-up (`getaddrinfo` for
 `localhost`, `res_init`, the UDP upstream socket), the trust-store
-directory walk, the audit write path (create, `flock`, `fdatasync`,
+directory walk, the audit write path (resolved private-directory preparation,
+create, `flock`, `fdatasync`,
 rename, unlink), and a Unix-socket accept. These are the paths that
 otherwise run only on first use, minutes into a session. A gap now
 kills the endpoint at startup, the reporter names the probe, and the
@@ -90,6 +91,27 @@ Adding a syscall to the allowlist requires deliberate review (this
 file is the audit point). Never add: execve, setuid, setgid, ptrace,
 capset. The `confined_role_allowlist_rejects_dangerous_syscalls`
 unit test in `mod.rs` asserts these are absent.
+
+## Audit directory resolution
+
+Resolved audit-directory preparation calls `canonicalize` before open and
+append-time recreation. On x86_64 this reaches legacy `readlink`; aarch64
+uses `readlinkat`. The shared confined-role table permits both names, folding
+`readlink` into `readlinkat` on aarch64. This also affects the collector role,
+which consumes the same table, not only the network endpoint.
+
+Security review accepted the additional x86_64 entry point because the
+already-permitted `readlinkat` supplies the equivalent pathname-observation
+capability. Seccomp does not restrict either operation to audit paths, and
+Landlock is not a symlink-metadata confidentiality boundary. Neither call
+grants permission to open target contents or write outside existing grants.
+No Landlock grant, trap behavior or confinement ordering changes.
+
+The audit probe uses the real resolved-directory helper. The positive
+real-filter test requires no probe errors; the x86_64 negative witness removes
+only `readlink` while retaining `readlinkat` and requires SIGSYS attributed to
+`file-append`. On aarch64 both names refer to one syscall, so that negative
+witness is explicitly x86_64-only.
 
 ## Adding a syscall
 

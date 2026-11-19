@@ -32,7 +32,8 @@
 //! it — but it is a real gap in the letter of that claim, and is not covered here.
 //!
 //! Comments and string literals are blanked first via [`crate::rust_source`],
-//! so this file's own prose naming `create_dir_all` cannot fail the gate.
+//! then test-only items are removed. Fixture directory creation is not a
+//! production ownership decision; production after a test module is still scanned.
 
 use anyhow::{Result, bail};
 use std::path::Path;
@@ -43,7 +44,7 @@ const WATCHED: &[&str] = &["crates/mvm-hostd/src/audit", "crates/mvm-client/src/
 /// The call this gate refuses in those modules.
 const BANNED: &str = "create_dir_all";
 
-/// The helper that must be used instead.
+/// The owned-state helper; caller-selected parents use `create_output_parent`.
 const REQUIRED: &str = "create_private_dir";
 
 /// Sites that must keep using the raw call, with the reason.
@@ -53,7 +54,7 @@ const REQUIRED: &str = "create_private_dir";
 /// operator's `--out` export target among them). Tightening a directory the
 /// user named is not ours to do, and the audit roots it *does* touch are
 /// already created privately by the emitter before any write reaches it.
-const ALLOWED: &[&str] = &["emitter/atomic_write.rs"];
+const ALLOWED: &[&str] = &["crates/mvm-hostd/src/audit/emitter/atomic_write.rs"];
 
 pub(crate) fn run(workspace: &Path) -> Result<()> {
     let mut findings: Vec<String> = Vec::new();
@@ -70,17 +71,18 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
                 .unwrap_or(&file)
                 .display()
                 .to_string();
-            if ALLOWED.iter().any(|a| relative.ends_with(a)) {
+            if ALLOWED.contains(&relative.as_str()) {
                 continue;
             }
             let raw = std::fs::read_to_string(&file)
                 .map_err(|e| anyhow::anyhow!("reading {}: {e}", file.display()))?;
-            let body = crate::rust_source::blank_comments_and_strings(&raw);
+            let body = crate::rust_source::strip_cfg_test_items(
+                &crate::rust_source::blank_comments_and_strings(&raw),
+            );
 
             for (line_no, line) in body.lines().enumerate() {
-                if line.contains(REQUIRED) {
+                if line.contains(REQUIRED) || line.contains("create_output_parent") {
                     converted += 1;
-                    continue;
                 }
                 if line.contains(BANNED) {
                     findings.push(format!(
@@ -143,6 +145,67 @@ pub(crate) fn rust_files(root: &Path) -> Result<Vec<std::path::PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn workspace_with(source: &str, file: &str) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        for dir in WATCHED {
+            std::fs::create_dir_all(root.path().join(dir)).unwrap();
+        }
+        let path = root.path().join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, source).unwrap();
+        root
+    }
+
+    #[test]
+    fn nested_test_bodies_are_excluded_but_later_production_is_checked() {
+        let source = r#"
+            fn private() { mvm_core::config::create_private_dir(path); }
+            #[cfg(test)]
+            mod tests {
+                mod nested {
+                    fn fixture() { std::fs::create_dir_all(path); }
+                }
+            }
+            fn output() { mvm_core::config::create_output_parent(path); }
+        "#;
+        let root = workspace_with(source, "crates/mvm-hostd/src/audit/sample.rs");
+        run(root.path()).unwrap();
+        std::fs::write(
+            root.path().join("crates/mvm-hostd/src/audit/sample.rs"),
+            format!("{source}\nfn production() {{ std::fs::create_dir_all(path); }}"),
+        )
+        .unwrap();
+        assert!(
+            run(root.path())
+                .unwrap_err()
+                .to_string()
+                .contains("sample.rs")
+        );
+    }
+
+    #[test]
+    fn a_policy_helper_on_the_same_line_cannot_hide_raw_production_creation() {
+        let root = workspace_with(
+            "fn f() { create_output_parent(a); std::fs::create_dir_all(b); }",
+            "crates/mvm-hostd/src/audit/sample.rs",
+        );
+        assert!(run(root.path()).is_err());
+    }
+
+    #[test]
+    fn only_the_exact_existing_atomic_writer_path_is_exempt() {
+        let root = workspace_with(
+            "fn f() { std::fs::create_dir_all(path); }",
+            "crates/mvm-hostd/src/audit/unrelated/emitter/atomic_write.rs",
+        );
+        assert!(
+            run(root.path())
+                .unwrap_err()
+                .to_string()
+                .contains("unrelated")
+        );
+    }
 
     #[test]
     fn passes_on_this_workspace() {

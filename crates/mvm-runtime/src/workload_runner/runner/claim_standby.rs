@@ -59,6 +59,15 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         if claim
             .start_config
             .as_ref()
+            .is_some_and(|config| config.mailbox_conversation.is_some())
+        {
+            return Err(StandbyError::ClaimFailed(
+                "mailbox conversation identity requires a fresh cold boot".into(),
+            ));
+        }
+        if claim
+            .start_config
+            .as_ref()
             .is_some_and(|config| config.caller_registration.is_some())
         {
             return Err(StandbyError::ClaimFailed(
@@ -317,6 +326,8 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                     // A warm child must rekey and enroll independently; it
                     // cannot inherit a parent's mailbox ACK authority.
                     reader_plan: None,
+                    mailbox_conversation: None,
+                    actor: None,
                     // A restored child already holds its parent's signing key
                     // in the memory image it woke from, and there is no way to
                     // put a different one there. Its endpoint pins what the

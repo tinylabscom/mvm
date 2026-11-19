@@ -91,6 +91,28 @@ impl WakeupQuantity {
     }
 }
 
+/// Which quantity a memory figure is. A physical footprint and a proportional
+/// set size charge shared pages differently, so they are never comparable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryQuantity {
+    /// `ri_phys_footprint` from libproc rusage.
+    #[default]
+    PhysicalFootprint,
+    /// `Pss` from `/proc/<pid>/smaps_rollup`.
+    ProportionalSetSize,
+}
+
+impl MemoryQuantity {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::PhysicalFootprint => "physical footprint",
+            Self::ProportionalSetSize => "proportional set size",
+        }
+    }
+}
+
 /// A wakeup rate together with the quantity it counts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -221,6 +243,9 @@ impl Default for Latencies {
 pub struct Section {
     pub backend: String,
     pub architecture: String,
+    /// The quantity every memory figure in this section measures.
+    #[serde(default)]
+    pub memory_quantity: MemoryQuantity,
     pub fixed_host_cost: FixedHostCost,
     pub by_residency: ResidencyCosts,
     pub by_standby: StandbyCosts,
@@ -240,6 +265,7 @@ impl Section {
         Self {
             backend: backend.into(),
             architecture: architecture.into(),
+            memory_quantity: MemoryQuantity::default(),
             fixed_host_cost: FixedHostCost::unmeasured(wakeups),
             by_residency: ResidencyCosts::unmeasured(wakeups),
             by_standby: StandbyCosts::unmeasured(wakeups),
@@ -322,18 +348,24 @@ fn render_section(out: &mut String, s: &Section) {
 
     let fixed = &s.fixed_host_cost;
     out.push_str("Fixed host cost with zero units:\n\n");
-    out.push_str("| Memory | Idle CPU | Wakeups per second | Wakeup quantity | Disk |\n");
-    out.push_str("| --- | --- | --- | --- | --- |\n");
+    out.push_str(
+        "| Memory | Memory quantity | Idle CPU | Wakeups per second | Wakeup quantity | Disk |\n",
+    );
+    out.push_str("| --- | --- | --- | --- | --- | --- |\n");
     out.push_str(&format!(
-        "| {} | {} | {} | {} | {} |\n\n",
+        "| {} | {} | {} | {} | {} | {} |\n\n",
         bytes_cell(&fixed.memory_bytes),
+        s.memory_quantity.label(),
         float_cell(&fixed.idle_cpu_millicores, " m"),
         float_cell(&fixed.wakeups.per_second, ""),
         fixed.wakeups.quantity.label(),
         bytes_cell(&fixed.disk_bytes),
     ));
 
-    out.push_str("Per-unit cost:\n\n");
+    out.push_str(&format!(
+        "Per-unit cost (memory is {}):\n\n",
+        s.memory_quantity.label()
+    ));
     out.push_str(
         "| State | Memory | CPU | Wakeups per second | Disk |\n| --- | --- | --- | --- | --- |\n",
     );
@@ -431,8 +463,8 @@ mod tests {
             }
             rows += 1;
             for cell in cells.iter().skip(1) {
-                // The wakeup quantity label is text, not a figure.
-                if cell.ends_with("derived") {
+                // The quantity labels are text, not figures.
+                if cell.ends_with("derived") || *cell == MemoryQuantity::default().label() {
                     continue;
                 }
                 assert_eq!(*cell, DASH, "row {line}");
@@ -492,6 +524,25 @@ mod tests {
             WakeupQuantity::LinuxProcfs.label(),
             WakeupQuantity::MacosLibproc.label()
         );
+    }
+
+    #[test]
+    fn memory_quantities_are_labelled_differently() {
+        let mut section = empty_section();
+        let footprint = render_markdown(&report_with(section.clone()));
+        section.memory_quantity = MemoryQuantity::ProportionalSetSize;
+        let pss = render_markdown(&report_with(section));
+        assert!(footprint.contains("physical footprint"));
+        assert!(pss.contains("proportional set size"));
+        assert!(!pss.contains("physical footprint"));
+    }
+
+    #[test]
+    fn a_report_without_memory_quantity_reads_as_physical_footprint() {
+        let mut value = serde_json::to_value(empty_section()).unwrap();
+        value.as_object_mut().unwrap().remove("memory_quantity");
+        let section: Section = serde_json::from_value(value).unwrap();
+        assert_eq!(section.memory_quantity, MemoryQuantity::PhysicalFootprint);
     }
 
     #[test]

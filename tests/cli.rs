@@ -153,6 +153,35 @@ fn audit_consistency_real_commands_generate_verify_and_refuse_rollback() {
 }
 
 #[test]
+fn actor_launch_help_requires_a_manifest_without_initializing_workflow_state() {
+    let home = tempfile::tempdir().expect("isolated CLI home");
+    let state = home.path().join("state");
+    let help = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", &state)
+        .env("HOME", home.path())
+        .args(["actor", "launch", "--help"])
+        .output()
+        .expect("actor launch help");
+    assert!(
+        help.status.success(),
+        "{}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&help.stdout);
+    assert!(stdout.contains("<MANIFEST>"), "{stdout}");
+    assert!(stdout.contains("--json"), "{stdout}");
+    assert!(!state.join("actors").exists());
+    let missing = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", &state)
+        .env("HOME", home.path())
+        .args(["actor", "launch"])
+        .output()
+        .expect("missing actor manifest");
+    assert!(!missing.status.success());
+    assert!(!state.join("actors").exists());
+}
+
+#[test]
 fn config_file_is_global_and_malformed_file_fails_before_command_dispatch() {
     let home = tempfile::tempdir().expect("isolated CLI home");
     let path = home.path().join("options.toml");

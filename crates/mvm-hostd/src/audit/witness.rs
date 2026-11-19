@@ -529,7 +529,8 @@ mod tests {
         n: usize,
         tag: &str,
     ) -> mvm_contract::merkle::SignedAuditRoot {
-        use crate::supervisor::{AuditSigner, FileAuditSigner, PlanAuditEntry};
+        use crate::audit::audit_file::FileAuditSigner;
+        use crate::audit::signer::{AuditSigner, PlanAuditEntry};
         let signer = FileAuditSigner::open(key.clone(), dir).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()

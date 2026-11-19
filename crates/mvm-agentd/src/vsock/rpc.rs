@@ -876,8 +876,14 @@ pub fn send_entrypoint_on_authenticated_session(
     stream: &mut UnixStream,
     session: &mut AuthenticatedSession,
     request: &GuestRequest,
-    mut on_event: impl FnMut(&EntrypointEvent),
+    on_event: impl FnMut(&EntrypointEvent),
 ) -> Result<EntrypointEvent> {
+    require_retained_entrypoint(request)?;
+    session.write(stream, request)?;
+    read_entrypoint_on_authenticated_session(stream, session, request, on_event)
+}
+
+fn require_retained_entrypoint(request: &GuestRequest) -> Result<()> {
     let capability = match request {
         GuestRequest::RunEntrypoint {
             stream_input: false,
@@ -892,7 +898,18 @@ pub fn send_entrypoint_on_authenticated_session(
         supported_capabilities().contains(&capability),
         "unsupported entrypoint capability"
     );
-    session.write(stream, request)?;
+    Ok(())
+}
+
+/// Read a previously dispatched entrypoint through its terminal frame on the same session.
+/// Never sends another request or treats transport EOF as a terminal event.
+pub fn read_entrypoint_on_authenticated_session(
+    stream: &mut UnixStream,
+    session: &mut AuthenticatedSession,
+    request: &GuestRequest,
+    mut on_event: impl FnMut(&EntrypointEvent),
+) -> Result<EntrypointEvent> {
+    require_retained_entrypoint(request)?;
     loop {
         let response = check_response(request, session.read(stream)?)?;
         let GuestResponse::EntrypointEvent(event) = response else {

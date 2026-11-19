@@ -9,6 +9,7 @@ pub mod execution_plan;
 pub mod network_limits;
 pub mod output_grant;
 pub mod sdk_sidecar;
+pub mod topology;
 pub mod types;
 pub mod validity;
 pub mod verb;

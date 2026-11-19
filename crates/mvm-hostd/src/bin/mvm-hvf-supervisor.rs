@@ -1043,6 +1043,10 @@ fn run() -> anyhow::Result<()> {
     // The start time rides with the pid so a pid recycled after this process
     // dies cannot make a dead machine look alive.
     let record = mvm_vmm::host::network_endpoint_spawn::EndpointPid::of_child(std::process::id());
+    anyhow::ensure!(
+        record.started.is_some(),
+        "cannot establish original workload process identity"
+    );
     std::fs::write(&cfg.pid_file, record.render()).context("publish protected supervisor PID")?;
     diagnostics.stage(StartupStage::PidPublished);
     drop(diagnostics);

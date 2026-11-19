@@ -74,6 +74,144 @@ pub fn sdk_sidecar_attachment_for(
 /// host-resolved sidecar from a user-requested share at a glance.
 pub const SDK_SIDECAR_SHARE_TAG: &str = "sdk-sidecar";
 
+/// Immutable SDK artifact identity; mount paths and permissions are never caller-supplied.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SdkSidecarPin {
+    pub version: String,
+    pub arch: mvm_core::arch::GuestArch,
+    pub libc: mvm_contract::guest_libc::GuestLibc,
+    pub image_sha256: mvm_contract::assurance::Sha256Digest,
+}
+
+impl SdkSidecarPin {
+    /// Capture the identity of an attachment resolved before signing the plan.
+    pub fn from_attachment(
+        attachment: &SdkSidecarAttachment,
+        arch: mvm_core::arch::GuestArch,
+        libc: mvm_contract::guest_libc::GuestLibc,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            attachment.grant.content_sha256.as_ref() == Some(&attachment.image_sha256),
+            "SDK sidecar attachment must pin its content before signing"
+        );
+        Ok(Self {
+            version: attachment.version.clone(),
+            arch,
+            libc,
+            image_sha256: mvm_contract::assurance::Sha256Digest::parse(format!(
+                "sha256:{}",
+                attachment.image_sha256
+            ))?,
+        })
+    }
+
+    /// Re-resolve exactly pinned bytes. This conveys no attachment permission.
+    pub fn resolve_exact(
+        &self,
+        cache_root: &std::path::Path,
+        source_checkout: Option<&std::path::Path>,
+    ) -> Result<SdkSidecarAttachment> {
+        anyhow::ensure!(
+            !self.version.is_empty()
+                && self.version.len() <= 128
+                && self.version.as_bytes()[0].is_ascii_digit()
+                && self
+                    .version
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b".-+".contains(&byte)),
+            "invalid pinned SDK sidecar version"
+        );
+        let resolver = mvm_fs::sdk_sidecar::SdkSidecarResolver::new(
+            cache_root.to_path_buf(),
+            self.version.clone(),
+        );
+        let attachment = resolve_verified_sdk_sidecar_attachment(
+            &resolver,
+            self.arch,
+            self.libc,
+            source_checkout,
+        )?;
+        anyhow::ensure!(
+            format!("sha256:{}", attachment.image_sha256) == self.image_sha256.as_str(),
+            "SDK sidecar content differs from pinned artifact"
+        );
+        Ok(attachment)
+    }
+}
+
+impl SdkSidecarAttachment {
+    /// Require the exact content-pinned system grant before attaching the verified bytes.
+    pub fn require_signed_grant(&self, plan: &mvm_core::plan::ExecutionPlan) -> Result<()> {
+        anyhow::ensure!(
+            mvm_core::plan::sdk_sidecar_required(plan),
+            "SDK sidecar is not requested"
+        );
+        let mut grants = plan
+            .shares
+            .iter()
+            .filter(|grant| grant.tag == SDK_SIDECAR_SHARE_TAG);
+        anyhow::ensure!(
+            grants.next() == Some(&self.grant) && grants.next().is_none(),
+            "SDK sidecar attachment does not match the exact signed system grant"
+        );
+        Ok(())
+    }
+}
+
+/// Resolve the plan-required sidecar, seeding only from an already verified default cache.
+///
+/// Call before signing to add the returned read-only, content-pinned system grant;
+/// use [`SdkSidecarPin::resolve_exact`] before attaching the volume at launch.
+/// Source launches refuse stale FFI artifacts rather than rebuilding or downloading.
+pub fn resolve_or_seed_sdk_sidecar_attachment(
+    plan: &mvm_core::plan::ExecutionPlan,
+    resolver: &mvm_fs::sdk_sidecar::SdkSidecarResolver,
+    arch: mvm_core::arch::GuestArch,
+    libc: mvm_contract::guest_libc::GuestLibc,
+    source_checkout: Option<&std::path::Path>,
+) -> Result<Option<SdkSidecarAttachment>> {
+    if !mvm_core::plan::sdk_sidecar_required(plan) {
+        return Ok(None);
+    }
+    resolve_verified_sdk_sidecar_attachment(resolver, arch, libc, source_checkout).map(Some)
+}
+
+/// Resolve verified artifact bytes without granting permission to mount them.
+///
+/// Trusted template preparation can use this before workflow membership exists.
+/// The final signed plan must pass [`SdkSidecarAttachment::require_signed_grant`].
+pub fn resolve_verified_sdk_sidecar_attachment(
+    resolver: &mvm_fs::sdk_sidecar::SdkSidecarResolver,
+    arch: mvm_core::arch::GuestArch,
+    libc: mvm_contract::guest_libc::GuestLibc,
+    source_checkout: Option<&std::path::Path>,
+) -> Result<SdkSidecarAttachment> {
+    anyhow::ensure!(
+        libc != mvm_contract::guest_libc::GuestLibc::Unknown,
+        "SDK sidecar requires a known guest libc"
+    );
+    let artifact = mvm_build::sdk_sidecar::resolve_or_seed_from_default_cache(resolver, arch, libc)
+        .context("SDK sidecar is not prepared; run `mvmctl bootstrap` first")?;
+    if let Some(source) = source_checkout {
+        let provenance = mvm_build::sdk_sidecar::cached_sidecar_provenance(
+            resolver.cache_root(),
+            resolver.expected_version(),
+            arch,
+            libc,
+            source,
+        )
+        .context("cannot verify source SDK sidecar provenance; run `mvmctl bootstrap`")?;
+        anyhow::ensure!(
+            provenance == mvm_build::sdk_sidecar::SidecarProvenance::MatchesSource,
+            "SDK sidecar predates this source tree; run `mvmctl bootstrap` before actor launch"
+        );
+    }
+    let mut attachment = sdk_sidecar_attachment_for(&artifact);
+    attachment.grant.content_sha256 = Some(attachment.image_sha256.clone());
+    Ok(attachment)
+}
+
 /// Resolve the SDK sidecar for `services`, or `None` when no bound host service
 /// needs it.
 ///
@@ -189,6 +327,83 @@ mod tests {
             ),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn actor_sidecar_pin_requires_exact_bytes_and_signed_read_only_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let arch = GuestArch::host();
+        let libc = mvm_contract::guest_libc::GuestLibc::Musl;
+        seed_sidecar_cache(dir.path(), "1.2.3", arch);
+        let resolver = SdkSidecarResolver::new(dir.path().to_path_buf(), "1.2.3".into());
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.services = vec![svc("host.actor.v1")];
+        plan.sdk_uses_sidecar = true;
+        let attachment = resolve_or_seed_sdk_sidecar_attachment(&plan, &resolver, arch, libc, None)
+            .unwrap()
+            .unwrap();
+        assert!(attachment.volume.read_only);
+        assert_eq!(
+            attachment.grant.content_sha256.as_ref(),
+            Some(&attachment.image_sha256)
+        );
+        let pin = SdkSidecarPin::from_attachment(&attachment, arch, libc).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<SdkSidecarPin>(&serde_json::to_vec(&pin).unwrap()).unwrap(),
+            pin
+        );
+        assert!(attachment.require_signed_grant(&plan).is_err());
+        plan.shares.push(attachment.grant.clone());
+        let resolved = pin.resolve_exact(dir.path(), None).unwrap();
+        assert_eq!(resolved, attachment);
+        resolved.require_signed_grant(&plan).unwrap();
+        plan.shares[0].read_only = false;
+        assert!(resolved.require_signed_grant(&plan).is_err());
+        plan.shares[0] = attachment.grant;
+        let mut changed = pin.clone();
+        changed.image_sha256 = mvm_contract::assurance::Sha256Digest::from_bytes(&[0; 32]);
+        assert!(changed.resolve_exact(dir.path(), None).is_err());
+        changed.version = "../elsewhere".into();
+        assert!(changed.resolve_exact(dir.path(), None).is_err());
+        plan.sdk_uses_sidecar = false;
+        assert!(
+            resolve_or_seed_sdk_sidecar_attachment(&plan, &resolver, arch, libc, None,)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn actor_sidecar_rejects_unknown_libc_and_unverified_source_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let arch = GuestArch::host();
+        let libc = mvm_contract::guest_libc::GuestLibc::Musl;
+        seed_sidecar_cache(dir.path(), "1.2.3", arch);
+        let resolver = SdkSidecarResolver::new(dir.path().to_path_buf(), "1.2.3".into());
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.services = vec![svc("host.actor.v1")];
+        plan.sdk_uses_sidecar = true;
+        assert!(
+            resolve_or_seed_sdk_sidecar_attachment(
+                &plan,
+                &resolver,
+                arch,
+                mvm_contract::guest_libc::GuestLibc::Unknown,
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_or_seed_sdk_sidecar_attachment(
+                &plan,
+                &resolver,
+                arch,
+                libc,
+                Some(source.path()),
+            )
+            .is_err()
+        );
     }
 
     #[test]

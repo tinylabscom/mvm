@@ -406,6 +406,7 @@ fn run_inner(
     let ResolvedLaunch {
         backend,
         start_config,
+        host_budget,
         verified_runtime,
         mailbox_posture,
         use_snapshot,
@@ -442,6 +443,9 @@ fn run_inner(
     if let Some(runtime) = &_built_runtime {
         runtime.verify_config(&start_config)?;
     }
+    // Hold the admission borrow across boot so no nested launch can re-enter
+    // the owner while the transient host charge is being recorded.
+    let admission = audit_owner.map(std::cell::RefCell::borrow);
     if let Some(admission) = audit_owner {
         let admission = admission.borrow();
         let owner = admission
@@ -459,6 +463,15 @@ fn run_inner(
         user_named: req.name.is_some(),
         writable_images: &mut disk_images,
     };
+    if let Some(permit) = &host_budget {
+        let plan = mvm_core::plan::plan_from_admitted_json(
+            start_config
+                .plan_json
+                .as_deref()
+                .context("admitted transient plan missing")?,
+        )?;
+        permit.mark_dispatching_for(&plan, &vm_name)?;
+    }
     let booted = boot_transient_vm(
         vm_name,
         use_snapshot,
@@ -466,6 +479,17 @@ fn run_inner(
         timing.then_some(&mut warm_claim_marks),
         &mut sub_marks,
     )?;
+    if let Some(permit) = &host_budget
+        && let Err(error) = permit.record_started(&booted.name)
+    {
+        return match backend.stop(&mvm_core::vm_backend::VmId(booted.name.clone())) {
+            Ok(_) => Err(error.context("recording transient host charge")),
+            Err(stop) => Err(error.context(format!(
+                "recording transient host charge; rollback unconfirmed: {stop:#}"
+            ))),
+        };
+    }
+    drop(admission);
     let vm_name = booted.name;
     let effective_lifecycle = booted.lifecycle;
     if vm_name != requested_vm_name {
@@ -1042,6 +1066,8 @@ fn prepare_then_admit<T>(
 /// `warm_to_target`, and the spawn derives the parent's boot shape and the
 /// pool's compat key from the same value the launch will later be matched on.
 pub struct ResolvedLaunch {
+    /// The same one-use host hold returned by admission.
+    pub host_budget: Option<std::sync::Arc<mvm_hostd::admission_budget::HostBudgetPermit>>,
     /// The backend the launch resolved against. Selected here rather than by
     /// the caller so a warm spawn and the run it serves cannot disagree about
     /// which backend's capabilities shaped the config.
@@ -1147,6 +1173,7 @@ pub fn resolve_launch(
     let mut use_snapshot = boot.use_snapshot;
     let mut built_pack_check = None;
     let mut mailbox_posture = None;
+    let mut host_budget = None;
 
     // Attach everything the boot waits on before admitting. Admission starts
     // the plan's validity window and the verb grant minted from it expires
@@ -1234,6 +1261,7 @@ pub fn resolve_launch(
         let mut sub = sub;
         built_pack_check = sub.built_pack_check.take();
         mailbox_posture = sub.mailbox_posture.take();
+        host_budget = Some(std::sync::Arc::clone(&sub.host_budget));
         let read_only_materialized_images = sub.apply_to(&mut start_config);
         for volume in &mut start_config.volumes {
             if read_only_materialized_images.contains(&volume.host)
@@ -1303,6 +1331,7 @@ pub fn resolve_launch(
     Ok(ResolvedLaunch {
         backend,
         start_config,
+        host_budget,
         verified_runtime,
         mailbox_posture,
         use_snapshot,

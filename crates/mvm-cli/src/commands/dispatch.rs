@@ -32,6 +32,7 @@ impl TopLevelCommand for Commands {
             Some(mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?)
         };
         match self {
+            Commands::Actor(a) => actor::run(a),
             Commands::Env(a) => env::group::run(cli, a, cfg),
             Commands::Bootstrap(a) => bootstrap::run(cli, a, cfg),
             Commands::BuilderVmBootstrap(a) => bootstrap::run_builder_vm_bootstrap(cli, a, cfg),

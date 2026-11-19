@@ -8,7 +8,7 @@
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
-use crate::supervisor::PlanAuditEntry;
+use crate::audit::signer::PlanAuditEntry;
 
 /// Whether an evidence-bearing emit must also produce a receipt.
 ///

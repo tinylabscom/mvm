@@ -78,6 +78,10 @@ impl OwnedClientBoot {
                 .as_mut()
                 .context("owned native image preparation missing")?
                 .take_boot_images()?;
+            resources
+                .admission
+                .admitted
+                .mark_host_budget_dispatching(&resources.config.name)?;
             group.runtime = Some(
                 resources
                     .backend
@@ -217,6 +221,26 @@ impl OwnedClientBoot {
     }
 
     pub fn stop(&mut self) -> Result<()> {
+        let budget = self
+            .custody
+            .as_ref()
+            .and_then(|group| group.resources.as_ref())
+            .filter(|resources| {
+                resources
+                    ._volumes
+                    .as_ref()
+                    .is_none_or(|volumes| volumes.lease_keys().is_empty())
+            })
+            .map(|resources| resources.admission.admitted.host_budget_permit());
+        if let Some(budget) = budget {
+            return budget
+                .reconcile_ordinary_stopped(|| self.stop_and_drop_resources())
+                .map(|_| ());
+        }
+        self.stop_and_drop_resources()
+    }
+
+    fn stop_and_drop_resources(&mut self) -> Result<()> {
         self.quiesce()?;
         // Only actual original-owner stop/child-free classification permits
         // leases, payloads and admission to be released.
@@ -451,6 +475,8 @@ pub struct SessionVm {
 /// types of its own. **Do not log `plan_json`**: the signed envelope carries
 /// secret bindings.
 pub struct SessionAuditSubstrate {
+    /// The actual host reservation, retained until the boot handoff completes.
+    pub host_budget: std::sync::Arc<mvm_hostd::admission_budget::HostBudgetPermit>,
     /// The tenant the plan was admitted under.
     pub tenant_id: String,
     /// The signed plan, serialized.
@@ -858,6 +884,7 @@ fn boot_session_core(
             (admitted.substrate, Some(admitted.context))
         }
     };
+    let host_budget = std::sync::Arc::clone(&substrate.host_budget);
     require_native_owner(backend.kind(), context.is_some())?;
     let built_pack_check = substrate.built_pack_check.take();
     substrate.apply_to(&mut start_config);
@@ -906,6 +933,13 @@ fn boot_session_core(
         }
         return Ok(SessionBootResult::Owned(owner));
     }
+    let plan = mvm_core::plan::plan_from_admitted_json(
+        start_config
+            .plan_json
+            .as_deref()
+            .context("session plan missing")?,
+    )?;
+    host_budget.mark_dispatching_for(&plan, &vm_name)?;
     let vm_id = backend
         .start_with_verified_runtime(&start_config, verified_runtime.as_ref())
         .with_context(|| format!("starting session microVM '{vm_name}'"))?;
@@ -916,11 +950,7 @@ fn boot_session_core(
     // the budget exists to prevent, so the boot stops rather than stay up
     // uncounted. Session plans declare no resource grants, so the charge is
     // the configured memory and no CPU millicores.
-    let charge = mvm_hostd::admission_budget::charge_for(
-        u64::from(memory_mib),
-        &mvm_contract::grants::Grants::default(),
-    );
-    if let Err(err) = mvm_hostd::admission_budget::record_charge(&vm_name, charge) {
+    if let Err(err) = host_budget.record_started(&vm_name) {
         if let Err(stop_err) = backend.stop(&vm_id) {
             tracing::warn!(
                 error = %stop_err,
@@ -1098,6 +1128,9 @@ mod tests {
 
     #[test]
     fn child_free_failure_audits_once_and_keeps_original_error_through_retry() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
         let keys = tempfile::tempdir().unwrap();
         let audit = tempfile::tempdir().unwrap();
         let admission = crate::admission::admit_plan_tests::admitted_into(
@@ -1149,9 +1182,19 @@ mod tests {
 
     #[test]
     fn applying_admission_preserves_durability_and_materialized_images() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
         for outcome in [Ok(()), Err(anyhow::anyhow!("audit sync refused"))] {
             let should_succeed = outcome.is_ok();
             let mut substrate = SessionAuditSubstrate {
+                host_budget: std::sync::Arc::new(
+                    mvm_hostd::admission_budget::HostBudgetPermit::reserve(
+                        "vm",
+                        mvm_contract::grants::budget::MachineCharge::default(),
+                    )
+                    .unwrap(),
+                ),
                 tenant_id: "tenant".into(),
                 plan_json: "signed-plan".into(),
                 audit_context: test_audit_context(),

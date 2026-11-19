@@ -1,11 +1,10 @@
-//! Chain-signed audit: the signer, the on-disk chain, the recorder and its mirror, and the per-subsystem audit events (DNS, ICMP, secret substitution, gateway flows, transcripts).
+//! Per-subsystem audit producers and compatibility paths to the audit-owned chain.
 
-pub mod audit_checkpoint;
-pub mod audit_dedup;
-pub mod audit_file;
-pub mod audit_mirror;
-pub mod audit_recorder;
-pub mod bound_sink;
+pub use crate::audit::{
+    audit_checkpoint, audit_dedup, audit_file, audit_mirror, audit_recorder, bound_sink, signer,
+    transcript_sink,
+};
+
 pub mod denial_stage;
 /// Chain-signed metadata audit for policy-gated DNS questions.
 pub mod dns_audit;
@@ -16,7 +15,3 @@ pub mod icmp_audit;
 /// Chain-signed `secret.substituted` / `secret.placeholder_dropped`
 /// audit events (claim 13: metadata only, never the secret value).
 pub mod secret_audit;
-pub mod signer;
-/// Live forensic transcript capture sink — fills an armed capture's manifest
-/// with encrypted byte chunks as they cross the host bridge.
-pub mod transcript_sink;

@@ -28,8 +28,8 @@ pub struct HostChannels {
     /// Per-VM host GPU endpoint UDS (`mvm-gpu-endpoint`), present only on
     /// GPU launches.
     pub gpu_socket: Option<PathBuf>,
-    /// Additional host-dial listeners, including telemetry and admitted console
-    /// data channels. Telemetry is present independently of console grants.
+    /// Additional host-dial listeners, including telemetry, admitted mailbox and
+    /// console data channels. Telemetry is present independently of console grants.
     pub console_data_sockets: Vec<(u32, PathBuf)>,
     /// Builder-tier control listeners: job dispatch and the resident daemon's
     /// typed channel, for a persistent builder VM. Empty for every workload.
@@ -99,6 +99,19 @@ pub struct HostChannels {
     pub capture_control: Option<mvm_vmm::hvf_handoff::CaptureControlSender>,
 }
 
+/// Quiet control requests are bounded by their service, not transport inactivity.
+pub(super) fn long_lived_host_dial_ports<'a>(
+    sockets: &'a [(u32, PathBuf)],
+    builder: &'a [(u32, PathBuf)],
+) -> impl Iterator<Item = u32> + 'a {
+    builder.iter().map(|(port, _)| *port).chain(
+        sockets
+            .iter()
+            .filter(|(port, _)| *port == mvm_contract::protocol::mailbox::MAILBOX_PORT)
+            .map(|(port, _)| *port),
+    )
+}
+
 /// An injected owner is authoritative even if its consumer has failed.
 pub(super) fn install_console_sink(
     uart: &mut mvm_vmm::vmm::device::Pl011,
@@ -119,6 +132,25 @@ mod tests {
     use super::*;
     use mvm_vmm::host::console_capture::bounded;
     use mvm_vmm::vmm::device::{MmioDevice, Pl011};
+
+    #[test]
+    fn only_configured_mailbox_and_builder_channels_are_long_lived() {
+        use mvm_contract::protocol::mailbox::MAILBOX_PORT;
+
+        let console = (20_001, PathBuf::from("console.sock"));
+        let mailbox = (MAILBOX_PORT, PathBuf::from("mailbox.sock"));
+        let builder = [(21_471, PathBuf::from("builder.sock"))];
+        assert!(long_lived_host_dial_ports(&[], &[]).next().is_none());
+        assert!(
+            long_lived_host_dial_ports(std::slice::from_ref(&console), &[])
+                .next()
+                .is_none()
+        );
+        assert_eq!(
+            long_lived_host_dial_ports(&[console, mailbox], &builder).collect::<Vec<_>>(),
+            vec![21_471, MAILBOX_PORT]
+        );
+    }
 
     #[test]
     fn protected_sink_never_opens_the_legacy_path_even_after_consumer_failure() {

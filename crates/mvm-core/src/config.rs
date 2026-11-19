@@ -1,5 +1,8 @@
 use sha2::Digest as _;
 
+mod output_parent;
+pub use output_parent::{create_output_parent, create_private_dir_resolved};
+
 /// Default Firecracker version, overridable at build time via `MVM_FC_VERSION` env var.
 ///
 /// This is what a host with no Firecracker is given. A host that already has
@@ -213,15 +216,17 @@ pub fn mvm_home_strict() -> std::io::Result<std::path::PathBuf> {
 /// On a host without Unix permission bits this refuses rather than creating
 /// the directory; see [`crate::private_fs`].
 pub fn create_private_dir(dir: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+    create_private_dir_under(std::path::Path::new(&mvm_home()), dir.as_ref())
+}
+
+fn create_private_dir_under(home: &std::path::Path, dir: &std::path::Path) -> std::io::Result<()> {
     use crate::private_fs::ensure_private_dir;
-    let dir = dir.as_ref();
-    let home = std::path::PathBuf::from(mvm_home());
-    let Ok(under_home) = dir.strip_prefix(&home) else {
+    let Ok(under_home) = dir.strip_prefix(home) else {
         return ensure_private_dir(dir);
     };
 
-    ensure_private_dir(&home)?;
-    let mut walked = home;
+    ensure_private_dir(home)?;
+    let mut walked = home.to_path_buf();
     for component in under_home.components() {
         walked.push(component);
         ensure_private_dir(&walked)?;
@@ -1080,6 +1085,11 @@ pub fn vm_vsock_egress_marker_path(name: &str) -> std::path::PathBuf {
 /// here.
 pub fn vm_network_endpoint_socket(name: &str) -> std::path::PathBuf {
     vm_socket_dir(name).join("substitution-endpoint.sock")
+}
+
+/// Host-only, read-only gate-probe socket owned by the per-VM endpoint.
+pub fn vm_network_gate_probe_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf {
+    vm_socket_dir_at(state_dir).join("network-gate-probe.sock")
 }
 
 /// Filename of the hvf VMM's host→guest agent-RPC bridge socket:

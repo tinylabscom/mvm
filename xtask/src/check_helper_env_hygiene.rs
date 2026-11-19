@@ -551,7 +551,7 @@ const HELPER_SPAWNS: &[(&str, &str)] = &[
     ),
     (
         "crates/mvm-vmm/src/host/network_endpoint_spawn.rs",
-        "fn spawn_network_endpoint(",
+        "fn spawn_network_endpoint_retained(",
     ),
     (
         "crates/mvm-vmm/src/host/network_endpoint_spawn/owned.rs",
@@ -1075,6 +1075,35 @@ mod tests {
         assert!(
             unwitnessed_host_sites(&[(file.to_string(), filtered.to_string())], &entry).is_empty()
         );
+    }
+
+    #[test]
+    fn both_endpoint_constructors_are_covered_and_reject_raw_commands() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask sits in the workspace root");
+        for site in [
+            (
+                "crates/mvm-vmm/src/host/network_endpoint_spawn.rs",
+                "fn spawn_network_endpoint_retained(",
+            ),
+            (
+                "crates/mvm-vmm/src/host/network_endpoint_spawn/owned.rs",
+                "fn spawn_prepared(",
+            ),
+        ] {
+            assert!(
+                HELPER_SPAWNS.contains(&site),
+                "missing constructor: {site:?}"
+            );
+            let source = std::fs::read_to_string(workspace.join(site.0)).unwrap();
+            check_site(&source, site.1).unwrap();
+            let raw = source.replace(
+                "mvm_core::env_hygiene::helper_command(",
+                "std::process::Command::new(",
+            );
+            assert!(check_site(&raw, site.1).is_err(), "{site:?}");
+        }
     }
 
     #[test]

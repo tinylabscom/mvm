@@ -163,7 +163,7 @@ fn workspace_labels(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::supervisor::verify_audit_chain;
+    use crate::audit::audit_file::verify_audit_chain;
     use ed25519_dalek::SigningKey;
     use rand::Rng;
 

@@ -39,6 +39,32 @@ effect closure and crash restoration are not qualified here. A2 remains
 owned with #5543; A3–A5 must establish native lifecycle evidence before any
 production recovery caller is connected.
 
+## Endpoint gate-probe control transport
+
+Reviewed the client launch probe, endpoint config projection, listener binding
+and dispatch, and ordinary/owned endpoint spawn evidence. Gate probes use a
+separate host-only Unix socket for both Wire and FlowMux endpoints; the guest
+data protocol remains fixed by admission. The endpoint binds the control
+socket before reporting process readiness, with the existing private-directory
+and mode-0600 listener discipline. Only `GateProbeRequest` is accepted there,
+and the existing projected gate answers without forwarding, granting egress,
+recording workload audit, or authenticating a guest session.
+
+The control listener accepts at most four concurrent probes with no queued
+task waiters, limits each request body to 8 KiB before allocation, and gives
+the entire request/response exchange five seconds. These limits apply only
+to probes, not guest or connector traffic. Four DNS-sized samples fit the
+request cap, while a normal launch uses one connection and performs no
+external I/O in its probe. Focused tests cover over-cap prefixes, stalled
+prefixes/bodies, a nonreading response peer and connection saturation.
+
+The existing endpoint process owns the listener. Reaping removes its path;
+ordinary restart reconciles stale sockets, while owned spawn refuses existing
+evidence. A failed probe still refuses launch. The added subprocess witness
+covers both modes, admitted HTTPS and refused ports, forward-request refusal,
+private permissions, unchanged guest authentication, and teardown. This does
+not witness a native VM boot or Linux confinement; those remain live CI checks.
+
 ## Signed application HVF startup diagnostics
 
 Reviewed in [#5681](https://github.com/tinylabscom/mvm/pull/5681): standalone
@@ -63,6 +89,37 @@ A source-order tripwire covers recorder placement. Actual native startup
 failure recording, unconfirmed-child recovery, confirmed rollback, and a
 successful public Claude boot/stop remain outside this source-only witness.
 No retained runtime state or native credential was changed by the patch.
+
+## Audit-chain module ownership
+
+The ADR-061 prerequisite relocates the existing chain signer, file writer,
+checkpoint cache, recorder, mirror, dedup and transcript/bound sinks into
+`crates/mvm-hostd/src/audit/`. Supervisor module and flattened exports retain
+the same concrete identities. This changes Rust source ownership, not runtime
+resource ownership or the security claims of ADR-001.
+
+The archived focused review read module declarations/imports, file-signer
+batch/Drop and sidecar-lock ownership, and the bound recorder's direct journal
+path, weak sink binding, health persistence and expiry refusal. The direct
+journal operation stays restricted to the common audit module
+(`pub(in crate::audit)`). The bound sink moves with the recorder rather than
+widening this method to crate visibility.
+
+Existing transition owners remain: the host caller supplies signing authority;
+the file signer serializes append/rotation with the sidecar lock; callers own
+batch durability waits; Drop best-effort flushes deferred entries; endpoint
+startup owns registration and the bound sink owns its epoch-local health.
+An expired weak binding still refuses instead of falling back to unbound
+recording. No cancellation, lock, key, event, serialization, recovery or
+retirement transition is changed by the mechanical move.
+
+The [implementation report](../../xtask/data/evidence/adr-061/audit-chain-implementation-report.md)
+separates historical review/checks from recovery evidence at `d772741916`.
+Recovery compared current source modulo imports/visibility; it did not repeat
+the historical runtime validation. Combined checks and the separately owned
+file/checkpoint/emitter directory-policy changes require integration validation.
+This is not a new review of producer adapters, native completion, the combined
+signer helper, mailbox features or backend isolation.
 
 ## Guest-runtime first-use publication
 
@@ -124,6 +181,57 @@ fleet transaction is implemented. The live evidence is restricted to the
 Linux/Firecracker scenarios cited in the PR; it does not replace review of
 unrelated lifecycle paths or claim crash recovery can resume an incomplete
 publication automatically.
+## Actor conversation waits and recovery
+
+Reviewed the MVMC v2 invocation budget, guest-local single-exchange admission,
+caller-disconnect handling, authenticated enrollment/lease validation, host
+conversation waits, durable peer delivery worker, and HVF mailbox idle handling.
+Caller patience narrows signed authority; queueing and handshake consume the
+original monotonic budget. Concurrent local requests receive an explicit refusal,
+and both active and busy frame decoders have absolute deadlines. The guest owns
+one exchange worker, not an unbounded thread per caller.
+
+Cold guest clocks can lag newly issued enrollment and lease timestamps. The guest
+authenticates signatures and static bindings before waiting for actual guest time
+to reach issuance, then repeats full validation before use. Waiting is bounded by
+the original caller deadline and a short validation phase; it neither adjusts the
+clock nor accepts early authority. Invalid signatures, contradictory windows,
+expiry, and cancellation remain refusals.
+
+The delivery worker retries transient unavailability with capped jittered
+backoff, using the persisted attempt/expiry limits and original sealed message.
+Only configured mailbox and builder control ports survive HVF transport idle
+eviction; service deadlines and EOF still apply. Integrity refusals do not
+schedule a timer retry, though a later unrelated wake can retry a retained
+record within its existing budget.
+
+On 2026-11-17, `scripts/actor-live-hvf.sh` completed the trusted-host development
+two-guest workflow: forbidden template and oversized message refusal, durable
+call/reply and ACKs, parent application exit zero, and two terminal reservations.
+Child application-terminal observation was uncertain during release; native
+teardown was established separately through original ownership. The separate
+`actor_response_survives_helper_process_crash_before_signed_ack` process test
+witnesses exact-config recovery of an accepted response before the parent result
+ACK. Neither witness establishes automatic actor-supervisor restart, VM crash
+recovery, same-UID helper confinement, production assurance, latency, or density.
+
+## Original HVF actor liveness
+
+Reviewed `HvfRunningVm::status`, `OwnedInstance::try_exited`,
+`ConnectedInstance::connect_bound`, the supervisor stop-control exchange, and
+the actor controller's activation/resource/lifecycle/serve error boundaries.
+An original live owner previously fell through into a fresh name-based control
+connection. Status now returns from retained child custody for both live and
+exited observations; observation errors remain errors. Attached status still
+requires its authenticated generation-bound probe. Exit finalization checks,
+stop authority, resource release, and terminal accounting are unchanged.
+
+Pure branch regressions cover live/exited/unknown original status without
+attachment and attached-generation refusal. An in-process supervisor protocol
+test covers repeated observation connections: the serial server has no
+extra-owner rejection rule. This does not identify the cause of a particular
+live EOF, nor prove guest application readiness. No guest execution or broad
+supervisor/lifecycle review is implied by this focused change.
 
 ## Compile-time AES-GCM boundary
 
@@ -177,6 +285,95 @@ comment exists, not that its claim is true; the sites were read, but a comment i
 | Volume, checkpoint and peer-EOF custody | custody, removal guard, EOF after timeout refusal | [#4880](https://github.com/tinylabscom/mvm/pull/4880), [#4957](https://github.com/tinylabscom/mvm/pull/4957), [#4864](https://github.com/tinylabscom/mvm/pull/4864), [#4879](https://github.com/tinylabscom/mvm/pull/4879) | fixed under the volume and vmm owner work; not re-read for this table |
 | Unsafe/FFI documentation | missing `SAFETY` claims | [#4993](https://github.com/tinylabscom/mvm/pull/4993), [#5438](https://github.com/tinylabscom/mvm/pull/5438) | every `unsafe` block in the workspace has a comment; see the gate above |
 | Restore readiness teardown | failed restore leaving its supervisor running | [#5490](https://github.com/tinylabscom/mvm/issues/5490) (fix on `fix/5490-hvf-restore-teardown`, PR pending) | `crates/mvm-backends/src/driver/hvf_restore.rs` (`await_restored`): both error returns after the ready marker now stop and reap the spawned supervisor through the owned child handle, with the outcome logged; the published record is validated by `restored_identity` and the pid read stays on the guarded `process_liveness` helper |
+
+## Endpoint provisioning handoff
+
+### Host capacity reservation
+
+Ordinary admitted launches and actor pre-plan reservations share the generic
+`admission-budget/reservations.json` memory/CPU ledger. A short exclusive lock
+serializes legacy-charge measurement, pending holds and durable reservation
+creation; it is not held across signing or boot. Admission retains the actual
+permit, not a readiness boolean. The physical VM name is frozen at dispatch;
+coordinated reservations refuse physical-name substitution.
+
+Prepared ordinary holds can be released before effects. Dispatching/unknown
+holds remain charged after launcher failure. A successfully recorded ordinary
+running hold carries the original PID and start identity and can reclaim only
+memory/CPU on confirmed death of that identity. Missing/malformed PID files are
+not proof. A caller-owned ordinary launch with no PID marker can refund only
+through its original successful runtime stop and resource-drop callback, and
+only when it has no managed lease keys. A failed stop, managed lease ambiguity,
+or failed accounting write retains capacity and reports the refusal; this is
+not complete ordinary volume-cleanup reconciliation. Actor-coordinated holds
+cannot use that refund and never auto-release: the original lifecycle
+owner must confirm death and resource cleanup and commit the terminal result
+before invoking digest-bound reconciliation.
+
+Ordinary runs without a configured host memory/CPU ceiling do not create a
+pending journal. They still write their legacy charge for a later configured
+ceiling. Actor holds are always journaled and an unbounded ordinary permit
+cannot be promoted into a coordinator hold.
+
+The ordinary Firecracker launch script now writes the existing `fc.identity`
+pid/start sidecar from the process that will exec Firecracker, while keeping
+the bare `fc.pid` wire unchanged. Accounting requires those files' PIDs to
+match. HVF and libkrun publish their own pid/start identities and refuse
+unavailable identity publication before guest execution. No process is signaled
+by recapturing a PID. Older or unsupported bare-only evidence remains unknown;
+there is no new name-only recovery command. Lost-owner reconciliation and
+managed-volume cleanup evidence remain explicit availability limitations.
+
+The actor coordinator combines this prepared host hold with its separate scope
+reservation before one dispatch authorization. These are conservative prepared
+holds, not atomic cross-file writes. Interrupted coordination may overreserve;
+it must not grant capacity twice or automatically dispatch a recovered request.
+No ordinary launch initializes an actor journal. Unadmitted warm-factory
+capacity is not newly accounted here, and no resident-capacity or timing claim
+is promoted.
+
+Actor cold-start refusals now retain runtime-origin no-dispatch evidence only
+before the first possible helper/native dispatch. The opaque evidence binds
+the physical VM name, complete admitted plan (including nonce), and original
+signed envelope. Missing state/PIDs, successful rollback, and missing original
+VM custody cannot mint it. The endpoint boundary is conservative even when its
+particular configuration would not spawn a process.
+
+Admission validates that evidence and durably emits `plan.cancelled` before
+changing a dispatching hold. Coordinated holds enter charged `NoDispatch`,
+which cannot authorize another launch; the lifecycle owner still writes its
+cancelled journal and terminal audit before digest-bound refund. Root cleanup
+uses its existing never-dispatched terminal transaction only for the matching
+attempt. Ordinary cancellation retains a digest-bound terminal tombstone.
+Both cleanup owners retry a failed cancellation audit/accounting write from
+the retained original proof; they do not treat a successful rollback as evidence.
+Unknown and partial starts retain their original native/helper owners.
+Crash recovery cannot reconstruct the opaque runtime proof from process absence.
+Reviewed paths are runtime actor startup, the shared cold runner, admitted-start
+failure handling, root cleanup, child cancellation, and host-budget transitions;
+this is not a new review of backend teardown or live native execution.
+
+The focused launch-lifecycle review for
+[#5117](https://github.com/tinylabscom/mvm/issues/5117) follows the admitted
+cold-start and resumed-session paths through `WorkloadRunner`, the real
+network endpoint spawner, and the endpoint's bound-audit readiness handshake.
+The handshake already follows binding and probing the serving audit sink;
+this review adds no second readiness gate.
+
+The post-spawn provisioning tail in
+`crates/mvm-runtime/src/workload_runner/runner/spawner.rs` must retain cleanup
+ownership until its fallible telemetry provisioning record is written. The
+existing `EndpointGuard` covers that interval, then hands cleanup back to
+`ClaimGuards` on success. The regression tests exercise a real stand-in child
+and its pid/environment sidecars, not a guest VM or real FlowMux session.
+
+Cleanup retains the existing reaper's semantics: identity-checked SIGTERM and
+best-effort removal of sidecars, fingerprints, and telemetry state. It does not
+wait for termination or return signal/removal errors; the provisioning error
+remains the launch error. A crash, an unremovable path, or a process that ignores
+SIGTERM is not newly guaranteed clean. Bound audit health evidence is retained,
+not reset for reuse. This is not an exhaustive review of warm restore,
+supervisor teardown, or actor lifecycle, and completes no phase-0 gate.
 
 ## Flow-audit lifecycle boundary
 

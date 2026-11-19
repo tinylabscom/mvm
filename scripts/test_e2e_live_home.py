@@ -117,5 +117,81 @@ class PostRunListingTests(unittest.TestCase):
         self.assertIn("bdd-leftover", result.stderr)
 
 
+class CleanupTests(unittest.TestCase):
+    def run_cleanup(self, root, stop_status, rm_status):
+        script = Path(__file__).with_name("e2e-documented-surface.sh").read_text()
+        cleanup = script[script.index('SNAPSHOT="$E2E_HOME/'):script.index(
+            "# Following the run."
+        )]
+        (root / ".e2e-machines-before").write_text("")
+        state = root / "vm" / "standby-test" / "runtime.json"
+        state.parent.mkdir(parents=True)
+        state.write_text('{"identity":"unprobeable"}\n')
+        cli = root / "mvmctl"
+        cli.write_text(f"#!{sys.executable}\n" + """
+import os
+from pathlib import Path
+import sys
+
+home = Path(os.environ["MVM_HOME"])
+verb = sys.argv[2]
+with (home / "calls").open("a") as calls:
+    calls.write(verb + "\\n")
+state = home / "vm" / "standby-test" / "runtime.json"
+if verb == "ls":
+    print("NAME STATUS")
+    print("standby-test Failed")
+elif verb == "stop":
+    if int(os.environ["STOP_STATUS"]):
+        print("cannot establish HVF process identity", file=sys.stderr)
+        sys.exit(int(os.environ["STOP_STATUS"]))
+    state.unlink()
+elif verb == "rm":
+    print("machine standby-test does not exist", file=sys.stderr)
+    sys.exit(int(os.environ["RM_STATUS"]))
+else:
+    sys.exit(99)
+""")
+        cli.chmod(0o755)
+        result = subprocess.run(
+            ["bash", "-c", "set -euo pipefail\n" + cleanup + """
+status=0
+reap post-run || status=$?
+printf 'cleanup_blocked=%s\\n' "$CLEANUP_BLOCKED"
+exit "$status"
+"""],
+            env={
+                **os.environ,
+                "E2E_HOME": str(root),
+                "MVMCTL": str(cli),
+                "STOP_STATUS": str(stop_status),
+                "RM_STATUS": str(rm_status),
+            },
+            capture_output=True,
+            text=True,
+        )
+        return result, state, (root / "calls").read_text().splitlines()
+
+    def test_failed_stop_cannot_be_hidden_by_missing_or_idempotent_rm(self):
+        for rm_status in (0, 1):
+            with self.subTest(rm_status=rm_status), tempfile.TemporaryDirectory() as temporary:
+                result, state, calls = self.run_cleanup(Path(temporary), 1, rm_status)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("cleanup_blocked=1", result.stdout)
+                self.assertIn("cannot establish HVF process identity", result.stderr)
+                self.assertIn("retained evidence:", result.stderr)
+                self.assertEqual(state.read_text(), '{"identity":"unprobeable"}\n')
+                self.assertEqual(calls, ["ls", "stop"])
+
+    def test_successful_stop_allows_missing_or_idempotent_rm(self):
+        for rm_status in (0, 1):
+            with self.subTest(rm_status=rm_status), tempfile.TemporaryDirectory() as temporary:
+                result, state, calls = self.run_cleanup(Path(temporary), 0, rm_status)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("cleanup_blocked=0", result.stdout)
+                self.assertFalse(state.exists())
+                self.assertEqual(calls, ["ls", "stop", "rm"])
+
+
 if __name__ == "__main__":
     unittest.main()

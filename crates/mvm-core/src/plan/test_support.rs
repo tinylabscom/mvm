@@ -170,6 +170,7 @@ impl PlanFixture {
     pub fn build(self) -> ExecutionPlan {
         let now = Utc::now();
         ExecutionPlan {
+            workflow: None,
             grants: self.grants,
             environment: None,
             runtime_identity: None,

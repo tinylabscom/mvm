@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use mvm_core::substitution_wire::{EndpointRequest, MAX_GATE_PROBE_SAMPLES, WireRequest};
+use mvm_core::substitution_wire::{GateProbeRequest, MAX_GATE_PROBE_SAMPLES, WireRequest};
 use tokio::net::{UnixListener, UnixStream};
 
 #[cfg(target_os = "linux")]
@@ -22,7 +22,15 @@ use crate::supervisor::endpoint::accept_loop::{
 enum ListenerMode {
     GuestWire,
     HostConnector,
+    GateProbe,
 }
+
+// Four DNS names, even JSON-escaped, fit comfortably without HTTP-sized frames.
+const MAX_GATE_PROBE_FRAME_BYTES: usize = 8 * 1024;
+// A launch needs one probe; tolerate overlapping local callers without waiters.
+const MAX_GATE_PROBE_CONNECTIONS: usize = 4;
+// A probe performs no network I/O beyond its local request and response.
+const GATE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl SubstitutionService {
     /// Accept loop: one routed request per connection, framed JSON, a task per
@@ -39,14 +47,30 @@ impl SubstitutionService {
             .await;
     }
 
+    /// Serve only read-only gate probes on the private host control socket.
+    pub async fn serve_gate_probes(self: Arc<Self>, listener: UnixListener) {
+        self.serve_with_mode(listener, ListenerMode::GateProbe)
+            .await;
+    }
+
     async fn serve_with_mode(self: Arc<Self>, listener: UnixListener, mode: ListenerMode) {
+        let probe_slots = matches!(mode, ListenerMode::GateProbe)
+            .then(|| Arc::new(tokio::sync::Semaphore::new(MAX_GATE_PROBE_CONNECTIONS)));
         let mut transient = 0u32;
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
                     transient = 0;
+                    let permit = match &probe_slots {
+                        Some(slots) => match Arc::clone(slots).try_acquire_owned() {
+                            Ok(permit) => Some(permit),
+                            Err(_) => continue,
+                        },
+                        None => None,
+                    };
                     let me = Arc::clone(&self);
                     tokio::spawn(async move {
+                        let _permit = permit;
                         let result = match mode {
                             ListenerMode::GuestWire => me
                                 .handle_connection(stream)
@@ -55,6 +79,10 @@ impl SubstitutionService {
                             ListenerMode::HostConnector => {
                                 me.handle_connector_connection(stream).await
                             }
+                            ListenerMode::GateProbe => me
+                                .handle_gate_probe_connection(stream)
+                                .await
+                                .map_err(anyhow::Error::from),
                         };
                         if let Err(e) = result {
                             tracing::warn!(error = %e, "substitution endpoint connection failed");
@@ -140,34 +168,34 @@ impl SubstitutionService {
     }
 
     async fn handle_connection(&self, mut stream: UnixStream) -> Result<(), FrameError> {
-        let request: EndpointRequest = read_json_frame(&mut stream, MAX_FRAME_BYTES).await?;
-        self.answer(stream, request).await
+        let request: WireRequest = read_json_frame(&mut stream, MAX_FRAME_BYTES).await?;
+        let response = self.process(request).await;
+        write_json_frame(&mut stream, &response).await
     }
 
-    /// Answer one demultiplexed request. The forward path is unchanged; the
-    /// gate probe is witnessed by the running gate and never touches the
-    /// substitution pipeline or the audit recorder.
-    async fn answer(
-        &self,
-        mut stream: UnixStream,
-        request: EndpointRequest,
-    ) -> Result<(), FrameError> {
-        match request {
-            EndpointRequest::Forward(wire) => {
-                let resp = self.process(wire).await;
-                write_json_frame(&mut stream, &resp).await
+    async fn handle_gate_probe_connection<S>(&self, mut stream: S) -> Result<(), FrameError>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        tokio::time::timeout(GATE_PROBE_TIMEOUT, async {
+            let probe: GateProbeRequest =
+                read_json_frame(&mut stream, MAX_GATE_PROBE_FRAME_BYTES).await?;
+            if probe.samples.len() > MAX_GATE_PROBE_SAMPLES {
+                return Err(FrameError::from(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "gate probe carries too many samples",
+                )));
             }
-            EndpointRequest::GateProbe(probe) => {
-                if probe.samples.len() > MAX_GATE_PROBE_SAMPLES {
-                    return Err(FrameError::from(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "gate probe carries too many samples",
-                    )));
-                }
-                let resp = self.process_gate_probe(probe);
-                write_json_frame(&mut stream, &resp).await
-            }
-        }
+            let response = self.process_gate_probe(probe);
+            write_json_frame(&mut stream, &response).await
+        })
+        .await
+        .map_err(|_| {
+            FrameError::from(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "gate probe request and response deadline elapsed",
+            ))
+        })?
     }
 
     async fn handle_connector_connection(&self, mut stream: UnixStream) -> anyhow::Result<()> {
@@ -190,33 +218,15 @@ impl SubstitutionService {
         let stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(conn_fd) };
         let (mut stream, request) = tokio::task::spawn_blocking(move || {
             let mut s = stream;
-            let request: EndpointRequest = vsock::read_frame_sync(&mut s)?;
+            let request: WireRequest = vsock::read_frame_sync(&mut s)?;
             std::io::Result::Ok((s, request))
         })
         .await
         .map_err(std::io::Error::other)??;
-        if let EndpointRequest::GateProbe(probe) = &request
-            && probe.samples.len() > MAX_GATE_PROBE_SAMPLES
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "gate probe carries too many samples",
-            ));
-        }
-        match request {
-            EndpointRequest::Forward(wire) => {
-                let resp = self.process(wire).await;
-                tokio::task::spawn_blocking(move || vsock::write_frame_sync(&mut stream, &resp))
-                    .await
-                    .map_err(std::io::Error::other)?
-            }
-            EndpointRequest::GateProbe(probe) => {
-                let resp = self.process_gate_probe(probe);
-                tokio::task::spawn_blocking(move || vsock::write_frame_sync(&mut stream, &resp))
-                    .await
-                    .map_err(std::io::Error::other)?
-            }
-        }
+        let response = self.process(request).await;
+        tokio::task::spawn_blocking(move || vsock::write_frame_sync(&mut stream, &response))
+            .await
+            .map_err(std::io::Error::other)?
     }
 }
 
@@ -430,8 +440,7 @@ mod server_tests {
     async fn gate_probe_roundtrips_over_uds_without_touching_the_forwarder() {
         use crate::supervisor::endpoint::network_endpoint_proxy::test_support::gate_admitting;
         use mvm_core::substitution_wire::{
-            EndpointRequest, GateProbeExpect, GateProbeRequest, GateProbeResponse, GateProbeSample,
-            GateProbeVerdict,
+            GateProbeExpect, GateProbeRequest, GateProbeResponse, GateProbeSample, GateProbeVerdict,
         };
 
         let (service, _ph, forwarder, dir) = service_with_gate(
@@ -441,7 +450,7 @@ mod server_tests {
         );
         let sock = dir.path().join("probe.sock");
         let listener = UnixListener::bind(&sock).unwrap();
-        let server = tokio::spawn(Arc::clone(&service).serve(listener));
+        let server = tokio::spawn(Arc::clone(&service).serve_gate_probes(listener));
 
         // The client is blocking std I/O; run it off the runtime so the
         // single-threaded test runtime keeps polling the server task.
@@ -450,7 +459,7 @@ mod server_tests {
             client
                 .set_read_timeout(Some(std::time::Duration::from_secs(10)))
                 .unwrap();
-            let request = EndpointRequest::GateProbe(GateProbeRequest {
+            let request = GateProbeRequest {
                 samples: vec![
                     GateProbeSample {
                         host: "192.0.2.1".into(),
@@ -463,7 +472,7 @@ mod server_tests {
                         expect: GateProbeExpect::Admit,
                     },
                 ],
-            });
+            };
             let body = serde_json::to_vec(&request).unwrap();
             mvm_core::substitution_wire::write_frame(&mut client, &body).unwrap();
             let framed = mvm_core::substitution_wire::read_frame(&mut client).unwrap();
@@ -488,14 +497,14 @@ mod server_tests {
     #[tokio::test]
     async fn gate_probe_over_the_sample_cap_refuses_the_connection() {
         use mvm_core::substitution_wire::{
-            EndpointRequest, GateProbeExpect, GateProbeRequest, GateProbeSample,
-            MAX_GATE_PROBE_SAMPLES,
+            GateProbeExpect, GateProbeRequest, GateProbeSample, MAX_GATE_PROBE_SAMPLES,
         };
 
         let (service, _ph, _forwarder, _dir) = service_with("sk-test", &["api.example.com"]);
         let (mut client, server) = UnixStream::pair().expect("socket pair");
-        let handler = tokio::spawn(async move { service.handle_connection(server).await });
-        let request = EndpointRequest::GateProbe(GateProbeRequest {
+        let handler =
+            tokio::spawn(async move { service.handle_gate_probe_connection(server).await });
+        let request = GateProbeRequest {
             samples: (0..=MAX_GATE_PROBE_SAMPLES)
                 .map(|_| GateProbeSample {
                     host: "192.0.2.1".into(),
@@ -503,12 +512,122 @@ mod server_tests {
                     expect: GateProbeExpect::Deny,
                 })
                 .collect(),
-        });
+        };
         write_json_frame(&mut client, &request).await.unwrap();
         assert!(
             handler.await.expect("handler join").is_err(),
             "an over-cap probe must fail the connection, not answer it"
         );
+    }
+
+    #[tokio::test]
+    async fn gate_probe_is_refused_on_guest_wire_listener() {
+        let (service, _ph, forwarder, _dir) = service_with("sk-test", &["api.example.com"]);
+        let (mut client, server) = UnixStream::pair().expect("socket pair");
+        let handler = tokio::spawn(async move { service.handle_connection(server).await });
+        write_json_frame(
+            &mut client,
+            &mvm_core::substitution_wire::GateProbeRequest { samples: vec![] },
+        )
+        .await
+        .unwrap();
+        assert!(handler.await.unwrap().is_err());
+        assert!(forwarder.seen.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn gate_probe_control_refuses_forward_requests_without_forwarding() {
+        let (service, _ph, forwarder, _dir) = service_with("sk-test", &["api.example.com"]);
+        let (mut client, server) = UnixStream::pair().expect("socket pair");
+        let handler =
+            tokio::spawn(async move { service.handle_gate_probe_connection(server).await });
+        let request = WireRequest {
+            method: "GET".into(),
+            url: "https://api.example.com/".into(),
+            headers: vec![],
+            body_b64: String::new(),
+        };
+        write_json_frame(&mut client, &request).await.unwrap();
+        assert!(handler.await.unwrap().is_err());
+        assert!(forwarder.seen.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn gate_probe_rejects_excess_length_before_reading_body() {
+        use tokio::io::AsyncWriteExt as _;
+        let (service, _ph, forwarder, _dir) = service_with("sk-test", &["api.example.com"]);
+        let (mut client, server) = tokio::io::duplex(4);
+        client.write_all(&u32::MAX.to_be_bytes()).await.unwrap();
+        assert!(matches!(
+            service.handle_gate_probe_connection(server).await,
+            Err(crate::framing::FrameError::TooLarge {
+                cap: super::MAX_GATE_PROBE_FRAME_BYTES,
+                ..
+            })
+        ));
+        assert!(forwarder.seen.lock().unwrap().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn gate_probe_deadline_closes_partial_prefix_and_body() {
+        use tokio::io::AsyncWriteExt as _;
+        let (service, _ph, _forwarder, _dir) = service_with("sk-test", &["api.example.com"]);
+        for partial in [vec![0, 0], vec![0, 0, 0, 20, b'{']] {
+            let (mut client, server) = tokio::io::duplex(64);
+            client.write_all(&partial).await.unwrap();
+            let started = tokio::time::Instant::now();
+            let error = service
+                .handle_gate_probe_connection(server)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, crate::framing::FrameError::Io(error) if error.kind() == std::io::ErrorKind::TimedOut)
+            );
+            assert_eq!(started.elapsed(), super::GATE_PROBE_TIMEOUT);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn gate_probe_deadline_includes_a_nonreading_response_peer() {
+        let (service, _ph, _forwarder, _dir) = service_with("sk-test", &["api.example.com"]);
+        // One byte of response capacity forces even its length prefix to stall.
+        let (mut client, server) = tokio::io::duplex(1);
+        let started = tokio::time::Instant::now();
+        let handler =
+            tokio::spawn(async move { service.handle_gate_probe_connection(server).await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(4)).await;
+        write_json_frame(
+            &mut client,
+            &mvm_core::substitution_wire::GateProbeRequest { samples: vec![] },
+        )
+        .await
+        .unwrap();
+        let error = handler.await.unwrap().unwrap_err();
+        assert!(
+            matches!(error, crate::framing::FrameError::Io(error) if error.kind() == std::io::ErrorKind::TimedOut)
+        );
+        assert_eq!(started.elapsed(), super::GATE_PROBE_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn gate_probe_saturation_refuses_without_waiting_for_a_slot() {
+        use tokio::io::AsyncReadExt as _;
+        let (service, _ph, _forwarder, dir) = service_with("sk-test", &["api.example.com"]);
+        let sock = dir.path().join("bounded-probe.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let task = tokio::spawn(service.serve_gate_probes(listener));
+        let mut stalled = Vec::new();
+        for _ in 0..super::MAX_GATE_PROBE_CONNECTIONS {
+            stalled.push(UnixStream::connect(&sock).await.unwrap());
+        }
+        let mut excess = UnixStream::connect(&sock).await.unwrap();
+        let read = tokio::time::timeout(std::time::Duration::from_secs(1), excess.read(&mut [0]))
+            .await
+            .expect("saturated listener must refuse immediately");
+        assert_eq!(read.unwrap(), 0);
+        drop(stalled);
+        task.abort();
     }
 
     #[tokio::test]

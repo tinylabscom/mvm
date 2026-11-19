@@ -153,6 +153,10 @@ impl Commands {
     /// reserve that channel before reconcile-on-entry or other startup chrome.
     pub(super) fn emits_machine_readable_stdout(&self) -> bool {
         match self {
+            Commands::Actor(a) => matches!(
+                a.action,
+                super::actor::ActorCommand::Launch { json: true, .. }
+            ),
             // `run` is `machine run`, and reserves stdout on the same terms.
             Commands::Run(a) => {
                 let r = &a.machine;
@@ -237,6 +241,7 @@ impl Commands {
     /// table update will trip that test).
     pub(super) fn verb_name(&self) -> &'static str {
         match self {
+            Commands::Actor(_) => "actor",
             // `env <sub>` delegates (bootstrap/cleanup/uninstall/update/sign).
             Commands::Env(a) => a.action.verb_name(),
             Commands::Bootstrap(_) => "bootstrap",

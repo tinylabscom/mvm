@@ -294,10 +294,18 @@ fn dispatch_config(mut cfg: SupervisorConfig) -> ExitCode {
     // code parses them as a lone pid.
     if cfg.pid_file_name.is_none() {
         let record =
-            mvm_vmm::host::network_endpoint_spawn::EndpointPid::of_child(std::process::id())
-                .render();
-        if let Err(e) = mvm_core::atomic_io::write_private_ephemeral(&pid_file, record.as_bytes()) {
-            eprintln!("mvm-libkrun-supervisor: record start time in pid file: {e}");
+            mvm_vmm::host::network_endpoint_spawn::EndpointPid::of_child(std::process::id());
+        if record.started.is_none() {
+            eprintln!(
+                "mvm-libkrun-supervisor: cannot establish original workload process identity"
+            );
+            return ExitCode::FAILURE;
+        }
+        if let Err(error) =
+            mvm_core::atomic_io::write_private_ephemeral(&pid_file, record.render().as_bytes())
+        {
+            eprintln!("mvm-libkrun-supervisor: record original workload process identity: {error}");
+            return ExitCode::FAILURE;
         }
     }
     let timer_inputs = mvm_hostd::supervisor::lifecycle::wall_clock::SupervisorTimerInputs {

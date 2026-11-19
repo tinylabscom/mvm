@@ -539,6 +539,11 @@ jobs:
         with:
           tool: nextest
 
+      # The hostd graph test resolves the macOS target offline, so it needs
+      # every platform's locked sources, not just this runner's.
+      - name: Fetch locked sources for cross-target graph tests
+        run: cargo fetch --locked
+
       - name: Run tests under the release profile
         # Every other lane runs in a debug profile: debug assertions on,
         # integer overflow trapped by the profile default. The shipped binary

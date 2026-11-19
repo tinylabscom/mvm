@@ -143,16 +143,25 @@ fn write_frame<T: Serialize>(
     value: &T,
     limit: usize,
 ) -> Result<(), Refusal> {
+    write_versioned_frame(stream, value, READER_MAGIC, limit)
+}
+
+pub(super) fn write_versioned_frame<T: Serialize>(
+    stream: &mut impl Write,
+    value: &T,
+    magic: &[u8],
+    limit: usize,
+) -> Result<(), Refusal> {
     let mut json = BoundedBytes {
         bytes: Vec::new(),
-        limit: limit - READER_MAGIC.len(),
+        limit: limit.checked_sub(magic.len()).ok_or(Refusal::Malformed)?,
     };
     serde_json::to_writer(&mut json, &Versioned { version: 1, value })
         .map_err(|_| Refusal::Oversized(limit))?;
-    let len = READER_MAGIC.len() + json.bytes.len();
+    let len = magic.len() + json.bytes.len();
     stream
         .write_all(&(len as u32).to_be_bytes())
-        .and_then(|()| stream.write_all(READER_MAGIC))
+        .and_then(|()| stream.write_all(magic))
         .and_then(|()| stream.write_all(&json.bytes))
         .map_err(|_| Refusal::Unavailable)
 }
@@ -195,6 +204,10 @@ mod payload_base64 {
 }
 
 fn read_frame<T: DeserializeOwned>(stream: &mut impl Read, limit: usize) -> Result<T, Refusal> {
+    decode_body(&read_body(stream, limit)?)
+}
+
+pub(super) fn read_body(stream: &mut impl Read, limit: usize) -> Result<Vec<u8>, Refusal> {
     let mut len = [0u8; 4];
     stream
         .read_exact(&mut len)
@@ -207,14 +220,29 @@ fn read_frame<T: DeserializeOwned>(stream: &mut impl Read, limit: usize) -> Resu
     stream
         .read_exact(&mut body)
         .map_err(|_| Refusal::Malformed)?;
-    decode_body(&body)
+    Ok(body)
 }
 
 fn decode_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, Refusal> {
-    let json = body.strip_prefix(READER_MAGIC).ok_or(Refusal::Malformed)?;
+    decode_versioned_body(body, READER_MAGIC)
+}
+
+pub(super) fn decode_versioned_body<T: DeserializeOwned>(
+    body: &[u8],
+    magic: &[u8],
+) -> Result<T, Refusal> {
+    let json = body.strip_prefix(magic).ok_or(Refusal::Malformed)?;
     let frame: Versioned<T> = serde_json::from_slice(json).map_err(|_| Refusal::Malformed)?;
     if frame.version != 1 {
         return Err(Refusal::Malformed);
     }
     Ok(frame.value)
+}
+
+/// Decode a guest-local reader operation after a shared bounded read.
+pub fn decode_application_body(body: &[u8]) -> Result<ApplicationReaderRequest, Refusal> {
+    if body.len() > MAX_REQUEST_BYTES {
+        return Err(Refusal::Oversized(MAX_REQUEST_BYTES));
+    }
+    decode_body(body)
 }

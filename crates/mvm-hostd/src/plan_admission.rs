@@ -87,8 +87,8 @@ pub use admission_support::{
     enforce_sdk_sidecar_backend_compatibility, enforce_sdk_sidecar_for_launch,
 };
 pub use admit::{
-    BundleAdmissionContext, BundleImageAdmissionContext, admit_for_run, admit_plan_for_run,
-    admit_signed_plan_for_run,
+    BundleAdmissionContext, BundleImageAdmissionContext, HostPermitAdmission, admit_for_run,
+    admit_plan_for_run, admit_plan_for_run_with_host_permit, admit_signed_plan_for_run,
 };
 pub use bundle_environment::BundleEnvironmentRefused;
 pub use extension_packs::{AdmittedExtension, ExtensionAdmissionContext};
@@ -107,7 +107,8 @@ pub use rollback::{
 pub use shares::enforce_admitted_shares;
 pub use start::{
     CliStartFailure, DispatchedPersistent, StartAdmittedParams, StartedMachine, admit_and_start,
-    start_admitted, start_cli_transient, start_persistent,
+    start_admitted, start_admitted_owned_actor, start_admitted_owned_actor_with_bootstrap,
+    start_cli_transient, start_persistent,
 };
 pub(crate) use start::{
     admit_synthesized_with_verified_release, start_admitted_with_verified_release,
@@ -133,6 +134,7 @@ pub(crate) use start::{
 /// push a grant into `plan.services` that admission never saw.
 #[derive(Debug)]
 pub struct AdmittedPlan {
+    host_budget: std::sync::Arc<crate::admission_budget::HostBudgetPermit>,
     plan: ExecutionPlan,
     plan_id: PlanId,
     variant: Variant,
@@ -149,6 +151,21 @@ pub struct AdmittedPlan {
 }
 
 impl AdmittedPlan {
+    /// Spend the host hold before invoking any backend start.
+    pub fn mark_host_budget_dispatching(&self, vm_name: &str) -> Result<()> {
+        self.host_budget.mark_dispatching_for(&self.plan, vm_name)
+    }
+
+    /// Host reservation identity bound by a coordinating lifecycle owner.
+    pub fn host_budget_id(&self) -> &str {
+        self.host_budget.id()
+    }
+
+    /// Retain the same one-dispatch reservation across a legacy boot substrate.
+    pub fn host_budget_permit(&self) -> std::sync::Arc<crate::admission_budget::HostBudgetPermit> {
+        std::sync::Arc::clone(&self.host_budget)
+    }
+
     /// The verified plan body — what every downstream authorization decision
     /// reads.
     #[must_use]
@@ -218,7 +235,17 @@ impl AdmittedPlan {
         signer_id: String,
         signed: SignedExecutionPlan,
     ) -> Self {
+        let host_budget = crate::admission_budget::HostBudgetPermit::reserve_ordinary(
+            &plan.workload.0,
+            crate::admission_budget::charge_for(
+                plan.resources.mem_mib,
+                plan.grants.as_ref().unwrap_or(&Default::default()),
+            ),
+        )
+        .expect("test host capacity");
+        host_budget.bind_plan(&plan).expect("test plan binding");
         Self {
+            host_budget: std::sync::Arc::new(host_budget),
             plan_id: plan.plan_id.clone(),
             variant: Variant::Dev,
             signer_id,

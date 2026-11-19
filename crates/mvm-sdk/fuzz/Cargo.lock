@@ -804,6 +804,7 @@ name = "mvm-host-services"
 version = "0.28.0-rc.11"
 dependencies = [
  "mvm-agentd",
+ "mvm-contract",
  "mvm-core",
  "serde",
  "serde_json",

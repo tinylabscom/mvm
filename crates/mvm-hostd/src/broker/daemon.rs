@@ -498,6 +498,10 @@ impl HostAgentDaemon {
         let _bound = register_bound_handlers(&mut registry, &local_services);
         open_admitted_assurance_session(&_bound, r);
         for binding in &r.service_proxies {
+            if binding.service.as_str() == "host.actor.v1" {
+                registry.actor_endpoint = Some(PathBuf::from(&binding.endpoint));
+                continue;
+            }
             let proxy = Arc::new(ControllerServiceProxy::new(binding.clone())?);
             let handler: Arc<dyn mvm_core::protocol::handler::ServiceHandler> = proxy.clone();
             registry.register(Arc::clone(&handler));
