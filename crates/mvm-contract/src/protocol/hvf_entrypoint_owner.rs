@@ -16,6 +16,36 @@ pub const VERSION: u8 = 1;
 pub const MAX_CANONICAL_PLAN_BYTES: usize = 65_536;
 const ADMISSION_DOMAIN: &[u8] = b"mvm.hvf-owner.fresh-admission.v1\0";
 
+/// Provider-issued one-shot authority for one exact fresh-admission request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerGrant {
+    /// Owner-authority protocol version.
+    pub version: u8,
+    /// Protected provider issuer selected by the deployment receipt.
+    pub issuer: String,
+    /// Monotonic commissioning generation from the root-owned deployment receipt.
+    pub provider_epoch: u64,
+    /// One-shot durable grant identity.
+    pub grant_id: [u8; 32],
+    /// Exact [`FreshAdmissionRequest::digest`] authorized by this grant.
+    pub request_digest: [u8; 32],
+    /// Inclusive Unix-seconds start bound.
+    pub issued_at_secs: u64,
+    /// Exclusive Unix-seconds expiry.
+    pub expires_at_secs: u64,
+}
+
+/// Domain-separated provider signature over [`OwnerGrant`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedOwnerGrant {
+    /// Typed provider assertion.
+    pub grant: OwnerGrant,
+    /// Ed25519 signature over the provider-only grant domain and typed bytes.
+    pub signature: Vec<u8>,
+}
+
 /// Complete public binding independently retained by the protected verifier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
