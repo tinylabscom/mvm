@@ -33,6 +33,35 @@ def fingerprint(path: Path) -> dict:
         return {"status": "unavailable", "sha256": None}
 
 
+def linux_cpu(cpuinfo: Path = Path("/proc/cpuinfo")) -> str | None:
+    """The first `model name`; aarch64 kernels publish none, which stays missing."""
+    try:
+        for line in cpuinfo.read_text().splitlines():
+            key, _, value = line.partition(":")
+            if key.strip() == "model name" and value.strip():
+                return value.strip()
+    except OSError:
+        pass
+    return None
+
+
+def linux_os_build(
+    os_release: Path = Path("/etc/os-release"), kernel: str | None = None
+) -> str | None:
+    """`PRETTY_NAME (kernel release)`, or whichever half is available."""
+    pretty = None
+    try:
+        for line in os_release.read_text().splitlines():
+            if line.startswith("PRETTY_NAME="):
+                pretty = line.split("=", 1)[1].strip().strip('"') or None
+    except OSError:
+        pass
+    kernel = platform.release() if kernel is None else kernel
+    if pretty and kernel:
+        return f"{pretty} ({kernel})"
+    return pretty or kernel
+
+
 def collect(root: Path, summary: dict[str, str], environ: dict[str, str]) -> dict:
     system = platform.system()
     working_tree_status = probe(
@@ -66,15 +95,22 @@ def collect(root: Path, summary: dict[str, str], environ: dict[str, str]) -> dic
             "architecture": platform.machine(),
             "logical_cpus": os.cpu_count(),
             "memory_mib": int(summary["host_memory_mib"]),
-            "os_build": probe("sw_vers", "-buildVersion") if system == "Darwin" else None,
+            "os_build": (
+                probe("sw_vers", "-buildVersion") if system == "Darwin"
+                else linux_os_build() if system == "Linux" else None
+            ),
             "hardware_model": probe("sysctl", "-n", "hw.model") if system == "Darwin" else None,
-            "cpu": probe("sysctl", "-n", "machdep.cpu.brand_string") if system == "Darwin" else None,
+            "cpu": (
+                probe("sysctl", "-n", "machdep.cpu.brand_string") if system == "Darwin"
+                else linux_cpu() if system == "Linux" else None
+            ),
             "power": probe("pmset", "-g", "batt") if system == "Darwin" else None,
         },
         "configuration": {
             key: summary[key] for key in (
                 "run_id", "image", "backend", "launch_mode", "waves", "memory",
                 "cpus", "settle_seconds", "idle_sample_seconds", "custom_workload",
+                "build_profile",
             )
         },
         "guards": {

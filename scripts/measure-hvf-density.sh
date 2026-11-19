@@ -44,11 +44,16 @@ Useful overrides:
   MVM_HVF_DENSITY_MAILBOX=1                  grant one distinct mailbox per VM
   MVM_HVF_DENSITY_ACK_LARGE=1                explicitly permit waves over 100 VMs
   Large waves also require configured guest RAM to fit within 80% of host RAM.
-  Linux requires /dev/kvm and MVM's shipped Firecracker; unpinned overrides are refused.
+  Linux requires MVM's shipped Firecracker; unpinned overrides are refused.
+  Linux also requires, checked before anything is built:
+    a non-root user (mvmctl refuses to launch Firecracker as root),
+    read-write access to /dev/kvm (usually membership of the kvm group), and
+    a systemd user session bus (log in, or enable lingering for the user),
+    since each Firecracker launch runs in a transient systemd scope.
   MVM_HVF_DENSITY_WORKLOAD_KERNEL=/path     seed isolated cache with this kernel
   MVM_HVF_DENSITY_SEED_HOST_KERNEL=0        do not auto-seed from ~/.cache/mvm
   MVM_HVF_DENSITY_SKIP_PREPULL=1            skip image pull before waves
-  MVM_HVF_DENSITY_SKIP_BUILD=1              reuse existing binaries
+  MVM_HVF_DENSITY_SKIP_BUILD=1              reuse existing release binaries
   MVM_HVF_DENSITY_MVMCTL=/path/mvmctl       mvmctl binary override
   MVM_HVF_SUPERVISOR_PATH=/path/supervisor  supervisor binary override
   MVM_SUBSTITUTION_ENDPOINT_PATH=/path/bin  endpoint binary override
@@ -59,7 +64,11 @@ Useful overrides:
 Artifacts include command logs, VM names, launch failures, ps RSS snapshots,
 host memory snapshots, and cleanup results. All generated state is isolated under
 OUT_DIR unless an explicit override points elsewhere.
-metadata.json records source/host identity, binary hashes and measurement boundaries.
+metadata.json records source/host identity, the build profile, binary hashes and
+measurement boundaries. The harness builds and measures release binaries; a binary
+override records the profile as unknown, and bench report refuses it.
+The busy-host check repeats after the build and at the start of every wave; a wave
+that starts on a busy host is recorded as wave_N_contaminated in summary.tsv.
 It is not a successful-run receipt. RSS/idle samples include host-wide matching
 processes; receipt latency includes execution, not just boot or agent readiness.
 physical-memory-*.json records per-process resident bytes and a named quantity
@@ -90,6 +99,35 @@ if [[ "$#" -gt 0 ]]; then
   CUSTOM_WORKLOAD=1
 fi
 
+# The tests point this at a fixture file; a real run always opens /dev/kvm.
+KVM_DEVICE="${MVM_HVF_DENSITY_KVM_DEVICE:-/dev/kvm}"
+
+# The same conditions the Firecracker launch refuses on, checked before a
+# build that takes most of an hour on a cold host.
+firecracker_preflight() {
+  local user
+  user="$(id -un)"
+  if [[ "$(id -u)" -eq 0 ]]; then
+    echo "refusing: mvmctl will not launch Firecracker as root; rerun as a non-root user with read-write access to ${KVM_DEVICE}" >&2
+    return 73
+  fi
+  if [[ ! -r "${KVM_DEVICE}" || ! -w "${KVM_DEVICE}" ]]; then
+    echo "refusing: ${user} cannot open ${KVM_DEVICE} read-write; add the user to the kvm group (usermod -aG kvm ${user}) and log in again" >&2
+    return 73
+  fi
+  # Mirrors the launch's own probe: a session bus address, or the bus socket
+  # systemd places in the user's runtime directory.
+  if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]] &&
+    { [[ -z "${XDG_RUNTIME_DIR:-}" ]] || [[ ! -e "${XDG_RUNTIME_DIR}/bus" ]]; }; then
+    echo "refusing: no systemd user session bus, which the Firecracker launch scope needs; run from a login session, or enable lingering (loginctl enable-linger ${user}) and set XDG_RUNTIME_DIR=/run/user/\$(id -u)" >&2
+    return 73
+  fi
+}
+
+if [[ "${BACKEND}" == "firecracker" && "${MVM_HVF_DENSITY_ALLOW_UNSUPPORTED:-0}" != "1" ]]; then
+  firecracker_preflight || exit $?
+fi
+
 host_ok=0
 case "${BACKEND}" in
   hvf)
@@ -98,7 +136,7 @@ case "${BACKEND}" in
     fi
     ;;
   firecracker)
-    if [[ "$(uname -s)" == "Linux" && -r /dev/kvm && -w /dev/kvm ]]; then
+    if [[ "$(uname -s)" == "Linux" ]]; then
       host_ok=1
     fi
     ;;
@@ -242,9 +280,15 @@ if [[ "${BACKEND}" == "hvf" ]]; then
 fi
 
 busy_host_processes="${OUT_DIR}/busy-host-processes.txt"
+# Prints build and MVM runtime processes, skipping the PIDs listed in the
+# optional file (this run's own resident daemons); succeeds when any remain.
 capture_busy_host_processes() {
-  ps axww -o pid=,ppid=,comm=,args= | awk '
+  ps axww -o pid=,ppid=,comm=,args= | awk -v skip="${1:-}" '
+    BEGIN {
+      if (skip != "") while ((getline pid < skip) > 0) owned[pid] = 1
+    }
     {
+      if ($1 in owned) next
       args = $0
       if (args ~ /measure-hvf-density.sh/) next
       if (args ~ /awk /) next
@@ -265,7 +309,8 @@ capture_busy_host_processes() {
   '
 }
 
-if [[ "${MVM_HVF_DENSITY_ALLOW_BUSY_HOST:-0}" != "1" ]]; then
+refuse_busy_host() {
+  [[ "${MVM_HVF_DENSITY_ALLOW_BUSY_HOST:-0}" == "1" ]] && return 0
   if capture_busy_host_processes >"${busy_host_processes}"; then
     echo "refusing: active build or MVM runtime processes would contaminate the density baseline" >&2
     echo "see ${busy_host_processes}" >&2
@@ -273,7 +318,35 @@ if [[ "${MVM_HVF_DENSITY_ALLOW_BUSY_HOST:-0}" != "1" ]]; then
     exit 72
   fi
   : >"${busy_host_processes}"
-fi
+}
+
+refuse_busy_host
+
+# This run's resident daemons, recorded once nothing but its own preparation
+# has run since the post-build check.
+resident_pids="${OUT_DIR}/resident-pids.txt"
+record_resident_pids() {
+  ps axww -o pid=,comm= | awk '
+    $2 ~ /(mvm-hvf-supervisor|firecracker|mvmctl|mvm-network-endpoint|mvm-mailbox|mvm-host-agent)/ { print $1 }
+  ' >"${resident_pids}"
+}
+
+# Samplers count host-wide processes, so a build or another session's VM that
+# appears mid-run would be charged to the wave. Marks the wave, never skips it.
+# shortcut: a resident daemon that restarts mid-run gets a new PID and marks
+# later waves contaminated; fails safe, upgrade to ownership by MVM_HOME if it bites.
+check_wave_host() {
+  local wave="$1"
+  local dir="$2"
+  [[ "${MVM_HVF_DENSITY_ALLOW_BUSY_HOST:-0}" == "1" ]] && return 0
+  local found="${dir}/busy-host-processes.txt"
+  if capture_busy_host_processes "${resident_pids}" >"${found}"; then
+    local programs
+    programs="$(awk '{ n = split($3, p, "/"); print p[n] }' "${found}" | sort -u | paste -sd, -)"
+    printf 'wave_%s_contaminated\tbusy_host:%s\n' "${wave}" "${programs}" >>"${SUMMARY}"
+    echo "warning: wave ${wave} started on a busy host (${programs}); see ${found}" >&2
+  fi
+}
 
 # Standby holds are warmed through the warm residency; "standby" is not a residency.
 RESIDENCY="${MODE}"
@@ -323,21 +396,30 @@ cd "${ROOT}"
 
 seed_workload_kernel
 
+# Host-process memory and CPU describe the profile they ran, so measure the
+# one users run.
 if [[ "${SKIP_BUILD}" != "1" ]]; then
-  "${run_env[@]}" cargo build -p mvmctl --bin mvmctl
-  "${run_env[@]}" cargo build -p mvm-hostd --bin mvm-network-endpoint
+  "${run_env[@]}" cargo build --release -p mvmctl --bin mvmctl
+  "${run_env[@]}" cargo build --release -p mvm-hostd --bin mvm-network-endpoint
   if [[ "${BACKEND}" == "hvf" ]]; then
-    "${run_env[@]}" cargo build -p mvm-hostd --bin mvm-hvf-supervisor
+    "${run_env[@]}" cargo build --release -p mvm-hostd --bin mvm-hvf-supervisor
   fi
   if [[ "${MAILBOX}" == "1" ]]; then
-    "${run_env[@]}" cargo build -p mvm-hostd --bin mvm-mailbox
+    "${run_env[@]}" cargo build --release -p mvm-hostd --bin mvm-mailbox
   fi
 fi
 
-MVMCTL_BIN="${MVM_HVF_DENSITY_MVMCTL:-${TARGET_DIR}/debug/mvmctl}"
-SUPERVISOR_BIN="${MVM_HVF_SUPERVISOR_PATH:-${TARGET_DIR}/debug/mvm-hvf-supervisor}"
-ENDPOINT_BIN="${MVM_SUBSTITUTION_ENDPOINT_PATH:-${TARGET_DIR}/debug/mvm-network-endpoint}"
-MAILBOX_BIN="${MVM_HVF_DENSITY_MAILBOX_BIN:-${TARGET_DIR}/debug/mvm-mailbox}"
+BUILD_PROFILE="release"
+for override in MVM_HVF_DENSITY_MVMCTL MVM_HVF_SUPERVISOR_PATH \
+  MVM_SUBSTITUTION_ENDPOINT_PATH MVM_HVF_DENSITY_MAILBOX_BIN; do
+  if [[ -n "${!override:-}" ]]; then
+    BUILD_PROFILE="unknown:binary_override"
+  fi
+done
+MVMCTL_BIN="${MVM_HVF_DENSITY_MVMCTL:-${TARGET_DIR}/release/mvmctl}"
+SUPERVISOR_BIN="${MVM_HVF_SUPERVISOR_PATH:-${TARGET_DIR}/release/mvm-hvf-supervisor}"
+ENDPOINT_BIN="${MVM_SUBSTITUTION_ENDPOINT_PATH:-${TARGET_DIR}/release/mvm-network-endpoint}"
+MAILBOX_BIN="${MVM_HVF_DENSITY_MAILBOX_BIN:-${TARGET_DIR}/release/mvm-mailbox}"
 
 if [[ ! -x "${MVMCTL_BIN}" ]]; then
   echo "refusing: mvmctl not executable at ${MVMCTL_BIN}" >&2
@@ -399,6 +481,10 @@ cleanup_active_pids() {
 }
 trap cleanup_active_pids INT TERM EXIT
 
+# The build and prepull can take most of an hour; check again before any VM of
+# this run exists, so anything found now is someone else's.
+refuse_busy_host
+
 prime_name="${RUN_ID}-prime"
 if ! "${run_env[@]}" "MVM_RESIDENCY=cold" "${MVMCTL_BIN}" machine run \
   --name "${prime_name}" --hypervisor "${BACKEND}" --image "${IMAGE_REF}" \
@@ -414,6 +500,7 @@ if ! "${run_env[@]}" "${MVMCTL_BIN}" machine stop --all --yes \
   echo "refusing: first-use preparation left a machine; see ${OUT_DIR}/prime-*.stderr" >&2
   exit 71
 fi
+record_resident_pids
 
 capture_host_memory() {
   local phase="$1"
@@ -606,6 +693,7 @@ cleanup_wave() {
   echo -e "mvmctl\t${MVMCTL_BIN}"
   echo -e "supervisor\t${SUPERVISOR_BIN}"
   echo -e "network_endpoint\t${ENDPOINT_BIN}"
+  echo -e "build_profile\t${BUILD_PROFILE}"
 } >"${SUMMARY}"
 
 python3 "${ROOT}/scripts/density_metadata.py" "${ROOT}" "${SUMMARY}" \
@@ -614,6 +702,7 @@ python3 "${ROOT}/scripts/density_metadata.py" "${ROOT}" "${SUMMARY}" \
 # Wave 0: the host with no unit launched, so fixed cost can be told from per-unit cost.
 zero_dir="${OUT_DIR}/wave-0"
 mkdir -p "${zero_dir}"
+check_wave_host 0 "${zero_dir}"
 sleep "${SETTLE_SECONDS}"
 capture_matching_processes "settled" "${zero_dir}"
 zero_owned="$(wc -l <"${zero_dir}/matching-settled.txt" | tr -d ' ')"
@@ -638,6 +727,7 @@ capture_idle "${zero_dir}" 0
 for wave in "${WAVES[@]}"; do
   wave_dir="${OUT_DIR}/wave-${wave}"
   mkdir -p "${wave_dir}"
+  check_wave_host "${wave}" "${wave_dir}"
   : >"${wave_dir}/launches.tsv"
   : >"${active_pids_file}"
   pids=()
