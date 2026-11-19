@@ -86,8 +86,8 @@ impl MailboxJournal {
             return Err(JournalError::WrongAuthority);
         }
         if self.history_key.is_some_and(|reference| {
-            reference.address != self.address
-                || reference.execution_epoch != context.current_execution_epoch
+            reference.address() != self.address
+                || reference.execution_epoch() != context.current_execution_epoch
         }) {
             return Err(JournalError::HistoryKeyMismatch);
         }

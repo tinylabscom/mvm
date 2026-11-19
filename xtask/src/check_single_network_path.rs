@@ -23,13 +23,18 @@ const OWNED_SPAWN_RS: &str = "crates/mvm-vmm/src/host/network_endpoint_spawn/own
 
 /// Every production definition of an endpoint spawn seam, by file and name.
 ///
-/// The detached seam is the one every workload runner reaches. The owned seam
-/// keeps the endpoint a child of the process that spawned it, for a supervisor
-/// that must confirm its exit; it lives inside the same module, builds the same
-/// configuration and runs the same binary. A third definition, or either one in
-/// another file, is a second endpoint implementation.
+/// The detached seam is the one every workload runner reaches; it delegates
+/// to the retained seam and discards the child. The retained seam is the same
+/// spawn keeping its original child, so an actor owner can attach the endpoint
+/// as a tracked helper; it lives inside the same module, builds the same
+/// configuration and runs the same binary. The owned seam keeps the endpoint a
+/// child of the process that spawned it, for a supervisor that must confirm its
+/// exit; it lives inside the same module, builds the same configuration and
+/// runs the same binary. A fourth definition, or any of these in another file,
+/// is a second endpoint implementation.
 const SPAWN_SEAMS: &[(&str, &str)] = &[
     (SPAWN_RS, "spawn_network_endpoint"),
+    (SPAWN_RS, "spawn_network_endpoint_retained"),
     (OWNED_SPAWN_RS, "spawn_network_endpoint_owned"),
 ];
 
@@ -280,12 +285,15 @@ fn check_single_endpoint_implementation(workspace: &Path) -> Result<()> {
     }
 
     let spawner = production_code(&read(workspace, SPAWNER_RS)?);
+    // The runner reaches the endpoint through exactly one seam call — the
+    // retained spawn pinned in SPAWN_SEAMS, which the detached seam itself
+    // delegates to. A second seam call here would be a second network path.
     if spawner
         .matches("impl NetworkEndpointSpawner for RealNetworkEndpointSpawner")
         .count()
         != 1
         || spawner
-            .matches("spawn_network_endpoint(SubstitutionSpawnParams")
+            .matches("::spawn_network_endpoint_retained(")
             .count()
             != 1
     {

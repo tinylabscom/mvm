@@ -158,6 +158,7 @@ fn actor_launch_help_requires_a_manifest_without_initializing_workflow_state() {
     let state = home.path().join("state");
     let help = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
         .env("MVM_HOME", &state)
+        .env("HOME", home.path())
         .args(["actor", "launch", "--help"])
         .output()
         .expect("actor launch help");
@@ -172,6 +173,7 @@ fn actor_launch_help_requires_a_manifest_without_initializing_workflow_state() {
     assert!(!state.join("actors").exists());
     let missing = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
         .env("MVM_HOME", &state)
+        .env("HOME", home.path())
         .args(["actor", "launch"])
         .output()
         .expect("missing actor manifest");

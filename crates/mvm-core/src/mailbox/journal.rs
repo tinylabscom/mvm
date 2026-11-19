@@ -16,11 +16,11 @@ use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use hmac::{Hmac, Mac, digest::KeyInit};
 use mvm_contract::protocol::mailbox::{
-    ContentType, DeliveryLeaseNonce, DeliveryOutcome, DestinationReceipt, EncryptionAlgorithm,
-    ExecutionEpoch, MailboxAddress, MailboxDeliveryLease, MailboxEnvelope, MailboxGrant,
-    MailboxGuestReaderScope, MailboxOperation, MailboxRetentionPolicy, ProtocolVersion,
-    SignatureAlgorithm, SignedDestinationReceipt, SignedMailboxCapability,
-    SignedMailboxDeliveryAck, SignedMailboxDeliveryLease, SignedMailboxGuestReaderEnrollment,
+    ContentType, DeliveryLeaseNonce, DeliveryOutcome, DestinationReceipt, MailboxAddress,
+    MailboxDeliveryLease, MailboxEnvelope, MailboxGrant, MailboxGuestReaderScope, MailboxOperation,
+    MailboxRetentionPolicy, ProtocolVersion, SignatureAlgorithm, SignedDestinationReceipt,
+    SignedMailboxCapability, SignedMailboxDeliveryAck, SignedMailboxDeliveryLease,
+    SignedMailboxGuestReaderEnrollment,
 };
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -50,6 +50,8 @@ const MAX_LEASE_RETRIES: u8 = 3;
 mod anchor;
 mod capacity;
 mod checkpoint;
+mod history_key;
+pub use history_key::HistoryKeyRef;
 mod receipt;
 mod recovery;
 pub use anchor::FileJournalAnchor;
@@ -99,90 +101,6 @@ pub trait JournalAnchor {
         expected: JournalTip,
         next: JournalTip,
     ) -> Result<(), JournalError>;
-}
-
-/// Recoverable storage-key identity for one mailbox and execution epoch.
-///
-/// This identifies the journal key, not the separately encrypted payload's
-/// opening key. Deserialization is not admission authority; production must
-/// bind it to a verified plan and authenticated restart manifest. A later
-/// epoch or rotation needs an explicit anchored handoff.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HistoryKeyRef {
-    address: MailboxAddress,
-    execution_epoch: ExecutionEpoch,
-    algorithm: EncryptionAlgorithm,
-    key_id: [u8; 32],
-    version: u32,
-}
-
-impl std::fmt::Debug for HistoryKeyRef {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("HistoryKeyRef")
-            .field("version", &self.version)
-            .finish_non_exhaustive()
-    }
-}
-
-impl HistoryKeyRef {
-    /// Identify a custody key version; construction alone is not authority.
-    ///
-    /// The host must bind these fields to a verified plan and authenticated
-    /// restart manifest before using the reference to reopen retained history.
-    pub fn new(
-        address: MailboxAddress,
-        execution_epoch: ExecutionEpoch,
-        key_id: [u8; 32],
-        version: u32,
-    ) -> Result<Self, JournalError> {
-        if key_id == [0; 32] || version == 0 {
-            return Err(JournalError::HistoryKeyUnavailable);
-        }
-        Ok(Self {
-            address,
-            execution_epoch,
-            algorithm: EncryptionAlgorithm::AES_256_GCM,
-            key_id,
-            version,
-        })
-    }
-
-    #[must_use]
-    pub const fn address(&self) -> MailboxAddress {
-        self.address
-    }
-
-    #[must_use]
-    pub const fn execution_epoch(&self) -> ExecutionEpoch {
-        self.execution_epoch
-    }
-
-    #[must_use]
-    pub const fn algorithm(&self) -> EncryptionAlgorithm {
-        self.algorithm
-    }
-
-    #[must_use]
-    pub const fn key_id(&self) -> &[u8; 32] {
-        &self.key_id
-    }
-
-    #[must_use]
-    pub const fn version(&self) -> u32 {
-        self.version
-    }
-
-    fn validate(&self) -> Result<(), JournalError> {
-        if self.key_id == [0; 32]
-            || self.version == 0
-            || self.algorithm != EncryptionAlgorithm::AES_256_GCM
-        {
-            return Err(JournalError::HistoryKeyUnavailable);
-        }
-        Ok(())
-    }
 }
 
 /// Existing-only key lookup; recovery must never silently mint a new root.

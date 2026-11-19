@@ -220,7 +220,8 @@ fn actor_response_survives_helper_process_crash_before_signed_ack() {
                 "--nocapture",
             ])
             .env(MARKER, "1")
-            .env("MVM_HOME", home.path());
+            .env("MVM_HOME", home.path())
+            .env("HOME", home.path());
         let output = mvm_core::bounded_run::run_bounded(
             command,
             mvm_core::bounded_run::RunBounds::new(Duration::from_secs(90), 32 * 1024),
