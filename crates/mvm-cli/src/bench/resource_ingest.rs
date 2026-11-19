@@ -306,6 +306,32 @@ fn string_at<'a>(meta: &'a Value, path: &[&str]) -> Result<&'a str> {
         .with_context(|| format!("metadata.json has no `{}`", path.join(".")))
 }
 
+/// Host-process memory and CPU describe the profile that ran, and only the
+/// release profile is what users run.
+fn require_release_build(meta: &Value) -> Result<()> {
+    match meta["configuration"]["build_profile"].as_str() {
+        Some("release") => Ok(()),
+        Some(other) => bail!(
+            "the run measured a `{other}` build; only release-build density runs are reported"
+        ),
+        None => bail!(
+            "metadata.json records no build profile; the run predates the field, \
+             so rerun the harness, which builds and records a release profile"
+        ),
+    }
+}
+
+/// A wave the harness found starting on a busy host was sampled alongside
+/// someone else's processes.
+fn refuse_contaminated(s: &Summary, wave: u32) -> Result<()> {
+    match s.get(&format!("wave_{wave}_contaminated")) {
+        Some(reason) => {
+            bail!("wave {wave} started on a busy host ({reason}); rerun on a quiet host")
+        }
+        None => Ok(()),
+    }
+}
+
 fn mode_of(raw: &str) -> Result<Mode> {
     match raw {
         "cold" => Ok(Mode::Cold),
@@ -360,6 +386,7 @@ pub fn from_density_dir(dir: &Path) -> Result<Section> {
     {
         bail!("the run bypassed the native-host guard; its figures are not attributable");
     }
+    require_release_build(&meta)?;
     let quantity = quantity_of(string_at(&meta, &["host", "os"])?)?;
     let architecture = architecture_of(string_at(&meta, &["host", "architecture"])?);
     let waves = string_at(&meta, &["configuration", "waves"])?
@@ -389,8 +416,10 @@ pub fn from_density_dir(dir: &Path) -> Result<Section> {
         .context("the zero-unit baseline is missing")?;
     let baseline = idle_totals(&summary, 0, false).context("the zero-unit baseline is missing")?;
 
+    refuse_contaminated(&summary, 0)?;
     let mut chosen = None;
     for wave in waves {
+        refuse_contaminated(&summary, wave)?;
         let read = read_wave(&summary, wave, standby)?;
         if wave == largest {
             chosen = Some(read);
@@ -883,6 +912,30 @@ mod tests {
         assert!(error_of(&dir).contains("bypassed"));
         let dir = with_meta(|m| m.replace("\"native_host_bypassed\": false, ", ""));
         assert!(from_density_dir(dir.path()).is_err());
+    }
+
+    #[test]
+    fn only_a_release_build_is_ingested() {
+        let dir = with_meta(|m| m.replace("\"release\"", "\"debug\""));
+        assert!(error_of(&dir).contains("measured a `debug` build"));
+        let dir = with_meta(|m| m.replace("\"release\"", "\"unknown:binary_override\""));
+        assert!(error_of(&dir).contains("unknown:binary_override"));
+        let dir = with_meta(|m| m.replace(", \"build_profile\": \"release\"", ""));
+        assert!(error_of(&dir).contains("predates the field"));
+    }
+
+    #[test]
+    fn a_contaminated_wave_is_refused_by_name() {
+        for wave in [0, 1, 2] {
+            let dir = edited(|s| format!("{s}\nwave_{wave}_contaminated\tbusy_host:cargo,rustc\n"));
+            let err = error_of(&dir);
+            assert!(
+                err.contains(&format!(
+                    "wave {wave} started on a busy host (busy_host:cargo,rustc)"
+                )),
+                "{err}"
+            );
+        }
     }
 
     #[test]
