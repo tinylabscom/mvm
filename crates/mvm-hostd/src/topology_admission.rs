@@ -155,21 +155,24 @@ pub fn sign_topology_as_host(
 }
 
 /// The highest generation admitted for `tenant` under `home`, verified again
-/// against the trusted signers, or `None` when none has been admitted. A
-/// tenant that is not one path component can have no admitted topology.
+/// against the trusted signers, or `None` when none has been admitted.
 ///
 /// # Errors
 ///
-/// A record that cannot be read, does not verify, or whose digest is not the
-/// one it was sealed with.
+/// A tenant that is not one path component, whose topology store cannot be
+/// named; a record that cannot be read, does not verify, or whose digest is
+/// not the one it was sealed with.
 pub(crate) fn last_admitted_topology(
     home: &Path,
     tenant: &TenantId,
     host_signer_keys_dir: Option<&Path>,
 ) -> Result<Option<Topology>> {
-    if crate::audit::prune_pins::validate_tenant(&tenant.0).is_err() {
-        return Ok(None);
-    }
+    crate::audit::prune_pins::validate_tenant(&tenant.0).with_context(|| {
+        format!(
+            "tenant {:?} is not a single path component, so no topology store can be named",
+            tenant.0
+        )
+    })?;
     let Some(last) = record::last_admitted(home, &tenant.0)? else {
         return Ok(None);
     };

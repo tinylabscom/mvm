@@ -42,6 +42,11 @@ pub enum TopologyBindingRefusal {
         bound: Sha256Digest,
         admitted: Sha256Digest,
     },
+    #[error("the plan names unit {} but launches workload {}", .unit.0, .workload.0)]
+    WorkloadMismatch {
+        unit: WorkloadId,
+        workload: WorkloadId,
+    },
     #[error("the admitted topology names no unit {}", .unit.0)]
     UnknownUnit { unit: WorkloadId },
     #[error("unit {} boots recipe {topology}; the plan boots {plan}", .unit.0)]
@@ -101,6 +106,12 @@ pub fn check_topology_binding<'t>(
             admitted: digest,
         });
     }
+    if plan.workload != binding.unit {
+        return Err(TopologyBindingRefusal::WorkloadMismatch {
+            unit: binding.unit.clone(),
+            workload: plan.workload.clone(),
+        });
+    }
     let unit = topology
         .units
         .iter()
@@ -157,7 +168,7 @@ mod tests {
     fn unit(plan: &ExecutionPlan) -> Unit {
         let mut topology = super::super::tests::full();
         let mut unit = topology.units.remove(0);
-        unit.workload = WorkloadId("unit-a".to_string());
+        unit.workload = plan.workload.clone();
         unit.recipe = Sha256Digest::parse(alloc::format!("sha256:{}", plan.image.sha256)).unwrap();
         unit.resources = UnitResources {
             cpus: plan.resources.cpus,
@@ -178,7 +189,7 @@ mod tests {
         topology.succession.clear();
         plan.topology = Some(TopologyBinding {
             topology: topology.digest(),
-            unit: WorkloadId("unit-a".to_string()),
+            unit: plan.workload.clone(),
         });
         (plan, topology)
     }
@@ -192,7 +203,7 @@ mod tests {
     fn a_matching_bound_plan_passes_and_names_its_unit() {
         let (plan, topology) = matching();
         let unit = check_topology_binding(&plan, Some(&topology)).unwrap();
-        assert_eq!(unit.unwrap().workload.0, "unit-a");
+        assert_eq!(unit.unwrap().workload, plan.workload);
     }
 
     #[test]
@@ -231,12 +242,26 @@ mod tests {
 
     #[test]
     fn a_plan_naming_a_unit_the_topology_lacks_is_refused() {
-        let (mut plan, topology) = matching();
-        plan.topology.as_mut().unwrap().unit = WorkloadId("unit-z".to_string());
+        let (mut plan, mut topology) = matching();
+        topology.units[0].workload = WorkloadId("unit-z".to_string());
+        plan.topology.as_mut().unwrap().topology = topology.digest();
         assert_eq!(
             check_topology_binding(&plan, Some(&topology)),
             Err(TopologyBindingRefusal::UnknownUnit {
-                unit: WorkloadId("unit-z".to_string())
+                unit: plan.workload.clone()
+            })
+        );
+    }
+
+    #[test]
+    fn a_plan_for_another_workload_cannot_take_a_units_slot() {
+        let (mut plan, topology) = matching();
+        plan.workload = WorkloadId("vm-other".to_string());
+        assert_eq!(
+            check_topology_binding(&plan, Some(&topology)),
+            Err(TopologyBindingRefusal::WorkloadMismatch {
+                unit: topology.units[0].workload.clone(),
+                workload: WorkloadId("vm-other".to_string()),
             })
         );
     }

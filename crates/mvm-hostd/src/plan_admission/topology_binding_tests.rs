@@ -231,13 +231,51 @@ fn a_plan_bound_to_an_earlier_generation_is_refused_against_the_highest() {
 fn a_plan_naming_a_unit_the_topology_lacks_is_refused() {
     let host = Host::new();
     let plan = plan();
-    let topology = topology_for(&plan, 1);
+    let mut topology = topology_for(&plan, 1);
+    topology.units[0].workload = WorkloadId("vm-other".to_string());
     host.admit_topology(&topology);
     assert_eq!(
-        refusal(host.admit(&bind(plan, &topology, "vm-absent"))),
+        refusal(host.admit(&bind(plan, &topology, UNIT))),
         TopologyBindingRefusal::UnknownUnit {
-            unit: WorkloadId("vm-absent".to_string())
+            unit: WorkloadId(UNIT.to_string())
         }
+    );
+}
+
+#[test]
+fn a_plan_for_another_workload_cannot_take_a_units_slot() {
+    let host = Host::new();
+    let mut plan = plan();
+    let topology = topology_for(&plan, 1);
+    host.admit_topology(&topology);
+    plan.workload = WorkloadId("vm-other".to_string());
+    assert_eq!(
+        refusal(host.admit(&bind(plan, &topology, UNIT))),
+        TopologyBindingRefusal::WorkloadMismatch {
+            unit: WorkloadId(UNIT.to_string()),
+            workload: WorkloadId("vm-other".to_string()),
+        }
+    );
+}
+
+#[test]
+fn a_tenant_no_topology_store_can_hold_is_refused() {
+    let host = Host::new();
+    let mut plan = plan();
+    plan.tenant = TenantId("acme/east".to_string());
+    let err = host
+        .admit(&readdress(plan))
+        .err()
+        .map(|e| format!("{e:#}"))
+        .expect("the plan is refused");
+    assert!(err.contains("not a single path component"), "got: {err}");
+    assert!(
+        crate::topology_admission::last_admitted_topology(
+            host.home.path(),
+            &TenantId("acme/east".to_string()),
+            Some(&host.keys()),
+        )
+        .is_err()
     );
 }
 
@@ -275,4 +313,125 @@ fn another_tenants_topology_does_not_bind_this_tenants_plans() {
     other.tenant = TenantId("globex".to_string());
     host.admit_topology(&other);
     host.admit(&plan).expect("admitted");
+}
+
+/// The fleet issuer a host pins for externally signed plans.
+fn fleet_key() -> SigningKey {
+    SigningKey::from_bytes(&[42u8; 32])
+}
+
+fn trust_fleet() {
+    let cfg = MvmConfig {
+        trusted_plan_signers: vec![TrustedPlanSigner {
+            signer_id: "fleet-prod".to_string(),
+            ed25519_pubkey_hex: hex::encode(fleet_key().verifying_key().as_bytes()),
+        }],
+        ..MvmConfig::default()
+    };
+    mvm_core::user_config::save(&cfg, None).expect("writing the host config");
+}
+
+#[test]
+fn an_externally_signed_plan_is_refused_the_same_way_without_spending_its_nonce() {
+    let host = Host::new();
+    let plan = plan();
+    let topology = topology_for(&plan, 1);
+    host.admit_topology(&topology);
+    trust_fleet();
+    let admit = |plan: &ExecutionPlan| {
+        admit_signed_plan_for_run(
+            &sign_plan(plan, &fleet_key(), "fleet-prod"),
+            &SystemClock,
+            &host.ledger,
+            None,
+            RunPosture::without_backend(Variant::Dev),
+        )
+    };
+
+    let expected = TopologyBindingRefusal::Unbound {
+        admitted: topology.digest(),
+    };
+    assert_eq!(refusal(admit(&plan)), expected);
+    assert_eq!(refusal(admit(&plan)), expected);
+    let admitted = admit(&bind(plan, &topology, UNIT)).expect("the nonce was never spent");
+    assert_eq!(admitted.signer_id(), "fleet-prod");
+}
+
+fn refused_entries(host: &Host, tenant: &str) -> usize {
+    let chain = host
+        .home
+        .path()
+        .join("audit")
+        .join(format!("{tenant}.jsonl"));
+    std::fs::read_to_string(chain)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["entry"]["event"]
+                == "plan.admission_refused"
+        })
+        .count()
+}
+
+/// Boot through the shared admitted-boot entrypoint with a chain emitter, the
+/// path whose caller also records admission failures.
+fn admit_and_start_on_mock(host: &Host) -> Result<StartedMachine> {
+    let keys = host.keys();
+    let emitter = emitter(host.home.path(), &keys);
+    admit_and_start(
+        &mvm_runtime::AnyBackend::from_hypervisor("mock"),
+        AdmitAndStartParams {
+            synthesis: &fixture_input(UNIT),
+            config: mvm_core::vm_backend::VmStartConfig {
+                name: UNIT.into(),
+                rootfs_path: "/store/rootfs.ext4".into(),
+                ..Default::default()
+            },
+            clock: &SystemClock,
+            ledger: &host.ledger,
+            host_signer_keys_dir: Some(&keys),
+            bundle_ctx: None,
+            extension_ctx: None,
+            variant: Variant::Dev,
+            policy_bundle: None,
+            emitter: Some(&emitter),
+            audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+            assurance: None,
+        },
+    )
+}
+
+#[test]
+fn a_refusal_on_the_boot_path_is_recorded_once() {
+    let host = Host::new();
+    let topology = topology_for(&plan(), 1);
+    host.admit_topology(&topology);
+    let tenant = topology.tenant.0.clone();
+
+    let Err(err) = admit_and_start_on_mock(&host) else {
+        panic!("expected the launch to be refused")
+    };
+    assert!(err.downcast_ref::<TopologyBindingRefusal>().is_some());
+    assert_eq!(refused_entries(&host, &tenant), 1);
+}
+
+#[test]
+fn an_unreadable_topology_record_refuses_and_is_recorded_once() {
+    let host = Host::new();
+    let topology = topology_for(&plan(), 1);
+    host.admit_topology(&topology);
+    let tenant = topology.tenant.0.clone();
+    let dir = mvm_core::config::topologies_dir_at(host.home.path()).join(&tenant);
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        std::fs::write(entry.unwrap().path(), b"not a record").unwrap();
+    }
+
+    let Err(err) = admit_and_start_on_mock(&host) else {
+        panic!("expected the launch to be refused")
+    };
+    assert!(
+        format!("{err:#}").contains("reading the topology admitted"),
+        "got: {err:#}"
+    );
+    assert_eq!(refused_entries(&host, &tenant), 1);
 }

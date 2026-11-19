@@ -55,16 +55,31 @@ fn decide(home: &Path, plan: &ExecutionPlan, host_signer_keys_dir: Option<&Path>
     Ok(())
 }
 
+/// Context on a refusal this check has already written to the chain. A caller
+/// that audits admission failures itself skips an error carrying it, so each
+/// refusal is recorded once. A refusal whose entry could not be written does
+/// not carry it, and is left for that caller to record.
+#[derive(Debug)]
+pub(crate) struct TopologyRefusalAudited;
+
+impl std::fmt::Display for TopologyRefusalAudited {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(REFUSED)
+    }
+}
+
+const REFUSED: &str = "plan refused: it does not match the admitted topology";
+
 fn audit_refusal(
     home: &Path,
     plan: &ExecutionPlan,
     host_signer_keys_dir: Option<&Path>,
     refusal: anyhow::Error,
 ) -> anyhow::Error {
-    let refusal = refusal.context("plan refused: it does not match the admitted topology");
-    match emit(home, plan, host_signer_keys_dir, &format!("{refusal:#}")) {
-        Ok(()) => refusal,
-        Err(e) => refusal.context(format!(
+    let reason = format!("{REFUSED}: {refusal:#}");
+    match emit(home, plan, host_signer_keys_dir, &reason) {
+        Ok(()) => refusal.context(TopologyRefusalAudited),
+        Err(e) => refusal.context(REFUSED).context(format!(
             "the refusal could not be written to the audit chain: {e:#}"
         )),
     }
