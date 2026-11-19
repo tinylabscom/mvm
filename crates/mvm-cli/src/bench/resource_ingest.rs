@@ -27,6 +27,26 @@ enum Mode {
     Standby,
 }
 
+/// What holds a standby, as the harness recorded in `metadata.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StandbyForm {
+    ResidentProcess,
+    OnDiskSnapshot,
+}
+
+fn standby_form_of(meta: &Value) -> Result<StandbyForm> {
+    match meta["configuration"]["standby_form"].as_str() {
+        Some("resident_process") => Ok(StandbyForm::ResidentProcess),
+        Some("on_disk_snapshot") => Ok(StandbyForm::OnDiskSnapshot),
+        Some(other) => bail!(
+            "metadata.json standby_form `{other}` is not resident_process or on_disk_snapshot"
+        ),
+        None => bail!(
+            "metadata.json records no standby_form; the run predates the field, so rerun the harness"
+        ),
+    }
+}
+
 struct Summary(BTreeMap<String, String>);
 
 impl Summary {
@@ -131,17 +151,43 @@ struct Wave {
     vm_state_bytes: u64,
 }
 
-fn read_wave(s: &Summary, wave: u32, standby: bool) -> Result<Wave> {
+/// The units a wave held and the extra disk they cost beyond the VM state dir.
+/// A resident standby is a VMM process; a snapshot standby has none, so it is
+/// counted from the pool and charged its snapshot bytes.
+fn wave_units(s: &Summary, wave: u32, form: Option<StandbyForm>) -> Result<(u64, u64)> {
     let key = |name: &str| format!("wave_{wave}_{name}");
-    let units = s.count(&key("vmm_processes"))?;
-    if units == 0 {
+    let processes = s.count(&key("vmm_processes"))?;
+    if form == Some(StandbyForm::OnDiskSnapshot) {
+        if processes != 0 {
+            bail!(
+                "wave {wave} observed {processes} VMM processes, but snapshot standbys hold none"
+            );
+        }
+        let units = s.count(&key("standby_count"))?;
+        if units != u64::from(wave) {
+            bail!(
+                "wave {wave} observed {units} snapshot standbys; the count must equal the wave size"
+            );
+        }
+        let snapshot_bytes = s
+            .count(&key("standby_snapshot_du_kib"))?
+            .saturating_mul(1024);
+        return Ok((units, snapshot_bytes));
+    }
+    if processes == 0 {
         bail!("wave {wave} observed no VMM process; refusing to divide by zero units");
     }
     // The process count is host-wide, so a stray VM from another session shows up
     // here as a count that is not the wave's declared size.
-    if units != u64::from(wave) {
-        bail!("wave {wave} observed {units} VMM processes; the count must equal the wave size");
+    if processes != u64::from(wave) {
+        bail!("wave {wave} observed {processes} VMM processes; the count must equal the wave size");
     }
+    Ok((processes, 0))
+}
+
+fn read_wave(s: &Summary, wave: u32, standby: Option<StandbyForm>) -> Result<Wave> {
+    let key = |name: &str| format!("wave_{wave}_{name}");
+    let (units, snapshot_bytes) = wave_units(s, wave, standby)?;
     if s.count(&key("launch_failures"))? != 0 {
         bail!("wave {wave} recorded launch failures");
     }
@@ -150,8 +196,11 @@ fn read_wave(s: &Summary, wave: u32, standby: bool) -> Result<Wave> {
     }
     Ok(Wave {
         units,
-        idle: idle_totals(s, wave, standby)?,
-        vm_state_bytes: s.count(&key("vm_state_du_kib"))?.saturating_mul(1024),
+        idle: idle_totals(s, wave, standby.is_some())?,
+        vm_state_bytes: s
+            .count(&key("vm_state_du_kib"))?
+            .saturating_mul(1024)
+            .saturating_add(snapshot_bytes),
     })
 }
 
@@ -437,7 +486,10 @@ pub fn from_density_dir(dir: &Path) -> Result<Section> {
     if mode == Mode::Warm {
         bail!("warm-mode density runs are not ingested yet");
     }
-    let standby = mode == Mode::Standby;
+    let standby = match mode {
+        Mode::Standby => Some(standby_form_of(&meta)?),
+        _ => None,
+    };
     let memory_quantity = memory_quantity_of(string_at(&meta, &["host", "os"])?);
     let mut section = Section::unmeasured(backend, architecture, quantity);
     section.memory_quantity = memory_quantity;
@@ -457,11 +509,17 @@ pub fn from_density_dir(dir: &Path) -> Result<Section> {
         }
     }
     let wave = chosen.context("the largest wave was not read")?;
-    let memory = wave_memory(
-        &dir.join(format!("wave-{largest}")),
-        wave.units,
-        memory_quantity,
-    )?;
+    let memory = if standby == Some(StandbyForm::OnDiskSnapshot) {
+        Figure::unmeasured(
+            "a snapshot standby holds no resident process; its guest RAM is in the snapshot file",
+        )
+    } else {
+        wave_memory(
+            &dir.join(format!("wave-{largest}")),
+            wave.units,
+            memory_quantity,
+        )?
+    };
 
     match &baseline {
         Idle::Measured(b) => {
@@ -478,11 +536,11 @@ pub fn from_density_dir(dir: &Path) -> Result<Section> {
     section.fixed_host_cost.memory_bytes = baseline_memory(dir, memory_quantity)?;
     section.fixed_host_cost.disk_bytes = baseline_disk(&summary)?;
 
-    let cost = unit_cost(quantity, &baseline, &wave, memory, standby)?;
-    if standby {
-        section.by_standby.resident = cost;
-    } else {
-        section.by_residency.running = cost;
+    let cost = unit_cost(quantity, &baseline, &wave, memory, standby.is_some())?;
+    match standby {
+        Some(StandbyForm::ResidentProcess) => section.by_standby.resident = cost,
+        Some(StandbyForm::OnDiskSnapshot) => section.by_standby.warm = cost,
+        None => section.by_residency.running = cost,
     }
     Ok(section)
 }
@@ -706,7 +764,11 @@ mod tests {
         std::fs::write(
             dir.path().join("metadata.json"),
             meta.replace("\"cold\"", "\"standby\"")
-                .replace("\"1 2\"", "\"2\""),
+                .replace("\"1 2\"", "\"2\"")
+                .replace(
+                    "\"build_profile\"",
+                    "\"standby_form\": \"resident_process\", \"build_profile\"",
+                ),
         )
         .unwrap();
         let s = from_density_dir(dir.path()).unwrap();
@@ -714,6 +776,72 @@ mod tests {
         assert_eq!(measured(&s.by_standby.resident.cpu_millicores), 4.0);
         assert_eq!(measured(&s.by_standby.resident.wakeups.per_second), 2.5);
         assert!(s.by_residency.running.cpu_millicores.value().is_none());
+    }
+
+    /// A firecracker-style run: two snapshot standbys, no VMM process.
+    fn snapshot_standby_run(summary: impl FnOnce(String) -> String) -> tempfile::TempDir {
+        let dir = edited(|s| {
+            let s = s
+                .replace("wave_2_vmm_processes\t2", "wave_2_vmm_processes\t0")
+                .replace(
+                    "wave_2_idle_window_seconds\t10.0",
+                    "wave_2_idle_sampler\tnot_applicable:no_resident_process",
+                );
+            summary(format!(
+                "{s}\nwave_2_standby_count\t2\nwave_2_standby_snapshot_du_kib\t512\n"
+            ))
+        });
+        let meta = std::fs::read_to_string(dir.path().join("metadata.json")).unwrap();
+        std::fs::write(
+            dir.path().join("metadata.json"),
+            meta.replace("\"cold\"", "\"standby\"")
+                .replace("\"1 2\"", "\"2\"")
+                .replace(
+                    "\"build_profile\"",
+                    "\"standby_form\": \"on_disk_snapshot\", \"build_profile\"",
+                ),
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn snapshot_standbys_report_in_their_own_class_with_snapshot_bytes() {
+        let dir = snapshot_standby_run(|s| s);
+        let s = from_density_dir(dir.path()).unwrap();
+        // (2048 KiB of VM state + 512 KiB of snapshots) over 2 standbys.
+        assert_eq!(measured(&s.by_standby.warm.disk_bytes), 2560 * 1024 / 2);
+        assert!(s.by_standby.warm.memory_bytes.value().is_none());
+        assert!(s.by_standby.warm.cpu_millicores.value().is_none());
+        assert!(s.by_standby.resident.disk_bytes.value().is_none());
+        assert!(s.by_residency.running.disk_bytes.value().is_none());
+    }
+
+    #[test]
+    fn a_snapshot_run_that_saw_a_process_or_too_few_standbys_is_refused() {
+        let dir = snapshot_standby_run(|s| {
+            s.replace("wave_2_vmm_processes\t0", "wave_2_vmm_processes\t1")
+        });
+        let err = format!("{:#}", from_density_dir(dir.path()).unwrap_err());
+        assert!(err.contains("hold none"), "{err}");
+        let dir = snapshot_standby_run(|s| {
+            s.replace("wave_2_standby_count\t2", "wave_2_standby_count\t1")
+        });
+        let err = format!("{:#}", from_density_dir(dir.path()).unwrap_err());
+        assert!(err.contains("snapshot standbys"), "{err}");
+    }
+
+    #[test]
+    fn a_standby_run_without_a_recorded_form_is_refused() {
+        let dir = snapshot_standby_run(|s| s);
+        let meta = std::fs::read_to_string(dir.path().join("metadata.json")).unwrap();
+        std::fs::write(
+            dir.path().join("metadata.json"),
+            meta.replace("\"standby_form\": \"on_disk_snapshot\", ", ""),
+        )
+        .unwrap();
+        let err = format!("{:#}", from_density_dir(dir.path()).unwrap_err());
+        assert!(err.contains("standby_form"), "{err}");
     }
 
     fn launch_report(lane: LaunchLane, samples: &[f64]) -> ColdLaunchReport {
