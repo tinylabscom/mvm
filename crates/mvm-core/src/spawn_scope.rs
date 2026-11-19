@@ -1068,8 +1068,44 @@ fn run_bounded(mut cmd: Command, timeout: Duration) -> Option<String> {
     Some(stdout)
 }
 
+/// Why a systemd user manager could not be asked about a unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserManagerGap {
+    /// `systemctl` is not on `PATH`.
+    SystemctlMissing,
+    /// No user session bus to reach the manager over.
+    NoUserSessionBus,
+    /// The query failed or outlived its deadline.
+    NoAnswer,
+}
+
+/// `systemctl --user show <unit>` for the named properties, as `Key=value`
+/// lines, bounded by the same deadline as a scope query.
+///
+/// A unit the manager has never heard of is not an error here: it answers
+/// with each property's default.
+///
+/// # Errors
+///
+/// The manager cannot be reached, or did not answer in time.
+pub fn show_user_unit(unit: &str, properties: &[&str]) -> Result<String, UserManagerGap> {
+    let systemctl = binary_on_path(SYSTEMCTL).ok_or(UserManagerGap::SystemctlMissing)?;
+    if !session_bus_present() {
+        return Err(UserManagerGap::NoUserSessionBus);
+    }
+    let mut cmd = crate::env_hygiene::helper_command(&systemctl);
+    cmd.args(["--user", "show"]);
+    for property in properties {
+        cmd.args(["-p", property]);
+    }
+    // After `--`, so a unit name can never be read as an option.
+    cmd.arg("--").arg(unit);
+    run_bounded(cmd, SCOPE_QUERY_TIMEOUT).ok_or(UserManagerGap::NoAnswer)
+}
+
 /// One property's value from `systemctl show` output.
-fn show_property<'a>(output: &'a str, key: &str) -> Option<&'a str> {
+#[must_use]
+pub fn show_property<'a>(output: &'a str, key: &str) -> Option<&'a str> {
     output
         .lines()
         .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))

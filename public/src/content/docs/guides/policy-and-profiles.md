@@ -164,6 +164,55 @@ The trust boundary remains a trusted Linux host enforcing policy against an
 untrusted workload. This does not add malicious-host protection or expand
 other backends' security guarantees.
 
+### A coordinator the service manager owns
+
+By default the coordinator is spawned by whichever command first needs it and
+left running detached. On Linux it can instead be a systemd **user** service,
+so the manager starts it, restarts it and reaps it. There is one unit per user
+and MVM home, and the home is the unit's instance name:
+
+```ini
+# ~/.config/systemd/user/mvm-policy-coordinator@.service
+[Unit]
+Description=mvm policy coordinator for %f
+
+[Service]
+Type=exec
+NotifyAccess=none
+Environment="MVM_HOME=%f"
+ExecStart=%h/.local/bin/mvm-policy-coordinator --managed-home %f
+Restart=on-failure
+```
+
+`mvmctl` does not write this file, enable or start the unit, or turn on
+lingering; provisioning it is an operator decision. The example has no
+`[Install]` section, so an operator starts it with
+`systemctl --user start "mvm-policy-coordinator@$(systemd-escape --path "$HOME/.mvm").service"`.
+`ExecStart` names the helper the installer links beside `mvmctl` and assumes
+the default install directory. The unit fails to start while a detached
+coordinator already serves that home. The instance is the canonical home
+in `systemd-escape --path` form, so `/home/op/.mvm` is
+`mvm-policy-coordinator@home-op-.mvm.service`. Started this way the helper
+refuses to serve unless it is running in that unit's control group for that
+home; it binds its own socket and does not use socket activation.
+
+```sh
+mvmctl policy coordinator
+```
+
+This asks the user manager for the unit's main process and invocation,
+connects to the coordinator's socket, and requires the kernel's credentials
+for that connection and the coordinator's own answer to agree with the
+manager, before and after the exchange. It reports the unit, invocation,
+process, user and home, or says what is missing: no user manager, a unit that
+is not provisioned or not running, or a listener that is not the service. It
+never falls back to starting a detached coordinator.
+
+The report identifies who answered. It does not say the coordinator is ready,
+that its state is current, or that anything may be committed, and the other
+`policy` commands do not yet require a managed coordinator. Processes of the
+same user are not confined from one another by this check.
+
 ## Groups
 
 ```toml

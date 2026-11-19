@@ -22,6 +22,27 @@ fn policy_activation_requires_an_explicit_project_and_is_listed() {
 }
 
 #[test]
+fn policy_coordinator_takes_no_project_and_is_listed() {
+    for arguments in [
+        &["mvmctl", "policy", "coordinator"][..],
+        &["mvmctl", "policy", "coordinator", "--json"],
+    ] {
+        cli_command()
+            .try_get_matches_from(arguments)
+            .expect("the coordinator report parses");
+    }
+    assert!(
+        cli_command()
+            .try_get_matches_from(["mvmctl", "policy", "coordinator", "--start"])
+            .is_err(),
+        "the report has no way to start or install a service"
+    );
+    let help = mvm_cli::commands::help_text_for(&["policy".into(), "--help".into()])
+        .expect("policy --help renders");
+    assert!(help.contains("coordinator"), "{help}");
+}
+
+#[test]
 fn audit_consistency_requires_explicit_roots_and_exposes_help() {
     for verb in ["prove-consistency", "verify-consistency"] {
         let mut args = vec!["mvmctl", "trust", "audit", verb];
