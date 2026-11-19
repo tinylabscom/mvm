@@ -46,6 +46,8 @@ use std::fmt;
 use std::process::Command;
 
 mod denylist;
+#[cfg(any(test, feature = "test-support"))]
+pub mod spawn_recorder;
 
 use denylist::is_family_prefix;
 pub use denylist::{EnvFamily, classify};
@@ -272,6 +274,8 @@ pub fn helper_command(program: impl AsRef<OsStr>) -> Command {
 /// needs its own session token, a user's script its own module search path.
 #[must_use]
 pub fn helper_command_with(program: impl AsRef<OsStr>, readmit: &EnvReadmit) -> Command {
+    #[cfg(any(test, feature = "test-support"))]
+    spawn_recorder::note(program.as_ref());
     let mut command = Command::new(program);
     scrub_command(&mut command, readmit);
     command
