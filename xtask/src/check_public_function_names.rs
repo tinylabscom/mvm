@@ -36,7 +36,20 @@ struct SiblingPair {
 // verification boundary at call sites. The CLI admission owner keeps its
 // `new_for_rootfs_with_runtime` sibling for the same reason: cold dispatch
 // must retain the exact launch-owned verified set the admission ran against.
+//
+// The warm-claim path keeps its `try_warm_claim_with_admission` sibling
+// because that variant threads the CLI admission owner through the claim so
+// the unified dispatch admits exactly once; the bare name is the
+// admission-free convenience for callers that never carry one, and dropping
+// the distinction would let a caller silently claim outside the admission
+// it owes.
 const EXCEPTIONS: &[(&str, &str, &str, &str)] = &[
+    (
+        "crates/mvm-cli/src/commands/pool.rs",
+        "module",
+        "try_warm_claim",
+        "try_warm_claim_with_admission",
+    ),
     (
         "crates/mvm-client/src/admission/cli_dispatch.rs",
         "impl CliAdmission",
