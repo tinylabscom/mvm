@@ -154,6 +154,38 @@ pub fn sign_topology_as_host(
     sign_topology(topology, &host.signing, &host_signer_id()).context("signing the topology")
 }
 
+/// The highest generation admitted for `tenant` under `home`, verified again
+/// against the trusted signers, or `None` when none has been admitted. A
+/// tenant that is not one path component can have no admitted topology.
+///
+/// # Errors
+///
+/// A record that cannot be read, does not verify, or whose digest is not the
+/// one it was sealed with.
+pub(crate) fn last_admitted_topology(
+    home: &Path,
+    tenant: &TenantId,
+    host_signer_keys_dir: Option<&Path>,
+) -> Result<Option<Topology>> {
+    if crate::audit::prune_pins::validate_tenant(&tenant.0).is_err() {
+        return Ok(None);
+    }
+    let Some(last) = record::last_admitted(home, &tenant.0)? else {
+        return Ok(None);
+    };
+    let trusted = trusted_topology_signers(host_signer_keys_dir)?;
+    let trusted_refs: Vec<(&str, &VerifyingKey)> =
+        trusted.iter().map(|(id, key)| (id.as_str(), key)).collect();
+    let topology = verify_topology(&last.signed, &trusted_refs)
+        .with_context(|| format!("verifying admitted topology generation {}", last.generation))?;
+    anyhow::ensure!(
+        topology.digest() == last.digest,
+        "admitted topology generation {} does not have the digest it was sealed with",
+        last.generation
+    );
+    Ok(Some(topology))
+}
+
 fn load_host_signer(dir: Option<&Path>) -> Result<crate::audit::host_keypair::HostSigner> {
     match dir {
         Some(dir) => crate::audit::host_keypair::load_or_init_at(dir),

@@ -29,8 +29,10 @@ use serde::{Deserialize, Serialize};
 use crate::assurance::Sha256Digest;
 use crate::plan::types::{TenantId, WorkloadId};
 
+pub mod binding;
 pub mod requirements;
 pub mod signing;
+pub use binding::{TopologyBinding, TopologyBindingRefusal, check_topology_binding, plan_recipe};
 pub use requirements::{MeasuredFailoverMs, UnmetRequirement, check_requirements};
 pub use signing::{SignedTopology, TopologySignatureError, sign_topology, verify_topology};
 

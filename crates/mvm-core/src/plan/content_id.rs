@@ -268,6 +268,22 @@ mod tests {
         }
 
         #[test]
+        fn a_topology_bound_plan_address_is_frozen() {
+            // The unbound address above stays where it was; the binding moves
+            // it, and to exactly this.
+            let mut plan = fixture("acme", 7).build();
+            plan.topology = Some(mvm_contract::plan::topology::TopologyBinding {
+                topology: mvm_contract::assurance::Sha256Digest::from_bytes(&[3; 32]),
+                unit: crate::plan::WorkloadId("vm-alpha".to_string()),
+            });
+            check(
+                "topology-bound",
+                compute_plan_id(&plan).0.as_str(),
+                "sha256:6478dec648ecaa43b46787e56432f1c129de1ea0602b74c93e43a4bbd495c7bc",
+            );
+        }
+
+        #[test]
         fn stored_plan_id_is_excluded_from_its_own_address() {
             // What makes the id a content-address rather than a
             // self-referential field: relabelling must not move it.
