@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "source": {
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "dirty": false
+  },
+  "sections": [
+    {
+      "backend": "hvf",
+      "architecture": "aarch64",
+      "memory_quantity": "physical_footprint",
+      "fixed_host_cost": {
+        "memory_bytes": {
+          "status": "measured",
+          "value": 7000000
+        },
+        "idle_cpu_millicores": {
+          "status": "measured",
+          "value": 10.0
+        },
+        "wakeups": {
+          "quantity": "macos_libproc",
+          "per_second": {
+            "status": "measured",
+            "value": 5.0
+          }
+        },
+        "disk_bytes": {
+          "status": "measured",
+          "value": 4194304
+        }
+      },
+      "by_residency": {
+        "running": {
+          "memory_bytes": {
+            "status": "measured",
+            "value": 20000000
+          },
+          "cpu_millicores": {
+            "status": "measured",
+            "value": 4.0
+          },
+          "wakeups": {
+            "quantity": "macos_libproc",
+            "per_second": {
+              "status": "measured",
+              "value": 2.5
+            }
+          },
+          "disk_bytes": {
+            "status": "measured",
+            "value": 1048576
+          }
+        },
+        "idle": {
+          "memory_bytes": {
+            "status": "unmeasured",
+            "reason": "not measured"
+          },
+          "cpu_millicores": {
+            "status": "unmeasured",
+            "reason": "not measured"
+          },
+          "wakeups": {
+            "quantity": "macos_libproc",
+            "per_second": {
+              "status": "unmeasured",
+              "reason": "not measured"
+            }
+          },
+          "disk_bytes": {
+            "status": "unmeasured",
+            "reason": "not measured"
+          }
+        },
+        "parked": {
+          "memory_bytes": {
+            "status": "unmeasured",
+            "reason": "not measured"
+          },
+          "cpu_millicores": {
+            "status": "unmeasured",
+            "reason": "not measured"
+          },
+          "wakeups": {
+            "quantity": "macos_libproc",
+            "per_second": {
+              "status": "unmeasured",
+              "reason": "not measured"
+            }
+          },
+          "disk_bytes": {
+            "status": "unmeasured",
+            "reason": "not measured"
+          }
+        }
+      },
+      "by_standby": {
+        "resident": {
+          "memory_bytes": {
+            "status": "unmeasured",
+            "reason": "not measured"
+          },
+          "cpu_millicores": {
+            "status": "unmeasured",
+            "reason": "not measured"
+          },
+          "wakeups": {
+            "quantity": "macos_libproc",
+            "per_second": {
+              "status": "unmeasured",
+              "reason": "not measured"
+            }
+          },
+          "disk_bytes": {
+            "status": "unmeasured",
+            "reason": "not measured"
+          }
+        },
+        "warm": {
+          "memory_bytes": {
+            "status": "unmeasured",
+            "reason": "not measured"
+          },
+          "cpu_millicores": {
+            "status": "unmeasured",
+            "reason": "not measured"
+          },
+          "wakeups": {
+            "quantity": "macos_libproc",
+            "per_second": {
+              "status": "unmeasured",
+              "reason": "not measured"
+            }
+          },
+          "disk_bytes": {
+            "status": "unmeasured",
+            "reason": "not measured"
+          }
+        }
+      },
+      "latencies": {
+        "cold_launch_ms": {
+          "status": "unmeasured",
+          "reason": "not measured"
+        },
+        "warm_launch_ms": {
+          "status": "unmeasured",
+          "reason": "not measured"
+        },
+        "failover_ms": {
+          "status": "unmeasured",
+          "reason": "feature not implemented"
+        },
+        "state_cell_update_ms": {
+          "status": "unmeasured",
+          "reason": "feature not implemented"
+        },
+        "mailbox_round_trip_ms": {
+          "status": "unmeasured",
+          "reason": "feature not implemented"
+        }
+      }
+    }
+  ]
+}

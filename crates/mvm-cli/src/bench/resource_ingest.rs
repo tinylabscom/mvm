@@ -15,7 +15,8 @@ use serde_json::Value;
 
 use super::cold_launch::{ColdLaunchReport, LaunchLane, SpanStats};
 use super::resource_report::{
-    Figure, MemoryQuantity, ResourceReport, Section, UnitCost, WakeupQuantity, Wakeups,
+    Figure, MemoryQuantity, ResourceReport, Section, SourceRevision, UnitCost, WakeupQuantity,
+    Wakeups,
 };
 
 /// Launch mode the harness records in `metadata.json`.
@@ -171,7 +172,16 @@ fn bytes_key(quantity: MemoryQuantity) -> &'static str {
     }
 }
 
-fn footprint(path: &Path, expected: MemoryQuantity) -> Result<std::result::Result<u64, String>> {
+/// A measured capture: the summed bytes and how many processes they cover.
+struct Capture {
+    bytes: u64,
+    processes: usize,
+}
+
+fn footprint(
+    path: &Path,
+    expected: MemoryQuantity,
+) -> Result<std::result::Result<Capture, String>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading {}; the harness always writes it", path.display()))?;
     let json: Value = serde_json::from_str(&text)
@@ -209,7 +219,10 @@ fn footprint(path: &Path, expected: MemoryQuantity) -> Result<std::result::Resul
             )
         })?;
     }
-    Ok(Ok(total))
+    Ok(Ok(Capture {
+        bytes: total,
+        processes: processes.len(),
+    }))
 }
 
 /// Per-unit physical footprint: what the wave added between its `before` and
@@ -220,7 +233,7 @@ fn wave_memory(wave_dir: &Path, units: u64, quantity: MemoryQuantity) -> Result<
     match (before, settled) {
         (Ok(before), Ok(settled)) => {
             // The captures are host-wide, so a shrink is other processes' doing.
-            Ok(match settled.checked_sub(before) {
+            Ok(match settled.bytes.checked_sub(before.bytes) {
                 Some(added) => Figure::measured(added / units),
                 None => Figure::unmeasured(
                     "the host footprint shrank during the wave, so the wave's share is unknowable",
@@ -231,18 +244,32 @@ fn wave_memory(wave_dir: &Path, units: u64, quantity: MemoryQuantity) -> Result<
     }
 }
 
-/// Fixed host memory: the summed physical footprint of the MVM host processes
-/// the zero-unit capture found. Runs recorded before wave 0 captured memory
-/// stay unmeasured.
+/// Fixed host memory: the summed memory of the MVM host processes the
+/// zero-unit capture found. Runs recorded before wave 0 captured memory stay
+/// unmeasured, and so does a capture that matched no process: a sum over
+/// nothing is not a measured zero.
 fn baseline_memory(dir: &Path, quantity: MemoryQuantity) -> Result<Figure<u64>> {
     let path = dir.join("wave-0/physical-memory-settled.json");
     if !path.exists() {
         return Ok(Figure::unmeasured("the run has no wave-0 memory capture"));
     }
     Ok(match footprint(&path, quantity)? {
-        Ok(bytes) => Figure::measured(bytes),
+        Ok(Capture { processes: 0, .. }) => Figure::unmeasured(NO_RESIDENT_HOST_PROCESS),
+        Ok(capture) => Figure::measured(capture.bytes),
         Err(reason) => Figure::unmeasured(reason),
     })
+}
+
+const NO_RESIDENT_HOST_PROCESS: &str = "no resident host process at zero units";
+
+/// The source tree the run measured. Not a refusal when dirty: the report says
+/// so and the compare refuses it.
+fn source_of(meta: &Value) -> Result<SourceRevision> {
+    let commit = string_at(meta, &["source", "revision"])?.to_string();
+    let dirty = meta["source"]["dirty"]
+        .as_bool()
+        .context("metadata.json has no boolean `source.dirty`")?;
+    Ok(SourceRevision { commit, dirty })
 }
 
 /// Fixed host disk: blocks held by the run's isolated MVM home with zero units.
@@ -364,19 +391,23 @@ fn architecture_of(raw: &str) -> &str {
     }
 }
 
+fn read_run_file(dir: &Path, name: &str) -> Result<String> {
+    std::fs::read_to_string(dir.join(name))
+        .with_context(|| format!("reading {}", dir.join(name).display()))
+}
+
+fn read_metadata(dir: &Path) -> Result<Value> {
+    serde_json::from_str(&read_run_file(dir, "metadata.json")?).context("parsing metadata.json")
+}
+
 /// Build one section from a density run directory.
 ///
 /// The largest recorded wave supplies the per-unit figures; every wave the
 /// run declared must be complete, so a run that stopped early is refused
 /// rather than reported from its surviving waves.
 pub fn from_density_dir(dir: &Path) -> Result<Section> {
-    let read = |name: &str| {
-        std::fs::read_to_string(dir.join(name))
-            .with_context(|| format!("reading {}", dir.join(name).display()))
-    };
-    let summary = Summary::parse(&read("summary.tsv")?)?;
-    let meta: Value =
-        serde_json::from_str(&read("metadata.json")?).context("parsing metadata.json")?;
+    let summary = Summary::parse(&read_run_file(dir, "summary.tsv")?)?;
+    let meta = read_metadata(dir)?;
 
     let backend = string_at(&meta, &["configuration", "backend"])?;
     let mode = mode_of(string_at(&meta, &["configuration", "launch_mode"])?)?;
@@ -516,9 +547,11 @@ pub fn assemble(density_dir: &Path, launch_reports: &[PathBuf]) -> Result<Resour
         })
         .collect::<Result<Vec<_>>>()?;
     fold_launch_reports(&mut section, &reports)?;
-    let mut report = ResourceReport::default();
-    report.sections.push(section);
-    Ok(report)
+    Ok(ResourceReport {
+        source: Some(source_of(&read_metadata(density_dir)?)?),
+        sections: vec![section],
+        ..ResourceReport::default()
+    })
 }
 
 #[cfg(test)]
@@ -936,6 +969,64 @@ mod tests {
                 "{err}"
             );
         }
+    }
+
+    #[test]
+    fn a_zero_unit_capture_that_matched_nothing_is_unmeasured_not_zero() {
+        let empty =
+            r#"{"status": "measured", "quantity": "proportional_set_size", "processes": []}"#;
+        // An empty `before` is a real zero: nothing ran before the wave.
+        let dir = linux_run(empty, empty, &pss_capture(4000));
+        let s = from_density_dir(dir.path()).unwrap();
+        assert_eq!(
+            reason_of(&s.fixed_host_cost.memory_bytes),
+            NO_RESIDENT_HOST_PROCESS
+        );
+        assert_eq!(s.by_residency.running.memory_bytes, Figure::measured(2000));
+    }
+
+    #[test]
+    fn the_report_carries_the_recorded_source_commit_and_dirty_flag() {
+        let report = assemble(&fixture(), &[]).unwrap();
+        assert_eq!(
+            report.source,
+            Some(SourceRevision {
+                commit: "0123456789abcdef0123456789abcdef01234567".into(),
+                dirty: false,
+            })
+        );
+        let dir = with_meta(|m| m.replace("\"dirty\": false", "\"dirty\": true"));
+        let report = assemble(dir.path(), &[]).unwrap();
+        assert!(
+            report.source.unwrap().dirty,
+            "a dirty run is reported, not refused"
+        );
+        let dir = with_meta(|m| m.replace("\"dirty\": false", "\"dirty\": \"yes\""));
+        let err = format!("{:#}", assemble(dir.path(), &[]).unwrap_err());
+        assert!(err.contains("source.dirty"), "{err}");
+    }
+
+    /// The compare in xtask cannot link this crate, so it reads this file. The
+    /// test keeps it identical to what the serializer writes today.
+    #[test]
+    fn the_checked_in_resource_report_fixture_is_current() {
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/resource-report.json");
+        let current = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&assemble(&fixture(), &[]).unwrap()).unwrap()
+        );
+        if std::env::var_os("MVM_UPDATE_RESOURCE_REPORT_FIXTURE").is_some() {
+            std::fs::write(&path, &current).unwrap();
+        }
+        let recorded = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            recorded == current,
+            "{} is stale; regenerate it with\n  \
+             MVM_UPDATE_RESOURCE_REPORT_FIXTURE=1 cargo nextest run -p mvm-cli \
+             the_checked_in_resource_report_fixture_is_current",
+            path.display()
+        );
     }
 
     #[test]
