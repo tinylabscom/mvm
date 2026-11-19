@@ -3,9 +3,10 @@
 //! cells only one unit may write, the controller succession and the
 //! cryptographic suite.
 //!
-//! This module is the format, its structural rules and, in [`signing`], its
-//! signed envelope. Host capability, admission and enforcement live elsewhere;
-//! nothing here knows what a host or backend can do.
+//! This module is the format, its structural rules, in [`signing`] its signed
+//! envelope and in [`requirements`] the comparison of what it requires with
+//! what a backend declares it enforces. Admission and enforcement themselves
+//! live elsewhere.
 //!
 //! ## Determinism
 //!
@@ -28,7 +29,9 @@ use serde::{Deserialize, Serialize};
 use crate::assurance::Sha256Digest;
 use crate::plan::types::{TenantId, WorkloadId};
 
+pub mod requirements;
 pub mod signing;
+pub use requirements::{MeasuredFailoverMs, UnmetRequirement, check_requirements};
 pub use signing::{SignedTopology, TopologySignatureError, sign_topology, verify_topology};
 
 /// The topology wire-format version this build writes and the newest it

@@ -7,7 +7,7 @@ use chrono::TimeZone;
 
 use super::*;
 
-fn id(name: &str) -> WorkloadId {
+pub(super) fn id(name: &str) -> WorkloadId {
     WorkloadId(name.to_string())
 }
 
