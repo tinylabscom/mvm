@@ -3,8 +3,10 @@
 //! This module serializes the existing per-workload ledger. It does not allocate
 //! epochs, authenticate lifecycle observations, launch a VM, or clear quarantine.
 
+#[cfg(unix)]
+use std::io::Read;
 use std::{
-    io::{self, Read, Write},
+    io::{self, Write},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -25,9 +27,10 @@ use super::{
 
 const DIRECTORY: &str = "host-interface";
 const LEDGER: &str = "workloads.json";
+#[cfg(unix)]
 const LOCK: &str = "workloads.lock";
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 thread_local! {
     static FAIL_PARENT_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static PARENT_SYNCS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -853,6 +856,7 @@ fn ledger_path(home: &Path) -> PathBuf {
     store_dir(home).join(LEDGER)
 }
 
+#[cfg(unix)]
 fn ensure_store_dir(home: &Path) -> Result<PathBuf, RecoveryCustodyError> {
     std::fs::symlink_metadata(home).map_err(RecoveryCustodyError::State)?;
     crate::private_fs::create_owned_private_dir(home).map_err(RecoveryCustodyError::State)?;
@@ -863,6 +867,7 @@ fn ensure_store_dir(home: &Path) -> Result<PathBuf, RecoveryCustodyError> {
     Ok(directory)
 }
 
+#[cfg(unix)]
 fn sync_store_parent(home: &Path) -> io::Result<()> {
     #[cfg(test)]
     {
@@ -876,12 +881,12 @@ fn sync_store_parent(home: &Path) -> io::Result<()> {
     crate::atomic_io::sync_dir(home).map_err(io::Error::other)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) fn fail_parent_sync_once_for_test() {
     FAIL_PARENT_SYNC.set(true);
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) fn take_parent_sync_count_for_test() -> usize {
     PARENT_SYNCS.replace(0)
 }

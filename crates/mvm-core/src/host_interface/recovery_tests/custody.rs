@@ -977,6 +977,7 @@ fn malformed_completed_and_activation_state_refuse_on_reload() {
 }
 
 #[test]
+#[cfg(unix)]
 fn an_existing_store_retries_parent_directory_sync_before_acknowledgement() {
     let home = tempfile::tempdir().unwrap();
     let fixture = Fixture::new();
