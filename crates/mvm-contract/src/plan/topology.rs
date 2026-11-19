@@ -92,6 +92,10 @@ pub struct Unit {
     /// The post-admission transitions this unit permits. None by default.
     #[serde(default, skip_serializing_if = "SealedTransitions::is_none")]
     pub permits: SealedTransitions,
+    /// The longest the unit may stay silent, in milliseconds, before the host
+    /// treats it as failed. Absent declares no liveness deadline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liveness_period_ms: Option<NonZeroU32>,
 }
 
 /// What a unit is sized at. The wall-clock bound is not here: it is a grant
@@ -363,6 +367,17 @@ pub enum TopologyValidationError {
     UnitInTwoPairs { unit: WorkloadId },
     #[error("the pair for {} declares a recovery bound with no standby kept", .active.0)]
     RecoveryBoundWithoutStandby { active: WorkloadId },
+    #[error(
+        "the pair for {} states a {bound_ms} ms recovery bound, no longer than the unit's \
+         {period_ms} ms liveness period; detecting a failure alone takes the whole period, \
+         so the bound must exceed it",
+        .active.0
+    )]
+    RecoveryBoundWithinLivenessPeriod {
+        active: WorkloadId,
+        bound_ms: NonZeroU32,
+        period_ms: NonZeroU32,
+    },
 }
 
 /// Where a strictly-ascending check first failed.
@@ -485,7 +500,7 @@ impl Topology {
         })?;
         let mut members = BTreeSet::new();
         for pair in &self.standby_pairs {
-            self.require_unit(&pair.active, UnitReference::StandbyActive)?;
+            let active = self.require_unit(&pair.active, UnitReference::StandbyActive)?;
             self.require_unit(&pair.standby, UnitReference::StandbyMember)?;
             if pair.active == pair.standby {
                 return Err(E::SelfStandby {
@@ -502,6 +517,16 @@ impl Topology {
             if pair.class == StandbyClass::None && pair.recovery_bound_ms.is_some() {
                 return Err(E::RecoveryBoundWithoutStandby {
                     active: pair.active.clone(),
+                });
+            }
+            if let (Some(bound_ms), Some(period_ms)) =
+                (pair.recovery_bound_ms, active.liveness_period_ms)
+                && bound_ms <= period_ms
+            {
+                return Err(E::RecoveryBoundWithinLivenessPeriod {
+                    active: pair.active.clone(),
+                    bound_ms,
+                    period_ms,
                 });
             }
         }

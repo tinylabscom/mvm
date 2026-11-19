@@ -84,6 +84,15 @@ pub enum StateCellControl {
     None,
 }
 
+/// How a backend holds a unit's liveness deadline, if it can.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LivenessControl {
+    /// No host-held deadline exists, so a liveness period cannot be served.
+    #[default]
+    None,
+}
+
 /// Which cryptographic suites a backend's admission path implements.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -109,6 +118,8 @@ pub struct ResourceControls {
     pub standby: StandbyControl,
     #[serde(default)]
     pub state_cells: StateCellControl,
+    #[serde(default)]
+    pub liveness: LivenessControl,
     /// The strongest isolation tier the backend provides on every run, or
     /// `None` where it provides none at all.
     #[serde(default)]
@@ -123,9 +134,10 @@ impl ResourceControls {
     /// that might silently claim or silently drop enforcement.
     ///
     /// No backend pins cores exclusively, keeps a standby, holds a state cell
-    /// or implements a suite beyond the classical one, so every arm answers
-    /// `None` / `ClassicalOnly` for those. They are spelled out per arm anyway:
-    /// when one backend gains a mechanism, its arm changes and no other does.
+    /// or a liveness deadline, or implements a suite beyond the classical one,
+    /// so every arm answers `None` / `ClassicalOnly` for those. They are spelled
+    /// out per arm anyway: when one backend gains a mechanism, its arm changes
+    /// and no other does.
     #[must_use]
     pub const fn for_backend(kind: BackendKind) -> Self {
         match kind {
@@ -153,6 +165,7 @@ impl ResourceControls {
                 placement: PlacementControl::None,
                 standby: StandbyControl::None,
                 state_cells: StateCellControl::None,
+                liveness: LivenessControl::None,
                 isolation: Some(IsolationTier::Vm),
                 suite: SuiteControl::ClassicalOnly,
             },
@@ -180,6 +193,7 @@ impl ResourceControls {
                 placement: PlacementControl::None,
                 standby: StandbyControl::None,
                 state_cells: StateCellControl::None,
+                liveness: LivenessControl::None,
                 isolation: Some(IsolationTier::Vm),
                 suite: SuiteControl::ClassicalOnly,
             },
@@ -193,6 +207,7 @@ impl ResourceControls {
                 placement: PlacementControl::None,
                 standby: StandbyControl::None,
                 state_cells: StateCellControl::None,
+                liveness: LivenessControl::None,
                 isolation: Some(IsolationTier::Task),
                 suite: SuiteControl::ClassicalOnly,
             },
@@ -212,6 +227,7 @@ impl ResourceControls {
                 placement: PlacementControl::None,
                 standby: StandbyControl::None,
                 state_cells: StateCellControl::None,
+                liveness: LivenessControl::None,
                 isolation: Some(IsolationTier::Vm),
                 suite: SuiteControl::ClassicalOnly,
             },
@@ -226,6 +242,7 @@ impl ResourceControls {
                 placement: PlacementControl::None,
                 standby: StandbyControl::None,
                 state_cells: StateCellControl::None,
+                liveness: LivenessControl::None,
                 isolation: Some(IsolationTier::Task),
                 suite: SuiteControl::ClassicalOnly,
             },
@@ -236,6 +253,7 @@ impl ResourceControls {
                 placement: PlacementControl::None,
                 standby: StandbyControl::None,
                 state_cells: StateCellControl::None,
+                liveness: LivenessControl::None,
                 isolation: None,
                 suite: SuiteControl::ClassicalOnly,
             },
@@ -250,6 +268,7 @@ impl ResourceControls {
                 placement: PlacementControl::None,
                 standby: StandbyControl::None,
                 state_cells: StateCellControl::None,
+                liveness: LivenessControl::None,
                 isolation: Some(IsolationTier::Task),
                 suite: SuiteControl::ClassicalOnly,
             },
@@ -266,6 +285,7 @@ impl Default for ResourceControls {
             placement: PlacementControl::None,
             standby: StandbyControl::None,
             state_cells: StateCellControl::None,
+            liveness: LivenessControl::None,
             isolation: None,
             suite: SuiteControl::ClassicalOnly,
         }
@@ -1114,6 +1134,7 @@ mod tests {
             assert_eq!(c.placement, PlacementControl::None, "{kind:?}");
             assert_eq!(c.standby, StandbyControl::None, "{kind:?}");
             assert_eq!(c.state_cells, StateCellControl::None, "{kind:?}");
+            assert_eq!(c.liveness, LivenessControl::None, "{kind:?}");
             assert_eq!(c.suite, SuiteControl::ClassicalOnly, "{kind:?}");
         }
     }
