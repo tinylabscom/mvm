@@ -103,18 +103,36 @@ socket-custody fix in #4808. This entrypoint alone does not complete #4764.
 
 ## Prerequisites
 
-- **Rust 1.97.1** (Edition 2024) — install via [rustup](https://rustup.rs).
+- **Rust 1.100.0** (Edition 2024) — install via [rustup](https://rustup.rs).
   `rust-toolchain.toml` pins ordinary builds, tests, linting, and release builds
   to this compiler. `just` recipes use the same LLVM backend and worktree target
   directory as plain Cargo; there is no separate Cranelift development build.
-  Fuzzing and eBPF retain their nightly-only tooling. Embedded Linux payloads
-  retain the separate reproducibility pin installed by `just payload::toolchain`.
+  Excluded browser/example Cargo projects inherit this root compiler too.
+  Embedded Linux payloads use the same version through the reproducibility
+  metadata installed by `just payload::toolchain`; the toolchain check rejects
+  divergence. Fuzzing retains nightly for sanitizer flags, and eBPF retains
+  nightly for building the core library for BPF targets. Those tooling exceptions
+  are not ordinary stable builds. Cargo package `rust-version` declarations
+  describe minimum supported compilers, not a different selected toolchain.
+- **Nix source builds** select first-party Cargo, rustc, and Clippy from the same
+  source snapshot's Rust pin and locked Rust overlay, rather than a caller's
+  ambient `rustPlatform`. The compiler runs on the build machine with the target's
+  standard library; existing static-musl and dynamic-libc linker settings remain
+  separate. An uncached overlay requires its immutable, hash-verified source
+  download during evaluation. There is no fallback to an ambient compiler.
 - **macOS 26+ Apple Silicon or Linux** — standard source-checkout development
   uses native HVF on macOS and native `/dev/kvm` on Linux. Downloaded releases
   also carry an explicitly selected libkrun preview for macOS 13–25 Apple
   Silicon; contributors rebuilding that tier need its integration toolchain.
 - **`zig` + `cargo-zigbuild`** — source-checkout contributors only; needed to build the Linux host binaries a VM boot uses, which a release `cargo build` embeds and a debug `mvmctl` builds on first use. `just payload::toolchain` installs the pinned Zig package into `~/.local/share/mvm/toolchains/zig/<version>` rather than system Python, so it works with externally managed Python on Ubuntu and Debian; the build detects the pinned binary there. End-users running a downloaded `mvmctl` don't need them.
 - **Nix** — not needed on the host. Nix evaluation and `nix build` run inside the builder VM.
+
+Direct Nix recipe sources must include `rust-toolchain.toml` and `nix/flake.lock`.
+The source snapshot's lock is authoritative: overriding only the consumer's
+rust-overlay flake input does not change the compiler. Direct callers must remove
+the former `rustPlatform` and `clippy` arguments from first-party recipes.
+Pin changes select new derivations; existing Nix store outputs remain immutable.
+Third-party nixpkgs/libkrun builds are not part of this first-party compiler pin.
 
 ### Do I need to install libkrun?
 

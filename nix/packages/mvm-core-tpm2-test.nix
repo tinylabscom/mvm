@@ -10,13 +10,15 @@
   pkgs,
   lib,
   stdenv,
-  rustPlatform,
   pkg-config,
   mvmSrc,
   tpm2-tss,
   swtpm,
 }:
 
+let
+  rustPlatform = (import ./rust-platform.nix { inherit pkgs mvmSrc; }).rustPlatform;
+in
 rustPlatform.buildRustPackage {
   pname = "mvm-core-tpm2-test";
   version = "0.18.0";

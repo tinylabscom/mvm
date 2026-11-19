@@ -48,13 +48,11 @@ let
     else
       throw "no musl target for this host platform";
 
-  # Native cargo plus a rustc sysroot carrying the musl std — the mechanism
-  # `embedded-rust-toolchain.nix` exists for. `pkgsMusl.rustPlatform` would
-  # instead rebuild the toolchain itself against musl, which this crate does
-  # not need: its closure is pure Rust, so nothing here compiles C.
-  muslToolchain = pkgs.callPackage ./embedded-rust-toolchain.nix {
-    target = muslTarget;
-  };
+  # Use a build-machine compiler with target std, not a compiler rebuilt against musl.
+  rustPlatform = (import ./rust-platform.nix {
+    inherit pkgs mvmSrc;
+    target = if isMusl then muslTarget else pkgs.stdenv.hostPlatform.rust.rustcTarget;
+  }).rustPlatform;
 
   # The linker driver, and the thing that actually decides the output's libc.
   # Naming a `*-linux-musl` target is NOT sufficient: with `crt-static` off the
@@ -69,7 +67,7 @@ let
 
 in
 
-pkgs.rustPlatform.buildRustPackage ({
+rustPlatform.buildRustPackage ({
   pname = "mvm-sdk-cdylib" + lib.optionalString isMusl "-musl";
   version = workspaceVersion;
 
@@ -140,7 +138,6 @@ pkgs.rustPlatform.buildRustPackage ({
 } // lib.optionalAttrs isMusl {
   # Cross-compile to musl with a native toolchain. `-crt-static` off because a
   # cdylib needs a dynamic loader; the guest supplies musl's.
-  nativeBuildInputs = [ muslToolchain ];
   CARGO_BUILD_TARGET = muslTarget;
   # The linker goes in RUSTFLAGS rather than `CARGO_TARGET_<TRIPLE>_LINKER`.
   # Both are documented, but only this one was verified end to end to produce

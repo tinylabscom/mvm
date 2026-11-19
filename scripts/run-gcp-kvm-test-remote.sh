@@ -135,10 +135,16 @@ cd "$repo"
 source scripts/dev-env.sh
 export RUSTUP_HOME="$repo/.mvm-test/rustup"
 export PATH="$CARGO_HOME/bin:$PATH"
+RUSTUP_TOOLCHAIN="$(sed -n 's/^channel = "\([^"]*\)"$/\1/p' "$repo/rust-toolchain.toml")"
+[[ "$RUSTUP_TOOLCHAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+  echo "error: repository Rust toolchain pin is missing" >&2
+  exit 1
+}
+export RUSTUP_TOOLCHAIN
 
 if ! command -v rustup >/dev/null 2>&1; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --profile minimal --default-toolchain stable
+    | sh -s -- -y --profile minimal --default-toolchain "$RUSTUP_TOOLCHAIN"
 fi
 # The file is installed by rustup immediately above.
 # shellcheck source=/dev/null
@@ -222,6 +228,7 @@ if [[ "$run_mode" == unprivileged ]]; then
     runuser -u "$run_user" -- env
     HOME="/home/$run_user"
     RUSTUP_HOME="$RUSTUP_HOME"
+    RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN"
     PATH="$CARGO_HOME/bin:/usr/local/bin:/usr/bin:/bin"
     MVM_FIRECRACKER_BIN=/usr/local/bin/firecracker
     XDG_RUNTIME_DIR="$run_dir"
