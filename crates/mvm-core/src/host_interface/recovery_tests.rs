@@ -1,6 +1,7 @@
 use ed25519_dalek::{SigningKey, VerifyingKey};
 
 mod authority;
+mod custody;
 mod transitions;
 
 use super::{
@@ -100,8 +101,18 @@ impl Fixture {
     }
 
     fn verify(&self, now: ClockEvidence) -> Result<VerifiedOfflineAuthority, Denial> {
+        self.verify_for("workload", now)
+    }
+
+    fn verify_for(
+        &self,
+        workload: &str,
+        now: ClockEvidence,
+    ) -> Result<VerifiedOfflineAuthority, Denial> {
         let trusted = [("issuer".into(), self.key.verifying_key())];
-        VerifiedOfflineAuthority::verify(self.input(&trusted), now)
+        let mut input = self.input(&trusted);
+        input.expected.workload_id = workload;
+        VerifiedOfflineAuthority::verify(input, now)
     }
 
     fn input<'a>(&'a self, trusted: &'a [(String, VerifyingKey)]) -> AuthorityInput<'a> {
@@ -128,9 +139,13 @@ impl Fixture {
     }
 
     fn history(&self) -> History {
+        self.history_for("workload")
+    }
+
+    fn history_for(&self, workload: &str) -> History {
         History {
             authority_id: signed_record_digest(&self.companion).unwrap(),
-            workload_id: "workload".into(),
+            workload_id: workload.into(),
             original: Owner {
                 instance: [9; 16],
                 epoch: ExecutionEpoch(4),
@@ -139,6 +154,10 @@ impl Fixture {
             restarts_spent: 0,
             last_operation: 10,
         }
+    }
+
+    fn companion_id(&self) -> [u8; 32] {
+        signed_record_digest(&self.companion).unwrap()
     }
 
     fn recovery(&self) -> Recovery {

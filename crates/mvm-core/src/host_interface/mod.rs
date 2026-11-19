@@ -15,6 +15,7 @@ pub mod offline;
 pub mod policy;
 pub mod preflight;
 pub mod recovery;
+pub mod recovery_custody;
 #[cfg(test)]
 mod recovery_tests;
 pub mod state;

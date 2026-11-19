@@ -137,7 +137,8 @@ pub fn signed_record_digest(record: &impl Serialize) -> Result<[u8; 32], serde_j
 }
 
 /// Injected conservative time bounds, including suspend or loss of continuity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "quality", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClockEvidence {
     /// No security-time assertion can be made.
     Unknown,
@@ -368,5 +369,24 @@ impl VerifiedOfflineAuthority {
     }
     pub(super) fn clock(&self) -> ClockEvidence {
         self.clock
+    }
+
+    pub(super) fn workload_id(&self) -> &str {
+        &self.policy.workload_id
+    }
+
+    pub(super) fn constrain_restored_time(
+        mut self,
+        persisted_expiry: u64,
+        persisted_deadline: u64,
+        accepted_clock: ClockEvidence,
+    ) -> Result<Self, Denial> {
+        if self.expiry != persisted_expiry {
+            return Err(OfflineRefusal::HistoryInvalid.into());
+        }
+        self.clock.follows(accepted_clock)?;
+        self.deadline = self.deadline.min(persisted_deadline);
+        self.check_time(self.clock)?;
+        Ok(self)
     }
 }

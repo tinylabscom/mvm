@@ -39,6 +39,39 @@ effect closure and crash restoration are not qualified here. A2 remains
 owned with #5543; A3–A5 must establish native lifecycle evidence before any
 production recovery caller is connected.
 
+## Durable offline recovery custody
+
+The A2 slice reviews the existing per-workload ledger, atomic private writer,
+stable file lock and A1 reducer restoration against the
+[durable custody contract](durable-recovery-custody.md). Every current writer
+uses the same serialized read-modify-publish boundary. Managed history records
+one active epoch, one never-reusable high-water mark, finite restart/operation
+watermarks, one current transition and one completed transition. Legacy local
+entries keep their missing-state defaults; a managed entry cannot use ordinary
+admission or ordinary replacement.
+
+Reservation durably raises the high-water mark and debit before returning.
+Fencing, retirement, activation and launch eligibility remain distinct.
+Activation changes the active epoch only after the fenced phase, never clears
+quarantine, and returns one owner action only on the first durable transition
+to `Launching`. Cancellation and uncertainty preserve whether activation
+committed. A restored `Launching` phase becomes non-dispatchable `Unknown`
+custody rather than repeating launch. Exact retained retries return status;
+older evicted operations refuse through the sequence watermark.
+
+The owner-only ledger and lock are bounded and reject symlinks, extra hard
+links, wrong ownership/modes, corrupt state and inconsistent phase/history.
+Publication reuses the synced private atomic writer; a write failure reports
+`CommitUnknown`, after which locked reload and durable reconciliation precede
+progress. Persisted absolute/monotonic evidence prevents controller restart
+or clock correction extending authority. Tests use injected storage failures
+and modeled ownership facts; they do not prove physical power-loss behavior.
+
+No production lifecycle owner is connected. The ledger does not authenticate
+retirement, detect malicious same-UID namespace replacement or whole-host
+rollback, allocate ordinary launch/wake epochs, converge the plan/mailbox epoch
+type, or qualify latency. Those remain with #5543 and A3–A5.
+
 ## Endpoint gate-probe control transport
 
 Reviewed the client launch probe, endpoint config projection, listener binding

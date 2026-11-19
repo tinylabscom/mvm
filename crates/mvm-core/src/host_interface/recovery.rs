@@ -12,16 +12,19 @@ use super::{
     lease::LeaseOp,
     offline::{ClockEvidence, DependencyLoss, VerifiedOfflineAuthority},
 };
+use serde::{Deserialize, Serialize};
 
 /// Exact original owner identity, supplied by the lifecycle owner.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Owner {
     pub instance: [u8; 16],
     pub epoch: ExecutionEpoch,
 }
 
 /// Proven history input, not a persistence format or a defaultable ledger entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct History {
     pub authority_id: [u8; 32],
     pub workload_id: String,
@@ -32,7 +35,8 @@ pub struct History {
 }
 
 /// Candidate allocation from the epoch owner, not an allocation by this reducer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RestartRequest {
     pub operation: u64,
     pub original: Owner,
@@ -41,7 +45,8 @@ pub struct RestartRequest {
 }
 
 /// Complete identity every persisted acknowledgement and ownership observation must match.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TransitionBinding {
     pub authority_id: [u8; 32],
     pub workload_id: String,
@@ -51,7 +56,8 @@ pub struct TransitionBinding {
 }
 
 /// Internal recovery phases, independent of primary node lifecycle states.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RecoveryPhase {
     Running,
     Reserving,
@@ -67,7 +73,8 @@ pub enum RecoveryPhase {
 }
 
 /// Trusted adapter inputs. Retirement covers the original VM and every effect holder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RecoveryEvent {
     ReservationCommitted,
     BeginFence,
@@ -155,6 +162,76 @@ impl Recovery {
             last_event: None,
             last_clock,
             refusal: None,
+        })
+    }
+
+    pub(super) fn restore(
+        authority: VerifiedOfflineAuthority,
+        history: History,
+        binding: TransitionBinding,
+        phase: RecoveryPhase,
+    ) -> Result<Self, Denial> {
+        if binding.authority_id != authority.id()
+            || binding.workload_id != history.workload_id
+            || binding.request.original != history.original
+            || binding.request.operation != history.last_operation
+            || binding.request.proposed_epoch != history.epoch_high_water
+            || binding.restart_debit != history.restarts_spent
+            || binding.original_lease_expiry != authority.lease_expiry()
+            || history.restarts_spent > authority.policy().restart.limit()
+            || !matches!(
+                phase,
+                RecoveryPhase::Reserved
+                    | RecoveryPhase::Fencing
+                    | RecoveryPhase::Fenced
+                    | RecoveryPhase::Activating
+                    | RecoveryPhase::Launching
+                    | RecoveryPhase::Cancelled
+                    | RecoveryPhase::Unknown
+                    | RecoveryPhase::Blocked
+            )
+        {
+            return Err(OfflineRefusal::HistoryInvalid.into());
+        }
+        authority
+            .policy()
+            .restart
+            .check_epoch(binding.request.proposed_epoch)?;
+        let last_event = match phase {
+            RecoveryPhase::Reserved => Some(RecoveryEvent::ReservationCommitted),
+            RecoveryPhase::Fencing => Some(RecoveryEvent::BeginFence),
+            RecoveryPhase::Fenced => Some(RecoveryEvent::Retired),
+            RecoveryPhase::Activating => Some(RecoveryEvent::Activate),
+            RecoveryPhase::Launching => Some(RecoveryEvent::ActivationCommitted),
+            RecoveryPhase::Cancelled => Some(RecoveryEvent::Cancel),
+            RecoveryPhase::Unknown => Some(RecoveryEvent::Uncertain),
+            RecoveryPhase::Blocked => None,
+            RecoveryPhase::Running | RecoveryPhase::Reserving | RecoveryPhase::Ready => {
+                return Err(OfflineRefusal::HistoryInvalid.into());
+            }
+        };
+        let refusal = match phase {
+            RecoveryPhase::Cancelled => Some(OfflineRefusal::Cancelled.into()),
+            RecoveryPhase::Unknown => Some(OfflineRefusal::OwnershipUnknown.into()),
+            RecoveryPhase::Blocked => Some(OfflineRefusal::DependencyLost.into()),
+            RecoveryPhase::Reserved
+            | RecoveryPhase::Fencing
+            | RecoveryPhase::Fenced
+            | RecoveryPhase::Activating
+            | RecoveryPhase::Launching => None,
+            RecoveryPhase::Running | RecoveryPhase::Reserving | RecoveryPhase::Ready => {
+                return Err(OfflineRefusal::HistoryInvalid.into());
+            }
+        };
+        let last_clock = authority.clock();
+        Ok(Self {
+            authority,
+            history,
+            binding: Some(binding),
+            phase,
+            last_event,
+            last_clock,
+            refusal,
         })
     }
 
