@@ -7,10 +7,10 @@ use std::io::{self, Write};
 
 use mvm_core::plan::{ExecutionPlan, SCHEMA_VERSION, content_id::verify_plan_id};
 
-pub(super) fn is_supported_canonical_plan(bytes: &[u8]) -> bool {
+pub(crate) fn is_supported_canonical_plan(bytes: &[u8]) -> bool {
     // A decoded byte vector cannot be larger than its containing default frame.
     // Enforce that conservative bound even for direct in-process dispatch calls.
-    if bytes.is_empty() || bytes.len() > super::DEFAULT_MAX_FRAME_BYTES {
+    if bytes.is_empty() || bytes.len() > super::server::DEFAULT_MAX_FRAME_BYTES {
         return false;
     }
     let Ok(plan) = serde_json::from_slice::<ExecutionPlan>(bytes) else {

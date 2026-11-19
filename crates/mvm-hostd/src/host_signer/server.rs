@@ -16,11 +16,9 @@ use tracing::{debug, info, warn};
 
 use crate::audit_signer::helper_client::SignerHelperClient;
 use crate::host_signer::keystore::{Keystore, SharedKeystore};
+use crate::host_signer::plan_payload;
 
-const DEFAULT_MAX_FRAME_BYTES: usize = 65_536;
-
-#[path = "plan_payload.rs"]
-mod plan_payload;
+pub(crate) const DEFAULT_MAX_FRAME_BYTES: usize = 65_536;
 
 #[derive(Clone)]
 enum SignBackend {
