@@ -50,6 +50,8 @@ const MAX_LEASE_RETRIES: u8 = 3;
 mod anchor;
 mod capacity;
 mod checkpoint;
+mod fence;
+pub use fence::JournalFence;
 mod history_key;
 pub use history_key::HistoryKeyRef;
 mod receipt;
@@ -119,6 +121,8 @@ pub enum JournalError {
     InvalidLimits,
     #[error("journal writer is already active")]
     Busy,
+    #[error("mailbox journal is fenced and can no longer be opened")]
+    Fenced,
     #[error("journal quota exhausted")]
     Full,
     #[error("mailbox expiry settlement needs another bounded pass")]
