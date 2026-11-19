@@ -11,7 +11,8 @@ use core::num::NonZeroU32;
 use super::{CorePlacement, CryptoSuite, IsolationTier, StandbyClass, StandbyPair, Topology, Unit};
 use crate::plan::types::WorkloadId;
 use crate::protocol::resource_controls::{
-    PlacementControl, ResourceControls, StandbyControl, StateCellControl, SuiteControl,
+    LivenessControl, PlacementControl, ResourceControls, StandbyControl, StateCellControl,
+    SuiteControl,
 };
 
 /// The failover time measured for this host and backend, in milliseconds.
@@ -62,6 +63,15 @@ pub enum UnmetRequirement {
         active: WorkloadId,
         class: StandbyClass,
     },
+    #[error(
+        "unit {} declares a {period_ms} ms liveness period, and this backend holds no \
+         liveness deadline",
+        .unit.0
+    )]
+    LivenessPeriod {
+        unit: WorkloadId,
+        period_ms: NonZeroU32,
+    },
     #[error("cell {cell} requires a host-held state cell, which this backend does not provide")]
     StateCell { cell: String },
 }
@@ -80,6 +90,7 @@ pub fn check_requirements(
     for unit in &topology.units {
         check_placement(unit, controls.placement)?;
         check_isolation(unit, controls.isolation)?;
+        check_liveness(unit, controls.liveness)?;
     }
     for pair in &topology.standby_pairs {
         // The bound is checked before the class so that a pair whose class is
@@ -125,6 +136,16 @@ fn check_isolation(unit: &Unit, provided: Option<IsolationTier>) -> Result<(), U
             provided,
         }),
         _ => Ok(()),
+    }
+}
+
+fn check_liveness(unit: &Unit, control: LivenessControl) -> Result<(), UnmetRequirement> {
+    match (unit.liveness_period_ms, control) {
+        (None, _) => Ok(()),
+        (Some(period_ms), LivenessControl::None) => Err(UnmetRequirement::LivenessPeriod {
+            unit: unit.workload.clone(),
+            period_ms,
+        }),
     }
 }
 

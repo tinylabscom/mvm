@@ -68,6 +68,26 @@ fn exclusive_placement_is_refused_with_its_unit() {
 }
 
 #[test]
+fn a_liveness_period_is_refused_with_its_unit_on_every_backend() {
+    let mut topology = stating_nothing();
+    topology.units[3].liveness_period_ms = Some(ms(100));
+    for &kind in BackendKind::ALL {
+        assert_eq!(
+            check_requirements(
+                &topology,
+                ResourceControls::for_backend(kind),
+                Some(MeasuredFailoverMs(ms(1)))
+            ),
+            Err(UnmetRequirement::LivenessPeriod {
+                unit: id("w1-standby"),
+                period_ms: ms(100),
+            }),
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
 fn a_state_cell_is_refused_with_its_name() {
     let mut topology = stating_nothing();
     topology.cells = full().cells;
