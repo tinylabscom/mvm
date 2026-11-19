@@ -92,6 +92,72 @@ fn fixture() -> (
 }
 
 #[test]
+fn future_enrollment_is_authenticated_before_not_yet_valid_can_be_observed() {
+    use mvm_contract::protocol::mailbox::MailboxDeliveryError;
+    let (authority, _, grant, plan_id, nonce, receive, enrollment) = fixture();
+    let capability = sign_capability(receive, &authority).unwrap();
+    let mut signed = sign_guest_reader_enrollment(enrollment, &authority).unwrap();
+    let mut scope = MailboxGuestReaderScope {
+        plan: &grant,
+        plan_id: &plan_id,
+        plan_nonce: &nonce,
+        receive: &capability.grant,
+        current_boot: signed.enrollment.consumer_boot,
+        current_session: signed.enrollment.consumer_session,
+        now_unix_ms: signed.enrollment.issued_at_unix_ms - 1,
+    };
+    assert!(matches!(
+        verify_guest_reader_enrollment(
+            &signed,
+            &capability,
+            &scope,
+            &authority.verifying_key(),
+            &[]
+        ),
+        Err(MailboxError::DeliveryContract(
+            MailboxDeliveryError::NotYetValid
+        ))
+    ));
+    signed.signature[0] ^= 1;
+    assert!(
+        matches!(
+            verify_guest_reader_enrollment(
+                &signed,
+                &capability,
+                &scope,
+                &authority.verifying_key(),
+                &[]
+            ),
+            Err(MailboxError::ReaderEnrollmentSignatureInvalid)
+        ),
+        "forged future issuance must never trigger a validity wait"
+    );
+    signed.signature[0] ^= 1;
+    scope.now_unix_ms = signed.enrollment.issued_at_unix_ms;
+    verify_guest_reader_enrollment(
+        &signed,
+        &capability,
+        &scope,
+        &authority.verifying_key(),
+        &[],
+    )
+    .unwrap();
+    scope.now_unix_ms = signed.enrollment.expires_at_unix_ms;
+    assert!(matches!(
+        verify_guest_reader_enrollment(
+            &signed,
+            &capability,
+            &scope,
+            &authority.verifying_key(),
+            &[]
+        ),
+        Err(MailboxError::DeliveryContract(
+            MailboxDeliveryError::Expired
+        ))
+    ));
+}
+
+#[test]
 fn own_mailbox_grant_mints_a_distinct_boot_bound_receive_capability() {
     let (authority, guest, grant, plan_id, plan_nonce, mut send, mut enrollment) = fixture();
     let binding = MailboxReaderBootBinding {
@@ -420,6 +486,24 @@ fn lease_and_ack_signatures_bind_committed_ciphertext_and_consumer() {
     )
     .unwrap();
     let authority_vk = authority.verifying_key();
+    mvm_core::mailbox::reader::verify_delivery_lease_signature(&lease, &authority_vk).unwrap();
+    assert!(matches!(
+        lease.check_scope(&plan, &receive, enrollment.consumer_session, 119),
+        Err(mvm_contract::protocol::mailbox::MailboxDeliveryError::NotYetValid)
+    ));
+    lease
+        .check_scope(&plan, &receive, enrollment.consumer_session, 120)
+        .unwrap();
+    assert!(matches!(
+        lease.check_scope(&plan, &receive, enrollment.consumer_session, 190),
+        Err(mvm_contract::protocol::mailbox::MailboxDeliveryError::Expired)
+    ));
+    let mut forged_future = lease.clone();
+    forged_future.signature[0] ^= 1;
+    assert!(matches!(
+        mvm_core::mailbox::reader::verify_delivery_lease_signature(&forged_future, &authority_vk),
+        Err(MailboxError::DeliveryLeaseSignatureInvalid)
+    ));
     let context = ReaderDeliveryContext {
         plan: &plan,
         capability: &capability,

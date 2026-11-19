@@ -14,6 +14,7 @@ HOSTS = ("x86_64", "aarch64")
 HOST_BINS = (
     "mvmctl", "mvm-host-agent", "mvm-signer-helper", "mvm-network-endpoint",
     "mvm-broker", "mvm-audit-signer", "mvm-mailbox", "mvm-gpu-endpoint",
+    "mvm-actor-holder", "mvm-actor-controller",
 )
 
 

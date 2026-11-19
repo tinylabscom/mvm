@@ -49,6 +49,8 @@ pub(super) fn run_post_admission_gates(
     }
     let runtime = prepare_built_pack_start(admitted, &mut config, backend)
         .map_err(|error| ("registry-pack-boot", error))?;
+    // Direct admitted callers need the same signed on-disk material as CLI boots.
+    super::stash_plan_for_bridge(&config).map_err(|error| ("launch-substrate", error))?;
     Ok((config, runtime))
 }
 

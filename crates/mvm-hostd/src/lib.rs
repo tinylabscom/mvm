@@ -25,6 +25,13 @@
 
 #![deny(unreachable_pub)]
 
+pub mod actor_authority;
+pub mod actor_bootstrap;
+pub mod actor_controller;
+pub mod actor_holder;
+pub mod actor_lifecycle;
+pub mod actor_process;
+pub mod actor_reservations;
 pub mod admission_budget;
 pub mod admitted_campaign_runner;
 pub mod assurance_agent_adapter;

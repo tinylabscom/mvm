@@ -16,11 +16,11 @@ use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use hmac::{Hmac, Mac, digest::KeyInit};
 use mvm_contract::protocol::mailbox::{
-    ContentType, DeliveryLeaseNonce, DeliveryOutcome, DestinationReceipt, EncryptionAlgorithm,
-    ExecutionEpoch, MailboxAddress, MailboxDeliveryLease, MailboxEnvelope, MailboxGrant,
-    MailboxGuestReaderScope, MailboxOperation, MailboxRetentionPolicy, ProtocolVersion,
-    SignatureAlgorithm, SignedDestinationReceipt, SignedMailboxCapability,
-    SignedMailboxDeliveryAck, SignedMailboxDeliveryLease, SignedMailboxGuestReaderEnrollment,
+    ContentType, DeliveryLeaseNonce, DeliveryOutcome, DestinationReceipt, MailboxAddress,
+    MailboxDeliveryLease, MailboxEnvelope, MailboxGrant, MailboxGuestReaderScope, MailboxOperation,
+    MailboxRetentionPolicy, ProtocolVersion, SignatureAlgorithm, SignedDestinationReceipt,
+    SignedMailboxCapability, SignedMailboxDeliveryAck, SignedMailboxDeliveryLease,
+    SignedMailboxGuestReaderEnrollment,
 };
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -50,6 +50,8 @@ const MAX_LEASE_RETRIES: u8 = 3;
 mod anchor;
 mod capacity;
 mod checkpoint;
+mod history_key;
+pub use history_key::HistoryKeyRef;
 mod receipt;
 mod recovery;
 pub use anchor::FileJournalAnchor;
@@ -99,90 +101,6 @@ pub trait JournalAnchor {
         expected: JournalTip,
         next: JournalTip,
     ) -> Result<(), JournalError>;
-}
-
-/// Recoverable storage-key identity for one mailbox and execution epoch.
-///
-/// This identifies the journal key, not the separately encrypted payload's
-/// opening key. Deserialization is not admission authority; production must
-/// bind it to a verified plan and authenticated restart manifest. A later
-/// epoch or rotation needs an explicit anchored handoff.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HistoryKeyRef {
-    address: MailboxAddress,
-    execution_epoch: ExecutionEpoch,
-    algorithm: EncryptionAlgorithm,
-    key_id: [u8; 32],
-    version: u32,
-}
-
-impl std::fmt::Debug for HistoryKeyRef {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("HistoryKeyRef")
-            .field("version", &self.version)
-            .finish_non_exhaustive()
-    }
-}
-
-impl HistoryKeyRef {
-    /// Identify a custody key version; construction alone is not authority.
-    ///
-    /// The host must bind these fields to a verified plan and authenticated
-    /// restart manifest before using the reference to reopen retained history.
-    pub fn new(
-        address: MailboxAddress,
-        execution_epoch: ExecutionEpoch,
-        key_id: [u8; 32],
-        version: u32,
-    ) -> Result<Self, JournalError> {
-        if key_id == [0; 32] || version == 0 {
-            return Err(JournalError::HistoryKeyUnavailable);
-        }
-        Ok(Self {
-            address,
-            execution_epoch,
-            algorithm: EncryptionAlgorithm::AES_256_GCM,
-            key_id,
-            version,
-        })
-    }
-
-    #[must_use]
-    pub const fn address(&self) -> MailboxAddress {
-        self.address
-    }
-
-    #[must_use]
-    pub const fn execution_epoch(&self) -> ExecutionEpoch {
-        self.execution_epoch
-    }
-
-    #[must_use]
-    pub const fn algorithm(&self) -> EncryptionAlgorithm {
-        self.algorithm
-    }
-
-    #[must_use]
-    pub const fn key_id(&self) -> &[u8; 32] {
-        &self.key_id
-    }
-
-    #[must_use]
-    pub const fn version(&self) -> u32 {
-        self.version
-    }
-
-    fn validate(&self) -> Result<(), JournalError> {
-        if self.key_id == [0; 32]
-            || self.version == 0
-            || self.algorithm != EncryptionAlgorithm::AES_256_GCM
-        {
-            return Err(JournalError::HistoryKeyUnavailable);
-        }
-        Ok(())
-    }
 }
 
 /// Existing-only key lookup; recovery must never silently mint a new root.
@@ -423,6 +341,12 @@ pub struct LeasedMailboxMessage {
 }
 
 impl LeasedMailboxMessage {
+    /// Original authenticated message metadata, unchanged by delivery or retry.
+    #[must_use]
+    pub fn header(&self) -> &mvm_contract::protocol::mailbox::MailboxEnvelopeHeader {
+        self.message.opened.header()
+    }
+
     #[must_use]
     pub fn payload(&self) -> &[u8] {
         self.message.payload()
@@ -915,6 +839,39 @@ impl MailboxJournal {
             .map(EncodedDestinationReceipt::into_signed)
     }
 
+    /// Recover existing local acceptance evidence for exact immutable bytes.
+    ///
+    /// This does not authorize new admission or payload disclosure. It is for
+    /// reconciling an endpoint's interrupted transaction against this journal.
+    pub fn accepted_local_receipt(
+        &self,
+        envelope: &MailboxEnvelope,
+        capability: &SignedMailboxCapability,
+        signer: &SigningKey,
+        anchor: &FileJournalAnchor,
+    ) -> Result<Option<SignedDestinationReceipt>, JournalError> {
+        self.local_ready(anchor, &signer.verifying_key())?;
+        self.seen
+            .values()
+            .find(|entry| entry.envelope == *envelope && entry.capability == *capability)
+            .map(|entry| sign_receipt(entry.accepted_receipt.clone(), signer).map_err(Into::into))
+            .transpose()
+    }
+
+    /// Whether exact immutable bytes have an application ACK in this local journal.
+    pub fn locally_acknowledged(
+        &self,
+        envelope: &MailboxEnvelope,
+        capability: &SignedMailboxCapability,
+        signer: &SigningKey,
+        anchor: &FileJournalAnchor,
+    ) -> Result<bool, JournalError> {
+        self.local_ready(anchor, &signer.verifying_key())?;
+        Ok(self.seen.values().any(|entry| {
+            entry.envelope == *envelope && entry.capability == *capability && entry.acknowledged
+        }))
+    }
+
     fn append(
         &mut self,
         event: JournalEvent,
@@ -1085,26 +1042,55 @@ impl MailboxJournal {
             return Err(JournalError::Uncertain);
         }
         for identity in &self.order {
-            let entry = self.seen.get(identity).ok_or(JournalError::Corrupt)?;
-            if entry.acknowledged
-                || entry.expired_at_unix_ms.is_some()
-                || request.context.now_unix_ms >= entry.envelope.routing.expires_at_unix_ms
-            {
-                continue;
+            if let Some(message) = self.receive_identity(*identity, request)? {
+                return Ok(Some(message));
             }
-            let opened = self.open_for_reader(*identity, entry, &request)?;
-            return Ok(Some(ReceivedMailboxMessage {
-                identity: *identity,
-                opened,
-            }));
         }
         Ok(None)
+    }
+
+    fn receive_identity(
+        &self,
+        identity: ReplayIdentity,
+        request: JournalReceive<'_>,
+    ) -> Result<Option<ReceivedMailboxMessage>, JournalError> {
+        let entry = self
+            .seen
+            .get(&identity)
+            .ok_or(JournalError::UnknownMessage)?;
+        if entry.acknowledged
+            || entry.expired_at_unix_ms.is_some()
+            || request.context.now_unix_ms >= entry.envelope.routing.expires_at_unix_ms
+        {
+            return Ok(None);
+        }
+        let opened = self.open_for_reader(identity, entry, &request)?;
+        Ok(Some(ReceivedMailboxMessage { identity, opened }))
     }
 
     /// Commit one signed lease and its one-time possession challenge before
     /// releasing plaintext to the authenticated guest reader.
     pub fn lease_next(
         &mut self,
+        request: JournalGuestLease<'_>,
+        anchor: impl FnOnce(JournalTip) -> Result<(), JournalError>,
+    ) -> Result<Option<LeasedMailboxMessage>, JournalError> {
+        self.lease_selected(None, request, anchor)
+    }
+
+    /// Lease an exact committed result without consuming an unrelated FIFO entry.
+    pub fn lease_message(
+        &mut self,
+        identity: ReplayIdentity,
+        request: JournalGuestLease<'_>,
+        anchor: impl FnOnce(JournalTip) -> Result<(), JournalError>,
+    ) -> Result<Option<LeasedMailboxMessage>, JournalError> {
+        self.lease_selected(Some(identity), request, anchor)
+    }
+
+    fn lease_selected(
+        &mut self,
+        identity: Option<ReplayIdentity>,
         request: JournalGuestLease<'_>,
         anchor: impl FnOnce(JournalTip) -> Result<(), JournalError>,
     ) -> Result<Option<LeasedMailboxMessage>, JournalError> {
@@ -1134,7 +1120,11 @@ impl MailboxJournal {
             request.possession_signature,
             &key,
         )?;
-        let Some(message) = self.receive_next(request.receive)? else {
+        let message = match identity {
+            Some(identity) => self.receive_identity(identity, request.receive)?,
+            None => self.receive_next(request.receive)?,
+        };
+        let Some(message) = message else {
             return Ok(None);
         };
         let identity = message.identity;
@@ -1295,6 +1285,34 @@ impl MailboxJournal {
         request: JournalGuestAck<'_>,
         anchor: impl FnOnce(JournalTip) -> Result<(), JournalError>,
     ) -> Result<JournalTip, JournalError> {
+        let identity = self.verify_guest_ack(request)?;
+        let entry = self
+            .seen
+            .get(&identity)
+            .ok_or(JournalError::UnknownMessage)?;
+        if entry.acknowledged {
+            return Ok(self.tip);
+        }
+        let tip = self.append(
+            JournalEvent::AcknowledgedSigned {
+                identity,
+                ack: Box::new(request.signed.clone()),
+            },
+            anchor,
+        )?;
+        let entry = self.seen.get_mut(&identity).ok_or(JournalError::Corrupt)?;
+        entry.acknowledged = true;
+        entry.signed_ack = Some(request.signed.clone());
+        Ok(tip)
+    }
+
+    /// Check exact current guest ACK authority without mutating journal state.
+    /// An endpoint may persist its ACK intent after this check, then must recheck
+    /// through `acknowledge_signed` before reporting completion.
+    pub fn verify_guest_ack(
+        &self,
+        request: JournalGuestAck<'_>,
+    ) -> Result<ReplayIdentity, JournalError> {
         if self.poisoned {
             return Err(JournalError::Uncertain);
         }
@@ -1353,24 +1371,10 @@ impl MailboxJournal {
             request.enrollment,
             &guest_key,
         )?;
-        if entry.acknowledged {
-            return if entry.signed_ack.as_ref() == Some(request.signed) {
-                Ok(self.tip)
-            } else {
-                Err(JournalError::ConflictingRetry)
-            };
+        if entry.acknowledged && entry.signed_ack.as_ref() != Some(request.signed) {
+            return Err(JournalError::ConflictingRetry);
         }
-        let tip = self.append(
-            JournalEvent::AcknowledgedSigned {
-                identity,
-                ack: Box::new(request.signed.clone()),
-            },
-            anchor,
-        )?;
-        let entry = self.seen.get_mut(&identity).ok_or(JournalError::Corrupt)?;
-        entry.acknowledged = true;
-        entry.signed_ack = Some(request.signed.clone());
-        Ok(tip)
+        Ok(identity)
     }
 
     fn open_for_reader(
@@ -1390,7 +1394,23 @@ impl MailboxJournal {
         let mut send_context = request.context.clone();
         send_context.acting_principal = entry.capability.grant.subject;
         send_context.expected_capability_issuer = entry.capability.grant.issuer;
-        send_context.required_operation = MailboxOperation::Send;
+        send_context.required_operation = if entry.capability.grant.message_kinds
+            == [mvm_contract::protocol::mailbox::MailboxMessageKind::Reply]
+            && entry
+                .capability
+                .grant
+                .operations
+                .allows(MailboxOperation::Reply)
+            && !entry
+                .capability
+                .grant
+                .operations
+                .allows(MailboxOperation::Send)
+        {
+            MailboxOperation::Reply
+        } else {
+            MailboxOperation::Send
+        };
         let opened = open_authenticated_envelope(
             &entry.envelope,
             &entry.capability,

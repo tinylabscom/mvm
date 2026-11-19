@@ -908,8 +908,7 @@ pub(crate) fn run_zigbuild(
     let mut cmd = mvm_core::env_hygiene::helper_command(&cargo);
     cmd.args(zigbuild_args_for_output(args))
         .current_dir(&spec.workspace_root);
-    apply_zigbuild_env(&mut cmd, spec, rustc.as_deref())?;
-    cmd.envs(env.iter().map(|(key, value)| (key, value)));
+    apply_zigbuild_env(&mut cmd, spec, rustc.as_deref(), env)?;
     // Cargo inherits stdio. Quiet mode suppresses routine progress while still
     // surfacing compiler errors; the CLI's verbose mode preserves raw output.
     let status = cmd
@@ -974,7 +973,7 @@ pub fn build_guest_binaries(
     let mut cmd = mvm_core::env_hygiene::helper_command(&cargo);
     cmd.args(zigbuild_args_for_output(&argv[1..]))
         .current_dir(&spec.workspace_root);
-    apply_zigbuild_env(&mut cmd, spec, rustc.as_deref())?;
+    apply_zigbuild_env(&mut cmd, spec, rustc.as_deref(), &[])?;
     // Cargo inherits stdio. Quiet mode suppresses routine progress while still
     // surfacing compiler errors; the CLI's verbose mode preserves raw output.
     let status = cmd
@@ -1018,23 +1017,24 @@ fn zigbuild_args_for_output(args: &[String]) -> Vec<String> {
     quiet
 }
 
-/// The flags every guest build carries unless a target sets its own. rustc asks
-/// the linker for `-Wl,-O1` on an optimized build, and zig's linker answers
-/// every link with "ignoring deprecated linker optimization setting '1'", which
-/// rustc's `linker_messages` lint reprints as a warning under each of the
-/// dozens of guest binaries. That message is zig's, not a problem in the code,
-/// so it is allowed here; the workspace's own builds keep the lint on.
+/// The lint allowance every guest build carries. rustc asks the linker for
+/// `-Wl,-O1` on an optimized build, and zig's linker answers every link with
+/// "ignoring deprecated linker optimization setting '1'", which rustc's
+/// `linker_messages` lint reprints as a warning under each of the dozens of
+/// guest binaries. That message is zig's, not a problem in the code, so it is
+/// allowed here; the workspace's own builds keep the lint on.
 ///
-/// Passed as `CARGO_BUILD_RUSTFLAGS`, never as `RUSTFLAGS` or
-/// `CARGO_ENCODED_RUSTFLAGS`: cargo lets either of those override the
-/// per-target `CARGO_TARGET_<TRIPLE>_RUSTFLAGS` that a musl shared object sets
-/// to turn static linking off, and with it back on the `cdylib` is not built.
+/// Cargo reads exactly one rustflags source and never merges them, so this
+/// allowance cannot ride a separate global source: it is combined with each
+/// recipe's own per-target flags into the single encoded source
+/// `apply_zigbuild_env` assembles, where nothing can shadow them.
 const ZIGBUILD_RUSTFLAGS: &str = "-Alinker-messages";
 
 fn apply_zigbuild_env(
     cmd: &mut std::process::Command,
     spec: &GuestAgentBuildSpec,
     rustc: Option<&Path>,
+    env: &[(String, String)],
 ) -> Result<(), GuestAgentBuildError> {
     if let Some(rustc) = rustc {
         cmd.env("RUSTC", rustc);
@@ -1046,11 +1046,26 @@ fn apply_zigbuild_env(
         .env("RUSTC_WRAPPER", "")
         .env("RUSTC_WORKSPACE_WRAPPER", "")
         .env_remove("RUSTUP_TOOLCHAIN")
+        // Cargo reads exactly one rustflags source and never merges them, so
+        // every global source the outer session may have set must be scrubbed
+        // here; the single encoded source below is assembled from the lint
+        // allowance and the recipe's own per-target flags, where neither can
+        // shadow the other.
         .env_remove("RUSTFLAGS")
-        // Scrub the outer session's overriding flags, so none can ride along or
-        // mask a target's own, then set the lowest-precedence default.
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .env("CARGO_BUILD_RUSTFLAGS", ZIGBUILD_RUSTFLAGS);
+        .env_remove("CARGO_BUILD_RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS");
+
+    cmd.envs(env.iter().map(|(key, value)| (key, value)));
+    let mut rustflags = ZIGBUILD_RUSTFLAGS.to_string();
+    for (key, value) in env {
+        if key.starts_with("CARGO_TARGET_") && key.ends_with("_RUSTFLAGS") {
+            for flag in value.split_whitespace() {
+                rustflags.push('\x1f');
+                rustflags.push_str(flag);
+            }
+        }
+    }
+    cmd.env("CARGO_ENCODED_RUSTFLAGS", rustflags);
 
     // Keep cargo-zigbuild's own cache under the mvm cache root instead of
     // whatever platform-global default the host picks (for example
@@ -1674,8 +1689,7 @@ mod tests {
             let mut cmd = std::process::Command::new("cargo");
             cmd.env("RUSTFLAGS", "-Zthreads=8")
                 .env("CARGO_ENCODED_RUSTFLAGS", "-Zthreads=8");
-            apply_zigbuild_env(&mut cmd, &spec, None).expect("configure zigbuild env");
-            cmd.envs(build.env.iter().map(|(k, v)| (k, v)));
+            apply_zigbuild_env(&mut cmd, &spec, None, &build.env).expect("configure zigbuild env");
 
             let value = |name: &str| {
                 cmd.get_envs()
@@ -1690,14 +1704,70 @@ mod tests {
                 value(&target_var).is_some_and(|f| f.contains("-C target-feature=-crt-static")),
                 "{so}: {target_var} must carry -crt-static"
             );
-            for global in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"] {
+            let encoded = value("CARGO_ENCODED_RUSTFLAGS")
+                .unwrap_or_else(|| panic!("{so}: the one encoded rustflags source must be set"));
+            assert!(
+                encoded.split('\x1f').any(|flag| flag == ZIGBUILD_RUSTFLAGS),
+                "{so}: the lint allowance must ride the encoded source"
+            );
+            assert!(
+                encoded.contains("target-feature=-crt-static"),
+                "{so}: the encoded source must carry the recipe's -crt-static"
+            );
+            for global in ["RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS"] {
                 assert_eq!(value(global), None, "{so}: {global} would shadow it");
             }
-            assert_eq!(
-                value("CARGO_BUILD_RUSTFLAGS").as_deref(),
-                Some(ZIGBUILD_RUSTFLAGS),
-                "{so}: the lint allowance must stay, at the lowest precedence"
-            );
+        }
+    }
+
+    #[test]
+    fn zigbuild_command_combines_extra_target_flags_with_linker_suppression() {
+        use std::ffi::OsStr;
+
+        let tmp = tempfile::tempdir().unwrap();
+        for arch in [GuestArch::Aarch64, GuestArch::X86_64] {
+            let spec =
+                GuestAgentBuildSpec::new(tmp.path().to_path_buf(), arch, tmp.path().join("target"));
+            for build in crate::guest_bins::extras::extra_builds(arch).unwrap() {
+                let mut cmd = std::process::Command::new("cargo");
+                cmd.args(build.args())
+                    .env("RUSTFLAGS", "-Zthreads=8")
+                    .env("CARGO_ENCODED_RUSTFLAGS", "-Zthreads=8");
+                apply_zigbuild_env(
+                    &mut cmd,
+                    &spec,
+                    Some(Path::new("/pinned/rustc")),
+                    &build.env,
+                )
+                .unwrap();
+                let path = build.member.path();
+                let mut expected = vec!["-Alinker-messages".to_string()];
+                if path.contains("/lib/musl/") {
+                    expected.extend(["-C".to_string(), "target-feature=-crt-static".to_string()]);
+                } else if path.contains("/initramfs/") {
+                    expected.extend(["-C".to_string(), "target-feature=+crt-static".to_string()]);
+                }
+                if path.contains("/lib/") && !path.ends_with("/libmvm_host_services.so") {
+                    let soname = path.rsplit('/').next().unwrap();
+                    expected.extend(["-C".to_string(), format!("link-arg=-Wl,-soname,{soname}")]);
+                }
+                let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+                assert_eq!(
+                    envs.get(OsStr::new("CARGO_ENCODED_RUSTFLAGS")),
+                    Some(&Some(OsStr::new(&expected.join("\x1f")))),
+                    "{path}: the single encoded source must combine the allowance with the recipe flags"
+                );
+                assert_eq!(
+                    envs.get(OsStr::new("CARGO_BUILD_RUSTFLAGS")),
+                    Some(&None),
+                    "{path}: a second rustflags source would shadow the merge"
+                );
+                assert_eq!(envs.get(OsStr::new("RUSTFLAGS")), Some(&None));
+                assert_eq!(
+                    envs.get(OsStr::new("RUSTC")),
+                    Some(&Some(OsStr::new("/pinned/rustc")))
+                );
+            }
         }
     }
 
@@ -1713,7 +1783,7 @@ mod tests {
             .env("CARGO_ENCODED_RUSTFLAGS", "-Zthreads=8")
             .env("RUSTC_WRAPPER", "outer-rustc-wrapper")
             .env("RUSTUP_TOOLCHAIN", "nightly");
-        apply_zigbuild_env(&mut cmd, &spec, Some(Path::new("/pinned/rustc")))
+        apply_zigbuild_env(&mut cmd, &spec, Some(Path::new("/pinned/rustc")), &[])
             .expect("configure zigbuild env");
 
         let envs: std::collections::HashMap<_, _> = cmd
@@ -1755,13 +1825,16 @@ mod tests {
             Some(&Some(std::ffi::OsString::new()))
         );
         assert_eq!(
-            envs.get(std::ffi::OsStr::new("CARGO_BUILD_RUSTFLAGS")),
+            envs.get(std::ffi::OsStr::new("CARGO_ENCODED_RUSTFLAGS")),
             Some(&Some(std::ffi::OsString::from("-Alinker-messages"))),
             "the guest build carries only the flag that silences zig's linker notice, not the outer session's"
         );
-        // An overriding flag set would replace a target's own flags, such as the
-        // `-crt-static` a musl shared object needs.
-        for removed in ["RUSTUP_TOOLCHAIN", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"] {
+        // A second rustflags source would replace a target's own flags, such
+        // as the `-crt-static` a musl shared object needs: cargo reads one
+        // source and never merges. The encoded source itself is re-set below
+        // from the allowance, so the outer session's value cannot leak through
+        // it either.
+        for removed in ["RUSTUP_TOOLCHAIN", "RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS"] {
             assert_eq!(
                 envs.get(std::ffi::OsStr::new(removed)),
                 Some(&None),

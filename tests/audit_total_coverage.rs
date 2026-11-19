@@ -673,6 +673,10 @@ const CAPTURE_SUB: &[(&str, AuditPosture)] = &[
 /// `crates/mvm-cli/src/commands/mod.rs`. Adding a new command? Add
 /// an entry here — the test below fails until you do.
 const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
+    (
+        "actor",
+        AuditPosture::DelegatesToSub(&[("launch", AuditPosture::Emits("cmd.actor"))]),
+    ),
     // Environment / installer surfaces: bootstrap/cleanup/
     // uninstall/update/sign grouped under `env <sub>`.
     ("env", AuditPosture::DelegatesToSub(ENV_SUB)),
@@ -1008,6 +1012,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         // `machine mailbox recv` signs one payload-free read entry.
         "mailbox.read",
         // Top-level command audit envelopes.
+        "cmd.actor",
         "cmd.agent-session",
         "cmd.build",
         "cmd.deploy",

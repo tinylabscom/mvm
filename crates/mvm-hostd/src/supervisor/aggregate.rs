@@ -1271,6 +1271,7 @@ mod tests {
 
     fn sample_plan() -> ExecutionPlan {
         let mut plan = ExecutionPlan {
+            workflow: None,
             execution_epoch: 1,
             mailbox: None,
             grants: None,

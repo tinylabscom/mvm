@@ -78,6 +78,11 @@ pub struct ExecutionPlan {
     pub tenant: TenantId,
     pub workload: WorkloadId,
 
+    /// Optional membership and lifecycle delegation. Absent direct plans do not
+    /// initialize workflow services and retain their existing signed bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<crate::protocol::workload_actor::WorkflowBinding>,
+
     /// Which backend / runtime profile this workload runs on.
     /// Resolved by `BackendRegistry`.
     pub runtime_profile: RuntimeProfileRef,
@@ -440,6 +445,7 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
 
     let valid_from = Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0).unwrap();
     ExecutionPlan {
+        workflow: None,
         execution_epoch: 1,
         environment: None,
         runtime_identity: None,

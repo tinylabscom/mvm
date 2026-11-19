@@ -159,6 +159,8 @@ impl<'a> Default for AuditSignerSpawnParamsBuilder<'a> {
 pub struct AuditSignerHandle {
     /// The UDS the audit-signer bound and the broker forwards entries to.
     pub uds_path: PathBuf,
+    /// Original child custody; dropping this handle preserves detached behavior.
+    pub child: std::process::Child,
 }
 
 /// Spawn the per-VM `mvm-audit-signer` moat. Hands it a JSON `SubprocessConfig`
@@ -211,14 +213,18 @@ fn spawn_audit_signer_with_timeout(
     let child = spawn_detached_with_config(&bin, &cfg, "mvm-audit-signer")?;
     // The audit-signer emits no stdout handshake — it binds its UDS after
     // parsing config. Readiness = the UDS path appears. On timeout, fail closed.
-    wait_for_uds("mvm-audit-signer", &uds_path, child.id(), ready_timeout)?;
-
-    let pid_file = state_dir.join(AUDIT_SIGNER_PID_FILE);
-    std::fs::write(&pid_file, child.id().to_string())
-        .map_err(|e| anyhow!("write {}: {e}", pid_file.display()))?;
+    let ready = (|| {
+        wait_for_uds("mvm-audit-signer", &uds_path, ready_timeout)?;
+        let pid_file = state_dir.join(AUDIT_SIGNER_PID_FILE);
+        std::fs::write(&pid_file, child.id().to_string())
+            .map_err(|e| anyhow!("write {}: {e}", pid_file.display()))
+    })();
+    if let Err(error) = ready {
+        return Err(super::retained_spawn::rollback(error, child));
+    }
     // Detach: drop the child handle without killing. The subprocess runs
     // daemonized (setsid) and is reaped by the stop path via the PID file.
-    Ok(AuditSignerHandle { uds_path })
+    Ok(AuditSignerHandle { uds_path, child })
 }
 
 /// Locate a per-VM subprocess binary `bin`: `<env_var>` override → the host
@@ -267,10 +273,10 @@ pub fn resolve_subprocess_bin_for(bin: &str, env_var: &str, host: &HostProcess) 
 
 /// Poll for the subprocess's UDS to appear within `timeout`. The subprocess
 /// binds it shortly after parsing its stdin config; a missing socket past the
-/// deadline (or an early exit) means the spawn failed — SIGKILL it and bail so
-/// the caller rolls back the VM (fail closed). Adaptive backoff keeps a fast
+/// deadline means the spawn failed; the caller retains the Child for rollback.
+/// Adaptive backoff keeps a fast
 /// bind cheap while bounding a slow one.
-pub(crate) fn wait_for_uds(what: &str, uds_path: &Path, pid: u32, timeout: Duration) -> Result<()> {
+pub(crate) fn wait_for_uds(what: &str, uds_path: &Path, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     let mut backoff = Duration::from_millis(5);
     loop {
@@ -278,7 +284,6 @@ pub(crate) fn wait_for_uds(what: &str, uds_path: &Path, pid: u32, timeout: Durat
             return Ok(());
         }
         if Instant::now() >= deadline {
-            kill(pid as libc::pid_t, libc::SIGKILL);
             bail!(
                 "{what} did not bind {} within {timeout:?}",
                 uds_path.display()
@@ -338,6 +343,7 @@ pub struct BrokerSpawnParams<'a> {
     /// Exact host-service bindings from the admitted execution plan.
     pub services: &'a [mvm_core::protocol::broker::ServiceId],
     pub capability_bindings: &'a [mvm_contract::protocol::agent_capability::CapabilityBinding],
+    pub service_proxies: &'a [mvm_contract::protocol::broker_control::ServiceProxyBinding],
 }
 
 impl<'a> BrokerSpawnParams<'a> {
@@ -360,6 +366,7 @@ pub struct BrokerSpawnParamsBuilder<'a> {
     audit_signer_uds_path: Option<&'a Path>,
     services: Option<&'a [mvm_core::protocol::broker::ServiceId]>,
     capability_bindings: Option<&'a [mvm_contract::protocol::agent_capability::CapabilityBinding]>,
+    service_proxies: &'a [mvm_contract::protocol::broker_control::ServiceProxyBinding],
 }
 
 impl<'a> BrokerSpawnParamsBuilder<'a> {
@@ -374,6 +381,7 @@ impl<'a> BrokerSpawnParamsBuilder<'a> {
             audit_signer_uds_path: None,
             services: None,
             capability_bindings: None,
+            service_proxies: &[],
         }
     }
 
@@ -428,9 +436,20 @@ impl<'a> BrokerSpawnParamsBuilder<'a> {
         self
     }
 
+    /// Bind an admitted actor holder's opaque route.
+    #[must_use]
+    pub fn service_proxies(
+        mut self,
+        proxies: &'a [mvm_contract::protocol::broker_control::ServiceProxyBinding],
+    ) -> Self {
+        self.service_proxies = proxies;
+        self
+    }
+
     /// Finish, or name the first required field left unset.
     pub fn build(self) -> Result<BrokerSpawnParams<'a>, BuilderError> {
         Ok(BrokerSpawnParams {
+            service_proxies: self.service_proxies,
             workload_id: self
                 .workload_id
                 .ok_or(BuilderError::missing("BrokerSpawnParams", "workload_id"))?,
@@ -471,6 +490,8 @@ impl<'a> Default for BrokerSpawnParamsBuilder<'a> {
 pub struct BrokerHandle {
     /// The `vm_vsock_port_socket(vm_name, BROKER_PORT)` the broker bound.
     pub uds_path: PathBuf,
+    /// Original child custody; dropping this handle preserves detached behavior.
+    pub child: std::process::Child,
 }
 
 /// Spawn the per-VM `mvm-broker` moat, binding the `BROKER_PORT` UDS the VMM
@@ -487,6 +508,28 @@ fn spawn_broker_with_timeout(
     params: BrokerSpawnParams<'_>,
     ready_timeout: Duration,
 ) -> Result<BrokerHandle> {
+    spawn_broker_with_routes(params, ready_timeout, &[])
+}
+
+/// Spawn the existing broker with admitted opaque actor routes and retain its child.
+pub fn spawn_broker_with_actor_routes(
+    params: BrokerSpawnParams<'_>,
+    routes: &[mvm_contract::protocol::broker_control::ServiceProxyBinding],
+) -> Result<BrokerHandle> {
+    anyhow::ensure!(
+        routes
+            .iter()
+            .all(|route| route.service.as_str() == "host.actor.v1"),
+        "owned broker supports only the admitted actor route"
+    );
+    spawn_broker_with_routes(params, BROKER_READY_TIMEOUT, routes)
+}
+
+fn spawn_broker_with_routes(
+    params: BrokerSpawnParams<'_>,
+    ready_timeout: Duration,
+    routes: &[mvm_contract::protocol::broker_control::ServiceProxyBinding],
+) -> Result<BrokerHandle> {
     let BrokerSpawnParams {
         workload_id,
         tenant_id,
@@ -495,7 +538,17 @@ fn spawn_broker_with_timeout(
         audit_signer_uds_path,
         services,
         capability_bindings,
+        service_proxies,
     } = params;
+    anyhow::ensure!(
+        routes.is_empty() || service_proxies.is_empty() || routes == service_proxies,
+        "conflicting admitted actor routes"
+    );
+    let routes = if routes.is_empty() {
+        service_proxies
+    } else {
+        routes
+    };
     let bin = resolve_subprocess_bin_to_spawn(&AuxBin::new(
         "mvm-broker",
         "MVM_BROKER_PATH",
@@ -520,16 +573,23 @@ fn spawn_broker_with_timeout(
         "audit_signer_uds_path": audit_signer_uds_path,
         "services_bindings": services,
         "capability_bindings": capability_bindings,
+        "service_proxies": routes,
     });
 
     let child = spawn_detached_with_config(&bin, &cfg, "mvm-broker")?;
     // No stdout handshake — the broker just binds. Readiness = the UDS appears.
-    wait_for_uds("mvm-broker", uds_path, child.id(), ready_timeout)?;
-    let pid_file = state_dir.join(BROKER_PID_FILE);
-    std::fs::write(&pid_file, child.id().to_string())
-        .map_err(|e| anyhow!("write {}: {e}", pid_file.display()))?;
+    let ready = (|| {
+        wait_for_uds("mvm-broker", uds_path, ready_timeout)?;
+        let pid_file = state_dir.join(BROKER_PID_FILE);
+        std::fs::write(&pid_file, child.id().to_string())
+            .map_err(|e| anyhow!("write {}: {e}", pid_file.display()))
+    })();
+    if let Err(error) = ready {
+        return Err(super::retained_spawn::rollback(error, child));
+    }
     Ok(BrokerHandle {
         uds_path: uds_path.to_path_buf(),
+        child,
     })
 }
 
@@ -562,15 +622,22 @@ pub fn spawn_detached_with_config(
             Ok(())
         });
     }
+    super::process_exit::require_owned_child_custody()?;
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow!("spawn {what} ({}): {e}", bin.display()))?;
-    child
+    let written = child
         .stdin
         .take()
-        .ok_or_else(|| anyhow!("{what} stdin was not piped"))?
-        .write_all(cfg.to_string().as_bytes())
-        .map_err(|e| anyhow!("pipe SubprocessConfig to {what}: {e}"))?;
+        .ok_or_else(|| anyhow!("{what} stdin was not piped"))
+        .and_then(|mut stdin| {
+            stdin
+                .write_all(cfg.to_string().as_bytes())
+                .map_err(|e| anyhow!("pipe SubprocessConfig to {what}: {e}"))
+        });
+    if let Err(error) = written {
+        return Err(super::retained_spawn::rollback(error, child));
+    }
     // (stdin writer dropped here → EOF, so the subprocess stops reading config.)
     Ok(child)
 }
@@ -791,6 +858,7 @@ pub fn spawn_broker_services_if_admitted(
         audit_signer_uds_path: &audit.uds_path,
         services,
         capability_bindings,
+        service_proxies: &[],
     })?;
     Ok(guard)
 }
@@ -958,6 +1026,41 @@ mod tests {
     }
 
     #[test]
+    fn audit_signer_pid_write_failure_returns_original_reaped_custody() {
+        let _lock = HOME_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(dir.path());
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(state.join(AUDIT_SIGNER_PID_FILE)).unwrap();
+        let stub = dir.path().join("audit-signer");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\ncat >/dev/null\ntouch '{}'\nexec sleep 30\n",
+                state.join(AUDIT_SIGNER_SOCK).display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        env.set("MVM_AUDIT_SIGNER_PATH", &stub);
+        let error = match spawn_audit_signer(AuditSignerSpawnParams {
+            workload_id: "actor",
+            tenant_id: "tenant",
+            vm_name: "actor",
+            state_dir: &state,
+        }) {
+            Ok(_) => panic!("PID path directory must refuse startup"),
+            Err(error) => error,
+        };
+        let retained = error
+            .downcast_ref::<crate::host::retained_spawn::RetainedSpawnFailure>()
+            .expect("PID-write failure retains original child rollback");
+        retained.retry_stop().unwrap();
+        retained.retry_stop().unwrap();
+    }
+
+    #[test]
     fn spawn_audit_signer_errors_when_bin_override_missing() {
         let _g = HOME_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let mut env = TestEnv::new();
@@ -1015,6 +1118,7 @@ mod tests {
             audit_signer_uds_path: &audit_uds,
             services: &[],
             capability_bindings: &[],
+            service_proxies: &[],
         });
 
         let handle = res.expect("spawn with stub broker should succeed");

@@ -373,6 +373,17 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
         release: Option<&mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime>,
     ) -> Result<VmId> {
+        self.start_retaining_vm(config, images, release)
+            .map(|vm| vm.id().clone())
+    }
+
+    /// Keep the original native owner instead of reducing a successful launch to its name.
+    pub(crate) fn start_retaining_vm(
+        &self,
+        config: &VmStartConfig,
+        images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
+        release: Option<&mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime>,
+    ) -> Result<Box<dyn RunningVm>> {
         let _activation_barrier =
             mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
         let state_dir = vm_state_dir(&config.name);
@@ -413,10 +424,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             network_policy: &config.network_policy,
             cmdline,
         };
-        match self.start_workload_custodied_with_release(&inputs, images, release) {
-            Ok(_vm) => Ok(VmId(config.name.clone())),
-            Err(e) => Err(e),
-        }
+        self.start_workload_custodied_with_release(&inputs, images, release)
     }
 
     pub(super) fn start_workload_custodied_with_release(

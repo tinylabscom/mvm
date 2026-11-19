@@ -168,6 +168,118 @@ than the default `dev`, such as `--profile standard`, resolves to one); the gues
 production build too. Dynamic port forwarding is refused: declare ingress
 with `network=` before boot. SSH is not part of the SDK or runtime contract.
 
+## In-guest actors and durable messages
+
+`mvm.actor` and `mvm.mailbox` are the in-guest interfaces for the initial
+**cold native HVF workflow**: one admitted controller and depth-one,
+non-delegating workers. They are separate from host-local `Machine` and
+`Sandbox` automation. Launch the parent with
+`mvmctl actor launch MANIFEST [--json]`, using a host-authored exact manifest
+with finite budgets and validity windows. The native HVF witness exercises the
+shared actor/mailbox path with Rust guest fixtures. Python wrapper tests are
+separate; that native witness is not evidence of a Python-guest end-to-end run.
+
+### Lifecycle authority
+
+The parent must have workflow membership, an explicit lifecycle grant, and
+the admitted `host.actor.v1` service. A direct workload has no implicit actor
+authority, and a worker cannot recursively launch another worker.
+
+| Python API | Meaning |
+| --- | --- |
+| `mvm.actor.launch_child(grant_id, template_id, *, idempotency_key, timeout_secs=60.0)` | Select one exact template from the signed grant |
+| `mvm.actor.observe_child(handle, *, timeout_secs=60.0)` | Observe the child bound to this authenticated controller |
+| `mvm.actor.release_child(handle, *, idempotency_key, timeout_secs=60.0)` | Request destruction; do not assume cleanup has finished |
+
+These calls use the admitted encrypted lifecycle channel. They carry no task
+payload, arbitrary argv/environment, resource overrides, backend selection,
+or placement. Templates determine what a child runs; task data travels through
+the mailbox instead.
+
+Each call returns one of the following typed outcomes:
+
+- `Pending(request_id)`: durable intent exists, without a completed launch result.
+- `Running(handle)`: the host confirmed the admitted child is running.
+- `Released(request_id)`: child death, resource cleanup, and the terminal record
+  are confirmed.
+- `Refused(code)`: the operation was refused without granting authority.
+- `Unknown(request_id)`: dispatch occurred but its result is uncertain.
+
+`Unknown` is not permission to redispatch with a new idempotency key, and it
+does not mean released. Retain the original operation identity when reconciling
+an uncertain result. The SDK does not automatically retry lifecycle calls.
+A transport exception or timeout also does not establish that no effect occurred.
+Only `Released` confirms release; used children never reenter shared warm capacity.
+
+`Running.handle` is an `ActorHandle`. Its opaque token is redacted from `repr`;
+do not serialize it into logs. The host checks the token against its journal and
+the authenticated controller boot. Constructing or copying a Python handle
+does not mint authority. `handle.mailbox` returns the canonical mailbox address,
+not a host route, and knowing that address does not grant permission to send.
+
+### Explicit mailbox calls, replies, and acknowledgements
+
+`mvm.mailbox` uses the dedicated encrypted mailbox channel and its existing
+guest-local reader bridge, not the lifecycle broker. The boot projection pins
+the canonical address, policy epoch, and reader identity; the guest does not
+accept a replacement identity from a host handshake.
+
+| Python API | Meaning |
+| --- | --- |
+| `mvm.mailbox.call(destination, payload, *, message_id, correlation_id, deadline_unix_ms, content_type, timeout_secs=60.0)` | Queue a call under explicit, retained message identities |
+| `mvm.mailbox.receive(*, timeout_secs=60.0)` | Receive an authorized request without acknowledging its application effect |
+| `mvm.mailbox.reply(request_message_id, payload, *, message_id, content_type, timeout_secs=60.0)` | Reply under that request's scoped reply authority, not an arbitrary reverse-send grant |
+| `mvm.mailbox.receive_result(call_message_id, *, timeout_secs=60.0)` | Receive a reply correlated to the original call |
+| `mvm.mailbox.ack_request(request_message_id, *, lease, timeout_secs=60.0)` | Acknowledge processing of the exact delivered request lease |
+| `mvm.mailbox.ack_result(call_message_id, result_message_id, *, lease, timeout_secs=60.0)` | Acknowledge processing of the exact delivered reply lease |
+
+Payloads are `bytes`. Message and correlation IDs are exactly 32-byte `bytes`
+values; retain them across recovery rather than generating new IDs for an
+uncertain operation. `destination` is a canonical address dictionary, such as
+the one returned by `handle.mailbox`. `content_type` is a dictionary with
+`name` and `version` fields selected from the workload's actual mailbox policy.
+`deadline_unix_ms` is an explicit absolute deadline;
+`timeout_secs` bounds the local operation and does not extend mailbox authority.
+Mailbox timeouts must be finite and between 1 and 300 seconds; the shared C ABI
+uses whole seconds. Python delegates framing to that Rust transport rather than
+implementing a separate mailbox wire. Conversation wire version 2 carries the
+remaining caller budget through the guest-local bridge and authenticated host
+exchange. Queueing and handshake time consume that budget. Receive waits are
+also capped by signed reader/enrollment expiry and the retained call deadline;
+disconnecting the local caller cancels its wait, not the durable call itself.
+Version 1 conversation frames refuse rather than being guessed or downgraded.
+The current guest bridge admits one active exchange. Concurrent operations receive
+an explicit unavailable refusal instead of waiting behind a long Receive. Cancel
+or finish that observation before issuing a Reply, ACK, or another Call from the
+same guest. Expiration ends the observation; it does not promise a `pending`
+response after the response deadline or establish non-execution.
+Freshly signed enrollment or delivery material can require a short bounded wait
+for the guest clock to reach its issuance time. This consumes the existing caller
+budget; it does not adjust clocks, accept future authority, or extend a lease.
+
+Responses are dictionaries. A `queued` outcome from `call` means durable source
+intent, not destination acceptance and not an application reply. Even destination
+acceptance as durable is distinct from application processing. Only an outcome
+of `delivery` carries a delivered message: its `payload` is decoded to `bytes`,
+its `header` identifies the message, and its `lease` is the canonical delivery
+lease needed for acknowledgement.
+
+Process the delivered payload before acknowledging it. Pass the **exact**
+`delivery["lease"]` to `ack_request` or `ack_result`, along with the matching
+message IDs from the delivered header and original call. Convert header ID
+arrays to `bytes`, for example `bytes(delivery["header"]["message_id"])`.
+The guest bridge signs the canonical ACK; the SDK does not fabricate or replace
+the lease. An `acknowledged` outcome confirms the ACK operation, not a separate application
+reply. Receiving, replying, and acknowledging are separate calls; none implicitly
+acknowledges another.
+
+The transport is at-least-once, so applications must deduplicate effects.
+`pending` and `timed_out` do not prove that the remote handler did not execute.
+The SDK does not automatically retry, ACK, or treat an uncertain response as
+permission to repeat application effects. These boundaries rely on the trusted
+host and admitted policy; they do not provide confidentiality from a compromised
+active host.
+
 ## Machine lifecycle
 
 `mv.Machine` covers the machine lifecycle for host automation. Admission,

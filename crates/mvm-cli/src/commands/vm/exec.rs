@@ -940,6 +940,7 @@ pub(in crate::commands) fn run_secure_started(
             .transpose()
             .context("serializing admitted policy bundle for the transient run")?;
         let substrate = crate::exec::SessionAuditSubstrate {
+            host_budget: c.admitted.host_budget_permit(),
             tenant_id: c.admitted.plan().tenant.0.clone(),
             plan_json,
             audit_context: c.admitted.workload_audit_context(),

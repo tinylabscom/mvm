@@ -55,6 +55,20 @@ fn send(stream: &mut UnixStream, request: &SignedControl) -> bool {
 }
 
 #[test]
+fn repeated_observation_connections_are_not_extra_owner_refusals() {
+    let _home = home();
+    let (_owner, stop) = control("observations");
+    let instance = wire::read_instance("observations").unwrap();
+    let (_, root) = wire::existing_operator().unwrap();
+    for _ in 0..3 {
+        let (stream, response) = challenge("observations");
+        verify_challenge(&response, &root, &instance, &[9; 32]).unwrap();
+        drop(stream);
+    }
+    assert!(!stop.load(Ordering::Acquire));
+}
+
+#[test]
 fn valid_stop_dispatches_but_does_not_publish_terminal_or_remove_evidence() {
     let _home = home();
     let (owner, stop) = control("dispatch");

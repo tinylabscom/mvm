@@ -17,6 +17,125 @@ fn registered_guard() -> BrokerGuard {
     ))
 }
 
+struct FailingActorBroker;
+
+#[test]
+fn runtime_no_dispatch_proof_binds_preboot_refusal_and_is_lost_before_dispatch() {
+    let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .expect("home lock");
+    let (_env, _home) = isolated_runtime_home();
+    let root = tempfile::tempdir().unwrap();
+    let rootfs = root.path().join("rootfs.ext4");
+    std::fs::write(&rootfs, b"unprepared image").unwrap();
+    let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+    plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
+    let signed = mvm_core::plan::sign_plan(
+        &plan,
+        &ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
+        "host:test",
+    );
+    let cfg = VmStartConfig {
+        name: "runtime-preboot-refusal".into(),
+        rootfs_path: rootfs.display().to_string(),
+        plan_json: Some(serde_json::to_string(&signed).unwrap()),
+        ..Default::default()
+    };
+    let driver = MockDriver::default();
+    let runner = WorkloadRunner::new(
+        driver.clone(),
+        RecordingSpawner::new("/run/ep.sock"),
+        FailingActorBroker,
+    );
+    assert!(runner.start_retaining_vm(&cfg, Vec::new(), None).is_err());
+    assert!(driver.booted_specs().is_empty());
+    assert!(runner.spawner.seen.lock().unwrap().is_none());
+    let proof = runner
+        .no_dispatch_proof(&cfg)
+        .expect("original preboot refusal");
+    assert!(proof.matches_launch(&cfg.name, &plan));
+    assert!(!proof.matches_launch("another-vm", &plan));
+    let mut other = plan.clone();
+    other.nonce = Nonce::from_bytes([42; 16]);
+    assert!(!proof.matches_launch(&cfg.name, &other));
+    assert!(proof.signed_plan_for("another-vm").is_none());
+
+    runner.begin_dispatch();
+    assert!(runner.no_dispatch_proof(&cfg).is_none());
+}
+
+impl BrokerRegistrar for FailingActorBroker {
+    fn register(&self, _request: &BrokerRegisterRequest<'_>) -> Result<BrokerGuard> {
+        anyhow::bail!("injected actor broker registration failure")
+    }
+}
+
+#[test]
+fn actor_postboot_broker_failure_retains_original_vm_without_best_effort_stop() {
+    let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .expect("home lock");
+    let (_env, _home) = isolated_runtime_home();
+    let driver = MockDriver::default();
+    let slot = Arc::new(std::sync::Mutex::new(None));
+    let runner = WorkloadRunner::new(
+        driver.clone(),
+        RecordingSpawner::new("/run/ep.sock"),
+        FailingActorBroker,
+    )
+    .with_actor_custody(Arc::clone(&slot));
+    let cfg = config("actor-broker-refused");
+    assert!(runner.boot_bound_workload(&launch(&cfg)).is_err());
+    assert!(runner.no_dispatch_proof(&cfg).is_none());
+    let original = slot
+        .lock()
+        .unwrap()
+        .take()
+        .expect("original booted VM retained");
+    assert_eq!(original.id().0, cfg.name);
+    assert!(
+        driver.killed_vms().is_empty(),
+        "failure must retain original custody"
+    );
+    original.kill().unwrap();
+    assert_eq!(driver.killed_vms(), vec![cfg.name]);
+}
+
+#[test]
+fn actor_postboot_activation_barrier_failure_retains_original_vm() {
+    let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .expect("home lock");
+    let (_env, _home) = isolated_runtime_home();
+    let driver = MockDriver::default();
+    let slot = Arc::new(std::sync::Mutex::new(None));
+    let runner = WorkloadRunner::new(
+        driver.clone(),
+        RecordingSpawner::new("/run/ep.sock"),
+        RecordingBrokerRegistrar::new(),
+    )
+    .with_actor_custody(Arc::clone(&slot));
+    let cfg = checked_source_launch_config(
+        "actor-activation-refused",
+        Some(
+            mvm_core::admission_durability::AdmissionDurability::spawn(|| {
+                anyhow::bail!("injected activation durability refusal")
+            })
+            .unwrap(),
+        ),
+    );
+    assert!(runner.start_workload(&launch(&cfg)).is_err());
+    let original = slot
+        .lock()
+        .unwrap()
+        .take()
+        .expect("original booted VM retained");
+    assert_eq!(original.id().0, cfg.name);
+    assert!(driver.killed_vms().is_empty());
+    original.kill().unwrap();
+    assert_eq!(driver.killed_vms(), vec![cfg.name]);
+}
+
 #[test]
 fn a_workload_that_bound_no_host_service_is_not_degraded() {
     assert!(BrokerGuard::defused().services_healthy(&[]));

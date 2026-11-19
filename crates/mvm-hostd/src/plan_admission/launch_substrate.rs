@@ -168,6 +168,9 @@ pub fn persists_plan_before_start(backend: &str) -> bool {
 /// boundary for unmigrated launches), after audit-substrate population and
 /// before the bridge spawn reads the signed envelope back from disk. No-op
 /// without `cfg.plan_json`; files land at mode 0600 via [`write_secret_file`].
+///
+/// Preserve the admitted envelope bytes rather than reconstructing a plan from
+/// persisted state. Bridge and mailbox helpers read this same per-run copy.
 pub fn stash_plan_for_bridge(cfg: &mvm_core::vm_backend::VmStartConfig) -> Result<()> {
     stash_plan_and_mint_verb_grant(cfg).map(|_| ())
 }

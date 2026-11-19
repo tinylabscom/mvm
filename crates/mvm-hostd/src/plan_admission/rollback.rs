@@ -153,7 +153,7 @@ pub fn apply_admitted_grants_or_undo_launch(
     )
 }
 
-fn apply_admitted_grants_with_rollback(
+pub(super) fn apply_admitted_grants_with_rollback(
     backend: &AnyBackend,
     vm_id: &VmId,
     admitted: &AdmittedPlan,
@@ -231,12 +231,7 @@ fn record_charge_with_rollback(
     rollback: impl FnOnce() -> Result<()>,
     audit_policy: FailureAuditPolicy,
 ) -> Result<()> {
-    let undeclared = Grants::default();
-    let charge = crate::admission_budget::charge_for(
-        admitted.plan().resources.mem_mib,
-        admitted.plan().grants.as_ref().unwrap_or(&undeclared),
-    );
-    crate::admission_budget::record_charge(vm_name, charge).map_err(|err| {
+    admitted.host_budget.record_started(vm_name).map_err(|err| {
         undo_launch_with(
             UndoLaunch {
                 backend,

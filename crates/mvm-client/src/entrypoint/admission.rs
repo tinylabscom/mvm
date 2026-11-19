@@ -272,6 +272,7 @@ impl EntrypointAdmission {
             .transpose()?;
         Ok(AdmittedEntrypoint {
             substrate: SessionAuditSubstrate {
+                host_budget: ctx.admitted.host_budget_permit(),
                 tenant_id: ctx.admitted.plan().tenant.0.clone(),
                 plan_json,
                 audit_context: ctx.admitted.workload_audit_context(),

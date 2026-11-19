@@ -245,6 +245,10 @@ pub struct VmStartConfig {
     /// Audit identity projected by the admitting host.
     /// Missing context never implies a builder identity.
     pub audit_context: Option<crate::audit_sink::AuditContext>,
+    /// Public mailbox target issued by the trusted VM-scoped provider before boot.
+    /// The runtime combines it with fresh reader credentials; it never derives
+    /// an address or policy epoch from a peer's handshake or global key store.
+    pub mailbox_conversation: Option<crate::mailbox::conversation_wire::ConversationTarget>,
     /// Optional caller registration from the trusted entrypoint admission path.
     /// This is not producer readiness and is not accepted by warm launches.
     pub caller_registration: Option<caller_registration::CallerRegistration>,

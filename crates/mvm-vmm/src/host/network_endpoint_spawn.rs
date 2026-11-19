@@ -998,7 +998,14 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
 /// the `mvmctl` that booted the VM; the stop path reaps
 /// it via [`SUBST_PID_FILE`]. The real secret values never leave the endpoint's
 /// address space — only the opaque placeholders are persisted/handed out.
-pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result<()> {
+pub fn spawn_network_endpoint(params: SubstitutionSpawnParams<'_>) -> Result<()> {
+    spawn_network_endpoint_retained(params).map(drop)
+}
+
+/// Run the ordinary endpoint handshake without discarding its original child.
+pub fn spawn_network_endpoint_retained(
+    mut params: SubstitutionSpawnParams<'_>,
+) -> Result<std::process::Child> {
     use std::io::Write;
     validate_audit_context(&params)?;
     // One resolution point for every backend. A caller that supplied a proxy
@@ -1063,60 +1070,67 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
     }
     let pid_file = state_dir.join(SUBST_PID_FILE);
     let env_path = mvm_core::config::vm_substitution_env_path(vm_name);
+    crate::host::process_exit::require_owned_child_custody()?;
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow!("spawn substitution endpoint ({}): {e}", bin.display()))?;
-    let mut process_guard = SpawnedEndpointGuard::new(child.id(), &pid_file, &env_path);
+    let mut sidecars = SpawnedEndpointSidecars::new(&pid_file, &env_path);
 
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow!("substitution endpoint stdin was not piped"))?
-        .write_all(cfg.to_string().as_bytes())
-        .map_err(|e| anyhow!("pipe EndpointConfig to substitution endpoint: {e}"))?;
-    // (stdin writer dropped here → EOF, so the endpoint stops reading config.)
+    let configured = (|| -> Result<()> {
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("substitution endpoint stdin was not piped"))?
+            .write_all(cfg.to_string().as_bytes())
+            .map_err(|e| anyhow!("pipe EndpointConfig to substitution endpoint: {e}"))?;
+        // (stdin writer dropped here → EOF, so the endpoint stops reading config.)
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow!("substitution endpoint stdout was not piped"))?;
-    let handshake = read_handshake_line(
-        stdout,
-        child.id(),
-        handshake_timeout(),
-        &HandshakeContext {
-            endpoint: &bin,
-            stderr_log: Some(&stderr_log),
-        },
-    )?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("substitution endpoint stdout was not piped"))?;
+        let handshake = read_handshake_line(
+            stdout,
+            child.id(),
+            handshake_timeout(),
+            &HandshakeContext {
+                endpoint: &bin,
+                stderr_log: Some(&stderr_log),
+            },
+        )?;
 
-    // The start time beside the pid is what lets a later reap tell this
-    // process from whatever is handed its pid after it exits.
-    mvm_core::atomic_io::write_private_ephemeral(
-        &pid_file,
-        EndpointPid::of_child(child.id()).render().as_bytes(),
-    )
-    .map_err(|e| anyhow!("write {}: {e}", pid_file.display()))?;
-    process_guard.mark_pid_written();
-    if let Some(parent) = env_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| anyhow!("create {}: {e}", parent.display()))?;
+        // The start time beside the pid is what lets a later reap tell this
+        // process from whatever is handed its pid after it exits.
+        mvm_core::atomic_io::write_private_ephemeral(
+            &pid_file,
+            EndpointPid::of_child(child.id()).render().as_bytes(),
+        )
+        .map_err(|e| anyhow!("write {}: {e}", pid_file.display()))?;
+        sidecars.pid_written = true;
+        if let Some(parent) = env_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow!("create {}: {e}", parent.display()))?;
+        }
+        // The two halves part company here. Only `env` is persisted, because only
+        // the guest launch env needs to survive into a later `mvmctl` invocation;
+        // the fingerprints stay in this process, which is the one that will open
+        // the input gate.
+        let env_json = serde_json::to_vec(&handshake.env)
+            .map_err(|e| anyhow!("serialize substitution env for {}: {e}", env_path.display()))?;
+        // The launch env is configuration: owner-only, and a link at the path is
+        // replaced rather than written through.
+        mvm_core::atomic_io::write_private_ephemeral(&env_path, &env_json)
+            .map_err(|e| anyhow!("write {}: {e}", env_path.display()))?;
+        record_secret_fingerprints(vm_name, handshake.input_fingerprints);
+        sidecars.env_written = true;
+        Ok(())
+    })();
+    if let Err(error) = configured {
+        let error = crate::host::retained_spawn::rollback(error, child);
+        sidecars.remove_after_rollback(&error);
+        return Err(error);
     }
-    // The two halves part company here. Only `env` is persisted, because only
-    // the guest launch env needs to survive into a later `mvmctl` invocation;
-    // the fingerprints stay in this process, which is the one that will open
-    // the input gate.
-    let env_json = serde_json::to_vec(&handshake.env)
-        .map_err(|e| anyhow!("serialize substitution env for {}: {e}", env_path.display()))?;
-    // The launch env is configuration: owner-only, and a link at the path is
-    // replaced rather than written through.
-    mvm_core::atomic_io::write_private_ephemeral(&env_path, &env_json)
-        .map_err(|e| anyhow!("write {}: {e}", env_path.display()))?;
-    record_secret_fingerprints(vm_name, handshake.input_fingerprints);
-    process_guard.mark_env_written();
-    process_guard.defuse();
-    // Detach: drop the child handle without killing. The endpoint runs
-    // daemonized (setsid) and is reaped by the stop path via SUBST_PID_FILE.
-    Ok(())
+    Ok(child)
 }
 
 fn validate_audit_context(params: &SubstitutionSpawnParams<'_>) -> Result<()> {
@@ -1129,46 +1143,29 @@ fn validate_audit_context(params: &SubstitutionSpawnParams<'_>) -> Result<()> {
     Ok(())
 }
 
-struct SpawnedEndpointGuard {
-    pid: libc::pid_t,
+struct SpawnedEndpointSidecars {
     pid_file: PathBuf,
     env_path: PathBuf,
     pid_written: bool,
     env_written: bool,
-    armed: bool,
 }
 
-impl SpawnedEndpointGuard {
-    fn new(pid: u32, pid_file: &Path, env_path: &Path) -> Self {
+impl SpawnedEndpointSidecars {
+    fn new(pid_file: &Path, env_path: &Path) -> Self {
         Self {
-            pid: pid as libc::pid_t,
             pid_file: pid_file.to_path_buf(),
             env_path: env_path.to_path_buf(),
             pid_written: false,
             env_written: false,
-            armed: true,
         }
     }
 
-    fn mark_pid_written(&mut self) {
-        self.pid_written = true;
-    }
-
-    fn mark_env_written(&mut self) {
-        self.env_written = true;
-    }
-
-    fn defuse(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for SpawnedEndpointGuard {
-    fn drop(&mut self) {
-        if self.armed {
-            if pid_is_alive(self.pid) {
-                kill(self.pid, libc::SIGTERM);
-            }
+    fn remove_after_rollback(&self, error: &anyhow::Error) {
+        // Preserve evidence unless the original child was actually reaped.
+        if error
+            .downcast_ref::<crate::host::retained_spawn::RetainedSpawnFailure>()
+            .is_some_and(|failure| failure.exit_collected())
+        {
             if self.pid_written {
                 let _ = std::fs::remove_file(&self.pid_file);
             }
@@ -1704,36 +1701,57 @@ mod tests {
     }
 
     #[test]
-    fn spawned_endpoint_guard_cleans_both_sidecars_on_failure() {
-        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+    fn collected_spawn_rollback_cleans_both_written_sidecars() {
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join(SUBST_PID_FILE);
         let env_file = dir.path().join("substitution.env.json");
         std::fs::write(&pid_file, child.id().to_string()).unwrap();
         std::fs::write(&env_file, b"sidecar").unwrap();
 
-        {
-            let mut guard = SpawnedEndpointGuard::new(child.id(), &pid_file, &env_file);
-            guard.mark_pid_written();
-            guard.mark_env_written();
-        }
+        let mut sidecars = SpawnedEndpointSidecars::new(&pid_file, &env_file);
+        sidecars.pid_written = true;
+        sidecars.env_written = true;
+        let error = crate::host::retained_spawn::rollback(anyhow!("startup failed"), child);
+        sidecars.remove_after_rollback(&error);
 
         assert!(!pid_file.exists());
         assert!(!env_file.exists());
-        let _ = child.wait();
     }
 
     #[test]
-    fn defused_spawned_endpoint_guard_does_not_signal_a_live_endpoint() {
+    fn collected_spawn_rollback_preserves_sidecars_it_did_not_write() {
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join(SUBST_PID_FILE);
+        let env_file = dir.path().join("substitution.env.json");
+        std::fs::write(&pid_file, b"previous evidence").unwrap();
+        std::fs::write(&env_file, b"previous configuration").unwrap();
+        let sidecars = SpawnedEndpointSidecars::new(&pid_file, &env_file);
+        let error = crate::host::retained_spawn::rollback(anyhow!("startup failed"), child);
+        sidecars.remove_after_rollback(&error);
+
+        assert_eq!(std::fs::read(&pid_file).unwrap(), b"previous evidence");
+        assert_eq!(std::fs::read(&env_file).unwrap(), b"previous configuration");
+    }
+
+    #[test]
+    fn unconfirmed_spawn_rollback_preserves_sidecars_and_does_not_signal() {
         let mut child = Command::new("sleep").arg("30").spawn().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join(SUBST_PID_FILE);
         let env_file = dir.path().join("substitution.env.json");
-        let mut guard = SpawnedEndpointGuard::new(child.id(), &pid_file, &env_file);
-        guard.defuse();
-        drop(guard);
+        std::fs::write(&pid_file, child.id().to_string()).unwrap();
+        std::fs::write(&env_file, b"sidecar").unwrap();
+        let mut sidecars = SpawnedEndpointSidecars::new(&pid_file, &env_file);
+        sidecars.pid_written = true;
+        sidecars.env_written = true;
+        sidecars.remove_after_rollback(&anyhow!("no collected exit"));
+        drop(sidecars);
 
-        assert!(pid_is_alive(child.id() as libc::pid_t));
+        assert!(pid_file.exists());
+        assert!(env_file.exists());
+        assert!(child.try_wait().unwrap().is_none());
         child.kill().unwrap();
         let _ = child.wait();
     }
@@ -2429,21 +2447,12 @@ mod tests {
         let invalid_home = dir.join("mvm-home-file");
         std::fs::write(&invalid_home, b"not a directory").unwrap();
         let stub = dir.join("stub-endpoint.sh");
-        let stopped = dir.join("stopped");
-        let pid_capture = dir.join("endpoint.pid");
-        // Arm the TERM trap BEFORE announcing readiness. The spawner only
-        // proceeds to the rollback SIGTERM once it reads this handshake line, so
-        // if the stub announced "ready" first, the SIGTERM could land in the gap
-        // before `trap` runs — default-terminating the stub with no `stopped`
-        // sentinel. Arming first makes the sentinel write deterministic instead
-        // of racing the trap install under load. Do not reorder these two lines.
+        // Keep the original child alive until rollback, without a descendant.
         std::fs::write(
             &stub,
             format!(
-                "{}cat >/dev/null\necho $$ > {}\ntrap 'echo stopped > {}; exit 0' TERM\necho '{}'\nwhile :; do sleep 1; done\n",
+                "{}cat >/dev/null\necho '{}'\nexec sleep 30\n",
                 stub_preamble(),
-                pid_capture.display(),
-                stopped.display(),
                 READY_HANDSHAKE
             ),
         )
@@ -2481,40 +2490,17 @@ mod tests {
             flowmux_identity: None,
         });
 
-        assert!(result.is_err(), "invalid MVM_HOME must fail sidecar setup");
-        assert!(!state_dir.join(SUBST_PID_FILE).exists());
-
-        // The stub is a shell script: it has to take the SIGTERM, run the
-        // trap body and write the sentinel. One second of budget for that
-        // is not a property of the rollback, it is a bet on how loaded the
-        // host is. The deadline here is only a hang guard, so it is
-        // generous; the poll interval sets the common-case cost.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while !stopped.exists() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        let sentinel_written = stopped.exists();
-
-        // Reap the stub whatever happened, but only after reading the
-        // sentinel. SIGKILL cannot fire a TERM trap, so killing first
-        // turns "the stub was slow" into "the sentinel can never appear"
-        // — the previous order did exactly that, then asserted on the
-        // outcome it had just foreclosed.
-        if let Ok(pid) = std::fs::read_to_string(&pid_capture)
-            && let Ok(pid) = pid.trim().parse::<libc::pid_t>()
-        {
-            // SAFETY: kill takes two integers and touches no memory; `pid` was written by the
-            //         helper process this test spawned.
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
-            }
-        }
-        std::fs::remove_dir_all(&dir).ok();
-
+        let error = result.expect_err("invalid MVM_HOME must fail sidecar setup");
+        let retained = error
+            .downcast_ref::<crate::host::retained_spawn::RetainedSpawnFailure>()
+            .expect("startup failure retains original child custody");
         assert!(
-            sentinel_written,
-            "rollback must terminate the endpoint process"
+            retained.exit_collected(),
+            "rollback must collect child exit"
         );
+        retained.retry_stop().unwrap();
+        assert!(!state_dir.join(SUBST_PID_FILE).exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // Build a minimal params (empty secrets, default redaction, UDS transport,

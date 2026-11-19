@@ -113,6 +113,7 @@ guest-RPC surface, fleet-shaped workflows).
 
 | Command                                                                                                                 | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `mvmctl actor launch <manifest> [--json]`                                                                               | Admit a local parent named by a strict host-authored JSON manifest (the parent plus its exact actor templates) and retain its workflow in an independent controller process that survives this caller. The parent must be a controller workload admitted from a matching immutable snapshot, carry the `host.actor.v1` lifecycle service and a mailbox grant, and stay within finite actor CPU/memory subceilings under the configured global host budgets. Only the native HVF ownership path is supported; other hosts refuse. Prints the admitted machine, plan, and controller PID; `--json` emits them as one JSON object |
 | `mvmctl build [SOURCE]`                                                                                                 | Detect a pack spec, manifest project, or Nix flake, build it through its existing pipeline, and write a host-signed local `.mvmpkg`; `SOURCE` defaults to `.` and the archive defaults to `./<source-name>.mvmpkg`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `mvmctl capture`                                                                                                        | Inspect a Linux project and selected commands, resolve the evidence into canonical MVM IR, and render or verify the resulting environment (`project`, `resolve`, and `verify` subcommands)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `mvmctl machine run --flake <ref>`                                                                                      | Build a Nix flake and boot a transient VM                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
@@ -210,6 +211,48 @@ Without a selector, the endpoint exposes the backend's available ordinals.
 With a selector, the guest sees one device at ordinal `0`, mapped to the
 selected host ordinal. Invalid host ordinals fail closed during endpoint
 startup.
+
+## Workload Actors
+
+`mvmctl actor launch MANIFEST [--json]` launches an explicitly authored local
+workflow. This initial path supports a **cold native HVF controller and
+depth-one, non-delegating workers**. Other backend paths are refused; this
+command does not select a fallback. The native `scripts/actor-live-hvf.sh`
+witness exercises parent/child launch, durable request/reply, signed ACKs, and
+terminal cleanup on a trusted development host. It does not qualify production
+assurance, automatic helper restart, latency, or density.
+
+`MANIFEST` is a required host-authored JSON file, not guest-supplied launch
+configuration. The version-one `ActorBootstrap` document contains `version`,
+`parent`, `launch`, `templates`, `constraints`, and `host_budget`. It binds the
+parent's workflow identity, finite lifecycle validity window, constraint snapshot,
+and exact digest-pinned template allow-list. Each template supplies its immutable
+plan and cold-launch definition. Unknown fields, unsupported versions, invalid
+content addresses, and inconsistent bindings are refused. The encoded manifest
+is bounded to 4 MiB.
+
+Author and provision the manifest against the actual local artifacts and mailbox
+provider before invoking the command. The host authoring API
+`ActorBootstrap::provision` prepares the SDK/mailbox projections and binds the
+template, constraint, and plan digests; it does not itself launch the workflow.
+There is no generic manifest with safe runnable resource defaults. The operator
+must also configure finite positive `host_budget_memory_mib` and
+`host_budget_cpu_millicores` ceilings, leaving host safety headroom. The manifest's
+actor subceiling cannot replace or exceed those ordinary-workload host budgets.
+
+The command returns after actual parent activation. An independent host controller
+retains the workflow's VM and helper owners after the CLI exits. `--json` prints
+`machine`, `plan_id`, and `controller_pid`; these are host-side launch observations,
+not a guest lifecycle capability or proof that a child task completed.
+
+Inside the admitted parent, `mvm.actor` selects only exact template bindings via
+`launch_child`, `observe_child`, and `release_child`. It cannot submit arbitrary
+images, argv, environment, resources, backend, or placement. Task input and replies
+use the separate canonical mailbox channel. A lifecycle `Unknown` outcome or
+transport timeout is **not permission to redispatch** with a new idempotency key:
+retain the original operation identity and reconcile its recorded outcome.
+Only `Released` confirms child death, cleanup, and the durable terminal record.
+Used children are destroyed, never returned to shared warm capacity.
 
 ## Environment Management
 

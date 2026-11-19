@@ -104,6 +104,19 @@ pub const PER_VM_HOST_BINARIES: &[PerVmBinary] = &[
         features: "",
         scope: PerVmScope::Always,
     },
+    // Authenticated actor parsing and lifecycle authority remain separate processes.
+    PerVmBinary {
+        package: "mvm-hostd",
+        name: "mvm-actor-holder",
+        features: "",
+        scope: PerVmScope::Always,
+    },
+    PerVmBinary {
+        package: "mvm-hostd",
+        name: "mvm-actor-controller",
+        features: "",
+        scope: PerVmScope::Always,
+    },
     // The per-VM GPU endpoint, spawned for a guest launched with `--gpu`. It
     // needs no GPU on the host: without a driver it answers through its
     // deterministic stub backend, so it ships everywhere `mvmctl` does.

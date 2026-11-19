@@ -846,6 +846,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
     });
 
     let mut plan = ExecutionPlan {
+        workflow: None,
         environment,
         runtime_identity: None,
         build_provenance: Default::default(),

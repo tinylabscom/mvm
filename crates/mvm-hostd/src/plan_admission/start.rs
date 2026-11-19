@@ -4,8 +4,9 @@
 use super::admit::admit_plan_for_run;
 use super::assurance_runtime::verify_selected_runtime;
 use super::rollback::{
-    UndoLaunch, UndoLaunchFailure, apply_admitted_grants_or_undo_launch,
-    record_charge_or_undo_launch, undo_cli_launch, undo_launch,
+    FailureAuditPolicy, UndoLaunch, UndoLaunchFailure, apply_admitted_grants_or_undo_launch,
+    apply_admitted_grants_with_rollback, record_charge_or_undo_launch,
+    record_charge_with_owned_rollback, undo_cli_launch, undo_launch, undo_launch_with,
 };
 use super::{AdmitAndStartParams, AdmittedPlan, RunPosture, final_gates, registry_pack};
 use anyhow::{Context, Result};
@@ -99,6 +100,9 @@ pub fn start_persistent(
         params,
         verified_runtime,
         StartFinalization::Persistent { writable_images },
+        None,
+        None,
+        || Ok(()),
     )?;
     Ok(DispatchedPersistent {
         vm_id: started.vm_id,
@@ -203,8 +207,14 @@ pub(crate) fn start_admitted_with_verified_release(
     params: StartAdmittedParams<'_>,
     verified_runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
 ) -> Result<StartedMachine> {
-    let started =
-        start_admitted_with_finalization(params, verified_runtime, StartFinalization::Immediate)?;
+    let started = start_admitted_with_finalization(
+        params,
+        verified_runtime,
+        StartFinalization::Immediate,
+        None,
+        None,
+        || Ok(()),
+    )?;
     Ok(StartedMachine {
         vm_id: started.vm_id,
         admitted: started.admitted,
@@ -224,6 +234,9 @@ pub fn start_cli_transient(
         params,
         verified_runtime,
         StartFinalization::CliTransient { writable_images },
+        None,
+        None,
+        || Ok(()),
     )
     .map(|started| started.vm_id)
 }
@@ -232,9 +245,13 @@ fn start_admitted_with_finalization(
     params: StartAdmittedParams<'_>,
     verified_runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
     finalization: StartFinalization,
+    mut actor_owner: Option<&mut Option<mvm_runtime::actor_teardown::ActorOwner>>,
+    bootstrap: Option<mvm_runtime::actor_teardown::ActorBootstrap>,
+    before_dispatch: impl FnOnce() -> Result<()>,
 ) -> Result<StartTailResult> {
     let cli_transient = matches!(finalization, StartFinalization::CliTransient { .. });
     let persistent = matches!(finalization, StartFinalization::Persistent { .. });
+
     let backend = params.backend;
     let mut admitted = params.admitted;
     anyhow::ensure!(
@@ -386,8 +403,20 @@ fn start_admitted_with_finalization(
         }
         return Err(err);
     }
+    // Actor launches run one last caller gate after every shared admission
+    // check and before the budget marks dispatch.
+    before_dispatch()?;
     // Spent before the backend starts, so an admission that reached dispatch
     // can never authorize another launch, whatever the start's outcome.
+    if let Err(error) = admitted.mark_host_budget_dispatching(&config.name) {
+        if let Some(emitter) = params.emitter
+            && let Err(audit_error) =
+                emitter.emit_failed(admitted.plan(), "host-budget", &format!("{error:#}"))
+        {
+            tracing::warn!(error = %audit_error, "audit emit_failed failed (non-fatal)");
+        }
+        return Err(error.context("host-budget dispatch refused"));
+    }
     admitted.dispatched = true;
     if cli_transient
         && (mvm_runtime::catalog::descriptor(backend.kind()).is_workload
@@ -398,7 +427,25 @@ fn start_admitted_with_finalization(
     {
         return Err(CliStartFailure::Unrecorded(err).into());
     }
-    let start = if let StartFinalization::CliTransient { writable_images }
+    let start = if let Some(slot) = actor_owner.as_mut() {
+        backend
+            .start_owned_actor_with_bootstrap(&config, verified_runtime, bootstrap)
+            .map(|owner| {
+                let vm_id = owner.vm_id().clone();
+                **slot = Some(owner);
+                vm_id
+            })
+            .inspect_err(|error| {
+                if let Some(failure) =
+                    error.downcast_ref::<mvm_runtime::actor_teardown::ActorStartFailure>()
+                    && let Ok(Some(owner)) = failure.take_owner()
+                {
+                    **slot = Some(owner);
+                }
+                // An ownerless typed failure may still hold original boot/helper
+                // custody. Return it intact for the lifecycle coordinator to retain.
+            })
+    } else if let StartFinalization::CliTransient { writable_images }
     | StartFinalization::Persistent {
         writable_images, ..
     } = finalization
@@ -443,7 +490,19 @@ fn start_admitted_with_finalization(
     };
     match start {
         Ok(vm_id) => {
-            let enforced_grants = if cli_transient || persistent {
+            // A VM whose grants could not be applied is running without the
+            // bounds it was admitted under; the helper stops it rather than
+            // leaving a run whose only record says it was bounded.
+            let enforced_grants = if actor_owner.is_some() {
+                Some(apply_admitted_grants_with_rollback(
+                    backend,
+                    &vm_id,
+                    &admitted,
+                    params.emitter,
+                    || stop_actor(&mut actor_owner),
+                    FailureAuditPolicy::OwnedAfterConfirmedRollback,
+                )?)
+            } else if cli_transient || persistent {
                 // The CLI finalizes on teardown; persistent starts finalize
                 // after authenticated readiness. Neither accepts here.
                 None
@@ -461,7 +520,16 @@ fn start_admitted_with_finalization(
             // budget, and an undercounted host is precisely the state the
             // budget exists to prevent — so this is fatal, and rolls the
             // launch back the same way an unapplied grant does.
-            if !cli_transient && !persistent {
+            if actor_owner.is_some() {
+                record_charge_with_owned_rollback(
+                    backend,
+                    &vm_id,
+                    &vm_name,
+                    &admitted,
+                    params.emitter,
+                    || stop_actor(&mut actor_owner),
+                )?;
+            } else if !cli_transient && !persistent {
                 record_charge_or_undo_launch(backend, &vm_id, &vm_name, &admitted, params.emitter)?;
             }
             if !cli_transient
@@ -469,15 +537,24 @@ fn start_admitted_with_finalization(
                 && let Some(emitter) = params.emitter
             {
                 if let Err(e) = emitter.emit_launched(admitted.plan(), &backend_name) {
+                    if actor_owner.is_some() {
+                        return Err(e);
+                    }
                     tracing::warn!(error = %e, "audit emit_launched failed (non-fatal)");
                 }
                 let record = launch_decision_record(admitted.plan(), &backend_name);
                 if let Err(e) = emitter.emit_decision_record(admitted.plan(), record) {
+                    if actor_owner.is_some() {
+                        return Err(e);
+                    }
                     tracing::warn!(error = %e, "audit emit_decision_record for launch failed (non-fatal)");
                 }
                 if let Some(enforced_grants) = &enforced_grants
                     && let Err(e) = emitter.emit_grants_enforced(admitted.plan(), enforced_grants)
                 {
+                    if actor_owner.is_some() {
+                        return Err(e);
+                    }
                     tracing::warn!(error = %e, "audit emit_grants_enforced failed (non-fatal)");
                 }
             }
@@ -507,34 +584,57 @@ fn start_admitted_with_finalization(
                 return Err(if cli_transient {
                     cli_rollback_error(undo_cli_launch(undo))
                 } else {
-                    undo_launch(undo)
+                    undo_start(undo, &mut actor_owner)
                 });
             }
             // Last, so no earlier rollback leaves a mailbox process behind.
             // A grant that cannot be served is refused rather than booting a
             // guest whose mailbox port nobody answers.
-            if !persistent
-                && let Err(err) = crate::mailbox_process::spawn_for_launch(
-                    admitted.plan(),
-                    backend,
-                    &vm_name,
-                    mailbox_posture.as_ref(),
-                )
-            {
-                let undo = UndoLaunch {
-                    backend,
-                    vm_id: &vm_id,
-                    admitted: &admitted,
-                    emitter: if cli_transient { None } else { params.emitter },
-                    stage: "mailbox-process",
-                    reason: "the granted guest mailbox could not be served",
-                    err: err.into(),
-                };
-                return Err(if cli_transient {
-                    cli_rollback_error(undo_cli_launch(undo))
-                } else {
-                    undo_launch(undo)
-                });
+            if !persistent {
+                let mailbox =
+                    if let Some(owner) = actor_owner.as_mut().and_then(|slot| slot.as_mut()) {
+                        let mut child = crate::mailbox_process::spawn_for_launch_owned(
+                            admitted.plan(),
+                            backend,
+                            &vm_name,
+                            mailbox_posture.as_ref(),
+                        )
+                        .context("actor mailbox helper spawn/readiness failed")?;
+                        let state_dir = mvm_core::config::vm_state_dir(&vm_name);
+                        owner.attach_helper(
+                            "mailbox",
+                            &mut child,
+                            &[
+                                state_dir.join(mvm_vmm::host::vm_helpers::MAILBOX_PID_FILE),
+                                mvm_core::config::vm_mailbox_secret_at(&state_dir),
+                            ],
+                        )
+                    } else {
+                        crate::mailbox_process::spawn_for_launch(
+                            admitted.plan(),
+                            backend,
+                            &vm_name,
+                            mailbox_posture.as_ref(),
+                        )
+                        .map(|_| ())
+                        .map_err(anyhow::Error::from)
+                    };
+                if let Err(err) = mailbox {
+                    let undo = UndoLaunch {
+                        backend,
+                        vm_id: &vm_id,
+                        admitted: &admitted,
+                        emitter: if cli_transient { None } else { params.emitter },
+                        stage: "mailbox-process",
+                        reason: "the granted guest mailbox could not be served",
+                        err,
+                    };
+                    return Err(if cli_transient {
+                        cli_rollback_error(undo_cli_launch(undo))
+                    } else {
+                        undo_start(undo, &mut actor_owner)
+                    });
+                }
             }
             Ok(StartTailResult {
                 vm_id,
@@ -544,6 +644,29 @@ fn start_admitted_with_finalization(
             })
         }
         Err(err) => {
+            if let Some(proof) = err
+                .downcast_ref::<mvm_runtime::actor_teardown::ActorStartFailure>()
+                .and_then(|failure| failure.no_dispatch_proof())
+            {
+                let reconciled = params
+                    .emitter
+                    .context("runtime cancellation requires durable audit")
+                    .and_then(|emitter| {
+                        admitted.host_budget.record_runtime_no_dispatch(
+                            proof,
+                            &vm_name,
+                            admitted.plan(),
+                            emitter,
+                        )
+                    });
+                return match reconciled {
+                    Ok(()) => Err(err),
+                    Err(reconcile) => {
+                        Err(err
+                            .context(format!("runtime cancellation remains held: {reconcile:#}")))
+                    }
+                };
+            }
             if !cli_transient
                 && let Some(emitter) = params.emitter
                 && let Err(e) =
@@ -557,6 +680,85 @@ fn start_admitted_with_finalization(
                 err
             })
         }
+    }
+}
+
+/// Start through the ordinary gates while retaining original actor teardown custody.
+///
+/// The owner slot remains populated after a post-start error. Callers must retain
+/// it until cleanup is proved; an error never authorizes a capacity refund.
+pub fn start_admitted_owned_actor(
+    params: StartAdmittedParams<'_>,
+    owner: &mut Option<mvm_runtime::actor_teardown::ActorOwner>,
+    before_dispatch: impl FnOnce() -> Result<()>,
+) -> Result<StartedMachine> {
+    start_owned_admitted_impl(params, owner, None, before_dispatch)
+}
+
+/// Start an admitted controller with its original per-boot holder provisioned before activation.
+pub fn start_admitted_owned_actor_with_bootstrap(
+    params: StartAdmittedParams<'_>,
+    owner: &mut Option<mvm_runtime::actor_teardown::ActorOwner>,
+    bootstrap: mvm_runtime::actor_teardown::ActorBootstrap,
+    before_dispatch: impl FnOnce() -> Result<()>,
+) -> Result<StartedMachine> {
+    start_owned_admitted_impl(params, owner, Some(bootstrap), before_dispatch)
+}
+
+fn start_owned_admitted_impl(
+    params: StartAdmittedParams<'_>,
+    owner: &mut Option<mvm_runtime::actor_teardown::ActorOwner>,
+    bootstrap: Option<mvm_runtime::actor_teardown::ActorBootstrap>,
+    before_dispatch: impl FnOnce() -> Result<()>,
+) -> Result<StartedMachine> {
+    anyhow::ensure!(owner.is_none(), "actor owner slot is already occupied");
+    anyhow::ensure!(
+        params.emitter.is_some(),
+        "actor launch requires durable audit"
+    );
+    mvm_runtime::actor_teardown::supports_actor_backend(params.backend)?;
+    let verified =
+        mvm_runtime::runtime_evidence::verify_selected_release_runtime_set(&params.config)?;
+    let started = start_admitted_with_finalization(
+        params,
+        verified.as_ref(),
+        StartFinalization::Immediate,
+        Some(owner),
+        bootstrap,
+        before_dispatch,
+    )?;
+    Ok(StartedMachine {
+        vm_id: started.vm_id,
+        admitted: started.admitted,
+        enforced_grants: started
+            .enforced_grants
+            .expect("actor host start always checks enforced grants"),
+    })
+}
+
+fn stop_actor(
+    slot: &mut Option<&mut Option<mvm_runtime::actor_teardown::ActorOwner>>,
+) -> Result<()> {
+    let owner = slot
+        .as_mut()
+        .and_then(|slot| slot.as_mut())
+        .ok_or_else(|| anyhow::anyhow!("original actor owner missing"))?;
+    let _proof = owner.stop_and_reap()?;
+    Ok(())
+}
+
+fn undo_start(
+    undo: UndoLaunch<'_>,
+    slot: &mut Option<&mut Option<mvm_runtime::actor_teardown::ActorOwner>>,
+) -> anyhow::Error {
+    if slot.is_some() {
+        undo_launch_with(
+            undo,
+            || stop_actor(slot),
+            FailureAuditPolicy::OwnedAfterConfirmedRollback,
+        )
+    } else {
+        undo_launch(undo)
     }
 }
 
