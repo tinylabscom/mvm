@@ -288,7 +288,7 @@ impl CliAdmission {
         config: mvm_core::vm_backend::VmStartConfig,
         ctx: &mvm_runtime::workload_runner::ClaimContext<'_>,
         handle: &mvm_core::vm_backend::StandbyHandle,
-    ) -> (Self, anyhow::Result<mvm_core::vm_backend::VmId>) {
+    ) -> (Self, anyhow::Result<crate::standby::OwnedWarmClaim>) {
         if !matches!(&self, Self::Pending(pending) if pending.source_rootfs.is_some()) {
             return (
                 self,
@@ -323,8 +323,8 @@ impl CliAdmission {
             handle,
         );
         match result {
-            Ok(mvm_hostd::plan_admission::WarmClaimDispatch::Claimed(id)) => {
-                (Self::Dispatched(Box::new(audit)), Ok(id))
+            Ok(mvm_hostd::plan_admission::WarmClaimDispatch::Claimed(owned)) => {
+                (Self::Dispatched(Box::new(audit)), Ok(owned))
             }
             Ok(mvm_hostd::plan_admission::WarmClaimDispatch::ReservationLost(authority)) => (
                 Self::Pending(Box::new(PendingCliAdmission {

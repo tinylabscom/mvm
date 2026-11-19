@@ -784,7 +784,7 @@ fn claim_with_mode<F, G, T>(
 ) -> Result<LaunchDecision>
 where
     F: FnOnce(&StandbyHandle) -> Result<Option<T>>,
-    G: FnOnce(&ClaimContext<'_>, &StandbyHandle, T) -> Result<VmId>,
+    G: FnOnce(&ClaimContext<'_>, &StandbyHandle, T) -> Result<mvm_client::standby::OwnedWarmClaim>,
 {
     if matches!(mode, WarmLaunchMode::Cold) {
         return Ok(LaunchDecision::ColdBoot);
@@ -883,11 +883,11 @@ where
         grant_issuer: Some(&grant_issuer),
     };
     match dispatch(&ctx, &handle, claim) {
-        Ok(vm_id) => {
+        Ok(owned) => {
             // The standby has become the VM; drop its pool entry (the control UDS is
             // one-shot). The VM now lives under its vms/<id> state dir.
             let _ = pool.remove(&handle.id);
-            Ok(LaunchDecision::Claimed(vm_id))
+            Ok(LaunchDecision::Claimed(owned))
         }
         Err(e) => {
             tracing::warn!(standby = %handle.id, error = %format!("{e:#}"), "standby claim failed");

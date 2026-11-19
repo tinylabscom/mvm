@@ -614,8 +614,7 @@ fn entrypoint_failed_grant_rollback_remains_unsealed_when_stop_is_unconfirmed() 
         },
         None,
     )
-    .err()
-    .expect("grant application and rollback both fail");
+    .expect_err("grant application and rollback both fail");
     assert!(matches!(
         error.downcast_ref::<CliStartFailure>(),
         Some(CliStartFailure::UncertainStop(_))

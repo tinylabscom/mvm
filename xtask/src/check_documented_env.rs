@@ -203,7 +203,9 @@ mod tests {
 
     #[test]
     fn generated_site_cannot_turn_an_allowlist_entry_into_a_source_reference() {
-        assert!(is_generated_site("public/dist/reference/vsock-messages/index.html"));
+        assert!(is_generated_site(
+            "public/dist/reference/vsock-messages/index.html"
+        ));
         assert!(is_generated_site("public/.astro/content-assets.mjs"));
         assert!(!is_generated_site("public/src/lib/docs-index.ts"));
     }

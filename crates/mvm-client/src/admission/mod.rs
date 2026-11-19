@@ -2381,7 +2381,8 @@ pub(crate) mod admit_plan_tests {
         assert!(error.is_err(), "a JSON substitution cannot spend admission");
         assert!(matches!(owner, CliAdmission::Pending(_)));
         let (owner, result) = owner.claim_warm(&backend, config, &claim_context, &handle);
-        assert_eq!(result.expect("mock warm dispatch").0, handle.id);
+        let (claimed, _lifecycle) = result.expect("mock warm dispatch").into_parts();
+        assert_eq!(claimed, mvm_core::vm_backend::VmId(handle.id));
         assert!(matches!(owner, CliAdmission::Dispatched(_)));
     }
 

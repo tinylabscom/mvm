@@ -45,6 +45,10 @@ pub fn start_owned_entrypoint(
         !admitted.dispatched,
         "original admitted plan was already dispatched"
     );
+    // The mailbox profile is a property of the admitted plan, not the start
+    // config, and an unservable guest mailbox refuses before any native
+    // preparation spends the one-use admission.
+    crate::mailbox_launch::require_legacy_launch(admitted.plan().mailbox.as_ref())?;
     anyhow::ensure!(
         runtime.is_none(),
         "native runtime slot must be empty before dispatch"
@@ -317,8 +321,14 @@ pub fn start_entrypoint(
     params: StartAdmittedParams<'_>,
     verified_runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
 ) -> Result<StartedMachine> {
-    let started =
-        start_admitted_with_finalization(params, verified_runtime, StartFinalization::Entrypoint)?;
+    let started = start_admitted_with_finalization(
+        params,
+        verified_runtime,
+        StartFinalization::Entrypoint,
+        None,
+        None,
+        || Ok(()),
+    )?;
     Ok(StartedMachine {
         vm_id: started.vm_id,
         admitted: started.admitted,
@@ -372,14 +382,21 @@ pub fn start_fs_quick_fork(
     params: StartAdmittedParams<'_>,
     verified_runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
 ) -> Result<VmId> {
-    start_admitted_with_finalization(params, verified_runtime, StartFinalization::FsQuickFork)
-        .map(|started| started.vm_id)
+    start_admitted_with_finalization(
+        params,
+        verified_runtime,
+        StartFinalization::FsQuickFork,
+        None,
+        None,
+        || Ok(()),
+    )
+    .map(|started| started.vm_id)
 }
 
 /// Outcome of a selected warm claim. A lost reservation never spent its
 /// authority, so the caller can cold-dispatch that same admission.
 pub enum WarmClaimDispatch {
-    Claimed(VmId),
+    Claimed(mvm_runtime::backend::OwnedWarmClaim),
     ReservationLost(Box<AdmittedPlan>),
 }
 
@@ -472,8 +489,8 @@ pub fn claim_cli_transient(
     // No plan JSON can create this authority: only admission owns this value.
     // Spend it before the runner can fork or resume the child.
     admitted.dispatched = true;
-    match backend.claim_standby_via_runner(ctx, handle, &claim) {
-        Ok(id) => Ok(WarmClaimDispatch::Claimed(id)),
+    match backend.claim_standby_owned_via_runner(ctx, handle, &claim) {
+        Ok(owned) => Ok(WarmClaimDispatch::Claimed(owned)),
         Err(StandbyError::ReservationLost) => {
             admitted.dispatched = false;
             Ok(WarmClaimDispatch::ReservationLost(Box::new(admitted)))
@@ -914,7 +931,11 @@ fn start_admitted_with_finalization(
                         backend,
                         vm_id: &vm_id,
                         admitted: &admitted,
-                        emitter: if cli_transient || fork { None } else { params.emitter },
+                        emitter: if cli_transient || fork {
+                            None
+                        } else {
+                            params.emitter
+                        },
                         stage: "mailbox-process",
                         reason: "the granted guest mailbox could not be served",
                         err,

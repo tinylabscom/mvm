@@ -1622,7 +1622,9 @@ mod tests {
 
     /// The strict-startup refusal is gone: the first unnamed run of an image
     /// on a host with an empty pool boots cold rather than failing and
-    /// telling the operator to prepare a standby first.
+    /// telling the operator to prepare a standby first. Without a one-use CLI
+    /// admission the claim never reaches the pool: the launch keeps its
+    /// authority and boots cold as unadmitted.
     #[test]
     fn an_unnamed_run_with_no_standby_ready_boots_cold_instead_of_refusing() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
@@ -1656,7 +1658,7 @@ mod tests {
         assert!(matches!(
             claim_warm_standby(&mut attempt).unwrap(),
             crate::commands::pool::WarmClaimOutcome::Cold(
-                crate::commands::pool::ColdStartReason::NoStandbyReady
+                crate::commands::pool::ColdStartReason::Unadmitted
             )
         ));
     }
