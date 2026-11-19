@@ -1100,6 +1100,7 @@ impl MvmClient for LocalBackend {
     async fn resume_machine(&self, id: &MachineId, opts: ResumeOpts) -> Result<ResumeOutcome> {
         let _barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()
             .map_err(backend_err)?;
+        crate::policy_profiles::coordinator::recover_workload_ledger().map_err(backend_err)?;
         if cfg!(target_os = "linux") && self.backend.kind() != BackendKind::Mock {
             crate::policy_profiles::coordinator::ensure_if_activated().map_err(backend_err)?;
         }

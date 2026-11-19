@@ -693,6 +693,7 @@ fn restore(id: &str, json: bool) -> Result<()> {
     }
     let _activation_barrier =
         mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
+    mvm_client::policy_profiles::coordinator::recover_workload_ledger()?;
     if cfg!(target_os = "linux") {
         mvm_client::policy_profiles::coordinator::ensure_if_activated()?;
     }
