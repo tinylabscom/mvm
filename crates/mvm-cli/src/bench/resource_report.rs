@@ -199,7 +199,10 @@ impl ResidencyCosts {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StandbyCosts {
+    /// Standbys held by a resident VMM process each.
     pub resident: UnitCost,
+    /// Standbys held as an on-disk snapshot with no process. The two classes
+    /// are different quantities and are never merged.
     pub warm: UnitCost,
 }
 
@@ -387,8 +390,11 @@ fn render_section(out: &mut String, s: &Section) {
     out.push_str(&unit_row("running", &s.by_residency.running));
     out.push_str(&unit_row("idle", &s.by_residency.idle));
     out.push_str(&unit_row("parked", &s.by_residency.parked));
-    out.push_str(&unit_row("standby resident", &s.by_standby.resident));
-    out.push_str(&unit_row("standby warm", &s.by_standby.warm));
+    out.push_str(&unit_row(
+        "standby resident process",
+        &s.by_standby.resident,
+    ));
+    out.push_str(&unit_row("standby on-disk snapshot", &s.by_standby.warm));
 
     let l = &s.latencies;
     out.push_str("\nLatency (ms):\n\n");
