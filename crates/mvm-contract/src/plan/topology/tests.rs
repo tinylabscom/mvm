@@ -32,6 +32,7 @@ fn unit(name: &str, role: UnitRole, cores: &[u32]) -> Unit {
         },
         min_isolation: None,
         permits: SealedTransitions::default(),
+        liveness_period_ms: None,
     }
 }
 
@@ -131,6 +132,7 @@ fn defaults_are_omitted_and_restored() {
         "edges",
         "succession",
         "\"checkpoint\"",
+        "liveness_period_ms",
     ] {
         assert!(!json.contains(absent), "{absent} serialized at its default");
     }
@@ -184,6 +186,25 @@ fn the_digest_of_a_fixed_topology_is_pinned() {
     );
 }
 
+/// [`full`] with a liveness period on a paired unit, inside its recovery
+/// bound, and on an unpaired one.
+fn with_liveness() -> Topology {
+    let mut topology = full();
+    topology.units[2].liveness_period_ms = NonZeroU32::new(150);
+    topology.units[4].liveness_period_ms = NonZeroU32::new(100);
+    topology
+}
+
+#[test]
+fn the_digest_of_a_fixed_topology_with_liveness_periods_is_pinned() {
+    let topology = with_liveness();
+    topology.validate().unwrap();
+    assert_eq!(
+        topology.digest().as_str(),
+        "sha256:03476fe25e1a0b00296ad9236d82aea65b5bc2ccfbac793d4b98a3c66f177995"
+    );
+}
+
 #[test]
 fn the_digest_changes_when_any_field_changes() {
     type Mutation = fn(&mut Topology);
@@ -211,6 +232,9 @@ fn the_digest_changes_when_any_field_changes() {
         }),
         ("min_isolation", |t| t.units[0].min_isolation = None),
         ("permits", |t| t.units[0].permits.checkpoint = true),
+        ("liveness period", |t| {
+            t.units[4].liveness_period_ms = NonZeroU32::new(100);
+        }),
         ("pair class", |t| {
             t.standby_pairs[1].class = StandbyClass::Cold
         }),
@@ -546,6 +570,33 @@ fn a_recovery_bound_with_no_standby_kept_is_refused() {
     );
 
     topology.standby_pairs[1].recovery_bound_ms = None;
+    topology.validate().unwrap();
+}
+
+#[test]
+fn a_recovery_bound_no_longer_than_the_liveness_period_is_refused() {
+    for period in [200, 201] {
+        let mut topology = full();
+        topology.units[2].liveness_period_ms = NonZeroU32::new(period);
+        assert_eq!(
+            refused(&topology),
+            TopologyValidationError::RecoveryBoundWithinLivenessPeriod {
+                active: id("w1"),
+                bound_ms: NonZeroU32::new(200).unwrap(),
+                period_ms: NonZeroU32::new(period).unwrap(),
+            },
+            "period {period}"
+        );
+    }
+    let mut topology = full();
+    topology.units[2].liveness_period_ms = NonZeroU32::new(199);
+    topology.validate().unwrap();
+}
+
+#[test]
+fn a_liveness_period_on_the_standby_does_not_constrain_the_bound() {
+    let mut topology = full();
+    topology.units[3].liveness_period_ms = NonZeroU32::new(500);
     topology.validate().unwrap();
 }
 
