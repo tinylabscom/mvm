@@ -989,10 +989,11 @@ mod tests {
     }
 
     #[test]
-    fn the_detached_and_owned_seams_in_their_own_files_pass() {
+    fn the_pinned_seams_in_their_own_files_pass() {
         check_spawn_seams(&[
             def(OWNED_SPAWN_RS, "spawn_network_endpoint_owned"),
             def(SPAWN_RS, "spawn_network_endpoint"),
+            def(SPAWN_RS, "spawn_network_endpoint_retained"),
         ])
         .unwrap();
     }
