@@ -49,11 +49,11 @@ jobs:
           persist-credentials: false
       - name: Install pinned SBOM tooling without signing authority
         run: |
-          rustup toolchain install 1.97.1 --profile minimal --no-self-update
-          cargo +1.97.1 install cargo-cyclonedx --version '=0.5.10' --locked
+          rustup toolchain install 1.100.0 --profile minimal --no-self-update
+          cargo +1.100.0 install cargo-cyclonedx --version '=0.5.10' --locked
       - name: Generate SBOM
         run: |
-          cargo +1.97.1 cyclonedx --format json --all --override-filename sbom.cdx
+          cargo +1.100.0 cyclonedx --format json --all --override-filename sbom.cdx
           git diff --exit-code -- Cargo.lock
           test -s sbom.cdx.json
       - name: Record exact SBOM content
@@ -284,7 +284,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
           targets: ${{ matrix.build_target }}
 
       # The SDK host library is built against this arch's gnu target even on

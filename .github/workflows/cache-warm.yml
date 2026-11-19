@@ -9,10 +9,10 @@ name: Warm the Rust build cache
 # scope and the required aggregate, so they do not consume the Rust cache.
 #
 # It costs one build per merge and saves several per validation cycle. Its
-# entries are keyed to the stable 1.97.1 toolchain, so they serve the lanes that
-# build on it — lint-core and the three lint-features lanes. The nightly test
-# lanes key to a different toolchain and restore nothing from here, on purpose;
-# the note at the end of this file says why.
+# entries are keyed to the stable 1.100.0 toolchain, so they serve the lanes that
+# use the corresponding lint-core and lint-features cache keys. Ordinary test
+# lanes now use the same compiler; cache reuse still depends on their key and
+# feature/profile selection, not the compiler version alone.
 #
 # The test-support graph differs enough to rebuild almost every workspace crate
 # after restoring the default entry, so it has a dedicated trusted-main key.
@@ -98,7 +98,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
           components: clippy
 
       - name: Install system build deps
@@ -135,7 +135,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
 
       - uses: ./.github/actions/apt-deps
         with:
@@ -158,10 +158,10 @@ jobs:
           cargo check -p mvm-cli --features test-support \
             --example verification_loop
 
-  # There is deliberately no warm job for the nightly test lanes, and one was
-  # tried. Those lanes run a toolchain this workflow does not write for, so they
-  # restore nothing — which looked like the reason `Test workspace` was slow.
-  # It was not. A `warm-nightly` job wrote the entry they look for, and across
+  # Historical trial, before ordinary tests moved to the common stable pin:
+  # those lanes used a nightly this workflow did not write for, so they restored
+  # nothing — which looked like the reason `Test workspace` was slow.
+  # It was not. A `warm-nightly` job wrote the entry they looked for, and across
   # ten lane-runs the hits halved what they compiled (Test workspace ~495 → ~270
   # crates, Test Linux ~820 → ~518) and saved no wall clock: medians moved by
   # ten to thirty seconds, inside run-to-run noise.

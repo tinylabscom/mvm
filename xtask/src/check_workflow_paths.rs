@@ -895,7 +895,7 @@ mod tests {
         for setup in [
             "actions/checkout@",
             "dtolnay/rust-toolchain@",
-            "toolchain: 1.97.1",
+            "toolchain: 1.100.0",
             "uses: ./.github/actions/rust-cache",
         ] {
             assert!(lane.contains(setup));
@@ -1276,7 +1276,7 @@ mod tests {
         for expected in [
             "github.event_name == 'pull_request'",
             "shellcheck -x \"${scripts[@]}\"",
-            "rustc +1.97.1 --edition=2024 -D warnings --test",
+            "rustc +1.100.0 --edition=2024 -D warnings --test",
             "git merge-base \"$BASE_SHA\" \"$HEAD_SHA\"",
             "git diff --name-only --diff-filter=A",
             "could not classify added shell scripts",
@@ -1419,7 +1419,7 @@ mod tests {
         )
         .expect("Linux coverage script must be readable");
         for expected in [
-            "cargo +1.97.1 build -p mvm-contract --target wasm32-unknown-unknown",
+            "cargo +1.100.0 build -p mvm-contract --target wasm32-unknown-unknown",
             "cargo test -p mvm-conformance --test meta",
         ] {
             assert!(

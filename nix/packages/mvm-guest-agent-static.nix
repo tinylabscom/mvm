@@ -18,8 +18,12 @@ let
   # is expected to pass the target-system `pkgs` (e.g. from the flake's
   # `forAllSystems`), so `pkgsStatic` gives us a same-arch musl toolchain.
   staticPkgs = pkgs.pkgsStatic;
+  rustPlatform = (import ./rust-platform.nix {
+    pkgs = staticPkgs;
+    inherit mvmSrc;
+  }).rustPlatform;
 in
-staticPkgs.rustPlatform.buildRustPackage {
+rustPlatform.buildRustPackage {
   pname = "mvm-guest-agent-static";
   version = "0.18.0";
 
