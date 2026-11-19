@@ -274,6 +274,17 @@ impl Section {
     }
 }
 
+/// The source tree the measured binaries were built from, as the density
+/// harness recorded it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceRevision {
+    pub commit: String,
+    /// The tree carried uncommitted changes, so the commit alone does not
+    /// say what was measured.
+    pub dirty: bool,
+}
+
 /// The versioned report.
 ///
 /// ```
@@ -293,6 +304,9 @@ impl Section {
 #[serde(deny_unknown_fields)]
 pub struct ResourceReport {
     pub schema_version: u32,
+    /// Absent only in reports written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceRevision>,
     pub sections: Vec<Section>,
 }
 
@@ -300,6 +314,7 @@ impl Default for ResourceReport {
     fn default() -> Self {
         Self {
             schema_version: RESOURCE_REPORT_SCHEMA_VERSION,
+            source: None,
             sections: Vec::new(),
         }
     }
@@ -393,6 +408,23 @@ fn render_section(out: &mut String, s: &Section) {
     out.push('\n');
 }
 
+fn source_line(source: Option<&SourceRevision>) -> String {
+    match source {
+        None => "Source commit: not recorded.\n\n".to_string(),
+        Some(SourceRevision {
+            commit,
+            dirty: false,
+        }) => format!("Source commit: `{commit}`.\n\n"),
+        Some(SourceRevision {
+            commit,
+            dirty: true,
+        }) => format!(
+            "**Measured from a modified tree**: commit `{commit}` with uncommitted \
+             changes. These figures are not publishable.\n\n"
+        ),
+    }
+}
+
 /// Render the report as markdown tables. An unmeasured figure is a dash; its
 /// reason is only in the JSON form.
 #[must_use]
@@ -401,6 +433,7 @@ pub fn render_markdown(report: &ResourceReport) -> String {
         "## Resource report (schema version {})\n\n",
         report.schema_version
     );
+    out.push_str(&source_line(report.source.as_ref()));
     for section in &report.sections {
         render_section(&mut out, section);
     }
@@ -428,7 +461,11 @@ mod tests {
         section.fixed_host_cost.memory_bytes = Figure::measured(4096);
         section.latencies.cold_launch_ms =
             Figure::measured(SpanStats::from_samples(&[10.0, 20.0, 30.0]));
-        let report = report_with(section);
+        let mut report = report_with(section);
+        report.source = Some(SourceRevision {
+            commit: "abc123".into(),
+            dirty: true,
+        });
         let json = serde_json::to_string(&report).unwrap();
         let back: ResourceReport = serde_json::from_str(&json).unwrap();
         assert_eq!(report, back);
@@ -543,6 +580,26 @@ mod tests {
         value.as_object_mut().unwrap().remove("memory_quantity");
         let section: Section = serde_json::from_value(value).unwrap();
         assert_eq!(section.memory_quantity, MemoryQuantity::PhysicalFootprint);
+    }
+
+    #[test]
+    fn a_report_from_a_modified_tree_says_so_in_markdown() {
+        let mut report = report_with(empty_section());
+        report.source = Some(SourceRevision {
+            commit: "abc123".into(),
+            dirty: true,
+        });
+        let md = render_markdown(&report);
+        assert!(md.contains("Measured from a modified tree"), "{md}");
+        assert!(
+            md.contains("`abc123`") && md.contains("not publishable"),
+            "{md}"
+        );
+        report.source.as_mut().unwrap().dirty = false;
+        let md = render_markdown(&report);
+        assert!(md.contains("Source commit: `abc123`.") && !md.contains("modified"));
+        report.source = None;
+        assert!(render_markdown(&report).contains("Source commit: not recorded."));
     }
 
     #[test]

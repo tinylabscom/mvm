@@ -1,9 +1,10 @@
 //! Observed resource figures and the reproducibility compare.
 //!
-//! A resource report is read as plain JSON: every object carrying a `status`
-//! key is a figure, every other object is walked, and `backend` /
-//! `architecture` name the section. xtask does not link the CLI crate, so the
-//! schema is followed by field name only.
+//! A resource report is read as plain JSON: a section's scalar fields are
+//! named in [`SECTION_SCALARS`], every object carrying a `status` key is a
+//! figure, and every other object is walked. xtask does not link the CLI
+//! crate, so the schema is followed by field name only; a checked-in report
+//! written by the CLI's own serializer keeps the two from drifting.
 
 use std::path::{Path, PathBuf};
 
@@ -13,6 +14,15 @@ use serde_json::Value;
 /// Leaves of a latency summary that the compare checks; the rest are listed
 /// as observed but never compared (max and p99 are single-sample noise).
 const COMPARED_STATS: [&str; 2] = ["p50", "p95"];
+
+/// Section fields that are labels rather than figure groups.
+const SECTION_SCALARS: [&str; 3] = ["backend", "architecture", "memory_quantity"];
+
+/// What a section's memory figures mean when it predates the label.
+const DEFAULT_MEMORY_QUANTITY: &str = "physical_footprint";
+
+/// The flag that lets a comparison run on reports that cannot be published.
+const ALLOW_UNPUBLISHABLE: &str = "--allow-unpublishable";
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Reading {
@@ -31,12 +41,21 @@ pub(super) struct Figure {
 pub(super) struct Section {
     pub backend: String,
     pub architecture: String,
+    pub memory_quantity: String,
     pub figures: Vec<Figure>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Source {
+    pub commit: String,
+    pub dirty: bool,
 }
 
 #[derive(Debug)]
 pub(super) struct Report {
     pub schema_version: u64,
+    /// `None` for a report written before the CLI recorded its source.
+    pub source: Option<Source>,
     pub sections: Vec<Section>,
 }
 
@@ -91,20 +110,44 @@ pub(super) fn parse_report(name: &str, text: &str) -> Result<Report> {
         };
         let mut figures = Vec::new();
         for (key, v) in obj {
-            if key != "backend" && key != "architecture" {
+            if !SECTION_SCALARS.contains(&key.as_str()) {
                 walk(name, &format!("{at}.{key}"), v, &mut figures)?;
             }
         }
+        let memory_quantity = match obj.get("memory_quantity") {
+            None => DEFAULT_MEMORY_QUANTITY.to_owned(),
+            Some(_) => text_field("memory_quantity")?,
+        };
         out.push(Section {
             backend: text_field("backend")?,
             architecture: text_field("architecture")?,
+            memory_quantity,
             figures,
         });
     }
     Ok(Report {
         schema_version,
+        source: parse_source(name, root.get("source"))?,
         sections: out,
     })
+}
+
+fn parse_source(name: &str, v: Option<&Value>) -> Result<Option<Source>> {
+    let Some(v) = v else {
+        return Ok(None);
+    };
+    let commit = v
+        .get("commit")
+        .and_then(Value::as_str)
+        .with_context(|| format!("{name}: source.commit missing or not a string"))?;
+    let dirty = v
+        .get("dirty")
+        .and_then(Value::as_bool)
+        .with_context(|| format!("{name}: source.dirty missing or not a boolean"))?;
+    Ok(Some(Source {
+        commit: commit.to_owned(),
+        dirty,
+    }))
 }
 
 /// `at` is the path for error messages; the figure path drops the
@@ -268,6 +311,13 @@ pub(super) fn compare(a: &Report, b: &Report, tolerance: f64) -> Result<()> {
         else {
             bail!("section {id} is present in A only");
         };
+        if sa.memory_quantity != sb.memory_quantity {
+            bail!(
+                "section {id} measures memory as {} in A and {} in B; the two are not comparable",
+                sa.memory_quantity,
+                sb.memory_quantity
+            );
+        }
         if let Some(fb) = sb
             .figures
             .iter()
@@ -312,12 +362,39 @@ pub(super) fn compare(a: &Report, b: &Report, tolerance: f64) -> Result<()> {
     Ok(())
 }
 
+/// Why the pair cannot back a published figure; empty when it can.
+pub(super) fn unpublishable_reasons(a: &Report, b: &Report) -> Vec<String> {
+    let mut reasons = Vec::new();
+    for (label, r) in [("A", a), ("B", b)] {
+        match &r.source {
+            None => reasons.push(format!("{label} does not record its source commit")),
+            Some(s) if s.dirty => reasons.push(format!(
+                "{label} was measured from a modified tree at {}",
+                s.commit
+            )),
+            Some(_) => {}
+        }
+    }
+    if let (Some(sa), Some(sb)) = (&a.source, &b.source)
+        && sa.commit != sb.commit
+    {
+        reasons.push(format!(
+            "A and B were built from different commits ({} vs {})",
+            sa.commit, sb.commit
+        ));
+    }
+    reasons
+}
+
 pub(super) fn compare_subcommand(args: &[String]) -> Result<()> {
     let mut files = Vec::new();
     let mut tolerance = None;
+    let mut allow_unpublishable = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        if a == "--tolerance" {
+        if a == ALLOW_UNPUBLISHABLE {
+            allow_unpublishable = true;
+        } else if a == "--tolerance" {
             let v = it.next().context("--tolerance needs a percent value")?;
             let t: f64 = v.parse().with_context(|| format!("bad tolerance {v:?}"))?;
             if !t.is_finite() || t < 0.0 {
@@ -329,14 +406,28 @@ pub(super) fn compare_subcommand(args: &[String]) -> Result<()> {
         }
     }
     let (Some(tolerance), [fa, fb]) = (tolerance, files.as_slice()) else {
-        bail!("usage: perf resource-compare <A.json> <B.json> --tolerance <PERCENT>");
+        bail!(
+            "usage: perf resource-compare <A.json> <B.json> --tolerance <PERCENT> [{ALLOW_UNPUBLISHABLE}]"
+        );
     };
-    compare(
-        &load_report(Path::new(fa))?,
-        &load_report(Path::new(fb))?,
-        tolerance,
-    )?;
-    eprintln!("resource reports agree within {tolerance}%");
+    let (a, b) = (load_report(Path::new(fa))?, load_report(Path::new(fb))?);
+    let reasons = unpublishable_reasons(&a, &b);
+    if !reasons.is_empty() && !allow_unpublishable {
+        bail!(
+            "refusing to compare: {}. Pass {ALLOW_UNPUBLISHABLE} to compare anyway; \
+             the result cannot be published",
+            reasons.join("; ")
+        );
+    }
+    compare(&a, &b, tolerance)?;
+    if reasons.is_empty() {
+        eprintln!("resource reports agree within {tolerance}%");
+    } else {
+        eprintln!(
+            "resource reports agree within {tolerance}%, but the comparison is NOT publishable: {}",
+            reasons.join("; ")
+        );
+    }
     Ok(())
 }
 
@@ -516,6 +607,102 @@ mod tests {
         });
         let e = compare(&a, &b, 100.0).unwrap_err().to_string();
         assert!(e.contains("disk_bytes") && e.contains("B only"), "{e}");
+    }
+
+    /// Written by the CLI's own serializer and held current by a CLI test.
+    const CLI_REPORT: &str =
+        include_str!("../../../crates/mvm-cli/tests/fixtures/resource-report.json");
+
+    fn cli_report_with(edit: impl FnOnce(&mut Value)) -> Report {
+        let mut v: Value = serde_json::from_str(CLI_REPORT).unwrap();
+        edit(&mut v);
+        parse(&v.to_string())
+    }
+
+    #[test]
+    fn a_report_from_the_cli_serializer_parses_and_compares_with_itself() {
+        let r = parse(CLI_REPORT);
+        let s = &r.sections[0];
+        assert_eq!(s.memory_quantity, "physical_footprint");
+        assert!(
+            s.figures
+                .iter()
+                .any(|f| f.path == "fixed_host_cost.memory_bytes")
+        );
+        assert!(r.source.is_some());
+        compare(&r, &parse(CLI_REPORT), 0.0).unwrap();
+        assert!(unpublishable_reasons(&r, &parse(CLI_REPORT)).is_empty());
+    }
+
+    #[test]
+    fn sections_measuring_different_memory_quantities_are_not_compared() {
+        let a = parse(CLI_REPORT);
+        let b = cli_report_with(|v| {
+            v["sections"][0]["memory_quantity"] = "proportional_set_size".into();
+        });
+        let e = compare(&a, &b, 100.0).unwrap_err().to_string();
+        assert!(
+            e.contains("physical_footprint") && e.contains("proportional_set_size"),
+            "{e}"
+        );
+        let unlabelled = cli_report_with(|v| {
+            v["sections"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("memory_quantity");
+        });
+        compare(&a, &unlabelled, 0.0).unwrap();
+    }
+
+    #[test]
+    fn an_unknown_scalar_in_a_section_is_still_refused() {
+        let e = parse_report(
+            "bad.json",
+            r#"{"schema_version":1,"sections":[{"backend":"b","architecture":"a","note":"x"}]}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("sections[0].note is not an object"), "{e}");
+    }
+
+    #[test]
+    fn dirty_unrecorded_or_mismatched_sources_are_unpublishable() {
+        let clean = parse(CLI_REPORT);
+        let dirty = cli_report_with(|v| v["source"]["dirty"] = true.into());
+        let other = cli_report_with(|v| v["source"]["commit"] = "feedface".into());
+        let unrecorded = cli_report_with(|v| {
+            v.as_object_mut().unwrap().remove("source");
+        });
+        let reasons = |a: &Report, b: &Report| unpublishable_reasons(a, b).join("; ");
+        assert!(reasons(&clean, &dirty).contains("B was measured from a modified tree"));
+        assert!(reasons(&other, &clean).contains("different commits (feedface vs"));
+        assert!(reasons(&unrecorded, &clean).contains("A does not record its source commit"));
+    }
+
+    #[test]
+    fn the_compare_command_refuses_a_dirty_pair_unless_allowed_and_says_so() {
+        let dir = std::env::temp_dir().join(format!("mvm-resource-compare-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut v: Value = serde_json::from_str(CLI_REPORT).unwrap();
+        v["source"]["dirty"] = true.into();
+        let (a, b) = (dir.join("a.json"), dir.join("b.json"));
+        std::fs::write(&a, CLI_REPORT).unwrap();
+        std::fs::write(&b, v.to_string()).unwrap();
+        let args = |extra: &[&str]| -> Vec<String> {
+            [a.to_str().unwrap(), b.to_str().unwrap(), "--tolerance", "1"]
+                .iter()
+                .chain(extra)
+                .map(|s| (*s).to_owned())
+                .collect()
+        };
+        let refused = compare_subcommand(&args(&[])).unwrap_err().to_string();
+        let allowed = compare_subcommand(&args(&[ALLOW_UNPUBLISHABLE]));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(
+            refused.contains("modified tree") && refused.contains(ALLOW_UNPUBLISHABLE),
+            "{refused}"
+        );
+        allowed.unwrap();
     }
 
     #[test]
