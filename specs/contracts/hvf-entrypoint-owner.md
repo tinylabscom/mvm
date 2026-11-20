@@ -281,9 +281,13 @@ connections remain compatibility wrappers using the existing key in both
 roles. The owner route never falls back from explicit roots to that legacy
 loader.
 
-This split is source-level wiring only. The provider stop root is not yet loaded
-from a commissioned deployment receipt, and no protected authority/runtime IPC
-or positive factory supplies it in production.
+This split is source-level wiring only. A strict read-only macOS loader now
+loads the distinct native and provider-stop roots from the fixed protected
+commissioning receipt, and a pure adapter can construct the typed control roots
+without opening a connection. Journal opening remains deferred until an
+open-existing, non-repairing protected lock path exists. These seams remain
+disconnected: no protected authority/runtime IPC, service, native operation or
+positive factory consumes them in production.
 
 ## Recovery authorization
 
