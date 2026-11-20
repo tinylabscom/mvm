@@ -34,7 +34,8 @@ struct State {
     // At most the initial listener and one resident child's listener. Keeping
     // the old listener open avoids descriptor reuse while the worker polls it.
     listeners: Vec<UnixListener>,
-    key: SigningKey,
+    native_control_signing: SigningKey,
+    provider_stop_root: ed25519_dalek::VerifyingKey,
     #[cfg(test)]
     before_commit: Option<(
         std::sync::mpsc::SyncSender<()>,
@@ -65,6 +66,11 @@ pub struct StopControl {
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
+pub(crate) struct StopControlKeys {
+    pub(crate) native_control_signing: SigningKey,
+    pub(crate) provider_stop_root: ed25519_dalek::VerifyingKey,
+}
+
 /// Publication cannot be rolled back after its signed bytes become visible.
 #[derive(Debug)]
 #[must_use]
@@ -86,8 +92,24 @@ impl StopControl {
         let bootstrap = crate::audit::host_keypair::load_or_init()?;
         drop(bootstrap);
         mvm_core::launch_trace::lap("stop_control.keypair_load");
-        let (key, _) = wire::existing_operator()?;
+        let (key, root) = wire::existing_operator()?;
         mvm_core::launch_trace::lap("stop_control.operator_lookup");
+        Self::start_explicit(
+            vm,
+            stop,
+            StopControlKeys {
+                native_control_signing: key,
+                provider_stop_root: root,
+            },
+        )
+    }
+
+    pub(crate) fn start_explicit(
+        vm: &str,
+        stop: &'static AtomicBool,
+        keys: StopControlKeys,
+    ) -> Result<Self> {
+        let _ = wire::state_dir(vm)?;
         let (instance, listener) = provision(vm)?;
         let (wake_read, wake) = UnixStream::pair()?;
         wake_read.set_nonblocking(true)?;
@@ -97,7 +119,8 @@ impl StopControl {
                 instance,
                 phase: Phase::Active,
                 listeners: vec![listener],
-                key,
+                native_control_signing: keys.native_control_signing,
+                provider_stop_root: keys.provider_stop_root,
                 #[cfg(test)]
                 before_commit: None,
                 #[cfg(test)]
@@ -380,7 +403,7 @@ fn wake(shared: &Shared) {
 }
 
 fn sign(state: &State, operation: HvfInstanceControl) -> Result<SignedControl> {
-    let seed = zeroize::Zeroizing::new(state.key.to_bytes());
+    let seed = zeroize::Zeroizing::new(state.native_control_signing.to_bytes());
     Ok(broker_control::sign(
         ControlRequest::HvfInstanceV1(operation),
         &seed,
@@ -498,7 +521,7 @@ fn exchange(shared: &Shared, stream: &mut UnixStream, deadline: Instant) -> Resu
         ensure!(Instant::now() < deadline, "HVF stop connection expired");
         verify_stop(
             &request,
-            &state.key.verifying_key(),
+            &state.provider_stop_root,
             &state.instance,
             &connection_nonce,
             SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
