@@ -273,10 +273,36 @@ fn host_interface_refuses_a_plan_from_before_a_replacement() {
     stale.execution_epoch = 2;
     host_gates::admit_host_interface(&stale).expect("the current epoch admits");
     stale.execution_epoch = 3;
-    assert!(
-        host_gates::admit_host_interface(&stale).is_err(),
-        "an epoch the host never issued is refused too"
-    );
+    let err = host_gates::admit_host_interface(&stale)
+        .expect_err("an epoch the host never issued is refused too");
+    assert!(err.to_string().contains("not yet current"), "{err}");
+}
+
+#[test]
+fn the_launch_check_reads_the_durable_record_the_coordinator_wrote() {
+    use mvm_core::host_interface::workload::WorkloadChange;
+    let (_env, home) = host_with_ceiling(Default::default());
+    let mut plan = synthesize_plan(&fixture_input("vm-durable")).unwrap();
+    assert_eq!(plan.execution_epoch, 1);
+    {
+        let store = crate::policy_generation::workload_store::OwnedWorkloadStore::open(home.path())
+            .unwrap();
+        store
+            .commit(&WorkloadChange::Replace {
+                workload: "vm-durable".into(),
+                from_epoch: mvm_contract::protocol::mailbox::ExecutionEpoch::FIRST,
+            })
+            .unwrap();
+    }
+    // A fresh read after the writer is gone: the record survives the process
+    // that wrote it, and the plan synthesized before the replacement is stale.
+    let err = host_gates::admit_host_interface(&plan)
+        .expect_err("a plan from before the replacement must not admit");
+    assert!(err.to_string().contains("stale execution epoch 1"), "{err}");
+    plan.execution_epoch = 2;
+    host_gates::admit_host_interface(&plan).expect("the recorded epoch admits");
+    let bystander = synthesize_plan(&fixture_input("vm-bystander")).unwrap();
+    host_gates::admit_host_interface(&bystander).expect("another unit is unaffected");
 }
 
 #[test]

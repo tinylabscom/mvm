@@ -181,10 +181,10 @@ impl ExecutionEpoch {
         self.0
     }
 
-    /// The following epoch; stays at `u64::MAX` rather than wrapping to zero.
+    /// The following epoch, or `None` at `u64::MAX`, so an old epoch is never reissued.
     #[must_use]
-    pub const fn saturating_next(self) -> Self {
-        Self(self.0.saturating_add(1))
+    pub fn checked_next(self) -> Option<Self> {
+        self.0.checked_add(1).map(Self)
     }
 }
 

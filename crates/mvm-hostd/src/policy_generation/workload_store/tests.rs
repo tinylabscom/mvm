@@ -279,7 +279,7 @@ fn quarantine_is_idempotent_and_a_stale_replace_changes_nothing() {
 fn seed(home: &Path, count: usize) {
     let mut workloads = WorkloadLedger::default();
     for n in 0..count {
-        workloads.replace(&format!("w{n}"));
+        workloads.replace(&format!("w{n}")).unwrap();
     }
     let dir = canonical_dir_at(home);
     std::fs::create_dir_all(&dir).unwrap();
@@ -375,7 +375,7 @@ fn a_replace_that_would_eat_the_byte_reserve_is_refused_while_a_quarantine_commi
         <= MAX_LEDGER_BYTES - QUARANTINE_RESERVE_BYTES
     {
         for _ in 0..500 {
-            workloads.replace(&format!("{n:0>256}"));
+            workloads.replace(&format!("{n:0>256}")).unwrap();
             n += 1;
         }
     }
@@ -628,7 +628,7 @@ mod destinations {
 
     fn write_destinations(home: &Path, destinations: BTreeMap<String, DestinationEntry>) {
         let mut workloads = WorkloadLedger::default();
-        workloads.replace("old");
+        workloads.replace("old").unwrap();
         let dir = canonical_dir_at(home);
         std::fs::create_dir_all(&dir).unwrap();
         let bytes = serde_json::to_vec(&CanonicalLedger {

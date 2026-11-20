@@ -51,11 +51,13 @@ impl LocalHostInterface {
         self
     }
 
-    /// Issue the epoch a replacement workload must carry.
-    pub fn advance_epoch(&self) -> ExecutionEpoch {
+    /// Issue the epoch a replacement workload must carry; refused at the maximum.
+    pub fn advance_epoch(&self) -> Result<ExecutionEpoch, Denial> {
         let mut g = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        g.1 = g.1.saturating_next();
-        g.1
+        g.1 =
+            g.1.checked_next()
+                .ok_or(Denial::EpochExhausted(g.1.get()))?;
+        Ok(g.1)
     }
 
     pub fn current_epoch(&self) -> ExecutionEpoch {
