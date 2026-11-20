@@ -8,6 +8,142 @@ Scope: [#4655](https://github.com/tinylabscom/mvm/issues/4655), under
 Issue comments own approval provenance, review revisions and delivery status.
 This contract describes required behavior, not evidence that it is implemented.
 
+## Maintainer decision: protected provisioner
+
+The maintainer selected the production provider recommended in
+[`ps06-builder-authority.md`](ps06-builder-authority.md): a signed, notarized,
+root-installed provider with separate non-login `_mvm_authority` and
+`_mvm_runtime` principals. `_mvm_authority` owns a fresh provider-internal
+issuer, policy, one-shot grants, revocation and canonical audit;
+`_mvm_runtime` owns original children, frozen inputs, quarantine and cleanup.
+A root-owned deployment receipt pins the installed code cohort, role IDs and
+issuer public key. CLI and Studio remain unprivileged authenticated clients.
+
+This decision authorizes repository implementation of that boundary. It does
+not authorize installing services or accounts, provisioning real credentials,
+running a VM, signing or notarizing artifacts, or publishing a release on the
+current host. Missing, corrupt or interrupted commissioning refuses; normal
+startup cannot initialize an empty provider ledger or self-pin another issuer.
+The legacy invoking-user host signer, caller registration and a signature-valid
+grant alone cannot authorize an owner birth.
+
+This amendment **supersedes** the invoking-user birth-owner and fixed
+`mvmctl`-adjacent owner deployment described later in this document.
+`_mvm_runtime`, launched from the protected provider installation, is the
+original-child owner. The invoking user remains only an authenticated client
+and never receives native custody, signer access or a lifecycle capability.
+Requirements below for one owner per invocation, original custody from birth,
+no PID reconstruction, bounded framing, hardened runtime, environment
+allowlisting, final-byte verification, recovery possession and absorbing
+quarantine still apply to the protected runtime component. Requirements that
+derive its executable from `mvmctl`'s path, authenticate only a same-UID peer,
+or place the owner under the invoking UID no longer apply.
+
+The authority and runtime services mutually authenticate their immediate peers
+using kernel audit tokens, expected protected role UIDs and pinned code
+requirements from the deployment receipt. CLI and Studio authenticate to the
+authority service as unprivileged clients; their enrollment/possession proof
+authorizes only the exact retained operation. A successful XPC/launchd lookup,
+same UID, socket path or signature-valid public grant is not authority.
+
+### Closed source vocabulary
+
+`mvm-contract::protocol::hvf_entrypoint_owner` defines public versioned bindings
+for one fresh canonical admission, owner lifecycle audit and original-instance
+HVF control. The vocabulary contains no path, PID, executable, argv, arbitrary
+signing bytes or pre-birth native generation.
+
+`FreshOwnerBinding` binds the operation, complete controlling principal,
+installation, owner incarnation, tenant, workload, exact canonical-plan digest,
+exact frozen-input digest, policy revision and finite expiry.
+The owner incarnation is selected before admission and is not a fabricated
+native generation. Provider epoch, connection challenge and request sequence
+belong to the later authenticated provider envelope and durable journal; this
+public record is not that envelope. `FreshAdmissionRequest` commits to
+the complete exact plan bytes under the
+`mvm.hvf-owner.fresh-admission.v1\0` domain: SHA-256 over that domain including
+its NUL, compact typed `serde_json` serialization of `FreshOwnerBinding` in
+declaration order, then the exact plan bytes. This is not JCS or `Value`
+serialization. Decoding or hashing these values grants nothing. Any v1 encoding
+change requires an explicit version and domain migration.
+
+The protected verifier eventually returns a private, non-cloneable,
+non-serializable `VerifiedOwnerGrant` after checking the provider signature,
+deployment identity and complete independently retained request expectations.
+It is not yet launch authority. A protected journal separately checks
+revocation and durably consumes the exact grant before returning the private
+`ConsumedOwnerGrant`. The key holder accepts only the exact closed operation
+and independently recomputes its domain and binding. Neither the source
+vocabulary nor an existing opaque `SignPlan` endpoint is that capability.
+
+`OwnerGrant` is the provider-issued public one-shot envelope. It binds one
+issuer, nonzero commissioning epoch and grant ID to the domain-separated digest of one exact
+`FreshAdmissionRequest`, with finite ordered issuance and expiry. Its signature
+is Ed25519 over `mvm.hvf-owner.grant.v1\0` including its NUL followed by compact
+typed `serde_json` serialization of `OwnerGrant` in declaration order. It is
+not JCS or a generic sign-bytes operation. The signature does not itself
+authorize work. The protected runtime compares the issuer key
+with the root-owned deployment receipt, re-verifies every retained expectation,
+checks the exact request, checks durable revocation/consumption state, and
+commits consumption before returning a private `ConsumedOwnerGrant`. A lost
+response is reconciled by a protected locked read: a retained consumed or
+revoked disposition cannot retry; proven absence means publication did not
+occur and no consumed capability was returned, so re-verification may retry.
+A corrupt or missing initialized journal refuses.
+The journal is initialized exactly once under a stable digest of issuer label,
+issuer public key and commissioning epoch; another provider generation cannot
+reuse its grant IDs, revocations or consumption namespace.
+The commissioning epoch identifies an installed issuer generation. It is not a
+runtime session epoch and does not by itself invalidate allowances after an
+authority-service restart; that freshness belongs to the later authenticated
+provider envelope and durable restart transition.
+The journal records the last accepted security time. Consumption and revocation
+sample their injected provider clock only after acquiring exclusion; regression
+before the grant's verification observation refuses. Expiry may durably advance
+the time floor, but refuses before grant consumption or authority return.
+Consumption does not extend expiry, and a later activation must check the same
+or an earlier deadline again.
+The protected journal covers ordinary crash recovery under the trusted
+administrator boundary. It does not detect deliberate rollback of the complete
+root-owned deployment receipt and journal by the trusted host administrator.
+
+### Closed admission key-holder acceptance
+
+After durable consumption, the authority key holder may sign only the exact
+canonical `ExecutionPlan` bytes whose `FreshAdmissionRequest` digest appears in
+that consumed record. The key holder binds its issuer key and commissioning
+epoch to the journal's provider identity, rechecks canonical plan encoding, and
+rechecks current expiry under the journal's serialized clock before signing.
+It exposes no arbitrary bytes, legacy `SignPlan`, path, PID or native-control
+operation through this API. Exact retries return the same deterministic
+Ed25519 signature and create no additional authority or native effect.
+
+The current library adapter opens no IPC endpoint and performs no peer
+authentication. The future protected authority service must authenticate its
+immediate runtime peer against the deployment receipt before invoking it.
+Plan-signing acceptance does not append audit, bind a native generation,
+authorize HVF control, create a process or return a launch capability.
+
+### Refusal-only packaged process boundary
+
+`mvm-hvf-run-owner` is first shipped as a refusal-only `mvm-client` binary. Its
+only protocol is one 4-KiB length-prefixed bootstrap binding followed by the
+typed `OwnerFactoryDisabled` response. Unknown versions/fields, zero identities,
+truncation and oversized declarations refuse before output. Version 1 has no
+success, start, signer, audit, native-control or VM-factory response.
+
+The macOS release and exact-commit SourceHelpers archives include this binary.
+After the final byte-changing hardened-runtime signature, packaging writes
+`owner-component.json` inside the archive with the exact final SHA-256, package
+version, target, source commit and bootstrap protocol. The outer keyless archive
+signature authenticates both manifest and member. Final-package inspection
+requires exact equality. The installer copies but never re-signs the owner.
+
+This packaging does not make the adjacent user-owned executable the production
+provider owner selected above. It supplies authenticated final bytes for the
+future root-installed provider cohort. No current caller prepares, executes or
+probes the owner, and existing HVF/Firecracker factory gates remain unchanged.
+
 ## Process and authority
 
 `mvm-hvf-run-owner` is the proposed binary in `mvm-client`, with a thin entry

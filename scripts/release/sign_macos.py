@@ -34,6 +34,12 @@ ROLES = {
     # Retain the historical spelling when inspecting older staging layouts.
     "mvm-krun-supervisor": ["com.apple.security.hypervisor"],
 }
+REQUIRED_CLI_BINARIES = {
+    "mvmctl",
+    "mvm-hvf-supervisor",
+    "mvm-hvf-run-owner",
+    "mvm-libkrun-supervisor",
+}
 # codesign treats a requirement argument without '=' as a filename.
 DEVELOPER_ID_REQUIREMENT = (
     '=anchor apple generic and '
@@ -48,6 +54,14 @@ def run(*args):
     if result.returncode:
         raise RuntimeError(f"{args[0]} {args[1]} failed (exit {result.returncode})")
     return result.stdout
+
+
+def run_diagnostic(*args):
+    """Run a non-secret inspection command and return stdout plus stderr."""
+    result = subprocess.run([str(arg) for arg in args], capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(f"{args[0]} {args[1]} failed (exit {result.returncode})")
+    return result.stdout + result.stderr
 
 
 def macho_type(path):
@@ -129,7 +143,7 @@ def producer_sign(payload, report, require_cli_inventory=False):
     code = targets(payload)
     if require_cli_inventory:
         names = {path.name for path, kind in code if kind == 2}
-        missing = {"mvmctl", "mvm-hvf-supervisor", "mvm-libkrun-supervisor"} - names
+        missing = REQUIRED_CLI_BINARIES - names
         if missing:
             raise RuntimeError("missing required CLI inventory: " + ", ".join(sorted(missing)))
     entries = []
@@ -137,6 +151,8 @@ def producer_sign(payload, report, require_cli_inventory=False):
         for path, kind in sorted(code, key=lambda item: item[1] == 2):
             keys = ROLES.get(path.name, []) if kind == 2 else []
             args = ["codesign", "--force", "--sign", "-", "--timestamp=none"]
+            if path.name == "mvm-hvf-run-owner":
+                args += ["--options", "runtime"]
             if keys:
                 entitlements = Path(tmp) / "entitlements.plist"
                 entitlements.write_bytes(plistlib.dumps(dict.fromkeys(keys, True)))
