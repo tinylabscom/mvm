@@ -4113,6 +4113,7 @@ dependencies = [
  "libkrun-sys",
  "mio",
  "mvm-agentd",
+ "mvm-backends",
  "mvm-build",
  "mvm-contract",
  "mvm-core",

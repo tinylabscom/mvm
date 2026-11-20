@@ -351,7 +351,7 @@ fn start_flowmux_session(
         let audit_dir = tempfile::tempdir().map_err(FlowMuxError::Transport)?;
         let signer = FileAuditSigner::open_file(
             SigningKey::from_bytes(&[0x41; 32]),
-            &audit_dir.path().join("audit.jsonl"),
+            audit_dir.path().join("audit.jsonl"),
         )
         .map_err(|error| FlowMuxError::Audit(std::io::Error::other(error)))?;
         let tenant = TenantId("network-perf".into());
