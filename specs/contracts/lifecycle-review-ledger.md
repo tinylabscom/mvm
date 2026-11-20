@@ -143,6 +143,33 @@ rollback, immediate audit ordering and uncertain-stop retention. They do not
 qualify native HVF or Firecracker behavior, strengthen Preview resource claim
 18, or satisfy the formal cold/warm performance requirements.
 
+## Entrypoint and installed-bundle preparation ownership
+
+The ordinary entrypoint/session slice under
+[#5520](https://github.com/tinylabscom/mvm/issues/5520) keeps slot, rootfs,
+kernel, backend, VM-name and verity resolution in `mvm-client`. Non-portable
+boots now enter the shared hostd preparation boundary for source attachment,
+one launch-scoped runtime verification and one admission before their existing
+legacy or native-owned dispatch tail. Installed bundles remain an authenticated
+ordinary-source attachment: archive, enrollment, canonical-kernel and pin
+checks stay in the client attachment, while the existing final gate rechecks
+the registry pack at dispatch.
+
+The returned capability retains the exact config, `VerifiedRuntimeSet` and
+opaque admitted context. Plan JSON and `SessionAuditSubstrate` remain
+projections. Legacy dispatch still owns its launch, grant, budget, mailbox and
+failure-audit order. Native HVF dispatch still requires the original owner and
+retains that custody when activation or stop is uncertain. Producer-owned
+portable assets remain on their prior preparation and post-admission
+verification path, including refusal when an installed bundle is also selected.
+
+Mock and source-level tests cover preparation order, refusal before backend
+start, one-use admission, runtime/config identity checks, installed-bundle
+pin/no-fallback and dispatch recheck behavior, native ownership and uncertain
+stop custody, and the unchanged portable branch. They do not qualify a live
+HVF or Firecracker launch, Linux confinement, a billable GCP host, or the
+formal cold/warm performance requirements.
+
 ## Signed application HVF startup diagnostics
 
 Reviewed in [#5681](https://github.com/tinylabscom/mvm/pull/5681): standalone

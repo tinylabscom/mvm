@@ -785,6 +785,38 @@ fn persistent_boundary_admission(
     }
 }
 
+fn entrypoint_boundary_admission(
+    name: &str,
+    backend: &mvm_runtime::AnyBackend,
+    keys: &std::path::Path,
+    audit: &std::path::Path,
+    config: &VmStartConfig,
+    runtime: &mvm_runtime::runtime_evidence::VerifiedRuntimeSet,
+) -> LaunchAdmission<()> {
+    let admitted = admit_for_run(
+        &fixture_input(name),
+        &SystemClock,
+        &InMemoryNonceLedger::new(),
+        Some(keys),
+        None,
+        RunPosture::on_backend(Variant::Dev, backend.kind())
+            .with_runtime(Some(config))
+            .with_verified_runtime(Some(runtime)),
+    )
+    .expect("entrypoint boundary admission");
+    let emitter = crate::audit::emitter::AuditEmitter::with_dir(
+        ed25519_dalek::SigningKey::from_bytes(&[42; 32]),
+        audit,
+    )
+    .expect("audit emitter");
+    LaunchAdmission {
+        admitted,
+        emitter,
+        policy_bundle: None,
+        continuation: (),
+    }
+}
+
 #[test]
 fn persistent_boundary_verifies_then_admits_then_dispatches_once() {
     let (_env, _home) = host_with_ceiling(Default::default());
@@ -835,6 +867,189 @@ fn persistent_boundary_verifies_then_admits_then_dispatches_once() {
             .contains("plan.launched"),
         "persistent acceptance remains with the client readiness owner"
     );
+}
+
+#[test]
+fn entrypoint_boundary_authenticates_then_admits_and_retains_runtime_through_dispatch() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let keys = tempfile::tempdir().expect("keys");
+    let audit = tempfile::tempdir().expect("audit");
+    let runtime_dir = tempfile::tempdir().expect("runtime fixture");
+    let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+    let name = "entrypoint-boundary-order";
+    let events = std::cell::RefCell::new(Vec::new());
+    let runtime = mvm_build::guest_runtime::evidence::verified_release_runtime_fixture(
+        runtime_dir.path(),
+        mvm_core::arch::GuestArch::host(),
+        mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+        mvm_runtime::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION,
+    );
+    let release = std::sync::Arc::clone(&runtime.release);
+
+    let prepared = prepare_entrypoint(
+        VmStartConfig {
+            name: name.into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            ..Default::default()
+        },
+        backend.kind(),
+        |config| {
+            events.borrow_mut().push("source-authentication");
+            config.runtime_release_proof = Some(release.proof().clone());
+            config.runtime_overlay_path = Some(runtime.overlay.display().to_string());
+            config.runtime_overlay_verity_path = Some(runtime.overlay_verity.display().to_string());
+            config.runtime_overlay_roothash = Some(runtime.overlay_roothash.clone());
+            config.runtime_overlay_version = Some(release.proof().version.clone());
+            config.initrd_path = Some(runtime.initramfs.display().to_string());
+            Ok(Some(std::sync::Arc::clone(&release)))
+        },
+        |config, verified| {
+            let verified = verified.expect("selected release is verified before admission");
+            assert!(
+                std::ptr::eq(verified.release(), release.as_ref()),
+                "admission borrows the exact release selected by attachment"
+            );
+            assert_eq!(
+                verified.identity().archive_sha256,
+                release.proof().archive_sha256
+            );
+            events.borrow_mut().push("admission");
+            Ok(entrypoint_boundary_admission(
+                name,
+                &backend,
+                keys.path(),
+                audit.path(),
+                config,
+                verified,
+            ))
+        },
+    )
+    .expect("prepare entrypoint");
+    let (config, runtime, admission) = prepared.into_parts();
+    assert_eq!(
+        *events.borrow(),
+        ["source-authentication", "admission"],
+        "source authentication and release verification precede admission"
+    );
+    let verified = runtime.as_deref().expect("prepared runtime retained");
+    assert!(
+        std::ptr::eq(verified.release(), release.as_ref()),
+        "dispatch retains the exact release observed by admission"
+    );
+    assert!(!matches!(
+        backend.status(&VmId(name.into())),
+        Ok(mvm_core::vm_backend::VmStatus::Running)
+    ));
+
+    let error = start_entrypoint(
+        StartAdmittedParams {
+            backend: &backend,
+            admitted: admission.admitted,
+            config,
+            policy_bundle: admission.policy_bundle.as_ref(),
+            emitter: Some(&admission.emitter),
+            assurance: None,
+        },
+        runtime.as_deref(),
+    )
+    .expect_err("mock refuses the retained verified release at dispatch");
+    assert!(
+        format!("{error:#}").contains("cannot consume a verified release runtime"),
+        "dispatch observes the exact retained runtime: {error:#}"
+    );
+    assert!(!matches!(
+        backend.status(&VmId(name.into())),
+        Ok(mvm_core::vm_backend::VmStatus::Running)
+    ));
+}
+
+#[test]
+fn entrypoint_source_or_runtime_refusal_never_reaches_admission_or_dispatch() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+    let name = "entrypoint-preparation-refusal";
+    let admitted = std::cell::Cell::new(false);
+
+    let error = match prepare_entrypoint(
+        VmStartConfig {
+            name: name.into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            ..Default::default()
+        },
+        backend.kind(),
+        |_| anyhow::bail!("installed bundle authentication refused"),
+        |_, _| {
+            admitted.set(true);
+            Ok(())
+        },
+    ) {
+        Ok(_) => panic!("source refusal must stop preparation"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("installed bundle authentication refused")
+    );
+    assert!(!admitted.get(), "source refusal precedes admission");
+    assert!(!matches!(
+        backend.status(&VmId(name.into())),
+        Ok(mvm_core::vm_backend::VmStatus::Running)
+    ));
+}
+
+#[test]
+fn entrypoint_runtime_tampering_after_attachment_refuses_before_admission() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let runtime_dir = tempfile::tempdir().expect("runtime fixture");
+    let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+    let name = "entrypoint-runtime-tamper";
+    let admitted = std::cell::Cell::new(false);
+    let runtime = mvm_build::guest_runtime::evidence::verified_release_runtime_fixture(
+        runtime_dir.path(),
+        mvm_core::arch::GuestArch::host(),
+        mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+        mvm_runtime::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION,
+    );
+    let release = std::sync::Arc::clone(&runtime.release);
+
+    let error = match prepare_entrypoint(
+        VmStartConfig {
+            name: name.into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            ..Default::default()
+        },
+        backend.kind(),
+        |config| {
+            config.runtime_release_proof = Some(release.proof().clone());
+            config.runtime_overlay_path = Some(runtime.overlay.display().to_string());
+            config.runtime_overlay_verity_path = Some(runtime.overlay_verity.display().to_string());
+            config.runtime_overlay_roothash = Some(runtime.overlay_roothash.clone());
+            config.runtime_overlay_version = Some(release.proof().version.clone());
+            config.initrd_path = Some(runtime.initramfs.display().to_string());
+            std::fs::write(&runtime.overlay, b"changed after attachment")
+                .expect("tamper selected overlay");
+            Ok(Some(release))
+        },
+        |_, _| {
+            admitted.set(true);
+            Ok(())
+        },
+    ) {
+        Ok(_) => panic!("tampered selected runtime must refuse preparation"),
+        Err(error) => error,
+    };
+
+    assert!(
+        format!("{error:#}").contains("runtime artifact differs from signed assembly"),
+        "runtime-integrity refusal is explicit: {error:#}"
+    );
+    assert!(!admitted.get(), "runtime verification precedes admission");
+    assert!(!matches!(
+        backend.status(&VmId(name.into())),
+        Ok(mvm_core::vm_backend::VmStatus::Running)
+    ));
 }
 
 #[test]

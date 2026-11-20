@@ -245,6 +245,9 @@ pub(crate) enum LaunchSource<'a> {
     LocalTransient {
         lifecycle: &'a MachineLifecycleLock,
     },
+    Entrypoint {
+        backend_kind: mvm_core::vm_backend::BackendKind,
+    },
 }
 
 pub(crate) struct PreparedLaunch<A> {
@@ -276,10 +279,10 @@ pub(crate) fn prepare_launch<A>(
                 .require_cold_state()
                 .map_err(CliStartFailure::StateNotOwned)?;
         }
-        LaunchSource::CliCold { backend_kind } => {
+        LaunchSource::CliCold { backend_kind } | LaunchSource::Entrypoint { backend_kind } => {
             tracing::trace!(
                 backend = backend_kind.as_str(),
-                "preparing selected CLI cold source"
+                "preparing selected cold source"
             );
         }
     }
@@ -297,6 +300,62 @@ pub(crate) fn prepare_launch<A>(
         config,
         verified_runtime,
         admission,
+    })
+}
+
+/// An ordinary entrypoint prepared through attachment, runtime verification and admission.
+pub struct PreparedEntrypoint<A> {
+    config: VmStartConfig,
+    verified_runtime: Option<std::sync::Arc<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>>,
+    admission: A,
+}
+
+impl<A> PreparedEntrypoint<A> {
+    /// Return the exact prepared config, retained runtime evidence and admission.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        VmStartConfig,
+        Option<std::sync::Arc<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>>,
+        A,
+    ) {
+        (self.config, self.verified_runtime, self.admission)
+    }
+}
+
+/// Prepare an ordinary entrypoint without changing its source-specific dispatch tail.
+///
+/// Attachment includes installed-bundle authentication when the client selects
+/// one. The returned runtime evidence is the same launch-scoped set supplied to
+/// admission and must be retained through dispatch.
+///
+/// # Errors
+/// Propagates attachment, runtime verification, or admission refusal before any
+/// backend dispatch.
+pub fn prepare_entrypoint<A>(
+    config: VmStartConfig,
+    backend_kind: mvm_core::vm_backend::BackendKind,
+    attach: impl FnOnce(
+        &mut VmStartConfig,
+    ) -> Result<
+        Option<std::sync::Arc<mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime>>,
+    >,
+    admit: impl FnOnce(
+        &mut VmStartConfig,
+        Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
+    ) -> Result<A>,
+) -> Result<PreparedEntrypoint<A>> {
+    let prepared = prepare_launch(
+        LaunchSource::Entrypoint { backend_kind },
+        config,
+        attach,
+        admit,
+    )?;
+    Ok(PreparedEntrypoint {
+        config: prepared.config,
+        verified_runtime: prepared.verified_runtime,
+        admission: prepared.admission,
     })
 }
 

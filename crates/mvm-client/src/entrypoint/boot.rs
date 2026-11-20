@@ -29,7 +29,7 @@ pub(crate) struct ClientBootResources {
     // and reseals attachments, so it must outlive every uncertain native use.
     pub _volumes: Option<crate::volume::LaunchPreparation>,
     pub built_runtime: Option<mvm_hostd::plan_admission::PreparedBuiltPackRuntime>,
-    pub verified_runtime: Option<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
+    pub verified_runtime: Option<std::sync::Arc<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>>,
 }
 
 struct ClientCustody {
@@ -66,7 +66,7 @@ impl OwnedClientBoot {
                 &mut resources.admission.admitted,
                 &mut resources.config,
                 resources.admission.policy_bundle.as_ref(),
-                resources.verified_runtime.as_ref(),
+                resources.verified_runtime.as_deref(),
                 &mut resources.built_runtime,
                 &mut group.runtime,
             )
@@ -753,9 +753,12 @@ fn require_native_owner(backend: mvm_core::vm_backend::BackendKind, has_owner: b
 fn session_runtime_set(
     config: &VmStartConfig,
     release: Option<crate::launch::runtime_source::ReleaseRuntime>,
-) -> Result<Option<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>> {
+) -> Result<Option<std::sync::Arc<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>>> {
     crate::launch::runtime_source::paired_release_evidence(config, release)?
-        .map(|release| mvm_runtime::runtime_evidence::verify_release_runtime_set(config, release))
+        .map(|release| {
+            mvm_runtime::runtime_evidence::verify_release_runtime_set(config, release)
+                .map(std::sync::Arc::new)
+        })
         .transpose()
 }
 
@@ -816,54 +819,71 @@ fn boot_session_core(
         ..Default::default()
     };
 
-    // The runtime overlay is the single source of the guest agent and its
-    // helpers here, as on the transient path; a missing required overlay is
-    // built or acquired, never replaced by a copy baked into the rootfs.
-    let release = if let Some(assets) = portable_boot_assets {
+    // Producer-owned portable closure preparation remains separate until its
+    // source migration. Ordinary and installed-bundle entrypoints use hostd's
+    // shared attachment, verification and admission boundary.
+    let (mut start_config, verified_runtime, admitted) = if let Some(assets) = portable_boot_assets
+    {
         require_portable_without_installed_bundle(true, bundle_archive.as_deref())?;
-        Some(assets.apply_for_health(&mut start_config)?)
+        let release = Some(assets.apply_for_health(&mut start_config)?);
+        let verified_runtime = session_runtime_set(&start_config, release)?;
+        let admitted = admit(AdmitInputs {
+            rootfs: std::path::Path::new(&rootfs),
+            kernel: start_config
+                .kernel_path
+                .as_deref()
+                .map(std::path::Path::new),
+            backend_kind: backend.kind(),
+            vm_name: &vm_name,
+            sdk_sidecar: None,
+            assets: &[],
+            volumes: &start_config.volumes,
+            bundle_archive: bundle_archive.as_deref(),
+            runtime_config: Some(&start_config),
+            verified_runtime: verified_runtime.as_deref(),
+            verified_runtime_owner: None,
+        })?;
+        (start_config, verified_runtime, admitted)
     } else {
-        let release = attach_runtime_overlay_if_cached_version_verified(
-            &mut start_config,
-            backend.name(),
-            None,
-            pair,
-        )?;
-        if let Some(release) = &release {
-            attach_universal_initramfs_with_verified_release(
-                &mut start_config,
-                backend.name(),
-                release,
-            )?;
-        } else {
-            attach_universal_initramfs_if_cached(&mut start_config, backend.name())?;
-        }
-        release
+        mvm_hostd::plan_admission::prepare_entrypoint(
+            start_config,
+            backend.kind(),
+            |config| {
+                let release = attach_runtime_overlay_if_cached_version_verified(
+                    config,
+                    backend.name(),
+                    None,
+                    pair,
+                )?;
+                if let Some(release) = &release {
+                    attach_universal_initramfs_with_verified_release(
+                        config,
+                        backend.name(),
+                        release,
+                    )?;
+                } else {
+                    attach_universal_initramfs_if_cached(config, backend.name())?;
+                }
+                crate::launch::runtime_source::paired_release_evidence(config, release)
+            },
+            |config, verified_runtime| {
+                admit(AdmitInputs {
+                    rootfs: std::path::Path::new(&rootfs),
+                    kernel: config.kernel_path.as_deref().map(std::path::Path::new),
+                    backend_kind: backend.kind(),
+                    vm_name: &vm_name,
+                    sdk_sidecar: None,
+                    assets: &[],
+                    volumes: &config.volumes,
+                    bundle_archive: bundle_archive.as_deref(),
+                    runtime_config: Some(config),
+                    verified_runtime,
+                    verified_runtime_owner: None,
+                })
+            },
+        )?
+        .into_parts()
     };
-    let verified_runtime = session_runtime_set(&start_config, release)?;
-
-    // Admission starts the plan and verb-grant validity windows. All boot
-    // preparation therefore completes before this point, immediately before
-    // the backend consumes the admitted start config.
-    let admitted = admit(AdmitInputs {
-        rootfs: std::path::Path::new(&rootfs),
-        kernel: start_config
-            .kernel_path
-            .as_deref()
-            .map(std::path::Path::new),
-        backend_kind: backend.kind(),
-        vm_name: &vm_name,
-        // An entrypoint VM binds no SDK host service.
-        sdk_sidecar: None,
-        // The function payload is admitted as the workload itself; there are
-        // no standalone assets.
-        assets: &[],
-        volumes: &start_config.volumes,
-        bundle_archive: bundle_archive.as_deref(),
-        runtime_config: Some(&start_config),
-        verified_runtime: verified_runtime.as_ref(),
-        verified_runtime_owner: None,
-    })?;
     let native_owned = matches!(&admitted, BootAdmission::Owned(_));
     let (substrate, context) = match admitted {
         BootAdmission::Admitted(admitted) | BootAdmission::Owned(admitted) => {
@@ -927,7 +947,7 @@ fn boot_session_core(
             emitter: Some(&emitter),
             assurance: None,
         },
-        verified_runtime.as_ref(),
+        verified_runtime.as_deref(),
     );
     let started = result.inspect_err(|error| {
         audit_entrypoint_dispatch_failure(&emitter, &audit_plan, &vm_name, error);
