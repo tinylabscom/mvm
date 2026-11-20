@@ -962,15 +962,13 @@ mod unix {
             ed25519_dalek::SigningKey,
             mvm_core::host_interface::workload::DestinationEnrollment,
         ) {
-            use mvm_core::host_interface::{
-                ExecutionEpoch,
-                workload::{DestinationEnrollment, DestinationTip},
-            };
+            use mvm_contract::protocol::mailbox::ExecutionEpoch;
+            use mvm_core::host_interface::workload::{DestinationEnrollment, DestinationTip};
             let key = ed25519_dalek::SigningKey::from_bytes(&[5; 32]);
             let enrollment = DestinationEnrollment {
                 destination: "ab".repeat(32),
                 workload: "w".into(),
-                epoch: ExecutionEpoch(1),
+                epoch: ExecutionEpoch::new(1).unwrap(),
                 key: hex::encode(key.verifying_key().to_bytes()),
                 tip: DestinationTip {
                     cursor: 0,

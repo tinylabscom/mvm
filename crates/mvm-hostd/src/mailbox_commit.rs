@@ -14,11 +14,9 @@ use std::sync::{
 };
 
 use ed25519_dalek::SigningKey;
-use mvm_core::host_interface::{
-    ExecutionEpoch,
-    workload::{
-        DestinationCommit, DestinationEnrollment, DestinationTip, PreparedHead, SignedPreparedHead,
-    },
+use mvm_contract::protocol::mailbox::ExecutionEpoch;
+use mvm_core::host_interface::workload::{
+    DestinationCommit, DestinationEnrollment, DestinationTip, PreparedHead, SignedPreparedHead,
 };
 use mvm_core::mailbox::journal::{FileJournalAnchor, JournalError, JournalTip};
 

@@ -446,7 +446,7 @@ mod destinations {
         DestinationEnrollment {
             destination: DESTINATION.into(),
             workload: workload.into(),
-            epoch: ExecutionEpoch(epoch),
+            epoch: ExecutionEpoch::new(epoch).unwrap(),
             key: key_hex(&key()),
             tip: tip(0),
         }
@@ -456,7 +456,7 @@ mod destinations {
         PreparedHead {
             destination: DESTINATION.into(),
             workload: workload.into(),
-            epoch: ExecutionEpoch(epoch),
+            epoch: ExecutionEpoch::new(epoch).unwrap(),
             expected: tip(from),
             next: tip(from + 1),
         }
@@ -619,7 +619,7 @@ mod destinations {
     fn destination_entry(workload: &str, changed: u64) -> DestinationEntry {
         DestinationEntry {
             workload: workload.into(),
-            epoch: ExecutionEpoch(1),
+            epoch: ExecutionEpoch::new(1).unwrap(),
             key: "a".repeat(64),
             tip: tip(0),
             changed,
@@ -675,7 +675,7 @@ mod destinations {
         let evicted = PreparedHead {
             destination: id(0),
             workload: "live".into(),
-            epoch: ExecutionEpoch(1),
+            epoch: ExecutionEpoch::new(1).unwrap(),
             expected: tip(0),
             next: tip(1),
         }

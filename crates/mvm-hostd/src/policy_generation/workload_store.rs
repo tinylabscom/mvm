@@ -404,7 +404,8 @@ impl WorkloadStore {
             workload.epoch == enrollment.epoch,
             &format!(
                 "workload epoch changed: expected {}, current {}",
-                enrollment.epoch.0, workload.epoch.0
+                enrollment.epoch.get(),
+                workload.epoch.get()
             ),
         )?;
         bump_sequence(&mut canonical)?;
@@ -464,7 +465,8 @@ impl WorkloadStore {
             workload.epoch == entry.epoch,
             &format!(
                 "workload epoch changed: expected {}, current {}",
-                entry.epoch.0, workload.epoch.0
+                entry.epoch.get(),
+                workload.epoch.get()
             ),
         )?;
         bump_sequence(&mut canonical)?;

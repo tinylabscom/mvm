@@ -63,7 +63,7 @@ fn destination() -> Destination {
     Destination {
         id: ID.into(),
         workload: "w".into(),
-        epoch: ExecutionEpoch(1),
+        epoch: ExecutionEpoch::new(1).unwrap(),
         key: SigningKey::from_bytes(&[9; 32]),
     }
 }
@@ -157,7 +157,7 @@ fn a_commit_the_owner_took_before_the_local_write_is_replayed_not_refused() {
     let prepared = PreparedHead {
         destination: ID.into(),
         workload: "w".into(),
-        epoch: ExecutionEpoch(1),
+        epoch: ExecutionEpoch::new(1).unwrap(),
         expected: wire(JournalTip::genesis()),
         next: wire(tip(1)),
     }
