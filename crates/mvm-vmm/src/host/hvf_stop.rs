@@ -27,8 +27,24 @@ pub struct ConnectedInstance {
     observer: ProcessExitObserver,
     instance: HvfInstance,
     connection_nonce: [u8; 32],
-    signing: SigningKey,
-    root: VerifyingKey,
+    legacy_signing: Option<SigningKey>,
+    roots: HvfControlRoots,
+}
+
+#[derive(Clone)]
+pub struct HvfControlRoots {
+    challenge_and_finalization: VerifyingKey,
+    stop: VerifyingKey,
+}
+
+impl HvfControlRoots {
+    #[must_use]
+    pub fn new(challenge_and_finalization: VerifyingKey, stop: VerifyingKey) -> Self {
+        Self {
+            challenge_and_finalization,
+            stop,
+        }
+    }
 }
 
 /// Non-wire proof that a fresh challenge bound this exact instance and
@@ -85,26 +101,56 @@ impl ConnectedInstance {
     }
     pub fn connect(vm: &str) -> Result<Self> {
         let instance = wire::read_instance(vm)?;
-        Self::connect_bound(instance, None)
+        Self::connect_bound_legacy(instance, None)
     }
 
     pub fn connect_instance(instance: HvfInstance) -> Result<Self> {
-        Self::connect_bound(instance, None)
+        Self::connect_bound_legacy(instance, None)
+    }
+
+    pub fn connect_instance_explicit(
+        instance: HvfInstance,
+        roots: HvfControlRoots,
+    ) -> Result<Self> {
+        Self::connect_bound_with_roots(instance, None, roots, None)
     }
 
     /// An owned launch may use its Child's ID, never a PID loaded from disk.
     pub fn connect_owned(vm: &str, child_pid: u32) -> Result<Self> {
         require_owned_child_custody()?;
-        Self::connect_bound(wire::read_instance(vm)?, Some(child_pid))
+        Self::connect_bound_legacy(wire::read_instance(vm)?, Some(child_pid))
     }
 
-    fn connect_bound(instance: HvfInstance, owned_pid: Option<u32>) -> Result<Self> {
+    pub fn connect_owned_explicit(
+        vm: &str,
+        child_pid: u32,
+        roots: HvfControlRoots,
+    ) -> Result<Self> {
+        require_owned_child_custody()?;
+        Self::connect_bound_with_roots(wire::read_instance(vm)?, Some(child_pid), roots, None)
+    }
+
+    fn connect_bound_legacy(instance: HvfInstance, owned_pid: Option<u32>) -> Result<Self> {
+        let (signing, root) = wire::existing_operator()?;
+        Self::connect_bound_with_roots(
+            instance,
+            owned_pid,
+            HvfControlRoots::new(root, root),
+            Some(signing),
+        )
+    }
+
+    fn connect_bound_with_roots(
+        instance: HvfInstance,
+        owned_pid: Option<u32>,
+        roots: HvfControlRoots,
+        legacy_signing: Option<SigningKey>,
+    ) -> Result<Self> {
         let vm = &instance.vm_id;
         ensure!(
             wire::read_instance(vm)? == instance,
             "HVF ownership generation changed"
         );
-        let (signing, root) = wire::existing_operator()?;
         let deadline = Instant::now() + wire::CONNECTION_BUDGET;
         let mut stream = wire::connect(vm, deadline)?;
         let pid = super::uds_peer::connected_peer_pid(&stream)?;
@@ -126,14 +172,19 @@ impl ConnectedInstance {
         rand::rng().fill_bytes(&mut client_nonce);
         wire::write_all(&mut stream, &client_nonce, deadline)?;
         let challenge: SignedControl = wire::read_frame(&mut stream, deadline)?;
-        let connection_nonce = verify_challenge(&challenge, &root, &instance, &client_nonce)?;
+        let connection_nonce = verify_challenge(
+            &challenge,
+            &roots.challenge_and_finalization,
+            &instance,
+            &client_nonce,
+        )?;
         Ok(Self {
             stream,
             observer,
             instance,
             connection_nonce,
-            signing,
-            root,
+            legacy_signing,
+            roots,
         })
     }
 
@@ -143,7 +194,10 @@ impl ConnectedInstance {
             connection_nonce: self.connection_nonce,
             issued_at_secs: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
         };
-        let seed = zeroize::Zeroizing::new(self.signing.to_bytes());
+        let signing = self.legacy_signing.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("root-explicit HVF connection requires external stop signing")
+        })?;
+        let seed = zeroize::Zeroizing::new(signing.to_bytes());
         let request = broker_control::sign(ControlRequest::HvfInstanceV1(operation), &seed)?;
         self.stop_signed(request)
     }
@@ -158,7 +212,7 @@ impl ConnectedInstance {
         write_verified_stop(
             &mut self.stream,
             &request,
-            &self.root,
+            &self.roots.stop,
             &self.instance,
             &self.connection_nonce,
             now_secs,
@@ -177,7 +231,12 @@ impl ConnectedInstance {
             unconfirmed_exit_evidence(&self.instance.vm_id)
         );
         let exit_wait = wait_start.elapsed();
-        terminal_proof(self.instance, &self.root, dispatch, exit_wait)
+        terminal_proof(
+            self.instance,
+            &self.roots.challenge_and_finalization,
+            dispatch,
+            exit_wait,
+        )
     }
 
     /// Waiting for natural exit needs the same already-established lifetime
@@ -188,7 +247,12 @@ impl ConnectedInstance {
             self.observer.wait_event(deadline)? == ProcessExitWait::Exited,
             "HVF supervisor natural exit remains unconfirmed"
         );
-        terminal_proof(self.instance, &self.root, Duration::ZERO, started.elapsed())
+        terminal_proof(
+            self.instance,
+            &self.roots.challenge_and_finalization,
+            Duration::ZERO,
+            started.elapsed(),
+        )
     }
 }
 
@@ -200,7 +264,25 @@ pub struct OwnedInstance {
     observer: ProcessExitObserver,
     passive_wait: Mutex<()>,
     instance: HvfInstance,
-    root: VerifyingKey,
+    roots: HvfControlRoots,
+    explicit_roots: Option<HvfControlRoots>,
+}
+
+pub struct OwnedStopSession<'a> {
+    owner: &'a OwnedInstance,
+    peer: ConnectedInstance,
+}
+
+impl OwnedStopSession<'_> {
+    #[must_use]
+    pub fn authorization(&self) -> BoundStopAuthorization {
+        self.peer.stop_authorization()
+    }
+
+    pub fn stop_signed(self, request: SignedControl) -> Result<ConfirmedExit> {
+        let proof = self.peer.stop_signed(request)?;
+        self.owner.finish_owned_stop(proof)
+    }
 }
 
 impl OwnedInstance {
@@ -217,6 +299,32 @@ impl OwnedInstance {
         );
         let pid = process.id();
         let peer = ConnectedInstance::connect_owned(vm, pid)?;
+        Self::adopt_connected(child, peer, false)
+    }
+
+    pub fn adopt_explicit(
+        child: &mut Option<Child>,
+        vm: &str,
+        roots: HvfControlRoots,
+    ) -> Result<Self> {
+        require_owned_child_custody()?;
+        let process = child
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("owned child missing"))?;
+        ensure!(
+            process.try_wait()?.is_none(),
+            "cannot adopt an already-exited owned child"
+        );
+        let peer = ConnectedInstance::connect_owned_explicit(vm, process.id(), roots)?;
+        Self::adopt_connected(child, peer, true)
+    }
+
+    fn adopt_connected(
+        child: &mut Option<Child>,
+        peer: ConnectedInstance,
+        explicit: bool,
+    ) -> Result<Self> {
+        let roots = peer.roots;
         Ok(Self {
             child: Mutex::new(
                 child
@@ -226,12 +334,25 @@ impl OwnedInstance {
             observer: peer.observer,
             passive_wait: Mutex::new(()),
             instance: peer.instance,
-            root: peer.root,
+            explicit_roots: explicit.then(|| roots.clone()),
+            roots,
         })
     }
 
     pub fn instance(&self) -> &HvfInstance {
         &self.instance
+    }
+
+    fn connect_peer(&self, child_pid: u32) -> Result<ConnectedInstance> {
+        match &self.explicit_roots {
+            Some(roots) => ConnectedInstance::connect_bound_with_roots(
+                self.instance.clone(),
+                Some(child_pid),
+                roots.clone(),
+                None,
+            ),
+            None => ConnectedInstance::connect_bound_legacy(self.instance.clone(), Some(child_pid)),
+        }
     }
 
     /// Open the guest bridge only while the original child and signed native
@@ -257,7 +378,7 @@ impl OwnedInstance {
             self.observer.wait_event(Instant::now())? == ProcessExitWait::TimedOut,
             "owned HVF lifetime ended before bridge open"
         );
-        let before = ConnectedInstance::connect_bound(self.instance.clone(), Some(child.id()))?;
+        let before = self.connect_peer(child.id())?;
         // This was an observation, not a pending stop request. Release its
         // serial control slot before taking the fresh post-connection probe.
         // The original child and lifetime observer remain held by this owner.
@@ -274,7 +395,7 @@ impl OwnedInstance {
         require_bridge_peer(stream, child.id())?;
         // The bridge runs in the same supervisor, never in a delegated socket
         // server. A fresh native answer brackets the actual bridge connection.
-        let after = ConnectedInstance::connect_bound(self.instance.clone(), Some(child.id()))?;
+        let after = self.connect_peer(child.id())?;
         ensure!(
             child.try_wait()?.is_none(),
             "owned HVF child exited during bridge open"
@@ -299,7 +420,7 @@ impl OwnedInstance {
             "owned HVF child already exited"
         );
         require_bridge_peer(stream, child.id())?;
-        let peer = ConnectedInstance::connect_bound(self.instance.clone(), Some(child.id()))?;
+        let peer = self.connect_peer(child.id())?;
         ensure!(
             child.try_wait()?.is_none(),
             "owned HVF child exited during bridge validation"
@@ -340,7 +461,7 @@ impl OwnedInstance {
         }
         terminal_proof(
             self.instance.clone(),
-            &self.root,
+            &self.roots.challenge_and_finalization,
             Duration::ZERO,
             Duration::ZERO,
         )?;
@@ -360,7 +481,7 @@ impl OwnedInstance {
         if self.try_exited()? {
             return terminal_proof(
                 self.instance.clone(),
-                &self.root,
+                &self.roots.challenge_and_finalization,
                 Duration::ZERO,
                 Duration::ZERO,
             );
@@ -382,10 +503,33 @@ impl OwnedInstance {
         }
         terminal_proof(
             self.instance.clone(),
-            &self.root,
+            &self.roots.challenge_and_finalization,
             Duration::ZERO,
             started.elapsed(),
         )
+    }
+
+    /// Open one externally signed stop session for this retained original child.
+    pub fn connect_stop_with_roots(&self) -> Result<OwnedStopSession<'_>> {
+        require_owned_child_custody()?;
+        let mut child = self
+            .child
+            .lock()
+            .map_err(|_| anyhow::anyhow!("owned child poisoned"))?;
+        ensure!(
+            child.try_wait()?.is_none(),
+            "owned HVF child already exited"
+        );
+        let roots = self.explicit_roots.clone().ok_or_else(|| {
+            anyhow::anyhow!("owned HVF instance was not adopted with explicit roots")
+        })?;
+        let peer = ConnectedInstance::connect_bound_with_roots(
+            self.instance.clone(),
+            Some(child.id()),
+            roots,
+            None,
+        )?;
+        Ok(OwnedStopSession { owner: self, peer })
     }
 
     pub fn stop(&self) -> Result<ConfirmedExit> {
@@ -400,13 +544,21 @@ impl OwnedInstance {
         if exited {
             return terminal_proof(
                 self.instance.clone(),
-                &self.root,
+                &self.roots.challenge_and_finalization,
                 Duration::ZERO,
                 Duration::ZERO,
             );
         }
-        let peer = ConnectedInstance::connect_bound(self.instance.clone(), Some(pid))?;
+        ensure!(
+            self.explicit_roots.is_none(),
+            "root-explicit HVF owner requires external stop signing"
+        );
+        let peer = ConnectedInstance::connect_bound_legacy(self.instance.clone(), Some(pid))?;
         let proof = peer.stop()?;
+        self.finish_owned_stop(proof)
+    }
+
+    fn finish_owned_stop(&self, proof: ConfirmedExit) -> Result<ConfirmedExit> {
         // wait_event deliberately did not reap this owned child's status.
         require_owned_child_custody()?;
         {
