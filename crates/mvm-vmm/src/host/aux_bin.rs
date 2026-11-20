@@ -212,9 +212,11 @@ pub(crate) fn resolve_verified_in(
 /// bytes. The probe's answer is a property of the file alone (env hygiene
 /// gives the probe a scrubbed environment, and the probe flag is handled
 /// before anything else in the helper), so the same bytes answer the same
-/// version every time. Remembering the outcome avoids a per-launch exec;
-/// metadata rejects obvious changes cheaply, but matching metadata still
-/// requires hashing the bytes because timestamps can share a filesystem tick.
+/// version every time. Remembering the outcome avoids a per-launch exec.
+/// Metadata rejects obvious changes cheaply, but a rewrite can share a
+/// filesystem timestamp tick with the write it replaces, so metadata alone is
+/// not trusted while the file is still that recent (see [`stamp_is_settled`]):
+/// then the bytes are hashed, and a match renews the memo.
 ///
 /// This memoizes a compatibility check, never an authorization decision: a
 /// mismatch or a missing memo falls back to executing the probe exactly as
@@ -227,6 +229,8 @@ struct ProbeMemo {
     contract_version: u32,
     stamp: FileStamp,
     sha256: String,
+    /// Nanoseconds since the Unix epoch when this memo was written.
+    recorded_ns: i64,
 }
 
 /// A cheap rejection filter, not proof that a file's bytes are unchanged.
@@ -285,21 +289,80 @@ fn probe_memo_accepts(env: &VerifyEnv, spec: &AuxBin<'_>, resolved: &Path) -> bo
     let Ok(memo) = serde_json::from_slice::<ProbeMemo>(&bytes) else {
         return false;
     };
-    memo.memo_version == PROBE_MEMO_VERSION
-        && memo.contract_version == helper_contract::HOST_HELPER_CONTRACT_VERSION
-        && memo.path == resolved
-        && Some(memo.stamp) == file_stamp(resolved)
-        && mvm_core::crypto::image_verify::sha256_file(resolved)
-            .is_ok_and(|digest| digest == memo.sha256)
+    let Some(stamp) = file_stamp(resolved) else {
+        return false;
+    };
+    if memo.memo_version != PROBE_MEMO_VERSION
+        || memo.contract_version != helper_contract::HOST_HELPER_CONTRACT_VERSION
+        || memo.path != resolved
+        || memo.stamp != stamp
+    {
+        return false;
+    }
+    if stamp_is_settled(&stamp, memo.recorded_ns) {
+        return true;
+    }
+    let Ok(digest) = mvm_core::crypto::image_verify::sha256_file(resolved) else {
+        return false;
+    };
+    if digest != memo.sha256 {
+        return false;
+    }
+    // The file is unchanged but was too recent for its timestamps to prove it;
+    // renewing the memo lets the next launch skip the hash once it has aged.
+    write_probe_memo(env, spec, resolved, stamp, digest);
+    true
+}
+
+/// Whether a file's timestamps are old enough, relative to when its memo was
+/// written, to prove no rewrite has happened since. A rewrite made after the
+/// memo carries a later mtime and ctime, so it cannot match the stamp, unless
+/// it lands in the same timestamp tick as the write the memo describes; a
+/// stamp within [`RACY_MARGIN_NS`] of the memo (or after it) cannot rule that
+/// out. This is the "racily clean" rule: such a file is hashed instead.
+fn stamp_is_settled(stamp: &FileStamp, recorded_ns: i64) -> bool {
+    let newest = stamp.mtime_ns.max(stamp.ctime_ns);
+    recorded_ns.saturating_sub(newest) >= RACY_MARGIN_NS
+}
+
+/// Wider than the coarsest timestamp granularity a supported filesystem
+/// offers (two seconds on FAT), so a settled stamp cannot share a tick with
+/// the write that preceded the memo.
+const RACY_MARGIN_NS: i64 = 2_000_000_000;
+
+fn now_ns() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
+        .unwrap_or(0)
 }
 
 /// Remember a probe that just succeeded, best effort: the memo is a cache,
 /// so a write failure only means the next launch re-probes.
 fn record_probe_memo(env: &VerifyEnv, spec: &AuxBin<'_>, resolved: &Path) {
-    let (Some(memo_dir), Some(stamp)) = (&env.probe_memo_dir, file_stamp(resolved)) else {
+    if env.probe_memo_dir.is_none() {
+        return;
+    }
+    let Some(stamp) = file_stamp(resolved) else {
         return;
     };
     let Ok(sha256) = mvm_core::crypto::image_verify::sha256_file(resolved) else {
+        return;
+    };
+    write_probe_memo(env, spec, resolved, stamp, sha256);
+}
+
+/// Write the memo for an already-measured stamp and digest. Best effort, as
+/// [`record_probe_memo`].
+fn write_probe_memo(
+    env: &VerifyEnv,
+    spec: &AuxBin<'_>,
+    resolved: &Path,
+    stamp: FileStamp,
+    sha256: String,
+) {
+    let Some(memo_dir) = &env.probe_memo_dir else {
         return;
     };
     let memo = ProbeMemo {
@@ -308,6 +371,7 @@ fn record_probe_memo(env: &VerifyEnv, spec: &AuxBin<'_>, resolved: &Path) {
         contract_version: helper_contract::HOST_HELPER_CONTRACT_VERSION,
         stamp,
         sha256,
+        recorded_ns: now_ns(),
     };
     let Ok(bytes) = serde_json::to_vec(&memo) else {
         return;
@@ -323,7 +387,7 @@ fn record_probe_memo(env: &VerifyEnv, spec: &AuxBin<'_>, resolved: &Path) {
     }
 }
 
-const PROBE_MEMO_VERSION: u32 = 2;
+const PROBE_MEMO_VERSION: u32 = 3;
 
 /// How a helper answered (or failed to answer) the contract probe.
 enum ProbeOutcome {
@@ -1347,6 +1411,92 @@ mod tests {
         assert!(err.contains("contract version 0"), "{err}");
     }
 
+    /// Rewrite the memo for `bin` in place through `edit`.
+    fn edit_memo(memo_dir: &Path, edit: impl FnOnce(&mut ProbeMemo)) {
+        let path = probe_memo_path(memo_dir, "mvm-hvf-supervisor");
+        let mut memo: ProbeMemo = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        edit(&mut memo);
+        std::fs::write(&path, serde_json::to_vec(&memo).unwrap()).unwrap();
+    }
+
+    fn memoized_helper() -> (tempfile::TempDir, PathBuf, VerifyEnv, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("mvm-hvf-supervisor");
+        write_exe(
+            &bin,
+            &answering_helper(
+                "mvm-hvf-supervisor",
+                helper_contract::HOST_HELPER_CONTRACT_VERSION,
+            ),
+        );
+        let memo_dir = tmp.path().join("memo");
+        let mut env = test_env(None);
+        env.probe_memo_dir = Some(memo_dir.clone());
+        record_probe_memo(&env, &hvf_spec(), &bin);
+        (tmp, bin, env, memo_dir)
+    }
+
+    #[test]
+    fn a_helper_older_than_its_memo_is_accepted_without_hashing_it() {
+        let (_tmp, bin, env, memo_dir) = memoized_helper();
+        // Model a helper last written well before the memo. The digest is
+        // wrong on purpose: only a metadata decision can accept it, so this
+        // fails if the bytes are hashed.
+        edit_memo(&memo_dir, |memo| {
+            memo.recorded_ns = memo.stamp.mtime_ns.max(memo.stamp.ctime_ns) + 2 * RACY_MARGIN_NS;
+            memo.sha256 = "0".repeat(64);
+        });
+        assert!(probe_memo_accepts(&env, &hvf_spec(), &bin));
+    }
+
+    #[test]
+    fn a_helper_within_the_margin_of_its_memo_is_hashed() {
+        let (_tmp, bin, env, memo_dir) = memoized_helper();
+        edit_memo(&memo_dir, |memo| {
+            memo.recorded_ns = memo.stamp.mtime_ns.max(memo.stamp.ctime_ns) + RACY_MARGIN_NS - 1;
+            memo.sha256 = "0".repeat(64);
+        });
+        assert!(
+            !probe_memo_accepts(&env, &hvf_spec(), &bin),
+            "a stamp inside the margin must be checked against the bytes"
+        );
+    }
+
+    #[test]
+    fn a_helper_newer_than_its_memo_is_hashed() {
+        let (_tmp, bin, env, memo_dir) = memoized_helper();
+        edit_memo(&memo_dir, |memo| {
+            memo.recorded_ns = memo.stamp.mtime_ns.min(memo.stamp.ctime_ns) - 1;
+            memo.sha256 = "0".repeat(64);
+        });
+        assert!(!probe_memo_accepts(&env, &hvf_spec(), &bin));
+    }
+
+    #[test]
+    fn a_recent_unchanged_helper_is_accepted_and_renews_its_memo() {
+        let (_tmp, bin, env, memo_dir) = memoized_helper();
+        // Just written, so inside the margin: accepted by hash, then renewed
+        // with a later write time so it can age out of the margin.
+        edit_memo(&memo_dir, |memo| memo.recorded_ns = 1);
+        assert!(probe_memo_accepts(&env, &hvf_spec(), &bin));
+        let renewed: ProbeMemo = serde_json::from_slice(
+            &std::fs::read(probe_memo_path(&memo_dir, "mvm-hvf-supervisor")).unwrap(),
+        )
+        .unwrap();
+        assert!(renewed.recorded_ns > 1, "a verified hit renews the memo");
+    }
+
+    #[test]
+    fn a_memo_without_a_write_time_is_refused() {
+        let (_tmp, bin, env, memo_dir) = memoized_helper();
+        let path = probe_memo_path(&memo_dir, "mvm-hvf-supervisor");
+        let mut memo: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        memo.as_object_mut().unwrap().remove("recorded_ns");
+        std::fs::write(&path, serde_json::to_vec(&memo).unwrap()).unwrap();
+        assert!(!probe_memo_accepts(&env, &hvf_spec(), &bin));
+    }
+
     #[test]
     fn metadata_only_probe_memos_are_not_accepted() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1399,6 +1549,7 @@ mod tests {
             contract_version: helper_contract::HOST_HELPER_CONTRACT_VERSION + 1,
             stamp,
             sha256: mvm_core::crypto::image_verify::sha256_file(&bin).unwrap(),
+            recorded_ns: now_ns(),
         };
         std::fs::write(
             probe_memo_path(&memo_dir, "mvm-hvf-supervisor"),
