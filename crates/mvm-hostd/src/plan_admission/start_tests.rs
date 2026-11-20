@@ -947,6 +947,53 @@ fn persistent_boundary_lock_mismatch_refuses_before_attachment_or_admission() {
 }
 
 #[test]
+fn local_transient_lifecycle_refusals_precede_attachment_and_admission() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let reached = std::cell::Cell::new(false);
+
+    for (lock_name, config_name, occupied) in [
+        ("local-lock-owner", "local-other-machine", false),
+        ("local-occupied", "local-occupied", true),
+    ] {
+        if occupied {
+            let state = mvm_core::config::vm_state_dir(config_name);
+            std::fs::create_dir_all(&state).expect("occupied state directory");
+            std::fs::write(state.join(".warm-claim-reservation"), b"reserved")
+                .expect("occupied lifecycle marker");
+        }
+        let lifecycle =
+            mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(lock_name)
+                .expect("lifecycle");
+        let error = match prepare_launch(
+            LaunchSource::LocalTransient {
+                lifecycle: &lifecycle,
+            },
+            VmStartConfig {
+                name: config_name.into(),
+                ..Default::default()
+            },
+            |_| {
+                reached.set(true);
+                Ok(None)
+            },
+            |_, _| -> anyhow::Result<()> {
+                reached.set(true);
+                Ok(())
+            },
+        ) {
+            Ok(_) => panic!("unowned local transient lifecycle must refuse"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error.downcast_ref::<CliStartFailure>(),
+            Some(CliStartFailure::StateNotOwned(_))
+        ));
+        assert!(!reached.get(), "lifecycle refusal precedes preparation");
+    }
+}
+
+#[test]
 fn persistent_boundary_runtime_tampering_refuses_before_admission() {
     let (_env, _home) = host_with_ceiling(Default::default());
     let directory = tempfile::tempdir().expect("runtime fixture");

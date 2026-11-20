@@ -406,6 +406,7 @@ impl LocalBackend {
                 emitter: emitter.as_deref(),
                 assurance: campaign.as_ref(),
             },
+            lifecycle,
         )
         .map_err(prepared_client_error)
     }

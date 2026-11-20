@@ -119,6 +119,30 @@ before activation or non-activation boot; the wrapper has no new live-backend
 witness. These tests do not qualify native HVF or Firecracker behavior or the
 formal cold/warm performance requirements.
 
+## Local transient admission ownership
+
+The `LocalBackend` transient source slice under
+[#5520](https://github.com/tinylabscom/mvm/issues/5520) keeps image, volume,
+secret-reference and command/session preparation in the client. Hostd borrows
+the client's existing `MachineLifecycleLock`, validates its matching name and
+cold state without reacquiring it, then uses the shared source preparation
+boundary for runtime attachment, one launch-scoped verification and one
+admission before the existing immediate admitted dispatch.
+
+Synthesized and externally signed authorities remain alternatives inside this
+one source. External envelopes retain their pinned signer and durable replay
+ledger requirements; neither plan JSON nor request fields replace signed
+authority. Confirmed failure retains the existing client cleanup owner.
+Uncertain stop returns before terminal cleanup, so volume, secret, runtime and
+audit custody remain available for reconciliation. This migration adds no
+persistent readiness, lease-finalization or deferred CLI audit semantics.
+
+Mock and source-level tests cover both authorities, lifecycle refusal before
+attachment, replay and signer refusal, rootfs/runtime mismatch, final-gate
+rollback, immediate audit ordering and uncertain-stop retention. They do not
+qualify native HVF or Firecracker behavior, strengthen Preview resource claim
+18, or satisfy the formal cold/warm performance requirements.
+
 ## Signed application HVF startup diagnostics
 
 Reviewed in [#5681](https://github.com/tinylabscom/mvm/pull/5681): standalone

@@ -121,7 +121,8 @@ pub use start::{
     start_fs_quick_fork, start_owned_entrypoint, start_persistent,
 };
 pub(crate) use start::{
-    admit_synthesized_with_verified_release, start_admitted_with_verified_release,
+    LaunchSource, admit_synthesized_with_verified_release, prepare_launch,
+    start_admitted_with_verified_release,
 };
 
 /// Result of a successful admission. Carries everything the caller
