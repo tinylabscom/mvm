@@ -535,6 +535,7 @@ fn stage_fixture(name: &str, dir: &Path, home: &Path) {
         "audit-consistency" => stage_audit_consistency(dir, home),
         // These commands read the project in the working directory.
         "project-policy" => stage_project_policy(dir),
+        "authored-policy-group" => crate::steps::cli::stage_authored_policy_group(dir),
         other => panic!("unknown fixture {other:?} in the tier manifest"),
     }
 }
@@ -658,11 +659,13 @@ fn instruction_trust_examples_run(
 /// A pack reference needs a verified install, and `pack-sources` lives in a
 /// separate checkout. Neither is present in the offline example fixture.
 fn needs_external_policy_source(path: &[String], example: &DocExample) -> bool {
-    matches!(path.join(" ").as_str(), "policy show" | "why")
-        && example
-            .argv
-            .iter()
-            .any(|arg| arg.starts_with("agent/") || arg.starts_with("./pack-sources/"))
+    matches!(
+        path.join(" ").as_str(),
+        "policy show" | "policy validate" | "why"
+    ) && example
+        .argv
+        .iter()
+        .any(|arg| arg.starts_with("agent/") || arg.starts_with("./pack-sources/"))
 }
 
 #[then(expr = "every side-effect-free documented example executes successfully")]
@@ -712,6 +715,15 @@ fn every_exec_tier_example_runs(_world: &mut CliWorld) {
         let output = execute_in(&example, &home, Some(&dir), &env);
         ran += 1;
 
+        if path.join(" ") == "policy validate" {
+            assert!(
+                output.status.success(),
+                "the authored policy example must validate successfully: {}\n{}",
+                example.location(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
         // A command killed by a signal never ran to completion, whatever its
         // tier says about exit codes.
         if output.status.code().is_none() {
@@ -740,7 +752,7 @@ fn every_exec_tier_example_runs(_world: &mut CliWorld) {
     }
 
     assert!(ran > 0, "no exec-tier examples were found to run");
-    for path in ["policy show", "why"] {
+    for path in ["policy show", "policy validate", "why"] {
         assert!(
             seen.iter().any(|seen| seen.join(" ") == path),
             "no offline policy example exercised {path}"

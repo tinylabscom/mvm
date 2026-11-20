@@ -638,18 +638,30 @@ fn retention_reconciles_ack_before_removing_journal_evidence() {
     let mut c = f.open();
     let id = f.enqueue(&mut c);
     let mut header = f.reply_header();
-    header.expires_at_unix_ms = NOW + 1_000;
+    // Durable setup shares the fixture's deadline; retention advances explicitly below.
+    header.expires_at_unix_ms = DEADLINE;
+    let retained_until = c.config.limits.retention.retained_until(DEADLINE).unwrap();
     let envelope = f.seal(header, &f.responder);
     c.accept_reply(id, &envelope, &f.context(MailboxOperation::Reply))
         .unwrap();
     c.acknowledge_result(id, &f.receive, &f.context(MailboxOperation::Receive))
         .unwrap();
     let mut interrupted = c.state.clone();
-    interrupted.calls[0].result = ResultState::AckRequested(envelope);
+    interrupted.calls[0].result = ResultState::AckRequested(envelope.clone());
     c.commit(interrupted).unwrap();
     drop(c);
     let mut c = f.open();
-    c.prune(NOW + 2_000).unwrap();
+    assert!(
+        c.journal
+            .locally_acknowledged(&envelope, &f.reply, &f.authority, &c.anchor)
+            .unwrap()
+    );
+    c.prune(retained_until + 1).unwrap();
+    assert!(
+        !c.journal
+            .locally_acknowledged(&envelope, &f.reply, &f.authority, &c.anchor)
+            .unwrap()
+    );
     assert!(matches!(
         c.receive_result(id, &f.receive, &f.context(MailboxOperation::Receive))
             .unwrap(),

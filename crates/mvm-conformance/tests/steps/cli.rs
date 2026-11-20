@@ -171,8 +171,12 @@ fn authored_policy_group_in_scratch(world: &mut CliWorld) {
         .scratch_dir
         .as_ref()
         .expect("`Given a scratch working directory` must run before this step");
-    let policy_dir = scratch.path().join("policy");
-    fs::create_dir(&policy_dir).expect("create policy fixture directory");
+    stage_authored_policy_group(scratch.path());
+}
+
+pub(super) fn stage_authored_policy_group(dir: &std::path::Path) {
+    let policy_dir = dir.join("policy");
+    fs::create_dir_all(&policy_dir).expect("create policy fixture directory");
     fs::write(
         policy_dir.join("api-group.toml"),
         "description = \"Read the GitHub API\"\n\n[network]\nallow = [\"api.github.com:443\"]\n",

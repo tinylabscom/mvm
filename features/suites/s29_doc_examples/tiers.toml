@@ -722,8 +722,8 @@ reason = "reports a coordinator that a systemd user manager runs for this home; 
 
 [[command]]
 path = "policy validate"
-tier = "parse"
-reason = "documented invocations need published packs or the separate mvm-packs checkout; focused CLI tests cover offline validation"
+tier = "exec"
+fixture = "authored-policy-group"
 
 [[command]]
 path = "pull"

@@ -1467,6 +1467,7 @@ mod tests {
         child_binding: ConversationBinding,
         parent: ActorConversationEndpoint,
         child: ActorConversationEndpoint,
+        _environment: mvm_core::util::test_env::TestEnv,
     }
 
     fn binding(plan: &ExecutionPlan, address: MailboxAddress, seed: u8) -> ConversationBinding {
@@ -1507,7 +1508,7 @@ mod tests {
     }
 
     fn pair() -> Pair {
-        let (directory, owner, parent_plan, mut child_plan) =
+        let (directory, owner, parent_plan, mut child_plan, environment) =
             crate::actor_lifecycle::local_mailboxes::tests::setup();
         let derived = owner.derive(&parent_plan, &child_plan).unwrap();
         child_plan.mailbox = Some(derived.grant);
@@ -1536,6 +1537,7 @@ mod tests {
             child_binding,
             parent,
             child,
+            _environment: environment,
         }
     }
 

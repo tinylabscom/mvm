@@ -105,6 +105,22 @@ impl AuditEmitter {
         })
     }
 
+    /// Emit `unit.mutation_refused`: a change to a sealed unit was refused
+    /// after admission. Bound to the unit's plan when it could be read, and
+    /// otherwise to `tenant` with the unbound sentinels.
+    pub fn emit_sealed_mutation_refused(
+        &self,
+        plan: Option<&ExecutionPlan>,
+        tenant: &mvm_core::plan::TenantId,
+        labels: impl IntoIterator<Item = (String, String)>,
+    ) -> Result<()> {
+        let event = crate::seal_gate::MUTATION_REFUSED_EVENT;
+        match plan {
+            Some(plan) => self.emit(plan, event, labels),
+            None => self.emit_topology_decision(tenant, event, labels),
+        }
+    }
+
     /// Emit `control_key.used` — fires when a `ControlKey` is used to
     /// authorize an orchestrator action. Carries the key id, role, and a
     /// short action label. No secret material is logged.
