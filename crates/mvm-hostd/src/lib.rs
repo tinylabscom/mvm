@@ -54,6 +54,7 @@ pub mod extension_admission;
 pub mod extension_controller;
 pub mod hvf_owner_audit_signer;
 pub mod hvf_owner_grants;
+pub mod hvf_owner_native_control_signer;
 pub mod hvf_owner_signer;
 /// Shared length-prefixed framing for same-UID host control channels.
 pub use mvm_core::framing;
