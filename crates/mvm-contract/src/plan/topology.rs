@@ -167,6 +167,18 @@ pub enum IsolationTier {
     Vm,
 }
 
+impl IsolationTier {
+    /// The wire spelling, the same string serde writes.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Task => "task",
+            Self::Partition => "partition",
+            Self::Vm => "vm",
+        }
+    }
+}
+
 /// The transitions a sealed unit permits after admission.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

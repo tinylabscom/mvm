@@ -29,7 +29,8 @@ use anyhow::{Context, Result};
 use mvm_core::plan::{PlanSeccompTier, SecretBinding, SecretReleasePolicy, SynthesisInput};
 use mvm_core::vm_backend::{VmStartConfig, VmVolume};
 use mvm_runtime::AnyBackend;
-use mvm_runtime::runtime_evidence::{VerifiedRuntimeSet, verify_release_runtime_set};
+use mvm_runtime::runtime_evidence::VerifiedRuntimeSet;
+use mvm_runtime::vm::instance_snapshot::MachineLifecycleLock;
 
 use crate::audit::emitter::AuditEmitter;
 use crate::plan_admission::{
@@ -194,6 +195,16 @@ pub(crate) fn attach_guest_runtime(
     config: &mut VmStartConfig,
     backend_name: &str,
 ) -> Result<Option<VerifiedRuntimeSet>> {
+    let release = attach_guest_runtime_selection(config, backend_name)?;
+    release
+        .map(|release| mvm_runtime::runtime_evidence::verify_release_runtime_set(config, release))
+        .transpose()
+}
+
+fn attach_guest_runtime_selection(
+    config: &mut VmStartConfig,
+    backend_name: &str,
+) -> Result<Option<std::sync::Arc<mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime>>> {
     if !mvm_runtime::universal_initramfs::KERNEL_BOOTING_HYPERVISORS.contains(&backend_name) {
         return Ok(None);
     }
@@ -238,17 +249,14 @@ pub(crate) fn attach_guest_runtime(
         .resolve(&arch.to_string())
         .context("cached initramfs required for local boot; prepare the guest runtime first")?;
     selected.initrd_path = Some(initramfs.image_path.display().to_string());
-    let verified = if let Some(release) = release {
-        Some(verify_release_runtime_set(&selected, release)?)
-    } else {
+    if release.is_none() {
         mvm_runtime::runtime_evidence::verify_runtime_for_launch(
             &selected,
             mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
         )?;
-        None
-    };
+    }
     *config = selected;
-    Ok(verified)
+    Ok(release)
 }
 
 /// Admit `req` through the signed-plan gate and boot it on `backend`.
@@ -262,11 +270,11 @@ pub fn admit_and_boot_local(
     backend: &AnyBackend,
     req: &LocalRunRequest,
     ctx: LocalRunContext<'_>,
+    lifecycle: &MachineLifecycleLock,
 ) -> Result<StartedMachine> {
     let _runtime_proofs = mvm_build::guest_runtime::evidence::LaunchProofScope::begin();
     ResolvedLocal::new(req)?
-        .verify()?
-        .admit(backend, ctx)?
+        .prepare(backend, ctx, lifecycle)?
         .dispatch()
 }
 
@@ -280,20 +288,26 @@ struct ResolvedLocal<'a> {
 
 enum LocalAuthority<'a> {
     Synthesized,
-    Signed(&'a mvm_core::plan::SignedExecutionPlan),
+    ExternallySigned(&'a mvm_core::plan::SignedExecutionPlan),
 }
 
 struct VerifiedLocal<'a> {
-    resolved: ResolvedLocal<'a>,
-    runtime: Option<VerifiedRuntimeSet>,
+    req: &'a LocalRunRequest,
+    authority: LocalAuthority<'a>,
+    rootfs_sha: String,
+    kernel_sha: Option<String>,
 }
 
 struct AdmittedLocal<'backend, 'context> {
     backend: &'backend AnyBackend,
     context: LocalRunContext<'context>,
     admitted: AdmittedPlan,
+}
+
+struct PreparedLocal<'backend, 'context> {
     config: VmStartConfig,
-    runtime: Option<VerifiedRuntimeSet>,
+    runtime: Option<std::sync::Arc<VerifiedRuntimeSet>>,
+    admission: AdmittedLocal<'backend, 'context>,
 }
 
 impl<'a> ResolvedLocal<'a> {
@@ -308,7 +322,7 @@ impl<'a> ResolvedLocal<'a> {
         let sha = mvm_core::crypto::image_verify::sha256_file_cached(&req.rootfs_path)
             .with_context(|| format!("hashing rootfs at {}", req.rootfs_path.display()))?;
         let authority = match req.signed_plan.as_ref() {
-            Some(signed) => LocalAuthority::Signed(signed),
+            Some(signed) => LocalAuthority::ExternallySigned(signed),
             None => LocalAuthority::Synthesized,
         };
 
@@ -366,11 +380,37 @@ impl<'a> ResolvedLocal<'a> {
         })
     }
 
-    fn verify(mut self) -> Result<VerifiedLocal<'a>> {
-        let runtime = attach_guest_runtime(&mut self.config, &self.req.backend_name)?;
-        Ok(VerifiedLocal {
-            resolved: self,
-            runtime,
+    fn prepare<'backend, 'context>(
+        self,
+        backend: &'backend AnyBackend,
+        ctx: LocalRunContext<'context>,
+        lifecycle: &MachineLifecycleLock,
+    ) -> Result<PreparedLocal<'backend, 'context>> {
+        let Self {
+            req,
+            authority,
+            rootfs_sha,
+            kernel_sha,
+            config,
+        } = self;
+        let prepared = crate::plan_admission::prepare_launch(
+            crate::plan_admission::LaunchSource::LocalTransient { lifecycle },
+            config,
+            |config| attach_guest_runtime_selection(config, &req.backend_name),
+            |config, runtime| {
+                VerifiedLocal {
+                    req,
+                    authority,
+                    rootfs_sha,
+                    kernel_sha,
+                }
+                .admit(backend, ctx, config, runtime)
+            },
+        )?;
+        Ok(PreparedLocal {
+            config: prepared.config,
+            runtime: prepared.verified_runtime,
+            admission: prepared.admission,
         })
     }
 }
@@ -380,17 +420,23 @@ impl VerifiedLocal<'_> {
         self,
         backend: &'backend AnyBackend,
         ctx: LocalRunContext<'context>,
+        config: &mut VmStartConfig,
+        verified_runtime: Option<&VerifiedRuntimeSet>,
     ) -> Result<AdmittedLocal<'backend, 'context>> {
-        let ResolvedLocal {
+        let VerifiedLocal {
             req,
             authority,
             rootfs_sha: sha,
             kernel_sha,
-            config,
-        } = self.resolved;
-        let verified_runtime = self.runtime;
-        if let LocalAuthority::Signed(signed) = authority {
-            return admit_signed_local(backend, req, signed, &sha, config, verified_runtime, ctx);
+        } = self;
+        if let LocalAuthority::ExternallySigned(signed) = authority {
+            let admitted =
+                admit_signed_local(backend, req, signed, &sha, config, verified_runtime, &ctx)?;
+            return Ok(AdmittedLocal {
+                backend,
+                context: ctx,
+                admitted,
+            });
         }
 
         let synthesis = SynthesisInput {
@@ -475,14 +521,12 @@ impl VerifiedLocal<'_> {
                 audit_durability: crate::audit::durability::AuditDurability::BestEffort,
                 assurance: ctx.assurance,
             },
-            verified_runtime.as_ref(),
+            verified_runtime,
         )?;
         Ok(AdmittedLocal {
             backend,
             context: ctx,
             admitted,
-            config,
-            runtime: verified_runtime,
         })
     }
 }
@@ -497,19 +541,19 @@ impl VerifiedLocal<'_> {
 /// would be booting bytes the signer never authorized. The caller's
 /// `cpus`/`mem_mib`/`grants`/`destroy_on_exit` are not consulted here;
 /// `admit_and_boot_local` only routes here when `req.signed_plan` is set.
-fn admit_signed_local<'backend, 'context>(
-    backend: &'backend AnyBackend,
+fn admit_signed_local(
+    backend: &AnyBackend,
     req: &LocalRunRequest,
     signed: &mvm_core::plan::SignedExecutionPlan,
     rootfs_sha: &str,
-    mut config: VmStartConfig,
-    verified_runtime: Option<VerifiedRuntimeSet>,
-    ctx: LocalRunContext<'context>,
-) -> Result<AdmittedLocal<'backend, 'context>> {
+    config: &mut VmStartConfig,
+    verified_runtime: Option<&VerifiedRuntimeSet>,
+    ctx: &LocalRunContext<'_>,
+) -> Result<AdmittedPlan> {
     use crate::plan_admission::RunPosture;
     let posture = RunPosture::on_backend(mvm_core::plan::Variant::Dev, backend.kind())
-        .with_runtime(Some(&config))
-        .with_verified_runtime(verified_runtime.as_ref());
+        .with_runtime(Some(config))
+        .with_verified_runtime(verified_runtime);
     let admitted = crate::plan_admission::admit_signed_plan_for_run(
         signed, ctx.clock, ctx.ledger, None, posture,
     )?;
@@ -557,27 +601,21 @@ fn admit_signed_local<'backend, 'context>(
         crate::audit::durability::AuditDurability::BestEffort,
     )?;
 
-    Ok(AdmittedLocal {
-        backend,
-        context: ctx,
-        admitted,
-        config,
-        runtime: verified_runtime,
-    })
+    Ok(admitted)
 }
 
-impl AdmittedLocal<'_, '_> {
+impl PreparedLocal<'_, '_> {
     fn dispatch(self) -> Result<StartedMachine> {
         crate::plan_admission::start_admitted_with_verified_release(
             crate::plan_admission::StartAdmittedParams {
-                backend: self.backend,
-                admitted: self.admitted,
+                backend: self.admission.backend,
+                admitted: self.admission.admitted,
                 config: self.config,
                 policy_bundle: None,
-                emitter: self.context.emitter,
-                assurance: self.context.assurance,
+                emitter: self.admission.context.emitter,
+                assurance: self.admission.context.assurance,
             },
-            self.runtime.as_ref(),
+            self.runtime.as_deref(),
         )
     }
 }
@@ -639,6 +677,7 @@ mod tests {
                 emitter: None,
                 assurance: None,
             },
+            &MachineLifecycleLock::acquire(&req.name).unwrap(),
         )
         .expect("admit + boot over mock");
 
@@ -703,6 +742,7 @@ mod tests {
                     emitter: None,
                     assurance: None,
                 },
+                &MachineLifecycleLock::acquire(&req.name).unwrap(),
             )
             .expect_err("raw materialized images must not reach the backend");
             assert!(
@@ -818,6 +858,7 @@ mod tests {
                 emitter: Some(&emitter),
                 assurance: None,
             },
+            &MachineLifecycleLock::acquire(&req.name).unwrap(),
         )
         .expect("admitted boot with a volume");
         assert_eq!(started.admitted.plan().shares.len(), 1);
@@ -893,6 +934,7 @@ mod tests {
                 emitter: Some(&emitter),
                 assurance: None,
             },
+            &MachineLifecycleLock::acquire(&req.name).unwrap(),
         )
         .expect_err("the SDK-sidecar gate must refuse");
         assert!(
@@ -1107,6 +1149,7 @@ mod tests {
                 emitter: None,
                 assurance: None,
             },
+            &MachineLifecycleLock::acquire(&req.name).unwrap(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("hashing rootfs"));
@@ -1189,6 +1232,7 @@ mod signed_boot_tests {
                 emitter: None,
                 assurance: None,
             },
+            &MachineLifecycleLock::acquire(&req.name).unwrap(),
         )
     }
 
@@ -1234,21 +1278,17 @@ mod signed_boot_tests {
             emitter: None,
             assurance: None,
         };
+        let lifecycle = MachineLifecycleLock::acquire(&req.name).unwrap();
 
         let resolved = ResolvedLocal::new(&req).expect("resolve image");
         assert_eq!(
             backend.status(&id).unwrap(),
             mvm_core::vm_backend::VmStatus::Stopped
         );
-        let verified = resolved.verify().expect("verify selected runtime");
-        assert_eq!(
-            backend.status(&id).unwrap(),
-            mvm_core::vm_backend::VmStatus::Stopped
-        );
-        let admitted = verified
-            .admit(&backend, ctx)
+        let admitted = resolved
+            .prepare(&backend, ctx, &lifecycle)
             .expect("admit fleet signature");
-        assert!(std::ptr::eq(admitted.context.ledger, &ledger));
+        assert!(std::ptr::eq(admitted.admission.context.ledger, &ledger));
         assert_eq!(
             backend.status(&id).unwrap(),
             mvm_core::vm_backend::VmStatus::Stopped
@@ -1256,9 +1296,7 @@ mod signed_boot_tests {
 
         let replay = ResolvedLocal::new(&req)
             .unwrap()
-            .verify()
-            .unwrap()
-            .admit(
+            .prepare(
                 &backend,
                 LocalRunContext {
                     clock: &SystemClock,
@@ -1267,6 +1305,7 @@ mod signed_boot_tests {
                     emitter: None,
                     assurance: None,
                 },
+                &lifecycle,
             )
             .err()
             .expect("the same signed nonce must refuse a second admission");
@@ -1303,17 +1342,17 @@ mod signed_boot_tests {
             assurance: None,
         };
 
-        let verified = ResolvedLocal::new(&req)
+        let lifecycle = MachineLifecycleLock::acquire(&req.name).unwrap();
+        let admitted = ResolvedLocal::new(&req)
             .expect("resolve local image")
-            .verify()
-            .expect("verify local runtime");
+            .prepare(&backend, ctx, &lifecycle)
+            .expect("admit local plan");
         assert_eq!(
             backend.status(&id).unwrap(),
             mvm_core::vm_backend::VmStatus::Stopped
         );
-        let admitted = verified.admit(&backend, ctx).expect("admit local plan");
-        assert!(!admitted.admitted.signer_id().is_empty());
-        assert_eq!(admitted.admitted.plan().image.sha256.len(), 64);
+        assert!(!admitted.admission.admitted.signer_id().is_empty());
+        assert_eq!(admitted.admission.admitted.plan().image.sha256.len(), 64);
         assert_eq!(
             backend.status(&id).unwrap(),
             mvm_core::vm_backend::VmStatus::Stopped
