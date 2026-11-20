@@ -68,12 +68,44 @@ serialization. Decoding or hashing these values grants nothing. Any v1 encoding
 change requires an explicit version and domain migration.
 
 The protected verifier eventually returns a private, non-cloneable,
-non-serializable `VerifiedOwnerGrant` only after checking the provisioner,
-enrollment, policy, revocation, retained inputs and durable one-shot state.
-The key holder accepts only the exact closed operation and independently
-recomputes its domain and binding. Unknown or interrupted consumption remains
-spent/unknown. Neither the source vocabulary nor an existing opaque
-`SignPlan` endpoint is that capability.
+non-serializable `VerifiedOwnerGrant` after checking the provider signature,
+deployment identity and complete independently retained request expectations.
+It is not yet launch authority. A protected journal separately checks
+revocation and durably consumes the exact grant before returning the private
+`ConsumedOwnerGrant`. The key holder accepts only the exact closed operation
+and independently recomputes its domain and binding. Neither the source
+vocabulary nor an existing opaque `SignPlan` endpoint is that capability.
+
+`OwnerGrant` is the provider-issued public one-shot envelope. It binds one
+issuer, nonzero commissioning epoch and grant ID to the domain-separated digest of one exact
+`FreshAdmissionRequest`, with finite ordered issuance and expiry. Its signature
+is Ed25519 over `mvm.hvf-owner.grant.v1\0` including its NUL followed by compact
+typed `serde_json` serialization of `OwnerGrant` in declaration order. It is
+not JCS or a generic sign-bytes operation. The signature does not itself
+authorize work. The protected runtime compares the issuer key
+with the root-owned deployment receipt, re-verifies every retained expectation,
+checks the exact request, checks durable revocation/consumption state, and
+commits consumption before returning a private `ConsumedOwnerGrant`. A lost
+response is reconciled by a protected locked read: a retained consumed or
+revoked disposition cannot retry; proven absence means publication did not
+occur and no consumed capability was returned, so re-verification may retry.
+A corrupt or missing initialized journal refuses.
+The journal is initialized exactly once under a stable digest of issuer label,
+issuer public key and commissioning epoch; another provider generation cannot
+reuse its grant IDs, revocations or consumption namespace.
+The commissioning epoch identifies an installed issuer generation. It is not a
+runtime session epoch and does not by itself invalidate allowances after an
+authority-service restart; that freshness belongs to the later authenticated
+provider envelope and durable restart transition.
+The journal records the last accepted security time. Consumption and revocation
+sample their injected provider clock only after acquiring exclusion; regression
+before the grant's verification observation refuses. Expiry may durably advance
+the time floor, but refuses before grant consumption or authority return.
+Consumption does not extend expiry, and a later activation must check the same
+or an earlier deadline again.
+The protected journal covers ordinary crash recovery under the trusted
+administrator boundary. It does not detect deliberate rollback of the complete
+root-owned deployment receipt and journal by the trusted host administrator.
 
 ## Process and authority
 
