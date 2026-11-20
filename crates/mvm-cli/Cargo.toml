@@ -94,6 +94,7 @@ toml.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
+mvm-hostd = { workspace = true, features = ["test-support"] }
 mvm-core = { workspace = true, features = ["test-support"] }
 mvm-build = { workspace = true, default-features = false, features = ["builder-libkrun", "test-support"] }
 mvm-runtime = { workspace = true, features = ["test-support"] }

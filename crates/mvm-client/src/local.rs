@@ -20,6 +20,8 @@ mod resume;
 mod rootfs;
 #[cfg(test)]
 mod rootfs_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod seal_gate_tests;
 mod state;
 
 pub use rootfs::materialize_image_rootfs;
@@ -49,6 +51,7 @@ use mvm_core::client::{
     MvmClient, MvmError, Result, TelemetryReadRequest, TelemetryReadResponse, TelemetryStatus,
 };
 use mvm_core::config::vm_state_dir;
+use mvm_hostd::seal_gate::Mutation;
 #[cfg(feature = "test-support")]
 use mvm_runtime::vm::instance_snapshot::CannedIO;
 use mvm_runtime::vm::instance_snapshot::{
@@ -809,6 +812,14 @@ pub(crate) fn backend_err(e: impl std::fmt::Display) -> MvmError {
     }
 }
 
+/// Pass a change to machine `name` through the host's seal gate; a sealed
+/// unit's refusal is already audited and comes back as `Rejected`.
+fn authorize_change(name: &str, mutation: Mutation) -> Result<()> {
+    mvm_hostd::seal_gate::authorize(name, mutation).map_err(|e| MvmError::Rejected {
+        reason: format!("{e:#}"),
+    })
+}
+
 /// Record when `name` expires on its host name-registry entry, or clear it
 /// with `None`; the TTL reaper stops a machine past it. Synchronous, so a
 /// caller already inside a runtime (the host library) sets a TTL without
@@ -1040,6 +1051,7 @@ impl MvmClient for LocalBackend {
 
     async fn pause_machine(&self, id: &MachineId, opts: PauseOpts) -> Result<PauseOutcome> {
         let name = &id.0;
+        authorize_change(name, Mutation::Pause)?;
         let backend = self.lifecycle_backend_for(name);
         // The same per-machine lock a resume holds: a pause racing a resume
         // would otherwise seal and mark paused a machine the resume then marks
@@ -1098,6 +1110,7 @@ impl MvmClient for LocalBackend {
     }
 
     async fn resume_machine(&self, id: &MachineId, opts: ResumeOpts) -> Result<ResumeOutcome> {
+        authorize_change(&id.0, Mutation::Resume)?;
         let _barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()
             .map_err(backend_err)?;
         if cfg!(target_os = "linux") && self.backend.kind() != BackendKind::Mock {
@@ -1129,6 +1142,7 @@ impl MvmClient for LocalBackend {
     }
 
     async fn set_ttl(&self, id: &MachineId, expires_at: Option<String>) -> Result<()> {
+        authorize_change(&id.0, Mutation::Expiry)?;
         let detail = match &expires_at {
             Some(at) => format!("expires_at={at}"),
             None => "expires_at=cleared".to_string(),
