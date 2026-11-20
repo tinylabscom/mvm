@@ -1123,6 +1123,52 @@ fn a_stable_message_id_retried_into_a_new_epoch_or_boot_is_not_a_duplicate() {
 }
 
 #[test]
+fn each_units_current_epoch_comes_from_the_gate_and_fences_only_that_unit() {
+    use mvm_core::host_interface::{
+        epoch_gate::CommandGate, error::Denial, workload::WorkloadLedger,
+    };
+    let at = |epoch: u64| ExecutionEpoch::new(epoch).expect("epoch");
+    // Unit "a" has been replaced up to the message's epoch; "b" never was.
+    let mut ledger = WorkloadLedger::default();
+    while ledger.entry("a").epoch < header().execution_epoch {
+        ledger.replace("a").expect("replace");
+    }
+    ledger.quarantine("q");
+    let open_for = |gate: &CommandGate, unit: &str| {
+        let mut current = context();
+        current.current_execution_epoch = gate.current(unit);
+        open_under(
+            &seal_with(header(), b"hello"),
+            grant(),
+            &current,
+            &mut InMemoryReplayProtector::default(),
+        )
+    };
+
+    let gate = CommandGate::new(ledger.clone());
+    assert_eq!(open_for(&gate, "a").expect("current epoch opens"), b"hello");
+    assert_eq!(
+        open_for(&gate, "b").expect_err("b is still at its first epoch"),
+        MailboxError::ExecutionEpochNotPromoted
+    );
+    // A quarantined unit is refused by the gate even at its current epoch.
+    assert_eq!(
+        gate.admit("q", gate.current("q")),
+        Err(Denial::WorkloadQuarantined("q".into()))
+    );
+
+    // Replacing "a" fences the message's epoch for "a" and leaves "b" alone.
+    ledger.replace("a").expect("replace");
+    let gate = CommandGate::new(ledger);
+    assert_eq!(gate.current("a"), at(8));
+    assert_eq!(
+        open_for(&gate, "a").expect_err("replaced"),
+        MailboxError::StaleExecutionEpoch
+    );
+    assert_eq!(gate.current("b"), ExecutionEpoch::FIRST);
+}
+
+#[test]
 fn stale_or_foreign_epochs_are_fenced_on_both_sides() {
     let refuse =
         |header: MailboxEnvelopeHeader, grant: MailboxCapabilityGrant, context: OpenContext| {
@@ -1135,12 +1181,13 @@ fn stale_or_foreign_epochs_are_fenced_on_both_sides() {
             .expect_err("must be fenced")
         };
 
-    // A message from an epoch the owner has not reached.
+    // A message from an epoch the owner has not reached, as a standby's
+    // would be before its promotion.
     let mut owner_behind = context();
     owner_behind.current_execution_epoch = ExecutionEpoch::new(6).expect("epoch");
     assert_eq!(
         refuse(header(), grant(), owner_behind),
-        MailboxError::StaleExecutionEpoch
+        MailboxError::ExecutionEpochNotPromoted
     );
 
     // A capability spanning both epochs does not make a signed message from

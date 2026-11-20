@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::crypto::aead::Key;
+use crate::host_interface::{epoch_gate, error::Denial};
 
 use super::{
     MailboxError, OpenContext, SealRequest, encode_envelope, seal_envelope,
@@ -207,6 +208,8 @@ pub enum TransportBindingError {
     WrongAddress,
     #[error("transport binding execution epoch is stale")]
     StaleExecutionEpoch,
+    #[error("transport binding execution epoch is not yet current")]
+    ExecutionEpochNotPromoted,
     #[error("transport binding policy epoch is stale")]
     StalePolicyEpoch,
     #[error("transport binding is not yet valid")]
@@ -324,8 +327,12 @@ pub fn authorize_route(
     if claims.address != context.expected_address {
         return Err(TransportBindingError::WrongAddress);
     }
-    if claims.execution_epoch != context.current_execution_epoch {
-        return Err(TransportBindingError::StaleExecutionEpoch);
+    match epoch_gate::admit_at(context.current_execution_epoch, claims.execution_epoch) {
+        Ok(_) => {}
+        Err(Denial::EpochNotPromoted { .. }) => {
+            return Err(TransportBindingError::ExecutionEpochNotPromoted);
+        }
+        Err(_) => return Err(TransportBindingError::StaleExecutionEpoch),
     }
     if claims.policy_epoch != context.current_policy_epoch {
         return Err(TransportBindingError::StalePolicyEpoch);

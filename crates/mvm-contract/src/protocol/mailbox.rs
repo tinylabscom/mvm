@@ -763,6 +763,13 @@ pub struct MailboxCapabilityGrant {
 }
 
 impl MailboxCapabilityGrant {
+    /// Whether `epoch` lies within the grant's signed epoch bounds. Scope
+    /// only: whether the epoch is its unit's current one is the epoch gate's.
+    #[must_use]
+    pub fn admits_epoch(&self, epoch: ExecutionEpoch) -> bool {
+        (self.minimum_execution_epoch..=self.maximum_execution_epoch).contains(&epoch)
+    }
+
     pub fn validate_bounds(&self) -> Result<(), MailboxContractError> {
         if !self.operations.is_valid()
             || self.message_kinds.is_empty()
@@ -1018,8 +1025,7 @@ impl SignedMailboxGuestReaderEnrollment {
             return Err(MailboxDeliveryError::WrongPlanIdentity);
         }
         if enrolled.execution_epoch != scope.plan.epoch
-            || enrolled.execution_epoch < scope.receive.minimum_execution_epoch
-            || enrolled.execution_epoch > scope.receive.maximum_execution_epoch
+            || !scope.receive.admits_epoch(enrolled.execution_epoch)
         {
             return Err(MailboxDeliveryError::StaleExecutionEpoch);
         }
@@ -1120,10 +1126,7 @@ impl MailboxDeliveryLease {
         if lease.address.mailbox != plan.mailbox {
             return Err(MailboxDeliveryError::WrongPlanMailbox);
         }
-        if lease.execution_epoch != plan.epoch
-            || lease.execution_epoch < receive.minimum_execution_epoch
-            || lease.execution_epoch > receive.maximum_execution_epoch
-        {
+        if lease.execution_epoch != plan.epoch || !receive.admits_epoch(lease.execution_epoch) {
             return Err(MailboxDeliveryError::StaleExecutionEpoch);
         }
         if lease.address != receive.address {
