@@ -2841,6 +2841,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_volume_directory_refuses_admission() {
+        let (_environment, _home) = crate::test_fixtures::isolated_mvm_home();
         let tmp = tempfile::tempdir().expect("tmp");
         // Don't actually build the volume — the directory under
         // `<tmp>/<hash>/` will not exist.
