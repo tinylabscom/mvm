@@ -107,6 +107,23 @@ The protected journal covers ordinary crash recovery under the trusted
 administrator boundary. It does not detect deliberate rollback of the complete
 root-owned deployment receipt and journal by the trusted host administrator.
 
+### Closed admission key-holder acceptance
+
+After durable consumption, the authority key holder may sign only the exact
+canonical `ExecutionPlan` bytes whose `FreshAdmissionRequest` digest appears in
+that consumed record. The key holder binds its issuer key and commissioning
+epoch to the journal's provider identity, rechecks canonical plan encoding, and
+rechecks current expiry under the journal's serialized clock before signing.
+It exposes no arbitrary bytes, legacy `SignPlan`, path, PID or native-control
+operation through this API. Exact retries return the same deterministic
+Ed25519 signature and create no additional authority or native effect.
+
+The current library adapter opens no IPC endpoint and performs no peer
+authentication. The future protected authority service must authenticate its
+immediate runtime peer against the deployment receipt before invoking it.
+Plan-signing acceptance does not append audit, bind a native generation,
+authorize HVF control, create a process or return a launch capability.
+
 ## Process and authority
 
 `mvm-hvf-run-owner` is the proposed binary in `mvm-client`, with a thin entry

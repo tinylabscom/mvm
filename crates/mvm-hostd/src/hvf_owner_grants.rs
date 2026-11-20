@@ -153,6 +153,12 @@ impl std::fmt::Debug for OwnerGrantStore {
 }
 
 impl OwnerGrantStore {
+    /// Commissioned provider identity bound to this journal handle.
+    #[must_use]
+    pub fn provider_id(&self) -> [u8; 32] {
+        self.provider_id
+    }
+
     /// Initialize an empty namespace exactly once.
     ///
     /// The trusted installer must create, validate and protect the complete
@@ -231,7 +237,7 @@ impl OwnerGrantStore {
         let grant_id = grant.grant_id();
         let _lock = self.lock()?;
         let mut journal = self.read()?;
-        let now_secs = self.observe_time(&mut journal, grant_id)?;
+        let now_secs = self.observe_time(&mut journal, grant_id, 0)?;
         if now_secs < grant.verified_at_secs() {
             return Err(OwnerGrantStoreError::ClockRegression);
         }
@@ -286,7 +292,7 @@ impl OwnerGrantStore {
         }
         let _lock = self.lock()?;
         let mut journal = self.read()?;
-        let now_secs = self.observe_time(&mut journal, grant_id)?;
+        let now_secs = self.observe_time(&mut journal, grant_id, 0)?;
         if let Some(existing) = journal
             .records
             .iter()
@@ -334,6 +340,27 @@ impl OwnerGrantStore {
             }))
     }
 
+    pub(crate) fn authorize_consumed(
+        &self,
+        grant_id: [u8; 32],
+        request_digest: [u8; 32],
+    ) -> Result<ConsumedGrantAuthorization<'_>, OwnerGrantStoreError> {
+        let lock = self.lock()?;
+        let mut journal = self.read()?;
+        let now_secs = self.observe_time(&mut journal, grant_id, 0)?;
+        let expires_at_secs = validate_consumed(&journal, grant_id, request_digest, now_secs)?;
+        self.commit_journal(&journal, grant_id)?;
+        let observed_at_secs = self.fresh_time(now_secs, expires_at_secs)?;
+        Ok(ConsumedGrantAuthorization {
+            store: self,
+            _lock: lock,
+            journal,
+            grant_id,
+            request_digest,
+            observed_at_secs,
+        })
+    }
+
     fn lock(&self) -> Result<atomic_io::FileLock, OwnerGrantStoreError> {
         crate::admission_budget::acquire_lock(&self.path.with_extension("lock"))
             .map_err(OwnerGrantStoreError::Storage)
@@ -349,18 +376,42 @@ impl OwnerGrantStore {
         &self,
         journal: &mut GrantJournal,
         grant_id: [u8; 32],
+        minimum_secs: u64,
     ) -> Result<u64, OwnerGrantStoreError> {
         let now_secs = self.now_secs()?;
-        if now_secs < journal.last_observed_secs {
+        if now_secs < journal.last_observed_secs.max(minimum_secs) {
             return Err(OwnerGrantStoreError::Conflict);
         }
         if now_secs > journal.last_observed_secs {
             journal.last_observed_secs = now_secs;
-            let bytes = serialize(journal)?;
-            (self.commit)(&self.path, &bytes)
-                .map_err(|source| OwnerGrantStoreError::CommitUnknown { grant_id, source })?;
+            self.commit_journal(journal, grant_id)?;
         }
         Ok(now_secs)
+    }
+
+    fn fresh_time(
+        &self,
+        minimum_secs: u64,
+        expires_at_secs: u64,
+    ) -> Result<u64, OwnerGrantStoreError> {
+        let now_secs = self.now_secs()?;
+        if now_secs < minimum_secs {
+            return Err(OwnerGrantStoreError::Conflict);
+        }
+        if now_secs >= expires_at_secs {
+            return Err(OwnerGrantStoreError::Expired);
+        }
+        Ok(now_secs)
+    }
+
+    fn commit_journal(
+        &self,
+        journal: &GrantJournal,
+        grant_id: [u8; 32],
+    ) -> Result<(), OwnerGrantStoreError> {
+        let bytes = serialize(journal)?;
+        (self.commit)(&self.path, &bytes)
+            .map_err(|source| OwnerGrantStoreError::CommitUnknown { grant_id, source })
     }
 
     fn read(&self) -> Result<GrantJournal, OwnerGrantStoreError> {
@@ -405,7 +456,7 @@ impl OwnerGrantStore {
     }
 
     #[cfg(test)]
-    fn with_commit(
+    pub(crate) fn with_commit(
         &self,
         commit: impl Fn(&Path, &[u8]) -> io::Result<()> + Send + Sync + 'static,
     ) -> Self {
@@ -415,6 +466,67 @@ impl OwnerGrantStore {
             clock: Arc::clone(&self.clock),
             commit: Arc::new(commit),
         }
+    }
+}
+
+fn validate_consumed(
+    journal: &GrantJournal,
+    grant_id: [u8; 32],
+    request_digest: [u8; 32],
+    now_secs: u64,
+) -> Result<u64, OwnerGrantStoreError> {
+    let record = journal
+        .records
+        .iter()
+        .find(|record| record.grant_id == grant_id)
+        .ok_or(OwnerGrantStoreError::Conflict)?;
+    match record.disposition {
+        GrantDisposition::Consumed {
+            request_digest: retained,
+            ..
+        } if retained != request_digest => Err(OwnerGrantStoreError::Conflict),
+        GrantDisposition::Consumed {
+            expires_at_secs, ..
+        } if now_secs >= expires_at_secs => Err(OwnerGrantStoreError::Expired),
+        GrantDisposition::Consumed {
+            expires_at_secs, ..
+        } => Ok(expires_at_secs),
+        GrantDisposition::Revoked { .. } => Err(OwnerGrantStoreError::Revoked),
+    }
+}
+
+pub(crate) struct ConsumedGrantAuthorization<'a> {
+    store: &'a OwnerGrantStore,
+    _lock: atomic_io::FileLock,
+    journal: GrantJournal,
+    grant_id: [u8; 32],
+    request_digest: [u8; 32],
+    observed_at_secs: u64,
+}
+
+impl ConsumedGrantAuthorization<'_> {
+    pub(crate) fn check_current(&mut self) -> Result<(), OwnerGrantStoreError> {
+        let expires_at_secs = validate_consumed(
+            &self.journal,
+            self.grant_id,
+            self.request_digest,
+            self.observed_at_secs,
+        )?;
+        self.observed_at_secs = self
+            .store
+            .fresh_time(self.observed_at_secs, expires_at_secs)?;
+        Ok(())
+    }
+
+    pub(crate) fn recheck(mut self) -> Result<u64, OwnerGrantStoreError> {
+        let now_secs =
+            self.store
+                .observe_time(&mut self.journal, self.grant_id, self.observed_at_secs)?;
+        let expires_at_secs =
+            validate_consumed(&self.journal, self.grant_id, self.request_digest, now_secs)?;
+        self.store
+            .fresh_time(now_secs.max(self.observed_at_secs), expires_at_secs)?;
+        Ok(expires_at_secs)
     }
 }
 
