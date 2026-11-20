@@ -415,6 +415,7 @@ jobs:
           python3 scripts/test_claude_demo_consumer.py
           python3 scripts/test_claude_demo_preflight.py
           python3 scripts/test_e2e_failure_manifest.py
+          python3 scripts/test_measure_hvf_density.py
           python3 scripts/test_pack_build_native.py
           python3 scripts/test_published_installed_boot.py
           python3 -m unittest discover -s tests -p 'test_published_installed_boot.py'
