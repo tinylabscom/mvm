@@ -469,7 +469,7 @@ fn refused_entries(host: &Host, tenant: &str) -> usize {
 /// Boot through the shared admitted-boot entrypoint with a chain emitter, the
 /// path whose caller also records admission failures.
 fn admit_and_start_on_mock(host: &Host) -> Result<StartedMachine> {
-    on_boot_path(host, |backend, params| admit_and_start(backend, params))
+    on_boot_path(host, admit_and_start)
 }
 
 /// Run `admit` over the boot path's parameters for the fixture workload.
