@@ -416,6 +416,12 @@ pub fn claim_cli_transient(
 ) -> Result<WarmClaimDispatch> {
     let mut admitted = admitted;
     anyhow::ensure!(!admitted.dispatched, "CLI admission was already dispatched");
+    // A standby's scope was created before this launch was placed, so it holds
+    // no CPU set and a claimed child would run unconfined.
+    anyhow::ensure!(
+        admitted.allowed_cpus().is_none(),
+        "a launch placed on host cores cannot claim a warm standby"
+    );
     anyhow::ensure!(
         admitted.plan().image.name == config.name,
         "warm claim identity differs from admitted plan"
@@ -782,6 +788,21 @@ fn start_admitted_with_finalization(
                     || stop_actor(&mut actor_owner),
                     FailureAuditPolicy::OwnedAfterConfirmedRollback,
                 )?)
+            } else if (cli_transient || fork) && admitted.allowed_cpus().is_some() {
+                // Neither path reads grants back later, so a launch placed on
+                // host cores is checked here: a scope that does not hold the
+                // admitted set stops the VM before the caller sees it start.
+                // Persistent starts reach the same check after readiness.
+                apply_admitted_grants_with_rollback(
+                    backend,
+                    &vm_id,
+                    &admitted,
+                    None,
+                    || backend.stop(&vm_id).map(|_| ()),
+                    FailureAuditPolicy::OwnedAfterConfirmedRollback,
+                )
+                .map_err(cli_rollback_error)?;
+                None
             } else if cli_transient || persistent || fork {
                 // The CLI finalizes on teardown; persistent starts finalize
                 // after authenticated readiness. Fs-quick forks retain their

@@ -1011,6 +1011,21 @@ fn warm_eligible_launch(cfg: &VmStartConfig, late_volume_slots: u8) -> bool {
         && mvm_vmm::host::egress_bridge::mailbox_cmdline_token(cfg).is_none()
 }
 
+/// A launch admission placed on host cores: a standby's scope was created
+/// without its CPU set, so the launch boots cold into a scope that has it.
+fn placed_launch_boots_cold() -> Result<WarmClaimOutcome> {
+    if claim_required() {
+        return outcome_for_refusal(
+            WarmClaimRefusal::PreparationFailed {
+                reason: "required warm claim is ineligible: the launch is placed on host cores"
+                    .into(),
+            },
+            true,
+        );
+    }
+    Ok(WarmClaimOutcome::Cold(ColdStartReason::IneligibleShape))
+}
+
 /// Attempt a warm-pool claim for this launch: the claimed `VmId` (the standby
 /// id the VM now runs under), or the reason it boots cold.
 ///
@@ -1074,6 +1089,9 @@ pub(crate) fn try_warm_claim_with_admission(
             .as_ref()
             .context("warm claim lost its CLI admission")?;
         owner.check_legacy_projection(cfg)?;
+        if owner.allowed_cpus().is_some() {
+            return placed_launch_boots_cold();
+        }
     }
     // The same builder the spawn side records with, so the key searched for is
     // the key recorded. The rootfs digest comes from the sidecar cache plan
@@ -1172,6 +1190,18 @@ mod tests {
 
     fn sha256_hex_of(bytes: &[u8]) -> String {
         hex::encode(Sha256::digest(bytes))
+    }
+
+    #[test]
+    fn a_placed_launch_boots_cold_unless_a_claim_is_required() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.remove("MVM_HVF_WARM_REQUIRE_CLAIM");
+        assert!(matches!(
+            placed_launch_boots_cold(),
+            Ok(WarmClaimOutcome::Cold(ColdStartReason::IneligibleShape))
+        ));
+        env.set("MVM_HVF_WARM_REQUIRE_CLAIM", "1");
+        assert!(placed_launch_boots_cold().is_err());
     }
 
     #[test]

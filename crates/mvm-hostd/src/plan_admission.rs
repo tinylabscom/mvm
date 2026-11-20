@@ -277,6 +277,15 @@ impl AdmittedPlan {
     }
 
     #[cfg(test)]
+    pub(crate) fn with_allowed_cpus_for_test(
+        mut self,
+        cpus: mvm_contract::protocol::cpu_set::CpuSet,
+    ) -> Self {
+        self.allowed_cpus = Some(cpus);
+        self
+    }
+
+    #[cfg(test)]
     pub(crate) fn with_assurance_runtime_for_test(mut self, config: &VmStartConfig) -> Self {
         self.assurance_runtime = Some(
             AssuranceRuntimeBinding::verify(config, &self.plan, None)
