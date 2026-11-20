@@ -303,7 +303,17 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 secrets.len()
             );
         }
-        let parent_state_dir = vm_state_dir(handle.id.as_str());
+        // A saved-state parent's own dir is gone; its identity travelled in
+        // the checkpoint and was materialized into the child's dir. A resident
+        // parent keeps its dir and has nothing materialized.
+        let parent_state_dir = if child_dir
+            .join(mvm_vmm::host::flowmux_identity::PUBLIC_IDENTITY_FILE)
+            .is_file()
+        {
+            child_dir.clone()
+        } else {
+            vm_state_dir(handle.id.as_str())
+        };
         if let Some(audit) = &claim.audit_context
             && audit.plan() != Some(&plan)
         {
