@@ -297,7 +297,9 @@ pub struct RuntimeArtifactSelection<'a> {
     pub host_protocol: u32,
 }
 
-/// Owns copied bytes matching a checked declaration. Authentication depends on
+/// Owns a generation of artifact files matching a checked declaration: fresh
+/// copies, or hard links to an intact shared copy that was re-hashed when
+/// linked. Authentication depends on
 /// the issuing release/source evidence, not this shared byte owner. Not yet a boot
 /// capability: dropping this owner removes its files, so detached launch must
 /// transfer ownership to a durable, generation-scoped lifecycle before use.
@@ -606,11 +608,37 @@ fn snapshot_file(
     }
     copy_snapshot_file(source, destination, expected)?;
     if let Some(blob) = &blob {
-        // Best effort: a lost race or a refused link only costs the next
-        // generation a copy.
-        let _ = std::fs::hard_link(destination, blob);
+        publish_shared_copy(destination, blob);
     }
     Ok(())
+}
+
+/// Make the fresh, verified `copy` the shared copy at `blob`, replacing one that
+/// was missing, changed or mis-permissioned so later launches link again
+/// instead of copying forever. The new name is linked beside the blob and
+/// renamed over it, so a reader sees the old file or the new one, never a
+/// partial one. Best effort: failing only costs the next launch a copy.
+fn publish_shared_copy(copy: &Path, blob: &Path) {
+    static PUBLISHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let (Some(store), Some(name)) = (blob.parent(), blob.file_name()) else {
+        return;
+    };
+    let staged = store.join(format!(
+        ".{}.{}.{}",
+        name.to_string_lossy(),
+        std::process::id(),
+        PUBLISHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    if std::fs::hard_link(copy, &staged).is_err() {
+        return;
+    }
+    if std::fs::rename(&staged, blob).is_err() {
+        let _ = std::fs::remove_file(&staged);
+        return;
+    }
+    // The bytes are flushed with the generation that owns `copy`; this makes
+    // the new directory entry durable too.
+    let _ = std::fs::File::open(store).and_then(|directory| directory.sync_all());
 }
 
 /// Link `blob` into place as `destination` and check the linked inode, which is
@@ -1206,18 +1234,30 @@ mod tests {
         std::fs::write(&blob, b"tampered").unwrap();
         std::fs::set_permissions(&blob, std::fs::Permissions::from_mode(0o400)).unwrap();
         let third = snapshot();
-        assert_ne!(inode(third.overlay_path()), inode(blob.clone()));
         assert_eq!(std::fs::read(third.overlay_path()).unwrap(), b"overlay");
+        // ...and the fresh copy repairs the shared one, which the next launch
+        // links again.
+        assert_eq!(std::fs::read(&blob).unwrap(), b"overlay");
+        assert_eq!(inode(third.overlay_path()), inode(blob.clone()));
+        let after_repair = snapshot();
+        assert_eq!(inode(after_repair.overlay_path()), inode(blob.clone()));
 
         // Nor is one that lost its read-only private mode.
         let initramfs_blob = shared.join(&declaration.initramfs_sha256);
         std::fs::set_permissions(&initramfs_blob, std::fs::Permissions::from_mode(0o644)).unwrap();
         let fourth = snapshot();
-        assert_ne!(inode(fourth.initramfs_path()), inode(initramfs_blob));
         assert_eq!(
             std::fs::metadata(fourth.initramfs_path()).unwrap().mode() & 0o777,
             0o400
         );
+        assert_eq!(
+            std::fs::metadata(&initramfs_blob).unwrap().mode() & 0o777,
+            0o400,
+            "the repaired shared copy is read-only again"
+        );
+        assert_eq!(inode(snapshot().initramfs_path()), inode(initramfs_blob));
+        // No staging names are left in the store.
+        assert_eq!(std::fs::read_dir(&shared).unwrap().count(), 3);
     }
 
     #[test]

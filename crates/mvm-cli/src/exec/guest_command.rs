@@ -105,12 +105,10 @@ pub fn transient_run_dev_console(pty: bool, image_sealed: bool) -> bool {
 /// directory of its own under `/tmp`; that directory goes too, or every such
 /// run leaves one behind.
 pub(crate) fn remove_transient_state_dir(staging_dir: &str) {
-    let socket_dir = mvm_core::config::vm_socket_dir_at(std::path::Path::new(staging_dir));
-    if socket_dir != std::path::Path::new(staging_dir)
-        && let Err(e) = std::fs::remove_dir_all(&socket_dir)
-        && e.kind() != std::io::ErrorKind::NotFound
+    if let Err(e) =
+        mvm_runtime::vm::reconcile::remove_fallback_socket_dir(std::path::Path::new(staging_dir))
     {
-        tracing::debug!(error = %e, dir = %socket_dir.display(), "transient socket dir cleanup failed");
+        tracing::debug!(error = %e, dir = staging_dir, "transient socket dir cleanup failed");
     }
     match std::fs::remove_dir_all(staging_dir) {
         Ok(()) => {}
