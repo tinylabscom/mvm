@@ -26,6 +26,11 @@ const ISOLATED_CPUS: &str = "/sys/devices/system/cpu/isolated";
 /// whatever cores it happens to inherit.
 pub(super) const SCOPE_CPUS_FILE: &str = "spawn-scope-cpus";
 
+/// The file under a VM's state dir naming the topology unit a placed boot
+/// runs. Written by admission after the read-back; cleared here at every
+/// scoped boot and on stop, so it never outlives the boot that wrote it.
+pub const PLACEMENT_OWNER_FILE: &str = "placement-owner.json";
+
 /// Why this host's spawn scope cannot carry an allowed-CPU set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CpusetGap {
@@ -125,15 +130,30 @@ pub(super) fn allowed_cpus_property(cpus: &CpuSet) -> String {
 
 /// Record, or clear, the set this boot's scope is asked for. A state dir is
 /// reused across boots of one machine, so a boot without a set must clear the
-/// previous boot's record or its read-back would look for one.
+/// previous boot's record or its read-back would look for one. The previous
+/// boot's placement owner is cleared with it, whatever this boot asks for.
 pub(super) fn record_requested(state_dir: &Path, cpus: Option<&CpuSet>) -> std::io::Result<()> {
+    clear_placement_owner(state_dir)?;
     let path = state_dir.join(SCOPE_CPUS_FILE);
     match cpus {
         Some(cpus) => std::fs::write(path, cpus.to_string()),
-        None => match std::fs::remove_file(path) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-            _ => Ok(()),
-        },
+        None => remove_if_present(&path),
+    }
+}
+
+/// Remove the placement owner record, if there is one.
+///
+/// # Errors
+///
+/// The record exists and cannot be removed.
+pub fn clear_placement_owner(state_dir: &Path) -> std::io::Result<()> {
+    remove_if_present(&state_dir.join(PLACEMENT_OWNER_FILE))
+}
+
+fn remove_if_present(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
     }
 }
 
@@ -202,6 +222,22 @@ mod tests {
         record_requested(dir.path(), None).unwrap();
         assert!(!requested_for_vm(dir.path()));
         record_requested(dir.path(), None).expect("clearing nothing is fine");
+    }
+
+    #[test]
+    fn every_scoped_boot_clears_the_previous_placement_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = dir.path().join(PLACEMENT_OWNER_FILE);
+        std::fs::write(&owner, "{}").unwrap();
+        record_requested(dir.path(), None).unwrap();
+        assert!(!owner.exists(), "an unconfined boot clears it");
+        std::fs::write(&owner, "{}").unwrap();
+        record_requested(dir.path(), Some(&CpuSet::parse("1").unwrap())).unwrap();
+        assert!(
+            !owner.exists(),
+            "a placed boot clears it until admission writes its own"
+        );
+        clear_placement_owner(dir.path()).expect("clearing nothing is fine");
     }
 
     #[test]

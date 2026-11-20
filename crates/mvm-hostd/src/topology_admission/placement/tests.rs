@@ -319,3 +319,27 @@ fn a_running_exclusive_machine_keeps_its_cores_held_after_release() {
         Err(HostPlacementRefusal::NoCoreLeft { held: set("0-7") })
     );
 }
+
+#[test]
+fn a_malformed_owner_record_on_a_running_machine_refuses_an_exclusive_topology() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = mvm_core::config::vm_state_dir_at(home.path(), "garbled");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("libkrun.pid"), std::process::id().to_string()).unwrap();
+    std::fs::write(dir.join(mvm_core::spawn_scope::PLACEMENT_OWNER_FILE), "{").unwrap();
+    // Its recorded set would keep it off core 2, but nothing read beside a
+    // record that cannot be trusted is trusted either.
+    std::fs::write(dir.join("spawn-scope-cpus"), "0-1").unwrap();
+    let host = HostCpus {
+        live: live::live_machines(home.path()),
+        ..host("0-7")
+    };
+    assert_eq!(
+        check_host_placement(&tenant("t"), &with_placements(&[("a", &[2])]), &host, &[]),
+        Err(HostPlacementRefusal::HeldByLiveMachine {
+            unit: wid("a"),
+            machine: "garbled".into(),
+            cores: set("2"),
+        })
+    );
+}

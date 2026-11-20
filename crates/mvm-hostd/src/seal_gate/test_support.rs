@@ -43,6 +43,7 @@ pub fn topology_for(plan: &ExecutionPlan, generation: u64, permits: SealedTransi
             min_isolation: None,
             permits,
             liveness_period_ms: None,
+            require_isolated_cores: false,
         }],
         standby_pairs: Vec::new(),
         cells: Vec::new(),
@@ -64,6 +65,13 @@ pub fn admit(topology: &Topology) -> Result<()> {
         signed: &signed,
         backend: mvm_core::vm_backend::BackendKind::Firecracker,
         measured_failover: None,
+        // The topology places nothing, so no host fact is read.
+        host_cpus: &crate::topology_admission::HostCpus {
+            scope_cpuset: false,
+            online: None,
+            isolated: None,
+            live: Vec::new(),
+        },
         clock: &mvm_core::time::SystemClock,
         host_signer_keys_dir: None,
         emitter: &emitter,
