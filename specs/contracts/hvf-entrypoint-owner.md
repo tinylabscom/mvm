@@ -284,10 +284,10 @@ loader.
 This split is source-level wiring only. A strict read-only macOS loader now
 loads the distinct native and provider-stop roots from the fixed protected
 commissioning receipt, and a pure adapter can construct the typed control roots
-without opening a connection. Journal opening remains deferred until an
-open-existing, non-repairing protected lock path exists. These seams remain
-disconnected: no protected authority/runtime IPC, service, native operation or
-positive factory consumes them in production.
+without opening a connection. The open-only journal seam requires both journal
+and lock to preexist and never creates or repairs either.
+These seams remain disconnected: no protected authority/runtime IPC, service,
+native operation or positive factory consumes them in production.
 
 ## Recovery authorization
 
