@@ -45,6 +45,18 @@ impl HvfControlRoots {
             stop,
         }
     }
+
+    /// Native-supervisor root for challenge and finalization attestations.
+    #[must_use]
+    pub fn challenge_and_finalization(&self) -> &VerifyingKey {
+        &self.challenge_and_finalization
+    }
+
+    /// Provider root for owner stop-request authorization.
+    #[must_use]
+    pub fn stop(&self) -> &VerifyingKey {
+        &self.stop
+    }
 }
 
 /// Non-wire proof that a fresh challenge bound this exact instance and
