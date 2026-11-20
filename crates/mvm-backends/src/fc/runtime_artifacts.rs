@@ -582,7 +582,10 @@ mod tests {
     fn an_unreadable_descriptor_table_fails_closed() {
         // No process has this pid, so /proc/<pid>/fd cannot be listed; the
         // check must refuse rather than fall back to the digest alone.
-        let error = HeldFiles::of_process(u32::MAX).unwrap_err();
+        let error = match HeldFiles::of_process(u32::MAX) {
+            Err(error) => error,
+            Ok(_) => panic!("expected an error for an unreadable descriptor table"),
+        };
         assert!(error.to_string().contains("/fd"), "{error:#}");
     }
 
