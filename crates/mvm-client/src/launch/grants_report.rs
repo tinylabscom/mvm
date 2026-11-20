@@ -64,9 +64,9 @@ fn report_enforced_grants_with(
 
     crate::record_enforced_grants(&started.vm_id().0, &enforced);
 
-    if let Err(e) = ctx
-        .emitter
-        .emit_grants_enforced(ctx.admitted.plan(), &enforced)
+    if let Err(e) =
+        ctx.emitter
+            .emit_grants_enforced(ctx.admitted.plan(), &enforced, started.backend().kind())
     {
         tracing::warn!(error = %e, "audit emit_grants_enforced failed (non-fatal)");
     }

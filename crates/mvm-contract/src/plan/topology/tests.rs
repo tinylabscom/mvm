@@ -670,3 +670,17 @@ fn errors_name_the_offending_element() {
     .to_string();
     assert!(message.contains("w1") && message.contains("w2") && message.contains('2'));
 }
+
+#[test]
+fn an_isolation_label_is_the_serde_spelling() {
+    for tier in [
+        IsolationTier::Task,
+        IsolationTier::Partition,
+        IsolationTier::Vm,
+    ] {
+        assert_eq!(
+            serde_json::to_value(tier).unwrap(),
+            serde_json::Value::String(tier.label().to_string())
+        );
+    }
+}

@@ -2439,10 +2439,12 @@ mod tests {
                     tasks: EnforcedCeiling::enforced(EnforcedTier::Cgroup2PidsMax, 1024),
                     placement: Default::default(),
                 },
+                mvm_contract::protocol::vm_backend::BackendKind::Firecracker,
             )
             .unwrap();
         let content = std::fs::read_to_string(dir.path().join("local.jsonl")).unwrap();
         for needle in [
+            grants_audit::LABEL_ISOLATION_TIER,
             grants_audit::LABEL_MEMORY_TIER,
             "cgroup2:memory.max",
             "805306368",

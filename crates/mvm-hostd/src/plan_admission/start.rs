@@ -1018,7 +1018,11 @@ fn start_admitted_with_finalization(
                     tracing::warn!(error = %e, "audit emit_decision_record for launch failed (non-fatal)");
                 }
                 if let Some(enforced_grants) = &enforced_grants
-                    && let Err(e) = emitter.emit_grants_enforced(admitted.plan(), enforced_grants)
+                    && let Err(e) = emitter.emit_grants_enforced(
+                        admitted.plan(),
+                        enforced_grants,
+                        backend.kind(),
+                    )
                 {
                     if actor_owner.is_some() {
                         return Err(e);
