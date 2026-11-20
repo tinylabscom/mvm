@@ -116,9 +116,10 @@ pub use shares::enforce_admitted_shares;
 pub use start::{
     CliStartFailure, DispatchedPersistent, LaunchAdmission, PreparePersistentParams,
     PreparedEntrypoint, PreparedPersistent, StartAdmittedParams, StartedMachine, WarmClaimDispatch,
-    admit_and_start, boot_vm, claim_cli_transient, prepare_entrypoint, start_admitted,
-    start_admitted_owned_actor, start_admitted_owned_actor_with_bootstrap, start_cli_transient,
-    start_entrypoint, start_fs_quick_fork, start_owned_entrypoint, start_persistent,
+    admit_and_start, boot_vm, claim_cli_transient, prepare_entrypoint, prepare_portable_entrypoint,
+    start_admitted, start_admitted_owned_actor, start_admitted_owned_actor_with_bootstrap,
+    start_cli_transient, start_entrypoint, start_fs_quick_fork, start_owned_entrypoint,
+    start_persistent,
 };
 pub(crate) use start::{
     LaunchSource, admit_synthesized_with_verified_release, prepare_launch,

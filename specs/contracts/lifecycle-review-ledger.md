@@ -160,15 +160,46 @@ opaque admitted context. Plan JSON and `SessionAuditSubstrate` remain
 projections. Legacy dispatch still owns its launch, grant, budget, mailbox and
 failure-audit order. Native HVF dispatch still requires the original owner and
 retains that custody when activation or stop is uncertain. Producer-owned
-portable assets remain on their prior preparation and post-admission
-verification path, including refusal when an installed bundle is also selected.
+portable assets are a distinct source reviewed separately below.
 
 Mock and source-level tests cover preparation order, refusal before backend
 start, one-use admission, runtime/config identity checks, installed-bundle
 pin/no-fallback and dispatch recheck behavior, native ownership and uncertain
-stop custody, and the unchanged portable branch. They do not qualify a live
-HVF or Firecracker launch, Linux confinement, a billable GCP host, or the
-formal cold/warm performance requirements.
+stop custody. They do not qualify a live HVF or Firecracker launch, Linux
+confinement, a billable GCP host, or the formal cold/warm performance
+requirements.
+
+## Producer-owned portable entrypoint preparation
+
+The following [#5520](https://github.com/tinylabscom/mvm/issues/5520)
+source slice keeps slot, rootfs, kernel, backend, VM-name and verity
+resolution, plus the original non-serializable
+`PreparedPortableBootAssets`, in `mvm-client`. Portable remains a distinct
+private hostd source alternative. Hostd invokes the client's narrow one-shot
+capabilities in source integrity/revocation recheck and exact closure
+application → one launch-scoped release-runtime verification → one admission
+→ admission substrate application → retained runtime equivalence → portable
+asset final-equivalence order, then returns the exact config,
+`VerifiedRuntimeSet` and opaque admission to the existing legacy or
+native-owned dispatch tail.
+
+The installed-bundle exclusion is checked before portable application.
+Portable staging directories and retained publisher proof stay owned by the
+client object through verification and dispatch; neither plan JSON nor
+`SessionAuditSubstrate` reconstructs that trust. A post-admission final-config
+refusal records the existing `guest-runtime` failure against the same
+admission context. Existing Required durability, legacy grant/budget/mailbox
+finalization, native ownership, rollback and uncertain-stop custody are
+unchanged.
+
+Mock-backed hostd tests and a private client capability fixture cover ordered
+one-use preparation, pre-admission source/runtime refusal, post-admission
+config substitution, the exact admission's `guest-runtime` failure, single
+admission and exact runtime retention into the existing dispatch paths.
+Existing entrypoint tests cover portable/bundle exclusion, native custody and
+uncertain stop. They do not qualify a live HVF or Firecracker launch, Linux
+confinement, a billable GCP host, or the formal cold/warm performance
+requirements.
 
 ## Signed application HVF startup diagnostics
 

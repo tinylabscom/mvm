@@ -964,6 +964,224 @@ fn entrypoint_boundary_authenticates_then_admits_and_retains_runtime_through_dis
 }
 
 #[test]
+fn portable_entrypoint_orders_capabilities_and_retains_exact_runtime_for_dispatch() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let keys = tempfile::tempdir().expect("keys");
+    let audit = tempfile::tempdir().expect("audit");
+    let runtime_dir = tempfile::tempdir().expect("runtime fixture");
+    let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+    let name = "portable-entrypoint-order";
+    let events = std::cell::RefCell::new(Vec::new());
+    let runtime = mvm_build::guest_runtime::evidence::verified_release_runtime_fixture(
+        runtime_dir.path(),
+        mvm_core::arch::GuestArch::host(),
+        mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+        mvm_runtime::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION,
+    );
+    let release = std::sync::Arc::clone(&runtime.release);
+
+    let prepared = prepare_portable_entrypoint(
+        VmStartConfig {
+            name: name.into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            ..Default::default()
+        },
+        backend.kind(),
+        |config| {
+            events.borrow_mut().push("attach");
+            config.runtime_release_proof = Some(release.proof().clone());
+            config.runtime_overlay_path = Some(runtime.overlay.display().to_string());
+            config.runtime_overlay_verity_path = Some(runtime.overlay_verity.display().to_string());
+            config.runtime_overlay_roothash = Some(runtime.overlay_roothash.clone());
+            config.runtime_overlay_version = Some(release.proof().version.clone());
+            config.initrd_path = Some(runtime.initramfs.display().to_string());
+            Ok(std::sync::Arc::clone(&release))
+        },
+        |config, verified| {
+            verified
+                .verify_config(config)
+                .expect("verification precedes portable admission");
+            assert!(
+                std::ptr::eq(verified.release(), release.as_ref()),
+                "admission sees the exact attached release"
+            );
+            events.borrow_mut().push("admit");
+            Ok(entrypoint_boundary_admission(
+                name,
+                &backend,
+                keys.path(),
+                audit.path(),
+                config,
+                verified,
+            ))
+        },
+        |_, admission| {
+            events.borrow_mut().push("apply-admission");
+            Ok(admission)
+        },
+        |config, verified, _| {
+            events.borrow_mut().push("final-equivalence");
+            verified
+                .verify_config(config)
+                .expect("retained runtime still matches final config");
+            assert_eq!(
+                config.runtime_overlay_version.as_deref(),
+                Some(release.proof().version.as_str())
+            );
+            Ok(())
+        },
+    )
+    .expect("prepare portable entrypoint");
+
+    assert_eq!(
+        *events.borrow(),
+        ["attach", "admit", "apply-admission", "final-equivalence"]
+    );
+    let (config, verified_runtime, admission) = prepared.into_parts();
+    let verified_runtime = verified_runtime.expect("portable runtime retained");
+    assert!(
+        std::ptr::eq(verified_runtime.release(), release.as_ref()),
+        "dispatch retains the exact release observed by admission"
+    );
+    assert_eq!(
+        admission.admitted.plan().runtime_identity.as_ref(),
+        Some(verified_runtime.identity())
+    );
+    let error = start_entrypoint(
+        StartAdmittedParams {
+            backend: &backend,
+            admitted: admission.admitted,
+            config,
+            policy_bundle: admission.policy_bundle.as_ref(),
+            emitter: Some(&admission.emitter),
+            assurance: None,
+        },
+        Some(&verified_runtime),
+    )
+    .expect_err("mock cannot consume a retained verified release");
+    assert!(
+        format!("{error:#}").contains("cannot consume a verified release runtime"),
+        "{error:#}"
+    );
+    assert!(!matches!(
+        backend.status(&VmId(name.into())),
+        Ok(mvm_core::vm_backend::VmStatus::Running)
+    ));
+}
+
+#[test]
+fn portable_final_config_substitution_records_same_admission_failure_before_start() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let keys = tempfile::tempdir().expect("keys");
+    let audit = tempfile::tempdir().expect("audit");
+    let runtime_dir = tempfile::tempdir().expect("runtime fixture");
+    let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+    let name = "portable-final-config-substitution";
+    let runtime = mvm_build::guest_runtime::evidence::verified_release_runtime_fixture(
+        runtime_dir.path(),
+        mvm_core::arch::GuestArch::host(),
+        mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+        mvm_runtime::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION,
+    );
+    let release = std::sync::Arc::clone(&runtime.release);
+
+    let error = match prepare_portable_entrypoint(
+        VmStartConfig {
+            name: name.into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            ..Default::default()
+        },
+        backend.kind(),
+        |config| {
+            config.runtime_release_proof = Some(release.proof().clone());
+            config.runtime_overlay_path = Some(runtime.overlay.display().to_string());
+            config.runtime_overlay_verity_path = Some(runtime.overlay_verity.display().to_string());
+            config.runtime_overlay_roothash = Some(runtime.overlay_roothash.clone());
+            config.runtime_overlay_version = Some(release.proof().version.clone());
+            config.initrd_path = Some(runtime.initramfs.display().to_string());
+            Ok(release)
+        },
+        |config, verified| {
+            Ok(entrypoint_boundary_admission(
+                name,
+                &backend,
+                keys.path(),
+                audit.path(),
+                config,
+                verified,
+            ))
+        },
+        |config, admission| {
+            config.runtime_overlay_version = Some("substituted-after-admission".into());
+            Ok(admission)
+        },
+        |config, _, admission| {
+            let error = anyhow::anyhow!(
+                "final portable config differs: {}",
+                config
+                    .runtime_overlay_version
+                    .as_deref()
+                    .unwrap_or("missing")
+            );
+            admission
+                .emitter
+                .emit_failed(
+                    admission.admitted.plan(),
+                    "guest-runtime",
+                    &format!("{error:#}"),
+                )
+                .expect("record final portable refusal");
+            Err(error)
+        },
+    ) {
+        Ok(_) => panic!("post-admission portable substitution must refuse"),
+        Err(error) => error,
+    };
+
+    assert!(format!("{error:#}").contains("substituted-after-admission"));
+    assert!(!matches!(
+        backend.status(&VmId(name.into())),
+        Ok(mvm_core::vm_backend::VmStatus::Running)
+    ));
+    let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).expect("audit chain");
+    assert_eq!(chain.matches("plan.failed").count(), 1, "{chain}");
+    assert!(chain.contains("guest-runtime"), "{chain}");
+}
+
+#[test]
+fn portable_source_refusal_precedes_admission_and_backend_start() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+    let name = "portable-source-refusal";
+    let admitted = std::cell::Cell::new(false);
+
+    let error = match prepare_portable_entrypoint(
+        VmStartConfig {
+            name: name.into(),
+            ..Default::default()
+        },
+        backend.kind(),
+        |_| anyhow::bail!("portable publisher revocation advanced"),
+        |_, _| {
+            admitted.set(true);
+            Ok(())
+        },
+        |_, admission| Ok(admission),
+        |_, _, _| Ok(()),
+    ) {
+        Ok(_) => panic!("portable source refusal must stop preparation"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("revocation advanced"));
+    assert!(!admitted.get(), "source refusal precedes admission");
+    assert!(!matches!(
+        backend.status(&VmId(name.into())),
+        Ok(mvm_core::vm_backend::VmStatus::Running)
+    ));
+}
+
+#[test]
 fn entrypoint_source_or_runtime_refusal_never_reaches_admission_or_dispatch() {
     let (_env, _home) = host_with_ceiling(Default::default());
     let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
