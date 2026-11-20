@@ -14,6 +14,42 @@ separately, the files that were not read. Absence from the "read" column is not 
 soundness. "Read" is taken from the fixing PR descriptions and the review notes for the lane; the
 line ranges are as recorded there and were not re-derived when this file was written.
 
+## Conformance authenticated HVF cleanup
+
+Reviewed the conformance reaper, its scenario after-hook, interrupt handler,
+temporary-home guard and world destructor, plus the existing CLI stop route
+and HVF authenticated-stop boundary. Home-local runtime evidence selects VM
+names, not numeric PID authority. The harness delegates validation,
+authentication, finalization and state removal to `mvmctl machine stop` in an
+isolated child with a 45-second deadline per candidate. It does not read
+identity-file contents or remove VM directories or pool records itself.
+
+Identified supervisors and processes whose paths match an HVF candidate home
+are excluded from raw signals, including custom-named helpers. Exclusion
+markers persist across cleanup sweeps. Missing evidence, refused or timed-out
+stop, newly observed home-local candidates and surviving protected processes
+remain unknown; later disappearance does not clear an unknown report.
+Unconfirmed cleanup retains owned temporary homes. Explicit guard completion
+returns one report for the step to assert; Drop remains the unwind backstop.
+Unrelated homes are neither stop targets nor sources of global cleanup failure.
+Non-HVF-only homes retain the existing helper TERM/KILL cleanup.
+
+Hermetic tests cover command isolation, production stdin-configured argv,
+malformed/missing/FIFO evidence, stop refusal and timeout, cross-home
+separation, custom-helper exclusion, later sweeps and retained temporary-home
+ownership. The shared bounded runner sends zero-cap output streams to null so
+this child neither captures secrets nor waits on descendant-held output pipes.
+The ignored native entry point requires an explicitly opted-in private root,
+CLI binary and exactly one expected VM; compiling it is not live evidence.
+
+Limits: this is a test-harness cleanup review, not a new review of backend
+authentication, kernel lifetime observation or release guarantees. Process
+tables and filesystem discovery are observations, not an atomic lifecycle
+lock; work starting after the final scan is outside this witness. Conservatively
+excluding helpers in an HVF home can leave a helper survivor and fail cleanup.
+No native reaper run, successful public Claude boot/release, Linux confinement
+or hardware finalization was established by these hermetic tests.
+
 ## Offline recovery decision boundary
 
 The A1 slice under [#5120](https://github.com/tinylabscom/mvm/issues/5120)

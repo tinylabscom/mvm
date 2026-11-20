@@ -661,6 +661,30 @@ pub fn live_home_precedence<'a>(
 /// An explicit `CARGO_BIN_EXE_mvmctl` wins — the `just` recipes set it — and a
 /// relative one is read from the workspace root, the directory the recipes
 /// name it from. Otherwise the binary is found beside the test binary.
+pub fn mvmctl_path() -> std::io::Result<std::path::PathBuf> {
+    Ok(resolve_mvmctl_path(
+        std::env::var_os("CARGO_BIN_EXE_mvmctl").map(std::path::PathBuf::from),
+        &std::env::current_exe()?,
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+    ))
+}
+
+/// Prepare the same CLI and sibling-helper search path used by live steps.
+pub fn command_for_binary(bin_path: &std::path::Path) -> std::process::Command {
+    let mut cmd = mvm_core::env_hygiene::helper_command(bin_path);
+    if let Some(bin_dir) = bin_path.parent() {
+        let mut path = bin_dir.as_os_str().to_os_string();
+        path.push(":");
+        if let Some(existing) = std::env::var_os("PATH") {
+            path.push(existing);
+        }
+        cmd.env("PATH", path);
+    }
+    cmd.env("MVM_COLD_BUILD", "auto");
+    cmd
+}
+
+/// Resolve an explicit CLI override or the CLI beside the test executable.
 pub fn resolve_mvmctl_path(
     explicit: Option<std::path::PathBuf>,
     test_binary: &std::path::Path,
