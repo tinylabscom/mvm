@@ -21,6 +21,7 @@ serde_jcs = "0.1"
 # Host-only: `workload_address` normalization. Optional; `host-state` pulls it.
 unicode-normalization = { version = "0.1", optional = true }
 chrono.workspace = true
+time.workspace = true
 # The no_std + alloc foundation crate. `plan::validity` re-exports its
 # `FreshnessClaims`; `plan::{types,verb,verb_trust}` are module aliases
 # onto its `plan` submodules.

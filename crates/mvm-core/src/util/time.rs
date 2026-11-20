@@ -19,32 +19,64 @@ impl Clock for SystemClock {
     }
 }
 
+/// Render whole seconds since the Unix epoch as `YYYY-MM-DDTHH:MM:SSZ`.
+/// Seconds outside the representable years 0000..=9999 clamp to the nearest
+/// bound, so no input can panic or emit a year the format has no width for.
+fn rfc3339_from_unix_secs(secs: i64) -> String {
+    let dt = ::time::OffsetDateTime::from_unix_timestamp(secs).unwrap_or(if secs < 0 {
+        ::time::PrimitiveDateTime::MIN.assume_utc()
+    } else {
+        ::time::PrimitiveDateTime::MAX.assume_utc()
+    });
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        dt.year().clamp(0, 9999),
+        u8::from(dt.month()),
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second()
+    )
+}
+
+/// Whole seconds since the Unix epoch, rounded toward negative infinity for
+/// instants before it (the rounding `chrono` applies).
+fn unix_secs_floor(at: std::time::SystemTime) -> i64 {
+    match at.duration_since(std::time::SystemTime::UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+        Err(e) => {
+            let d = e.duration();
+            let back = i64::try_from(d.as_secs()).unwrap_or(i64::MAX);
+            let whole = if d.subsec_nanos() > 0 {
+                back.saturating_add(1)
+            } else {
+                back
+            };
+            -whole
+        }
+    }
+}
+
 /// Return the current UTC timestamp in ISO 8601 format.
 pub fn utc_now() -> String {
-    Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    rfc3339_from_system_time(std::time::SystemTime::now())
 }
 
 /// Render a `SystemTime` as the same ISO 8601 / RFC 3339 shape [`utc_now`]
 /// emits, so a filesystem timestamp and a recorded one are comparable by eye
 /// and by `parse_iso8601`.
 pub fn rfc3339_from_system_time(at: std::time::SystemTime) -> String {
-    DateTime::<Utc>::from(at)
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string()
+    rfc3339_from_unix_secs(unix_secs_floor(at))
 }
 
 /// Return the UTC timestamp `dur` seconds from now in ISO 8601 format.
-/// Saturates at `chrono::DateTime::MAX_UTC` rather than panicking on
+/// Saturates at `9999-12-31T23:59:59Z` rather than panicking on
 /// overflow — callers downstream of `crate::crypto::policy::parse_ttl`
 /// already cap the duration to 30d, but this saturates anyway as
 /// defense in depth.
 pub fn utc_plus_duration(dur: Duration) -> String {
     let secs = i64::try_from(dur.as_secs()).unwrap_or(i64::MAX);
-    let delta = chrono::Duration::try_seconds(secs).unwrap_or(chrono::Duration::MAX);
-    let dt = Utc::now()
-        .checked_add_signed(delta)
-        .unwrap_or(DateTime::<Utc>::MAX_UTC);
-    dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    rfc3339_from_unix_secs(unix_secs_floor(std::time::SystemTime::now()).saturating_add(secs))
 }
 
 /// Parse an ISO 8601 / RFC 3339 timestamp emitted by `utc_now` /
@@ -104,9 +136,65 @@ mod tests {
 
     #[test]
     fn utc_plus_duration_saturates() {
-        // u64::MAX seconds should not panic; returns MAX_UTC.
-        let s = utc_plus_duration(Duration::from_secs(u64::MAX));
-        assert!(s.ends_with('Z'));
+        // u64::MAX seconds must not panic; it clamps to the last renderable second.
+        assert_eq!(
+            utc_plus_duration(Duration::from_secs(u64::MAX)),
+            "9999-12-31T23:59:59Z"
+        );
+    }
+
+    fn chrono_secs_form(at: std::time::SystemTime) -> String {
+        DateTime::<Utc>::from(at)
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string()
+    }
+
+    #[test]
+    fn rfc3339_from_system_time_is_byte_identical_to_chrono() {
+        use std::time::{Duration as D, SystemTime, UNIX_EPOCH};
+        let cases = [
+            UNIX_EPOCH,
+            UNIX_EPOCH + D::from_secs(1_709_251_199), // 2024-02-29T23:59:59Z, leap day
+            UNIX_EPOCH + D::new(1_709_251_199, 999_999_999), // fraction truncates, never rounds
+            UNIX_EPOCH + D::from_secs(2_147_483_648), // past i32
+            UNIX_EPOCH + D::from_secs(253_402_300_799), // 9999-12-31T23:59:59Z
+            UNIX_EPOCH - D::from_secs(1),
+            UNIX_EPOCH - D::new(0, 1), // sub-second before the epoch floors to 23:59:59
+            UNIX_EPOCH - D::new(86_400 * 365, 500_000_000),
+        ];
+        for at in cases {
+            assert_eq!(rfc3339_from_system_time(at), chrono_secs_form(at), "{at:?}");
+        }
+        let _ = SystemTime::now();
+    }
+
+    #[test]
+    fn utc_now_matches_chrono_now_within_a_second() {
+        let ours = parse_iso8601(&utc_now()).expect("parses");
+        assert!((Utc::now() - ours).num_seconds().abs() <= 1);
+    }
+
+    #[test]
+    fn emitted_z_form_and_chrono_offset_form_parse_to_the_same_instant() {
+        let z = parse_iso8601("2024-02-29T23:59:59Z").unwrap();
+        let off = parse_iso8601("2024-03-01T01:59:59+02:00").unwrap();
+        let zero = parse_iso8601("2024-02-29T23:59:59+00:00").unwrap();
+        assert_eq!(z, off);
+        assert_eq!(z, zero);
+        assert_eq!(
+            z.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "2024-02-29T23:59:59Z"
+        );
+    }
+
+    #[test]
+    fn parse_iso8601_edge_cases() {
+        assert!(parse_iso8601("2024-02-30T00:00:00Z").is_none());
+        assert!(parse_iso8601("2024-03-01T24:00:00Z").is_none());
+        assert!(parse_iso8601("2024-03-01T00:00:00").is_none());
+        assert!(parse_iso8601(" 2024-03-01T00:00:00Z").is_none());
+        let frac = parse_iso8601("2024-02-29T23:59:59.987Z").unwrap();
+        assert_eq!(frac.timestamp(), 1_709_251_199);
     }
 
     #[test]
