@@ -9,7 +9,7 @@ use mvm_contract::protocol::mailbox::ExecutionEpoch;
 use mvm_contract::protocol::workload_actor::{
     LifecycleGrant, LifecycleOperation, ParentIdentity, WorkflowRole,
 };
-use mvm_core::host_interface::workload::WorkloadLedger;
+use mvm_core::host_interface::epoch_gate::CommandGate;
 use mvm_core::net::actor_session::ActorSessionBinding;
 use mvm_core::util::atomic_io::{FileLock, write_private};
 use mvm_runtime::actor_teardown::ActorOwner;
@@ -170,8 +170,8 @@ impl ParentActivation {
         );
         let epoch = ExecutionEpoch::new(self.plan.execution_epoch)
             .context("controller plan carries a zero execution epoch")?;
-        WorkloadLedger::load_at(Path::new(&mvm_core::config::mvm_home()))?
-            .authorize(&self.plan.workload.0, epoch)?;
+        CommandGate::load_at(Path::new(&mvm_core::config::mvm_home()))?
+            .admit(&self.plan.workload.0, epoch)?;
         Ok(())
     }
 }
@@ -299,5 +299,34 @@ mod tests {
                 .check_current_record(LifecycleOperation::ReleaseChild, now)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn replacing_the_unit_in_the_durable_record_fences_the_activation() {
+        use mvm_core::host_interface::workload::WorkloadChange;
+        let home = tempfile::tempdir().unwrap();
+        let mut environment = mvm_core::util::test_env::TestEnv::new();
+        environment.isolate_mvm_home(home.path());
+        let backend = AnyBackend::from_hypervisor("mock");
+        let (machine, binding) = started(&backend, 1);
+        let active =
+            ParentActivation::activate(&machine, binding, &home.path().join("active")).unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        assert!(
+            active
+                .check_current_record(LifecycleOperation::Launch, now)
+                .is_ok()
+        );
+        crate::policy_generation::workload_store::OwnedWorkloadStore::open(home.path())
+            .unwrap()
+            .commit(&WorkloadChange::Replace {
+                workload: machine.admitted.plan().workload.0.clone(),
+                from_epoch: ExecutionEpoch::FIRST,
+            })
+            .unwrap();
+        let err = active
+            .check_current_record(LifecycleOperation::Launch, now)
+            .expect_err("the replaced epoch is fenced");
+        assert!(err.to_string().contains("stale execution epoch"), "{err}");
     }
 }

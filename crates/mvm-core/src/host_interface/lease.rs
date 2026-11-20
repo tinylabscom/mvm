@@ -5,8 +5,8 @@
 //! Reachability never restores authorization by itself: after a reconnect the
 //! node stays denied until [`Reconnect::complete`] has seen a fresh answer to a
 //! fresh challenge, a node that is still `Active`, and a policy no older than
-//! the floor. [`CommandGate`] rejects replayed, reordered and wrong-epoch
-//! commands from either side of the partition.
+//! the floor. [`super::epoch_gate::CommandGate`] rejects replayed, reordered
+//! and wrong-epoch commands from either side of the partition.
 //!
 //! Bounded recovery decisions use the separately verified companion in
 //! [`super::offline`] and the pure [`super::recovery`] consumer. These primitives
@@ -15,7 +15,7 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
-use super::{ExecutionEpoch, NodeState, error::Denial};
+use super::{NodeState, error::Denial};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -122,37 +122,6 @@ impl SignedLease {
             });
         }
         Ok(l)
-    }
-}
-
-/// Accepts a command only if it carries the current epoch and a sequence
-/// number strictly greater than every one accepted before.
-#[derive(Debug, Clone)]
-pub struct CommandGate {
-    epoch: ExecutionEpoch,
-    last_seq: u64,
-}
-
-impl CommandGate {
-    pub fn new(epoch: ExecutionEpoch) -> Self {
-        Self { epoch, last_seq: 0 }
-    }
-
-    pub fn accept(&mut self, epoch: ExecutionEpoch, seq: u64) -> Result<(), Denial> {
-        if epoch != self.epoch {
-            return Err(Denial::StaleEpoch {
-                got: epoch.get(),
-                current: self.epoch.get(),
-            });
-        }
-        if seq <= self.last_seq {
-            return Err(Denial::ReplayedCommand {
-                got: seq,
-                last: self.last_seq,
-            });
-        }
-        self.last_seq = seq;
-        Ok(())
     }
 }
 
@@ -304,25 +273,6 @@ mod tests {
         assert_eq!(
             signed(&k).verify(&trusted(&k), "ship", 150, 9),
             Err(Denial::PolicyRollback { got: 4, min: 9 })
-        );
-    }
-
-    #[test]
-    fn the_command_gate_rejects_replay_reorder_and_stale_epochs() {
-        let mut g = CommandGate::new(ExecutionEpoch::new(2).unwrap());
-        assert!(g.accept(ExecutionEpoch::new(2).unwrap(), 1).is_ok());
-        assert!(g.accept(ExecutionEpoch::new(2).unwrap(), 3).is_ok());
-        assert_eq!(
-            g.accept(ExecutionEpoch::new(2).unwrap(), 3),
-            Err(Denial::ReplayedCommand { got: 3, last: 3 })
-        );
-        assert_eq!(
-            g.accept(ExecutionEpoch::new(2).unwrap(), 2),
-            Err(Denial::ReplayedCommand { got: 2, last: 3 })
-        );
-        assert_eq!(
-            g.accept(ExecutionEpoch::new(1).unwrap(), 9),
-            Err(Denial::StaleEpoch { got: 1, current: 2 })
         );
     }
 

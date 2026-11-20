@@ -9,6 +9,7 @@
 
 pub mod activation_barrier;
 pub mod destination;
+pub mod epoch_gate;
 pub mod error;
 pub mod lease;
 pub mod local;

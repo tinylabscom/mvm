@@ -503,3 +503,17 @@ fn stale_epoch_policy_and_expired_lease_cannot_acknowledge() {
         Err(MailboxDeliveryError::InvalidSignatureLength)
     );
 }
+
+#[test]
+fn an_epoch_advances_until_the_maximum_and_then_refuses() {
+    let first = ExecutionEpoch::FIRST;
+    assert_eq!(first.checked_next().map(ExecutionEpoch::get), Some(2));
+    let last = ExecutionEpoch::new(u64::MAX).expect("epoch");
+    assert_eq!(
+        last.checked_next(),
+        None,
+        "the old epoch must not stay live"
+    );
+    assert!(ExecutionEpoch::new(0).is_err());
+    assert!(serde_json::from_str::<ExecutionEpoch>("0").is_err());
+}

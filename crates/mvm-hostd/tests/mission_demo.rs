@@ -40,7 +40,8 @@ use mvm_contract::protocol::mailbox::{
 use mvm_core::crypto::aead::Key;
 use mvm_core::host_interface::{
     Assurance, HostInterface, HostInterfaceError, HostPolicy, LaunchRequest, NodeState,
-    lease::{CommandGate, LeaseOp, OfflineLease, Reconnect, SignedLease, answer_challenge},
+    epoch_gate::CommandGate,
+    lease::{LeaseOp, OfflineLease, Reconnect, SignedLease, answer_challenge},
     local::LocalHostInterface,
     workload::WorkloadLedger,
 };
@@ -470,12 +471,14 @@ fn contain_terminate_and_rebuild() {
 
     // Act 4: only the suspect is contained, on the command of the control
     // plane; a replayed copy of that command is rejected.
-    let mut commands = CommandGate::new(ExecutionEpoch::new(1).unwrap());
+    let mut commands = CommandGate::new(WorkloadLedger::default());
     commands
-        .accept(ExecutionEpoch::new(1).unwrap(), 1)
+        .accept("analyst", ExecutionEpoch::FIRST, 1)
         .expect("first command accepted");
     assert!(
-        commands.accept(ExecutionEpoch::new(1).unwrap(), 1).is_err(),
+        commands
+            .accept("analyst", ExecutionEpoch::FIRST, 1)
+            .is_err(),
         "replayed command refused"
     );
     let suspect = ship.plan("analyst");

@@ -188,7 +188,7 @@ fn revoked_and_quarantined_nodes_cannot_launch_and_revoked_is_terminal() {
 fn replacement_gets_a_fresh_epoch_and_the_stale_one_is_rejected() {
     let h = local(HostPolicy::default(), Assurance::None);
     let old = h.current_epoch();
-    let new = h.advance_epoch();
+    let new = h.advance_epoch().unwrap();
     assert!(new > old);
     assert_eq!(
         denied(h.authorize_workload(&req(old.get()))),
@@ -198,6 +198,10 @@ fn replacement_gets_a_fresh_epoch_and_the_stale_one_is_rejected() {
         }
     );
     assert!(h.authorize_workload(&req(new.get())).is_ok());
+    let last = local(HostPolicy::default(), Assurance::None)
+        .with_record(NodeState::Active, ExecutionEpoch::new(u64::MAX).unwrap());
+    assert_eq!(last.advance_epoch(), Err(Denial::EpochExhausted(u64::MAX)));
+    assert_eq!(last.current_epoch().get(), u64::MAX);
 }
 
 #[test]

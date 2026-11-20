@@ -178,12 +178,17 @@ impl WorkloadLedger {
         self.0.entry(workload.to_owned()).or_default().quarantined = true;
     }
 
-    /// Authorize a fresh start under a new epoch; the old epoch is dead.
-    pub fn replace(&mut self, workload: &str) -> ExecutionEpoch {
+    /// Authorize a fresh start under a new epoch; the old epoch is dead. An
+    /// epoch at the maximum is refused and the entry is left unchanged.
+    pub fn replace(&mut self, workload: &str) -> Result<ExecutionEpoch, Denial> {
+        let current = self.entry(workload).epoch;
+        let next = current
+            .checked_next()
+            .ok_or(Denial::EpochExhausted(current.get()))?;
         let e = self.0.entry(workload.to_owned()).or_default();
-        e.epoch = e.epoch.saturating_next();
+        e.epoch = next;
         e.quarantined = false;
-        e.epoch
+        Ok(next)
     }
 
     /// Local launch gate: refuses a quarantined workload. It cannot check
@@ -194,20 +199,10 @@ impl WorkloadLedger {
         self.authorize(workload, self.entry(workload).epoch)
     }
 
-    /// May `workload` start presenting `epoch`? Quarantine and staleness both
-    /// refuse; only the current epoch of a contained-free workload passes.
+    /// May `workload` start presenting `epoch`? This is the epoch gate's rule
+    /// ([`super::epoch_gate::CommandGate`]) applied to this ledger.
     pub fn authorize(&self, workload: &str, epoch: ExecutionEpoch) -> Result<(), Denial> {
-        let e = self.entry(workload);
-        if epoch != e.epoch {
-            return Err(Denial::StaleEpoch {
-                got: epoch.get(),
-                current: e.epoch.get(),
-            });
-        }
-        if e.quarantined {
-            return Err(Denial::WorkloadQuarantined(workload.to_owned()));
-        }
-        Ok(())
+        super::epoch_gate::decide(workload, self.entry(workload), epoch).map(drop)
     }
 }
 
@@ -287,7 +282,7 @@ mod tests {
         );
         assert!(l.authorize("b", start).is_ok(), "bystander unaffected");
 
-        let fresh = l.replace("a");
+        let fresh = l.replace("a").unwrap();
         assert!(fresh > start);
         assert!(l.authorize("a", fresh).is_ok());
         assert_eq!(
@@ -298,6 +293,18 @@ mod tests {
             }),
             "the old epoch stays dead after replacement"
         );
+    }
+
+    #[test]
+    fn replacing_at_the_maximum_epoch_refuses_and_leaves_the_entry_alone() {
+        let mut l: WorkloadLedger = serde_json::from_str(&format!(
+            r#"{{"a":{{"epoch":{},"quarantined":true}}}}"#,
+            u64::MAX
+        ))
+        .unwrap();
+        let before = l.clone();
+        assert_eq!(l.replace("a"), Err(Denial::EpochExhausted(u64::MAX)));
+        assert_eq!(l, before, "the old epoch stays current and contained");
     }
 
     fn write(path: &Path, bytes: &[u8]) {

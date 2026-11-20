@@ -15,6 +15,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use mvm_contract::protocol::mailbox::ExecutionEpoch;
+use mvm_core::host_interface::Denial;
 use mvm_core::host_interface::workload::{WorkloadChange, WorkloadCommit, WorkloadLedger};
 use mvm_core::plan::ExecutionPlan;
 
@@ -195,7 +196,9 @@ fn replace_with(
     workload: &str,
 ) -> Result<ExecutionEpoch> {
     let previous = authority.ledger()?.entry(workload).epoch;
-    let next = previous.saturating_next();
+    let next = previous
+        .checked_next()
+        .ok_or(Denial::EpochExhausted(previous.get()))?;
     emit_operator_event(
         emitter,
         plan,
