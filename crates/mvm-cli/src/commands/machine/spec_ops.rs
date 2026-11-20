@@ -1,4 +1,7 @@
-use super::remove::{remove_machine_spec_in_lifecycle, resolve_remove_targets, rm_running_refusal};
+use super::remove::{
+    remove_machine_spec_in_lifecycle, resolve_remove_targets, rm_all_undefined_refusal,
+    rm_running_refusal,
+};
 use super::*;
 use mvm_client::lifecycle::MachineLifecycleLock;
 
@@ -162,6 +165,20 @@ pub(super) fn inspect_machine(args: MachineInspectArgs) -> Result<()> {
 pub(super) fn remove_machine(args: MachineRemoveArgs) -> Result<()> {
     let json = args.json;
     let targets = resolve_remove_targets(args.all, &args.names)?;
+    if args.all {
+        // `--all` removes definitions, so a VM that has none (a standby, an
+        // unnamed run) is not a target; it must not be passed over as absent
+        // while its VMM is still alive.
+        let live: Vec<String> = mvm_client::LocalBackend::new()
+            .list_stop_targets()
+            .into_iter()
+            .filter(|machine| machine.status != mvm_core::client::dto::MachineStatus::Stopped)
+            .map(|machine| machine.name)
+            .collect();
+        if let Some(msg) = rm_all_undefined_refusal(&targets, &live) {
+            anyhow::bail!(msg);
+        }
+    }
     if targets.is_empty() {
         if json {
             println!("[]");

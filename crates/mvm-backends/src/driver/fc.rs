@@ -55,7 +55,7 @@ use dial::fc_guest_dial_socket;
 #[cfg(all(test, unix))]
 use kernel::fc_descriptor_recipe;
 use kernel::resolve_fc_kernel_path;
-use stop::{bind_process_to_socket, prepare_guest_filesystems_for_stop};
+use stop::{bind_process_to_socket, prepare_guest_filesystems_for_stop, resume_if_paused};
 #[cfg(test)]
 use stop::{require_guest_filesystem_flush, stop_after_guest_flush, stop_firecracker_guest};
 
@@ -1360,6 +1360,8 @@ impl RunningVm for FcRunningVm {
             return Ok(());
         }
         let started = Instant::now();
+        let api_socket = crate::fc::fc_api_socket_path(&self.state_dir.to_string_lossy());
+        resume_if_paused(Path::new(&api_socket))?;
         let result = prepare_guest_filesystems_for_stop(&self.vsock_uds);
         tracing::debug!(
             ms = started.elapsed().as_secs_f64() * 1000.0,

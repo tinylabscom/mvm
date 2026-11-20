@@ -42,6 +42,28 @@ pub(super) fn require_guest_filesystem_flush(response: GuestResponse) -> Result<
     }
 }
 
+/// Let a paused guest run again so it can answer the stop-time flush. A paused
+/// guest's agent never answers, so asking it would only time out, refuse the
+/// stop and leave the VMM running; skipping the flush instead would drop writes
+/// the guest has not yet flushed. An API that cannot be queried is left to the
+/// flush to report.
+pub(super) fn resume_if_paused(api_socket: &std::path::Path) -> Result<()> {
+    #[derive(serde::Deserialize)]
+    struct InstanceInfo {
+        state: String,
+    }
+    let Ok(info) = crate::fc::call(api_socket, "GET", "/", None) else {
+        return Ok(());
+    };
+    let info: InstanceInfo =
+        serde_json::from_str(&info).context("parse Firecracker instance state before stop")?;
+    if info.state == "Paused" {
+        crate::fc::call(api_socket, "PATCH", "/vm", Some(r#"{"state":"Resumed"}"#))
+            .context("resume a paused Firecracker guest so it can flush before stop")?;
+    }
+    Ok(())
+}
+
 pub(super) fn prepare_guest_filesystems_for_stop(vsock_uds: &str) -> Result<()> {
     let mut stream = connect_to_port(vsock_uds, GUEST_AGENT_PORT, GUEST_STOP_DRAIN_TIMEOUT_SECS)
         .with_context(|| format!("connect to guest agent for filesystem flush via {vsock_uds}"))?;

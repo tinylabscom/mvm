@@ -81,6 +81,26 @@ pub(super) fn resolve_remove_targets(all: bool, names: &[String]) -> Result<Vec<
     Ok(targets)
 }
 
+/// Refusal message when `machine rm --all` would pass over live VMs that have
+/// no machine definition (standbys, unnamed runs). `None` when every live VM is
+/// one of the targets. Pure so the wording is unit-testable.
+pub(super) fn rm_all_undefined_refusal(targets: &[String], live: &[String]) -> Option<String> {
+    let undefined: Vec<&str> = live
+        .iter()
+        .filter(|name| !targets.contains(name))
+        .map(String::as_str)
+        .collect();
+    if undefined.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "refusing to remove: VMs with no machine definition are still running ({}). \
+         `machine rm` removes definitions only; stop them first (`mvmctl machine stop {}`).",
+        undefined.join(", "),
+        undefined.join(" ")
+    ))
+}
+
 /// Refusal message when `machine rm` targets running machines without
 /// `--force`. Returns `None` when nothing is running (so removal proceeds).
 /// Pure so the wording is unit-testable.
