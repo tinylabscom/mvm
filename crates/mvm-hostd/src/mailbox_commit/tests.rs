@@ -325,3 +325,28 @@ fn coordinating_reports_the_tip_the_owner_enrolled() {
         wire(JournalTip::genesis())
     );
 }
+
+#[test]
+fn an_actor_destination_id_is_stable_and_differs_by_purpose_and_message() {
+    use mvm_contract::protocol::mailbox::ExecutionEpoch as ContractEpoch;
+    let epoch = ContractEpoch::new(1).unwrap();
+    let id = |journal, message: u8| {
+        actor_destination_id(
+            &address(),
+            &epoch,
+            journal,
+            &MessageId::from_bytes([message; 32]),
+        )
+        .unwrap()
+    };
+    let call = id(ActorJournal::Call, 0);
+    assert_eq!(call, id(ActorJournal::Call, 0));
+    assert_eq!(call.len(), 64);
+    assert!(call.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+    assert_ne!(call, id(ActorJournal::Control, 0));
+    assert_ne!(call, id(ActorJournal::Call, 1));
+    assert_eq!(
+        call, "08d67bec8b7fcb32edefcd37a167cf4d92de1e1dc90764062def62262ba89b73",
+        "the derivation is part of what a ledger remembers"
+    );
+}

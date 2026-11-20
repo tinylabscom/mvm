@@ -237,7 +237,9 @@ fn actor_response_survives_helper_process_crash_before_signed_ack() {
     }
 
     let fixture = super::actor_fixture(std::path::Path::new(&mvm_core::config::mvm_home()));
-    let parent_config = super::actor_process_config(&fixture.home, &fixture.plan, 44);
+    let coordinator = super::Coordinator::start(&fixture.home);
+    let mut parent_config = super::actor_process_config(&fixture.home, &fixture.plan, 44);
+    parent_config.coordinator = Some(coordinator.socket.clone());
     let mut child_plan = fixture.plan.clone();
     child_plan.workload.0 = "crash-child".into();
     child_plan.image.name = child_plan.workload.0.clone();
@@ -258,7 +260,8 @@ fn actor_response_survives_helper_process_crash_before_signed_ack() {
             .grant,
     );
     child_plan.plan_id = mvm_core::plan::compute_plan_id(&child_plan);
-    let child_config = super::actor_process_config(&fixture.home, &child_plan, 46);
+    let mut child_config = super::actor_process_config(&fixture.home, &child_plan, 46);
+    child_config.coordinator = Some(coordinator.socket.clone());
     let parent_guest = Guest::new(&parent_config, 44);
     let child_guest = Guest::new(&child_config, 46);
     // Serialize once: restart consumes these exact original keys and actor material.
