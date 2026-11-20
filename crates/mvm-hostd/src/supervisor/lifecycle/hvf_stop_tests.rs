@@ -1,6 +1,7 @@
 use super::*;
 use mvm_core::protocol::hvf_control::{verify_challenge, verify_finalized};
 use mvm_core::util::test_env::TestEnv;
+use mvm_vmm::host::hvf_stop::{ConnectedInstance, HvfControlRoots};
 
 struct Home {
     _env: TestEnv,
@@ -85,6 +86,75 @@ fn valid_stop_dispatches_but_does_not_publish_terminal_or_remove_evidence() {
     drop(owner);
     assert_eq!(wire::read_instance("dispatch").unwrap(), instance);
     assert!(wire::socket_path("dispatch").unwrap().exists());
+}
+
+#[test]
+fn explicit_native_and_provider_roots_have_distinct_roles() {
+    let _home = home();
+    let stop = Box::leak(Box::new(AtomicBool::new(false)));
+    let native = SigningKey::from_bytes(&[41; 32]);
+    let provider = SigningKey::from_bytes(&[42; 32]);
+    let owner = StopControl::start_explicit(
+        "split-roots",
+        stop,
+        StopControlKeys {
+            native_control_signing: native.clone(),
+            provider_stop_root: provider.verifying_key(),
+        },
+    )
+    .unwrap();
+    let instance = wire::read_instance("split-roots").unwrap();
+    assert!(
+        ConnectedInstance::connect_instance_explicit(
+            instance.clone(),
+            HvfControlRoots::new(provider.verifying_key(), provider.verifying_key()),
+        )
+        .is_err()
+    );
+    let connected = ConnectedInstance::connect_instance_explicit(
+        instance.clone(),
+        HvfControlRoots::new(native.verifying_key(), provider.verifying_key()),
+    )
+    .unwrap();
+    assert_eq!(connected.stop_authorization().instance(), &instance);
+    drop(connected);
+    let (mut stream, response) = challenge("split-roots");
+    let connection_nonce =
+        verify_challenge(&response, &native.verifying_key(), &instance, &[9; 32]).unwrap();
+    assert!(verify_challenge(&response, &provider.verifying_key(), &instance, &[9; 32],).is_err());
+    let legacy_role_request = broker_control::sign(
+        ControlRequest::HvfInstanceV1(HvfInstanceControl::StopHvfInstance {
+            instance: instance.clone(),
+            connection_nonce,
+            issued_at_secs: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        }),
+        &native.to_bytes(),
+    )
+    .unwrap();
+    assert!(!send(&mut stream, &legacy_role_request));
+    assert!(!stop.load(Ordering::Acquire));
+
+    let (mut stream, response) = challenge("split-roots");
+    let connection_nonce =
+        verify_challenge(&response, &native.verifying_key(), &instance, &[9; 32]).unwrap();
+    let request = broker_control::sign(
+        ControlRequest::HvfInstanceV1(HvfInstanceControl::StopHvfInstance {
+            instance,
+            connection_nonce,
+            issued_at_secs: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        }),
+        &provider.to_bytes(),
+    )
+    .unwrap();
+    assert!(send(&mut stream, &request));
+    assert!(stop.load(Ordering::Acquire));
+    drop(owner);
 }
 
 #[test]
