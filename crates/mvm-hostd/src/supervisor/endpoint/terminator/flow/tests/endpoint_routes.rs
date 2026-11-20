@@ -145,6 +145,7 @@ fn an_ask_is_refused_until_an_approver_answers_it() {
     let chain = vm.audit_chain();
     assert!(chain.contains(REASON_APPROVAL_UNAVAILABLE), "{chain}");
     assert!(chain.contains("\"outcome\":\"ask\""), "{chain}");
+    drop(vm);
 
     struct Approves;
     #[async_trait]
@@ -227,6 +228,7 @@ fn an_unbound_host_is_terminated_for_its_rules_only_when_the_route_grants_interc
     assert!(status_line(&allowed).starts_with("HTTP/1.1 200"));
     let refused = send(&vm, OTHER_HOST, "DELETE", "/public/readme", None);
     assert!(status_line(&refused).starts_with("HTTP/1.1 502"));
+    drop(vm);
 
     // Without the grant the host is not terminated, and an opaque flow to it
     // is refused rather than relayed with its rules unenforced.

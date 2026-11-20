@@ -1319,7 +1319,7 @@ mod tests {
     fn admitted_runtime_identity_is_chain_signed_and_tamper_detected() {
         use mvm_contract::plan::{RuntimeArtifactDigests, RuntimeIdentity};
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = SigningKey::from_bytes(&[44; 32]);
         let verifying = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
@@ -1362,7 +1362,7 @@ mod tests {
 
     #[test]
     fn a_durability_batch_flushes_atomic_files_even_when_the_body_fails() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = SigningKey::from_bytes(&[31; 32]);
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
         let first = dir.path().join("first.json");
@@ -1394,7 +1394,7 @@ mod tests {
     /// the batch's own sync is left to the handle.
     #[test]
     fn a_detached_batch_writes_now_and_leaves_only_its_sync_outstanding() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = SigningKey::from_bytes(&[33; 32]);
         let verifying = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
@@ -1420,7 +1420,7 @@ mod tests {
 
     #[test]
     fn a_detached_batch_whose_body_fails_returns_no_handle() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = SigningKey::from_bytes(&[35; 32]);
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
         let error = emitter
@@ -1436,7 +1436,7 @@ mod tests {
             ActorRef, AttestationBinding, DecisionCategory, DecisionOutcome, DecisionRecordBuilder,
         };
 
-        let audit_dir = tempfile::tempdir().unwrap();
+        let audit_dir = crate::audit::test_fixtures::AuditDir::new();
         let decisions_dir = tempfile::tempdir().unwrap();
         let key = SigningKey::from_bytes(&[34; 32]);
         let signer_pubkey = hex::encode(key.verifying_key().to_bytes());
@@ -1486,7 +1486,7 @@ mod tests {
     fn a_root_published_inside_a_batch_joins_its_flush() {
         use mvm_contract::merkle::verify_signed_root;
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = SigningKey::from_bytes(&[35; 32]);
         let vk = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
@@ -1530,7 +1530,7 @@ mod tests {
 
     #[test]
     fn a_shared_primary_signer_must_match_the_key_and_directory() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let other = tempfile::tempdir().unwrap();
         let key = SigningKey::from_bytes(&[32; 32]);
         let signer = Arc::new(FileAuditSigner::open(key.clone(), dir.path()).unwrap());
@@ -1554,7 +1554,7 @@ mod tests {
     /// it on purpose.
     #[tokio::test]
     async fn an_emitter_dropped_inside_an_async_context_does_not_panic() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -1580,7 +1580,7 @@ mod tests {
     fn audit_log_carries_plan_id_for_every_launch() {
         // Emit a full admitted→launched pair; both lines must reference
         // the same plan_id and live in the tenant's audit file.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -1615,7 +1615,7 @@ mod tests {
             (StreamRetention::Persist, "persist"),
             (StreamRetention::Ephemeral, "ephemeral"),
         ] {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::audit::test_fixtures::AuditDir::new();
             let mut seed = [0u8; 32];
             rand::rng().fill_bytes(&mut seed);
             let emitter =
@@ -1644,7 +1644,7 @@ mod tests {
     /// fails here whatever it is called.
     #[test]
     fn stream_audit_entries_carry_the_binding_and_no_payload_bytes() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let mut seed = [0u8; 32];
         rand::rng().fill_bytes(&mut seed);
         let key = SigningKey::from_bytes(&seed);
@@ -1691,7 +1691,7 @@ mod tests {
     fn agent_prompt_entries_carry_the_binding_and_no_prompt_or_answer_bytes() {
         use agent_prompt_audit as k;
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let mut seed = [0u8; 32];
         rand::rng().fill_bytes(&mut seed);
         let key = SigningKey::from_bytes(&seed);
@@ -1787,7 +1787,7 @@ mod tests {
 
     #[test]
     fn drive_refusals_are_chain_signed() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = SigningKey::from_bytes(&[47; 32]);
         let verifying_key = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
@@ -1827,7 +1827,7 @@ mod tests {
 
     #[test]
     fn audit_chain_verifies_clean() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -1845,7 +1845,7 @@ mod tests {
 
     #[test]
     fn oci_provenance_event_is_chain_signed_with_required_labels() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -1903,7 +1903,7 @@ mod tests {
         // The park entry's extras must add to the plan's session labels, not
         // replace them: `for_plan` merges extras over the plan's own labels,
         // so a key collision would overwrite what was signed.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -1943,7 +1943,7 @@ mod tests {
 
     #[test]
     fn session_renewed_event_is_chain_signed_and_keeps_the_plan_labels() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = SigningKey::from_bytes(&[41u8; 32]);
         let vk = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
@@ -1974,7 +1974,7 @@ mod tests {
 
     #[test]
     fn session_resumed_event_is_chain_signed_and_keeps_the_plan_labels() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2012,7 +2012,7 @@ mod tests {
 
     #[test]
     fn a_guest_memory_scrub_is_chain_signed_as_counts_only() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2056,7 +2056,7 @@ mod tests {
         // The posture label is per-plan, not per-file: two boots in one chain
         // each carry their own plan id alongside the strategy they booted, so a
         // reader can attribute a posture rather than infer it from position.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2085,7 +2085,7 @@ mod tests {
 
     #[test]
     fn grant_required_event_is_chain_signed_with_required_labels() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2122,7 +2122,7 @@ mod tests {
 
     #[test]
     fn transcript_sealed_event_is_chain_signed_with_root_labels() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut seed = [0u8; 32];
             rand::rng().fill_bytes(&mut seed);
@@ -2163,7 +2163,7 @@ mod tests {
         // Synthesize a valid chain, then forge an extra entry whose
         // signature is wrong (or rather, taken from a different key).
         // verify_audit_chain must refuse.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2195,7 +2195,7 @@ mod tests {
 
     #[test]
     fn emit_teardown_failed_records_why_a_session_has_no_seal() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2228,7 +2228,7 @@ mod tests {
 
     #[test]
     fn emit_failed_records_class_and_message() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2254,7 +2254,7 @@ mod tests {
 
     #[test]
     fn emit_exited_records_capture_fidelity() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2304,7 +2304,7 @@ mod tests {
 
     #[test]
     fn an_exit_entry_carries_the_usage_record() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2359,7 +2359,7 @@ mod tests {
     fn an_exit_that_measured_nothing_still_says_so_in_the_chain() {
         // Absence of the label would be indistinguishable from an older
         // entry; an explicit all-unavailable record is the attestable form.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2390,7 +2390,7 @@ mod tests {
 
     #[test]
     fn emit_memory_limit_exceeded_names_the_ceiling_and_the_mechanism() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2418,7 +2418,7 @@ mod tests {
 
     #[test]
     fn emit_grants_enforced_carries_the_read_back_ceilings() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2454,7 +2454,7 @@ mod tests {
 
     #[test]
     fn emit_exited_writes_plan_exited_with_code() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2475,7 +2475,7 @@ mod tests {
 
     #[test]
     fn emit_egress_destinations_records_host_port_allowlist() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2504,7 +2504,7 @@ mod tests {
 
     #[test]
     fn emit_egress_destinations_is_noop_for_empty_allowlist() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2523,7 +2523,7 @@ mod tests {
 
     #[test]
     fn audit_dir_is_created_with_0700_perms() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let target = dir.path().join("audit-fresh");
         let key = {
             let mut __ed_seed = [0u8; 32];
@@ -2542,7 +2542,7 @@ mod tests {
 
     #[test]
     fn policy_file_destination_gets_a_replicated_chain() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let replica = dir.path().join("replica.jsonl");
         let key = {
             let mut __ed_seed = [0u8; 32];
@@ -2579,7 +2579,7 @@ mod tests {
     /// a chain-signed audit log.
     #[test]
     fn the_primary_signer_constructor_also_requires_chain_signing() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut seed = [0u8; 32];
             rand::rng().fill_bytes(&mut seed);
@@ -2602,7 +2602,7 @@ mod tests {
 
     #[test]
     fn policy_requires_chain_signing() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2621,7 +2621,7 @@ mod tests {
 
     #[test]
     fn policy_refuses_unwired_replication_schemes() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2640,7 +2640,7 @@ mod tests {
 
     #[test]
     fn policy_refuses_relative_file_destinations() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2659,7 +2659,7 @@ mod tests {
 
     #[test]
     fn verb_denied_entry_is_chained_and_verifies() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2711,7 +2711,7 @@ mod tests {
 
     #[test]
     fn checkpoint_created_records_id_and_digest() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2736,7 +2736,7 @@ mod tests {
 
     #[test]
     fn checkpoint_forked_records_lineage_digests() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2780,7 +2780,7 @@ mod tests {
         use mvm_core::image_lineage::{
             ImageBuildIdentity, ImageCanonicalId, ImageIdentity, ImageNode, ImageProvenance,
         };
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2850,7 +2850,7 @@ mod tests {
 
     #[test]
     fn image_reverted_records_node_digest_via_and_reference() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2880,7 +2880,7 @@ mod tests {
 
     #[test]
     fn checkpoint_restored_records_id_digest_and_vm() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2909,7 +2909,7 @@ mod tests {
     fn publish_root_writes_a_verifiable_signed_root() {
         use mvm_contract::merkle::{verify_inclusion, verify_signed_root};
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2947,7 +2947,7 @@ mod tests {
 
     #[test]
     fn publish_root_refuses_a_tampered_chain() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2968,7 +2968,7 @@ mod tests {
 
     #[test]
     fn receipts_disabled_by_default() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -2983,7 +2983,7 @@ mod tests {
 
     #[test]
     fn receipts_emitted_when_enabled() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -3018,7 +3018,7 @@ mod tests {
 
     #[test]
     fn receipt_chain_continuity_across_emits() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -3063,7 +3063,7 @@ mod tests {
 
     #[test]
     fn checkpoint_receipts_emitted_when_enabled() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -3137,7 +3137,7 @@ mod asset_identities_emit_tests {
 
     #[test]
     fn asset_identities_event_carries_kind_name_digest_labels() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = SigningKey::from_bytes(&[41; 32]);
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
 
@@ -3173,7 +3173,7 @@ mod asset_identities_emit_tests {
 
     #[test]
     fn asset_identities_event_skipped_when_plan_has_none() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::audit::test_fixtures::AuditDir::new();
         let key = SigningKey::from_bytes(&[42; 32]);
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
         let plan = fixture_plan("local", "plan-no-assets");

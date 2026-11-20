@@ -700,6 +700,8 @@ mod tests {
         audit_path: std::path::PathBuf,
         audit_key: ed25519_dalek::VerifyingKey,
         _dir: tempfile::TempDir,
+        // Keep the home stable until the service's recorder has dropped.
+        _env: mvm_core::util::test_env::TestEnv,
     }
 
     impl Assembled {
@@ -801,6 +803,7 @@ mod tests {
         forwarder: Arc<dyn Forwarder>,
         routing: Routing,
     ) -> Assembled {
+        let env = mvm_core::util::test_env::TestEnv::new();
         let dir = tempfile::tempdir().expect("tempdir");
         let store = FileSecretStore::with_dir(dir.path().join("secrets"));
         let mut registry = SubstitutionRegistry::new();
@@ -891,6 +894,7 @@ mod tests {
             audit_path,
             audit_key,
             _dir: dir,
+            _env: env,
         }
     }
 
@@ -1422,6 +1426,7 @@ mod tests {
             vm.intermediate_pem,
             "each VM's certificate is its own"
         );
+        drop(vm);
         let stranger = harness(BOUND_HOST, b"{\"ok\":true}");
         assert!(
             exchange_trusting(
@@ -2194,28 +2199,32 @@ mod tests {
     #[test]
     fn a_cached_leaf_is_keyed_by_its_issuer_too() {
         let first = harness(BOUND_HOST, b"");
-        let second = harness(BOUND_HOST, b"");
         let one = first
             .service
             .tls_intermediate()
             .expect("first intermediate");
+        let first_cert = one.cert_pem().to_string();
+        let first_key = cache_key(one, BOUND_HOST);
+        let cache = LeafCache::default();
+        let under_one = cache.config_for(one, BOUND_HOST).expect("mint under one");
+        drop(first);
+
+        let second = harness(BOUND_HOST, b"");
         let two = second
             .service
             .tls_intermediate()
             .expect("second intermediate");
         assert_ne!(
-            one.cert_pem(),
+            first_cert,
             two.cert_pem(),
             "the two harnesses mint independent intermediates"
         );
         assert_ne!(
-            cache_key(one, BOUND_HOST),
+            first_key,
             cache_key(two, BOUND_HOST),
             "one authority under two issuers is two cache entries"
         );
 
-        let cache = LeafCache::default();
-        let under_one = cache.config_for(one, BOUND_HOST).expect("mint under one");
         let under_two = cache.config_for(two, BOUND_HOST).expect("mint under two");
         assert!(
             !Arc::ptr_eq(&under_one, &under_two),

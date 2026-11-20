@@ -620,30 +620,92 @@ mod server_tests {
     use tempfile::tempdir;
     use tokio::net::{UnixListener, UnixStream};
 
+    fn with_isolated_runtime(run: impl AsyncFnOnce(&tempfile::TempDir)) {
+        let _env = mvm_core::util::test_env::TestEnv::new();
+        let dir = tempdir().unwrap();
+        // Runtime shutdown destroys remaining tasks before their directory and home.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(run(&dir));
+    }
+
+    #[test]
+    fn unwinding_stops_tasks_before_restoring_the_fixture_home() {
+        struct TaskDrop {
+            home: std::path::PathBuf,
+            dir: std::path::PathBuf,
+            observed: Arc<Mutex<Option<bool>>>,
+        }
+        impl Drop for TaskDrop {
+            fn drop(&mut self) {
+                *self.observed.lock().unwrap() = Some(
+                    self.home.is_dir()
+                        && self.dir.is_dir()
+                        && std::env::var_os("MVM_HOME").as_deref() == Some(self.home.as_os_str()),
+                );
+            }
+        }
+
+        mvm_core::util::test_env::isolated_env_probe(|| {
+            let previous_home = std::env::var_os("MVM_HOME");
+            let observed = Arc::new(Mutex::new(None));
+            let result = std::panic::catch_unwind(|| {
+                with_isolated_runtime(async |dir| {
+                    let probe = TaskDrop {
+                        home: mvm_core::config::mvm_home().into(),
+                        dir: dir.path().to_path_buf(),
+                        observed: Arc::clone(&observed),
+                    };
+                    let (started, ready) = tokio::sync::oneshot::channel();
+                    tokio::spawn(async move {
+                        let _probe = probe;
+                        started.send(()).unwrap();
+                        std::future::pending::<()>().await;
+                    });
+                    ready.await.unwrap();
+                    panic!("exercise fixture teardown");
+                });
+            });
+            assert!(result.is_err());
+            assert_eq!(*observed.lock().unwrap(), Some(true));
+            assert_eq!(Arc::strong_count(&observed), 1, "task was destroyed");
+            assert_eq!(std::env::var_os("MVM_HOME"), previous_home);
+        });
+    }
+
+    struct RecordedService {
+        service: Arc<SubstitutionService>,
+        ph: String,
+        chain: std::path::PathBuf,
+        _dir: tempfile::TempDir,
+        // Drop the service's recorder before releasing the fixture home.
+        _env: mvm_core::util::test_env::TestEnv,
+    }
+
     /// A service with a chain-signed recorder, under `gate`, and the path of
     /// the chain it writes. Its one secret is bound to `api.openai.com`.
-    fn recorded_service(
-        dir: &std::path::Path,
-        gate: Arc<mvm_runtime::vmm::egress_gate::EgressGate>,
-    ) -> (Arc<SubstitutionService>, String, std::path::PathBuf) {
+    fn recorded_service(gate: Arc<mvm_runtime::vmm::egress_gate::EgressGate>) -> RecordedService {
         let forwarder = Arc::new(MockForwarder {
             seen: Mutex::new(None),
         });
-        recorded_service_with(dir, gate, forwarder)
+        recorded_service_with(gate, forwarder)
     }
 
     /// [`recorded_service`] over a caller-chosen forward leg.
     fn recorded_service_with(
-        dir: &std::path::Path,
         gate: Arc<mvm_runtime::vmm::egress_gate::EgressGate>,
         forwarder: Arc<dyn crate::supervisor::endpoint::network_endpoint_proxy::Forwarder>,
-    ) -> (Arc<SubstitutionService>, String, std::path::PathBuf) {
+    ) -> RecordedService {
         use crate::supervisor::audit::audit_file::FileAuditSigner;
         use crate::supervisor::audit::audit_recorder::Recorder;
         use ed25519_dalek::SigningKey;
         use mvm_core::plan::TenantId;
 
-        let store = FileSecretStore::with_dir(dir.join("secrets"));
+        let env = mvm_core::util::test_env::TestEnv::new();
+        let dir = tempdir().unwrap();
+        let store = FileSecretStore::with_dir(dir.path().join("secrets"));
         store
             .put(
                 "local",
@@ -658,7 +720,7 @@ mod server_tests {
             .mint(bearer_ref("openai", &["api.openai.com"]))
             .as_str()
             .to_string();
-        let chain = dir.join("audit.jsonl");
+        let chain = dir.path().join("audit.jsonl");
         let signer =
             FileAuditSigner::open_file(SigningKey::from_bytes(&[9u8; 32]), &chain).unwrap();
         let recorder = Recorder::new(Arc::new(signer), TenantId("local".into()));
@@ -666,7 +728,13 @@ mod server_tests {
             SubstitutionService::new(Arc::new(reg), resolver, forwarder, gate)
                 .with_recorder(recorder),
         );
-        (service, ph, chain)
+        RecordedService {
+            service,
+            ph,
+            chain,
+            _dir: dir,
+            _env: env,
+        }
     }
 
     /// Answers with a response head and then fails partway through the body,
@@ -721,14 +789,14 @@ mod server_tests {
     /// credential was sent, and the response did not arrive whole.
     #[tokio::test]
     async fn a_response_that_fails_partway_is_recorded_after_the_substitution() {
-        let dir = tempdir().unwrap();
-        let (service, ph, chain) = recorded_service_with(
-            dir.path(),
+        let fixture = recorded_service_with(
             gate_admitting(&[("api.openai.com", 443)]),
             Arc::new(MidBodyFailure),
         );
+        let ph = &fixture.ph;
 
-        let mut response = service
+        let mut response = fixture
+            .service
             .process_stream(WireRequest {
                 method: "POST".into(),
                 url: "https://api.openai.com/v1".into(),
@@ -743,9 +811,10 @@ mod server_tests {
         while let Some(chunk) = response.body.recv().await {
             failed |= chunk.is_err();
         }
+        assert_eq!(Arc::strong_count(&fixture.service), 1, "relay has finished");
         assert!(failed, "the guest sees the failure");
 
-        let logged = std::fs::read_to_string(&chain).unwrap();
+        let logged = std::fs::read_to_string(&fixture.chain).unwrap();
         let substituted = logged.find("secret.substituted").expect("hand-off entry");
         let outcome = logged
             .find("secret.forward_outcome")
@@ -759,14 +828,16 @@ mod server_tests {
     /// Drive one substituted request that fails mid-body and return the chain
     /// text from the `secret.forward_outcome` entry on.
     async fn forward_outcome_entry(proxy: Option<mvm_http::ProxyConfig>) -> String {
-        let dir = tempdir().unwrap();
-        let (mut service, ph, chain) = recorded_service_with(
-            dir.path(),
+        let mut fixture = recorded_service_with(
             gate_admitting(&[("api.openai.com", 443)]),
             Arc::new(MidBodyFailure),
         );
-        Arc::get_mut(&mut service).expect("sole owner").proxy = proxy.map(Arc::new);
-        let mut response = service
+        Arc::get_mut(&mut fixture.service)
+            .expect("sole owner")
+            .proxy = proxy.map(Arc::new);
+        let ph = &fixture.ph;
+        let mut response = fixture
+            .service
             .process_stream(WireRequest {
                 method: "POST".into(),
                 url: "https://api.openai.com/v1".into(),
@@ -776,7 +847,8 @@ mod server_tests {
             .await
             .expect("the response head arrived");
         while response.body.recv().await.is_some() {}
-        let logged = std::fs::read_to_string(&chain).unwrap();
+        assert_eq!(Arc::strong_count(&fixture.service), 1, "relay has finished");
+        let logged = std::fs::read_to_string(&fixture.chain).unwrap();
         let at = logged
             .find("secret.forward_outcome")
             .expect("outcome entry");
@@ -837,17 +909,17 @@ mod server_tests {
     /// and the refusal is recorded without the token.
     #[tokio::test]
     async fn a_placeholder_in_a_request_body_is_refused_and_recorded() {
-        let dir = tempdir().unwrap();
         let forwarder = Arc::new(MockForwarder {
             seen: Mutex::new(None),
         });
-        let (service, ph, chain) = recorded_service_with(
-            dir.path(),
+        let fixture = recorded_service_with(
             gate_admitting(&[("api.openai.com", 443)]),
             Arc::clone(&forwarder) as _,
         );
+        let ph = &fixture.ph;
 
-        let resp = service
+        let resp = fixture
+            .service
             .process(WireRequest {
                 method: "POST".into(),
                 url: "https://api.openai.com/v1".into(),
@@ -864,10 +936,10 @@ mod server_tests {
             "nothing forwarded"
         );
 
-        let logged = std::fs::read_to_string(&chain).unwrap();
+        let logged = std::fs::read_to_string(&fixture.chain).unwrap();
         assert!(logged.contains("secret.flow_refused"), "{logged}");
         assert!(logged.contains("placeholder_in_body"), "{logged}");
-        assert!(!logged.contains(&ph), "the token is not recorded: {logged}");
+        assert!(!logged.contains(ph), "the token is not recorded: {logged}");
         assert!(!logged.contains("secret.substituted"), "{logged}");
     }
 
@@ -875,17 +947,17 @@ mod server_tests {
     /// usual place a client puts an API key when it is not in a header.
     #[tokio::test]
     async fn a_placeholder_in_a_url_is_refused_and_recorded() {
-        let dir = tempdir().unwrap();
         let forwarder = Arc::new(MockForwarder {
             seen: Mutex::new(None),
         });
-        let (service, ph, chain) = recorded_service_with(
-            dir.path(),
+        let fixture = recorded_service_with(
             gate_admitting(&[("api.openai.com", 443)]),
             Arc::clone(&forwarder) as _,
         );
+        let ph = &fixture.ph;
 
-        let resp = service
+        let resp = fixture
+            .service
             .process(WireRequest {
                 method: "GET".into(),
                 url: format!("https://api.openai.com/v1/models?key={ph}"),
@@ -899,9 +971,9 @@ mod server_tests {
             "nothing forwarded"
         );
 
-        let logged = std::fs::read_to_string(&chain).unwrap();
+        let logged = std::fs::read_to_string(&fixture.chain).unwrap();
         assert!(logged.contains("placeholder_in_url"), "{logged}");
-        assert!(!logged.contains(&ph), "{logged}");
+        assert!(!logged.contains(ph), "{logged}");
     }
 
     /// Records every body chunk the forward leg receives, which is what a
@@ -961,15 +1033,14 @@ mod server_tests {
     /// byte of it reaches the forward leg.
     #[tokio::test]
     async fn a_placeholder_split_across_streamed_chunks_is_never_sent() {
-        let dir = tempdir().unwrap();
         let forwarder = Arc::new(ChunkRecorder {
             received: Mutex::new(Vec::new()),
         });
-        let (service, ph, chain) = recorded_service_with(
-            dir.path(),
+        let fixture = recorded_service_with(
             gate_admitting(&[("api.openai.com", 443)]),
             Arc::clone(&forwarder) as _,
         );
+        let ph = &fixture.ph;
 
         let body = format!("{{\"text\":\"{ph}\"}}").into_bytes();
         let cut = body.len() / 2;
@@ -984,7 +1055,8 @@ mod server_tests {
             .unwrap();
         drop(sender);
 
-        let result = service
+        let result = fixture
+            .service
             .process_body_stream(
                 mvm_core::substitution_wire::HttpFlowHead {
                     method: "POST".into(),
@@ -1002,7 +1074,7 @@ mod server_tests {
             !String::from_utf8_lossy(&received).contains("mvm-secret-"),
             "no byte of the placeholder reached the forward leg"
         );
-        let logged = std::fs::read_to_string(&chain).unwrap();
+        let logged = std::fs::read_to_string(&fixture.chain).unwrap();
         assert!(logged.contains("placeholder_in_body"), "{logged}");
     }
 
@@ -1010,11 +1082,10 @@ mod server_tests {
     /// records neither a substitution nor an outcome.
     #[tokio::test]
     async fn a_forward_without_a_substitution_records_no_outcome() {
-        let dir = tempdir().unwrap();
-        let (service, _ph, chain) =
-            recorded_service(dir.path(), gate_admitting(&[("api.openai.com", 443)]));
+        let fixture = recorded_service(gate_admitting(&[("api.openai.com", 443)]));
 
-        let resp = service
+        let resp = fixture
+            .service
             .process(WireRequest {
                 method: "GET".into(),
                 url: "https://api.openai.com/v1/models".into(),
@@ -1024,7 +1095,7 @@ mod server_tests {
             .await;
         assert!(matches!(resp, WireResponse::Ok { .. }), "{resp:?}");
 
-        let logged = std::fs::read_to_string(&chain).unwrap_or_default();
+        let logged = std::fs::read_to_string(&fixture.chain).unwrap_or_default();
         assert!(!logged.contains("secret.substituted"), "{logged}");
         assert!(!logged.contains("secret.forward_outcome"), "{logged}");
     }
@@ -1033,18 +1104,18 @@ mod server_tests {
     /// typed path too, and the chain records the class, not a generic denial.
     #[tokio::test]
     async fn a_restricted_address_refusal_records_its_class() {
-        let dir = tempdir().unwrap();
-        let (service, ph, chain) = recorded_service(
-            dir.path(),
-            std::sync::Arc::new(mvm_runtime::vmm::egress_gate::EgressGate::new(
+        let fixture = recorded_service(std::sync::Arc::new(
+            mvm_runtime::vmm::egress_gate::EgressGate::new(
                 mvm_contract::policy::projection::CanonicalEgress::Unrestricted,
-            )),
-        );
+            ),
+        ));
+        let ph = &fixture.ph;
         for url in [
             "http://169.254.169.254/latest/meta-data/",
             "http://10.20.30.40/internal",
         ] {
-            let resp = service
+            let resp = fixture
+                .service
                 .process(WireRequest {
                     method: "GET".into(),
                     url: url.into(),
@@ -1057,7 +1128,7 @@ mod server_tests {
                 "{url}: {resp:?}"
             );
         }
-        let logged = std::fs::read_to_string(&chain).unwrap();
+        let logged = std::fs::read_to_string(&fixture.chain).unwrap();
         assert!(logged.contains("cloud_metadata"), "{logged}");
         assert!(logged.contains("private_range"), "{logged}");
         assert!(
@@ -1073,11 +1144,11 @@ mod server_tests {
     /// chain.
     #[tokio::test]
     async fn a_claim10_refusal_is_recorded_in_the_chain_signed_log() {
-        let dir = tempdir().unwrap();
-        let (service, ph, chain) =
-            recorded_service(dir.path(), gate_admitting(&[("api.openai.com", 443)]));
+        let fixture = recorded_service(gate_admitting(&[("api.openai.com", 443)]));
+        let ph = &fixture.ph;
 
-        let resp = service
+        let resp = fixture
+            .service
             .process(WireRequest {
                 method: "POST".into(),
                 url: "http://93.184.216.34/probe-path-marker?q=query-marker".into(),
@@ -1093,7 +1164,7 @@ mod server_tests {
             "{resp:?}"
         );
 
-        let logged = std::fs::read_to_string(&chain).unwrap();
+        let logged = std::fs::read_to_string(&fixture.chain).unwrap();
         assert!(logged.contains("secret.flow_refused"), "{logged}");
         assert!(logged.contains("policy_denied"), "{logged}");
         assert!(logged.contains("93.184.216.34:80"), "{logged}");
@@ -1115,15 +1186,11 @@ mod server_tests {
     #[tokio::test]
     async fn a_denied_destination_stays_denied_with_proxy_and_no_proxy_configured() {
         for no_proxy in ["", "*", "api.openai.com"] {
-            let dir = tempdir().unwrap();
             let forwarder = Arc::new(MockForwarder {
                 seen: Mutex::new(None),
             });
-            let (mut service, ph, chain) = recorded_service_with(
-                dir.path(),
-                gate_admitting(&[("other.example", 443)]),
-                forwarder.clone(),
-            );
+            let mut fixture =
+                recorded_service_with(gate_admitting(&[("other.example", 443)]), forwarder.clone());
             let proxy = mvm_http::ProxyConfig::from_lookup(|key| match key {
                 "https_proxy" => Some("http://proxy.corp:3128".into()),
                 "no_proxy" => Some(no_proxy.into()),
@@ -1131,8 +1198,12 @@ mod server_tests {
             })
             .unwrap()
             .unwrap();
-            Arc::get_mut(&mut service).expect("sole owner").proxy = Some(Arc::new(proxy));
-            let response = service
+            Arc::get_mut(&mut fixture.service)
+                .expect("sole owner")
+                .proxy = Some(Arc::new(proxy));
+            let ph = &fixture.ph;
+            let response = fixture
+                .service
                 .process(WireRequest {
                     method: "GET".into(),
                     url: "https://api.openai.com/v1/models".into(),
@@ -1145,11 +1216,11 @@ mod server_tests {
                 "{response:?}"
             );
             assert!(forwarder.seen.lock().unwrap().is_none());
-            let logged = std::fs::read_to_string(&chain).unwrap();
+            let logged = std::fs::read_to_string(&fixture.chain).unwrap();
             assert!(logged.contains("policy_denied"));
             assert!(!logged.contains("secret.forward_outcome"));
             let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]).verifying_key();
-            crate::supervisor::audit::audit_file::verify_audit_chain(&chain, &key).unwrap();
+            crate::supervisor::audit::audit_file::verify_audit_chain(&fixture.chain, &key).unwrap();
         }
     }
 
@@ -1157,11 +1228,10 @@ mod server_tests {
     /// such rather than silently.
     #[tokio::test]
     async fn a_malformed_destination_refusal_is_recorded_in_the_chain_signed_log() {
-        let dir = tempdir().unwrap();
-        let (service, _ph, chain) =
-            recorded_service(dir.path(), gate_admitting(&[("api.openai.com", 443)]));
+        let fixture = recorded_service(gate_admitting(&[("api.openai.com", 443)]));
 
-        let resp = service
+        let resp = fixture
+            .service
             .process(WireRequest {
                 method: "GET".into(),
                 url: "not a url".into(),
@@ -1171,7 +1241,7 @@ mod server_tests {
             .await;
         assert!(matches!(resp, WireResponse::Refused { .. }), "{resp:?}");
 
-        let logged = std::fs::read_to_string(&chain).unwrap();
+        let logged = std::fs::read_to_string(&fixture.chain).unwrap();
         assert!(logged.contains("secret.flow_refused"), "{logged}");
         assert!(logged.contains("malformed"), "{logged}");
         assert!(logged.contains("unparseable"), "{logged}");
@@ -1181,11 +1251,10 @@ mod server_tests {
     /// read as a policy denial.
     #[tokio::test]
     async fn a_peer_refusal_is_recorded_in_the_chain_signed_log() {
-        let dir = tempdir().unwrap();
-        let (service, _ph, chain) =
-            recorded_service(dir.path(), gate_admitting(&[("api.openai.com", 443)]));
+        let fixture = recorded_service(gate_admitting(&[("api.openai.com", 443)]));
 
-        let resp = service
+        let resp = fixture
+            .service
             .process(WireRequest {
                 method: "GET".into(),
                 url: "http://db.mvm.peer:5432/".into(),
@@ -1195,7 +1264,7 @@ mod server_tests {
             .await;
         assert!(matches!(resp, WireResponse::Refused { .. }), "{resp:?}");
 
-        let logged = std::fs::read_to_string(&chain).unwrap();
+        let logged = std::fs::read_to_string(&fixture.chain).unwrap();
         assert!(logged.contains("secret.flow_refused"), "{logged}");
         assert!(logged.contains("peer_destination"), "{logged}");
         assert!(logged.contains("db.mvm.peer"), "{logged}");
@@ -1205,11 +1274,11 @@ mod server_tests {
     /// An admitted request writes no refusal.
     #[tokio::test]
     async fn an_admitted_request_records_no_refusal() {
-        let dir = tempdir().unwrap();
-        let (service, ph, chain) =
-            recorded_service(dir.path(), gate_admitting(&[("api.openai.com", 443)]));
+        let fixture = recorded_service(gate_admitting(&[("api.openai.com", 443)]));
+        let ph = &fixture.ph;
 
-        let resp = service
+        let resp = fixture
+            .service
             .process(WireRequest {
                 method: "POST".into(),
                 url: "https://api.openai.com/v1".into(),
@@ -1219,22 +1288,25 @@ mod server_tests {
             .await;
         assert!(matches!(resp, WireResponse::Ok { .. }), "{resp:?}");
 
-        let logged = std::fs::read_to_string(&chain).unwrap_or_default();
+        let logged = std::fs::read_to_string(&fixture.chain).unwrap_or_default();
         assert!(!logged.contains("secret.flow_refused"), "{logged}");
     }
 
     /// A fail-closed refusal (compressed/over-cap body to a redaction-opted-in
     /// destination) is observable: it lands one metadata-only audit entry naming
     /// the destination, and never the body bytes.
-    #[tokio::test]
-    async fn fail_closed_refusal_is_audited() {
+    #[test]
+    fn fail_closed_refusal_is_audited() {
+        with_isolated_runtime(fail_closed_refusal_case);
+    }
+
+    async fn fail_closed_refusal_case(dir: &tempfile::TempDir) {
         use crate::supervisor::audit::audit_file::FileAuditSigner;
         use crate::supervisor::audit::audit_recorder::Recorder;
         use ed25519_dalek::SigningKey;
         use mvm_core::plan::TenantId;
         use mvm_core::policy::{EntropyMode, RedactionAction, RedactionPolicy, RedactionProfile};
 
-        let dir = tempdir().unwrap();
         let store = FileSecretStore::with_dir(dir.path().join("secrets"));
         store
             .put(
@@ -1301,6 +1373,13 @@ mod server_tests {
         };
         write_json_frame(&mut client, &wire).await.unwrap();
         let resp: WireResponse = read_json_frame(&mut client, MAX_FRAME_BYTES).await.unwrap();
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            Arc::strong_count(&service),
+            1,
+            "connection task has finished"
+        );
         assert!(
             matches!(&resp, WireResponse::Refused { message } if message.contains("fail-closed")),
             "compressed body must fail closed: {resp:?}"
@@ -1322,17 +1401,19 @@ mod server_tests {
             !logged.contains("SUPERSECRETBODY"),
             "audit chain must not carry the body bytes: {logged}"
         );
-        server.abort();
     }
 
-    #[tokio::test]
-    async fn emits_secret_substituted_audit_on_success() {
+    #[test]
+    fn emits_secret_substituted_audit_on_success() {
+        with_isolated_runtime(secret_substituted_case);
+    }
+
+    async fn secret_substituted_case(dir: &tempfile::TempDir) {
         use crate::supervisor::audit::audit_file::FileAuditSigner;
         use crate::supervisor::audit::audit_recorder::Recorder;
         use ed25519_dalek::SigningKey;
         use mvm_core::plan::TenantId;
 
-        let dir = tempdir().unwrap();
         let store = FileSecretStore::with_dir(dir.path().join("secrets"));
         store
             .put(
@@ -1381,6 +1462,13 @@ mod server_tests {
         // The audit emit completes before the Ok response is written, so the
         // chain entry is on disk by the time we read the reply.
         let _resp: WireResponse = read_json_frame(&mut client, MAX_FRAME_BYTES).await.unwrap();
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            Arc::strong_count(&service),
+            1,
+            "connection task has finished"
+        );
 
         let logged = std::fs::read_to_string(&chain).unwrap();
         assert!(logged.contains("secret.substituted"), "got: {logged}");
@@ -1391,17 +1479,19 @@ mod server_tests {
             !logged.contains("sk-live-zzz"),
             "audit chain must not carry the secret value: {logged}"
         );
-        server.abort();
     }
 
-    #[tokio::test]
-    async fn emits_placeholder_dropped_audit_on_unbound_refusal() {
+    #[test]
+    fn emits_placeholder_dropped_audit_on_unbound_refusal() {
+        with_isolated_runtime(placeholder_dropped_case);
+    }
+
+    async fn placeholder_dropped_case(dir: &tempfile::TempDir) {
         use crate::supervisor::audit::audit_file::FileAuditSigner;
         use crate::supervisor::audit::audit_recorder::Recorder;
         use ed25519_dalek::SigningKey;
         use mvm_core::plan::TenantId;
 
-        let dir = tempdir().unwrap();
         let store = FileSecretStore::with_dir(dir.path().join("secrets"));
         store
             .put(
@@ -1451,6 +1541,13 @@ mod server_tests {
         };
         write_json_frame(&mut client, &wire).await.unwrap();
         let resp: WireResponse = read_json_frame(&mut client, MAX_FRAME_BYTES).await.unwrap();
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            Arc::strong_count(&service),
+            1,
+            "connection task has finished"
+        );
         assert!(
             matches!(&resp, WireResponse::Refused { message }
                 if message.contains("not in the secret's allowed_hosts")),
@@ -1470,6 +1567,5 @@ mod server_tests {
             !logged.contains("sk-live-zzz"),
             "audit chain must not carry the secret value: {logged}"
         );
-        server.abort();
     }
 }

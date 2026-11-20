@@ -627,6 +627,7 @@ mod tests {
     use crate::audit::audit_file::FileAuditSigner;
     use crate::audit::signer::AuditSigner;
     use crate::audit::signer::PlanAuditEntry;
+    use crate::audit::test_fixtures::AuditDir;
 
     fn sample_plan_id() -> PlanId {
         PlanId("sha256:0000000000000000000000000000000000000000000000000000000000000001".into())
@@ -781,7 +782,7 @@ mod tests {
 
     #[test]
     fn exported_receipts_verify_and_form_chain() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = AuditDir::new();
         let signing_key = SigningKey::from_bytes(&[6u8; 32]);
         let signer = FileAuditSigner::open(signing_key.clone(), dir.path()).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -828,7 +829,7 @@ mod tests {
         // enumeration -- another plan's entries can sit between them -- and
         // this test pins exactly that, interleaving a second plan inside the
         // first one's range.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = AuditDir::new();
         let signing_key = SigningKey::from_bytes(&[23u8; 32]);
         let signer = FileAuditSigner::open(signing_key.clone(), dir.path()).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -899,7 +900,7 @@ mod tests {
         // Without this the receipt names the audit root and nothing the
         // workload produced, so a receipt forwarded on its own cannot say
         // which transcript belongs to it.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = AuditDir::new();
         let signing_key = SigningKey::from_bytes(&[13u8; 32]);
         let signer = FileAuditSigner::open(signing_key.clone(), dir.path()).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -961,7 +962,7 @@ mod tests {
     #[test]
     fn an_adopted_transcript_is_marked_incomplete_on_the_receipt() {
         // A floor presented as a full account would be a wrong record.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = AuditDir::new();
         let signing_key = SigningKey::from_bytes(&[17u8; 32]);
         let signer = FileAuditSigner::open(signing_key.clone(), dir.path()).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -994,7 +995,7 @@ mod tests {
 
     #[test]
     fn exited_receipt_includes_exit_code_and_timing() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = AuditDir::new();
         let signing_key = SigningKey::from_bytes(&[11u8; 32]);
         let signer = FileAuditSigner::open(signing_key.clone(), dir.path()).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -1035,7 +1036,7 @@ mod tests {
 
     #[test]
     fn grant_required_populates_capabilities_on_exported_receipts() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = AuditDir::new();
         let signing_key = SigningKey::from_bytes(&[12u8; 32]);
         let signer = FileAuditSigner::open(signing_key.clone(), dir.path()).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -1077,7 +1078,7 @@ mod tests {
 
     #[test]
     fn egress_destinations_populate_network_destinations_on_exported_receipts() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = AuditDir::new();
         let signing_key = SigningKey::from_bytes(&[13u8; 32]);
         let signer = FileAuditSigner::open(signing_key.clone(), dir.path()).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -1124,7 +1125,7 @@ mod tests {
 
     #[test]
     fn plan_id_filter_limits_exported_receipts() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = AuditDir::new();
         let signing_key = SigningKey::from_bytes(&[7u8; 32]);
         let signer = FileAuditSigner::open(signing_key.clone(), dir.path()).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -1165,7 +1166,7 @@ mod tests {
     fn export_fixture_with_usage(
         capture: mvm_core::usage_capture::UsageCapture,
     ) -> Vec<SignedExecutionReceipt> {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = AuditDir::new();
         let signing_key = SigningKey::from_bytes(&[21u8; 32]);
         let signer = FileAuditSigner::open(signing_key.clone(), dir.path()).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -1192,7 +1193,7 @@ mod tests {
     /// carries no `usage` label at all, standing in for an entry written
     /// before this feature existed.
     fn export_fixture_without_usage_label() -> Vec<SignedExecutionReceipt> {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = AuditDir::new();
         let signing_key = SigningKey::from_bytes(&[22u8; 32]);
         let signer = FileAuditSigner::open(signing_key.clone(), dir.path()).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()

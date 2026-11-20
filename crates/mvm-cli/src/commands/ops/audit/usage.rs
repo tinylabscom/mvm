@@ -310,6 +310,7 @@ mod tests {
     /// chain and return its raw lines: the same `SignedEnvelope` JSON the
     /// verified reader hands the report builder.
     fn chain_lines(entries: &[(&str, Option<&str>, AiUsageRecord)]) -> Vec<String> {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut seed = [0u8; 32];

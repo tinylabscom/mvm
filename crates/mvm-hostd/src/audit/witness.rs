@@ -418,6 +418,7 @@ pub fn flush_configured(audit_dir: &Path, tenant: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::test_fixtures::AuditDir;
     use std::sync::Mutex;
 
     /// A sink that records what it was handed and can be told to fail, so the
@@ -570,7 +571,7 @@ mod tests {
         // The whole point of shipping roots off-host. Every root on both sides
         // is genuinely host-signed, so no signature check can find this --
         // only comparing against what the witness kept.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = AuditDir::new();
         let key = fresh_key();
         let vk = key.verifying_key();
         let sink = FileWitnessSink::new(dir.path().join("witness.jsonl"));
@@ -611,7 +612,7 @@ mod tests {
     fn a_host_that_dropped_a_witnessed_root_is_caught() {
         // Deletion, not substitution: the host simply no longer has anything
         // at that tree size. `host_root: None` says which of the two it was.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = AuditDir::new();
         let key = fresh_key();
         let vk = key.verifying_key();
         let sink = FileWitnessSink::new(dir.path().join("witness.jsonl"));
@@ -633,7 +634,7 @@ mod tests {
     fn an_unsent_tail_is_not_a_divergence() {
         // The normal state between flushes. Reporting it as tampering would
         // make the check cry wolf on every healthy host.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = AuditDir::new();
         let key = fresh_key();
         let vk = key.verifying_key();
         let sink = FileWitnessSink::new(dir.path().join("witness.jsonl"));
@@ -652,7 +653,7 @@ mod tests {
     fn an_empty_witness_detects_nothing_and_says_so() {
         // Zero agreed is the honest answer. A bare "clean" here would read as
         // "verified" when nothing was compared.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = AuditDir::new();
         let key = fresh_key();
         let sink = FileWitnessSink::new(dir.path().join("witness.jsonl"));
         seed_and_publish(dir.path(), &key, 2, "a");
@@ -678,7 +679,7 @@ mod tests {
         // A shared mark would let one sink's success suppress delivery to the
         // other, which is the failure mode that makes a second witness
         // pointless.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = AuditDir::new();
         seed_history(dir.path(), &[5]);
         let a = FileWitnessSink::new(dir.path().join("a.jsonl"));
         let b = FileWitnessSink::new(dir.path().join("b.jsonl"));
@@ -697,7 +698,7 @@ mod tests {
 
     #[test]
     fn the_file_sink_appends_rather_than_replacing() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = AuditDir::new();
         let out = dir.path().join("witness.jsonl");
         let sink = FileWitnessSink::new(&out);
         sink.witness(&[root(1)]).unwrap();
