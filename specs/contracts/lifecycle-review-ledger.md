@@ -491,8 +491,18 @@ the archive predates every later commit. Waiting activations cannot take the
 last 32 handler slots, which keeps a quarantine from being refused at the
 connection limit by activations alone.
 
-Limits: a launch that read the ledger before a quarantine commit can still
-start after it, so the operator stops the machine after quarantining; mailbox
+Limits: a launch reads the ledger at admission and again once its VM is live,
+before grants, charges, the launch record, the assurance session and the
+mailbox process. A refusal on that second read stops the VM the launch started
+and records `plan.failed` at stage `workload-contained`, so a quarantine or
+replacement committed in between is seen either by the operator's stop or by
+the launch itself. The guest can run for the interval between spawn and that
+read. Only hostd's admitted start, warm claim and checkpoint fork read it a
+second time; a start that reaches the backend without an admitted plan in hand
+(`start_prepared` in `mvm-client`, the unadmitted branch of the transient exec
+path in `mvm-cli`) does not, so the operator still stops the machine after
+quarantining. The warm-claim and fork call sites have no test that reaches
+them; the shared check and the admitted start are tested; mailbox
 destination commits are ordered by this lane only on the production local path
 (next section). Quarantine and replace need the coordinator process and are
 refused when it cannot start. A failure

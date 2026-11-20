@@ -11,13 +11,10 @@ use mvm_core::plan::ExecutionPlan;
 /// covered by the durable host-budget reservation and enforcement by the runtime
 /// verification in `RunPosture`, both of which run just before this.
 pub(super) fn admit_host_interface(plan: &ExecutionPlan) -> Result<()> {
-    use anyhow::Context;
-    use mvm_contract::protocol::mailbox::ExecutionEpoch;
     use mvm_core::host_interface::{
-        Assurance, HostInterface, LaunchRequest, epoch_gate::CommandGate,
-        local::LocalHostInterface, store,
+        Assurance, HostInterface, LaunchRequest, local::LocalHostInterface, store,
     };
-    let home = std::path::PathBuf::from(mvm_core::config::mvm_home());
+    let home = mvm_home_path();
     let record = store::load_node_record_at(&home)?;
     let policy = store::load_policy_at(&home)?;
     let now = || {
@@ -31,11 +28,7 @@ pub(super) fn admit_host_interface(plan: &ExecutionPlan) -> Result<()> {
     // every other workload keeps launching. A local launch synthesizes its
     // plan at the current epoch; a plan arriving from a control plane carries
     // the epoch that authority issued.
-    let epoch = ExecutionEpoch::new(plan.execution_epoch)
-        .context("the plan carries a zero execution epoch")?;
-    let gate = CommandGate::load_at(&home)?;
-    gate.admit(&plan.workload.0, epoch)
-        .map_err(mvm_core::host_interface::HostInterfaceError::from)?;
+    let (epoch, gate) = load_gate_and_admit(plan, &home)?;
     // Software evidence only: this adapter collects no hardware attestation.
     // The node admission check compares the plan's epoch with the unit's
     // durable record, never with a value derived from the request itself.
@@ -48,4 +41,27 @@ pub(super) fn admit_host_interface(plan: &ExecutionPlan) -> Result<()> {
     })?;
     mvm_core::launch_trace::lap("admit_plan.grants_budget_and_host_interface");
     Ok(())
+}
+
+pub(super) fn mvm_home_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_core::config::mvm_home())
+}
+
+/// Read the workload ledger under `home` and admit the plan's workload at its
+/// epoch. Shared by the admission preflight and the post-spawn recheck so the
+/// two can never disagree on how the epoch is built.
+pub(super) fn load_gate_and_admit(
+    plan: &ExecutionPlan,
+    home: &std::path::Path,
+) -> Result<(
+    mvm_contract::protocol::mailbox::ExecutionEpoch,
+    mvm_core::host_interface::epoch_gate::CommandGate,
+)> {
+    use anyhow::Context;
+    let epoch = mvm_contract::protocol::mailbox::ExecutionEpoch::new(plan.execution_epoch)
+        .context("the plan carries a zero execution epoch")?;
+    let gate = mvm_core::host_interface::epoch_gate::CommandGate::load_at(home)?;
+    gate.admit(&plan.workload.0, epoch)
+        .map_err(mvm_core::host_interface::HostInterfaceError::from)?;
+    Ok((epoch, gate))
 }
