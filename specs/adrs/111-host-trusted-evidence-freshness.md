@@ -298,6 +298,19 @@ A launch that read the ledger before a quarantine commit can still start after
 it; the operator stops the machine after quarantining. Quarantine and replace
 now need the coordinator process and are refused when it cannot start.
 
+The same lane orders a production mailbox destination's journal commits. A
+destination enrolls with the key it signs prepared heads under, enrolls again
+idempotently on every helper start, and asks the coordinator to move its tip
+before it writes its local anchor. The coordinator refuses a commit once the
+workload is quarantined or replaced, so a containment decision and an
+acceptance have one order; an acceptance that was committed first stays
+accepted, and a same-binding re-enrollment is answered after a quarantine so it
+is anchored. When the table is full, destinations of replaced epochs are
+retired first, then the least recently changed; a retired live destination
+enrolls again at its own anchor tip, which gives up the coordinator's rollback
+check for that step. Actor journals and development mailboxes are not enrolled.
+A helper that exits after an unknown outcome is not restarted automatically.
+
 This coordinator is an implementation of [#5097](https://github.com/tinylabscom/mvm/issues/5097)'s
 local host-interface responsibilities, not a second authority alongside
 `HostInterface`. Local mode resolves and applies locally without central

@@ -22,6 +22,11 @@ use super::{
     error::{Denial, HostInterfaceError},
 };
 
+pub use super::destination::{
+    DestinationCommit, DestinationEnrollment, DestinationEntry, DestinationTip, MAX_DESTINATIONS,
+    PreparedHead, SignedPreparedHead,
+};
+
 /// File name of the canonical ledger inside [`canonical_dir_at`].
 pub const LEDGER_FILE: &str = "ledger.json";
 /// File name of the commit or migration obligation beside the ledger.
@@ -78,6 +83,9 @@ pub struct WorkloadLedger(BTreeMap<String, WorkloadEntry>);
 pub struct CanonicalLedger {
     pub sequence: u64,
     pub workloads: WorkloadLedger,
+    /// Mailbox destinations, keyed by their 64-hex destination id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub destinations: BTreeMap<String, DestinationEntry>,
 }
 
 /// One ledger change a caller asks the coordinator to commit.
@@ -305,6 +313,7 @@ mod tests {
         serde_json::to_vec(&CanonicalLedger {
             sequence,
             workloads,
+            ..Default::default()
         })
         .unwrap()
     }
@@ -407,6 +416,7 @@ mod tests {
         let ledger = CanonicalLedger {
             sequence: 3,
             workloads: WorkloadLedger::default(),
+            ..Default::default()
         };
         assert_eq!(
             serde_json::from_slice::<CanonicalLedger>(&serde_json::to_vec(&ledger).unwrap())
