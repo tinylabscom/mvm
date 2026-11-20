@@ -232,12 +232,21 @@ pub fn admit_topology(request: &TopologyAdmissionRequest<'_>) -> Result<Topology
         Ok(Decision::Same(admitted)) => Ok(TopologyAdmission::AlreadyAdmitted(admitted)),
         Ok(Decision::New {
             admitted,
+            home,
             reserved,
             lock,
         }) => {
             let audited = audit_admitted(request, &admitted);
             let result = match audited {
-                Ok(()) => Ok(TopologyAdmission::Admitted(admitted)),
+                Ok(()) => {
+                    // The generation is admitted; a cell it dropped is now
+                    // refused to every caller, and its storage can go.
+                    if let Err(e) = crate::state_cells::remove_undeclared(&home, &admitted.topology)
+                    {
+                        tracing::warn!("removing cells the new generation dropped: {e:#}");
+                    }
+                    Ok(TopologyAdmission::Admitted(admitted))
+                }
                 Err(audit) => {
                     crate::state_cells::release(&reserved);
                     Err(withdraw(&admitted.record_path, audit))
@@ -253,6 +262,7 @@ pub fn admit_topology(request: &TopologyAdmissionRequest<'_>) -> Result<Topology
 enum Decision {
     New {
         admitted: AdmittedTopology,
+        home: PathBuf,
         /// Cells this admission created, removed again if it fails.
         reserved: Vec<PathBuf>,
         lock: mvm_core::atomic_io::FileLock,
@@ -337,6 +347,7 @@ fn decide(
             signer_id,
             record_path,
         },
+        home,
         reserved,
         lock,
     })

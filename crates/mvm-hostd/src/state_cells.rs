@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, ensure};
 use mvm_contract::plan::topology::{StateCell, Topology};
 use mvm_contract::protocol::mailbox::ExecutionEpoch;
-use mvm_core::atomic_io::{FileLock, NewFile, write_private_new};
+use mvm_core::atomic_io::{self, FileLock, NewFile, write_private_new};
 use mvm_core::host_interface::Denial;
 use mvm_core::host_interface::epoch_gate::CommandGate;
 use mvm_core::plan::{TenantId, WorkloadId};
@@ -46,6 +46,54 @@ pub const STATE_CELL_REFUSED_EVENT: &str = "state_cell.refused";
 /// The largest cell this host reserves. A cell is a small piece of control
 /// state copied whole on every update, not a volume.
 pub const MAX_CELL_BYTES: u64 = 1024 * 1024;
+
+/// The most cells one topology may declare.
+pub const MAX_CELLS_PER_TOPOLOGY: usize = 64;
+
+/// The most disk one tenant's cells may take, both slots of every cell
+/// counted. The store keeps only the cells of the tenant's admitted
+/// generation, so this bounds the tenant's whole directory, lock files aside.
+pub const MAX_RESERVED_BYTES_PER_TENANT: u64 = 16 * 1024 * 1024;
+
+/// A topology whose cells exceed what this host reserves.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ReservationLimit {
+    #[error("cell {cell} declares {size} bytes and this host reserves at most {MAX_CELL_BYTES}")]
+    CellTooLarge { cell: String, size: u64 },
+    #[error(
+        "the topology declares {count} cells and this host reserves at most \
+         {MAX_CELLS_PER_TOPOLOGY}"
+    )]
+    TooManyCells { count: usize },
+    #[error(
+        "the cells need {bytes} bytes on disk and this host reserves at most \
+         {MAX_RESERVED_BYTES_PER_TENANT} per tenant"
+    )]
+    TooManyBytes { bytes: u64 },
+}
+
+fn check_limits(topology: &Topology) -> Result<(), ReservationLimit> {
+    let count = topology.cells.len();
+    if count > MAX_CELLS_PER_TOPOLOGY {
+        return Err(ReservationLimit::TooManyCells { count });
+    }
+    let mut bytes: u64 = 0;
+    for cell in &topology.cells {
+        let size = cell.size_bytes.get();
+        if size > MAX_CELL_BYTES {
+            return Err(ReservationLimit::CellTooLarge {
+                cell: cell.name.clone(),
+                size,
+            });
+        }
+        // At most 64 cells of at most 1 MiB each: no overflow.
+        bytes += slots::file_len(size);
+    }
+    if bytes > MAX_RESERVED_BYTES_PER_TENANT {
+        return Err(ReservationLimit::TooManyBytes { bytes });
+    }
+    Ok(())
+}
 
 /// A cell operation the host refused. The returned error's root cause, so a
 /// caller can `downcast_ref` it even when the refusal's audit write failed.
@@ -285,6 +333,7 @@ pub(crate) fn reserve(home: &Path, topology: &Topology) -> Result<Vec<PathBuf>> 
     if topology.cells.is_empty() {
         return Ok(created);
     }
+    check_limits(topology)?;
     let dir = tenant_dir(home, &topology.tenant);
     mvm_core::config::create_private_dir(&dir)
         .with_context(|| format!("creating {} privately", dir.display()))?;
@@ -305,10 +354,6 @@ pub(crate) fn reserve(home: &Path, topology: &Topology) -> Result<Vec<PathBuf>> 
 /// Returns whether the file was created.
 fn reserve_one(path: &Path, cell: &StateCell) -> Result<bool> {
     let size = cell.size_bytes.get();
-    ensure!(
-        size <= MAX_CELL_BYTES,
-        "the cell declares {size} bytes and this host reserves at most {MAX_CELL_BYTES}"
-    );
     match write_private_new(path, &slots::reserved(size))
         .with_context(|| format!("writing {}", path.display()))?
     {
@@ -333,6 +378,40 @@ pub(crate) fn release(created: &[PathBuf]) {
             tracing::warn!(path = %path.display(), "removing a reserved cell: {e}");
         }
     }
+}
+
+/// Remove the cells of `topology`'s tenant that `topology` no longer
+/// declares. Called only once `topology` is admitted and audited: from then
+/// on every operation looks its cell up in this generation and refuses one it
+/// does not declare, so nothing can still be authorized to use a removed
+/// cell. Each removal holds the cell's lock, so it waits out an operation
+/// that read the previous generation; one that takes the lock afterwards
+/// finds no file and fails. A generation that declares the cell again later
+/// starts it empty. Lock files are left in place, since removing one would
+/// let two holders lock different inodes.
+pub(crate) fn remove_undeclared(home: &Path, topology: &Topology) -> Result<()> {
+    let dir = tenant_dir(home, &topology.tenant);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    };
+    let declared: std::collections::BTreeSet<PathBuf> = topology
+        .cells
+        .iter()
+        .map(|c| cell_path(home, &topology.tenant, &c.name))
+        .collect();
+    for entry in entries {
+        let path = entry
+            .with_context(|| format!("reading {}", dir.display()))?
+            .path();
+        if path.extension().is_none_or(|e| e != "cell") || declared.contains(&path) {
+            continue;
+        }
+        let _lock = FileLock::acquire(&path)?;
+        std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+    }
+    atomic_io::sync_dir(&dir)
 }
 
 #[cfg(test)]

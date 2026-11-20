@@ -549,3 +549,75 @@ fn admission_refuses_a_cell_it_cannot_reserve_and_keeps_nothing() {
         "no generation was sealed"
     );
 }
+
+fn named_cell(name: &str, size: u64) -> StateCell {
+    StateCell {
+        name: name.to_string(),
+        writer: id("controller"),
+        readers: Vec::new(),
+        size_bytes: NonZeroU64::new(size).unwrap(),
+        update: Default::default(),
+        per_write_audit: false,
+    }
+}
+
+#[test]
+fn a_topology_over_the_cell_count_or_byte_ceiling_is_refused_by_name() {
+    let mut many = topology(1, 16);
+    many.cells = (0..=MAX_CELLS_PER_TOPOLOGY)
+        .map(|n| named_cell(&format!("c{n:03}"), 1))
+        .collect();
+    assert_eq!(
+        check_limits(&many),
+        Err(ReservationLimit::TooManyCells {
+            count: MAX_CELLS_PER_TOPOLOGY + 1
+        })
+    );
+
+    let mut large = topology(1, 16);
+    large.cells = (0..8)
+        .map(|n| named_cell(&format!("c{n}"), MAX_CELL_BYTES))
+        .collect();
+    assert_eq!(
+        check_limits(&large),
+        Err(ReservationLimit::TooManyBytes {
+            bytes: 8 * slots::file_len(MAX_CELL_BYTES)
+        })
+    );
+    assert_eq!(
+        check_limits(&topology(1, MAX_CELL_BYTES + 1)),
+        Err(ReservationLimit::CellTooLarge {
+            cell: CELL.into(),
+            size: MAX_CELL_BYTES + 1
+        })
+    );
+
+    let host = Host::new();
+    let err = host.admit(&large).unwrap_err();
+    let refused = err.downcast_ref::<TopologyRefused>().unwrap();
+    assert_eq!(refused.stage, RefusalStage::StateCells);
+    assert!(refused.reason.contains("per tenant"), "{}", refused.reason);
+    assert!(
+        !mvm_core::config::state_cells_dir_at(host.home.path()).exists(),
+        "nothing was reserved"
+    );
+}
+
+#[test]
+fn a_generation_that_drops_a_cell_removes_it_and_refuses_its_use() {
+    let host = Host::admitted();
+    let (t, controller) = (tenant(), id("controller"));
+    host.cells()
+        .write(&as_unit(&t, &controller, 1), 1, b"old")
+        .unwrap();
+    let dropped = host.path();
+
+    let mut next = topology(2, 16);
+    next.cells = vec![named_cell("other", 8)];
+    host.admit(&next).expect("admits");
+
+    assert!(!dropped.exists(), "the dropped cell's storage is released");
+    assert!(cell_path(host.home.path(), &t, "other").exists());
+    let err = host.cells().read(&as_unit(&t, &controller, 1)).unwrap_err();
+    assert!(matches!(refusal(&err), CellRefusal::UnknownCell { .. }));
+}
