@@ -67,8 +67,10 @@ mod canonical_kernel;
 mod cli_cold;
 mod composition;
 mod display_grants;
+mod entrypoint;
 mod extension_packs;
 mod final_gates;
+mod fs_quick;
 mod grant_validation;
 mod host_gates;
 mod launch_substrate;
@@ -97,7 +99,9 @@ pub use cli_cold::{
     DispatchedCliCold, PrepareCliColdParams, PreparedCliCold, PreparedCliWarmClaim,
     abandon_prepared_cli_cold, claim_prepared_cli_cold, prepare_cli_cold, start_prepared_cli_cold,
 };
+pub use entrypoint::{PreparedEntrypoint, prepare_entrypoint, prepare_portable_entrypoint};
 pub use extension_packs::{AdmittedExtension, ExtensionAdmissionContext};
+pub use fs_quick::{PreparedFilesystemFork, prepare_filesystem_fork};
 pub use launch_substrate::{
     persists_plan_before_start, populate_audit_substrate, stash_plan_and_mint_verb_grant,
     stash_plan_for_bridge, thread_cpu_grant, thread_tenant_id,
@@ -115,11 +119,10 @@ pub use rollback::{
 pub use shares::enforce_admitted_shares;
 pub use start::{
     CliStartFailure, DispatchedPersistent, LaunchAdmission, PreparePersistentParams,
-    PreparedEntrypoint, PreparedPersistent, StartAdmittedParams, StartedMachine, WarmClaimDispatch,
-    admit_and_start, boot_vm, claim_cli_transient, prepare_entrypoint, prepare_portable_entrypoint,
-    start_admitted, start_admitted_owned_actor, start_admitted_owned_actor_with_bootstrap,
-    start_cli_transient, start_entrypoint, start_fs_quick_fork, start_owned_entrypoint,
-    start_persistent,
+    PreparedPersistent, StartAdmittedParams, StartedMachine, WarmClaimDispatch, admit_and_start,
+    boot_vm, claim_cli_transient, start_admitted, start_admitted_owned_actor,
+    start_admitted_owned_actor_with_bootstrap, start_cli_transient, start_entrypoint,
+    start_fs_quick_fork, start_owned_entrypoint, start_persistent,
 };
 pub(crate) use start::{
     LaunchSource, admit_synthesized_with_verified_release, prepare_launch,

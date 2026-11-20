@@ -2335,6 +2335,125 @@ fn cli_transient_defers_launch_narrative_without_readmitting() {
 
 #[cfg(unix)]
 #[test]
+fn filesystem_fork_prepares_once_before_existing_dispatch() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let keys = tempfile::tempdir().expect("keys");
+    let audit = tempfile::tempdir().expect("audit");
+    let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+    let name = "fs-quick-preparation-order";
+    let events = std::cell::RefCell::new(Vec::new());
+
+    let prepared = prepare_filesystem_fork(
+        VmStartConfig {
+            name: name.into(),
+            rootfs_path: "/store/materialized-child/rootfs.ext4".into(),
+            ..Default::default()
+        },
+        backend.kind(),
+        |_| {
+            events.borrow_mut().push("attach");
+            Ok(None)
+        },
+        |_, runtime| {
+            assert!(runtime.is_none(), "fixture selected no release runtime");
+            events.borrow_mut().push("admit");
+            let admission =
+                persistent_boundary_admission(name, &backend, keys.path(), audit.path());
+            crate::audit::durability::record_admission(
+                Some(&admission.emitter),
+                admission.admitted.plan(),
+                admission.admitted.signer_id(),
+                crate::audit::durability::AuditDurability::BestEffort,
+            )
+            .expect("record filesystem fork admission");
+            Ok(admission)
+        },
+    )
+    .expect("prepare filesystem fork");
+    assert_eq!(*events.borrow(), ["attach", "admit"]);
+    assert!(
+        backend.list().expect("mock list").is_empty(),
+        "preparation cannot start the backend"
+    );
+
+    let (config, runtime, admission) = prepared.into_parts();
+    events.borrow_mut().push("dispatch");
+    let started = start_fs_quick_fork(
+        StartAdmittedParams {
+            backend: &backend,
+            admitted: admission.admitted,
+            config,
+            policy_bundle: admission.policy_bundle.as_ref(),
+            emitter: Some(&admission.emitter),
+            assurance: None,
+        },
+        runtime.as_deref(),
+    )
+    .expect("dispatch prepared filesystem fork");
+    assert_eq!(*events.borrow(), ["attach", "admit", "dispatch"]);
+    assert_eq!(
+        backend.status(&started).expect("mock status"),
+        mvm_core::vm_backend::VmStatus::Running
+    );
+    let chain =
+        std::fs::read_to_string(audit.path().join("local.jsonl")).expect("fork audit chain");
+    assert_eq!(chain.matches("plan.admitted").count(), 1, "{chain}");
+    backend.stop(&started).expect("stop mock VM");
+}
+
+#[cfg(unix)]
+#[test]
+fn filesystem_fork_runtime_tamper_refuses_before_admission_or_start() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let runtime_dir = tempfile::tempdir().expect("runtime fixture");
+    let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+    let runtime = mvm_build::guest_runtime::evidence::verified_release_runtime_fixture(
+        runtime_dir.path(),
+        mvm_core::arch::GuestArch::host(),
+        mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+        mvm_runtime::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION,
+    );
+    let release = std::sync::Arc::clone(&runtime.release);
+    let admitted = std::cell::Cell::new(false);
+
+    let error = match prepare_filesystem_fork(
+        VmStartConfig {
+            name: "fs-quick-runtime-tamper".into(),
+            rootfs_path: "/store/materialized-child/rootfs.ext4".into(),
+            ..Default::default()
+        },
+        backend.kind(),
+        |config| {
+            config.runtime_release_proof = Some(release.proof().clone());
+            config.runtime_overlay_path = Some(runtime.overlay.display().to_string());
+            config.runtime_overlay_verity_path = Some(runtime.overlay_verity.display().to_string());
+            config.runtime_overlay_roothash = Some(runtime.overlay_roothash.clone());
+            config.runtime_overlay_version = Some(release.proof().version.clone());
+            config.initrd_path = Some(runtime.initramfs.display().to_string());
+            std::fs::write(&runtime.overlay, b"tampered overlay").expect("tamper runtime");
+            Ok(Some(std::sync::Arc::clone(&release)))
+        },
+        |_, _| -> anyhow::Result<()> {
+            admitted.set(true);
+            anyhow::bail!("admission must not run")
+        },
+    ) {
+        Ok(_) => panic!("tampered runtime unexpectedly prepared"),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{error:#}").contains("runtime artifact differs from signed assembly"),
+        "{error:#}"
+    );
+    assert!(!admitted.get(), "tampering must refuse before admission");
+    assert!(
+        backend.list().expect("mock list").is_empty(),
+        "tampering must refuse before backend start"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn fs_quick_fork_spends_one_admission_without_immediate_acceptance() {
     let (_env, _home) = host_with_ceiling(Default::default());
     let dir = tempfile::tempdir().expect("test directory");

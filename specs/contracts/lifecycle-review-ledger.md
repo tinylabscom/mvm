@@ -201,6 +201,34 @@ uncertain stop. They do not qualify a live HVF or Firecracker launch, Linux
 confinement, a billable GCP host, or the formal cold/warm performance
 requirements.
 
+## Booted filesystem quick-fork preparation
+
+The booted filesystem quick-fork source slice under
+[#5520](https://github.com/tinylabscom/mvm/issues/5520) keeps only source
+arguments, parent-derived resources and kernel selection, and UI in the CLI.
+`mvm-client` retains the authenticated `MaterializedFsQuickFork`, derives the
+only admissible child rootfs path, and owns child name, tenant and effective
+secret-binding equivalence, one operation-local nonce ledger, audit
+continuation and the fresh launch-scoped runtime evidence. Unbooted
+publication, full-VM fork, retained restore, warm and operator sources are
+unchanged.
+
+Hostd's private filesystem-fork source orders runtime attachment, one fresh
+selected-runtime verification and one admission, then spends the exact
+`AdmittedPlan` through the existing filesystem-fork dispatch. Plan JSON remains
+a projection. The materialized child rootfs is both source and instance path,
+so preparation cannot replace it. Existing fork finalization still adds no
+immediate grant acceptance or host-budget charge. A confirmed refusal retains
+artifact locations; an uncertain stop emits no clean success or terminal
+failure and leaves the materialized source and audit state for reconciliation.
+
+Focused source and mock tests cover preparation order, runtime and admitted
+child mismatch refusal, one-use dispatch, exact rootfs identity, unchanged
+grant/budget behavior, final-gate refusal and nonterminal uncertain-stop
+classification. They do not qualify a native Firecracker or HVF launch,
+strengthen ADR-001 claims, establish durable replay beyond the operation-local
+ledger, or satisfy the formal cold/warm performance requirements.
+
 ## Signed application HVF startup diagnostics
 
 Reviewed in [#5681](https://github.com/tinylabscom/mvm/pull/5681): standalone

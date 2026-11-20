@@ -7,9 +7,8 @@
 mod kernel;
 
 pub(super) use mvm_client::admission::{
-    AdmissionContext, AdmitPlanForBootParams, admit_plan_for_boot,
-    admit_plan_for_boot_syncing_beside_boot, admit_plan_for_boot_with_verified_retained,
-    admit_plan_for_boot_with_verified_runtime,
+    AdmissionContext, AdmitPlanForBootParams, admit_plan_for_boot_syncing_beside_boot,
+    admit_plan_for_boot_with_verified_retained,
     admit_plan_for_boot_with_verified_runtime_syncing_beside_boot,
     attach_guest_boot_config_for_plan, emit_failed, emit_launched, guest_profile_for_boot,
 };
@@ -23,5 +22,4 @@ pub(crate) use mvm_client::launch::runtime_source::{
     SdkSidecarAttachment, attach_runtime_overlay_if_cached_version_verified,
     attach_universal_initramfs_if_cached, attach_universal_initramfs_with_verified_release,
     emit_runtime_source_status, resolve_sdk_sidecar_attachment_for_host,
-    verify_release_runtime_set,
 };

@@ -67,7 +67,7 @@ pub fn prepare_cli_cold(
 /// A materialized filesystem child bound to its own fresh, one-use admission.
 /// This is not a transient run: its launch audit is written after backend
 /// start, while the fork does not add an immediate host budget charge.
-pub struct FsQuickBootAdmission(CliAdmission);
+pub(crate) struct FsQuickBootAdmission(CliAdmission);
 
 impl FsQuickBootAdmission {
     /// Bind the materialized child and refuse a plan that violates fork secret policy.
@@ -75,7 +75,7 @@ impl FsQuickBootAdmission {
     /// The expected rootfs is derived from the fork artifact, not caller input.
     /// # Errors
     /// Refuses a child plan that widens or drops secrets against the fork policy.
-    pub fn new(
+    pub(crate) fn new(
         context: AdmissionContext,
         child: &crate::checkpoint::fs_quick::MaterializedFsQuickFork,
         verified_runtime: Option<std::sync::Arc<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>>,
@@ -94,7 +94,7 @@ impl FsQuickBootAdmission {
     }
 
     /// Spend the admitted child through hostd, retaining the CLI's fork audit semantics.
-    pub fn start(
+    pub(crate) fn start(
         self,
         backend: &mvm_runtime::AnyBackend,
         config: mvm_core::vm_backend::VmStartConfig,
