@@ -24,10 +24,10 @@ pub const DEPLOYMENT_RECEIPT_VERSION: u8 = 1;
 pub const MAX_DEPLOYMENT_RECEIPT_BYTES: u64 = 64 * 1024;
 
 const RECEIPT_NAME: &str = "deployment-receipt.json";
-const COHORT_DOMAIN: &[u8] = b"mvm.hvf-owner.code-cohort.v1\0";
+pub(super) const COHORT_DOMAIN: &[u8] = b"mvm.hvf-owner.code-cohort.v1\0";
 const OWNER_COMPONENT: &str = "mvm-hvf-run-owner";
 const OWNER_BOOTSTRAP_PROTOCOL_VERSION: u8 = 1;
-const MAX_DEPLOYMENT_ID_BYTES: usize = 128;
+pub(super) const MAX_DEPLOYMENT_ID_BYTES: usize = 128;
 const MAX_ISSUER_BYTES: usize = 256;
 const MAX_EXECUTABLE_BYTES: usize = 1024;
 const MAX_REQUIREMENT_BYTES: usize = 4096;
@@ -66,39 +66,39 @@ pub struct ControlRootPinsV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProtectedRolePinsV1 {
-    authority: ProtectedRolePinV1,
-    runtime: ProtectedRolePinV1,
+    pub(super) authority: ProtectedRolePinV1,
+    pub(super) runtime: ProtectedRolePinV1,
 }
 
 /// One protected process identity and its immutable requirement source pin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProtectedRolePinV1 {
-    uid: u32,
-    gid: u32,
-    executable: String,
-    designated_requirement: String,
+    pub(super) uid: u32,
+    pub(super) gid: u32,
+    pub(super) executable: String,
+    pub(super) designated_requirement: String,
 }
 
 /// Domain-separated approval of the packaged owner component record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OwnerCodeCohortV1 {
-    digest: [u8; 32],
-    owner_component: OwnerComponentPinV1,
+    pub(super) digest: [u8; 32],
+    pub(super) owner_component: OwnerComponentPinV1,
 }
 
 /// Exact fields emitted by `owner-component.json` after final signing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OwnerComponentPinV1 {
-    schema_version: u8,
-    component: String,
-    sha256: String,
-    version: String,
-    target: String,
-    source_commit: String,
-    bootstrap_protocol_version: u8,
+    pub(super) schema_version: u8,
+    pub(super) component: String,
+    pub(super) sha256: String,
+    pub(super) version: String,
+    pub(super) target: String,
+    pub(super) source_commit: String,
+    pub(super) bootstrap_protocol_version: u8,
 }
 
 /// Validated immutable receipt loaded from a protected descriptor walk.
@@ -432,7 +432,7 @@ fn verifying_key(bytes: [u8; 32]) -> Result<VerifyingKey, HvfOwnerDeploymentRece
     Ok(key)
 }
 
-fn valid_role(role: &ProtectedRolePinV1) -> bool {
+pub(super) fn valid_role(role: &ProtectedRolePinV1) -> bool {
     role.uid != 0
         && role.gid != 0
         && valid_absolute_path(&role.executable)
@@ -451,7 +451,7 @@ fn valid_absolute_path(value: &str) -> bool {
             .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
 }
 
-fn valid_component(component: &OwnerComponentPinV1) -> bool {
+pub(super) fn valid_component(component: &OwnerComponentPinV1) -> bool {
     component.schema_version == 1
         && component.component == OWNER_COMPONENT
         && component.bootstrap_protocol_version == OWNER_BOOTSTRAP_PROTOCOL_VERSION
@@ -461,7 +461,7 @@ fn valid_component(component: &OwnerComponentPinV1) -> bool {
         && lowercase_hex(&component.source_commit, 40)
 }
 
-fn strict_label(value: &str, maximum: usize) -> bool {
+pub(super) fn strict_label(value: &str, maximum: usize) -> bool {
     !value.is_empty() && value.len() <= maximum && value.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
@@ -490,7 +490,7 @@ fn lowercase_hex(value: &str, length: usize) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn cohort_digest(component: &OwnerComponentPinV1) -> [u8; 32] {
+pub(super) fn cohort_digest(component: &OwnerComponentPinV1) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(COHORT_DOMAIN);
     // Serialization of this fully typed fixed-order v1 record is infallible.
