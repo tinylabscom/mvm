@@ -250,6 +250,9 @@ libkrun-live = ["libkrun-sys"]
 # Propagate the debug-only HVF warm-restore validation lane to the supervisor.
 hvf-live-validation = ["mvm-runtime/hvf-live-validation"]
 trusted-apfs = ["mvm-runtime/trusted-apfs"]
+# Exposes `seal_gate::test_support` to downstream test suites. Never enabled
+# by a production binary.
+test-support = []
 
 [lints]
 workspace = true

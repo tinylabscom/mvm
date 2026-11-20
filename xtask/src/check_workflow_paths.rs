@@ -2332,6 +2332,9 @@ mod tests {
                 "crates/mvm-runtime/",
                 "crates/mvm-backends/",
                 "crates/mvm-vmm/",
+                // Enabled only through mvm-client's and mvm-cli's
+                // dev-dependency, so their test lanes compile and run it.
+                "crates/mvm-hostd/src/seal_gate.rs",
                 "tests/audit_emissions_live.rs",
             ]
             .iter()
