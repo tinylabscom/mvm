@@ -161,17 +161,25 @@ Any populated source-preview v1 journal refuses as incompatible; it is never
 silently migrated to empty state. No production caller or commissioned provider
 used v1.
 
-This slice deliberately exposes no method that accepts a public `HvfInstance`
-and no durable `Bound` state: a serializable identity cannot establish original
-native custody. The later birth integration must move this reservation into an
-aggregate retaining the opaque `ColdHvfOwner`, derive the actual generation
-from that owner, and preserve it on every error before extending the journal.
-Publication failure, process death or loss of the live reservation leaves
-`Prepared` quarantined and returns no reusable capability.
+The journal exposes no method that accepts a public `HvfInstance`. Its one-way
+`Prepared -> Bound` transition borrows the opaque `ColdHvfOwner` retained by the
+authenticated cold channel and derives the actual generation internally. The
+channel permits this borrow only after activation and before dispatch. The
+returned receipt is non-serializable and is neither stop proof nor a native
+control capability. A retained observation, including `Bound`, cannot recreate
+the reservation, receipt or owner.
+
+Binding consumes the live reservation on every outcome. A failure returns only
+an uncertain quarantine marker while the caller continues to own the borrowed
+native owner. Publication uncertainty therefore cannot be retried by supplying
+an observed generation. Process death or loss of the live reservation leaves
+`Prepared` or `Bound` quarantined and returns no reusable capability. The
+source seam remains disconnected from the refusal-only owner executable and
+does not enable a positive factory.
 
 The source-only API also has no retirement operation. Later work may clear
 quarantine only from the original live owner after the complete terminal,
-cleanup and audit proof. Merely reading `Prepared` never proves a VM exists or
+cleanup and audit proof. Merely reading `Prepared` or `Bound` never proves a VM
 stopped.
 
 ## Process and authority

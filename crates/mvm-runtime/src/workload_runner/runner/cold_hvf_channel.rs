@@ -47,6 +47,10 @@ enum Phase {
     Uncertain,
 }
 
+fn can_borrow_original_owner(phase: Phase) -> bool {
+    phase == Phase::Activated
+}
+
 pub(super) struct ColdHvfPreparation {
     pub(super) launch: crate::kernel_custody::KernelBoundLaunch,
     pub(super) images: mvm_vmm::host::boot_images::FrozenBootImageBytes,
@@ -137,6 +141,22 @@ impl NativeCompletion {
 }
 
 impl ColdHvfChannel {
+    /// Borrow the actual original HVF owner after authenticated activation.
+    ///
+    /// The callback cannot retain or reconstruct native custody. This seam is
+    /// only for binding durable bookkeeping to the owner already held here.
+    pub fn with_original_hvf_owner<T>(
+        &mut self,
+        operation: impl FnOnce(&ColdHvfOwner) -> Result<T>,
+    ) -> Result<T> {
+        let custody = self.custody()?;
+        anyhow::ensure!(
+            can_borrow_original_owner(custody.phase),
+            "original HVF owner requires authenticated activation before dispatch"
+        );
+        operation(custody.native.as_ref().context("native owner missing")?)
+    }
+
     /// Transfer this controller's actor bootstrap only after authenticated activation.
     ///
     /// The caller must retain the resulting holder with this native owner and
@@ -799,6 +819,31 @@ mod tests {
         let mut empty = ColdHvfChannel { custody: None };
         assert!(empty.complete().is_err());
         assert!(empty.finalize_readonly_entrypoint().is_err());
+    }
+
+    #[test]
+    fn original_owner_borrow_refuses_without_retained_activated_custody() {
+        let mut empty = ColdHvfChannel { custody: None };
+        let called = std::cell::Cell::new(false);
+        assert!(
+            empty
+                .with_original_hvf_owner(|_| {
+                    called.set(true);
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(!called.get());
+        assert!(can_borrow_original_owner(Phase::Activated));
+        for phase in [
+            Phase::Prepared,
+            Phase::Dispatched(DispatchLane::Exec),
+            Phase::Dispatched(DispatchLane::Entrypoint),
+            Phase::Finalized(CompletionBarrier::FilesystemsSynced),
+            Phase::Uncertain,
+        ] {
+            assert!(!can_borrow_original_owner(phase));
+        }
     }
 
     #[test]

@@ -325,7 +325,7 @@ mod tests {
         assert!(matches!(
             fixture.signer.sign_admission(&fixture.request),
             Err(OwnerAdmissionSignError::Grant(
-                OwnerGrantStoreError::Conflict
+                OwnerGrantStoreError::ClockRegression
             ))
         ));
         fixture.clock.0.store(90, Ordering::SeqCst);
