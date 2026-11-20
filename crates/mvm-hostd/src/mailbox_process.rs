@@ -33,6 +33,7 @@ use std::sync::mpsc::sync_channel;
 use std::time::Duration;
 
 use mvm_contract::protocol::mailbox::{MAILBOX_PORT, MailboxGrant};
+use mvm_core::host_interface::ExecutionEpoch;
 use mvm_core::mailbox::journal::{FileJournalAnchor, JournalError, JournalLimits, MailboxJournal};
 use mvm_core::plan::{ExecutionPlan, Variant};
 use mvm_core::vm_backend::{HostDialRoute, VmId, VmStartConfig};
@@ -40,6 +41,9 @@ use mvm_runtime::backend::AnyBackend;
 use mvm_vmm::host::aux_bin::AuxBin;
 use mvm_vmm::host::flowmux_identity::{MAILBOX_READER_BOOT_FILE, MailboxReaderBootBinding};
 
+use crate::mailbox_commit::{
+    Coordinated, CoordinatorSocket, Destination, coordinate, require_reached,
+};
 use crate::mailbox_custody::RetainedMailboxKeys;
 use crate::mailbox_launch::{
     DerivedMailboxKeys, LAUNCH_LIMITS, derive_launch_keys, mint_epoch_secret, shred_epoch_secret,
@@ -88,6 +92,10 @@ pub struct MailboxProcessConfig {
     pub reader_boot: Option<MailboxReaderBootBinding>,
     /// The VM whose lifetime bounds this process.
     pub vm_state_dir: PathBuf,
+    /// The policy coordinator's socket. A production destination commits
+    /// through it, so containment and acceptance share one order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator: Option<PathBuf>,
 }
 
 /// Parse the stdin config.
@@ -149,6 +157,7 @@ fn serve_verified(config: MailboxProcessConfig) -> Result<()> {
         posture,
         reader_boot,
         vm_state_dir,
+        coordinator,
     } = config;
     let posture = posture.ok_or_else(|| {
         Error::new(
@@ -194,6 +203,7 @@ fn serve_verified(config: MailboxProcessConfig) -> Result<()> {
                 posture: Some(posture),
                 reader_boot,
                 vm_state_dir,
+                coordinator,
             },
             material,
         );
@@ -218,6 +228,7 @@ fn serve_verified(config: MailboxProcessConfig) -> Result<()> {
                 posture: Some(posture),
                 reader_boot,
                 vm_state_dir,
+                coordinator,
             },
         );
     }
@@ -370,6 +381,7 @@ fn serve_local(
         posture,
         reader_boot,
         vm_state_dir,
+        coordinator,
     } = config;
     let posture = posture.ok_or_else(|| {
         Error::new(
@@ -428,8 +440,34 @@ fn serve_local(
     let mut sealer = sealer.with_grant(&grant)?;
     mvm_core::private_fs::ensure_private_dir(&paths.source_intents).map_err(Error::other)?;
     sealer.intent_dir = Some(paths.source_intents);
-    let anchor = FileJournalAnchor::open(&paths.anchor, address, retained.anchor_key())
-        .map_err(Error::other)?;
+    let coordinator = coordinator.ok_or_else(|| {
+        Error::new(
+            ErrorKind::PermissionDenied,
+            "production mailbox has no policy coordinator to order its commits",
+        )
+    })?;
+    let (commit_key, _) =
+        mvm_core::crypto::ed25519_keypair::load_or_init(&paths.commit_key, &paths.commit_key_pub)
+            .map_err(Error::other)?;
+    // Built before the journal opens so a suffix the anchor has not yet seen
+    // is ordered by the same authority as a live commit.
+    let Coordinated {
+        anchor,
+        refused,
+        unknown,
+        enrolled,
+    } = coordinate(
+        FileJournalAnchor::open(&paths.anchor, address, retained.anchor_key())
+            .map_err(Error::other)?,
+        std::sync::Arc::new(CoordinatorSocket(coordinator)),
+        Destination {
+            id: paths.destination,
+            workload: plan.workload.0.clone(),
+            epoch: ExecutionEpoch(plan.execution_epoch),
+            key: commit_key,
+        },
+    )
+    .map_err(Error::other)?;
     let journal = MailboxJournal::open_local_with_custody(
         &paths.journal,
         retained.history_reference(),
@@ -440,6 +478,7 @@ fn serve_local(
         retention,
     )
     .map_err(Error::other)?;
+    require_reached(&anchor, &enrolled).map_err(Error::other)?;
     let reader = reader::load_or_enroll(
         &vm_state_dir,
         &grant,
@@ -457,21 +496,38 @@ fn serve_local(
     )?;
     service.install_guest_reader(reader)?;
     std::io::stdout().write_all(READY_MARKER)?;
-    while keep_serving(launcher, &vm_state_dir) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let still_ordered = || !refused.load(SeqCst) && !unknown.load(SeqCst);
+    let stop_if_unordered = || {
+        if refused.load(SeqCst) {
+            Err(Error::new(
+                ErrorKind::PermissionDenied,
+                "the workload ledger refused a mailbox commit",
+            ))
+        } else if unknown.load(SeqCst) {
+            Err(Error::other(
+                "a mailbox commit's outcome is unknown; restart reconciles it",
+            ))
+        } else {
+            Ok(())
+        }
+    };
+    while keep_serving(launcher, &vm_state_dir) && still_ordered() {
         if service
             .serve_guest_while(&route, &mut sealer, || {
-                keep_serving(launcher, &vm_state_dir)
+                keep_serving(launcher, &vm_state_dir) && still_ordered()
             })
             .is_err()
         {
             std::thread::sleep(POLL_INTERVAL);
         }
+        stop_if_unordered()?;
         match service.maintain_local() {
             Ok(()) | Err(JournalError::MaintenancePending) => {}
             Err(error) => return Err(Error::other(error)),
         }
     }
-    Ok(())
+    stop_if_unordered()
 }
 
 fn vm_is_alive(state_dir: &Path) -> bool {
@@ -505,6 +561,7 @@ pub fn build_config(
         posture: None,
         reader_boot: None,
         vm_state_dir: state_dir.to_path_buf(),
+        coordinator: None,
     })
 }
 
@@ -774,6 +831,11 @@ pub fn spawn_for_launch_owned(
                 address,
             )
             .map_err(Error::other)?;
+        }
+        if config.actor.is_none() && posture.variant() == Variant::Prod {
+            let home = PathBuf::from(mvm_core::config::mvm_home());
+            config.coordinator =
+                Some(crate::policy_generation::coordinator::ensure(&home).map_err(Error::other)?);
         }
         config.posture =
             Some(posture.handoff(config.reader_boot.as_ref().map(|binding| binding.boot)));
@@ -1293,6 +1355,7 @@ mod tests {
             posture: Some(MailboxLaunchPosture::for_test(&plan, Variant::Dev).handoff(None)),
             reader_boot: None,
             vm_state_dir: state_path,
+            coordinator: None,
             actor: None,
         };
         let socket = config.socket.clone();
@@ -1355,6 +1418,7 @@ mod tests {
             posture: Some(MailboxLaunchPosture::for_test(&plan, Variant::Dev).handoff(None)),
             reader_boot: None,
             vm_state_dir: state.path().to_path_buf(),
+            coordinator: None,
             actor: None,
         };
         let helper = std::thread::spawn(move || serve(config));
@@ -1480,6 +1544,8 @@ mod tests {
         listener
             .set_nonblocking(true)
             .expect("bounded guest accept");
+        let coordinator = crate::policy_generation::coordinator::serve_in_process(home.path())
+            .expect("coordinator for the destination");
         let socket = home.path().join("mailbox.sock");
         let restart_keys = keys.clone();
         let restart_binding = binding.clone();
@@ -1493,6 +1559,7 @@ mod tests {
             posture: Some(posture.handoff(Some(binding.boot))),
             reader_boot: Some(binding.clone()),
             vm_state_dir: state.path().to_path_buf(),
+            coordinator: None,
         };
         assert!(
             serve_verified(wrong_keys).is_err(),
@@ -1509,6 +1576,7 @@ mod tests {
             posture: Some(posture.handoff(Some(binding.boot))),
             reader_boot: Some(binding),
             vm_state_dir: state.path().to_path_buf(),
+            coordinator: Some(coordinator.clone()),
         };
         let (stopped_tx, stopped_rx) = sync_channel(1);
         let helper = std::thread::spawn(move || {
@@ -1649,8 +1717,25 @@ mod tests {
             .expect("helper stopped after VM state moved");
         helper.join().expect("helper task").expect("clean stop");
         std::fs::rename(&parked, &state_path).expect("restore same VM identity");
-        let anchor = FileJournalAnchor::open(&paths.anchor, address, retained.anchor_key())
-            .expect("held local anchor");
+        // Every production commit goes through the ledger's owner, a
+        // compaction between restarts included.
+        let (commit_key, _) = mvm_core::crypto::ed25519_keypair::load_or_init(
+            &paths.commit_key,
+            &paths.commit_key_pub,
+        )
+        .expect("commit key");
+        let Coordinated { anchor, .. } = coordinate(
+            FileJournalAnchor::open(&paths.anchor, address, retained.anchor_key())
+                .expect("held local anchor"),
+            std::sync::Arc::new(CoordinatorSocket(coordinator.clone())),
+            Destination {
+                id: paths.destination.clone(),
+                workload: plan.workload.0.clone(),
+                epoch: ExecutionEpoch(plan.execution_epoch),
+                key: commit_key,
+            },
+        )
+        .expect("coordinated anchor");
         let mut journal = MailboxJournal::open_local_with_custody(
             &paths.journal,
             retained.history_reference(),
@@ -1684,6 +1769,7 @@ mod tests {
             posture: Some(posture.handoff(Some(restart_binding.boot))),
             reader_boot: Some(restart_binding),
             vm_state_dir: state_path,
+            coordinator: Some(coordinator.clone()),
         };
         let (restarted_tx, restarted_rx) = sync_channel(1);
         let restarted = std::thread::spawn(move || {
@@ -1854,6 +1940,7 @@ mod tests {
             posture: None,
             reader_boot: None,
             vm_state_dir: state.path().to_path_buf(),
+            coordinator: None,
             actor: None,
         };
         assert_eq!(serve(config), 1);
@@ -1888,6 +1975,7 @@ mod tests {
             posture: Some(MailboxLaunchPosture::for_test(&plan, Variant::Prod).handoff(None)),
             reader_boot: None,
             vm_state_dir,
+            coordinator: None,
             actor: None,
         };
         let error = serve_verified(config).expect_err("no signed guest boot");
