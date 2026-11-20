@@ -17,6 +17,15 @@ pub(crate) fn map_status(s: &VmStatus) -> MachineStatus {
     }
 }
 
+/// A paused Firecracker VMM is still a live process, so the backend reports it
+/// running; the registry's `paused` flag is what records the pause.
+fn observed_status(s: &VmStatus, reg: Option<&VmRegistration>) -> MachineStatus {
+    match (map_status(s), reg) {
+        (MachineStatus::Running, Some(r)) if r.paused => MachineStatus::Paused,
+        (status, _) => status,
+    }
+}
+
 /// The detail behind a non-happy status — currently the failure reason, which
 /// rides on [`MachineState::status_detail`] because [`MachineStatus::Failed`]
 /// is a unit variant.
@@ -47,7 +56,7 @@ pub(super) fn to_state(info: VmInfo, reg: Option<&VmRegistration>) -> MachineSta
     let backend = resolve_backend_name(&info.name);
     MachineState {
         id: MachineId(info.id.0),
-        status: map_status(&info.status),
+        status: observed_status(&info.status, reg),
         status_detail: status_detail(&info.status),
         backend,
         guest_ip: info.guest_ip,
@@ -134,6 +143,34 @@ mod tests {
                 reason: "boom".into()
             }),
             MachineStatus::Failed
+        );
+    }
+
+    #[test]
+    fn a_running_vmm_the_registry_records_as_paused_reports_paused() {
+        use mvm_runtime::vm::name_registry::RegisterParams;
+        let mut registry = VmNameRegistry::default();
+        registry
+            .register(RegisterParams::minimal("web", "/tmp/vms/web", "default"))
+            .unwrap();
+        let live = registry.lookup("web").unwrap().clone();
+        registry.set_paused("web", true).unwrap();
+        let paused = registry.lookup("web").unwrap().clone();
+        assert_eq!(
+            observed_status(&VmStatus::Running, Some(&paused)),
+            MachineStatus::Paused
+        );
+        assert_eq!(
+            observed_status(&VmStatus::Running, Some(&live)),
+            MachineStatus::Running
+        );
+        assert_eq!(
+            observed_status(&VmStatus::Stopped, Some(&paused)),
+            MachineStatus::Stopped
+        );
+        assert_eq!(
+            observed_status(&VmStatus::Running, None),
+            MachineStatus::Running
         );
     }
 
