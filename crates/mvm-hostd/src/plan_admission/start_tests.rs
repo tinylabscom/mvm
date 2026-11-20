@@ -762,7 +762,7 @@ fn persistent_boundary_admission(
     backend: &mvm_runtime::AnyBackend,
     keys: &std::path::Path,
     audit: &std::path::Path,
-) -> PersistentAdmission<()> {
+) -> LaunchAdmission<()> {
     let admitted = admit_for_run(
         &fixture_input(name),
         &SystemClock,
@@ -777,7 +777,7 @@ fn persistent_boundary_admission(
         audit,
     )
     .expect("audit emitter");
-    PersistentAdmission {
+    LaunchAdmission {
         admitted,
         emitter,
         policy_bundle: None,
@@ -838,6 +838,73 @@ fn persistent_boundary_verifies_then_admits_then_dispatches_once() {
 }
 
 #[test]
+fn cli_cold_preparation_orders_attach_and_admission_without_starting_backend() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let keys = tempfile::tempdir().expect("keys");
+    let audit = tempfile::tempdir().expect("audit");
+    let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+    let name = "cli-cold-preparation-order";
+    let events = std::cell::RefCell::new(Vec::new());
+
+    let prepared = prepare_cli_cold(
+        PrepareCliColdParams {
+            backend: &backend,
+            config: VmStartConfig {
+                name: name.into(),
+                rootfs_path: "/store/rootfs.ext4".into(),
+                ..Default::default()
+            },
+        },
+        |_| {
+            events.borrow_mut().push("attach");
+            Ok(None)
+        },
+        |_, runtime| {
+            assert!(runtime.is_none(), "fixture has no selected release runtime");
+            events.borrow_mut().push("admit");
+            let admission =
+                persistent_boundary_admission(name, &backend, keys.path(), audit.path());
+            crate::audit::durability::record_admission(
+                Some(&admission.emitter),
+                admission.admitted.plan(),
+                admission.admitted.signer_id(),
+                crate::audit::durability::AuditDurability::BestEffort,
+            )
+            .expect("durable admission record");
+            Ok(admission)
+        },
+    )
+    .expect("prepare CLI cold");
+
+    assert_eq!(*events.borrow(), ["attach", "admit"]);
+    assert!(!matches!(
+        backend.status(&VmId(name.into())),
+        Ok(mvm_core::vm_backend::VmStatus::Running)
+    ));
+    let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).expect("audit chain");
+    assert_eq!(chain.matches("plan.admitted").count(), 1, "{chain}");
+    assert!(!chain.contains("plan.launched"), "{chain}");
+
+    let prepared_plan_id = prepared.plan().plan_id.clone();
+    let (dispatched, started) = start_prepared_cli_cold(prepared, &backend, Vec::new());
+    assert_eq!(started.expect("dispatch prepared CLI cold").0, name);
+    let (plan, _emitter, ()) = dispatched.into_parts();
+    assert_eq!(plan.plan_id, prepared_plan_id);
+    let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).expect("audit chain");
+    assert_eq!(chain.matches("plan.admitted").count(), 1, "{chain}");
+    assert!(!chain.contains("plan.launched"), "{chain}");
+    assert!(
+        !mvm_core::config::vm_state_dir(name)
+            .join("admitted-charge.json")
+            .exists(),
+        "CLI cold does not acquire persistent budget hooks"
+    );
+    backend
+        .stop(&VmId(name.into()))
+        .expect("stop prepared CLI cold fixture");
+}
+
+#[test]
 fn persistent_boundary_lock_mismatch_refuses_before_attachment_or_admission() {
     let (_env, _home) = host_with_ceiling(Default::default());
     let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
@@ -859,7 +926,7 @@ fn persistent_boundary_lock_mismatch_refuses_before_attachment_or_admission() {
             reached.set(true);
             Ok(None)
         },
-        |_, _| -> anyhow::Result<PersistentAdmission<()>> {
+        |_, _| -> anyhow::Result<LaunchAdmission<()>> {
             reached.set(true);
             anyhow::bail!("admission must not run")
         },
@@ -918,7 +985,7 @@ fn persistent_boundary_runtime_tampering_refuses_before_admission() {
             lifecycle: &lifecycle,
         },
         |_| Ok(None),
-        |_, _| -> anyhow::Result<PersistentAdmission<()>> {
+        |_, _| -> anyhow::Result<LaunchAdmission<()>> {
             admitted.set(true);
             anyhow::bail!("admission must not run")
         },
@@ -954,7 +1021,7 @@ fn persistent_boundary_required_audit_failure_refuses_before_dispatch() {
             lifecycle: &lifecycle,
         },
         |_| Ok(None),
-        |_, _| -> anyhow::Result<PersistentAdmission<()>> {
+        |_, _| -> anyhow::Result<LaunchAdmission<()>> {
             anyhow::bail!("required audit sync refused")
         },
     ) {

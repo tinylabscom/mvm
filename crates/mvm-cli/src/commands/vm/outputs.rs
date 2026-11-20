@@ -200,8 +200,9 @@ impl PreparedOutputs {
                 && mvm_client::admission::cli_start_failure_kind(error)
                     == Some(mvm_client::admission::CliStartFailureKind::UncertainStop)
                 && let Some(owner) = admitted.borrow().as_ref()
+                && let Some(audit) = owner.audit_continuation()
             {
-                owner.audit_continuation().record_uncertain_stop(error);
+                audit.record_uncertain_stop(error);
             }
             return result;
         }

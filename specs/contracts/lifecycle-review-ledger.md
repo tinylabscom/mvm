@@ -126,6 +126,35 @@ durability refusal, lock mismatch and uncertain lease retention. They do not
 qualify Linux Firecracker, a billable GCP host, or the formal cold/warm
 performance requirements.
 
+## CLI transient cold preparation ownership
+
+The next [#5520](https://github.com/tinylabscom/mvm/issues/5520) source slice
+prepares admitted CLI cold authority in hostd before warm/template/cold
+selection. Hostd orders runtime attachment, one launch-scoped selected-runtime
+verification and one signed admission with its durability obligation, without
+starting a backend. The existing Required-tier sync may overlap selection and
+isolated guest initialization, but the retained config still blocks warm claim,
+non-activation boot or workload activation until that sync succeeds. The opaque
+capability retains the exact lowered config, policy, runtime evidence, admitted
+plan and immutable audit continuation; serialized plan JSON remains a
+projection only.
+
+Warm claim and cold dispatch consume the same one-shot authority. A lost warm
+reservation returns that exact unspent capability, while warm success or a
+terminal refusal returns only the audit continuation. Writable image locks stay
+with the CLI until cold is selected, then transfer once through the existing
+CLI-transient finalization. Confirmed teardown permits the deferred launch,
+posture, exit and seal narrative. Uncertain stop retains runtime, scratch and
+writable-image custody and leaves the session unsealed. Planless warm parents
+and template snapshots remain explicit, non-migrated alternatives.
+
+Mock-backed tests cover preparation order with zero starts, one signed
+admission, deferred launch audit, absent persistent budget hooks and
+uncertain-stop retention. Existing runner tests cover Required-sync refusal
+before activation or non-activation boot; the wrapper has no new live-backend
+witness. These tests do not qualify native HVF or Firecracker behavior or the
+formal cold/warm performance requirements.
+
 ## Signed application HVF startup diagnostics
 
 Reviewed in [#5681](https://github.com/tinylabscom/mvm/pull/5681): standalone
