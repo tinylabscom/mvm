@@ -357,13 +357,19 @@ pub fn load_strict(override_dir: Option<&Path>) -> Result<MvmConfig> {
 }
 
 /// Save `MvmConfig` to `<mvm_config_dir>/config.toml` (or `override_dir/config.toml` in tests).
+///
+/// The directory is 0700 and the file 0600 whatever the umask: the admission
+/// path reads this file through a reader that refuses a group- or
+/// other-writable one, so a umask-derived mode would refuse our own launch.
+/// Saving replaces the file, so it also narrows a copy an older build left
+/// wider.
 pub fn save(cfg: &MvmConfig, override_dir: Option<&Path>) -> Result<()> {
     let dir = config_dir(override_dir);
-    std::fs::create_dir_all(&dir)
+    crate::config::create_private_dir(&dir)
         .with_context(|| format!("Failed to create config directory: {}", dir.display()))?;
     let path = config_path_at(&dir);
     let text = toml::to_string_pretty(cfg).context("Failed to serialize config")?;
-    std::fs::write(&path, text)
+    crate::atomic_io::write_private(&path, text.as_bytes())
         .with_context(|| format!("Failed to write config to {}", path.display()))
 }
 

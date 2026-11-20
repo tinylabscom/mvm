@@ -1054,7 +1054,10 @@ fn run() -> anyhow::Result<()> {
         "cannot establish original workload process identity"
     );
     mvm_core::launch_trace::lap("pid_identity");
-    std::fs::write(&cfg.pid_file, record.render()).context("publish protected supervisor PID")?;
+    // Explicitly 0600: host admission refuses a group-writable pid marker, and a
+    // plain write would take its mode from the umask.
+    mvm_core::atomic_io::write_private_ephemeral(&cfg.pid_file, record.render().as_bytes())
+        .context("publish protected supervisor PID")?;
     mvm_core::launch_trace::lap("pid_file_write");
     diagnostics.stage(StartupStage::PidPublished);
     drop(diagnostics);
