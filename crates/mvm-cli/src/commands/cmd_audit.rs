@@ -324,6 +324,7 @@ mod tests {
     fn the_active_file_signer_is_scoped_to_the_command_and_directory() {
         use mvm_client::audit::chain::active_signer::active_signer_for;
 
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         let other = tempfile::tempdir().unwrap();
         let signer = Arc::new(

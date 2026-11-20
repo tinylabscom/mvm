@@ -240,6 +240,24 @@ impl Default for Latencies {
     }
 }
 
+/// Idle wakeups of one thread name within one host component, from the run's
+/// largest wave. Attribution for finding a wakeup source, not a compared
+/// figure: a thread name is not stable across versions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThreadWakeups {
+    pub component: String,
+    pub thread: String,
+    /// Threads of that name across every process of the component.
+    pub threads: u64,
+    /// Summed over those threads.
+    pub per_second: f64,
+    /// `per_second` less the zero-unit wave's rate for the same thread name,
+    /// divided by the wave's units. Negative when a fixed host thread happened
+    /// to wake less during the wave than during the baseline.
+    pub per_unit_per_second: f64,
+}
+
 /// Everything reported for one (backend, architecture) pair.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -253,6 +271,10 @@ pub struct Section {
     pub by_residency: ResidencyCosts,
     pub by_standby: StandbyCosts,
     pub latencies: Latencies,
+    /// Absent where the sampler has no per-thread counter (macOS) and in
+    /// reports written before the field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub thread_wakeups: Vec<ThreadWakeups>,
 }
 
 impl Section {
@@ -273,6 +295,7 @@ impl Section {
             by_residency: ResidencyCosts::unmeasured(wakeups),
             by_standby: StandbyCosts::unmeasured(wakeups),
             latencies: Latencies::default(),
+            thread_wakeups: Vec::new(),
         }
     }
 }
@@ -361,6 +384,27 @@ fn latency_row(name: &str, f: &Figure<SpanStats>) -> String {
     }
 }
 
+/// Busiest thread first, by its per-unit rate.
+fn render_threads(out: &mut String, s: &Section) {
+    if s.thread_wakeups.is_empty() {
+        return;
+    }
+    let mut rows: Vec<&ThreadWakeups> = s.thread_wakeups.iter().collect();
+    rows.sort_by(|a, b| b.per_unit_per_second.total_cmp(&a.per_unit_per_second));
+    out.push_str(&format!(
+        "\nIdle wakeups by thread, largest wave ({}):\n\n",
+        s.fixed_host_cost.wakeups.quantity.label()
+    ));
+    out.push_str("| Component | Thread | Threads | Wakeups per second | Per unit |\n");
+    out.push_str("| --- | --- | --- | --- | --- |\n");
+    for t in rows {
+        out.push_str(&format!(
+            "| {} | {} | {} | {:.2} | {:.2} |\n",
+            t.component, t.thread, t.threads, t.per_second, t.per_unit_per_second
+        ));
+    }
+}
+
 fn render_section(out: &mut String, s: &Section) {
     out.push_str(&format!("### {} / {}\n\n", s.backend, s.architecture));
 
@@ -395,6 +439,7 @@ fn render_section(out: &mut String, s: &Section) {
         &s.by_standby.resident,
     ));
     out.push_str(&unit_row("standby on-disk snapshot", &s.by_standby.warm));
+    render_threads(out, s);
 
     let l = &s.latencies;
     out.push_str("\nLatency (ms):\n\n");
@@ -606,6 +651,31 @@ mod tests {
         assert!(md.contains("Source commit: `abc123`.") && !md.contains("modified"));
         report.source = None;
         assert!(render_markdown(&report).contains("Source commit: not recorded."));
+    }
+
+    #[test]
+    fn thread_rows_render_busiest_first_and_are_omitted_when_absent() {
+        let mut section = empty_section();
+        assert!(!render_markdown(&report_with(section.clone())).contains("by thread"));
+        let row = |thread: &str, per_unit: f64| ThreadWakeups {
+            component: "firecracker".into(),
+            thread: thread.into(),
+            threads: 2,
+            per_second: per_unit * 2.0,
+            per_unit_per_second: per_unit,
+        };
+        section.thread_wakeups = vec![row("fc_api", 0.5), row("fc_vcpu 0", 60.0)];
+        let md = render_markdown(&report_with(section.clone()));
+        let vcpu = md
+            .find("| firecracker | fc_vcpu 0 | 2 | 120.00 | 60.00 |")
+            .unwrap();
+        let api = md
+            .find("| firecracker | fc_api | 2 | 1.00 | 0.50 |")
+            .unwrap();
+        assert!(vcpu < api, "{md}");
+        let back: Section =
+            serde_json::from_value(serde_json::to_value(&section).unwrap()).unwrap();
+        assert_eq!(back, section);
     }
 
     #[test]

@@ -10,10 +10,11 @@ pub use mvm_hostd::policy_generation::{GENERATION_ASSET_PREFIX, ProjectPolicyCan
 /// Report the coordinator a systemd user manager runs for this MVM home.
 ///
 /// Unlike [`ensure`], this never spawns one: a unit that is absent, stopped
-/// or unverifiable is a refusal. The exchange with the coordinator is bounded
-/// per read and per write (five seconds each), not five seconds in total. A
-/// report is identity only — not readiness,
-/// current authority, or permission to commit.
+/// or unverifiable is a refusal. Native manager queries and the coordinator
+/// socket exchange share one five-second IPC budget, not a fresh timeout per
+/// partial read or write. No subprocess is launched and no dormant unit is
+/// loaded to inspect it. A report is identity only — not readiness, current
+/// authority, or permission to commit.
 ///
 /// # Errors
 ///

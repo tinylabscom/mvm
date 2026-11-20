@@ -15,8 +15,14 @@ use serde_json::Value;
 /// as observed but never compared (max and p99 are single-sample noise).
 const COMPARED_STATS: [&str; 2] = ["p50", "p95"];
 
-/// Section fields that are labels rather than figure groups.
-const SECTION_SCALARS: [&str; 3] = ["backend", "architecture", "memory_quantity"];
+/// Section fields that are not figure groups: labels, and the per-thread
+/// wakeup attribution, whose thread names are not stable enough to compare.
+const SECTION_SCALARS: [&str; 4] = [
+    "backend",
+    "architecture",
+    "memory_quantity",
+    "thread_wakeups",
+];
 
 /// What a section's memory figures mean when it predates the label.
 const DEFAULT_MEMORY_QUANTITY: &str = "physical_footprint";

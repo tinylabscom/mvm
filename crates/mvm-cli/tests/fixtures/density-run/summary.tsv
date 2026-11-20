@@ -11,6 +11,8 @@ wave_0_idle_mvm-host-agent_threads	3
 wave_0_idle_mvm-host-agent_descriptors	9
 wave_0_idle_mvm-host-agent_cpu_millicores	10.0
 wave_0_idle_mvm-host-agent_wakeups_per_second	5.0
+wave_0_thread_mvm-host-agent_main_threads	1
+wave_0_thread_mvm-host-agent_main_wakeups_per_second	2.0
 wave_1_vmm_processes	1
 wave_1_vm_state_du_kib	1024
 wave_1_runtime_evidence_du_kib	0
@@ -31,3 +33,9 @@ wave_2_idle_mvm-hvf-supervisor_cpu_millicores	6.0
 wave_2_idle_mvm-hvf-supervisor_wakeups_per_second	4.0
 wave_2_idle_mvm-host-agent_cpu_millicores	12.0
 wave_2_idle_mvm-host-agent_wakeups_per_second	6.0
+wave_2_thread_mvm-hvf-supervisor_vcpu_0_threads	2
+wave_2_thread_mvm-hvf-supervisor_vcpu_0_wakeups_per_second	3.0
+wave_2_thread_mvm-hvf-supervisor_run_threads	2
+wave_2_thread_mvm-hvf-supervisor_run_wakeups_per_second	1.0
+wave_2_thread_mvm-host-agent_main_threads	1
+wave_2_thread_mvm-host-agent_main_wakeups_per_second	3.0

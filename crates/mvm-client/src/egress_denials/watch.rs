@@ -157,15 +157,46 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use mvm_hostd::supervisor::audit::audit_recorder::{EventCategory, Recorder};
 
-    /// Write real chain-signed entries through the recorder the endpoint
-    /// uses, as the endpoint would for machine `vm`.
-    fn endpoint_recorder(dir: &std::path::Path, vm: &str) -> Recorder {
-        let signer = mvm_hostd::supervisor::audit::audit_file::FileAuditSigner::open(
-            SigningKey::from_bytes(&[9; 32]),
-            dir.to_path_buf(),
-        )
-        .unwrap();
-        Recorder::new(Arc::new(signer), mvm_core::plan::TenantId("local".into())).with_vm_name(vm)
+    struct WatchFixture {
+        watch: Option<DenialWatch>,
+        dir: tempfile::TempDir,
+        // Restore the environment only after the watch has joined and its directory is gone.
+        _env: mvm_core::util::test_env::TestEnv,
+    }
+
+    impl WatchFixture {
+        fn new() -> Self {
+            let env = mvm_core::util::test_env::TestEnv::new();
+            Self {
+                watch: None,
+                dir: tempfile::tempdir().unwrap(),
+                _env: env,
+            }
+        }
+
+        /// Callers keep recorders in later locals so they drop before this fixture.
+        fn endpoint_recorder(&self, vm: &str) -> Recorder {
+            let signer = mvm_hostd::supervisor::audit::audit_file::FileAuditSigner::open(
+                SigningKey::from_bytes(&[9; 32]),
+                self.dir.path().to_path_buf(),
+            )
+            .unwrap();
+            Recorder::new(Arc::new(signer), mvm_core::plan::TenantId("local".into()))
+                .with_vm_name(vm)
+        }
+
+        fn finish(&mut self) -> DenialTally {
+            self.watch.take().expect("fixture watch started").finish()
+        }
+    }
+
+    impl Drop for WatchFixture {
+        fn drop(&mut self) {
+            // DenialWatch::drop only signals stop; join even when a test unwinds.
+            if let Some(watch) = self.watch.take() {
+                watch.finish();
+            }
+        }
     }
 
     fn deny(recorder: &Recorder, target: &str, reason: &str) {
@@ -201,24 +232,24 @@ mod tests {
     /// started is counted.
     #[test]
     fn a_watch_prints_each_distinct_refusal_of_its_machine_once_and_counts_all() {
-        let dir = tempfile::tempdir().unwrap();
-        let watched = endpoint_recorder(dir.path(), "vm-a");
-        let other = endpoint_recorder(dir.path(), "vm-b");
+        let mut fixture = WatchFixture::new();
+        let watched = fixture.endpoint_recorder("vm-a");
+        let other = fixture.endpoint_recorder("vm-b");
         deny(&watched, "stale.example:443", "policy_denied");
 
         let sink = Arc::new(Captured::default());
-        let watch = DenialWatch::start(WatchTarget {
-            chain: dir.path().join("local.jsonl"),
+        fixture.watch = Some(DenialWatch::start(WatchTarget {
+            chain: fixture.dir.path().join("local.jsonl"),
             vm_name: "vm-a".into(),
             live: Live::Notices,
             sink: Arc::clone(&sink) as Arc<dyn NoticeSink>,
-        });
+        }));
         deny(&watched, "api.example.com:443", "policy_denied");
         deny(&other, "other.example:443", "policy_denied");
         deny(&watched, "api.example.com:443", "policy_denied");
         deny(&watched, "169.254.169.254:80", "policy_denied");
         wait_for(&sink, 2);
-        let tally = watch.finish();
+        let tally = fixture.finish();
 
         assert_eq!(
             sink.lines(),
@@ -238,17 +269,17 @@ mod tests {
 
     #[test]
     fn a_quiet_watch_counts_without_printing() {
-        let dir = tempfile::tempdir().unwrap();
-        let watched = endpoint_recorder(dir.path(), "vm-a");
+        let mut fixture = WatchFixture::new();
+        let watched = fixture.endpoint_recorder("vm-a");
         let sink = Arc::new(Captured::default());
-        let watch = DenialWatch::start(WatchTarget {
-            chain: dir.path().join("local.jsonl"),
+        fixture.watch = Some(DenialWatch::start(WatchTarget {
+            chain: fixture.dir.path().join("local.jsonl"),
             vm_name: "vm-a".into(),
             live: Live::Quiet,
             sink: Arc::clone(&sink) as Arc<dyn NoticeSink>,
-        });
+        }));
         deny(&watched, "api.example.com:443", "policy_denied");
-        let tally = watch.finish();
+        let tally = fixture.finish();
         assert!(sink.lines().is_empty());
         assert_eq!(tally.destinations().len(), 1);
     }
@@ -257,16 +288,43 @@ mod tests {
     /// finished still count: the last poll runs after the stop request.
     #[test]
     fn finishing_reads_what_was_recorded_just_before_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let watched = endpoint_recorder(dir.path(), "vm-a");
-        let watch = DenialWatch::start(WatchTarget {
-            chain: dir.path().join("local.jsonl"),
+        let mut fixture = WatchFixture::new();
+        let watched = fixture.endpoint_recorder("vm-a");
+        fixture.watch = Some(DenialWatch::start(WatchTarget {
+            chain: fixture.dir.path().join("local.jsonl"),
             vm_name: "vm-a".into(),
             live: Live::Quiet,
             sink: Arc::new(Captured::default()),
-        });
+        }));
         deny(&watched, "late.example:443", "policy_denied");
-        let tally = watch.finish();
+        let tally = fixture.finish();
         assert_eq!(tally.destinations()[0].destination, "late.example:443");
+    }
+
+    #[test]
+    fn dropping_fixture_joins_watch_before_restoring_home() {
+        mvm_core::util::test_env::isolated_env_probe(|| {
+            let previous_home = std::env::var_os("MVM_HOME");
+            let sink = Arc::new(Captured::default());
+            let fixture_home;
+            {
+                let mut fixture = WatchFixture::new();
+                fixture_home = std::path::PathBuf::from(mvm_core::config::mvm_home());
+                assert_ne!(Some(fixture_home.as_os_str()), previous_home.as_deref());
+                assert!(fixture_home.is_dir());
+                let watched = fixture.endpoint_recorder("vm-a");
+                fixture.watch = Some(DenialWatch::start(WatchTarget {
+                    chain: fixture.dir.path().join("local.jsonl"),
+                    vm_name: "vm-a".into(),
+                    live: Live::Notices,
+                    sink: Arc::clone(&sink) as Arc<dyn NoticeSink>,
+                }));
+                deny(&watched, "late.example:443", "policy_denied");
+            }
+            assert_eq!(sink.lines().len(), 1);
+            assert_eq!(Arc::strong_count(&sink), 1, "watch released its target");
+            assert_eq!(std::env::var_os("MVM_HOME"), previous_home);
+            assert!(!fixture_home.exists());
+        });
     }
 }

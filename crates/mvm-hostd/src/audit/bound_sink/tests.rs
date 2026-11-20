@@ -354,7 +354,7 @@ fn repeated_write_errors_remain_counted_and_recovery_preserves_incomplete_eviden
 fn an_unwritable_journal_marks_the_epoch_before_returning_the_error() {
     use std::os::unix::fs::PermissionsExt;
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::audit::test_fixtures::AuditDir::new();
     let runtime = runtime();
     let journal = dir.path().join("audit.jsonl");
     let key = ed25519_dalek::SigningKey::from_bytes(&[11; 32]);

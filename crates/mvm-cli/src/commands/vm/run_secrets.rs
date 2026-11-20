@@ -95,6 +95,7 @@ mod tests {
 
     #[test]
     fn a_manifest_edit_after_policy_resolution_cannot_widen_secret_destinations() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let project = tempfile::tempdir().unwrap();
         let path = project.path().join("mvm.toml");
         std::fs::write(
@@ -121,6 +122,7 @@ mod tests {
 
     #[test]
     fn a_new_manifest_after_policy_resolution_cannot_declare_secrets() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let project = tempfile::tempdir().unwrap();
         let mut args = RunArgs {
             flake: Some(project.path().display().to_string()),

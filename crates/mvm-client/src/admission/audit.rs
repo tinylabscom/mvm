@@ -685,6 +685,7 @@ disabled_inspectors = ["ssrf_guarrd"]
 
     #[test]
     fn admission_fails_when_policy_bundle_has_bad_l4_cidr() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         // A bundle that parses through TOML but carries an
         // unparseable `dst_cidr` must fail admission with
         // `policy-l4-spec-invalid`. Same hermetic shape as the

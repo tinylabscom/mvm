@@ -478,8 +478,8 @@ mod tests {
     use crate::supervisor::endpoint::flowmux::registry::RegistryLimits;
     use crate::supervisor::endpoint::flowmux::tests::{
         fresh_keys, gate_allowing_addr, gate_pinning_name, local_test_ip, read_flowmux_frame,
-        recorder_at, run_session, run_session_from, run_session_on_runtime, run_session_with,
-        tcp_echo_server, write_frame,
+        recorder_at, run_owned_session_on_runtime, run_session, run_session_from,
+        run_session_on_runtime, run_session_with, tcp_echo_server, write_frame,
     };
     use crate::supervisor::endpoint::flowmux::{FlowMuxAccept, FlowMuxVmResources};
 
@@ -616,6 +616,7 @@ mod tests {
     /// flake's fetcher is as able to aim at the host's LAN as any workload.
     #[test]
     fn builder_egress_refuses_private_ranges_and_metadata_and_audits_both() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         const PRIVATE: &str = "10.255.0.1:80";
         const METADATA: &str = "169.254.169.254:80";
         let dir = tempfile::tempdir().expect("tempdir");
@@ -625,7 +626,7 @@ mod tests {
             &mvm_build::builder_vm_transport::builder_egress_policy(),
         );
         let (mut guest, mut guest_session, host) =
-            run_session_on_runtime(move |id, key, anchor, limits| {
+            run_owned_session_on_runtime(move |id, key, anchor, limits| {
                 FlowMuxAccept::new(id, key, anchor, limits, gate)
                     .with_audit_sink(RecorderSink::wrap(recorder))
             });
@@ -675,6 +676,7 @@ mod tests {
     /// chain-verified denial rather than an allow in the audit log.
     #[test]
     fn a_flow_no_rule_admits_is_refused_and_audited_under_the_default_policy() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         const TARGET: &str = "example.com:443";
         let dir = tempfile::tempdir().expect("tempdir");
         let audit_path = dir.path().join("audit.jsonl");
@@ -683,7 +685,7 @@ mod tests {
             &mvm_core::policy::network_policy::NetworkPolicy::default(),
         );
         let (mut guest, mut guest_session, host) =
-            run_session_on_runtime(move |id, key, anchor, limits| {
+            run_owned_session_on_runtime(move |id, key, anchor, limits| {
                 FlowMuxAccept::new(id, key, anchor, limits, gate)
                     .with_audit_sink(RecorderSink::wrap(recorder))
             });
@@ -905,6 +907,7 @@ mod tests {
     /// record. The audit entry then has to say so.
     #[test]
     fn a_bound_connect_is_terminated_on_the_host_rather_than_dialed() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         const NAME: &str = "api.terminated.test";
         let dir = tempfile::tempdir().expect("tempdir");
         let audit_path = dir.path().join("audit.jsonl");
@@ -913,7 +916,7 @@ mod tests {
         let gate = gate_pinning_name(NAME, local_test_ip(), 443);
 
         let (mut guest, mut guest_session, host) =
-            run_session_on_runtime(move |id, key, anchor, limits| {
+            run_owned_session_on_runtime(move |id, key, anchor, limits| {
                 FlowMuxAccept::new(id, key, anchor, limits, gate)
                     .with_substitution(Some(service))
                     .with_audit_sink(RecorderSink::wrap(recorder))
@@ -977,6 +980,7 @@ mod tests {
     /// The open alone is enough: the proxy attribution is written with the
     /// `host.flow.allowed` entry at open, before any request arrives.
     fn terminated_flow_chain(proxy: Option<mvm_http::ProxyConfig>) -> String {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         const NAME: &str = "api.terminated.test";
         let dir = tempfile::tempdir().expect("tempdir");
         let audit_path = dir.path().join("audit.jsonl");
@@ -990,7 +994,7 @@ mod tests {
         );
         let gate = gate_pinning_name(NAME, local_test_ip(), 443);
         let (mut guest, mut guest_session, host) =
-            run_session_on_runtime(move |id, key, anchor, limits| {
+            run_owned_session_on_runtime(move |id, key, anchor, limits| {
                 FlowMuxAccept::new(id, key, anchor, limits, gate)
                     .with_substitution(Some(service))
                     .with_audit_sink(RecorderSink::wrap(recorder))
@@ -1077,6 +1081,7 @@ mod tests {
     /// endpoint that has one.
     #[test]
     fn an_opaque_flow_on_a_proxied_endpoint_carries_no_proxy_label() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let addr = tcp_echo_server();
         let (service, _dir) = substitution_binding("bound.example", true);
         let service = Arc::new(
@@ -1095,7 +1100,7 @@ mod tests {
         let (recorder, audit_key) = recorder_at(&audit_path);
         let gate = gate_allowing_addr(addr.ip(), addr.port(), None);
         let (mut guest, mut guest_session, host) =
-            run_session_on_runtime(move |id, key, anchor, limits| {
+            run_owned_session_on_runtime(move |id, key, anchor, limits| {
                 FlowMuxAccept::new(id, key, anchor, limits, gate)
                     .with_substitution(Some(service))
                     .with_audit_sink(RecorderSink::wrap(recorder))
@@ -1310,6 +1315,7 @@ mod tests {
     /// the rules could not be enforced on a flow the host never reads.
     #[test]
     fn an_opaque_flow_to_a_route_with_ungranted_rules_is_refused_and_audited() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let addr = tcp_echo_server();
         let route = mvm_contract::policy::routes::EgressRoute {
             id: "local".into(),
@@ -1330,7 +1336,7 @@ mod tests {
         let (recorder, audit_key) = recorder_at(&audit_path);
         let gate = gate_allowing_addr(addr.ip(), addr.port(), None);
         let (mut guest, mut guest_session, host) =
-            run_session_on_runtime(move |id, key, anchor, limits| {
+            run_owned_session_on_runtime(move |id, key, anchor, limits| {
                 FlowMuxAccept::new(id, key, anchor, limits, gate)
                     .with_substitution(Some(service))
                     .with_audit_sink(RecorderSink::wrap(recorder))

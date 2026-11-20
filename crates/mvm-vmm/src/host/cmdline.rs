@@ -536,6 +536,7 @@ mod tests {
     #[test]
     fn workload_cmdline_asserts_a_mailbox_only_for_a_granted_plan() {
         use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxGrant, MailboxId};
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         let build = |grant: Option<MailboxGrant>| {
             let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();

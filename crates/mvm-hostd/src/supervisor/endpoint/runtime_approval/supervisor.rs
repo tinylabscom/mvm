@@ -698,6 +698,8 @@ mod tests {
         audit_path: std::path::PathBuf,
         audit_key: ed25519_dalek::VerifyingKey,
         _dir: tempfile::TempDir,
+        // Keep the home stable until the supervisor's recorder has dropped.
+        _env: mvm_core::util::test_env::TestEnv,
     }
 
     impl Harness {
@@ -719,6 +721,7 @@ mod tests {
         broker: Option<Arc<dyn ApprovalBroker>>,
         edit: impl FnOnce(ApprovalSupervisorBuilder) -> ApprovalSupervisorBuilder,
     ) -> Harness {
+        let env = mvm_core::util::test_env::TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         let signing_key = SigningKey::from_bytes(&[9u8; 32]);
         let audit_key = signing_key.verifying_key();
@@ -742,6 +745,7 @@ mod tests {
             audit_path,
             audit_key,
             _dir: dir,
+            _env: env,
         }
     }
 
@@ -969,6 +973,7 @@ mod tests {
                 reason: REASON_APPROVAL_UNAVAILABLE
             }
         );
+        drop(h);
 
         let unreachable = scripted(|_| Err(BrokerError::Unavailable));
         let h = harness(Some(unreachable), |b| b);
@@ -978,6 +983,7 @@ mod tests {
                 reason: REASON_APPROVAL_UNAVAILABLE
             }
         );
+        drop(h);
 
         let wrong = scripted(|_| {
             Ok(ApprovalAnswer::approved(

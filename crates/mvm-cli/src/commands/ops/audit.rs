@@ -1650,6 +1650,7 @@ mod verify_cert_tests {
         // tenant_label is what we plant in the labels (operator-
         // visible tenant id) — usually the same as the chain's
         // own tenant.
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let chain_dir = dir.join("audit");
         std::fs::create_dir_all(&chain_dir).unwrap();
         let signing_key = {
@@ -1778,6 +1779,7 @@ mod verify_cert_tests {
         // The helper must skip non-destruction events so the
         // index isn't polluted by other categories on the same
         // chain file.
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let dir = tempdir().unwrap();
         let chain_dir = dir.path().join("audit");
         std::fs::create_dir_all(&chain_dir).unwrap();
@@ -2037,6 +2039,7 @@ mod merkle_verb_tests {
         use mvm_client::audit::chain::supervisor::{AuditSigner, FileAuditSigner, PlanAuditEntry};
         use std::collections::BTreeMap;
 
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         let chain_dir = dir.path().join("audit");
         std::fs::create_dir_all(&chain_dir).unwrap();
