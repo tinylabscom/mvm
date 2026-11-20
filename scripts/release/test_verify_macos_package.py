@@ -42,6 +42,11 @@ class PackageTests(unittest.TestCase):
         patch.object(gate.platform, "system", return_value="Darwin").start()
         self.run = patch.object(gate.sign_macos, "run",
                                 return_value=plistlib.dumps({}).decode()).start()
+        self.diagnostic = patch.object(
+            gate.sign_macos,
+            "run_diagnostic",
+            return_value="flags=0x10000(runtime)",
+        ).start()
 
     def write_producer(self):
         self.producer.write_text(json.dumps({
@@ -55,6 +60,10 @@ class PackageTests(unittest.TestCase):
                 archive.writestr(name, data)
 
     def verify(self, notary=None, **kwargs):
+        if kwargs.get("require_cli_inventory") or kwargs.get("require_owner_inventory"):
+            kwargs.setdefault("owner_version", "1")
+            kwargs.setdefault("owner_target", "aarch64-apple-darwin")
+            kwargs.setdefault("owner_source_commit", "a" * 40)
         gate.verify(self.archive, self.producer, notary, self.report,
                     sdk_layout=True, **kwargs)
 
@@ -132,43 +141,104 @@ class PackageTests(unittest.TestCase):
         files = {
             "mvmctl": macho(2),
             "mvm-hvf-supervisor": macho(2),
+            "mvm-hvf-run-owner": macho(2),
             "mvm-libkrun-supervisor": macho(2),
         }
         self.inventory = [{
-            "path": name, "role": name,
-            "required_entitlements": gate.sign_macos.ROLES[name],
+            "path": name,
+            "role": name if name in gate.sign_macos.ROLES else "code",
+            "required_entitlements": gate.sign_macos.ROLES.get(name, []),
             "sha256": hashlib.sha256(data).hexdigest(),
         } for name, data in files.items()]
         self.write_producer()
+        files["owner-component.json"] = json.dumps({
+            "schema_version": 1,
+            "component": "mvm-hvf-run-owner",
+            "sha256": hashlib.sha256(files["mvm-hvf-run-owner"]).hexdigest(),
+            "version": "1",
+            "target": "aarch64-apple-darwin",
+            "source_commit": "a" * 40,
+            "bootstrap_protocol_version": 1,
+        }).encode()
         self.pack(files)
         def readback(*args):
+            if args[0] == "otool":
+                if args[1] == "-L":
+                    return f"{args[-1]}:\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n"
+                return ""
             if args[1] == "-d":
                 return plistlib.dumps(dict.fromkeys(
-                    gate.sign_macos.ROLES[args[-1].name], True)).decode()
+                    gate.sign_macos.ROLES.get(args[-1].name, []), True)).decode()
             return ""
         self.run.side_effect = readback
         self.verify(require_cli_inventory=True)
+        self.assertEqual(
+            json.loads(self.report.read_text())["owner_component"]["component"],
+            "mvm-hvf-run-owner",
+        )
+        manifest = files.pop("owner-component.json")
+        self.pack(files)
+        with self.assertRaisesRegex(ValueError, "missing owner component"):
+            self.verify(require_cli_inventory=True)
+        for field, value, message in (
+            ("sha256", "0" * 64, "bytes differ"),
+            ("version", "2", "version differs"),
+            ("target", "other-target", "target differs"),
+            ("source_commit", "b" * 40, "source commit differs"),
+        ):
+            changed = json.loads(manifest)
+            changed[field] = value
+            files["owner-component.json"] = json.dumps(changed).encode()
+            self.pack(files)
+            with self.assertRaisesRegex(ValueError, message):
+                self.verify(require_cli_inventory=True)
+        files["owner-component.json"] = manifest
+        self.pack(files)
+        self.diagnostic.return_value = "flags=0x0"
+        with self.assertRaisesRegex(ValueError, "hardened runtime"):
+            self.verify(require_cli_inventory=True)
+        self.diagnostic.return_value = "flags=0x10000(runtime)"
+
+        def non_system(*args):
+            if args[0] == "otool" and args[1] == "-L":
+                return f"{args[-1]}:\n\t@rpath/libinjected.dylib\n"
+            return readback(*args)
+
+        self.run.side_effect = non_system
+        with self.assertRaisesRegex(ValueError, "non-system library"):
+            self.verify(require_cli_inventory=True)
 
     def test_cli_package_rejects_host_specific_macho_paths(self):
         files = {
             "mvmctl": macho(2),
             "mvm-hvf-supervisor": macho(2),
+            "mvm-hvf-run-owner": macho(2),
             "mvm-libkrun-supervisor": macho(2),
         }
         self.inventory = [{
-            "path": name, "role": name,
-            "required_entitlements": gate.sign_macos.ROLES[name],
+            "path": name,
+            "role": name if name in gate.sign_macos.ROLES else "code",
+            "required_entitlements": gate.sign_macos.ROLES.get(name, []),
             "sha256": hashlib.sha256(data).hexdigest(),
         } for name, data in files.items()]
         self.write_producer()
+        files["owner-component.json"] = json.dumps({
+            "schema_version": 1,
+            "component": "mvm-hvf-run-owner",
+            "sha256": hashlib.sha256(files["mvm-hvf-run-owner"]).hexdigest(),
+            "version": "1",
+            "target": "aarch64-apple-darwin",
+            "source_commit": "a" * 40,
+            "bootstrap_protocol_version": 1,
+        }).encode()
         self.pack(files)
         self.run.side_effect = lambda *args: (
             "/opt/homebrew/opt/libkrun/lib/libkrun.dylib" if args[0] == "otool" else
             plistlib.dumps(dict.fromkeys(
-                gate.sign_macos.ROLES[args[-1].name], True)).decode()
+                gate.sign_macos.ROLES.get(args[-1].name, []), True)).decode()
             if args[1] == "-d" else ""
         )
-        with self.assertRaisesRegex(ValueError, "non-relocatable path"):
+        with self.assertRaisesRegex(ValueError, "non-relocatable path|non-system library"):
             self.verify(require_cli_inventory=True)
 
     def test_zip_unsafe_normalized_duplicate_and_link_reject(self):
@@ -201,6 +271,106 @@ class PackageTests(unittest.TestCase):
             archive.addfile(member)
         with self.assertRaises(ValueError):
             self.verify(envelope="package")
+
+    def test_source_helper_owner_only_archive_checks_identity_and_hardening(self):
+        self.archive = self.root / "helpers.tgz"
+        owner_bytes = macho(2)
+        manifest = {
+            "schema_version": 1,
+            "component": "mvm-hvf-run-owner",
+            "sha256": hashlib.sha256(owner_bytes).hexdigest(),
+            "version": "1",
+            "target": "aarch64-apple-darwin",
+            "source_commit": "a" * 40,
+            "bootstrap_protocol_version": 1,
+        }
+        self.inventory = [{
+            "path": "mvm-hvf-run-owner",
+            "role": "code",
+            "required_entitlements": [],
+            "sha256": hashlib.sha256(owner_bytes).hexdigest(),
+        }]
+        self.write_producer()
+
+        def pack(files):
+            with tarfile.open(self.archive, "w:gz") as archive:
+                for name, data in files.items():
+                    member = tarfile.TarInfo(f"helpers/{name}")
+                    member.size = len(data)
+                    member.mode = 0o755 if name == "mvm-hvf-run-owner" else 0o644
+                    archive.addfile(member, io.BytesIO(data))
+
+        files = {
+            "mvm-hvf-run-owner": owner_bytes,
+            "owner-component.json": json.dumps(manifest).encode(),
+        }
+        pack(files)
+
+        def readback(*args):
+            if args[0] == "otool":
+                if args[1] == "-L":
+                    return f"{args[-1]}:\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n"
+                return ""
+            if args[1] == "-d":
+                return plistlib.dumps({}).decode()
+            return ""
+
+        self.run.side_effect = readback
+        gate.verify(
+            self.archive,
+            self.producer,
+            None,
+            self.report,
+            envelope="helpers",
+            require_owner_inventory=True,
+            owner_version="1",
+            owner_target="aarch64-apple-darwin",
+            owner_source_commit="a" * 40,
+        )
+        self.assertEqual(
+            json.loads(self.report.read_text())["owner_component"],
+            manifest,
+        )
+        with self.assertRaisesRegex(ValueError, "expectation is incomplete"):
+            gate.verify(
+                self.archive,
+                self.producer,
+                None,
+                self.report,
+                envelope="helpers",
+                require_owner_inventory=True,
+            )
+        files.pop("mvm-hvf-run-owner")
+        pack(files)
+        with self.assertRaisesRegex(ValueError, "missing owner executable"):
+            gate.verify(
+                self.archive,
+                self.producer,
+                None,
+                self.report,
+                envelope="helpers",
+                require_owner_inventory=True,
+                owner_version="1",
+                owner_target="aarch64-apple-darwin",
+                owner_source_commit="a" * 40,
+            )
+        files["mvm-hvf-run-owner"] = owner_bytes
+        pack(files)
+        self.run.side_effect = lambda *args: (
+            "LC_RPATH" if args[0] == "otool" and args[1] == "-l" else readback(*args)
+        )
+        with self.assertRaisesRegex(ValueError, "rpath"):
+            gate.verify(
+                self.archive,
+                self.producer,
+                None,
+                self.report,
+                envelope="helpers",
+                require_owner_inventory=True,
+                owner_version="1",
+                owner_target="aarch64-apple-darwin",
+                owner_source_commit="a" * 40,
+            )
 
     def test_zip_limits_before_extraction(self):
         member = zipfile.ZipInfo("large")
@@ -274,12 +444,18 @@ class PackageTests(unittest.TestCase):
                     script = re.sub(r"\$\{\{.*?\}\}", str(signed).lower(),
                                     textwrap.dedent(body))
                     recorder = self.root / "python3"
-                    recorder.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$ARGV_LOG"\n')
+                    recorder.write_text(
+                        '#!/bin/sh\n'
+                        'if [ "$1" = -c ]; then printf "1\\n"; exit 0; fi\n'
+                        'printf "%s\\n" "$@" > "$ARGV_LOG"\n'
+                    )
                     recorder.chmod(0o700)
                     log = self.root / "argv"
                     env = dict(os.environ, PATH=f"{self.root}:{os.environ['PATH']}",
                                RUNNER_TEMP=str(self.root / "runner temp"),
                                GITHUB_REF_TYPE="tag" if signed else "branch",
+                               BUILD_TARGET="aarch64-apple-darwin",
+                               SOURCE_COMMIT="a" * 40,
                                ARGV_LOG=str(log))
                     subprocess.run(["/bin/bash", "-c", script], env=env,
                                    cwd=self.root, check=True, capture_output=True)

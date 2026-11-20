@@ -21,7 +21,7 @@ pub enum PerVmScope {
     MacOsAarch64,
 }
 
-/// A per-VM host process `mvmctl` spawns at runtime, one process per guest.
+/// A per-VM host process shipped beside `mvmctl`.
 ///
 /// These are separate `[[bin]]` targets in other packages, so the root
 /// `cargo build` that produces `mvmctl` does not produce them. They are
@@ -30,7 +30,8 @@ pub enum PerVmScope {
 /// `target/{release,debug}` fallback exists solely for source checkouts.
 /// A binary listed here that the release tarball omits is therefore a
 /// spawn failure for anyone who installed from a release rather than
-/// building from source.
+/// building from source. A refusal-only prerequisite may be packaged before a
+/// caller is enabled; its entry documents that narrower state.
 #[derive(Debug, Clone, Copy)]
 pub struct PerVmBinary {
     /// Workspace package that owns the `[[bin]]` target.
@@ -129,6 +130,14 @@ pub const PER_VM_HOST_BINARIES: &[PerVmBinary] = &[
     PerVmBinary {
         package: "mvm-hostd",
         name: "mvm-hvf-supervisor",
+        features: "",
+        scope: PerVmScope::MacOsAarch64,
+    },
+    // Protected cold-HVF lifecycle boundary. Its v1 process remains
+    // refusal-only; listing it packages no positive VM factory.
+    PerVmBinary {
+        package: "mvm-client",
+        name: "mvm-hvf-run-owner",
         features: "",
         scope: PerVmScope::MacOsAarch64,
     },

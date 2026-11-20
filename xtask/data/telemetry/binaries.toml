@@ -317,6 +317,20 @@ category = "code-generator"
 reason = "Development schema or SDK generator; not a VM runtime producer."
 
 [[binary]]
+package = "mvm-client"
+name = "mvm-hvf-run-owner"
+source = "crates/mvm-client/src/bin/mvm-hvf-run-owner.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "host"
+owner = "Protected cold-HVF owner prerequisite"
+signals = ["diagnostics", "stdio"]
+entrypoint = "fn main("
+gap = "Refusal-only bootstrap failures reach stderr only; no protected provider collector is connected."
+required_witness = "The commissioned provider captures bounded owner startup/refusal diagnostics without exposing bootstrap bytes or blocking lifecycle control."
+
+[[binary]]
 package = "mvm-contract"
 name = "emit_assurance_schema"
 source = "crates/mvm-contract/src/bin/emit_assurance_schema.rs"

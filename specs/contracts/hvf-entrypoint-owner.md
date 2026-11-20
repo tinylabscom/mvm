@@ -124,6 +124,26 @@ immediate runtime peer against the deployment receipt before invoking it.
 Plan-signing acceptance does not append audit, bind a native generation,
 authorize HVF control, create a process or return a launch capability.
 
+### Refusal-only packaged process boundary
+
+`mvm-hvf-run-owner` is first shipped as a refusal-only `mvm-client` binary. Its
+only protocol is one 4-KiB length-prefixed bootstrap binding followed by the
+typed `OwnerFactoryDisabled` response. Unknown versions/fields, zero identities,
+truncation and oversized declarations refuse before output. Version 1 has no
+success, start, signer, audit, native-control or VM-factory response.
+
+The macOS release and exact-commit SourceHelpers archives include this binary.
+After the final byte-changing hardened-runtime signature, packaging writes
+`owner-component.json` inside the archive with the exact final SHA-256, package
+version, target, source commit and bootstrap protocol. The outer keyless archive
+signature authenticates both manifest and member. Final-package inspection
+requires exact equality. The installer copies but never re-signs the owner.
+
+This packaging does not make the adjacent user-owned executable the production
+provider owner selected above. It supplies authenticated final bytes for the
+future root-installed provider cohort. No current caller prepares, executes or
+probes the owner, and existing HVF/Firecracker factory gates remain unchanged.
+
 ## Process and authority
 
 `mvm-hvf-run-owner` is the proposed binary in `mvm-client`, with a thin entry
