@@ -1,6 +1,6 @@
 use super::remove::{
     remove_machine_spec_in_lifecycle, resolve_remove_targets, rm_all_undefined_refusal,
-    rm_running_refusal,
+    rm_running_refusal, undefined_live_vms,
 };
 use super::*;
 use mvm_client::lifecycle::MachineLifecycleLock;
@@ -165,21 +165,25 @@ pub(super) fn inspect_machine(args: MachineInspectArgs) -> Result<()> {
 pub(super) fn remove_machine(args: MachineRemoveArgs) -> Result<()> {
     let json = args.json;
     let targets = resolve_remove_targets(args.all, &args.names)?;
-    if args.all {
-        // `--all` removes definitions, so a VM that has none (a standby, an
-        // unnamed run) is not a target; it must not be passed over as absent
-        // while its VMM is still alive.
+    // `--all` removes definitions, so a live VM that has none (a standby, an
+    // unnamed run) is not a target; it must not be passed over as absent.
+    let undefined = if args.all {
         let live: Vec<String> = mvm_client::LocalBackend::new()
             .list_stop_targets()
             .into_iter()
             .filter(|machine| machine.status != mvm_core::client::dto::MachineStatus::Stopped)
             .map(|machine| machine.name)
             .collect();
-        if let Some(msg) = rm_all_undefined_refusal(&targets, &live) {
-            anyhow::bail!(msg);
-        }
+        undefined_live_vms(&targets, &live)
+    } else {
+        Vec::new()
+    };
+    if !args.force
+        && let Some(msg) = rm_all_undefined_refusal(&undefined)
+    {
+        anyhow::bail!(msg);
     }
-    if targets.is_empty() {
+    if targets.is_empty() && undefined.is_empty() {
         if json {
             println!("[]");
         } else {
@@ -189,7 +193,14 @@ pub(super) fn remove_machine(args: MachineRemoveArgs) -> Result<()> {
     }
     if !args.yes {
         use std::io::IsTerminal as _;
-        let prompt = if targets.len() == 1 {
+        let prompt = if !undefined.is_empty() {
+            format!(
+                "Remove {} machine(s) and stop {} VM(s) with no definition ({})?",
+                targets.len(),
+                undefined.len(),
+                undefined.join(", ")
+            )
+        } else if targets.len() == 1 {
             format!("Remove machine {:?}?", targets[0])
         } else {
             format!(
@@ -202,6 +213,24 @@ pub(super) fn remove_machine(args: MachineRemoveArgs) -> Result<()> {
         if !confirmed {
             println!("aborted");
             return Ok(());
+        }
+    }
+    // Only reached with `--force`: there is no definition to remove, so the
+    // VMM is stopped and that is all.
+    for name in &undefined {
+        let stopped = MachineLifecycleLock::acquire(name).and_then(|lifecycle| {
+            mvm_client::LocalBackend::new()
+                .stop_machine_in_lifecycle(
+                    &mvm_core::client::dto::MachineId(name.clone()),
+                    &lifecycle,
+                    None,
+                )
+                .map_err(|error| anyhow::anyhow!(error))
+        });
+        match stopped {
+            Ok(()) if !json => println!("stopped {name} (no machine definition to remove)"),
+            Ok(()) => {}
+            Err(error) => crate::ui::warn(&format!("could not stop {name}: {error:#}")),
         }
     }
     for name in &targets {

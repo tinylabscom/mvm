@@ -864,7 +864,9 @@ pub(in crate::commands) struct MachineRemoveArgs {
     #[arg(long)]
     pub yes: bool,
     /// Stop a running machine before removing it. Without this, removing a
-    /// running machine is refused (its VM would be orphaned).
+    /// running machine is refused (its VM would be orphaned). With `--all`,
+    /// also stop live VMs that have no machine definition (standbys, unnamed
+    /// runs), which `--all` otherwise refuses to pass over.
     #[arg(long)]
     pub force: bool,
     /// Print a JSON deletion summary.
@@ -1550,7 +1552,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Shell(shell_args) => shell_machine(cli, shell_args, cfg),
         MachineAction::SetTimeout(timeout_args) => set_machine_timeout(timeout_args),
         MachineAction::Stop(stop_args) => stop_machine(cli, stop_args, cfg),
-        MachineAction::Quarantine(args) => quarantine_machine(cli, args, cfg),
+        MachineAction::Quarantine(args) => quarantine_machine(args),
         MachineAction::Replace(args) => replace_machine(&args),
         MachineAction::Mailbox(MachineMailboxAction::Recv { name }) => recv_mailbox(&name),
         MachineAction::Reconfigure(args) => run_reconfigure(args),

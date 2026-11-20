@@ -111,6 +111,9 @@ pub struct MockDriver {
     /// test can prove a refused claim actually tore its child down instead of
     /// leaving it resumed.
     killed: Arc<Mutex<Vec<String>>>,
+    /// Names of the VMs whose guest a stop asked to prepare (resume and
+    /// flush), so a test can prove a stop that must not touch the guest did not.
+    prepared: Arc<Mutex<Vec<String>>>,
     /// Bytes a killed VM appends to its own console capture before it goes,
     /// modelling the guest's last words: a shutdown trace, a panic, whatever
     /// the kernel prints on the way down. Empty by default, because most
@@ -158,6 +161,7 @@ impl MockDriver {
             child_identity_scripted: false,
             delivered_identities: Arc::new(Mutex::new(Vec::new())),
             killed: Arc::new(Mutex::new(Vec::new())),
+            prepared: Arc::new(Mutex::new(Vec::new())),
             dying_console_output: Vec::new(),
             fail_kill: false,
             refuse_attach: false,
@@ -293,6 +297,11 @@ impl MockDriver {
     pub fn killed_vms(&self) -> Vec<String> {
         self.killed.lock().unwrap().clone()
     }
+
+    /// Names of the VMs whose guest a stop asked to prepare, in order.
+    pub fn prepared_vms(&self) -> Vec<String> {
+        self.prepared.lock().unwrap().clone()
+    }
 }
 
 impl VmmDriver for MockDriver {
@@ -368,6 +377,7 @@ impl VmmDriver for MockDriver {
             status: self.status.clone(),
             guest_ends: Arc::clone(&self.guest_ends),
             killed: Arc::clone(&self.killed),
+            prepared: Arc::clone(&self.prepared),
             dying_console_output: self.dying_console_output.clone(),
             fail_kill: self.fail_kill,
         }))
@@ -474,6 +484,7 @@ impl VmmDriver for MockDriver {
             status: self.status.clone(),
             guest_ends: Arc::clone(&self.guest_ends),
             killed: Arc::clone(&self.killed),
+            prepared: Arc::clone(&self.prepared),
             dying_console_output: self.dying_console_output.clone(),
             fail_kill: self.fail_kill,
         }))
@@ -544,6 +555,7 @@ pub struct MockRunningVm {
     status: VmStatus,
     guest_ends: GuestEnds,
     killed: Arc<Mutex<Vec<String>>>,
+    prepared: Arc<Mutex<Vec<String>>>,
     dying_console_output: Vec<u8>,
     fail_kill: bool,
 }
@@ -584,6 +596,10 @@ impl RunningVm for MockRunningVm {
         }
         self.killed.lock().unwrap().push(self.id.0.clone());
         self.print_dying_words();
+        Ok(())
+    }
+    fn prepare_stop(&self) -> Result<()> {
+        self.prepared.lock().unwrap().push(self.id.0.clone());
         Ok(())
     }
     fn pause(&self) -> Result<()> {

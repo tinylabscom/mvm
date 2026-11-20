@@ -769,6 +769,39 @@ impl LocalBackend {
                 "health restart instance names a different machine",
             ));
         }
+        self.stop_in_lifecycle_with(
+            id,
+            lifecycle,
+            expected.is_none(),
+            |backend, vid| match expected {
+                Some(expected) => backend.stop_hvf_instance(expected),
+                None => backend.stop(vid),
+            },
+        )
+    }
+
+    /// Stop a machine without asking its guest anything: no resume, no
+    /// filesystem flush, straight to termination. For a workload that is no
+    /// longer trusted to cooperate, such as one being quarantined; unflushed
+    /// guest writes are lost.
+    pub async fn stop_machine_without_guest(&self, id: &MachineId) -> Result<()> {
+        let lifecycle = machine_lifecycle(&id.0).await?;
+        lifecycle.require_name(&id.0).map_err(backend_err)?;
+        self.stop_in_lifecycle_with(id, &lifecycle, true, |backend, vid| {
+            backend.abort_start(vid)
+        })
+    }
+
+    fn stop_in_lifecycle_with(
+        &self,
+        id: &MachineId,
+        lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+        record_failure: bool,
+        stop: impl FnOnce(
+            &AnyBackend,
+            &VmId,
+        ) -> anyhow::Result<Option<mvm_runtime::workload_runner::StopTiming>>,
+    ) -> Result<()> {
         let vid = VmId(id.0.clone());
         let stopped_session = mvm_core::config::machine_spec_path(&id.0)
             .exists()
@@ -776,10 +809,7 @@ impl LocalBackend {
             .flatten();
         let owner = AnyBackend::for_started_vm(&id.0);
         let backend = owner.as_ref().unwrap_or(&self.backend);
-        let result = match expected {
-            Some(expected) => backend.stop_hvf_instance(expected),
-            None => backend.stop(&vid),
-        };
+        let result = stop(backend, &vid);
         if result.is_ok() {
             if let Some(plan) = &stopped_session {
                 crate::launch::seal_stopped_session(plan, &id.0);
@@ -792,9 +822,7 @@ impl LocalBackend {
                 ))
             })?;
             remove_stopped_runtime_state(&id.0, lifecycle)?;
-        } else if expected.is_none()
-            && let (Err(e), Some(plan)) = (&result, &stopped_session)
-        {
+        } else if record_failure && let (Err(e), Some(plan)) = (&result, &stopped_session) {
             crate::launch::record_session_stop_failure(Some(plan), &id.0, &format!("{e:#}"));
         }
         result.map(|_| ()).map_err(backend_err)

@@ -54,6 +54,28 @@ fn stop_one(client: &LocalBackend, runtime: &tokio::runtime::Runtime, name: &str
     result
 }
 
+/// Stop `name` without asking its guest to cooperate: no resume of a paused
+/// guest and no filesystem flush. For a workload under quarantine, which is no
+/// longer trusted to run even briefly; writes it had not flushed are lost.
+pub(in crate::commands) fn stop_without_guest(name: &str) -> Result<()> {
+    let client = LocalBackend::new();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("build runtime for stopping a machine")?;
+    record_vm_readiness(name, InstanceReadiness::Stopping);
+    let result = runtime
+        .block_on(client.stop_machine_without_guest(&MachineId(name.to_string())))
+        .map_err(|error| anyhow::anyhow!(error));
+    let outcome = if result.is_ok() {
+        "ok_without_guest"
+    } else {
+        "stop_failed"
+    };
+    mvm_core::audit_emit!(VmStop, vm: name, "{outcome}");
+    result
+}
+
 /// Stop every running VM. Fleet/multi-VM is mvmd's job; this is the local
 /// "stop them all" convenience. Each VM is stopped by its owning VMM (resolved
 /// inside the facade), so QEMU/libkrun VMs are stopped too — not just whichever
