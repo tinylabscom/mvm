@@ -31,7 +31,12 @@ pub(crate) fn command_for_binary(bin_path: &Path) -> Command {
 /// The `mvmctl` binary the suite drives — one resolution shared by the
 /// freshness check and every step, so the binary checked is the binary run.
 pub(crate) fn mvmctl_path() -> PathBuf {
-    mvm_conformance::mvmctl_path().expect("locate the conformance test binary")
+    let test_binary = std::env::current_exe().expect("locate the conformance test binary");
+    mvm_conformance::resolve_mvmctl_path(
+        std::env::var_os("CARGO_BIN_EXE_mvmctl").map(PathBuf::from),
+        &test_binary,
+        &workspace_root(),
+    )
 }
 
 /// The repository root, resolved from this crate's manifest directory.
