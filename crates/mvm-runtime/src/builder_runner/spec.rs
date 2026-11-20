@@ -128,6 +128,7 @@ pub fn builder_spec(inputs: &BuilderSpecInputs<'_>) -> VmmSpec {
         // The builder VM is the trusted build engine, not a workload. Nothing
         // admits it under a grant, so there is no bound to carry here.
         cpu_grant: None,
+        allowed_cpus: None,
         memory_mib: inputs.memory_mib,
         mem_initial_mib: None,
         blocks,
@@ -231,6 +232,7 @@ pub fn stage0_spec(inputs: &Stage0SpecInputs<'_>) -> VmmSpec {
         cmdline,
         vcpus: inputs.vcpus,
         cpu_grant: None,
+        allowed_cpus: None,
         memory_mib: inputs.memory_mib,
         mem_initial_mib: None,
         blocks: vec![
@@ -369,6 +371,7 @@ pub fn persistent_builder_spec(inputs: &PersistentBuilderSpecInputs<'_>) -> VmmS
         cmdline,
         vcpus: inputs.vcpus,
         cpu_grant: None,
+        allowed_cpus: None,
         memory_mib: inputs.memory_mib,
         mem_initial_mib: None,
         blocks,

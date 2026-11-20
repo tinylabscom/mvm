@@ -8,14 +8,18 @@
   pkgs,
   lib,
   stdenv,
-  rustPlatform,
   pkg-config,
-  clippy,
   mvmSrc,
   tpm2-tss,
 }:
 
-rustPlatform.buildRustPackage {
+let
+  rust = import ./rust-platform.nix {
+    inherit pkgs mvmSrc;
+    extensions = [ "clippy" ];
+  };
+in
+rust.rustPlatform.buildRustPackage {
   pname = "mvm-core-tpm2-clippy";
   version = "0.18.0";
 
@@ -43,7 +47,7 @@ rustPlatform.buildRustPackage {
 
   nativeBuildInputs = [
     pkg-config
-    clippy
+    rust.toolchain
   ];
 
   buildInputs = [

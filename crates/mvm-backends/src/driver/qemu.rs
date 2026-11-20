@@ -846,6 +846,7 @@ mod tests {
             cmdline: String::new(),
             vcpus: 2,
             cpu_grant: None,
+            allowed_cpus: None,
             memory_mib: 512,
             mem_initial_mib: None,
             blocks,

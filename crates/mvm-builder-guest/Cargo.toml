@@ -6,7 +6,6 @@ edition.workspace = true
 description = "builder-VM guest binaries and the contract they share with the host that boots them"
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 authors.workspace = true
 
 # The binaries `mvm-cli/build.rs` cross-compiles to static musl and embeds:

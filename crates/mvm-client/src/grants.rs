@@ -83,6 +83,7 @@ mod tests {
                 805_306_368,
             ),
             tasks: mvm_contract::protocol::resource_controls::EnforcedCeiling::declared(),
+            placement: Default::default(),
         };
         record_enforced_grants("vm-a", &enforced);
         assert_eq!(enforced_grants_of("vm-a"), Some(enforced));

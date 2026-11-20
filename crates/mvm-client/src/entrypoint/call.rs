@@ -535,6 +535,7 @@ pub fn boot_entrypoint_vm_owned(
     let _activation_barrier =
         mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
     let backend_name = vm.admission.backend_name().to_string();
+    crate::policy_profiles::coordinator::recover_workload_ledger()?;
     if cfg!(target_os = "linux")
         && crate::backend_kind_for(&backend_name) != mvm_core::vm_backend::BackendKind::Mock
     {
@@ -612,6 +613,7 @@ pub fn boot_entrypoint_vm(
         portable_boot_assets,
     } = vm;
     let backend_name = admission.backend_name().to_string();
+    crate::policy_profiles::coordinator::recover_workload_ledger()?;
     if cfg!(target_os = "linux")
         && crate::backend_kind_for(&backend_name) != mvm_core::vm_backend::BackendKind::Mock
     {

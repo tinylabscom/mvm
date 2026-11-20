@@ -253,6 +253,7 @@ pub fn start_machine_spec_in_lifecycle(
     lifecycle.require_name(&spec.name)?;
     let _activation_barrier =
         mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
+    crate::policy_profiles::coordinator::recover_workload_ledger()?;
     if cfg!(target_os = "linux")
         && crate::backend_kind_for(params.hypervisor) != mvm_core::vm_backend::BackendKind::Mock
     {

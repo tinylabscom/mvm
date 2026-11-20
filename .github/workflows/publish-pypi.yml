@@ -94,7 +94,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: stable
+          toolchain: 1.100.0
 
       - name: Validate SDK release manifest and package metadata
         run: |

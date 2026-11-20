@@ -134,6 +134,7 @@ fn parent_boot_spec(name: &str, images: &LiveImages, state_dir: &Path) -> VmmSpe
         ),
         vcpus: 2,
         cpu_grant: None,
+        allowed_cpus: None,
         memory_mib: 512,
         mem_initial_mib: None,
         blocks: vec![

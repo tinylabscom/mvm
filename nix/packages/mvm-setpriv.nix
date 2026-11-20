@@ -7,11 +7,16 @@
 
 {
   pkgs,
-  rustPlatform,
   lib,
   mvmSrc,
 }:
 
+let
+  rustPlatform = (import ./rust-platform.nix {
+    pkgs = pkgs.pkgsStatic;
+    inherit mvmSrc;
+  }).rustPlatform;
+in
 rustPlatform.buildRustPackage {
   pname = "mvm-setpriv";
   version = "0.18.1";

@@ -500,6 +500,7 @@ fn run_victim_target_kernel(
         cmdline: "console=ttyS0 reboot=k panic=1 net.ifnames=0".to_string(),
         vcpus: 2,
         cpu_grant: None,
+        allowed_cpus: None,
         // The PoC's reference VM is 2 CPUs / 4096 MB (its vm/config.env); its
         // direct-map refinement is calibrated to that physical map. With less
         // RAM the refinement finds no RAM run and every pc-hijack attempt

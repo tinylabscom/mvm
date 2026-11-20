@@ -340,12 +340,15 @@ pub(crate) mod tests {
     use mvm_core::plan::{compute_plan_id, test_support::PlanFixture};
     use std::num::NonZeroU64;
 
+    /// Keep the fifth element alive: peer socket bindings depend on `MVM_HOME`.
     pub(crate) fn setup() -> (
         tempfile::TempDir,
         LocalActorMailboxes,
         ExecutionPlan,
         ExecutionPlan,
+        mvm_core::util::test_env::TestEnv,
     ) {
+        let environment = mvm_core::util::test_env::TestEnv::new();
         let dir = tempfile::tempdir_in("/tmp").unwrap();
         crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
         let mut parent = PlanFixture::new().build();
@@ -413,12 +416,39 @@ pub(crate) mod tests {
                 plan_id: parent.plan_id.clone(),
             },
         };
-        (dir, owner, parent, child)
+        (dir, owner, parent, child, environment)
+    }
+
+    #[test]
+    fn the_fixture_holds_the_process_environment_for_its_lifetime() {
+        mvm_core::util::test_env::isolated_env_probe(|| {
+            let fixture = setup();
+            let (started, ready) = std::sync::mpsc::channel();
+            let (sent, received) = std::sync::mpsc::channel();
+            let probe = std::thread::spawn(move || {
+                started.send(()).expect("report the probe started");
+                let _environment = mvm_core::util::test_env::TestEnv::new();
+                sent.send(()).expect("report the acquired environment");
+            });
+            ready
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .expect("the probe starts");
+            let while_live = received.recv_timeout(std::time::Duration::from_millis(300));
+            drop(fixture);
+            let after_drop = received.recv_timeout(std::time::Duration::from_secs(60));
+            after_drop.expect("the environment is released with the fixture");
+            probe.join().expect("probe thread");
+            assert_eq!(
+                while_live,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+                "another test acquired the environment while the fixture was live"
+            );
+        });
     }
 
     #[test]
     fn real_keys_install_exact_live_templates_and_pair_specific_directions() {
-        let (dir, owner, parent, mut child) = setup();
+        let (dir, owner, parent, mut child, _environment) = setup();
         let derived = owner.derive(&parent, &child).unwrap();
         owner.verify_current(&parent, &derived).unwrap();
         child.mailbox = Some(derived.grant);
@@ -520,7 +550,7 @@ pub(crate) mod tests {
 
     #[test]
     fn policy_scope_tamper_and_uninstalled_parent_refuse() {
-        let (dir, owner, parent, child) = setup();
+        let (dir, owner, parent, child, _environment) = setup();
         let mut foreign = parent.clone();
         foreign
             .workflow
@@ -549,7 +579,7 @@ pub(crate) mod tests {
     fn actual_pair_keys_seal_and_authenticate_only_the_admitted_direction() {
         use mvm_contract::protocol::mailbox::{CapabilityId, MessageId};
         use mvm_core::mailbox::{InMemoryReplayProtector, OpenContext, SealRequest};
-        let (dir, owner, parent, mut child) = setup();
+        let (dir, owner, parent, mut child, _environment) = setup();
         let derived = owner.derive(&parent, &child).unwrap();
         child.mailbox = Some(derived.grant);
         child.plan_id = compute_plan_id(&child);
@@ -625,7 +655,7 @@ pub(crate) mod tests {
 
     #[test]
     fn corrupt_peer_registry_and_missing_root_refuse_without_reinitializing() {
-        let (dir, owner, parent, child) = setup();
+        let (dir, owner, parent, child, _environment) = setup();
         let derived = owner.derive(&parent, &child).unwrap();
         let parent_keys = actor_template::endpoint_material(dir.path(), &parent)
             .unwrap()
@@ -649,7 +679,7 @@ pub(crate) mod tests {
 
     #[test]
     fn revocation_is_durable_idempotent_and_preserves_sealed_history() {
-        let (dir, owner, parent, mut child) = setup();
+        let (dir, owner, parent, mut child, _environment) = setup();
         let derived = owner.derive(&parent, &child).unwrap();
         child.mailbox = Some(derived.grant);
         child.plan_id = compute_plan_id(&child);

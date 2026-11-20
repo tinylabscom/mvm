@@ -238,6 +238,15 @@ pub(super) fn boot_transient_vm(
 ) -> Result<BootedVm> {
     use crate::commands::vm::phase_timing::SubPhase;
 
+    // A snapshot restores into a scope created without the admitted CPU set,
+    // so a launch placed on host cores boots cold.
+    let placed = attempt.admission.is_some_and(|owner| {
+        owner
+            .borrow()
+            .as_ref()
+            .is_some_and(|o| o.allowed_cpus().is_some())
+    });
+    let use_snapshot = use_snapshot && !placed;
     let phase_timing = warm_claim_marks.is_some();
     let boot_started = phase_timing.then(std::time::Instant::now);
     if let Some(marks) = warm_claim_marks.as_mut() {

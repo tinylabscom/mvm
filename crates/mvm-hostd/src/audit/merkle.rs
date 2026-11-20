@@ -542,6 +542,7 @@ mod tests {
     use super::*;
     use crate::audit::audit_file::FileAuditSigner;
     use crate::audit::signer::{AuditSigner, PlanAuditEntry};
+    use crate::audit::test_fixtures::AuditDir;
     use ed25519_dalek::SigningKey;
     use mvm_contract::merkle::{verify_inclusion, verify_signed_root};
     use mvm_core::plan::{PlanId, TenantId};
@@ -572,8 +573,8 @@ mod tests {
 
     /// Seed a real chain of `n` entries via `FileAuditSigner` and return the
     /// dir, the signer's key, and the raw leaf lines.
-    fn seed_chain(n: usize) -> (tempfile::TempDir, SigningKey, Vec<String>) {
-        let dir = tempfile::tempdir().unwrap();
+    fn seed_chain(n: usize) -> (AuditDir, SigningKey, Vec<String>) {
+        let dir = AuditDir::new();
         let key = fresh_key();
         let signer = FileAuditSigner::open(key.clone(), dir.path()).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -969,7 +970,7 @@ mod tests {
         // be provably a prefix of one published after it -- if the tree were
         // rebuilt per-segment, the older root would describe leaves that no
         // longer sit where it says they do.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = AuditDir::new();
         let key = fresh_key();
         let vk = key.verifying_key();
 
@@ -1028,7 +1029,7 @@ mod tests {
         // The signature check cannot catch this: both roots are genuinely
         // host-signed. Only the consistency proof can, because the leaves no
         // longer extend what the older root committed to.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = AuditDir::new();
         let key = fresh_key();
         let vk = key.verifying_key();
 

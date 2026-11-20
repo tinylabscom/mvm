@@ -82,9 +82,12 @@ impl StopControl {
     /// unsigned stop exception or a new independent issuer.
     pub fn start(vm: &str, stop: &'static AtomicBool) -> Result<Self> {
         let _ = wire::state_dir(vm)?;
+        mvm_core::launch_trace::lap("stop_control.state_dir");
         let bootstrap = crate::audit::host_keypair::load_or_init()?;
         drop(bootstrap);
+        mvm_core::launch_trace::lap("stop_control.keypair_load");
         let (key, _) = wire::existing_operator()?;
+        mvm_core::launch_trace::lap("stop_control.operator_lookup");
         let (instance, listener) = provision(vm)?;
         let (wake_read, wake) = UnixStream::pair()?;
         wake_read.set_nonblocking(true)?;
@@ -116,6 +119,7 @@ impl StopControl {
                     service.stop.store(true, Ordering::Release);
                 }
             })?;
+        mvm_core::launch_trace::lap("stop_control.wake_pair_and_worker_spawn");
         Ok(Self {
             authority: StopAuthority(shared),
             worker: Some(worker),
@@ -343,6 +347,7 @@ impl StopAuthority {
 fn provision(vm: &str) -> Result<(HvfInstance, UnixListener)> {
     let dir = wire::state_dir(vm)?;
     let listener = wire::bind(vm)?;
+    mvm_core::launch_trace::lap("stop_control.provision_bind");
     let mut nonce = [0; 32];
     rand::rng().fill_bytes(&mut nonce);
     let instance = HvfInstance {
@@ -353,6 +358,7 @@ fn provision(vm: &str) -> Result<(HvfInstance, UnixListener)> {
         &dir.join(wire::INSTANCE_FILE),
         &serde_json::to_vec(&instance)?,
     )?;
+    mvm_core::launch_trace::lap("stop_control.provision_instance_write");
     // Submitted, not flushed per directory: this chain runs on every launch,
     // and on macOS each per-directory flush is a device-wide F_FULLFSYNC
     // costing several milliseconds. One final full flush covers every
@@ -361,6 +367,7 @@ fn provision(vm: &str) -> Result<(HvfInstance, UnixListener)> {
         &mvm_core::config::mvm_home_strict()?,
         &dir,
     )?;
+    mvm_core::launch_trace::lap("stop_control.provision_dir_chain_submit");
     Ok((instance, listener))
 }
 

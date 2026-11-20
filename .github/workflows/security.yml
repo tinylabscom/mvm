@@ -90,7 +90,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: nightly
+          toolchain: 1.100.0
 
       - name: Cache cargo
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -134,7 +134,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: nightly
+          toolchain: 1.100.0
 
       - name: Cache cargo
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -158,7 +158,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: nightly
+          toolchain: 1.100.0
 
       - name: Cache cargo
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -192,7 +192,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: nightly
+          toolchain: 1.100.0
 
       - name: Cache cargo
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -224,7 +224,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: nightly
+          toolchain: 1.100.0
 
       # The release-artifact feature embeds the helper binaries that shipped
       # mvmctl artifacts need at runtime, so this reproducibility check must
@@ -296,8 +296,8 @@ jobs:
         # lane unseen (only this lane runs nightly). Frozen alongside the
         # committed per-crate fuzz Cargo.locks so the whole lane is
         # deterministic — bump this date deliberately. This is the nightly the
-        # lane last passed on. The other security lanes intentionally stay on
-        # the floating nightly compiler input; the action code itself is pinned.
+        # lane last passed on. Ordinary security lanes use the repository's
+        # stable compiler pin; the action code itself is pinned too.
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: nightly-2026-06-11
@@ -559,7 +559,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: nightly
+          toolchain: 1.100.0
 
       # build.rs cross-compiles the embedded host-vm binaries (Plan 115 /
       # ADR-065); without zig + cargo-zigbuild the mvmctl build panics.
@@ -602,7 +602,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
 
       # The guest binaries are static musl, cross-compiled with the pinned
       # toolchain the build script and `mvmctl` both use.
@@ -718,7 +718,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
 
       # The guest binaries are static musl, cross-compiled with the pinned
       # toolchain the build script and `mvmctl` both use.
@@ -888,7 +888,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: nightly
+          toolchain: 1.100.0
 
       - uses: ./.github/actions/install-zigbuild
 
@@ -947,7 +947,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: nightly
+          toolchain: 1.100.0
 
       - uses: ./.github/actions/install-zigbuild
         if: matrix.lane.zigbuild
@@ -986,7 +986,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: nightly
+          toolchain: 1.100.0
 
       - name: Install system build deps
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
@@ -1013,7 +1013,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: nightly
+          toolchain: 1.100.0
 
       - name: Install system build deps
         run: |

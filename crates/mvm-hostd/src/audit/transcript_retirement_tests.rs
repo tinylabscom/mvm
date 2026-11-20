@@ -7,6 +7,8 @@ use mvm_core::transcript::{
     TranscriptWriter, TranscriptWriterConfig,
 };
 
+// Each test owns one home guard: fixtures may coexist, and a guard in each
+// fixture would deadlock the non-reentrant environment lock.
 struct Fixture {
     root: tempfile::TempDir,
     manifest: TranscriptManifest,
@@ -108,6 +110,7 @@ impl Fixture {
 
 #[test]
 fn authenticated_boundary_preserves_manifest_and_resumes_exactly() {
+    let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     let f = Fixture::new(true);
     assert_eq!(
         reconcile_capture(f.context(), 604_999).unwrap(),
@@ -150,6 +153,7 @@ fn authenticated_boundary_preserves_manifest_and_resumes_exactly() {
 /// while the verification metadata keeps verifying.
 #[test]
 fn read_expiry_scheduling_and_cleanup_are_separate_operations() {
+    let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     let f = Fixture::new(true);
     let dir = f.root.path().join("capture");
     let manifest_bytes = std::fs::read(dir.join(MANIFEST_FILENAME)).unwrap();
@@ -215,6 +219,7 @@ fn read_expiry_scheduling_and_cleanup_are_separate_operations() {
 
 #[test]
 fn authenticated_opening_is_exact_and_preserves_historical_recovery_attribution() {
+    let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     use mvm_core::transcript::evidence::{
         TRANSCRIPT_OPENED_EVENT, authenticate_opening, opening_labels, recovered_seal_entry,
     };
@@ -311,6 +316,7 @@ fn rewrite_line(path: &Path, idx: usize, edit: impl FnOnce(&str) -> String) {
 
 #[test]
 fn an_appended_opening_is_confirmed_from_the_genesis_line_and_after_history() {
+    let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     use mvm_core::transcript::evidence::authenticate_appended_opening;
     for history in [0, 5] {
         let (f, seed, entry) = appended_opening_fixture(history);
@@ -329,6 +335,7 @@ fn an_appended_opening_is_confirmed_from_the_genesis_line_and_after_history() {
 /// the opening, which the full history walk still does.
 #[test]
 fn confirming_an_appended_opening_does_not_rewalk_the_history_before_it() {
+    let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     use mvm_core::transcript::evidence::{authenticate_appended_opening, authenticate_opening};
     let (f, seed, entry) = appended_opening_fixture(4);
     let key = f.emitter.verifying_key();
@@ -348,6 +355,7 @@ fn confirming_an_appended_opening_does_not_rewalk_the_history_before_it() {
 
 #[test]
 fn an_appended_opening_is_refused_under_another_key_or_another_seed() {
+    let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     use mvm_core::transcript::evidence::authenticate_appended_opening;
     let (f, seed, _) = appended_opening_fixture(2);
     let wrong_key = ed25519_dalek::SigningKey::from_bytes(&[18; 32]).verifying_key();
@@ -370,6 +378,7 @@ fn an_appended_opening_is_refused_under_another_key_or_another_seed() {
 
 #[test]
 fn an_edited_or_unchained_appended_opening_is_refused() {
+    let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     use mvm_core::transcript::evidence::authenticate_appended_opening;
     // The readable labels no longer match the signed bytes.
     let (f, seed, _) = appended_opening_fixture(2);
@@ -390,6 +399,7 @@ fn an_edited_or_unchained_appended_opening_is_refused() {
 
 #[test]
 fn a_second_appended_opening_for_the_same_capture_is_refused() {
+    let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     use mvm_core::transcript::evidence::authenticate_appended_opening;
     let (f, seed, entry) = appended_opening_fixture(1);
     f.emitter
@@ -401,6 +411,7 @@ fn a_second_appended_opening_for_the_same_capture_is_refused() {
 
 #[test]
 fn atomic_recovery_publication_serializes_independent_signers() {
+    let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     use mvm_core::transcript::evidence::authenticated_seal;
     let (f, seed, recovered) = recovery_fixture();
     let _capture_lease = CaptureDirectory::for_writer(&f.root.path().join("capture")).unwrap();
@@ -479,6 +490,7 @@ fn recovery_fixture() -> (Fixture, TranscriptManifest, TranscriptManifest) {
 
 #[test]
 fn staged_recovery_retries_after_seal_append_fsync_failure_without_duplicate() {
+    let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     use crate::audit::audit_file::write_faults::{Boundary, Guard};
     let (f, seed, recovered) = recovery_fixture();
     let _capture_lease = CaptureDirectory::for_writer(&f.root.path().join("capture")).unwrap();
@@ -511,6 +523,8 @@ fn staged_recovery_retries_after_seal_append_fsync_failure_without_duplicate() {
 #[test]
 fn seal_lookup_does_not_turn_conflicting_evidence_into_absence() {
     use mvm_core::transcript::evidence::authenticated_seal;
+    // Keep MVM_HOME stable through directory classification on every append.
+    let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     for kind in ["conflict", "duplicate", "retired-first", "broken"] {
         let (f, seed, recovered) = recovery_fixture();
         let key = f.emitter.verifying_key();
@@ -569,6 +583,7 @@ fn seal_lookup_does_not_turn_conflicting_evidence_into_absence() {
 
 #[test]
 fn historical_pruning_does_not_prove_that_a_seal_never_existed() {
+    let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     use crate::audit::audit_file::{FileAuditSigner, RotationPolicy};
     use mvm_core::transcript::evidence::authenticated_seal;
     let (f, seed, recovered) = recovery_fixture();
@@ -663,6 +678,7 @@ fn historical_pruning_does_not_prove_that_a_seal_never_existed() {
 
 #[test]
 fn instances_of_one_workload_retire_independently() {
+    let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     let first = Fixture::for_vm(true, "service-instance-1");
     let second = Fixture::for_vm(true, "service-instance-2");
     assert_eq!(first.plan.workload, second.plan.workload);
@@ -675,6 +691,7 @@ fn instances_of_one_workload_retire_independently() {
 
 #[test]
 fn requested_concrete_vm_is_authenticated_not_workload_name() {
+    let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     let f = Fixture::new(true);
     let mut wrong = f.context();
     wrong.vm = "service-instance-2";
@@ -687,6 +704,7 @@ fn requested_concrete_vm_is_authenticated_not_workload_name() {
 
 #[test]
 fn replacement_plan_cannot_change_original_retirement_attribution() {
+    let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     let mut f = Fixture::new(true);
     let original_plan_id = f.plan.plan_id.clone();
     f.plan = mvm_core::plan::test_support::PlanFixture::new()
@@ -708,6 +726,7 @@ fn replacement_plan_cannot_change_original_retirement_attribution() {
 
 #[test]
 fn missing_authority_bad_clock_and_live_owner_never_unlink() {
+    let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     let f = Fixture::new(false);
     assert!(reconcile_capture(f.context(), 605_000).is_err());
     assert!(f.payload().exists());
@@ -723,6 +742,7 @@ fn missing_authority_bad_clock_and_live_owner_never_unlink() {
 
 #[test]
 fn crash_after_signed_evidence_before_unlink_is_resumable() {
+    let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     let f = Fixture::new(true);
     let mut entry = for_plan(&f.plan, None, TRANSCRIPT_RETIRED_EVENT, []);
     entry.labels = labels(&f.manifest).unwrap();
@@ -746,6 +766,7 @@ fn crash_after_signed_evidence_before_unlink_is_resumable() {
 
 #[test]
 fn conflict_or_unsigned_missing_payload_refuses() {
+    let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     let f = Fixture::new(true);
     std::fs::remove_file(f.payload()).unwrap();
     assert!(reconcile_capture(f.context(), 605_000).is_err());
@@ -772,6 +793,7 @@ fn conflict_or_unsigned_missing_payload_refuses() {
 
 #[test]
 fn actual_audit_append_and_fsync_failure_never_authorize_unlink() {
+    let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     use crate::audit::audit_file::write_faults::{Boundary, Guard};
     // These synchronous tests have no entered Tokio runtime: the emitter runs
     // its current-thread executor here. Consumption proves the seam was hit.
@@ -832,6 +854,7 @@ fn actual_audit_append_and_fsync_failure_never_authorize_unlink() {
 
 #[test]
 fn signing_refusal_leaves_every_payload_and_original_root_untouched() {
+    let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     let f = Fixture::new(true);
     assert!(
         reconcile_with(f.context(), 605_000, None, |_| bail!(
@@ -852,6 +875,7 @@ fn signing_refusal_leaves_every_payload_and_original_root_untouched() {
 
 #[test]
 fn crash_after_one_payload_unlink_resumes_without_new_evidence() {
+    let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     let mut f = Fixture::new(false);
     let mut second = f.manifest.chunks[0].clone();
     second.file = "1.seg".into();
@@ -892,6 +916,7 @@ fn crash_after_one_payload_unlink_resumes_without_new_evidence() {
 
 #[test]
 fn policy_rehash_without_host_authority_never_unlinks() {
+    let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     let mut f = Fixture::new(true);
     f.manifest.at_rest.as_mut().unwrap().payload_after_seal_secs = 1;
     f.manifest.sealed_root_hex = mvm_core::transcript::sealed_root_hex(&f.manifest).unwrap();
@@ -906,6 +931,7 @@ fn policy_rehash_without_host_authority_never_unlinks() {
 
 #[test]
 fn aggregate_pressure_requires_signed_budget_and_checked_accounting() {
+    let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     let mut f = Fixture::new(false);
     let budget = mvm_core::transcript::GenerationBudget {
         max_plaintext_bytes: f.manifest.retained_plaintext_bytes().unwrap() + 1,
@@ -1008,6 +1034,7 @@ fn aggregate_pressure_requires_signed_budget_and_checked_accounting() {
 
 #[test]
 fn pressure_cannot_enroll_forensic_captures_or_trust_rehashed_totals() {
+    let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     let f = Fixture::new(true);
     let owner = BudgetOwner::acquire(
         f.root.path(),
