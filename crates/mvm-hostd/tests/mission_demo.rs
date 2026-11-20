@@ -2574,7 +2574,7 @@ fn two_nodes_deliver_over_a_loopback_tcp_peer_transport() {
     );
     assert_eq!(
         route_to(addr, 2, 2_000, &transport_authority).err(),
-        Some(TransportBindingError::StaleExecutionEpoch)
+        Some(TransportBindingError::ExecutionEpochNotPromoted)
     );
     // A frame larger than the channel bound never leaves the sender.
     let small = ChannelLimits::new(16, 32).unwrap();

@@ -68,17 +68,26 @@ pub(super) fn decide(
     entry: WorkloadEntry,
     epoch: ExecutionEpoch,
 ) -> Result<ExecutionEpoch, Denial> {
-    let (got, current) = (epoch.get(), entry.epoch.get());
-    if epoch < entry.epoch {
-        return Err(Denial::StaleEpoch { got, current });
-    }
-    if epoch > entry.epoch {
-        return Err(Denial::EpochNotPromoted { got, current });
-    }
+    admit_at(entry.epoch, epoch)?;
     if entry.quarantined {
         return Err(Denial::WorkloadQuarantined(unit.to_owned()));
     }
     Ok(entry.epoch)
+}
+
+/// The epoch half of the gate's rule, for a verifier that is handed its
+/// unit's current epoch rather than the record: only `current` passes, an
+/// older epoch is stale and a newer one is not yet promoted. Whoever supplies
+/// `current` is responsible for having read it from the gate.
+pub fn admit_at(current: ExecutionEpoch, epoch: ExecutionEpoch) -> Result<ExecutionEpoch, Denial> {
+    let (got, now) = (epoch.get(), current.get());
+    if epoch < current {
+        return Err(Denial::StaleEpoch { got, current: now });
+    }
+    if epoch > current {
+        return Err(Denial::EpochNotPromoted { got, current: now });
+    }
+    Ok(current)
 }
 
 #[cfg(test)]
@@ -122,6 +131,19 @@ mod tests {
         );
         let promoted = CommandGate::new(replaced(&["a"]));
         assert_eq!(promoted.admit("a", epoch(2)), Ok(epoch(2)));
+    }
+
+    #[test]
+    fn admit_at_passes_only_the_current_epoch() {
+        assert_eq!(admit_at(epoch(2), epoch(2)), Ok(epoch(2)));
+        assert_eq!(
+            admit_at(epoch(2), epoch(1)),
+            Err(Denial::StaleEpoch { got: 1, current: 2 })
+        );
+        assert_eq!(
+            admit_at(epoch(2), epoch(3)),
+            Err(Denial::EpochNotPromoted { got: 3, current: 2 })
+        );
     }
 
     #[test]

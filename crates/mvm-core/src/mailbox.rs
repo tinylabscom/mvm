@@ -196,12 +196,28 @@ pub enum MailboxError {
     StalePolicyEpoch,
     #[error("mailbox execution epoch is stale")]
     StaleExecutionEpoch,
+    #[error("mailbox execution epoch is not yet current")]
+    ExecutionEpochNotPromoted,
     #[error("mailbox message is not yet valid")]
     IssuedInFuture,
     #[error("mailbox message has expired")]
     Expired,
     #[error("mailbox message is a replay")]
     Replay,
+}
+
+/// The mailbox owner's current epoch, as the epoch gate decides it, against
+/// the epoch a message or binding carries.
+fn admit_execution_epoch(
+    current: ExecutionEpoch,
+    epoch: ExecutionEpoch,
+) -> Result<(), MailboxError> {
+    use crate::host_interface::{epoch_gate, error::Denial};
+    match epoch_gate::admit_at(current, epoch) {
+        Ok(_) => Ok(()),
+        Err(Denial::EpochNotPromoted { .. }) => Err(MailboxError::ExecutionEpochNotPromoted),
+        Err(_) => Err(MailboxError::StaleExecutionEpoch),
+    }
 }
 
 impl From<MailboxContractError> for MailboxError {
@@ -414,9 +430,7 @@ fn verify_identity_and_time(
     if header.recipient != context.expected_recipient {
         return Err(MailboxError::WrongRecipient);
     }
-    if header.execution_epoch != context.current_execution_epoch {
-        return Err(MailboxError::StaleExecutionEpoch);
-    }
+    admit_execution_epoch(context.current_execution_epoch, header.execution_epoch)?;
     if header.policy_epoch != context.current_policy_epoch {
         return Err(MailboxError::StalePolicyEpoch);
     }
@@ -478,9 +492,7 @@ fn verify_capability_scope(
     if header.plaintext_len > grant.max_payload_bytes {
         return Err(MailboxError::CapabilityPayloadExceeded);
     }
-    if context.current_execution_epoch < grant.minimum_execution_epoch
-        || context.current_execution_epoch > grant.maximum_execution_epoch
-    {
+    if !grant.admits_epoch(context.current_execution_epoch) {
         return Err(MailboxError::StaleExecutionEpoch);
     }
     if grant.policy_epoch != context.current_policy_epoch {
