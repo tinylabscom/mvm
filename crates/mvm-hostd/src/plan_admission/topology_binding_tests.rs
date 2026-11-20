@@ -39,6 +39,12 @@ impl Host {
     }
 
     fn admit_topology(&self, topology: &Topology) {
+        self.admit_topology_on(topology, false);
+    }
+
+    /// Admit on a host whose scope carries a CPU set, so exclusive placement
+    /// is served.
+    fn admit_topology_on(&self, topology: &Topology, scope_cpuset: bool) {
         let keys = self.keys();
         let signed = sign_topology_as_host(topology, Some(&keys)).expect("signs");
         let emitter = emitter(self.home.path(), &keys);
@@ -47,6 +53,12 @@ impl Host {
             signed: &signed,
             backend: mvm_core::vm_backend::BackendKind::Firecracker,
             measured_failover: None,
+            host_cpus: &crate::topology_admission::HostCpus {
+                scope_cpuset,
+                online: Some(mvm_contract::protocol::cpu_set::CpuSet::parse("0-7").unwrap()),
+                isolated: None,
+                live: Vec::new(),
+            },
             clock: &SystemClock,
             host_signer_keys_dir: Some(&keys),
             emitter: &emitter,
@@ -111,6 +123,7 @@ fn topology_for(plan: &ExecutionPlan, generation: u64) -> Topology {
             min_isolation: None,
             permits: SealedTransitions::default(),
             liveness_period_ms: None,
+            require_isolated_cores: false,
         }],
         standby_pairs: Vec::new(),
         cells: Vec::new(),
@@ -434,4 +447,55 @@ fn an_unreadable_topology_record_refuses_and_is_recorded_once() {
         "got: {err:#}"
     );
     assert_eq!(refused_entries(&host, &tenant), 1);
+}
+
+/// Another tenant's topology holding core 0 exclusively.
+fn holding_core_zero(plan: &ExecutionPlan) -> Topology {
+    let mut topology = topology_for(plan, 1);
+    topology.tenant = TenantId("other-tenant".to_string());
+    topology.units[0].placement =
+        CorePlacement::Exclusive(vec![mvm_contract::plan::topology::CoreId(0)]);
+    topology
+}
+
+#[test]
+fn nothing_is_refused_for_placement_while_no_core_is_held() {
+    let host = Host::new();
+    let admitted = host.admit(&plan()).expect("admitted as before");
+    assert_eq!(admitted.allowed_cpus(), None);
+}
+
+#[test]
+fn a_plan_that_cannot_be_confined_is_refused_while_cores_are_held_and_keeps_its_nonce() {
+    let host = Host::new();
+    let plan = plan();
+    let holder = holding_core_zero(&plan);
+    host.admit_topology_on(&holder, true);
+
+    // No backend is known to this admission, so nothing can confine it.
+    let err = host.admit(&plan).expect_err("refused while core 0 is held");
+    assert!(
+        matches!(
+            err.downcast_ref::<super::placement::PlanPlacementRefusal>(),
+            Some(super::placement::PlanPlacementRefusal::BackendCannotConfine { .. })
+        ),
+        "{err:#}"
+    );
+    assert!(
+        err.downcast_ref::<super::topology_binding::TopologyRefusalAudited>()
+            .is_some(),
+        "the refusal is recorded by the check itself"
+    );
+    let entry = host.last_entry(&plan.tenant.0);
+    assert_eq!(entry["event"], "plan.admission_refused");
+    assert_eq!(entry["labels"]["stage"], CORE_PLACEMENT_STAGE);
+    assert_eq!(refused_entries(&host, &plan.tenant.0), 1);
+
+    // Once nothing holds a core, the same plan is admitted: its nonce was
+    // never spent by the refusal.
+    std::fs::remove_dir_all(
+        mvm_core::config::topologies_dir_at(host.home.path()).join(&holder.tenant.0),
+    )
+    .unwrap();
+    host.admit(&plan).expect("the nonce was never spent");
 }

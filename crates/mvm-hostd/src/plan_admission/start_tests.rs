@@ -1788,6 +1788,54 @@ fn cli_transient_defers_launch_narrative_without_readmitting() {
 
 #[cfg(unix)]
 #[test]
+fn a_placed_cli_transient_whose_scope_reads_back_no_cpuset_is_stopped() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let dir = tempfile::tempdir().expect("test directory");
+    // The mock reports every dimension declared, so its read-back holds no
+    // cpuset: exactly what a scope that ignored `AllowedCPUs=` looks like.
+    let backend = mvm_runtime::AnyBackend::Mock(mvm_runtime::mock::MockBackend::new());
+    let config = VmStartConfig {
+        name: "cli-transient-placed".into(),
+        rootfs_path: "/store/rootfs.ext4".into(),
+        ..Default::default()
+    };
+    let admitted = admit_for_run(
+        &fixture_input(&config.name),
+        &SystemClock,
+        &InMemoryNonceLedger::new(),
+        Some(dir.path()),
+        None,
+        RunPosture::on_backend(Variant::Dev, backend.kind()).with_runtime(Some(&config)),
+    )
+    .expect("one admission")
+    .with_allowed_cpus_for_test(mvm_contract::protocol::cpu_set::CpuSet::parse("2-3").unwrap());
+    let vm_name = config.name.clone();
+    let error = start_cli_transient(
+        StartAdmittedParams {
+            backend: &backend,
+            admitted,
+            config,
+            policy_bundle: None,
+            emitter: None,
+            assurance: None,
+        },
+        None,
+        Vec::new(),
+    )
+    .expect_err("a placement that did not hold refuses the start");
+    assert!(
+        format!("{error:#}").contains("reads back no cpuset"),
+        "{error:#}"
+    );
+    assert_eq!(
+        backend.status(&VmId(vm_name)).expect("status"),
+        mvm_core::vm_backend::VmStatus::Stopped,
+        "the started VM is rolled back"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn fs_quick_fork_spends_one_admission_without_immediate_acceptance() {
     let (_env, _home) = host_with_ceiling(Default::default());
     let dir = tempfile::tempdir().expect("test directory");
