@@ -345,7 +345,6 @@ let
   # used by generated workload scripts.
   setprivPkg = import ../packages/mvm-setpriv.nix {
     inherit pkgs;
-    rustPlatform = pkgs.pkgsStatic.rustPlatform;
     lib = pkgs.lib;
     inherit mvmSrc;
   };

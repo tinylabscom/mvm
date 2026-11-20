@@ -348,6 +348,19 @@ pub enum CliAdmission {
 
 pub use cli_dispatch::FsQuickBootAdmission;
 
+impl CliAdmission {
+    /// The host cores admission placed this launch on, while the authority is
+    /// still pending. A placed launch boots cold: neither a standby nor a
+    /// snapshot restore is born inside a scope carrying the set.
+    #[must_use]
+    pub fn allowed_cpus(&self) -> Option<&mvm_contract::protocol::cpu_set::CpuSet> {
+        match self {
+            Self::Pending(pending) => pending.authority.allowed_cpus(),
+            Self::Dispatched(_) => None,
+        }
+    }
+}
+
 /// Private fields keep the pending authority one-shot.
 pub struct PendingCliAdmission {
     authority: AdmittedPlan,

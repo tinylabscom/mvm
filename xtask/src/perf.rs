@@ -129,7 +129,7 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
                 "  budgets [--json]               Print every documented perf budget as a table"
             );
             eprintln!(
-                "  resource-compare <A> <B> --tolerance <PERCENT>  Fail on the first resource figure that differs"
+                "  resource-compare <A> <B> --tolerance <PERCENT> [--allow-unpublishable]  Fail on the first resource figure that differs; refuses dirty or mixed-commit reports unless allowed"
             );
             std::process::exit(1);
         }

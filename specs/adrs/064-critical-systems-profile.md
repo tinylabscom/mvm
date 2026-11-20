@@ -164,9 +164,13 @@ doctor` reports both conditions.
 
 The achieved placement is read back and recorded in the same audit entry as
 the other enforced bounds. MVM does not reconfigure the host kernel. Whether
-the named cores are isolated from the general scheduler is a host property that
-`mvmctl doctor` reports and that admission checks when the topology requires
-it.
+the named cores are isolated from the general scheduler is a host property.
+`mvmctl doctor` reports it. A unit may also require it, through the optional
+`require_isolated_cores` field, which is valid only with exclusive placement and
+is left out of the encoding when false. Topology admission reads the host's
+isolated-CPU list only for a unit that sets the field. It refuses the topology
+if the list names fewer than all of the unit's cores, and names the cores that
+are missing. It also refuses it if the host publishes no isolated-CPU list.
 
 ### 5. Standby pairs and failover
 
@@ -187,6 +191,12 @@ brokers for cell reads only, and refused for writes, mailbox receipt and
 egress. Promotion makes it the current epoch. That is an amendment to
 ADR-062 section 3.
 
+A standby epoch is numbered above its unit's active epoch when it is admitted,
+so promotion never moves an epoch number backwards and ADR-057's rule that a
+new owner holds a strictly greater epoch still holds. Until promotion, every
+capability's epoch bounds exclude it; promotion re-checks each capability
+against those bounds.
+
 Epoch authority is decided in one place. A single gate answers whether an
 epoch may perform an operation, and every host service calls it: the mailbox,
 the egress gate, the cell service and the host-service broker. No service
@@ -196,10 +206,19 @@ grants, a standby epoch may read its unit's cells, and every other epoch is
 refused. Fencing a failed epoch and promoting its standby are therefore one
 update to the gate's input, not a message to each service.
 
+The gate is keyed by unit. One epoch covers a unit's mailbox, its egress and
+its cells, so a failover fences all three with one change. ADR-057 speaks of
+the epoch of a mailbox owner; for a unit in a topology that owner is the unit.
+
 Two epoch types exist today, the mailbox contract's and the host interface's,
 and about thirty production sites compare epochs inline, most of them in
-mailbox code. They become one type, owned by the gate. That work lands with
-the state cells of section 6, which are the gate's first new caller.
+mailbox code. They become one type, owned by the gate: the mailbox
+contract's, which has no zero value. The host interface's type, which admits
+zero and saturates when advanced, is deleted, and its callers treat zero and
+overflow as errors. The gate extends the host interface's existing command
+gate, which already checks an epoch and a sequence number, and does not sit
+beside it. That work lands with the state cells of section 6, which are the
+gate's first new caller.
 
 Failure is detected by the host, never by the guest, in two layers.
 
@@ -213,6 +232,9 @@ The second detects a unit that is alive but stuck, and is opt-in. A unit may
 declare a liveness period in the topology. The host holds one deadline for
 that unit and resets it on any traffic the epoch gate accepts from the unit's
 current epoch: a cell write, a mailbox send, or an explicit liveness signal.
+Cell writes and the explicit signal are built first. A mailbox send resets the
+deadline only once ADR-057's call and cast send path exists, which waits on
+that ADR's open decisions.
 A unit sends the explicit signal only when it has had nothing else to say for
 a period, so a busy unit pays nothing extra. When the deadline passes, the
 host applies the same failover sequence as for a crash. A unit that declares
@@ -233,6 +255,8 @@ The rules that keep this safe:
 - An early expiry on a loaded host fails in the safe direction: the old epoch
   is fenced before the standby is promoted, so there are never two writers.
 - Expiry and promotion are audited. Individual liveness signals are not.
+- An expiry is reported as ADR-057's `epoch_replaced` observation, after the
+  fence, so a supervisor sees a terminal fact and not an uncertain one.
 - A recovery bound shorter than the liveness period plus the measured
   promotion time is refused at admission.
 
@@ -245,12 +269,19 @@ heartbeat.
 Failover is one host-applied sequence, each step a host-witnessed event:
 
 1. Fence the failed epoch. Every broker, cell and mailbox refuses it from this
-   point.
+   point. The fence is a durable record of the unit's current epoch, written
+   before step 2. It is not the mailbox journal's store fence, which closes a
+   store to every later writer and exists for store migration; using that here
+   would lock the promoted standby out of the unit's own journal.
 2. Promote the standby: its epoch becomes the unit's current epoch, the
    unit's mailbox is delivered to it under ADR-057's epoch fencing, and it
    gains write authority over the unit's cells. No resolver is involved; a
    unit has one mailbox address before and after.
 3. Provision the next standby of the declared class.
+
+Under ADR-057 as it stands, a call still waiting for its reply when the epoch
+ends resolves as unavailable, so a failover would lose every such call.
+Failover does not ship until ADR-057 decides what happens to those calls.
 
 The crashed guest's memory is never resumed (ADR-062 section 4). A failover
 that cannot complete step 3 leaves the unit running without a standby; that is
@@ -477,6 +508,12 @@ establishment, then hybrid signatures on long-lived artifacts. This ADR adds:
 
 ## Open decisions
 
+- What a failover does with a call that is still waiting for its reply. This
+  is ADR-057's to decide, and section 5's failover waits on it. State cells
+  and the explicit liveness signal do not.
+- Whether a promoted standby inherits its unit's mailbox quota or starts with
+  a fresh one, and whether a call ended by a failover gets its own audit
+  entry. Both follow from ADR-057's open decisions.
 - The shortest liveness period each backend can hold without false failovers
   under load. It needs the failover measurements; until then a period is
   refused wherever no measured figure exists.

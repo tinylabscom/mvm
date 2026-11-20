@@ -21,6 +21,7 @@ use mvm_core::plan::{ExecutionPlan, synthesize_plan};
 use mvm_core::policy::PolicyBundle;
 use mvm_core::vm_backend::{StandbyClaim, StandbyError, StandbyHandle, VmId, VmStartConfig};
 use mvm_runtime::AnyBackend;
+use mvm_runtime::vm::instance_snapshot::MachineLifecycleLock;
 
 /// Dispatch an already admitted entrypoint on its original native channel.
 ///
@@ -141,6 +142,9 @@ pub enum CliStartFailure {
     Recorded(anyhow::Error),
     #[error("{0:#}")]
     Unrecorded(anyhow::Error),
+    /// The selected name is held by another launch; the caller cannot clean its state.
+    #[error("{0:#}")]
+    StateNotOwned(anyhow::Error),
     #[error("{0:#}")]
     UncertainStop(anyhow::Error),
 }
@@ -195,6 +199,130 @@ pub struct DispatchedPersistent {
     /// The exact admitted configuration handed to the backend, for post-start
     /// mailbox setup; the caller's pre-gate config is not authoritative.
     pub config: VmStartConfig,
+}
+
+/// Inputs whose verification, admission and dispatch must stay under one lifecycle lock.
+pub struct PreparePersistentParams<'a> {
+    /// The selected backend instance that will receive the admitted config.
+    pub backend: &'a AnyBackend,
+    /// Source-prepared config whose selected runtime is not yet launch-verified.
+    pub config: VmStartConfig,
+    /// Writable image locks transferred to the backend on dispatch.
+    pub writable_images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
+    /// The caller-held guard spanning source preparation through readiness.
+    pub lifecycle: &'a MachineLifecycleLock,
+}
+
+/// One signed persistent admission plus caller-owned post-dispatch state.
+pub struct PersistentAdmission<C> {
+    /// The one-use authority created for this exact persistent config.
+    pub admitted: AdmittedPlan,
+    /// The signer that records later readiness acceptance or refusal.
+    pub emitter: crate::audit::emitter::AuditEmitter,
+    /// The resolved policy bundle enforced by final launch gates.
+    pub policy_bundle: Option<PolicyBundle>,
+    /// Opaque client state returned without granting launch authority.
+    pub continuation: C,
+}
+
+/// A persistent child dispatched under the admission created in the same call.
+pub struct PreparedPersistent<C> {
+    /// Backend identity of the dispatched but not yet accepted child.
+    pub vm_id: VmId,
+    /// Original admitted authority and audit continuation for readiness.
+    pub admission: PersistentAdmission<C>,
+    /// Exact post-gate config handed to the backend and mailbox owner.
+    pub config: VmStartConfig,
+}
+
+/// Attach, verify, admit and dispatch a persistent cold boot in that order.
+///
+/// Source-specific attachment and plan lowering stay in the client callbacks,
+/// while this boundary owns their order and retains the verified runtime
+/// through dispatch. The supplied lifecycle lock is never reacquired.
+///
+/// # Errors
+/// Refuses a mismatched or non-cold lifecycle before attachment or admission,
+/// or propagates attachment, verification, durable admission and dispatch
+/// failures without starting a backend past the refusing stage.
+pub fn boot_vm<C>(
+    params: PreparePersistentParams<'_>,
+    attach: impl FnOnce(
+        &mut VmStartConfig,
+    ) -> Result<
+        Option<std::sync::Arc<mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime>>,
+    >,
+    admit: impl FnOnce(
+        &mut VmStartConfig,
+        Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
+    ) -> Result<PersistentAdmission<C>>,
+) -> Result<PreparedPersistent<C>> {
+    let PreparePersistentParams {
+        backend,
+        mut config,
+        writable_images,
+        lifecycle,
+    } = params;
+    lifecycle
+        .require_name(&config.name)
+        .map_err(CliStartFailure::StateNotOwned)?;
+    lifecycle
+        .require_cold_state()
+        .map_err(CliStartFailure::StateNotOwned)?;
+
+    let release = attach(&mut config)?;
+    let verified_runtime = match release {
+        Some(release) => Some(mvm_runtime::runtime_evidence::verify_release_runtime_set(
+            &config, release,
+        )?),
+        None => mvm_runtime::runtime_evidence::verify_selected_release_runtime_set(&config)?,
+    };
+    let admission = admit(&mut config, verified_runtime.as_ref())?;
+    let PersistentAdmission {
+        admitted,
+        emitter,
+        policy_bundle,
+        continuation,
+    } = admission;
+    let audit_plan = admitted.plan().clone();
+    let started = start_admitted_with_finalization(
+        StartAdmittedParams {
+            backend,
+            admitted,
+            config,
+            policy_bundle: policy_bundle.as_ref(),
+            emitter: Some(&emitter),
+            assurance: None,
+        },
+        verified_runtime.as_ref(),
+        StartFinalization::Persistent { writable_images },
+        None,
+        None,
+        || Ok(()),
+    )
+    .inspect_err(|dispatch_error| {
+        if matches!(
+            dispatch_error.downcast_ref::<CliStartFailure>(),
+            Some(CliStartFailure::UncertainStop(_))
+        ) {
+            return;
+        }
+        if let Err(error) =
+            emitter.seal_session(&audit_plan, crate::audit::session::SealReason::Failed)
+        {
+            tracing::warn!(%error, "sealing refused persistent admission failed");
+        }
+    })?;
+    Ok(PreparedPersistent {
+        vm_id: started.vm_id,
+        admission: PersistentAdmission {
+            admitted: started.admitted,
+            emitter,
+            policy_bundle,
+            continuation,
+        },
+        config: started.config,
+    })
 }
 
 /// Dispatch a persistent guest while its caller retains readiness-dependent finalization.
@@ -416,6 +544,12 @@ pub fn claim_cli_transient(
 ) -> Result<WarmClaimDispatch> {
     let mut admitted = admitted;
     anyhow::ensure!(!admitted.dispatched, "CLI admission was already dispatched");
+    // A standby's scope was created before this launch was placed, so it holds
+    // no CPU set and a claimed child would run unconfined.
+    anyhow::ensure!(
+        admitted.allowed_cpus().is_none(),
+        "a launch placed on host cores cannot claim a warm standby"
+    );
     anyhow::ensure!(
         admitted.plan().image.name == config.name,
         "warm claim identity differs from admitted plan"
@@ -453,6 +587,7 @@ pub fn claim_cli_transient(
         prepared.volumes.iter().all(|volume| volume.read_only),
         "warm claim cannot transfer writable volume custody"
     );
+    crate::seal_gate::persist_sealed_plan(&config.name, admitted.plan())?;
     let audit = mvm_vmm::host::audit_substrate::compute_audit_substrate(
         &config.name,
         prepared.tenant_id.as_deref(),
@@ -662,6 +797,23 @@ fn start_admitted_with_finalization(
         }
         return Err(err);
     }
+    // A unit admitted under a topology reads as sealed only through its
+    // persisted plan, so that write is part of the launch. It goes first: the
+    // bridge stash below replaces it with the signed envelope, which reads as
+    // the same plan.
+    if let Err(err) = crate::seal_gate::persist_sealed_plan(&vm_name, admitted.plan()) {
+        if (persistent || entrypoint)
+            && let Some(emitter) = params.emitter
+            && let Err(e) = emitter.emit_failed(admitted.plan(), "seal-plan", &format!("{err:#}"))
+        {
+            tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
+        }
+        return Err(if cli_transient {
+            CliStartFailure::Unrecorded(err).into()
+        } else {
+            err
+        });
+    }
     if (persistent || fork || entrypoint) && super::persists_plan_before_start(backend.name()) {
         super::stash_plan_for_bridge(&config).inspect_err(|err| {
             if !fork
@@ -782,6 +934,21 @@ fn start_admitted_with_finalization(
                     || stop_actor(&mut actor_owner),
                     FailureAuditPolicy::OwnedAfterConfirmedRollback,
                 )?)
+            } else if (cli_transient || fork) && admitted.allowed_cpus().is_some() {
+                // Neither path reads grants back later, so a launch placed on
+                // host cores is checked here: a scope that does not hold the
+                // admitted set stops the VM before the caller sees it start.
+                // Persistent starts reach the same check after readiness.
+                apply_admitted_grants_with_rollback(
+                    backend,
+                    &vm_id,
+                    &admitted,
+                    None,
+                    || backend.stop(&vm_id).map(|_| ()),
+                    FailureAuditPolicy::OwnedAfterConfirmedRollback,
+                )
+                .map_err(cli_rollback_error)?;
+                None
             } else if cli_transient || persistent || fork {
                 // The CLI finalizes on teardown; persistent starts finalize
                 // after authenticated readiness. Fs-quick forks retain their
@@ -989,6 +1156,22 @@ fn start_admitted_with_finalization(
                     }
                 };
             }
+            let (err, persistent_stop_uncertain) = if persistent {
+                classify_persistent_dispatch_error(err)
+            } else {
+                (err, false)
+            };
+            if persistent_stop_uncertain {
+                crate::audit::unsealed::record_unsealed_end(
+                    params.emitter.map(|emitter| (emitter, admitted.plan())),
+                    crate::audit::unsealed::UnsealedEnd::new(
+                        &vm_name,
+                        crate::audit::unsealed::UnsealedReason::StopFailed,
+                    )
+                    .error(format!("backend-start: {err:#}")),
+                );
+                return Err(CliStartFailure::UncertainStop(err).into());
+            }
             if !cli_transient
                 && !fork
                 && let Some(emitter) = params.emitter
@@ -1003,6 +1186,13 @@ fn start_admitted_with_finalization(
                 err
             })
         }
+    }
+}
+
+fn classify_persistent_dispatch_error(error: anyhow::Error) -> (anyhow::Error, bool) {
+    match mvm_runtime::backend::release_confirmed_start_failure(error) {
+        Ok(error) => (error, false),
+        Err(error) => (error, true),
     }
 }
 
@@ -1160,6 +1350,9 @@ pub(crate) fn admit_synthesized_with_verified_release(
         Ok(admitted) => admitted,
         Err(err) => {
             if let Some(emitter) = params.emitter
+                && err
+                    .downcast_ref::<super::topology_binding::TopologyRefusalAudited>()
+                    .is_none()
                 && let Err(e) =
                     emitter.emit_refused(&plan, "admit_plan_for_run", &format!("{err:#}"))
             {

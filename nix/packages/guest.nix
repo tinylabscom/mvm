@@ -37,7 +37,6 @@ in
 
   mvm-setpriv = import ./mvm-setpriv.nix {
     inherit pkgs lib mvmSrc;
-    rustPlatform = staticPkgs.rustPlatform;
   };
 
   mvm-runner = import ./mvm-runner.nix {

@@ -64,6 +64,12 @@ exec > >(tee -a /root/live-fork-witness.log) 2>&1
 BOOT_IMAGE_TAG="$1"; REMOTE_DIR="$2"; MICROVM="$3"
 export HOME=/root
 . "$HOME/.cargo/env" 2>/dev/null || true
+RUSTUP_TOOLCHAIN="$(sed -n 's/^channel = "\([^"]*\)"$/\1/p' "$REMOTE_DIR/rust-toolchain.toml")"
+[[ "$RUSTUP_TOOLCHAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+    echo "missing exact Rust toolchain pin in remote checkout" >&2
+    exit 1
+}
+export RUSTUP_TOOLCHAIN
 
 echo "=== remote deps $(date) ==="
 need_pkgs=0
@@ -90,7 +96,7 @@ if ! command -v zig >/dev/null 2>&1; then
 fi
 if ! command -v cargo >/dev/null 2>&1; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y --default-toolchain stable --profile minimal
+        | sh -s -- -y --default-toolchain "$RUSTUP_TOOLCHAIN" --profile minimal
     . "$HOME/.cargo/env"
 fi
 # The guest-agent cross-compile pins its own toolchain via

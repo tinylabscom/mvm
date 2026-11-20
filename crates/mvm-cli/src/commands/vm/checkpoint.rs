@@ -365,6 +365,9 @@ struct SessionStep {
 fn capture_vm_full_for_running_vm(
     args: CaptureVmFullArgs<'_>,
 ) -> Result<mvm_core::checkpoint::CheckpointMeta> {
+    // Checkpoint, fork and replay pause the running unit: a sealed one must
+    // declare it.
+    mvm_client::checkpoint::authorize_capture(args.name)?;
     let runtime_overlay_version = runtime_contract_for_checkpoint(args.name)?;
     let control = args.backend.vm_full_control(args.name).ok_or_else(|| {
         anyhow::anyhow!(
@@ -3357,5 +3360,39 @@ mod tests {
 
         let anchor = SignedChainAnchor::load().unwrap();
         verify_image_lineage(&store, &child, &anchor).unwrap();
+    }
+
+    /// Checkpoint, fork and replay all capture through
+    /// `capture_vm_full_for_running_vm`; a sealed unit that does not declare
+    /// `checkpoint` refuses there before its backend is touched.
+    #[test]
+    fn a_sealed_unit_without_checkpoint_refuses_a_vm_full_capture() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .workload("capture-sealed")
+            .build();
+        mvm_hostd::seal_gate::test_support::seal("capture-sealed", plan, Default::default())
+            .unwrap();
+        let store = CheckpointStore::open();
+        let err = capture_vm_full_for_running_vm(CaptureVmFullArgs {
+            name: "capture-sealed",
+            state_dir: home.path(),
+            store: &store,
+            backend: &AnyBackend::from_hypervisor("mock"),
+            id: CheckpointId::new("refused"),
+            tag: None,
+            created_unix: 0,
+            step: None,
+        })
+        .unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<mvm_hostd::seal_gate::SealRefusal>(),
+                Some(mvm_hostd::seal_gate::SealRefusal::NotDeclared { .. })
+            ),
+            "{err:#}"
+        );
     }
 }

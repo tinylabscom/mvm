@@ -40,6 +40,20 @@ pub fn record_boot_charge(
     )
 }
 
+pub(super) fn record_persistent_boot_charge(
+    ctx: &AdmissionContext,
+    vm_name: &str,
+    started: &StartedVm,
+) -> anyhow::Result<()> {
+    mvm_hostd::plan_admission::record_persistent_charge_or_undo_launch(
+        started.backend(),
+        started.vm_id(),
+        vm_name,
+        &ctx.admitted,
+        Some(&ctx.emitter),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

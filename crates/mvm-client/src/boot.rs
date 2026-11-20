@@ -165,10 +165,7 @@ impl StartedVm {
         &self.backend
     }
 
-    /// Pair a backend with a VM it has already started. Crate-private: outside
-    /// tests the only way to hold one is to have gone through
-    /// [`start_prepared`].
-    #[cfg(test)]
+    /// Pair a backend with a VM dispatched by the host-owned admitted executor.
     pub(crate) fn from_started(backend: mvm_runtime::backend::AnyBackend, vm_id: VmId) -> Self {
         Self { backend, vm_id }
     }
@@ -219,6 +216,7 @@ pub fn start_prepared_custodied_with_verified_runtime(
 }
 
 /// Spend a persistent admission through hostd while retaining its readiness owner.
+#[cfg(test)]
 pub(crate) fn start_admitted_persistent(
     backend: mvm_runtime::backend::AnyBackend,
     config: mvm_core::vm_backend::VmStartConfig,

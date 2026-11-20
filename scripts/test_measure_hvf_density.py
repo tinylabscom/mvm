@@ -33,6 +33,13 @@ with (Path(os.environ["MVM_HOME"]).parent / "commands.jsonl").open("a") as log:
         for key in ("MVM_RESIDENCY", "MVM_HVF_WARM_REQUIRE_CLAIM",
                     "MVM_PHASE_TIMING", "MVM_LAUNCH_SAMPLE_JSON")
     }]) + "\\n")
+if args[:2] == ["bench", "report"]:
+    if os.environ.get("MVM_FAKE_REPORT_FAIL") == "1":
+        print("report refused", file=sys.stderr)
+        sys.exit(1)
+    Path(args[args.index("--out") + 1]).write_text("{}")
+    print("| report |")
+    sys.exit(0)
 if args[:2] == ["machine", "run"]:
     def flag(name):
         return args[args.index(name) + 1]
@@ -184,8 +191,22 @@ home = Path(os.environ["MVM_HOME"])
 with (home.parent / "commands.jsonl").open("a") as log:
     log.write(json.dumps([args, os.environ.get("MVM_RESIDENCY"),
                           os.environ.get("MVM_HVF_WARM_REQUIRE_CLAIM")]) + "\\n")
+if args[:2] == ["bench", "report"]:
+    if os.environ.get("MVM_FAKE_REPORT_FAIL") == "1":
+        print("report refused", file=sys.stderr)
+        sys.exit(1)
+    Path(args[args.index("--out") + 1]).write_text("{}")
+    print("| report |")
+    sys.exit(0)
 if args[:2] == ["pool", "warm"]:
     (home / "pool" / "standby-1").mkdir(parents=True)
+    if os.environ.get("MVM_FAKE_SNAPSHOT_STANDBY") == "1":
+        (home / "snapshots").mkdir(exist_ok=True)
+        (home / "snapshots" / "standby-1.bin").write_bytes(b"x" * 8192)
+if args[:3] == ["pool", "status", "--json"]:
+    pid = 0 if os.environ.get("MVM_FAKE_SNAPSHOT_STANDBY") == "1" else 4321
+    print(json.dumps({"idle": 1, "claimed": 0, "parked": 0, "dead": 0,
+                      "standbys": [{"id": "standby-1", "state": "idle", "pid": pid}]}))
 """
 
     def run_standby(self, base: Path, extra: dict) -> subprocess.CompletedProcess:
@@ -241,6 +262,70 @@ if args[:2] == ["pool", "warm"]:
             self.assertIn("launch_mode\tstandby", summary)
             self.assertIn("wave_0_matching_processes\t0", summary)
             self.assertIn("wave_0_sampler_scope\thost_wide_matching_processes", summary)
+
+    def test_snapshot_standbys_are_counted_from_the_pool_and_charged_their_bytes(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            base = Path(tmp)
+            meminfo = base / "meminfo"
+            meminfo.write_text("MemTotal:       16777216 kB\n")
+            result = self.run_standby(base, {
+                "MVM_HVF_DENSITY_BACKEND": "firecracker",
+                "MVM_HVF_DENSITY_MEMINFO": str(meminfo),
+                "MVM_FAKE_SNAPSHOT_STANDBY": "1",
+            })
+            self.assertEqual(result.returncode, 0, result.stderr)
+            summary = (base / "out/summary.tsv").read_text()
+            self.assertIn("standby_form\ton_disk_snapshot\n", summary)
+            self.assertIn("wave_1_vmm_processes\t0\n", summary)
+            self.assertIn("wave_1_standby_count\t1\n", summary)
+            self.assertRegex(summary, r"wave_1_standby_snapshot_du_kib\t[1-9][0-9]*\n")
+            self.assertIn("wave_1_idle_sampler\tnot_applicable:no_resident_process", summary)
+            metadata = json.loads((base / "out/metadata.json").read_text())
+            self.assertEqual(metadata["configuration"]["standby_form"], "on_disk_snapshot")
+
+    def test_a_resident_standby_records_its_form_as_a_process(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            base = Path(tmp)
+            result = self.run_standby(base, {})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("standby_form\tresident_process\n", (base / "out/summary.tsv").read_text())
+
+    def test_a_too_long_data_dir_refuses_a_firecracker_standby_before_anything_runs(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            base = Path(tmp)
+            long_dir = base / ("d" * 60) / "mvm-data"
+            meminfo = base / "meminfo"
+            meminfo.write_text("MemTotal:       16777216 kB\n")
+            result = self.run_standby(base, {
+                "MVM_HVF_DENSITY_BACKEND": "firecracker",
+                "MVM_HVF_DENSITY_MEMINFO": str(meminfo),
+                "MVM_HVF_DENSITY_DATA_DIR": str(long_dir),
+            })
+            self.assertEqual(result.returncode, 65, result.stderr)
+            self.assertIn("MVM_HVF_DENSITY_DATA_DIR", result.stderr)
+            self.assertFalse(long_dir.exists())
+            self.assertFalse((base / "out/commands.jsonl").exists())
+
+    def test_the_resource_report_is_written_and_its_failure_fails_the_run(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            base = Path(tmp)
+            result = self.run_standby(base, {})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((base / "out/resource-report.json").read_text(), "{}")
+            self.assertEqual((base / "out/resource-report.md").read_text(), "| report |\n")
+            commands = [
+                json.loads(line)[0]
+                for line in (base / "out/commands.jsonl").read_text().splitlines()
+            ]
+            report = next(c for c in commands if c[:2] == ["bench", "report"])
+            self.assertEqual(report[2], "--density-dir")
+            self.assertEqual(report[3], str(base / "out"))
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            result = self.run_standby(Path(tmp), {"MVM_FAKE_REPORT_FAIL": "1"})
+            self.assertEqual(result.returncode, 74, result.stderr)
+            self.assertIn("resource report generation failed", result.stderr)
+            self.assertIn("report refused",
+                          (Path(tmp) / "out/resource-report.stderr").read_text())
 
     def test_pool_is_never_cleared_under_the_default_mvm_home(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
@@ -368,6 +453,9 @@ from pathlib import Path
 args = sys.argv[1:]
 with (Path(os.environ["MVM_HOME"]).parent / "commands.jsonl").open("a") as log:
     log.write(json.dumps(args) + "\\n")
+if args[:2] == ["bench", "report"]:
+    Path(args[args.index("--out") + 1]).write_text("{}")
+    sys.exit(0)
 if args[:2] == ["machine", "run"] and "--receipt" in args:
     time.sleep(30)
 """)

@@ -46,7 +46,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
 
       # The guest artifacts are cross-compiled with cargo-zigbuild under the
       # pinned toolchain, for the musl and glibc targets of both arches; this

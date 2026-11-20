@@ -160,6 +160,7 @@ path = "src/bin/emit_instruction_trust_schema.rs"
 required-features = ["schema"]
 
 [dev-dependencies]
+mvm-hostd = { workspace = true, features = ["test-support"] }
 # Embedders opt into authoring explicitly, separately from runtime control.
 mvm-sdk = { workspace = true }
 base64 = { workspace = true }

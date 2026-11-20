@@ -6,7 +6,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 authors.workspace = true
 description = "Image → mountable rootfs for mvm: OCI distribution client (registry/manifest/layer fetch + allow-listed unpack) and a pure-Rust, memory-safe, deterministic ext4 writer (no mkfs, no subprocess)."
 

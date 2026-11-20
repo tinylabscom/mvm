@@ -11,7 +11,7 @@ runs:
       shell: bash
       env:
         CHECKER: ${{ inputs.checker }}
-        RUSTUP_TOOLCHAIN: "1.97.1"
+        RUSTUP_TOOLCHAIN: "1.100.0"
       run: |
         set -euo pipefail
         case "$CHECKER" in

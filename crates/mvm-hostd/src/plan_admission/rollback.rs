@@ -49,9 +49,10 @@ pub(super) fn undo_cli_launch(undo: UndoLaunch<'_>) -> anyhow::Error {
     )
 }
 
+/// A post-start refusal whose compensating stop could not be confirmed.
 #[derive(Debug, thiserror::Error)]
 #[error("{primary:#}; rollback remains unconfirmed: {stop:#}")]
-pub(super) struct UndoLaunchFailure {
+pub struct UndoLaunchFailure {
     #[source]
     primary: anyhow::Error,
     stop: anyhow::Error,
@@ -113,10 +114,25 @@ fn apply_admitted_grants(
 ) -> Result<EnforcedGrants> {
     let undeclared = Grants::default();
     let grants = admitted.plan().grants.as_ref().unwrap_or(&undeclared);
-    backend
+    let mut enforced = backend
         .as_vm_backend()
         .apply_grants(vm_id, grants)
-        .context("applying the admitted plan's grants to the started VM")
+        .context("applying the admitted plan's grants to the started VM")?;
+    super::placement::check_placement_readback(admitted.allowed_cpus(), &mut enforced)
+        .context("confining the started VM to the host cores it was placed on")?;
+    if admitted.allowed_cpus().is_some() {
+        // A later topology admission reads this to tell this unit's own
+        // machine from one that would keep running on cores it is handing out.
+        crate::topology_admission::placement::record_owner(
+            &mvm_core::config::vm_state_dir(&vm_id.0),
+            &crate::topology_admission::placement::PlacementOwner {
+                tenant: admitted.plan().tenant.clone(),
+                workload: admitted.plan().workload.clone(),
+                exclusive: admitted.holds_cores_exclusively(),
+            },
+        )?;
+    }
+    Ok(enforced)
 }
 
 /// Apply the admitted plan's grants to a VM that has just started, and undo
@@ -150,6 +166,23 @@ pub fn apply_admitted_grants_or_undo_launch(
         emitter,
         || backend.stop(vm_id).map(|_| ()),
         FailureAuditPolicy::LegacyImmediate,
+    )
+}
+
+/// Apply grants for a client-owned persistent start; a failed stop remains unsealed.
+pub fn apply_persistent_grants_or_undo_launch(
+    backend: &AnyBackend,
+    vm_id: &VmId,
+    admitted: &AdmittedPlan,
+    emitter: Option<&crate::audit::emitter::AuditEmitter>,
+) -> Result<EnforcedGrants> {
+    apply_admitted_grants_with_rollback(
+        backend,
+        vm_id,
+        admitted,
+        emitter,
+        || backend.stop(vm_id).map(|_| ()),
+        FailureAuditPolicy::OwnedAfterConfirmedRollback,
     )
 }
 
@@ -216,6 +249,19 @@ pub fn record_charge_or_undo_launch(
         || backend.stop(vm_id).map(|_| ()),
         FailureAuditPolicy::LegacyImmediate,
     )
+}
+
+/// Record a persistent charge; a failed stop remains unsealed.
+pub fn record_persistent_charge_or_undo_launch(
+    backend: &AnyBackend,
+    vm_id: &VmId,
+    vm_name: &str,
+    admitted: &AdmittedPlan,
+    emitter: Option<&crate::audit::emitter::AuditEmitter>,
+) -> Result<()> {
+    record_charge_with_owned_rollback(backend, vm_id, vm_name, admitted, emitter, || {
+        backend.stop(vm_id).map(|_| ())
+    })
 }
 
 pub(super) fn record_entrypoint_charge_or_undo_launch(

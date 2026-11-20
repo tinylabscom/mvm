@@ -20,6 +20,7 @@ pub struct VmFullStepCheckpointer;
 impl StepCheckpointer for VmFullStepCheckpointer {
     fn capture(&self, step: StepCapture<'_>) -> Result<CheckpointMeta> {
         let name = step.vm_name;
+        super::authorize_capture(name)?;
         let backend = AnyBackend::for_started_vm(name).unwrap_or_else(AnyBackend::auto_select);
         let available = backend.snapshot_capability();
         if !available.satisfies(SnapshotCapability::SaveRestore) {
@@ -114,5 +115,48 @@ fn bind_created(name: &str, meta: &CheckpointMeta) {
     })();
     if let Err(error) = result {
         tracing::warn!(%error, vm = name, "checkpoint audit binding failed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A prompt step pauses the unit to capture it, so a sealed unit that does
+    /// not declare `checkpoint` refuses before any backend is touched.
+    #[test]
+    fn a_sealed_unit_without_checkpoint_refuses_a_prompt_step() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .workload("prompt-sealed")
+            .build();
+        mvm_hostd::seal_gate::test_support::seal("prompt-sealed", plan, Default::default())
+            .unwrap();
+        let step = StepCapture {
+            vm_name: "prompt-sealed",
+            parent: None,
+            session: mvm_core::checkpoint::SessionBinding {
+                session_id: mvm_contract::protocol::agent_session::AgentSessionId::parse("s")
+                    .unwrap(),
+                generation: 1,
+                journal_cursor: 0,
+                approval_head: mvm_core::checkpoint::ApprovalHead::parse(format!(
+                    "sha256:{}",
+                    "0".repeat(64)
+                ))
+                .unwrap(),
+                replay_input_digest: None,
+            },
+        };
+        let err = VmFullStepCheckpointer.capture(step).unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<mvm_hostd::seal_gate::SealRefusal>(),
+                Some(mvm_hostd::seal_gate::SealRefusal::NotDeclared { .. })
+            ),
+            "{err:#}"
+        );
     }
 }

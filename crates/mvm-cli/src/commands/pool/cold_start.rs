@@ -29,8 +29,8 @@ pub(crate) enum ColdStartReason {
     /// The caller named the machine, and a claimed standby runs under its own
     /// id.
     Named,
-    /// A shape a shared parent cannot serve: extra volumes, guest egress, or
-    /// boot assets pinned by a bundle.
+    /// A shape a shared parent cannot serve: extra volumes, guest egress,
+    /// boot assets pinned by a bundle, or a placement on host cores.
     IneligibleShape,
     /// This host keeps no standbys (`MVM_RESIDENCY=cold`).
     StandbysDisabled,

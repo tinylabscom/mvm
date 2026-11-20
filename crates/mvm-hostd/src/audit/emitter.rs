@@ -2437,6 +2437,7 @@ mod tests {
                     wall_clock: EnforcedTier::Declared,
                     memory: EnforcedCeiling::enforced(EnforcedTier::Cgroup2MemoryMax, 805_306_368),
                     tasks: EnforcedCeiling::enforced(EnforcedTier::Cgroup2PidsMax, 1024),
+                    placement: Default::default(),
                 },
             )
             .unwrap();

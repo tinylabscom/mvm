@@ -6,7 +6,6 @@ edition.workspace = true
 description = "Nix builder pipeline and artifact cache for mvm"
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
