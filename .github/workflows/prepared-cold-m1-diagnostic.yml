@@ -63,10 +63,19 @@ jobs:
       - name: Preflight the exact launch outside the benchmark
         run: |
           set -euo pipefail
-          MVM_LAUNCH_SAMPLE_JSON="$RESULTS_DIR/preflight.json" \
-            target/release/mvmctl run --no-detect \
-              --image docker.io/library/alpine:latest --hypervisor hvf \
-              --no-build --fresh -- /bin/true
+          # Two launches, a few seconds apart. The first signs the helper and
+          # records its probe memo within the timestamp margin of the signing,
+          # so the next launch has to hash the helper once and renew the memo.
+          # The lane rejects a hash in any launch it runs, warm-ups included,
+          # so that one hash belongs here and not in the benchmark.
+          for attempt in 1 2; do
+            MVM_LAUNCH_SAMPLE_JSON="$RESULTS_DIR/preflight-${attempt}.json" \
+              target/release/mvmctl run --no-detect \
+                --image docker.io/library/alpine:latest --hypervisor hvf \
+                --no-build --fresh -- /bin/true
+            sleep 3
+          done
+          cp "$RESULTS_DIR/preflight-2.json" "$RESULTS_DIR/preflight.json"
 
       - name: Measure physical-cold launches
         run: |
@@ -111,6 +120,7 @@ jobs:
           path: |
             ${{ runner.temp }}/mvm-physical-cold-${{ github.run_id }}-${{ github.run_attempt }}/provenance.txt
             ${{ runner.temp }}/mvm-physical-cold-${{ github.run_id }}-${{ github.run_attempt }}/preflight.json
+            ${{ runner.temp }}/mvm-physical-cold-${{ github.run_id }}-${{ github.run_attempt }}/preflight-1.json
             ${{ runner.temp }}/mvm-physical-cold-${{ github.run_id }}-${{ github.run_attempt }}/bench.json
             ${{ runner.temp }}/mvm-physical-cold-${{ github.run_id }}-${{ github.run_attempt }}/bench.log
           if-no-files-found: warn
