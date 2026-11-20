@@ -197,8 +197,11 @@ fn read_wave(s: &Summary, wave: u32, standby: Option<StandbyForm>) -> Result<Wav
     Ok(Wave {
         units,
         idle: idle_totals(s, wave, standby.is_some())?,
+        // Runtime records outlive the units that wrote them, so they are part
+        // of each unit's disk, not a shared cost the state dir would hide.
         vm_state_bytes: s
             .count(&key("vm_state_du_kib"))?
+            .saturating_add(s.count(&key("runtime_evidence_du_kib"))?)
             .saturating_mul(1024)
             .saturating_add(snapshot_bytes),
     })
@@ -668,6 +671,24 @@ mod tests {
         assert_eq!(measured(&run.memory_bytes), 20_000_000);
         assert!(s.by_standby.resident.cpu_millicores.value().is_none());
         assert!(s.by_residency.idle.cpu_millicores.value().is_none());
+    }
+
+    #[test]
+    fn runtime_evidence_a_wave_left_is_charged_to_its_units() {
+        let dir = edited(|s| {
+            s.replace(
+                "wave_2_runtime_evidence_du_kib\t0",
+                "wave_2_runtime_evidence_du_kib\t512",
+            )
+        });
+        let s = from_density_dir(dir.path()).unwrap();
+        assert_eq!(
+            measured(&s.by_residency.running.disk_bytes),
+            (2048 + 512) * 1024 / 2
+        );
+
+        let dir = edited(|s| s.replace("wave_2_runtime_evidence_du_kib\t0\n", ""));
+        assert!(error_of(&dir).contains("wave_2_runtime_evidence_du_kib"));
     }
 
     #[test]

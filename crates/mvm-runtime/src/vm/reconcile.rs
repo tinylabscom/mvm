@@ -289,7 +289,9 @@ pub fn reap_unowned_state_dir(state_dir: &Path, instance_dir: &Path) -> Result<b
 /// Caller retains the existing per-machine lifecycle lock for this directory.
 pub(crate) fn reap_unowned_state_dir_locked(state_dir: &Path) -> Result<bool, String> {
     if !state_dir.exists() {
-        return Ok(true);
+        // Nothing can run out of a state dir that is gone, but a teardown that
+        // removed only it may have left the separate socket dir behind.
+        return remove_runtime_dirs(state_dir).map(|()| true);
     }
     if state_dir_has_live_process(state_dir) {
         return Ok(false);
@@ -1377,6 +1379,19 @@ mod tests {
 
         assert_eq!(reaped, Ok(true));
         assert!(!dir.exists());
+        assert!(!socket_dir.exists());
+    }
+
+    #[test]
+    fn a_locked_reap_removes_a_socket_dir_left_behind_by_its_state_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("d".repeat(120)).join("vms").join("gone");
+        let socket_dir = mvm_core::config::vm_socket_dir_at(&dir);
+        assert_ne!(socket_dir, dir, "the fixture must keep its sockets apart");
+        std::fs::create_dir_all(&socket_dir).unwrap();
+        std::fs::write(socket_dir.join("fc.socket"), b"").unwrap();
+
+        assert_eq!(reap_unowned_state_dir_locked(&dir), Ok(true));
         assert!(!socket_dir.exists());
     }
 
