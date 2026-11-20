@@ -52,6 +52,10 @@ const RAW_ALLOWED: &[(&str, &str)] = &[
         "documentation of the store",
     ),
     (
+        "crates/mvm-core/src/image_set/fixtures/prepared_owner.rs",
+        "test-only #[path] fixture enrolls a synthetic kernel bundle publisher",
+    ),
+    (
         "crates/mvm-client/src/instruction_trust/gate.rs",
         "instruction policy trust, not a bundle",
     ),
