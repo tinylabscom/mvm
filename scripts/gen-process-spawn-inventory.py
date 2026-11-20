@@ -272,6 +272,7 @@ A = {
     "mvm-runtime/src/host_shell.rs": ("shell script", "bash -c for ShellEnvironment host commands"),
     "mvm-runtime/src/storage/backend.rs": ("storage tool", "dmsetup thin-pool operations"),
     "mvm-runtime/src/storage/volume/encrypted_linux.rs": ("storage tool", "cryptsetup, mount, umount, mkfs.ext4 for an encrypted volume"),
+    "mvm-runtime/src/workload_runner/runner/standby_live_hvf.rs": ("test harness", "opt-in native HVF standby witness runs the authenticated conformance reaper test binary"),
     "mvm-vmm/src/host/aux_bin.rs": ("helper bin", "`--contract-version` probe of a helper; cargo build of helpers from source"),
     "mvm-vmm/src/host/broker_services_spawn.rs": ("helper bin", "spawn the per-VM host-services broker"),
     "mvm-vmm/src/host/gpu_endpoint_spawn.rs": ("helper bin", "spawn the per-VM GPU endpoint"),
@@ -313,6 +314,7 @@ A = {
     "mvm-cli/src/host_binaries/payload_build.rs": ("toolchain", "cargo zigbuild of the embedded host binaries (refusal is in host_binaries/source.rs)"),
     "mvm-cli/src/update.rs": ("mvmctl self re-exec", "`--version` smoke test and `bootstrap` of the freshly installed mvmctl"),
     # dev only
+    "mvm-conformance/src/lib.rs": ("test harness", "prepare the mvmctl CLI command and sibling-helper search path for conformance runs"),
     "mvm-conformance/src/vmm_reaper.rs": ("test harness", "ps / kill / sudo to reap leaked VMMs in conformance runs"),
 }
 # Authority by crate when a row says nothing more specific.
@@ -376,6 +378,7 @@ REVIEWED = {
     "mvm-client/src/secret/source.rs": ("bounded-user-adapter", "`SecretSourceResolver::run_cli`: the program is one of two fixed names (`Cli::OnePassword`, `Cli::Bitwarden`) found only in trusted directories (`find_trusted`: absolute, canonical, not under an untrusted root, owner and mode checked); argv is a fixed subcommand plus typed references; environment is scrubbed with only that CLI's own session variables re-admitted by exact name (`helper_command_with`); stdin null; run through the shared `mvm_core::bounded_run::run_bounded` with stdout capped at `MAX_SOURCE_BYTES` and stderr at 4 KiB, and a wall-clock timeout that kills the child (`CliTimedOut`); errors carry at most 200 characters of the first stderr line and never the value. It cannot run `mvmctl` (`check-no-cli-shellout`)."),
     "mvm-build/src/stage0.rs": ("fixed-argv-utility", "`extract_nix_store_tarball_with_native_tar`: fixed `tar -xJf <tarball> -C <dir> --strip-components 1` on the Stage 0 root tarball, which is a bootstrap seed digest-verified before extraction; any failure clears the partial extract and falls back to the in-process extractor (`extract_nix_store_tarball_pure_rust`), so the spawn is an optimisation with a typed error and a pure-Rust alternative. No wall-clock bound."),
     "mvm-build/src/embed_toolchain.rs": ("embedder-refused-by-caller", "The module is shared with `build.rs` and the CLI payload build, which are not library paths. The only non-CLI caller is `rustc_has_target`, reached from `guest_agent_build::ensure_rust_targets` after `zigbuild_tools`, whose first statement is `refuse_toolchain_spawn` (`CliSpawn::GuestRuntimeToolchain`); a library embedder is refused before any `rustup`, `cargo`, `rustc`, `zig` or `python3` probe runs. The module cannot call that function itself because `build.rs` includes it without `mvm-vmm`."),
+    "mvm-runtime/src/workload_runner/runner/standby_live_hvf.rs": ("test-only", "`standby.rs` includes this module only under `cfg(all(test, target_os = \"macos\", target_arch = \"aarch64\"))`; `run_reaper` spawns the explicitly supplied conformance test binary only from the ignored, opt-in `native_standby_inventory` witness. No production library path loads this module."),
 }
 
 # What is missing for each file that stays open-review. Every open-review file

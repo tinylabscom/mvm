@@ -165,6 +165,7 @@ fn actor_process_config(
         ),
         reader_boot: Some(boot),
         vm_state_dir: state,
+        coordinator: None,
     }
 }
 

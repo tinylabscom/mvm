@@ -340,13 +340,15 @@ pub struct AdmissionContext {
 /// The authority cannot be cloned or built from signed-plan JSON. A cold
 /// dispatch consumes it; a pool miss leaves it pending for the cold path.
 pub enum CliAdmission {
+    /// Host-prepared authority for the admitted CLI cold alternative.
+    PreparedCold(Box<mvm_hostd::plan_admission::PreparedCliCold<CliColdContinuation>>),
     /// One-use authority before warm/cold selection.
     Pending(Box<PendingCliAdmission>),
     /// Dispatch spent the authority; only the audit continuation remains.
     Dispatched(Box<AuditContinuation>),
 }
 
-pub use cli_dispatch::FsQuickBootAdmission;
+pub use cli_dispatch::{FsQuickBootAdmission, prepare_cli_cold};
 
 impl CliAdmission {
     /// The host cores admission placed this launch on, while the authority is
@@ -355,6 +357,7 @@ impl CliAdmission {
     #[must_use]
     pub fn allowed_cpus(&self) -> Option<&mvm_contract::protocol::cpu_set::CpuSet> {
         match self {
+            Self::PreparedCold(prepared) => prepared.allowed_cpus(),
             Self::Pending(pending) => pending.authority.allowed_cpus(),
             Self::Dispatched(_) => None,
         }
@@ -368,6 +371,53 @@ pub struct PendingCliAdmission {
     audit: AuditContinuation,
     source_rootfs: Option<std::path::PathBuf>,
     verified_runtime: Option<std::sync::Arc<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>>,
+}
+
+/// Read-only CLI state retained inside the opaque host-prepared capability.
+pub struct CliColdContinuation {
+    host_budget: std::sync::Arc<mvm_hostd::admission_budget::HostBudgetPermit>,
+    mailbox_posture: Option<mvm_hostd::plan_admission::MailboxLaunchPosture>,
+    _built_runtime: Option<mvm_hostd::plan_admission::PreparedBuiltPackRuntime>,
+}
+
+/// Source-specific lowering produced by the CLI admission callback.
+pub struct CliColdAdmissionInput {
+    admission: CliAdmission,
+    built_runtime: Option<mvm_hostd::plan_admission::PreparedBuiltPackRuntime>,
+}
+
+impl CliColdAdmissionInput {
+    /// Move the temporary audit owner into host-prepared launch authority.
+    #[must_use]
+    pub fn new(
+        admission: CliAdmission,
+        built_runtime: Option<mvm_hostd::plan_admission::PreparedBuiltPackRuntime>,
+    ) -> Self {
+        Self {
+            admission,
+            built_runtime,
+        }
+    }
+}
+
+/// Actual admission plus its config projection before source-specific lowering.
+pub struct CliColdAdmissionResult {
+    /// Temporary owner installed before fallible post-admission lowering.
+    pub admission: std::rc::Rc<std::cell::RefCell<Option<CliAdmission>>>,
+    /// Read-only/config-drive projection applied only inside host preparation.
+    pub substrate: crate::entrypoint::SessionAuditSubstrate,
+}
+
+/// Prepared CLI cold projection used for warm/template/cold selection.
+pub struct PreparedCliCold {
+    /// Opaque one-shot launch owner.
+    pub admission: CliAdmission,
+    /// Read-only projection of the exact host-prepared config.
+    pub config: mvm_core::vm_backend::VmStartConfig,
+    /// Existing admission budget hold used by the CLI dispatch accounting.
+    pub host_budget: std::sync::Arc<mvm_hostd::admission_budget::HostBudgetPermit>,
+    /// Existing mailbox posture used by explicit non-cold alternatives.
+    pub mailbox_posture: Option<mvm_hostd::plan_admission::MailboxLaunchPosture>,
 }
 
 /// Read-only admitted plan and its original signer for post-run accounting.

@@ -585,7 +585,7 @@ fn finish_admitted_persistent(
                 policy_bundle,
                 host_signer_public_path,
             } = admission;
-            Ok(mvm_hostd::plan_admission::PersistentAdmission {
+            Ok(mvm_hostd::plan_admission::LaunchAdmission {
                 admitted,
                 emitter,
                 policy_bundle,
@@ -599,7 +599,7 @@ fn finish_admitted_persistent(
         admission,
         config: dispatched_config,
     } = dispatched;
-    let mvm_hostd::plan_admission::PersistentAdmission {
+    let mvm_hostd::plan_admission::LaunchAdmission {
         admitted,
         emitter,
         policy_bundle,

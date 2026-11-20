@@ -73,6 +73,15 @@ use transient::{
 };
 pub(crate) use transient::{RuntimeRunCustody, TransientStopFailure, combine_run_and_stop};
 
+pub(crate) type CliColdAdmit<'a> =
+    dyn Fn(AdmitInputs<'_>) -> Result<mvm_client::admission::CliColdAdmissionResult> + 'a;
+
+#[derive(Clone, Copy)]
+pub(crate) enum LaunchAdmit<'a> {
+    Session(&'a SessionAdmit<'a>),
+    CliCold(&'a CliColdAdmit<'a>),
+}
+
 /// Exit code the CLI returns when a guest command exceeds its `--timeout`.
 /// Matches GNU `timeout(1)` so scripts can branch on it.
 pub const EXEC_TIMEOUT_EXIT_CODE: i32 = 124;
@@ -345,7 +354,7 @@ impl ExecRequest {
 fn run_inner(
     req: ExecRequest,
     capture: bool,
-    admit: Option<&SessionAdmit<'_>>,
+    admit: Option<LaunchAdmit<'_>>,
     audit_owner: Option<&std::cell::RefCell<Option<mvm_client::admission::CliAdmission>>>,
     posture: Option<&PostureSink>,
     startup_started: std::time::Instant,
@@ -398,7 +407,7 @@ fn run_inner(
     // also what `pool warm` needs — so it lives in one function both call
     // rather than two that are free to drift.
     let mut resolve_marks = LaunchResolveMarks::new(timing);
-    let launch = resolve_launch(
+    let launch = resolve_launch_with_admit(
         &req.launch_shape(),
         admit,
         &mut resolve_marks,
@@ -410,11 +419,20 @@ fn run_inner(
         host_budget,
         verified_runtime,
         mailbox_posture,
+        cli_admission,
         use_snapshot,
         root_strategy,
         image: resolved,
         _built_runtime,
     } = launch;
+    if let Some(admission) = cli_admission {
+        let owner = audit_owner.context("prepared CLI cold launch has no audit owner")?;
+        anyhow::ensure!(
+            owner.borrow().is_none(),
+            "CLI launch already has an admission owner"
+        );
+        *owner.borrow_mut() = Some(admission);
+    }
     let startup_admitted = std::time::Instant::now();
     let vm_name = start_config.name.clone();
 
@@ -1044,6 +1062,18 @@ fn prepare_then_admit<T>(
     admit()
 }
 
+fn finish_cli_cold_lowering<T, U>(
+    owner: &std::cell::RefCell<Option<T>>,
+    lowering: Result<U>,
+) -> Result<(T, U)> {
+    let lowered = lowering?;
+    let owner = owner
+        .borrow_mut()
+        .take()
+        .context("CLI cold preparation lost its admitted audit owner")?;
+    Ok((owner, lowered))
+}
+
 /// One launch's boot shape, resolved without starting a VM.
 ///
 /// This is the whole of what a launch knows about itself before
@@ -1068,6 +1098,8 @@ pub struct ResolvedLaunch {
     pub verified_runtime: Option<std::sync::Arc<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>>,
     /// Only admission may supply Dev posture for an opted-in mailbox.
     pub mailbox_posture: Option<mvm_hostd::plan_admission::MailboxLaunchPosture>,
+    /// Opaque host-prepared owner for the admitted CLI cold alternative.
+    pub cli_admission: Option<mvm_client::admission::CliAdmission>,
     /// Whether snapshot restore survives admission (an admitted workload
     /// always cold-boots).
     pub use_snapshot: bool,
@@ -1095,6 +1127,15 @@ pub struct ResolvedLaunch {
 pub fn resolve_launch(
     shape: &LaunchShape<'_>,
     admit: Option<&SessionAdmit<'_>>,
+    marks: &mut LaunchResolveMarks,
+    sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
+) -> Result<ResolvedLaunch> {
+    resolve_launch_with_admit(shape, admit.map(LaunchAdmit::Session), marks, sub)
+}
+
+fn resolve_launch_with_admit(
+    shape: &LaunchShape<'_>,
+    admit: Option<LaunchAdmit<'_>>,
     marks: &mut LaunchResolveMarks,
     sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
 ) -> Result<ResolvedLaunch> {
@@ -1165,159 +1206,278 @@ pub fn resolve_launch(
     let mut built_pack_check = None;
     let mut mailbox_posture = None;
     let mut host_budget = None;
+    let mut verified_runtime = None;
+    let mut built_runtime = None;
+    let mut cli_admission = None;
+    let clamp_vcpus = |config: &mut VmStartConfig| {
+        if let Some(granted) =
+            mvm_core::vm_backend::clamp_vcpus(config.cpus, backend.capabilities().max_vcpus)
+        {
+            ui::warn(&format!(
+                "{} supports at most {granted} vCPU(s); {} requested, booting with {granted}",
+                backend.name(),
+                config.cpus,
+            ));
+            tracing::info!(
+                backend = backend.name(),
+                requested = config.cpus,
+                granted,
+                "vcpu request clamped to the backend ceiling"
+            );
+            config.cpus = granted;
+        }
+    };
 
     // Attach everything the boot waits on before admitting. Admission starts
     // the plan's validity window and the verb grant minted from it expires
     // with it, so a cold overlay build after admission would spend the window
     // the boot needs (see `mvm_client::launch::boot_order`).
-    let t_overlay = std::time::Instant::now();
-    sub.start(SubPhase::AttachOverlay);
-    mvm_core::launch_trace::lap_reset(None);
-    let verified_release = crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
-        crate::commands::vm::up::attach_runtime_overlay_if_cached_version_verified(
-            &mut start_config,
-            backend.name(),
-            None,
-            pair,
-        )
-    })?;
-    mvm_core::launch_trace::lap("attach_overlay.tail");
-    sub.finish(SubPhase::AttachOverlay);
-    tracing::debug!(
-        ms = t_overlay.elapsed().as_secs_f64() * 1000.0,
-        "admit window: attach runtime overlay"
-    );
-
-    let t_initramfs = std::time::Instant::now();
-    sub.start(SubPhase::AttachInitramfs);
-    mvm_core::launch_trace::lap_reset(None);
-    if let Some(release) = &verified_release {
-        crate::commands::vm::up::attach_universal_initramfs_with_verified_release(
-            &mut start_config,
-            backend.name(),
-            release,
-        )?;
-    } else {
-        crate::commands::vm::up::attach_universal_initramfs_if_cached(
-            &mut start_config,
-            backend.name(),
-        )?;
-    }
-    mvm_core::launch_trace::lap("attach_initramfs.tail");
-    sub.finish(SubPhase::AttachInitramfs);
-    tracing::debug!(
-        ms = t_initramfs.elapsed().as_secs_f64() * 1000.0,
-        "admit window: attach universal initramfs"
-    );
-    let verified_runtime = verified_release
-        .map(|release| {
-            mvm_runtime::runtime_evidence::verify_release_runtime_set(&start_config, release)
-                .map(std::sync::Arc::new)
-        })
-        .transpose()?;
-
-    // Admit the transient run as a locally-signed workload. Setting
-    // tenant_id + plan_json makes the runner-backed microVM supervisor enforce
-    // `network_policy` and chain-audit the run. Force cold boot when admitted —
-    // snapshot restore is unavailable for workload admission.
-    let t_admission = std::time::Instant::now();
-    sub.start(SubPhase::AdmitPlan);
-    mvm_core::launch_trace::lap_reset(None);
-    // A run resolved from an installed bundle boots its extracted files;
-    // admission pins the bundle and checks those files against what was signed.
     let bundle_archive = image
         .template_id
         .as_deref()
         .map(mvm_runtime::vm::template::lifecycle::installed_bundle_archive)
         .transpose()?
         .flatten();
-    if let Some(admit_fn) = admit
-        && let Some(sub) = admit_fn(AdmitInputs {
-            rootfs: std::path::Path::new(&image.rootfs),
-            kernel: start_config
-                .kernel_path
-                .as_deref()
-                .map(std::path::Path::new),
-            backend_kind: backend.kind(),
-            vm_name: &vm_name,
-            sdk_sidecar: sdk_sidecar.as_ref(),
-            assets: shape.assets,
-            volumes: &start_config.volumes,
-            bundle_archive: bundle_archive.as_deref(),
-            runtime_config: Some(&start_config),
-            verified_runtime: verified_runtime.as_deref(),
-            verified_runtime_owner: verified_runtime.as_ref(),
-        })?
-    {
-        let mut sub = sub;
-        built_pack_check = sub.built_pack_check.take();
-        mailbox_posture = sub.mailbox_posture.take();
-        host_budget = Some(std::sync::Arc::clone(&sub.host_budget));
-        let read_only_materialized_images = sub.apply_to(&mut start_config);
-        for volume in &mut start_config.volumes {
-            if read_only_materialized_images.contains(&volume.host)
-                || volume
-                    .materialized_image
-                    .as_ref()
-                    .is_some_and(|image| read_only_materialized_images.contains(image))
-            {
-                volume.read_only = true;
-            }
-        }
-        use_snapshot = false;
+    if let Some(LaunchAdmit::CliCold(admit_fn)) = admit {
+        let sub = std::cell::RefCell::new(&mut *sub);
+        let prepared = mvm_client::admission::prepare_cli_cold(
+            &backend,
+            start_config,
+            |config| {
+                let t_overlay = std::time::Instant::now();
+                sub.borrow_mut().start(SubPhase::AttachOverlay);
+                mvm_core::launch_trace::lap_reset(None);
+                let release =
+                    crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
+                        crate::commands::vm::up::attach_runtime_overlay_if_cached_version_verified(
+                            config,
+                            backend.name(),
+                            None,
+                            pair,
+                        )
+                    })?;
+                mvm_core::launch_trace::lap("attach_overlay.tail");
+                sub.borrow_mut().finish(SubPhase::AttachOverlay);
+                tracing::debug!(
+                    ms = t_overlay.elapsed().as_secs_f64() * 1000.0,
+                    "admit window: attach runtime overlay"
+                );
 
-        refuse_unloadable_sidecar(
-            &image.rootfs,
-            &start_config.volumes,
-            start_config.plan_json.as_deref(),
+                let t_initramfs = std::time::Instant::now();
+                sub.borrow_mut().start(SubPhase::AttachInitramfs);
+                mvm_core::launch_trace::lap_reset(None);
+                if let Some(release) = &release {
+                    crate::commands::vm::up::attach_universal_initramfs_with_verified_release(
+                        config,
+                        backend.name(),
+                        release,
+                    )?;
+                } else {
+                    crate::commands::vm::up::attach_universal_initramfs_if_cached(
+                        config,
+                        backend.name(),
+                    )?;
+                }
+                mvm_core::launch_trace::lap("attach_initramfs.tail");
+                sub.borrow_mut().finish(SubPhase::AttachInitramfs);
+                tracing::debug!(
+                    ms = t_initramfs.elapsed().as_secs_f64() * 1000.0,
+                    "admit window: attach universal initramfs"
+                );
+                Ok(release)
+            },
+            |config, verified| {
+                let t_admission = std::time::Instant::now();
+                sub.borrow_mut().start(SubPhase::AdmitPlan);
+                mvm_core::launch_trace::lap_reset(None);
+                let mvm_client::admission::CliColdAdmissionResult {
+                    admission,
+                    mut substrate,
+                } = admit_fn(AdmitInputs {
+                    rootfs: std::path::Path::new(&image.rootfs),
+                    kernel: config.kernel_path.as_deref().map(std::path::Path::new),
+                    backend_kind: backend.kind(),
+                    vm_name: &vm_name,
+                    sdk_sidecar: sdk_sidecar.as_ref(),
+                    assets: shape.assets,
+                    volumes: &config.volumes,
+                    bundle_archive: bundle_archive.as_deref(),
+                    runtime_config: Some(config),
+                    verified_runtime: verified,
+                    verified_runtime_owner: None,
+                })?;
+                let lowering = (|| {
+                    let built_pack_check = substrate.built_pack_check.take();
+                    let read_only_materialized_images = substrate.apply_to(config);
+                    for volume in &mut config.volumes {
+                        if read_only_materialized_images.contains(&volume.host)
+                            || volume
+                                .materialized_image
+                                .as_ref()
+                                .is_some_and(|image| read_only_materialized_images.contains(image))
+                        {
+                            volume.read_only = true;
+                        }
+                    }
+                    refuse_unloadable_sidecar(
+                        &image.rootfs,
+                        &config.volumes,
+                        config.plan_json.as_deref(),
+                    )?;
+                    mvm_core::launch_trace::lap("admit_plan.apply_and_sidecar_check");
+                    sub.borrow_mut().finish(SubPhase::AdmitPlan);
+                    tracing::debug!(
+                        ms = t_admission.elapsed().as_secs_f64() * 1000.0,
+                        "admit window: admission"
+                    );
+                    clamp_vcpus(config);
+                    let t_status = std::time::Instant::now();
+                    crate::commands::vm::up::emit_runtime_source_status(config);
+                    tracing::debug!(
+                        ms = t_status.elapsed().as_secs_f64() * 1000.0,
+                        "admit window: runtime source status"
+                    );
+                    let built_runtime = built_pack_check
+                        .map(|check| check.prepare(config, backend.kind()))
+                        .transpose()?
+                        .flatten();
+                    built_pack::require_handoff(shape.image, built_runtime.is_some())?;
+                    Ok(built_runtime)
+                })();
+                let (admission, built_runtime) =
+                    finish_cli_cold_lowering(admission.as_ref(), lowering)?;
+                Ok(mvm_client::admission::CliColdAdmissionInput::new(
+                    admission,
+                    built_runtime,
+                ))
+            },
         )?;
+        start_config = prepared.config;
+        host_budget = Some(prepared.host_budget);
+        mailbox_posture = prepared.mailbox_posture;
+        cli_admission = Some(prepared.admission);
+        use_snapshot = false;
     }
-    mvm_core::launch_trace::lap("admit_plan.apply_and_sidecar_check");
-    sub.finish(SubPhase::AdmitPlan);
-    tracing::debug!(
-        ms = t_admission.elapsed().as_secs_f64() * 1000.0,
-        "admit window: admission"
-    );
 
-    // Clamp the vCPU request to what this backend can actually create, and say
-    // so. Before the backend is chosen there is nothing to clamp against, and
-    // after the launch it is too late to tell anyone.
-    //
-    // Not an error. `--cpus 4` is a portable command meeting a host limit, and
-    // refusing it would make the same script succeed on Linux and fail on
-    // macOS for a reason the user cannot act on — worse, HVF's default is 2, so
-    // a hard refusal at a ceiling of 1 failed *every* launch on that backend.
-    // Silence is the other failure: a guest on one CPU while its admitted plan
-    // says four, with nothing to explain the performance.
-    if let Some(granted) =
-        mvm_core::vm_backend::clamp_vcpus(start_config.cpus, backend.capabilities().max_vcpus)
-    {
-        ui::warn(&format!(
-            "{} supports at most {granted} vCPU(s); {} requested, booting with {granted}",
-            backend.name(),
-            start_config.cpus,
-        ));
-        tracing::info!(
-            backend = backend.name(),
-            requested = start_config.cpus,
-            granted,
-            "vcpu request clamped to the backend ceiling"
+    if !matches!(admit, Some(LaunchAdmit::CliCold(_))) {
+        let t_overlay = std::time::Instant::now();
+        sub.start(SubPhase::AttachOverlay);
+        mvm_core::launch_trace::lap_reset(None);
+        let verified_release =
+            crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
+                crate::commands::vm::up::attach_runtime_overlay_if_cached_version_verified(
+                    &mut start_config,
+                    backend.name(),
+                    None,
+                    pair,
+                )
+            })?;
+        mvm_core::launch_trace::lap("attach_overlay.tail");
+        sub.finish(SubPhase::AttachOverlay);
+        tracing::debug!(
+            ms = t_overlay.elapsed().as_secs_f64() * 1000.0,
+            "admit window: attach runtime overlay"
         );
-        start_config.cpus = granted;
-    }
 
-    let t_status = std::time::Instant::now();
-    crate::commands::vm::up::emit_runtime_source_status(&start_config);
-    tracing::debug!(
-        ms = t_status.elapsed().as_secs_f64() * 1000.0,
-        "admit window: runtime source status"
-    );
+        let t_initramfs = std::time::Instant::now();
+        sub.start(SubPhase::AttachInitramfs);
+        mvm_core::launch_trace::lap_reset(None);
+        if let Some(release) = &verified_release {
+            crate::commands::vm::up::attach_universal_initramfs_with_verified_release(
+                &mut start_config,
+                backend.name(),
+                release,
+            )?;
+        } else {
+            crate::commands::vm::up::attach_universal_initramfs_if_cached(
+                &mut start_config,
+                backend.name(),
+            )?;
+        }
+        mvm_core::launch_trace::lap("attach_initramfs.tail");
+        sub.finish(SubPhase::AttachInitramfs);
+        tracing::debug!(
+            ms = t_initramfs.elapsed().as_secs_f64() * 1000.0,
+            "admit window: attach universal initramfs"
+        );
+        verified_runtime = verified_release
+            .map(|release| {
+                mvm_runtime::runtime_evidence::verify_release_runtime_set(&start_config, release)
+                    .map(std::sync::Arc::new)
+            })
+            .transpose()?;
+
+        // Admit the transient run as a locally-signed workload. Setting
+        // tenant_id + plan_json makes the runner-backed microVM supervisor enforce
+        // `network_policy` and chain-audit the run. Force cold boot when admitted —
+        // snapshot restore is unavailable for workload admission.
+        let t_admission = std::time::Instant::now();
+        sub.start(SubPhase::AdmitPlan);
+        mvm_core::launch_trace::lap_reset(None);
+        // A run resolved from an installed bundle boots its extracted files;
+        // admission pins the bundle and checks those files against what was signed.
+        if let Some(LaunchAdmit::Session(admit_fn)) = admit
+            && let Some(sub) = admit_fn(AdmitInputs {
+                rootfs: std::path::Path::new(&image.rootfs),
+                kernel: start_config
+                    .kernel_path
+                    .as_deref()
+                    .map(std::path::Path::new),
+                backend_kind: backend.kind(),
+                vm_name: &vm_name,
+                sdk_sidecar: sdk_sidecar.as_ref(),
+                assets: shape.assets,
+                volumes: &start_config.volumes,
+                bundle_archive: bundle_archive.as_deref(),
+                runtime_config: Some(&start_config),
+                verified_runtime: verified_runtime.as_deref(),
+                verified_runtime_owner: verified_runtime.as_ref(),
+            })?
+        {
+            let mut sub = sub;
+            built_pack_check = sub.built_pack_check.take();
+            mailbox_posture = sub.mailbox_posture.take();
+            host_budget = Some(std::sync::Arc::clone(&sub.host_budget));
+            let read_only_materialized_images = sub.apply_to(&mut start_config);
+            for volume in &mut start_config.volumes {
+                if read_only_materialized_images.contains(&volume.host)
+                    || volume
+                        .materialized_image
+                        .as_ref()
+                        .is_some_and(|image| read_only_materialized_images.contains(image))
+                {
+                    volume.read_only = true;
+                }
+            }
+            use_snapshot = false;
+
+            refuse_unloadable_sidecar(
+                &image.rootfs,
+                &start_config.volumes,
+                start_config.plan_json.as_deref(),
+            )?;
+        }
+        mvm_core::launch_trace::lap("admit_plan.apply_and_sidecar_check");
+        sub.finish(SubPhase::AdmitPlan);
+        tracing::debug!(
+            ms = t_admission.elapsed().as_secs_f64() * 1000.0,
+            "admit window: admission"
+        );
+
+        clamp_vcpus(&mut start_config);
+        let t_status = std::time::Instant::now();
+        crate::commands::vm::up::emit_runtime_source_status(&start_config);
+        tracing::debug!(
+            ms = t_status.elapsed().as_secs_f64() * 1000.0,
+            "admit window: runtime source status"
+        );
+        built_runtime = built_pack_check
+            .map(|check| check.prepare(&mut start_config, backend.kind()))
+            .transpose()?
+            .flatten();
+        built_pack::require_handoff(shape.image, built_runtime.is_some())?;
+    }
     marks.admitted = marks.now();
-    let built_runtime = built_pack_check
-        .map(|check| check.prepare(&mut start_config, backend.kind()))
-        .transpose()?
-        .flatten();
-    built_pack::require_handoff(shape.image, built_runtime.is_some())?;
 
     Ok(ResolvedLaunch {
         backend,
@@ -1325,6 +1485,7 @@ pub fn resolve_launch(
         host_budget,
         verified_runtime,
         mailbox_posture,
+        cli_admission,
         use_snapshot,
         root_strategy: boot.root_strategy,
         image,
@@ -1732,6 +1893,22 @@ mod tests {
         assert!(
             minted.elapsed() < std::time::Duration::from_millis(20),
             "the grant window must start when admission runs, not before preparation"
+        );
+    }
+
+    #[test]
+    fn post_admission_lowering_refusal_retains_the_exact_audit_owner() {
+        let owner = std::cell::RefCell::new(Some("admitted-authority"));
+        let error = finish_cli_cold_lowering::<_, ()>(
+            &owner,
+            Err(anyhow::anyhow!("built-pack preparation refused")),
+        )
+        .expect_err("post-admission lowering must refuse");
+        assert!(error.to_string().contains("built-pack"));
+        assert_eq!(
+            owner.into_inner(),
+            Some("admitted-authority"),
+            "sidecar or built-pack refusal keeps the owner for failure/output audit"
         );
     }
 

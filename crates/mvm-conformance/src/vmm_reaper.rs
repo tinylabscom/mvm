@@ -19,11 +19,46 @@
 //!
 //! A process the test user cannot signal (the root-owned VMM) is signalled
 //! through `sudo -n`, the same privilege its launch used.
+//!
+//! HVF supervisors are never raw-signalled. Home-local runtime evidence
+//! selects an isolated `mvmctl machine stop` child; only the existing backend
+//! authenticates shutdown and authorizes finalization cleanup. Missing evidence,
+//! refusal, timeout, or a newly observed supervisor leaves cleanup unknown.
 
 use mvm_core::env_hygiene::helper_command;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::IsolatedHome;
+
+/// Cleanup could not establish an authenticated HVF stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupUnknown {
+    /// No home-local runtime candidate accounted for the supervisor.
+    MissingVm,
+    /// Home-local runtime evidence could not be enumerated safely.
+    DiscoveryUnavailable,
+    /// The stop command refused or exited unsuccessfully.
+    StopRefused,
+    /// The stop command exceeded its deadline.
+    StopTimedOut,
+    /// The CLI could not be located, started, or waited on.
+    StopUnavailable,
+    /// A supervisor appeared after the authenticated-stop pass.
+    NewSupervisor,
+    /// A supervisor remained observable after the stop pass.
+    SupervisorSurvived,
+    /// The host process table could not be read.
+    ProcessTableUnavailable,
+}
+
+/// Bounded, secret-free cleanup diagnostic. No command output or identity bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownCleanup {
+    pub pid: Option<u32>,
+    pub category: CleanupUnknown,
+}
 
 /// One host process whose command line names a path the scenario owned.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,19 +74,30 @@ pub struct ReapReport {
     pub found: Vec<OwnedProcess>,
     /// Processes still running after SIGTERM and SIGKILL.
     pub survivors: Vec<OwnedProcess>,
+    /// Unconfirmed cleanup, retained even when a later scan finds no process.
+    pub unknown: Vec<UnknownCleanup>,
 }
 
 impl ReapReport {
     /// Whether nothing the scenario started outlived the reap.
     pub fn is_clean(&self) -> bool {
-        self.survivors.is_empty()
+        self.survivors.is_empty() && self.unknown.is_empty()
+    }
+
+    /// Describe failure without dumping runtime identity or subprocess output.
+    pub fn describe_failure(&self) -> String {
+        format!(
+            "{}\nunknown cleanup: {:?}",
+            Self::describe(&self.survivors),
+            self.unknown
+        )
     }
 
     /// A one-line-per-process description for a failure message or a log.
     pub fn describe(processes: &[OwnedProcess]) -> String {
         processes
             .iter()
-            .map(|process| format!("  pid {}: {}", process.pid, process.args))
+            .map(|process| format!("  pid {}", process.pid))
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -140,20 +186,17 @@ pub fn select_owned(
         .collect()
 }
 
-fn process_table() -> Vec<ProcessRow> {
-    helper_command("ps")
+fn process_table() -> Result<Vec<ProcessRow>, CleanupUnknown> {
+    let output = helper_command("ps")
         .args(["-ww", "-eo", "pid=,ppid=,args="])
         .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| parse_process_table(&String::from_utf8_lossy(&output.stdout)))
-        .unwrap_or_default()
-}
-
-fn scan(markers: &[String]) -> Vec<OwnedProcess> {
-    let rows = process_table();
-    let spare = ancestry(&rows, std::process::id());
-    select_owned(&rows, markers, &spare)
+        .map_err(|_| CleanupUnknown::ProcessTableUnavailable)?;
+    if !output.status.success() {
+        return Err(CleanupUnknown::ProcessTableUnavailable);
+    }
+    Ok(parse_process_table(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
 }
 
 /// Signal `pid` as the test user, and through `sudo -n` when that is refused:
@@ -173,48 +216,294 @@ fn signal(pid: u32, signal: &str) {
     }
 }
 
-fn wait_until_gone(markers: &[String], timeout: Duration) -> Vec<OwnedProcess> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let remaining = scan(markers);
-        if remaining.is_empty() || Instant::now() >= deadline {
-            return remaining;
+fn is_hvf(process: &OwnedProcess) -> bool {
+    is_hvf_with_override(
+        process,
+        std::env::var_os("MVM_HVF_SUPERVISOR_PATH").as_deref(),
+    )
+}
+
+fn is_hvf_with_override(process: &OwnedProcess, configured: Option<&std::ffi::OsStr>) -> bool {
+    // Deliberately conservative: an ambiguous wrapper must not raw-kill HVF.
+    process.args.contains("mvm-hvf-supervisor")
+        || configured
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|path| !path.is_empty() && process.args.contains(path))
+}
+
+fn hvf_candidates(homes: &[&Path]) -> Result<Vec<(PathBuf, String)>, CleanupUnknown> {
+    let mut candidates = Vec::new();
+    for home in homes {
+        let entries = match std::fs::read_dir(mvm_core::config::vms_dir_at(home)) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(CleanupUnknown::DiscoveryUnavailable),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|_| CleanupUnknown::DiscoveryUnavailable)?;
+            let kind = entry
+                .file_type()
+                .map_err(|_| CleanupUnknown::DiscoveryUnavailable)?;
+            if kind.is_symlink() {
+                return Err(CleanupUnknown::DiscoveryUnavailable);
+            }
+            if !kind.is_dir() {
+                continue;
+            }
+            let dir = entry.path();
+            let mut evidence = false;
+            for marker in [
+                "hvf-launch.lock",
+                "hvf.pid",
+                "hvf-instance.json",
+                "hvf-finalized.json",
+                "hvf-stop.sock",
+            ] {
+                match std::fs::symlink_metadata(dir.join(marker)) {
+                    Ok(_) => evidence = true,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => return Err(CleanupUnknown::DiscoveryUnavailable),
+                }
+            }
+            if evidence {
+                let name = entry.file_name();
+                let vm = name.to_str().ok_or(CleanupUnknown::DiscoveryUnavailable)?;
+                mvm_core::naming::validate_vm_name(vm)
+                    .map_err(|_| CleanupUnknown::DiscoveryUnavailable)?;
+                candidates.push((home.to_path_buf(), vm.to_owned()));
+            }
         }
-        std::thread::sleep(Duration::from_millis(100));
+    }
+    candidates.sort();
+    candidates.dedup();
+    Ok(candidates)
+}
+
+fn stop_command(binary: &Path, home: &Path, vm: &str) -> std::process::Command {
+    let mut command = crate::command_for_binary(binary);
+    command
+        .isolated_home(home)
+        .args(["machine", "stop", vm, "--yes"]);
+    command
+}
+
+trait ReapOps {
+    fn scan(&mut self, homes: &[&Path]) -> Result<Vec<OwnedProcess>, CleanupUnknown>;
+    fn stop(&mut self, home: &Path, vm: &str) -> Result<(), CleanupUnknown>;
+    fn signal(&mut self, pid: u32, signal: &str);
+    fn grace(&mut self, duration: Duration);
+}
+
+#[derive(Default)]
+struct HostOps {
+    markers: HashSet<String>,
+}
+
+impl ReapOps for HostOps {
+    fn scan(&mut self, homes: &[&Path]) -> Result<Vec<OwnedProcess>, CleanupUnknown> {
+        // Stop can remove a VM directory; retain its short-socket marker while
+        // also discovering directories a detached refill created in this round.
+        self.markers
+            .extend(homes.iter().flat_map(|home| owned_markers(home)));
+        let rows = process_table()?;
+        let spare = ancestry(&rows, std::process::id());
+        Ok(select_owned(
+            &rows,
+            &self.markers.iter().cloned().collect::<Vec<_>>(),
+            &spare,
+        ))
+    }
+
+    fn stop(&mut self, home: &Path, vm: &str) -> Result<(), CleanupUnknown> {
+        use mvm_core::bounded_run::{BoundedRunError, RunBounds, run_bounded};
+        let binary = crate::mvmctl_path().map_err(|_| CleanupUnknown::StopUnavailable)?;
+        // Only the CLI child is killed on timeout, never its detached supervisor.
+        // Diagnostics are categorical: arbitrary CLI output can contain secrets.
+        let output = run_bounded(
+            stop_command(&binary, home, vm),
+            RunBounds::new(Duration::from_secs(45), 0),
+        )
+        .map_err(|error| match error {
+            BoundedRunError::TimedOut(_) => CleanupUnknown::StopTimedOut,
+            BoundedRunError::Spawn(_) | BoundedRunError::Wait(_) => CleanupUnknown::StopUnavailable,
+        })?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(CleanupUnknown::StopRefused)
+        }
+    }
+
+    fn signal(&mut self, pid: u32, kind: &str) {
+        signal(pid, kind);
+    }
+
+    fn grace(&mut self, duration: Duration) {
+        // Detached external processes have no owned child event to wait on.
+        std::thread::sleep(duration);
     }
 }
 
-/// Stop every process still running against `home`: SIGTERM, a grace period,
-/// then SIGKILL. Each signal is re-aimed from a fresh scan, so a PID is only
-/// signalled while its command line still names a path under the home.
+/// Stop HVF through authenticated CLI shutdown; TERM/KILL only other helpers.
+/// Each sweep reclassifies supervisors, including ones born during cleanup.
+/// Unknown HVF cleanup remains a failure across later calls for the same home.
 pub fn reap_home(home: &Path) -> ReapReport {
     reap_homes(&[home])
 }
 
 /// [`reap_home`] over several homes with one process-table scan per round.
 pub fn reap_homes(homes: &[&Path]) -> ReapReport {
-    let markers: Vec<String> = homes.iter().flat_map(|home| owned_markers(home)).collect();
-    if markers.is_empty() {
-        return ReapReport::default();
-    }
-    let found = scan(&markers);
-    if found.is_empty() {
-        return ReapReport::default();
-    }
-    for process in &found {
-        signal(process.pid, "TERM");
-    }
-    let mut remaining = wait_until_gone(&markers, Duration::from_secs(5));
-    if !remaining.is_empty() {
-        for process in &remaining {
-            signal(process.pid, "KILL");
+    let mut report = reap_with(homes, &mut HostOps::default());
+    // A later Drop scan cannot turn refusal into permission to delete evidence.
+    let mut uncertain = UNCERTAIN_HOMES
+        .lock()
+        .expect("cleanup evidence lock poisoned");
+    retain_unknown(homes, &mut report, &mut uncertain);
+    report
+}
+
+fn retain_unknown(
+    homes: &[&Path],
+    report: &mut ReapReport,
+    uncertain: &mut HashMap<PathBuf, Vec<UnknownCleanup>>,
+) {
+    for home in homes {
+        if let Some(previous) = uncertain.get(*home) {
+            for unknown in previous {
+                if !report.unknown.contains(unknown) {
+                    report.unknown.push(unknown.clone());
+                }
+            }
         }
-        remaining = wait_until_gone(&markers, Duration::from_secs(2));
     }
-    ReapReport {
-        found,
-        survivors: remaining,
+    if !report.unknown.is_empty() {
+        for home in homes {
+            uncertain.insert(home.to_path_buf(), report.unknown.clone());
+        }
     }
+}
+
+static UNCERTAIN_HOMES: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<PathBuf, Vec<UnknownCleanup>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+fn reap_with(homes: &[&Path], ops: &mut impl ReapOps) -> ReapReport {
+    if homes.is_empty() {
+        return ReapReport::default();
+    }
+    let mut report = ReapReport::default();
+    let mut protected = HashSet::new();
+    let mut seen_hvf = HashSet::new();
+    let mut protected_markers = HashSet::new();
+    let mut attempted = HashSet::new();
+    // Authenticated stops may take seconds. Rescan before the first raw signal
+    // rather than acting on the helper PIDs observed before those stops.
+    for round in 0..4 {
+        let processes = match ops.scan(homes) {
+            Ok(processes) => processes,
+            Err(category) => {
+                report.unknown.push(UnknownCleanup {
+                    pid: None,
+                    category,
+                });
+                break;
+            }
+        };
+        if round == 0 {
+            report.found = processes.clone();
+        }
+        let candidates = match hvf_candidates(homes) {
+            Ok(candidates) => candidates,
+            Err(category) => {
+                report.unknown.push(UnknownCleanup {
+                    pid: None,
+                    category,
+                });
+                break;
+            }
+        };
+        // Production supervisors take config on stdin, not argv. Discover every
+        // home-local runtime candidate even when ps names only the executable.
+        for (home, vm) in &candidates {
+            // A configured supervisor can have an arbitrary filename. Without
+            // argv identity, raw cleanup cannot safely distinguish it from a
+            // helper in this home, even after the stop child returns.
+            protected_markers.extend(owned_markers(home));
+            if attempted.insert((home.clone(), vm.clone())) {
+                let result = if round == 0 {
+                    ops.stop(home, vm)
+                } else {
+                    Err(CleanupUnknown::NewSupervisor)
+                };
+                if let Err(category) = result {
+                    report.unknown.push(UnknownCleanup {
+                        pid: None,
+                        category,
+                    });
+                }
+            }
+        }
+        for process in &processes {
+            let in_hvf_home = protected_markers
+                .iter()
+                .any(|marker| process.args.contains(marker));
+            if in_hvf_home && protected.insert(process.pid) && round != 0 {
+                report.unknown.push(UnknownCleanup {
+                    pid: Some(process.pid),
+                    category: CleanupUnknown::NewSupervisor,
+                });
+            }
+            if is_hvf(process) && seen_hvf.insert(process.pid) {
+                protected.insert(process.pid);
+                let result = if round != 0 {
+                    Err(CleanupUnknown::NewSupervisor)
+                } else if in_hvf_home {
+                    Ok(())
+                } else {
+                    Err(CleanupUnknown::MissingVm)
+                };
+                if let Err(category) = result {
+                    let unknown = UnknownCleanup {
+                        pid: Some(process.pid),
+                        category,
+                    };
+                    if !report.unknown.contains(&unknown) {
+                        report.unknown.push(unknown);
+                    }
+                }
+            }
+        }
+        if round == 1 || round == 2 {
+            for process in &processes {
+                if !is_hvf(process) && !protected.contains(&process.pid) {
+                    ops.signal(process.pid, if round == 1 { "TERM" } else { "KILL" });
+                }
+            }
+        }
+        report.survivors = processes;
+        if round == 3 {
+            for process in &report.survivors {
+                if protected.contains(&process.pid)
+                    && !report
+                        .unknown
+                        .iter()
+                        .any(|unknown| unknown.pid == Some(process.pid))
+                {
+                    report.unknown.push(UnknownCleanup {
+                        pid: Some(process.pid),
+                        category: CleanupUnknown::SupervisorSurvived,
+                    });
+                }
+            }
+        }
+        if report.survivors.is_empty() && (round != 0 || candidates.is_empty()) {
+            break;
+        }
+        if round == 1 || round == 2 {
+            ops.grace(Duration::from_secs(if round == 1 { 5 } else { 2 }));
+        }
+    }
+    report
 }
 
 /// Homes a live step has launched `mvmctl` against during this run.
@@ -252,30 +541,70 @@ pub fn reap_launched_homes() -> ReapReport {
 #[derive(Debug)]
 pub struct ReapOnDrop {
     home: PathBuf,
+    temporary: Option<tempfile::TempDir>,
+    finished: bool,
 }
 
 impl ReapOnDrop {
     pub fn new(home: impl Into<PathBuf>) -> Self {
-        Self { home: home.into() }
+        Self {
+            home: home.into(),
+            temporary: None,
+            finished: false,
+        }
+    }
+
+    /// Own a temporary home so failed cleanup retains its evidence.
+    pub fn temporary(home: tempfile::TempDir) -> Self {
+        Self {
+            home: home.path().to_owned(),
+            temporary: Some(home),
+            finished: false,
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.home
+    }
+
+    /// Finish explicitly so the caller can fail on an unconfirmed cleanup.
+    pub fn finish(self) -> ReapReport {
+        self.finish_with(reap_home)
+    }
+
+    fn finish_with(mut self, reap: impl FnOnce(&Path) -> ReapReport) -> ReapReport {
+        let report = reap(&self.home);
+        self.complete(&report);
+        report
+    }
+
+    fn complete(&mut self, report: &ReapReport) {
+        if !report.is_clean()
+            && let Some(home) = self.temporary.take()
+        {
+            let _ = home.keep();
+        }
+        self.finished = true;
     }
 }
 
 impl Drop for ReapOnDrop {
     fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
         let report = reap_home(&self.home);
+        self.complete(&report);
         if !report.found.is_empty() {
             eprintln!(
-                "[bdd] stopped {} process(es) left running against {}:\n{}",
+                "[bdd] found {} process(es) left running against {}:\n{}",
                 report.found.len(),
                 self.home.display(),
                 ReapReport::describe(&report.found)
             );
         }
         if !report.is_clean() {
-            eprintln!(
-                "[bdd] could not stop:\n{}",
-                ReapReport::describe(&report.survivors)
-            );
+            eprintln!("[bdd] could not stop:\n{}", report.describe_failure());
         }
     }
 }
@@ -285,12 +614,448 @@ mod tests {
     use super::*;
     use std::process::Command;
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "live: explicit private standby fixture and authenticated-reaper opt-in required"]
+    fn native_authenticated_hvf_reap() {
+        use std::os::unix::fs::PermissionsExt;
+
+        assert_eq!(std::env::var("MVM_E2E_AUTH_REAPER").as_deref(), Ok("1"));
+        let home = PathBuf::from(
+            std::env::var_os("MVM_E2E_STANDBY_ROOT").expect("explicit standby fixture root"),
+        );
+        let configured = PathBuf::from(std::env::var_os("MVM_HOME").expect("explicit MVM_HOME"));
+        assert!(home.is_absolute(), "fixture root must be absolute");
+        assert_eq!(home, configured, "fixture root must equal MVM_HOME");
+        let metadata = std::fs::symlink_metadata(&home).expect("existing fixture root");
+        assert!(
+            metadata.is_dir(),
+            "fixture root must be a real directory, not a symlink"
+        );
+        assert_eq!(
+            metadata.permissions().mode() & 0o077,
+            0,
+            "fixture root must be private"
+        );
+        let binary = PathBuf::from(
+            std::env::var_os("CARGO_BIN_EXE_mvmctl").expect("explicit source-built CLI path"),
+        );
+        assert!(
+            binary.is_absolute() && binary.is_file(),
+            "CLI override must name an existing absolute binary"
+        );
+        assert_eq!(crate::mvmctl_path().unwrap(), binary);
+        let expected_vm =
+            std::env::var("MVM_E2E_EXPECTED_VM").expect("explicit expected fixture VM");
+        mvm_core::naming::validate_vm_name(&expected_vm).expect("valid expected VM name");
+        assert_eq!(
+            hvf_candidates(&[&home]).unwrap(),
+            [(home.clone(), expected_vm)],
+            "fixture must contain exactly the expected HVF runtime candidate"
+        );
+
+        // The parent witness owns launch and any fallback. This invokes only
+        // the real reaper and never owns or deletes the caller's fixture root.
+        let report = reap_home(&home);
+        assert!(
+            report.is_clean(),
+            "native reaper cleanup unknown:\n{}",
+            report.describe_failure()
+        );
+        assert!(home.is_dir(), "reaper must retain the caller's root");
+    }
+
     fn row(pid: u32, ppid: u32, args: &str) -> ProcessRow {
         ProcessRow {
             pid,
             ppid,
             args: args.to_string(),
         }
+    }
+
+    #[derive(Default)]
+    struct FakeOps {
+        scans: std::collections::VecDeque<Vec<OwnedProcess>>,
+        stops: Vec<(PathBuf, String)>,
+        signals: Vec<(u32, String)>,
+        refusal: Option<CleanupUnknown>,
+    }
+
+    impl ReapOps for FakeOps {
+        fn scan(&mut self, _: &[&Path]) -> Result<Vec<OwnedProcess>, CleanupUnknown> {
+            Ok(self.scans.pop_front().unwrap_or_default())
+        }
+        fn stop(&mut self, home: &Path, vm: &str) -> Result<(), CleanupUnknown> {
+            self.stops.push((home.to_owned(), vm.to_owned()));
+            self.refusal.map_or(Ok(()), Err)
+        }
+        fn signal(&mut self, pid: u32, kind: &str) {
+            self.signals.push((pid, kind.to_owned()));
+        }
+        fn grace(&mut self, _: Duration) {}
+    }
+
+    fn hvf_fixture(home: &Path, vm: &str, pid: u32) -> OwnedProcess {
+        let dir = mvm_core::config::vms_dir_at(home).join(vm);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("hvf-instance.json"),
+            serde_json::to_vec(&mvm_core::protocol::hvf_control::HvfInstance {
+                vm_id: vm.into(),
+                boot_nonce: [1; 32],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        OwnedProcess {
+            pid,
+            // Production passes JSON on stdin and no VM arguments.
+            args: home.join("bin/mvm-hvf-supervisor").display().to_string(),
+        }
+    }
+
+    #[test]
+    fn production_stdin_config_argv_needs_no_home_or_vm_argument() {
+        let home = tempfile::tempdir().unwrap();
+        hvf_fixture(home.path(), "resident", 42);
+        // Native cold/restore spawning passes the helper executable alone.
+        let rows = [row(42, 1, "/opt/mvm/libexec/mvm-hvf-supervisor")];
+        let selected = select_owned(&rows, &owned_markers(home.path()), &HashSet::new());
+        assert!(
+            selected.is_empty(),
+            "argv alone cannot attribute this supervisor"
+        );
+        let mut ops = FakeOps {
+            scans: [selected, vec![]].into(),
+            ..Default::default()
+        };
+        let report = reap_with(&[home.path()], &mut ops);
+        assert!(report.is_clean(), "{report:?}");
+        assert_eq!(ops.stops, [(home.path().to_owned(), "resident".into())]);
+        assert!(ops.signals.is_empty());
+    }
+
+    #[test]
+    fn other_shards_supervisors_do_not_fail_this_home() {
+        let home = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        hvf_fixture(other.path(), "resident", 42);
+        let rows = [
+            row(
+                42,
+                1,
+                &other
+                    .path()
+                    .join("bin/mvm-hvf-supervisor")
+                    .display()
+                    .to_string(),
+            ),
+            row(43, 1, "/opt/mvm/libexec/mvm-hvf-supervisor"),
+        ];
+        let processes = select_owned(&rows, &owned_markers(home.path()), &HashSet::new());
+        assert!(processes.is_empty());
+        let mut ops = FakeOps {
+            scans: [processes].into(),
+            ..Default::default()
+        };
+        assert!(reap_with(&[home.path()], &mut ops).is_clean());
+        assert!(ops.stops.is_empty());
+        assert!(ops.signals.is_empty());
+    }
+
+    #[test]
+    fn another_requested_homes_candidate_cannot_account_for_missing_evidence() {
+        let valid_home = tempfile::tempdir().unwrap();
+        let unknown_home = tempfile::tempdir().unwrap();
+        let valid = hvf_fixture(valid_home.path(), "resident", 42);
+        let unknown = OwnedProcess {
+            pid: 43,
+            args: unknown_home
+                .path()
+                .join("bin/mvm-hvf-supervisor")
+                .display()
+                .to_string(),
+        };
+        let mut ops = FakeOps {
+            scans: [vec![valid, unknown], vec![]].into(),
+            ..Default::default()
+        };
+        let report = reap_with(&[valid_home.path(), unknown_home.path()], &mut ops);
+        assert!(!report.is_clean());
+        assert_eq!(
+            report.unknown,
+            [UnknownCleanup {
+                pid: Some(43),
+                category: CleanupUnknown::MissingVm
+            }]
+        );
+        assert_eq!(
+            ops.stops,
+            [(valid_home.path().to_owned(), "resident".into())]
+        );
+        assert!(ops.signals.is_empty());
+    }
+
+    #[test]
+    fn custom_named_supervisor_in_hvf_home_never_receives_raw_signals() {
+        for refusal in [None, Some(CleanupUnknown::StopRefused)] {
+            let home = tempfile::tempdir().unwrap();
+            hvf_fixture(home.path(), "resident", 42);
+            let process = OwnedProcess {
+                pid: 42,
+                args: home.path().join("bin/custom-runner").display().to_string(),
+            };
+            let mut ops = FakeOps {
+                scans: [
+                    vec![process.clone()],
+                    vec![process.clone()],
+                    vec![process.clone()],
+                    vec![process],
+                ]
+                .into(),
+                refusal,
+                ..Default::default()
+            };
+            let report = reap_with(&[home.path()], &mut ops);
+            assert!(
+                !report.is_clean(),
+                "even a CLI success cannot hide a survivor"
+            );
+            assert!(ops.signals.is_empty());
+            assert_eq!(ops.stops.len(), 1);
+        }
+    }
+
+    #[test]
+    fn configured_custom_filename_is_an_exclusion_not_stop_authority() {
+        let process = OwnedProcess {
+            pid: 42,
+            args: "/fixture/home/bin/custom-runner".into(),
+        };
+        assert!(is_hvf_with_override(
+            &process,
+            Some(std::ffi::OsStr::new("/fixture/home/bin/custom-runner"))
+        ));
+        assert!(!is_hvf_with_override(&process, None));
+    }
+
+    #[test]
+    fn new_custom_named_process_in_hvf_home_keeps_cleanup_unknown() {
+        let home = tempfile::tempdir().unwrap();
+        hvf_fixture(home.path(), "resident", 42);
+        let process = OwnedProcess {
+            pid: 43,
+            args: home.path().join("bin/custom-runner").display().to_string(),
+        };
+        let mut ops = FakeOps {
+            scans: [vec![], vec![process], vec![]].into(),
+            ..Default::default()
+        };
+        let report = reap_with(&[home.path()], &mut ops);
+        assert!(!report.is_clean());
+        assert_eq!(report.unknown[0].category, CleanupUnknown::NewSupervisor);
+        assert!(ops.signals.is_empty());
+    }
+
+    #[test]
+    fn pid_marker_without_identity_still_requires_canonical_stop() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = mvm_core::config::vms_dir_at(home.path()).join("resident");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("hvf.pid"), "not-a-trusted-pid").unwrap();
+        let mut ops = FakeOps {
+            refusal: Some(CleanupUnknown::StopRefused),
+            ..Default::default()
+        };
+        let report = reap_with(&[home.path()], &mut ops);
+        assert!(!report.is_clean());
+        assert_eq!(ops.stops, [(home.path().to_owned(), "resident".into())]);
+        assert!(dir.join("hvf.pid").exists());
+        assert!(ops.signals.is_empty());
+    }
+
+    #[test]
+    fn fifo_identity_is_discovered_without_opening_it() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = mvm_core::config::vms_dir_at(home.path()).join("resident");
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("hvf-instance.json");
+        assert!(
+            Command::new("/usr/bin/mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut ops = FakeOps {
+            refusal: Some(CleanupUnknown::StopTimedOut),
+            ..Default::default()
+        };
+        let report = reap_with(&[home.path()], &mut ops);
+        assert!(!report.is_clean());
+        assert_eq!(report.unknown[0].category, CleanupUnknown::StopTimedOut);
+        assert!(fifo.exists());
+        assert!(ops.signals.is_empty());
+    }
+
+    #[test]
+    fn explicit_finish_retains_failed_home_and_returns_the_only_cleanup_report() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().to_owned();
+        hvf_fixture(&path, "resident", 42);
+        let mut ops = FakeOps {
+            refusal: Some(CleanupUnknown::StopRefused),
+            ..Default::default()
+        };
+        let report = ReapOnDrop::temporary(home).finish_with(|home| reap_with(&[home], &mut ops));
+        assert!(!report.is_clean());
+        assert_eq!(ops.stops.len(), 1);
+        assert!(path.join("vms/resident/hvf-instance.json").exists());
+        assert!(ops.signals.is_empty());
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn explicit_finish_cleans_a_confirmed_temporary_home() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().to_owned();
+        let report = ReapOnDrop::temporary(home).finish_with(|_| ReapReport::default());
+        assert!(report.is_clean());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn authenticated_stop_uses_isolated_cli_and_never_signals_hvf() {
+        let home = tempfile::tempdir().unwrap();
+        let process = hvf_fixture(home.path(), "parent", 42);
+        let mut ops = FakeOps {
+            scans: [vec![process], vec![]].into(),
+            ..Default::default()
+        };
+        let report = reap_with(&[home.path()], &mut ops);
+        assert!(report.is_clean(), "{report:?}");
+        assert_eq!(ops.stops, [(home.path().to_owned(), "parent".into())]);
+        assert!(ops.signals.is_empty());
+        let command = stop_command(Path::new("/test/mvmctl"), home.path(), "parent");
+        assert_eq!(command.get_program(), "/test/mvmctl");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["machine", "stop", "parent", "--yes"]
+        );
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "MVM_HOME" && value == Some(home.path().as_os_str()))
+        );
+    }
+
+    #[test]
+    fn refusals_and_invalid_identity_keep_evidence_even_after_process_disappears() {
+        for failure in [CleanupUnknown::StopRefused, CleanupUnknown::StopTimedOut] {
+            let home = tempfile::tempdir().unwrap();
+            let process = hvf_fixture(home.path(), "parent", 42);
+            let identity =
+                mvm_core::config::vms_dir_at(home.path()).join("parent/hvf-instance.json");
+            std::fs::write(&identity, "malformed secret").unwrap();
+            let before = std::fs::read(&identity).unwrap();
+            let mut ops = FakeOps {
+                scans: [vec![process], vec![]].into(),
+                refusal: Some(failure),
+                ..Default::default()
+            };
+            let report = reap_with(&[home.path()], &mut ops);
+            assert!(!report.is_clean());
+            assert_eq!(report.unknown[0].category, failure);
+            assert!(ops.signals.is_empty());
+            assert_eq!(std::fs::read(&identity).unwrap(), before);
+            assert!(!report.describe_failure().contains("secret"));
+        }
+    }
+
+    #[test]
+    fn missing_identity_and_unmatched_supervisors_are_never_raw_killed() {
+        let home = tempfile::tempdir().unwrap();
+        let missing = hvf_fixture(home.path(), "parent", 42);
+        std::fs::remove_file(
+            mvm_core::config::vms_dir_at(home.path()).join("parent/hvf-instance.json"),
+        )
+        .unwrap();
+        let unmatched = OwnedProcess {
+            pid: 43,
+            args: format!(
+                "mvm-hvf-supervisor {}/unknown/config",
+                home.path().display()
+            ),
+        };
+        let mut ops = FakeOps {
+            scans: [vec![missing, unmatched], vec![]].into(),
+            ..Default::default()
+        };
+        let report = reap_with(&[home.path()], &mut ops);
+        assert_eq!(
+            report
+                .unknown
+                .iter()
+                .map(|u| u.category)
+                .collect::<Vec<_>>(),
+            [CleanupUnknown::MissingVm, CleanupUnknown::MissingVm]
+        );
+        assert!(!report.is_clean());
+        assert!(ops.stops.is_empty());
+        assert!(ops.signals.is_empty());
+    }
+
+    #[test]
+    fn each_sweep_excludes_new_hvf_and_keeps_non_hvf_escalation() {
+        for arrival in [1, 2, 3] {
+            let home = tempfile::tempdir().unwrap();
+            let helper = OwnedProcess {
+                pid: 11,
+                args: "helper".into(),
+            };
+            let hvf = hvf_fixture(home.path(), "refill", 42);
+            let mut scans = vec![
+                vec![helper.clone()],
+                vec![helper.clone()],
+                vec![helper],
+                vec![],
+            ];
+            scans[arrival].push(hvf);
+            let mut ops = FakeOps {
+                scans: scans.into(),
+                ..Default::default()
+            };
+            let report = reap_with(&[home.path()], &mut ops);
+            assert!(!report.is_clean(), "{report:?}");
+            assert_eq!(report.unknown[0].category, CleanupUnknown::NewSupervisor);
+            assert_eq!(ops.signals, [(11, "TERM".into()), (11, "KILL".into())]);
+            assert_eq!(ops.stops.len(), 1);
+        }
+    }
+
+    #[test]
+    fn later_empty_drop_scan_does_not_clear_unknown() {
+        let home = Path::new("/fixture/home");
+        let mut uncertain = HashMap::new();
+        let mut refused = ReapReport {
+            unknown: vec![UnknownCleanup {
+                pid: Some(42),
+                category: CleanupUnknown::StopRefused,
+            }],
+            ..Default::default()
+        };
+        retain_unknown(&[home], &mut refused, &mut uncertain);
+        let mut later = ReapReport::default();
+        retain_unknown(&[home], &mut later, &mut uncertain);
+        assert!(!later.is_clean());
+        assert_eq!(later.unknown, refused.unknown);
+        let mut unrelated = ReapReport::default();
+        retain_unknown(
+            &[Path::new("/fixture/other")],
+            &mut unrelated,
+            &mut uncertain,
+        );
+        assert!(unrelated.is_clean());
     }
 
     #[test]
@@ -392,7 +1157,7 @@ mod tests {
     }
 
     fn is_running(pid: u32) -> bool {
-        process_table().iter().any(|row| row.pid == pid)
+        process_table().unwrap().iter().any(|row| row.pid == pid)
     }
 
     #[test]

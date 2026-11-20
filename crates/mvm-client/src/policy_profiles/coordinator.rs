@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use mvm_hostd::policy_generation::coordinator::{Request, Response, call, socket_path};
+use mvm_hostd::policy_generation::coordinator::{Request, Response, call};
 pub use mvm_hostd::policy_generation::managed::{ManagedCoordinator, ManagedRefusal};
 pub use mvm_hostd::policy_generation::{GENERATION_ASSET_PREFIX, ProjectPolicyCandidate};
 
@@ -36,14 +36,8 @@ pub fn managed_status() -> Result<ManagedCoordinator, ManagedRefusal> {
 ///
 /// The private state or helper is unavailable, or its readiness check fails.
 pub fn ensure() -> Result<PathBuf> {
-    #[cfg(unix)]
-    {
-        unix::ensure()
-    }
-    #[cfg(not(unix))]
-    {
-        bail!("local policy coordinator is supported only on Linux and macOS")
-    }
+    let home = PathBuf::from(mvm_core::config::mvm_home());
+    mvm_hostd::policy_generation::coordinator::ensure(&home)
 }
 
 /// Require the resident helper only after durable activation state exists.
@@ -412,104 +406,20 @@ fn request(mut request: Request) -> Result<Option<ProjectPolicyCandidate>> {
         Response::Unresolved { message } => bail!(
             "the outcome of the policy activation is unknown and the coordinator refuses policy reads until it recovers: {message}"
         ),
-        Response::Ready | Response::Status { .. } | Response::Workload { .. } => {
+        Response::Ready
+        | Response::Status { .. }
+        | Response::Workload { .. }
+        | Response::Destination { .. }
+        | Response::Unenrolled { .. } => {
             bail!("unexpected policy coordinator response to a project request")
-        }
-    }
-}
-
-#[cfg(unix)]
-mod unix {
-    use std::{
-        io,
-        os::unix::net::UnixStream,
-        thread,
-        time::{Duration, Instant},
-    };
-
-    use mvm_vmm::host::{
-        aux_bin::AuxBin,
-        broker_services_spawn::{resolve_subprocess_bin_to_spawn, spawn_detached_with_config},
-    };
-
-    use super::*;
-
-    pub(super) fn ensure() -> Result<PathBuf> {
-        let home = PathBuf::from(mvm_core::config::mvm_home());
-        anyhow::ensure!(
-            home.is_absolute(),
-            "MVM_HOME must be absolute for policy activation"
-        );
-        mvm_core::private_fs::create_owned_private_dir(&home)?;
-        let dir = mvm_core::config::policy_generations_dir_at(&home);
-        mvm_core::private_fs::create_owned_private_dir(&dir)?;
-        let socket = socket_path(&home);
-        mvm_core::private_fs::create_owned_private_dir(
-            socket
-                .parent()
-                .context("policy coordinator socket has no parent")?,
-        )?;
-        let _spawn_lock = mvm_core::util::atomic_io::FileLock::acquire(&dir.join("spawn"))?;
-        match UnixStream::connect(&socket) {
-            Ok(_) => {
-                ping(&socket)?;
-                return Ok(socket);
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-                ) => {}
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("connecting to policy coordinator {}", socket.display())
-                });
-            }
-        }
-        let bin = resolve_subprocess_bin_to_spawn(&AuxBin::new(
-            "mvm-policy-coordinator",
-            "MVM_POLICY_COORDINATOR_PATH",
-            "mvm-hostd",
-        ))?;
-        let mut child = spawn_detached_with_config(
-            &bin,
-            &serde_json::json!({"home": home}),
-            "mvm-policy-coordinator",
-        )?;
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline {
-            if let Ok(()) = ping(&socket) {
-                return Ok(socket);
-            }
-            if let Some(status) = child.try_wait()? {
-                bail!("policy coordinator exited before readiness: {status}");
-            }
-            thread::sleep(Duration::from_millis(25));
-        }
-        bail!(
-            "policy coordinator did not become ready at {}",
-            socket.display()
-        )
-    }
-
-    fn ping(socket: &Path) -> Result<()> {
-        match call(socket, &Request::Ping)? {
-            Response::Ready => Ok(()),
-            Response::Refused { message } => {
-                bail!("policy coordinator refused readiness: {message}")
-            }
-            Response::Policy { .. }
-            | Response::Status { .. }
-            | Response::Workload { .. }
-            | Response::Unresolved { .. } => {
-                bail!("policy coordinator answered a ping with something else")
-            }
         }
     }
 }
 
 #[cfg(all(test, unix))]
 mod tests {
+    use mvm_hostd::policy_generation::coordinator::socket_path;
+
     use super::*;
     use mvm_core::{
         manifest::{Manifest, PersistedManifest, Provenance, slot_dir, slot_revision_dir},

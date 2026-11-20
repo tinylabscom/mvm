@@ -20,8 +20,10 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
+use mvm_core::host_interface::destination::{is_hex64, parse_key};
 use mvm_core::host_interface::workload::{
-    CanonicalLedger, MAX_LEDGER_BYTES, PENDING_FILE, WorkloadChange, WorkloadCommit,
+    CanonicalLedger, DestinationCommit, DestinationEnrollment, DestinationEntry, MAX_DESTINATIONS,
+    MAX_LEDGER_BYTES, PENDING_FILE, SignedPreparedHead, WorkloadChange, WorkloadCommit,
     WorkloadLedger, archive_path_at, canonical_dir_at, legacy_path_at, read_ledger_bytes_at,
 };
 use mvm_core::util::atomic_io::{FileLock, atomic_write_durable, atomic_write_new, sync_dir};
@@ -67,6 +69,134 @@ impl std::fmt::Display for CommitUnresolved {
 }
 
 impl std::error::Error for CommitUnresolved {}
+
+/// A destination request the ledger's owner definitely refused: nothing was
+/// written, and asking again with the same request is answered the same way
+/// until the ledger changes. Any other failure of a destination request leaves
+/// its outcome unknown.
+#[derive(Debug)]
+pub(crate) struct DestinationRefusal {
+    not_enrolled: bool,
+    message: String,
+}
+
+impl DestinationRefusal {
+    fn new(message: &str) -> Self {
+        Self {
+            not_enrolled: false,
+            message: message.to_owned(),
+        }
+    }
+
+    fn not_enrolled() -> Self {
+        Self {
+            not_enrolled: true,
+            message: "destination is not enrolled".into(),
+        }
+    }
+
+    fn wrap(error: anyhow::Error) -> anyhow::Error {
+        anyhow::Error::new(Self::new(&format!("{error:#}")))
+    }
+
+    /// A ledger that cannot hold the change is a refusal; other failures are not.
+    fn if_too_large(error: anyhow::Error) -> anyhow::Error {
+        if error.downcast_ref::<LedgerTooLarge>().is_some() {
+            Self::wrap(error)
+        } else {
+            error
+        }
+    }
+
+    pub(crate) fn is_not_enrolled(&self) -> bool {
+        self.not_enrolled
+    }
+}
+
+impl std::fmt::Display for DestinationRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for DestinationRefusal {}
+
+fn refuse_unless(condition: bool, message: &str) -> Result<()> {
+    if condition {
+        Ok(())
+    } else {
+        Err(anyhow::Error::new(DestinationRefusal::new(message)))
+    }
+}
+
+#[derive(Debug)]
+struct LedgerTooLarge;
+
+impl std::fmt::Display for LedgerTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("workload ledger exceeds its size limit")
+    }
+}
+
+impl std::error::Error for LedgerTooLarge {}
+
+fn ensure_fits(len: usize, limit: u64) -> Result<()> {
+    if len as u64 <= limit {
+        Ok(())
+    } else {
+        Err(anyhow::Error::new(LedgerTooLarge))
+    }
+}
+
+fn bump_sequence(canonical: &mut CanonicalLedger) -> Result<()> {
+    canonical.sequence = canonical
+        .sequence
+        .checked_add(1)
+        .context("workload ledger sequence exhausted")?;
+    Ok(())
+}
+
+/// A new destination keeps the byte reserve a quarantine needs.
+const DESTINATION_LEDGER_LIMIT: u64 = MAX_LEDGER_BYTES - QUARANTINE_RESERVE_BYTES;
+
+/// Drop destinations until the ledger, which already holds `keep`, fits both
+/// bounds: first those whose workload has moved to another epoch, since they
+/// can never commit again, then the least recently changed. Re-serializing per
+/// removal is quadratic, which is acceptable at 4096 entries.
+fn make_room(canonical: &mut CanonicalLedger, keep: &str) -> Result<()> {
+    let fits = |c: &CanonicalLedger| -> Result<bool> {
+        Ok(c.destinations.len() <= MAX_DESTINATIONS
+            && serde_json::to_vec(c)?.len() as u64 <= DESTINATION_LEDGER_LIMIT)
+    };
+    if fits(canonical)? {
+        return Ok(());
+    }
+    let workloads = &canonical.workloads;
+    canonical
+        .destinations
+        .retain(|id, d| id == keep || workloads.entry(&d.workload).epoch == d.epoch);
+    while !fits(canonical)? {
+        let oldest = canonical
+            .destinations
+            .iter()
+            .filter(|(id, _)| id.as_str() != keep)
+            .min_by_key(|(_, d)| d.changed)
+            .map(|(id, _)| id.clone());
+        let Some(oldest) = oldest else {
+            return Err(anyhow::Error::new(DestinationRefusal::new(
+                "destination ledger is full",
+            )));
+        };
+        canonical.destinations.remove(&oldest);
+    }
+    Ok(())
+}
+
+/// Is `error` an interrupted commit rather than a refusal?
+#[cfg(test)]
+pub(crate) fn is_commit_unresolved(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<CommitUnresolved>().is_some()
+}
 
 fn unresolved(error: anyhow::Error) -> anyhow::Error {
     if error.downcast_ref::<CommitUnresolved>().is_some() {
@@ -157,16 +287,34 @@ impl WorkloadStore {
         self.dir().join(PENDING_FILE)
     }
 
-    /// Apply one change durably and return what the workload's entry is now.
-    pub(crate) fn commit(&self, change: &WorkloadChange) -> Result<WorkloadCommit> {
-        let _lane = self.lane.lock().unwrap_or_else(PoisonError::into_inner);
+    /// The canonical ledger after recovery and, if needed, migration. The
+    /// caller holds the lane.
+    fn load_canonical(&self) -> Result<CanonicalLedger> {
         self.recover_locked().map_err(unresolved)?;
         if read_ledger_bytes_at(&self.home)?.is_none() {
             self.migrate()?;
         }
         let bytes = read_ledger_bytes_at(&self.home)?.context("workload ledger vanished")?;
-        let mut canonical: CanonicalLedger =
-            serde_json::from_slice(&bytes).context("reading the canonical workload ledger")?;
+        serde_json::from_slice(&bytes).context("reading the canonical workload ledger")
+    }
+
+    /// Write `canonical`, whose sequence the caller has already advanced,
+    /// durably, obligation first. A refusal before the obligation changes
+    /// nothing; a failure after it is unresolved.
+    fn persist(&self, canonical: &CanonicalLedger, limit: u64) -> Result<()> {
+        let bytes = serde_json::to_vec(canonical).context("serializing the workload ledger")?;
+        ensure_fits(bytes.len(), limit)?;
+        let obligation = Obligation::Commit {
+            sequence: canonical.sequence,
+            sha256: hex::encode(Sha256::digest(&bytes)),
+        };
+        self.apply(&obligation, &bytes).map_err(unresolved)
+    }
+
+    /// Apply one change durably and return what the workload's entry is now.
+    pub(crate) fn commit(&self, change: &WorkloadChange) -> Result<WorkloadCommit> {
+        let _lane = self.lane.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut canonical = self.load_canonical()?;
         let workload = match change {
             WorkloadChange::Quarantine { workload } | WorkloadChange::Replace { workload, .. } => {
                 validate_name(workload)?;
@@ -204,29 +352,134 @@ impl WorkloadStore {
                 canonical.workloads.replace(workload);
             }
         }
-        canonical.sequence = canonical
-            .sequence
-            .checked_add(1)
-            .context("workload ledger sequence exhausted")?;
-        let bytes = serde_json::to_vec(&canonical).context("serializing the workload ledger")?;
+        bump_sequence(&mut canonical)?;
         let creates_by_replace = !known && matches!(change, WorkloadChange::Replace { .. });
         let limit = if creates_by_replace {
             MAX_LEDGER_BYTES - QUARANTINE_RESERVE_BYTES
         } else {
             MAX_LEDGER_BYTES
         };
-        ensure!(
-            bytes.len() as u64 <= limit,
-            "workload ledger exceeds its size limit"
-        );
-        let obligation = Obligation::Commit {
-            sequence: canonical.sequence,
-            sha256: hex::encode(Sha256::digest(&bytes)),
-        };
-        self.apply(&obligation, &bytes).map_err(unresolved)?;
+        self.persist(&canonical, limit)?;
         Ok(WorkloadCommit {
             sequence: canonical.sequence,
             entry: canonical.workloads.entry(workload),
+        })
+    }
+
+    /// Record a mailbox destination under a workload epoch. A destination's
+    /// key and binding never change, so a repeat is answered without a write,
+    /// even after its workload was quarantined: a commit that landed first
+    /// must still be anchored.
+    pub(crate) fn enroll_destination(
+        &self,
+        enrollment: &DestinationEnrollment,
+    ) -> Result<DestinationCommit> {
+        validate_name(&enrollment.workload).map_err(DestinationRefusal::wrap)?;
+        refuse_unless(
+            is_hex64(&enrollment.destination),
+            "destination id is malformed",
+        )?;
+        parse_key(&enrollment.key).map_err(DestinationRefusal::wrap)?;
+        enrollment
+            .tip
+            .validate()
+            .map_err(DestinationRefusal::wrap)?;
+        let _lane = self.lane.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut canonical = self.load_canonical()?;
+        if let Some(existing) = canonical.destinations.get(&enrollment.destination) {
+            refuse_unless(
+                existing.workload == enrollment.workload
+                    && existing.epoch == enrollment.epoch
+                    && existing.key == enrollment.key,
+                "destination is enrolled under a different binding",
+            )?;
+            return Ok(DestinationCommit {
+                sequence: existing.changed,
+                tip: existing.tip.clone(),
+            });
+        }
+        let workload = canonical.workloads.entry(&enrollment.workload);
+        refuse_unless(!workload.quarantined, "workload is quarantined")?;
+        refuse_unless(
+            workload.epoch == enrollment.epoch,
+            &format!(
+                "workload epoch changed: expected {}, current {}",
+                enrollment.epoch.0, workload.epoch.0
+            ),
+        )?;
+        bump_sequence(&mut canonical)?;
+        canonical.destinations.insert(
+            enrollment.destination.clone(),
+            DestinationEntry {
+                workload: enrollment.workload.clone(),
+                epoch: enrollment.epoch,
+                key: enrollment.key.clone(),
+                tip: enrollment.tip.clone(),
+                changed: canonical.sequence,
+            },
+        );
+        make_room(&mut canonical, &enrollment.destination)?;
+        self.persist(&canonical, DESTINATION_LEDGER_LIMIT)
+            .map_err(DestinationRefusal::if_too_large)?;
+        Ok(DestinationCommit {
+            sequence: canonical.sequence,
+            tip: enrollment.tip.clone(),
+        })
+    }
+
+    /// Move a destination's tip one step, ordered against containment.
+    pub(crate) fn commit_destination(
+        &self,
+        prepared: &SignedPreparedHead,
+    ) -> Result<DestinationCommit> {
+        let head = &prepared.head;
+        let _lane = self.lane.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut canonical = self.load_canonical()?;
+        let Some(entry) = canonical.destinations.get(&head.destination) else {
+            return Err(DestinationRefusal::not_enrolled().into());
+        };
+        refuse_unless(
+            head.workload == entry.workload && head.epoch == entry.epoch,
+            "prepared head names a different workload or epoch than the enrollment",
+        )?;
+        parse_key(&entry.key)
+            .and_then(|key| prepared.verify(&key))
+            .map_err(DestinationRefusal::wrap)?;
+        if entry.tip == head.next {
+            // A historical acceptance stays accepted after a quarantine or replacement.
+            return Ok(DestinationCommit {
+                sequence: entry.changed,
+                tip: entry.tip.clone(),
+            });
+        }
+        head.next.validate().map_err(DestinationRefusal::wrap)?;
+        refuse_unless(
+            entry.tip == head.expected
+                && head.expected.cursor.checked_add(1) == Some(head.next.cursor),
+            "prepared head diverges from the destination's committed tip",
+        )?;
+        let workload = canonical.workloads.entry(&entry.workload);
+        refuse_unless(!workload.quarantined, "workload is quarantined")?;
+        refuse_unless(
+            workload.epoch == entry.epoch,
+            &format!(
+                "workload epoch changed: expected {}, current {}",
+                entry.epoch.0, workload.epoch.0
+            ),
+        )?;
+        bump_sequence(&mut canonical)?;
+        let sequence = canonical.sequence;
+        let destination = canonical
+            .destinations
+            .get_mut(&head.destination)
+            .context("destination vanished under the lane")?;
+        destination.tip = head.next.clone();
+        destination.changed = sequence;
+        self.persist(&canonical, MAX_LEDGER_BYTES)
+            .map_err(DestinationRefusal::if_too_large)?;
+        Ok(DestinationCommit {
+            sequence,
+            tip: head.next.clone(),
         })
     }
 
@@ -416,6 +669,7 @@ impl WorkloadStore {
         let bytes = serde_json::to_vec(&CanonicalLedger {
             sequence: 0,
             workloads,
+            ..Default::default()
         })?;
         atomic_write_new(&self.ledger_path(), &bytes).context("writing the canonical ledger")?;
         sync_dir(&self.dir())?;
@@ -524,6 +778,30 @@ impl OwnedWorkloadStore {
     /// The change is refused, or its outcome is unknown.
     pub fn commit(&self, change: &WorkloadChange) -> Result<WorkloadCommit> {
         self.store.commit(change)
+    }
+
+    /// # Errors
+    ///
+    /// An interrupted commit cannot be resolved from what is on disk.
+    pub fn recover(&self) -> Result<()> {
+        self.store.recover()
+    }
+
+    /// # Errors
+    ///
+    /// The enrollment is refused, or its outcome is unknown.
+    pub fn enroll_destination(
+        &self,
+        enrollment: &DestinationEnrollment,
+    ) -> Result<DestinationCommit> {
+        self.store.enroll_destination(enrollment)
+    }
+
+    /// # Errors
+    ///
+    /// The head is refused, or its outcome is unknown.
+    pub fn commit_destination(&self, prepared: &SignedPreparedHead) -> Result<DestinationCommit> {
+        self.store.commit_destination(prepared)
     }
 }
 
