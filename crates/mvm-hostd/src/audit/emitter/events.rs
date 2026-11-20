@@ -427,8 +427,9 @@ pub mod grants_audit {
 
     use anyhow::Result;
     use mvm_contract::protocol::resource_controls::{
-        EnforcedCeiling, EnforcedGrants, EnforcedPlacement, EnforcedTier,
+        EnforcedCeiling, EnforcedGrants, EnforcedPlacement, EnforcedTier, ResourceControls,
     };
+    use mvm_contract::protocol::vm_backend::BackendKind;
     use mvm_core::plan::ExecutionPlan;
 
     use crate::audit::emitter::AuditEmitter;
@@ -453,6 +454,9 @@ pub mod grants_audit {
     pub const LABEL_CPUSET_REQUESTED: &str = "grants_cpuset_requested";
     /// Label: the scope's `cpuset.cpus.effective`, in the kernel list format.
     pub const LABEL_CPUSET_EFFECTIVE: &str = "grants_cpuset_effective";
+    /// Label: the isolation tier the backend declares for every run. Absent
+    /// when the backend declares none.
+    pub const LABEL_ISOLATION_TIER: &str = "grants_isolation_tier";
 
     /// Emitted when the kernel killed a workload's VMM for crossing its memory
     /// ceiling.
@@ -476,11 +480,12 @@ pub mod grants_audit {
             &self,
             plan: &ExecutionPlan,
             enforced: &EnforcedGrants,
+            backend: BackendKind,
         ) -> Result<()> {
             self.emit(
                 plan,
                 "plan.grants_enforced",
-                enforced_grants_labels(enforced),
+                grants_enforced_labels(enforced, backend),
             )
         }
 
@@ -534,6 +539,23 @@ pub mod grants_audit {
             enforced.tasks,
         );
         push_placement(&mut labels, &enforced.placement);
+        labels
+    }
+
+    /// The `plan.grants_enforced` labels: [`enforced_grants_labels`] plus the
+    /// isolation tier of the backend that ran the unit.
+    ///
+    /// The tier is the backend's declared control, not a read-back: isolation
+    /// is a property of the backend kind, with nothing per run to read back.
+    #[must_use]
+    pub fn grants_enforced_labels(
+        enforced: &EnforcedGrants,
+        backend: BackendKind,
+    ) -> Vec<(String, String)> {
+        let mut labels = enforced_grants_labels(enforced);
+        if let Some(tier) = ResourceControls::for_backend(backend).isolation {
+            labels.push((LABEL_ISOLATION_TIER.to_string(), tier.label().to_string()));
+        }
         labels
     }
 
@@ -625,6 +647,41 @@ pub mod grants_audit {
             assert_eq!(label(&labels, LABEL_TASKS_MAX), None);
             assert_eq!(label(&labels, LABEL_CPU_TIER), Some("declared"));
             assert_eq!(label(&labels, LABEL_WALL_CLOCK_TIER), Some("declared"));
+        }
+
+        #[test]
+        fn the_isolation_tier_is_the_backends_declared_one() {
+            // Every kind, so a backend that gains or loses a declared tier
+            // changes this entry with no edit here.
+            for &kind in BackendKind::ALL {
+                let labels = grants_enforced_labels(&EnforcedGrants::all_declared(), kind);
+                assert_eq!(
+                    label(&labels, LABEL_ISOLATION_TIER),
+                    ResourceControls::for_backend(kind)
+                        .isolation
+                        .map(|tier| tier.label()),
+                    "{kind:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_vm_backend_records_vm_and_one_declaring_nothing_records_no_tier() {
+            let all = EnforcedGrants::all_declared();
+            assert_eq!(
+                label(
+                    &grants_enforced_labels(&all, BackendKind::Firecracker),
+                    LABEL_ISOLATION_TIER
+                ),
+                Some("vm")
+            );
+            assert_eq!(
+                label(
+                    &grants_enforced_labels(&all, BackendKind::Mock),
+                    LABEL_ISOLATION_TIER
+                ),
+                None
+            );
         }
     }
 }

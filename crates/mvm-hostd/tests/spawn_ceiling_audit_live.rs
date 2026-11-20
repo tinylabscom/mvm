@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use ed25519_dalek::SigningKey;
 use mvm_contract::protocol::resource_controls::{EnforcedCeiling, EnforcedTier};
+use mvm_contract::protocol::vm_backend::BackendKind;
 use mvm_core::spawn_scope::{self, ScopeProbe, SpawnBounds};
 use mvm_hostd::audit::emitter::{AuditEmitter, grants_audit};
 
@@ -115,7 +116,11 @@ fn a_scoped_vmm_reads_back_guest_ram_plus_the_overhead() {
     let audit = tempfile::tempdir().expect("audit dir");
     let (emitter, verifying) = emitter_in(audit.path());
     emitter
-        .emit_grants_enforced(&plan("plan-LIVE-CEILING"), &enforced)
+        .emit_grants_enforced(
+            &plan("plan-LIVE-CEILING"),
+            &enforced,
+            BackendKind::Firecracker,
+        )
         .expect("audit the read-back");
     let chain = audit.path().join("local.jsonl");
     let content = std::fs::read_to_string(&chain).expect("chain written");
@@ -243,7 +248,11 @@ fn a_placed_vmm_reads_back_its_cpuset_and_runs_only_there() {
     let audit = tempfile::tempdir().expect("audit dir");
     let (emitter, verifying) = emitter_in(audit.path());
     emitter
-        .emit_grants_enforced(&plan("plan-LIVE-PLACED"), &enforced)
+        .emit_grants_enforced(
+            &plan("plan-LIVE-PLACED"),
+            &enforced,
+            BackendKind::Firecracker,
+        )
         .expect("audit the read-back");
     let chain = audit.path().join("local.jsonl");
     let content = std::fs::read_to_string(&chain).expect("chain written");
