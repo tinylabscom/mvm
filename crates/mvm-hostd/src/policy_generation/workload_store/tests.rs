@@ -1,11 +1,9 @@
 use std::{collections::BTreeMap, path::Path};
 
-use mvm_core::host_interface::{
-    ExecutionEpoch,
-    workload::{
-        CanonicalLedger, LEDGER_FILE, PENDING_FILE, WorkloadChange, WorkloadLedger,
-        archive_path_at, canonical_dir_at, legacy_path_at,
-    },
+use mvm_contract::protocol::mailbox::ExecutionEpoch;
+use mvm_core::host_interface::workload::{
+    CanonicalLedger, LEDGER_FILE, PENDING_FILE, WorkloadChange, WorkloadLedger, archive_path_at,
+    canonical_dir_at, legacy_path_at,
 };
 
 use super::*;
@@ -21,7 +19,7 @@ fn quarantine(name: &str) -> WorkloadChange {
 fn replace(name: &str, from: u64) -> WorkloadChange {
     WorkloadChange::Replace {
         workload: name.to_owned(),
-        from_epoch: ExecutionEpoch(from),
+        from_epoch: ExecutionEpoch::new(from).unwrap(),
     }
 }
 
@@ -266,7 +264,7 @@ fn quarantine_is_idempotent_and_a_stale_replace_changes_nothing() {
     let replaced = store.commit(&replace("a", 1)).unwrap();
     assert_eq!(
         (replaced.sequence, replaced.entry.epoch),
-        (2, ExecutionEpoch(2))
+        (2, ExecutionEpoch::new(2).unwrap())
     );
     assert!(!replaced.entry.quarantined);
     assert_eq!(store.commit(&replace("a", 2)).unwrap().sequence, 3);
@@ -275,7 +273,7 @@ fn quarantine_is_idempotent_and_a_stale_replace_changes_nothing() {
     let reopened = WorkloadStore::open(home.path()).unwrap();
     assert_eq!(reopened.commit(&quarantine("b")).unwrap().sequence, 4);
     let ledger = WorkloadLedger::load_at(home.path()).unwrap();
-    assert_eq!(ledger.entry("a").epoch, ExecutionEpoch(3));
+    assert_eq!(ledger.entry("a").epoch, ExecutionEpoch::new(3).unwrap());
 }
 
 fn seed(home: &Path, count: usize) {

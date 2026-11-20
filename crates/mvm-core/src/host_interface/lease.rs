@@ -141,8 +141,8 @@ impl CommandGate {
     pub fn accept(&mut self, epoch: ExecutionEpoch, seq: u64) -> Result<(), Denial> {
         if epoch != self.epoch {
             return Err(Denial::StaleEpoch {
-                got: epoch.0,
-                current: self.epoch.0,
+                got: epoch.get(),
+                current: self.epoch.get(),
             });
         }
         if seq <= self.last_seq {
@@ -309,19 +309,19 @@ mod tests {
 
     #[test]
     fn the_command_gate_rejects_replay_reorder_and_stale_epochs() {
-        let mut g = CommandGate::new(ExecutionEpoch(2));
-        assert!(g.accept(ExecutionEpoch(2), 1).is_ok());
-        assert!(g.accept(ExecutionEpoch(2), 3).is_ok());
+        let mut g = CommandGate::new(ExecutionEpoch::new(2).unwrap());
+        assert!(g.accept(ExecutionEpoch::new(2).unwrap(), 1).is_ok());
+        assert!(g.accept(ExecutionEpoch::new(2).unwrap(), 3).is_ok());
         assert_eq!(
-            g.accept(ExecutionEpoch(2), 3),
+            g.accept(ExecutionEpoch::new(2).unwrap(), 3),
             Err(Denial::ReplayedCommand { got: 3, last: 3 })
         );
         assert_eq!(
-            g.accept(ExecutionEpoch(2), 2),
+            g.accept(ExecutionEpoch::new(2).unwrap(), 2),
             Err(Denial::ReplayedCommand { got: 2, last: 3 })
         );
         assert_eq!(
-            g.accept(ExecutionEpoch(1), 9),
+            g.accept(ExecutionEpoch::new(1).unwrap(), 9),
             Err(Denial::StaleEpoch { got: 1, current: 2 })
         );
     }

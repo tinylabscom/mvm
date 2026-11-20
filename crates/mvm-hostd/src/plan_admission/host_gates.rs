@@ -11,8 +11,10 @@ use mvm_core::plan::ExecutionPlan;
 /// covered by the durable host-budget reservation and enforcement by the runtime
 /// verification in `RunPosture`, both of which run just before this.
 pub(super) fn admit_host_interface(plan: &ExecutionPlan) -> Result<()> {
+    use anyhow::Context;
+    use mvm_contract::protocol::mailbox::ExecutionEpoch;
     use mvm_core::host_interface::{
-        Assurance, ExecutionEpoch, HostInterface, LaunchRequest, local::LocalHostInterface, store,
+        Assurance, HostInterface, LaunchRequest, local::LocalHostInterface, store,
     };
     let home = std::path::PathBuf::from(mvm_core::config::mvm_home());
     let record = store::load_node_record_at(&home)?;
@@ -30,13 +32,15 @@ pub(super) fn admit_host_interface(plan: &ExecutionPlan) -> Result<()> {
     // replacement), is refused while every other workload keeps launching. A
     // local launch synthesizes its plan at the current epoch; a plan arriving
     // from a control plane carries the epoch that authority issued.
+    let epoch = ExecutionEpoch::new(plan.execution_epoch)
+        .context("the plan carries a zero execution epoch")?;
     mvm_core::host_interface::workload::WorkloadLedger::load_at(&home)?
-        .authorize(&plan.workload.0, ExecutionEpoch(plan.execution_epoch))
+        .authorize(&plan.workload.0, epoch)
         .map_err(mvm_core::host_interface::HostInterfaceError::from)?;
     host.authorize_workload(&LaunchRequest {
         workload_id: plan.workload.0.clone(),
         image_digest: plan.image.sha256.clone(),
-        epoch: ExecutionEpoch(record.epoch.0),
+        epoch: record.epoch,
     })?;
     mvm_core::launch_trace::lap("admit_plan.grants_budget_and_host_interface");
     Ok(())

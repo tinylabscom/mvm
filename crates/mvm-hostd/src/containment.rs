@@ -14,10 +14,8 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use mvm_core::host_interface::{
-    ExecutionEpoch,
-    workload::{WorkloadChange, WorkloadCommit, WorkloadLedger},
-};
+use mvm_contract::protocol::mailbox::ExecutionEpoch;
+use mvm_core::host_interface::workload::{WorkloadChange, WorkloadCommit, WorkloadLedger};
 use mvm_core::plan::ExecutionPlan;
 
 use crate::audit::emitter::AuditEmitter;
@@ -172,7 +170,7 @@ fn quarantine_with(
         "workload.quarantined",
         [
             ("workload".to_string(), workload.to_owned()),
-            ("epoch".to_string(), commit.entry.epoch.0.to_string()),
+            ("epoch".to_string(), commit.entry.epoch.get().to_string()),
             ("reason".to_string(), bounded(reason)),
         ],
     )
@@ -197,7 +195,7 @@ fn replace_with(
     workload: &str,
 ) -> Result<ExecutionEpoch> {
     let previous = authority.ledger()?.entry(workload).epoch;
-    let next = previous.next();
+    let next = previous.saturating_next();
     emit_operator_event(
         emitter,
         plan,
@@ -205,8 +203,8 @@ fn replace_with(
         "workload.replaced",
         [
             ("workload".to_string(), workload.to_owned()),
-            ("previous_epoch".to_string(), previous.0.to_string()),
-            ("epoch".to_string(), next.0.to_string()),
+            ("previous_epoch".to_string(), previous.get().to_string()),
+            ("epoch".to_string(), next.get().to_string()),
         ],
     )?;
     let commit = authority
@@ -258,7 +256,11 @@ mod tests {
         let fresh = replace_workload(&store, &emitter, &p).unwrap();
         let ledger = WorkloadLedger::load_at(home.path()).unwrap();
         assert!(ledger.authorize_local_start("suspect").is_ok());
-        assert!(ledger.authorize("suspect", ExecutionEpoch(1)).is_err());
+        assert!(
+            ledger
+                .authorize("suspect", ExecutionEpoch::new(1).unwrap())
+                .is_err()
+        );
         assert!(ledger.authorize("suspect", fresh).is_ok());
 
         let e = entries(audit.path());
@@ -436,7 +438,10 @@ mod tests {
             before
         );
         let ledger = WorkloadLedger::load_at(home.path()).unwrap();
-        assert_eq!(ledger.entry("suspect").epoch, ExecutionEpoch(1));
+        assert_eq!(
+            ledger.entry("suspect").epoch,
+            ExecutionEpoch::new(1).unwrap()
+        );
         assert!(ledger.entry("suspect").quarantined);
     }
 }

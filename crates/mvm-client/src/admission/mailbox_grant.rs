@@ -178,7 +178,7 @@ mod tests {
             .commit(
                 &mvm_core::host_interface::workload::WorkloadChange::Replace {
                     workload: "w".into(),
-                    from_epoch: mvm_core::host_interface::ExecutionEpoch(1),
+                    from_epoch: ExecutionEpoch::FIRST,
                 },
             )
             .unwrap();

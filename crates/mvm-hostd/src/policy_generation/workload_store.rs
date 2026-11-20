@@ -194,8 +194,8 @@ impl WorkloadStore {
                 ensure!(
                     current == *from_epoch,
                     "workload epoch changed: expected {}, current {}",
-                    from_epoch.0,
-                    current.0
+                    from_epoch.get(),
+                    current.get()
                 );
                 ensure!(
                     known || canonical.workloads.len() < MAX_WORKLOADS - QUARANTINE_RESERVE,
