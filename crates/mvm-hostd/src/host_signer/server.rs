@@ -20,7 +20,7 @@ use crate::host_signer::keystore::{Keystore, SharedKeystore};
 const DEFAULT_MAX_FRAME_BYTES: usize = 65_536;
 
 #[path = "plan_payload.rs"]
-mod plan_payload;
+pub(crate) mod plan_payload;
 
 #[derive(Clone)]
 enum SignBackend {
