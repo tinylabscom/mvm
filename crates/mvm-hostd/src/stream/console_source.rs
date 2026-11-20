@@ -10,11 +10,12 @@
 //! capture is already running the whole time (every backend opens it before
 //! boot), so following it closes both windows.
 //!
-//! **Polling, not a watch API.** A held read offset re-checked on an
-//! interval behaves identically on macOS and Linux and across all four
-//! workload backends; an OS-specific watch (inotify/FSEvents/kqueue) would
-//! need a second implementation to keep in sync with the first, for a file
-//! that is at most a few kilobytes a second.
+//! **Event-driven where the host allows it.** Between reads the follower
+//! blocks on a `ConsoleWait`: inotify on Linux, so an idle console costs no
+//! host wakeup, and a fixed-interval re-check elsewhere (see the
+//! `console_wait` module). Only *when* to look differs; the
+//! read path below is shared, so truncation, rotation and a file that does not
+//! exist yet are handled identically on every host.
 //!
 //! **Read-only, always.** This module only ever opens the capture file for
 //! reading. The console itself has no host input fd by design (a sealed
@@ -33,13 +34,14 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
-use std::time::Duration;
 
 use mvm_contract::stream::{StreamKind, StreamSource};
 
 use crate::stream::broker::StreamBroker;
+use crate::stream::console_wait::{self, ConsoleWait};
 
 /// A [`StreamBroker`] shared between producers. `ingest` takes `&mut self`,
 /// and the console follower runs on its own thread alongside whatever else
@@ -48,43 +50,29 @@ use crate::stream::broker::StreamBroker;
 /// the chain and `seq` are per-broker, not per-source.
 pub type SharedBroker = Arc<Mutex<StreamBroker>>;
 
-/// How often the follower re-checks the file for new bytes.
-const POLL_INTERVAL: Duration = Duration::from_millis(200);
-
-/// The follower's stop flag, waitable so a stop does not have to sit out the
-/// rest of the current poll interval.
-///
-/// A plain flag plus `sleep` made stopping cost whatever remained of
-/// [`POLL_INTERVAL`], which is paid on the teardown path of every workload and
-/// measured as the largest single span of a transient stop. Waiting on a
-/// condvar keeps the same idle cadence when nothing is happening while making
-/// the stop itself immediate.
-#[derive(Default)]
+/// The follower's stop flag, plus the waiter a stop interrupts so it does not
+/// have to wait for the console to change before it is noticed. Stopping is
+/// paid on the teardown path of every workload.
 struct StopSignal {
-    stopped: Mutex<bool>,
-    wake: Condvar,
+    stopped: AtomicBool,
+    waiter: Box<dyn ConsoleWait>,
 }
 
 impl StopSignal {
-    /// Recovered rather than propagated on poison, matching the rest of this
-    /// module: a panicking producer must not strand a follower thread that
-    /// would otherwise exit cleanly.
+    fn new(waiter: Box<dyn ConsoleWait>) -> Self {
+        Self {
+            stopped: AtomicBool::new(false),
+            waiter,
+        }
+    }
+
     fn set(&self) {
-        *self.stopped.lock().unwrap_or_else(PoisonError::into_inner) = true;
-        self.wake.notify_all();
+        self.stopped.store(true, Ordering::SeqCst);
+        self.waiter.interrupt();
     }
 
     fn is_set(&self) -> bool {
-        *self.stopped.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Idle for at most `timeout`, returning as soon as a stop lands.
-    fn wait(&self, timeout: Duration) {
-        let stopped = self.stopped.lock().unwrap_or_else(PoisonError::into_inner);
-        if *stopped {
-            return;
-        }
-        let _ = self.wake.wait_timeout(stopped, timeout);
+        self.stopped.load(Ordering::SeqCst)
     }
 }
 
@@ -127,20 +115,26 @@ impl ConsoleSource {
     /// documents) rather than propagate it into a workload boot failure over
     /// what is, at bottom, an observability feature.
     pub fn follow(path: &Path, broker: SharedBroker) -> io::Result<ConsoleSourceHandle> {
-        Self::follow_with(std::thread::Builder::new(), path, broker)
+        Self::follow_with(
+            std::thread::Builder::new(),
+            path,
+            broker,
+            console_wait::for_console(),
+        )
     }
 
     /// Same as [`follow`](Self::follow), parameterized on the thread
-    /// `Builder` to spawn on — the seam a test uses to force a deterministic
-    /// spawn failure (an unsatisfiable `stack_size`) without exhausting the
-    /// process's real thread/fd limits, which would starve every other test
-    /// running alongside it under full-suite parallelism.
+    /// `Builder` to spawn on and the waiter to idle on — the seams a test uses
+    /// to force a deterministic spawn failure (an unsatisfiable `stack_size`)
+    /// without exhausting the process's real thread/fd limits, and to count
+    /// the follower's wakeups.
     fn follow_with(
         builder: std::thread::Builder,
         path: &Path,
         broker: SharedBroker,
+        waiter: Box<dyn ConsoleWait>,
     ) -> io::Result<ConsoleSourceHandle> {
-        let stop = Arc::new(StopSignal::default());
+        let stop = Arc::new(StopSignal::new(waiter));
         let thread_stop = Arc::clone(&stop);
         let owned_path = path.to_path_buf();
         let thread = match builder
@@ -202,11 +196,14 @@ impl Drop for ConsoleSourceHandle {
 
 /// The follower loop: drain whatever is available, checking `stop` between
 /// chunks so a stop signal is honored within one chunk read even under a
-/// heavy backlog, then idle-poll once caught up. A stop request takes the
-/// bounded final drain on the way out rather than returning on the spot.
+/// heavy backlog, then block until the file may have changed once caught up.
+/// A stop request takes the bounded final drain on the way out rather than
+/// returning on the spot.
 fn run(path: &Path, broker: &SharedBroker, stop: &StopSignal) {
     let mut state = FollowState::default();
     loop {
+        // Armed before the read, so a write after the read still ends the wait.
+        stop.waiter.arm(path);
         while poll_once(path, &mut state, broker) {
             if stop.is_set() {
                 return final_drain(path, &mut state, broker);
@@ -219,7 +216,7 @@ fn run(path: &Path, broker: &SharedBroker, stop: &StopSignal) {
             // a stop flag set after the poll that missed those bytes.
             return final_drain(path, &mut state, broker);
         }
-        stop.wait(POLL_INTERVAL);
+        stop.waiter.wait();
     }
 }
 
@@ -335,11 +332,13 @@ pub(in crate::stream) fn lock_broker(broker: &SharedBroker) -> MutexGuard<'_, St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stream::console_wait::POLL_INTERVAL;
     use crate::stream::redact::StreamRedaction;
     use mvm_core::policy::RedactionPolicy;
     use mvm_core::transcript::{CaptureBinding, TranscriptWriter};
     use std::path::PathBuf;
-    use std::time::Instant;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
     /// Holds the transcript tempdir alive alongside the broker writing into
@@ -468,6 +467,114 @@ mod tests {
         assert_eq!(fx.broker.lock().unwrap().counters().ingested, 1);
     }
 
+    // --- idle wakeups ------------------------------------------------------
+
+    /// Delegates to the host's real waiter and counts every return from
+    /// `wait`, each of which is one wakeup of the follower thread.
+    struct Counted {
+        inner: Box<dyn ConsoleWait>,
+        wakeups: Arc<AtomicUsize>,
+    }
+
+    impl ConsoleWait for Counted {
+        fn arm(&self, path: &Path) {
+            self.inner.arm(path);
+        }
+
+        fn wait(&self) {
+            self.inner.wait();
+            self.wakeups.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn interrupt(&self) {
+            self.inner.interrupt();
+        }
+    }
+
+    fn follow_counted(fx: &Fixture) -> (ConsoleSourceHandle, Arc<AtomicUsize>) {
+        let wakeups = Arc::new(AtomicUsize::new(0));
+        let waiter = Box::new(Counted {
+            inner: console_wait::for_console(),
+            wakeups: Arc::clone(&wakeups),
+        });
+        let handle = ConsoleSource::follow_with(
+            std::thread::Builder::new(),
+            &fx.console_path(),
+            Arc::clone(&fx.broker),
+            waiter,
+        )
+        .expect("follow the console log");
+        (handle, wakeups)
+    }
+
+    /// Stop must not wait for the console to change: an idle console never
+    /// will, and teardown joins this thread. The bound is loose for a loaded
+    /// test host; a stop that waited on the file would never return at all.
+    #[test]
+    fn stop_returns_promptly_from_an_idle_wait() {
+        let fx = broker_fixture("vm-idle-stop");
+        std::fs::write(fx.console_path(), b"settled\n").expect("write console log");
+        let (handle, _) = follow_counted(&fx);
+        wait_for(Duration::from_secs(5), || {
+            (fx.broker.lock().unwrap().counters().ingested == 1).then_some(())
+        });
+        std::thread::sleep(Duration::from_millis(100));
+
+        let started = Instant::now();
+        handle.stop();
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "stop took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The property an idle unit's wakeup budget rests on: once caught up, the
+    /// follower does not wake while nobody writes the console, and a write or
+    /// a rotation still reaches the broker.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_unchanged_console_wakes_the_follower_zero_times() {
+        let fx = broker_fixture("vm-idle");
+        let mut reader = fx.broker.lock().unwrap().subscribe();
+        std::fs::write(fx.console_path(), b"booted\n").expect("write console log");
+        let (handle, wakeups) = follow_counted(&fx);
+        assert_eq!(
+            wait_for(Duration::from_secs(5), || reader.recv()).payload,
+            b"booted\n"
+        );
+        // Let the events of the initial write finish arriving.
+        std::thread::sleep(Duration::from_millis(100));
+
+        let settled = wakeups.load(Ordering::SeqCst);
+        std::thread::sleep(POLL_INTERVAL * 5);
+        assert_eq!(
+            wakeups.load(Ordering::SeqCst),
+            settled,
+            "woke on an unchanged file"
+        );
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(fx.console_path())
+            .expect("open for append");
+        std::io::Write::write_all(&mut file, b"late line\n").expect("append");
+        assert_eq!(
+            wait_for(Duration::from_secs(5), || reader.recv()).payload,
+            b"late line\n"
+        );
+
+        let replacement = fx.console_dir.path().join("console.log.new");
+        std::fs::write(&replacement, b"rotated\n").expect("write replacement");
+        std::fs::rename(&replacement, fx.console_path()).expect("rotate over the original");
+        assert_eq!(
+            wait_for(Duration::from_secs(5), || reader.recv()).payload,
+            b"rotated\n"
+        );
+
+        handle.stop();
+    }
+
     // --- the last thing the workload said ---------------------------------
 
     #[test]
@@ -519,7 +626,12 @@ mod tests {
         let path = fx.console_path();
 
         let doomed = std::thread::Builder::new().stack_size(usize::MAX);
-        let result = ConsoleSource::follow_with(doomed, &path, Arc::clone(&fx.broker));
+        let result = ConsoleSource::follow_with(
+            doomed,
+            &path,
+            Arc::clone(&fx.broker),
+            console_wait::for_console(),
+        );
         assert!(
             result.is_err(),
             "an unspawnable follower thread must surface as Err, not a panic"

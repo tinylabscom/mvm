@@ -15,8 +15,8 @@ use serde_json::Value;
 
 use super::cold_launch::{ColdLaunchReport, LaunchLane, SpanStats};
 use super::resource_report::{
-    Figure, MemoryQuantity, ResourceReport, Section, SourceRevision, UnitCost, WakeupQuantity,
-    Wakeups,
+    Figure, MemoryQuantity, ResourceReport, Section, SourceRevision, ThreadWakeups, UnitCost,
+    WakeupQuantity, Wakeups,
 };
 
 /// Launch mode the harness records in `metadata.json`.
@@ -142,6 +142,54 @@ fn idle_totals(s: &Summary, wave: u32, standby: bool) -> Result<Idle> {
         wakeups_per_second: wakeups,
         per_standby: standby.then_some((cpu_per, wake_per)),
     }))
+}
+
+/// A wave's per-thread rows, keyed by (component, thread), valued (threads,
+/// wakeups per second). Component names carry no underscore, so the first one
+/// after the prefix ends the component.
+fn thread_rates(s: &Summary, wave: u32) -> Result<BTreeMap<(String, String), (u64, f64)>> {
+    let prefix = format!("wave_{wave}_thread_");
+    let mut rows = BTreeMap::new();
+    for key in s.0.keys() {
+        let Some(rest) = key
+            .strip_prefix(&prefix)
+            .and_then(|rest| rest.strip_suffix("_wakeups_per_second"))
+        else {
+            continue;
+        };
+        let Some((component, thread)) = rest.split_once('_') else {
+            bail!("summary.tsv `{key}` names no thread");
+        };
+        let threads = s
+            .count(&format!("{prefix}{rest}_threads"))
+            .with_context(|| format!("wave {wave} thread `{rest}` is partial"))?;
+        rows.insert(
+            (component.to_string(), thread.to_string()),
+            (threads, s.number(key)?),
+        );
+    }
+    Ok(rows)
+}
+
+/// The largest wave's thread rows, each less its zero-unit rate and divided by
+/// the wave's units. A run whose sampler had no per-thread counter has none.
+fn thread_wakeups(s: &Summary, wave: u32, units: u64) -> Result<Vec<ThreadWakeups>> {
+    let baseline = thread_rates(s, 0)?;
+    Ok(thread_rates(s, wave)?
+        .into_iter()
+        .map(|((component, thread), (threads, per_second))| {
+            let base = baseline
+                .get(&(component.clone(), thread.clone()))
+                .map_or(0.0, |(_, rate)| *rate);
+            ThreadWakeups {
+                component,
+                thread,
+                threads,
+                per_second,
+                per_unit_per_second: (per_second - base) / units as f64,
+            }
+        })
+        .collect())
 }
 
 /// Everything one wave contributes, after refusing a wave that did not finish.
@@ -539,6 +587,7 @@ pub fn from_density_dir(dir: &Path) -> Result<Section> {
     section.fixed_host_cost.memory_bytes = baseline_memory(dir, memory_quantity)?;
     section.fixed_host_cost.disk_bytes = baseline_disk(&summary)?;
 
+    section.thread_wakeups = thread_wakeups(&summary, largest, wave.units)?;
     let cost = unit_cost(quantity, &baseline, &wave, memory, standby.is_some())?;
     match standby {
         Some(StandbyForm::ResidentProcess) => section.by_standby.resident = cost,
@@ -689,6 +738,48 @@ mod tests {
 
         let dir = edited(|s| s.replace("wave_2_runtime_evidence_du_kib\t0\n", ""));
         assert!(error_of(&dir).contains("wave_2_runtime_evidence_du_kib"));
+    }
+
+    #[test]
+    fn per_thread_rows_are_ingested_net_of_their_baseline_per_unit() {
+        let s = from_density_dir(&fixture()).unwrap();
+        let row = |thread: &str| {
+            s.thread_wakeups
+                .iter()
+                .find(|t| t.thread == thread)
+                .unwrap_or_else(|| panic!("no `{thread}` row in {:?}", s.thread_wakeups))
+        };
+        let vcpu = row("vcpu_0");
+        assert_eq!(
+            (vcpu.component.as_str(), vcpu.threads, vcpu.per_second),
+            ("mvm-hvf-supervisor", 2, 3.0)
+        );
+        assert_eq!(vcpu.per_unit_per_second, 1.5);
+        // 2.0 at the baseline, 3.0 across two units.
+        assert_eq!(row("main").per_unit_per_second, 0.5);
+        assert_eq!(s.thread_wakeups.len(), 3);
+    }
+
+    #[test]
+    fn a_thread_row_without_its_thread_count_is_an_error() {
+        let dir = edited(|s| s.replace("wave_2_thread_mvm-hvf-supervisor_vcpu_0_threads\t2\n", ""));
+        assert!(error_of(&dir).contains("is partial"), "{}", error_of(&dir));
+    }
+
+    #[test]
+    fn a_run_without_thread_rows_reports_none() {
+        let dir = edited(|s| {
+            s.lines()
+                .filter(|l| !l.contains("_thread_"))
+                .map(|l| format!("{l}\n"))
+                .collect()
+        });
+        assert!(
+            from_density_dir(dir.path())
+                .unwrap()
+                .thread_wakeups
+                .is_empty()
+        );
     }
 
     #[test]

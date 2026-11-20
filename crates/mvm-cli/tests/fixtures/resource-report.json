@@ -160,7 +160,30 @@
           "status": "unmeasured",
           "reason": "feature not implemented"
         }
-      }
+      },
+      "thread_wakeups": [
+        {
+          "component": "mvm-host-agent",
+          "thread": "main",
+          "threads": 1,
+          "per_second": 3.0,
+          "per_unit_per_second": 0.5
+        },
+        {
+          "component": "mvm-hvf-supervisor",
+          "thread": "run",
+          "threads": 2,
+          "per_second": 1.0,
+          "per_unit_per_second": 0.5
+        },
+        {
+          "component": "mvm-hvf-supervisor",
+          "thread": "vcpu_0",
+          "threads": 2,
+          "per_second": 3.0,
+          "per_unit_per_second": 1.5
+        }
+      ]
     }
   ]
 }
