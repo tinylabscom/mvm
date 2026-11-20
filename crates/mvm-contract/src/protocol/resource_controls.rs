@@ -115,6 +115,9 @@ pub enum StateCellControl {
     /// No host-held cell exists on this tier.
     #[default]
     None,
+    /// The host's own cell store: reserved at topology admission, written
+    /// only by the writer unit's current epoch, independent of the VMM.
+    HostStore,
 }
 
 /// How a backend holds a unit's liveness deadline, if it can.
@@ -166,11 +169,17 @@ impl ResourceControls {
     /// `BackendKind` must answer this question rather than inherit a default
     /// that might silently claim or silently drop enforcement.
     ///
-    /// No backend pins cores exclusively, keeps a standby, holds a state cell
-    /// or a liveness deadline, or implements a suite beyond the classical one,
-    /// so every arm answers `None` / `ClassicalOnly` for those. They are spelled
-    /// out per arm anyway: when one backend gains a mechanism, its arm changes
-    /// and no other does.
+    /// No backend pins cores exclusively, keeps a standby, holds a liveness
+    /// deadline, or implements a suite beyond the classical one, so every arm
+    /// answers `None` / `ClassicalOnly` for those. They are spelled out per arm
+    /// anyway: when one backend gains a mechanism, its arm changes and no
+    /// other does.
+    ///
+    /// State cells live in the host's own store, so they do not depend on the
+    /// VMM. They are offered by every tier whose unit is a guest with a vsock
+    /// channel to the host, the only path a cell is reached by, and by the
+    /// mock, whose store is the same host store. A wasm module has no such
+    /// channel and a browser-hosted guest has no host store.
     #[must_use]
     pub const fn for_backend(kind: BackendKind) -> Self {
         match kind {
@@ -197,7 +206,7 @@ impl ResourceControls {
                 // virtualization either way.
                 placement: PlacementControl::None,
                 standby: StandbyControl::None,
-                state_cells: StateCellControl::None,
+                state_cells: StateCellControl::HostStore,
                 liveness: LivenessControl::None,
                 isolation: Some(IsolationTier::Vm),
                 suite: SuiteControl::ClassicalOnly,
@@ -225,7 +234,7 @@ impl ResourceControls {
                 wall_clock: WallClockControl::None,
                 placement: PlacementControl::None,
                 standby: StandbyControl::None,
-                state_cells: StateCellControl::None,
+                state_cells: StateCellControl::HostStore,
                 liveness: LivenessControl::None,
                 isolation: Some(IsolationTier::Vm),
                 suite: SuiteControl::ClassicalOnly,
@@ -239,7 +248,7 @@ impl ResourceControls {
                 wall_clock: WallClockControl::None,
                 placement: PlacementControl::None,
                 standby: StandbyControl::None,
-                state_cells: StateCellControl::None,
+                state_cells: StateCellControl::HostStore,
                 liveness: LivenessControl::None,
                 isolation: Some(IsolationTier::Task),
                 suite: SuiteControl::ClassicalOnly,
@@ -259,7 +268,7 @@ impl ResourceControls {
                 wall_clock: WallClockControl::SupervisorTimer,
                 placement: PlacementControl::None,
                 standby: StandbyControl::None,
-                state_cells: StateCellControl::None,
+                state_cells: StateCellControl::HostStore,
                 liveness: LivenessControl::None,
                 isolation: Some(IsolationTier::Vm),
                 suite: SuiteControl::ClassicalOnly,
@@ -285,7 +294,7 @@ impl ResourceControls {
                 wall_clock: WallClockControl::None,
                 placement: PlacementControl::None,
                 standby: StandbyControl::None,
-                state_cells: StateCellControl::None,
+                state_cells: StateCellControl::HostStore,
                 liveness: LivenessControl::None,
                 isolation: None,
                 suite: SuiteControl::ClassicalOnly,
@@ -1247,15 +1256,31 @@ mod tests {
     }
 
     #[test]
-    fn no_backend_serves_a_critical_requirement_yet() {
+    fn no_backend_serves_placement_standby_or_liveness_yet() {
         for &kind in BackendKind::ALL {
             let c = ResourceControls::for_backend(kind);
             assert_eq!(c.placement, PlacementControl::None, "{kind:?}");
             assert_eq!(c.standby, StandbyControl::None, "{kind:?}");
-            assert_eq!(c.state_cells, StateCellControl::None, "{kind:?}");
             assert_eq!(c.liveness, LivenessControl::None, "{kind:?}");
             assert_eq!(c.suite, SuiteControl::ClassicalOnly, "{kind:?}");
         }
+    }
+
+    #[test]
+    fn state_cells_are_held_only_where_a_guest_has_a_vsock_channel_to_the_host() {
+        for &kind in BackendKind::ALL {
+            let expected = match kind {
+                BackendKind::Wasm | BackendKind::WebLinux => StateCellControl::None,
+                _ => StateCellControl::HostStore,
+            };
+            assert_eq!(
+                ResourceControls::for_backend(kind).state_cells,
+                expected,
+                "{kind:?}"
+            );
+        }
+        let encoded = serde_json::to_value(StateCellControl::HostStore).unwrap();
+        assert_eq!(encoded, "host_store");
     }
 
     #[test]

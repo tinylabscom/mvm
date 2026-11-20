@@ -7,7 +7,8 @@
 //! clock, the generation against the last one admitted for the tenant, the
 //! backend's enforcement of every stated requirement, the host's cores against
 //! every exclusive placement, and the host budget over
-//! the sum of the units. Only then is the generation sealed into a record and
+//! the sum of the units. Every state cell the topology declares is then
+//! reserved at full size in the host's cell store. Only then is the generation sealed into a record and
 //! `topology.admitted` written to the tenant's chain.
 //!
 //! Every refusal writes `topology.admission_refused` with the stage and the
@@ -63,6 +64,7 @@ pub enum RefusalStage {
     Generation,
     Requirements,
     Budget,
+    StateCells,
     Record,
 }
 
@@ -76,6 +78,7 @@ impl RefusalStage {
             Self::Generation => "generation",
             Self::Requirements => "requirements",
             Self::Budget => "budget",
+            Self::StateCells => "state_cells",
             Self::Record => "record",
         }
     }
@@ -227,11 +230,18 @@ pub fn admit_topology(request: &TopologyAdmissionRequest<'_>) -> Result<Topology
     let mut known = None;
     match decide(request, &mut known) {
         Ok(Decision::Same(admitted)) => Ok(TopologyAdmission::AlreadyAdmitted(admitted)),
-        Ok(Decision::New { admitted, lock }) => {
+        Ok(Decision::New {
+            admitted,
+            reserved,
+            lock,
+        }) => {
             let audited = audit_admitted(request, &admitted);
             let result = match audited {
                 Ok(()) => Ok(TopologyAdmission::Admitted(admitted)),
-                Err(audit) => Err(withdraw(&admitted.record_path, audit)),
+                Err(audit) => {
+                    crate::state_cells::release(&reserved);
+                    Err(withdraw(&admitted.record_path, audit))
+                }
             };
             drop(lock);
             result
@@ -243,6 +253,8 @@ pub fn admit_topology(request: &TopologyAdmissionRequest<'_>) -> Result<Topology
 enum Decision {
     New {
         admitted: AdmittedTopology,
+        /// Cells this admission created, removed again if it fails.
+        reserved: Vec<PathBuf>,
         lock: mvm_core::atomic_io::FileLock,
     },
     Same(AdmittedTopology),
@@ -312,8 +324,12 @@ fn decide(
         admitted_at: request.clock.now(),
         signed: request.signed.clone(),
     };
-    let record_path = record::persist(&home, tenant, &new)
-        .map_err(|e| refused(RefusalStage::Record, format_args!("{e:#}")))?;
+    let reserved = crate::state_cells::reserve(&home, &topology)
+        .map_err(|e| refused(RefusalStage::StateCells, format_args!("{e:#}")))?;
+    let record_path = record::persist(&home, tenant, &new).map_err(|e| {
+        crate::state_cells::release(&reserved);
+        refused(RefusalStage::Record, format_args!("{e:#}"))
+    })?;
     Ok(Decision::New {
         admitted: AdmittedTopology {
             topology,
@@ -321,6 +337,7 @@ fn decide(
             signer_id,
             record_path,
         },
+        reserved,
         lock,
     })
 }

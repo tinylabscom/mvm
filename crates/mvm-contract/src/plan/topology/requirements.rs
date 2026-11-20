@@ -8,7 +8,10 @@
 use alloc::string::String;
 use core::num::NonZeroU32;
 
-use super::{CorePlacement, CryptoSuite, IsolationTier, StandbyClass, StandbyPair, Topology, Unit};
+use super::{
+    CellUpdate, CorePlacement, CryptoSuite, IsolationTier, StandbyClass, StandbyPair, StateCell,
+    Topology, Unit,
+};
 use crate::plan::types::WorkloadId;
 use crate::protocol::resource_controls::{
     LivenessControl, PlacementControl, ResourceControls, StandbyControl, StateCellControl,
@@ -74,6 +77,16 @@ pub enum UnmetRequirement {
     },
     #[error("cell {cell} requires a host-held state cell, which this backend does not provide")]
     StateCell { cell: String },
+    #[error(
+        "cell {cell} asks for follow, and this host does not yet signal a standby that a cell \
+         changed"
+    )]
+    CellFollow { cell: String },
+    #[error(
+        "cell {cell} asks for an audit entry per write, and this host has no measured audit \
+         budget to admit it against"
+    )]
+    CellPerWriteAudit { cell: String },
 }
 
 /// Compare what `topology` requires with what `controls` enforce, returning
@@ -98,16 +111,24 @@ pub fn check_requirements(
         check_recovery_bound(pair, measured)?;
         check_standby(pair, controls.standby)?;
     }
-    if let Some(cell) = topology.cells.first() {
-        match controls.state_cells {
-            StateCellControl::None => {
-                return Err(UnmetRequirement::StateCell {
-                    cell: cell.name.clone(),
-                });
-            }
-        }
+    for cell in &topology.cells {
+        check_cell(cell, controls.state_cells)?;
     }
     Ok(())
+}
+
+fn check_cell(cell: &StateCell, control: StateCellControl) -> Result<(), UnmetRequirement> {
+    let cell_name = || cell.name.clone();
+    match control {
+        StateCellControl::None => Err(UnmetRequirement::StateCell { cell: cell_name() }),
+        StateCellControl::HostStore if cell.update == CellUpdate::Follow => {
+            Err(UnmetRequirement::CellFollow { cell: cell_name() })
+        }
+        StateCellControl::HostStore if cell.per_write_audit => {
+            Err(UnmetRequirement::CellPerWriteAudit { cell: cell_name() })
+        }
+        StateCellControl::HostStore => Ok(()),
+    }
 }
 
 fn check_suite(suite: CryptoSuite, control: SuiteControl) -> Result<(), UnmetRequirement> {

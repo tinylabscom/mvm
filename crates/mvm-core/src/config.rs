@@ -327,6 +327,11 @@ pub fn topologies_dir_at(home: impl AsRef<std::path::Path>) -> std::path::PathBu
     home.as_ref().join("topologies")
 }
 
+/// Host-held state cells, one directory per tenant: `<mvm_home>/state-cells`.
+pub fn state_cells_dir_at(home: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    home.as_ref().join("state-cells")
+}
+
 /// The user's authored policy files: `<mvm_home>/config/policy`.
 ///
 /// Profiles live in `profiles/<name>.toml` and groups in `groups/<name>.toml`
