@@ -1,8 +1,9 @@
 # PS06 canonical-builder authority
 
-Status: **B implementation acceptance contract under review. No installed
-provider, commissioned issuer, enabled owner factory or native qualification
-is claimed by this document.**
+Status: **B implementation acceptance contract under review. Source now
+contains a create-only public commissioning-intent publisher and read-only
+deployment-receipt/journal seams. No installed provider, commissioned issuer,
+enabled owner factory or native qualification is claimed by this document.**
 
 The maintainer selected the B direction: protect authority and writable resources
 from an attacker-controlled, unconfined process under the developer's UID.
@@ -161,7 +162,12 @@ the earlier delegation approval.
 Proposed trusted setup sequence:
 
 1. The installer validates the signed code cohort and provisions the two role
-   identities, protected roots and a root-owned initialization intent.
+   identities, protected roots and a root-owned initialization intent. The
+   source-only publisher for this first step writes only bounded public role
+   and approved-code-cohort metadata at the fixed
+   `/private/var/db/mvm/owner-commissioning-intent.json` path. It refuses any
+   existing intent, receipt, completion, authority-ready, journal or lock
+   artifact and never creates parents, repairs state or overwrites an object.
 2. A fixed initialization entry point runs as the authority UID, exclusively
    locks the authority namespace and creates the issuer only for that intent.
    It exposes no secret and accepts no caller-selected key or key path.
@@ -176,7 +182,9 @@ Proposed trusted setup sequence:
 Installation crash recovery is an explicit administrator setup action, not an
 API available to the requesting developer. No production key is generated,
 imported, retired or read here. The exact installer-to-initializer authentication
-and intent-consumption protocol needs implementation review before commissioning.
+and intent-consumption protocol, key creation, deployment-receipt/completion
+writers and journal initialization remain deferred and need implementation
+review before commissioning.
 
 Legacy keys remain outside this provider's authority domain. Neither callers nor
 legacy `SignHost`/`SignPlan` endpoints can produce signatures under the new
