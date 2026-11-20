@@ -66,6 +66,7 @@ mod bundle_environment;
 mod canonical_kernel;
 mod cli_cold;
 mod composition;
+mod containment_recheck;
 mod display_grants;
 mod extension_packs;
 mod final_gates;
@@ -470,6 +471,8 @@ mod admit_tests;
 mod admitted_plan_tests;
 #[cfg(test)]
 mod bundle_admission_tests;
+#[cfg(test)]
+mod containment_recheck_tests;
 #[cfg(test)]
 mod extension_tests;
 #[cfg(test)]

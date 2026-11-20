@@ -327,3 +327,29 @@ fn record_charge_with_rollback(
         )
     })
 }
+
+pub(super) fn stop_actor(
+    slot: &mut Option<&mut Option<mvm_runtime::actor_teardown::ActorOwner>>,
+) -> Result<()> {
+    let owner = slot
+        .as_mut()
+        .and_then(|slot| slot.as_mut())
+        .ok_or_else(|| anyhow::anyhow!("original actor owner missing"))?;
+    let _proof = owner.stop_and_reap()?;
+    Ok(())
+}
+
+pub(super) fn undo_start(
+    undo: UndoLaunch<'_>,
+    slot: &mut Option<&mut Option<mvm_runtime::actor_teardown::ActorOwner>>,
+) -> anyhow::Error {
+    if slot.is_some() {
+        undo_launch_with(
+            undo,
+            || stop_actor(slot),
+            FailureAuditPolicy::OwnedAfterConfirmedRollback,
+        )
+    } else {
+        undo_launch(undo)
+    }
+}
