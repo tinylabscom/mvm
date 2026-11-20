@@ -53,6 +53,8 @@ pub mod egress_broker;
 pub mod extension_admission;
 pub mod extension_controller;
 pub mod hvf_owner_audit_signer;
+#[cfg(unix)]
+pub mod hvf_owner_deployment;
 pub mod hvf_owner_grants;
 pub mod hvf_owner_native_control_signer;
 pub mod hvf_owner_signer;

@@ -66,6 +66,9 @@ pub mod health;
 /// Transport-independent host interface: contract, fail-closed preflight, local adapter.
 pub mod host_interface;
 pub mod host_storage_encryption;
+/// Strict protected commissioning record for the cold-HVF owner roles.
+#[cfg(unix)]
+pub mod hvf_owner_deployment_receipt;
 pub mod icmp_wire;
 /// Content-addressed image version-lineage nodes (the image analog of
 /// [`checkpoint`]). Provenance metadata, never authorization.
