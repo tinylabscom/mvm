@@ -1,6 +1,10 @@
 //! The post-admission tail every admitted boot shares, and the one-call
 //! admit-and-boot entry point.
 
+mod portable_entrypoint;
+
+pub use portable_entrypoint::prepare_portable_entrypoint;
+
 use super::admit::admit_plan_for_run;
 use super::assurance_runtime::verify_selected_runtime;
 use super::rollback::{
@@ -312,6 +316,62 @@ pub(crate) fn prepare_launch<A>(
     })
 }
 
+/// An ordinary entrypoint prepared through attachment, runtime verification and admission.
+pub struct PreparedEntrypoint<A> {
+    config: VmStartConfig,
+    verified_runtime: Option<std::sync::Arc<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>>,
+    admission: A,
+}
+
+impl<A> PreparedEntrypoint<A> {
+    /// Return the exact prepared config, retained runtime evidence and admission.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        VmStartConfig,
+        Option<std::sync::Arc<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>>,
+        A,
+    ) {
+        (self.config, self.verified_runtime, self.admission)
+    }
+}
+
+/// Prepare an ordinary entrypoint without changing its source-specific dispatch tail.
+///
+/// Attachment includes installed-bundle authentication when the client selects
+/// one. The returned runtime evidence is the same launch-scoped set supplied to
+/// admission and must be retained through dispatch.
+///
+/// # Errors
+/// Propagates attachment, runtime verification, or admission refusal before any
+/// backend dispatch.
+pub fn prepare_entrypoint<A>(
+    config: VmStartConfig,
+    backend_kind: mvm_core::vm_backend::BackendKind,
+    attach: impl FnOnce(
+        &mut VmStartConfig,
+    ) -> Result<
+        Option<std::sync::Arc<mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime>>,
+    >,
+    admit: impl FnOnce(
+        &mut VmStartConfig,
+        Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
+    ) -> Result<A>,
+) -> Result<PreparedEntrypoint<A>> {
+    let prepared = prepare_launch(
+        LaunchSource::Entrypoint { backend_kind },
+        config,
+        attach,
+        admit,
+    )?;
+    Ok(PreparedEntrypoint {
+        config: prepared.config,
+        verified_runtime: prepared.verified_runtime,
+        admission: prepared.admission,
+    })
+}
+
 /// Attach, verify, admit and dispatch a persistent cold boot in that order.
 ///
 /// Source-specific attachment and plan lowering stay in the client callbacks,
@@ -616,6 +676,12 @@ pub fn claim_cli_transient(
 ) -> Result<WarmClaimDispatch> {
     let mut admitted = admitted;
     anyhow::ensure!(!admitted.dispatched, "CLI admission was already dispatched");
+    // A standby's scope was created before this launch was placed, so it holds
+    // no CPU set and a claimed child would run unconfined.
+    anyhow::ensure!(
+        admitted.allowed_cpus().is_none(),
+        "a launch placed on host cores cannot claim a warm standby"
+    );
     anyhow::ensure!(
         admitted.plan().image.name == config.name,
         "warm claim identity differs from admitted plan"
@@ -653,6 +719,7 @@ pub fn claim_cli_transient(
         prepared.volumes.iter().all(|volume| volume.read_only),
         "warm claim cannot transfer writable volume custody"
     );
+    crate::seal_gate::persist_sealed_plan(&config.name, admitted.plan())?;
     let audit = mvm_vmm::host::audit_substrate::compute_audit_substrate(
         &config.name,
         prepared.tenant_id.as_deref(),
@@ -862,6 +929,23 @@ fn start_admitted_with_finalization(
         }
         return Err(err);
     }
+    // A unit admitted under a topology reads as sealed only through its
+    // persisted plan, so that write is part of the launch. It goes first: the
+    // bridge stash below replaces it with the signed envelope, which reads as
+    // the same plan.
+    if let Err(err) = crate::seal_gate::persist_sealed_plan(&vm_name, admitted.plan()) {
+        if (persistent || entrypoint)
+            && let Some(emitter) = params.emitter
+            && let Err(e) = emitter.emit_failed(admitted.plan(), "seal-plan", &format!("{err:#}"))
+        {
+            tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
+        }
+        return Err(if cli_transient {
+            CliStartFailure::Unrecorded(err).into()
+        } else {
+            err
+        });
+    }
     if (persistent || fork || entrypoint) && super::persists_plan_before_start(backend.name()) {
         super::stash_plan_for_bridge(&config).inspect_err(|err| {
             if !fork
@@ -982,6 +1066,21 @@ fn start_admitted_with_finalization(
                     || stop_actor(&mut actor_owner),
                     FailureAuditPolicy::OwnedAfterConfirmedRollback,
                 )?)
+            } else if (cli_transient || fork) && admitted.allowed_cpus().is_some() {
+                // Neither path reads grants back later, so a launch placed on
+                // host cores is checked here: a scope that does not hold the
+                // admitted set stops the VM before the caller sees it start.
+                // Persistent starts reach the same check after readiness.
+                apply_admitted_grants_with_rollback(
+                    backend,
+                    &vm_id,
+                    &admitted,
+                    None,
+                    || backend.stop(&vm_id).map(|_| ()),
+                    FailureAuditPolicy::OwnedAfterConfirmedRollback,
+                )
+                .map_err(cli_rollback_error)?;
+                None
             } else if cli_transient || persistent || fork {
                 // The CLI finalizes on teardown; persistent starts finalize
                 // after authenticated readiness. Fs-quick forks retain their
@@ -1051,7 +1150,11 @@ fn start_admitted_with_finalization(
                     tracing::warn!(error = %e, "audit emit_decision_record for launch failed (non-fatal)");
                 }
                 if let Some(enforced_grants) = &enforced_grants
-                    && let Err(e) = emitter.emit_grants_enforced(admitted.plan(), enforced_grants)
+                    && let Err(e) = emitter.emit_grants_enforced(
+                        admitted.plan(),
+                        enforced_grants,
+                        backend.kind(),
+                    )
                 {
                     if actor_owner.is_some() {
                         return Err(e);
@@ -1383,6 +1486,9 @@ pub(crate) fn admit_synthesized_with_verified_release(
         Ok(admitted) => admitted,
         Err(err) => {
             if let Some(emitter) = params.emitter
+                && err
+                    .downcast_ref::<super::topology_binding::TopologyRefusalAudited>()
+                    .is_none()
                 && let Err(e) =
                     emitter.emit_refused(&plan, "admit_plan_for_run", &format!("{err:#}"))
             {

@@ -32,6 +32,22 @@ pub fn read_pinned_toolchain(root: &Path, arch: &str) -> Pin {
 
 /// `read_pinned_toolchain` for a caller that has somewhere to go on failure.
 pub fn try_read_pinned_toolchain(root: &Path, arch: &str) -> Result<Pin, String> {
+    let (pinned, manifest) = read_toolchain_table(root)?;
+    Ok(Pin {
+        rust: pinned_string(&pinned, "rust", &manifest)?,
+        zig: pinned_string(&pinned, "zig", &manifest)?,
+        cargo_zigbuild: pinned_string(&pinned, "cargo-zigbuild", &manifest)?,
+        target: resolve_target_for_arch(&pinned, arch)?,
+    })
+}
+
+/// Just the pinned zig version, for a build that needs no per-arch target.
+pub fn try_read_pinned_zig(root: &Path) -> Result<String, String> {
+    let (pinned, manifest) = read_toolchain_table(root)?;
+    pinned_string(&pinned, "zig", &manifest)
+}
+
+fn read_toolchain_table(root: &Path) -> Result<(toml::Value, PathBuf), String> {
     let manifest = root.join("Cargo.toml");
     let toml_str = std::fs::read_to_string(&manifest)
         .map_err(|e| format!("read {}: {e}", manifest.display()))?;
@@ -42,18 +58,14 @@ pub fn try_read_pinned_toolchain(root: &Path, arch: &str) -> Result<Pin, String>
         .and_then(|item| item.get("metadata"))
         .and_then(|item| item.get("mvm"))
         .and_then(|item| item.get("toolchain"))
+        .cloned()
         .ok_or_else(|| {
             format!(
                 "{} is missing [workspace.metadata.mvm.toolchain]",
                 manifest.display()
             )
         })?;
-    Ok(Pin {
-        rust: pinned_string(pinned, "rust", &manifest)?,
-        zig: pinned_string(pinned, "zig", &manifest)?,
-        cargo_zigbuild: pinned_string(pinned, "cargo-zigbuild", &manifest)?,
-        target: resolve_target_for_arch(pinned, arch)?,
-    })
+    Ok((pinned, manifest))
 }
 
 fn pinned_string(toolchain: &toml::Value, key: &str, manifest: &Path) -> Result<String, String> {
@@ -108,7 +120,7 @@ pub fn resolve_pinned_zig(zig_pin: &str) -> Result<Option<String>, String> {
         return Ok(None);
     }
     Err(format!(
-        "zig {zig_pin} is required to cross-compile the embedded host binaries but was not \
+        "zig {zig_pin} is required to cross-compile Linux binaries but was not \
          found. Install it with `just payload::toolchain` (recommended — it installs the exact \
          pinned zig and the musl Rust targets), put zig {zig_pin} on PATH, or set \
          MVM_EMBED_ZIG=/path/to/zig. Homebrew's `zig` is usually a newer, incompatible \

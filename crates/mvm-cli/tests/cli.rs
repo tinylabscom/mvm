@@ -253,6 +253,33 @@ fn bench_report_takes_a_density_dir_and_the_lane_form_still_parses() {
             .is_err(),
         "fit needs vcpus and memory"
     );
+    cli_command()
+        .try_get_matches_from([
+            "mvmctl",
+            "bench",
+            "fit",
+            "--topology",
+            "t.json",
+            "--backend",
+            "firecracker",
+            "--inventory",
+            "h.json",
+        ])
+        .expect("the topology form parses without a size");
+    assert!(
+        cli_command()
+            .try_get_matches_from([
+                "mvmctl",
+                "bench",
+                "fit",
+                "--topology",
+                "t.json",
+                "--units",
+                "4",
+            ])
+            .is_err(),
+        "a topology carries its own sizes"
+    );
     let help = mvm_cli::commands::help_text_for(&["bench".into(), "--help".into()])
         .expect("bench --help renders");
     assert!(help.contains("fit"), "{help}");

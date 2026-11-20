@@ -90,8 +90,6 @@
       self,
       nixpkgs,
       microvm,
-      # Direct library-only consumers call outputs without resolving flake inputs.
-      rust-overlay ? null,
       mvm-workspace,
       ...
     }:
@@ -162,7 +160,7 @@
       hostPackagesFor =
         system:
         import ./packages {
-          pkgs = nixpkgs.legacyPackages.${system}.extend rust-overlay.overlays.default;
+          pkgs = nixpkgs.legacyPackages.${system};
           mvmSrc = workspaceSrc;
         };
 
@@ -184,7 +182,7 @@
       guestPackagesFor =
         system:
         import ./packages/guest.nix {
-          pkgs = (import nixpkgs { inherit system; }).extend rust-overlay.overlays.default;
+          pkgs = import nixpkgs { inherit system; };
           mvmSrc = workspaceSrc;
           inherit workspaceVersion;
         };
@@ -202,7 +200,7 @@
         final: _prev:
         let
           hostPackages = import ./packages {
-            pkgs = final.extend rust-overlay.overlays.default;
+            pkgs = final;
             mvmSrc = workspaceSrc;
           };
         in

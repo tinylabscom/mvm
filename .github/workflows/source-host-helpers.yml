@@ -77,7 +77,7 @@ jobs:
           test "$(git -C helper-source rev-parse HEAD)" = "${SOURCE_SHA}"
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
           targets: ${{ matrix.build_target }}
       - uses: ./.github/actions/install-zigbuild
       - name: Build launch helpers

@@ -32,17 +32,16 @@ use ed25519_dalek::SigningKey;
 use mvm_contract::protocol::mailbox::{
     AuthorizationDomainId, AuthorizationDomainRouteLabel, BootId, CapabilityId,
     CapabilityOperations, CausationId, CiphertextPadding, ContentType, CorrelationId, DeliveryId,
-    DestinationRouteToken, EncryptionAlgorithm, EncryptionContext, ExecutionEpoch as MbEpoch,
-    MailboxAddress, MailboxCapabilityGrant, MailboxEnvelopeHeader, MailboxId, MailboxMessageKind,
-    MailboxOperation, MailboxRoutingFrame, MessageId, OrderingScope, PrincipalId, ProtocolVersion,
-    ReplayNonce, ReplyRoute, RevocationId, SequenceNumber, SignatureAlgorithm, TenantId,
-    TransportBindingId,
+    DestinationRouteToken, EncryptionAlgorithm, EncryptionContext, ExecutionEpoch, MailboxAddress,
+    MailboxCapabilityGrant, MailboxEnvelopeHeader, MailboxId, MailboxMessageKind, MailboxOperation,
+    MailboxRoutingFrame, MessageId, OrderingScope, PrincipalId, ProtocolVersion, ReplayNonce,
+    ReplyRoute, RevocationId, SequenceNumber, SignatureAlgorithm, TenantId, TransportBindingId,
 };
 use mvm_core::crypto::aead::Key;
 use mvm_core::host_interface::{
-    Assurance, ExecutionEpoch, HostInterface, HostInterfaceError, HostPolicy, LaunchRequest,
-    NodeState,
-    lease::{CommandGate, LeaseOp, OfflineLease, Reconnect, SignedLease, answer_challenge},
+    Assurance, HostInterface, HostInterfaceError, HostPolicy, LaunchRequest, NodeState,
+    epoch_gate::CommandGate,
+    lease::{LeaseOp, OfflineLease, Reconnect, SignedLease, answer_challenge},
     local::LocalHostInterface,
     workload::WorkloadLedger,
 };
@@ -63,6 +62,7 @@ use mvm_hostd::containment::{quarantine_workload, replace_workload};
 use mvm_hostd::mailbox_service::{
     GuestSealer, MailboxLimits, MailboxPolicy, MailboxService, Refusal, send, serve_granted_guest,
 };
+use mvm_hostd::policy_generation::workload_store::OwnedWorkloadStore;
 use mvm_hostd::supervisor::verify_audit_chain;
 #[path = "support/tcp_peer_transport.rs"]
 mod tcp_peer_transport;
@@ -79,6 +79,7 @@ fn now() -> u64 {
 struct Node {
     name: &'static str,
     home: tempfile::TempDir,
+    workloads: OwnedWorkloadStore,
     audit: tempfile::TempDir,
     audit_key: SigningKey,
     identity: SigningKey,
@@ -92,9 +93,12 @@ impl Node {
         let audit = tempfile::tempdir().unwrap();
         let audit_key = SigningKey::from_bytes(&[seed; 32]);
         let emitter = AuditEmitter::with_dir(audit_key.clone(), audit.path()).unwrap();
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let workloads = OwnedWorkloadStore::open(home.path()).unwrap();
         Self {
             name,
-            home: tempfile::tempdir_in("/tmp").unwrap(),
+            home,
+            workloads,
             audit,
             audit_key,
             identity: SigningKey::from_bytes(&[seed.wrapping_add(100); 32]),
@@ -215,7 +219,7 @@ fn header(epoch: u64, id: u8) -> MailboxEnvelopeHeader {
         recipient: aircraft_principal(),
         mailbox: address().mailbox,
         sender_boot: BootId::from_bytes([5; 32]),
-        execution_epoch: MbEpoch::new(epoch).unwrap(),
+        execution_epoch: ExecutionEpoch::new(epoch).unwrap(),
         message_id: MessageId::from_bytes([id; 32]),
         correlation_id: CorrelationId::from_bytes([7; 32]),
         causation_id: CausationId::from_bytes([8; 32]),
@@ -269,8 +273,8 @@ fn grant(operations: &[MailboxOperation]) -> MailboxCapabilityGrant {
         max_messages_per_minute: 60,
         max_outstanding_calls: 8,
         max_queue_contribution_bytes: 4096,
-        minimum_execution_epoch: MbEpoch::new(1).unwrap(),
-        maximum_execution_epoch: MbEpoch::new(9).unwrap(),
+        minimum_execution_epoch: ExecutionEpoch::new(1).unwrap(),
+        maximum_execution_epoch: ExecutionEpoch::new(9).unwrap(),
         policy_epoch: 4,
         not_before_unix_ms: 900,
         expires_at_unix_ms: 3_000,
@@ -289,7 +293,7 @@ fn context(current_epoch: u64) -> OpenContext {
         expected_recipient: aircraft_principal(),
         acting_principal: ship_principal(),
         expected_capability_issuer: issuer(),
-        current_execution_epoch: MbEpoch::new(current_epoch).unwrap(),
+        current_execution_epoch: ExecutionEpoch::new(current_epoch).unwrap(),
         current_policy_epoch: 4,
         required_operation: MailboxOperation::Send,
         now_unix_ms: 1_500,
@@ -374,7 +378,7 @@ impl Channel {
         operations: &[MailboxOperation],
     ) -> Result<Vec<u8>, Refusal> {
         self.service
-            .set_current_epoch(MbEpoch::new(current_epoch).unwrap());
+            .set_current_epoch(ExecutionEpoch::new(current_epoch).unwrap());
         let capability = sign_capability(grant(operations), &self.authority_key).unwrap();
         let envelope = seal_envelope(
             SealRequest {
@@ -467,17 +471,19 @@ fn contain_terminate_and_rebuild() {
 
     // Act 4: only the suspect is contained, on the command of the control
     // plane; a replayed copy of that command is rejected.
-    let mut commands = CommandGate::new(ExecutionEpoch(1));
+    let mut commands = CommandGate::new(WorkloadLedger::default());
     commands
-        .accept(ExecutionEpoch(1), 1)
+        .accept("analyst", ExecutionEpoch::FIRST, 1)
         .expect("first command accepted");
     assert!(
-        commands.accept(ExecutionEpoch(1), 1).is_err(),
+        commands
+            .accept("analyst", ExecutionEpoch::FIRST, 1)
+            .is_err(),
         "replayed command refused"
     );
     let suspect = ship.plan("analyst");
     quarantine_workload(
-        ship.home.path(),
+        &ship.workloads,
         &ship.emitter,
         &suspect,
         "planted compromise",
@@ -493,8 +499,8 @@ fn contain_terminate_and_rebuild() {
     aircraft.launch("nav").expect("other nodes are unaffected");
 
     // Act 5: the replacement gets fresh authority; the old epoch stays dead.
-    let epoch = replace_workload(ship.home.path(), &ship.emitter, &suspect).unwrap();
-    assert_eq!(epoch.0, 2);
+    let epoch = replace_workload(&ship.workloads, &ship.emitter, &suspect).unwrap();
+    assert_eq!(epoch.get(), 2);
     ship.launch("analyst").expect("the replacement launches");
     assert!(
         channel.deliver(1, 2, 3, &send) == Err(refused(MailboxError::StaleExecutionEpoch)),
@@ -843,7 +849,7 @@ fn plan_and_trust(channel: &Channel, granted: bool) -> (ExecutionPlan, MailboxPo
         plan.mailbox = Some(mvm_contract::protocol::mailbox::MailboxGrant {
             mailbox: address().mailbox,
             authority_key: channel.authority_key.verifying_key().to_bytes(),
-            epoch: MbEpoch::new(1).unwrap(),
+            epoch: ExecutionEpoch::new(1).unwrap(),
             report: None,
             retention: None,
             service_blind: None,
@@ -986,7 +992,7 @@ fn granted_plan(authority_key: [u8; 32]) -> ExecutionPlan {
     plan.mailbox = Some(mvm_contract::protocol::mailbox::MailboxGrant {
         mailbox: address().mailbox,
         authority_key,
-        epoch: MbEpoch::new(1).unwrap(),
+        epoch: ExecutionEpoch::new(1).unwrap(),
         report: None,
         retention: None,
         service_blind: None,
@@ -1000,8 +1006,12 @@ fn a_restarted_mailbox_sealer_does_not_reuse_its_sender_boot() {
 
     let dir = tempfile::tempdir().unwrap();
     host_keys(dir.path(), 5);
-    let authority =
-        authority_key_for(dir.path(), &address().mailbox, MbEpoch::new(1).unwrap()).unwrap();
+    let authority = authority_key_for(
+        dir.path(),
+        &address().mailbox,
+        ExecutionEpoch::new(1).unwrap(),
+    )
+    .unwrap();
     let grant = granted_plan(authority.to_bytes()).mailbox.unwrap();
     let keys = derive_launch_keys(dir.path(), &grant, &test_secret()).unwrap();
     let (_, first) = keys.trust();
@@ -1031,14 +1041,14 @@ fn derived_mailbox_keys_differ_per_mailbox_and_are_not_the_host_key() {
         MailboxId::from_bytes([1; 32]),
         MailboxId::from_bytes([2; 32]),
     );
-    let a1 = authority_key_for(keys.path(), &m1, MbEpoch::new(1).unwrap()).unwrap();
+    let a1 = authority_key_for(keys.path(), &m1, ExecutionEpoch::new(1).unwrap()).unwrap();
     assert_ne!(
         a1,
-        authority_key_for(keys.path(), &m2, MbEpoch::new(1).unwrap()).unwrap()
+        authority_key_for(keys.path(), &m2, ExecutionEpoch::new(1).unwrap()).unwrap()
     );
     assert_ne!(
         a1,
-        authority_key_for(other.path(), &m1, MbEpoch::new(1).unwrap()).unwrap()
+        authority_key_for(other.path(), &m1, ExecutionEpoch::new(1).unwrap()).unwrap()
     );
     assert_ne!(a1, SigningKey::from_bytes(&[5; 32]).verifying_key());
 
@@ -1055,7 +1065,7 @@ fn derived_mailbox_keys_differ_per_mailbox_and_are_not_the_host_key() {
     );
     // An authority the host does not derive for this mailbox is refused.
     let mut foreign = grant;
-    foreign.authority_key = authority_key_for(keys.path(), &m2, MbEpoch::new(1).unwrap())
+    foreign.authority_key = authority_key_for(keys.path(), &m2, ExecutionEpoch::new(1).unwrap())
         .unwrap()
         .to_bytes();
     assert!(host_trust(keys.path(), &foreign, &test_secret()).is_err());
@@ -1073,8 +1083,12 @@ fn derived_keys_serve_the_guest_port_and_queue_what_the_guest_sent() {
     let dir = tempfile::tempdir_in("/tmp").unwrap();
     host_keys(dir.path(), 5);
     let listener = UnixListener::bind(dir.path().join("port.sock")).unwrap();
-    let authority =
-        authority_key_for(dir.path(), &address().mailbox, MbEpoch::new(1).unwrap()).unwrap();
+    let authority = authority_key_for(
+        dir.path(),
+        &address().mailbox,
+        ExecutionEpoch::new(1).unwrap(),
+    )
+    .unwrap();
     let grant = granted_plan(authority.to_bytes()).mailbox.unwrap();
     let keys = derive_launch_keys(dir.path(), &grant, &test_secret()).unwrap();
     let outbox = dir.path().join("outbox");
@@ -1114,8 +1128,12 @@ fn a_running_guest_submits_again_after_its_first_message_was_consumed() {
     let dir = tempfile::tempdir_in("/tmp").unwrap();
     host_keys(dir.path(), 5);
     let listener = UnixListener::bind(dir.path().join("port.sock")).unwrap();
-    let authority =
-        authority_key_for(dir.path(), &address().mailbox, MbEpoch::new(1).unwrap()).unwrap();
+    let authority = authority_key_for(
+        dir.path(),
+        &address().mailbox,
+        ExecutionEpoch::new(1).unwrap(),
+    )
+    .unwrap();
     let grant = granted_plan(authority.to_bytes()).mailbox.unwrap();
     let keys = derive_launch_keys(dir.path(), &grant, &test_secret()).unwrap();
     let outbox = dir.path().join("outbox");
@@ -1282,7 +1300,7 @@ fn local_mailbox_service_returns_exact_signed_v2_receipt_after_restart() {
     let socket = node.home.path().join("local.sock");
     let signer = channel.authority_key.clone();
     let authority = signer.verifying_key();
-    let reference = HistoryKeyRef::new(address(), MbEpoch::new(1).unwrap(), [30; 32], 1)
+    let reference = HistoryKeyRef::new(address(), ExecutionEpoch::new(1).unwrap(), [30; 32], 1)
         .expect("versioned history identity");
     let custody = Custody(reference);
     let limits = JournalLimits {
@@ -1389,7 +1407,7 @@ fn local_mailbox_service_returns_exact_signed_v2_receipt_after_restart() {
             &guest_outbox,
             &authority,
             address().mailbox,
-            MbEpoch::new(1).expect("execution epoch"),
+            ExecutionEpoch::new(1).expect("execution epoch"),
         )
         .expect("guest verifies V2 receipt before removing outbox")
     });
@@ -1427,7 +1445,7 @@ fn local_mailbox_service_returns_exact_signed_v2_receipt_after_restart() {
             &retry_outbox,
             &authority,
             address().mailbox,
-            MbEpoch::new(1).expect("execution epoch"),
+            ExecutionEpoch::new(1).expect("execution epoch"),
         )
         .expect("original signed local verdict")
     });
@@ -1649,7 +1667,7 @@ fn signed_guest_lease_and_exact_ack_survive_mock_anchored_restart() {
     let plan = MailboxGrant {
         mailbox: address().mailbox,
         authority_key: authority.to_bytes(),
-        epoch: MbEpoch::new(1).unwrap(),
+        epoch: ExecutionEpoch::new(1).unwrap(),
         report: None,
         retention: None,
         service_blind: None,
@@ -2375,7 +2393,7 @@ fn missing_verified_posture_prevents_the_helper_from_reporting_ready() {
     let authority = mvm_hostd::mailbox_launch::authority_key_for(
         &keys,
         &address().mailbox,
-        MbEpoch::new(1).unwrap(),
+        ExecutionEpoch::new(1).unwrap(),
     )
     .unwrap()
     .to_bytes();
@@ -2438,7 +2456,7 @@ fn route_to(
         binding_id: r.transport_binding_id,
         issuer: issuer(),
         address: address(),
-        execution_epoch: MbEpoch::new(epoch).unwrap(),
+        execution_epoch: ExecutionEpoch::new(epoch).unwrap(),
         transport_identity: TransportIdentity::from_bytes([9; 32]),
         route_id: RouteId::from_bytes([20; 32]),
         authorization_domain_route_label: r.authorization_domain_route_label,
@@ -2454,7 +2472,7 @@ fn route_to(
     let ctx = TransportBindingContext {
         expected_issuer: issuer(),
         expected_address: address(),
-        current_execution_epoch: MbEpoch::new(1).unwrap(),
+        current_execution_epoch: ExecutionEpoch::new(1).unwrap(),
         current_policy_epoch: 4,
         minimum_assurance: TransportAssurance::IsolatedProduction,
         now_unix_ms: 1_500,
@@ -2556,7 +2574,7 @@ fn two_nodes_deliver_over_a_loopback_tcp_peer_transport() {
     );
     assert_eq!(
         route_to(addr, 2, 2_000, &transport_authority).err(),
-        Some(TransportBindingError::StaleExecutionEpoch)
+        Some(TransportBindingError::ExecutionEpochNotPromoted)
     );
     // A frame larger than the channel bound never leaves the sender.
     let small = ChannelLimits::new(16, 32).unwrap();

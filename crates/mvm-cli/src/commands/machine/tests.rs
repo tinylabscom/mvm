@@ -1,7 +1,8 @@
 use super::lifecycle::finish_machine_exec;
 use super::receipt::MachineStartInitPolicy;
 use super::remove::{
-    remove_machine_runtime_state, remove_machine_spec, resolve_remove_targets, rm_running_refusal,
+    remove_machine_runtime_state, remove_machine_spec, resolve_remove_targets,
+    rm_all_undefined_refusal, rm_running_refusal, undefined_live_vms,
 };
 use super::runtime::{
     PostStart, effective_hypervisor, needs_built_pack_preflight, post_start_action,
@@ -3339,6 +3340,20 @@ fn rm_running_refusal_wording() {
     assert!(msg.contains("web, db"), "lists the running names: {msg}");
     assert!(msg.contains("machine stop web db"), "hints stop: {msg}");
     assert!(msg.contains("--force"), "mentions --force: {msg}");
+}
+
+#[test]
+fn rm_all_refuses_while_an_undefined_vm_is_live() {
+    let targets = ["web".to_string()];
+    assert!(undefined_live_vms(&targets, &["web".to_string()]).is_empty());
+    assert!(rm_all_undefined_refusal(&[]).is_none());
+    let undefined = undefined_live_vms(&targets, &["web".to_string(), "standby-a1".to_string()]);
+    assert_eq!(undefined, vec!["standby-a1".to_string()]);
+    let msg = rm_all_undefined_refusal(&undefined).expect("a live standby refuses");
+    assert!(msg.contains("standby-a1"), "names the live VM: {msg}");
+    assert!(!msg.contains("web"), "a target is not reported: {msg}");
+    assert!(msg.contains("machine stop standby-a1"), "hints stop: {msg}");
+    assert!(msg.contains("--force"), "names the override: {msg}");
 }
 
 #[test]

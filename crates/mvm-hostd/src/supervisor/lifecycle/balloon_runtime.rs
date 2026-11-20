@@ -107,7 +107,10 @@ where
         }
     }
 
-    controller.tick(&states, |vm, target| backend.balloon_set_target(vm, target))
+    controller.tick(&states, |vm, target| {
+        crate::seal_gate::authorize(&vm.0, crate::seal_gate::Mutation::MemoryTarget)?;
+        backend.balloon_set_target(vm, target)
+    })
 }
 
 /// Async loop: every `config.base_interval` (± `config.jitter`),

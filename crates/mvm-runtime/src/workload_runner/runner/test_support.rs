@@ -293,7 +293,11 @@ pub(super) fn spawn_activation_guest(
     std::thread::spawn(move || {
         let mut stream = {
             let mut found = None;
-            for _ in 0..200 {
+            // A loaded full run can delay the runner's connect by many
+            // seconds. Giving up early panics this thread while the runner,
+            // still unconnected, blocks forever in its handshake read.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            while std::time::Instant::now() < deadline {
                 if let Some(end) = driver.take_guest_end(&vm_id, GUEST_AGENT_PORT) {
                     found = Some(end);
                     break;

@@ -7,7 +7,6 @@ rust-version.workspace = true
 description = "Minimal HTTP/1.1 client over rustls for mvm's fetch, registry, and egress paths"
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 authors.workspace = true
 
 [dependencies]

@@ -13,6 +13,7 @@ wave_0_idle_mvm-host-agent_cpu_millicores	10.0
 wave_0_idle_mvm-host-agent_wakeups_per_second	5.0
 wave_1_vmm_processes	1
 wave_1_vm_state_du_kib	1024
+wave_1_runtime_evidence_du_kib	0
 wave_1_launch_failures	0
 wave_1_cleanup_ok	1
 wave_1_idle_window_seconds	10.0
@@ -22,6 +23,7 @@ wave_1_idle_mvm-host-agent_cpu_millicores	11.0
 wave_1_idle_mvm-host-agent_wakeups_per_second	5.5
 wave_2_vmm_processes	2
 wave_2_vm_state_du_kib	2048
+wave_2_runtime_evidence_du_kib	0
 wave_2_launch_failures	0
 wave_2_cleanup_ok	1
 wave_2_idle_window_seconds	10.0

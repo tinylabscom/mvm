@@ -628,6 +628,8 @@ impl LocalBackend {
     pub async fn launch(&self, mut request: LaunchRequest) -> Result<LaunchOutcome> {
         let _barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()
             .map_err(crate::local::backend_err)?;
+        crate::policy_profiles::coordinator::recover_workload_ledger()
+            .map_err(crate::local::backend_err)?;
         if cfg!(target_os = "linux")
             && self.backend.kind() != mvm_core::vm_backend::BackendKind::Mock
         {
@@ -1066,6 +1068,8 @@ impl LocalBackend {
     /// Starting a machine that is already running returns its state.
     pub async fn start_persistent(&self, name: &str) -> Result<MachineState> {
         let _barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()
+            .map_err(crate::local::backend_err)?;
+        crate::policy_profiles::coordinator::recover_workload_ledger()
             .map_err(crate::local::backend_err)?;
         if cfg!(target_os = "linux")
             && self.backend.kind() != mvm_core::vm_backend::BackendKind::Mock

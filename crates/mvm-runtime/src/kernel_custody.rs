@@ -505,6 +505,7 @@ mod tests {
             cmdline: String::new(),
             vcpus: 1,
             cpu_grant: None,
+            allowed_cpus: None,
             memory_mib: 512,
             mem_initial_mib: None,
             blocks: vec![],

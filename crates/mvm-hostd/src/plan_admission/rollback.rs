@@ -114,10 +114,25 @@ fn apply_admitted_grants(
 ) -> Result<EnforcedGrants> {
     let undeclared = Grants::default();
     let grants = admitted.plan().grants.as_ref().unwrap_or(&undeclared);
-    backend
+    let mut enforced = backend
         .as_vm_backend()
         .apply_grants(vm_id, grants)
-        .context("applying the admitted plan's grants to the started VM")
+        .context("applying the admitted plan's grants to the started VM")?;
+    super::placement::check_placement_readback(admitted.allowed_cpus(), &mut enforced)
+        .context("confining the started VM to the host cores it was placed on")?;
+    if admitted.allowed_cpus().is_some() {
+        // A later topology admission reads this to tell this unit's own
+        // machine from one that would keep running on cores it is handing out.
+        crate::topology_admission::placement::record_owner(
+            &mvm_core::config::vm_state_dir(&vm_id.0),
+            &crate::topology_admission::placement::PlacementOwner {
+                tenant: admitted.plan().tenant.clone(),
+                workload: admitted.plan().workload.clone(),
+                exclusive: admitted.holds_cores_exclusively(),
+            },
+        )?;
+    }
+    Ok(enforced)
 }
 
 /// Apply the admitted plan's grants to a VM that has just started, and undo

@@ -558,9 +558,26 @@ impl Drop for CliWorld {
     fn drop(&mut self) {
         let report = self.reap_scenario_processes();
         if !report.is_clean() {
+            // Retain all scenario-owned evidence when cleanup is uncertain.
+            for home in [
+                &mut self.isolated_home,
+                &mut self.scratch_dir,
+                &mut self.warm_restore_home,
+                &mut self.hvf_restore_tmp,
+                &mut self.hvf_ckpt_tmp,
+                &mut self.snapshot_tmp,
+                &mut self.warm_claim_store_root,
+                &mut self.warm_claim_src,
+                &mut self.one_transport_dir,
+                &mut self.one_transport_state,
+            ] {
+                if let Some(home) = home.take() {
+                    let _ = home.keep();
+                }
+            }
             eprintln!(
                 "[bdd] processes outlived their scenario and could not be stopped:\n{}",
-                mvm_conformance::vmm_reaper::ReapReport::describe(&report.survivors)
+                report.describe_failure()
             );
         }
     }

@@ -6,7 +6,6 @@ edition.workspace = true
 description = "Rust bindings for the Red Hat libkrun C library (Linux KVM, macOS HVF)"
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 authors.workspace = true
 build = "build.rs"
 

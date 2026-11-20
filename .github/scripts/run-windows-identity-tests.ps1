@@ -27,8 +27,8 @@ $receipt = [ordered]@{
     os = [Environment]::OSVersion.VersionString
     filesystem = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($root)).DriveFormat
     powershell = $PSVersionTable.PSVersion.ToString()
-    toolchain = '1.97.1'
-    compiler_qualification = 'Existing CI stable pin, not the repository nightly compiler.'
+    toolchain = '1.100.0'
+    compiler_qualification = 'Repository stable pin selected by rust-toolchain.toml.'
     target = 'x86_64-pc-windows-msvc'
     unsupported = @('Unix raw-filename observations', 'POSIX mode and symlink identity cases')
     commands = $commands
@@ -70,7 +70,7 @@ function Control-Hashes {
 
 function Compile-Test {
     param([string] $Package, [string[]] $Selection, [string] $TargetName, [string] $Label)
-    $arguments = @('+1.97.1', 'test', '--locked', '-p', $Package)
+    $arguments = @('+1.100.0', 'test', '--locked', '-p', $Package)
     if ($Package -eq 'mvm-build') {
         $arguments += '--no-default-features'
     }
@@ -205,12 +205,12 @@ $applicationTests = @(
 
 try {
     $receipt.controls_before = Control-Hashes
-    $rust = @(Invoke-Logged 'rustc' @('+1.97.1', '-Vv') 'rustc.log')
+    $rust = @(Invoke-Logged 'rustc' @('+1.100.0', '-Vv') 'rustc.log')
     if (@($rust | Where-Object { $_ -ceq 'host: x86_64-pc-windows-msvc' }).Count -ne 1) {
         throw 'Expected the native Windows MSVC toolchain.'
     }
     $receipt.rustc = $rust
-    $receipt.cargo = @(Invoke-Logged 'cargo' @('+1.97.1', '-V') 'cargo.log')
+    $receipt.cargo = @(Invoke-Logged 'cargo' @('+1.100.0', '-V') 'cargo.log')
     $build = Compile-Test 'mvm-build' @('--lib') 'mvm_build' 'build'
     $pair = Compile-Test 'mvm-build' @('--test', 'local_producer_pair') 'local_producer_pair' 'pair'
     $core = Compile-Test 'mvm-core' @('--lib') 'mvm_core' 'core'

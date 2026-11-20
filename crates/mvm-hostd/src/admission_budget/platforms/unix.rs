@@ -71,8 +71,16 @@ fn open_owned(path: &Path, forbidden_mode: u32) -> Result<Option<std::fs::File>>
     let file = std::fs::File::from(fd);
     let meta = file.metadata()?;
     ensure!(
-        meta.is_file() && meta.mode() & forbidden_mode == 0 && meta.nlink() == 1,
-        "host accounting file has unsafe permissions or is not regular"
+        meta.is_file() && meta.nlink() == 1,
+        "host accounting file {} is not a regular file with a single link",
+        path.display()
+    );
+    ensure!(
+        meta.mode() & forbidden_mode == 0,
+        "host accounting file {path} has unsafe permissions {mode:04o}, which open it \
+         to group or others; restrict it to its owner (for example `chmod 600 {path}`)",
+        path = path.display(),
+        mode = meta.mode() & 0o7777
     );
     private_fs::require_current_owner(&meta)?;
     Ok(Some(file))

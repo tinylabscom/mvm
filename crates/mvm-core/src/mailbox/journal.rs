@@ -56,7 +56,7 @@ mod history_key;
 pub use history_key::HistoryKeyRef;
 mod receipt;
 mod recovery;
-pub use anchor::FileJournalAnchor;
+pub use anchor::{FileJournalAnchor, FinalCommit};
 use checkpoint::{CheckpointState, checkpoint_path};
 pub use receipt::EncodedDestinationReceipt;
 use receipt::ReceiptCompletion;

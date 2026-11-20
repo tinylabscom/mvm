@@ -382,6 +382,14 @@ pub struct ExecutionPlan {
     /// — enforce, with the shipped default set.
     #[serde(default)]
     pub protected_paths: crate::policy::protected_paths::ProtectedPathsPolicy,
+
+    /// The admitted topology this plan belongs to and the unit it boots.
+    /// `None` (the default) binds the plan to no topology, which a host admits
+    /// only while it has admitted no topology for the plan's tenant.
+    /// Skip-serialized when absent so unbound plans keep their bytes and
+    /// their content address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topology: Option<crate::plan::topology::TopologyBinding>,
 }
 
 const fn default_sdk_uses_sidecar() -> bool {
@@ -516,6 +524,7 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
         sdk_uses_sidecar: true,
         action_budget: None,
         protected_paths: Default::default(),
+        topology: None,
     }
 }
 

@@ -289,7 +289,9 @@ pub fn reap_unowned_state_dir(state_dir: &Path, instance_dir: &Path) -> Result<b
 /// Caller retains the existing per-machine lifecycle lock for this directory.
 pub(crate) fn reap_unowned_state_dir_locked(state_dir: &Path) -> Result<bool, String> {
     if !state_dir.exists() {
-        return Ok(true);
+        // Nothing can run out of a state dir that is gone, but a teardown that
+        // removed only it may have left the separate socket dir behind.
+        return remove_runtime_dirs(state_dir).map(|()| true);
     }
     if state_dir_has_live_process(state_dir) {
         return Ok(false);
@@ -308,11 +310,28 @@ pub(crate) fn reap_unowned_state_dir_locked(state_dir: &Path) -> Result<bool, St
 /// Absent directories are not an error. The caller owns the decision that
 /// nothing is still running out of them.
 pub fn remove_runtime_dirs(state_dir: &Path) -> Result<(), String> {
-    let socket_dir = mvm_core::config::vm_socket_dir_at(state_dir);
-    if socket_dir != state_dir {
-        remove_state_dir(&socket_dir)?;
-    }
+    remove_fallback_socket_dir(state_dir).map_err(|e| {
+        format!(
+            "{}: {e}",
+            mvm_core::config::vm_socket_dir_at(state_dir).display()
+        )
+    })?;
     remove_state_dir(state_dir)
+}
+
+/// Remove the short `/tmp` socket directory a deep `state_dir` falls back to.
+/// Does nothing when the sockets live in the state dir itself or the directory
+/// is absent. Its name is predictable, so anything there that is not a private
+/// directory owned by this user is left alone rather than followed or removed.
+pub fn remove_fallback_socket_dir(state_dir: &Path) -> std::io::Result<()> {
+    let socket_dir = mvm_core::config::vm_socket_dir_at(state_dir);
+    let ours = socket_dir != state_dir
+        && std::fs::symlink_metadata(&socket_dir).is_ok_and(|metadata| metadata.is_dir())
+        && mvm_core::config::is_owned_fallback_socket_dir(&socket_dir);
+    if !ours {
+        return Ok(());
+    }
+    std::fs::remove_dir_all(&socket_dir)
 }
 
 /// Best-effort recursive removal of a state dir. The dead-process
@@ -1370,13 +1389,55 @@ mod tests {
         let dir = PathBuf::from(make_state_dir(&vms_root, "stopped", None));
         let socket_dir = mvm_core::config::vm_socket_dir_at(&dir);
         assert_ne!(socket_dir, dir, "the fixture must keep its sockets apart");
-        std::fs::create_dir_all(&socket_dir).unwrap();
+        mvm_core::config::secure_fallback_socket_dir_at(&dir).unwrap();
         std::fs::write(socket_dir.join("substitution-endpoint.sock"), b"").unwrap();
 
         let reaped = reap_unowned_state_dir(&dir, &tmp.path().join("instances").join("stopped"));
 
         assert_eq!(reaped, Ok(true));
         assert!(!dir.exists());
+        assert!(!socket_dir.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn only_our_own_fallback_socket_dir_is_removed() {
+        let state_dir = std::path::PathBuf::from("/tmp").join(format!(
+            "{}-remove-{}",
+            "x".repeat(70),
+            std::process::id()
+        ));
+        let socket_dir = mvm_core::config::vm_socket_dir_at(&state_dir);
+        assert_ne!(socket_dir, state_dir, "fixture must fall back");
+
+        mvm_core::config::secure_fallback_socket_dir_at(&state_dir).unwrap();
+        std::fs::write(socket_dir.join("fc.socket"), b"").unwrap();
+        remove_fallback_socket_dir(&state_dir).unwrap();
+        assert!(!socket_dir.exists());
+        // Absent is not an error.
+        remove_fallback_socket_dir(&state_dir).unwrap();
+
+        // A link planted at the predictable name is neither followed nor removed.
+        let target = tempfile::tempdir().unwrap();
+        std::fs::write(target.path().join("keep"), b"").unwrap();
+        std::os::unix::fs::symlink(target.path(), &socket_dir).unwrap();
+        remove_fallback_socket_dir(&state_dir).unwrap();
+        let planted = std::fs::symlink_metadata(&socket_dir).map(|m| m.file_type().is_symlink());
+        std::fs::remove_file(&socket_dir).unwrap();
+        assert!(planted.unwrap());
+        assert!(target.path().join("keep").exists());
+    }
+
+    #[test]
+    fn a_locked_reap_removes_a_socket_dir_left_behind_by_its_state_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("d".repeat(120)).join("vms").join("gone");
+        let socket_dir = mvm_core::config::vm_socket_dir_at(&dir);
+        assert_ne!(socket_dir, dir, "the fixture must keep its sockets apart");
+        mvm_core::config::secure_fallback_socket_dir_at(&dir).unwrap();
+        std::fs::write(socket_dir.join("fc.socket"), b"").unwrap();
+
+        assert_eq!(reap_unowned_state_dir_locked(&dir), Ok(true));
         assert!(!socket_dir.exists());
     }
 

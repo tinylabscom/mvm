@@ -82,7 +82,7 @@ class ReleaseSupplyChainTests(unittest.TestCase):
         producer = job(self.workflow, "sbom")
         signer = job(self.workflow, "release")
         self.assertIn("contents: read", producer)
-        self.assertIn("cargo +1.97.1 install cargo-cyclonedx --version '=0.5.10' --locked", producer)
+        self.assertIn("cargo +1.100.0 install cargo-cyclonedx --version '=0.5.10' --locked", producer)
         self.assertIn("git diff --exit-code -- Cargo.lock", producer)
         self.assertIn("path: sbom.cdx.json", producer)
         self.assertIn("if-no-files-found: error", producer)

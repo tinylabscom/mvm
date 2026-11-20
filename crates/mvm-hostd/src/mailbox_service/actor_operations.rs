@@ -4,6 +4,7 @@
 //! frames are persisted first and drained by the transport outside that lock.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use hmac::{Hmac, KeyInit, Mac};
@@ -16,6 +17,7 @@ use mvm_contract::protocol::mailbox::{
     SignedMailboxDeliveryAck, SignedMailboxDeliveryLease,
 };
 use mvm_core::crypto::aead::{self, Key};
+use mvm_core::host_interface::workload::DestinationTip;
 use mvm_core::mailbox::conversation_wire::{
     ConversationBinding, ConversationRequest, ConversationResponse,
 };
@@ -40,6 +42,7 @@ use crate::mailbox_launch::actor_template::{
 };
 
 mod scope;
+use crate::mailbox_commit::{ActorJournal, ActorOrdering, actor_destination_id, require_reached};
 use scope::{ScopedHistory, address, call_policy, context, key, reader_scope, storage};
 
 const MAX_RETAINED_CALLS: usize = 4096;
@@ -141,6 +144,9 @@ pub struct ActorConversationEndpoint {
     started: Instant,
     clock_origin_ms: i64,
     poisoned: bool,
+    /// Orders every journal's commits through the workload ledger; absent for
+    /// a development launch.
+    ordering: Option<Arc<ActorOrdering>>,
     _lock: FileLock,
 }
 
@@ -239,6 +245,7 @@ impl ActorConversationEndpoint {
             started: Instant::now(),
             clock_origin_ms,
             poisoned: false,
+            ordering: None,
             _lock: lock,
         };
         if !existed {
@@ -246,6 +253,32 @@ impl ActorConversationEndpoint {
         }
         owner.check_quota(&owner.state)?;
         Ok(owner)
+    }
+
+    /// Order every journal this endpoint opens through the workload ledger.
+    #[must_use]
+    pub(crate) fn with_ordering(mut self, ordering: Arc<ActorOrdering>) -> Self {
+        self.ordering = Some(ordering);
+        self
+    }
+
+    /// The anchor to open a journal with, and the tip the ledger holds for it
+    /// when ordered. A refused or unknown ordering is an unavailable
+    /// destination to the caller.
+    fn ordered(
+        &self,
+        anchor: FileJournalAnchor,
+        journal: ActorJournal,
+        id: MessageId,
+    ) -> Result<(FileJournalAnchor, Option<DestinationTip>)> {
+        let Some(ordering) = &self.ordering else {
+            return Ok((anchor, None));
+        };
+        let destination =
+            actor_destination_id(&self.material.address, &self.material.epoch, journal, &id)
+                .map_err(storage)?;
+        let coordinated = ordering.order(anchor, destination).map_err(storage)?;
+        Ok((coordinated.anchor, Some(coordinated.enrolled)))
     }
 
     fn now(&self) -> Result<i64> {
@@ -376,6 +409,7 @@ impl ActorConversationEndpoint {
             *self.purpose_key(id, b"anchor").expose_bytes(),
         )
         .map_err(storage)?;
+        let (anchor, enrolled) = self.ordered(anchor, ActorJournal::Call, id)?;
         let segment_bytes = ((self.config.max_storage_bytes - CONTROL_STORAGE_BYTES) / 4 * 3)
             / self.material.template.capability.max_outstanding_calls as usize;
         let journal = MailboxJournal::open_local_with_custody(
@@ -391,6 +425,9 @@ impl ActorConversationEndpoint {
             self.retention,
         )
         .map_err(storage)?;
+        if let Some(enrolled) = &enrolled {
+            require_reached(&anchor, enrolled).map_err(storage)?;
+        }
         Ok((journal, anchor))
     }
 
@@ -477,6 +514,7 @@ impl ActorConversationEndpoint {
             *self.purpose_key(id, b"control-anchor").expose_bytes(),
         )
         .map_err(storage)?;
+        let (anchor, enrolled) = self.ordered(anchor, ActorJournal::Control, id)?;
         let journal = MailboxJournal::open_local_with_custody(
             &directory.join("journal"),
             reference,
@@ -490,6 +528,9 @@ impl ActorConversationEndpoint {
             self.retention,
         )
         .map_err(storage)?;
+        if let Some(enrolled) = &enrolled {
+            require_reached(&anchor, enrolled).map_err(storage)?;
+        }
         Ok((journal, anchor))
     }
 
@@ -1467,6 +1508,7 @@ mod tests {
         child_binding: ConversationBinding,
         parent: ActorConversationEndpoint,
         child: ActorConversationEndpoint,
+        _environment: mvm_core::util::test_env::TestEnv,
     }
 
     fn binding(plan: &ExecutionPlan, address: MailboxAddress, seed: u8) -> ConversationBinding {
@@ -1507,7 +1549,7 @@ mod tests {
     }
 
     fn pair() -> Pair {
-        let (directory, owner, parent_plan, mut child_plan) =
+        let (directory, owner, parent_plan, mut child_plan, environment) =
             crate::actor_lifecycle::local_mailboxes::tests::setup();
         let derived = owner.derive(&parent_plan, &child_plan).unwrap();
         child_plan.mailbox = Some(derived.grant);
@@ -1536,6 +1578,7 @@ mod tests {
             child_binding,
             parent,
             child,
+            _environment: environment,
         }
     }
 
@@ -2123,5 +2166,124 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    mod ordered {
+        use super::*;
+        use crate::mailbox_commit::{ActorJournal, OrderingFlags, actor_destination_id};
+        use crate::policy_generation::workload_store::OwnedWorkloadStore;
+        use mvm_core::host_interface::workload::{
+            CanonicalLedger, WorkloadChange, read_ledger_bytes_at,
+        };
+        use std::sync::atomic::Ordering;
+
+        /// A pair whose child, the endpoint that accepts calls, is ordered.
+        struct Ordered {
+            pair: Pair,
+            store: Arc<OwnedWorkloadStore>,
+            ordering: Arc<ActorOrdering>,
+        }
+
+        fn ordered() -> Ordered {
+            let mut pair = pair();
+            let store = Arc::new(OwnedWorkloadStore::open(pair.directory.path()).unwrap());
+            let ordering = Arc::new(ActorOrdering {
+                authority: store.clone(),
+                key: SigningKey::from_bytes(&[77; 32]),
+                workload: pair.child_plan.workload.0.clone(),
+                epoch: mvm_contract::protocol::mailbox::ExecutionEpoch::new(
+                    pair.child_plan.execution_epoch,
+                )
+                .unwrap(),
+                flags: OrderingFlags::default(),
+            });
+            pair.child = pair.child.with_ordering(Arc::clone(&ordering));
+            Ordered {
+                pair,
+                store,
+                ordering,
+            }
+        }
+
+        fn ledger(ordered: &Ordered) -> CanonicalLedger {
+            let bytes = read_ledger_bytes_at(ordered.pair.directory.path())
+                .unwrap()
+                .unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        }
+
+        fn id_of(ordered: &Ordered, journal: ActorJournal, message: u8) -> String {
+            let material = &ordered.pair.child.material;
+            actor_destination_id(
+                &material.address,
+                &material.epoch,
+                journal,
+                &MessageId::from_bytes([message; 32]),
+            )
+            .unwrap()
+        }
+
+        /// The parent queues call `id`; the child accepts it.
+        fn deliver(ordered: &mut Ordered, id: u8) -> Result<SignedDestinationReceipt> {
+            let destination = ordered.pair.child_binding.address;
+            queue(&mut ordered.pair.parent, destination, id, b"call").unwrap();
+            let dispatch = ordered
+                .pair
+                .parent
+                .pending_dispatches()
+                .unwrap()
+                .into_iter()
+                .find(|dispatch| dispatch.message_id == MessageId::from_bytes([id; 32]))
+                .unwrap();
+            ordered.pair.child.accept_peer(dispatch.frame)
+        }
+
+        fn quarantine(ordered: &Ordered) {
+            ordered
+                .store
+                .commit(&WorkloadChange::Quarantine {
+                    workload: ordered.pair.child_plan.workload.0.clone(),
+                })
+                .unwrap();
+        }
+
+        #[test]
+        fn accepting_a_call_advances_that_calls_destination_and_the_control_journal_is_another() {
+            let mut ordered = ordered();
+            deliver(&mut ordered, 1).unwrap();
+            let call = id_of(&ordered, ActorJournal::Call, 1);
+            assert!(ledger(&ordered).destinations[&call].tip.cursor >= 1);
+
+            ordered.pair.child.control_journal().unwrap();
+            let control = id_of(&ordered, ActorJournal::Control, 0);
+            assert_ne!(call, control);
+            assert!(ledger(&ordered).destinations.contains_key(&control));
+        }
+
+        #[test]
+        fn after_a_quarantine_a_new_call_is_refused_and_an_open_segments_anchor_is_untouched() {
+            let mut ordered = ordered();
+            deliver(&mut ordered, 1).unwrap();
+            let anchor = ordered.pair.child.segment(0).unwrap().join("anchor");
+            let before = std::fs::read(&anchor).unwrap();
+            quarantine(&ordered);
+
+            assert!(
+                deliver(&mut ordered, 2).is_err(),
+                "a refused ordering is never a success"
+            );
+            assert!(ordered.ordering.flags.refused.load(Ordering::SeqCst));
+            assert!(!ordered.ordering.flags.unknown.load(Ordering::SeqCst));
+            assert_eq!(std::fs::read(&anchor).unwrap(), before);
+        }
+
+        #[test]
+        fn a_call_accepted_before_a_quarantine_still_opens_and_reaches_its_tip() {
+            let mut ordered = ordered();
+            deliver(&mut ordered, 1).unwrap();
+            quarantine(&ordered);
+            ordered.pair.child.journal(0).unwrap();
+            assert!(!ordered.ordering.flags.refused.load(Ordering::SeqCst));
+        }
     }
 }
