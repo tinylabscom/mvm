@@ -14,7 +14,36 @@ use super::hvf_control::HvfInstance;
 pub const VERSION: u8 = 1;
 /// Canonical plans retain the existing 64-KiB signing ceiling.
 pub const MAX_CANONICAL_PLAN_BYTES: usize = 65_536;
+/// Refusal-only owner bootstrap frame limit, checked before allocation.
+pub const MAX_BOOTSTRAP_BYTES: usize = 4096;
 const ADMISSION_DOMAIN: &[u8] = b"mvm.hvf-owner.fresh-admission.v1\0";
+
+/// Public bootstrap binding for the protected runtime owner process.
+///
+/// Possession is not authority; the future receiver rechecks provider state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerBootstrap {
+    /// Bootstrap protocol version.
+    pub version: u8,
+    /// Commissioned provider identity from the protected deployment receipt.
+    pub provider_id: [u8; 32],
+    /// One-shot grant identity.
+    pub grant_id: [u8; 32],
+    /// Exact retained operation.
+    pub operation_id: [u8; 32],
+    /// Fresh protected runtime process incarnation.
+    pub owner_incarnation: [u8; 32],
+    /// Complete fresh-admission request commitment.
+    pub request_digest: [u8; 32],
+}
+
+/// Bounded refusal response. No success/factory variant exists in v1.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum OwnerBootstrapResponse {
+    OwnerFactoryDisabled {},
+}
 
 /// Provider-issued one-shot authority for one exact fresh-admission request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
