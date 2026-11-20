@@ -200,13 +200,24 @@ home; it binds its own socket and does not use socket activation.
 mvmctl policy coordinator
 ```
 
-This asks the user manager for the unit's main process and invocation,
-connects to the coordinator's socket, and requires the kernel's credentials
-for that connection and the coordinator's own answer to agree with the
-manager, before and after the exchange. It reports the unit, invocation,
-process, user and home, or says what is missing: no user manager, a unit that
-is not provisioned or not running, or a listener that is not the service. It
-never falls back to starting a detached coordinator.
+This connects directly to `/run/user/UID/systemd/private`, authenticates the
+user manager's kernel peer and native protocol, and asks for the unit's main
+process and invocation. It connects to the coordinator's socket and requires
+the kernel's credentials and the coordinator's own answer to agree with that
+same manager, before and after the exchange. It reports the unit, invocation,
+process, user and home, or a refusal: no user manager, a unit that is not
+provisioned or not running, an unloaded unit whose state is unknown, or a
+listener that is not the service. An unloaded unit might still be installed;
+observation does not load it to find out. There is no subprocess, unit start,
+or fallback to a detached coordinator.
+
+Observation does not initialize a missing MVM home, create configuration or
+signing keys, append command-audit records, or start telemetry/update checks.
+Native manager authentication, both observations and the coordinator exchange
+share one five-second IPC budget; partial reads and writes cannot renew it.
+This does not bound filesystem canonicalization or arbitrary OS scheduling
+stalls. Native authentication is limited to 4 KiB and messages to 16 KiB
+before allocating their bodies; unsolicited file descriptors are refused.
 
 The report identifies who answered. It does not say the coordinator is ready,
 that its state is current, or that anything may be committed, and the other

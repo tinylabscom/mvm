@@ -17,6 +17,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
+#[cfg(any(target_os = "linux", all(test, unix)))]
+mod native_bus;
+
 /// The template every managed coordinator is an instance of.
 pub const UNIT_PREFIX: &str = "mvm-policy-coordinator@";
 const UNIT_SUFFIX: &str = ".service";
@@ -26,9 +29,9 @@ const MAX_UNIT_NAME_BYTES: usize = 255;
 pub const MANAGED_HOME_FLAG: &str = "--managed-home";
 /// Version of the [`CoordinatorStatus`] reply.
 pub const STATUS_PROTOCOL: u32 = 1;
-/// What the client asks the manager for on each observation.
-#[cfg(target_os = "linux")]
-const OBSERVED_PROPERTIES: [&str; 4] = ["LoadState", "ActiveState", "MainPID", "InvocationID"];
+
+#[cfg(any(target_os = "linux", all(test, unix)))]
+mod manager;
 
 /// The user, state root and unit one managed coordinator is bound to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,45 +310,6 @@ struct UnitObservation {
     invocation: String,
 }
 
-#[cfg(any(test, target_os = "linux"))]
-fn observe(unit: &str, show: &str) -> Result<UnitObservation, ManagedRefusal> {
-    let property = |key: &str| {
-        mvm_core::spawn_scope::show_property(show, key).ok_or_else(|| ManagedRefusal::Unknown {
-            unit: unit.to_string(),
-            detail: format!("the manager's answer has no {key}"),
-        })
-    };
-    let load_state = property("LoadState")?;
-    if load_state != "loaded" {
-        return Err(ManagedRefusal::NotProvisioned {
-            unit: unit.to_string(),
-            load_state: load_state.to_string(),
-        });
-    }
-    let active_state = property("ActiveState")?;
-    if active_state != "active" {
-        return Err(ManagedRefusal::NotRunning {
-            unit: unit.to_string(),
-            active_state: active_state.to_string(),
-        });
-    }
-    let main_pid = property("MainPID")?
-        .parse::<u32>()
-        .ok()
-        .filter(|pid| *pid > 1);
-    let invocation = property("InvocationID")?;
-    match main_pid {
-        Some(main_pid) if is_invocation_id(invocation) => Ok(UnitObservation {
-            main_pid,
-            invocation: invocation.to_string(),
-        }),
-        _ => Err(ManagedRefusal::Unknown {
-            unit: unit.to_string(),
-            detail: "the manager reports it active without a main process and invocation".into(),
-        }),
-    }
-}
-
 /// The managed coordinator one authenticated connection reached.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ManagedCoordinator {
@@ -443,48 +407,56 @@ fn connect_without_waiting(socket: &Path) -> std::io::Result<std::os::unix::net:
 }
 
 #[cfg(target_os = "linux")]
-fn status_with(
-    home: &Path,
-    show: &dyn Fn(&str) -> Result<String, mvm_core::spawn_scope::UserManagerGap>,
-) -> Result<ManagedCoordinator, ManagedRefusal> {
-    use mvm_core::spawn_scope::UserManagerGap;
-
-    let expected = ManagedIdentity::for_home(rustix::process::geteuid().as_raw(), home)
-        .map_err(|error| ManagedRefusal::InvalidHome(format!("{error:#}")))?;
+async fn status_with_observer<F>(
+    expected: &ManagedIdentity,
+    deadline: std::time::Instant,
+    mut observe: impl FnMut() -> F,
+) -> Result<ManagedCoordinator, ManagedRefusal>
+where
+    F: std::future::Future<Output = Result<UnitObservation, ManagedRefusal>>,
+{
     let unit = expected.unit();
-    let ask = || {
-        let answer = show(unit).map_err(|gap| ManagedRefusal::ManagerUnavailable {
-            unit: unit.to_string(),
-            reason: match gap {
-                UserManagerGap::SystemctlMissing => "systemctl is not on PATH",
-                UserManagerGap::NoUserSessionBus => "this process has no user session bus",
-                UserManagerGap::NoAnswer => "it did not answer in time",
-            },
-        })?;
-        observe(unit, &answer)
-    };
     let unknown = |detail: String| ManagedRefusal::Unknown {
         unit: unit.to_string(),
         detail,
     };
-    let before = ask()?;
-    let mut stream = connect_without_waiting(&super::coordinator::socket_path(home))
+    let require_budget = || {
+        if std::time::Instant::now() >= deadline {
+            Err(unknown(
+                "managed coordinator observation deadline expired".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    };
+    require_budget()?;
+    let before = observe().await?;
+    require_budget()?;
+    let stream = connect_without_waiting(&super::coordinator::socket_path(expected.home()))
         .map_err(|error| unknown(format!("connecting to its socket: {error}")))?;
     let peer = peer_credentials(&stream)
         .map_err(|error| unknown(format!("reading its kernel credentials: {error}")))?;
-    verify_peer(&expected, &before, peer)?;
-    let status = super::coordinator::exchange_status(&mut stream)
-        .map_err(|error| unknown(format!("{error:#}")))?;
-    let after = ask()?;
-    verify_status(&expected, &before, peer, &status, &after)
+    verify_peer(expected, &before, peer)?;
+    // Keep the native manager's reader running while waiting on the coordinator.
+    // Await the owned task rather than timing out and detaching its JoinHandle;
+    // the stream itself enforces this same absolute deadline.
+    let status =
+        tokio::task::spawn_blocking(move || super::coordinator::exchange_status(stream, deadline))
+            .await
+            .map_err(|error| unknown(format!("joining the status exchange: {error}")))?
+            .map_err(|error| unknown(format!("{error:#}")))?;
+    require_budget()?;
+    let after = observe().await?;
+    require_budget()?;
+    verify_status(expected, &before, peer, &status, &after)
 }
 
 /// Report the manager-owned coordinator for `home`, over one connection
 /// authenticated against the kernel and the user manager.
 ///
-/// Read-only and bounded: two manager queries with a deadline each, one
-/// non-waiting connect, one small request and reply under a short timeout.
-/// It never installs, starts or spawns anything.
+/// Native manager queries bracket a non-waiting connect and a small status
+/// exchange. All IPC shares one five-second deadline. It never launches a
+/// subprocess, loads a dormant unit, or installs or starts a coordinator.
 ///
 /// # Errors
 ///
@@ -492,9 +464,22 @@ fn status_with(
 pub fn managed_status(home: &Path) -> Result<ManagedCoordinator, ManagedRefusal> {
     #[cfg(target_os = "linux")]
     {
-        status_with(home, &|unit| {
-            mvm_core::spawn_scope::show_user_unit(unit, &OBSERVED_PROPERTIES)
+        let expected = ManagedIdentity::for_home(rustix::process::geteuid().as_raw(), home)
+            .map_err(|error| ManagedRefusal::InvalidHome(format!("{error:#}")))?;
+        let deadline = std::time::Instant::now() + super::coordinator::STATUS_TIMEOUT;
+        crate::blocking::block_on_anywhere(async {
+            // One kernel-authenticated manager stream spans both observations.
+            // A replacement manager cannot be accepted by reconnecting midway.
+            let bus = manager::connect(&expected, deadline.into()).await?;
+            status_with_observer(&expected, deadline, || {
+                manager::observe(&bus, &expected, deadline.into())
+            })
+            .await
         })
+        .map_err(|error| ManagedRefusal::Unknown {
+            unit: expected.unit().to_string(),
+            detail: format!("running native coordinator observation: {error}"),
+        })?
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -542,12 +527,6 @@ mod tests {
                 invocation: INVOCATION.into(),
             },
         }
-    }
-
-    fn show(load: &str, active: &str, pid: &str, invocation: &str) -> String {
-        format!(
-            "LoadState={load}\nActiveState={active}\nMainPID={pid}\nInvocationID={invocation}\n"
-        )
     }
 
     #[test]
@@ -660,40 +639,6 @@ mod tests {
     }
 
     #[test]
-    fn a_manager_answer_is_running_only_with_a_process_and_invocation() {
-        let unit = "u.service";
-        assert_eq!(
-            observe(unit, &show("loaded", "active", "4242", INVOCATION)).unwrap(),
-            observation()
-        );
-        assert!(matches!(
-            observe(unit, &show("not-found", "inactive", "0", "")),
-            Err(ManagedRefusal::NotProvisioned { load_state, .. }) if load_state == "not-found"
-        ));
-        for state in ["inactive", "failed", "activating", "deactivating"] {
-            assert!(matches!(
-                observe(unit, &show("loaded", state, "4242", INVOCATION)),
-                Err(ManagedRefusal::NotRunning { active_state, .. }) if active_state == state
-            ));
-        }
-        for (pid, invocation) in [
-            ("0", INVOCATION),
-            ("1", INVOCATION),
-            ("x", INVOCATION),
-            ("4242", ""),
-        ] {
-            assert!(matches!(
-                observe(unit, &show("loaded", "active", pid, invocation)),
-                Err(ManagedRefusal::Unknown { .. })
-            ));
-        }
-        assert!(matches!(
-            observe(unit, "LoadState=loaded\nActiveState=active\n"),
-            Err(ManagedRefusal::Unknown { .. })
-        ));
-    }
-
-    #[test]
     fn the_kernel_peer_must_be_the_managers_main_process_for_this_user() {
         verify_peer(&identity(), &observation(), peer()).unwrap();
         for wrong in [
@@ -800,11 +745,27 @@ mod tests {
         use std::cell::Cell;
         use std::sync::Arc;
 
-        use mvm_core::spawn_scope::UserManagerGap;
         use mvm_core::util::test_env::TestEnv;
 
         use super::super::super::coordinator::{bind, serve_on, socket_path};
         use super::*;
+
+        fn status_with(
+            home: &Path,
+            observe: &dyn Fn(&str) -> Result<UnitObservation, ManagedRefusal>,
+        ) -> Result<ManagedCoordinator, ManagedRefusal> {
+            let expected = ManagedIdentity::for_home(rustix::process::geteuid().as_raw(), home)
+                .map_err(|error| ManagedRefusal::InvalidHome(format!("{error:#}")))?;
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(status_with_observer(
+                    &expected,
+                    std::time::Instant::now() + super::super::super::coordinator::STATUS_TIMEOUT,
+                    || std::future::ready(observe(expected.unit())),
+                ))
+        }
 
         struct Service {
             _environment: TestEnv,
@@ -847,8 +808,11 @@ mod tests {
             }
         }
 
-        fn running_as(pid: u32, invocation: &str) -> String {
-            show("loaded", "active", &pid.to_string(), invocation)
+        fn running_as(pid: u32, invocation: &str) -> UnitObservation {
+            UnitObservation {
+                main_pid: pid,
+                invocation: invocation.to_string(),
+            }
         }
 
         #[test]
@@ -917,20 +881,26 @@ mod tests {
         fn a_unit_that_stops_or_restarts_during_the_exchange_is_not_verified() {
             let service = serving(managed);
             for (second, expected) in [
-                (show("loaded", "activating", "0", ""), "not running"),
                 (
-                    running_as(std::process::id(), &"f".repeat(32)),
+                    Err(ManagedRefusal::NotRunning {
+                        unit: service.unit.clone(),
+                        active_state: "activating".into(),
+                    }),
+                    "not running",
+                ),
+                (
+                    Ok(running_as(std::process::id(), &"f".repeat(32))),
                     "restarted while its status was being read",
                 ),
             ] {
                 let asked = Cell::new(0);
                 let refusal = status_with(&service.home, &|_| {
                     asked.set(asked.get() + 1);
-                    Ok(if asked.get() == 1 {
-                        running_as(std::process::id(), INVOCATION)
+                    if asked.get() == 1 {
+                        Ok(running_as(std::process::id(), INVOCATION))
                     } else {
                         second.clone()
-                    })
+                    }
                 })
                 .unwrap_err();
                 assert!(refusal.to_string().contains(expected), "{refusal}");
@@ -941,17 +911,30 @@ mod tests {
         fn absent_stopped_or_unreachable_is_reported_and_nothing_is_started() {
             let (_environment, _root, home) = canonical_home();
             let socket = socket_path(&home);
+            let identity =
+                ManagedIdentity::for_home(rustix::process::geteuid().as_raw(), &home).unwrap();
             for (answer, expected) in [
                 (
-                    Ok(show("not-found", "inactive", "0", "")),
+                    Err(ManagedRefusal::NotProvisioned {
+                        unit: identity.unit.clone(),
+                        load_state: "not-found".into(),
+                    }),
                     "is not provisioned",
                 ),
                 (
-                    Ok(show("loaded", "failed", "0", "")),
+                    Err(ManagedRefusal::NotRunning {
+                        unit: identity.unit.clone(),
+                        active_state: "failed".into(),
+                    }),
                     "provisioned but not running",
                 ),
-                (Err(UserManagerGap::NoUserSessionBus), "no user session bus"),
-                (Err(UserManagerGap::NoAnswer), "did not answer in time"),
+                (
+                    Err(ManagedRefusal::ManagerUnavailable {
+                        unit: identity.unit.clone(),
+                        reason: "its fixed native socket is unavailable",
+                    }),
+                    "native socket is unavailable",
+                ),
                 (
                     Ok(running_as(std::process::id(), INVOCATION)),
                     "connecting to its socket",

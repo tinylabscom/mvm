@@ -57,13 +57,13 @@ const BUDGETS: &[ClosureBudget] = &[
         package: "mvmctl",
         target: "x86_64-unknown-linux-gnu",
         features: RELEASE_FEATURES,
-        max: 371,
+        max: 381,
     },
     ClosureBudget {
         package: "mvmctl",
         target: "aarch64-unknown-linux-gnu",
         features: RELEASE_FEATURES,
-        max: 370,
+        max: 380,
     },
     ClosureBudget {
         package: "mvm-builder-guest",
@@ -91,7 +91,9 @@ const MACOS_CLOSURE_BUDGET: usize = 346;
 /// Maximum distinct packages in the default Linux closure.
 /// Includes the shared authored-policy crate used by client and host admission;
 /// the extraction adds one first-party package and no third-party dependencies.
-pub(crate) const CLOSURE_BUDGET: usize = 351;
+/// Native user-manager observation adds eleven packages, ten in release
+/// closures where futures-core is already present; no guest or macOS increase.
+pub(crate) const CLOSURE_BUDGET: usize = 362;
 
 pub(crate) fn run(workspace: &Path) -> Result<()> {
     for budget in BUDGETS {

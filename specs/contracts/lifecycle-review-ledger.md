@@ -240,11 +240,32 @@ connection handling in `policy_generation/coordinator.rs`, and the
 `mvmctl policy coordinator` caller, for
 [#5255](https://github.com/tinylabscom/mvm/issues/5255). A systemd user
 manager owns the process: it creates, restarts and reaps the unit, and the
-coordinator only refuses to serve when it is not that unit. The client owns
-nothing but one connection, which it drops on every outcome. Deadlines are the
-manager query bound, a non-waiting connect and an exchange bounded per read and per write (five
-seconds each, not five seconds in total); there is no retry. No durable state is written, so there is nothing to recover: a
-restart between the two manager observations is reported as unknown. The
+coordinator only refuses to serve when it is not that unit. The client owns a
+native manager connection and one coordinator stream, not the service. The
+fixed user-manager socket is kernel-authenticated before native EXTERNAL/P2P
+authentication; the same connection remains alive across both observations.
+Only `GetUnit` and typed property reads are sent. An unloaded unit is unknown,
+not evidence that its unit file is absent. No subprocess or loading/start
+operation is used.
+
+All IPC shares one absolute five-second budget after home validation. Partial
+reads and writes cannot renew it, and an expired deadline sends no request
+bytes. The native transport caps authentication at 4 KiB and frames at 16 KiB
+before allocating a body; unsolicited descriptors are refused and disposed.
+The socket shutdown guard covers failed or canceled authentication and
+observation. A read canceled midway becomes unusable. Linux uses a zero-sized
+ancillary buffer and close-on-exec reception; non-Linux socket-pair fixtures
+do not qualify arbitrary ancillary truncation on those platforms.
+
+The coordinator stream moves to one blocking exchange task so the native
+reader can progress. Its handle is awaited rather than detached on timeout,
+and the stream itself enforces the original deadline. The native owner stays
+alive through that join and the final observation. Return drops both
+connections. This IPC budget is not a hard bound on filesystem lookups or OS
+scheduling stalls. There is no retry. The CLI observes before configuration,
+signer, command-audit, telemetry and update startup. No durable state is
+written, so there is nothing to recover: a restart between the two manager
+observations is reported as unknown. The
 detached spawn path, activation and generation storage are unchanged and not
 re-reviewed here. Not reviewed: a provisioned unit on a real host, restart
 limits, and any commit, migration or signing path.

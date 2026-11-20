@@ -25,6 +25,8 @@ const MAX_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 #[cfg(any(test, target_os = "linux"))]
 const MAX_STATUS_BYTES: usize = 4 * 1024;
+#[cfg(any(target_os = "linux", all(test, unix)))]
+pub(super) const STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Handler threads alive at once; a connection past this is refused. An
 /// activation can hold its thread for as long as a launch holds the shared
 /// barrier, so the count needs a ceiling, and it stays well under the default
@@ -92,16 +94,14 @@ mod unix {
         time::Duration,
     };
 
+    #[cfg(any(test, target_os = "linux"))]
+    use std::time::Instant;
+
     use super::*;
 
     static ACTIVATIONS: Mutex<()> = Mutex::new(());
-    #[cfg(any(test, target_os = "linux"))]
-    const STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 
-    fn read_frame<T: serde::de::DeserializeOwned>(
-        stream: &mut UnixStream,
-        max: usize,
-    ) -> Result<T> {
+    fn read_frame<T: serde::de::DeserializeOwned>(stream: &mut impl Read, max: usize) -> Result<T> {
         let mut length = [0u8; 4];
         stream.read_exact(&mut length)?;
         let length = u32::from_be_bytes(length) as usize;
@@ -111,7 +111,7 @@ mod unix {
         serde_json::from_slice(&bytes).context("decoding policy coordinator frame")
     }
 
-    fn write_frame<T: Serialize>(stream: &mut UnixStream, value: &T, max: usize) -> Result<()> {
+    fn write_frame<T: Serialize>(stream: &mut impl Write, value: &T, max: usize) -> Result<()> {
         let bytes = serde_json::to_vec(value).context("encoding policy coordinator frame")?;
         ensure!(
             bytes.len() <= max,
@@ -141,12 +141,13 @@ mod unix {
     /// and a small reply. The caller decides whether to believe it.
     #[cfg(any(test, target_os = "linux"))]
     pub(in crate::policy_generation) fn exchange_status(
-        stream: &mut UnixStream,
+        stream: UnixStream,
+        deadline: Instant,
     ) -> Result<CoordinatorStatus> {
-        stream.set_read_timeout(Some(STATUS_TIMEOUT))?;
-        stream.set_write_timeout(Some(STATUS_TIMEOUT))?;
-        write_frame(stream, &Request::Status, MAX_REQUEST_BYTES)?;
-        match read_frame(stream, MAX_STATUS_BYTES)? {
+        // The shared I/O wrapper keeps partial reads and writes on one budget.
+        let mut stream = mvm_core::net::actor_session::ActorDeadlineStream::new(stream, deadline)?;
+        write_frame(&mut stream, &Request::Status, MAX_REQUEST_BYTES)?;
+        match read_frame(&mut stream, MAX_STATUS_BYTES)? {
             Response::Status { status } => Ok(status),
             Response::Refused { message } => {
                 anyhow::bail!("policy coordinator refused a status request: {message}")
@@ -456,8 +457,11 @@ mod unix {
             });
 
             let socket = socket_path(&home);
-            let mut stream = UnixStream::connect(&socket).unwrap();
-            assert_eq!(exchange_status(&mut stream).unwrap(), status);
+            let stream = UnixStream::connect(&socket).unwrap();
+            assert_eq!(
+                exchange_status(stream, Instant::now() + STATUS_TIMEOUT).unwrap(),
+                status
+            );
             assert!(matches!(
                 call(&socket, &Request::Ping).unwrap(),
                 Response::Ready
@@ -566,6 +570,55 @@ mod unix {
         }
 
         #[test]
+        fn trickled_status_bytes_do_not_renew_the_exchange_deadline() {
+            let status = CoordinatorStatus {
+                protocol: super::super::super::managed::STATUS_PROTOCOL,
+                pid: 42,
+                uid: 1000,
+                home: PathBuf::from("/home/operator/.state"),
+                lifetime: Lifetime::Detached,
+            };
+            let body = serde_json::to_vec(&Response::Status { status }).unwrap();
+            let mut frame = u32::try_from(body.len()).unwrap().to_be_bytes().to_vec();
+            frame.extend(body);
+            let (client, mut server) = UnixStream::pair().unwrap();
+            let (stop, stopped) = std::sync::mpsc::sync_channel(1);
+            let answering = std::thread::spawn(move || {
+                server.set_read_timeout(Some(STATUS_TIMEOUT)).unwrap();
+                let request = read_frame::<Request>(&mut server, MAX_REQUEST_BYTES).unwrap();
+                assert!(matches!(request, Request::Status));
+                for chunk in frame.chunks(frame.len().div_ceil(12)) {
+                    if server.write_all(chunk).is_err()
+                        || stopped.recv_timeout(STATUS_TIMEOUT / 8).is_ok()
+                    {
+                        break;
+                    }
+                }
+            });
+            let result = exchange_status(client, Instant::now() + STATUS_TIMEOUT);
+            let _ = stop.send(());
+            answering.join().unwrap();
+            let error = result.expect_err("partial progress must not renew the status budget");
+            assert_eq!(
+                error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                std::io::ErrorKind::TimedOut,
+                "{error:#}"
+            );
+        }
+
+        #[test]
+        fn an_expired_status_deadline_closes_without_sending() {
+            let (client, mut server) = UnixStream::pair().unwrap();
+            let error = exchange_status(client, Instant::now()).unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                std::io::ErrorKind::TimedOut
+            );
+            server.set_nonblocking(true).unwrap();
+            assert_eq!(server.read(&mut [0]).unwrap(), 0, "no request bytes sent");
+        }
+
+        #[test]
         fn a_status_reply_is_bounded_and_must_be_a_status() {
             for reply in [
                 Response::Ready,
@@ -573,20 +626,20 @@ mod unix {
                     message: "unknown variant `status`".into(),
                 },
             ] {
-                let (mut client, mut server) = UnixStream::pair().unwrap();
+                let (client, mut server) = UnixStream::pair().unwrap();
                 let answering = std::thread::spawn(move || {
                     let request = read_frame::<Request>(&mut server, MAX_REQUEST_BYTES).unwrap();
                     assert!(matches!(request, Request::Status));
                     write_frame(&mut server, &reply, MAX_RESPONSE_BYTES).unwrap();
                 });
-                assert!(exchange_status(&mut client).is_err());
+                assert!(exchange_status(client, Instant::now() + STATUS_TIMEOUT).is_err());
                 answering.join().unwrap();
             }
-            let (mut client, mut server) = UnixStream::pair().unwrap();
+            let (client, mut server) = UnixStream::pair().unwrap();
             server
                 .write_all(&u32::try_from(MAX_STATUS_BYTES + 1).unwrap().to_be_bytes())
                 .unwrap();
-            let error = exchange_status(&mut client).unwrap_err();
+            let error = exchange_status(client, Instant::now() + STATUS_TIMEOUT).unwrap_err();
             assert!(error.to_string().contains("exceeds its limit"), "{error}");
         }
 

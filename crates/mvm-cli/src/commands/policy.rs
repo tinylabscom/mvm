@@ -170,7 +170,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 
 /// Report the coordinator the systemd user manager runs for this home. A
 /// refusal is the answer when there is none; nothing is installed or started.
-fn coordinator(args: &CoordinatorArgs) -> Result<()> {
+pub(in crate::commands) fn coordinator(args: &CoordinatorArgs) -> Result<()> {
     let managed = mvm_client::policy_profiles::coordinator::managed_status()?;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&managed)?);
