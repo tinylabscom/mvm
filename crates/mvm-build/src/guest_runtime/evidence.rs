@@ -87,11 +87,14 @@ impl VerifiedRuntimeManifest {
     }
 
     /// Retain only the evidence bytes consumed by the successful verifier.
+    /// With `shared`, the archive is linked from that content store when an
+    /// intact copy is already there, as in [`Self::snapshot_artifacts_shared_in`].
     #[tracing::instrument(skip_all)]
     pub fn retain_release_proof_in(
         &self,
         proof: &RuntimeReleaseProof,
         generation: &Path,
+        shared: Option<&Path>,
     ) -> Result<RuntimeReleaseProof, GuestRuntimeError> {
         if proof.archive_sha256 != self.digest
             || proof.arch != self.arch
@@ -105,7 +108,7 @@ impl VerifiedRuntimeManifest {
         retained.archive = generation.join("archive");
         retained.checksum = generation.join("checksum");
         retained.signature_bundle = generation.join("archive.signature");
-        snapshot_file(self.archive.path(), &retained.archive, &self.digest)?;
+        snapshot_file(self.archive.path(), &retained.archive, &self.digest, shared)?;
         for (path, bytes) in [
             (&retained.checksum, self.checksum.as_slice()),
             (&retained.signature_bundle, self.signature.as_slice()),
@@ -166,6 +169,26 @@ impl VerifiedRuntimeManifest {
         self.snapshot_artifacts_at(selection, Some(private_parent))
     }
 
+    /// [`Self::snapshot_artifacts_in`], sharing bytes through the content store
+    /// `shared`: an artifact already there under its digest is linked into the
+    /// generation and re-hashed in place instead of copied, and a fresh copy is
+    /// published there for the next generation. The generation layout and its
+    /// verification are unchanged; only the inodes are shared.
+    pub fn snapshot_artifacts_shared_in(
+        &self,
+        selection: &RuntimeArtifactSelection<'_>,
+        private_parent: &Path,
+        shared: &Path,
+    ) -> Result<VerifiedRuntimeArtifacts, GuestRuntimeError> {
+        snapshot_declared_artifacts(
+            &self.digest,
+            self.declaration(selection.arch)?,
+            selection,
+            Some(private_parent),
+            Some(shared),
+        )
+    }
+
     fn snapshot_artifacts_at(
         &self,
         selection: &RuntimeArtifactSelection<'_>,
@@ -176,6 +199,7 @@ impl VerifiedRuntimeManifest {
             self.declaration(selection.arch)?,
             selection,
             private_parent,
+            None,
         )
     }
 }
@@ -188,6 +212,7 @@ pub(super) fn snapshot_declared_artifacts(
     declaration: &RuntimeAssembly,
     selection: &RuntimeArtifactSelection<'_>,
     private_parent: Option<&Path>,
+    shared: Option<&Path>,
 ) -> Result<VerifiedRuntimeArtifacts, GuestRuntimeError> {
     if let Some(parent) = private_parent {
         let parent_metadata = std::fs::symlink_metadata(parent)?;
@@ -234,7 +259,7 @@ pub(super) fn snapshot_declared_artifacts(
             &declaration.initramfs_sha256,
         ),
     ] {
-        snapshot_file(source, destination, expected)?;
+        snapshot_file(source, destination, expected, shared)?;
     }
     Ok(VerifiedRuntimeArtifacts {
         directory,
@@ -272,7 +297,9 @@ pub struct RuntimeArtifactSelection<'a> {
     pub host_protocol: u32,
 }
 
-/// Owns copied bytes matching a checked declaration. Authentication depends on
+/// Owns a generation of artifact files matching a checked declaration: fresh
+/// copies, or hard links to an intact shared copy that was re-hashed when
+/// linked. Authentication depends on
 /// the issuing release/source evidence, not this shared byte owner. Not yet a boot
 /// capability: dropping this owner removes its files, so detached launch must
 /// transfer ownership to a durable, generation-scoped lifecycle before use.
@@ -563,6 +590,86 @@ fn sync_snapshot(output: &std::fs::File) -> std::io::Result<()> {
 
 #[tracing::instrument(skip_all, fields(artifact = snapshot_name(destination)))]
 fn snapshot_file(
+    source: &Path,
+    destination: &Path,
+    expected: &str,
+    shared: Option<&Path>,
+) -> Result<(), GuestRuntimeError> {
+    let blob = shared.map(|store| store.join(expected));
+    if let Some(blob) = &blob
+        && std::fs::symlink_metadata(blob).is_ok()
+    {
+        // The selection is still checked against its declaration: a changed
+        // source refuses the launch even when an intact copy is on hand.
+        hash_artifact(source, expected, &mut std::io::sink())?;
+        if link_shared_copy(blob, destination, expected)? {
+            return Ok(());
+        }
+    }
+    copy_snapshot_file(source, destination, expected)?;
+    if let Some(blob) = &blob {
+        publish_shared_copy(destination, blob);
+    }
+    Ok(())
+}
+
+/// Make the fresh, verified `copy` the shared copy at `blob`, replacing one that
+/// was missing, changed or mis-permissioned so later launches link again
+/// instead of copying forever. The new name is linked beside the blob and
+/// renamed over it, so a reader sees the old file or the new one, never a
+/// partial one. Best effort: failing only costs the next launch a copy.
+fn publish_shared_copy(copy: &Path, blob: &Path) {
+    static PUBLISHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let (Some(store), Some(name)) = (blob.parent(), blob.file_name()) else {
+        return;
+    };
+    let staged = store.join(format!(
+        ".{}.{}.{}",
+        name.to_string_lossy(),
+        std::process::id(),
+        PUBLISHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    if std::fs::hard_link(copy, &staged).is_err() {
+        return;
+    }
+    if std::fs::rename(&staged, blob).is_err() {
+        let _ = std::fs::remove_file(&staged);
+        return;
+    }
+    // The bytes are flushed with the generation that owns `copy`; this makes
+    // the new directory entry durable too.
+    let _ = std::fs::File::open(store).and_then(|directory| directory.sync_all());
+}
+
+/// Link `blob` into place as `destination` and check the linked inode, which is
+/// what a backend will read. A missing, mis-permissioned or changed blob is not
+/// an error: the link is removed and the caller copies from the source.
+fn link_shared_copy(
+    blob: &Path,
+    destination: &Path,
+    expected: &str,
+) -> Result<bool, GuestRuntimeError> {
+    if std::fs::hard_link(blob, destination).is_err() {
+        return Ok(false);
+    }
+    let intact = read_only_regular_file(destination)
+        && hash_artifact(destination, expected, &mut std::io::sink()).is_ok();
+    if !intact {
+        std::fs::remove_file(destination)?;
+    }
+    Ok(intact)
+}
+
+/// The shape a retained artifact must keep: a regular file of ours, mode 0400.
+fn read_only_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| {
+        metadata.file_type().is_file()
+            && mvm_core::private_fs::require_current_owner(&metadata).is_ok()
+            && mvm_core::private_fs::mode_bits(path, &metadata).is_ok_and(|mode| mode == 0o400)
+    })
+}
+
+fn copy_snapshot_file(
     source: &Path,
     destination: &Path,
     expected: &str,
@@ -1084,6 +1191,77 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn generations_share_artifact_bytes_and_never_link_a_changed_copy() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let (dir, verified) = fixture();
+        let parent = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let shared = parent.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        let paths = ["overlay", "verity", "initramfs"].map(|name| dir.path().join(name));
+        let root = "a".repeat(64);
+        let selected = selection(&paths, &root);
+        let snapshot = || {
+            verified
+                .snapshot_artifacts_shared_in(&selected, parent.path(), &shared)
+                .unwrap()
+        };
+        let first = snapshot();
+        let second = snapshot();
+        assert_ne!(first.directory_path(), second.directory_path());
+        let inode = |path: PathBuf| std::fs::metadata(path).unwrap().ino();
+        assert_eq!(inode(first.overlay_path()), inode(second.overlay_path()));
+        assert_eq!(
+            inode(first.initramfs_path()),
+            inode(second.initramfs_path())
+        );
+        assert_eq!(std::fs::read_dir(&shared).unwrap().count(), 3);
+
+        // A changed selection is refused even with an intact shared copy.
+        let original = std::fs::read(&paths[0]).unwrap();
+        std::fs::write(&paths[0], b"replacement").unwrap();
+        assert!(
+            verified
+                .snapshot_artifacts_shared_in(&selected, parent.path(), &shared)
+                .is_err()
+        );
+        std::fs::write(&paths[0], original).unwrap();
+
+        // A shared copy whose bytes changed is never handed to a generation.
+        let declaration = verified.declaration(GuestArch::X86_64).unwrap();
+        let blob = shared.join(&declaration.overlay_sha256);
+        std::fs::set_permissions(&blob, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&blob, b"tampered").unwrap();
+        std::fs::set_permissions(&blob, std::fs::Permissions::from_mode(0o400)).unwrap();
+        let third = snapshot();
+        assert_eq!(std::fs::read(third.overlay_path()).unwrap(), b"overlay");
+        // ...and the fresh copy repairs the shared one, which the next launch
+        // links again.
+        assert_eq!(std::fs::read(&blob).unwrap(), b"overlay");
+        assert_eq!(inode(third.overlay_path()), inode(blob.clone()));
+        let after_repair = snapshot();
+        assert_eq!(inode(after_repair.overlay_path()), inode(blob.clone()));
+
+        // Nor is one that lost its read-only private mode.
+        let initramfs_blob = shared.join(&declaration.initramfs_sha256);
+        std::fs::set_permissions(&initramfs_blob, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let fourth = snapshot();
+        assert_eq!(
+            std::fs::metadata(fourth.initramfs_path()).unwrap().mode() & 0o777,
+            0o400
+        );
+        assert_eq!(
+            std::fs::metadata(&initramfs_blob).unwrap().mode() & 0o777,
+            0o400,
+            "the repaired shared copy is read-only again"
+        );
+        assert_eq!(inode(snapshot().initramfs_path()), inode(initramfs_blob));
+        // No staging names are left in the store.
+        assert_eq!(std::fs::read_dir(&shared).unwrap().count(), 3);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn failed_persistence_cleans_only_its_own_unpublished_generation() {
         let (dir, verified) = fixture();
         let parent = tempfile::tempdir().unwrap();
@@ -1213,7 +1391,7 @@ mod tests {
         let digest = hex::encode(Sha256::digest(&bytes));
         std::fs::write(&source, bytes).unwrap();
         let started = std::time::Instant::now();
-        snapshot_file(&source, &dir.path().join("snapshot"), &digest).unwrap();
+        snapshot_file(&source, &dir.path().join("snapshot"), &digest, None).unwrap();
         eprintln!("128 MiB copy+SHA256: {:?}", started.elapsed());
     }
 }

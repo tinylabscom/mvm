@@ -879,13 +879,18 @@ of what a detached VM executed: launch admission must still bind those owned
 bytes to the backend for the VM's lifetime.
 
 Cold workload starts and newly booted standby parents bind release artifacts
-to fresh private generations under
+to a new private generation under
 `$MVM_HOME/runtime-evidence/<vm-name>/` (normally
 `~/.mvm/runtime-evidence/<vm-name>/`). The launcher authenticates the signed
-release, checks the selected guest RPC protocol and verity root, and copies
-and hashes the selected overlay, verity tree and initramfs in the same read
-stream. It publishes the generation before spawning and boots those private
-paths, not the mutable cache paths. A deserialized proof or a source-cache
+release, checks the selected guest RPC protocol and verity root, and hashes
+the selected overlay, verity tree and initramfs against the declaration. The
+generation's files are hard links into `$MVM_HOME/runtime-evidence/shared_content/`,
+one copy per digest shared by every VM: when an intact, read-only copy of ours
+is already there the launcher links it and re-hashes the linked file; otherwise
+it copies and hashes the selected bytes in the same read stream and publishes
+that copy for the next launch. It publishes the generation before spawning and
+boots those generation paths, not the mutable cache paths. The per-VM
+generation outlives `machine rm`; the shared copy is not deleted. A deserialized proof or a source-cache
 fingerprint grants no authority.
 
 Contributor runtimes use a separate, explicitly unsigned source-integrity

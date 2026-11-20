@@ -602,13 +602,22 @@ capture_storage() {
   else
     printf '0\t%s\n' "${DATA_DIR}/snapshots" >"${dir}/snapshot-blocks-${phase}.txt"
   fi
+  # Each launch keeps a runtime record here that outlives `machine rm`; its
+  # artifact bytes are hard links into one shared copy, which du counts once.
+  if [[ -d "${DATA_DIR}/runtime-evidence" ]]; then
+    du -sk "${DATA_DIR}/runtime-evidence" >"${dir}/runtime-evidence-blocks-${phase}.txt"
+  else
+    printf '0\t%s\n' "${DATA_DIR}/runtime-evidence" >"${dir}/runtime-evidence-blocks-${phase}.txt"
+  fi
 }
 
-# Snapshot bytes this wave added, so earlier waves' leftovers are not charged to it.
-snapshot_growth_kib() {
+# Bytes of one storage kind this wave added, so earlier waves' leftovers are
+# not charged to it.
+blocks_growth_kib() {
   local dir="$1"
+  local kind="$2"
   awk 'FNR == 1 { v[++n] = $1 } END { d = v[2] - v[1]; print (d > 0 ? d : 0) }' \
-    "${dir}/snapshot-blocks-before.txt" "${dir}/snapshot-blocks-settled.txt"
+    "${dir}/${kind}-blocks-before.txt" "${dir}/${kind}-blocks-settled.txt"
 }
 
 # Standbys the pool reports idle with no process behind them, which is how a
@@ -892,11 +901,13 @@ for wave in "${WAVES[@]}"; do
     printf 'wave_%s_mailbox_rss_kib\t%s\n' "${wave}" "${mailbox_rss_kib}"
     printf 'wave_%s_mailbox_threads\t%s\n' "${wave}" "${mailbox_threads}"
     printf 'wave_%s_vm_state_du_kib\t%s\n' "${wave}" "${vm_state_kib}"
+    printf 'wave_%s_runtime_evidence_du_kib\t%s\n' \
+      "${wave}" "$(blocks_growth_kib "${wave_dir}" runtime-evidence)"
     printf 'wave_%s_fs_available_delta_kib\t%s\n' \
       "${wave}" "$((available_before - available_settled))"
     if [[ "${STANDBY_FORM}" == "on_disk_snapshot" ]]; then
       printf 'wave_%s_standby_count\t%s\n' "${wave}" "${standby_count}"
-      printf 'wave_%s_standby_snapshot_du_kib\t%s\n' "${wave}" "$(snapshot_growth_kib "${wave_dir}")"
+      printf 'wave_%s_standby_snapshot_du_kib\t%s\n' "${wave}" "$(blocks_growth_kib "${wave_dir}" snapshot)"
     fi
   } >>"${SUMMARY}"
 
