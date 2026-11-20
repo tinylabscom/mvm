@@ -1627,6 +1627,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_signature_keeps_state_pending_or_failed() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let plan = sample_plan();
         let (mut signed, _sk, vk) = sign_sample(&plan);
         // Corrupt the payload after signing.
@@ -1638,13 +1639,14 @@ mod tests {
         let result = s.launch(&signed, &[("test", &vk)]).await;
         assert!(matches!(result, Err(SupervisorError::PlanVerify(_))));
         // We transition to Failed on error.
-        assert_eq!(s.state.current(), PlanState::Failed);
+        assert_eq!(s.state.current(), PlanState::Failed, "{result:?}");
         // Backend was never asked to launch.
         assert!(backend.launches().is_empty());
     }
 
     #[tokio::test]
     async fn unknown_signer_blocks_before_backend() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let plan = sample_plan();
         let (signed, _sk, _vk) = sign_sample(&plan);
         let (_other_sk, other_vk) = {
@@ -1662,7 +1664,7 @@ mod tests {
 
         let result = s.launch(&signed, &[("not-the-signer", &other_vk)]).await;
         assert!(matches!(result, Err(SupervisorError::PlanVerify(_))));
-        assert_eq!(s.state.current(), PlanState::Failed);
+        assert_eq!(s.state.current(), PlanState::Failed, "{result:?}");
         assert!(backend.launches().is_empty());
     }
 
