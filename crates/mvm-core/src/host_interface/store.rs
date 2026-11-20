@@ -30,7 +30,7 @@ impl Default for NodeRecord {
         Self {
             node_id: "local".into(),
             state: NodeState::Active,
-            epoch: ExecutionEpoch(1),
+            epoch: ExecutionEpoch::FIRST,
         }
     }
 }

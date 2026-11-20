@@ -104,7 +104,7 @@ impl LaunchWritableHandoff {
         &self,
         actual: &std::collections::BTreeMap<(u64, u64), usize>,
     ) -> Result<()> {
-        for (index, pair) in self._files.chunks_exact(2).enumerate() {
+        for (index, pair) in self._files.as_chunks::<2>().0.iter().enumerate() {
             for (role, file) in ["backing", "sidecar"].into_iter().zip(pair) {
                 let expected = file.metadata()?;
                 // Firecracker opens the original drive path in addition to
@@ -458,6 +458,7 @@ mod tests {
             cmdline: String::new(),
             vcpus: 1,
             cpu_grant: None,
+            allowed_cpus: None,
             memory_mib: 64,
             mem_initial_mib: None,
             blocks,

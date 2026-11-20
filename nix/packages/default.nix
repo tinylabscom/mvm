@@ -20,6 +20,7 @@ let
       throw "mvmctl Nix package only supports embedded host binaries on aarch64 and x86_64 hosts";
 
   embeddedRustToolchain = pkgs.callPackage ./embedded-rust-toolchain.nix {
+    inherit mvmSrc;
     target = embeddedRustTarget;
   };
 
@@ -60,7 +61,6 @@ let
   mvm-core-tpm2-clippy = pkgs.callPackage ./mvm-core-tpm2-clippy.nix {
     inherit mvmSrc;
     tpm2-tss = pkgs.tpm2-tss;
-    clippy = pkgs.clippy;
   };
 
   mvm-core-tpm2-test = pkgs.callPackage ./mvm-core-tpm2-test.nix {

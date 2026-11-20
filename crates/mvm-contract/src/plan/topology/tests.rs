@@ -33,6 +33,7 @@ fn unit(name: &str, role: UnitRole, cores: &[u32]) -> Unit {
         min_isolation: None,
         permits: SealedTransitions::default(),
         liveness_period_ms: None,
+        require_isolated_cores: false,
     }
 }
 
@@ -205,6 +206,41 @@ fn the_digest_of_a_fixed_topology_with_liveness_periods_is_pinned() {
     );
 }
 
+/// [`full`] with a paired unit requiring its exclusive cores isolated.
+fn with_isolated_cores() -> Topology {
+    let mut topology = full();
+    topology.units[2].require_isolated_cores = true;
+    topology
+}
+
+#[test]
+fn the_digest_of_a_fixed_topology_requiring_isolated_cores_is_pinned() {
+    let topology = with_isolated_cores();
+    topology.validate().unwrap();
+    assert_eq!(
+        topology.digest().as_str(),
+        "sha256:fa16d9f3b71759a21f9e3ccf27dc51a754b36a9e7f8c692bf0ee772591c8b0e0"
+    );
+}
+
+#[test]
+fn an_isolation_requirement_is_omitted_from_the_encoding_when_false() {
+    let json = serde_json::to_string(&full()).unwrap();
+    assert!(!json.contains("require_isolated_cores"), "{json}");
+    let json = serde_json::to_string(&with_isolated_cores()).unwrap();
+    assert!(json.contains(r#""require_isolated_cores":true"#), "{json}");
+}
+
+#[test]
+fn an_isolation_requirement_without_exclusive_cores_is_refused() {
+    let mut topology = full();
+    topology.units[4].require_isolated_cores = true;
+    assert_eq!(
+        topology.validate(),
+        Err(TopologyValidationError::IsolationWithoutExclusiveCores { unit: id("w2") })
+    );
+}
+
 #[test]
 fn the_digest_changes_when_any_field_changes() {
     type Mutation = fn(&mut Topology);
@@ -232,6 +268,9 @@ fn the_digest_changes_when_any_field_changes() {
         }),
         ("min_isolation", |t| t.units[0].min_isolation = None),
         ("permits", |t| t.units[0].permits.checkpoint = true),
+        ("require isolated cores", |t| {
+            t.units[2].require_isolated_cores = true
+        }),
         ("liveness period", |t| {
             t.units[4].liveness_period_ms = NonZeroU32::new(100);
         }),
@@ -630,4 +669,18 @@ fn errors_name_the_offending_element() {
     }
     .to_string();
     assert!(message.contains("w1") && message.contains("w2") && message.contains('2'));
+}
+
+#[test]
+fn an_isolation_label_is_the_serde_spelling() {
+    for tier in [
+        IsolationTier::Task,
+        IsolationTier::Partition,
+        IsolationTier::Vm,
+    ] {
+        assert_eq!(
+            serde_json::to_value(tier).unwrap(),
+            serde_json::Value::String(tier.label().to_string())
+        );
+    }
 }

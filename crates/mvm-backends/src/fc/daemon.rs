@@ -198,6 +198,14 @@ pub(crate) fn validate_required_scope(
     if let Some(gap) = mvm_core::spawn_scope::mechanism_gap() {
         anyhow::bail!("required Firecracker scope unavailable: {}", gap.describe());
     }
+    if bounds.allowed_cpus().is_some()
+        && let Some(gap) = mvm_core::spawn_scope::cpuset_gap()
+    {
+        anyhow::bail!(
+            "this launch is placed on host cores and its scope cannot carry them: {}",
+            gap.describe()
+        );
+    }
     Ok(())
 }
 
@@ -849,6 +857,7 @@ mod tests {
             memory_mib: 512,
             mem_initial_mib: None,
             cpu_grant: None,
+            allowed_cpus: None,
             blocks: vec![BlockDev {
                 source: "/original/volume".into(),
                 read_only: false,

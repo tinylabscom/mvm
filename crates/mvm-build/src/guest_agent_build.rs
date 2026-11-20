@@ -909,6 +909,7 @@ pub(crate) fn run_zigbuild(
     cmd.args(zigbuild_args_for_output(args))
         .current_dir(&spec.workspace_root);
     apply_zigbuild_env(&mut cmd, spec, rustc.as_deref(), env)?;
+    apply_pinned_zig(&mut cmd, spec)?;
     // Cargo inherits stdio. Quiet mode suppresses routine progress while still
     // surfacing compiler errors; the CLI's verbose mode preserves raw output.
     let status = cmd
@@ -974,6 +975,7 @@ pub fn build_guest_binaries(
     cmd.args(zigbuild_args_for_output(&argv[1..]))
         .current_dir(&spec.workspace_root);
     apply_zigbuild_env(&mut cmd, spec, rustc.as_deref(), &[])?;
+    apply_pinned_zig(&mut cmd, spec)?;
     // Cargo inherits stdio. Quiet mode suppresses routine progress while still
     // surfacing compiler errors; the CLI's verbose mode preserves raw output.
     let status = cmd
@@ -1078,6 +1080,24 @@ fn apply_zigbuild_env(
     std::fs::create_dir_all(&zig_global_cache_dir)?;
     cmd.env("CARGO_ZIGBUILD_CACHE_DIR", zigbuild_cache_dir);
     cmd.env("ZIG_GLOBAL_CACHE_DIR", zig_global_cache_dir);
+    Ok(())
+}
+
+/// Point cargo-zigbuild at the pinned zig, the way the host-binary payload
+/// build does. A spec with an explicit cargo (tests) keeps whatever zig it has.
+fn apply_pinned_zig(
+    cmd: &mut std::process::Command,
+    spec: &GuestAgentBuildSpec,
+) -> Result<(), GuestAgentBuildError> {
+    if spec.cargo.is_some() {
+        return Ok(());
+    }
+    let build_failed = |reason| GuestAgentBuildError::BuildFailed { reason };
+    let pin =
+        crate::embed_toolchain::try_read_pinned_zig(&spec.workspace_root).map_err(build_failed)?;
+    if let Some(zig) = crate::embed_toolchain::resolve_pinned_zig(&pin).map_err(build_failed)? {
+        cmd.env("CARGO_ZIGBUILD_ZIG_PATH", zig);
+    }
     Ok(())
 }
 
@@ -1769,6 +1789,53 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn pinned_zig_checkout(zig: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            format!("[workspace.metadata.mvm.toolchain]\nzig = \"{zig}\"\n"),
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn guest_build_pins_cargo_zigbuild_to_the_resolved_zig() {
+        let mut env = TestEnv::new();
+        env.set("MVM_EMBED_ZIG", "/pinned/zig");
+        let checkout = pinned_zig_checkout("0.0.0-test");
+        let spec = GuestAgentBuildSpec::new(
+            checkout.path().to_path_buf(),
+            GuestArch::Aarch64,
+            checkout.path().join("target"),
+        );
+        let mut cmd = std::process::Command::new("cargo");
+        apply_pinned_zig(&mut cmd, &spec).unwrap();
+        let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("CARGO_ZIGBUILD_ZIG_PATH")),
+            Some(&Some(std::ffi::OsStr::new("/pinned/zig")))
+        );
+    }
+
+    #[test]
+    fn guest_build_with_no_pinned_zig_names_the_fix() {
+        let mut env = TestEnv::new();
+        env.remove("MVM_EMBED_ZIG");
+        let home = tempfile::tempdir().unwrap();
+        env.set("HOME", home.path());
+        env.set("PATH", home.path());
+        let checkout = pinned_zig_checkout("0.0.0-test");
+        let spec = GuestAgentBuildSpec::new(
+            checkout.path().to_path_buf(),
+            GuestArch::Aarch64,
+            checkout.path().join("target"),
+        );
+        let mut cmd = std::process::Command::new("cargo");
+        let err = apply_pinned_zig(&mut cmd, &spec).unwrap_err().to_string();
+        assert!(err.contains("just payload::toolchain"), "{err}");
     }
 
     #[test]

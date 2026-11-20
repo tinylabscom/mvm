@@ -491,3 +491,71 @@ fn runtime_preboot_proof_keeps_coordinator_charged_until_durable_cancellation() 
     permit.reconcile_never_dispatched(&"b".repeat(64)).unwrap();
     assert!(HostBudgetPermit::reserve_at(home.path(), &budget(), "next", charge()).is_ok());
 }
+
+#[cfg(unix)]
+#[test]
+fn a_config_saved_under_a_group_writable_umask_is_private_and_admitted() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    const CHILD: &str = "MVM_HOSTD_CONFIG_UMASK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // The umask is process-wide, so the save runs in a fresh single-test
+        // process rather than in the shared test runner.
+        let status = std::process::Command::new("sh")
+            .args(["-c", "umask 002; exec \"$@\"", "config-umask"])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "admission_budget::permit::tests::a_config_saved_under_a_group_writable_umask_is_private_and_admitted",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+
+    let home = tempfile::tempdir().unwrap();
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+    std::fs::create_dir(home.path().join("probe")).unwrap();
+    assert_eq!(mode(&home.path().join("probe")), 0o775, "child umask");
+
+    let config_dir = home.path().join("config");
+    let config = mvm_core::user_config::MvmConfig {
+        host_budget_memory_mib: Some(4096),
+        ..Default::default()
+    };
+    mvm_core::user_config::save(&config, Some(&config_dir)).unwrap();
+    assert_eq!(mode(&config_dir), 0o700);
+    assert_eq!(mode(&config_dir.join("config.toml")), 0o600);
+    assert_eq!(
+        budget_at(home.path()).unwrap().max_total_memory_mib,
+        Some(4096)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_group_writable_config_is_refused_with_its_path_and_the_fix() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let home = tempfile::tempdir().unwrap();
+    let config_dir = home.path().join("config");
+    mvm_core::user_config::save(&Default::default(), Some(&config_dir)).unwrap();
+    let path = config_dir.join("config.toml");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).unwrap();
+
+    let message = budget_at(home.path()).unwrap_err().to_string();
+    assert!(message.contains(&path.display().to_string()), "{message}");
+    assert!(message.contains("0664"), "{message}");
+    assert!(
+        message.contains(&format!("chmod 600 {}", path.display())),
+        "{message}"
+    );
+
+    // Saving again replaces the file at its private mode.
+    mvm_core::user_config::save(&Default::default(), Some(&config_dir)).unwrap();
+    assert!(budget_at(home.path()).is_ok());
+}

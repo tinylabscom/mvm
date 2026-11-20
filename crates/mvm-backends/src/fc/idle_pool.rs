@@ -90,11 +90,11 @@ pub struct IdleShape {
 
 impl IdleShape {
     /// The shape of a launch, or `None` when it cannot use the pool: it carries
-    /// a CPU grant (whose quota the idle scope does not have), its guest size is
-    /// unknown, or it is a builder rather than a workload.
+    /// a CPU grant or a CPU placement (which the idle scope does not have), its
+    /// guest size is unknown, or it is a builder rather than a workload.
     #[must_use]
     pub fn for_launch(spec: &mvm_vmm::driver::spec::VmmSpec) -> Option<Self> {
-        if spec.trusted_builder || !spec.serves_guest_agent() {
+        if spec.trusted_builder || !spec.serves_guest_agent() || spec.allowed_cpus.is_some() {
             return None;
         }
         Self::for_bounds(spec.memory_mib, spec.cpu_grant.as_ref())

@@ -45,6 +45,7 @@ impl CheckedSourceRuntime {
             self.declaration(selection.arch)?,
             selection,
             None,
+            None,
         )
     }
 
@@ -58,6 +59,23 @@ impl CheckedSourceRuntime {
             self.declaration(selection.arch)?,
             selection,
             Some(private_parent),
+            None,
+        )
+    }
+
+    /// See `VerifiedRuntimeManifest::snapshot_artifacts_shared_in`.
+    pub fn snapshot_artifacts_shared_in(
+        &self,
+        selection: &RuntimeArtifactSelection<'_>,
+        private_parent: &Path,
+        shared: &Path,
+    ) -> Result<VerifiedRuntimeArtifacts, GuestRuntimeError> {
+        snapshot_declared_artifacts(
+            &self.digest,
+            self.declaration(selection.arch)?,
+            selection,
+            Some(private_parent),
+            Some(shared),
         )
     }
 }

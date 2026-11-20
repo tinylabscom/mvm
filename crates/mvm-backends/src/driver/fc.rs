@@ -55,7 +55,11 @@ use dial::fc_guest_dial_socket;
 #[cfg(all(test, unix))]
 use kernel::fc_descriptor_recipe;
 use kernel::resolve_fc_kernel_path;
-use stop::{bind_process_to_socket, prepare_guest_filesystems_for_stop};
+pub use stop::SEALED_PAUSE_MARKER;
+use stop::{
+    bind_process_to_socket, instance_paused, paused_by_sealed_pause, prepare_firecracker_stop,
+    prepare_guest_filesystems_for_stop,
+};
 #[cfg(test)]
 use stop::{require_guest_filesystem_flush, stop_after_guest_flush, stop_firecracker_guest};
 
@@ -560,7 +564,8 @@ fn start_or_claim_firecracker(
             socket,
             &spec.name,
             &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
-                .with_cpu_grant(spec.cpu_grant),
+                .with_cpu_grant(spec.cpu_grant)
+                .with_allowed_cpus(spec.allowed_cpus.clone()),
             &mut guard,
             handoff,
         )?;
@@ -709,7 +714,8 @@ impl FcDriver {
             "persistent writable Firecracker disks require prepared descriptor custody"
         );
         let bounds = mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
-            .with_cpu_grant(spec.cpu_grant);
+            .with_cpu_grant(spec.cpu_grant)
+            .with_allowed_cpus(spec.allowed_cpus.clone());
         crate::fc::validate_required_scope(&spec.name, &bounds)?;
         let kernel_path = resolve_fc_kernel_path(spec)?;
 
@@ -975,8 +981,12 @@ impl VmmDriver for FcDriver {
             // default: on Linux a cgroup can bound any process, and
             // Firecracker runs as a direct child of this driver — no
             // mvm-*-supervisor binary in front of it — so the cgroup goes
-            // on that child process directly.
-            resource_controls: ResourceControls::for_backend(BackendKind::Firecracker),
+            // on that child process directly. Placement is probed: the scope
+            // carries a CPU set only where cpuset is delegated to it.
+            resource_controls: ResourceControls::on_host(
+                BackendKind::Firecracker,
+                mvm_core::spawn_scope::cpuset_gap().is_none(),
+            ),
             ..VmCapabilities::default()
         }
     }
@@ -1354,7 +1364,17 @@ impl RunningVm for FcRunningVm {
             return Ok(());
         }
         let started = Instant::now();
-        let result = prepare_guest_filesystems_for_stop(&self.vsock_uds);
+        let api_socket = crate::fc::fc_api_socket_path(&self.state_dir.to_string_lossy());
+        let api_socket = Path::new(&api_socket);
+        let result = prepare_firecracker_stop(
+            instance_paused(api_socket),
+            || paused_by_sealed_pause(&self.state_dir, pid),
+            || {
+                crate::fc::call(api_socket, "PATCH", "/vm", Some(r#"{"state":"Resumed"}"#))
+                    .map(drop)
+            },
+            || prepare_guest_filesystems_for_stop(&self.vsock_uds),
+        );
         tracing::debug!(
             ms = started.elapsed().as_secs_f64() * 1000.0,
             ok = result.is_ok(),
@@ -1490,6 +1510,7 @@ mod tests {
             cmdline: String::new(),
             vcpus: 2,
             cpu_grant: None,
+            allowed_cpus: None,
             memory_mib: 512,
             mem_initial_mib: None,
             blocks,

@@ -624,24 +624,16 @@ pub(super) fn stop_machine(cli: &Cli, args: MachineStopArgs, cfg: &MvmConfig) ->
 
 /// Record the quarantine first, so the workload cannot relaunch, then stop it.
 /// A failed stop still leaves the workload quarantined and says so.
-pub(super) fn quarantine_machine(
-    cli: &Cli,
-    args: super::MachineQuarantineArgs,
-    cfg: &MvmConfig,
-) -> Result<()> {
+pub(super) fn quarantine_machine(args: super::MachineQuarantineArgs) -> Result<()> {
     mvm_client::containment::quarantine(&args.name, &args.reason)?;
     println!(
         "quarantined {}: it will not launch again until replaced",
         args.name
     );
-    down::run(
-        cli,
-        down::Args {
-            name: Some(args.name.clone()),
-        },
-        cfg,
-    )
-    .with_context(|| format!("{} is quarantined but could not be stopped", args.name))
+    // A quarantined workload is not resumed or asked to flush: stopping it
+    // must not hand it any more run time.
+    down::stop_without_guest(&args.name)
+        .with_context(|| format!("{} is quarantined but could not be stopped", args.name))
 }
 
 /// A replacement starts a new epoch; the VM still running under the old one

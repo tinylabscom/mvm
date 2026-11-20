@@ -68,6 +68,7 @@ pub mod jailer;
 /// [`keyholder::SecretResolver`] trait + the single-host
 /// [`keyholder::LocalResolver`].
 pub mod keyholder;
+mod mailbox_commit;
 mod mailbox_custody;
 pub mod mailbox_launch;
 pub mod mailbox_process;
@@ -90,6 +91,8 @@ pub mod rate_limit;
 pub mod run;
 /// Resume orchestration for durable agent sessions: turn a parked session
 /// record back into an admitted `ExecutionPlan`.
+/// The one check every post-admission change to a running unit passes.
+pub mod seal_gate;
 pub mod session_resume;
 pub mod stream;
 pub mod supervisor;

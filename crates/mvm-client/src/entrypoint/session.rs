@@ -385,12 +385,14 @@ pub struct IdleTimeoutUpdate {
 pub fn set_session_idle_timeout(raw_id: &str, secs: u64) -> Result<IdleTimeoutUpdate> {
     validate_idle_timeout(secs)?;
     let id = parse_id(raw_id)?;
+    // Gated under the record's lock, before it is rewritten.
     let record = session::update_session(&id, |r| {
+        mvm_hostd::seal_gate::authorize(&r.vm_name, mvm_hostd::seal_gate::Mutation::IdleTimeout)?;
         r.idle_timeout_secs = secs;
         Ok(())
     })
     .context("updating session timeout")?;
-    let substrate = update_idle_timeout(&record.vm_name, secs);
+    let substrate = send_idle_timeout(&record.vm_name, secs);
     Ok(IdleTimeoutUpdate { record, substrate })
 }
 
@@ -402,6 +404,12 @@ pub fn set_session_idle_timeout(raw_id: &str, secs: u64) -> Result<IdleTimeoutUp
 /// # Errors
 /// The agent unreachable, lacking the capability, or refusing the verb.
 pub fn update_idle_timeout(vm_name: &str, secs: u64) -> Result<(u64, u64)> {
+    mvm_hostd::seal_gate::authorize(vm_name, mvm_hostd::seal_gate::Mutation::IdleTimeout)?;
+    send_idle_timeout(vm_name, secs)
+}
+
+/// [`update_idle_timeout`] after the seal gate has allowed it.
+fn send_idle_timeout(vm_name: &str, secs: u64) -> Result<(u64, u64)> {
     let transport = mvm_vmm::vsock_transport::for_vm(vm_name)
         .with_context(|| format!("Picking transport for guest agent on {vm_name:?}"))?;
     let mut stream = transport
@@ -820,5 +828,72 @@ mod tests {
             panic!("a Pong is unexpected");
         };
         assert!(detail.contains("Pong"));
+    }
+
+    fn sealed_session(vm: &str) -> SessionRecord {
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .workload(vm)
+            .build();
+        mvm_hostd::seal_gate::test_support::seal(vm, plan, Default::default()).expect("sealed");
+        running(vm, SessionMode::Prod)
+    }
+
+    fn sealed_refusals() -> usize {
+        std::fs::read_to_string(mvm_hostd::audit::emitter::audit_path_for_tenant(
+            &mvm_core::config::mvm_audit_dir(),
+            mvm_core::plan::DEFAULT_TENANT,
+        ))
+        .unwrap_or_default()
+        .matches(mvm_hostd::seal_gate::MUTATION_REFUSED_EVENT)
+        .count()
+    }
+
+    #[test]
+    fn a_sealed_sessions_timeout_is_refused_before_its_record_is_rewritten() {
+        let _home = isolated();
+        let record = sealed_session("vm-sealed-timeout");
+        let err = set_session_idle_timeout(record.id.as_str(), 999)
+            .err()
+            .expect("a sealed unit's idle timeout is refused");
+        assert!(
+            err.downcast_ref::<mvm_hostd::seal_gate::SealRefusal>()
+                .is_some(),
+            "{err:#}"
+        );
+        let reread = session_info(record.id.as_str()).expect("still recorded");
+        assert_eq!(reread.idle_timeout_secs, record.idle_timeout_secs);
+        assert_eq!(sealed_refusals(), 1);
+
+        update_idle_timeout("vm-sealed-timeout", 5).expect_err("refused at the agent sender too");
+        assert_eq!(sealed_refusals(), 2);
+    }
+
+    #[test]
+    fn a_sealed_session_can_still_be_killed_and_reaped() {
+        let _home = isolated();
+        let plan = |vm: &str| {
+            mvm_core::plan::test_support::PlanFixture::new()
+                .workload(vm)
+                .build()
+        };
+        mvm_hostd::seal_gate::test_support::seal_all(&[
+            ("vm-sealed-kill", plan("vm-sealed-kill"), Default::default()),
+            ("vm-sealed-reap", plan("vm-sealed-reap"), Default::default()),
+        ])
+        .expect("sealed");
+        let killed = running("vm-sealed-kill", SessionMode::Prod);
+        kill_session(killed.id.as_str()).expect("killing is not gated");
+        assert_eq!(
+            session_info(killed.id.as_str()).expect("read").state,
+            SessionState::Killed
+        );
+
+        let mut stale = SessionRecord::new_running("vm-sealed-reap", "wl", SessionMode::Prod);
+        stale.idle_timeout_secs = 60;
+        stale.started_at = (chrono::Utc::now() - chrono::Duration::seconds(900))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        session::write_session(&stale).expect("write");
+        assert_eq!(reap_expired_sessions(), vec![stale.id.clone()]);
+        assert_eq!(sealed_refusals(), 0);
     }
 }

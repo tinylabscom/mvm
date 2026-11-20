@@ -30,9 +30,10 @@ let
   # A musl stdenv rebuilds the Rust/LLVM toolchain and its bootstrap closure
   # from source on the image builders. The shims are pure Rust, so use the
   # same lightweight prebuilt Rust + musl-std wrapper as the SDK cdylib.
-  muslToolchain = pkgs.callPackage ./embedded-rust-toolchain.nix {
-    target = muslTarget;
-  };
+  rustPlatform = (import ./rust-platform.nix {
+    inherit pkgs mvmSrc;
+    target = if isMusl then muslTarget else pkgs.stdenv.hostPlatform.rust.rustcTarget;
+  }).rustPlatform;
 
   # Only the linker needs to come from pkgsMusl. This wrapper is cached and
   # makes the resulting shared object depend on musl's libc.so, not glibc.
@@ -50,7 +51,7 @@ let
       # where a soname on an executable is inert.
       sonameFlag = "-C link-arg=-Wl,-soname,${soname}";
     in
-    pkgs.rustPlatform.buildRustPackage ({
+    rustPlatform.buildRustPackage ({
       pname = "mvm-gpu-shim-${libName}";
       version = "0.18.0";
 
@@ -116,7 +117,6 @@ let
         platforms = platforms.linux;
       };
     } // (if isMusl then {
-      nativeBuildInputs = [ muslToolchain ];
       CARGO_BUILD_TARGET = muslTarget;
       # A cdylib must stay dynamically linked to the matching guest libc.
       RUSTFLAGS = "-C target-feature=-crt-static -C linker=${muslLinker} ${sonameFlag}";

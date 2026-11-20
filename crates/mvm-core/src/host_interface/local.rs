@@ -36,7 +36,7 @@ impl LocalHostInterface {
             assurance,
             enforcement_ready: true,
             now,
-            state: Mutex::new((NodeState::Active, ExecutionEpoch(1))),
+            state: Mutex::new((NodeState::Active, ExecutionEpoch::FIRST)),
         }
     }
 
@@ -51,11 +51,13 @@ impl LocalHostInterface {
         self
     }
 
-    /// Issue the epoch a replacement workload must carry.
-    pub fn advance_epoch(&self) -> ExecutionEpoch {
+    /// Issue the epoch a replacement workload must carry; refused at the maximum.
+    pub fn advance_epoch(&self) -> Result<ExecutionEpoch, Denial> {
         let mut g = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        g.1 = g.1.next();
-        g.1
+        g.1 =
+            g.1.checked_next()
+                .ok_or(Denial::EpochExhausted(g.1.get()))?;
+        Ok(g.1)
     }
 
     pub fn current_epoch(&self) -> ExecutionEpoch {
@@ -91,10 +93,10 @@ impl HostInterface for LocalHostInterface {
                 if state != NodeState::Active {
                     return Err(Denial::NodeNotActive(state.label()));
                 }
-                if !req.epoch.is_current(epoch) {
+                if req.epoch != epoch {
                     return Err(Denial::StaleEpoch {
-                        got: req.epoch.0,
-                        current: epoch.0,
+                        got: req.epoch.get(),
+                        current: epoch.get(),
                     });
                 }
                 Ok(())

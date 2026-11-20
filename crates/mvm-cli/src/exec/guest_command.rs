@@ -100,7 +100,16 @@ pub fn transient_run_dev_console(pty: bool, image_sealed: bool) -> bool {
 /// `hvf.pid` / `console.log` here regardless, so a plain OCI launch created
 /// the dir and must clean it up too. Best-effort — teardown must
 /// never fail on a cleanup error.
+///
+/// A state dir too deep for a Unix socket path keeps its sockets in a short
+/// directory of its own under `/tmp`; that directory goes too, or every such
+/// run leaves one behind.
 pub(crate) fn remove_transient_state_dir(staging_dir: &str) {
+    if let Err(e) =
+        mvm_runtime::vm::reconcile::remove_fallback_socket_dir(std::path::Path::new(staging_dir))
+    {
+        tracing::debug!(error = %e, dir = staging_dir, "transient socket dir cleanup failed");
+    }
     match std::fs::remove_dir_all(staging_dir) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -638,6 +647,25 @@ mod tests {
         remove_transient_state_dir(&dir.to_string_lossy());
 
         assert!(!dir.exists(), "the host state dir must be removed");
+    }
+
+    #[test]
+    fn remove_transient_state_dir_removes_a_fallback_socket_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("d".repeat(120)).join("vms").join("deep-vm");
+        std::fs::create_dir_all(&dir).expect("create state dir");
+        let socket_dir = mvm_core::config::vm_socket_dir_at(&dir);
+        assert_ne!(socket_dir, dir, "the fixture must keep its sockets apart");
+        mvm_core::config::secure_fallback_socket_dir_at(&dir).expect("create socket dir");
+        std::fs::write(socket_dir.join("fc.socket"), b"").expect("write socket stand-in");
+
+        remove_transient_state_dir(&dir.to_string_lossy());
+
+        assert!(!dir.exists(), "the host state dir must be removed");
+        assert!(
+            !socket_dir.exists(),
+            "the fallback socket dir must be removed"
+        );
     }
 
     #[test]

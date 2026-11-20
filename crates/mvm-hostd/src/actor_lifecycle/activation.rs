@@ -3,13 +3,13 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use mvm_contract::plan::ExecutionPlan;
+use mvm_contract::protocol::mailbox::ExecutionEpoch;
 use mvm_contract::protocol::workload_actor::{
     LifecycleGrant, LifecycleOperation, ParentIdentity, WorkflowRole,
 };
-use mvm_core::host_interface::ExecutionEpoch;
-use mvm_core::host_interface::workload::WorkloadLedger;
+use mvm_core::host_interface::epoch_gate::CommandGate;
 use mvm_core::net::actor_session::ActorSessionBinding;
 use mvm_core::util::atomic_io::{FileLock, write_private};
 use mvm_runtime::actor_teardown::ActorOwner;
@@ -168,10 +168,10 @@ impl ParentActivation {
                 && now_unix_ms < self.plan.valid_until.timestamp_millis(),
             "controller plan expired"
         );
-        WorkloadLedger::load_at(Path::new(&mvm_core::config::mvm_home()))?.authorize(
-            &self.plan.workload.0,
-            ExecutionEpoch(self.plan.execution_epoch),
-        )?;
+        let epoch = ExecutionEpoch::new(self.plan.execution_epoch)
+            .context("controller plan carries a zero execution epoch")?;
+        CommandGate::load_at(Path::new(&mvm_core::config::mvm_home()))?
+            .admit(&self.plan.workload.0, epoch)?;
         Ok(())
     }
 }
@@ -181,7 +181,7 @@ mod tests {
     use std::num::NonZeroU64;
 
     use mvm_contract::assurance::Sha256Digest;
-    use mvm_contract::protocol::mailbox::{BootId, ExecutionEpoch as MailboxEpoch};
+    use mvm_contract::protocol::mailbox::BootId;
     use mvm_contract::protocol::resource_controls::EnforcedGrants;
     use mvm_contract::protocol::workload_actor::{
         ActorBindingId, ActorProtocolVersion, ControllerIdentity, DelegationDepth, TemplateBinding,
@@ -201,7 +201,7 @@ mod tests {
         let controller = ControllerIdentity {
             tenant: plan.tenant.clone(),
             workload: plan.workload.clone(),
-            execution_epoch: MailboxEpoch::new(1).unwrap(),
+            execution_epoch: ExecutionEpoch::new(1).unwrap(),
             boot_id: BootId::from_bytes([u8::try_from(generation).unwrap(); 32]),
             generation: NonZeroU64::new(generation).unwrap(),
         };
@@ -299,5 +299,34 @@ mod tests {
                 .check_current_record(LifecycleOperation::ReleaseChild, now)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn replacing_the_unit_in_the_durable_record_fences_the_activation() {
+        use mvm_core::host_interface::workload::WorkloadChange;
+        let home = tempfile::tempdir().unwrap();
+        let mut environment = mvm_core::util::test_env::TestEnv::new();
+        environment.isolate_mvm_home(home.path());
+        let backend = AnyBackend::from_hypervisor("mock");
+        let (machine, binding) = started(&backend, 1);
+        let active =
+            ParentActivation::activate(&machine, binding, &home.path().join("active")).unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        assert!(
+            active
+                .check_current_record(LifecycleOperation::Launch, now)
+                .is_ok()
+        );
+        crate::policy_generation::workload_store::OwnedWorkloadStore::open(home.path())
+            .unwrap()
+            .commit(&WorkloadChange::Replace {
+                workload: machine.admitted.plan().workload.0.clone(),
+                from_epoch: ExecutionEpoch::FIRST,
+            })
+            .unwrap();
+        let err = active
+            .check_current_record(LifecycleOperation::Launch, now)
+            .expect_err("the replaced epoch is fenced");
+        assert!(err.to_string().contains("stale execution epoch"), "{err}");
     }
 }

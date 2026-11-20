@@ -21,6 +21,7 @@ mod store;
 pub(crate) use store::GenerationStore;
 pub mod coordinator;
 pub mod managed;
+pub mod workload_store;
 
 const SCHEMA_VERSION: u32 = 1;
 const MAX_MANIFEST_BYTES: usize = 64 * 1024;

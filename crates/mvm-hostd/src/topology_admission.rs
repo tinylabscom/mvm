@@ -5,7 +5,8 @@
 //! against the signers a plan may carry (the host's own key and the operator's
 //! pinned plan signers), the tenant, the validity window against the caller's
 //! clock, the generation against the last one admitted for the tenant, the
-//! backend's enforcement of every stated requirement, and the host budget over
+//! backend's enforcement of every stated requirement, the host's cores against
+//! every exclusive placement, and the host budget over
 //! the sum of the units. Only then is the generation sealed into a record and
 //! `topology.admitted` written to the tenant's chain.
 //!
@@ -36,7 +37,11 @@ use mvm_core::time::Clock;
 use crate::audit::emitter::AuditEmitter;
 use crate::audit::host_keypair::host_signer_id;
 
+pub(crate) mod placement;
 mod record;
+pub use placement::{
+    HostCpus, HostPlacementRefusal, LiveMachine, PlacementOwner, exclusive_cores_held_on_host,
+};
 pub use record::AdmittedTopologyRecord;
 
 /// Chain event for an admitted topology generation.
@@ -109,6 +114,10 @@ pub struct TopologyAdmissionRequest<'a> {
     pub backend: BackendKind,
     /// The failover time measured on this host and backend, if any.
     pub measured_failover: Option<MeasuredFailoverMs>,
+    /// This host's cores and whether its spawn scope can carry an
+    /// allowed-CPU set, its isolated cores and its running machines;
+    /// [`HostCpus::probe`] outside tests.
+    pub host_cpus: &'a HostCpus,
     pub clock: &'a dyn Clock,
     /// Where the host signer lives; `None` for the default keys directory.
     pub host_signer_keys_dir: Option<&'a Path>,
@@ -152,6 +161,41 @@ pub fn sign_topology_as_host(
 ) -> Result<SignedTopology> {
     let host = load_host_signer(host_signer_keys_dir)?;
     sign_topology(topology, &host.signing, &host_signer_id()).context("signing the topology")
+}
+
+/// The highest generation admitted for `tenant` under `home`, verified again
+/// against the trusted signers, or `None` when none has been admitted.
+///
+/// # Errors
+///
+/// A tenant that is not one path component, whose topology store cannot be
+/// named; a record that cannot be read, does not verify, or whose digest is
+/// not the one it was sealed with.
+pub(crate) fn last_admitted_topology(
+    home: &Path,
+    tenant: &TenantId,
+    host_signer_keys_dir: Option<&Path>,
+) -> Result<Option<Topology>> {
+    crate::audit::prune_pins::validate_tenant(&tenant.0).with_context(|| {
+        format!(
+            "tenant {:?} is not a single path component, so no topology store can be named",
+            tenant.0
+        )
+    })?;
+    let Some(last) = record::last_admitted(home, &tenant.0)? else {
+        return Ok(None);
+    };
+    let trusted = trusted_topology_signers(host_signer_keys_dir)?;
+    let trusted_refs: Vec<(&str, &VerifyingKey)> =
+        trusted.iter().map(|(id, key)| (id.as_str(), key)).collect();
+    let topology = verify_topology(&last.signed, &trusted_refs)
+        .with_context(|| format!("verifying admitted topology generation {}", last.generation))?;
+    anyhow::ensure!(
+        topology.digest() == last.digest,
+        "admitted topology generation {} does not have the digest it was sealed with",
+        last.generation
+    );
+    Ok(Some(topology))
 }
 
 fn load_host_signer(dir: Option<&Path>) -> Result<crate::audit::host_keypair::HostSigner> {
@@ -246,10 +290,11 @@ fn decide(
 
     check_requirements(
         &topology,
-        ResourceControls::for_backend(request.backend),
+        ResourceControls::on_host(request.backend, request.host_cpus.scope_cpuset),
         request.measured_failover,
     )
     .map_err(|unmet| refused(RefusalStage::Requirements, unmet))?;
+    check_placement(request, &home, &topology)?;
     check_budget(&topology)?;
 
     if let Some(last) = same.then_some(last).flatten() {
@@ -340,6 +385,23 @@ fn check_generation(
             ),
         )),
     }
+}
+
+/// Refuse an exclusive core the host lacks or another tenant holds. Skipped
+/// for a topology holding no core, so an ordinary admission reads no other
+/// tenant's records.
+fn check_placement(
+    request: &TopologyAdmissionRequest<'_>,
+    home: &Path,
+    topology: &Topology,
+) -> Result<(), TopologyRefused> {
+    if placement::exclusive_cores(topology).is_empty() {
+        return Ok(());
+    }
+    let admitted = placement::admitted_topologies(home, request.host_signer_keys_dir)
+        .map_err(|e| refused(RefusalStage::Record, format_args!("{e:#}")))?;
+    placement::check_host_placement(request.tenant, topology, request.host_cpus, &admitted)
+        .map_err(|e| refused(RefusalStage::Requirements, e))
 }
 
 /// What the whole topology would charge the host if every unit ran at once.

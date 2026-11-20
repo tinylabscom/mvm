@@ -79,6 +79,11 @@ pub(crate) struct MailboxStoragePaths {
     pub(crate) journal: PathBuf,
     pub(crate) anchor: PathBuf,
     pub(crate) source_intents: PathBuf,
+    /// Signs prepared heads for the workload ledger's owner, and nothing else.
+    pub(crate) commit_key: PathBuf,
+    pub(crate) commit_key_pub: PathBuf,
+    /// The hex stem every file above shares; this destination's id in the ledger.
+    pub(crate) destination: String,
 }
 
 fn paths(keys_dir: &Path, identity: &Identity<'_>) -> Result<(PathBuf, PathBuf)> {
@@ -221,6 +226,13 @@ impl RetainedMailboxKeys {
             journal: bundle.with_extension("journal"),
             anchor: bundle.with_extension("anchor"),
             source_intents: bundle.with_extension("intents"),
+            commit_key: bundle.with_extension("commit-key"),
+            commit_key_pub: bundle.with_extension("commit-key.pub"),
+            destination: bundle
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .context("mailbox storage stem is not text")?
+                .to_owned(),
         })
     }
 

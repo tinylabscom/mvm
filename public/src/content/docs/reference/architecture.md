@@ -133,6 +133,14 @@ returned. Each idle process is stopped after 20 minutes unclaimed. The pool keep
 process per guest size and two in all, under `$MVM_HOME/fc-idle`; it is off under
 `MVM_RESIDENCY=cold` and when `MVM_FC_IDLE_POOL=0`.
 
+So a launch can leave three processes behind after `mvmctl` exits: the idle `firecracker`
+(its socket under `$MVM_HOME/fc-idle/idle-*`), and its reaper, a detached
+`sh -c … mvm-fc-idle-reaper` with a `sleep 1200` child. They are not a machine: they hold
+no guest, `machine ps` does not list them, the admission budget does not count them, and
+`machine stop`/`machine rm` leave them alone. When the sleep ends the reaper stops the
+idle process unless a launch claimed it first (a claim kills the reaper), then removes its
+directory; deleting `$MVM_HOME/fc-idle` makes the reaper stop it at that point regardless.
+
 ## Workspace Structure
 
 The workspace is organized by responsibility rather than by platform:

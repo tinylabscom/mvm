@@ -980,3 +980,82 @@ fn pending_receipt_retires_only_after_committed_terminal_retention() {
             .expect("no repeated maintenance")
     );
 }
+
+fn tip_at(cursor: u64) -> JournalTip {
+    JournalTip {
+        cursor,
+        head: [cursor as u8; 32],
+    }
+}
+
+type Calls = std::sync::Arc<Mutex<Vec<(JournalTip, JournalTip)>>>;
+
+fn recording(calls: &Calls, refuse: bool) -> FinalCommit {
+    let calls = std::sync::Arc::clone(calls);
+    Box::new(move |current, next| {
+        calls.lock().expect("calls").push((current, next));
+        if refuse {
+            Err(JournalError::Rollback)
+        } else {
+            Ok(())
+        }
+    })
+}
+
+#[test]
+fn a_refusing_final_commit_leaves_the_anchor_file_and_tip_unchanged() {
+    let fixture = Fixture::new();
+    let path = fixture.dir.path().join("anchor").join("tip");
+    let calls = Calls::default();
+    let anchor = fixture.anchor().with_final_commit(recording(&calls, true));
+    assert!(matches!(
+        anchor.advance(tip_at(1)),
+        Err(JournalError::Rollback)
+    ));
+    assert_eq!(anchor.tip(), JournalTip::genesis());
+    assert!(!path.exists());
+    drop(anchor);
+
+    let anchor = fixture.anchor().with_final_commit(recording(&calls, false));
+    anchor.advance(tip_at(1)).expect("hook then local write");
+    assert_eq!(anchor.tip(), tip_at(1));
+    assert!(path.exists());
+    assert_eq!(
+        *calls.lock().expect("calls"),
+        vec![
+            (JournalTip::genesis(), tip_at(1)),
+            (JournalTip::genesis(), tip_at(1))
+        ]
+    );
+}
+
+#[test]
+fn a_journal_poisoned_by_a_refusing_hook_reconciles_through_the_same_hook_call() {
+    let fixture = Fixture::new();
+    let path = fixture.dir.path().join("anchor").join("tip");
+    let calls = Calls::default();
+    let anchor = fixture.anchor().with_final_commit(recording(&calls, true));
+    let mut journal = fixture.open(&anchor, spacious()).expect("local journal");
+    assert!(journal.admit_local(fixture.request(), &anchor).is_err());
+    assert!(matches!(
+        journal.admit_local(fixture.request(), &anchor),
+        Err(JournalError::Uncertain)
+    ));
+    let refused = calls.lock().expect("calls").clone();
+    assert_eq!(refused.len(), 1);
+    drop(journal);
+    drop(anchor);
+    assert!(!path.exists());
+
+    let anchor = fixture.anchor().with_final_commit(recording(&calls, true));
+    assert!(fixture.open(&anchor, spacious()).is_err());
+    assert!(!path.exists(), "a refused reconcile writes nothing");
+    assert_eq!(anchor.tip(), JournalTip::genesis());
+    drop(anchor);
+
+    let anchor = fixture.anchor().with_final_commit(recording(&calls, false));
+    fixture.open(&anchor, spacious()).expect("reconcile");
+    assert_eq!(anchor.tip(), refused[0].1);
+    let all = calls.lock().expect("calls").clone();
+    assert_eq!(all.last(), refused.first());
+}

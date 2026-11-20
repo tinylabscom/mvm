@@ -140,8 +140,10 @@ pub fn factory_parent_config(
         // A factory parent is not the workload, so it is not what any grant was
         // admitted for. A child is spawned under its own admitted plan and
         // takes its bound from there; inheriting this launch's would bind a
-        // parent to a grant made for something else.
+        // parent to a grant made for something else. Core placement is the
+        // claiming child's for the same reason.
         cpu_grant: _,
+        allowed_cpus: _,
         memory_mib: _,
         ports: _,
         volumes: _,
@@ -215,6 +217,7 @@ pub fn factory_parent_config(
         canonical_kernel: None,
         cpus: u32::from(spec.vcpus),
         cpu_grant: None,
+        allowed_cpus: None,
         memory_mib: spec.mem_mib,
         initrd_path: initrd_path.clone(),
         legacy_bundle_runtime: legacy_bundle_runtime.clone(),

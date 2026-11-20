@@ -119,7 +119,8 @@ fn check_suite(suite: CryptoSuite, control: SuiteControl) -> Result<(), UnmetReq
 
 fn check_placement(unit: &Unit, control: PlacementControl) -> Result<(), UnmetRequirement> {
     match (&unit.placement, control) {
-        (CorePlacement::Floating, _) => Ok(()),
+        (CorePlacement::Floating, _)
+        | (CorePlacement::Exclusive(_), PlacementControl::SpawnScopeCpuSet) => Ok(()),
         (CorePlacement::Exclusive(_), PlacementControl::None) => {
             Err(UnmetRequirement::ExclusivePlacement {
                 unit: unit.workload.clone(),

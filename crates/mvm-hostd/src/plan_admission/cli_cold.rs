@@ -57,6 +57,12 @@ impl<C> PreparedCliCold<C> {
         self.prepared.admission.admitted.plan()
     }
 
+    /// Host cores reserved by this exact admitted launch.
+    #[must_use]
+    pub fn allowed_cpus(&self) -> Option<&mvm_contract::protocol::cpu_set::CpuSet> {
+        self.prepared.admission.admitted.allowed_cpus()
+    }
+
     /// Read-only caller continuation retained alongside launch authority.
     #[must_use]
     pub fn continuation(&self) -> &C {

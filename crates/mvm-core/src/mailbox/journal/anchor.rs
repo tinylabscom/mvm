@@ -34,6 +34,11 @@ struct AnchorRecord {
     tag: [u8; 32],
 }
 
+/// Runs before each local anchor write with `(current, next)`. An error stops
+/// the advance, so a commit another authority orders first can refuse it.
+pub type FinalCommit =
+    Box<dyn Fn(JournalTip, JournalTip) -> Result<(), JournalError> + Send + Sync>;
+
 /// A software-first, locally fsynced anchor. Keep its file outside the
 /// journal directory. It detects journal-only rollback, not simultaneous
 /// rollback of the entire trusted host and its anchor storage.
@@ -42,6 +47,7 @@ pub struct FileJournalAnchor {
     pub(super) address: MailboxAddress,
     key: Zeroizing<[u8; 32]>,
     tip: Mutex<JournalTip>,
+    final_commit: Option<FinalCommit>,
     _lock: FileLock,
 }
 
@@ -91,8 +97,16 @@ impl FileJournalAnchor {
             address,
             key: Zeroizing::new(key),
             tip: Mutex::new(tip),
+            final_commit: None,
             _lock: lock,
         })
+    }
+
+    /// Order every later advance through `commit` before it is written locally.
+    #[must_use]
+    pub fn with_final_commit(mut self, commit: FinalCommit) -> Self {
+        self.final_commit = Some(commit);
+        self
     }
 
     #[must_use]
@@ -106,6 +120,9 @@ impl FileJournalAnchor {
         let mut current = self.tip.lock().expect("mailbox anchor lock poisoned");
         if current.cursor.checked_add(1) != Some(tip.cursor) {
             return Err(JournalError::Rollback);
+        }
+        if let Some(commit) = &self.final_commit {
+            commit(*current, tip)?;
         }
         let body = AnchorBody {
             version: 1,
