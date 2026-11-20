@@ -22,6 +22,10 @@ pub enum Denial {
     NodeNotActive(&'static str),
     #[error("stale execution epoch {got}; current is {current}")]
     StaleEpoch { got: u64, current: u64 },
+    #[error("execution epoch {got} is not yet current (current is {current})")]
+    EpochNotPromoted { got: u64, current: u64 },
+    #[error("execution epoch {0} cannot advance")]
+    EpochExhausted(u64),
     #[error("invalid volume grant: {0}")]
     VolumeGrant(String),
     #[error("resource reservation failed")]

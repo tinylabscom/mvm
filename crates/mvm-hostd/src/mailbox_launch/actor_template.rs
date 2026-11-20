@@ -932,7 +932,7 @@ mod attempt_cleanup_tests {
     #[test]
     fn partial_attempt_cleanup_is_exact_and_repeatable() {
         for missing_halves in 0..=2 {
-            let (dir, owner, parent_plan, child_plan) = setup();
+            let (dir, owner, parent_plan, child_plan, _environment) = setup();
             let derived = owner.derive(&parent_plan, &child_plan).unwrap();
             let parent = read(dir.path(), &parent_plan.mailbox.unwrap())
                 .unwrap()
@@ -985,7 +985,7 @@ mod attempt_cleanup_tests {
 
     #[test]
     fn absent_attempt_cleanup_does_not_install_an_endpoint() {
-        let (dir, owner, parent, child) = setup();
+        let (dir, owner, parent, child, _environment) = setup();
         owner.reap_attempt(&parent, &child).unwrap();
         owner.reap_attempt(&parent, &child).unwrap();
         let derived = owner.derive(&parent, &child).unwrap();

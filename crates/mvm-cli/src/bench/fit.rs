@@ -6,8 +6,15 @@
 //! (vCPUs as a count) in `u128`, so the largest unit count cannot overflow.
 //!
 //! The vCPU check allows no overcommit: every declared vCPU needs a host
-//! thread.
+//! thread. A topology unit holding cores exclusively is charged those cores
+//! instead of its vCPU count, and a core shared by a standby pair once. Each
+//! exclusive core ID is then checked against the host's vCPU count, the only
+//! core information an inventory carries.
 
+use std::collections::BTreeMap;
+
+use mvm_contract::plan::topology::{CoreId, CorePlacement, Topology};
+use mvm_contract::plan::types::WorkloadId;
 use mvm_core::mvmd_iface::host_inventory::HostCapacity;
 use mvm_core::spawn_scope::VMM_MEMORY_OVERHEAD_MIB;
 
@@ -24,6 +31,66 @@ pub struct Deployment {
     pub memory_mib_per_unit: u64,
     /// Declared disk per unit; the report's measurement is used when absent.
     pub disk_mib_per_unit: Option<u64>,
+}
+
+/// What a deployment charges the host, summed over its units.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Demand {
+    pub units: u128,
+    pub vcpus: u128,
+    pub memory_mib: u128,
+    /// Declared disk for all units; the report's per-unit measurement is
+    /// used when absent.
+    pub disk_mib: Option<u128>,
+    /// Every exclusive core, once, with the first unit that holds it.
+    pub cores: BTreeMap<CoreId, WorkloadId>,
+}
+
+impl From<&Deployment> for Demand {
+    fn from(d: &Deployment) -> Self {
+        let n = u128::from(d.units);
+        Self {
+            units: n,
+            vcpus: n * u128::from(d.vcpus_per_unit),
+            memory_mib: n * u128::from(d.memory_mib_per_unit),
+            disk_mib: d.disk_mib_per_unit.map(|disk| n * u128::from(disk)),
+            cores: BTreeMap::new(),
+        }
+    }
+}
+
+impl From<&Topology> for Demand {
+    /// Sums every unit, standbys included. Structure is not checked here:
+    /// validate the topology first, or a core held by two unrelated units is
+    /// charged once as if they were a pair.
+    fn from(t: &Topology) -> Self {
+        let mut demand = Self {
+            units: t.units.len() as u128,
+            vcpus: 0,
+            memory_mib: 0,
+            disk_mib: Some(0),
+            cores: BTreeMap::new(),
+        };
+        for unit in &t.units {
+            demand.memory_mib += u128::from(unit.resources.mem_mib);
+            demand.disk_mib = demand
+                .disk_mib
+                .map(|d| d + u128::from(unit.resources.disk_mib));
+            match &unit.placement {
+                CorePlacement::Floating => demand.vcpus += u128::from(unit.resources.cpus),
+                CorePlacement::Exclusive(cores) => {
+                    for core in cores {
+                        demand
+                            .cores
+                            .entry(*core)
+                            .or_insert_with(|| unit.workload.clone());
+                    }
+                }
+            }
+        }
+        demand.vcpus += demand.cores.len() as u128;
+        demand
+    }
 }
 
 /// Where a figure used in the check came from.
@@ -50,6 +117,8 @@ pub enum Resource {
     Memory,
     Vcpu,
     Disk,
+    /// An exclusive core ID the host does not have.
+    Core,
 }
 
 /// Required vs available for one resource (MiB, or a vCPU count).
@@ -89,8 +158,12 @@ pub struct Fit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shortfall {
     pub resource: Resource,
+    /// For [`Resource::Core`], `required` is the core ID plus one and
+    /// `available` the host's vCPU count.
     pub headroom: Headroom,
     pub provenance: Provenance,
+    /// The missing core and the unit that holds it, for [`Resource::Core`].
+    pub core: Option<(CoreId, WorkloadId)>,
 }
 
 const DISK_UNKNOWN: &str = "no declared per-unit disk and the report has no measured one";
@@ -124,7 +197,20 @@ pub fn check_fit(
     host: &HostCapacity,
     section: &Section,
 ) -> Result<Fit, Shortfall> {
-    let n = u128::from(deployment.units);
+    check_demand(&Demand::from(deployment), host, section)
+}
+
+/// Check `demand` against `host`, using `section` for host costs.
+///
+/// # Errors
+/// A [`Shortfall`] naming the first of memory, vCPU, disk, exclusive core
+/// that does not fit.
+pub fn check_demand(
+    demand: &Demand,
+    host: &HostCapacity,
+    section: &Section,
+) -> Result<Fit, Shortfall> {
+    let n = demand.units;
     let running = &section.by_residency.running;
 
     let (fixed_mem, fixed_memory) = measured_mib(&section.fixed_host_cost.memory_bytes, Some(0));
@@ -135,9 +221,9 @@ pub fn check_fit(
     let (fixed_disk_mib, fixed_disk) = measured_mib(&section.fixed_host_cost.disk_bytes, Some(0));
     let (measured_unit_disk, _) = measured_mib(&running.disk_bytes, None);
 
-    let (unit_disk_mib, unit_disk) = match (deployment.disk_mib_per_unit, measured_unit_disk) {
-        (Some(d), _) => (Some(u128::from(d)), Some(Source::Declared)),
-        (None, Some(m)) => (Some(m), Some(Source::Measured)),
+    let (units_disk_mib, unit_disk) = match (demand.disk_mib, measured_unit_disk) {
+        (Some(d), _) => (Some(d), Some(Source::Declared)),
+        (None, Some(m)) => (Some(n * m), Some(Source::Measured)),
         (None, None) => (None, None),
     };
 
@@ -149,16 +235,15 @@ pub fn check_fit(
     };
 
     let memory = Headroom {
-        required: fixed_mem.unwrap_or(0)
-            + n * (u128::from(deployment.memory_mib_per_unit) + unit_over),
+        required: fixed_mem.unwrap_or(0) + demand.memory_mib + n * unit_over,
         available: u128::from(host.total_mem_mib),
     };
     let vcpu = Headroom {
-        required: n * u128::from(deployment.vcpus_per_unit),
+        required: demand.vcpus,
         available: u128::from(host.total_vcpus),
     };
-    let disk = unit_disk_mib.map(|u| Headroom {
-        required: fixed_disk_mib.unwrap_or(0) + n * u,
+    let disk = units_disk_mib.map(|u| Headroom {
+        required: fixed_disk_mib.unwrap_or(0) + u,
         available: gib_to_mib(host.total_disk_gib),
     });
 
@@ -166,6 +251,7 @@ pub fn check_fit(
         resource,
         headroom,
         provenance,
+        core: None,
     };
     if !memory.fits() {
         return Err(short(Resource::Memory, memory));
@@ -175,6 +261,18 @@ pub fn check_fit(
     }
     if let Some(d) = disk.filter(|d| !d.fits()) {
         return Err(short(Resource::Disk, d));
+    }
+    if let Some((core, unit)) = demand.cores.range(CoreId(host.total_vcpus)..).next() {
+        return Err(Shortfall {
+            core: Some((*core, unit.clone())),
+            ..short(
+                Resource::Core,
+                Headroom {
+                    required: u128::from(core.0) + 1,
+                    available: u128::from(host.total_vcpus),
+                },
+            )
+        });
     }
     Ok(Fit {
         memory,
@@ -190,9 +288,15 @@ pub fn check_fit(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::resource_report::{Figure, Section, WakeupQuantity};
     use super::*;
+    use mvm_contract::assurance::Sha256Digest;
+    use mvm_contract::plan::topology::{
+        CryptoSuite, SealedTransitions, StandbyClass, StandbyPair, TOPOLOGY_SCHEMA_VERSION, Unit,
+        UnitResources, UnitRole,
+    };
+    use mvm_contract::plan::types::TenantId;
 
     fn section(
         fixed_mem: Figure<u64>,
@@ -392,5 +496,146 @@ mod tests {
         .unwrap_err();
         assert_eq!(e.resource, Resource::Memory);
         assert!(e.headroom.required > e.headroom.available);
+    }
+
+    #[test]
+    fn mixed_unit_sizes_are_summed() {
+        let t = topology(
+            vec![
+                unit("a", 2, 1024, 100, &[]),
+                unit("b", 1, 256, 50, &[]),
+                unit("c", 4, 512, 10, &[]),
+            ],
+            vec![],
+        );
+        let fit = check_demand(&Demand::from(&t), &host(8, 100_000, 10), &unmeasured()).unwrap();
+        assert_eq!(
+            fit.memory.required,
+            1024 + 256 + 512 + 3 * u128::from(VMM_MEMORY_OVERHEAD_MIB)
+        );
+        assert_eq!(fit.vcpu.required, 7);
+        assert_eq!(
+            fit.disk,
+            DiskCheck::Checked(Headroom {
+                required: 160,
+                available: 10240
+            })
+        );
+        assert_eq!(fit.provenance.unit_disk, Some(Source::Declared));
+    }
+
+    #[test]
+    fn identical_topology_units_match_the_n_unit_path() {
+        let t = topology(
+            (0..5)
+                .map(|i| unit(&format!("w{i}"), 2, 512, 100, &[]))
+                .collect(),
+            vec![],
+        );
+        let h = host(16, 8192, 10);
+        let s = section(
+            Figure::measured(100 * BYTES_PER_MIB),
+            Figure::default(),
+            Figure::measured(30 * BYTES_PER_MIB),
+            Figure::default(),
+        );
+        assert_eq!(
+            check_demand(&Demand::from(&t), &h, &s),
+            check_fit(&dep(5, 2, 512, Some(100)), &h, &s)
+        );
+        // And when they do not fit, the same shortfall.
+        let small = host(9, 8192, 10);
+        assert_eq!(
+            check_demand(&Demand::from(&t), &small, &s),
+            check_fit(&dep(5, 2, 512, Some(100)), &small, &s)
+        );
+    }
+
+    #[test]
+    fn a_missing_exclusive_core_is_named_with_its_unit() {
+        let t = topology(
+            vec![unit("a", 1, 256, 1, &[1]), unit("b", 1, 256, 1, &[6, 9])],
+            vec![],
+        );
+        let e = check_demand(&Demand::from(&t), &host(8, 100_000, 10), &unmeasured()).unwrap_err();
+        assert_eq!(e.resource, Resource::Core);
+        assert_eq!(e.core, Some((CoreId(9), WorkloadId("b".to_string()))));
+        assert_eq!(
+            e.headroom,
+            Headroom {
+                required: 10,
+                available: 8
+            }
+        );
+    }
+
+    #[test]
+    fn a_standby_pair_sharing_cores_is_charged_them_once() {
+        let t = topology(
+            vec![
+                unit("a", 2, 256, 1, &[2, 3]),
+                unit("a-standby", 2, 256, 1, &[2, 3]),
+                unit("w", 1, 256, 1, &[]),
+            ],
+            vec![StandbyPair {
+                active: WorkloadId("a".to_string()),
+                standby: WorkloadId("a-standby".to_string()),
+                class: StandbyClass::None,
+                recovery_bound_ms: None,
+            }],
+        );
+        t.validate().unwrap();
+        let demand = Demand::from(&t);
+        assert_eq!(demand.vcpus, 3);
+        assert_eq!(demand.cores.len(), 2);
+        assert_eq!(demand.cores[&CoreId(2)], WorkloadId("a".to_string()));
+        assert_eq!(
+            check_demand(&demand, &host(4, 100_000, 10), &unmeasured())
+                .unwrap()
+                .vcpu,
+            Headroom {
+                required: 3,
+                available: 4
+            }
+        );
+    }
+
+    pub(crate) fn unit(name: &str, cpus: u32, mem_mib: u64, disk_mib: u64, cores: &[u32]) -> Unit {
+        Unit {
+            workload: WorkloadId(name.to_string()),
+            role: UnitRole::Worker,
+            recipe: Sha256Digest::from_bytes(&[1; 32]),
+            resources: UnitResources {
+                cpus,
+                mem_mib,
+                disk_mib,
+            },
+            placement: if cores.is_empty() {
+                CorePlacement::Floating
+            } else {
+                CorePlacement::Exclusive(cores.iter().copied().map(CoreId).collect())
+            },
+            min_isolation: None,
+            permits: SealedTransitions::default(),
+            liveness_period_ms: None,
+            require_isolated_cores: false,
+        }
+    }
+
+    pub(crate) fn topology(units: Vec<Unit>, standby_pairs: Vec<StandbyPair>) -> Topology {
+        use chrono::TimeZone;
+        Topology {
+            schema_version: TOPOLOGY_SCHEMA_VERSION,
+            tenant: TenantId("t".to_string()),
+            generation: 1,
+            valid_from: chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            valid_until: chrono::Utc.with_ymd_and_hms(2027, 1, 1, 0, 0, 0).unwrap(),
+            suite: CryptoSuite::CLASSICAL,
+            units,
+            standby_pairs,
+            cells: vec![],
+            edges: vec![],
+            succession: vec![],
+        }
     }
 }

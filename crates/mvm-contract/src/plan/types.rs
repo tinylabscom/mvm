@@ -999,7 +999,7 @@ impl CallerCommitment {
             return Err(CallerCommitmentParseError::WrongLength { len: value.len() });
         }
         let mut bytes = [0u8; 32];
-        for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             let high = caller_commitment_nibble(pair[0])?;
             let low = caller_commitment_nibble(pair[1])?;
             bytes[index] = (high << 4) | low;

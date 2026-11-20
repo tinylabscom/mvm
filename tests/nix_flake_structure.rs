@@ -180,9 +180,7 @@ fn mvm_setpriv_imports_pass_pkgs_to_the_static_crates_helper() {
             .expect("mk-guest.nix must be readable"),
     );
     assert!(
-        mk_guest.contains(
-            "import ../packages/mvm-setpriv.nix { inherit pkgs; rustPlatform = pkgs.pkgsStatic.rustPlatform;"
-        ),
+        mk_guest.contains("import ../packages/mvm-setpriv.nix { inherit pkgs;"),
         "the workload guest must pass pkgs into mvm-setpriv.nix"
     );
 
@@ -191,10 +189,15 @@ fn mvm_setpriv_imports_pass_pkgs_to_the_static_crates_helper() {
             .expect("nix/packages/guest.nix must be readable"),
     );
     assert!(
-        guest_recipes.contains(
-            "mvm-setpriv = import ./mvm-setpriv.nix { inherit pkgs lib mvmSrc; rustPlatform = staticPkgs.rustPlatform;"
-        ),
+        guest_recipes.contains("mvm-setpriv = import ./mvm-setpriv.nix { inherit pkgs lib mvmSrc;"),
         "the exported setpriv recipe must pass pkgs into mvm-setpriv.nix"
+    );
+    let setpriv = normalized_whitespace(
+        &fs::read_to_string(nix_dir().join("packages").join("mvm-setpriv.nix")).unwrap(),
+    );
+    assert!(
+        setpriv.contains("import ./rust-platform.nix { pkgs = pkgs.pkgsStatic; inherit mvmSrc;"),
+        "setpriv must retain the static target platform while selecting the pinned compiler"
     );
 }
 
@@ -571,22 +574,24 @@ fn embedded_rust_toolchain_pins_musl_std_components() {
         serde_json::from_str(&fs::read_to_string(nix_dir().join("flake.lock")).unwrap()).unwrap();
     let root_lock: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(repo_dir().join("flake.lock")).unwrap()).unwrap();
+    let supplier =
+        fs::read_to_string(nix_dir().join("packages").join("rust-platform.nix")).unwrap();
     assert!(
-        content.contains("version = \"1.97.1\"")
-            && content.contains("rust-bin.stable.${version}.minimal.override")
-            && content.contains("targets = [ target ];")
-            && flake.contains("rust-overlay ? null,")
-            && flake
-                .matches(".extend rust-overlay.overlays.default")
-                .count()
-                == 3
+        content.contains("import ./rust-platform.nix { inherit pkgs mvmSrc target; }")
+            && supplier.contains("rust-bin.stable.${version}.minimal.override")
+            && supplier.contains("targets = [ target ];")
+            && supplier.contains("sha256 = lock.narHash;")
+            && !flake.contains(".extend rust-overlay.overlays.default")
             && lock["nodes"]["rust-overlay"] == root_lock["nodes"]["rust-overlay"]
             && lock["nodes"]["root"]["inputs"]["rust-overlay"] == "rust-overlay",
         "embedded Rust toolchain must use the locked Rust overlay with the matching musl target"
     );
-    for package in ["default.nix", "mvm-gpu-shims.nix", "mvm-sdk-cdylib.nix"] {
+    let packages = fs::read_to_string(nix_dir().join("packages").join("default.nix")).unwrap();
+    assert!(packages.contains("./embedded-rust-toolchain.nix"));
+    for package in ["mvm-gpu-shims.nix", "mvm-sdk-cdylib.nix"] {
         let package = fs::read_to_string(nix_dir().join("packages").join(package)).unwrap();
-        assert!(package.contains("./embedded-rust-toolchain.nix"));
+        assert!(package.contains("./rust-platform.nix"));
+        assert!(package.contains("target = if isMusl then muslTarget else"));
     }
 }
 
@@ -1092,7 +1097,9 @@ fn guest_runtime_recipes_are_static_musl() {
     let runner = fs::read_to_string(nix_dir().join("packages").join("mvm-runner.nix"))
         .expect("read nix/packages/mvm-runner.nix");
     assert!(
-        runner.contains("pkgs.pkgsStatic.rustPlatform.buildRustPackage"),
+        normalized_whitespace(&runner)
+            .contains("import ./rust-platform.nix { pkgs = pkgs.pkgsStatic; inherit mvmSrc;")
+            && runner.contains("rustPlatform.buildRustPackage"),
         "the runner must use the static-musl Rust platform too"
     );
 }
@@ -1113,7 +1120,7 @@ fn gpu_shim_musl_build_uses_the_prebuilt_target_toolchain() {
         fs::read_to_string("nix/packages/mvm-gpu-shims.nix").expect("read GPU shim package");
 
     assert!(
-        content.contains("./embedded-rust-toolchain.nix")
+        content.contains("./rust-platform.nix")
             && content.contains("CARGO_BUILD_TARGET = muslTarget;")
             && content.contains("target-feature=-crt-static")
             && content.contains("linker=${muslLinker}"),
@@ -1296,9 +1303,13 @@ fn mk_guest_uses_the_static_custom_privilege_helper() {
     let content =
         fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
 
+    let setpriv = normalized_whitespace(
+        &fs::read_to_string(nix_dir().join("packages/mvm-setpriv.nix")).unwrap(),
+    );
     assert!(
         content.contains("import ../packages/mvm-setpriv.nix")
-            && content.contains("rustPlatform = pkgs.pkgsStatic.rustPlatform"),
+            && setpriv
+                .contains("import ./rust-platform.nix { pkgs = pkgs.pkgsStatic; inherit mvmSrc;"),
         "mkGuest must build the privilege helper through the static package set"
     );
     assert!(

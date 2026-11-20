@@ -798,7 +798,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     mod over_a_real_socket {
         use std::cell::Cell;
-        use std::sync::Arc;
 
         use mvm_core::spawn_scope::UserManagerGap;
         use mvm_core::util::test_env::TestEnv;
@@ -827,10 +826,15 @@ mod tests {
             let identity =
                 ManagedIdentity::for_home(rustix::process::geteuid().as_raw(), &home).unwrap();
             let status = CoordinatorStatus::of_this_process(&home, lifetime(&identity));
-            let (listener, store, owner) = bind(&home).unwrap();
+            let bound = bind(&home).unwrap();
             std::thread::spawn(move || {
-                let _owner = owner;
-                serve_on(&listener, &Arc::clone(&store), &status)
+                let _owner = bound.owner;
+                serve_on(
+                    &bound.listener,
+                    &bound.generations,
+                    &bound.workloads,
+                    &status,
+                )
             });
             Service {
                 _environment: environment,

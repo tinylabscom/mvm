@@ -12,6 +12,11 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+toolchain="$(sed -n 's/^channel = "\([^"]*\)"$/\1/p' "$repo_root/rust-toolchain.toml")"
+[[ "$toolchain" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+    echo "Missing exact Rust toolchain pin" >&2
+    exit 1
+}
 container_name="mvm-aarch64-smoke-$(date +%s)"
 
 if ! docker info >/dev/null 2>&1; then
@@ -33,7 +38,7 @@ docker run -d --rm --platform linux/arm64 \
     ubuntu:24.04 \
     tail -f /dev/null >/dev/null
 
-docker exec -it "$container_name" bash -c '
+docker exec -it -e RUSTUP_TOOLCHAIN="$toolchain" "$container_name" bash -c '
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
@@ -43,11 +48,11 @@ apt-get install -y -qq \
     curl git build-essential pkg-config \
     qemu-system-arm ipxe-qemu virtiofsd e2fsprogs attr jq
 
-echo "Installing Rust nightly + musl targets ..."
+echo "Installing Rust $RUSTUP_TOOLCHAIN + musl targets ..."
 curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain nightly >/dev/null
+    | sh -s -- -y --default-toolchain "$RUSTUP_TOOLCHAIN" >/dev/null
 source "$HOME/.cargo/env"
-rustup target add aarch64-unknown-linux-musl
+rustup target add aarch64-unknown-linux-musl --toolchain "$RUSTUP_TOOLCHAIN"
 
 echo "Installing cargo-zigbuild ..."
 cargo install cargo-zigbuild --version 0.23.0 --locked

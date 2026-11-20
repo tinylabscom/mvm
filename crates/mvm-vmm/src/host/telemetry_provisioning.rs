@@ -25,7 +25,7 @@ pub const DEFAULT_RECORDS_BYTE_CAP: u64 = 8 * 1024 * 1024;
 /// under the key this file wraps.
 pub const TELEMETRY_RECORDS_KEY_FILE: &str = "telemetry-records.key";
 /// Marker written only after this boot's telemetry-capable endpoint spawned.
-const TELEMETRY_PROVISIONED_FILE: &str = "telemetry-provisioned";
+pub const TELEMETRY_PROVISIONED_FILE: &str = "telemetry-provisioned";
 
 /// The variable that turns collection off for every boot this host starts.
 pub const ENV_TELEMETRY_COLLECT: &str = "MVM_TELEMETRY_COLLECT";

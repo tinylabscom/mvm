@@ -579,6 +579,31 @@ fn runtime_proof_rejection_precedes_every_backend_spawn() {
     }
 }
 
+/// The stop a quarantine uses never touches the guest: nothing is resumed or
+/// asked to flush, yet the VMM is still terminated.
+#[test]
+fn a_stop_without_the_guest_never_prepares_it() {
+    let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let mut env = TestEnv::new();
+    env.set("MVM_HOME", home.path());
+    let runner = WorkloadRunner::new(
+        MockDriver::default(),
+        RecordingSpawner::new("/run/ep.sock"),
+        RecordingBrokerRegistrar::new(),
+    );
+    let quarantined = VmId("quarantined".into());
+    runner.abort_start(&quarantined).unwrap();
+    assert!(runner.driver.prepared_vms().is_empty());
+    assert_eq!(runner.driver.killed_vms(), vec![quarantined.0.clone()]);
+
+    let stopped = VmId("stopped".into());
+    runner.stop(&stopped).unwrap();
+    assert_eq!(runner.driver.prepared_vms(), vec![stopped.0]);
+}
+
 #[test]
 #[cfg(unix)]
 fn retention_diagnostics_do_not_block_stop_but_invalid_leases_do() {

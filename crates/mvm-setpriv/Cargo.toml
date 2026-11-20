@@ -6,7 +6,6 @@ edition.workspace = true
 description = "guest privilege-drop and exec helper, and the descriptor hygiene it applies before exec"
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 authors.workspace = true
 
 # Small static-musl privilege-drop helper used by the Nix-built guest init.
@@ -21,7 +20,7 @@ path = "src/main.rs"
 # The library has the same name; documenting both would write one path twice.
 doc = false
 
-[dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
 
 [lints]

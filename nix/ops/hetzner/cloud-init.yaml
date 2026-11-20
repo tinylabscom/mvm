@@ -156,7 +156,7 @@ runcmd:
   # it as a non-root user sidesteps the question entirely).
   - |
     if ! sudo -u mvm test -x /home/mvm/.cargo/bin/cargo; then
-      sudo -u mvm bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal'
+      sudo -u mvm bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.100.0 --profile minimal'
       sudo -u mvm bash -c 'source $HOME/.cargo/env && rustup component add clippy rustfmt'
       sudo -u mvm bash -c 'source $HOME/.cargo/env && rustup install nightly'
     fi

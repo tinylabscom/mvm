@@ -81,7 +81,7 @@ fn capped_reader<R: Read + Send + 'static>(
     })
 }
 
-/// Run `cmd` with null stdin and piped, capped output.
+/// Run `cmd` with null stdin and capped output; zero-cap streams go to null.
 ///
 /// # Errors
 ///
@@ -90,8 +90,16 @@ fn capped_reader<R: Read + Send + 'static>(
 pub fn run_bounded(mut cmd: Command, bounds: RunBounds) -> Result<BoundedOutput, BoundedRunError> {
     let mut child = cmd
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(if bounds.max_stdout == 0 {
+            Stdio::null()
+        } else {
+            Stdio::piped()
+        })
+        .stderr(if bounds.max_stderr == 0 {
+            Stdio::null()
+        } else {
+            Stdio::piped()
+        })
         .spawn()
         .map_err(BoundedRunError::Spawn)?;
     let stdout = child
@@ -200,6 +208,19 @@ mod tests {
         let path = dir.path().join("tool.sh");
         write_executable_script(&path, body);
         crate::env_hygiene::helper_command(path)
+    }
+
+    #[test]
+    fn zero_capture_discards_output_without_pipe_readers() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = run_bounded(
+            script(&dir, "printf private-output; printf private-error >&2"),
+            RunBounds::new(Duration::from_secs(10), 0),
+        )
+        .unwrap();
+        assert!(out.status.success());
+        assert!(out.stdout.is_empty());
+        assert!(out.stderr.is_empty());
     }
 
     #[test]

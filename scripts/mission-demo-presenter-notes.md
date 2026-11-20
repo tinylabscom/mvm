@@ -4,6 +4,20 @@
 networking segment and the three statements to make about networking and
 post-quantum cryptography.
 
+## Flow
+
+In the networked world, mvm operates in two different modes, the online and offline mode. I'm going to focus on the offline mode for this deep dive, but will mention the differences in an online scenario at the end.
+
+Let's say we have a ship, a ground vehicle, and an aircraft. When we do an airgapped installation for these three guests, they share an epoch, a timestamp, and a secret. When we launch a microvm, we also run a tiny process called the host interface. This process handles all the policy enforcement which enables us to deploy to IoT devices along with other hosts. It runs only in memory.
+
+In the normal case, they send each other heartbeats to confirm they stay connected and are aware of th other nodes in the network. As each node is running their processes, they share that across the network in a compressed and deduplicated way using a technolog called UOR, an adjacent project I've helped author.
+
+In the case where there's a natural network split, for example if the cloud cover is heavy and the ground vehicle cannot link with the satellite, the ground vehicle won't be sending any heartbeats back across the network. In this case, the host interface kicks off it's retry mechanism which will retry using an exponential backoff attempts. If the configurable number of reconnect attempts fail, the network will consider the node offline. If configured, the host interface can start up a new microvm using the same exact signed microvm and continue processing when the network reconnects. By default, it shuts down.
+
+In the case where the ground vehicle is captured by an enemy and we detect malicious intrusion, we shut down the host interface, which will zeroize out the memory rendering the data unencryptable. Thus the enemy just sees junk bytes.
+
+In the online world, the host interface is configured to send data updates back to the control center.
+
 ## The optional networking segment
 
 ```sh

@@ -206,8 +206,8 @@ fn every_transition_binding_component_is_checked() {
             1 => binding.workload_id = "other".into(),
             2 => binding.request.operation += 1,
             3 => binding.request.original.instance = [11; 16],
-            4 => binding.request.original.epoch = ExecutionEpoch(3),
-            5 => binding.request.proposed_epoch = ExecutionEpoch(6),
+            4 => binding.request.original.epoch = ExecutionEpoch::new(3).unwrap(),
+            5 => binding.request.proposed_epoch = ExecutionEpoch::new(6).unwrap(),
             6 => binding.request.replacement_instance = [11; 16],
             7 => binding.restart_debit = 2,
             8 => binding.original_lease_expiry += 1,
@@ -228,14 +228,13 @@ fn every_transition_binding_component_is_checked() {
 #[test]
 fn impossible_history_and_reissued_companion_cannot_reset_existing_budget() {
     let f = Fixture::new();
-    for component in 0..5 {
+    for component in 0..4 {
         let mut history = f.history();
         match component {
             0 => history.authority_id = [0; 32],
-            1 => history.original.epoch = ExecutionEpoch(0),
-            2 => history.epoch_high_water = ExecutionEpoch(3),
-            3 => history.restarts_spent = 3,
-            4 => history.original.instance = [0; 16],
+            1 => history.epoch_high_water = ExecutionEpoch::new(3).unwrap(),
+            2 => history.restarts_spent = 3,
+            3 => history.original.instance = [0; 16],
             _ => unreachable!(),
         }
         assert!(Recovery::new(f.verify(clock(150, 10)).unwrap(), Some(history)).is_err());
@@ -264,5 +263,5 @@ fn one_workload_never_advances_a_bystanders_epoch_or_budget() {
     assert_eq!(recovered.phase(), RecoveryPhase::Ready);
     assert_eq!(bystander.phase(), RecoveryPhase::Running);
     assert!(bystander.binding().is_none());
-    assert_eq!(b.history().original.epoch, ExecutionEpoch(4));
+    assert_eq!(b.history().original.epoch, ExecutionEpoch::new(4).unwrap());
 }

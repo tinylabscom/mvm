@@ -110,6 +110,14 @@ mod tests {
         dir
     }
 
+    /// The Firecracker stop resumes a paused guest only when this marker names
+    /// it, so the two crates must agree on its name.
+    #[cfg(unix)]
+    #[test]
+    fn the_stop_path_reads_the_marker_a_pause_writes() {
+        assert_eq!(PAUSED_MARKER, mvm_backends::driver::fc::SEALED_PAUSE_MARKER);
+    }
+
     #[test]
     fn a_live_vmm_with_no_marker_is_unaccounted() {
         assert!(is_unaccounted(live_vm().path()));

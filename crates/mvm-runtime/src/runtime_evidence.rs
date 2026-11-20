@@ -146,10 +146,15 @@ impl CheckedLaunchRuntime<'_> {
         &self,
         selection: &RuntimeArtifactSelection<'_>,
         parent: &Path,
+        shared: &Path,
     ) -> Result<VerifiedRuntimeArtifacts> {
         match self {
-            Self::Release(runtime) => Ok(runtime.snapshot_artifacts_in(selection, parent)?),
-            Self::Source(runtime) => Ok(runtime.snapshot_artifacts_in(selection, parent)?),
+            Self::Release(runtime) => {
+                Ok(runtime.snapshot_artifacts_shared_in(selection, parent, shared)?)
+            }
+            Self::Source(runtime) => {
+                Ok(runtime.snapshot_artifacts_shared_in(selection, parent, shared)?)
+            }
             Self::LegacyBundle(_) | Self::LegacyPortable(_) => {
                 bail!("a legacy runtime has no CLI runtime assembly")
             }
@@ -855,6 +860,10 @@ fn runtime_selection(
     })
 }
 
+/// Directory under the runtime-evidence root holding artifact bytes shared by
+/// content. The underscore keeps it outside the VM-name space.
+pub const SHARED_CONTENT_DIR: &str = "shared_content";
+
 /// A narrow lock distinct from the outer instance restore lock. Its directory
 /// is outside VM state, so PID-based orphan reconciliation cannot erase bytes.
 pub(crate) struct RuntimeLifecycleLease {
@@ -865,6 +874,20 @@ pub(crate) struct RuntimeLifecycleLease {
 impl RuntimeLifecycleLease {
     pub(crate) fn canonical_kernel_record(&self) -> PathBuf {
         self.directory.join("canonical-kernel.json")
+    }
+
+    /// Content store the generations of every VM link their artifact bytes
+    /// from, so a launch keeps a per-VM record but not a per-VM copy. Named so
+    /// no VM name can collide with it, and never deleted: it holds one copy per
+    /// distinct runtime.
+    fn shared_content(&self) -> Result<PathBuf> {
+        let root = self
+            .directory
+            .parent()
+            .context("runtime lifecycle namespace has no root")?;
+        let shared = root.join(SHARED_CONTENT_DIR);
+        private_directory(&shared)?;
+        Ok(shared)
     }
 
     fn bundle_use_record(&self) -> PathBuf {
@@ -1051,7 +1074,8 @@ impl RuntimeLifecycleLease {
             return Ok(bound);
         }
         let selection = runtime_selection(config, minimum_protocol)?;
-        let artifacts = verified.snapshot_artifacts_in(&selection, &self.directory)?;
+        let shared = self.shared_content()?;
+        let artifacts = verified.snapshot_artifacts_in(&selection, &self.directory, &shared)?;
         let mut bound = config.clone();
         if let CheckedLaunchRuntime::Release(release) = &verified {
             bound.runtime_release_proof = Some(
@@ -1061,6 +1085,7 @@ impl RuntimeLifecycleLease {
                         .as_ref()
                         .context("release proof missing")?,
                     artifacts.directory_path(),
+                    Some(&shared),
                 )?,
             );
         }
@@ -1167,6 +1192,47 @@ mod tests {
         mvm_core::private_fs::set_mode(&overlay, 0o600).unwrap();
         std::fs::write(&overlay, b"swapped").unwrap();
         assert!(verify_runtime_binding(&binding).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn launches_share_one_copy_of_the_runtime_and_still_reverify() {
+        use std::os::unix::fs::MetadataExt;
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let rootfs = home.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"fixture rootfs").unwrap();
+        let (config, _) = checked_source_runtime_fixture("fixture-vm", &rootfs).unwrap();
+
+        let bind = |name: &str| {
+            let lease = RuntimeLifecycleLease::acquire(name).unwrap();
+            let named = VmStartConfig {
+                name: name.into(),
+                ..config.clone()
+            };
+            lease.bind(&named).unwrap()
+        };
+        let first = bind("share-a");
+        let second = bind("share-b");
+        let inode =
+            |path: &Option<String>| std::fs::metadata(path.as_deref().unwrap()).unwrap().ino();
+        assert_ne!(first.runtime_overlay_path, second.runtime_overlay_path);
+        assert_eq!(
+            inode(&first.runtime_overlay_path),
+            inode(&second.runtime_overlay_path)
+        );
+        assert_eq!(inode(&first.initrd_path), inode(&second.initrd_path));
+        let shared = namespace::root(false).unwrap().join(SHARED_CONTENT_DIR);
+        assert_eq!(std::fs::read_dir(shared).unwrap().count(), 3);
+        for bound in [&first, &second] {
+            verify_runtime_for_launch(bound, MIN_GUEST_RPC_PROTOCOL_VERSION)
+                .unwrap()
+                .expect("a bound launch carries runtime evidence");
+        }
     }
 
     #[test]

@@ -94,29 +94,39 @@ fn validate_ancestors(path: &Path) -> Result<()> {
         if !metadata.file_type().is_dir() {
             bail!("runtime namespace ancestor is not a real directory");
         }
-        validate_ancestor_permissions(&metadata)?;
+        validate_ancestor_permissions(ancestor, &metadata)?;
     }
     Ok(())
 }
 
 #[cfg(unix)]
-fn validate_ancestor_permissions(metadata: &Metadata) -> Result<()> {
+fn validate_ancestor_permissions(path: &Path, metadata: &Metadata) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     // SAFETY: geteuid has no arguments or memory preconditions.
     let uid = unsafe { libc::geteuid() };
     if metadata.uid() != 0 && metadata.uid() != uid {
-        bail!("runtime namespace ancestor is owned by another uid");
+        bail!(
+            "runtime namespace ancestor {} is owned by uid {}, not by you or root; \
+             move MVM_HOME below directories you or root own",
+            path.display(),
+            metadata.uid()
+        );
     }
     // In a root/owner-controlled sticky directory, another uid cannot rename
     // the next root/owner-owned entry. Every next component is checked too.
-    if metadata.mode() & 0o022 != 0 && metadata.mode() & 0o1000 == 0 {
-        bail!("runtime namespace ancestor is writable by another uid");
+    let mode = metadata.mode() & 0o7777;
+    if mode & 0o022 != 0 && mode & 0o1000 == 0 {
+        bail!(
+            "runtime namespace ancestor {path} has mode {mode:04o}, writable by \
+             group or others; it must not be (for example `chmod go-w {path}`)",
+            path = path.display()
+        );
     }
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn validate_ancestor_permissions(_metadata: &Metadata) -> Result<()> {
+fn validate_ancestor_permissions(_path: &Path, _metadata: &Metadata) -> Result<()> {
     bail!("runtime namespaces require Unix ownership and permission semantics")
 }
 
@@ -225,6 +235,26 @@ mod tests {
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert!(root_at(&home, true).is_err());
         assert!(!home.join("runtime-evidence").exists());
+    }
+
+    #[test]
+    fn a_group_writable_ancestor_refusal_names_the_directory_its_mode_and_the_fix() {
+        let temp = private_tempdir();
+        let parent = temp.path().join("projects");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let home = parent.join("mvm-home");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let message = root_at(&home, true).unwrap_err().to_string();
+        let shown = parent.canonicalize().unwrap().display().to_string();
+        assert!(message.contains(&shown), "{message}");
+        assert!(message.contains("0775"), "{message}");
+        assert!(
+            message.contains(&format!("chmod go-w {shown}")),
+            "{message}"
+        );
     }
 
     #[test]

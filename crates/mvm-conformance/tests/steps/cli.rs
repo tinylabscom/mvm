@@ -25,22 +25,7 @@ pub(crate) fn mvmctl_command() -> Command {
 }
 
 pub(crate) fn command_for_binary(bin_path: &Path) -> Command {
-    let mut cmd = Command::new(bin_path);
-    if let Some(bin_dir) = bin_path.parent() {
-        let mut path = bin_dir.as_os_str().to_os_string();
-        path.push(":");
-        if let Some(existing) = std::env::var_os("PATH") {
-            path.push(existing);
-        }
-        cmd.env("PATH", path);
-    }
-    // A spawned `mvmctl` that has to cold-build does so without the
-    // first-run notice, so scenarios that assert on stderr see the same
-    // output whether or not an earlier scenario warmed the cache. Scenarios
-    // that want a cold build to fail say so with `MVM_COLD_BUILD=refuse`.
-    cmd.env("MVM_COLD_BUILD", "auto");
-
-    cmd
+    mvm_conformance::command_for_binary(bin_path)
 }
 
 /// The `mvmctl` binary the suite drives — one resolution shared by the
@@ -103,8 +88,9 @@ fn run_mvmctl_isolated_home(world: &mut CliWorld, args: String) {
     // the missing-prerequisite path without depending on — or mutating — the
     // dev's real `~/.mvm`. The run is synchronous (`output()` blocks to exit)
     // and the fail-fast path spawns no VM, so the temp dir can drop right after.
-    let home = tempfile::tempdir().expect("create isolated MVM_HOME");
-    let _reaper = mvm_conformance::vmm_reaper::ReapOnDrop::new(home.path());
+    let home = mvm_conformance::vmm_reaper::ReapOnDrop::temporary(
+        tempfile::tempdir().expect("create isolated MVM_HOME"),
+    );
     let mut cmd = mvmctl_command();
     let output = cmd
         .args(mvm_conformance::doc_examples::tokenize(&args))
@@ -112,6 +98,12 @@ fn run_mvmctl_isolated_home(world: &mut CliWorld, args: String) {
         .output()
         .expect("failed to spawn mvmctl");
     world.last_run = Some(output);
+    let report = home.finish();
+    assert!(
+        report.is_clean(),
+        "isolated CLI cleanup was not confirmed:\n{}",
+        report.describe_failure()
+    );
 }
 
 /// Run against the home a prior `Given an isolated mvm home` created, so a later
@@ -171,8 +163,12 @@ fn authored_policy_group_in_scratch(world: &mut CliWorld) {
         .scratch_dir
         .as_ref()
         .expect("`Given a scratch working directory` must run before this step");
-    let policy_dir = scratch.path().join("policy");
-    fs::create_dir(&policy_dir).expect("create policy fixture directory");
+    stage_authored_policy_group(scratch.path());
+}
+
+pub(super) fn stage_authored_policy_group(dir: &std::path::Path) {
+    let policy_dir = dir.join("policy");
+    fs::create_dir_all(&policy_dir).expect("create policy fixture directory");
     fs::write(
         policy_dir.join("api-group.toml"),
         "description = \"Read the GitHub API\"\n\n[network]\nallow = [\"api.github.com:443\"]\n",

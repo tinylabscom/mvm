@@ -1226,6 +1226,9 @@ fn binding_verification_rejects_tamper_identity_epoch_policy_time_and_assurance(
     wrong.current_execution_epoch = ExecutionEpoch::new(8).expect("epoch");
     contexts.push((wrong, TransportBindingError::StaleExecutionEpoch));
     let mut wrong = binding_context();
+    wrong.current_execution_epoch = ExecutionEpoch::new(6).expect("epoch");
+    contexts.push((wrong, TransportBindingError::ExecutionEpochNotPromoted));
+    let mut wrong = binding_context();
     wrong.current_policy_epoch += 1;
     contexts.push((wrong, TransportBindingError::StalePolicyEpoch));
     let mut wrong = binding_context();

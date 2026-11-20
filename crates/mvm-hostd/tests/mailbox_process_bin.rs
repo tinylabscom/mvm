@@ -24,6 +24,49 @@ fn an_empty_config_and_an_unknown_field_are_refused() {
     assert!(!run_with(br#"{"seed":"00"}"#).success());
 }
 
+/// A real `mvm-policy-coordinator` for `home`, stopped when dropped.
+struct Coordinator {
+    child: std::process::Child,
+    socket: std::path::PathBuf,
+}
+
+impl Coordinator {
+    fn start(home: &std::path::Path) -> Self {
+        use mvm_hostd::policy_generation::coordinator::{Request, Response, call, socket_path};
+        let mut child = Command::new(env!("CARGO_BIN_EXE_mvm-policy-coordinator"))
+            .env_clear()
+            .env("MVM_HOME", home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn mvm-policy-coordinator");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&serde_json::to_vec(&serde_json::json!({"home": home})).unwrap())
+            .unwrap();
+        let socket = socket_path(home);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !matches!(call(&socket, &Request::Ping), Ok(Response::Ready)) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the policy coordinator did not become ready"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        Self { child, socket }
+    }
+}
+
+impl Drop for Coordinator {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 struct ActorFixture {
     home: std::path::PathBuf,
     owner: mvm_hostd::actor_lifecycle::local_mailboxes::LocalActorMailboxes,
@@ -165,6 +208,7 @@ fn actor_process_config(
         ),
         reader_boot: Some(boot),
         vm_state_dir: state,
+        coordinator: None,
     }
 }
 
@@ -175,7 +219,9 @@ fn actor_helper_assembles_current_plan_and_reader_before_ready() {
 
     let home = tempfile::tempdir_in("/tmp").unwrap();
     let fixture = actor_fixture(home.path());
-    let config = actor_process_config(&fixture.home, &fixture.plan, 44);
+    let coordinator = Coordinator::start(&fixture.home);
+    let mut config = actor_process_config(&fixture.home, &fixture.plan, 44);
+    config.coordinator = Some(coordinator.socket.clone());
     let mut child = Command::new(env!("CARGO_BIN_EXE_mvm-mailbox"))
         .env_clear()
         .stdin(Stdio::piped())
@@ -238,4 +284,15 @@ fn actor_helper_assembles_current_plan_and_reader_before_ready() {
             .join("mailbox-reader-authority.json")
             .exists()
     );
+}
+
+#[test]
+fn a_production_actor_helper_without_a_coordinator_refuses_to_serve() {
+    let home = tempfile::tempdir_in("/tmp").unwrap();
+    let fixture = actor_fixture(home.path());
+    let config = actor_process_config(&fixture.home, &fixture.plan, 44);
+    assert!(config.coordinator.is_none());
+    // The same config with a coordinator reaches READY in
+    // `actor_helper_assembles_current_plan_and_reader_before_ready`.
+    assert!(!run_with(&serde_json::to_vec(&config).unwrap()).success());
 }

@@ -326,7 +326,7 @@ echo "== 7. replace under a new epoch"
 out="$(mvm machine replace "$NAME" 2>&1)" || fail "replace failed: $out"
 grep -q "$NAME may launch again under execution epoch 2" <<<"$out" || fail "expected epoch 2: $out"
 say "$out"
-grep -q "\"epoch\": *2" "$MVM_HOME/host-interface/workloads.json" || fail "the ledger is not at epoch 2"
+grep -q "\"epoch\": *2" "$MVM_HOME/policy-generations/workloads/ledger.json" || fail "the ledger is not at epoch 2"
 say "the ledger is at epoch 2"
 
 echo "== 8. the replacement runs under new keys; check exact message order"

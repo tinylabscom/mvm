@@ -72,8 +72,8 @@ impl Fixture {
                 package_digest: [3; 32],
                 restart: RestartAllowance::SamePackage {
                     max_restarts: 2,
-                    first_epoch: ExecutionEpoch(5),
-                    last_epoch: ExecutionEpoch(6),
+                    first_epoch: ExecutionEpoch::new(5).unwrap(),
+                    last_epoch: ExecutionEpoch::new(6).unwrap(),
                 },
                 connection_attempts: 8,
                 dependency_loss: DependencyLoss::ContinueAuthorized,
@@ -133,9 +133,9 @@ impl Fixture {
             workload_id: "workload".into(),
             original: Owner {
                 instance: [9; 16],
-                epoch: ExecutionEpoch(4),
+                epoch: ExecutionEpoch::new(4).unwrap(),
             },
-            epoch_high_water: ExecutionEpoch(4),
+            epoch_high_water: ExecutionEpoch::new(4).unwrap(),
             restarts_spent: 0,
             last_operation: 10,
         }
@@ -151,9 +151,9 @@ fn request() -> RestartRequest {
         operation: 11,
         original: Owner {
             instance: [9; 16],
-            epoch: ExecutionEpoch(4),
+            epoch: ExecutionEpoch::new(4).unwrap(),
         },
-        proposed_epoch: ExecutionEpoch(5),
+        proposed_epoch: ExecutionEpoch::new(5).unwrap(),
         replacement_instance: [10; 16],
     }
 }
@@ -229,12 +229,19 @@ fn unknown_early_expired_and_overflowing_time_refuse() {
 
 #[test]
 fn invalid_restart_ranges_and_zero_connection_budget_refuse() {
-    for (count, first, last) in [(0, 5, 6), (3, 5, 6), (1, 0, 6), (1, 6, 5)] {
+    // A zero epoch is refused when the policy is parsed, before validation.
+    assert!(
+        serde_json::from_str::<RestartAllowance>(
+            r#"{"kind":"same_package","max_restarts":1,"first_epoch":0,"last_epoch":6}"#
+        )
+        .is_err()
+    );
+    for (count, first, last) in [(0, 5, 6), (3, 5, 6), (1, 6, 5)] {
         let mut f = Fixture::new();
         f.companion.policy.restart = RestartAllowance::SamePackage {
             max_restarts: count,
-            first_epoch: ExecutionEpoch(first),
-            last_epoch: ExecutionEpoch(last),
+            first_epoch: ExecutionEpoch::new(first).unwrap(),
+            last_epoch: ExecutionEpoch::new(last).unwrap(),
         };
         f.resign();
         assert!(f.verify(clock(150, 10)).is_err());
@@ -345,7 +352,7 @@ fn repeated_requests_conflicts_and_stale_inputs_do_not_spend_again() {
         );
     }
     let mut changed = request();
-    changed.proposed_epoch = ExecutionEpoch(6);
+    changed.proposed_epoch = ExecutionEpoch::new(6).unwrap();
     assert!(r.request(changed, clock(150, 10)).is_err());
     let mut binding = r.binding().unwrap().clone();
     binding.request.original.instance = [8; 16];
@@ -367,10 +374,10 @@ fn exhausted_allowance_and_epoch_bounds_refuse() {
     history.restarts_spent = 2;
     let mut r = Recovery::new(f.verify(clock(150, 10)).unwrap(), Some(history)).unwrap();
     assert!(r.request(request(), clock(150, 10)).is_err());
-    for epoch in [0, 4, 7, u64::MAX] {
+    for epoch in [4, 7, u64::MAX] {
         let mut r = f.recovery();
         let mut req = request();
-        req.proposed_epoch = ExecutionEpoch(epoch);
+        req.proposed_epoch = ExecutionEpoch::new(epoch).unwrap();
         assert!(r.request(req, clock(150, 10)).is_err());
     }
 }
@@ -447,7 +454,7 @@ fn ordinary_local_defaults_still_need_no_managed_authority() {
             .authorize_workload(&LaunchRequest {
                 workload_id: "ordinary".into(),
                 image_digest: "local-image".into(),
-                epoch: ExecutionEpoch(1),
+                epoch: ExecutionEpoch::new(1).unwrap(),
             })
             .is_ok()
     );

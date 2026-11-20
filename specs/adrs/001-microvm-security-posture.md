@@ -1217,8 +1217,11 @@ bootstrap path.
   audit log before workload authority is released. Restore, fork and warm
   claim authenticate their *retained* generation, not an unrelated fresh
   launch's cache. A cache refresh cannot replace the verified archive snapshot;
-  the artifact copy still hashes selected bytes against the declaration and
-  refuses drift. These checks assume a trusted host account: a same-user
+  the launch still hashes selected bytes against the declaration and refuses
+  drift. Each generation's artifact files are hard links into
+  `runtime-evidence/shared_content`, shared by content across VMs; a launch
+  re-hashes the linked inode it will boot and copies afresh rather than link a
+  shared copy that is not its own, not read-only or no longer matches. These checks assume a trusted host account: a same-user
   process able to alter private generations is outside this custody guarantee.
   A built registry pack still has its separate dispatch-time selection recheck.
   `MVM_SKIP_COSIGN_VERIFY` remains the emergency-rotation hatch; it does not

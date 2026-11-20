@@ -758,6 +758,10 @@ pub(in crate::commands) fn run_dispatch(
     // image of a machine that outlives the command from whatever directory it
     // was started in builds machines nobody chose.
     let cwd = std::env::current_dir().context("resolving the working directory")?;
+    if !args.run.dry_run && !args.attach {
+        mvm_client::policy_profiles::coordinator::recover_workload_ledger()
+            .context("recovering the workload ledger")?;
+    }
     if cfg!(target_os = "linux") && !args.run.dry_run && !args.attach {
         mvm_client::policy_profiles::coordinator::ensure_if_activated()
             .context("connecting to the host policy lifecycle coordinator")?;

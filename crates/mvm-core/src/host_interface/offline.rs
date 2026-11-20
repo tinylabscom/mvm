@@ -46,15 +46,11 @@ impl RestartAllowance {
         } = self
         {
             let capacity = last_epoch
-                .0
-                .checked_sub(first_epoch.0)
+                .get()
+                .checked_sub(first_epoch.get())
                 .and_then(|n| n.checked_add(1))
                 .ok_or(OfflineRefusal::Bounds)?;
-            if first_epoch.0 == 0
-                || max_restarts == 0
-                || max_restarts > ceiling
-                || u64::from(max_restarts) > capacity
-            {
+            if max_restarts == 0 || max_restarts > ceiling || u64::from(max_restarts) > capacity {
                 return Err(OfflineRefusal::Bounds.into());
             }
         }
