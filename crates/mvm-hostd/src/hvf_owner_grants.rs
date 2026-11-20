@@ -9,8 +9,11 @@ use std::{
     sync::Arc,
 };
 
+use mvm_backends::driver::hvf::ColdHvfOwner;
 use mvm_contract::protocol::hvf_entrypoint_owner::{FreshAdmissionRequest, FreshOwnerBinding};
-use mvm_core::{atomic_io, crypto::hvf_owner_grant::VerifiedOwnerGrant};
+use mvm_core::{
+    atomic_io, crypto::hvf_owner_grant::VerifiedOwnerGrant, protocol::hvf_control::HvfInstance,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -48,6 +51,11 @@ enum OwnerBirthState {
     Prepared {
         binding: FreshOwnerBinding,
         request_digest: [u8; 32],
+    },
+    Bound {
+        binding: FreshOwnerBinding,
+        request_digest: [u8; 32],
+        instance: HvfInstance,
     },
 }
 
@@ -108,6 +116,7 @@ pub enum OwnerGrantDisposition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnerBirthDisposition {
     Prepared,
+    Bound,
 }
 
 /// Non-wire one-shot permission to attempt the original native birth.
@@ -146,6 +155,65 @@ impl OwnerBirthReservation {
     #[must_use]
     pub fn observed_at_secs(&self) -> u64 {
         self.observed_at_secs
+    }
+}
+
+/// Non-wire receipt that the prepared birth was bound to retained native custody.
+///
+/// This receipt is not terminal evidence and grants no stop, attach or recovery
+/// operation.
+#[derive(Debug)]
+#[must_use = "retain this receipt with the original native owner"]
+pub struct BoundOwnerBirthReceipt {
+    provider_id: [u8; 32],
+    grant_id: [u8; 32],
+}
+
+impl BoundOwnerBirthReceipt {
+    #[must_use]
+    pub fn provider_id(&self) -> [u8; 32] {
+        self.provider_id
+    }
+
+    #[must_use]
+    pub fn grant_id(&self) -> [u8; 32] {
+        self.grant_id
+    }
+}
+
+/// Non-retryable custody marker returned when binding did not yield a receipt.
+#[derive(Debug)]
+#[must_use = "retain uncertain birth custody with the original native owner"]
+pub struct UncertainOwnerBirth {
+    provider_id: [u8; 32],
+    grant_id: [u8; 32],
+}
+
+impl UncertainOwnerBirth {
+    #[must_use]
+    pub fn provider_id(&self) -> [u8; 32] {
+        self.provider_id
+    }
+
+    #[must_use]
+    pub fn grant_id(&self) -> [u8; 32] {
+        self.grant_id
+    }
+}
+
+/// Failed or uncertain durable binding. The reservation is deliberately not
+/// returned because retrying a publication with an unknown outcome is unsafe.
+#[derive(Debug, Error)]
+#[error("failed to bind prepared HVF owner birth")]
+pub struct OwnerBirthBindError {
+    quarantine: UncertainOwnerBirth,
+    #[source]
+    source: OwnerGrantStoreError,
+}
+
+impl OwnerBirthBindError {
+    pub fn into_parts(self) -> (UncertainOwnerBirth, OwnerGrantStoreError) {
+        (self.quarantine, self.source)
     }
 }
 
@@ -493,6 +561,86 @@ impl OwnerGrantStore {
         })
     }
 
+    /// Bind a prepared birth to the actual original owner retained by the HVF
+    /// backend.
+    ///
+    /// The native generation is derived inside this method. Public instance
+    /// data cannot be supplied as custody evidence. Any failure consumes the
+    /// live reservation into an uncertain marker so publication is never
+    /// retried blindly.
+    ///
+    /// # Errors
+    /// Refuses mismatched custody, expiry, clock regression, corrupt state and
+    /// uncertain storage publication.
+    pub fn bind_prepared_birth(
+        &self,
+        reservation: OwnerBirthReservation,
+        owner: &ColdHvfOwner,
+    ) -> Result<BoundOwnerBirthReceipt, OwnerBirthBindError> {
+        let instance = owner
+            .instance()
+            .cloned()
+            .map_err(OwnerGrantStoreError::Storage);
+        self.bind_prepared_instance(reservation, instance)
+    }
+
+    fn bind_prepared_instance(
+        &self,
+        reservation: OwnerBirthReservation,
+        instance: Result<HvfInstance, OwnerGrantStoreError>,
+    ) -> Result<BoundOwnerBirthReceipt, OwnerBirthBindError> {
+        let provider_id = reservation.provider_id;
+        let grant_id = reservation.grant_id;
+        let result = (|| {
+            if provider_id != self.provider_id {
+                return Err(OwnerGrantStoreError::Conflict);
+            }
+            let instance = instance?;
+            if instance.vm_id != reservation.binding.workload_id || instance.boot_nonce == [0; 32] {
+                return Err(OwnerGrantStoreError::Conflict);
+            }
+            let expires_at_secs = reservation.binding.expires_at_secs;
+            let _lock = self.lock()?;
+            let mut journal = self.read()?;
+            let now_secs =
+                self.observe_time(&mut journal, grant_id, reservation.observed_at_secs)?;
+            if now_secs >= expires_at_secs {
+                return Err(OwnerGrantStoreError::Expired);
+            }
+            let record = journal
+                .records
+                .iter_mut()
+                .find(|record| record.grant_id == grant_id)
+                .ok_or(OwnerGrantStoreError::Conflict)?;
+            match &record.birth {
+                Some(OwnerBirthState::Prepared {
+                    binding,
+                    request_digest,
+                }) if binding == &reservation.binding
+                    && request_digest == &reservation.request_digest => {}
+                _ => return Err(OwnerGrantStoreError::Conflict),
+            }
+            record.birth = Some(OwnerBirthState::Bound {
+                binding: reservation.binding,
+                request_digest: reservation.request_digest,
+                instance: instance.clone(),
+            });
+            self.commit_journal(&journal, grant_id)?;
+            self.fresh_time(now_secs, expires_at_secs)?;
+            Ok(BoundOwnerBirthReceipt {
+                provider_id,
+                grant_id,
+            })
+        })();
+        result.map_err(|source| OwnerBirthBindError {
+            quarantine: UncertainOwnerBirth {
+                provider_id,
+                grant_id,
+            },
+            source,
+        })
+    }
+
     /// Observe quarantine without recreating a birth or native-owner capability.
     ///
     /// # Errors
@@ -512,6 +660,7 @@ impl OwnerGrantStore {
         };
         Ok(record.birth.as_ref().map(|birth| match birth {
             OwnerBirthState::Prepared { .. } => OwnerBirthDisposition::Prepared,
+            OwnerBirthState::Bound { .. } => OwnerBirthDisposition::Bound,
         }))
     }
 
@@ -555,7 +704,7 @@ impl OwnerGrantStore {
     ) -> Result<u64, OwnerGrantStoreError> {
         let now_secs = self.now_secs()?;
         if now_secs < journal.last_observed_secs.max(minimum_secs) {
-            return Err(OwnerGrantStoreError::Conflict);
+            return Err(OwnerGrantStoreError::ClockRegression);
         }
         if now_secs > journal.last_observed_secs {
             journal.last_observed_secs = now_secs;
@@ -571,7 +720,7 @@ impl OwnerGrantStore {
     ) -> Result<u64, OwnerGrantStoreError> {
         let now_secs = self.now_secs()?;
         if now_secs < minimum_secs {
-            return Err(OwnerGrantStoreError::Conflict);
+            return Err(OwnerGrantStoreError::ClockRegression);
         }
         if now_secs >= expires_at_secs {
             return Err(OwnerGrantStoreError::Expired);
@@ -660,10 +809,12 @@ impl OwnerGrantStore {
                 ) = (
                     &record.disposition,
                     match birth {
-                        OwnerBirthState::Prepared { binding, .. } => binding,
+                        OwnerBirthState::Prepared { binding, .. }
+                        | OwnerBirthState::Bound { binding, .. } => binding,
                     },
                     match birth {
-                        OwnerBirthState::Prepared { request_digest, .. } => request_digest,
+                        OwnerBirthState::Prepared { request_digest, .. }
+                        | OwnerBirthState::Bound { request_digest, .. } => request_digest,
                     },
                 )
                 else {
@@ -673,6 +824,11 @@ impl OwnerGrantStore {
                     || binding.validate().is_err()
                     || binding.operation_id != *operation_id
                     || binding.expires_at_secs != *expires_at_secs
+                {
+                    return Err(OwnerGrantStoreError::Corrupt);
+                }
+                if let OwnerBirthState::Bound { instance, .. } = birth
+                    && (instance.vm_id != binding.workload_id || instance.boot_nonce == [0; 32])
                 {
                     return Err(OwnerGrantStoreError::Corrupt);
                 }
@@ -852,6 +1008,13 @@ mod tests {
         verified_for(grant_id, &admission())
     }
 
+    fn instance() -> HvfInstance {
+        HvfInstance {
+            vm_id: "workload".into(),
+            boot_nonce: [9; 32],
+        }
+    }
+
     fn verified_for(grant_id: [u8; 32], request: &FreshAdmissionRequest) -> VerifiedOwnerGrant {
         let key = SigningKey::from_bytes(&[7; 32]);
         let verifying = key.verifying_key();
@@ -965,7 +1128,7 @@ mod tests {
         clock.set(80);
         assert!(matches!(
             store.consume(verified([14; 32])),
-            Err(OwnerGrantStoreError::Conflict)
+            Err(OwnerGrantStoreError::ClockRegression)
         ));
         assert!(matches!(
             OwnerGrantStore::open(
@@ -1076,6 +1239,115 @@ mod tests {
     }
 
     #[test]
+    fn prepared_journal_transition_binds_once_to_a_generation() {
+        let (_directory, store, _clock) = initialized();
+        let consumed = store.consume(verified([29; 32])).unwrap();
+        let reservation = store.reserve_birth(consumed, &admission()).unwrap();
+        let receipt = store
+            .bind_prepared_instance(reservation, Ok(instance()))
+            .unwrap();
+        assert_eq!(receipt.provider_id(), provider_id());
+        assert_eq!(receipt.grant_id(), [29; 32]);
+        assert_eq!(
+            store.birth_disposition([29; 32]).unwrap(),
+            Some(OwnerBirthDisposition::Bound)
+        );
+    }
+
+    #[test]
+    fn changed_or_uncertain_binding_returns_only_non_retryable_quarantine() {
+        let (_directory, store, _clock) = initialized();
+        let consumed = store.consume(verified([30; 32])).unwrap();
+        let reservation = store.reserve_birth(consumed, &admission()).unwrap();
+        let mut wrong = instance();
+        wrong.vm_id = "other".into();
+        let (uncertain, source) = store
+            .bind_prepared_instance(reservation, Ok(wrong))
+            .unwrap_err()
+            .into_parts();
+        assert_eq!(uncertain.grant_id(), [30; 32]);
+        assert!(matches!(source, OwnerGrantStoreError::Conflict));
+        assert_eq!(
+            store.birth_disposition([30; 32]).unwrap(),
+            Some(OwnerBirthDisposition::Prepared)
+        );
+
+        let (_directory, store, _clock) = initialized();
+        let consumed = store.consume(verified([31; 32])).unwrap();
+        let reservation = store.reserve_birth(consumed, &admission()).unwrap();
+        let failing = store.with_commit(|path, bytes| {
+            atomic_io::write_private(path, bytes).map_err(io::Error::other)?;
+            Err(io::Error::other("injected bound durability uncertainty"))
+        });
+        let (uncertain, source) = failing
+            .bind_prepared_instance(reservation, Ok(instance()))
+            .unwrap_err()
+            .into_parts();
+        assert_eq!(uncertain.provider_id(), provider_id());
+        assert!(matches!(source, OwnerGrantStoreError::CommitUnknown { .. }));
+        assert_eq!(
+            store.birth_disposition([31; 32]).unwrap(),
+            Some(OwnerBirthDisposition::Bound)
+        );
+    }
+
+    #[test]
+    fn binding_time_and_publication_failures_never_return_a_receipt() {
+        let (_directory, store, clock) = initialized();
+        let consumed = store.consume(verified([32; 32])).unwrap();
+        let reservation = store.reserve_birth(consumed, &admission()).unwrap();
+        let writer_clock = Arc::clone(&clock);
+        let expiring = store.with_commit(move |path, bytes| {
+            atomic_io::write_private(path, bytes).map_err(io::Error::other)?;
+            writer_clock.set(90);
+            Ok(())
+        });
+        let (uncertain, source) = expiring
+            .bind_prepared_instance(reservation, Ok(instance()))
+            .unwrap_err()
+            .into_parts();
+        assert_eq!(uncertain.grant_id(), [32; 32]);
+        assert!(matches!(source, OwnerGrantStoreError::Expired));
+        assert_eq!(
+            store.birth_disposition([32; 32]).unwrap(),
+            Some(OwnerBirthDisposition::Bound)
+        );
+
+        let (_directory, store, _clock) = initialized();
+        let consumed = store.consume(verified([33; 32])).unwrap();
+        let reservation = store.reserve_birth(consumed, &admission()).unwrap();
+        let failing = store.with_commit(|_, _| Err(io::Error::other("before bound publication")));
+        let (_, source) = failing
+            .bind_prepared_instance(reservation, Ok(instance()))
+            .unwrap_err()
+            .into_parts();
+        assert!(matches!(source, OwnerGrantStoreError::CommitUnknown { .. }));
+        assert_eq!(
+            store.birth_disposition([33; 32]).unwrap(),
+            Some(OwnerBirthDisposition::Prepared)
+        );
+    }
+
+    #[test]
+    fn malformed_bound_generation_refuses_on_reopen() {
+        let (directory, store, clock) = initialized();
+        let consumed = store.consume(verified([34; 32])).unwrap();
+        let reservation = store.reserve_birth(consumed, &admission()).unwrap();
+        let _receipt = store
+            .bind_prepared_instance(reservation, Ok(instance()))
+            .unwrap();
+        let path = directory.path().join("owner-grants.json");
+        let mut journal: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        journal["records"][0]["birth"]["instance"]["boot_nonce"] = vec![0; 32].into();
+        atomic_io::write_private(&path, &serde_json::to_vec(&journal).unwrap()).unwrap();
+        assert!(matches!(
+            OwnerGrantStore::open(path, provider_id(), clock),
+            Err(OwnerGrantStoreError::Corrupt)
+        ));
+    }
+
+    #[test]
     fn changed_birth_refuses_and_dropped_reservation_leaves_absorbing_quarantine() {
         let (_directory, store, _clock) = initialized();
         let consumed = store.consume(verified([17; 32])).unwrap();
@@ -1135,7 +1407,7 @@ mod tests {
         clock.set(40);
         assert!(matches!(
             store.reserve_birth(consumed, &admission()),
-            Err(OwnerGrantStoreError::Conflict)
+            Err(OwnerGrantStoreError::ClockRegression)
         ));
         assert_eq!(store.birth_disposition([23; 32]).unwrap(), None);
 
