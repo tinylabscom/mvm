@@ -16,8 +16,8 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::Duration;
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use mvm_contract::stream::secret_fingerprint::SecretFingerprint;
@@ -39,9 +39,35 @@ pub use sink::{
 const BACKOFF_BASE: Duration = Duration::from_millis(100);
 /// Ceiling the reconnect backoff saturates at.
 const BACKOFF_CAP: Duration = Duration::from_secs(5);
-/// How often a backoff sleep re-checks the stop flag, bounding how long a
-/// stop request can go unnoticed.
-const STOP_POLL: Duration = Duration::from_millis(25);
+
+/// The worker's stop request. Waiting on it blocks on a condvar for the whole
+/// timeout, so an idle backoff costs no wakeups and a stop ends it at once.
+#[derive(Default)]
+struct StopSignal {
+    stopped: Mutex<bool>,
+    wake: Condvar,
+}
+
+impl StopSignal {
+    fn stop(&self) {
+        *self.stopped.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.wake.notify_all();
+    }
+
+    fn is_stopped(&self) -> bool {
+        *self.stopped.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Block until stopped or `timeout` passes; true when stopped.
+    fn wait(&self, timeout: Duration) -> bool {
+        let guard = self.stopped.lock().unwrap_or_else(PoisonError::into_inner);
+        *self
+            .wake
+            .wait_timeout_while(guard, timeout, |stopped| !*stopped)
+            .unwrap_or_else(PoisonError::into_inner)
+            .0
+    }
+}
 
 /// Where the collector stands, for the supervisor and diagnostics to read.
 /// Codes are static labels, never payload bytes.
@@ -107,7 +133,7 @@ where
 pub struct CollectorHandle {
     status: Arc<Mutex<CoverageStatus>>,
     losses: Arc<LossCounters>,
-    stop: Arc<AtomicBool>,
+    stop: Arc<StopSignal>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -142,11 +168,11 @@ impl CollectorHandle {
     }
 
     /// Ask the worker to stop and wait for it. Takes effect between attempts,
-    /// between backoff polls, and at the next receive boundary of a live
+    /// during a backoff wait, and at the next receive boundary of a live
     /// session (peer close or error); a session blocked in a read ends when
     /// its peer or its stream's own timeout ends the read.
     pub fn stop(mut self) {
-        self.stop.store(true, Ordering::Release);
+        self.stop.stop();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -190,7 +216,7 @@ where
         + 'static,
 {
     let status = Arc::new(Mutex::new(CoverageStatus::Connecting));
-    let stop = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(StopSignal::default());
     let shared = WorkerShared {
         status: Arc::clone(&status),
         losses: Arc::clone(&losses),
@@ -210,7 +236,7 @@ where
 struct WorkerShared {
     status: Arc<Mutex<CoverageStatus>>,
     losses: Arc<LossCounters>,
-    stop: Arc<AtomicBool>,
+    stop: Arc<StopSignal>,
 }
 
 impl WorkerShared {
@@ -222,19 +248,12 @@ impl WorkerShared {
     }
 
     fn stopped(&self) -> bool {
-        self.stop.load(Ordering::Acquire)
+        self.stop.is_stopped()
     }
 
-    /// Sleep out `backoff` in stop-aware slices; true when stop arrived.
+    /// Wait out `backoff` in one blocking wait; true when stop arrived.
     fn backoff_interrupted(&self, backoff: Duration) -> bool {
-        let deadline = Instant::now() + backoff;
-        while Instant::now() < deadline {
-            if self.stopped() {
-                return true;
-            }
-            std::thread::sleep(STOP_POLL.min(deadline.saturating_duration_since(Instant::now())));
-        }
-        self.stopped()
+        self.stop.wait(backoff)
     }
 }
 
@@ -511,6 +530,7 @@ mod tests {
     use mvm_vmm::host::telemetry_registration::register_telemetry_boot;
     use std::os::unix::net::UnixStream;
     use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+    use std::time::Instant;
 
     fn keys() -> (SigningKey, SigningKey) {
         (
@@ -783,6 +803,28 @@ mod tests {
             started.elapsed() < Duration::from_secs(2),
             "stop must interrupt the backoff, not wait it out"
         );
+    }
+
+    #[test]
+    fn a_stop_signal_wait_is_one_blocking_wait_that_a_stop_ends_at_once() {
+        let signal = Arc::new(StopSignal::default());
+        let waiter = {
+            let signal = Arc::clone(&signal);
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                (signal.wait(Duration::from_secs(60)), started.elapsed())
+            })
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        signal.stop();
+        let (stopped, waited) = waiter.join().unwrap();
+        assert!(stopped);
+        assert!(waited < Duration::from_secs(5), "{waited:?}");
+        // Unstopped, the wait runs its whole timeout and reports it.
+        let idle = StopSignal::default();
+        let started = Instant::now();
+        assert!(!idle.wait(Duration::from_millis(150)));
+        assert!(started.elapsed() >= Duration::from_millis(150));
     }
 
     #[test]
