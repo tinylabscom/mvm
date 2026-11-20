@@ -198,6 +198,14 @@ impl BoundOwnerBirthReceipt {
             grant_id: self.grant_id,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn duplicate_for_test(&self) -> Self {
+        Self {
+            provider_id: self.provider_id,
+            grant_id: self.grant_id,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -869,6 +877,77 @@ impl OwnerGrantStore {
         })
     }
 
+    pub(crate) fn authorize_bound_original_control(
+        &self,
+        receipt: &BoundOwnerBirthReceipt,
+        admission: &FreshAdmissionRequest,
+        original: OriginalHvfOwnerBinding<'_>,
+    ) -> Result<BoundControlAuthorization<'_>, OwnerGrantStoreError> {
+        let instance = original
+            .owner()
+            .instance()
+            .map_err(OwnerGrantStoreError::Storage)?
+            .clone();
+        self.authorize_bound_control_parts(
+            receipt,
+            admission,
+            original.canonical_plan_digest(),
+            instance,
+        )
+    }
+
+    fn authorize_bound_control_parts(
+        &self,
+        receipt: &BoundOwnerBirthReceipt,
+        admission: &FreshAdmissionRequest,
+        canonical_plan_digest: [u8; 32],
+        instance: HvfInstance,
+    ) -> Result<BoundControlAuthorization<'_>, OwnerGrantStoreError> {
+        if receipt.provider_id != self.provider_id
+            || admission.validate().is_err()
+            || canonical_plan_digest != admission.binding.canonical_plan_digest
+        {
+            return Err(OwnerGrantStoreError::Conflict);
+        }
+        let request_digest = admission
+            .digest()
+            .map_err(|_| OwnerGrantStoreError::Conflict)?;
+        let lock = self.lock()?;
+        let mut journal = self.read()?;
+        let now_secs = self.observe_time(&mut journal, receipt.grant_id, 0)?;
+        let expires_at_secs = validate_bound_control(
+            &journal,
+            receipt.grant_id,
+            admission,
+            request_digest,
+            &instance,
+            now_secs,
+        )?;
+        self.commit_journal(&journal, receipt.grant_id)?;
+        let observed_at_secs = self.fresh_time(now_secs, expires_at_secs)?;
+        Ok(BoundControlAuthorization {
+            store: self,
+            _lock: lock,
+            journal,
+            grant_id: receipt.grant_id,
+            admission: admission.clone(),
+            request_digest,
+            instance,
+            observed_at_secs,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authorize_bound_control_parts_for_test(
+        &self,
+        receipt: &BoundOwnerBirthReceipt,
+        admission: &FreshAdmissionRequest,
+        canonical_plan_digest: [u8; 32],
+        instance: HvfInstance,
+    ) -> Result<BoundControlAuthorization<'_>, OwnerGrantStoreError> {
+        self.authorize_bound_control_parts(receipt, admission, canonical_plan_digest, instance)
+    }
+
     /// Observe quarantine without recreating a birth or native-owner capability.
     ///
     /// # Errors
@@ -1113,6 +1192,50 @@ fn validate_consumed(
     }
 }
 
+fn validate_bound_control(
+    journal: &GrantJournal,
+    grant_id: [u8; 32],
+    admission: &FreshAdmissionRequest,
+    request_digest: [u8; 32],
+    instance: &HvfInstance,
+    now_secs: u64,
+) -> Result<u64, OwnerGrantStoreError> {
+    let record = journal
+        .records
+        .iter()
+        .find(|record| record.grant_id == grant_id)
+        .ok_or(OwnerGrantStoreError::Conflict)?;
+    let expires_at_secs = match record.disposition {
+        GrantDisposition::Consumed {
+            operation_id,
+            request_digest: retained,
+            expires_at_secs,
+            ..
+        } if operation_id == admission.binding.operation_id
+            && retained == request_digest
+            && expires_at_secs == admission.binding.expires_at_secs =>
+        {
+            expires_at_secs
+        }
+        GrantDisposition::Consumed { .. } => return Err(OwnerGrantStoreError::Conflict),
+        GrantDisposition::Revoked { .. } => return Err(OwnerGrantStoreError::Revoked),
+    };
+    match &record.birth {
+        Some(OwnerBirthState::Bound {
+            binding,
+            request_digest: retained,
+            instance: retained_instance,
+        }) if binding == &admission.binding
+            && retained == &request_digest
+            && retained_instance == instance => {}
+        _ => return Err(OwnerGrantStoreError::Conflict),
+    }
+    if now_secs >= expires_at_secs {
+        return Err(OwnerGrantStoreError::Expired);
+    }
+    Ok(expires_at_secs)
+}
+
 pub(crate) struct ConsumedGrantAuthorization<'a> {
     store: &'a OwnerGrantStore,
     _lock: atomic_io::FileLock,
@@ -1120,6 +1243,59 @@ pub(crate) struct ConsumedGrantAuthorization<'a> {
     grant_id: [u8; 32],
     request_digest: [u8; 32],
     observed_at_secs: u64,
+}
+
+pub(crate) struct BoundControlAuthorization<'a> {
+    store: &'a OwnerGrantStore,
+    _lock: atomic_io::FileLock,
+    journal: GrantJournal,
+    grant_id: [u8; 32],
+    admission: FreshAdmissionRequest,
+    request_digest: [u8; 32],
+    instance: HvfInstance,
+    observed_at_secs: u64,
+}
+
+impl BoundControlAuthorization<'_> {
+    pub(crate) fn instance(&self) -> &HvfInstance {
+        &self.instance
+    }
+
+    pub(crate) fn observed_at_secs(&self) -> u64 {
+        self.observed_at_secs
+    }
+
+    pub(crate) fn check_current(&mut self) -> Result<(), OwnerGrantStoreError> {
+        let expires_at_secs = validate_bound_control(
+            &self.journal,
+            self.grant_id,
+            &self.admission,
+            self.request_digest,
+            &self.instance,
+            self.observed_at_secs,
+        )?;
+        self.observed_at_secs = self
+            .store
+            .fresh_time(self.observed_at_secs, expires_at_secs)?;
+        Ok(())
+    }
+
+    pub(crate) fn recheck(mut self) -> Result<(), OwnerGrantStoreError> {
+        let now_secs =
+            self.store
+                .observe_time(&mut self.journal, self.grant_id, self.observed_at_secs)?;
+        let expires_at_secs = validate_bound_control(
+            &self.journal,
+            self.grant_id,
+            &self.admission,
+            self.request_digest,
+            &self.instance,
+            now_secs,
+        )?;
+        self.store
+            .fresh_time(now_secs.max(self.observed_at_secs), expires_at_secs)?;
+        Ok(())
+    }
 }
 
 impl ConsumedGrantAuthorization<'_> {

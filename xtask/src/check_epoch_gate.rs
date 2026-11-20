@@ -309,6 +309,18 @@ const AGREEMENT: &[Entry] = &[
         2,
         "a reply grant is scoped to exactly the peer's epoch",
     ),
+    // Each closed owner signer keeps its `new` binding checks outside the
+    // gate: construction refuses the uncommissioned sentinel epoch and
+    // requires the derived provider identity to name the grants store's
+    // recorded epoch. The signer authorizes nothing at construction; the
+    // epoch is part of the commissioned identity being verified, not an
+    // epoch being granted acting authority.
+    (
+        "crates/mvm-hostd/src/hvf_owner_native_control_signer.rs",
+        "new",
+        2,
+        "binds the holder: refuses the uncommissioned sentinel epoch and requires the derived provider identity to name the grants store's recorded epoch",
+    ),
 ];
 
 /// A comparison operator, or a method that compares its receiver with its

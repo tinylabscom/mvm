@@ -252,6 +252,27 @@ grants no execution or native effect. Clock regression or expiry before that
 point refuses. Audit finalization never extends workload authority or permits a
 new close attempt.
 
+The source-only native-control signer completes the third closed key-holder
+shape without executing a control operation. It accepts only a live `Bound`
+receipt, the exact canonical admission, and an `OriginalHvfOwnerBinding`
+borrowed from activated native custody. The journal lock, retained instance,
+plan commitment, authority clock and expiry remain held through signing and a
+post-sign freshness check.
+
+The signer constructs only the existing connection-bound
+`HvfInstanceControl::StopHvfInstance` request and returns the established
+`SignedControl` envelope. It requires a non-serializable stop authorization
+created only after the control connection's fresh challenge is verified and
+its process-exit observer is armed. Challenge responses and finalization remain
+with the native supervisor because they attest to exchange and terminal facts
+that `Bound` admission alone cannot prove.
+
+No caller supplies an instance, PID, VM name, path, socket, category or
+arbitrary bytes to sign. `Prepared`, `AuditClosing` and `AuditClosed` refuse
+before key use. This adapter opens no endpoint, performs no
+stop/adoption/finalization, creates no retirement proof and does not make the
+owner executable positive.
+
 ## Recovery authorization
 
 Same UID, a private socket and a discoverable generation are necessary checks,
