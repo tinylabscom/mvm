@@ -308,7 +308,9 @@ accepted, and a same-binding re-enrollment is answered after a quarantine so it
 is anchored. When the table is full, destinations of replaced epochs are
 retired first, then the least recently changed; a retired live destination
 enrolls again at its own anchor tip, which gives up the coordinator's rollback
-check for that step. Actor journals and development mailboxes are not enrolled.
+check for that step. In a production posture an actor endpoint's per-call
+journals and its control journal are each a destination, and each open of one
+enrolls it again; development-posture mailboxes are not ordered.
 A helper that exits after an unknown outcome is not restarted automatically.
 
 This coordinator is an implementation of [#5097](https://github.com/tinylabscom/mvm/issues/5097)'s

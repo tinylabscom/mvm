@@ -14,7 +14,7 @@ use std::sync::{
 };
 
 use ed25519_dalek::SigningKey;
-use mvm_contract::protocol::mailbox::ExecutionEpoch;
+use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxAddress, MessageId};
 use mvm_core::host_interface::workload::{
     DestinationCommit, DestinationEnrollment, DestinationTip, PreparedHead, SignedPreparedHead,
 };
@@ -102,6 +102,14 @@ enum Failure {
 }
 
 impl Failure {
+    /// Mark the stop condition this failure is.
+    fn raise(&self, refused: &AtomicBool, unknown: &AtomicBool) {
+        match self {
+            Self::Refused(_) => refused.store(true, Ordering::SeqCst),
+            Self::Unknown(_) => unknown.store(true, Ordering::SeqCst),
+        }
+    }
+
     fn into_journal(self) -> JournalError {
         match self {
             Self::Refused(message) => {
@@ -159,6 +167,29 @@ pub(crate) fn coordinate(
     authority: Arc<dyn DestinationAuthority>,
     destination: Destination,
 ) -> Result<Coordinated, JournalError> {
+    coordinate_with(anchor, authority, destination, OrderingFlags::default())
+}
+
+/// The two stop conditions of an ordering, shared by every journal that one
+/// helper orders.
+#[derive(Clone, Default)]
+pub(crate) struct OrderingFlags {
+    pub(crate) refused: Arc<AtomicBool>,
+    pub(crate) unknown: Arc<AtomicBool>,
+}
+
+/// [`coordinate`] with stop flags the caller supplies, so several journals can
+/// stop one helper.
+///
+/// # Errors
+///
+/// As [`coordinate`].
+pub(crate) fn coordinate_with(
+    anchor: FileJournalAnchor,
+    authority: Arc<dyn DestinationAuthority>,
+    destination: Destination,
+    flags: OrderingFlags,
+) -> Result<Coordinated, JournalError> {
     let template = DestinationEnrollment {
         destination: destination.id.clone(),
         workload: destination.workload.clone(),
@@ -171,15 +202,17 @@ pub(crate) fn coordinate(
         ..template.clone()
     };
     let enrollment = enroll_at(anchor.tip());
-    let enrolled = resolve(authority.as_ref(), || authority.enroll(&enrollment))
-        .map_err(Failure::into_journal)?;
+    let OrderingFlags { refused, unknown } = flags;
+    let enrolled =
+        resolve(authority.as_ref(), || authority.enroll(&enrollment)).map_err(|failure| {
+            failure.raise(&refused, &unknown);
+            failure.into_journal()
+        })?;
     let local = anchor.tip();
     // One ahead is a commit the owner took before this helper wrote its anchor.
     if enrolled.tip != wire(local) && enrolled.tip.cursor != local.cursor.saturating_add(1) {
         return Err(JournalError::Rollback);
     }
-    let refused = Arc::new(AtomicBool::new(false));
-    let unknown = Arc::new(AtomicBool::new(false));
     let (refused_flag, unknown_flag) = (Arc::clone(&refused), Arc::clone(&unknown));
     let anchor = anchor.with_final_commit(Box::new(move |current, next| {
         let prepared = PreparedHead {
@@ -209,10 +242,7 @@ pub(crate) fn coordinate(
         resolve(authority.as_ref(), send)
             .map(|_| ())
             .map_err(|failure| {
-                match failure {
-                    Failure::Refused(_) => refused_flag.store(true, Ordering::SeqCst),
-                    Failure::Unknown(_) => unknown_flag.store(true, Ordering::SeqCst),
-                }
+                failure.raise(&refused_flag, &unknown_flag);
                 failure.into_journal()
             })
     }));
@@ -222,6 +252,92 @@ pub(crate) fn coordinate(
         unknown,
         enrolled: enrolled.tip,
     })
+}
+
+/// The error a serving loop exits with once either ordering flag is set.
+///
+/// # Errors
+///
+/// A refusal, or an outcome that stayed unknown.
+pub(crate) fn stop_if_unordered(refused: &AtomicBool, unknown: &AtomicBool) -> std::io::Result<()> {
+    if refused.load(Ordering::SeqCst) {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "the workload ledger refused a mailbox commit",
+        ))
+    } else if unknown.load(Ordering::SeqCst) {
+        Err(std::io::Error::other(
+            "a mailbox commit's outcome is unknown; restart reconciles it",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Which journal of an actor endpoint a destination id names.
+#[derive(Clone, Copy)]
+pub(crate) enum ActorJournal {
+    /// One call's journal, named by the call's message id.
+    Call,
+    /// The endpoint's control journal, named by the zero message id.
+    Control,
+}
+
+/// The ledger id of one actor journal: a domain-separated hash of the
+/// endpoint's address and epoch, the journal's purpose and its message id.
+pub(crate) fn actor_destination_id(
+    address: &MailboxAddress,
+    epoch: &ExecutionEpoch,
+    journal: ActorJournal,
+    message_id: &MessageId,
+) -> Result<String, serde_json::Error> {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"mvm.mailbox.actor-destination.v1\0");
+    hash.update(serde_jcs::to_vec(address)?);
+    hash.update(serde_jcs::to_vec(epoch)?);
+    hash.update(match journal {
+        ActorJournal::Call => &b"call"[..],
+        ActorJournal::Control => &b"control"[..],
+    });
+    hash.update(message_id.as_bytes());
+    Ok(hex::encode(hash.finalize()))
+}
+
+/// What an actor endpoint orders its journals under: shared by every journal
+/// it opens.
+pub(crate) struct ActorOrdering {
+    pub(crate) authority: Arc<dyn DestinationAuthority>,
+    pub(crate) key: SigningKey,
+    pub(crate) workload: String,
+    pub(crate) epoch: ExecutionEpoch,
+    pub(crate) flags: OrderingFlags,
+}
+
+impl ActorOrdering {
+    /// Order `anchor` as the destination `id`, then return it with the tip the
+    /// owner enrolled, which the journal must reach once open.
+    ///
+    /// # Errors
+    ///
+    /// As [`coordinate`].
+    pub(crate) fn order(
+        &self,
+        anchor: FileJournalAnchor,
+        id: String,
+    ) -> Result<Coordinated, JournalError> {
+        coordinate_with(
+            anchor,
+            Arc::clone(&self.authority),
+            Destination {
+                id,
+                workload: self.workload.clone(),
+                epoch: self.epoch,
+                key: self.key.clone(),
+            },
+            self.flags.clone(),
+        )
+    }
 }
 
 #[cfg(test)]

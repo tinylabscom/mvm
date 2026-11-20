@@ -41,7 +41,8 @@ use mvm_vmm::host::aux_bin::AuxBin;
 use mvm_vmm::host::flowmux_identity::{MAILBOX_READER_BOOT_FILE, MailboxReaderBootBinding};
 
 use crate::mailbox_commit::{
-    Coordinated, CoordinatorSocket, Destination, coordinate, require_reached,
+    ActorOrdering, Coordinated, CoordinatorSocket, Destination, OrderingFlags, coordinate,
+    require_reached, stop_if_unordered,
 };
 use crate::mailbox_custody::RetainedMailboxKeys;
 use crate::mailbox_launch::{
@@ -308,17 +309,42 @@ fn serve_actor(
     )?;
     let directory = material.registry_directory.with_extension("state");
     let max_storage_bytes = usize::try_from(material.max_storage_bytes).map_err(Error::other)?;
-    let owner = ActorConversationEndpoint::open(
+    let mut owner = ActorConversationEndpoint::open(
         ActorOperationConfig {
             plan: plan.clone(),
             binding: binding.clone(),
-            directory,
+            directory: directory.clone(),
             max_storage_bytes,
             now_unix_ms: crate::mailbox_launch::actor_template::current_time_ms()?,
         },
         material,
     )
     .map_err(Error::other)?;
+    let ordering = if posture.variant() == Variant::Prod {
+        let socket = config.coordinator.clone().ok_or_else(|| {
+            Error::new(
+                ErrorKind::PermissionDenied,
+                "production actor mailbox has no policy coordinator to order its commits",
+            )
+        })?;
+        // The key signs prepared heads and nothing else.
+        let (key, _) = mvm_core::crypto::ed25519_keypair::load_or_init(
+            &directory.join("commit.ed25519"),
+            &directory.join("commit.ed25519.pub"),
+        )
+        .map_err(Error::other)?;
+        let ordering = std::sync::Arc::new(ActorOrdering {
+            authority: std::sync::Arc::new(CoordinatorSocket(socket)),
+            key,
+            workload: plan.workload.0.clone(),
+            epoch: ExecutionEpoch::new(plan.execution_epoch).map_err(Error::other)?,
+            flags: OrderingFlags::default(),
+        });
+        owner = owner.with_ordering(std::sync::Arc::clone(&ordering));
+        Some(ordering)
+    } else {
+        None
+    };
     let (journal, anchor) = owner.control_journal().map_err(Error::other)?;
     let (policy, mut sealer) = config.keys.trust();
     let service = DurableMailboxService::bind_local(
@@ -337,7 +363,14 @@ fn serve_actor(
         .saturating_sub(crate::mailbox_launch::actor_template::current_time_ms()?);
     let remaining = Duration::from_millis(u64::try_from(remaining_ms).unwrap_or(0));
     let started = std::time::Instant::now();
-    let active = || started.elapsed() < remaining && keep_serving(launcher, &config.vm_state_dir);
+    let ordered = || {
+        ordering.as_ref().is_none_or(|ordering| {
+            stop_if_unordered(&ordering.flags.refused, &ordering.flags.unknown).is_ok()
+        })
+    };
+    let active = || {
+        started.elapsed() < remaining && keep_serving(launcher, &config.vm_state_dir) && ordered()
+    };
     service.install_guest_reader(reader)?;
     service.install_conversation(binding, owner)?;
     std::io::stdout().write_all(READY_MARKER)?;
@@ -362,7 +395,10 @@ fn serve_actor(
             Err(error) => return Err(error),
         }
     }
-    Ok(())
+    match &ordering {
+        Some(ordering) => stop_if_unordered(&ordering.flags.refused, &ordering.flags.unknown),
+        None => Ok(()),
+    }
 }
 
 fn serve_local(
@@ -495,22 +531,7 @@ fn serve_local(
     )?;
     service.install_guest_reader(reader)?;
     std::io::stdout().write_all(READY_MARKER)?;
-    use std::sync::atomic::Ordering::SeqCst;
-    let still_ordered = || !refused.load(SeqCst) && !unknown.load(SeqCst);
-    let stop_if_unordered = || {
-        if refused.load(SeqCst) {
-            Err(Error::new(
-                ErrorKind::PermissionDenied,
-                "the workload ledger refused a mailbox commit",
-            ))
-        } else if unknown.load(SeqCst) {
-            Err(Error::other(
-                "a mailbox commit's outcome is unknown; restart reconciles it",
-            ))
-        } else {
-            Ok(())
-        }
-    };
+    let still_ordered = || stop_if_unordered(&refused, &unknown).is_ok();
     while keep_serving(launcher, &vm_state_dir) && still_ordered() {
         if service
             .serve_guest_while(&route, &mut sealer, || {
@@ -520,13 +541,13 @@ fn serve_local(
         {
             std::thread::sleep(POLL_INTERVAL);
         }
-        stop_if_unordered()?;
+        stop_if_unordered(&refused, &unknown)?;
         match service.maintain_local() {
             Ok(()) | Err(JournalError::MaintenancePending) => {}
             Err(error) => return Err(Error::other(error)),
         }
     }
-    stop_if_unordered()
+    stop_if_unordered(&refused, &unknown)
 }
 
 fn vm_is_alive(state_dir: &Path) -> bool {
@@ -842,7 +863,7 @@ pub fn spawn_for_launch_owned(
             )
             .map_err(Error::other)?;
         }
-        if config.actor.is_none() && posture.variant() == Variant::Prod {
+        if posture.variant() == Variant::Prod {
             let home = PathBuf::from(mvm_core::config::mvm_home());
             config.coordinator =
                 Some(crate::policy_generation::coordinator::ensure(&home).map_err(Error::other)?);

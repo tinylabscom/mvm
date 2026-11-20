@@ -521,7 +521,19 @@ take the slots reserved for workload commits, and they do not take the
 activation lock. A launch without a reachable coordinator refuses a production
 mailbox.
 
-Limits: actor per-call and control journals are not enrolled. Every journal
+Actor mailboxes: in a production posture each call journal and the control
+journal of an actor endpoint is its own destination. The id is the SHA-256 of a
+domain string, the endpoint's address and execution epoch, the purpose (`call`
+or `control`) and the message id (zero for control). The endpoint signs prepared
+heads with a key in its state directory. Every open of a journal enrolls it
+again, one idempotent round trip, then checks after the open that the anchor
+reached the enrolled tip. One pair of stop flags is shared by all of an
+endpoint's journals, so a refusal or an unknown outcome on any of them stops the
+helper. Per-call destinations are retired by the same least-recently-changed
+rule. A production actor helper without a coordinator refuses to serve.
+Development-posture actor journals are not ordered.
+
+Limits: development-posture actor journals are not ordered. Every journal
 record costs one durable write by the coordinator. A helper that is frozen
 holds no lane, and the commit it was about to make is refused after the
 quarantine, while a record it already wrote but did not commit is left in its
