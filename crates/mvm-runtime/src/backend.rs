@@ -25,6 +25,23 @@ use mvm_backends::driver::hvf::HvfDriver;
 use mvm_backends::driver::{LibkrunDriver, QemuDriver};
 use mvm_vmm::host::drive_file::DriveFile;
 
+/// Release a failed custodied start only when its native owner proves no live child remains.
+///
+/// `Ok` carries an ordinary refusal whose launch custody is safe to release.
+/// `Err` retains the typed native failure because stop remains uncertain.
+///
+/// # Errors
+///
+/// Returns the custody-bearing failure when the child may still be live.
+pub fn release_confirmed_start_failure(
+    error: anyhow::Error,
+) -> std::result::Result<anyhow::Error, anyhow::Error> {
+    match error.downcast::<mvm_backends::driver::hvf::ColdHvfBootFailure>() {
+        Ok(failure) => failure.into_released_error().map_err(anyhow::Error::new),
+        Err(error) => Ok(error),
+    }
+}
+
 /// A warm child whose lifecycle gate remains held until the caller takes custody.
 #[must_use]
 pub struct OwnedWarmClaim {

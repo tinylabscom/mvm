@@ -98,6 +98,11 @@ pub struct Unit {
     /// treats it as failed. Absent declares no liveness deadline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liveness_period_ms: Option<NonZeroU32>,
+    /// The unit's exclusive cores must be isolated from the general scheduler
+    /// (`isolcpus=`), so processes MVM does not start are kept off them too.
+    /// Valid only with exclusive placement. Absent requires nothing.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub require_isolated_cores: bool,
 }
 
 /// What a unit is sized at. The wall-clock bound is not here: it is a grant
@@ -160,6 +165,18 @@ pub enum IsolationTier {
     Partition,
     /// Hardware virtualization.
     Vm,
+}
+
+impl IsolationTier {
+    /// The wire spelling, the same string serde writes.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Task => "task",
+            Self::Partition => "partition",
+            Self::Vm => "vm",
+        }
+    }
 }
 
 /// The transitions a sealed unit permits after admission.
@@ -352,6 +369,8 @@ pub enum TopologyValidationError {
     WriterIsReader { cell: String, unit: WorkloadId },
     #[error("unit {} declares an empty exclusive core set", .unit.0)]
     EmptyCoreSet { unit: WorkloadId },
+    #[error("unit {} requires isolated cores but holds none exclusively", .unit.0)]
+    IsolationWithoutExclusiveCores { unit: WorkloadId },
     #[error(
         "units {} and {} both hold core {} exclusively and are not a standby pair",
         .first.0, .second.0, .core.0
@@ -425,6 +444,11 @@ impl Topology {
             },
         })?;
         for unit in &self.units {
+            if unit.require_isolated_cores && unit.placement.is_floating() {
+                return Err(E::IsolationWithoutExclusiveCores {
+                    unit: unit.workload.clone(),
+                });
+            }
             if let CorePlacement::Exclusive(cores) = &unit.placement {
                 if cores.is_empty() {
                     return Err(E::EmptyCoreSet {

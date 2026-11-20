@@ -15,12 +15,17 @@
 //!   -display none -serial null -nodefaults -kernel /path/to/kernel -append console=ttyS0" \
 //! cargo test -p mvm-hostd --test spawn_ceiling_audit_live -- --ignored --nocapture --test-threads 1
 //! ```
+//!
+//! The placement witness also needs the cpuset controller delegated to the
+//! user manager (`mvmctl doctor` reports it). It places the VMM on the host's
+//! highest online core unless `MVM_LIVE_CPUS` names a set.
 
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 use ed25519_dalek::SigningKey;
 use mvm_contract::protocol::resource_controls::{EnforcedCeiling, EnforcedTier};
+use mvm_contract::protocol::vm_backend::BackendKind;
 use mvm_core::spawn_scope::{self, ScopeProbe, SpawnBounds};
 use mvm_hostd::audit::emitter::{AuditEmitter, grants_audit};
 
@@ -111,7 +116,11 @@ fn a_scoped_vmm_reads_back_guest_ram_plus_the_overhead() {
     let audit = tempfile::tempdir().expect("audit dir");
     let (emitter, verifying) = emitter_in(audit.path());
     emitter
-        .emit_grants_enforced(&plan("plan-LIVE-CEILING"), &enforced)
+        .emit_grants_enforced(
+            &plan("plan-LIVE-CEILING"),
+            &enforced,
+            BackendKind::Firecracker,
+        )
         .expect("audit the read-back");
     let chain = audit.path().join("local.jsonl");
     let content = std::fs::read_to_string(&chain).expect("chain written");
@@ -183,4 +192,81 @@ fn a_vmm_pushed_past_its_memory_ceiling_is_killed_and_audited() {
             .args(["--user", "reset-failed", &unit])
             .status();
     }
+}
+
+/// The set the placement witness confines the VMM to.
+fn live_cpus() -> mvm_contract::protocol::cpu_set::CpuSet {
+    use mvm_contract::protocol::cpu_set::CpuSet;
+    if let Ok(list) = std::env::var("MVM_LIVE_CPUS") {
+        return CpuSet::parse(&list).expect("MVM_LIVE_CPUS is a kernel CPU list");
+    }
+    let online = spawn_scope::online_cpus().expect("the kernel publishes its online CPUs");
+    let highest = online.iter().last().expect("at least one CPU is online");
+    CpuSet::parse(&highest.to_string()).expect("one CPU")
+}
+
+/// The CPUs the kernel lets `pid` run on, from `/proc/<pid>/status`.
+fn cpus_allowed(pid: u32) -> mvm_contract::protocol::cpu_set::CpuSet {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).expect("process status");
+    let list = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+        .expect("status carries Cpus_allowed_list");
+    mvm_contract::protocol::cpu_set::CpuSet::parse(list).expect("a kernel CPU list")
+}
+
+#[test]
+#[ignore = "needs a Linux host with a systemd user session, a delegated cpuset and a VMM"]
+fn a_placed_vmm_reads_back_its_cpuset_and_runs_only_there() {
+    if let Some(gap) = spawn_scope::cpuset_gap() {
+        panic!("this witness needs a scope cpuset: {}", gap.describe());
+    }
+    let cpus = live_cpus();
+    let state = tempfile::tempdir().expect("state dir");
+    let machine_id = format!("mvm-live-placed-{}", std::process::id());
+
+    let mut child = spawn_scope::bind_spawn(
+        vmm_command(),
+        &machine_id,
+        state.path(),
+        &SpawnBounds::for_guest_memory(guest_mib()).with_allowed_cpus(Some(cpus.clone())),
+    )
+    .spawn()
+    .expect("spawning the placed VMM");
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(
+        child.try_wait().expect("poll").is_none(),
+        "the placed VMM must still be running"
+    );
+
+    let mut enforced = spawn_scope::enforced_grants_for_vm(state.path());
+    println!("placed on {cpus}, read back {:?}", enforced.placement);
+    assert_eq!(enforced.placement.effective.as_ref(), Some(&cpus));
+    assert_eq!(cpus_allowed(child.id()), cpus, "the kernel's own affinity");
+
+    enforced.placement.requested = Some(cpus.clone());
+    let audit = tempfile::tempdir().expect("audit dir");
+    let (emitter, verifying) = emitter_in(audit.path());
+    emitter
+        .emit_grants_enforced(
+            &plan("plan-LIVE-PLACED"),
+            &enforced,
+            BackendKind::Firecracker,
+        )
+        .expect("audit the read-back");
+    let chain = audit.path().join("local.jsonl");
+    let content = std::fs::read_to_string(&chain).expect("chain written");
+    println!("{content}");
+    assert!(
+        content.contains(grants_audit::LABEL_CPUSET_EFFECTIVE),
+        "{content}"
+    );
+    assert!(content.contains(&format!("\"{cpus}\"")), "{content}");
+    mvm_hostd::supervisor::verify_audit_chain(&chain, &verifying).expect("chain verifies");
+
+    let unit = spawn_scope::read_scope_unit(state.path()).expect("recorded unit");
+    let _ = Command::new("systemctl")
+        .args(["--user", "stop", &unit])
+        .status();
+    let _ = child.wait();
 }

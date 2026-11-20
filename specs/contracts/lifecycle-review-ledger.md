@@ -14,6 +14,42 @@ separately, the files that were not read. Absence from the "read" column is not 
 soundness. "Read" is taken from the fixing PR descriptions and the review notes for the lane; the
 line ranges are as recorded there and were not re-derived when this file was written.
 
+## Conformance authenticated HVF cleanup
+
+Reviewed the conformance reaper, its scenario after-hook, interrupt handler,
+temporary-home guard and world destructor, plus the existing CLI stop route
+and HVF authenticated-stop boundary. Home-local runtime evidence selects VM
+names, not numeric PID authority. The harness delegates validation,
+authentication, finalization and state removal to `mvmctl machine stop` in an
+isolated child with a 45-second deadline per candidate. It does not read
+identity-file contents or remove VM directories or pool records itself.
+
+Identified supervisors and processes whose paths match an HVF candidate home
+are excluded from raw signals, including custom-named helpers. Exclusion
+markers persist across cleanup sweeps. Missing evidence, refused or timed-out
+stop, newly observed home-local candidates and surviving protected processes
+remain unknown; later disappearance does not clear an unknown report.
+Unconfirmed cleanup retains owned temporary homes. Explicit guard completion
+returns one report for the step to assert; Drop remains the unwind backstop.
+Unrelated homes are neither stop targets nor sources of global cleanup failure.
+Non-HVF-only homes retain the existing helper TERM/KILL cleanup.
+
+Hermetic tests cover command isolation, production stdin-configured argv,
+malformed/missing/FIFO evidence, stop refusal and timeout, cross-home
+separation, custom-helper exclusion, later sweeps and retained temporary-home
+ownership. The shared bounded runner sends zero-cap output streams to null so
+this child neither captures secrets nor waits on descendant-held output pipes.
+The ignored native entry point requires an explicitly opted-in private root,
+CLI binary and exactly one expected VM; compiling it is not live evidence.
+
+Limits: this is a test-harness cleanup review, not a new review of backend
+authentication, kernel lifetime observation or release guarantees. Process
+tables and filesystem discovery are observations, not an atomic lifecycle
+lock; work starting after the final scan is outside this witness. Conservatively
+excluding helpers in an HVF home can leave a helper survivor and fail cleanup.
+No native reaper run, successful public Claude boot/release, Linux confinement
+or hardware finalization was established by these hermetic tests.
+
 ## Offline recovery decision boundary
 
 The A1 slice under [#5120](https://github.com/tinylabscom/mvm/issues/5120)
@@ -64,6 +100,84 @@ evidence. A failed probe still refuses launch. The added subprocess witness
 covers both modes, admitted HTTPS and refused ports, forward-request refusal,
 private permissions, unchanged guest authentication, and teardown. This does
 not witness a native VM boot or Linux confinement; those remain live CI checks.
+
+## Persistent start admission ownership
+
+The persistent-source slice under
+[#5520](https://github.com/tinylabscom/mvm/issues/5520) reviews the machine
+lifecycle guard from source and volume preparation through host admission,
+backend dispatch, authenticated readiness and rollback. The client retains
+source preparation, writable-volume leases and post-dispatch acceptance.
+Hostd borrows the caller-held `MachineLifecycleLock`, validates its name and
+cold state without reacquiring it, retains the selected `VerifiedRuntimeSet`
+through one durable admission, and spends that admission on the existing
+persistent dispatch tail.
+
+Pre-dispatch lock, runtime and required-audit refusals start no backend.
+Confirmed post-start rollback records failure before reaping state under the
+same guard. An unconfirmed native start or stop records an unsealed outcome and
+retains runtime, name and volume custody; it does not authorize cleanup or a
+second attachment. `plan.launched` remains client-owned after the private
+host-socket gate probe, mailbox setup, authenticated guest readiness, grant
+readback, budget recording and lease commit.
+
+Mock and source-level tests cover stage order, runtime tampering, audit
+durability refusal, lock mismatch and uncertain lease retention. They do not
+qualify Linux Firecracker, a billable GCP host, or the formal cold/warm
+performance requirements.
+
+## CLI transient cold preparation ownership
+
+The next [#5520](https://github.com/tinylabscom/mvm/issues/5520) source slice
+prepares admitted CLI cold authority in hostd before warm/template/cold
+selection. Hostd orders runtime attachment, one launch-scoped selected-runtime
+verification and one signed admission with its durability obligation, without
+starting a backend. The existing Required-tier sync may overlap selection and
+isolated guest initialization, but the retained config still blocks warm claim,
+non-activation boot or workload activation until that sync succeeds. The opaque
+capability retains the exact lowered config, policy, runtime evidence, admitted
+plan and immutable audit continuation; serialized plan JSON remains a
+projection only.
+
+Warm claim and cold dispatch consume the same one-shot authority. A lost warm
+reservation returns that exact unspent capability, while warm success or a
+terminal refusal returns only the audit continuation. Writable image locks stay
+with the CLI until cold is selected, then transfer once through the existing
+CLI-transient finalization. Confirmed teardown permits the deferred launch,
+posture, exit and seal narrative. Uncertain stop retains runtime, scratch and
+writable-image custody and leaves the session unsealed. Planless warm parents
+and template snapshots remain explicit, non-migrated alternatives.
+
+Mock-backed tests cover preparation order with zero starts, one signed
+admission, deferred launch audit, absent persistent budget hooks and
+uncertain-stop retention. Existing runner tests cover Required-sync refusal
+before activation or non-activation boot; the wrapper has no new live-backend
+witness. These tests do not qualify native HVF or Firecracker behavior or the
+formal cold/warm performance requirements.
+
+## Local transient admission ownership
+
+The `LocalBackend` transient source slice under
+[#5520](https://github.com/tinylabscom/mvm/issues/5520) keeps image, volume,
+secret-reference and command/session preparation in the client. Hostd borrows
+the client's existing `MachineLifecycleLock`, validates its matching name and
+cold state without reacquiring it, then uses the shared source preparation
+boundary for runtime attachment, one launch-scoped verification and one
+admission before the existing immediate admitted dispatch.
+
+Synthesized and externally signed authorities remain alternatives inside this
+one source. External envelopes retain their pinned signer and durable replay
+ledger requirements; neither plan JSON nor request fields replace signed
+authority. Confirmed failure retains the existing client cleanup owner.
+Uncertain stop returns before terminal cleanup, so volume, secret, runtime and
+audit custody remain available for reconciliation. This migration adds no
+persistent readiness, lease-finalization or deferred CLI audit semantics.
+
+Mock and source-level tests cover both authorities, lifecycle refusal before
+attachment, replay and signer refusal, rootfs/runtime mismatch, final-gate
+rollback, immediate audit ordering and uncertain-stop retention. They do not
+qualify native HVF or Firecracker behavior, strengthen Preview resource claim
+18, or satisfy the formal cold/warm performance requirements.
 
 ## Signed application HVF startup diagnostics
 
@@ -293,6 +407,153 @@ obligation is written is exercised only by stopping between the store's own
 step functions, not through a real failing `fsync`, and the unresolved-error
 wrapping inside `publish_initial` has no test driven by a real failure.
 Migration exclusion and prepared-head signing custody are untouched.
+
+## Workload ledger store
+
+Covers `mvm-hostd/src/policy_generation/workload_store.rs`, the
+`CommitWorkload` request in `policy_generation/coordinator.rs`, the readers in
+`mvm-core/src/host_interface/workload.rs` and `mvm-hostd/src/containment.rs`,
+for [#5255](https://github.com/tinylabscom/mvm/issues/5255). The policy
+coordinator is the only writer of the containment ledger. Files, all under
+`policy-generations/workloads/`: `ledger.json` (sequence plus entries) and
+`pending.json` (the obligation, `Migrate` or `Commit{sequence, sha256}`).
+
+Commit order, under the store's lane and the coordinator owner lock: recover,
+migrate if the ledger is absent, apply the change, write `pending.json`
+durably, replace `ledger.json` durably, remove `pending.json`. A quarantine of
+an already quarantined workload returns the current commit without writing; a
+replace must name the workload's current epoch. Readers refuse while
+`pending.json` exists (checked before and after reading the ledger), on a
+malformed, oversize or non-regular ledger, and read the legacy file only when
+no canonical ledger exists. A reader that sees the obligation waits and
+re-reads, up to 100 rounds of 10 ms, before it refuses, so a commit in flight
+does not fail a launch. A stranded obligation is resolved by a `Recover`
+request: `quarantine`, `replace` and every launch, start, resume, restore and
+fork path send it, on every host and backend, when they see one
+(`recover_workload_ledger`, one `stat` otherwise). A reader reached some other
+way refuses until one of those runs.
+
+Interruptions: after the obligation and before the ledger rename, the ledger
+still has `sequence - 1` and recovery removes the obligation; after the rename,
+the ledger bytes match the recorded hash and recovery removes it; matching
+neither leaves the obligation, readers and further commits refuse, and the
+answer on the wire is `Unresolved`. Recovery runs at bind, on `Recover`, and
+before every commit.
+
+Migration: pre-validate the legacy file (size, strict parse, count and name
+bounds; a bad file changes nothing), write `Migrate`, create the archive
+directory, exchange it with `host-interface/workloads.json` so that path is a
+directory, write `MOVED` inside it, read the archived file, write `ledger.json`
+at sequence 0, remove the obligation. Any older binary's rename onto that path
+fails and its read fails. A resumed migration repeats from the obligation; a
+legacy write landing before the exchange is what the ledger starts from. The
+archive is never deleted or rewritten.
+
+Bounds: 16384 workloads, of which the last 1024 are reserved for quarantine
+(a replace cannot create an entry inside the reserve), names 1 to 256 bytes,
+4 MiB per ledger. The byte limit has the same reserve: a replace that creates a
+new entry is refused once the ledger would exceed 4 MiB minus 1024 worst-case
+escaped entries; a quarantine keeps the full limit.
+
+Ownership: the store holds an exclusive lock on a file inside the ledger
+directory for its life, so a second owner is refused however the home path is
+spelled (a symlink, a different spelling). The coordinator's own owner lock is
+separate and unchanged. A migrated ledger is never rebuilt: a fenced legacy
+path with no migration obligation and no canonical file is an error, because
+the archive predates every later commit. Waiting activations cannot take the
+last 32 handler slots, which keeps a quarantine from being refused at the
+connection limit by activations alone.
+
+Limits: a launch that read the ledger before a quarantine commit can still
+start after it, so the operator stops the machine after quarantining; mailbox
+destination commits are ordered by this lane only on the production local path
+(next section). Quarantine and replace need the coordinator process and are
+refused when it cannot start. A failure
+after the obligation is exercised by stopping between the store's steps, not
+through a failing `fsync`.
+
+## Mailbox destination commit order
+
+Covers `enroll_destination` and `commit_destination` in
+`mvm-hostd/src/policy_generation/workload_store.rs`, their requests in
+`policy_generation/coordinator.rs`, `mvm-hostd/src/mailbox_commit.rs`, the
+final-commit hook on `FileJournalAnchor` in
+`mvm-core/src/mailbox/journal/anchor.rs`, and `serve_local` in
+`mailbox_process.rs`, for [#5255](https://github.com/tinylabscom/mvm/issues/5255).
+A production, non-actor mailbox destination takes the last step of every
+journal commit through the workload ledger's lane, so a quarantine or
+replacement and a destination commit have one order. The helper writes and
+signs the journal record outside the lane; the lane then moves the destination's
+tip, and only after it answers does the helper write its local anchor.
+
+The ledger gains `destinations`, keyed by a 64-hex destination id (the stem of
+the destination's storage files). Each entry holds the workload, its execution
+epoch, the destination's verifying key, a tip (cursor and 64-hex head) and
+`changed`, the ledger sequence at which the entry was inserted or its tip last
+moved. At most 4096 destinations are recorded.
+
+Enrollment, under the lane after recovery. A helper enrolls on every start, so
+enrollment is idempotent. An existing entry with the same workload, epoch and
+key is answered first, with its tip and its `changed` sequence and nothing
+written, even if the workload has since been quarantined or replaced: a commit
+that landed first must still be anchored. Any other binding is refused, because
+a destination's key and binding never change. A new entry is refused for a
+quarantined workload or an epoch other than the workload's current one, and is
+inserted at the enrollment's tip. When the insert would pass 4096 entries or
+take the serialized ledger into the quarantine byte reserve, entries whose
+workload has moved to another epoch are dropped first, since they can never
+commit again, and then the least recently changed entries one at a time until
+the ledger fits. The enrollment is refused only if it does not fit with no other
+destination. An evicted live destination enrolls again at its own anchor tip,
+which gives up the coordinator's rollback check for that step.
+
+Commit, under the lane after recovery, in this order: an unenrolled destination
+is refused as not enrolled; a head that names another workload or epoch, or
+whose signature does not verify under the enrolled key, is refused; a head whose
+`next` equals the recorded tip is answered as committed without a write, even if
+the workload has since been quarantined or replaced, so an acceptance that
+happened stays accepted; a head whose `expected` is not the recorded tip, or
+whose cursor is not one past it, is refused as divergent; a quarantined workload
+or a changed epoch is refused; otherwise the tip is set, `changed` and the
+sequence are bumped and the ledger is written with the same obligation-first
+discipline as a workload commit. A refusal of the request itself happens before
+any write and is reported as `Refused`; a destination that is not enrolled is
+reported as `Unenrolled`. Every other failure of a destination request, such as
+an unreadable ledger, is reported as `Unresolved`, never as a refusal. An
+interrupted commit is `Unresolved`, and `Recover` settles it from the ledger on
+disk. The signing key signs prepared heads under the domain
+`mvm.mailbox.prepared-head.v1` and nothing else.
+
+Helper: it generates the signing key beside its anchor, enrolls at the anchor's
+tip before the journal opens, and refuses to start unless the recorded tip is
+the anchor's or exactly one cursor ahead of it (a commit taken before the local
+write was lost). After the journal opens, the anchor must be at the enrolled
+tip, so a commit the owner took must be explained by a journal suffix. Every
+anchor advance, including the open-time reconcile of a suffix the anchor has
+not seen, calls the owner first. A definite refusal fails the commit, poisons
+the journal and stops the helper. A commit answered `Unenrolled` enrolls again
+at the tip it started from and sends the same signed head once more. An unknown
+answer sends the same signed head again, up to three attempts in all with a
+short wait between them, asking the owner to recover between attempts when it
+reported an interrupted commit; if none is answered the commit fails and the
+helper stops, and the next start reconciles from its journal. Destination
+requests share the waiting-request bound that activations use, so they cannot
+take the slots reserved for workload commits, and they do not take the
+activation lock. A launch without a reachable coordinator refuses a production
+mailbox.
+
+Limits: actor per-call and control journals are not enrolled. Every journal
+record costs one durable write by the coordinator. A helper that is frozen
+holds no lane, and the commit it was about to make is refused after the
+quarantine, while a record it already wrote but did not commit is left in its
+journal until a reopen is refused. A development mailbox is not ordered by the
+ledger. Nothing restarts a mailbox helper that exits after an unknown outcome or
+a coordinator outage. After a quarantine a destination's journal is no longer
+compacted or expired, so retained ciphertext can outlive its retention until the
+workload is replaced and the store is removed by hand. The ordering hook is
+attached by the one production opener; a future opener must attach it too. A
+connection that has been accepted but has sent no frame holds a connection slot
+until its read timeout.
 
 ## Compile-time AES-GCM boundary
 

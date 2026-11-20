@@ -36,6 +36,18 @@ struct Host {
     home: tempfile::TempDir,
     signer: HostSigner,
     emitter: AuditEmitter,
+    host_cpus: HostCpus,
+}
+
+/// A host whose spawn scope cannot carry a CPU set, whatever the machine
+/// running the test can do.
+fn no_scope_cpuset() -> HostCpus {
+    HostCpus {
+        scope_cpuset: false,
+        online: None,
+        isolated: None,
+        live: Vec::new(),
+    }
 }
 
 impl Host {
@@ -50,7 +62,37 @@ impl Host {
             home,
             signer,
             emitter,
+            host_cpus: no_scope_cpuset(),
         }
+    }
+
+    /// A host whose scope carries a CPU set and that has `online` CPUs.
+    fn with_cpus(online: &str) -> Self {
+        Self {
+            host_cpus: HostCpus {
+                scope_cpuset: true,
+                online: Some(mvm_contract::protocol::cpu_set::CpuSet::parse(online).unwrap()),
+                isolated: None,
+                live: Vec::new(),
+            },
+            ..Self::new()
+        }
+    }
+
+    fn admit_for(&self, tenant: &str, topology: &Topology) -> Result<TopologyAdmission> {
+        let keys = self.keys();
+        let mut topology = topology.clone();
+        topology.tenant = TenantId(tenant.to_string());
+        admit_topology(&TopologyAdmissionRequest {
+            tenant: &topology.tenant,
+            signed: &self.sign(&topology),
+            backend: BackendKind::Firecracker,
+            measured_failover: None,
+            host_cpus: &self.host_cpus,
+            clock: &FixedClock(t0() + Duration::days(1)),
+            host_signer_keys_dir: Some(&keys),
+            emitter: &self.emitter,
+        })
     }
 
     fn with_memory_budget(memory_mib: u64) -> Self {
@@ -84,6 +126,7 @@ impl Host {
             signed,
             backend,
             measured_failover: measured,
+            host_cpus: &self.host_cpus,
             clock: &FixedClock(now),
             host_signer_keys_dir: Some(&keys),
             emitter: &self.emitter,
@@ -153,11 +196,12 @@ fn unit(name: &str, role: UnitRole) -> Unit {
         placement: CorePlacement::Floating,
         min_isolation: None,
         liveness_period_ms: None,
+        require_isolated_cores: false,
         permits: SealedTransitions::default(),
     }
 }
 
-fn topology(generation: u64) -> Topology {
+pub(super) fn topology(generation: u64) -> Topology {
     Topology {
         schema_version: TOPOLOGY_SCHEMA_VERSION,
         tenant: TenantId(TENANT.to_string()),
@@ -479,6 +523,7 @@ fn a_tenant_that_is_not_one_path_component_is_refused_before_anything_is_written
         signed: &signed,
         backend: BackendKind::Firecracker,
         measured_failover: None,
+        host_cpus: &no_scope_cpuset(),
         clock: &FixedClock(t0() + Duration::days(1)),
         host_signer_keys_dir: Some(&keys),
         emitter: &host.emitter,
@@ -517,5 +562,61 @@ fn the_topology_audit_chain_verifies_after_admissions_and_refusals() {
     assert_eq!(
         verify_audit_chain(&host.chain_path(), &host.signer.verifying).expect("chain verifies"),
         4
+    );
+}
+
+fn placed(generation: u64, cores: &[u32]) -> Topology {
+    let mut topology = topology(generation);
+    topology.units[1].placement =
+        CorePlacement::Exclusive(cores.iter().map(|c| CoreId(*c)).collect());
+    topology
+}
+
+#[test]
+fn exclusive_placement_is_admitted_where_the_scope_carries_a_cpu_set() {
+    let host = Host::with_cpus("0-7");
+    admitted(host.admit_for(TENANT, &placed(1, &[2, 3])).unwrap());
+}
+
+#[test]
+fn exclusive_placement_on_a_core_the_host_lacks_is_refused_and_persists_nothing() {
+    let host = Host::with_cpus("0-3");
+    let err = host.admit_for(TENANT, &placed(1, &[3, 4])).unwrap_err();
+    let refused = refusal(&err);
+    assert_eq!(refused.stage, RefusalStage::Requirements);
+    assert!(
+        refused.reason.contains("no such core"),
+        "{}",
+        refused.reason
+    );
+    assert!(host.records().is_empty());
+}
+
+#[test]
+fn exclusive_placement_another_tenant_holds_is_refused() {
+    let host = Host::with_cpus("0-7");
+    admitted(host.admit_for("other", &placed(1, &[3, 4])).unwrap());
+    let err = host.admit_for(TENANT, &placed(1, &[2, 3])).unwrap_err();
+    let refused = refusal(&err);
+    assert_eq!(refused.stage, RefusalStage::Requirements);
+    assert!(
+        refused.reason.contains("tenant other"),
+        "{}",
+        refused.reason
+    );
+    // A disjoint set beside it is fine.
+    admitted(host.admit_for(TENANT, &placed(1, &[5])).unwrap());
+}
+
+#[test]
+fn exclusive_placement_without_a_scope_cpu_set_is_refused_by_requirement() {
+    let host = Host::new();
+    let err = host.admit_for(TENANT, &placed(1, &[0])).unwrap_err();
+    let refused = refusal(&err);
+    assert_eq!(refused.stage, RefusalStage::Requirements);
+    assert!(
+        refused.reason.contains("exclusive core placement"),
+        "{}",
+        refused.reason
     );
 }

@@ -184,12 +184,18 @@ pub fn run_captured(
     admit: Option<&SessionAdmit<'_>>,
     posture: Option<&PostureSink>,
 ) -> Result<ExecOutput> {
-    run_captured_started(req, admit, None, posture, std::time::Instant::now())
+    run_captured_started(
+        req,
+        admit.map(super::LaunchAdmit::Session),
+        None,
+        posture,
+        std::time::Instant::now(),
+    )
 }
 
 pub(crate) fn run_captured_started(
     req: ExecRequest,
-    admit: Option<&SessionAdmit<'_>>,
+    admit: Option<super::LaunchAdmit<'_>>,
     audit_owner: Option<&std::cell::RefCell<Option<mvm_client::admission::CliAdmission>>>,
     posture: Option<&PostureSink>,
     startup_started: std::time::Instant,
@@ -221,12 +227,18 @@ pub fn run(
     admit: Option<&SessionAdmit<'_>>,
     posture: Option<&PostureSink>,
 ) -> Result<i32> {
-    run_started(req, admit, None, posture, std::time::Instant::now())
+    run_started(
+        req,
+        admit.map(super::LaunchAdmit::Session),
+        None,
+        posture,
+        std::time::Instant::now(),
+    )
 }
 
 pub(crate) fn run_started(
     req: ExecRequest,
-    admit: Option<&SessionAdmit<'_>>,
+    admit: Option<super::LaunchAdmit<'_>>,
     audit_owner: Option<&std::cell::RefCell<Option<mvm_client::admission::CliAdmission>>>,
     posture: Option<&PostureSink>,
     startup_started: std::time::Instant,

@@ -2,6 +2,68 @@
 
 use super::{AdmissionContext, AuditContinuation, CliAdmission, PendingCliAdmission};
 
+/// Run source-specific attach and lowering inside hostd's ordered CLI preparation.
+///
+/// # Errors
+/// Propagates attachment, selected-runtime verification, durable admission and
+/// source-lowering refusals. Preparation never starts a backend.
+pub fn prepare_cli_cold(
+    backend: &mvm_runtime::AnyBackend,
+    config: mvm_core::vm_backend::VmStartConfig,
+    attach: impl FnOnce(
+        &mut mvm_core::vm_backend::VmStartConfig,
+    ) -> anyhow::Result<
+        Option<std::sync::Arc<mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime>>,
+    >,
+    admit: impl FnOnce(
+        &mut mvm_core::vm_backend::VmStartConfig,
+        Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
+    ) -> anyhow::Result<super::CliColdAdmissionInput>,
+) -> anyhow::Result<super::PreparedCliCold> {
+    let prepared = mvm_hostd::plan_admission::prepare_cli_cold(
+        mvm_hostd::plan_admission::PrepareCliColdParams { backend, config },
+        attach,
+        |config, verified_runtime| {
+            let super::CliColdAdmissionInput {
+                admission,
+                built_runtime,
+            } = admit(config, verified_runtime)?;
+            let CliAdmission::Pending(pending) = admission else {
+                anyhow::bail!("CLI cold preparation lost its pending admission");
+            };
+            let PendingCliAdmission {
+                authority,
+                policy_bundle,
+                audit,
+                source_rootfs: _,
+                verified_runtime: _,
+            } = *pending;
+            let host_budget = authority.host_budget_permit();
+            let mailbox_posture = authority.mailbox_posture();
+            Ok(mvm_hostd::plan_admission::LaunchAdmission {
+                admitted: authority,
+                emitter: audit.emitter,
+                policy_bundle,
+                continuation: super::CliColdContinuation {
+                    host_budget,
+                    mailbox_posture,
+                    _built_runtime: built_runtime,
+                },
+            })
+        },
+    )?;
+    let continuation = prepared.continuation();
+    let config = prepared.config().clone();
+    let host_budget = std::sync::Arc::clone(&continuation.host_budget);
+    let mailbox_posture = continuation.mailbox_posture.clone();
+    Ok(super::PreparedCliCold {
+        admission: CliAdmission::PreparedCold(Box::new(prepared)),
+        config,
+        host_budget,
+        mailbox_posture,
+    })
+}
+
 /// A materialized filesystem child bound to its own fresh, one-use admission.
 /// This is not a transient run: its launch audit is written after backend
 /// start, while the fork does not add an immediate host budget charge.
@@ -41,6 +103,7 @@ impl FsQuickBootAdmission {
         if let Err(error) = owner.check_legacy_projection(&config) {
             owner
                 .audit_continuation()
+                .expect("filesystem fork retains its audit continuation")
                 .emit_failed("backend-start", &error);
             return Err(error);
         }
@@ -93,6 +156,8 @@ pub enum CliStartFailureKind {
     Recorded,
     /// The refusal is unrecorded; the CLI audit owner owes a `plan.failed` entry.
     Unrecorded,
+    /// A caller supplied a lifecycle guard for another machine or non-cold state.
+    StateNotOwned,
     /// Rollback was not confirmed; a VM may still be live.
     UncertainStop,
 }
@@ -108,11 +173,21 @@ pub fn cli_start_failure_kind(error: &anyhow::Error) -> Option<CliStartFailureKi
         Some(mvm_hostd::plan_admission::CliStartFailure::Unrecorded(_)) => {
             Some(CliStartFailureKind::Unrecorded)
         }
+        Some(mvm_hostd::plan_admission::CliStartFailure::StateNotOwned(_)) => {
+            Some(CliStartFailureKind::StateNotOwned)
+        }
         Some(mvm_hostd::plan_admission::CliStartFailure::UncertainStop(_)) => {
             Some(CliStartFailureKind::UncertainStop)
         }
         None => None,
     }
+}
+
+fn finish_prepared(
+    dispatched: mvm_hostd::plan_admission::DispatchedCliCold<super::CliColdContinuation>,
+) -> AuditContinuation {
+    let (plan, emitter, _continuation) = dispatched.into_parts();
+    AuditContinuation { plan, emitter }
 }
 
 impl CliAdmission {
@@ -160,6 +235,7 @@ impl CliAdmission {
     #[must_use]
     pub fn plan(&self) -> &mvm_core::plan::ExecutionPlan {
         match self {
+            Self::PreparedCold(prepared) => prepared.plan(),
             Self::Pending(pending) => pending.authority.plan(),
             Self::Dispatched(audit) => audit.plan(),
         }
@@ -167,10 +243,11 @@ impl CliAdmission {
 
     /// The original read-only audit owner, retained across a failed dispatch.
     #[must_use]
-    pub fn audit_continuation(&self) -> &AuditContinuation {
+    pub fn audit_continuation(&self) -> Option<&AuditContinuation> {
         match self {
-            Self::Pending(pending) => &pending.audit,
-            Self::Dispatched(audit) => audit,
+            Self::PreparedCold(_) => None,
+            Self::Pending(pending) => Some(&pending.audit),
+            Self::Dispatched(audit) => Some(audit),
         }
     }
 
@@ -187,6 +264,9 @@ impl CliAdmission {
         &self,
         config: &mvm_core::vm_backend::VmStartConfig,
     ) -> anyhow::Result<()> {
+        if let Self::PreparedCold(prepared) = self {
+            return prepared.verify_projection(config);
+        }
         let Self::Pending(pending) = self else {
             anyhow::bail!("CLI admission was already dispatched");
         };
@@ -227,6 +307,20 @@ impl CliAdmission {
         config: mvm_core::vm_backend::VmStartConfig,
         writable_images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
     ) -> (Self, anyhow::Result<()>) {
+        if let Self::PreparedCold(prepared) = self {
+            if let Err(error) = prepared.verify_projection(&config) {
+                return (Self::PreparedCold(prepared), Err(error));
+            }
+            let (dispatched, result) = mvm_hostd::plan_admission::start_prepared_cli_cold(
+                *prepared,
+                backend,
+                writable_images,
+            );
+            return (
+                Self::Dispatched(Box::new(finish_prepared(dispatched))),
+                result.map(|_| ()),
+            );
+        }
         if !matches!(&self, Self::Pending(pending) if pending.source_rootfs.is_some()) {
             return (
                 self,
@@ -289,6 +383,27 @@ impl CliAdmission {
         ctx: &mvm_runtime::workload_runner::ClaimContext<'_>,
         handle: &mvm_core::vm_backend::StandbyHandle,
     ) -> (Self, anyhow::Result<crate::standby::OwnedWarmClaim>) {
+        if let Self::PreparedCold(prepared) = self {
+            if let Err(error) = prepared.verify_projection(&config) {
+                return (Self::PreparedCold(prepared), Err(error));
+            }
+            return match mvm_hostd::plan_admission::claim_prepared_cli_cold(
+                *prepared, backend, ctx, handle,
+            ) {
+                mvm_hostd::plan_admission::PreparedCliWarmClaim::Claimed { claim, dispatched } => (
+                    Self::Dispatched(Box::new(finish_prepared(dispatched))),
+                    Ok(claim),
+                ),
+                mvm_hostd::plan_admission::PreparedCliWarmClaim::ReservationLost(prepared) => (
+                    Self::PreparedCold(prepared),
+                    Err(mvm_core::vm_backend::StandbyError::ReservationLost.into()),
+                ),
+                mvm_hostd::plan_admission::PreparedCliWarmClaim::Refused { error, dispatched } => (
+                    Self::Dispatched(Box::new(finish_prepared(dispatched))),
+                    Err(error),
+                ),
+            };
+        }
         if !matches!(&self, Self::Pending(pending) if pending.source_rootfs.is_some()) {
             return (
                 self,
@@ -344,6 +459,9 @@ impl CliAdmission {
     #[must_use]
     pub fn finish_legacy(self) -> AuditContinuation {
         match self {
+            Self::PreparedCold(prepared) => finish_prepared(
+                mvm_hostd::plan_admission::abandon_prepared_cli_cold(*prepared),
+            ),
             Self::Pending(pending) => pending.audit,
             Self::Dispatched(audit) => *audit,
         }
@@ -440,6 +558,10 @@ mod tests {
             (
                 mvm_hostd::plan_admission::CliStartFailure::Unrecorded(anyhow::anyhow!("start")),
                 CliStartFailureKind::Unrecorded,
+            ),
+            (
+                mvm_hostd::plan_admission::CliStartFailure::StateNotOwned(anyhow::anyhow!("lock")),
+                CliStartFailureKind::StateNotOwned,
             ),
             (
                 mvm_hostd::plan_admission::CliStartFailure::UncertainStop(anyhow::anyhow!("stop")),

@@ -759,7 +759,7 @@ pub fn current_local_epoch(workload: &str) -> Result<u64> {
     let home = std::path::PathBuf::from(crate::config::mvm_home());
     let ledger = crate::host_interface::workload::WorkloadLedger::load_at(&home)
         .map_err(|e| anyhow::anyhow!("reading the workload ledger: {e}"))?;
-    Ok(ledger.entry(workload).epoch.0)
+    Ok(ledger.entry(workload).epoch.get())
 }
 
 pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {

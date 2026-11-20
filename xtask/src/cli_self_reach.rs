@@ -37,8 +37,9 @@ const CLI_SIDE: &[&str] = &["mvm-cli", "mvm-capture", "mvm-conformance"];
 const NOT_LINKABLE: &[&str] = &["mvm-cli", "mvm-capture"];
 
 /// Files that build a process and resolve the CLI today. Some only hold the
-/// resolver or run a test binary; the list pins the set, not a verdict. Shrink-only: pay a site down by replacing it
-/// with a typed client call and deleting its line here.
+/// resolver or run a test binary; the list pins the set, not a verdict.
+/// Production reaches are shrink-only: replace them with typed client calls.
+/// The dev-only conformance harness intentionally exercises the real CLI.
 const KNOWN_REACHES: &[&str] = &[
     "crates/mvm-backends/src/driver/qemu_process.rs",
     "crates/mvm-build/src/builder_egress_process.rs",
@@ -50,6 +51,7 @@ const KNOWN_REACHES: &[&str] = &[
     "crates/mvm-cli/src/commands/pool/refill.rs",
     "crates/mvm-cli/src/test_boot_payload.rs",
     "crates/mvm-cli/src/update.rs",
+    "crates/mvm-conformance/src/lib.rs",
     "crates/mvm-hostd/src/health_probe.rs",
     "crates/mvm-vmm/src/host/aux_bin.rs",
 ];

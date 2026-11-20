@@ -108,6 +108,9 @@ pub struct VmmSpec {
     /// `mvm_core::spawn_scope::bind_spawn` at spawn, so the process is born
     /// bounded rather than bounded shortly afterwards.
     pub cpu_grant: Option<mvm_contract::grants::CpuGrant>,
+    /// The host CPUs the per-VM process's spawn scope is confined to, when
+    /// admission placed this launch. Only the Firecracker driver applies it.
+    pub allowed_cpus: Option<mvm_contract::protocol::cpu_set::CpuSet>,
     pub memory_mib: u32,
     /// Initial host commitment for virtio-balloon elasticity; `None` commits
     /// the full `memory_mib` at boot.

@@ -703,14 +703,10 @@ pub(crate) async fn machine_lifecycle(
 /// cleanup; reaping here would delete that unconsumed exit before it is read.
 /// A persistent machine — the restored-checkpoint case this exists for —
 /// reports no exit through the stop path, so it always reaps.
-pub(crate) fn remove_stopped_runtime_state(name: &str) -> Result<()> {
-    remove_stopped_runtime_state_with_lock(name, None)
-}
-
-fn remove_stopped_runtime_state_with_lock(
+fn remove_stopped_runtime_state(
     name: &str,
-    lifecycle: Option<&mvm_runtime::vm::instance_snapshot::MachineLifecycleLock>,
-) -> Result<()> {
+    lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+) -> Result<bool> {
     let state_dir = vm_state_dir(name);
     let transient_exit_pending = !mvm_core::config::machine_spec_path(name).exists()
         && mvm_core::exit_capture::exit_file_path(&state_dir).exists();
@@ -719,26 +715,37 @@ fn remove_stopped_runtime_state_with_lock(
             machine = name,
             "transient exit not yet reported; leaving state dir for its own cleanup"
         );
-        return Ok(());
+        return Ok(false);
     }
-    let removed = match lifecycle {
-        Some(lifecycle) => lifecycle.reap_unowned_state().map_err(|e| format!("{e:#}")),
-        None => mvm_runtime::vm::reconcile::reap_unowned_state_dir(
-            &state_dir,
-            &mvm_core::config::instance_dir(name),
-        ),
-    }
-    .map_err(|e| {
-        backend_err(format!(
-            "machine {name:?} stopped, but removing its state dir {} failed: {e}",
-            state_dir.display()
-        ))
-    })?;
+    let removed = lifecycle
+        .reap_unowned_state()
+        .map_err(|e| format!("{e:#}"))
+        .map_err(|e| {
+            backend_err(format!(
+                "machine {name:?} stopped, but removing its state dir {} failed: {e}",
+                state_dir.display()
+            ))
+        })?;
     if !removed {
         tracing::debug!(
             machine = name,
             "state dir still owned after stop; left in place"
         );
+    }
+    Ok(removed)
+}
+
+/// Complete a confirmed partial-start abort under the existing lifecycle gate.
+/// If reaping fails, leave both stop evidence and registry ownership for retry.
+pub(crate) fn cleanup_confirmed_launch_abort(
+    name: &str,
+    lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+) -> Result<()> {
+    lifecycle.require_name(name).map_err(backend_err)?;
+    lifecycle.mark_confirmed_stop().map_err(backend_err)?;
+    if remove_stopped_runtime_state(name, lifecycle)? {
+        deregister_from_name_registry(name);
+        lifecycle.clear_confirmed_stop().map_err(backend_err)?;
     }
     Ok(())
 }
@@ -784,7 +791,7 @@ impl LocalBackend {
                     id.0
                 ))
             })?;
-            remove_stopped_runtime_state_with_lock(&id.0, Some(lifecycle))?;
+            remove_stopped_runtime_state(&id.0, lifecycle)?;
         } else if expected.is_none()
             && let (Err(e), Some(plan)) = (&result, &stopped_session)
         {
@@ -1113,6 +1120,7 @@ impl MvmClient for LocalBackend {
         authorize_change(&id.0, Mutation::Resume)?;
         let _barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()
             .map_err(backend_err)?;
+        crate::policy_profiles::coordinator::recover_workload_ledger().map_err(backend_err)?;
         if cfg!(target_os = "linux") && self.backend.kind() != BackendKind::Mock {
             crate::policy_profiles::coordinator::ensure_if_activated().map_err(backend_err)?;
         }

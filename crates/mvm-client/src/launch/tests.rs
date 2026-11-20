@@ -162,6 +162,48 @@ async fn transient_launch_boots_admitted_and_audited() {
     let audit = home.audit_text();
     assert!(audit.contains("plan.admitted"), "got: {audit}");
     assert!(audit.contains("plan.launched"), "got: {audit}");
+    let entries: Vec<serde_json::Value> = audit
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("audit entry"))
+        .collect();
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry["entry"]["event"] == "plan.admitted")
+            .count(),
+        1,
+        "local transient admission must be recorded once"
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry["entry"]["event"] == "plan.launched")
+            .count(),
+        1,
+        "local transient launch must be recorded once"
+    );
+    let admitted = entries
+        .iter()
+        .position(|entry| entry["entry"]["event"] == "plan.admitted")
+        .expect("admitted event");
+    let launched = entries
+        .iter()
+        .position(|entry| entry["entry"]["event"] == "plan.launched")
+        .expect("launched event");
+    assert!(
+        admitted < launched,
+        "admission must precede immediate launch"
+    );
+    let admitted_labels = &entries[admitted]["entry"]["labels"];
+    assert_eq!(admitted_labels["workload"], "t-happy");
+    assert_eq!(
+        admitted_labels["signer_id"],
+        admitted_labels["authorizer_principal"]
+    );
+    assert!(admitted_labels["kernel_sha256"].is_string());
+    let launched_labels = &entries[launched]["entry"]["labels"];
+    assert_eq!(launched_labels["workload"], "t-happy");
+    assert_eq!(launched_labels["backend"], "mock");
 }
 
 #[tokio::test]

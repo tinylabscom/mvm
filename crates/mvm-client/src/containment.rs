@@ -9,6 +9,7 @@
 use anyhow::Result;
 use mvm_core::host_interface::workload::WorkloadLedger;
 use mvm_hostd::audit::{emitter::AuditEmitter, host_keypair, plan_persist};
+use mvm_hostd::containment::{CoordinatorWorkloads, WorkloadAuthority};
 
 fn home() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_core::config::mvm_home())
@@ -58,24 +59,61 @@ fn ensure_known(name: &str, emitter: &AuditEmitter) -> Result<()> {
 
 /// Refuse further launches of machine `name` and record `reason`. Works by
 /// name from the ledger and audit log, so a stopped machine can be contained.
+/// The ledger change goes through the policy coordinator; with none available
+/// this fails rather than writing the ledger locally.
 pub fn quarantine(name: &str, reason: &str) -> Result<()> {
-    let emitter = emitter()?;
-    ensure_known(name, &emitter)?;
-    mvm_hostd::containment::quarantine_named(&home(), &emitter, &tenant_of(name), name, reason)
+    crate::policy_profiles::coordinator::recover_interrupted_publication()?;
+    quarantine_with(connect_coordinator, name, reason)
 }
 
 /// Authorize a replacement of machine `name`; returns the new execution epoch.
 /// Needs no plan: stopping a machine removes its state directory, and replace
 /// must work after that.
 pub fn replace(name: &str) -> Result<u64> {
+    crate::policy_profiles::coordinator::recover_interrupted_publication()?;
+    replace_with(connect_coordinator, name)
+}
+
+/// Reached only after the machine is known, so a typo spawns nothing.
+fn connect_coordinator() -> Result<CoordinatorWorkloads> {
+    Ok(CoordinatorWorkloads::new(
+        crate::policy_profiles::coordinator::ensure()?,
+    ))
+}
+
+fn quarantine_with<A: WorkloadAuthority>(
+    connect: impl FnOnce() -> Result<A>,
+    name: &str,
+    reason: &str,
+) -> Result<()> {
     let emitter = emitter()?;
     ensure_known(name, &emitter)?;
-    mvm_hostd::containment::replace_named(&home(), &emitter, &tenant_of(name), name).map(|e| e.0)
+    let authority = connect()?;
+    mvm_hostd::containment::quarantine_named(&authority, &emitter, &tenant_of(name), name, reason)
+}
+
+fn replace_with<A: WorkloadAuthority>(
+    connect: impl FnOnce() -> Result<A>,
+    name: &str,
+) -> Result<u64> {
+    let emitter = emitter()?;
+    ensure_known(name, &emitter)?;
+    let authority = connect()?;
+    mvm_hostd::containment::replace_named(&authority, &emitter, &tenant_of(name), name)
+        .map(|e| e.get())
+}
+
+/// Exercise containment with an owned local store, not a coordinator transport.
+#[cfg(all(test, feature = "test-support"))]
+pub(crate) fn quarantine_in_process(name: &str, reason: &str) -> Result<()> {
+    let store = mvm_hostd::policy_generation::workload_store::OwnedWorkloadStore::open(&home())?;
+    quarantine_with(|| Ok(&store), name, reason)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_hostd::policy_generation::workload_store::OwnedWorkloadStore;
 
     #[test]
     fn quarantine_and_replace_by_machine_name_round_trip_through_the_ledger() {
@@ -86,13 +124,14 @@ mod tests {
             .workload("suspect")
             .build();
         plan_persist::write_plan("suspect", &plan).unwrap();
+        let store = OwnedWorkloadStore::open(home.path()).unwrap();
 
-        quarantine("suspect", "planted compromise").unwrap();
+        quarantine_with(|| Ok(&store), "suspect", "planted compromise").unwrap();
         let ledger = WorkloadLedger::load_at(home.path()).unwrap();
         assert!(ledger.authorize_local_start("suspect").is_err());
         assert!(ledger.authorize_local_start("other").is_ok());
 
-        assert_eq!(replace("suspect").unwrap(), 2);
+        assert_eq!(replace_with(|| Ok(&store), "suspect").unwrap(), 2);
         let ledger = WorkloadLedger::load_at(home.path()).unwrap();
         assert!(ledger.authorize_local_start("suspect").is_ok());
     }
@@ -106,7 +145,8 @@ mod tests {
             .workload("suspect")
             .build();
         plan_persist::write_plan("suspect", &plan).unwrap();
-        quarantine("suspect", "planted compromise").unwrap();
+        let store = OwnedWorkloadStore::open(home.path()).unwrap();
+        quarantine_with(|| Ok(&store), "suspect", "planted compromise").unwrap();
 
         // `machine stop` deletes the VM state directory, plan.json included.
         std::fs::remove_dir_all(home.path().join("vms")).unwrap();
@@ -114,7 +154,7 @@ mod tests {
 
         let ledger = WorkloadLedger::load_at(home.path()).unwrap();
         assert!(ledger.authorize_local_start("suspect").is_err());
-        assert_eq!(replace("suspect").unwrap(), 2);
+        assert_eq!(replace_with(|| Ok(&store), "suspect").unwrap(), 2);
         // The relaunch is synthesized at the ledger's epoch.
         assert_eq!(
             mvm_core::plan::synthesis::current_local_epoch("suspect").unwrap(),
@@ -128,7 +168,7 @@ mod tests {
         );
 
         // A second replace with no launch between advances the epoch again.
-        assert_eq!(replace("suspect").unwrap(), 3);
+        assert_eq!(replace_with(|| Ok(&store), "suspect").unwrap(), 3);
     }
 
     #[test]
@@ -136,8 +176,9 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(home.path());
-        assert!(quarantine("never-admitted", "x").is_err());
-        assert!(replace("never-admitted").is_err());
+        let store = OwnedWorkloadStore::open(home.path()).unwrap();
+        assert!(quarantine_with(|| Ok(&store), "never-admitted", "x").is_err());
+        assert!(replace_with(|| Ok(&store), "never-admitted").is_err());
         let ledger = WorkloadLedger::load_at(home.path()).unwrap();
         assert!(!ledger.knows("never-admitted"), "a typo mints no entry");
     }

@@ -15,6 +15,7 @@ struct Fixture {
     audit: PathBuf,
     policy: PathBuf,
     mount: PathBuf,
+    _env: mvm_core::util::test_env::TestEnv,
 }
 
 fn publisher_key() -> SigningKey {
@@ -24,6 +25,7 @@ fn publisher_key() -> SigningKey {
 /// A rootfs, key and audit directories, a mount holding one `CLAUDE.md`, and
 /// a user policy at `policy` (written only when `enforcement` is given).
 fn fixture(enforcement: Option<&str>) -> Fixture {
+    let env = mvm_core::util::test_env::TestEnv::new();
     let dir = tempfile::tempdir().unwrap();
     let rootfs = write_rootfs(dir.path(), b"instruction rootfs");
     let mount = dir.path().join("mount");
@@ -48,6 +50,7 @@ fn fixture(enforcement: Option<&str>) -> Fixture {
         policy,
         mount,
         _dir: dir,
+        _env: env,
     }
 }
 
@@ -474,6 +477,7 @@ fn malformed_materialized_identities_fail_before_plan_admitted() {
     })
     .expect_err("an unmapped materialized directory share fails closed");
     assert!(chain(&f).iter().all(|(event, _)| event != "plan.admitted"));
+    drop(f);
 
     for case in [
         Malformed::Missing,
@@ -661,8 +665,14 @@ mod ps11_keyless_witness {
     }
 
     fn assert_refused(f: &Fixture, result: Result<AdmissionContext>, reason: &str) {
-        result.expect_err("invalid provenance must refuse admission");
+        let error = result.expect_err("invalid provenance must refuse admission");
         let entries = chain(f);
+        assert!(
+            entries
+                .iter()
+                .any(|(event, _)| event == "trust.instruction_blocked"),
+            "missing instruction decision after admission error {error:#}: {entries:?}"
+        );
         let blocked = entry(&entries, "trust.instruction_blocked");
         assert_eq!(blocked["reason"], reason);
         entry(&entries, "plan.admission_refused");

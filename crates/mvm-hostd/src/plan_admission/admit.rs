@@ -362,7 +362,16 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
 
     // The topology check needs an authenticated body and a live window, and
     // must refuse before the nonce below is spent.
-    super::topology_binding::admit_topology_binding(&verified, host_signer_keys_dir)?;
+    let unit = super::topology_binding::admit_topology_binding(&verified, host_signer_keys_dir)?;
+    // Also before the nonce: a plan refused for want of cores it can be
+    // confined to keeps its replay allowance.
+    let placement = super::placement::admit_core_placement(
+        &mvm_core::config::mvm_home_strict()?,
+        &verified,
+        unit.as_ref(),
+        backend,
+        host_signer_keys_dir,
+    )?;
 
     // Bundle re-verify at admit time. Only fires
     // when the plan pinned a bundle; missing context with a pinned
@@ -449,6 +458,7 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
         assurance_runtime,
         canonical_kernel,
         backend,
+        placement,
         dispatched: false,
     })
 }

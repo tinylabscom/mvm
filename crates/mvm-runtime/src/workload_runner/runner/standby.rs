@@ -2,6 +2,10 @@
 
 use super::*;
 
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+#[path = "standby_live_hvf.rs"]
+mod live_hvf;
+
 impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, B> {
     /// Boot a standby parent, capture its whole live state, and release it.
     ///

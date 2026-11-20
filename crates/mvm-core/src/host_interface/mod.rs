@@ -8,6 +8,7 @@
 //! starts. It does not own the full launch or a running workload's lifecycle.
 
 pub mod activation_barrier;
+pub mod destination;
 pub mod error;
 pub mod lease;
 pub mod local;
@@ -28,7 +29,9 @@ pub use policy::{
     Assurance, AssuranceRequirement, HostPolicy, NamedVolumeGrant, SignedHostPolicy, VolumeMode,
 };
 pub use preflight::{CheckKind, PreflightCheck, PreflightReport, run_preflight};
-pub use state::{Conditions, ExecutionEpoch, NodeState};
+pub use state::{Conditions, NodeState};
+
+use mvm_contract::protocol::mailbox::ExecutionEpoch;
 
 /// What a launch asks the host interface to authorize.
 #[derive(Debug, Clone, PartialEq, Eq)]

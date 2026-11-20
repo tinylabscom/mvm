@@ -140,7 +140,6 @@ impl Recovery {
         if history.authority_id != authority.id()
             || history.workload_id != authority.policy().workload_id
             || history.original.instance == [0; 16]
-            || history.original.epoch.0 == 0
             || history.original.epoch > history.epoch_high_water
             || history.restarts_spent > authority.policy().restart.limit()
         {
