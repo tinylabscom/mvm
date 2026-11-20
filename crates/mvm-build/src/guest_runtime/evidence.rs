@@ -59,6 +59,94 @@ impl VerifiedReleaseRuntime {
     }
 }
 
+/// Synthetic authenticated release state for cross-crate launch-boundary tests.
+#[cfg(feature = "test-support")]
+pub struct VerifiedReleaseRuntimeFixture {
+    pub release: std::sync::Arc<VerifiedReleaseRuntime>,
+    pub overlay: PathBuf,
+    pub overlay_verity: PathBuf,
+    pub initramfs: PathBuf,
+    pub overlay_roothash: String,
+}
+
+/// Build internally authenticated runtime evidence without weakening production constructors.
+#[cfg(feature = "test-support")]
+pub fn verified_release_runtime_fixture(
+    root: &Path,
+    arch: GuestArch,
+    minimum_protocol: u32,
+    host_protocol: u32,
+) -> VerifiedReleaseRuntimeFixture {
+    use mvm_core::image_set::{GitCommit, WorktreeState};
+
+    std::fs::create_dir_all(root).expect("create verified runtime fixture directory");
+    let overlay = root.join("overlay.ext4");
+    let overlay_verity = root.join("overlay.verity");
+    let initramfs = root.join("initramfs");
+    std::fs::write(&overlay, b"overlay").expect("write verified runtime overlay");
+    std::fs::write(&overlay_verity, b"verity").expect("write verified runtime verity");
+    std::fs::write(&initramfs, b"initramfs").expect("write verified runtime initramfs");
+    let digest = |bytes: &[u8]| hex::encode(Sha256::digest(bytes));
+    let overlay_roothash = "a".repeat(64);
+    let declaration = RuntimeAssembly {
+        assembly_format: crate::guest_bins::assembly::RUNTIME_ASSEMBLY_FORMAT,
+        arch,
+        protocol_version: host_protocol,
+        min_supported_protocol_version: minimum_protocol,
+        overlay_sha256: digest(b"overlay"),
+        overlay_verity_sha256: digest(b"verity"),
+        overlay_roothash: overlay_roothash.clone(),
+        initramfs_sha256: digest(b"initramfs"),
+    };
+    let archive = root.join("guest-runtime.tar.gz");
+    std::fs::write(&archive, b"verified archive").expect("write verified runtime archive");
+    let archive_sha256 = digest(b"verified archive");
+    let proof = RuntimeReleaseProof {
+        archive,
+        checksum: root.join("guest-runtime.sha256"),
+        signature_bundle: root.join("guest-runtime.bundle"),
+        archive_sha256: archive_sha256.clone(),
+        version: "verified-runtime-fixture".into(),
+        arch,
+    };
+    let mut snapshot = tempfile::NamedTempFile::new().expect("create verified archive snapshot");
+    snapshot
+        .write_all(b"verified archive")
+        .expect("write verified archive snapshot");
+    let manifest = VerifiedRuntimeManifest {
+        archive: std::sync::Arc::new(snapshot),
+        checksum: Vec::new(),
+        signature: Vec::new(),
+        checksum_signature: None,
+        version: proof.version.clone(),
+        digest: archive_sha256,
+        manifest: GuestBinsManifest {
+            schema_version: crate::guest_bins::GUEST_BINS_MANIFEST_SCHEMA,
+            version: proof.version.clone(),
+            guest_source_fingerprint: "b".repeat(64),
+            sdk_cdylib_source_fingerprint: "c".repeat(64),
+            source: crate::image_source::RepoIdentity {
+                commit: GitCommit::new("d".repeat(40)).expect("valid fixture commit"),
+                worktree: WorktreeState::Clean,
+            },
+            files: std::collections::BTreeMap::new(),
+            assemblies: std::collections::BTreeMap::from([(arch, declaration)]),
+        },
+        arch,
+        signer: mvm_core::crypto::image_verify::VerifiedSigner {
+            identity: "verified runtime fixture".into(),
+            issuer: "verified runtime fixture".into(),
+        },
+    };
+    VerifiedReleaseRuntimeFixture {
+        release: std::sync::Arc::new(VerifiedReleaseRuntime::from_verified(proof, manifest)),
+        overlay,
+        overlay_verity,
+        initramfs,
+        overlay_roothash,
+    }
+}
+
 /// Authenticate a path-based proof and retain the checked archive for this launch.
 pub fn verify_release_runtime(
     proof: RuntimeReleaseProof,
