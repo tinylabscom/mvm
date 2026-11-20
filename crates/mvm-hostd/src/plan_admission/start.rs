@@ -235,23 +235,26 @@ pub struct PreparedPersistent<C> {
     pub config: VmStartConfig,
 }
 
-pub(super) enum LaunchSource<'a> {
+pub(crate) enum LaunchSource<'a> {
     Persistent {
         lifecycle: &'a MachineLifecycleLock,
     },
     CliCold {
         backend_kind: mvm_core::vm_backend::BackendKind,
     },
+    LocalTransient {
+        lifecycle: &'a MachineLifecycleLock,
+    },
 }
 
-pub(super) struct PreparedLaunch<A> {
-    pub(super) config: VmStartConfig,
-    pub(super) verified_runtime:
+pub(crate) struct PreparedLaunch<A> {
+    pub(crate) config: VmStartConfig,
+    pub(crate) verified_runtime:
         Option<std::sync::Arc<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>>,
-    pub(super) admission: A,
+    pub(crate) admission: A,
 }
 
-pub(super) fn prepare_launch<A>(
+pub(crate) fn prepare_launch<A>(
     source: LaunchSource<'_>,
     mut config: VmStartConfig,
     attach: impl FnOnce(
@@ -265,7 +268,7 @@ pub(super) fn prepare_launch<A>(
     ) -> Result<A>,
 ) -> Result<PreparedLaunch<A>> {
     match source {
-        LaunchSource::Persistent { lifecycle } => {
+        LaunchSource::Persistent { lifecycle } | LaunchSource::LocalTransient { lifecycle } => {
             lifecycle
                 .require_name(&config.name)
                 .map_err(CliStartFailure::StateNotOwned)?;
