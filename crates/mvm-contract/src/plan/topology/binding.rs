@@ -11,7 +11,7 @@ use alloc::string::String;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Topology, Unit, UnitResources};
+use super::{EdgeKind, Topology, Unit, UnitResources};
 use crate::assurance::Sha256Digest;
 use crate::plan::execution_plan::ExecutionPlan;
 use crate::plan::types::WorkloadId;
@@ -60,6 +60,17 @@ pub enum TopologyBindingRefusal {
         unit: WorkloadId,
         topology: UnitResources,
         plan: UnitResources,
+    },
+    /// Counts only: a plan's stream edge names a binding the host resolves,
+    /// not a source unit, so the edges cannot yet be matched one by one.
+    #[error(
+        "unit {} has {granted} inbound stream edge(s) in the topology; the plan declares {declared}",
+        .unit.0
+    )]
+    UngrantedStreamEdges {
+        unit: WorkloadId,
+        granted: usize,
+        declared: usize,
     },
 }
 
@@ -120,6 +131,7 @@ pub fn check_topology_binding<'t>(
             unit: binding.unit.clone(),
         })?;
     check_unit(plan, unit)?;
+    check_stream_edges(plan, topology, unit)?;
     Ok(Some(unit))
 }
 
@@ -142,6 +154,27 @@ fn check_unit(plan: &ExecutionPlan, unit: &Unit) -> Result<(), TopologyBindingRe
             unit: unit.workload.clone(),
             topology: unit.resources,
             plan: asked,
+        });
+    }
+    Ok(())
+}
+
+fn check_stream_edges(
+    plan: &ExecutionPlan,
+    topology: &Topology,
+    unit: &Unit,
+) -> Result<(), TopologyBindingRefusal> {
+    let granted = topology
+        .edges
+        .iter()
+        .filter(|edge| edge.kind == EdgeKind::Stream && edge.to == unit.workload)
+        .count();
+    let declared = plan.stream_edges.len();
+    if declared > granted {
+        return Err(TopologyBindingRefusal::UngrantedStreamEdges {
+            unit: unit.workload.clone(),
+            granted,
+            declared,
         });
     }
     Ok(())
@@ -310,6 +343,60 @@ mod tests {
         let (mut plan, topology) = matching();
         plan.resources.timeouts.exec_secs += 60;
         assert!(check_topology_binding(&plan, Some(&topology)).is_ok());
+    }
+
+    fn stream_edge_into(topology: &mut Topology, kind: EdgeKind, to: &WorkloadId) {
+        topology.edges.push(super::super::Edge {
+            kind,
+            from: WorkloadId("upstream".to_string()),
+            to: to.clone(),
+        });
+    }
+
+    fn rebind(plan: &mut ExecutionPlan, topology: &Topology) {
+        plan.topology.as_mut().unwrap().topology = topology.digest();
+    }
+
+    #[test]
+    fn a_stream_edge_the_topology_does_not_grant_is_refused() {
+        let (mut plan, mut topology) = matching();
+        // Edges into another unit, and mailbox edges into this one, grant nothing.
+        stream_edge_into(
+            &mut topology,
+            EdgeKind::Stream,
+            &WorkloadId("other".to_string()),
+        );
+        stream_edge_into(&mut topology, EdgeKind::Mailbox, &plan.workload);
+        rebind(&mut plan, &topology);
+        plan.stream_edges
+            .push(crate::stream::StreamEdge::new("input"));
+        assert_eq!(
+            check_topology_binding(&plan, Some(&topology)),
+            Err(TopologyBindingRefusal::UngrantedStreamEdges {
+                unit: plan.workload.clone(),
+                granted: 0,
+                declared: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn stream_edges_the_topology_grants_pass() {
+        let (mut plan, mut topology) = matching();
+        let workload = plan.workload.clone();
+        stream_edge_into(&mut topology, EdgeKind::Stream, &workload);
+        rebind(&mut plan, &topology);
+        plan.stream_edges
+            .push(crate::stream::StreamEdge::new("input"));
+        assert!(check_topology_binding(&plan, Some(&topology)).is_ok());
+    }
+
+    #[test]
+    fn an_unbound_plan_with_no_admitted_topology_keeps_its_stream_edges() {
+        let mut plan = minimal_plan();
+        plan.stream_edges
+            .push(crate::stream::StreamEdge::new("input"));
+        assert_eq!(check_topology_binding(&plan, None), Ok(None));
     }
 
     #[test]
