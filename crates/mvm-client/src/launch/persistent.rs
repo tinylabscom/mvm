@@ -179,47 +179,81 @@ fn register_vm_name(vm_name: &str, network_name: &str) {
 pub fn start_persistent_oci_machine(
     params: PersistentImageStartParams<'_>,
 ) -> Result<mvm_hostd::plan_admission::AdmittedPlan> {
-    start_persistent_with_prepared(params, None)
+    let lifecycle = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(params.name)?;
+    start_persistent_with_prepared(params, None, &lifecycle)
 }
 
-pub(crate) fn start_prepared_persistent_oci_machine(
+pub(super) fn start_persistent_oci_machine_in_lifecycle(
+    params: PersistentImageStartParams<'_>,
+    lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+) -> Result<mvm_hostd::plan_admission::AdmittedPlan> {
+    start_persistent_with_prepared(params, None, lifecycle)
+}
+
+pub(super) fn start_prepared_persistent_oci_machine_in_lifecycle(
     params: PersistentImageStartParams<'_>,
     prepared: &crate::image_cache::prepared::ValidatedPrepared,
+    lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
 ) -> Result<mvm_hostd::plan_admission::AdmittedPlan> {
     crate::image_cache::prepared::require_backend(
         &prepared.selection,
         params.backend_name,
         params.backend.name(),
     )?;
-    start_persistent_with_prepared(params, Some(prepared))
+    start_persistent_with_prepared(params, Some(prepared), lifecycle)
 }
 
-fn start_persistent_with_prepared(
-    params: PersistentImageStartParams<'_>,
-    prepared: Option<&crate::image_cache::prepared::ValidatedPrepared>,
+fn start_persistent_with_prepared<'a>(
+    params: PersistentImageStartParams<'a>,
+    prepared: Option<&'a crate::image_cache::prepared::ValidatedPrepared>,
+    lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
 ) -> Result<mvm_hostd::plan_admission::AdmittedPlan> {
+    lifecycle
+        .require_name(params.name)
+        .map_err(mvm_hostd::plan_admission::CliStartFailure::StateNotOwned)?;
+    lifecycle
+        .require_cold_state()
+        .map_err(mvm_hostd::plan_admission::CliStartFailure::StateNotOwned)?;
     // The steps of this one launch share a single check of the signed runtime
     // release; the next launch checks again.
     let _runtime_proofs = mvm_build::guest_runtime::evidence::LaunchProofScope::begin();
     let prepared_boot = prepare_persistent_boot(params, prepared)?;
-    finish_admitted_persistent(prepared_boot)
+    finish_admitted_persistent(prepared_boot, lifecycle)
 }
 
-struct PreparedPersistentBoot {
+struct PreparedPersistentBoot<'a> {
     backend: mvm_runtime::backend::AnyBackend,
     start_config: mvm_core::vm_backend::VmStartConfig,
-    admission: crate::admission::AdmissionContext,
     prepared_volumes: crate::volume::LaunchPreparation,
-    verified_runtime: Option<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
     /// The resolved policy the start config carries and the endpoint builds
     /// its gate from — the probe witnesses the gate this exact value admits.
     network_policy: mvm_core::network_policy::NetworkPolicy,
+    source: PersistentAdmissionSource<'a>,
 }
 
-fn prepare_persistent_boot(
-    params: PersistentImageStartParams<'_>,
-    prepared: Option<&crate::image_cache::prepared::ValidatedPrepared>,
-) -> Result<PreparedPersistentBoot> {
+struct PersistentAdmissionSource<'a> {
+    prepared: Option<&'a crate::image_cache::prepared::ValidatedPrepared>,
+    rootfs_path: &'a std::path::Path,
+    profile: &'a str,
+    cpus: u32,
+    ports: &'a [String],
+    backend_name: &'a str,
+    agent_verb: Vec<String>,
+    caller_commitment: Option<mvm_core::plan::CallerCommitment>,
+    registry_pack_image: Option<mvm_core::registry_pack::PackPin>,
+    policy_generation: Option<&'a mvm_core::plan::AssetIdentity>,
+    has_ad_hoc_argv: bool,
+    grants: Option<mvm_contract::grants::Grants>,
+    mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
+    workload_dir: Option<&'a std::path::Path>,
+    resolved_secrets: crate::admission::secrets::ResolvedPlanSecrets,
+    bundle_archive: Option<std::path::PathBuf>,
+}
+
+fn prepare_persistent_boot<'a>(
+    params: PersistentImageStartParams<'a>,
+    prepared: Option<&'a crate::image_cache::prepared::ValidatedPrepared>,
+) -> Result<PreparedPersistentBoot<'a>> {
     let PersistentImageStartParams {
         name,
         image_label,
@@ -318,156 +352,29 @@ fn prepare_persistent_boot(
     // sealed production boots; the guest profile and verb grant remain the
     // authoritative RPC gates as well.
     start_config.dev_console = preopen_console_for_profile(profile);
-    // Everything the boot waits on is prepared before admission, because
-    // admission starts the plan's validity window and the verb grant minted
-    // from it lives exactly as long. See `crate::launch::boot_order`.
-    let mut boot = (start_config, None);
-    let admission = crate::launch::boot_order::admit_after_preparation(
-        &mut boot,
-        |(config, verified_runtime)| {
-            let release = attach_runtime_overlay_if_cached_version_verified(
-                config,
-                backend_name,
-                None,
-                None,
-            )?;
-            match release {
-                Some(release) => {
-                    attach_universal_initramfs_with_verified_release(
-                        config,
-                        backend_name,
-                        &release,
-                    )?;
-                    *verified_runtime = Some(
-                        mvm_runtime::runtime_evidence::verify_release_runtime_set(config, release)?,
-                    );
-                    Ok(())
-                }
-                None => attach_universal_initramfs_if_cached(config, backend_name),
-            }
-        },
-        |(config, verified_runtime)| {
-            let admission_ledger = InMemoryNonceLedger::new();
-            let ingress = machine_port_ingress(ports)?;
-            let instruction_mounts = volumes
-                .iter()
-                .filter_map(|volume| {
-                    volume.materialized_image.as_deref().map(|image| {
-                        crate::admission::instructions::MaterializedMount {
-                            host_path: std::path::PathBuf::from(&volume.host),
-                            image_path: std::path::PathBuf::from(image),
-                        }
-                    })
-                })
-                .collect::<Vec<_>>();
-            let configured_images_dir = mvm_build::image_source::configured_images_dir();
-            let admission_params = AdmitPlanForBootParams {
-                bundle_sizing: Default::default(),
-                mailbox,
-                // What the backend will arm, so the admitted tier opens
-                // the GPU endpoint's vsock socket exactly when there is one.
-                gpu: config.gpu,
-                instructions: crate::admission::InstructionSources::for_workload(workload_dir)
-                    .with_mount_roots(&[])
-                    .with_materialized_mounts(&instruction_mounts),
-                outputs: Vec::new(),
-                network_mode: preflight_network(),
-                tenant: "local",
-                vm_name: name,
-                backend_name,
-                configured_images_dir: configured_images_dir.as_deref(),
-                rootfs_path,
-                kernel_path: config.kernel_path.as_deref().map(std::path::Path::new),
-                precomputed_image_sha256: None,
-                boot_artifact_identity: None,
-                runtime_config: Some(config),
-                cpus,
-                mem_mib: u64::from(memory_mib),
-                seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-                secret_release: resolved_secrets.secret_release,
-                secrets: resolved_secrets.secrets,
-                caller_commitment,
-                ledger: &admission_ledger,
-                keys_dir: None,
-                audit_dir: None,
-                policy_dir: None,
-                bundle_pin: bundle_archive
-                    .as_deref()
-                    .map(crate::admission::BundlePin::boots),
-                bundle_posture: None,
-                deps_volume: None,
-                shares: shares_from_volume_cfg(volumes),
-                assets: registry_pack_image
-                    .into_iter()
-                    .map(crate::admission::AssetSpec::RegistryPack)
-                    .chain(
-                        policy_generation
-                            .cloned()
-                            .map(crate::admission::AssetSpec::CommittedPolicy),
-                    )
-                    .collect(),
-                redaction: mvm_core::policy::RedactionPolicy::default(),
-                network_policy: network_policy.clone(),
-                agent_verb_override: agent_verb.to_vec(),
-                // Persistent machines carrying a trailing argv run an ad-hoc Exec (DevOnly);
-                // they must not receive an attenuated ProdSafe-only grant. Baked-entrypoint
-                // boots (no argv, non-dev profile) keep the grant.
-                restrict_agent_verbs: crate::admission::agent_verbs::grant_eligible(
-                    false,
-                    has_ad_hoc_argv,
-                    profile == "dev",
-                ),
-                services: Vec::new(),
-                grants,
-                // The typed kind of the backend this start resolved, so the grant gate
-                // measures a declared bound against the mechanisms that tier has rather
-                // than refusing for want of an answer.
-                backend_kind: Some(crate::backend_kind_for(backend_name)),
-                entrypoint: crate::admission::entrypoint_resolve::ResolvedEntrypoint::for_launch(
-                    rootfs_path,
-                    has_ad_hoc_argv,
-                ),
-            };
-            match (prepared, verified_runtime.as_ref()) {
-                (Some(prepared), runtime) => crate::admission::admit_prepared_plan_for_boot(
-                    admission_params,
-                    ingress,
-                    prepared,
-                    runtime,
-                ),
-                (None, Some(runtime)) => {
-                    crate::admission::admit_plan_for_boot_configured_ingress_with_verified_runtime(
-                        admission_params,
-                        ingress,
-                        runtime,
-                    )
-                }
-                (None, None) => admit_plan_for_boot_configured_ingress(admission_params, ingress),
-            }
-        },
-    )?;
-    let (mut start_config, verified_runtime) = boot;
-    for volume in &mut start_config.volumes {
-        if admission
-            .admitted
-            .plan()
-            .shares
-            .iter()
-            .any(|share| share.host_path == volume.host && share.read_only)
-        {
-            volume.read_only = true;
-        }
-    }
-    emit_runtime_source_status(&start_config);
-    let guest_profile = guest_profile_for_boot(profile == "dev", rootfs_path);
-    attach_guest_boot_config(&mut start_config, &admission, guest_profile)?;
     Ok(PreparedPersistentBoot {
         backend,
         start_config,
-        admission,
         prepared_volumes,
-        verified_runtime,
         network_policy,
+        source: PersistentAdmissionSource {
+            prepared,
+            rootfs_path,
+            profile,
+            cpus,
+            ports,
+            backend_name,
+            agent_verb,
+            caller_commitment,
+            registry_pack_image,
+            policy_generation,
+            has_ad_hoc_argv,
+            grants,
+            mailbox,
+            workload_dir,
+            resolved_secrets,
+            bundle_archive,
+        },
     })
 }
 
@@ -498,41 +405,213 @@ fn complete_writable_images(
 }
 
 fn finish_admitted_persistent(
-    prepared_boot: PreparedPersistentBoot,
+    prepared_boot: PreparedPersistentBoot<'_>,
+    lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
 ) -> Result<mvm_hostd::plan_admission::AdmittedPlan> {
     let PreparedPersistentBoot {
         backend,
         start_config,
-        admission,
         mut prepared_volumes,
-        verified_runtime,
         network_policy,
+        source,
     } = prepared_boot;
+    let PersistentAdmissionSource {
+        prepared,
+        rootfs_path,
+        profile,
+        cpus,
+        ports,
+        backend_name,
+        agent_verb,
+        caller_commitment,
+        registry_pack_image,
+        policy_generation,
+        has_ad_hoc_argv,
+        grants,
+        mailbox,
+        workload_dir,
+        resolved_secrets,
+        bundle_archive,
+    } = source;
     let name_label = start_config.name.clone();
     let name = name_label.as_str();
-    let backend_label = backend.name().to_string();
-    let backend_name = backend_label.as_str();
     #[cfg(unix)]
-    let images = match (|| -> Result<_> {
+    let images = (|| -> Result<_> {
         let mut images = prepared_volumes.take_writable_images();
         complete_writable_images(&start_config, &mut images)?;
         Ok(images)
-    })() {
-        Ok(images) => images,
-        Err(err) => {
-            emit_failed(&admission, "backend-start", &err);
-            return Err(err);
-        }
-    };
+    })()?;
     #[cfg(not(unix))]
     let images = Vec::new();
-    let (started, admission, dispatched_config) = crate::boot::start_admitted_persistent(
-        backend,
-        start_config,
+    let instruction_mounts = prepared_volumes
+        .volumes
+        .iter()
+        .filter_map(|volume| {
+            volume.materialized_image.as_deref().map(|image| {
+                crate::admission::instructions::MaterializedMount {
+                    host_path: std::path::PathBuf::from(&volume.host),
+                    image_path: std::path::PathBuf::from(image),
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let shares = shares_from_volume_cfg(&prepared_volumes.volumes);
+    let configured_images_dir = mvm_build::image_source::configured_images_dir();
+    let network_policy_for_admission = network_policy.clone();
+    let dispatched = mvm_hostd::plan_admission::boot_vm(
+        mvm_hostd::plan_admission::PreparePersistentParams {
+            backend: &backend,
+            config: start_config,
+            writable_images: images,
+            lifecycle,
+        },
+        |config| {
+            let release = attach_runtime_overlay_if_cached_version_verified(
+                config,
+                backend_name,
+                None,
+                None,
+            )?;
+            match release {
+                Some(release) => {
+                    attach_universal_initramfs_with_verified_release(
+                        config,
+                        backend_name,
+                        &release,
+                    )?;
+                    Ok(Some(release))
+                }
+                None => {
+                    attach_universal_initramfs_if_cached(config, backend_name)?;
+                    Ok(None)
+                }
+            }
+        },
+        |config, verified_runtime| {
+            let admission_ledger = InMemoryNonceLedger::new();
+            let ingress = machine_port_ingress(ports)?;
+            let admission_params = AdmitPlanForBootParams {
+                bundle_sizing: Default::default(),
+                mailbox,
+                gpu: config.gpu,
+                instructions: crate::admission::InstructionSources::for_workload(workload_dir)
+                    .with_mount_roots(&[])
+                    .with_materialized_mounts(&instruction_mounts),
+                outputs: Vec::new(),
+                network_mode: preflight_network(),
+                tenant: "local",
+                vm_name: name,
+                backend_name,
+                configured_images_dir: configured_images_dir.as_deref(),
+                rootfs_path,
+                kernel_path: config.kernel_path.as_deref().map(std::path::Path::new),
+                precomputed_image_sha256: None,
+                boot_artifact_identity: None,
+                runtime_config: Some(config),
+                cpus,
+                mem_mib: u64::from(config.memory_mib),
+                seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+                secret_release: resolved_secrets.secret_release,
+                secrets: resolved_secrets.secrets,
+                caller_commitment,
+                ledger: &admission_ledger,
+                keys_dir: None,
+                audit_dir: None,
+                policy_dir: None,
+                bundle_pin: bundle_archive
+                    .as_deref()
+                    .map(crate::admission::BundlePin::boots),
+                bundle_posture: None,
+                deps_volume: None,
+                shares,
+                assets: registry_pack_image
+                    .into_iter()
+                    .map(crate::admission::AssetSpec::RegistryPack)
+                    .chain(
+                        policy_generation
+                            .cloned()
+                            .map(crate::admission::AssetSpec::CommittedPolicy),
+                    )
+                    .collect(),
+                redaction: mvm_core::policy::RedactionPolicy::default(),
+                network_policy: network_policy_for_admission,
+                agent_verb_override: agent_verb,
+                restrict_agent_verbs: crate::admission::agent_verbs::grant_eligible(
+                    false,
+                    has_ad_hoc_argv,
+                    profile == "dev",
+                ),
+                services: Vec::new(),
+                grants,
+                backend_kind: Some(crate::backend_kind_for(backend_name)),
+                entrypoint: crate::admission::entrypoint_resolve::ResolvedEntrypoint::for_launch(
+                    rootfs_path,
+                    has_ad_hoc_argv,
+                ),
+            };
+            let admission = match (prepared, verified_runtime) {
+                (Some(prepared), runtime) => crate::admission::admit_prepared_plan_for_boot(
+                    admission_params,
+                    ingress,
+                    prepared,
+                    runtime,
+                ),
+                (None, Some(runtime)) => {
+                    crate::admission::admit_plan_for_boot_configured_ingress_with_verified_runtime(
+                        admission_params,
+                        ingress,
+                        runtime,
+                    )
+                }
+                (None, None) => admit_plan_for_boot_configured_ingress(admission_params, ingress),
+            }?;
+            for volume in &mut config.volumes {
+                if admission
+                    .admitted
+                    .plan()
+                    .shares
+                    .iter()
+                    .any(|share| share.host_path == volume.host && share.read_only)
+                {
+                    volume.read_only = true;
+                }
+            }
+            emit_runtime_source_status(config);
+            let guest_profile = guest_profile_for_boot(profile == "dev", rootfs_path);
+            attach_guest_boot_config(config, &admission, guest_profile)?;
+            let crate::admission::AdmissionContext {
+                admitted,
+                emitter,
+                policy_bundle,
+                host_signer_public_path,
+            } = admission;
+            Ok(mvm_hostd::plan_admission::PersistentAdmission {
+                admitted,
+                emitter,
+                policy_bundle,
+                continuation: host_signer_public_path,
+            })
+        },
+    );
+    let dispatched = retain_uncertain_dispatch_custody(dispatched, &mut prepared_volumes)?;
+    let mvm_hostd::plan_admission::PreparedPersistent {
+        vm_id,
         admission,
-        images,
-        verified_runtime.as_ref(),
-    )?;
+        config: dispatched_config,
+    } = dispatched;
+    let mvm_hostd::plan_admission::PersistentAdmission {
+        admitted,
+        emitter,
+        policy_bundle,
+        continuation: host_signer_public_path,
+    } = admission;
+    let admission = crate::admission::AdmissionContext {
+        admitted,
+        emitter,
+        policy_bundle,
+        host_signer_public_path,
+    };
+    let started = crate::boot::StartedVm::from_started(backend, vm_id);
     // Admission proves the signed policy verified; the probe proves the gate
     // the endpoint actually built from it took effect. It runs before the
     // guest-readiness wait and fails closed: a gate that cannot be witnessed
@@ -551,8 +630,6 @@ fn finish_admitted_persistent(
         let abort_is_unresolved = started.backend().abort_start(started.vm_id()).is_err();
         if abort_is_unresolved {
             prepared_volumes.commit();
-        } else {
-            crate::local::deregister_from_name_registry(name);
         }
         audit_detached_readiness_failure(
             &admission,
@@ -564,7 +641,9 @@ fn finish_admitted_persistent(
         if !abort_is_unresolved {
             // The failure record and session seal live under the runtime
             // state directory, so cleanup must follow audit finalization.
-            if let Err(cleanup_error) = crate::local::remove_stopped_runtime_state(name) {
+            if let Err(cleanup_error) =
+                crate::local::cleanup_confirmed_launch_abort(name, lifecycle)
+            {
                 tracing::warn!(
                     error = %cleanup_error,
                     machine = name,
@@ -583,11 +662,15 @@ fn finish_admitted_persistent(
         &dispatched_config,
         mailbox_posture.as_ref(),
     ) {
-        emit_failed(&admission, "mailbox-process", &error);
-        if let Err(cleanup_error) = crate::local::remove_stopped_runtime_state(name) {
-            tracing::warn!(error = %cleanup_error, machine = name, "removing runtime state after a refused mailbox failed");
-        }
-        return Err(error);
+        return Err(finish_post_start_failure(
+            &admission,
+            &mut prepared_volumes,
+            name,
+            "mailbox-process",
+            error,
+            PostStartFailure::Mailbox,
+            lifecycle,
+        ));
     }
     // A backend accepting a start only means its host process was spawned.
     // Detached callers must not observe success until the authenticated guest
@@ -614,7 +697,9 @@ fn finish_admitted_persistent(
         if !abort_is_unresolved {
             // The failure record and session seal live under the runtime
             // state directory, so cleanup must follow audit finalization.
-            if let Err(cleanup_error) = crate::local::remove_stopped_runtime_state(name) {
+            if let Err(cleanup_error) =
+                crate::local::cleanup_confirmed_launch_abort(name, lifecycle)
+            {
                 tracing::warn!(
                     error = %cleanup_error,
                     machine = name,
@@ -629,19 +714,104 @@ fn finish_admitted_persistent(
     // `apply_grants` on the path `mvmctl` boots: without it the tier is
     // computed correctly and reported to nobody. A failure here has already
     // stopped the VM, so the volume leases are released rather than committed.
-    super::grants_report::report_enforced_grants(&admission, &started)?;
+    if let Err(error) = super::grants_report::report_enforced_grants(&admission, &started) {
+        return Err(finish_post_start_failure(
+            &admission,
+            &mut prepared_volumes,
+            name,
+            "grants",
+            error,
+            PostStartFailure::HostRollback,
+            lifecycle,
+        ));
+    }
     // File what this boot committed against the host budget before the volume
     // leases commit: every later admission's committed-total check sums these
     // per-VM records, and a boot that never wrote one was invisible to it.
     // Fatal, like the grants step above — the VM stops rather than stay up as
     // a machine the host's accounting never saw, and the uncommitted leases
     // release with the rollback.
-    super::budget_charge::record_boot_charge(&admission, name, &started)?;
+    if let Err(error) =
+        super::budget_charge::record_persistent_boot_charge(&admission, name, &started)
+    {
+        return Err(finish_post_start_failure(
+            &admission,
+            &mut prepared_volumes,
+            name,
+            "host-budget",
+            error,
+            PostStartFailure::HostRollback,
+            lifecycle,
+        ));
+    }
     prepared_volumes.commit();
     emit_launched(&admission, backend_name, true);
     record_vm_readiness(name, InstanceReadiness::LaunchAccepted);
     mvm_core::audit_emit!(VmStart, vm: name);
     Ok(admission.admitted)
+}
+
+fn retain_uncertain_dispatch_custody<T>(
+    dispatched: Result<T>,
+    prepared_volumes: &mut crate::volume::LaunchPreparation,
+) -> Result<T> {
+    match dispatched {
+        Ok(dispatched) => Ok(dispatched),
+        Err(error)
+            if crate::admission::cli_start_failure_kind(&error)
+                == Some(crate::admission::CliStartFailureKind::UncertainStop) =>
+        {
+            prepared_volumes.commit();
+            Err(error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+enum PostStartFailure {
+    Mailbox,
+    HostRollback,
+}
+
+fn finish_post_start_failure(
+    admission: &crate::admission::AdmissionContext,
+    prepared_volumes: &mut crate::volume::LaunchPreparation,
+    name: &str,
+    stage: &str,
+    error: anyhow::Error,
+    source: PostStartFailure,
+    lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+) -> anyhow::Error {
+    let uncertain = match source {
+        PostStartFailure::Mailbox => {
+            error.is::<mvm_hostd::mailbox_process::MailboxStopUnconfirmed>()
+        }
+        PostStartFailure::HostRollback => {
+            error.is::<mvm_hostd::plan_admission::UndoLaunchFailure>()
+        }
+    };
+    if uncertain {
+        prepared_volumes.commit();
+        crate::launch::record_unsealed_end(
+            Some((&admission.emitter, admission.admitted.plan())),
+            crate::launch::UnsealedEnd::new(name, crate::launch::UnsealedReason::StopFailed)
+                .error(format!("{stage}: {error:#}")),
+        );
+    } else {
+        match source {
+            PostStartFailure::Mailbox => emit_failed(admission, stage, &error),
+            PostStartFailure::HostRollback => {
+                crate::admission::seal_recorded_failure(
+                    &admission.emitter,
+                    admission.admitted.plan(),
+                );
+            }
+        }
+        if let Err(cleanup_error) = crate::local::cleanup_confirmed_launch_abort(name, lifecycle) {
+            tracing::warn!(error = %cleanup_error, machine = name, "removing runtime state after confirmed rollback failed");
+        }
+    }
+    error
 }
 
 /// Audit a detached launch whose post-start readiness stage failed and the
@@ -673,6 +843,271 @@ mod persistent_oci_boot_tests {
 
     use crate::admission::admit_plan_tests::admitted_libkrun;
     use mvm_core::util::test_env::TestEnv;
+
+    #[test]
+    fn persistent_client_lock_mismatch_refuses_before_name_or_state_preparation() {
+        use crate::volume::VolumeService as _;
+
+        let _env_lock = ENV_TEST_LOCK.lock().expect("env test lock");
+        let home = tempfile::tempdir().expect("home");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let lifecycle =
+            mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire("lock-owner")
+                .expect("lifecycle");
+        let name = "other-machine";
+        let prepared_volumes = crate::volume::LocalVolumeService::new()
+            .acquire_launch_lease(
+                &crate::volume::LaunchLeaseRequest::builder(name)
+                    .expect("valid name")
+                    .build(),
+            )
+            .expect("empty volume preparation");
+        let params = super::PersistentImageStartParams {
+            name,
+            image_label: "fixture",
+            resolved_digest: "sha256:fixture",
+            rootfs_path: std::path::Path::new("/store/rootfs.ext4"),
+            profile: "dev",
+            cpus: 1,
+            memory_mib: 512,
+            mem_initial_mib: None,
+            prepared_volumes,
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            ports: &[],
+            backend_name: "mock",
+            kernel_path: None,
+            agent_verb: Vec::new(),
+            caller_commitment: None,
+            registry_pack_image: None,
+            policy_generation: None,
+            has_ad_hoc_argv: false,
+            grants: None,
+            mailbox: None,
+            gpu: false,
+            gpu_device: None,
+            workload_dir: None,
+            secrets: crate::admission::secrets::ResolvedPlanSecrets {
+                secrets: Vec::new(),
+                secret_release: mvm_core::plan::SecretReleasePolicy::default(),
+            },
+            backend: mvm_runtime::AnyBackend::from_hypervisor("mock"),
+        };
+
+        let error = super::start_persistent_with_prepared(params, None, &lifecycle)
+            .expect_err("another machine's lifecycle lock must refuse");
+
+        assert!(matches!(
+            error.downcast_ref::<mvm_hostd::plan_admission::CliStartFailure>(),
+            Some(mvm_hostd::plan_admission::CliStartFailure::StateNotOwned(_))
+        ));
+        assert!(!mvm_core::config::vm_state_dir(name).exists());
+        let registry =
+            mvm_runtime::vm::name_registry::VmNameRegistry::load(&crate::name_registry_path())
+                .expect("registry");
+        assert!(registry.lookup(name).is_none());
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn persistent_required_audit_failure_refuses_before_backend_dispatch() {
+        use crate::volume::VolumeService as _;
+
+        let _env_lock = ENV_TEST_LOCK.lock().expect("env test lock");
+        let home = tempfile::tempdir().expect("home");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let name = "persistent-required-audit";
+        let lifecycle = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(name)
+            .expect("lifecycle");
+        let rootfs = home.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"rootfs").expect("rootfs");
+        let audit = mvm_core::config::mvm_audit_dir();
+        std::fs::create_dir_all(&audit).expect("audit directory");
+        std::fs::create_dir(audit.join("local.jsonl")).expect("block audit chain file");
+        let prepared_volumes = crate::volume::LocalVolumeService::new()
+            .acquire_launch_lease(
+                &crate::volume::LaunchLeaseRequest::builder(name)
+                    .expect("valid name")
+                    .build(),
+            )
+            .expect("empty volume preparation");
+        let mock = mvm_runtime::MockBackend::new();
+        let params = super::PersistentImageStartParams {
+            name,
+            image_label: "fixture",
+            resolved_digest: "sha256:fixture",
+            rootfs_path: &rootfs,
+            profile: "prod",
+            cpus: 1,
+            memory_mib: 512,
+            mem_initial_mib: None,
+            prepared_volumes,
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            ports: &[],
+            backend_name: "mock",
+            kernel_path: None,
+            agent_verb: Vec::new(),
+            caller_commitment: None,
+            registry_pack_image: None,
+            policy_generation: None,
+            has_ad_hoc_argv: false,
+            grants: None,
+            mailbox: None,
+            gpu: false,
+            gpu_device: None,
+            workload_dir: None,
+            secrets: crate::admission::secrets::ResolvedPlanSecrets {
+                secrets: Vec::new(),
+                secret_release: mvm_core::plan::SecretReleasePolicy::default(),
+            },
+            backend: mvm_runtime::AnyBackend::Mock(mock.clone()),
+        };
+
+        let error = super::start_persistent_with_prepared(params, None, &lifecycle)
+            .expect_err("required audit failure must refuse");
+
+        assert!(
+            format!("{error:#}").contains("audit") || format!("{error:#}").contains("directory"),
+            "{error:#}"
+        );
+        assert_eq!(mock.count(), 0, "audit refusal precedes backend start");
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn persistent_dispatch_uncertainty_commits_volume_lease_custody() {
+        use crate::volume::VolumeService as _;
+
+        let _env_lock = ENV_TEST_LOCK.lock().expect("env test lock");
+        let home = tempfile::tempdir().expect("home");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let volume = mvm_runtime::image::RuntimeVolume {
+            host: home
+                .path()
+                .join("attached.ext4")
+                .to_string_lossy()
+                .into_owned(),
+            guest: "/data".into(),
+            size: "1M".into(),
+            read_only: true,
+            ..Default::default()
+        };
+        let mut volumes = crate::volume::LocalVolumeService::new()
+            .acquire_launch_lease(
+                &crate::volume::LaunchLeaseRequest::builder("dispatch-owner")
+                    .expect("valid name")
+                    .explicit_volumes(vec![volume.clone()])
+                    .build(),
+            )
+            .expect("volume preparation");
+        let error: anyhow::Error = mvm_hostd::plan_admission::CliStartFailure::UncertainStop(
+            anyhow::anyhow!("native start retains unresolved custody"),
+        )
+        .into();
+
+        super::retain_uncertain_dispatch_custody::<()>(Err(error), &mut volumes)
+            .expect_err("uncertain dispatch remains failed");
+        drop(volumes);
+
+        assert!(
+            crate::volume::LocalVolumeService::new()
+                .acquire_launch_lease(
+                    &crate::volume::LaunchLeaseRequest::builder("competing-owner")
+                        .expect("valid name")
+                        .explicit_volumes(vec![volume])
+                        .build(),
+                )
+                .is_err(),
+            "dispatch uncertainty retains the original volume lease"
+        );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn persistent_uncertain_stop_retains_runtime_name_and_volume_lease() {
+        use crate::volume::VolumeService as _;
+        use mvm_core::vm_backend::VmBackend as _;
+
+        let _env_lock = ENV_TEST_LOCK.lock().expect("env test lock");
+        let home = tempfile::tempdir().expect("home");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let name = "persistent-grant-stop-fails";
+        let lifecycle = mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(name)
+            .expect("lifecycle");
+        let (admission, _keys, audit_dir) = admitted_libkrun(name, None);
+        let state = mvm_core::config::vm_state_dir(name);
+        std::fs::create_dir_all(&state).expect("runtime state");
+        super::register_vm_name(name, "default");
+        let volume_path = home.path().join("attached.ext4");
+        let volume = mvm_runtime::image::RuntimeVolume {
+            host: volume_path.to_string_lossy().into_owned(),
+            guest: "/data".into(),
+            size: "1M".into(),
+            read_only: true,
+            ..Default::default()
+        };
+        let mut volumes = crate::volume::LocalVolumeService::new()
+            .acquire_launch_lease(
+                &crate::volume::LaunchLeaseRequest::builder(name)
+                    .expect("valid name")
+                    .explicit_volumes(vec![volume.clone()])
+                    .build(),
+            )
+            .expect("volume preparation");
+        let mock = mvm_runtime::MockBackend::new()
+            .with_failing_apply_grants()
+            .with_failing_stop();
+        let id = mock
+            .start(&mvm_core::vm_backend::VmStartConfig {
+                name: name.into(),
+                ..Default::default()
+            })
+            .expect("started VM");
+        let error = mvm_hostd::plan_admission::apply_persistent_grants_or_undo_launch(
+            &mvm_runtime::backend::AnyBackend::Mock(mock.clone()),
+            &id,
+            &admission.admitted,
+            Some(&admission.emitter),
+        )
+        .expect_err("grants refusal");
+        super::finish_post_start_failure(
+            &admission,
+            &mut volumes,
+            name,
+            "grants",
+            error,
+            super::PostStartFailure::HostRollback,
+            &lifecycle,
+        );
+        drop(volumes);
+
+        assert_eq!(mock.count(), 1, "unconfirmed stop may still be live");
+        assert!(state.exists(), "runtime evidence remains for recovery");
+        assert!(
+            crate::volume::LocalVolumeService::new()
+                .acquire_launch_lease(
+                    &crate::volume::LaunchLeaseRequest::builder("competing-owner")
+                        .expect("valid name")
+                        .explicit_volumes(vec![volume])
+                        .build(),
+                )
+                .is_err(),
+            "the original owner retains its volume lease"
+        );
+        let registry =
+            mvm_runtime::vm::name_registry::VmNameRegistry::load(&crate::name_registry_path())
+                .expect("name registry");
+        assert!(registry.lookup(name).is_some(), "name custody remains");
+        let chain =
+            std::fs::read_to_string(audit_dir.path().join("local.jsonl")).expect("audit chain");
+        assert!(chain.contains("plan.teardown_failed"), "{chain}");
+        assert!(!chain.contains("plan.failed"), "{chain}");
+        assert!(!chain.contains("plan.launched"), "{chain}");
+        assert!(!chain.contains("session.sealed"), "{chain}");
+    }
 
     #[test]
     fn readiness_audit_seals_completed_abort_but_leaves_unresolved_abort_unsealed() {

@@ -661,6 +661,15 @@ pub fn serve_started(
     serve_started_with(backend, id, config, posture, spawn_for_launch)
 }
 
+/// A mailbox launch refusal whose compensating VM stop could not be confirmed.
+#[derive(Debug, thiserror::Error)]
+#[error("{primary:#}; mailbox rollback remains unconfirmed: {stop:#}")]
+pub struct MailboxStopUnconfirmed {
+    #[source]
+    primary: anyhow::Error,
+    stop: anyhow::Error,
+}
+
 fn serve_started_with(
     backend: &AnyBackend,
     id: &VmId,
@@ -682,10 +691,12 @@ fn serve_started_with(
         Ok(())
     })();
     if let Err(error) = outcome {
+        let primary = error.context("the granted guest mailbox could not be served");
         if let Err(stop) = backend.stop(id) {
             tracing::warn!(vm = %id.0, error = %stop, "stopping a VM whose mailbox could not be served failed");
+            return Err(anyhow::Error::new(MailboxStopUnconfirmed { primary, stop }));
         }
-        return Err(error.context("the granted guest mailbox could not be served"));
+        return Err(primary);
     }
     Ok(())
 }
@@ -1210,6 +1221,28 @@ mod tests {
         });
         assert!(result.is_err());
         assert!(!matches!(
+            backend.status(&id),
+            Ok(mvm_core::vm_backend::VmStatus::Running)
+        ));
+    }
+
+    #[test]
+    fn selector_invalid_started_plan_retains_uncertain_stop_custody() {
+        let backend = AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_failing_stop());
+        let mut config = VmStartConfig {
+            name: "invalid-plan-stop-uncertain".into(),
+            ..Default::default()
+        };
+        let id = backend.start(&config).expect("mock starts");
+        config.plan_json = Some("invalid".into());
+
+        let error = serve_started_with(&backend, &id, &config, None, |_, _, _, _| {
+            panic!("malformed plan cannot spawn a mailbox helper")
+        })
+        .expect_err("invalid plan refuses");
+
+        assert!(error.is::<MailboxStopUnconfirmed>(), "{error:#}");
+        assert!(matches!(
             backend.status(&id),
             Ok(mvm_core::vm_backend::VmStatus::Running)
         ));

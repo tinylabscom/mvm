@@ -93,6 +93,8 @@ pub enum CliStartFailureKind {
     Recorded,
     /// The refusal is unrecorded; the CLI audit owner owes a `plan.failed` entry.
     Unrecorded,
+    /// A caller supplied a lifecycle guard for another machine or non-cold state.
+    StateNotOwned,
     /// Rollback was not confirmed; a VM may still be live.
     UncertainStop,
 }
@@ -107,6 +109,9 @@ pub fn cli_start_failure_kind(error: &anyhow::Error) -> Option<CliStartFailureKi
         }
         Some(mvm_hostd::plan_admission::CliStartFailure::Unrecorded(_)) => {
             Some(CliStartFailureKind::Unrecorded)
+        }
+        Some(mvm_hostd::plan_admission::CliStartFailure::StateNotOwned(_)) => {
+            Some(CliStartFailureKind::StateNotOwned)
         }
         Some(mvm_hostd::plan_admission::CliStartFailure::UncertainStop(_)) => {
             Some(CliStartFailureKind::UncertainStop)
@@ -440,6 +445,10 @@ mod tests {
             (
                 mvm_hostd::plan_admission::CliStartFailure::Unrecorded(anyhow::anyhow!("start")),
                 CliStartFailureKind::Unrecorded,
+            ),
+            (
+                mvm_hostd::plan_admission::CliStartFailure::StateNotOwned(anyhow::anyhow!("lock")),
+                CliStartFailureKind::StateNotOwned,
             ),
             (
                 mvm_hostd::plan_admission::CliStartFailure::UncertainStop(anyhow::anyhow!("stop")),

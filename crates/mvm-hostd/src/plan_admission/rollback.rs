@@ -49,9 +49,10 @@ pub(super) fn undo_cli_launch(undo: UndoLaunch<'_>) -> anyhow::Error {
     )
 }
 
+/// A post-start refusal whose compensating stop could not be confirmed.
 #[derive(Debug, thiserror::Error)]
 #[error("{primary:#}; rollback remains unconfirmed: {stop:#}")]
-pub(super) struct UndoLaunchFailure {
+pub struct UndoLaunchFailure {
     #[source]
     primary: anyhow::Error,
     stop: anyhow::Error,
@@ -153,6 +154,23 @@ pub fn apply_admitted_grants_or_undo_launch(
     )
 }
 
+/// Apply grants for a client-owned persistent start; a failed stop remains unsealed.
+pub fn apply_persistent_grants_or_undo_launch(
+    backend: &AnyBackend,
+    vm_id: &VmId,
+    admitted: &AdmittedPlan,
+    emitter: Option<&crate::audit::emitter::AuditEmitter>,
+) -> Result<EnforcedGrants> {
+    apply_admitted_grants_with_rollback(
+        backend,
+        vm_id,
+        admitted,
+        emitter,
+        || backend.stop(vm_id).map(|_| ()),
+        FailureAuditPolicy::OwnedAfterConfirmedRollback,
+    )
+}
+
 pub(super) fn apply_entrypoint_grants_or_undo_launch(
     backend: &AnyBackend,
     vm_id: &VmId,
@@ -216,6 +234,19 @@ pub fn record_charge_or_undo_launch(
         || backend.stop(vm_id).map(|_| ()),
         FailureAuditPolicy::LegacyImmediate,
     )
+}
+
+/// Record a persistent charge; a failed stop remains unsealed.
+pub fn record_persistent_charge_or_undo_launch(
+    backend: &AnyBackend,
+    vm_id: &VmId,
+    vm_name: &str,
+    admitted: &AdmittedPlan,
+    emitter: Option<&crate::audit::emitter::AuditEmitter>,
+) -> Result<()> {
+    record_charge_with_owned_rollback(backend, vm_id, vm_name, admitted, emitter, || {
+        backend.stop(vm_id).map(|_| ())
+    })
 }
 
 pub(super) fn record_entrypoint_charge_or_undo_launch(

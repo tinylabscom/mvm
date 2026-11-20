@@ -104,13 +104,15 @@ pub use nonce_ledger::InMemoryNonceLedger;
 pub use registry_pack::{BuiltPackBootCheck, PreparedBuiltPackRuntime, prepare_built_pack_start};
 pub use restore::dispatch_vm_full_fork;
 pub use rollback::{
-    apply_admitted_grants_or_undo_launch, record_charge_or_undo_launch,
-    record_charge_with_owned_rollback,
+    UndoLaunchFailure, apply_admitted_grants_or_undo_launch,
+    apply_persistent_grants_or_undo_launch, record_charge_or_undo_launch,
+    record_charge_with_owned_rollback, record_persistent_charge_or_undo_launch,
 };
 pub use shares::enforce_admitted_shares;
 pub use start::{
-    CliStartFailure, DispatchedPersistent, StartAdmittedParams, StartedMachine, WarmClaimDispatch,
-    admit_and_start, claim_cli_transient, start_admitted, start_admitted_owned_actor,
+    CliStartFailure, DispatchedPersistent, PersistentAdmission, PreparePersistentParams,
+    PreparedPersistent, StartAdmittedParams, StartedMachine, WarmClaimDispatch, admit_and_start,
+    boot_vm, claim_cli_transient, start_admitted, start_admitted_owned_actor,
     start_admitted_owned_actor_with_bootstrap, start_cli_transient, start_entrypoint,
     start_fs_quick_fork, start_owned_entrypoint, start_persistent,
 };

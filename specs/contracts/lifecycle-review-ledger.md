@@ -65,6 +65,31 @@ covers both modes, admitted HTTPS and refused ports, forward-request refusal,
 private permissions, unchanged guest authentication, and teardown. This does
 not witness a native VM boot or Linux confinement; those remain live CI checks.
 
+## Persistent start admission ownership
+
+The persistent-source slice under
+[#5520](https://github.com/tinylabscom/mvm/issues/5520) reviews the machine
+lifecycle guard from source and volume preparation through host admission,
+backend dispatch, authenticated readiness and rollback. The client retains
+source preparation, writable-volume leases and post-dispatch acceptance.
+Hostd borrows the caller-held `MachineLifecycleLock`, validates its name and
+cold state without reacquiring it, retains the selected `VerifiedRuntimeSet`
+through one durable admission, and spends that admission on the existing
+persistent dispatch tail.
+
+Pre-dispatch lock, runtime and required-audit refusals start no backend.
+Confirmed post-start rollback records failure before reaping state under the
+same guard. An unconfirmed native start or stop records an unsealed outcome and
+retains runtime, name and volume custody; it does not authorize cleanup or a
+second attachment. `plan.launched` remains client-owned after the private
+host-socket gate probe, mailbox setup, authenticated guest readiness, grant
+readback, budget recording and lease commit.
+
+Mock and source-level tests cover stage order, runtime tampering, audit
+durability refusal, lock mismatch and uncertain lease retention. They do not
+qualify Linux Firecracker, a billable GCP host, or the formal cold/warm
+performance requirements.
+
 ## Signed application HVF startup diagnostics
 
 Reviewed in [#5681](https://github.com/tinylabscom/mvm/pull/5681): standalone
