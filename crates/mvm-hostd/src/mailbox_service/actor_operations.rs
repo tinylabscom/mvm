@@ -17,6 +17,7 @@ use mvm_contract::protocol::mailbox::{
     SignedMailboxDeliveryAck, SignedMailboxDeliveryLease,
 };
 use mvm_core::crypto::aead::{self, Key};
+use mvm_core::host_interface::epoch_gate::admit_at;
 use mvm_core::host_interface::workload::DestinationTip;
 use mvm_core::mailbox::conversation_wire::{
     ConversationBinding, ConversationRequest, ConversationResponse,
@@ -162,6 +163,10 @@ impl ActorConversationEndpoint {
             .map_err(storage)?;
         if config.binding.address != material.address
             || config.binding.policy_epoch != material.template.capability.policy_epoch
+            || config
+                .plan
+                .mailbox
+                .is_none_or(|grant| admit_at(config.current_epoch, grant.epoch).is_err())
         {
             return Err(Refusal::NotAuthorized);
         }
@@ -1499,6 +1504,7 @@ mod tests {
     use crate::actor_lifecycle::{ActorMailboxes, local_mailboxes::LocalActorMailboxes};
     use crate::mailbox_launch::actor_template;
     use ed25519_dalek::SigningKey;
+    use mvm_contract::protocol::mailbox::ExecutionEpoch;
     use mvm_core::mailbox::reader::MailboxReaderBootBinding;
 
     struct Pair {
@@ -1534,6 +1540,17 @@ mod tests {
         plan: &ExecutionPlan,
         binding: &ConversationBinding,
     ) -> ActorConversationEndpoint {
+        let current = ExecutionEpoch::new(plan.execution_epoch).unwrap();
+        open_at(directory, name, plan, binding, current).unwrap()
+    }
+
+    fn open_at(
+        directory: &std::path::Path,
+        name: &str,
+        plan: &ExecutionPlan,
+        binding: &ConversationBinding,
+        current_epoch: ExecutionEpoch,
+    ) -> Result<ActorConversationEndpoint> {
         let material = actor_template::endpoint_material(directory, plan)
             .unwrap()
             .unwrap();
@@ -1544,14 +1561,10 @@ mod tests {
                 directory: directory.join(name),
                 max_storage_bytes: material.max_storage_bytes as usize,
                 now_unix_ms: actor_template::current_time_ms().unwrap(),
-                current_epoch: mvm_contract::protocol::mailbox::ExecutionEpoch::new(
-                    plan.execution_epoch,
-                )
-                .unwrap(),
+                current_epoch,
             },
             material,
         )
-        .unwrap()
     }
 
     fn pair() -> Pair {
@@ -1723,6 +1736,54 @@ mod tests {
             &SigningKey::from_bytes(&[ack_seed; 32]),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn an_endpoint_opens_only_at_its_units_gated_epoch() {
+        use crate::mailbox_service::bound_epoch;
+        use crate::policy_generation::workload_store::OwnedWorkloadStore;
+        use mvm_core::host_interface::workload::WorkloadChange;
+
+        let pair = pair();
+        let ledger = tempfile::tempdir().unwrap();
+        let dir = pair.directory.path();
+        let parent = pair.parent_plan.workload.0.clone();
+        let child = pair.child_plan.workload.0.clone();
+        let open_parent = |name: &str| {
+            let current = bound_epoch(ledger.path(), &parent).unwrap();
+            open_at(dir, name, &pair.parent_plan, &pair.parent_binding, current)
+        };
+        let open_child = |name: &str| {
+            let current = bound_epoch(ledger.path(), &child).unwrap();
+            open_at(dir, name, &pair.child_plan, &pair.child_binding, current)
+        };
+        assert!(open_parent("gated-parent-1").is_ok());
+        assert!(open_child("gated-child-1").is_ok());
+
+        let store = OwnedWorkloadStore::open(ledger.path()).unwrap();
+        store
+            .commit(&WorkloadChange::Replace {
+                workload: parent.clone(),
+                from_epoch: ExecutionEpoch::FIRST,
+            })
+            .unwrap();
+        assert!(matches!(
+            open_parent("gated-parent-2"),
+            Err(Refusal::NotAuthorized)
+        ));
+        assert!(open_child("gated-child-2").is_ok());
+
+        store
+            .commit(&WorkloadChange::Quarantine {
+                workload: child.clone(),
+            })
+            .unwrap();
+        let refused = bound_epoch(ledger.path(), &child).unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            bound_epoch(ledger.path(), &parent).unwrap(),
+            ExecutionEpoch::new(2).unwrap()
+        );
     }
 
     #[test]
