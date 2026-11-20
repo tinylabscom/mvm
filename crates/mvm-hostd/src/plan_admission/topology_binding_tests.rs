@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use mvm_contract::assurance::Sha256Digest;
 use mvm_contract::plan::topology::{
-    CorePlacement, CryptoSuite, SealedTransitions, TOPOLOGY_SCHEMA_VERSION, Topology,
-    TopologyBinding, TopologyBindingRefusal, Unit, UnitResources, UnitRole,
+    CorePlacement, CryptoSuite, Edge, EdgeKind, SealedTransitions, TOPOLOGY_SCHEMA_VERSION,
+    Topology, TopologyBinding, TopologyBindingRefusal, Unit, UnitResources, UnitRole,
 };
 use mvm_core::plan::{TenantId, WorkloadId};
 
@@ -316,6 +316,86 @@ fn a_plan_sized_differently_from_its_unit_is_refused() {
         refusal(host.admit(&bind(plan, &topology, UNIT))),
         TopologyBindingRefusal::ResourcesMismatch { .. }
     ));
+}
+
+/// `topology_for` with a producer unit whose output feeds the unit's stdin.
+fn topology_with_stream_into_unit(plan: &ExecutionPlan) -> Topology {
+    let mut topology = topology_for(plan, 1);
+    let mut producer = topology.units[0].clone();
+    producer.workload = WorkloadId("producer".to_string());
+    // Units are kept in ascending order, and "producer" sorts before the unit.
+    topology.units.insert(0, producer);
+    topology.edges.push(Edge {
+        kind: EdgeKind::Stream,
+        from: WorkloadId("producer".to_string()),
+        to: WorkloadId(UNIT.to_string()),
+    });
+    topology
+}
+
+fn with_stream_edges(mut plan: ExecutionPlan, count: usize) -> ExecutionPlan {
+    plan.stream_edges = (0..count)
+        .map(|i| mvm_contract::stream::StreamEdge::new(format!("input-{i}")))
+        .collect();
+    plan
+}
+
+#[test]
+fn a_stream_edge_the_topology_does_not_grant_is_refused_without_spending_its_nonce() {
+    let host = Host::new();
+    let plan = plan();
+    let topology = topology_for(&plan, 1);
+    host.admit_topology(&topology);
+    let tenant = topology.tenant.0.clone();
+    let ungranted = bind(with_stream_edges(plan.clone(), 1), &topology, UNIT);
+
+    let expected = TopologyBindingRefusal::UngrantedStreamEdges {
+        unit: WorkloadId(UNIT.to_string()),
+        granted: 0,
+        declared: 1,
+    };
+    assert_eq!(refusal(host.admit(&ungranted)), expected);
+    let entry = host.last_entry(&tenant);
+    assert_eq!(entry["event"], "plan.admission_refused");
+    assert_eq!(entry["labels"]["stage"], TOPOLOGY_BINDING_STAGE);
+    assert_eq!(refusal(host.admit(&ungranted)), expected);
+
+    // The refused plan's nonce was never spent.
+    host.admit(&bind(plan, &topology, UNIT))
+        .expect("the nonce was never spent");
+}
+
+#[test]
+fn stream_edges_the_topology_grants_are_admitted() {
+    let host = Host::new();
+    let plan = plan();
+    let topology = topology_with_stream_into_unit(&plan);
+    host.admit_topology(&topology);
+    host.admit(&bind(with_stream_edges(plan, 1), &topology, UNIT))
+        .expect("admitted");
+}
+
+#[test]
+fn more_stream_edges_than_the_topology_grants_are_refused() {
+    let host = Host::new();
+    let plan = plan();
+    let topology = topology_with_stream_into_unit(&plan);
+    host.admit_topology(&topology);
+    assert_eq!(
+        refusal(host.admit(&bind(with_stream_edges(plan, 2), &topology, UNIT))),
+        TopologyBindingRefusal::UngrantedStreamEdges {
+            unit: WorkloadId(UNIT.to_string()),
+            granted: 1,
+            declared: 2,
+        }
+    );
+}
+
+#[test]
+fn an_unbound_plan_with_stream_edges_is_admitted_as_before() {
+    let host = Host::new();
+    host.admit(&readdress(with_stream_edges(plan(), 1)))
+        .expect("admitted");
 }
 
 #[test]
