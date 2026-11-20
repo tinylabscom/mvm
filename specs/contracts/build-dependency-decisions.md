@@ -26,6 +26,55 @@ declined; the reasons are recorded so they are not re-derived.
 | [#4713](https://github.com/tinylabscom/mvm/issues/4713) phase 2 — gate `toml` and `regex` out of the guest closure | Make `toml` and `regex` optional `mvm-core` deps owned by `host-state`; gate `domain::manifest`, `user_config` and `config::{normalize_fc_version, fc_version}` behind it (`FC_VERSION_DEFAULT`, `FC_CI_ASSETS_VERSION` and `ARCH` stay ungated; the version normalizer is not rewritten) | No guest crate names the gated modules, and `regex` enters every guest closure only through `mvm-core`. The musl guest closure (same command as phase 1) goes from 100 to 91 with the `toml` gate — `toml`, `toml_edit`, `toml_datetime`, `toml_write`, `serde_spanned`, `winnow` and their now-exclusive `equivalent`/`hashbrown`/`indexmap` edges leave — and from 91 to 87 with the `regex` gate: `regex`, `regex-automata`, `regex-syntax` and `aho-corasick` leave, the last because its only remaining guest edge was `regex`'s `perf-literal`. Phase 1 kept `regex` because the guest-referenced `config` module used it; gating just the two host-only functions leaves the guest-referenced path helpers in place. The `mvmctl` host closure is byte-identical at 351: all twelve host crates enable `host-state`. The `manifest_fixtures` integration test gains a `required-features` entry. `check-guest-agent-runtime-free` name-bans the `toml` and `regex` stacks and its module inventory names `domain::manifest`, `user_config` and `config::fc_version`; `tar` and `aho-corasick` stay unbanned because a direct guest edge to either remains legitimate. | A guest-side consumer of the workload manifest, the operator config or Firecracker version normalization — each would be a new host↔guest protocol surface, not a linked module. |
 | [#4839](https://github.com/tinylabscom/mvm/issues/4839) — consumerless `mvm-hostlib` workspace-dependency row | Delete the `mvm-hostlib` entry from `[workspace.dependencies]`; the crate stays a workspace member | No manifest in the workspace names `mvm-hostlib` as a dependency (`rg 'mvm-hostlib' --glob Cargo.toml` finds only the member list, the unused row and the crate's own manifest), and `mvm-hostlib` is a leaf that nothing links. `cargo tree -p mvmctl -e normal,build --prefix none --locked \| sed 's/ (\*)//' \| sort -u \| wc -l` is 350 before and after, and the same for `-p mvm-hostlib` is 337 before and after; `Cargo.lock` is unchanged. It removes no package: it deletes a declaration that could only mislead a reader into thinking the library has a Rust consumer. | A Rust crate that links `libmvm_hostlib` in-process; add the dependency to that crate then. |
 
+## Native coordinator observation
+
+For [#5255](https://github.com/tinylabscom/mvm/issues/5255), the existing
+`policy coordinator` observation replaces `systemctl` subprocess output with
+`zbus` 6.4.0 over the fixed native user-manager socket. Authentication and
+D-Bus decoding stay in the library rather than a new hand-written protocol
+implementation. The application adds pre-allocation frame/authentication
+limits, one IPC deadline, descriptor refusal and owned shutdown.
+
+Production enables only `tokio` and `p2p`, with default features disabled,
+under the Linux dependency table. The `service` feature is Unix dev-only for
+socket-pair fixtures; no handover or production service API is enabled.
+The compatibility exceptions are exactly `syn` 2/3 and `winnow` 0.7/1:
+version-qualified older-line skips in cargo-deny plus exact-pair checks in
+the full-metadata duplicate-major gate. They waive no advisory, license or
+source check.
+
+Against `20b9da624f6922dbb5bcee184c1e443734143033`, measured with
+`cargo tree --locked -p PACKAGE -e normal,build --prefix none --target TARGET`
+and distinct `(name, version)` pairs:
+
+| Closure | Before | After |
+|---|---:|---:|
+| Default `mvmctl`, x86_64 Linux | 351 | 362 |
+| Default `mvmctl`, aarch64 macOS | 346 | 346 |
+| Release `mvmctl`, aarch64 macOS | 372 | 372 |
+| Release `mvmctl`, x86_64 Linux | 371 | 381 |
+| Release `mvmctl`, aarch64 Linux | 370 | 380 |
+| `mvm-builder-guest`, aarch64 musl | 88 | 88 |
+| `mvm-agentd`, aarch64 musl | 84 | 84 |
+| `mvm-host-services`, aarch64 musl | 85 | 85 |
+| Workspace all-features, x86_64 Linux | 579 | 589 |
+
+Release uses `host,user,release-artifact-bootstrap,release-channel,embed-host-bins`.
+The all-features measurement instead uses `--workspace -e no-dev --all-features`.
+The exact host-line command `cargo tree -p mvmctl -e normal,build --prefix none |
+sort -u | wc -l` remains 505; `-p mvm-builder-guest` remains 138. Repeat markers
+make these line counts different from package counts.
+
+The new Linux package names are `endi`, `ordered-stream`, `serde_repr`,
+`zbus`, `zbus_macros`, `zbus_utils`, `zcheapstr`, and `zruntime`, plus the new
+`syn` and `winnow` versions. Default Linux also gains `futures-core`, already
+present in release/all-features graphs. Required compatible minimums update
+`bitflags` 2.13.0 → 2.13.2, `socket2` 0.6.4 → 0.6.5 and
+`futures-core`/`futures-io` 0.3.32 → 0.3.34. Unchanged macOS and guest counts
+therefore do not mean byte-identical dependency sets. Budgets increase only by
+these measured Linux additions. Revisit the exceptions when the native
+library and existing consumers can use the same compatibility versions.
+
 ## Development compile-time boundary
 
 The development profile no longer optimizes all of `mvm-core` to make

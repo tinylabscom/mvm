@@ -103,6 +103,13 @@ fn replace_with<A: WorkloadAuthority>(
         .map(|e| e.get())
 }
 
+/// Exercise containment with an owned local store, not a coordinator transport.
+#[cfg(all(test, feature = "test-support"))]
+pub(crate) fn quarantine_in_process(name: &str, reason: &str) -> Result<()> {
+    let store = mvm_hostd::policy_generation::workload_store::OwnedWorkloadStore::open(&home())?;
+    quarantine_with(|| Ok(&store), name, reason)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

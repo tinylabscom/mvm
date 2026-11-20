@@ -230,6 +230,7 @@ mod tests {
     use super::*;
     use crate::audit::audit_file::{FileAuditSigner, RotationPolicy};
     use crate::audit::signer::{AuditSigner, PlanAuditEntry};
+    use crate::audit::test_fixtures::AuditDir;
     use mvm_core::plan::{PlanId, TenantId};
     use std::sync::{
         Arc,
@@ -257,7 +258,7 @@ mod tests {
         for tenant in ["local", "tenant-1", "tenant_2", "a\\b", "C:tenant"] {
             assert!(validate_tenant(tenant).is_ok(), "{tenant}");
         }
-        let root = tempfile::tempdir().unwrap();
+        let root = AuditDir::new();
         let signer = FileAuditSigner::open(
             ed25519_dalek::SigningKey::from_bytes(&[73; 32]),
             root.path(),
@@ -274,8 +275,8 @@ mod tests {
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
 
-    async fn rotated() -> (tempfile::TempDir, FileAuditSigner) {
-        let root = tempfile::tempdir().unwrap();
+    async fn rotated() -> (AuditDir, FileAuditSigner) {
+        let root = AuditDir::new();
         let key = ed25519_dalek::SigningKey::from_bytes(&[73; 32]);
         let signer = FileAuditSigner::open(key, root.path())
             .unwrap()

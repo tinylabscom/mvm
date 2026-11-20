@@ -2155,6 +2155,7 @@ mod tests {
     }
 
     /// A chain-signed recorder writing to `path`, plus the key that verifies it.
+    /// The caller holds `TestEnv` through all recorder drops and session joins.
     pub(super) fn recorder_at(
         path: &std::path::Path,
     ) -> (Arc<Recorder>, ed25519_dalek::VerifyingKey) {
@@ -2173,6 +2174,29 @@ mod tests {
         )
     }
 
+    /// Shut down and join before the caller's home guard can unwind.
+    pub(super) struct RuntimeSessionHost {
+        guest: UnixStream,
+        thread: Option<thread::JoinHandle<Result<(), FlowMuxError>>>,
+    }
+
+    impl RuntimeSessionHost {
+        pub(super) fn join(mut self) -> thread::Result<Result<(), FlowMuxError>> {
+            let _ = self.guest.shutdown(std::net::Shutdown::Both);
+            self.thread.take().expect("session thread is owned").join()
+        }
+    }
+
+    impl Drop for RuntimeSessionHost {
+        fn drop(&mut self) {
+            if let Some(thread) = self.thread.take() {
+                let _ = self.guest.shutdown(std::net::Shutdown::Both);
+                // Preserve the original panic if this is unwinding.
+                let _ = thread.join();
+            }
+        }
+    }
+
     /// Run a session the way the endpoint does — inside a Tokio runtime, with
     /// `serve` on a blocking task — so `Handle::try_current` finds a runtime
     /// and a terminated flow can be driven.
@@ -2188,9 +2212,26 @@ mod tests {
         Session,
         thread::JoinHandle<Result<(), FlowMuxError>>,
     ) {
+        let (guest, session, mut host) = run_owned_session_on_runtime(build);
+        (
+            guest,
+            session,
+            host.thread.take().expect("session thread is owned"),
+        )
+    }
+
+    /// Keep session teardown inside the caller's fixture lifetime, even on panic.
+    pub(super) fn run_owned_session_on_runtime(
+        build: impl FnOnce(&str, SigningKey, VerifyingKey, RegistryLimits) -> FlowMuxAccept
+        + Send
+        + 'static,
+    ) -> (UnixStream, Session, RuntimeSessionHost) {
         let (host_key, host_verify) = fresh_keys();
         let (guest_key, guest_verify) = fresh_keys();
         let (host_stream, mut guest_stream) = UnixStream::pair().unwrap();
+        let shutdown_guest = guest_stream
+            .try_clone()
+            .expect("clone guest shutdown socket");
         let host_handle = thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -2214,6 +2255,10 @@ mod tests {
                 .expect("session task")
             })
         });
+        let host = RuntimeSessionHost {
+            guest: shutdown_guest,
+            thread: Some(host_handle),
+        };
         let (mut guest_session, _session_id) =
             Session::guest(&mut guest_stream, guest_key, &host_verify).unwrap();
 
@@ -2227,7 +2272,70 @@ mod tests {
         let (opcode, _stream_id, _payload) =
             read_flowmux_frame(&mut guest_stream, &mut guest_session);
         assert_eq!(opcode, Opcode::HelloAck);
-        (guest_stream, guest_session, host_handle)
+        (guest_stream, guest_session, host)
+    }
+
+    #[test]
+    fn a_session_host_unwind_joins_before_restoring_the_fixture_home() {
+        use mvm_core::util::test_env::{TestEnv, isolated_env_probe};
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        use std::sync::mpsc;
+
+        isolated_env_probe(|| {
+            let previous_home = std::env::var_os("MVM_HOME");
+            let (guest, mut host_socket) = UnixStream::pair().unwrap();
+            host_socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let (finished, completed) = mpsc::sync_channel(1);
+            let unwound = catch_unwind(AssertUnwindSafe(|| {
+                let _env = TestEnv::new();
+                let dir = tempfile::tempdir().unwrap();
+                let (recorder, _) = recorder_at(&dir.path().join("audit.jsonl"));
+                let home = std::env::var_os("MVM_HOME").expect("fixture home is set");
+                let audit_dir = dir.path().to_path_buf();
+                let shutdown_guest = guest.try_clone().unwrap();
+                let worker = thread::spawn(move || {
+                    let read = host_socket.read(&mut [0u8; 1]);
+                    let observed_home = std::env::var_os("MVM_HOME");
+                    let home_exists = std::path::Path::new(&home).is_dir();
+                    let audit_dir_exists = audit_dir.is_dir();
+                    drop(recorder);
+                    finished
+                        .send((read, home, observed_home, home_exists, audit_dir_exists))
+                        .unwrap();
+                    Ok(())
+                });
+                let _host = RuntimeSessionHost {
+                    guest: shutdown_guest,
+                    thread: Some(worker),
+                };
+                panic!("forced fixture unwind");
+            }));
+            let before_cleanup = completed.try_recv();
+            let joined_during_unwind = before_cleanup.is_ok();
+            // Keep the guest open through unwind, so only the owner can unblock
+            // the host. Close it now too, to clean up a regressed detached worker.
+            let _ = guest.shutdown(std::net::Shutdown::Both);
+            let (read, home, observed_home, home_exists, audit_dir_exists) = before_cleanup
+                .unwrap_or_else(|_| completed.recv_timeout(Duration::from_secs(5)).unwrap());
+            let panic = unwound.expect_err("the fixture must unwind");
+            assert_eq!(panic.downcast_ref::<&str>(), Some(&"forced fixture unwind"));
+            assert!(
+                joined_during_unwind,
+                "the host must finish before fixture teardown"
+            );
+            assert!(
+                matches!(read, Ok(0)),
+                "shutdown must unblock the host: {read:?}"
+            );
+            assert_eq!(observed_home, Some(home));
+            assert!(
+                home_exists && audit_dir_exists,
+                "signer drops before its directories"
+            );
+            assert_eq!(std::env::var_os("MVM_HOME"), previous_home);
+        });
     }
 
     pub(super) fn write_frame(
@@ -2505,13 +2613,14 @@ mod tests {
     /// association to ride, and the session survives both.
     #[test]
     fn a_udp_association_under_an_allow_list_is_refused_and_audited() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let dir = tempfile::tempdir().expect("tempdir");
         let audit_path = dir.path().join("audit.jsonl");
         let (recorder, audit_key) = recorder_at(&audit_path);
         let gate = gate_pinning_name("api.udp.test", "198.51.100.7".parse().unwrap(), 443);
 
         let (mut guest, mut guest_session, host) =
-            run_session_on_runtime(move |id, key, anchor, limits| {
+            run_owned_session_on_runtime(move |id, key, anchor, limits| {
                 FlowMuxAccept::new(id, key, anchor, limits, gate)
                     .with_audit_sink(RecorderSink::wrap(recorder))
             });
@@ -2555,6 +2664,7 @@ mod tests {
     /// entry.
     #[test]
     fn a_refused_datagram_is_audited_once_per_target() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let dir = tempfile::tempdir().expect("tempdir");
         let audit_path = dir.path().join("audit.jsonl");
         let (recorder, audit_key) = recorder_at(&audit_path);
@@ -2562,7 +2672,7 @@ mod tests {
         let gate = gate_allowing_addr(admitted.ip(), 0, Some(admitted.port()));
 
         let (mut guest, mut guest_session, host) =
-            run_session_on_runtime(move |id, key, anchor, limits| {
+            run_owned_session_on_runtime(move |id, key, anchor, limits| {
                 FlowMuxAccept::new(id, key, anchor, limits, gate)
                     .with_audit_sink(RecorderSink::wrap(recorder))
             });

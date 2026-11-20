@@ -133,17 +133,20 @@ mod tests {
 
     #[test]
     fn same_name_launch_is_exclusive_and_prior_outcome_is_not_absence_proof() {
-        let directory = tempfile::tempdir().unwrap();
-        let first = claim_hvf_launch(directory.path()).unwrap();
-        assert!(claim_hvf_launch(directory.path()).is_err());
-        drop(first);
-        drop(claim_hvf_launch(directory.path()).unwrap());
-        std::fs::write(directory.path().join("workload.exit"), "124").unwrap();
-        assert!(claim_hvf_launch(directory.path()).is_err());
-        assert_eq!(
-            std::fs::read_to_string(directory.path().join("workload.exit")).unwrap(),
-            "124"
-        );
+        mvm_core::util::test_env::isolated_lock_probe(|| {
+            let _env = mvm_core::util::test_env::TestEnv::new();
+            let directory = tempfile::tempdir().unwrap();
+            let first = claim_hvf_launch(directory.path()).unwrap();
+            assert!(claim_hvf_launch(directory.path()).is_err());
+            drop(first);
+            drop(claim_hvf_launch(directory.path()).unwrap());
+            std::fs::write(directory.path().join("workload.exit"), "124").unwrap();
+            assert!(claim_hvf_launch(directory.path()).is_err());
+            assert_eq!(
+                std::fs::read_to_string(directory.path().join("workload.exit")).unwrap(),
+                "124"
+            );
+        });
     }
 
     #[test]

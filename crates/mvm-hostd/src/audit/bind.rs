@@ -138,6 +138,7 @@ mod tests {
     use super::*;
     use crate::audit::audit_file::verify_audit_chain;
     use crate::audit::emitter::AuditEmitter;
+    use crate::audit::test_fixtures::AuditDir;
     use ed25519_dalek::SigningKey;
     use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta, ContentBlob};
     use rand::Rng;
@@ -162,7 +163,7 @@ mod tests {
 
     #[test]
     fn bind_created_emits_a_verifiable_entry() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -191,7 +192,7 @@ mod tests {
 
     #[test]
     fn bind_restored_binds_the_restored_vm_and_via() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);
@@ -219,7 +220,7 @@ mod tests {
 
     #[test]
     fn bind_forked_refuses_a_child_with_no_parent_link() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = AuditDir::new();
         let mut seed = [0u8; 32];
         rand::rng().fill_bytes(&mut seed);
         let emitter = AuditEmitter::with_dir(SigningKey::from_bytes(&seed), dir.path()).unwrap();
@@ -240,7 +241,7 @@ mod tests {
 
     #[test]
     fn bind_forked_emits_parent_and_child_content_addresses() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = AuditDir::new();
         let key = {
             let mut __ed_seed = [0u8; 32];
             rand::rng().fill_bytes(&mut __ed_seed);

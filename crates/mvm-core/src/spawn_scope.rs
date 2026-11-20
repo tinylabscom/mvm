@@ -2022,11 +2022,12 @@ mod tests {
 
     #[test]
     fn a_hung_systemctl_reads_back_as_declared_instead_of_stalling() {
+        let _env = crate::util::test_env::TestEnv::new();
         let state = tempfile::tempdir().expect("state dir");
         let started = Instant::now();
         let out = run_bounded(
             {
-                let mut cmd = Command::new(fake_systemctl(state.path(), "sleep 30"));
+                let mut cmd = Command::new(fake_systemctl(state.path(), "exec /bin/sleep 30"));
                 cmd.arg("--user");
                 cmd
             },

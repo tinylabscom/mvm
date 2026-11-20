@@ -381,14 +381,38 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
 
-    fn recorder_at(file: &std::path::Path) -> (Recorder, ed25519_dalek::VerifyingKey) {
+    struct RecorderFixture {
+        recorder: Recorder,
+        vk: ed25519_dalek::VerifyingKey,
+        // Drop the signer before restoring the home used by directory classification.
+        _environment: mvm_core::util::test_env::TestEnv,
+    }
+
+    fn recorder_at(file: &std::path::Path) -> RecorderFixture {
+        let environment = mvm_core::util::test_env::TestEnv::new();
         let signing = SigningKey::from_bytes(&[7u8; 32]);
         let vk = signing.verifying_key();
         let signer = FileAuditSigner::open_file(signing, file).unwrap();
-        (
-            Recorder::new(Arc::new(signer), TenantId("local".into())),
+        RecorderFixture {
+            recorder: Recorder::new(Arc::new(signer), TenantId("local".into())),
             vk,
-        )
+            _environment: environment,
+        }
+    }
+
+    #[test]
+    fn recorder_fixture_owns_its_home_until_the_recorder_is_dropped() {
+        mvm_core::util::test_env::isolated_env_probe(|| {
+            let previous_home = std::env::var_os("MVM_HOME");
+            let dir = tempdir().unwrap();
+            let fixture = recorder_at(&dir.path().join("audit.jsonl"));
+            let fixture_home = std::path::PathBuf::from(mvm_core::config::mvm_home());
+            assert_ne!(Some(fixture_home.as_os_str()), previous_home.as_deref());
+            assert!(fixture_home.is_dir());
+            drop(fixture);
+            assert_eq!(std::env::var_os("MVM_HOME"), previous_home);
+            assert!(!fixture_home.exists());
+        });
     }
 
     // The signed `entry` payloads only — the claim-13 surface. The opaque
@@ -411,9 +435,10 @@ mod tests {
     async fn substituted_event_is_metadata_only_and_chain_verifies() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("audit.jsonl");
-        let (recorder, vk) = recorder_at(&file);
+        let fixture = recorder_at(&file);
+        let (recorder, vk) = (&fixture.recorder, &fixture.vk);
 
-        emit_secret_substituted(&recorder, "openai", "api.openai.com", AuthType::Bearer)
+        emit_secret_substituted(recorder, "openai", "api.openai.com", AuthType::Bearer)
             .await
             .unwrap();
 
@@ -429,17 +454,18 @@ mod tests {
             "audit chain must not carry the secret value: {payloads}"
         );
 
-        assert_eq!(verify_audit_chain(&file, &vk).unwrap(), 1);
+        assert_eq!(verify_audit_chain(&file, vk).unwrap(), 1);
     }
 
     #[tokio::test]
     async fn oauth_refresh_event_is_metadata_only_and_chain_verifies() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("audit.jsonl");
-        let (recorder, vk) = recorder_at(&file);
+        let fixture = recorder_at(&file);
+        let (recorder, vk) = (&fixture.recorder, &fixture.vk);
 
         emit_secret_oauth_refresh(
-            &recorder,
+            recorder,
             "oauth-secret",
             "auth.example.com",
             OAuthRefreshOutcome::Refreshed,
@@ -482,15 +508,16 @@ mod tests {
             );
         }
 
-        assert_eq!(verify_audit_chain(&file, &vk).unwrap(), 2);
+        assert_eq!(verify_audit_chain(&file, vk).unwrap(), 2);
     }
 
     #[tokio::test]
     async fn a_tampered_entry_fails_verification() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("audit.jsonl");
-        let (recorder, vk) = recorder_at(&file);
-        emit_secret_substituted(&recorder, "openai", "api.openai.com", AuthType::Bearer)
+        let fixture = recorder_at(&file);
+        let (recorder, vk) = (&fixture.recorder, &fixture.vk);
+        emit_secret_substituted(recorder, "openai", "api.openai.com", AuthType::Bearer)
             .await
             .unwrap();
 
@@ -499,16 +526,17 @@ mod tests {
             .unwrap()
             .replace("api.openai.com", "evil.example.com");
         std::fs::write(&file, tampered).unwrap();
-        assert!(verify_audit_chain(&file, &vk).is_err());
+        assert!(verify_audit_chain(&file, vk).is_err());
     }
 
     #[tokio::test]
     async fn redacted_event_records_categories_and_destination_only() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("audit.jsonl");
-        let (recorder, vk) = recorder_at(&file);
+        let fixture = recorder_at(&file);
+        let (recorder, vk) = (&fixture.recorder, &fixture.vk);
 
-        emit_secret_redacted(&recorder, "api.openai.com", "openai-key,email")
+        emit_secret_redacted(recorder, "api.openai.com", "openai-key,email")
             .await
             .unwrap();
 
@@ -522,28 +550,30 @@ mod tests {
             !payloads.contains("sk-") && !payloads.contains("XXX"),
             "audit chain must carry no matched bytes: {payloads}"
         );
-        assert_eq!(verify_audit_chain(&file, &vk).unwrap(), 1);
+        assert_eq!(verify_audit_chain(&file, vk).unwrap(), 1);
     }
 
     #[tokio::test]
     async fn placeholder_dropped_event_records_destination() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("audit.jsonl");
-        let (recorder, vk) = recorder_at(&file);
-        emit_secret_placeholder_dropped(&recorder, "evil.example.com")
+        let fixture = recorder_at(&file);
+        let (recorder, vk) = (&fixture.recorder, &fixture.vk);
+        emit_secret_placeholder_dropped(recorder, "evil.example.com")
             .await
             .unwrap();
         let chain = std::fs::read_to_string(&file).unwrap();
         assert!(chain.contains("secret.placeholder_dropped"));
         assert!(chain.contains("evil.example.com"));
-        assert_eq!(verify_audit_chain(&file, &vk).unwrap(), 1);
+        assert_eq!(verify_audit_chain(&file, vk).unwrap(), 1);
     }
 
     #[tokio::test]
     async fn rewrite_proof_event_records_only_metadata_and_digests() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("audit.jsonl");
-        let (recorder, vk) = recorder_at(&file);
+        let fixture = recorder_at(&file);
+        let (recorder, vk) = (&fixture.recorder, &fixture.vk);
         let proof = RewriteProofRecord {
             flow_id: mvm_core::policy::RewriteFlowId("flow-1".into()),
             event_index: 1,
@@ -559,7 +589,7 @@ mod tests {
             policy_decision: "replace:email".into(),
             authorization_decision: "runtime_owned".into(),
         };
-        emit_rewrite_proof(&recorder, "api.openai.com", "replace", &proof)
+        emit_rewrite_proof(recorder, "api.openai.com", "replace", &proof)
             .await
             .unwrap();
 
@@ -569,6 +599,6 @@ mod tests {
         assert!(chain.contains("mvmr1_x"));
         let payloads = entry_payloads(&chain);
         assert!(!payloads.contains("alice@example.com"));
-        assert_eq!(verify_audit_chain(&file, &vk).unwrap(), 1);
+        assert_eq!(verify_audit_chain(&file, vk).unwrap(), 1);
     }
 }
