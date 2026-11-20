@@ -560,7 +560,8 @@ fn start_or_claim_firecracker(
             socket,
             &spec.name,
             &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
-                .with_cpu_grant(spec.cpu_grant),
+                .with_cpu_grant(spec.cpu_grant)
+                .with_allowed_cpus(spec.allowed_cpus.clone()),
             &mut guard,
             handoff,
         )?;
@@ -709,7 +710,8 @@ impl FcDriver {
             "persistent writable Firecracker disks require prepared descriptor custody"
         );
         let bounds = mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
-            .with_cpu_grant(spec.cpu_grant);
+            .with_cpu_grant(spec.cpu_grant)
+            .with_allowed_cpus(spec.allowed_cpus.clone());
         crate::fc::validate_required_scope(&spec.name, &bounds)?;
         let kernel_path = resolve_fc_kernel_path(spec)?;
 
@@ -975,8 +977,12 @@ impl VmmDriver for FcDriver {
             // default: on Linux a cgroup can bound any process, and
             // Firecracker runs as a direct child of this driver — no
             // mvm-*-supervisor binary in front of it — so the cgroup goes
-            // on that child process directly.
-            resource_controls: ResourceControls::for_backend(BackendKind::Firecracker),
+            // on that child process directly. Placement is probed: the scope
+            // carries a CPU set only where cpuset is delegated to it.
+            resource_controls: ResourceControls::on_host(
+                BackendKind::Firecracker,
+                mvm_core::spawn_scope::cpuset_gap().is_none(),
+            ),
             ..VmCapabilities::default()
         }
     }
@@ -1490,6 +1496,7 @@ mod tests {
             cmdline: String::new(),
             vcpus: 2,
             cpu_grant: None,
+            allowed_cpus: None,
             memory_mib: 512,
             mem_initial_mib: None,
             blocks,

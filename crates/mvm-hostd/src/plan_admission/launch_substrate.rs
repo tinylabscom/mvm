@@ -67,15 +67,18 @@ pub fn thread_tenant_id(cfg: &mut mvm_core::vm_backend::VmStartConfig, admitted:
     cfg.tenant_id = Some(admitted.plan().tenant.0.clone());
 }
 
-/// Carry the admitted CPU bound onto the launch config, so the backend can be
-/// born inside it rather than adjusted into it afterwards.
+/// Carry the admitted CPU bound and core placement onto the launch config, so
+/// the backend can be born inside them rather than adjusted into them
+/// afterwards.
 ///
-/// Taken from the **signed, admitted** plan and nowhere else. A caller-supplied
-/// `cfg.cpu_grant` would be a bound chosen outside the admission that just
-/// checked it against the host's ceiling, so whatever was there is overwritten
-/// — including with `None`, which is what an uncapped plan means.
+/// Taken from the **admission** and nowhere else. A caller-supplied
+/// `cfg.cpu_grant` or `cfg.allowed_cpus` would be a bound chosen outside the
+/// admission that just checked it against the host, so whatever was there is
+/// overwritten — including with `None`, which is what an uncapped or unplaced
+/// launch means.
 pub fn thread_cpu_grant(cfg: &mut mvm_core::vm_backend::VmStartConfig, admitted: &AdmittedPlan) {
     cfg.cpu_grant = admitted.plan().grants.as_ref().and_then(|g| g.cpu);
+    cfg.allowed_cpus = admitted.allowed_cpus().cloned();
 }
 
 pub fn populate_audit_substrate(

@@ -73,6 +73,7 @@ mod host_gates;
 mod launch_substrate;
 mod mailbox_posture;
 mod nonce_ledger;
+mod placement;
 mod registry_pack;
 mod restore;
 mod rollback;
@@ -149,6 +150,9 @@ pub struct AdmittedPlan {
     assurance_runtime: Option<AssuranceRuntimeBinding>,
     canonical_kernel: Option<std::sync::Arc<canonical_kernel::AdmittedKernel>>,
     backend: Option<BackendKind>,
+    /// The host cores this launch is confined to, decided at admission from
+    /// the topology unit it boots and the cores admitted topologies hold.
+    allowed_cpus: Option<mvm_contract::protocol::cpu_set::CpuSet>,
     /// Set once the backend has been started under this admission. An
     /// admission authorizes one launch; the plan is handed back on
     /// `StartedMachine`, and holding it again must not start a second backend.
@@ -203,6 +207,13 @@ impl AdmittedPlan {
             vm_name: self.plan.image.name.clone(),
             grant,
         })
+    }
+
+    /// The host cores this launch is confined to, or `None` when admission
+    /// placed it nowhere.
+    #[must_use]
+    pub fn allowed_cpus(&self) -> Option<&mvm_contract::protocol::cpu_set::CpuSet> {
+        self.allowed_cpus.as_ref()
     }
 
     /// The signer whose key the plan verified under — this host's own signer
@@ -260,6 +271,7 @@ impl AdmittedPlan {
             assurance_runtime: None,
             canonical_kernel: None,
             backend: None,
+            allowed_cpus: None,
             dispatched: false,
         }
     }

@@ -10,7 +10,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use mvm_contract::plan::topology::check_topology_binding;
+use mvm_contract::plan::topology::{Unit, check_topology_binding};
 use mvm_core::plan::ExecutionPlan;
 
 use crate::audit::emitter::AuditEmitter;
@@ -19,11 +19,11 @@ use crate::audit::emitter::AuditEmitter;
 pub const TOPOLOGY_BINDING_STAGE: &str = "topology_binding";
 
 /// Check `plan` against the topology admitted for its tenant under the
-/// resolved mvm home.
+/// resolved mvm home, and return the unit it boots, if it is bound.
 pub(super) fn admit_topology_binding(
     plan: &ExecutionPlan,
     host_signer_keys_dir: Option<&Path>,
-) -> Result<()> {
+) -> Result<Option<Unit>> {
     let home = mvm_core::config::mvm_home_strict()?;
     admit_topology_binding_at(&home, plan, host_signer_keys_dir)
 }
@@ -40,19 +40,22 @@ pub(crate) fn admit_topology_binding_at(
     home: &Path,
     plan: &ExecutionPlan,
     host_signer_keys_dir: Option<&Path>,
-) -> Result<()> {
+) -> Result<Option<Unit>> {
     match decide(home, plan, host_signer_keys_dir) {
-        Ok(()) => Ok(()),
+        Ok(unit) => Ok(unit),
         Err(refusal) => Err(audit_refusal(home, plan, host_signer_keys_dir, refusal)),
     }
 }
 
-fn decide(home: &Path, plan: &ExecutionPlan, host_signer_keys_dir: Option<&Path>) -> Result<()> {
+fn decide(
+    home: &Path,
+    plan: &ExecutionPlan,
+    host_signer_keys_dir: Option<&Path>,
+) -> Result<Option<Unit>> {
     let admitted =
         crate::topology_admission::last_admitted_topology(home, &plan.tenant, host_signer_keys_dir)
             .context("reading the topology admitted for the plan's tenant")?;
-    check_topology_binding(plan, admitted.as_ref())?;
-    Ok(())
+    Ok(check_topology_binding(plan, admitted.as_ref())?.cloned())
 }
 
 /// Context on a refusal this check has already written to the chain. A caller

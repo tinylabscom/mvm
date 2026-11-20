@@ -47,6 +47,10 @@ impl Host {
             signed: &signed,
             backend: mvm_core::vm_backend::BackendKind::Firecracker,
             measured_failover: None,
+            host_cpus: &crate::topology_admission::HostCpus {
+                scope_cpuset: false,
+                online: None,
+            },
             clock: &SystemClock,
             host_signer_keys_dir: Some(&keys),
             emitter: &emitter,
