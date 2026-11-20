@@ -11,7 +11,13 @@
   version,
 }:
 
-pkgs.pkgsStatic.rustPlatform.buildRustPackage {
+let
+  rustPlatform = (import ./rust-platform.nix {
+    pkgs = pkgs.pkgsStatic;
+    inherit mvmSrc;
+  }).rustPlatform;
+in
+rustPlatform.buildRustPackage {
   pname = "mvm-runner";
   inherit version;
   src = mvmSrc;

@@ -33,7 +33,12 @@ Useful overrides:
   MVM_HVF_DENSITY_OUT_DIR=/tmp/path          artifact directory outside the repo
   MVM_HVF_DENSITY_BACKEND=firecracker        Linux/KVM instead of macOS HVF
   MVM_HVF_DENSITY_MODE=cold|warm|standby     cold (default), sequential warm claims, or
-                                             N standbys held unclaimed and idle-sampled
+                                             N standbys held unclaimed and idle-sampled.
+                                             On firecracker a standby is an on-disk snapshot
+                                             with no process: it is counted from the pool, its
+                                             snapshot bytes are charged, and metadata.json
+                                             records standby_form. Needs a short data dir
+                                             (MVM_HVF_DENSITY_DATA_DIR) for the VM sockets.
   MVM_HVF_DENSITY_WAVES="1 5 10 25 50 100"  wave sizes to run
   MVM_HVF_DENSITY_IMAGE=alpine              OCI image reference
   MVM_HVF_DENSITY_GUEST_SLEEP_SECONDS=240   in-guest sleep duration
@@ -71,6 +76,8 @@ The busy-host check repeats after the build and at the start of every wave; a wa
 that starts on a busy host is recorded as wave_N_contaminated in summary.tsv.
 It is not a successful-run receipt. RSS/idle samples include host-wide matching
 processes; receipt latency includes execution, not just boot or agent readiness.
+resource-report.json and resource-report.md are written at the end of a successful
+run by the harness's own mvmctl; a failure to produce them fails the run (exit 74).
 physical-memory-*.json records per-process resident bytes and a named quantity
 (macOS physical footprint, Linux proportional set size) before, during and after each wave; unavailable/partial samples stay explicit.
 wave-0 holds the zero-unit baseline: one settled memory and storage capture.
@@ -101,6 +108,7 @@ fi
 
 # The tests point this at a fixture file; a real run always opens /dev/kvm.
 KVM_DEVICE="${MVM_HVF_DENSITY_KVM_DEVICE:-/dev/kvm}"
+MEMINFO="${MVM_HVF_DENSITY_MEMINFO:-/proc/meminfo}"
 
 # The same conditions the Firecracker launch refuses on, checked before a
 # build that takes most of an hour on a cold host.
@@ -216,7 +224,7 @@ fi
 if [[ "${BACKEND}" == "hvf" ]]; then
   host_bytes="$(sysctl -n hw.memsize 2>/dev/null)" || host_bytes=""
 else
-  host_kib="$(awk '$1 == "MemTotal:" { print $2; exit }' /proc/meminfo)" || host_kib=""
+  host_kib="$(awk '$1 == "MemTotal:" { print $2; exit }' "${MEMINFO}")" || host_kib=""
   host_bytes=$(( ${host_kib:-0} * 1024 ))
 fi
 if ! [[ "${host_bytes}" =~ ^[0-9]+$ ]] || [[ "${host_bytes}" -eq 0 ]]; then
@@ -248,6 +256,19 @@ if [[ "${CUSTOM_WORKLOAD}" == "0" ]] && awk \
   'BEGIN { exit !(guest <= wave * spacing + settle + idle + 60) }'; then
   echo "refusing: guest sleep must outlast the launch wave, settling, idle sample and 60s boot margin" >&2
   exit 70
+fi
+
+# A Firecracker standby is captured as a full-VM snapshot, which needs the VM's
+# sockets inside its state dir; the longest is the substitution readiness socket.
+# shortcut: a relative MVM_HVF_DENSITY_DATA_DIR is measured as written; give an absolute one.
+if [[ "${BACKEND}" == "firecracker" && "${MODE}" == "standby" ]]; then
+  longest_standby_socket="${DATA_DIR}/vms/standby-0123456789abcdef/substitution-session-ready.sock"
+  if [[ "${#longest_standby_socket}" -gt 103 ]]; then
+    echo "refusing: a Firecracker standby snapshot needs its sockets in the VM state dir, and this path exceeds the 103-byte Unix socket limit:" >&2
+    echo "  ${longest_standby_socket}" >&2
+    echo "set MVM_HVF_DENSITY_DATA_DIR to a shorter new directory, for example /srv/mvm/d" >&2
+    exit 65
+  fi
 fi
 
 if [[ -e "${DATA_DIR}" || -L "${DATA_DIR}" ]]; then
@@ -352,6 +373,15 @@ check_wave_host() {
 RESIDENCY="${MODE}"
 if [[ "${MODE}" == "standby" ]]; then
   RESIDENCY="warm"
+fi
+# Firecracker captures a standby as an on-disk snapshot and releases the VMM
+# process; HVF keeps a resident supervisor per standby.
+STANDBY_FORM="not_applicable"
+if [[ "${MODE}" == "standby" ]]; then
+  STANDBY_FORM="resident_process"
+  if [[ "${BACKEND}" == "firecracker" ]]; then
+    STANDBY_FORM="on_disk_snapshot"
+  fi
 fi
 run_env=(
   env
@@ -508,7 +538,7 @@ capture_host_memory() {
   if [[ "${BACKEND}" == "hvf" ]]; then
     vm_stat >"${dir}/host-memory-${phase}.txt"
   else
-    cp /proc/meminfo "${dir}/host-memory-${phase}.txt"
+    cp "${MEMINFO}" "${dir}/host-memory-${phase}.txt"
   fi
   python3 "${ROOT}/scripts/density_memory.py" "${dir}" "${phase}"
 }
@@ -567,6 +597,29 @@ capture_storage() {
   else
     printf '0\t%s\n' "${DATA_DIR}/vms" >"${dir}/vm-state-blocks-${phase}.txt"
   fi
+  if [[ -d "${DATA_DIR}/snapshots" ]]; then
+    du -sk "${DATA_DIR}/snapshots" >"${dir}/snapshot-blocks-${phase}.txt"
+  else
+    printf '0\t%s\n' "${DATA_DIR}/snapshots" >"${dir}/snapshot-blocks-${phase}.txt"
+  fi
+}
+
+# Snapshot bytes this wave added, so earlier waves' leftovers are not charged to it.
+snapshot_growth_kib() {
+  local dir="$1"
+  awk 'FNR == 1 { v[++n] = $1 } END { d = v[2] - v[1]; print (d > 0 ? d : 0) }' \
+    "${dir}/snapshot-blocks-before.txt" "${dir}/snapshot-blocks-settled.txt"
+}
+
+# Standbys the pool reports idle with no process behind them, which is how a
+# snapshot-held standby appears. Prints the count; fails when the query does.
+count_snapshot_standbys() {
+  local dir="$1"
+  "${run_env[@]}" "${MVMCTL_BIN}" pool status --json >"${dir}/pool-status-settled.json" \
+    2>"${dir}/pool-status.stderr" || return 1
+  python3 -c 'import json, sys
+print(sum(1 for e in json.load(open(sys.argv[1]))["standbys"] if e["state"] == "idle" and e["pid"] == 0))' \
+    "${dir}/pool-status-settled.json"
 }
 
 capture_matching_processes() {
@@ -679,6 +732,7 @@ cleanup_wave() {
   echo -e "image\t${IMAGE_REF}"
   echo -e "backend\t${BACKEND}"
   echo -e "launch_mode\t${MODE}"
+  echo -e "standby_form\t${STANDBY_FORM}"
   echo -e "waves\t${WAVES_TEXT}"
   echo -e "guest_sleep_seconds\t${GUEST_SLEEP_SECONDS}"
   echo -e "settle_seconds\t${SETTLE_SECONDS}"
@@ -817,7 +871,12 @@ for wave in "${WAVES[@]}"; do
   vmm_count="$(awk -F '\t' -v component="${vmm_component}" \
     '$1 == component { print $2; found = 1; exit }
       END { if (!found) print 0 }' "${wave_dir}/rss-settled.tsv")"
-  if [[ "${MODE}" == "standby" && "${vmm_count}" -gt 0 ]]; then
+  standby_count="${vmm_count}"
+  if [[ "${STANDBY_FORM}" == "on_disk_snapshot" ]]; then
+    # No process holds these, so the sampler has nothing to sample.
+    standby_count="$(count_snapshot_standbys "${wave_dir}")" || standby_count=0
+    printf 'wave_%s_idle_sampler\tnot_applicable:no_resident_process\n' "${wave}" >>"${SUMMARY}"
+  elif [[ "${MODE}" == "standby" && "${vmm_count}" -gt 0 ]]; then
     capture_idle "${wave_dir}" "${wave}" "${vmm_count}"
   else
     capture_idle "${wave_dir}" "${wave}"
@@ -835,6 +894,10 @@ for wave in "${WAVES[@]}"; do
     printf 'wave_%s_vm_state_du_kib\t%s\n' "${wave}" "${vm_state_kib}"
     printf 'wave_%s_fs_available_delta_kib\t%s\n' \
       "${wave}" "$((available_before - available_settled))"
+    if [[ "${STANDBY_FORM}" == "on_disk_snapshot" ]]; then
+      printf 'wave_%s_standby_count\t%s\n' "${wave}" "${standby_count}"
+      printf 'wave_%s_standby_snapshot_du_kib\t%s\n' "${wave}" "$(snapshot_growth_kib "${wave_dir}")"
+    fi
   } >>"${SUMMARY}"
 
   cleanup_ok=0
@@ -854,7 +917,7 @@ for wave in "${WAVES[@]}"; do
   echo -e "wave_${wave}_launch_failures\t${failures}" >>"${SUMMARY}"
   echo -e "wave_${wave}_cleanup_ok\t${cleanup_ok}" >>"${SUMMARY}"
   if [[ "${failures}" -ne 0 || "${cleanup_ok}" -ne 1 ||
-        ( "${MVM_HVF_DENSITY_ALLOW_UNSUPPORTED:-0}" != "1" && "${vmm_count}" -lt "${wave}" ) ]]; then
+        ( "${MVM_HVF_DENSITY_ALLOW_UNSUPPORTED:-0}" != "1" && "${standby_count}" -lt "${wave}" ) ]]; then
     echo "wave ${wave} failed; see ${wave_dir}" >&2
     exit 71
   fi
@@ -882,4 +945,13 @@ for wave in "${WAVES[@]}"; do
 done
 
 trap - INT TERM EXIT
+
+# Markdown goes to stdout and the JSON report to --out. A run whose figures
+# cannot be ingested has produced nothing a reader can use, so it fails.
+if ! "${run_env[@]}" "${MVMCTL_BIN}" bench report --density-dir "${OUT_DIR}" \
+  --out "${OUT_DIR}/resource-report.json" >"${OUT_DIR}/resource-report.md" \
+  2>"${OUT_DIR}/resource-report.stderr"; then
+  echo "refusing: resource report generation failed; see ${OUT_DIR}/resource-report.stderr" >&2
+  exit 74
+fi
 echo "HVF density measurement complete: ${OUT_DIR}"

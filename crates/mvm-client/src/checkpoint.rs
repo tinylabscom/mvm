@@ -294,6 +294,18 @@ impl WorkspaceImage {
     }
 }
 
+/// Pass a full-VM capture of running machine `name` through the host's seal
+/// gate. A capture pauses the unit, so a sealed one must declare `checkpoint`;
+/// a refusal is already audited.
+///
+/// # Errors
+///
+/// The gate refused, with `mvm_hostd::seal_gate::SealRefusal` as the root
+/// cause.
+pub fn authorize_capture(name: &str) -> Result<()> {
+    mvm_hostd::seal_gate::authorize(name, mvm_hostd::seal_gate::Mutation::Checkpoint)
+}
+
 /// Validate a checkpoint identifier before it becomes an on-disk directory.
 pub fn validated_id(raw: &str) -> Result<CheckpointId> {
     CheckpointId::try_from_path_component(raw).map_err(Into::into)

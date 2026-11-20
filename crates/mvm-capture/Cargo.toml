@@ -7,7 +7,6 @@ rust-version.workspace = true
 description = "Project-environment capture frontend for mvm"
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 authors.workspace = true
 
 [dependencies]

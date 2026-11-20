@@ -285,6 +285,19 @@ well, since only this publication can have written it, so a rolled-back first
 publication leaves a clean store; anything that does not match is left in place
 and keeps refusing.
 
+The coordinator is also the single writer of the per-workload containment
+ledger (quarantine flag and execution epoch). Quarantine and replace are commit
+requests to it, applied under its owner lock with the same obligation-first
+discipline as a generation: a durable `pending.json`, then the ledger, then the
+obligation removed. Readers do not ask the coordinator; they read the canonical
+ledger file directly and refuse while an obligation exists, after a brief bounded wait for one in flight. The first commit
+migrates the pre-coordinator `host-interface/workloads.json` by exchanging that
+path with a directory and then reading the archived original, so a binary older
+than this change fails closed on every read and write of that path afterwards.
+A launch that read the ledger before a quarantine commit can still start after
+it; the operator stops the machine after quarantining. Quarantine and replace
+now need the coordinator process and are refused when it cannot start.
+
 This coordinator is an implementation of [#5097](https://github.com/tinylabscom/mvm/issues/5097)'s
 local host-interface responsibilities, not a second authority alongside
 `HostInterface`. Local mode resolves and applies locally without central

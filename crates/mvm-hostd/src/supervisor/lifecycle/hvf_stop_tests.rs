@@ -54,6 +54,40 @@ fn send(stream: &mut UnixStream, request: &SignedControl) -> bool {
     wire::read_exact(stream, &mut acknowledgment, deadline).is_ok() && acknowledgment == [1]
 }
 
+fn stop_control_laps() -> Vec<String> {
+    mvm_core::launch_trace::recorded_laps()
+        .into_iter()
+        .map(|phase| phase.name)
+        .filter(|name| name.starts_with("stop_control."))
+        .collect()
+}
+
+#[test]
+fn start_records_its_laps_in_order_only_when_a_trace_is_active() {
+    let mut env = TestEnv::new();
+    let dir = tempfile::tempdir().unwrap();
+    env.isolate_mvm_home(dir.path());
+
+    let (_untraced, _) = control("untraced-laps");
+    assert!(stop_control_laps().is_empty());
+
+    env.set(mvm_core::launch_trace::PHASE_TIMING_ENV, "1");
+    mvm_core::launch_trace::lap_reset(None);
+    let (_traced, _) = control("traced-laps");
+    assert_eq!(
+        stop_control_laps(),
+        [
+            "stop_control.state_dir",
+            "stop_control.keypair_load",
+            "stop_control.operator_lookup",
+            "stop_control.provision_bind",
+            "stop_control.provision_instance_write",
+            "stop_control.provision_dir_chain_submit",
+            "stop_control.wake_pair_and_worker_spawn",
+        ]
+    );
+}
+
 #[test]
 fn repeated_observation_connections_are_not_extra_owner_refusals() {
     let _home = home();

@@ -567,6 +567,7 @@ mod tests {
             profile: Some("default".to_string()),
             cpus: 2,
             cpu_grant: None,
+            allowed_cpus: None,
             memory_mib: 512,
             mem_initial_mib: None,
             volumes: Vec::new(),

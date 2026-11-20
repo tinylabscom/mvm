@@ -128,7 +128,10 @@ so none is removed): `mvmctl.nix` and the three `mvm-core-tpm2*.nix` files
 are the host and TPM2 variants exported by `nix/flake.nix`; `libkrun.nix`,
 `libkrunfw.nix` and `embedded-rust-toolchain.nix` are wired from
 `packages/default.nix` and pinned by `xtask check-kernel-pin-freshness` and
-`scripts/check-cargo-toolchain.sh`; `guest.nix` assembles the guest-side set
+`scripts/check-cargo-toolchain.sh`; `rust-platform.nix` supplies the root-pinned
+compiler and source-locked overlay to every first-party Rust recipe, including
+direct library imports and the embedded-toolchain wrapper.
+`guest.nix` assembles the guest-side set
 (`mvm-guest-agent*.nix`, `mvm-runner.nix`, `mvm-setpriv.nix`,
 `mvm-gpu-shims.nix`, `mvm-sdk-cdylib.nix`, `mvm-egress-client.nix`,
 `mvm-addon-dns.nix`, `mvm-exit-report.nix`) using `workspace-unpack.nix`;

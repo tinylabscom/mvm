@@ -243,6 +243,7 @@ impl PlanFixture {
             stream_retention: self.stream_retention,
             action_budget: None,
             protected_paths: Default::default(),
+            topology: None,
             sdk_uses_sidecar: self.sdk_uses_sidecar,
         }
     }

@@ -200,6 +200,11 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
         self.console_streamer.stop(&id.0);
         let console_cleanup = console_started.elapsed();
         let stopped = kill_result?;
+        // The boot this record named has ended; a later boot of the same
+        // machine must not inherit its unit.
+        if let Err(e) = mvm_core::spawn_scope::clear_placement_owner(&state_dir) {
+            tracing::warn!(vm = %id.0, error = %e, "clearing the placement owner after stop");
+        }
         if crate::kernel_custody::has_retained_kernel(&lifecycle)? {
             #[cfg(unix)]
             {

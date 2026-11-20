@@ -90,6 +90,8 @@ pub mod rate_limit;
 pub mod run;
 /// Resume orchestration for durable agent sessions: turn a parked session
 /// record back into an admitted `ExecutionPlan`.
+/// The one check every post-admission change to a running unit passes.
+pub mod seal_gate;
 pub mod session_resume;
 pub mod stream;
 pub mod supervisor;

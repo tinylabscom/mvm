@@ -68,6 +68,58 @@ fn exclusive_placement_is_refused_with_its_unit() {
 }
 
 #[test]
+fn exclusive_placement_is_refused_on_a_host_without_the_scope_cpuset() {
+    let mut topology = stating_nothing();
+    topology.units[2].placement = CorePlacement::Exclusive(vec![CoreId(3)]);
+    for &kind in BackendKind::ALL {
+        assert_eq!(
+            check_requirements(&topology, ResourceControls::on_host(kind, false), None),
+            Err(UnmetRequirement::ExclusivePlacement { unit: id("w1") }),
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
+fn exclusive_placement_is_admitted_only_against_the_scope_cpuset() {
+    let mut topology = stating_nothing();
+    topology.units[2].placement = CorePlacement::Exclusive(vec![CoreId(3)]);
+    for &kind in BackendKind::ALL {
+        let controls = ResourceControls::on_host(kind, true);
+        let expected = match controls.placement {
+            PlacementControl::SpawnScopeCpuSet => Ok(()),
+            PlacementControl::None => Err(UnmetRequirement::ExclusivePlacement { unit: id("w1") }),
+        };
+        assert_eq!(
+            check_requirements(&topology, controls, None),
+            expected,
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
+fn only_firecracker_declares_the_scope_cpuset() {
+    for &kind in BackendKind::ALL {
+        let declares = matches!(
+            PlacementControl::for_host(kind, true),
+            PlacementControl::SpawnScopeCpuSet
+        );
+        assert_eq!(declares, kind == BackendKind::Firecracker, "{kind:?}");
+        assert_eq!(
+            PlacementControl::for_host(kind, false),
+            PlacementControl::None
+        );
+    }
+    // The mock backend boots nothing, so it refuses the requirement whatever
+    // the host offers.
+    assert_eq!(
+        ResourceControls::on_host(BackendKind::Mock, true).placement,
+        PlacementControl::None
+    );
+}
+
+#[test]
 fn a_liveness_period_is_refused_with_its_unit_on_every_backend() {
     let mut topology = stating_nothing();
     topology.units[3].liveness_period_ms = Some(ms(100));

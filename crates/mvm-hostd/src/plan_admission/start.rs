@@ -601,6 +601,12 @@ pub fn claim_cli_transient(
 ) -> Result<WarmClaimDispatch> {
     let mut admitted = admitted;
     anyhow::ensure!(!admitted.dispatched, "CLI admission was already dispatched");
+    // A standby's scope was created before this launch was placed, so it holds
+    // no CPU set and a claimed child would run unconfined.
+    anyhow::ensure!(
+        admitted.allowed_cpus().is_none(),
+        "a launch placed on host cores cannot claim a warm standby"
+    );
     anyhow::ensure!(
         admitted.plan().image.name == config.name,
         "warm claim identity differs from admitted plan"
@@ -638,6 +644,7 @@ pub fn claim_cli_transient(
         prepared.volumes.iter().all(|volume| volume.read_only),
         "warm claim cannot transfer writable volume custody"
     );
+    crate::seal_gate::persist_sealed_plan(&config.name, admitted.plan())?;
     let audit = mvm_vmm::host::audit_substrate::compute_audit_substrate(
         &config.name,
         prepared.tenant_id.as_deref(),
@@ -847,6 +854,23 @@ fn start_admitted_with_finalization(
         }
         return Err(err);
     }
+    // A unit admitted under a topology reads as sealed only through its
+    // persisted plan, so that write is part of the launch. It goes first: the
+    // bridge stash below replaces it with the signed envelope, which reads as
+    // the same plan.
+    if let Err(err) = crate::seal_gate::persist_sealed_plan(&vm_name, admitted.plan()) {
+        if (persistent || entrypoint)
+            && let Some(emitter) = params.emitter
+            && let Err(e) = emitter.emit_failed(admitted.plan(), "seal-plan", &format!("{err:#}"))
+        {
+            tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
+        }
+        return Err(if cli_transient {
+            CliStartFailure::Unrecorded(err).into()
+        } else {
+            err
+        });
+    }
     if (persistent || fork || entrypoint) && super::persists_plan_before_start(backend.name()) {
         super::stash_plan_for_bridge(&config).inspect_err(|err| {
             if !fork
@@ -967,6 +991,21 @@ fn start_admitted_with_finalization(
                     || stop_actor(&mut actor_owner),
                     FailureAuditPolicy::OwnedAfterConfirmedRollback,
                 )?)
+            } else if (cli_transient || fork) && admitted.allowed_cpus().is_some() {
+                // Neither path reads grants back later, so a launch placed on
+                // host cores is checked here: a scope that does not hold the
+                // admitted set stops the VM before the caller sees it start.
+                // Persistent starts reach the same check after readiness.
+                apply_admitted_grants_with_rollback(
+                    backend,
+                    &vm_id,
+                    &admitted,
+                    None,
+                    || backend.stop(&vm_id).map(|_| ()),
+                    FailureAuditPolicy::OwnedAfterConfirmedRollback,
+                )
+                .map_err(cli_rollback_error)?;
+                None
             } else if cli_transient || persistent || fork {
                 // The CLI finalizes on teardown; persistent starts finalize
                 // after authenticated readiness. Fs-quick forks retain their
@@ -1368,6 +1407,9 @@ pub(crate) fn admit_synthesized_with_verified_release(
         Ok(admitted) => admitted,
         Err(err) => {
             if let Some(emitter) = params.emitter
+                && err
+                    .downcast_ref::<super::topology_binding::TopologyRefusalAudited>()
+                    .is_none()
                 && let Err(e) =
                     emitter.emit_refused(&plan, "admit_plan_for_run", &format!("{err:#}"))
             {

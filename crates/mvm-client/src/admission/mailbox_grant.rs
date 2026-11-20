@@ -160,7 +160,6 @@ mod tests {
 
     #[test]
     fn a_replaced_workloads_grant_carries_the_ledger_epoch_and_a_new_authority() {
-        use mvm_core::host_interface::workload::WorkloadLedger;
         let home = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(home.path());
@@ -172,9 +171,17 @@ mod tests {
         let at1 = at_workload_epoch(first, "w").unwrap();
         assert_eq!((at1.mailbox, at1.epoch.get()), (id, 1));
 
-        let mut ledger = WorkloadLedger::load_at(home.path()).unwrap();
-        ledger.replace("w");
-        ledger.save_at(home.path()).unwrap();
+        let store =
+            mvm_hostd::policy_generation::workload_store::OwnedWorkloadStore::open(home.path())
+                .unwrap();
+        store
+            .commit(
+                &mvm_core::host_interface::workload::WorkloadChange::Replace {
+                    workload: "w".into(),
+                    from_epoch: mvm_core::host_interface::ExecutionEpoch(1),
+                },
+            )
+            .unwrap();
         let at2 = at_workload_epoch(first, "w").unwrap();
         assert_eq!(at2.epoch.get(), 2);
         assert_ne!(at1.authority_key, at2.authority_key);

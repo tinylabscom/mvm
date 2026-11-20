@@ -63,6 +63,7 @@ use mvm_hostd::containment::{quarantine_workload, replace_workload};
 use mvm_hostd::mailbox_service::{
     GuestSealer, MailboxLimits, MailboxPolicy, MailboxService, Refusal, send, serve_granted_guest,
 };
+use mvm_hostd::policy_generation::workload_store::OwnedWorkloadStore;
 use mvm_hostd::supervisor::verify_audit_chain;
 #[path = "support/tcp_peer_transport.rs"]
 mod tcp_peer_transport;
@@ -79,6 +80,7 @@ fn now() -> u64 {
 struct Node {
     name: &'static str,
     home: tempfile::TempDir,
+    workloads: OwnedWorkloadStore,
     audit: tempfile::TempDir,
     audit_key: SigningKey,
     identity: SigningKey,
@@ -92,9 +94,12 @@ impl Node {
         let audit = tempfile::tempdir().unwrap();
         let audit_key = SigningKey::from_bytes(&[seed; 32]);
         let emitter = AuditEmitter::with_dir(audit_key.clone(), audit.path()).unwrap();
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let workloads = OwnedWorkloadStore::open(home.path()).unwrap();
         Self {
             name,
-            home: tempfile::tempdir_in("/tmp").unwrap(),
+            home,
+            workloads,
             audit,
             audit_key,
             identity: SigningKey::from_bytes(&[seed.wrapping_add(100); 32]),
@@ -477,7 +482,7 @@ fn contain_terminate_and_rebuild() {
     );
     let suspect = ship.plan("analyst");
     quarantine_workload(
-        ship.home.path(),
+        &ship.workloads,
         &ship.emitter,
         &suspect,
         "planted compromise",
@@ -493,7 +498,7 @@ fn contain_terminate_and_rebuild() {
     aircraft.launch("nav").expect("other nodes are unaffected");
 
     // Act 5: the replacement gets fresh authority; the old epoch stays dead.
-    let epoch = replace_workload(ship.home.path(), &ship.emitter, &suspect).unwrap();
+    let epoch = replace_workload(&ship.workloads, &ship.emitter, &suspect).unwrap();
     assert_eq!(epoch.0, 2);
     ship.launch("analyst").expect("the replacement launches");
     assert!(

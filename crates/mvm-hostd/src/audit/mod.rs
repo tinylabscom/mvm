@@ -49,5 +49,8 @@ pub mod transcript_sink;
 pub mod unsealed;
 pub mod witness;
 
+#[cfg(test)]
+mod test_fixtures;
+
 /// Content-addressed derived store for decision records.
 pub mod decisions;

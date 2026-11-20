@@ -1,6 +1,7 @@
 use super::*;
 use crate::audit::emitter::{AuditEmitter, audit_path_for_tenant};
 use crate::audit::signer::for_plan;
+use crate::audit::test_fixtures::AuditDir;
 use ed25519_dalek::SigningKey;
 use mvm_core::plan::ExecutionPlan;
 use mvm_core::plan::test_support::PlanFixture;
@@ -26,14 +27,14 @@ pub(super) fn request(plan_id: &str, reason: SealReason) -> SealRequest<'_> {
 }
 
 pub(super) struct Chain {
-    dir: tempfile::TempDir,
     pub(super) emitter: AuditEmitter,
     key: SigningKey,
+    dir: AuditDir,
 }
 
 impl Chain {
     pub(super) fn new() -> Self {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = AuditDir::new();
         let key = key(7);
         let emitter = AuditEmitter::with_dir(key.clone(), dir.path()).expect("emitter");
         Self { dir, emitter, key }
@@ -825,7 +826,7 @@ fn the_verification_report_has_a_stable_json_shape() {
 
 #[test]
 fn a_seal_survives_rotation_between_its_entries() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = AuditDir::new();
     let key = key(7);
     let signer = crate::audit::audit_file::FileAuditSigner::open(key.clone(), dir.path())
         .unwrap()
@@ -960,7 +961,7 @@ fn a_malformed_seal_reports_its_absolute_chain_position() {
 
 #[test]
 fn a_previous_seal_in_a_sealed_segment_cannot_be_replaced_by_genesis() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = AuditDir::new();
     let previous = plan("sha256:previous");
     let emitter = rotating_emitter(dir.path(), 1);
     run_noted_session(&emitter, &previous);
@@ -1005,7 +1006,7 @@ fn a_previous_seal_in_a_sealed_segment_cannot_be_replaced_by_genesis() {
 
 #[test]
 fn the_live_segment_seal_is_the_whole_chain_seal_across_rotations() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = AuditDir::new();
     let emitter = rotating_emitter(dir.path(), 24 * 1024);
     let mut engaged = 0;
     for n in 0..16 {
@@ -1061,7 +1062,7 @@ fn an_unrotated_chain_seals_from_the_live_segment_without_a_note() {
 
 #[test]
 fn a_rotated_chain_without_a_note_is_sealed_from_the_whole_chain() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = AuditDir::new();
     let emitter = rotating_emitter(dir.path(), 2 * 1024);
     for n in 0..4 {
         let p = plan(&format!("sha256:{n:08x}"));
@@ -1088,7 +1089,7 @@ fn a_rotated_chain_without_a_note_is_sealed_from_the_whole_chain() {
 
 #[test]
 fn a_session_the_chain_rotated_under_is_sealed_from_the_whole_chain() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = AuditDir::new();
     let emitter = rotating_emitter(dir.path(), 4 * 1024);
     let first = plan("sha256:00000001");
     run_noted_session(&emitter, &first);

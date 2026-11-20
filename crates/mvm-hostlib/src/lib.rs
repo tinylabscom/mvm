@@ -417,6 +417,9 @@ unsafe fn borrow<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
 }
 
 #[cfg(test)]
+mod spawn_free;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use mvm_core::client::mock::MockBackend;

@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 authors.workspace = true
 description = "Feature-gated no_std protocol and storage contracts shared by mvm and fleet orchestrators"
 

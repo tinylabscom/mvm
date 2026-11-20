@@ -9,7 +9,6 @@ license.workspace = true
 # against; nothing in the crates.io publish set depends on it.
 publish = false
 repository.workspace = true
-homepage.workspace = true
 authors.workspace = true
 
 # Architectural invariant #1 (.github/workflows/architecture.yml): the

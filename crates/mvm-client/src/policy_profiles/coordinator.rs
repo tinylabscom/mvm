@@ -61,10 +61,30 @@ pub fn ensure_if_activated() -> Result<()> {
     Ok(())
 }
 
-/// Ask the coordinator to resolve an interrupted publication before the
-/// caller's own state check, which still refuses if recovery could not run.
-fn recover_interrupted_publication() -> Result<()> {
-    if mvm_hostd::policy_generation::has_unresolved_publication()? {
+/// Ask the coordinator to finish an interrupted workload ledger commit, on
+/// every host: readers refuse while one is unresolved, and a launch is often
+/// the first command to find it. Costs one `stat` when there is none.
+///
+/// # Errors
+///
+/// A commit is unresolved and the coordinator cannot be reached.
+pub fn recover_workload_ledger() -> Result<()> {
+    let home = PathBuf::from(mvm_core::config::mvm_home());
+    if mvm_core::host_interface::workload::has_unresolved_commit_at(&home)? {
+        call(&ensure()?, &Request::Recover)
+            .context("recovering an interrupted workload ledger commit")?;
+    }
+    Ok(())
+}
+
+/// Ask the coordinator to resolve an interrupted publication or workload
+/// ledger commit before the caller's own state check, which still refuses if
+/// recovery could not run.
+pub(crate) fn recover_interrupted_publication() -> Result<()> {
+    let home = PathBuf::from(mvm_core::config::mvm_home());
+    if mvm_hostd::policy_generation::has_unresolved_publication()?
+        || mvm_core::host_interface::workload::has_unresolved_commit_at(&home)?
+    {
         call(&ensure()?, &Request::Recover)?;
     }
     Ok(())
@@ -392,7 +412,7 @@ fn request(mut request: Request) -> Result<Option<ProjectPolicyCandidate>> {
         Response::Unresolved { message } => bail!(
             "the outcome of the policy activation is unknown and the coordinator refuses policy reads until it recovers: {message}"
         ),
-        Response::Ready | Response::Status { .. } => {
+        Response::Ready | Response::Status { .. } | Response::Workload { .. } => {
             bail!("unexpected policy coordinator response to a project request")
         }
     }
@@ -478,7 +498,10 @@ mod unix {
             Response::Refused { message } => {
                 bail!("policy coordinator refused readiness: {message}")
             }
-            Response::Policy { .. } | Response::Status { .. } | Response::Unresolved { .. } => {
+            Response::Policy { .. }
+            | Response::Status { .. }
+            | Response::Workload { .. }
+            | Response::Unresolved { .. } => {
                 bail!("policy coordinator answered a ping with something else")
             }
         }
