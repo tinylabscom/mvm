@@ -280,6 +280,17 @@ fn probe_memo_path(memo_dir: &Path, bin: &str) -> PathBuf {
 }
 
 fn probe_memo_accepts(env: &VerifyEnv, spec: &AuxBin<'_>, resolved: &Path) -> bool {
+    // Read before the stamp, so a renewed memo can never claim to be younger
+    // than the stamp it holds.
+    probe_memo_accepts_at(env, spec, resolved, now_ns())
+}
+
+fn probe_memo_accepts_at(
+    env: &VerifyEnv,
+    spec: &AuxBin<'_>,
+    resolved: &Path,
+    observed_ns: i64,
+) -> bool {
     let Some(memo_dir) = &env.probe_memo_dir else {
         return false;
     };
@@ -299,7 +310,7 @@ fn probe_memo_accepts(env: &VerifyEnv, spec: &AuxBin<'_>, resolved: &Path) -> bo
     {
         return false;
     }
-    if stamp_is_settled(&stamp, memo.recorded_ns) {
+    if stamp_is_settled(&stamp, memo.recorded_ns, observed_ns) {
         return true;
     }
     let Ok(digest) = mvm_core::crypto::image_verify::sha256_file(resolved) else {
@@ -310,7 +321,7 @@ fn probe_memo_accepts(env: &VerifyEnv, spec: &AuxBin<'_>, resolved: &Path) -> bo
     }
     // The file is unchanged but was too recent for its timestamps to prove it;
     // renewing the memo lets the next launch skip the hash once it has aged.
-    write_probe_memo(env, spec, resolved, stamp, digest);
+    write_probe_memo(env, spec, resolved, stamp, digest, observed_ns);
     true
 }
 
@@ -320,9 +331,16 @@ fn probe_memo_accepts(env: &VerifyEnv, spec: &AuxBin<'_>, resolved: &Path) -> bo
 /// it lands in the same timestamp tick as the write the memo describes; a
 /// stamp within [`RACY_MARGIN_NS`] of the memo (or after it) cannot rule that
 /// out. This is the "racily clean" rule: such a file is hashed instead.
-fn stamp_is_settled(stamp: &FileStamp, recorded_ns: i64) -> bool {
+///
+/// A memo written after `observed_ns` came from a clock that has since moved
+/// backwards, so its age proves nothing and the file is hashed too.
+///
+/// File timestamps and the clock read here must come from the same clock. A
+/// filesystem served by a host whose clock runs more than the margin behind
+/// this one can stamp a rewrite as older than the memo.
+fn stamp_is_settled(stamp: &FileStamp, recorded_ns: i64, observed_ns: i64) -> bool {
     let newest = stamp.mtime_ns.max(stamp.ctime_ns);
-    recorded_ns.saturating_sub(newest) >= RACY_MARGIN_NS
+    recorded_ns <= observed_ns && recorded_ns.saturating_sub(newest) >= RACY_MARGIN_NS
 }
 
 /// Wider than the coarsest timestamp granularity a supported filesystem
@@ -344,13 +362,16 @@ fn record_probe_memo(env: &VerifyEnv, spec: &AuxBin<'_>, resolved: &Path) {
     if env.probe_memo_dir.is_none() {
         return;
     }
+    // Before the stamp and the digest, so the memo never claims to be younger
+    // than the bytes it describes.
+    let recorded_ns = now_ns();
     let Some(stamp) = file_stamp(resolved) else {
         return;
     };
     let Ok(sha256) = mvm_core::crypto::image_verify::sha256_file(resolved) else {
         return;
     };
-    write_probe_memo(env, spec, resolved, stamp, sha256);
+    write_probe_memo(env, spec, resolved, stamp, sha256, recorded_ns);
 }
 
 /// Write the memo for an already-measured stamp and digest. Best effort, as
@@ -361,6 +382,7 @@ fn write_probe_memo(
     resolved: &Path,
     stamp: FileStamp,
     sha256: String,
+    recorded_ns: i64,
 ) {
     let Some(memo_dir) = &env.probe_memo_dir else {
         return;
@@ -371,7 +393,7 @@ fn write_probe_memo(
         contract_version: helper_contract::HOST_HELPER_CONTRACT_VERSION,
         stamp,
         sha256,
-        recorded_ns: now_ns(),
+        recorded_ns,
     };
     let Ok(bytes) = serde_json::to_vec(&memo) else {
         return;
@@ -1436,54 +1458,75 @@ mod tests {
         (tmp, bin, env, memo_dir)
     }
 
-    #[test]
-    fn a_helper_older_than_its_memo_is_accepted_without_hashing_it() {
+    /// A memo whose digest is wrong on purpose, written `recorded_after_ns`
+    /// after the helper's newest timestamp, then checked at `observed_ns`.
+    /// Only a metadata decision can accept it.
+    fn accepted_on_metadata_alone(recorded_after_ns: i64, observed_after_ns: i64) -> bool {
         let (_tmp, bin, env, memo_dir) = memoized_helper();
-        // Model a helper last written well before the memo. The digest is
-        // wrong on purpose: only a metadata decision can accept it, so this
-        // fails if the bytes are hashed.
+        let stamp = file_stamp(&bin).unwrap();
+        let newest = stamp.mtime_ns.max(stamp.ctime_ns);
         edit_memo(&memo_dir, |memo| {
-            memo.recorded_ns = memo.stamp.mtime_ns.max(memo.stamp.ctime_ns) + 2 * RACY_MARGIN_NS;
+            memo.recorded_ns = newest + recorded_after_ns;
             memo.sha256 = "0".repeat(64);
         });
-        assert!(probe_memo_accepts(&env, &hvf_spec(), &bin));
+        probe_memo_accepts_at(&env, &hvf_spec(), &bin, newest + observed_after_ns)
     }
 
     #[test]
-    fn a_helper_within_the_margin_of_its_memo_is_hashed() {
-        let (_tmp, bin, env, memo_dir) = memoized_helper();
-        edit_memo(&memo_dir, |memo| {
-            memo.recorded_ns = memo.stamp.mtime_ns.max(memo.stamp.ctime_ns) + RACY_MARGIN_NS - 1;
-            memo.sha256 = "0".repeat(64);
-        });
+    fn a_helper_older_than_its_memo_is_accepted_without_hashing_it() {
+        assert!(accepted_on_metadata_alone(
+            2 * RACY_MARGIN_NS,
+            3 * RACY_MARGIN_NS
+        ));
+    }
+
+    #[test]
+    fn the_margin_boundary_is_exact() {
+        assert!(accepted_on_metadata_alone(RACY_MARGIN_NS, RACY_MARGIN_NS));
         assert!(
-            !probe_memo_accepts(&env, &hvf_spec(), &bin),
-            "a stamp inside the margin must be checked against the bytes"
+            !accepted_on_metadata_alone(RACY_MARGIN_NS - 1, RACY_MARGIN_NS),
+            "one nanosecond inside the margin must be checked against the bytes"
         );
     }
 
     #[test]
     fn a_helper_newer_than_its_memo_is_hashed() {
-        let (_tmp, bin, env, memo_dir) = memoized_helper();
-        edit_memo(&memo_dir, |memo| {
-            memo.recorded_ns = memo.stamp.mtime_ns.min(memo.stamp.ctime_ns) - 1;
-            memo.sha256 = "0".repeat(64);
-        });
-        assert!(!probe_memo_accepts(&env, &hvf_spec(), &bin));
+        assert!(!accepted_on_metadata_alone(-1, RACY_MARGIN_NS));
+    }
+
+    #[test]
+    fn a_memo_written_long_before_the_helper_is_hashed() {
+        assert!(!accepted_on_metadata_alone(i64::MIN / 2, RACY_MARGIN_NS));
+    }
+
+    #[test]
+    fn a_memo_from_the_future_is_hashed() {
+        // The clock has moved backwards since the memo was written, so its
+        // age proves nothing.
+        assert!(!accepted_on_metadata_alone(
+            4 * RACY_MARGIN_NS,
+            3 * RACY_MARGIN_NS
+        ));
     }
 
     #[test]
     fn a_recent_unchanged_helper_is_accepted_and_renews_its_memo() {
         let (_tmp, bin, env, memo_dir) = memoized_helper();
         // Just written, so inside the margin: accepted by hash, then renewed
-        // with a later write time so it can age out of the margin.
+        // with the time of the check and the stamp and digest measured then.
         edit_memo(&memo_dir, |memo| memo.recorded_ns = 1);
-        assert!(probe_memo_accepts(&env, &hvf_spec(), &bin));
+        let observed = now_ns();
+        assert!(probe_memo_accepts_at(&env, &hvf_spec(), &bin, observed));
         let renewed: ProbeMemo = serde_json::from_slice(
             &std::fs::read(probe_memo_path(&memo_dir, "mvm-hvf-supervisor")).unwrap(),
         )
         .unwrap();
-        assert!(renewed.recorded_ns > 1, "a verified hit renews the memo");
+        assert_eq!(renewed.recorded_ns, observed);
+        assert_eq!(Some(renewed.stamp), file_stamp(&bin));
+        assert_eq!(
+            renewed.sha256,
+            mvm_core::crypto::image_verify::sha256_file(&bin).unwrap()
+        );
     }
 
     #[test]
