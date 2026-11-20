@@ -230,21 +230,21 @@ fn checked_integer_boundaries_never_wrap_or_saturate_into_authority() {
     let mut f = Fixture::new();
     f.companion.policy.restart = RestartAllowance::SamePackage {
         max_restarts: 1,
-        first_epoch: ExecutionEpoch(u64::MAX),
-        last_epoch: ExecutionEpoch(u64::MAX),
+        first_epoch: ExecutionEpoch::new(u64::MAX).unwrap(),
+        last_epoch: ExecutionEpoch::new(u64::MAX).unwrap(),
     };
     f.resign();
     let mut history = f.history();
-    history.epoch_high_water = ExecutionEpoch(u64::MAX - 1);
+    history.epoch_high_water = ExecutionEpoch::new(u64::MAX - 1).unwrap();
     let mut r = Recovery::new(f.verify(clock(150, 10)).unwrap(), Some(history)).unwrap();
     let mut req = request();
-    req.proposed_epoch = ExecutionEpoch(u64::MAX);
+    req.proposed_epoch = ExecutionEpoch::new(u64::MAX).unwrap();
     assert_eq!(
         r.request(req, clock(150, 10)).unwrap().action,
         RecoveryAction::Reserve
     );
     let mut history = f.history();
-    history.epoch_high_water = ExecutionEpoch(u64::MAX);
+    history.epoch_high_water = ExecutionEpoch::new(u64::MAX).unwrap();
     history.last_operation = u64::MAX;
     let mut r = Recovery::new(f.verify(clock(150, 10)).unwrap(), Some(history)).unwrap();
     assert!(r.request(request(), clock(150, 10)).is_err());

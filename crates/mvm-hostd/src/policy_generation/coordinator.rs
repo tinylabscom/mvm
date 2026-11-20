@@ -846,31 +846,40 @@ mod unix {
 
         #[test]
         fn workload_commits_over_the_socket_reach_the_readers_ledger() {
-            use mvm_core::host_interface::{Denial, ExecutionEpoch, workload::WorkloadLedger};
+            use mvm_contract::protocol::mailbox::ExecutionEpoch;
+            use mvm_core::host_interface::{Denial, workload::WorkloadLedger};
             let _serial = MUTEX_TESTS.lock().unwrap();
             let served = serve_workloads();
             let commit = commit_workload(&served.socket, &quarantine("suspect")).unwrap();
             assert_eq!(commit.sequence, 1);
             let ledger = WorkloadLedger::load_at(&served.home).unwrap();
             assert_eq!(
-                ledger.authorize("suspect", ExecutionEpoch(1)),
+                ledger.authorize("suspect", ExecutionEpoch::new(1).unwrap()),
                 Err(Denial::WorkloadQuarantined("suspect".into()))
             );
-            assert!(ledger.authorize("other", ExecutionEpoch(1)).is_ok());
+            assert!(
+                ledger
+                    .authorize("other", ExecutionEpoch::new(1).unwrap())
+                    .is_ok()
+            );
 
             let replaced = commit_workload(
                 &served.socket,
                 &WorkloadChange::Replace {
                     workload: "suspect".into(),
-                    from_epoch: ExecutionEpoch(1),
+                    from_epoch: ExecutionEpoch::new(1).unwrap(),
                 },
             )
             .unwrap();
-            assert_eq!(replaced.entry.epoch, ExecutionEpoch(2));
+            assert_eq!(replaced.entry.epoch, ExecutionEpoch::new(2).unwrap());
             let ledger = WorkloadLedger::load_at(&served.home).unwrap();
-            assert!(ledger.authorize("suspect", ExecutionEpoch(2)).is_ok());
+            assert!(
+                ledger
+                    .authorize("suspect", ExecutionEpoch::new(2).unwrap())
+                    .is_ok()
+            );
             assert_eq!(
-                ledger.authorize("suspect", ExecutionEpoch(1)),
+                ledger.authorize("suspect", ExecutionEpoch::new(1).unwrap()),
                 Err(Denial::StaleEpoch { got: 1, current: 2 })
             );
         }
@@ -953,15 +962,13 @@ mod unix {
             ed25519_dalek::SigningKey,
             mvm_core::host_interface::workload::DestinationEnrollment,
         ) {
-            use mvm_core::host_interface::{
-                ExecutionEpoch,
-                workload::{DestinationEnrollment, DestinationTip},
-            };
+            use mvm_contract::protocol::mailbox::ExecutionEpoch;
+            use mvm_core::host_interface::workload::{DestinationEnrollment, DestinationTip};
             let key = ed25519_dalek::SigningKey::from_bytes(&[5; 32]);
             let enrollment = DestinationEnrollment {
                 destination: "ab".repeat(32),
                 workload: "w".into(),
-                epoch: ExecutionEpoch(1),
+                epoch: ExecutionEpoch::new(1).unwrap(),
                 key: hex::encode(key.verifying_key().to_bytes()),
                 tip: DestinationTip {
                     cursor: 0,

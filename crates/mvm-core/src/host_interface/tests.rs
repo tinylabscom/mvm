@@ -16,7 +16,7 @@ fn req(epoch: u64) -> LaunchRequest {
     LaunchRequest {
         workload_id: "w".into(),
         image_digest: "sha256:a".into(),
-        epoch: ExecutionEpoch(epoch),
+        epoch: ExecutionEpoch::new(epoch).unwrap(),
     }
 }
 fn local(p: HostPolicy, a: Assurance) -> LocalHostInterface {
@@ -191,13 +191,13 @@ fn replacement_gets_a_fresh_epoch_and_the_stale_one_is_rejected() {
     let new = h.advance_epoch();
     assert!(new > old);
     assert_eq!(
-        denied(h.authorize_workload(&req(old.0))),
+        denied(h.authorize_workload(&req(old.get()))),
         Denial::StaleEpoch {
-            got: old.0,
-            current: new.0
+            got: old.get(),
+            current: new.get()
         }
     );
-    assert!(h.authorize_workload(&req(new.0)).is_ok());
+    assert!(h.authorize_workload(&req(new.get())).is_ok());
 }
 
 #[test]

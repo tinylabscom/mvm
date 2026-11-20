@@ -67,7 +67,7 @@ pub struct WorkloadEntry {
 impl Default for WorkloadEntry {
     fn default() -> Self {
         Self {
-            epoch: ExecutionEpoch(1),
+            epoch: ExecutionEpoch::FIRST,
             quarantined: false,
         }
     }
@@ -181,7 +181,7 @@ impl WorkloadLedger {
     /// Authorize a fresh start under a new epoch; the old epoch is dead.
     pub fn replace(&mut self, workload: &str) -> ExecutionEpoch {
         let e = self.0.entry(workload.to_owned()).or_default();
-        e.epoch = e.epoch.next();
+        e.epoch = e.epoch.saturating_next();
         e.quarantined = false;
         e.epoch
     }
@@ -200,8 +200,8 @@ impl WorkloadLedger {
         let e = self.entry(workload);
         if epoch != e.epoch {
             return Err(Denial::StaleEpoch {
-                got: epoch.0,
-                current: e.epoch.0,
+                got: epoch.get(),
+                current: e.epoch.get(),
             });
         }
         if e.quarantined {
@@ -293,8 +293,8 @@ mod tests {
         assert_eq!(
             l.authorize("a", start),
             Err(Denial::StaleEpoch {
-                got: start.0,
-                current: fresh.0
+                got: start.get(),
+                current: fresh.get()
             }),
             "the old epoch stays dead after replacement"
         );
@@ -334,7 +334,7 @@ mod tests {
         let legacy = legacy_path_at(d.path());
         write(&legacy, br#"{"a":{"epoch":3,"quarantined":true}}"#);
         let l = WorkloadLedger::load_at(d.path()).unwrap();
-        assert!(l.entry("a").quarantined && l.entry("a").epoch == ExecutionEpoch(3));
+        assert!(l.entry("a").quarantined && l.entry("a").epoch == ExecutionEpoch::new(3).unwrap());
         write(&legacy, b"[");
         assert!(WorkloadLedger::load_at(d.path()).is_err());
     }
@@ -389,7 +389,7 @@ mod tests {
     fn the_wire_types_round_trip() {
         let change = WorkloadChange::Replace {
             workload: "a".into(),
-            from_epoch: ExecutionEpoch(2),
+            from_epoch: ExecutionEpoch::new(2).unwrap(),
         };
         let bytes = serde_json::to_vec(&change).unwrap();
         assert!(String::from_utf8_lossy(&bytes).contains(r#""kind":"replace""#));

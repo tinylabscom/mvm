@@ -155,7 +155,7 @@ mod tests {
         PreparedHead {
             destination: "d".repeat(64),
             workload: "w".into(),
-            epoch: ExecutionEpoch(1),
+            epoch: ExecutionEpoch::new(1).unwrap(),
             expected: tip(1),
             next: tip(2),
         }
@@ -176,7 +176,7 @@ mod tests {
         let enrollment = DestinationEnrollment {
             destination: "d".repeat(64),
             workload: "w".into(),
-            epoch: ExecutionEpoch(1),
+            epoch: ExecutionEpoch::new(1).unwrap(),
             key: "a".repeat(64),
             tip: tip(0),
         };
@@ -196,7 +196,7 @@ mod tests {
         );
         let entry = DestinationEntry {
             workload: "w".into(),
-            epoch: ExecutionEpoch(1),
+            epoch: ExecutionEpoch::new(1).unwrap(),
             key: "a".repeat(64),
             tip: tip(0),
             changed: 4,
@@ -221,7 +221,7 @@ mod tests {
         tampered.head.next = tip(3);
         assert!(tampered.verify(&signing.verifying_key()).is_err());
         let mut tampered = signed.clone();
-        tampered.head.epoch = ExecutionEpoch(2);
+        tampered.head.epoch = ExecutionEpoch::new(2).unwrap();
         assert!(tampered.verify(&signing.verifying_key()).is_err());
         let mut malformed = signed;
         malformed.signature = "00".into();

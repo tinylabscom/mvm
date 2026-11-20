@@ -99,7 +99,8 @@ fn replace_with<A: WorkloadAuthority>(
     let emitter = emitter()?;
     ensure_known(name, &emitter)?;
     let authority = connect()?;
-    mvm_hostd::containment::replace_named(&authority, &emitter, &tenant_of(name), name).map(|e| e.0)
+    mvm_hostd::containment::replace_named(&authority, &emitter, &tenant_of(name), name)
+        .map(|e| e.get())
 }
 
 #[cfg(test)]

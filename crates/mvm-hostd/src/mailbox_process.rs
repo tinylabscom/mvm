@@ -32,8 +32,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::sync_channel;
 use std::time::Duration;
 
-use mvm_contract::protocol::mailbox::{MAILBOX_PORT, MailboxGrant};
-use mvm_core::host_interface::ExecutionEpoch;
+use mvm_contract::protocol::mailbox::{ExecutionEpoch, MAILBOX_PORT, MailboxGrant};
 use mvm_core::mailbox::journal::{FileJournalAnchor, JournalError, JournalLimits, MailboxJournal};
 use mvm_core::plan::{ExecutionPlan, Variant};
 use mvm_core::vm_backend::{HostDialRoute, VmId, VmStartConfig};
@@ -463,7 +462,7 @@ fn serve_local(
         Destination {
             id: paths.destination,
             workload: plan.workload.0.clone(),
-            epoch: ExecutionEpoch(plan.execution_epoch),
+            epoch: ExecutionEpoch::new(plan.execution_epoch).map_err(Error::other)?,
             key: commit_key,
         },
     )
@@ -1764,7 +1763,7 @@ mod tests {
             Destination {
                 id: paths.destination.clone(),
                 workload: plan.workload.0.clone(),
-                epoch: ExecutionEpoch(plan.execution_epoch),
+                epoch: ExecutionEpoch::new(plan.execution_epoch).unwrap(),
                 key: commit_key,
             },
         )

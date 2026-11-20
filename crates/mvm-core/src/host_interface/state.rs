@@ -43,18 +43,3 @@ pub struct Conditions {
     pub degraded: bool,
     pub reconnecting: bool,
 }
-
-/// Monotonic per-workload authority generation. A replacement workload gets a
-/// strictly greater epoch; anything carrying an older one is rejected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ExecutionEpoch(pub u64);
-
-impl ExecutionEpoch {
-    pub fn next(self) -> Self {
-        Self(self.0.saturating_add(1))
-    }
-    pub fn is_current(self, current: Self) -> bool {
-        self == current
-    }
-}
