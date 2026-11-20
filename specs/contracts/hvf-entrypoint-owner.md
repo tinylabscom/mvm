@@ -164,7 +164,10 @@ used v1.
 The journal exposes no method that accepts a public `HvfInstance`. Its one-way
 `Prepared -> Bound` transition borrows the opaque `ColdHvfOwner` retained by the
 authenticated cold channel and derives the actual generation internally. The
-channel permits this borrow only after activation and before dispatch. The
+borrow also carries the SHA-256 commitment of the exact canonical plan bytes
+retained by that launch; binding refuses a different grant-plan commitment. The
+terminal completion retains the same commitment for audit closure. The channel
+permits this borrow only after activation and before dispatch. The
 returned receipt is non-serializable and is neither stop proof nor a native
 control capability. A retained observation, including `Bound`, cannot recreate
 the reservation, receipt or owner.
@@ -228,6 +231,26 @@ generation. Pre-birth requests never invent a generation to satisfy a wire
 shape. Failure or an unavailable operation refuses; there is no local-key
 fallback, replacement-key creation or borrowed signer purpose. Existing
 completion/audit policy and parser/key-holder separation remain unchanged.
+
+The source-only owner audit adapter now supplies the canonical-audit prerequisite
+without opening an endpoint. It consumes a live `Bound` receipt, checks the exact
+canonical admission and opaque `NativeCompletion`, then durably records
+`AuditClosing` before appending the closed success sequence:
+`plan.native_completed`, `plan.exited`, `session.sealed`, and the covering root.
+No caller selects a category, payload, path, PID, instance or bytes to sign.
+
+Append, seal, root-publication or journal-finalization ambiguity consumes the
+closure capability and returns only uncertain audit custody. `AuditClosing` is
+absorbing across restart in this slice; neither chain observation nor retry may
+mint `AuditClosed`. The failure-audit vocabulary, protected IPC, positive
+factory, retirement and native-control operations remain disabled.
+
+The durable `AuditClosing` publication is the authority-time linearization
+point. Expiry is rechecked immediately after that publication; once accepted,
+the fixed terminal audit sequence may finish after the deadline because it
+grants no execution or native effect. Clock regression or expiry before that
+point refuses. Audit finalization never extends workload authority or permits a
+new close attempt.
 
 ## Recovery authorization
 

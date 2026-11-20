@@ -128,9 +128,6 @@ mvm-net.workspace = true
 # plus the audit-chain verifier. Direct dep on the no_std foundation
 # crate the IR lives in.
 mvm-contract.workspace = true
-# Exact cold-HVF owner custody for the protected owner journal. This direct
-# lower-layer edge avoids making mvm-runtime depend back on hostd.
-mvm-backends.workspace = true
 # `mvm-runtime` provides the `VmNameRegistry` the TTL reaper walks, plus the
 # `VmBackend` implementations dispatched from `AnyBackend`.
 mvm-runtime.workspace = true

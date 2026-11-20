@@ -51,6 +51,18 @@ fn can_borrow_original_owner(phase: Phase) -> bool {
     phase == Phase::Activated
 }
 
+fn retained_canonical_plan_digest(plan_json: Option<&str>) -> Result<Option<[u8; 32]>> {
+    use sha2::{Digest as _, Sha256};
+
+    plan_json
+        .map(|json| {
+            let signed: mvm_core::plan::SignedExecutionPlan =
+                serde_json::from_str(json).context("decode retained admitted plan")?;
+            Ok(Sha256::digest(&signed.0.payload).into())
+        })
+        .transpose()
+}
+
 pub(super) struct ColdHvfPreparation {
     pub(super) launch: crate::kernel_custody::KernelBoundLaunch,
     pub(super) images: mvm_vmm::host::boot_images::FrozenBootImageBytes,
@@ -122,12 +134,31 @@ pub struct NativeCompletion {
 #[derive(Debug, serde::Serialize)]
 pub struct NativeCompletionEvidence {
     pub instance: mvm_core::protocol::hvf_control::HvfInstance,
+    pub canonical_plan_digest: Option<[u8; 32]>,
     pub rootfs_sha256: String,
     pub rootfs_roothash: String,
     pub runtime_archive_sha256: Option<String>,
     pub runtime_version: Option<String>,
     pub runtime_overlay_roothash: Option<String>,
     pub network_policy: mvm_core::network_policy::NetworkPolicy,
+}
+
+/// Borrowed association between the original native owner and the exact plan
+/// bytes retained by its launch configuration.
+pub struct OriginalHvfOwnerBinding<'a> {
+    owner: &'a ColdHvfOwner,
+    canonical_plan_digest: [u8; 32],
+}
+
+impl OriginalHvfOwnerBinding<'_> {
+    pub fn owner(&self) -> &ColdHvfOwner {
+        self.owner
+    }
+
+    #[must_use]
+    pub fn canonical_plan_digest(&self) -> [u8; 32] {
+        self.canonical_plan_digest
+    }
 }
 
 impl NativeCompletion {
@@ -147,14 +178,21 @@ impl ColdHvfChannel {
     /// only for binding durable bookkeeping to the owner already held here.
     pub fn with_original_hvf_owner<T>(
         &mut self,
-        operation: impl FnOnce(&ColdHvfOwner) -> Result<T>,
+        operation: impl FnOnce(OriginalHvfOwnerBinding<'_>) -> Result<T>,
     ) -> Result<T> {
         let custody = self.custody()?;
         anyhow::ensure!(
             can_borrow_original_owner(custody.phase),
             "original HVF owner requires authenticated activation before dispatch"
         );
-        operation(custody.native.as_ref().context("native owner missing")?)
+        let canonical_plan_digest = retained_canonical_plan_digest(
+            custody.preparation.launch.config().plan_json.as_deref(),
+        )?
+        .context("original HVF owner has no retained canonical plan")?;
+        operation(OriginalHvfOwnerBinding {
+            owner: custody.native.as_ref().context("native owner missing")?,
+            canonical_plan_digest,
+        })
     }
 
     /// Transfer this controller's actor bootstrap only after authenticated activation.
@@ -457,11 +495,13 @@ impl ColdHvfChannel {
             .map(|proof| proof.version.clone());
         let runtime_overlay_roothash = config.runtime_overlay_roothash.clone();
         let network_policy = config.network_policy.clone();
+        let canonical_plan_digest = retained_canonical_plan_digest(config.plan_json.as_deref())?;
         let proof = self
             .stop_retaining_evidence()?
             .context("native completion has no original exit proof")?;
         let evidence = NativeCompletionEvidence {
             instance: proof.instance().clone(),
+            canonical_plan_digest,
             rootfs_sha256,
             rootfs_roothash,
             runtime_archive_sha256,
@@ -844,6 +884,25 @@ mod tests {
         ] {
             assert!(!can_borrow_original_owner(phase));
         }
+    }
+
+    #[test]
+    fn retained_launch_envelope_commits_to_exact_canonical_plan_payload() {
+        use ed25519_dalek::SigningKey;
+        use mvm_core::plan::{sign_plan, test_support::PlanFixture};
+        use sha2::{Digest as _, Sha256};
+
+        let signed = sign_plan(
+            &PlanFixture::new().build(),
+            &SigningKey::from_bytes(&[17; 32]),
+            "fixture",
+        );
+        let json = serde_json::to_string(&signed).unwrap();
+        assert_eq!(
+            retained_canonical_plan_digest(Some(&json)).unwrap(),
+            Some(Sha256::digest(&signed.0.payload).into())
+        );
+        assert!(retained_canonical_plan_digest(Some("{}")).is_err());
     }
 
     #[test]

@@ -1152,6 +1152,29 @@ pub fn resolve_session(lines: &[String], selector: &str) -> Result<String> {
 }
 
 impl crate::audit::emitter::AuditEmitter {
+    /// Require this emitter's verified chain to contain the exact admitted
+    /// session and no existing seal before terminal closure begins.
+    pub(crate) fn require_open_admitted_session(&self, plan: &ExecutionPlan) -> Result<()> {
+        let lines =
+            read_lines_from_genesis(self.audit_dir(), &plan.tenant.0, &self.verifying_key())
+                .map_err(|(_, detail)| anyhow::anyhow!(detail))?;
+        let leaves = parse_leaves(&lines)?;
+        let admitted = leaves.iter().any(|leaf| {
+            leaf.entry.plan_id == plan.plan_id.0 && leaf.entry.event == SESSION_OPENED_EVENT
+        });
+        anyhow::ensure!(
+            admitted,
+            "owner audit close requires the existing admitted session"
+        );
+        anyhow::ensure!(
+            !leaves
+                .iter()
+                .any(|leaf| leaf.entry.plan_id == plan.plan_id.0 && is_seal(leaf)),
+            "owner audit session is already sealed"
+        );
+        Ok(())
+    }
+
     /// Seal `plan`'s session: compute its integrity summary over the verified
     /// chain and append it as a chain-signed `session.sealed` entry.
     ///
