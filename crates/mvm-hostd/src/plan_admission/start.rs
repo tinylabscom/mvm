@@ -1450,6 +1450,7 @@ pub(crate) fn admit_synthesized_with_verified_release(
     if let Some(runtime) = verified_runtime {
         plan.runtime_identity = Some(runtime.identity().clone());
     }
+    super::topology_binding::bind_synthesized_plan(&mut plan, params.host_signer_keys_dir);
 
     let admitted_result = admit_plan_for_run(
         &plan,
