@@ -273,6 +273,18 @@ before key use. This adapter opens no endpoint, performs no
 stop/adoption/finalization, creates no retirement proof and does not make the
 owner executable positive.
 
+The native control seam now carries two explicit verifier roles. The native
+supervisor signs challenge and finalization with its native-control key, while
+it verifies owner stop requests only under the provider stop root. A
+root-explicit connection retains no stop-signing private key; legacy
+connections remain compatibility wrappers using the existing key in both
+roles. The owner route never falls back from explicit roots to that legacy
+loader.
+
+This split is source-level wiring only. The provider stop root is not yet loaded
+from a commissioned deployment receipt, and no protected authority/runtime IPC
+or positive factory supplies it in production.
+
 ## Recovery authorization
 
 Same UID, a private socket and a discoverable generation are necessary checks,
