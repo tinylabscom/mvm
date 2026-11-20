@@ -9,11 +9,11 @@ use std::{
     sync::Arc,
 };
 
-use mvm_backends::driver::hvf::ColdHvfOwner;
 use mvm_contract::protocol::hvf_entrypoint_owner::{FreshAdmissionRequest, FreshOwnerBinding};
 use mvm_core::{
     atomic_io, crypto::hvf_owner_grant::VerifiedOwnerGrant, protocol::hvf_control::HvfInstance,
 };
+use mvm_runtime::workload_runner::runner::OriginalHvfOwnerBinding;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -53,6 +53,16 @@ enum OwnerBirthState {
         request_digest: [u8; 32],
     },
     Bound {
+        binding: FreshOwnerBinding,
+        request_digest: [u8; 32],
+        instance: HvfInstance,
+    },
+    AuditClosing {
+        binding: FreshOwnerBinding,
+        request_digest: [u8; 32],
+        instance: HvfInstance,
+    },
+    AuditClosed {
         binding: FreshOwnerBinding,
         request_digest: [u8; 32],
         instance: HvfInstance,
@@ -117,6 +127,8 @@ pub enum OwnerGrantDisposition {
 pub enum OwnerBirthDisposition {
     Prepared,
     Bound,
+    AuditClosing,
+    AuditClosed,
 }
 
 /// Non-wire one-shot permission to attempt the original native birth.
@@ -179,6 +191,74 @@ impl BoundOwnerBirthReceipt {
     pub fn grant_id(&self) -> [u8; 32] {
         self.grant_id
     }
+
+    pub(crate) fn into_uncertain_audit(self) -> UncertainOwnerAudit {
+        UncertainOwnerAudit {
+            provider_id: self.provider_id,
+            grant_id: self.grant_id,
+        }
+    }
+}
+
+#[derive(Debug)]
+#[must_use = "consume this capability exactly once to close the bound owner audit"]
+pub(crate) struct OwnerAuditClosure {
+    provider_id: [u8; 32],
+    grant_id: [u8; 32],
+    binding: FreshOwnerBinding,
+    request_digest: [u8; 32],
+    instance: HvfInstance,
+}
+
+impl OwnerAuditClosure {
+    pub(crate) fn instance(&self) -> &HvfInstance {
+        &self.instance
+    }
+
+    pub(crate) fn into_uncertain(self) -> UncertainOwnerAudit {
+        UncertainOwnerAudit {
+            provider_id: self.provider_id,
+            grant_id: self.grant_id,
+        }
+    }
+}
+
+#[derive(Debug)]
+#[must_use = "retain uncertain audit custody with the original native owner"]
+pub struct UncertainOwnerAudit {
+    provider_id: [u8; 32],
+    grant_id: [u8; 32],
+}
+
+impl UncertainOwnerAudit {
+    #[must_use]
+    pub fn provider_id(&self) -> [u8; 32] {
+        self.provider_id
+    }
+
+    #[must_use]
+    pub fn grant_id(&self) -> [u8; 32] {
+        self.grant_id
+    }
+}
+
+#[derive(Debug)]
+#[must_use = "retain closed audit evidence with original terminal custody"]
+pub struct ClosedOwnerAuditReceipt {
+    provider_id: [u8; 32],
+    grant_id: [u8; 32],
+}
+
+impl ClosedOwnerAuditReceipt {
+    #[must_use]
+    pub fn provider_id(&self) -> [u8; 32] {
+        self.provider_id
+    }
+
+    #[must_use]
+    pub fn grant_id(&self) -> [u8; 32] {
+        self.grant_id
+    }
 }
 
 /// Non-retryable custody marker returned when binding did not yield a receipt.
@@ -213,6 +293,20 @@ pub struct OwnerBirthBindError {
 
 impl OwnerBirthBindError {
     pub fn into_parts(self) -> (UncertainOwnerBirth, OwnerGrantStoreError) {
+        (self.quarantine, self.source)
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("failed or uncertain owner audit transition")]
+pub struct OwnerAuditTransitionError {
+    quarantine: UncertainOwnerAudit,
+    #[source]
+    source: OwnerGrantStoreError,
+}
+
+impl OwnerAuditTransitionError {
+    pub fn into_parts(self) -> (UncertainOwnerAudit, OwnerGrantStoreError) {
         (self.quarantine, self.source)
     }
 }
@@ -575,12 +669,22 @@ impl OwnerGrantStore {
     pub fn bind_prepared_birth(
         &self,
         reservation: OwnerBirthReservation,
-        owner: &ColdHvfOwner,
+        owner: OriginalHvfOwnerBinding<'_>,
     ) -> Result<BoundOwnerBirthReceipt, OwnerBirthBindError> {
         let instance = owner
+            .owner()
             .instance()
             .cloned()
             .map_err(OwnerGrantStoreError::Storage);
+        if owner.canonical_plan_digest() != reservation.binding.canonical_plan_digest {
+            return Err(OwnerBirthBindError {
+                quarantine: UncertainOwnerBirth {
+                    provider_id: reservation.provider_id,
+                    grant_id: reservation.grant_id,
+                },
+                source: OwnerGrantStoreError::Conflict,
+            });
+        }
         self.bind_prepared_instance(reservation, instance)
     }
 
@@ -641,6 +745,130 @@ impl OwnerGrantStore {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn bind_prepared_instance_for_test(
+        &self,
+        reservation: OwnerBirthReservation,
+        instance: HvfInstance,
+    ) -> Result<BoundOwnerBirthReceipt, OwnerBirthBindError> {
+        self.bind_prepared_instance(reservation, Ok(instance))
+    }
+
+    pub(crate) fn begin_audit_close(
+        &self,
+        receipt: BoundOwnerBirthReceipt,
+        admission: &FreshAdmissionRequest,
+        completion_instance: &HvfInstance,
+    ) -> Result<OwnerAuditClosure, OwnerAuditTransitionError> {
+        let provider_id = receipt.provider_id;
+        let grant_id = receipt.grant_id;
+        let result = (|| {
+            if provider_id != self.provider_id || admission.validate().is_err() {
+                return Err(OwnerGrantStoreError::Conflict);
+            }
+            let request_digest = admission
+                .digest()
+                .map_err(|_| OwnerGrantStoreError::Conflict)?;
+            let _lock = self.lock()?;
+            let mut journal = self.read()?;
+            let now_secs = self.observe_time(&mut journal, grant_id, 0)?;
+            let record = journal
+                .records
+                .iter_mut()
+                .find(|record| record.grant_id == grant_id)
+                .ok_or(OwnerGrantStoreError::Conflict)?;
+            let (binding, retained_digest, instance) = match &record.birth {
+                Some(OwnerBirthState::Bound {
+                    binding,
+                    request_digest,
+                    instance,
+                }) => (binding, request_digest, instance),
+                _ => return Err(OwnerGrantStoreError::Conflict),
+            };
+            if binding != &admission.binding
+                || retained_digest != &request_digest
+                || instance != completion_instance
+                || now_secs >= binding.expires_at_secs
+            {
+                return Err(if now_secs >= binding.expires_at_secs {
+                    OwnerGrantStoreError::Expired
+                } else {
+                    OwnerGrantStoreError::Conflict
+                });
+            }
+            let binding = binding.clone();
+            let instance = instance.clone();
+            record.birth = Some(OwnerBirthState::AuditClosing {
+                binding: binding.clone(),
+                request_digest,
+                instance: instance.clone(),
+            });
+            self.commit_journal(&journal, grant_id)?;
+            self.fresh_time(now_secs, binding.expires_at_secs)?;
+            Ok(OwnerAuditClosure {
+                provider_id,
+                grant_id,
+                binding,
+                request_digest,
+                instance,
+            })
+        })();
+        result.map_err(|source| OwnerAuditTransitionError {
+            quarantine: UncertainOwnerAudit {
+                provider_id,
+                grant_id,
+            },
+            source,
+        })
+    }
+
+    pub(crate) fn finish_audit_close(
+        &self,
+        closure: OwnerAuditClosure,
+    ) -> Result<ClosedOwnerAuditReceipt, OwnerAuditTransitionError> {
+        let provider_id = closure.provider_id;
+        let grant_id = closure.grant_id;
+        let result = (|| {
+            if provider_id != self.provider_id {
+                return Err(OwnerGrantStoreError::Conflict);
+            }
+            let _lock = self.lock()?;
+            let mut journal = self.read()?;
+            let record = journal
+                .records
+                .iter_mut()
+                .find(|record| record.grant_id == grant_id)
+                .ok_or(OwnerGrantStoreError::Conflict)?;
+            match &record.birth {
+                Some(OwnerBirthState::AuditClosing {
+                    binding,
+                    request_digest,
+                    instance,
+                }) if binding == &closure.binding
+                    && request_digest == &closure.request_digest
+                    && instance == &closure.instance => {}
+                _ => return Err(OwnerGrantStoreError::Conflict),
+            }
+            record.birth = Some(OwnerBirthState::AuditClosed {
+                binding: closure.binding,
+                request_digest: closure.request_digest,
+                instance: closure.instance,
+            });
+            self.commit_journal(&journal, grant_id)?;
+            Ok(ClosedOwnerAuditReceipt {
+                provider_id,
+                grant_id,
+            })
+        })();
+        result.map_err(|source| OwnerAuditTransitionError {
+            quarantine: UncertainOwnerAudit {
+                provider_id,
+                grant_id,
+            },
+            source,
+        })
+    }
+
     /// Observe quarantine without recreating a birth or native-owner capability.
     ///
     /// # Errors
@@ -661,6 +889,8 @@ impl OwnerGrantStore {
         Ok(record.birth.as_ref().map(|birth| match birth {
             OwnerBirthState::Prepared { .. } => OwnerBirthDisposition::Prepared,
             OwnerBirthState::Bound { .. } => OwnerBirthDisposition::Bound,
+            OwnerBirthState::AuditClosing { .. } => OwnerBirthDisposition::AuditClosing,
+            OwnerBirthState::AuditClosed { .. } => OwnerBirthDisposition::AuditClosed,
         }))
     }
 
@@ -810,11 +1040,15 @@ impl OwnerGrantStore {
                     &record.disposition,
                     match birth {
                         OwnerBirthState::Prepared { binding, .. }
-                        | OwnerBirthState::Bound { binding, .. } => binding,
+                        | OwnerBirthState::Bound { binding, .. }
+                        | OwnerBirthState::AuditClosing { binding, .. }
+                        | OwnerBirthState::AuditClosed { binding, .. } => binding,
                     },
                     match birth {
                         OwnerBirthState::Prepared { request_digest, .. }
-                        | OwnerBirthState::Bound { request_digest, .. } => request_digest,
+                        | OwnerBirthState::Bound { request_digest, .. }
+                        | OwnerBirthState::AuditClosing { request_digest, .. }
+                        | OwnerBirthState::AuditClosed { request_digest, .. } => request_digest,
                     },
                 )
                 else {
@@ -827,7 +1061,9 @@ impl OwnerGrantStore {
                 {
                     return Err(OwnerGrantStoreError::Corrupt);
                 }
-                if let OwnerBirthState::Bound { instance, .. } = birth
+                if let OwnerBirthState::Bound { instance, .. }
+                | OwnerBirthState::AuditClosing { instance, .. }
+                | OwnerBirthState::AuditClosed { instance, .. } = birth
                     && (instance.vm_id != binding.workload_id || instance.boot_nonce == [0; 32])
                 {
                     return Err(OwnerGrantStoreError::Corrupt);
@@ -1345,6 +1581,55 @@ mod tests {
             OwnerGrantStore::open(path, provider_id(), clock),
             Err(OwnerGrantStoreError::Corrupt)
         ));
+    }
+
+    #[test]
+    fn bound_birth_audit_intent_and_completion_are_one_way() {
+        let (_directory, store, _clock) = initialized();
+        let consumed = store.consume(verified([35; 32])).unwrap();
+        let reservation = store.reserve_birth(consumed, &admission()).unwrap();
+        let receipt = store
+            .bind_prepared_instance(reservation, Ok(instance()))
+            .unwrap();
+        let closure = store
+            .begin_audit_close(receipt, &admission(), &instance())
+            .unwrap();
+        assert_eq!(closure.instance(), &instance());
+        assert_eq!(
+            store.birth_disposition([35; 32]).unwrap(),
+            Some(OwnerBirthDisposition::AuditClosing)
+        );
+        let closed = store.finish_audit_close(closure).unwrap();
+        assert_eq!(closed.provider_id(), provider_id());
+        assert_eq!(closed.grant_id(), [35; 32]);
+        assert_eq!(
+            store.birth_disposition([35; 32]).unwrap(),
+            Some(OwnerBirthDisposition::AuditClosed)
+        );
+    }
+
+    #[test]
+    fn uncertain_audit_intent_returns_no_retryable_bound_receipt() {
+        let (_directory, store, _clock) = initialized();
+        let consumed = store.consume(verified([36; 32])).unwrap();
+        let reservation = store.reserve_birth(consumed, &admission()).unwrap();
+        let receipt = store
+            .bind_prepared_instance(reservation, Ok(instance()))
+            .unwrap();
+        let failing = store.with_commit(|path, bytes| {
+            atomic_io::write_private(path, bytes).map_err(io::Error::other)?;
+            Err(io::Error::other("injected audit-intent uncertainty"))
+        });
+        let (uncertain, source) = failing
+            .begin_audit_close(receipt, &admission(), &instance())
+            .unwrap_err()
+            .into_parts();
+        assert_eq!(uncertain.grant_id(), [36; 32]);
+        assert!(matches!(source, OwnerGrantStoreError::CommitUnknown { .. }));
+        assert_eq!(
+            store.birth_disposition([36; 32]).unwrap(),
+            Some(OwnerBirthDisposition::AuditClosing)
+        );
     }
 
     #[test]
