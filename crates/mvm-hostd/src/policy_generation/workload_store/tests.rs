@@ -288,6 +288,7 @@ fn seed(home: &Path, count: usize) {
     let bytes = serde_json::to_vec(&CanonicalLedger {
         sequence: 5,
         workloads,
+        ..Default::default()
     })
     .unwrap();
     std::fs::write(dir.join(LEDGER_FILE), bytes).unwrap();
@@ -390,6 +391,7 @@ fn a_replace_that_would_eat_the_byte_reserve_is_refused_while_a_quarantine_commi
         serde_json::to_vec(&CanonicalLedger {
             sequence: 1,
             workloads,
+            ..Default::default()
         })
         .unwrap(),
     )
@@ -414,4 +416,445 @@ fn a_lost_canonical_ledger_is_never_rebuilt_from_the_archive() {
     assert!(!ledger.exists());
     assert!(!canonical_dir_at(home.path()).join(PENDING_FILE).exists());
     assert!(WorkloadLedger::load_at(home.path()).is_err());
+}
+
+mod destinations {
+    use ed25519_dalek::SigningKey;
+    use mvm_core::host_interface::workload::{
+        DestinationEnrollment, DestinationEntry, DestinationTip, MAX_DESTINATIONS, PreparedHead,
+        SignedPreparedHead,
+    };
+
+    use super::*;
+
+    const DESTINATION: &str = "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0";
+
+    fn key() -> SigningKey {
+        SigningKey::from_bytes(&[7; 32])
+    }
+
+    fn key_hex(key: &SigningKey) -> String {
+        hex::encode(key.verifying_key().to_bytes())
+    }
+
+    fn tip(cursor: u64) -> DestinationTip {
+        DestinationTip {
+            cursor,
+            head: format!("{cursor:064x}"),
+        }
+    }
+
+    fn enrollment(workload: &str, epoch: u64) -> DestinationEnrollment {
+        DestinationEnrollment {
+            destination: DESTINATION.into(),
+            workload: workload.into(),
+            epoch: ExecutionEpoch(epoch),
+            key: key_hex(&key()),
+            tip: tip(0),
+        }
+    }
+
+    fn prepared(workload: &str, epoch: u64, from: u64, signer: &SigningKey) -> SignedPreparedHead {
+        PreparedHead {
+            destination: DESTINATION.into(),
+            workload: workload.into(),
+            epoch: ExecutionEpoch(epoch),
+            expected: tip(from),
+            next: tip(from + 1),
+        }
+        .sign(signer)
+        .unwrap()
+    }
+
+    fn ledger(home: &Path) -> CanonicalLedger {
+        serde_json::from_slice(&ledger_bytes(home)).unwrap()
+    }
+
+    fn disk_tip(home: &Path) -> DestinationTip {
+        ledger(home).destinations[DESTINATION].tip.clone()
+    }
+
+    fn enrolled() -> (tempfile::TempDir, WorkloadStore) {
+        let home = tempfile::tempdir().unwrap();
+        let store = WorkloadStore::open(home.path()).unwrap();
+        store.enroll_destination(&enrollment("w", 1)).unwrap();
+        (home, store)
+    }
+
+    #[test]
+    fn a_commit_moves_the_tip_and_the_sequence() {
+        let (home, store) = enrolled();
+        assert_eq!(sequence(home.path()), 1);
+        let commit = store
+            .commit_destination(&prepared("w", 1, 0, &key()))
+            .unwrap();
+        assert_eq!((commit.sequence, commit.tip), (2, tip(1)));
+        assert_eq!(disk_tip(home.path()), tip(1));
+    }
+
+    #[test]
+    fn a_quarantine_committed_first_refuses_the_prepared_commit() {
+        let (home, store) = enrolled();
+        store.commit(&quarantine("w")).unwrap();
+        let before = ledger_bytes(home.path());
+        let error = store
+            .commit_destination(&prepared("w", 1, 0, &key()))
+            .unwrap_err();
+        assert!(!is_unresolved(&error), "{error:#}");
+        assert_eq!(ledger_bytes(home.path()), before);
+        assert_eq!(disk_tip(home.path()), tip(0));
+    }
+
+    #[test]
+    fn a_destination_commit_first_survives_a_later_quarantine_and_resubmission() {
+        let (home, store) = enrolled();
+        let head = prepared("w", 1, 0, &key());
+        store.commit_destination(&head).unwrap();
+        store.commit(&quarantine("w")).unwrap();
+        assert_eq!(disk_tip(home.path()), tip(1));
+        let before = ledger_bytes(home.path());
+        assert_eq!(store.commit_destination(&head).unwrap().tip, tip(1));
+        assert_eq!(ledger_bytes(home.path()), before, "no write");
+        store.commit(&replace("w", 1)).unwrap();
+        assert_eq!(store.commit_destination(&head).unwrap().tip, tip(1));
+    }
+
+    #[test]
+    fn a_replacement_refuses_an_old_epoch_prepared_commit() {
+        let (home, store) = enrolled();
+        store.commit(&replace("w", 1)).unwrap();
+        let error = store
+            .commit_destination(&prepared("w", 1, 0, &key()))
+            .unwrap_err();
+        assert!(!is_unresolved(&error), "{error:#}");
+        assert_eq!(disk_tip(home.path()), tip(0));
+        let mut other = enrollment("w", 1);
+        other.destination = "e".repeat(64);
+        assert!(
+            store
+                .enroll_destination(&other)
+                .unwrap_err()
+                .to_string()
+                .contains("epoch changed"),
+            "a new destination cannot enroll under a replaced epoch"
+        );
+    }
+
+    #[test]
+    fn a_divergent_head_a_bad_signature_and_an_unknown_destination_are_refused() {
+        let (home, store) = enrolled();
+        let before = ledger_bytes(home.path());
+        let skipped = PreparedHead {
+            next: tip(2),
+            ..prepared("w", 1, 0, &key()).head
+        }
+        .sign(&key())
+        .unwrap();
+        for refused in [
+            prepared("w", 1, 5, &key()),
+            skipped,
+            prepared("w", 1, 0, &SigningKey::from_bytes(&[8; 32])),
+            prepared("other", 1, 0, &key()),
+            prepared("w", 2, 0, &key()),
+            SignedPreparedHead {
+                head: PreparedHead {
+                    destination: "e".repeat(64),
+                    ..prepared("w", 1, 0, &key()).head
+                },
+                signature: prepared("w", 1, 0, &key()).signature,
+            },
+        ] {
+            let error = store.commit_destination(&refused).unwrap_err();
+            assert!(!is_unresolved(&error), "{error:#}");
+        }
+        assert_eq!(ledger_bytes(home.path()), before);
+    }
+
+    #[test]
+    fn enrollment_is_idempotent_and_never_rebinds() {
+        let (home, store) = enrolled();
+        store
+            .commit_destination(&prepared("w", 1, 0, &key()))
+            .unwrap();
+        let before = ledger_bytes(home.path());
+        let again = store.enroll_destination(&enrollment("w", 1)).unwrap();
+        assert_eq!((again.sequence, again.tip), (2, tip(1)));
+        assert_eq!(ledger_bytes(home.path()), before, "no write");
+        assert_eq!(sequence(home.path()), 2);
+
+        let mut rekeyed = enrollment("w", 1);
+        rekeyed.key = key_hex(&SigningKey::from_bytes(&[8; 32]));
+        assert!(store.enroll_destination(&rekeyed).is_err());
+        assert!(store.enroll_destination(&enrollment("other", 1)).is_err());
+        assert_eq!(ledger_bytes(home.path()), before);
+    }
+
+    #[test]
+    fn a_quarantined_workload_cannot_enroll_and_malformed_enrollments_are_refused() {
+        let home = tempfile::tempdir().unwrap();
+        let store = WorkloadStore::open(home.path()).unwrap();
+        store.commit(&quarantine("w")).unwrap();
+        assert!(store.enroll_destination(&enrollment("w", 1)).is_err());
+        for bad in [
+            DestinationEnrollment {
+                destination: "short".into(),
+                ..enrollment("v", 1)
+            },
+            DestinationEnrollment {
+                key: "zz".into(),
+                ..enrollment("v", 1)
+            },
+            DestinationEnrollment {
+                tip: DestinationTip {
+                    cursor: 0,
+                    head: "x".into(),
+                },
+                ..enrollment("v", 1)
+            },
+            enrollment("", 1),
+        ] {
+            assert!(store.enroll_destination(&bad).is_err());
+        }
+        assert_eq!(sequence(home.path()), 1);
+    }
+
+    fn destination_entry(workload: &str, changed: u64) -> DestinationEntry {
+        DestinationEntry {
+            workload: workload.into(),
+            epoch: ExecutionEpoch(1),
+            key: "a".repeat(64),
+            tip: tip(0),
+            changed,
+        }
+    }
+
+    fn write_destinations(home: &Path, destinations: BTreeMap<String, DestinationEntry>) {
+        let mut workloads = WorkloadLedger::default();
+        workloads.replace("old");
+        let dir = canonical_dir_at(home);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bytes = serde_json::to_vec(&CanonicalLedger {
+            sequence: 5_000_000,
+            workloads,
+            destinations,
+        })
+        .unwrap();
+        std::fs::write(dir.join(LEDGER_FILE), bytes).unwrap();
+    }
+
+    fn id(n: usize) -> String {
+        format!("{n:064x}")
+    }
+
+    fn is_not_enrolled(error: &anyhow::Error) -> bool {
+        error
+            .downcast_ref::<DestinationRefusal>()
+            .is_some_and(DestinationRefusal::is_not_enrolled)
+    }
+
+    fn is_refusal(error: &anyhow::Error) -> bool {
+        error.downcast_ref::<DestinationRefusal>().is_some()
+    }
+
+    #[test]
+    fn a_full_table_with_nothing_stale_evicts_the_least_recently_changed_entry() {
+        let home = tempfile::tempdir().unwrap();
+        let store = WorkloadStore::open(home.path()).unwrap();
+        let table = (0..MAX_DESTINATIONS)
+            .map(|n| (id(n), destination_entry("live", n as u64 + 1)))
+            .collect();
+        write_destinations(home.path(), table);
+        store.enroll_destination(&enrollment("live", 1)).unwrap();
+        let after = ledger(home.path());
+        assert_eq!(after.destinations.len(), MAX_DESTINATIONS);
+        assert!(
+            !after.destinations.contains_key(&id(0)),
+            "smallest changed went"
+        );
+        assert!(after.destinations.contains_key(&id(1)));
+        assert_eq!(after.destinations[DESTINATION].changed, after.sequence);
+
+        let evicted = PreparedHead {
+            destination: id(0),
+            workload: "live".into(),
+            epoch: ExecutionEpoch(1),
+            expected: tip(0),
+            next: tip(1),
+        }
+        .sign(&key())
+        .unwrap();
+        let error = store.commit_destination(&evicted).unwrap_err();
+        assert!(is_not_enrolled(&error), "{error:#}");
+    }
+
+    #[test]
+    fn a_full_table_drops_stale_epoch_entries_before_any_live_one() {
+        let home = tempfile::tempdir().unwrap();
+        let store = WorkloadStore::open(home.path()).unwrap();
+        let table = (0..MAX_DESTINATIONS)
+            .map(|n| {
+                let stale = n < 10;
+                // Stale entries are the most recently changed, so a plain
+                // oldest-first rule would keep them and drop live ones.
+                let (workload, changed) = if stale {
+                    ("old", 10_000 + n as u64)
+                } else {
+                    ("live", n as u64)
+                };
+                (id(n), destination_entry(workload, changed))
+            })
+            .collect();
+        write_destinations(home.path(), table);
+        store.enroll_destination(&enrollment("live", 1)).unwrap();
+        let after = ledger(home.path());
+        assert_eq!(after.destinations.len(), MAX_DESTINATIONS - 10 + 1);
+        assert!(after.destinations.values().all(|d| d.workload != "old"));
+        assert!(after.destinations.contains_key(&id(10)));
+    }
+
+    #[test]
+    fn the_byte_bound_evicts_the_least_recently_changed_entries_with_long_names() {
+        let home = tempfile::tempdir().unwrap();
+        let store = WorkloadStore::open(home.path()).unwrap();
+        // A control character escapes to six bytes, so these names fill the
+        // byte bound long before the count bound.
+        let name = "\u{1}".repeat(MAX_NAME_BYTES);
+        let mut table = BTreeMap::new();
+        let mut n = 0;
+        loop {
+            table.insert(id(n), destination_entry(&name, n as u64 + 1));
+            n += 1;
+            if n % 50 == 0 {
+                let probe = serde_json::to_vec(&table).unwrap().len() as u64;
+                if probe + 1_000 > MAX_LEDGER_BYTES - QUARANTINE_RESERVE_BYTES {
+                    break;
+                }
+            }
+        }
+        assert!(n < MAX_DESTINATIONS, "bytes bind before the count");
+        write_destinations(home.path(), table);
+        let mut fresh = enrollment(&name, 1);
+        fresh.destination = id(n + 1);
+        store.enroll_destination(&fresh).unwrap();
+        let bytes = ledger_bytes(home.path());
+        assert!(bytes.len() as u64 <= MAX_LEDGER_BYTES - QUARANTINE_RESERVE_BYTES);
+        let after = ledger(home.path());
+        assert!(!after.destinations.contains_key(&id(0)));
+        assert!(after.destinations.contains_key(&fresh.destination));
+        assert!(after.destinations.len() < n + 1, "something was evicted");
+    }
+
+    #[test]
+    fn a_same_binding_re_enrollment_of_a_quarantined_workload_returns_its_tip() {
+        let (home, store) = enrolled();
+        store
+            .commit_destination(&prepared("w", 1, 0, &key()))
+            .unwrap();
+        store.commit(&quarantine("w")).unwrap();
+        let before = ledger_bytes(home.path());
+        let again = store.enroll_destination(&enrollment("w", 1)).unwrap();
+        assert_eq!(again.tip, tip(1));
+        assert_eq!(
+            again.sequence, 2,
+            "the sequence the destination last changed at"
+        );
+        assert_eq!(ledger_bytes(home.path()), before);
+    }
+
+    #[test]
+    fn a_new_enrollment_for_a_quarantined_workload_is_refused() {
+        let (_home, store) = enrolled();
+        store.commit(&quarantine("w")).unwrap();
+        let mut other = enrollment("w", 1);
+        other.destination = "e".repeat(64);
+        let error = store.enroll_destination(&other).unwrap_err();
+        assert!(is_refusal(&error), "{error:#}");
+    }
+
+    #[test]
+    fn a_commit_that_landed_before_a_quarantine_is_returned_by_re_enrollment_but_no_further_head_commits()
+     {
+        let (_home, store) = enrolled();
+        let first = prepared("w", 1, 0, &key());
+        store.commit_destination(&first).unwrap();
+        store.commit(&quarantine("w")).unwrap();
+        assert_eq!(
+            store.enroll_destination(&enrollment("w", 1)).unwrap().tip,
+            tip(1)
+        );
+        assert_eq!(store.commit_destination(&first).unwrap().tip, tip(1));
+        let further = prepared("w", 1, 1, &key());
+        assert!(is_refusal(&store.commit_destination(&further).unwrap_err()));
+    }
+
+    #[test]
+    fn an_unreadable_ledger_makes_a_destination_request_unresolved_not_refused() {
+        let (home, store) = enrolled();
+        std::fs::write(canonical_dir_at(home.path()).join(LEDGER_FILE), b"{").unwrap();
+        for error in [
+            store.enroll_destination(&enrollment("w", 1)).unwrap_err(),
+            store
+                .commit_destination(&prepared("w", 1, 0, &key()))
+                .unwrap_err(),
+        ] {
+            assert!(!is_refusal(&error), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn a_fault_at_each_step_is_unresolved_and_recovery_reports_the_outcome() {
+        for (step, landed) in [(Step::CommitObligation, false), (Step::CommitLedger, true)] {
+            let (home, store) = enrolled();
+            let head = prepared("w", 1, 0, &key());
+            store.fail_after(step);
+            let error = store.commit_destination(&head).unwrap_err();
+            assert!(is_unresolved(&error), "{step:?}: {error:#}");
+            assert!(WorkloadLedger::load_at(home.path()).is_err());
+
+            drop(store);
+            let fresh = WorkloadStore::open(home.path()).unwrap();
+            fresh.recover().unwrap();
+            let expected = if landed { tip(1) } else { tip(0) };
+            assert_eq!(disk_tip(home.path()), expected, "{step:?}");
+            let sequence_before = sequence(home.path());
+            let answer = fresh.commit_destination(&head).unwrap();
+            assert_eq!(answer.tip, tip(1), "{step:?}");
+            let wrote = u64::from(!landed);
+            assert_eq!(sequence(home.path()), sequence_before + wrote, "{step:?}");
+        }
+    }
+
+    #[test]
+    fn a_migration_fault_during_enrollment_is_unresolved_and_recoverable() {
+        for step in [
+            Step::MigrateObligation,
+            Step::MigrateArchiveDir,
+            Step::MigrateExchanged,
+            Step::MigrateCanonical,
+        ] {
+            let home = home_with_legacy(LEGACY);
+            let store = WorkloadStore::open(home.path()).unwrap();
+            store.fail_after(step);
+            let error = store.enroll_destination(&enrollment("x", 1)).unwrap_err();
+            assert!(is_unresolved(&error), "{step:?}: {error:#}");
+            drop(store);
+            let fresh = WorkloadStore::open(home.path()).unwrap();
+            fresh.recover().unwrap();
+            assert_eq!(
+                fresh.enroll_destination(&enrollment("x", 1)).unwrap().tip,
+                tip(0)
+            );
+        }
+    }
+
+    #[test]
+    fn the_owned_store_exposes_both_operations() {
+        let home = tempfile::tempdir().unwrap();
+        let owned = OwnedWorkloadStore::open(home.path()).unwrap();
+        owned.enroll_destination(&enrollment("w", 1)).unwrap();
+        let commit = owned
+            .commit_destination(&prepared("w", 1, 0, &key()))
+            .unwrap();
+        assert_eq!(commit.tip, tip(1));
+    }
 }
