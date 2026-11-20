@@ -118,7 +118,7 @@ pub use start::{
 pub(crate) use start::{
     admit_synthesized_with_verified_release, start_admitted_with_verified_release,
 };
-pub use topology_binding::TOPOLOGY_BINDING_STAGE;
+pub use topology_binding::{CORE_PLACEMENT_STAGE, TOPOLOGY_BINDING_STAGE};
 
 /// Result of a successful admission. Carries everything the caller
 /// needs to hand to the backend (the plan + its id), to the audit
@@ -151,8 +151,8 @@ pub struct AdmittedPlan {
     canonical_kernel: Option<std::sync::Arc<canonical_kernel::AdmittedKernel>>,
     backend: Option<BackendKind>,
     /// The host cores this launch is confined to, decided at admission from
-    /// the topology unit it boots and the cores admitted topologies hold.
-    allowed_cpus: Option<mvm_contract::protocol::cpu_set::CpuSet>,
+    /// the topology unit it boots and the cores held on the host.
+    placement: Option<placement::AdmittedPlacement>,
     /// Set once the backend has been started under this admission. An
     /// admission authorizes one launch; the plan is handed back on
     /// `StartedMachine`, and holding it again must not start a second backend.
@@ -213,7 +213,16 @@ impl AdmittedPlan {
     /// placed it nowhere.
     #[must_use]
     pub fn allowed_cpus(&self) -> Option<&mvm_contract::protocol::cpu_set::CpuSet> {
-        self.allowed_cpus.as_ref()
+        self.placement.as_ref().map(|placement| &placement.cpus)
+    }
+
+    /// Whether the cores this launch is confined to are its unit's own,
+    /// rather than the cores left over by other units' exclusive placements.
+    #[must_use]
+    pub fn holds_cores_exclusively(&self) -> bool {
+        self.placement
+            .as_ref()
+            .is_some_and(|placement| placement.exclusive)
     }
 
     /// The signer whose key the plan verified under — this host's own signer
@@ -271,7 +280,7 @@ impl AdmittedPlan {
             assurance_runtime: None,
             canonical_kernel: None,
             backend: None,
-            allowed_cpus: None,
+            placement: None,
             dispatched: false,
         }
     }
@@ -281,7 +290,10 @@ impl AdmittedPlan {
         mut self,
         cpus: mvm_contract::protocol::cpu_set::CpuSet,
     ) -> Self {
-        self.allowed_cpus = Some(cpus);
+        self.placement = Some(placement::AdmittedPlacement {
+            cpus,
+            exclusive: false,
+        });
         self
     }
 

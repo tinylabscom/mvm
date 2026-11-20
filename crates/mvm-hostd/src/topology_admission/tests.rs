@@ -45,6 +45,8 @@ fn no_scope_cpuset() -> HostCpus {
     HostCpus {
         scope_cpuset: false,
         online: None,
+        isolated: None,
+        live: Vec::new(),
     }
 }
 
@@ -70,6 +72,8 @@ impl Host {
             host_cpus: HostCpus {
                 scope_cpuset: true,
                 online: Some(mvm_contract::protocol::cpu_set::CpuSet::parse(online).unwrap()),
+                isolated: None,
+                live: Vec::new(),
             },
             ..Self::new()
         }
@@ -192,6 +196,7 @@ fn unit(name: &str, role: UnitRole) -> Unit {
         placement: CorePlacement::Floating,
         min_isolation: None,
         liveness_period_ms: None,
+        require_isolated_cores: false,
         permits: SealedTransitions::default(),
     }
 }

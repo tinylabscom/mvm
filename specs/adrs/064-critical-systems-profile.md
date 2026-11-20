@@ -164,9 +164,13 @@ doctor` reports both conditions.
 
 The achieved placement is read back and recorded in the same audit entry as
 the other enforced bounds. MVM does not reconfigure the host kernel. Whether
-the named cores are isolated from the general scheduler is a host property that
-`mvmctl doctor` reports and that admission checks when the topology requires
-it.
+the named cores are isolated from the general scheduler is a host property.
+`mvmctl doctor` reports it. A unit may also require it, through the optional
+`require_isolated_cores` field, which is valid only with exclusive placement and
+is left out of the encoding when false. Topology admission reads the host's
+isolated-CPU list only for a unit that sets the field. It refuses the topology
+if the list names fewer than all of the unit's cores, and names the cores that
+are missing. It also refuses it if the host publishes no isolated-CPU list.
 
 ### 5. Standby pairs and failover
 

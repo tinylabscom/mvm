@@ -142,6 +142,13 @@ pub(super) fn requested_for_vm(state_dir: &Path) -> bool {
     state_dir.join(SCOPE_CPUS_FILE).is_file()
 }
 
+/// The CPU set this VM's scope was born confined to, or `None` when it was
+/// not confined (or its record cannot be read, which reads as unconfined).
+#[must_use]
+pub fn recorded_cpus(state_dir: &Path) -> Option<CpuSet> {
+    read_cpu_list(&state_dir.join(SCOPE_CPUS_FILE))
+}
+
 impl ScopeProbe {
     /// The `cpuset.cpus.effective` of the scope this VM was born into, or
     /// `None` when there is no recorded scope or its cpuset cannot be read.
@@ -195,6 +202,17 @@ mod tests {
         record_requested(dir.path(), None).unwrap();
         assert!(!requested_for_vm(dir.path()));
         record_requested(dir.path(), None).expect("clearing nothing is fine");
+    }
+
+    #[test]
+    fn the_recorded_set_reads_back_or_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(recorded_cpus(dir.path()), None);
+        record_requested(dir.path(), Some(&CpuSet::parse("4-5").unwrap())).unwrap();
+        assert_eq!(
+            recorded_cpus(dir.path()),
+            Some(CpuSet::parse("4,5").unwrap())
+        );
     }
 
     #[test]

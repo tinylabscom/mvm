@@ -2,10 +2,11 @@
 //! scope it was born into holds exactly those.
 //!
 //! A unit whose topology entry holds cores exclusively runs on those cores. A
-//! floating unit, or a plan bound to no topology, runs on the cores no admitted
-//! topology holds, but only while some topology on this host holds any: with
-//! none admitted, nothing is confined and scheduling is the host's, as it has
-//! always been.
+//! floating unit, or a plan bound to no topology, runs on the cores nothing
+//! holds exclusively, but only while something on this host holds any: with
+//! no core held, nothing is confined and scheduling is the host's, as it has
+//! always been. While cores are held, a launch that cannot be confined to the
+//! rest is refused rather than run on them.
 
 use std::path::Path;
 
@@ -15,40 +16,117 @@ use mvm_contract::protocol::cpu_set::CpuSet;
 use mvm_contract::protocol::resource_controls::EnforcedGrants;
 use mvm_contract::protocol::vm_backend::BackendKind;
 
-use crate::topology_admission::placement::{held_on_host, remaining_cores};
+use crate::topology_admission::placement::{
+    HostCpus, HostPlacementRefusal, held_on_host, remaining_cores,
+};
 
-/// The CPU set to confine a launch to, or `None` when it is not confined.
+/// The cores admission placed a launch on, and whether they are the unit's
+/// own exclusive cores or the cores left over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AdmittedPlacement {
+    pub(crate) cpus: CpuSet,
+    pub(crate) exclusive: bool,
+}
+
+/// Why a launch cannot be placed while cores are held exclusively.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum PlanPlacementRefusal {
+    #[error(
+        "cores {held} are held exclusively on this host, and a launch on {} cannot be \
+         confined to the rest",
+        .backend.map_or("an unknown backend", BackendKind::as_str)
+    )]
+    BackendCannotConfine {
+        backend: Option<BackendKind>,
+        held: CpuSet,
+    },
+    #[error(
+        "cores {held} are held exclusively on this host, and its spawn scope cannot carry a \
+         CPU set to keep this launch off them"
+    )]
+    ScopeCannotConfine { held: CpuSet },
+    #[error("cores {held} are held exclusively, and this host publishes no list of its CPUs")]
+    NoCpuList { held: CpuSet },
+    #[error(transparent)]
+    Host(#[from] HostPlacementRefusal),
+}
+
+/// The placement of a launch, or `None` when it is not confined.
 ///
-/// `unit` is the topology unit the plan boots, from the binding check.
-/// Floating confinement applies only on Firecracker, the one backend that
-/// declares a scope CPU set; a unit holding cores exclusively was refused at
-/// topology admission on any other.
+/// `unit` is the topology unit the plan boots, from the binding check. A unit
+/// holding cores exclusively gets them on any backend; topology admission
+/// already refused it on one without the mechanism, and the read-back refuses
+/// a scope that did not hold them.
 ///
 /// # Errors
 ///
-/// The admitted topologies cannot be read, the host publishes no CPU list
-/// while cores are held, or the held cores leave none.
-pub(super) fn admitted_cpus(
+/// The admitted topologies cannot be read, or a [`PlanPlacementRefusal`].
+pub(super) fn admitted_placement(
     home: &Path,
     unit: Option<&Unit>,
     backend: Option<BackendKind>,
+    host: &HostCpus,
     host_signer_keys_dir: Option<&Path>,
-) -> Result<Option<CpuSet>> {
-    if let Some(cores) = unit.and_then(exclusive) {
-        return Ok(Some(cores));
+) -> Result<Option<AdmittedPlacement>> {
+    if let Some(cpus) = unit.and_then(exclusive) {
+        return Ok(Some(AdmittedPlacement {
+            cpus,
+            exclusive: true,
+        }));
     }
-    if backend != Some(BackendKind::Firecracker) {
-        return Ok(None);
-    }
-    let held = held_on_host(home, host_signer_keys_dir)
-        .context("reading the core placements admitted on this host")?;
+    let held = held_on_host(home, host, host_signer_keys_dir)
+        .context("reading the core placements held on this host")?;
     if held.is_empty() {
         return Ok(None);
     }
-    let online = mvm_core::spawn_scope::online_cpus().with_context(|| {
-        format!("cores {held} are held exclusively and this host publishes no list of its CPUs")
-    })?;
-    Ok(Some(remaining_cores(&online, &held)?))
+    Ok(Some(AdmittedPlacement {
+        cpus: floating_cpus(backend, host, held)?,
+        exclusive: false,
+    }))
+}
+
+/// [`admitted_placement`] on this host, under `home`, with a refusal written
+/// to the plan's chain once, as the topology binding check writes its own.
+///
+/// # Errors
+///
+/// As [`admitted_placement`], carrying the audited marker when the refusal
+/// was recorded.
+pub(super) fn admit_core_placement(
+    home: &Path,
+    plan: &mvm_core::plan::ExecutionPlan,
+    unit: Option<&Unit>,
+    backend: Option<BackendKind>,
+    host_signer_keys_dir: Option<&Path>,
+) -> Result<Option<AdmittedPlacement>> {
+    let host = HostCpus::probe(home);
+    admitted_placement(home, unit, backend, &host, host_signer_keys_dir).map_err(|refusal| {
+        super::topology_binding::audit_refusal(
+            home,
+            plan,
+            host_signer_keys_dir,
+            super::topology_binding::AuditedRefusal::CORE_PLACEMENT,
+            refusal,
+        )
+    })
+}
+
+/// The cores left for a floating launch while `held` are held.
+fn floating_cpus(
+    backend: Option<BackendKind>,
+    host: &HostCpus,
+    held: CpuSet,
+) -> Result<CpuSet, PlanPlacementRefusal> {
+    if backend != Some(BackendKind::Firecracker) {
+        return Err(PlanPlacementRefusal::BackendCannotConfine { backend, held });
+    }
+    if !host.scope_cpuset {
+        return Err(PlanPlacementRefusal::ScopeCannotConfine { held });
+    }
+    let Some(online) = &host.online else {
+        return Err(PlanPlacementRefusal::NoCpuList { held });
+    };
+    Ok(remaining_cores(online, &held)?)
 }
 
 fn exclusive(unit: &Unit) -> Option<CpuSet> {
@@ -119,6 +197,7 @@ mod tests {
             placement: CorePlacement::Floating,
             min_isolation: None,
             liveness_period_ms: None,
+            require_isolated_cores: false,
             permits: SealedTransitions::default(),
         }
     }
@@ -171,6 +250,39 @@ mod tests {
         assert!(grants.placement.is_unset());
     }
 
+    fn no_host() -> HostCpus {
+        HostCpus {
+            scope_cpuset: false,
+            online: None,
+            isolated: None,
+            live: Vec::new(),
+        }
+    }
+
+    /// A host where a running machine holds 2-3 exclusively.
+    fn held_host() -> HostCpus {
+        use crate::topology_admission::placement::{LiveMachine, PlacementOwner};
+        HostCpus {
+            scope_cpuset: true,
+            online: Some(set("0-7")),
+            isolated: None,
+            live: vec![LiveMachine {
+                name: "pinned".into(),
+                cpus: Some(set("2-3")),
+                owner: Some(PlacementOwner {
+                    tenant: mvm_core::plan::TenantId("t".into()),
+                    workload: mvm_core::plan::WorkloadId("a".into()),
+                    exclusive: true,
+                }),
+            }],
+        }
+    }
+
+    fn refusal(err: anyhow::Error) -> PlanPlacementRefusal {
+        err.downcast::<PlanPlacementRefusal>()
+            .expect("a typed refusal")
+    }
+
     #[test]
     fn a_unit_holding_cores_is_confined_to_them_on_any_backend() {
         let home = tempfile::tempdir().unwrap();
@@ -180,24 +292,105 @@ mod tests {
             mvm_contract::plan::topology::CoreId(5),
         ]);
         assert_eq!(
-            admitted_cpus(home.path(), Some(&unit), None, None).unwrap(),
-            Some(set("4-5"))
+            admitted_placement(home.path(), Some(&unit), None, &no_host(), None).unwrap(),
+            Some(AdmittedPlacement {
+                cpus: set("4-5"),
+                exclusive: true
+            })
         );
     }
 
     #[test]
-    fn nothing_is_confined_while_no_topology_holds_a_core() {
+    fn nothing_is_confined_or_refused_while_no_core_is_held() {
         let home = tempfile::tempdir().unwrap();
         let unit = floating_unit();
-        for unit in [None, Some(&unit)] {
-            assert_eq!(
-                admitted_cpus(home.path(), unit, Some(BackendKind::Firecracker), None).unwrap(),
+        for backend in [
+            Some(BackendKind::Firecracker),
+            Some(BackendKind::Qemu),
+            Some(BackendKind::Hvf),
+            Some(BackendKind::Wasm),
+            None,
+        ] {
+            for unit in [None, Some(&unit)] {
+                assert_eq!(
+                    admitted_placement(home.path(), unit, backend, &no_host(), None).unwrap(),
+                    None,
+                    "{backend:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_floating_firecracker_launch_gets_the_cores_left_over() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(
+            admitted_placement(
+                home.path(),
+                None,
+                Some(BackendKind::Firecracker),
+                &held_host(),
                 None
+            )
+            .unwrap(),
+            Some(AdmittedPlacement {
+                cpus: set("0-1,4-7"),
+                exclusive: false
+            })
+        );
+    }
+
+    #[test]
+    fn a_launch_that_cannot_be_confined_is_refused_while_cores_are_held() {
+        let home = tempfile::tempdir().unwrap();
+        for backend in [
+            Some(BackendKind::Qemu),
+            Some(BackendKind::Libkrun),
+            Some(BackendKind::Hvf),
+            Some(BackendKind::Wasm),
+            None,
+        ] {
+            let err = admitted_placement(home.path(), None, backend, &held_host(), None)
+                .expect_err("refused");
+            assert_eq!(
+                refusal(err),
+                PlanPlacementRefusal::BackendCannotConfine {
+                    backend,
+                    held: set("2-3")
+                }
             );
         }
+        let no_scope = HostCpus {
+            scope_cpuset: false,
+            ..held_host()
+        };
+        let err = admitted_placement(
+            home.path(),
+            None,
+            Some(BackendKind::Firecracker),
+            &no_scope,
+            None,
+        )
+        .expect_err("refused");
         assert_eq!(
-            admitted_cpus(home.path(), None, Some(BackendKind::Qemu), None).unwrap(),
-            None
+            refusal(err),
+            PlanPlacementRefusal::ScopeCannotConfine { held: set("2-3") }
+        );
+        let no_list = HostCpus {
+            online: None,
+            ..held_host()
+        };
+        let err = admitted_placement(
+            home.path(),
+            None,
+            Some(BackendKind::Firecracker),
+            &no_list,
+            None,
+        )
+        .expect_err("refused");
+        assert_eq!(
+            refusal(err),
+            PlanPlacementRefusal::NoCpuList { held: set("2-3") }
         );
     }
 }

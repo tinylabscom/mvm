@@ -1,19 +1,24 @@
 //! The host half of exclusive core placement: which cores this host has, which
-//! cores admitted topologies already hold, and what is left for everything
-//! else.
+//! cores admitted topologies and running machines already hold, and what is
+//! left for everything else.
 //!
 //! [`check_requirements`](mvm_contract::plan::topology::check_requirements)
 //! decides whether the backend has a mechanism at all, and
 //! [`Topology::validate`] refuses an overlap between two units of one
 //! topology. What neither can see is the host: a core the kernel does not
-//! have, and a core another tenant's admitted topology holds.
+//! have or does not isolate, a core another tenant's admitted topology holds,
+//! and a core a machine that is already running may use.
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use mvm_contract::plan::topology::{CorePlacement, Topology};
+use mvm_contract::plan::topology::{CorePlacement, Topology, Unit};
 use mvm_contract::protocol::cpu_set::CpuSet;
 use mvm_core::plan::{TenantId, WorkloadId};
+
+mod live;
+pub(crate) use live::record_owner;
+pub use live::{LiveMachine, PlacementOwner};
 
 /// What admission needs to know about this host's cores.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,16 +27,40 @@ pub struct HostCpus {
     pub scope_cpuset: bool,
     /// The CPUs the kernel has online, or `None` where it publishes no list.
     pub online: Option<CpuSet>,
+    /// The CPUs isolated from the general scheduler, or `None` where the
+    /// kernel publishes no list.
+    pub isolated: Option<CpuSet>,
+    /// Every machine running on this host, with the cores it may use.
+    pub live: Vec<LiveMachine>,
 }
 
 impl HostCpus {
-    /// This host, as it is now.
+    /// This host, as it is now, with the machines running under `home`.
     #[must_use]
-    pub fn probe() -> Self {
+    pub fn probe(home: &Path) -> Self {
         Self {
             scope_cpuset: mvm_core::spawn_scope::cpuset_gap().is_none(),
             online: mvm_core::spawn_scope::online_cpus(),
+            isolated: mvm_core::spawn_scope::isolated_cpus(),
+            live: live::live_machines(home),
         }
+    }
+
+    /// The cores a running machine may use: its recorded set, or every online
+    /// core when it was not confined.
+    fn cores_of<'a>(&'a self, machine: &'a LiveMachine) -> Option<&'a CpuSet> {
+        machine.cpus.as_ref().or(self.online.as_ref())
+    }
+
+    /// Cores running machines hold exclusively, whatever the latest
+    /// generation of their topology says.
+    #[must_use]
+    pub fn held_by_live_machines(&self) -> CpuSet {
+        self.live
+            .iter()
+            .filter(|machine| machine.owner.as_ref().is_some_and(|o| o.exclusive))
+            .filter_map(|machine| machine.cpus.as_ref())
+            .fold(CpuSet::default(), |held, cpus| held.union(cpus))
     }
 }
 
@@ -56,6 +85,26 @@ pub enum HostPlacementRefusal {
         other_tenant: TenantId,
         other_unit: WorkloadId,
     },
+    #[error(
+        "unit {} holds cores {cores} exclusively, and running machine {machine} may use them",
+        .unit.0
+    )]
+    HeldByLiveMachine {
+        unit: WorkloadId,
+        machine: String,
+        cores: CpuSet,
+    },
+    #[error(
+        "unit {} requires its cores isolated from the general scheduler, and {cores} are not",
+        .unit.0
+    )]
+    CoresNotIsolated { unit: WorkloadId, cores: CpuSet },
+    #[error(
+        "unit {} requires its cores isolated from the general scheduler, and this host \
+         publishes no list of isolated CPUs",
+        .unit.0
+    )]
+    NoIsolationList { unit: WorkloadId },
     #[error("exclusive placement holds every online core ({held}), leaving none for anything else")]
     NoCoreLeft { held: CpuSet },
 }
@@ -73,15 +122,17 @@ pub(crate) fn exclusive_cores(topology: &Topology) -> CpuSet {
 }
 
 /// Check `topology`, about to be admitted for `tenant`, against this host's
-/// cores and the topologies already admitted for other tenants.
+/// cores, the topologies already admitted for other tenants, and the machines
+/// already running.
 ///
 /// `admitted` may include `tenant`'s own last generation; it is skipped,
-/// because the generation being admitted replaces it.
+/// because the generation being admitted replaces it. A running machine is
+/// not skipped for that reason: a core it may use stays in use until it stops.
 ///
 /// # Errors
 ///
-/// The first core the host lacks, the first core another tenant holds, or a
-/// placement that would leave no core for floating units and MVM's own work.
+/// The first refusal in the order of [`HostPlacementRefusal`]'s checks per
+/// unit, then a placement that would leave no core free.
 pub(crate) fn check_host_placement(
     tenant: &TenantId,
     topology: &Topology,
@@ -98,38 +149,10 @@ pub(crate) fn check_host_placement(
             continue;
         };
         let cores = CpuSet::from_cores(cores);
-        for core in cores.iter() {
-            match &host.online {
-                None => {
-                    return Err(HostPlacementRefusal::NoCpuList {
-                        unit: unit.workload.clone(),
-                        core,
-                    });
-                }
-                Some(online) if !online.contains(core) => {
-                    return Err(HostPlacementRefusal::UnknownCore {
-                        unit: unit.workload.clone(),
-                        core,
-                    });
-                }
-                Some(_) => {}
-            }
-        }
-        for (other_tenant, other) in &others {
-            for other_unit in &other.units {
-                let CorePlacement::Exclusive(other_cores) = &other_unit.placement else {
-                    continue;
-                };
-                if let Some(core) = cores.first_shared(&CpuSet::from_cores(other_cores)) {
-                    return Err(HostPlacementRefusal::HeldByAnotherTenant {
-                        unit: unit.workload.clone(),
-                        core,
-                        other_tenant: other_tenant.clone(),
-                        other_unit: other_unit.workload.clone(),
-                    });
-                }
-            }
-        }
+        check_online(unit, &cores, host)?;
+        check_isolated(unit, &cores, host)?;
+        check_other_tenants(unit, &cores, &others)?;
+        check_live_machines(tenant, topology, unit, &cores, host)?;
         held = held.union(&cores);
     }
     if let Some(online) = &host.online
@@ -137,13 +160,125 @@ pub(crate) fn check_host_placement(
     {
         let held_everywhere = others
             .iter()
-            .fold(held, |all, (_, other)| all.union(&exclusive_cores(other)));
+            .fold(held, |all, (_, other)| all.union(&exclusive_cores(other)))
+            .union(&host.held_by_live_machines());
         remaining_cores(online, &held_everywhere)?;
     }
     Ok(())
 }
 
-/// The online cores no admitted topology holds exclusively.
+fn check_online(unit: &Unit, cores: &CpuSet, host: &HostCpus) -> Result<(), HostPlacementRefusal> {
+    for core in cores.iter() {
+        match &host.online {
+            None => {
+                return Err(HostPlacementRefusal::NoCpuList {
+                    unit: unit.workload.clone(),
+                    core,
+                });
+            }
+            Some(online) if !online.contains(core) => {
+                return Err(HostPlacementRefusal::UnknownCore {
+                    unit: unit.workload.clone(),
+                    core,
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// Read isolation only for a unit that requires it.
+fn check_isolated(
+    unit: &Unit,
+    cores: &CpuSet,
+    host: &HostCpus,
+) -> Result<(), HostPlacementRefusal> {
+    if !unit.require_isolated_cores {
+        return Ok(());
+    }
+    let Some(isolated) = &host.isolated else {
+        return Err(HostPlacementRefusal::NoIsolationList {
+            unit: unit.workload.clone(),
+        });
+    };
+    let exposed = cores.difference(isolated);
+    if exposed.is_empty() {
+        return Ok(());
+    }
+    Err(HostPlacementRefusal::CoresNotIsolated {
+        unit: unit.workload.clone(),
+        cores: exposed,
+    })
+}
+
+fn check_other_tenants(
+    unit: &Unit,
+    cores: &CpuSet,
+    others: &[&(TenantId, Topology)],
+) -> Result<(), HostPlacementRefusal> {
+    for (other_tenant, other) in others {
+        for other_unit in &other.units {
+            let CorePlacement::Exclusive(other_cores) = &other_unit.placement else {
+                continue;
+            };
+            if let Some(core) = cores.first_shared(&CpuSet::from_cores(other_cores)) {
+                return Err(HostPlacementRefusal::HeldByAnotherTenant {
+                    unit: unit.workload.clone(),
+                    core,
+                    other_tenant: other_tenant.clone(),
+                    other_unit: other_unit.workload.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Refuse cores a running machine may use, unless it runs this unit or the
+/// other member of its standby pair.
+fn check_live_machines(
+    tenant: &TenantId,
+    topology: &Topology,
+    unit: &Unit,
+    cores: &CpuSet,
+    host: &HostCpus,
+) -> Result<(), HostPlacementRefusal> {
+    for machine in &host.live {
+        if machine
+            .owner
+            .as_ref()
+            .is_some_and(|owner| owns_pair(tenant, topology, unit, owner))
+        {
+            continue;
+        }
+        let Some(usable) = host.cores_of(machine) else {
+            continue;
+        };
+        let shared = cores.intersection(usable);
+        if !shared.is_empty() {
+            return Err(HostPlacementRefusal::HeldByLiveMachine {
+                unit: unit.workload.clone(),
+                machine: machine.name.clone(),
+                cores: shared,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn owns_pair(tenant: &TenantId, topology: &Topology, unit: &Unit, owner: &PlacementOwner) -> bool {
+    if owner.tenant != *tenant {
+        return false;
+    }
+    owner.workload == unit.workload
+        || topology.standby_pairs.iter().any(|pair| {
+            (pair.active == unit.workload && pair.standby == owner.workload)
+                || (pair.standby == unit.workload && pair.active == owner.workload)
+        })
+}
+
+/// The online cores nothing holds exclusively.
 ///
 /// # Errors
 ///
@@ -198,162 +333,41 @@ pub(crate) fn admitted_topologies(
     Ok(admitted)
 }
 
-/// Every core held exclusively by any topology admitted under the resolved
-/// mvm home, for a report rather than a decision.
+/// Every core held exclusively on this host, by an admitted topology or a
+/// running machine, for a report rather than a decision.
 ///
 /// # Errors
 ///
 /// As [`admitted_topologies`].
 pub fn exclusive_cores_held_on_host() -> Result<CpuSet> {
-    held_on_host(&mvm_core::config::mvm_home_strict()?, None)
+    let home = mvm_core::config::mvm_home_strict()?;
+    let live = HostCpus {
+        scope_cpuset: false,
+        online: None,
+        isolated: None,
+        live: live::live_machines(&home),
+    };
+    held_on_host(&home, &live, None)
 }
 
-/// Every core held exclusively by any topology admitted on this host.
+/// Every core held exclusively on this host: by any admitted topology, and by
+/// any running machine placed exclusively, even one whose topology has since
+/// released it.
 ///
 /// # Errors
 ///
 /// As [`admitted_topologies`].
-pub(crate) fn held_on_host(home: &Path, host_signer_keys_dir: Option<&Path>) -> Result<CpuSet> {
+pub(crate) fn held_on_host(
+    home: &Path,
+    host: &HostCpus,
+    host_signer_keys_dir: Option<&Path>,
+) -> Result<CpuSet> {
     Ok(admitted_topologies(home, host_signer_keys_dir)?
         .iter()
-        .fold(CpuSet::default(), |held, (_, topology)| {
+        .fold(host.held_by_live_machines(), |held, (_, topology)| {
             held.union(&exclusive_cores(topology))
         }))
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use mvm_contract::plan::topology::CoreId;
-
-    fn tenant(name: &str) -> TenantId {
-        TenantId(name.to_string())
-    }
-
-    fn with_placements(placements: &[(&str, &[u32])]) -> Topology {
-        let mut topology = super::super::tests::topology(1);
-        let template = topology.units[0].clone();
-        topology.units = placements
-            .iter()
-            .map(|(name, cores)| {
-                let mut unit = template.clone();
-                unit.workload = WorkloadId((*name).to_string());
-                unit.placement = if cores.is_empty() {
-                    CorePlacement::Floating
-                } else {
-                    CorePlacement::Exclusive(cores.iter().map(|c| CoreId(*c)).collect())
-                };
-                unit
-            })
-            .collect();
-        topology
-    }
-
-    fn host(online: &str) -> HostCpus {
-        HostCpus {
-            scope_cpuset: true,
-            online: Some(CpuSet::parse(online).unwrap()),
-        }
-    }
-
-    #[test]
-    fn a_core_the_host_does_not_have_is_refused() {
-        let topology = with_placements(&[("a", &[2, 9])]);
-        assert_eq!(
-            check_host_placement(&tenant("t"), &topology, &host("0-7"), &[]),
-            Err(HostPlacementRefusal::UnknownCore {
-                unit: WorkloadId("a".into()),
-                core: 9
-            })
-        );
-    }
-
-    #[test]
-    fn a_host_with_no_cpu_list_refuses_any_exclusive_core() {
-        let topology = with_placements(&[("a", &[1])]);
-        let host = HostCpus {
-            scope_cpuset: true,
-            online: None,
-        };
-        assert_eq!(
-            check_host_placement(&tenant("t"), &topology, &host, &[]),
-            Err(HostPlacementRefusal::NoCpuList {
-                unit: WorkloadId("a".into()),
-                core: 1
-            })
-        );
-    }
-
-    #[test]
-    fn a_core_another_tenant_holds_is_refused() {
-        let ours = with_placements(&[("a", &[2, 3])]);
-        let theirs = with_placements(&[("x", &[]), ("y", &[3, 4])]);
-        assert_eq!(
-            check_host_placement(&tenant("t"), &ours, &host("0-7"), &[(tenant("u"), theirs)]),
-            Err(HostPlacementRefusal::HeldByAnotherTenant {
-                unit: WorkloadId("a".into()),
-                core: 3,
-                other_tenant: tenant("u"),
-                other_unit: WorkloadId("y".into()),
-            })
-        );
-    }
-
-    #[test]
-    fn our_own_previous_generation_does_not_conflict() {
-        let ours = with_placements(&[("a", &[2, 3])]);
-        let previous = ours.clone();
-        assert_eq!(
-            check_host_placement(
-                &tenant("t"),
-                &ours,
-                &host("0-7"),
-                &[(tenant("t"), previous)]
-            ),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn disjoint_tenants_and_floating_units_are_admitted() {
-        let ours = with_placements(&[("a", &[2, 3]), ("b", &[])]);
-        let theirs = with_placements(&[("y", &[4])]);
-        assert_eq!(
-            check_host_placement(&tenant("t"), &ours, &host("0-7"), &[(tenant("u"), theirs)]),
-            Ok(())
-        );
-        let floating = with_placements(&[("a", &[])]);
-        let no_list = HostCpus {
-            scope_cpuset: false,
-            online: None,
-        };
-        assert_eq!(
-            check_host_placement(&tenant("t"), &floating, &no_list, &[]),
-            Ok(()),
-            "a topology with no exclusive core reads nothing off the host"
-        );
-    }
-
-    #[test]
-    fn a_placement_that_leaves_no_core_is_refused() {
-        let ours = with_placements(&[("a", &[0, 1])]);
-        let theirs = with_placements(&[("y", &[2, 3])]);
-        assert_eq!(
-            check_host_placement(&tenant("t"), &ours, &host("0-3"), &[(tenant("u"), theirs)]),
-            Err(HostPlacementRefusal::NoCoreLeft {
-                held: CpuSet::parse("0-3").unwrap()
-            })
-        );
-    }
-
-    #[test]
-    fn the_remaining_cores_exclude_every_held_one() {
-        let online = CpuSet::parse("0-7").unwrap();
-        let held = exclusive_cores(&with_placements(&[("a", &[2, 3]), ("b", &[]), ("c", &[6])]));
-        assert_eq!(held.to_string(), "2-3,6");
-        assert_eq!(
-            remaining_cores(&online, &held).unwrap().to_string(),
-            "0-1,4-5,7"
-        );
-    }
-}
+mod tests;

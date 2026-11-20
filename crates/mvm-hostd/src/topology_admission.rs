@@ -39,7 +39,9 @@ use crate::audit::host_keypair::host_signer_id;
 
 pub(crate) mod placement;
 mod record;
-pub use placement::{HostCpus, HostPlacementRefusal, exclusive_cores_held_on_host};
+pub use placement::{
+    HostCpus, HostPlacementRefusal, LiveMachine, PlacementOwner, exclusive_cores_held_on_host,
+};
 pub use record::AdmittedTopologyRecord;
 
 /// Chain event for an admitted topology generation.
@@ -113,7 +115,8 @@ pub struct TopologyAdmissionRequest<'a> {
     /// The failover time measured on this host and backend, if any.
     pub measured_failover: Option<MeasuredFailoverMs>,
     /// This host's cores and whether its spawn scope can carry an
-    /// allowed-CPU set; [`HostCpus::probe`] outside tests.
+    /// allowed-CPU set, its isolated cores and its running machines;
+    /// [`HostCpus::probe`] outside tests.
     pub host_cpus: &'a HostCpus,
     pub clock: &'a dyn Clock,
     /// Where the host signer lives; `None` for the default keys directory.

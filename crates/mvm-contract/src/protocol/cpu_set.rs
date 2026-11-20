@@ -90,6 +90,12 @@ impl CpuSet {
         Self(self.0.union(&other.0).copied().collect())
     }
 
+    /// The CPUs in both sets.
+    #[must_use]
+    pub fn intersection(&self, other: &Self) -> Self {
+        Self(self.0.intersection(&other.0).copied().collect())
+    }
+
     /// The lowest CPU in both sets, if any.
     #[must_use]
     pub fn first_shared(&self, other: &Self) -> Option<u32> {
@@ -193,6 +199,7 @@ mod tests {
             "2-3,6"
         );
         assert_eq!(all.first_shared(&taken), Some(2));
+        assert_eq!(all.intersection(&taken), taken);
         assert_eq!(taken.first_shared(&CpuSet::parse("4").unwrap()), None);
         let json = serde_json::to_string(&all).unwrap();
         assert_eq!(json, "\"0-7\"");

@@ -76,6 +76,7 @@ use mvm_contract::protocol::resource_controls::{
 mod cpuset;
 pub use cpuset::{
     CpusetGap, cpuset_delegated_at, cpuset_gap, isolated_cpus, online_cpus, read_cpu_list,
+    recorded_cpus,
 };
 
 /// systemd expresses a CPU quota as a percentage of one core, so one percent is

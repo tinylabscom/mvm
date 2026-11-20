@@ -43,7 +43,13 @@ pub(crate) fn admit_topology_binding_at(
 ) -> Result<Option<Unit>> {
     match decide(home, plan, host_signer_keys_dir) {
         Ok(unit) => Ok(unit),
-        Err(refusal) => Err(audit_refusal(home, plan, host_signer_keys_dir, refusal)),
+        Err(refusal) => Err(audit_refusal(
+            home,
+            plan,
+            host_signer_keys_dir,
+            AuditedRefusal::TOPOLOGY_BINDING,
+            refusal,
+        )),
     }
 }
 
@@ -58,31 +64,52 @@ fn decide(
     Ok(check_topology_binding(plan, admitted.as_ref())?.cloned())
 }
 
-/// Context on a refusal this check has already written to the chain. A caller
-/// that audits admission failures itself skips an error carrying it, so each
-/// refusal is recorded once. A refusal whose entry could not be written does
-/// not carry it, and is left for that caller to record.
+/// Context on a refusal this check, or the core placement check after it, has
+/// already written to the chain. A caller that audits admission failures
+/// itself skips an error carrying it, so each refusal is recorded once. A
+/// refusal whose entry could not be written does not carry it, and is left for
+/// that caller to record.
 #[derive(Debug)]
-pub(crate) struct TopologyRefusalAudited;
+pub(crate) struct TopologyRefusalAudited(&'static str);
 
 impl std::fmt::Display for TopologyRefusalAudited {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(REFUSED)
+        f.write_str(self.0)
     }
 }
 
-const REFUSED: &str = "plan refused: it does not match the admitted topology";
+/// Which check refused, as its chain stage and its headline.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct AuditedRefusal {
+    stage: &'static str,
+    headline: &'static str,
+}
 
-fn audit_refusal(
+impl AuditedRefusal {
+    const TOPOLOGY_BINDING: Self = Self {
+        stage: TOPOLOGY_BINDING_STAGE,
+        headline: "plan refused: it does not match the admitted topology",
+    };
+    pub(super) const CORE_PLACEMENT: Self = Self {
+        stage: CORE_PLACEMENT_STAGE,
+        headline: "plan refused: it cannot be placed on this host's cores",
+    };
+}
+
+/// The `stage` label a core placement refusal carries.
+pub const CORE_PLACEMENT_STAGE: &str = "core_placement";
+
+pub(super) fn audit_refusal(
     home: &Path,
     plan: &ExecutionPlan,
     host_signer_keys_dir: Option<&Path>,
+    check: AuditedRefusal,
     refusal: anyhow::Error,
 ) -> anyhow::Error {
-    let reason = format!("{REFUSED}: {refusal:#}");
-    match emit(home, plan, host_signer_keys_dir, &reason) {
-        Ok(()) => refusal.context(TopologyRefusalAudited),
-        Err(e) => refusal.context(REFUSED).context(format!(
+    let reason = format!("{}: {refusal:#}", check.headline);
+    match emit(home, plan, host_signer_keys_dir, check.stage, &reason) {
+        Ok(()) => refusal.context(TopologyRefusalAudited(check.headline)),
+        Err(e) => refusal.context(check.headline).context(format!(
             "the refusal could not be written to the audit chain: {e:#}"
         )),
     }
@@ -92,15 +119,12 @@ fn emit(
     home: &Path,
     plan: &ExecutionPlan,
     host_signer_keys_dir: Option<&Path>,
+    stage: &str,
     reason: &str,
 ) -> Result<()> {
     let signer = match host_signer_keys_dir {
         Some(dir) => crate::audit::host_keypair::load_or_init_at(dir)?,
         None => crate::audit::host_keypair::load_or_init()?,
     };
-    AuditEmitter::with_dir(signer.signing, &home.join("audit"))?.emit_refused(
-        plan,
-        TOPOLOGY_BINDING_STAGE,
-        reason,
-    )
+    AuditEmitter::with_dir(signer.signing, &home.join("audit"))?.emit_refused(plan, stage, reason)
 }
