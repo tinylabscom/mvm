@@ -1171,6 +1171,12 @@ const GUEST_SIDECAR_FILES: &[&str] = &[
     mvm_build::builder_vm::SIDECAR_FILENAME,
     "rootfs.verity",
     "rootfs.roothash",
+    // A standby parent's public guest identity and telemetry marker. A
+    // Firecracker parent's state dir is removed once it is captured, so the
+    // checkpoint is the only place a later claim can learn what its restored
+    // guest already holds.
+    mvm_vmm::host::flowmux_identity::PUBLIC_IDENTITY_FILE,
+    mvm_vmm::host::telemetry_provisioning::TELEMETRY_PROVISIONED_FILE,
 ];
 
 /// Copy guest sidecars from the directory that contains `src_rootfs` into
@@ -2162,6 +2168,11 @@ mod tests {
         std::fs::write(rootfs_dir.join("rootfs.verity"), b"verity").unwrap();
         let identity = rootfs_dir.join("flowmux-identity.ext4");
         std::fs::write(&identity, b"identity").unwrap();
+        std::fs::write(
+            rootfs_dir.join(mvm_vmm::host::flowmux_identity::PUBLIC_IDENTITY_FILE),
+            b"{}",
+        )
+        .unwrap();
         let ctl = MockControl {
             rootfs,
             identity: Some(identity),
@@ -2198,6 +2209,10 @@ mod tests {
         assert!(
             names.contains(&"flowmux-identity.ext4"),
             "expected identity anchor in vm_full content; got {names:?}"
+        );
+        assert!(
+            names.contains(&mvm_vmm::host::flowmux_identity::PUBLIC_IDENTITY_FILE),
+            "a warm claim needs the parent's public identity from the checkpoint; got {names:?}"
         );
         assert_eq!(
             names
