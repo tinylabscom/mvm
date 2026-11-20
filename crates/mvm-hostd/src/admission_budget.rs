@@ -19,7 +19,7 @@ use mvm_vmm::host::process_liveness::state_dir_has_live_process;
 
 mod permit;
 pub use permit::{HostBudgetPermit, HostBudgetRelease};
-pub(crate) use permit::{acquire_lock, read_private};
+pub(crate) use permit::{acquire_existing_lock, acquire_lock, read_private};
 
 /// File name of the per-VM charge record, written into the VM's state dir at
 /// boot and read back by every later admission.
