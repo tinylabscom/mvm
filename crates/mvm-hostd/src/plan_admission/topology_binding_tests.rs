@@ -323,7 +323,8 @@ fn topology_with_stream_into_unit(plan: &ExecutionPlan) -> Topology {
     let mut topology = topology_for(plan, 1);
     let mut producer = topology.units[0].clone();
     producer.workload = WorkloadId("producer".to_string());
-    topology.units.push(producer);
+    // Units are kept in ascending order, and "producer" sorts before the unit.
+    topology.units.insert(0, producer);
     topology.edges.push(Edge {
         kind: EdgeKind::Stream,
         from: WorkloadId("producer".to_string()),
