@@ -551,6 +551,44 @@ mod tests {
         assert!(!held.contains(FileId::of(&std::fs::metadata(&other).unwrap())));
     }
 
+    #[cfg(target_os = "linux")]
+    fn io_in(dir: &Path) -> super::super::io::FirecrackerIO {
+        super::super::io::FirecrackerIO::new(dir.join("fc.socket"))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_restored_vm_without_a_pid_marker_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = restored_vmm_pid(&io_in(dir.path())).unwrap_err();
+        assert!(error.to_string().contains("fc.pid"), "{error:#}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_pid_marker_naming_a_process_that_is_not_this_vms_firecracker_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        // The test process is alive but is not a Firecracker serving this socket.
+        std::fs::write(dir.path().join("fc.pid"), std::process::id().to_string()).unwrap();
+        let error = restored_vmm_pid(&io_in(dir.path())).unwrap_err();
+        assert!(
+            error.to_string().contains("is not the Firecracker serving"),
+            "{error:#}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_unreadable_descriptor_table_fails_closed() {
+        // No process has this pid, so /proc/<pid>/fd cannot be listed; the
+        // check must refuse rather than fall back to the digest alone.
+        let error = match HeldFiles::of_process(u32::MAX) {
+            Err(error) => error,
+            Ok(_) => panic!("expected an error for an unreadable descriptor table"),
+        };
+        assert!(error.to_string().contains("/fd"), "{error:#}");
+    }
+
     #[test]
     fn absent_configuration_is_not_baked_runtime_evidence() {
         for config in ["{}", r#"{"boot-source":{},"drives":[]}"#] {
