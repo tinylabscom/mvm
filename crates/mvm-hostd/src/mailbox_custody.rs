@@ -152,15 +152,8 @@ fn identity<'a>(
     );
     // Only the host-trusted template's address is checked here; the transient
     // seed is never used to open retained ciphertext or re-sign history.
-    let (policy, _) = derive_launch_keys(keys_dir, &grant, &Key::random())?.trust();
     ensure!(
-        address
-            == MailboxAddress {
-                tenant: policy.context.expected_tenant,
-                authorization_domain: policy.context.expected_authorization_domain,
-                mailbox: policy.context.expected_mailbox,
-                recipient: policy.context.expected_recipient,
-            },
+        address == derive_launch_keys(keys_dir, &grant, &Key::random())?.address(),
         "mailbox custody address does not match host-trusted template"
     );
     Ok(Identity {
@@ -441,16 +434,9 @@ mod tests {
             service_blind: None,
         });
         plan.plan_id = compute_plan_id(&plan);
-        let (policy, _) =
-            derive_launch_keys(dir.path(), &plan.mailbox.expect("grant"), &Key::random())
-                .expect("host mailbox keys")
-                .trust();
-        let address = MailboxAddress {
-            tenant: policy.context.expected_tenant,
-            authorization_domain: policy.context.expected_authorization_domain,
-            mailbox: policy.context.expected_mailbox,
-            recipient: policy.context.expected_recipient,
-        };
+        let address = derive_launch_keys(dir.path(), &plan.mailbox.expect("grant"), &Key::random())
+            .expect("host mailbox keys")
+            .address();
         (dir, plan, address)
     }
 
@@ -636,7 +622,7 @@ mod tests {
                 .expose_bytes()
         );
         assert_eq!(anchor_key, keys.anchor_key());
-        let (policy, mut sealer) = derived.trust();
+        let (policy, mut sealer) = derived.trust(ExecutionEpoch::FIRST);
         let payload_key = keys.payload_key();
         assert_eq!(
             *policy.encryption_key.expose_bytes(),

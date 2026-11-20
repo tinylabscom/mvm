@@ -34,6 +34,7 @@ use mvm_contract::protocol::mailbox::{
     SequenceNumber, SignedMailboxCapability,
 };
 use mvm_core::crypto::aead::Key;
+use mvm_core::host_interface::epoch_gate::CommandGate;
 pub use mvm_core::mailbox::frame::Refusal;
 use mvm_core::mailbox::frame::{
     OWN_MAILBOX_RECIPIENT, OutboxMessage, decode_frame, encode_frame, send_frame,
@@ -79,15 +80,29 @@ pub struct MailboxPolicy {
 
 impl MailboxPolicy {
     /// Fold a signed plan's grant into host-held trust. The grant decides
-    /// which mailbox, whose capabilities and which epoch; the keys and peer
-    /// identities stay what the host already trusted.
+    /// which mailbox and whose capabilities; the keys and peer identities stay
+    /// what the host already trusted. The epoch the policy accepts is not the
+    /// grant's: it is the receiving unit's current epoch, which the bind site
+    /// reads from the epoch gate ([`bound_epoch`]).
     pub fn with_grant(mut self, grant: &MailboxGrant) -> std::io::Result<Self> {
         self.authority_key = VerifyingKey::from_bytes(&grant.authority_key)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         self.context.expected_mailbox = grant.mailbox;
-        self.context.current_execution_epoch = grant.epoch;
         Ok(self)
     }
+}
+
+/// The current execution epoch of `unit`, the unit whose service is binding
+/// to check its incoming messages, read once from the workload ledger under
+/// `home`. A quarantined unit is refused, so its service never binds.
+///
+/// The service keeps this value for as long as it serves: a replacement or a
+/// quarantine the policy coordinator commits after bind is not seen until the
+/// service binds again.
+pub fn bound_epoch(home: &Path, unit: &str) -> std::io::Result<ExecutionEpoch> {
+    let gate = CommandGate::load_at(home).map_err(std::io::Error::other)?;
+    gate.admit(unit, gate.current(unit))
+        .map_err(|denial| std::io::Error::new(std::io::ErrorKind::PermissionDenied, denial))
 }
 
 /// Host-held material that turns a guest's plaintext message into a sealed,
@@ -556,10 +571,12 @@ impl MailboxService {
     }
 
     /// The execution epoch this node currently accepts, for a service that
-    /// outlives a workload replacement (the scripted three-node demo). The
-    /// per-VM mailbox process never calls it: it takes its epoch from its
-    /// grant, and a replacement is a new process under a grant whose epoch
-    /// and keys are both new.
+    /// outlives a workload replacement (the scripted three-node demo). This
+    /// advances the epoch outside the workload ledger, so it exists only in
+    /// test builds: the per-VM mailbox process reads its unit's epoch from the
+    /// ledger when it binds ([`bound_epoch`]), and a replacement is a new
+    /// process under a grant whose epoch and keys are both new.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_current_epoch(&self, epoch: ExecutionEpoch) {
         self.shared
             .state
@@ -909,7 +926,8 @@ mod accept_loop_tests {
             retention: None,
             service_blind: None,
         };
-        let (trust, _) = crate::mailbox_launch::host_trust(dir, &grant, &test_secret()).unwrap();
+        let (trust, _) =
+            crate::mailbox_launch::host_trust(dir, &grant, &test_secret(), grant.epoch).unwrap();
         let limits = MailboxLimits {
             max_depth: 4,
             max_frame_bytes: 1024,
@@ -1117,8 +1135,122 @@ mod tests {
         let grant = grant_at(keys, epoch);
         let (policy, sealer) = derive_launch_keys(keys, &grant, &test_secret())
             .unwrap()
-            .trust();
+            .trust(grant.epoch);
         bind_fixture_grant(&grant, policy, sealer, LAUNCH_LIMITS, socket).unwrap()
+    }
+
+    /// A unit's service bound the way the mailbox process binds it: its
+    /// current epoch read once from the ledger under `home`. Its guest seals
+    /// under a grant at `sealed`.
+    fn bind_unit(
+        home: &Path,
+        unit: &str,
+        socket: &Path,
+        sealed: u64,
+    ) -> std::io::Result<(MailboxService, GuestSealer)> {
+        let grant = grant_at(home, sealed);
+        let (policy, sealer) = derive_launch_keys(home, &grant, &test_secret())
+            .unwrap()
+            .trust(bound_epoch(home, unit)?);
+        bind_fixture_grant(&grant, policy, sealer, LAUNCH_LIMITS, socket)
+    }
+
+    /// Send one guest message through a unit's service; the refusal, if any.
+    fn deliver(home: &Path, unit: &str, sealed: u64) -> std::result::Result<(), Refusal> {
+        let socket = home.join(format!("{unit}-{sealed}.sock"));
+        let (service, mut sealer) = bind_unit(home, unit, &socket, sealed).unwrap();
+        let (capability, envelope) = sealer.seal(greeting()).unwrap();
+        send(&socket, &capability, &envelope)?;
+        assert!(service.receive().is_some(), "an accepted message is queued");
+        Ok(())
+    }
+
+    fn refused(error: mvm_core::mailbox::MailboxError) -> std::result::Result<(), Refusal> {
+        Err(Refusal::Mailbox(error.to_string()))
+    }
+
+    /// A home whose ledger has replaced unit `a` once, to epoch 2, and has
+    /// never touched unit `b`.
+    fn ledger_with_a_replaced() -> tempfile::TempDir {
+        let home = tempfile::tempdir().unwrap();
+        crate::audit::host_keypair::load_or_init_at(home.path()).unwrap();
+        crate::policy_generation::workload_store::OwnedWorkloadStore::open(home.path())
+            .unwrap()
+            .commit(
+                &mvm_core::host_interface::workload::WorkloadChange::Replace {
+                    workload: "a".into(),
+                    from_epoch: ExecutionEpoch::FIRST,
+                },
+            )
+            .unwrap();
+        home
+    }
+
+    #[test]
+    fn a_service_binds_at_its_units_ledger_epoch_and_refuses_any_other() {
+        use mvm_core::mailbox::MailboxError::{ExecutionEpochNotPromoted, StaleExecutionEpoch};
+        let home = ledger_with_a_replaced();
+        let home = home.path();
+        assert_eq!(
+            bound_epoch(home, "a").unwrap(),
+            ExecutionEpoch::new(2).unwrap()
+        );
+        assert_eq!(deliver(home, "a", 2), Ok(()));
+        assert_eq!(deliver(home, "a", 1), refused(StaleExecutionEpoch));
+        assert_eq!(deliver(home, "a", 3), refused(ExecutionEpochNotPromoted));
+    }
+
+    #[test]
+    fn two_units_are_gated_by_their_own_ledger_epochs() {
+        use mvm_core::mailbox::MailboxError::{ExecutionEpochNotPromoted, StaleExecutionEpoch};
+        let home = ledger_with_a_replaced();
+        let home = home.path();
+        assert_eq!(bound_epoch(home, "b").unwrap(), ExecutionEpoch::FIRST);
+        assert_eq!(deliver(home, "b", 1), Ok(()));
+        assert_eq!(deliver(home, "b", 2), refused(ExecutionEpochNotPromoted));
+        assert_eq!(deliver(home, "a", 2), Ok(()));
+        assert_eq!(deliver(home, "a", 1), refused(StaleExecutionEpoch));
+    }
+
+    #[test]
+    fn a_quarantined_units_service_does_not_bind() {
+        let home = ledger_with_a_replaced();
+        crate::policy_generation::workload_store::OwnedWorkloadStore::open(home.path())
+            .unwrap()
+            .commit(
+                &mvm_core::host_interface::workload::WorkloadChange::Quarantine {
+                    workload: "a".into(),
+                },
+            )
+            .unwrap();
+        let socket = home.path().join("a.sock");
+        let refused = bind_unit(home.path(), "a", &socket, 2).err().unwrap();
+        assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(!socket.exists(), "a quarantined unit binds no listener");
+        assert!(
+            bound_epoch(home.path(), "b").is_ok(),
+            "bystander unaffected"
+        );
+    }
+
+    #[test]
+    fn the_demo_epoch_setter_is_compiled_only_for_tests() {
+        let source = include_str!("mailbox_service.rs");
+        let declared = source.find("pub fn set_current_epoch").unwrap();
+        assert!(
+            source[..declared]
+                .trim_end()
+                .ends_with("#[cfg(any(test, feature = \"test-support\"))]"),
+            "the setter advances the epoch outside the ledger"
+        );
+        for production in [
+            include_str!("mailbox_process.rs"),
+            include_str!("mailbox_launch.rs"),
+            include_str!("bin/mvm-mailbox.rs"),
+        ] {
+            let body = production.split("#[cfg(test)]").next().unwrap();
+            assert!(!body.contains("set_current_epoch"));
+        }
     }
 
     #[test]
@@ -1159,7 +1291,7 @@ mod tests {
         let socket = dir.path().join("b.sock");
         let (policy, _) = derive_launch_keys(dir.path(), &grant_at(dir.path(), 1), &test_secret())
             .unwrap()
-            .trust();
+            .trust(ExecutionEpoch::FIRST);
         let service = MailboxService::bind(&socket, LAUNCH_LIMITS, policy).unwrap();
         service.set_current_epoch(ExecutionEpoch::new(2).unwrap());
         assert_eq!(
@@ -1180,7 +1312,9 @@ mod tests {
         ),
     ) -> std::result::Result<(), Refusal> {
         let grant = grant_at(keys, 1);
-        let (policy, sealer) = derive_launch_keys(keys, &grant, secret).unwrap().trust();
+        let (policy, sealer) = derive_launch_keys(keys, &grant, secret)
+            .unwrap()
+            .trust(grant.epoch);
         let socket = keys.join(name);
         let _bound = bind_fixture_grant(&grant, policy, sealer, LAUNCH_LIMITS, &socket).unwrap();
         send(&socket, &sealed.0, &sealed.1)
@@ -1194,7 +1328,9 @@ mod tests {
         mvm_contract::protocol::mailbox::MailboxEnvelope,
     ) {
         let grant = grant_at(keys, 1);
-        let (_, mut sealer) = derive_launch_keys(keys, &grant, secret).unwrap().trust();
+        let (_, mut sealer) = derive_launch_keys(keys, &grant, secret)
+            .unwrap()
+            .trust(grant.epoch);
         sealer.seal(greeting()).unwrap()
     }
 
@@ -1222,7 +1358,7 @@ mod tests {
         let old_secret = crate::mailbox_launch::mint_epoch_secret(state.path()).unwrap();
         let (policy, mut sealer) = derive_launch_keys(keys.path(), &grant, &old_secret)
             .unwrap()
-            .trust();
+            .trust(grant.epoch);
         let service = MailboxService::bind(&socket, LAUNCH_LIMITS, policy).unwrap();
         let (capability, envelope) = sealer.seal(greeting()).unwrap();
         send(&socket, &capability, &envelope).expect("first send accepted");
@@ -1242,7 +1378,7 @@ mod tests {
         assert_ne!(old_secret.expose_bytes(), new_secret.expose_bytes());
         let (policy, mut sealer) = derive_launch_keys(keys.path(), &grant, &new_secret)
             .unwrap()
-            .trust();
+            .trust(grant.epoch);
         let _restarted = MailboxService::bind(&socket, LAUNCH_LIMITS, policy).unwrap();
         assert_eq!(
             send(&socket, &capability, &envelope),

@@ -193,6 +193,7 @@ fn actor_process_config(
         actor: actor_template::endpoint_material(&keys_dir, plan).unwrap(),
         // The helper must never need to open the launcher's root keys.
         keys_dir: home.join("unavailable-root-keys"),
+        home: home.to_path_buf(),
         socket: mvm_core::config::vm_mailbox_socket_at(&state),
         route: mvm_core::vm_backend::HostDialRoute::PortSocket(state.join("guest.sock")),
         posture: Some(

@@ -841,8 +841,9 @@ fn a_guest_addresses_its_own_mailbox_without_the_derived_recipient() {
 }
 
 /// A plan, optionally carrying a mailbox grant for `channel`'s authority and
-/// epoch 1. The host-held trust the test hands in names a different epoch and
-/// a different authority, so only the grant can make a message open.
+/// epoch 1. The host-held trust the test hands in names a different authority,
+/// so only the grant can make a message open. Its epoch is the unit's current
+/// one, which the bind site reads from the epoch gate, not from the grant.
 fn plan_and_trust(channel: &Channel, granted: bool) -> (ExecutionPlan, MailboxPolicy) {
     let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
     if granted {
@@ -856,7 +857,7 @@ fn plan_and_trust(channel: &Channel, granted: bool) -> (ExecutionPlan, MailboxPo
         });
     }
     let trust = MailboxPolicy {
-        context: context(7),
+        context: context(1),
         encryption_key: Key::from_bytes([23; 32]),
         sender_key: channel.sender_key.verifying_key(),
         authority_key: SigningKey::from_bytes(&[99; 32]).verifying_key(),
@@ -1014,8 +1015,8 @@ fn a_restarted_mailbox_sealer_does_not_reuse_its_sender_boot() {
     .unwrap();
     let grant = granted_plan(authority.to_bytes()).mailbox.unwrap();
     let keys = derive_launch_keys(dir.path(), &grant, &test_secret()).unwrap();
-    let (_, first) = keys.trust();
-    let (_, restarted) = keys.trust();
+    let (_, first) = keys.trust(grant.epoch);
+    let (_, restarted) = keys.trust(grant.epoch);
     let first = first.with_grant(&grant).unwrap();
     let restarted = restarted.with_grant(&grant).unwrap();
 
@@ -1055,7 +1056,7 @@ fn derived_mailbox_keys_differ_per_mailbox_and_are_not_the_host_key() {
     let mut plan = granted_plan(a1.to_bytes());
     plan.mailbox.as_mut().unwrap().mailbox = m1;
     let grant = plan.mailbox.unwrap();
-    let (policy, sealer) = host_trust(keys.path(), &grant, &test_secret()).unwrap();
+    let (policy, sealer) = host_trust(keys.path(), &grant, &test_secret(), grant.epoch).unwrap();
     assert_eq!(policy.authority_key, a1);
     assert_ne!(sealer.sender_key.to_bytes(), [5; 32]);
     assert_ne!(sealer.authority_key.to_bytes(), [5; 32]);
@@ -1068,7 +1069,7 @@ fn derived_mailbox_keys_differ_per_mailbox_and_are_not_the_host_key() {
     foreign.authority_key = authority_key_for(keys.path(), &m2, ExecutionEpoch::new(1).unwrap())
         .unwrap()
         .to_bytes();
-    assert!(host_trust(keys.path(), &foreign, &test_secret()).is_err());
+    assert!(host_trust(keys.path(), &foreign, &test_secret(), grant.epoch).is_err());
 }
 
 /// A granted plan's derived keys serve the guest port from their own thread
@@ -1107,6 +1108,7 @@ fn derived_keys_serve_the_guest_port_and_queue_what_the_guest_sent() {
             route: mvm_core::vm_backend::HostDialRoute::PortSocket(dir.path().join("port.sock")),
         },
         LAUNCH_LIMITS,
+        grant.epoch,
     );
     assert_eq!(guest.join().unwrap(), Ok(()));
     let received = (0..100).find_map(|_| {
@@ -1159,6 +1161,7 @@ fn a_running_guest_submits_again_after_its_first_message_was_consumed() {
             route: mvm_core::vm_backend::HostDialRoute::PortSocket(dir.path().join("port.sock")),
         },
         LAUNCH_LIMITS,
+        grant.epoch,
     );
     let receive = || {
         (0..100)
@@ -2399,6 +2402,7 @@ fn missing_verified_posture_prevents_the_helper_from_reporting_ready() {
     .to_bytes();
     let grant = granted_plan(authority).mailbox.unwrap();
     let config = build_config(
+        &keys,
         &keys,
         &grant,
         &state_dir,

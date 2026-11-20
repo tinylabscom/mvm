@@ -43,7 +43,7 @@ use crate::mailbox_launch::actor_template::{
 
 mod scope;
 use crate::mailbox_commit::{ActorJournal, ActorOrdering, actor_destination_id, require_reached};
-use scope::{ScopedHistory, address, call_policy, context, key, reader_scope, storage};
+use scope::{ScopedHistory, address, key, reader_scope, storage};
 
 const MAX_RETAINED_CALLS: usize = 4096;
 const MAX_SEGMENT_RECORDS: usize = 64;
@@ -95,6 +95,8 @@ pub struct ActorOperationConfig {
     /// Aggregate disk allowance, including retained call metadata and all segments.
     pub max_storage_bytes: usize,
     pub now_unix_ms: i64,
+    /// This unit's execution epoch, read from the epoch gate when it bound.
+    pub current_epoch: mvm_contract::protocol::mailbox::ExecutionEpoch,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -470,7 +472,7 @@ impl ActorConversationEndpoint {
         let record = &self.state.records[index];
         if record.direction == Direction::Outbound {
             let mut conversation = self.conversation(index, peer)?;
-            let policy = call_policy(peer, self.now()?)?;
+            let policy = self.call_policy(peer, self.now()?)?;
             conversation
                 .enqueue_call(CallAdmission {
                     envelope: &record.call,
@@ -570,7 +572,7 @@ impl ActorConversationEndpoint {
             {
                 return Err(Refusal::NotAuthorized);
             }
-            let policy = call_policy(&peer, now)?;
+            let policy = self.call_policy(&peer, now)?;
             let opened = mvm_core::mailbox::open_authenticated_envelope(
                 &record.call,
                 &peer.send_capability,
@@ -646,7 +648,7 @@ impl ActorConversationEndpoint {
             &self.material.sender_key(),
         )
         .map_err(|_| Refusal::NotAuthorized)?;
-        let policy = call_policy(&peer, now)?;
+        let policy = self.call_policy(&peer, now)?;
         mvm_core::mailbox::open_authenticated_envelope(
             &call,
             &peer.send_capability,
@@ -893,7 +895,7 @@ impl ActorConversationEndpoint {
         reply: SignedMailboxCapability,
     ) -> Result<SignedDestinationReceipt> {
         let now = self.now()?;
-        let policy = call_policy(peer, now)?;
+        let policy = self.call_policy(peer, now)?;
         let opened = mvm_core::mailbox::open_authenticated_envelope(
             &envelope,
             &peer.send_capability,
@@ -1008,7 +1010,7 @@ impl ActorConversationEndpoint {
             if record.direction != Direction::Outbound || record.peer != peer.child_address {
                 continue;
             }
-            let context = context(
+            let context = self.context(
                 &peer.reply_header,
                 &record.reply_capability,
                 self.now()?,
@@ -1058,7 +1060,7 @@ impl ActorConversationEndpoint {
             let peer = self.peer(record.peer)?;
             self.initialize_call(index, &peer)?;
             let record = &self.state.records[index];
-            let context = context(
+            let context = self.context(
                 &peer.call.header,
                 authority.capability(),
                 self.now()?,
@@ -1131,7 +1133,7 @@ impl ActorConversationEndpoint {
         }
         let peer = self.peer(record.peer)?;
         let now = self.now()?;
-        let context = context(
+        let context = self.context(
             &peer.reply_header,
             &record.reply_capability,
             now,
@@ -1231,7 +1233,7 @@ impl ActorConversationEndpoint {
             .ok_or(Refusal::NotAuthorized)?;
         let record = &self.state.records[index];
         let peer = self.peer(record.peer)?;
-        let context = context(
+        let context = self.context(
             &peer.reply_header,
             authority.capability(),
             self.now()?,
@@ -1313,7 +1315,7 @@ impl ActorConversationEndpoint {
         } else {
             &peer.call.header
         };
-        let context = context(
+        let context = self.context(
             header,
             authority.capability(),
             self.now()?,
@@ -1542,6 +1544,10 @@ mod tests {
                 directory: directory.join(name),
                 max_storage_bytes: material.max_storage_bytes as usize,
                 now_unix_ms: actor_template::current_time_ms().unwrap(),
+                current_epoch: mvm_contract::protocol::mailbox::ExecutionEpoch::new(
+                    plan.execution_epoch,
+                )
+                .unwrap(),
             },
             material,
         )
@@ -2161,6 +2167,7 @@ mod tests {
                     directory: path,
                     max_storage_bytes: material.max_storage_bytes as usize,
                     now_unix_ms: actor_template::current_time_ms().unwrap(),
+                    current_epoch: mvm_contract::protocol::mailbox::ExecutionEpoch::new(1).unwrap(),
                 },
                 material
             )

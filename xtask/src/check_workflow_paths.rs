@@ -2335,6 +2335,7 @@ mod tests {
                 // Enabled only through mvm-client's and mvm-cli's
                 // dev-dependency, so their test lanes compile and run it.
                 "crates/mvm-hostd/src/seal_gate.rs",
+                "crates/mvm-hostd/src/mailbox_service.rs",
                 "tests/audit_emissions_live.rs",
             ]
             .iter()

@@ -21,6 +21,7 @@ use mvm_contract::protocol::mailbox::{
     MailboxEnvelope, MailboxEnvelopeHeader, MailboxGrant, MailboxGuestReaderScope, RevocationId,
     SignedDestinationReceipt, SignedMailboxCapability, SignedMailboxGuestReaderEnrollment,
 };
+use mvm_core::host_interface::epoch_gate::admit_at;
 use mvm_core::mailbox::conversation_wire::{
     self, ConversationBinding, ConversationRequest, ConversationResponse,
 };
@@ -959,8 +960,10 @@ fn guest_context(
     policy: &MailboxPolicy,
     reader: &GuestReaderAuthority,
 ) -> Result<OpenContext, Refusal> {
+    // The reader acts at its plan's epoch; only the unit's current one, which
+    // the policy took from the epoch gate at bind, may receive.
     if policy.context.expected_mailbox != reader.grant.mailbox
-        || policy.context.current_execution_epoch != reader.grant.epoch
+        || admit_at(policy.context.current_execution_epoch, reader.grant.epoch).is_err()
         || policy.context.expected_recipient != reader.capability.grant.address.recipient
         || policy.authority_key.to_bytes() != reader.grant.authority_key
     {
@@ -1422,7 +1425,7 @@ mod reader_tests {
         };
         let keys = crate::mailbox_launch::derive_launch_keys(dir.path(), &grant, &Key::random())
             .expect("test-purpose launch keys");
-        let (policy, sealer) = keys.trust();
+        let (policy, sealer) = keys.trust(epoch);
         let policy = policy.with_grant(&grant).expect("legacy test policy");
         let mut sealer = sealer.with_grant(&grant).expect("legacy test sealer");
         let intents = dir.path().join("intents");
