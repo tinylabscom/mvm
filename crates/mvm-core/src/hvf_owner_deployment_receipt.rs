@@ -4,16 +4,24 @@
 //! object described here. It does not evaluate a designated requirement,
 //! authenticate a peer, initialize state, or authorize an owner factory.
 
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 use std::fs::File;
-use std::io::{self, Read as _};
+use std::io;
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
+use std::io::Read as _;
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 use std::os::unix::fs::MetadataExt as _;
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 use std::path::{Component, Path};
 
 use ed25519_dalek::VerifyingKey;
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 use rustix::fs::{Mode, OFlags};
 use serde::{Deserialize, Serialize};
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 use sha2::{Digest as _, Sha256};
 
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 use crate::crypto::hvf_owner_grant::provider_identity;
 
 /// Fixed production receipt path. No configuration or environment override exists.
@@ -23,14 +31,23 @@ pub const DEPLOYMENT_RECEIPT_VERSION: u8 = 1;
 /// Maximum receipt bytes accepted from the protected descriptor.
 pub const MAX_DEPLOYMENT_RECEIPT_BYTES: u64 = 64 * 1024;
 
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 const RECEIPT_NAME: &str = "deployment-receipt.json";
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 const COHORT_DOMAIN: &[u8] = b"mvm.hvf-owner.code-cohort.v1\0";
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 const OWNER_COMPONENT: &str = "mvm-hvf-run-owner";
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 const OWNER_BOOTSTRAP_PROTOCOL_VERSION: u8 = 1;
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 const MAX_DEPLOYMENT_ID_BYTES: usize = 128;
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 const MAX_ISSUER_BYTES: usize = 256;
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 const MAX_EXECUTABLE_BYTES: usize = 1024;
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 const MAX_REQUIREMENT_BYTES: usize = 4096;
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 const MAX_COMPONENT_STRING_BYTES: usize = 128;
 
 /// Exact strict v1 JSON schema stored by the trusted installer.
@@ -308,17 +325,20 @@ pub fn load_test_hvf_owner_deployment_receipt(
     })
 }
 
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 struct ProtectedRoot {
     directory: File,
     expected_uid: u32,
     expected_gid: u32,
 }
 
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 enum DirectoryMode {
     SecureAncestor,
     Deployment,
 }
 
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 fn load_from_db_root(
     root: ProtectedRoot,
 ) -> Result<LoadedHvfOwnerDeploymentReceipt, HvfOwnerDeploymentReceiptError> {
@@ -354,6 +374,7 @@ fn load_from_db_root(
     validate(receipt)
 }
 
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 fn require_object_shape(bytes: &[u8]) -> Result<(), HvfOwnerDeploymentReceiptError> {
     let value: serde_json::Value =
         serde_json::from_slice(bytes).map_err(HvfOwnerDeploymentReceiptError::Json)?;
@@ -370,6 +391,7 @@ fn require_object_shape(bytes: &[u8]) -> Result<(), HvfOwnerDeploymentReceiptErr
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 fn require_object(
     value: Option<&serde_json::Value>,
 ) -> Result<&serde_json::Map<String, serde_json::Value>, HvfOwnerDeploymentReceiptError> {
@@ -378,6 +400,7 @@ fn require_object(
         .ok_or(HvfOwnerDeploymentReceiptError::Semantic)
 }
 
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 fn validate(
     receipt: HvfOwnerDeploymentReceiptV1,
 ) -> Result<LoadedHvfOwnerDeploymentReceipt, HvfOwnerDeploymentReceiptError> {
@@ -420,6 +443,7 @@ fn validate(
     })
 }
 
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 fn verifying_key(bytes: [u8; 32]) -> Result<VerifyingKey, HvfOwnerDeploymentReceiptError> {
     if bytes == [0; 32] {
         return Err(HvfOwnerDeploymentReceiptError::Semantic);
@@ -432,6 +456,7 @@ fn verifying_key(bytes: [u8; 32]) -> Result<VerifyingKey, HvfOwnerDeploymentRece
     Ok(key)
 }
 
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 fn valid_role(role: &ProtectedRolePinV1) -> bool {
     role.uid != 0
         && role.gid != 0
@@ -439,6 +464,7 @@ fn valid_role(role: &ProtectedRolePinV1) -> bool {
         && strict_source(&role.designated_requirement, MAX_REQUIREMENT_BYTES)
 }
 
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 fn valid_absolute_path(value: &str) -> bool {
     if !strict_source(value, MAX_EXECUTABLE_BYTES) {
         return false;
@@ -451,6 +477,7 @@ fn valid_absolute_path(value: &str) -> bool {
             .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
 }
 
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 fn valid_component(component: &OwnerComponentPinV1) -> bool {
     component.schema_version == 1
         && component.component == OWNER_COMPONENT
@@ -461,10 +488,12 @@ fn valid_component(component: &OwnerComponentPinV1) -> bool {
         && lowercase_hex(&component.source_commit, 40)
 }
 
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 fn strict_label(value: &str, maximum: usize) -> bool {
     !value.is_empty() && value.len() <= maximum && value.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 fn strict_source(value: &str, maximum: usize) -> bool {
     !value.is_empty()
         && value.len() <= maximum
@@ -475,6 +504,7 @@ fn strict_source(value: &str, maximum: usize) -> bool {
         && !value.ends_with(' ')
 }
 
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 fn target_triple(value: &str) -> bool {
     strict_label(value, MAX_COMPONENT_STRING_BYTES)
         && value
@@ -483,6 +513,7 @@ fn target_triple(value: &str) -> bool {
         && value.contains('-')
 }
 
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 fn lowercase_hex(value: &str, length: usize) -> bool {
     value.len() == length
         && value
@@ -490,6 +521,7 @@ fn lowercase_hex(value: &str, length: usize) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 fn cohort_digest(component: &OwnerComponentPinV1) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(COHORT_DOMAIN);
@@ -498,6 +530,7 @@ fn cohort_digest(component: &OwnerComponentPinV1) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 fn open_directory(parent: &File, name: &str) -> io::Result<File> {
     Ok(File::from(rustix::fs::openat(
         parent,
@@ -507,6 +540,7 @@ fn open_directory(parent: &File, name: &str) -> io::Result<File> {
     )?))
 }
 
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 fn open_regular(parent: &File, name: &str) -> io::Result<File> {
     Ok(File::from(rustix::fs::openat(
         parent,
@@ -516,6 +550,7 @@ fn open_regular(parent: &File, name: &str) -> io::Result<File> {
     )?))
 }
 
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 fn require_directory(
     file: &File,
     uid: u32,
@@ -539,6 +574,7 @@ fn require_directory(
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", feature = "test-support", test))]
 fn require_receipt_file(
     file: &File,
     uid: u32,
@@ -586,7 +622,7 @@ fn has_extended_acl(file: &File) -> io::Result<bool> {
     Ok(true)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), any(feature = "test-support", test)))]
 fn has_extended_acl(_file: &File) -> io::Result<bool> {
     Ok(false)
 }
@@ -594,7 +630,7 @@ fn has_extended_acl(_file: &File) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
 
     use ed25519_dalek::SigningKey;
 
@@ -682,6 +718,16 @@ mod tests {
             expected_uid: uid,
             expected_gid: gid,
         })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn production_loader_refuses_non_macos_even_with_fixture_support() {
+        assert!(matches!(
+            load_hvf_owner_deployment_receipt(),
+            Err(HvfOwnerDeploymentReceiptError::Io(error))
+                if error.kind() == io::ErrorKind::Unsupported
+        ));
     }
 
     #[test]
