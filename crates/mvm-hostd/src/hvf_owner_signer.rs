@@ -416,10 +416,30 @@ mod tests {
             50,
         )
         .unwrap();
-        fixture.signer.grants.consume(verified).unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let clock = Arc::new(Clock(AtomicU64::new(50)));
+        let grants = OwnerGrantStore::initialize(
+            directory.path().join("owner-grants.json"),
+            provider_identity("provider", &verifying, 1),
+            clock,
+        )
+        .unwrap();
+        grants.consume(verified).unwrap();
+        let key_path = directory.path().join("provider-key");
+        std::fs::write(&key_path, [7; 32]).unwrap();
+        let signer = OwnerAdmissionSigner::new(
+            "provider",
+            1,
+            Keystore::load_from_file(&key_path).unwrap(),
+            grants,
+        )
+        .unwrap();
         let before = Keystore::test_signing_calls();
         assert!(matches!(
-            fixture.signer.sign_admission(&OwnerAdmissionSignRequest {
+            signer.sign_admission(&OwnerAdmissionSignRequest {
                 grant_id: [10; 32],
                 admission,
             }),

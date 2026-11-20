@@ -31,6 +31,7 @@ pub struct OwnerGrantExpectation<'a> {
 pub struct VerifiedOwnerGrant {
     provider_id: [u8; 32],
     grant_id: [u8; 32],
+    operation_id: [u8; 32],
     request_digest: [u8; 32],
     verified_at_secs: u64,
     expires_at_secs: u64,
@@ -47,6 +48,12 @@ impl VerifiedOwnerGrant {
     #[must_use]
     pub fn grant_id(&self) -> [u8; 32] {
         self.grant_id
+    }
+
+    /// Exact lifecycle operation protected from conflicting reissuance.
+    #[must_use]
+    pub fn operation_id(&self) -> [u8; 32] {
+        self.operation_id
     }
 
     /// Exact request commitment retained by the durable consumer.
@@ -158,6 +165,7 @@ pub fn verify_owner_grant(
             expected.provider_epoch,
         ),
         grant_id: grant.grant_id,
+        operation_id: binding.operation_id,
         request_digest: grant.request_digest,
         verified_at_secs: now_secs,
         expires_at_secs: grant.expires_at_secs.min(binding.expires_at_secs),

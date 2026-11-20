@@ -9,11 +9,12 @@ use std::{
     sync::Arc,
 };
 
+use mvm_contract::protocol::hvf_entrypoint_owner::{FreshAdmissionRequest, FreshOwnerBinding};
 use mvm_core::{atomic_io, crypto::hvf_owner_grant::VerifiedOwnerGrant};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const MAX_RECORDS: usize = 4096;
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 
@@ -22,6 +23,7 @@ const MAX_BYTES: usize = 4 * 1024 * 1024;
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 enum GrantDisposition {
     Consumed {
+        operation_id: [u8; 32],
         request_digest: [u8; 32],
         consumed_at_secs: u64,
         expires_at_secs: u64,
@@ -36,6 +38,17 @@ enum GrantDisposition {
 struct GrantRecord {
     grant_id: [u8; 32],
     disposition: GrantDisposition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    birth: Option<OwnerBirthState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+enum OwnerBirthState {
+    Prepared {
+        binding: FreshOwnerBinding,
+        request_digest: [u8; 32],
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,15 +63,27 @@ struct GrantJournal {
 /// Non-wire proof that exact provider authority was durably consumed.
 #[derive(Debug)]
 pub struct ConsumedOwnerGrant {
+    provider_id: [u8; 32],
     grant_id: [u8; 32],
+    operation_id: [u8; 32],
     request_digest: [u8; 32],
     expires_at_secs: u64,
 }
 
 impl ConsumedOwnerGrant {
     #[must_use]
+    pub fn provider_id(&self) -> [u8; 32] {
+        self.provider_id
+    }
+
+    #[must_use]
     pub fn grant_id(&self) -> [u8; 32] {
         self.grant_id
+    }
+
+    #[must_use]
+    pub fn operation_id(&self) -> [u8; 32] {
+        self.operation_id
     }
 
     #[must_use]
@@ -77,6 +102,51 @@ impl ConsumedOwnerGrant {
 pub enum OwnerGrantDisposition {
     Consumed,
     Revoked,
+}
+
+/// Read-only durable quarantine observation. It never authorizes native work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnerBirthDisposition {
+    Prepared,
+}
+
+/// Non-wire one-shot permission to attempt the original native birth.
+#[derive(Debug)]
+#[must_use = "dropping this reservation leaves absorbing pre-birth quarantine"]
+pub struct OwnerBirthReservation {
+    provider_id: [u8; 32],
+    grant_id: [u8; 32],
+    binding: FreshOwnerBinding,
+    request_digest: [u8; 32],
+    observed_at_secs: u64,
+}
+
+impl OwnerBirthReservation {
+    #[must_use]
+    pub fn provider_id(&self) -> [u8; 32] {
+        self.provider_id
+    }
+
+    #[must_use]
+    pub fn grant_id(&self) -> [u8; 32] {
+        self.grant_id
+    }
+
+    #[must_use]
+    pub fn binding(&self) -> &FreshOwnerBinding {
+        &self.binding
+    }
+
+    #[must_use]
+    pub fn request_digest(&self) -> [u8; 32] {
+        self.request_digest
+    }
+
+    /// Latest accepted clock observation the native birth path must not precede.
+    #[must_use]
+    pub fn observed_at_secs(&self) -> u64 {
+        self.observed_at_secs
+    }
 }
 
 /// Protected grant-store failure.
@@ -259,22 +329,39 @@ impl OwnerGrantStore {
                 GrantDisposition::Revoked { .. } => Err(OwnerGrantStoreError::Revoked),
             };
         }
+        if journal.records.iter().any(|record| {
+            matches!(
+                record.disposition,
+                GrantDisposition::Consumed {
+                    operation_id,
+                    request_digest,
+                    ..
+                } if operation_id == grant.operation_id()
+                    || request_digest == grant.request_digest()
+            )
+        }) {
+            return Err(OwnerGrantStoreError::Conflict);
+        }
         if journal.records.len() >= MAX_RECORDS {
             return Err(OwnerGrantStoreError::Exhausted);
         }
         journal.records.push(GrantRecord {
             grant_id,
             disposition: GrantDisposition::Consumed {
+                operation_id: grant.operation_id(),
                 request_digest: grant.request_digest(),
                 consumed_at_secs: now_secs,
                 expires_at_secs: grant.expires_at_secs(),
             },
+            birth: None,
         });
         let bytes = serialize(&journal)?;
         (self.commit)(&self.path, &bytes)
             .map_err(|source| OwnerGrantStoreError::CommitUnknown { grant_id, source })?;
         Ok(ConsumedOwnerGrant {
+            provider_id: self.provider_id,
             grant_id,
+            operation_id: grant.operation_id(),
             request_digest: grant.request_digest(),
             expires_at_secs: grant.expires_at_secs(),
         })
@@ -311,6 +398,7 @@ impl OwnerGrantStore {
             disposition: GrantDisposition::Revoked {
                 revoked_at_secs: now_secs,
             },
+            birth: None,
         });
         let bytes = serialize(&journal)?;
         (self.commit)(&self.path, &bytes)
@@ -338,6 +426,93 @@ impl OwnerGrantStore {
                 GrantDisposition::Consumed { .. } => OwnerGrantDisposition::Consumed,
                 GrantDisposition::Revoked { .. } => OwnerGrantDisposition::Revoked,
             }))
+    }
+
+    /// Persist absorbing pre-birth quarantine before any native effect.
+    ///
+    /// The consumed grant is moved into this call. Publication uncertainty or
+    /// any returned error yields no reusable birth reservation.
+    ///
+    /// # Errors
+    /// Refuses changed bindings, expiry, revocation, replay and storage errors.
+    pub fn reserve_birth(
+        &self,
+        consumed: ConsumedOwnerGrant,
+        admission: &FreshAdmissionRequest,
+    ) -> Result<OwnerBirthReservation, OwnerGrantStoreError> {
+        if consumed.provider_id() != self.provider_id
+            || admission.validate().is_err()
+            || admission.binding.operation_id != consumed.operation_id()
+            || admission
+                .digest()
+                .map_err(|_| OwnerGrantStoreError::Conflict)?
+                != consumed.request_digest()
+            || admission.binding.expires_at_secs != consumed.expires_at_secs()
+        {
+            return Err(OwnerGrantStoreError::Conflict);
+        }
+        let grant_id = consumed.grant_id();
+        let request_digest = consumed.request_digest();
+        let _lock = self.lock()?;
+        let mut journal = self.read()?;
+        let now_secs = self.observe_time(&mut journal, grant_id, 0)?;
+        if now_secs >= consumed.expires_at_secs() {
+            return Err(OwnerGrantStoreError::Expired);
+        }
+        let record = journal
+            .records
+            .iter_mut()
+            .find(|record| record.grant_id == grant_id)
+            .ok_or(OwnerGrantStoreError::Conflict)?;
+        match record.disposition {
+            GrantDisposition::Consumed {
+                request_digest: retained,
+                ..
+            } if retained == request_digest && record.birth.is_none() => {}
+            GrantDisposition::Consumed { .. } => return Err(OwnerGrantStoreError::Conflict),
+            GrantDisposition::Revoked { .. } => return Err(OwnerGrantStoreError::Revoked),
+        }
+        record.birth = Some(OwnerBirthState::Prepared {
+            binding: admission.binding.clone(),
+            request_digest,
+        });
+        self.commit_journal(&journal, grant_id)?;
+        let now_secs = self.now_secs()?;
+        if now_secs < journal.last_observed_secs {
+            return Err(OwnerGrantStoreError::ClockRegression);
+        }
+        if now_secs >= consumed.expires_at_secs() {
+            return Err(OwnerGrantStoreError::Expired);
+        }
+        Ok(OwnerBirthReservation {
+            provider_id: self.provider_id,
+            grant_id,
+            binding: admission.binding.clone(),
+            request_digest,
+            observed_at_secs: now_secs,
+        })
+    }
+
+    /// Observe quarantine without recreating a birth or native-owner capability.
+    ///
+    /// # Errors
+    /// Refuses missing, corrupt or unavailable protected state.
+    pub fn birth_disposition(
+        &self,
+        grant_id: [u8; 32],
+    ) -> Result<Option<OwnerBirthDisposition>, OwnerGrantStoreError> {
+        let _lock = self.lock()?;
+        let journal = self.read()?;
+        let Some(record) = journal
+            .records
+            .iter()
+            .find(|record| record.grant_id == grant_id)
+        else {
+            return Ok(None);
+        };
+        Ok(record.birth.as_ref().map(|birth| match birth {
+            OwnerBirthState::Prepared { .. } => OwnerBirthDisposition::Prepared,
+        }))
     }
 
     pub(crate) fn authorize_consumed(
@@ -435,14 +610,35 @@ impl OwnerGrantStore {
                 return Err(OwnerGrantStoreError::Corrupt);
             }
             if let GrantDisposition::Consumed {
+                operation_id,
                 request_digest,
                 consumed_at_secs,
                 expires_at_secs,
             } = record.disposition
-                && (request_digest == [0; 32]
+                && (operation_id == [0; 32]
+                    || request_digest == [0; 32]
                     || consumed_at_secs >= expires_at_secs
                     || consumed_at_secs > journal.last_observed_secs
                     || expires_at_secs == 0)
+            {
+                return Err(OwnerGrantStoreError::Corrupt);
+            }
+            if let GrantDisposition::Consumed {
+                operation_id,
+                request_digest,
+                ..
+            } = record.disposition
+                && journal.records[..index].iter().any(|earlier| {
+                    matches!(
+                        earlier.disposition,
+                        GrantDisposition::Consumed {
+                            operation_id: earlier_operation,
+                            request_digest: earlier_digest,
+                            ..
+                        } if earlier_operation == operation_id
+                            || earlier_digest == request_digest
+                    )
+                })
             {
                 return Err(OwnerGrantStoreError::Corrupt);
             }
@@ -450,6 +646,36 @@ impl OwnerGrantStore {
                 && revoked_at_secs > journal.last_observed_secs
             {
                 return Err(OwnerGrantStoreError::Corrupt);
+            }
+            if let Some(birth) = &record.birth {
+                let (
+                    GrantDisposition::Consumed {
+                        operation_id,
+                        request_digest,
+                        expires_at_secs,
+                        ..
+                    },
+                    binding,
+                    birth_digest,
+                ) = (
+                    &record.disposition,
+                    match birth {
+                        OwnerBirthState::Prepared { binding, .. } => binding,
+                    },
+                    match birth {
+                        OwnerBirthState::Prepared { request_digest, .. } => request_digest,
+                    },
+                )
+                else {
+                    return Err(OwnerGrantStoreError::Corrupt);
+                };
+                if birth_digest != request_digest
+                    || binding.validate().is_err()
+                    || binding.operation_id != *operation_id
+                    || binding.expires_at_secs != *expires_at_secs
+                {
+                    return Err(OwnerGrantStoreError::Corrupt);
+                }
             }
         }
         Ok(journal)
@@ -602,11 +828,9 @@ mod tests {
         }
     }
 
-    fn verified(grant_id: [u8; 32]) -> VerifiedOwnerGrant {
-        let key = SigningKey::from_bytes(&[7; 32]);
-        let verifying = key.verifying_key();
+    fn admission() -> FreshAdmissionRequest {
         let plan = br#"{"schema_version":1}"#.to_vec();
-        let request = FreshAdmissionRequest {
+        FreshAdmissionRequest {
             binding: FreshOwnerBinding {
                 version: VERSION,
                 operation_id: [1; 32],
@@ -621,7 +845,16 @@ mod tests {
                 expires_at_secs: 90,
             },
             canonical_plan: plan,
-        };
+        }
+    }
+
+    fn verified(grant_id: [u8; 32]) -> VerifiedOwnerGrant {
+        verified_for(grant_id, &admission())
+    }
+
+    fn verified_for(grant_id: [u8; 32], request: &FreshAdmissionRequest) -> VerifiedOwnerGrant {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let verifying = key.verifying_key();
         let signed = sign_owner_grant(
             OwnerGrant {
                 version: VERSION,
@@ -637,21 +870,21 @@ mod tests {
         .unwrap();
         verify_owner_grant(
             &signed,
-            &request,
+            request,
             OwnerGrantExpectation {
                 issuer: "provider",
                 issuer_key: &verifying,
                 provider_epoch: 1,
-                operation_id: [1; 32],
-                owner_incarnation: [2; 32],
-                controlling_principal: [3; 32],
-                installation: [4; 16],
-                tenant_id: "tenant",
-                workload_id: "workload",
-                canonical_plan_digest: Sha256::digest(br#"{"schema_version":1}"#).into(),
-                frozen_inputs_digest: [5; 32],
-                policy_revision: [6; 32],
-                expires_at_secs: 90,
+                operation_id: request.binding.operation_id,
+                owner_incarnation: request.binding.owner_incarnation,
+                controlling_principal: request.binding.controlling_principal,
+                installation: request.binding.installation,
+                tenant_id: &request.binding.tenant_id,
+                workload_id: &request.binding.workload_id,
+                canonical_plan_digest: request.binding.canonical_plan_digest,
+                frozen_inputs_digest: request.binding.frozen_inputs_digest,
+                policy_revision: request.binding.policy_revision,
+                expires_at_secs: request.binding.expires_at_secs,
             },
             50,
         )
@@ -694,6 +927,17 @@ mod tests {
         assert!(matches!(
             store.consume(verified([8; 32])),
             Err(OwnerGrantStoreError::AlreadyConsumed)
+        ));
+        assert!(matches!(
+            store.consume(verified([21; 32])),
+            Err(OwnerGrantStoreError::Conflict)
+        ));
+        let mut changed = admission();
+        changed.canonical_plan.push(b' ');
+        changed.binding.canonical_plan_digest = Sha256::digest(&changed.canonical_plan).into();
+        assert!(matches!(
+            store.consume(verified_for([22; 32], &changed)),
+            Err(OwnerGrantStoreError::Conflict)
         ));
         assert!(matches!(
             OwnerGrantStore::open(
@@ -811,17 +1055,172 @@ mod tests {
     }
 
     #[test]
+    fn birth_quarantine_precedes_any_native_effect_and_observation_cannot_recreate_it() {
+        let (_directory, store, _clock) = initialized();
+        let consumed = store.consume(verified([16; 32])).unwrap();
+        let reservation = store.reserve_birth(consumed, &admission()).unwrap();
+        assert_eq!(reservation.provider_id(), provider_id());
+        assert_eq!(reservation.grant_id(), [16; 32]);
+        assert_eq!(reservation.binding(), &admission().binding);
+        assert_eq!(reservation.request_digest(), admission().digest().unwrap());
+        assert_eq!(reservation.observed_at_secs(), 50);
+        drop(reservation);
+        assert_eq!(
+            store.birth_disposition([16; 32]).unwrap(),
+            Some(OwnerBirthDisposition::Prepared)
+        );
+        assert!(matches!(
+            store.consume(verified([16; 32])),
+            Err(OwnerGrantStoreError::AlreadyConsumed)
+        ));
+    }
+
+    #[test]
+    fn changed_birth_refuses_and_dropped_reservation_leaves_absorbing_quarantine() {
+        let (_directory, store, _clock) = initialized();
+        let consumed = store.consume(verified([17; 32])).unwrap();
+        let mut changed = admission();
+        changed.binding.workload_id.push_str("-other");
+        assert!(matches!(
+            store.reserve_birth(consumed, &changed),
+            Err(OwnerGrantStoreError::Conflict)
+        ));
+        assert_eq!(store.birth_disposition([17; 32]).unwrap(), None);
+
+        let (_directory, store, _clock) = initialized();
+        let consumed = store.consume(verified([18; 32])).unwrap();
+        let reservation = store.reserve_birth(consumed, &admission()).unwrap();
+        drop(reservation);
+        assert_eq!(
+            store.birth_disposition([18; 32]).unwrap(),
+            Some(OwnerBirthDisposition::Prepared)
+        );
+    }
+
+    #[test]
+    fn uncertain_birth_publication_returns_no_reusable_native_capability() {
+        let (_directory, store, _clock) = initialized();
+        let consumed = store.consume(verified([19; 32])).unwrap();
+        let failing = store.with_commit(|path, bytes| {
+            atomic_io::write_private(path, bytes).map_err(io::Error::other)?;
+            Err(io::Error::other("injected birth durability uncertainty"))
+        });
+        assert!(matches!(
+            failing.reserve_birth(consumed, &admission()),
+            Err(OwnerGrantStoreError::CommitUnknown { .. })
+        ));
+        assert_eq!(
+            store.birth_disposition([19; 32]).unwrap(),
+            Some(OwnerBirthDisposition::Prepared)
+        );
+        assert!(matches!(
+            store.consume(verified([19; 32])),
+            Err(OwnerGrantStoreError::AlreadyConsumed)
+        ));
+    }
+
+    #[test]
+    fn birth_reservation_refuses_expiry_regression_and_prepublication_failure() {
+        let (_directory, store, clock) = initialized();
+        let consumed = store.consume(verified([22; 32])).unwrap();
+        clock.set(90);
+        assert!(matches!(
+            store.reserve_birth(consumed, &admission()),
+            Err(OwnerGrantStoreError::Expired)
+        ));
+        assert_eq!(store.birth_disposition([22; 32]).unwrap(), None);
+
+        let (_directory, store, clock) = initialized();
+        let consumed = store.consume(verified([23; 32])).unwrap();
+        clock.set(40);
+        assert!(matches!(
+            store.reserve_birth(consumed, &admission()),
+            Err(OwnerGrantStoreError::Conflict)
+        ));
+        assert_eq!(store.birth_disposition([23; 32]).unwrap(), None);
+
+        let (_directory, store, _clock) = initialized();
+        let consumed = store.consume(verified([24; 32])).unwrap();
+        let failing = store.with_commit(|_, _| Err(io::Error::other("before publication")));
+        assert!(matches!(
+            failing.reserve_birth(consumed, &admission()),
+            Err(OwnerGrantStoreError::CommitUnknown { .. })
+        ));
+        assert_eq!(store.birth_disposition([24; 32]).unwrap(), None);
+        assert!(matches!(
+            store.consume(verified([24; 32])),
+            Err(OwnerGrantStoreError::AlreadyConsumed)
+        ));
+    }
+
+    #[test]
+    fn postpublication_clock_is_retained_or_refuses_without_a_reservation() {
+        for (grant_id, after, expected) in [
+            ([26; 32], 40, Some(OwnerGrantStoreError::ClockRegression)),
+            ([27; 32], 90, Some(OwnerGrantStoreError::Expired)),
+            ([28; 32], 80, None),
+        ] {
+            let (_directory, store, clock) = initialized();
+            let consumed = store.consume(verified(grant_id)).unwrap();
+            let writer_clock = Arc::clone(&clock);
+            let committing = store.with_commit(move |path, bytes| {
+                atomic_io::write_private(path, bytes).map_err(io::Error::other)?;
+                writer_clock.set(after);
+                Ok(())
+            });
+            let result = committing.reserve_birth(consumed, &admission());
+            match expected {
+                Some(OwnerGrantStoreError::ClockRegression) => {
+                    assert!(matches!(result, Err(OwnerGrantStoreError::ClockRegression)))
+                }
+                Some(OwnerGrantStoreError::Expired) => {
+                    assert!(matches!(result, Err(OwnerGrantStoreError::Expired)))
+                }
+                None => assert_eq!(result.unwrap().observed_at_secs(), 80),
+                Some(_) => unreachable!("test enumerates only time refusals"),
+            }
+            assert_eq!(
+                store.birth_disposition(grant_id).unwrap(),
+                Some(OwnerBirthDisposition::Prepared)
+            );
+        }
+    }
+
+    #[test]
+    fn reopen_observes_prepared_quarantine_without_recreating_reservation() {
+        let (directory, store, clock) = initialized();
+        let consumed = store.consume(verified([25; 32])).unwrap();
+        let reservation = store.reserve_birth(consumed, &admission()).unwrap();
+        drop(reservation);
+        drop(store);
+        let reopened = OwnerGrantStore::open(
+            directory.path().join("owner-grants.json"),
+            provider_id(),
+            clock,
+        )
+        .unwrap();
+        assert_eq!(
+            reopened.birth_disposition([25; 32]).unwrap(),
+            Some(OwnerBirthDisposition::Prepared)
+        );
+        assert!(matches!(
+            reopened.consume(verified([25; 32])),
+            Err(OwnerGrantStoreError::AlreadyConsumed)
+        ));
+    }
+
+    #[test]
     fn malformed_duplicate_and_inconsistent_records_refuse() {
         let (_directory, store, _clock) = initialized();
         for journal in [
             serde_json::json!({
-                "version":2,
+                "version":3,
                 "provider_id":provider_id(),
                 "last_observed_secs":50,
                 "records":[]
             }),
             serde_json::json!({
-                "version":1,
+                "version":2,
                 "provider_id":provider_id(),
                 "last_observed_secs":50,
                 "records":[
@@ -830,13 +1229,14 @@ mod tests {
                 ]
             }),
             serde_json::json!({
-                "version":1,
+                "version":2,
                 "provider_id":provider_id(),
                 "last_observed_secs":50,
                 "records":[{
                     "grant_id":vec![2;32],
                     "disposition":{
                         "state":"consumed",
+                        "operation_id":vec![1;32],
                         "request_digest":vec![3;32],
                         "consumed_at_secs":10,
                         "expires_at_secs":10
@@ -844,7 +1244,7 @@ mod tests {
                 }]
             }),
             serde_json::json!({
-                "version":1,
+                "version":2,
                 "provider_id":provider_id(),
                 "last_observed_secs":50,
                 "records":[{
@@ -855,6 +1255,47 @@ mod tests {
                     }
                 }]
             }),
+            serde_json::json!({
+                "version":2,
+                "provider_id":provider_id(),
+                "last_observed_secs":50,
+                "records":[{
+                    "grant_id":vec![5;32],
+                    "disposition":{
+                        "state":"revoked",
+                        "revoked_at_secs":10
+                    },
+                    "birth":{
+                        "state":"prepared",
+                        "binding":serde_json::to_value(&admission().binding).unwrap(),
+                        "request_digest":admission().digest().unwrap()
+                    }
+                }]
+            }),
+            {
+                let mut binding = admission().binding;
+                binding.operation_id = [9; 32];
+                serde_json::json!({
+                    "version":2,
+                    "provider_id":provider_id(),
+                    "last_observed_secs":50,
+                    "records":[{
+                        "grant_id":vec![6;32],
+                        "disposition":{
+                            "state":"consumed",
+                            "operation_id":vec![1;32],
+                            "request_digest":admission().digest().unwrap(),
+                            "consumed_at_secs":10,
+                            "expires_at_secs":90
+                        },
+                        "birth":{
+                            "state":"prepared",
+                            "binding":serde_json::to_value(binding).unwrap(),
+                            "request_digest":admission().digest().unwrap()
+                        }
+                    }]
+                })
+            },
         ] {
             atomic_io::write_private(&store.path, &serde_json::to_vec(&journal).unwrap()).unwrap();
             assert!(matches!(store.read(), Err(OwnerGrantStoreError::Corrupt)));
