@@ -35,10 +35,17 @@ use mvm_core::vm_backend::{
 use crate::checkpoint::{CaptureFsQuickParams, capture_fs_quick};
 use crate::mock_guest_agent::MockGuestAgent;
 
+#[cfg(feature = "test-support")]
+pub(crate) struct MockActorExit {
+    pub(crate) id: VmId,
+    pub(crate) generation: uuid::Uuid,
+}
+
 /// Per-VM state held by [`MockBackend`].
 #[derive(Debug, Clone)]
 struct MockVm {
     name: String,
+    generation: uuid::Uuid,
     cpus: u32,
     memory_mib: u32,
     profile: Option<String>,
@@ -79,6 +86,54 @@ pub struct MockBackend {
 }
 
 impl MockBackend {
+    #[cfg(feature = "test-support")]
+    pub(crate) fn actor_generation(&self, id: &VmId) -> Result<uuid::Uuid> {
+        self.state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("mock state poisoned"))?
+            .get(&id.0)
+            .map(|vm| vm.generation)
+            .ok_or_else(|| anyhow::anyhow!("original mock actor missing"))
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn stop_actor(&self, id: &VmId, generation: uuid::Uuid) -> Result<MockActorExit> {
+        self.stop_recorded(id, Some(generation))?;
+        Ok(MockActorExit {
+            id: id.clone(),
+            generation,
+        })
+    }
+
+    fn stop_recorded(&self, id: &VmId, generation: Option<uuid::Uuid>) -> Result<()> {
+        if self.fail_stop {
+            bail!("mock: forced stop failure (test knob) for '{}'", id.0);
+        }
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("mock backend state mutex poisoned"))?;
+        if let Some(expected) = generation {
+            anyhow::ensure!(
+                state.get(&id.0).is_some_and(|vm| vm.generation == expected),
+                "original mock actor generation changed"
+            );
+        }
+        let mut agents = self
+            .agents
+            .lock()
+            .map_err(|_| anyhow::anyhow!("mock agent custody poisoned"))?;
+        if let Some(agent) = agents.remove(&id.0) {
+            agent.stop();
+        }
+        let vm_dir = Self::vm_dir(&id.0);
+        if vm_dir.exists() {
+            std::fs::remove_dir_all(&vm_dir)?;
+        }
+        state.remove(&id.0);
+        Ok(())
+    }
+
     /// Construct a fresh empty mock backend.
     pub fn new() -> Self {
         Self::default()
@@ -246,6 +301,7 @@ impl VmBackend for MockBackend {
             config.name.clone(),
             MockVm {
                 name: config.name.clone(),
+                generation: uuid::Uuid::new_v4(),
                 cpus: config.cpus,
                 memory_mib: config.memory_mib,
                 profile: config.profile.clone(),
@@ -338,6 +394,7 @@ impl VmBackend for MockBackend {
             handle.id.clone(),
             MockVm {
                 name: handle.id.clone(),
+                generation: uuid::Uuid::new_v4(),
                 cpus: u32::from(handle.vcpus),
                 memory_mib: handle.mem_mib,
                 profile: None,
@@ -350,26 +407,7 @@ impl VmBackend for MockBackend {
     }
 
     fn stop(&self, id: &VmId) -> Result<()> {
-        if self.fail_stop {
-            bail!("mock: forced stop failure (test knob) for '{}'", id.0);
-        }
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("mock backend state mutex poisoned"))?;
-        state.remove(&id.0);
-        // Drop the agent (which joins its thread + removes the socket)
-        // and the on-disk VM dir.
-        if let Ok(mut agents) = self.agents.lock()
-            && let Some(agent) = agents.remove(&id.0)
-        {
-            agent.stop();
-        }
-        let vm_dir = Self::vm_dir(&id.0);
-        if vm_dir.exists() {
-            let _ = std::fs::remove_dir_all(&vm_dir);
-        }
-        Ok(())
+        self.stop_recorded(id, None)
     }
 
     fn stop_all(&self) -> Result<()> {
@@ -529,6 +567,7 @@ mod tests {
             profile: Some("default".to_string()),
             cpus: 2,
             cpu_grant: None,
+            allowed_cpus: None,
             memory_mib: 512,
             mem_initial_mib: None,
             volumes: Vec::new(),
@@ -542,6 +581,7 @@ mod tests {
             tenant_id: None,
             plan_json: None,
             audit_context: None,
+            mailbox_conversation: None,
             caller_registration: None,
             bundle_json: None,
             warm_pool_size: 0,

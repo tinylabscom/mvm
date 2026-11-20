@@ -16,6 +16,7 @@ use mvm_core::plan::{ExecutionPlan, SCHEMA_VERSION};
 
 fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
     ExecutionPlan {
+        workflow: None,
         execution_epoch: 1,
         grants: None,
         environment: None,
@@ -27,6 +28,7 @@ fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
         stream_retention: Default::default(),
         action_budget: None,
         protected_paths: Default::default(),
+        topology: None,
         ingress: Vec::new(),
         network_limits: Default::default(),
         schema_version: SCHEMA_VERSION,

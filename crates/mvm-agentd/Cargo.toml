@@ -6,7 +6,6 @@ edition.workspace = true
 description = "in-guest agent: vsock protocol, entrypoint runtime, and the addon/egress helper bins for mvm microVMs"
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 authors.workspace = true
 
 [[bin]]

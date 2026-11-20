@@ -22,6 +22,7 @@ pub use mvm_build::image_source::{
     IMAGES_CHECKOUT_MARKERS, ImageSource, ImageSourceError, MVM_IMAGES_DIR_ENV, RepoIdentity,
 };
 pub use mvm_build::runtime_pieces::{PieceOrigin, PieceOriginError, RuntimePiece, short_digest};
+pub use mvm_hostd::topology_admission::exclusive_cores_held_on_host;
 
 /// The distribution channel compiled into this binary.
 #[must_use]

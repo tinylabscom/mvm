@@ -102,7 +102,29 @@ pub fn emit_failed(ctx: &AdmissionContext, class: &str, err: &anyhow::Error) {
     emit_failure(&ctx.emitter, ctx.admitted.plan(), class, err);
 }
 
+/// A failed restore whose child stop could not be confirmed cannot seal a
+/// terminal failure: retain recovery evidence while the VM may still run.
+pub fn record_uncertain_restore_stop(ctx: &AdmissionContext, name: &str, err: &anyhow::Error) {
+    crate::launch::record_unsealed_end(
+        Some((&ctx.emitter, ctx.admitted.plan())),
+        crate::launch::UnsealedEnd::new(name, crate::launch::UnsealedReason::StopFailed)
+            .error(format!("{err:#}")),
+    );
+}
+
 impl super::AuditContinuation {
+    /// Preserve the filesystem fork's launch record and best-effort plan persistence.
+    pub fn emit_fork_launched(&self, backend: &str) {
+        if let Err(error) = self.emitter.emit_launched(self.plan(), backend) {
+            tracing::warn!(%error, "audit emit_launched failed (non-fatal)");
+        }
+        if let Err(error) =
+            mvm_hostd::audit::plan_persist::write_plan(&self.plan().workload.0, self.plan())
+        {
+            tracing::warn!(%error, "persisting fork plan failed (non-fatal)");
+        }
+    }
+
     /// Record and seal a command, output or teardown failure on this plan's chain.
     pub fn emit_failed(&self, class: &str, err: &anyhow::Error) {
         emit_failure(&self.emitter, self.plan(), class, err);

@@ -846,6 +846,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
     });
 
     let mut plan = ExecutionPlan {
+        workflow: None,
         environment,
         runtime_identity: None,
         build_provenance: Default::default(),
@@ -907,6 +908,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         stream_retention: input.stream_retention,
         action_budget: None,
         protected_paths: Default::default(),
+        topology: None,
         sdk_uses_sidecar: true,
     };
 

@@ -20,7 +20,10 @@
   mvmSrc,
 }:
 
-pkgs.rustPlatform.buildRustPackage {
+let
+  rustPlatform = (import ./rust-platform.nix { inherit pkgs mvmSrc; }).rustPlatform;
+in
+rustPlatform.buildRustPackage {
   pname = "mvm-addon-dns";
   version = "0.14.0";
 

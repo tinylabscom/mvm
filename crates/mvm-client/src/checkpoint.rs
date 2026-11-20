@@ -25,11 +25,11 @@ pub use mvm_runtime::base::runtime_meta;
 pub use mvm_runtime::base::runtime_meta::{VmRuntimeMeta, read as read_runtime_meta};
 pub use mvm_runtime::checkpoint::{
     BlobStatus, CaptureFsQuickParams, CaptureVmFullParams, CheckpointChainAnchor, CheckpointStore,
-    ForkParams, ForkParentLiveness, LineageRelation, RestoreParams, RestoredChild,
-    VerifiedRetainedRuntime, WorkspaceVolume, capture_fs_quick, capture_vm_full,
+    ForkParams, ForkParentLiveness, ForkStopUncertain, LineageRelation, RestoreParams,
+    RestoredChild, VerifiedRetainedRuntime, WorkspaceVolume, capture_fs_quick, capture_vm_full,
     checkpoint_ancestry, checkpoint_children, diff_checkpoints, fork_vm_full,
-    fork_vm_full_verified, materialized_blob_sha256, materialized_source, restore_checkpoint,
-    verify_checkpoint_runtime, verify_lineage, vm_full_restorer_for, vm_is_running,
+    materialized_blob_sha256, materialized_source, restore_checkpoint, verify_checkpoint_runtime,
+    verify_lineage, vm_full_restorer_for, vm_is_running,
 };
 pub use mvm_runtime::firecracker::FcForkRestorer;
 pub use mvm_runtime::hvf_restore::HvfForkRestorer;
@@ -43,6 +43,30 @@ pub use mvm_runtime::microvm::{
 pub use mvm_runtime::vm::instance_snapshot::lock_resume;
 pub use mvm_runtime::vm::snapshot_key::SNAPSHOT_TENANT_KEY_ENV;
 pub use mvm_runtime::vm::template::lifecycle::template_artifacts_for_slot_revision;
+
+/// Consume a full-VM fork child's own admission through the hostd restore gate.
+///
+/// The caller retains the context for the fork's existing success/failure
+/// audit and post-restore generation handshake; it cannot dispatch it twice.
+pub fn dispatch_vm_full_fork(
+    admission: &mut crate::admission::AdmissionContext,
+    store: &CheckpointStore,
+    params: ForkParams,
+    restore: &mvm_runtime::checkpoint::ForkRestore<'_>,
+    anchor: &dyn CheckpointChainAnchor,
+    runtime: &VerifiedRetainedRuntime,
+    stop_child: &dyn Fn(&str) -> Result<()>,
+) -> Result<CheckpointMeta> {
+    mvm_hostd::plan_admission::dispatch_vm_full_fork(
+        &mut admission.admitted,
+        store,
+        params,
+        restore,
+        anchor,
+        runtime,
+        stop_child,
+    )
+}
 
 /// Host-local checkpoint catalog, lineage verification, removal and workspace images.
 pub struct Checkpoints {
@@ -268,6 +292,18 @@ impl WorkspaceImage {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+/// Pass a full-VM capture of running machine `name` through the host's seal
+/// gate. A capture pauses the unit, so a sealed one must declare `checkpoint`;
+/// a refusal is already audited.
+///
+/// # Errors
+///
+/// The gate refused, with `mvm_hostd::seal_gate::SealRefusal` as the root
+/// cause.
+pub fn authorize_capture(name: &str) -> Result<()> {
+    mvm_hostd::seal_gate::authorize(name, mvm_hostd::seal_gate::Mutation::Checkpoint)
 }
 
 /// Validate a checkpoint identifier before it becomes an on-disk directory.

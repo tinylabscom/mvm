@@ -73,10 +73,13 @@ mod host_gates;
 mod launch_substrate;
 mod mailbox_posture;
 mod nonce_ledger;
+mod placement;
 mod registry_pack;
+mod restore;
 mod rollback;
 mod shares;
 mod start;
+mod topology_binding;
 mod verb_grant_sidecar;
 
 use assurance_runtime::AssuranceRuntimeBinding;
@@ -87,8 +90,8 @@ pub use admission_support::{
     enforce_sdk_sidecar_backend_compatibility, enforce_sdk_sidecar_for_launch,
 };
 pub use admit::{
-    BundleAdmissionContext, BundleImageAdmissionContext, admit_for_run, admit_plan_for_run,
-    admit_signed_plan_for_run,
+    BundleAdmissionContext, BundleImageAdmissionContext, HostPermitAdmission, admit_for_run,
+    admit_plan_for_run, admit_plan_for_run_with_host_permit, admit_signed_plan_for_run,
 };
 pub use bundle_environment::BundleEnvironmentRefused;
 pub use extension_packs::{AdmittedExtension, ExtensionAdmissionContext};
@@ -100,18 +103,24 @@ pub use mailbox_posture::{MailboxLaunchPosture, MailboxPostureHandoff};
 pub use mvm_core::time::{Clock, SystemClock};
 pub use nonce_ledger::InMemoryNonceLedger;
 pub use registry_pack::{BuiltPackBootCheck, PreparedBuiltPackRuntime, prepare_built_pack_start};
+pub use restore::dispatch_vm_full_fork;
 pub use rollback::{
-    apply_admitted_grants_or_undo_launch, record_charge_or_undo_launch,
-    record_charge_with_owned_rollback,
+    UndoLaunchFailure, apply_admitted_grants_or_undo_launch,
+    apply_persistent_grants_or_undo_launch, record_charge_or_undo_launch,
+    record_charge_with_owned_rollback, record_persistent_charge_or_undo_launch,
 };
 pub use shares::enforce_admitted_shares;
 pub use start::{
-    CliStartFailure, DispatchedPersistent, StartAdmittedParams, StartedMachine, admit_and_start,
-    start_admitted, start_cli_transient, start_persistent,
+    CliStartFailure, DispatchedPersistent, PersistentAdmission, PreparePersistentParams,
+    PreparedPersistent, StartAdmittedParams, StartedMachine, WarmClaimDispatch, admit_and_start,
+    boot_vm, claim_cli_transient, start_admitted, start_admitted_owned_actor,
+    start_admitted_owned_actor_with_bootstrap, start_cli_transient, start_entrypoint,
+    start_fs_quick_fork, start_owned_entrypoint, start_persistent,
 };
 pub(crate) use start::{
     admit_synthesized_with_verified_release, start_admitted_with_verified_release,
 };
+pub use topology_binding::{CORE_PLACEMENT_STAGE, TOPOLOGY_BINDING_STAGE};
 
 /// Result of a successful admission. Carries everything the caller
 /// needs to hand to the backend (the plan + its id), to the audit
@@ -133,6 +142,7 @@ pub(crate) use start::{
 /// push a grant into `plan.services` that admission never saw.
 #[derive(Debug)]
 pub struct AdmittedPlan {
+    host_budget: std::sync::Arc<crate::admission_budget::HostBudgetPermit>,
     plan: ExecutionPlan,
     plan_id: PlanId,
     variant: Variant,
@@ -142,6 +152,9 @@ pub struct AdmittedPlan {
     assurance_runtime: Option<AssuranceRuntimeBinding>,
     canonical_kernel: Option<std::sync::Arc<canonical_kernel::AdmittedKernel>>,
     backend: Option<BackendKind>,
+    /// The host cores this launch is confined to, decided at admission from
+    /// the topology unit it boots and the cores held on the host.
+    placement: Option<placement::AdmittedPlacement>,
     /// Set once the backend has been started under this admission. An
     /// admission authorizes one launch; the plan is handed back on
     /// `StartedMachine`, and holding it again must not start a second backend.
@@ -149,6 +162,21 @@ pub struct AdmittedPlan {
 }
 
 impl AdmittedPlan {
+    /// Spend the host hold before invoking any backend start.
+    pub fn mark_host_budget_dispatching(&self, vm_name: &str) -> Result<()> {
+        self.host_budget.mark_dispatching_for(&self.plan, vm_name)
+    }
+
+    /// Host reservation identity bound by a coordinating lifecycle owner.
+    pub fn host_budget_id(&self) -> &str {
+        self.host_budget.id()
+    }
+
+    /// Retain the same one-dispatch reservation across a legacy boot substrate.
+    pub fn host_budget_permit(&self) -> std::sync::Arc<crate::admission_budget::HostBudgetPermit> {
+        std::sync::Arc::clone(&self.host_budget)
+    }
+
     /// The verified plan body — what every downstream authorization decision
     /// reads.
     #[must_use]
@@ -181,6 +209,22 @@ impl AdmittedPlan {
             vm_name: self.plan.image.name.clone(),
             grant,
         })
+    }
+
+    /// The host cores this launch is confined to, or `None` when admission
+    /// placed it nowhere.
+    #[must_use]
+    pub fn allowed_cpus(&self) -> Option<&mvm_contract::protocol::cpu_set::CpuSet> {
+        self.placement.as_ref().map(|placement| &placement.cpus)
+    }
+
+    /// Whether the cores this launch is confined to are its unit's own,
+    /// rather than the cores left over by other units' exclusive placements.
+    #[must_use]
+    pub fn holds_cores_exclusively(&self) -> bool {
+        self.placement
+            .as_ref()
+            .is_some_and(|placement| placement.exclusive)
     }
 
     /// The signer whose key the plan verified under — this host's own signer
@@ -218,7 +262,17 @@ impl AdmittedPlan {
         signer_id: String,
         signed: SignedExecutionPlan,
     ) -> Self {
+        let host_budget = crate::admission_budget::HostBudgetPermit::reserve_ordinary(
+            &plan.workload.0,
+            crate::admission_budget::charge_for(
+                plan.resources.mem_mib,
+                plan.grants.as_ref().unwrap_or(&Default::default()),
+            ),
+        )
+        .expect("test host capacity");
+        host_budget.bind_plan(&plan).expect("test plan binding");
         Self {
+            host_budget: std::sync::Arc::new(host_budget),
             plan_id: plan.plan_id.clone(),
             variant: Variant::Dev,
             signer_id,
@@ -228,8 +282,21 @@ impl AdmittedPlan {
             assurance_runtime: None,
             canonical_kernel: None,
             backend: None,
+            placement: None,
             dispatched: false,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_allowed_cpus_for_test(
+        mut self,
+        cpus: mvm_contract::protocol::cpu_set::CpuSet,
+    ) -> Self {
+        self.placement = Some(placement::AdmittedPlacement {
+            cpus,
+            exclusive: false,
+        });
+        self
     }
 
     #[cfg(test)]
@@ -413,3 +480,5 @@ mod signed_plan_admission_tests;
 mod start_tests;
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+mod topology_binding_tests;

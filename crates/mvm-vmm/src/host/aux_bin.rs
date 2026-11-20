@@ -186,6 +186,7 @@ pub(crate) fn resolve_verified_in(
             ProbeOutcome::Answered(version)
                 if version == helper_contract::HOST_HELPER_CONTRACT_VERSION =>
             {
+                record_probe_memo(env, spec, &built.path);
                 Ok(built.path)
             }
             stale => Err(build_did_not_fix(spec, &built.path, &stale, &built.command)),
@@ -207,27 +208,28 @@ pub(crate) fn resolve_verified_in(
 }
 
 /// A remembered outcome of executing a helper's contract probe: the exact
-/// file that answered, the version it answered with, and an identity stamp of
-/// its bytes. The probe's answer is a property of the file alone (env hygiene
+/// file that answered, the version it answered with, and a digest of its
+/// bytes. The probe's answer is a property of the file alone (env hygiene
 /// gives the probe a scrubbed environment, and the probe flag is handled
 /// before anything else in the helper), so the same bytes answer the same
-/// version every time. Remembering the outcome turns a per-launch exec of a
-/// multi-megabyte binary into a stat comparison; any drift in the stamp —
-/// including the contract version this build expects changing — re-probes.
+/// version every time. Remembering the outcome avoids a per-launch exec;
+/// metadata rejects obvious changes cheaply, but matching metadata still
+/// requires hashing the bytes because timestamps can share a filesystem tick.
 ///
 /// This memoizes a compatibility check, never an authorization decision: a
 /// mismatch or a missing memo falls back to executing the probe exactly as
-/// before, and a file that would fail the probe cannot be made to pass by a
-/// memo, because changing its bytes changes the stamp.
+/// before. Like the probe itself, this assumes trusted host storage, not a
+/// hostile writer racing verification or forging the memo.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct ProbeMemo {
     memo_version: u32,
     path: PathBuf,
     contract_version: u32,
     stamp: FileStamp,
+    sha256: String,
 }
 
-/// What identifies one exact state of a file's bytes for memo matching.
+/// A cheap rejection filter, not proof that a file's bytes are unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct FileStamp {
     len: u64,
@@ -287,6 +289,8 @@ fn probe_memo_accepts(env: &VerifyEnv, spec: &AuxBin<'_>, resolved: &Path) -> bo
         && memo.contract_version == helper_contract::HOST_HELPER_CONTRACT_VERSION
         && memo.path == resolved
         && Some(memo.stamp) == file_stamp(resolved)
+        && mvm_core::crypto::image_verify::sha256_file(resolved)
+            .is_ok_and(|digest| digest == memo.sha256)
 }
 
 /// Remember a probe that just succeeded, best effort: the memo is a cache,
@@ -295,11 +299,15 @@ fn record_probe_memo(env: &VerifyEnv, spec: &AuxBin<'_>, resolved: &Path) {
     let (Some(memo_dir), Some(stamp)) = (&env.probe_memo_dir, file_stamp(resolved)) else {
         return;
     };
+    let Ok(sha256) = mvm_core::crypto::image_verify::sha256_file(resolved) else {
+        return;
+    };
     let memo = ProbeMemo {
         memo_version: PROBE_MEMO_VERSION,
         path: resolved.to_path_buf(),
         contract_version: helper_contract::HOST_HELPER_CONTRACT_VERSION,
         stamp,
+        sha256,
     };
     let Ok(bytes) = serde_json::to_vec(&memo) else {
         return;
@@ -315,7 +323,7 @@ fn record_probe_memo(env: &VerifyEnv, spec: &AuxBin<'_>, resolved: &Path) {
     }
 }
 
-const PROBE_MEMO_VERSION: u32 = 1;
+const PROBE_MEMO_VERSION: u32 = 2;
 
 /// How a helper answered (or failed to answer) the contract probe.
 enum ProbeOutcome {
@@ -579,6 +587,7 @@ fn recover_stale_helper(
         ProbeOutcome::Answered(version)
             if version == helper_contract::HOST_HELPER_CONTRACT_VERSION =>
         {
+            record_probe_memo(env, spec, &rebuilt);
             Ok(rebuilt)
         }
         still_stale => Err(build_did_not_fix(
@@ -1289,20 +1298,83 @@ mod tests {
         resolve_verified_in(&hvf_spec(), &lookup, &env).unwrap();
         assert_eq!(probe_runs(&probe_log), 1);
 
-        // Same name, different-length bytes, so the length half of the stamp
-        // differs even on filesystems whose timestamp granularity would let
-        // two quick rewrites share a tick: the stamp must not match, and the
-        // stale answer must be discovered by a fresh probe rather than
-        // trusted from the memo.
-        write_exe(
-            &bin,
-            &counting_helper("mvm-hvf-supervisor", 100, &probe_log),
-        );
+        // Same name and length, but changed bytes must trigger a fresh probe.
+        write_exe(&bin, &counting_helper("mvm-hvf-supervisor", 0, &probe_log));
         let err = resolve_verified_in(&hvf_spec(), &lookup, &env)
             .unwrap_err()
             .to_string();
         assert_eq!(probe_runs(&probe_log), 2, "changed bytes must re-probe");
-        assert!(err.contains("contract version 100"), "{err}");
+        assert!(err.contains("contract version 0"), "{err}");
+    }
+
+    #[test]
+    fn same_length_changed_helper_is_reprobed_when_metadata_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let probe_log = tmp.path().join("probe-ran");
+        let bin = tmp.path().join("mvm-hvf-supervisor");
+        let current = counting_helper(
+            "mvm-hvf-supervisor",
+            helper_contract::HOST_HELPER_CONTRACT_VERSION,
+            &probe_log,
+        );
+        let stale = counting_helper("mvm-hvf-supervisor", 0, &probe_log);
+        assert_eq!(current.len(), stale.len());
+        write_exe(&bin, &current);
+        let lookup = Lookup {
+            override_path: None,
+            dirs: vec![tmp.path().to_path_buf()],
+        };
+        let memo_dir = tmp.path().join("memo");
+        let mut env = test_env(None);
+        env.probe_memo_dir = Some(memo_dir.clone());
+        resolve_verified_in(&hvf_spec(), &lookup, &env).unwrap();
+        assert!(probe_memo_accepts(&env, &hvf_spec(), &bin));
+
+        let memo_path = probe_memo_path(&memo_dir, "mvm-hvf-supervisor");
+        let mut memo: ProbeMemo =
+            serde_json::from_slice(&std::fs::read(&memo_path).unwrap()).unwrap();
+        write_exe(&bin, &stale);
+        // Model a filesystem timestamp collision without depending on its clock
+        // resolution: retain the original content witness, match only metadata.
+        memo.stamp = file_stamp(&bin).unwrap();
+        std::fs::write(&memo_path, serde_json::to_vec(&memo).unwrap()).unwrap();
+
+        assert!(!probe_memo_accepts(&env, &hvf_spec(), &bin));
+        let err = resolve_verified_in(&hvf_spec(), &lookup, &env)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(probe_runs(&probe_log), 2, "changed bytes must re-probe");
+        assert!(err.contains("contract version 0"), "{err}");
+    }
+
+    #[test]
+    fn metadata_only_probe_memos_are_not_accepted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("mvm-hvf-supervisor");
+        write_exe(
+            &bin,
+            &answering_helper(
+                "mvm-hvf-supervisor",
+                helper_contract::HOST_HELPER_CONTRACT_VERSION,
+            ),
+        );
+        let memo_dir = tmp.path().join("memo");
+        let mut env = test_env(None);
+        env.probe_memo_dir = Some(memo_dir.clone());
+        record_probe_memo(&env, &hvf_spec(), &bin);
+        assert!(probe_memo_accepts(&env, &hvf_spec(), &bin));
+
+        let memo_path = probe_memo_path(&memo_dir, "mvm-hvf-supervisor");
+        let mut memo: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&memo_path).unwrap()).unwrap();
+        memo["memo_version"] = 1.into();
+        memo.as_object_mut().unwrap().remove("sha256");
+        std::fs::write(&memo_path, serde_json::to_vec(&memo).unwrap()).unwrap();
+        assert!(!probe_memo_accepts(&env, &hvf_spec(), &bin));
+
+        memo["memo_version"] = PROBE_MEMO_VERSION.into();
+        std::fs::write(&memo_path, serde_json::to_vec(&memo).unwrap()).unwrap();
+        assert!(!probe_memo_accepts(&env, &hvf_spec(), &bin));
     }
 
     #[test]
@@ -1326,6 +1398,7 @@ mod tests {
             // not satisfy this one even when the bytes are unchanged.
             contract_version: helper_contract::HOST_HELPER_CONTRACT_VERSION + 1,
             stamp,
+            sha256: mvm_core::crypto::image_verify::sha256_file(&bin).unwrap(),
         };
         std::fs::write(
             probe_memo_path(&memo_dir, "mvm-hvf-supervisor"),
@@ -1956,6 +2029,41 @@ mod tests {
             *fixture.signed.0.borrow(),
             vec![(built, RequiredEntitlement::Hypervisor)]
         );
+    }
+
+    #[test]
+    fn prepared_build_is_reused_by_controller_but_changed_bytes_are_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = scratch_checkout(tmp.path());
+        let log = tmp.path().join("cargo.log");
+        let mut fixture = source_fixture(tmp.path(), &root, "release", &building_cargo(&log));
+        fixture.env.probe_memo_dir = Some(tmp.path().join("probe-memo"));
+        let spec = AuxBin::new("mvm-actor-holder", "MVM_ACTOR_HOLDER_PATH", "mvm-hostd");
+        let lookup = checkout_lookup(&root);
+        let built = resolve_verified_in(&spec, &lookup, &fixture.env).unwrap();
+        assert!(probe_memo_accepts(&fixture.env, &spec, &built));
+
+        // The independently launched controller cannot initiate source builds.
+        fixture.env.source_builds = false;
+        assert_eq!(
+            resolve_verified_in(&spec, &lookup, &fixture.env).unwrap(),
+            built
+        );
+        assert_eq!(cargo_invocations(&log).len(), 1);
+
+        // The tampered helper must differ in byte length: the memo stamp is
+        // length plus filesystem times, and a same-length rewrite can land in
+        // the same timestamp tick on filesystems with coarse mtime
+        // granularity, leaving the stamp unchanged.
+        write_exe(
+            &built,
+            "#!/bin/sh\necho 'mvm-actor-holder contract-version=0' # stale\n",
+        );
+        assert!(!probe_memo_accepts(&fixture.env, &spec, &built));
+        // A stale recovery which leaves wrong bytes must still refuse.
+        write_exe(&fixture.env.cargo, &fresh_cargo(&log));
+        assert!(resolve_verified_in(&spec, &lookup, &fixture.env).is_err());
+        assert_eq!(cargo_invocations(&log).len(), 2);
     }
 
     /// Set `path`'s modification time `age` before now.

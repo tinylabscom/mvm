@@ -5,9 +5,11 @@
     "so a name can only appear or disappear here deliberately.",
     "Regenerate intentionally; do not paste over a failure.",
     "",
-    "The only directional backlog is `kv`, whose first in-guest SDK witness",
-    "is intentionally Python-only. What otherwise remains is the two",
-    "categories that describe differences rather than debt.",
+    "The directional backlog is `kv`, `actor` and `mailbox`, whose initial",
+    "guest SDK surfaces are Python-only. `actor` uses the lifecycle broker;",
+    "`mailbox` uses the dedicated encrypted mailbox channel, not that broker.",
+    "TypeScript counterparts with equivalent contract coverage close these",
+    "entries. The other two categories describe differences rather than debt.",
     "",
     "`python_only_permanent_by_design` cannot close. `derive_schema` needs",
     "runtime type information TypeScript erases before the program runs, and",
@@ -41,7 +43,9 @@
     "derive_schema"
   ],
   "python_only_absent_from_typescript": [
-    "kv"
+    "actor",
+    "kv",
+    "mailbox"
   ],
   "typescript_only_absent_from_python": []
 }

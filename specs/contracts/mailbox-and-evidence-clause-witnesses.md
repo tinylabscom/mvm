@@ -38,6 +38,52 @@ exercises.
 Accepted architecture is not security-claim promotion: no mailbox claim is
 added to ADR-001 by this table.
 
+### Preview actor conversation wait budgets
+
+The unshipped actor conversation interface uses `MVMC` version 2 and the
+`mvm.mailbox.conversation.v2` authenticated-session purpose. Version 1
+conversation frames refuse; ordinary `MVMR` reader and outbox frames are unchanged.
+The initial local and encrypted conversation invocation contains the operation
+and a bounded `wait_budget_ms` duration, not a grant. Forwarders subtract queueing
+and handshake time from their monotonic deadline rather than restarting it.
+Only a verified reader enrollment permits a longer Receive wait. Signed
+capability/enrollment expiry and the retained call deadline independently cap
+the caller budget. Short handshake and write limits remain in force.
+
+The cold guest's coarse launch clock can trail a freshly signed host issuance.
+The guest may wait for its actual clock to reach an authenticated enrollment or
+delivery lease's issuance time, but never treats the material as valid early.
+Signatures, exact bindings, and static time-window contradictions are checked
+before waiting. Enrollment waiting consumes the original short handshake budget;
+a received lease has a short validation phase capped by the original invocation
+deadline. Caller disconnect cancels either wait. Full signature, scope and current
+freshness validation runs again before possession, payload exposure or ACK use.
+There is no skew allowance, backdating, clock adjustment, or lease extension.
+
+A disconnected local caller releases its waiter and closes the associated host
+exchange. This cancels observation, not a durably queued call or a remote effect.
+The guest bridge has one active exchange and a fixed request worker. A concurrent
+complete request receives a typed unavailable refusal; no second remote lane or
+unbounded per-client workers are created. Active and busy-path frame decoding
+share one absolute frame deadline; incremental bytes cannot renew it.
+Expiry ends the observation with an
+expired result where transport permits, never a promised `Pending` frame written
+through an already-expired response budget.
+Python delegates this wire to the shared Rust C ABI. Focused regression coverage
+is in `conversation_wire`, guest `mailbox` / `mailbox_reader`, and the host's
+`pending_read_waits_for_event_disconnect_or_deadline_without_polling_state`;
+these source-level witnesses do not claim a completed live backend validation.
+
+The actor-specific process witness
+`actor_response_survives_helper_process_crash_before_signed_ack` in
+`crates/mvm-hostd/tests/mailbox_process_bin/actor_crash.rs` runs actual mailbox
+helpers and crashes the original receiving helper after reply delivery but
+before the parent result ACK. Restart with the retained original configuration must
+replay the same reply and lease, then accept the signed ACK and report settlement.
+This covers the actor response's service-plus-journal recovery boundary; it does
+not establish automatic runtime supervision, VM recovery, or the broader service
+claims listed above.
+
 ## Evidence completeness (ADR-110)
 
 Enforcing code: `mvm-hostd::audit::{receipt_export,receipt_archive,receipt_archive_verify}`

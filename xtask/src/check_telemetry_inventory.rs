@@ -580,6 +580,8 @@ required-features = ["hidden"]
         let inventory: Inventory = toml::from_str(&text).unwrap();
         for (package, name) in [
             ("mvm-agentd", "mvm-runner"),
+            ("mvm-hostd", "mvm-actor-controller"),
+            ("mvm-hostd", "mvm-actor-holder"),
             ("mvm-hostd", "mvm-extension-provider"),
             ("mvmctl", "mvmctl"),
         ] {

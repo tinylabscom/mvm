@@ -310,6 +310,7 @@ pub fn workload_device_spec(config: &VmStartConfig, cmdline: &str, console_log: 
         cmdline: cmdline.to_string(),
         vcpus: config.cpus,
         cpu_grant: config.cpu_grant,
+        allowed_cpus: config.allowed_cpus.clone(),
         memory_mib: config.memory_mib,
         mem_initial_mib: config.mem_initial_mib,
         blocks: workload_blocks(config),

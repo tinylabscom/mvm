@@ -318,6 +318,23 @@ See the [frame state machine](https://github.com/tinylabscom/mvm/blob/main/crate
 and [endpoint payload dispatch](https://github.com/tinylabscom/mvm/blob/main/crates/mvm-hostd/src/supervisor/endpoint/flowmux.rs#L450-L730).
 <VsockTypes family="flow" />
 
+## Wire-mode substitution endpoint
+
+On Linux, a configured Wire-mode endpoint accepts guest-initiated vsock
+connections as well as host-local Unix-socket connections. Each request is
+length-prefixed JSON (a big-endian `u32` byte count, bounded at 16 MiB).
+`EndpointRequest` is untagged: a `WireRequest` forwards to its bound
+destination and receives `WireResponse`; a `GateProbeRequest` asks the live
+egress gate to decide up to four `GateProbeSample` values and receives
+`GateProbeResponse`. `GateProbeExpect` is the caller's expected verdict;
+`GateProbeOutcome` carries the actual `GateProbeVerdict`. A probe does not
+substitute secrets, open a forward leg, or grant egress. The host launch
+witness uses the Unix socket, but the Linux Wire-mode vsock listener also
+accepts the probe payload. This is separate from authenticated FlowMux frames
+and does not imply that a Wire-mode listener is present for every workload.
+
+<VsockTypes family="endpoint_wire" />
+
 ## Telemetry
 
 Port **5254** is a dedicated authenticated connection. After the three-message
@@ -523,7 +540,8 @@ message:
   control and `MVEX` extension-controller messages are host-local IPC.
   The substitution endpoint's `WireRequest`/`WireResponse` and secret-resolver
   `ResolveWireRequest`/`ResolveWireResponse` also use separate host-local
-  sockets. Only the derived `HttpFlowHead`/`HttpFlowResponseHead` values above
+  sockets; the Wire-mode substitution endpoint can use host-local or Linux
+  vsock transport. Only the derived `HttpFlowHead`/`HttpFlowResponseHead` values above
   are typed FlowMux payloads; raw secret values never become a new vsock DTO.
   The same endpoint socket also carries `EndpointRequest`, an untagged choice
   between a substitution `WireRequest` (tried first) and a `GateProbeRequest`

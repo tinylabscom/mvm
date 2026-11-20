@@ -67,15 +67,18 @@ pub fn thread_tenant_id(cfg: &mut mvm_core::vm_backend::VmStartConfig, admitted:
     cfg.tenant_id = Some(admitted.plan().tenant.0.clone());
 }
 
-/// Carry the admitted CPU bound onto the launch config, so the backend can be
-/// born inside it rather than adjusted into it afterwards.
+/// Carry the admitted CPU bound and core placement onto the launch config, so
+/// the backend can be born inside them rather than adjusted into them
+/// afterwards.
 ///
-/// Taken from the **signed, admitted** plan and nowhere else. A caller-supplied
-/// `cfg.cpu_grant` would be a bound chosen outside the admission that just
-/// checked it against the host's ceiling, so whatever was there is overwritten
-/// — including with `None`, which is what an uncapped plan means.
+/// Taken from the **admission** and nowhere else. A caller-supplied
+/// `cfg.cpu_grant` or `cfg.allowed_cpus` would be a bound chosen outside the
+/// admission that just checked it against the host, so whatever was there is
+/// overwritten — including with `None`, which is what an uncapped or unplaced
+/// launch means.
 pub fn thread_cpu_grant(cfg: &mut mvm_core::vm_backend::VmStartConfig, admitted: &AdmittedPlan) {
     cfg.cpu_grant = admitted.plan().grants.as_ref().and_then(|g| g.cpu);
+    cfg.allowed_cpus = admitted.allowed_cpus().cloned();
 }
 
 pub fn populate_audit_substrate(
@@ -168,6 +171,9 @@ pub fn persists_plan_before_start(backend: &str) -> bool {
 /// boundary for unmigrated launches), after audit-substrate population and
 /// before the bridge spawn reads the signed envelope back from disk. No-op
 /// without `cfg.plan_json`; files land at mode 0600 via [`write_secret_file`].
+///
+/// Preserve the admitted envelope bytes rather than reconstructing a plan from
+/// persisted state. Bridge and mailbox helpers read this same per-run copy.
 pub fn stash_plan_for_bridge(cfg: &mvm_core::vm_backend::VmStartConfig) -> Result<()> {
     stash_plan_and_mint_verb_grant(cfg).map(|_| ())
 }

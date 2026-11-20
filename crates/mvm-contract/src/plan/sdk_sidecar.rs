@@ -9,12 +9,12 @@
 //! it.
 //!
 //! "Can actually use it" is decided here, from the signed plan's host-service
-//! bindings and nothing else. Not from an environment variable a guest could
+//! bindings and workflow mailbox grant. Not from an environment variable a guest could
 //! set, not from scanning application source for an `import mvm`: a workload
-//! that was never bound to an SDK-served host service gets no sidecar, and a
-//! workload that was bound to one gets it read-only. The binding set is the
-//! same one the broker's dispatch gate enforces, so the attachment decision and
-//! the call-time authorization can never disagree.
+//! with an SDK-served service or a workflow mailbox receives it read-only unless
+//! it explicitly uses a native transport. An ordinary legacy mailbox alone does
+//! not change the workload's attachment requirements. Sidecar presence grants no
+//! service or mailbox authority.
 
 use alloc::vec::Vec;
 
@@ -38,7 +38,8 @@ pub const SDK_SIDECAR_LIB_PATH: &str = "/lib/libmvm_host_services.so";
 /// reviewer sees the whole SDK-reachable surface in one place. `broker.v1` is
 /// deliberately absent: it is the meta service the transport itself speaks, not
 /// a verb the SDK exposes to workload code.
-pub const SDK_HOST_SERVICES: [&str; 4] = [
+pub const SDK_HOST_SERVICES: [&str; 5] = [
+    "host.actor.v1",
     "host.audit.v1",
     "host.cost.v1",
     "host.kv.v1",
@@ -74,7 +75,9 @@ pub fn sdk_sidecar_required_for(services: &[ServiceId], sdk_uses_sidecar: bool) 
 /// between them.
 #[must_use]
 pub fn sdk_sidecar_required(plan: &ExecutionPlan) -> bool {
-    sdk_sidecar_required_for(&plan.services, plan.sdk_uses_sidecar)
+    plan.sdk_uses_sidecar
+        && (sdk_sidecar_required_for(&plan.services, true)
+            || (plan.workflow.is_some() && plan.mailbox.is_some()))
 }
 
 #[cfg(test)]
@@ -92,6 +95,59 @@ mod tests {
     fn no_services_needs_no_sidecar() {
         assert!(!sdk_sidecar_required_for(&[], true));
         assert!(sdk_host_services_in(&[]).is_empty());
+    }
+
+    #[test]
+    fn workflow_mailbox_requires_sidecar_but_legacy_mailbox_and_optout_do_not() {
+        use crate::assurance::Sha256Digest;
+        use crate::plan::{PlanId, TenantId, WorkloadId};
+        use crate::protocol::mailbox::{BootId, ExecutionEpoch, MailboxGrant, MailboxId};
+        use crate::protocol::workload_actor::{
+            ActorBindingId, ActorProtocolVersion, ControllerIdentity, ParentIdentity,
+            WorkflowBinding, WorkflowRole,
+        };
+
+        let mut plan = minimal_plan();
+        plan.services.clear();
+        plan.sdk_uses_sidecar = true;
+        plan.mailbox = Some(MailboxGrant {
+            mailbox: MailboxId::from_bytes([1; 32]),
+            authority_key: [2; 32],
+            epoch: ExecutionEpoch::new(1).unwrap(),
+            report: None,
+            retention: None,
+            service_blind: None,
+        });
+        assert!(
+            !sdk_sidecar_required(&plan),
+            "ordinary mailbox remains unchanged"
+        );
+        plan.workflow = Some(WorkflowBinding {
+            version: ActorProtocolVersion::V1,
+            workflow_id: ActorBindingId::new("workflow").unwrap(),
+            constraint_snapshot_digest: Sha256Digest::from_bytes(&[3; 32]),
+            role: WorkflowRole::Worker {
+                parent: ParentIdentity {
+                    plan_id: PlanId("parent-plan".into()),
+                    controller: ControllerIdentity {
+                        tenant: TenantId("tenant".into()),
+                        workload: WorkloadId("parent".into()),
+                        execution_epoch: ExecutionEpoch::new(1).unwrap(),
+                        boot_id: BootId::from_bytes([4; 32]),
+                        generation: core::num::NonZeroU64::new(1).unwrap(),
+                    },
+                },
+            },
+        });
+        assert!(sdk_sidecar_required(&plan));
+        plan.sdk_uses_sidecar = false;
+        assert!(!sdk_sidecar_required(&plan), "native transport can opt out");
+        plan.sdk_uses_sidecar = true;
+        plan.mailbox = None;
+        assert!(
+            !sdk_sidecar_required(&plan),
+            "membership alone is insufficient"
+        );
     }
 
     #[test]

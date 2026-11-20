@@ -4,8 +4,10 @@
 use super::admit::admit_plan_for_run;
 use super::assurance_runtime::verify_selected_runtime;
 use super::rollback::{
-    UndoLaunch, UndoLaunchFailure, apply_admitted_grants_or_undo_launch,
-    record_charge_or_undo_launch, undo_cli_launch, undo_launch,
+    FailureAuditPolicy, UndoLaunch, UndoLaunchFailure, apply_admitted_grants_or_undo_launch,
+    apply_admitted_grants_with_rollback, apply_entrypoint_grants_or_undo_launch,
+    record_charge_or_undo_launch, record_charge_with_owned_rollback,
+    record_entrypoint_charge_or_undo_launch, undo_cli_launch, undo_launch, undo_launch_with,
 };
 use super::{AdmitAndStartParams, AdmittedPlan, RunPosture, final_gates, registry_pack};
 use anyhow::{Context, Result};
@@ -17,13 +19,110 @@ use mvm_contract::provenance::{
 };
 use mvm_core::plan::{ExecutionPlan, synthesize_plan};
 use mvm_core::policy::PolicyBundle;
-use mvm_core::vm_backend::{VmId, VmStartConfig};
+use mvm_core::vm_backend::{StandbyClaim, StandbyError, StandbyHandle, VmId, VmStartConfig};
 use mvm_runtime::AnyBackend;
+use mvm_runtime::vm::instance_snapshot::MachineLifecycleLock;
+
+/// Dispatch an already admitted entrypoint on its original native channel.
+///
+/// The caller supplies slots inside its original custody group. The runtime
+/// slot is populated before activation, so even an uncertain activation error
+/// cannot discard the child or its admission and image owners.
+///
+/// # Errors
+/// Refuses an unsupported backend, spent admission, invalid runtime or host
+/// gate, or failed native preparation/activation. A post-preparation failure
+/// leaves the original runtime in `runtime` for its caller to stop.
+pub fn start_owned_entrypoint(
+    backend: &AnyBackend,
+    admitted: &mut AdmittedPlan,
+    config: &mut VmStartConfig,
+    policy_bundle: Option<&PolicyBundle>,
+    verified_runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
+    built_runtime: &mut Option<super::PreparedBuiltPackRuntime>,
+    runtime: &mut Option<mvm_runtime::workload_runner::runner::OwnedRuntimeLaunch>,
+) -> Result<()> {
+    anyhow::ensure!(
+        !admitted.dispatched,
+        "original admitted plan was already dispatched"
+    );
+    // The mailbox profile is a property of the admitted plan, not the start
+    // config, and an unservable guest mailbox refuses before any native
+    // preparation spends the one-use admission.
+    crate::mailbox_launch::require_legacy_launch(admitted.plan().mailbox.as_ref())?;
+    anyhow::ensure!(
+        runtime.is_none(),
+        "native runtime slot must be empty before dispatch"
+    );
+    anyhow::ensure!(
+        backend.kind() == mvm_core::vm_backend::BackendKind::Hvf,
+        "original-owner entrypoint requires HVF"
+    );
+    anyhow::ensure!(
+        admitted.backend == Some(backend.kind()),
+        "original-owner entrypoint backend differs from admitted backend"
+    );
+    mvm_runtime::workload_backend::require_workload_backend(backend)?;
+    if let Some(release) = verified_runtime {
+        release.verify_config(config)?;
+        admitted
+            .plan()
+            .require_runtime_identity(release.identity())?;
+    } else if admitted.plan().runtime_identity.is_none() {
+        verify_selected_runtime(config)?;
+    }
+    *built_runtime = final_gates::run_post_admission_gates_for_source(
+        config,
+        admitted,
+        backend.kind(),
+        policy_bundle,
+        final_gates::ImageSource::OwnedNative,
+    )
+    .map_err(|(stage, err)| err.context(format!("admission gate refused ({stage})")))?;
+    anyhow::ensure!(
+        admitted.plan().runtime_identity.is_none()
+            || verified_runtime.is_some()
+            || built_runtime.is_some(),
+        "admitted runtime identity has no retained verification"
+    );
+    if let Some(release) = verified_runtime {
+        release.verify_config(config)?;
+        admitted
+            .plan()
+            .require_runtime_identity(release.identity())?;
+    }
+    registry_pack::verify_runtime_at_dispatch(built_runtime.as_ref(), config, admitted, None)?;
+    crate::mailbox_process::require_servable(config, backend, admitted.mailbox_posture().as_ref())?;
+    if super::persists_plan_before_start(backend.name()) {
+        super::stash_plan_for_bridge(config)?;
+    }
+    // The one-use authority is spent before the first native side effect.
+    admitted.dispatched = true;
+    let images = built_runtime
+        .as_mut()
+        .context("owned native image preparation missing")?
+        .take_boot_images()?;
+    *runtime = Some(backend.prepare_owned_launch_with_verified_runtime(
+        config,
+        images,
+        verified_runtime,
+    )?);
+    let original = runtime
+        .as_mut()
+        .context("original native runtime missing")?;
+    if let Some(built) = built_runtime.as_ref() {
+        built.verify_config(original.config()?)?;
+    }
+    original.activate()
+}
 
 /// CLI transient boots keep their completion narrative with the caller.
 enum StartFinalization {
     /// Record launch and failures at the host dispatch boundary.
     Immediate,
+    /// Keep the ordinary launch/rollback tail, but persist the bridge
+    /// substrate before an entrypoint's backend opens its endpoint.
+    Entrypoint,
     /// Defer success until confirmed transient teardown.
     CliTransient {
         writable_images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
@@ -32,6 +131,8 @@ enum StartFinalization {
     Persistent {
         writable_images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
     },
+    /// Fork launch/failure audit stays with the CLI; no immediate grant acceptance or charge.
+    FsQuickFork,
 }
 
 /// Distinguish an already-audited pack refusal, a CLI-owned failure, and an uncertain stop.
@@ -41,6 +142,9 @@ pub enum CliStartFailure {
     Recorded(anyhow::Error),
     #[error("{0:#}")]
     Unrecorded(anyhow::Error),
+    /// The selected name is held by another launch; the caller cannot clean its state.
+    #[error("{0:#}")]
+    StateNotOwned(anyhow::Error),
     #[error("{0:#}")]
     UncertainStop(anyhow::Error),
 }
@@ -50,6 +154,14 @@ pub(super) fn cli_rollback_error(error: anyhow::Error) -> anyhow::Error {
         CliStartFailure::UncertainStop(error).into()
     } else {
         CliStartFailure::Unrecorded(error).into()
+    }
+}
+
+fn entrypoint_rollback_error(error: anyhow::Error) -> anyhow::Error {
+    if error.is::<UndoLaunchFailure>() {
+        CliStartFailure::UncertainStop(error).into()
+    } else {
+        error
     }
 }
 
@@ -89,6 +201,130 @@ pub struct DispatchedPersistent {
     pub config: VmStartConfig,
 }
 
+/// Inputs whose verification, admission and dispatch must stay under one lifecycle lock.
+pub struct PreparePersistentParams<'a> {
+    /// The selected backend instance that will receive the admitted config.
+    pub backend: &'a AnyBackend,
+    /// Source-prepared config whose selected runtime is not yet launch-verified.
+    pub config: VmStartConfig,
+    /// Writable image locks transferred to the backend on dispatch.
+    pub writable_images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
+    /// The caller-held guard spanning source preparation through readiness.
+    pub lifecycle: &'a MachineLifecycleLock,
+}
+
+/// One signed persistent admission plus caller-owned post-dispatch state.
+pub struct PersistentAdmission<C> {
+    /// The one-use authority created for this exact persistent config.
+    pub admitted: AdmittedPlan,
+    /// The signer that records later readiness acceptance or refusal.
+    pub emitter: crate::audit::emitter::AuditEmitter,
+    /// The resolved policy bundle enforced by final launch gates.
+    pub policy_bundle: Option<PolicyBundle>,
+    /// Opaque client state returned without granting launch authority.
+    pub continuation: C,
+}
+
+/// A persistent child dispatched under the admission created in the same call.
+pub struct PreparedPersistent<C> {
+    /// Backend identity of the dispatched but not yet accepted child.
+    pub vm_id: VmId,
+    /// Original admitted authority and audit continuation for readiness.
+    pub admission: PersistentAdmission<C>,
+    /// Exact post-gate config handed to the backend and mailbox owner.
+    pub config: VmStartConfig,
+}
+
+/// Attach, verify, admit and dispatch a persistent cold boot in that order.
+///
+/// Source-specific attachment and plan lowering stay in the client callbacks,
+/// while this boundary owns their order and retains the verified runtime
+/// through dispatch. The supplied lifecycle lock is never reacquired.
+///
+/// # Errors
+/// Refuses a mismatched or non-cold lifecycle before attachment or admission,
+/// or propagates attachment, verification, durable admission and dispatch
+/// failures without starting a backend past the refusing stage.
+pub fn boot_vm<C>(
+    params: PreparePersistentParams<'_>,
+    attach: impl FnOnce(
+        &mut VmStartConfig,
+    ) -> Result<
+        Option<std::sync::Arc<mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime>>,
+    >,
+    admit: impl FnOnce(
+        &mut VmStartConfig,
+        Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
+    ) -> Result<PersistentAdmission<C>>,
+) -> Result<PreparedPersistent<C>> {
+    let PreparePersistentParams {
+        backend,
+        mut config,
+        writable_images,
+        lifecycle,
+    } = params;
+    lifecycle
+        .require_name(&config.name)
+        .map_err(CliStartFailure::StateNotOwned)?;
+    lifecycle
+        .require_cold_state()
+        .map_err(CliStartFailure::StateNotOwned)?;
+
+    let release = attach(&mut config)?;
+    let verified_runtime = match release {
+        Some(release) => Some(mvm_runtime::runtime_evidence::verify_release_runtime_set(
+            &config, release,
+        )?),
+        None => mvm_runtime::runtime_evidence::verify_selected_release_runtime_set(&config)?,
+    };
+    let admission = admit(&mut config, verified_runtime.as_ref())?;
+    let PersistentAdmission {
+        admitted,
+        emitter,
+        policy_bundle,
+        continuation,
+    } = admission;
+    let audit_plan = admitted.plan().clone();
+    let started = start_admitted_with_finalization(
+        StartAdmittedParams {
+            backend,
+            admitted,
+            config,
+            policy_bundle: policy_bundle.as_ref(),
+            emitter: Some(&emitter),
+            assurance: None,
+        },
+        verified_runtime.as_ref(),
+        StartFinalization::Persistent { writable_images },
+        None,
+        None,
+        || Ok(()),
+    )
+    .inspect_err(|dispatch_error| {
+        if matches!(
+            dispatch_error.downcast_ref::<CliStartFailure>(),
+            Some(CliStartFailure::UncertainStop(_))
+        ) {
+            return;
+        }
+        if let Err(error) =
+            emitter.seal_session(&audit_plan, crate::audit::session::SealReason::Failed)
+        {
+            tracing::warn!(%error, "sealing refused persistent admission failed");
+        }
+    })?;
+    Ok(PreparedPersistent {
+        vm_id: started.vm_id,
+        admission: PersistentAdmission {
+            admitted: started.admitted,
+            emitter,
+            policy_bundle,
+            continuation,
+        },
+        config: started.config,
+    })
+}
+
 /// Dispatch a persistent guest while its caller retains readiness-dependent finalization.
 pub fn start_persistent(
     params: StartAdmittedParams<'_>,
@@ -99,6 +335,9 @@ pub fn start_persistent(
         params,
         verified_runtime,
         StartFinalization::Persistent { writable_images },
+        None,
+        None,
+        || Ok(()),
     )?;
     Ok(DispatchedPersistent {
         vm_id: started.vm_id,
@@ -198,13 +437,48 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
     start_admitted_with_verified_release(params, verified.as_ref())
 }
 
+/// Start an entrypoint with the release evidence retained by this admission.
+///
+/// Selection, signed-plan binding, host gates, budget rollback and launch
+/// audit all remain in the ordinary admitted tail.
+///
+/// # Errors
+/// A launch gate or backend refusal, or a post-start grant or charge that
+/// could not be applied and rolled back.
+pub fn start_entrypoint(
+    params: StartAdmittedParams<'_>,
+    verified_runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
+) -> Result<StartedMachine> {
+    let started = start_admitted_with_finalization(
+        params,
+        verified_runtime,
+        StartFinalization::Entrypoint,
+        None,
+        None,
+        || Ok(()),
+    )?;
+    Ok(StartedMachine {
+        vm_id: started.vm_id,
+        admitted: started.admitted,
+        enforced_grants: started
+            .enforced_grants
+            .expect("entrypoint host start checks enforced grants"),
+    })
+}
+
 /// Start a locally admitted release using this launch's authenticated archive.
 pub(crate) fn start_admitted_with_verified_release(
     params: StartAdmittedParams<'_>,
     verified_runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
 ) -> Result<StartedMachine> {
-    let started =
-        start_admitted_with_finalization(params, verified_runtime, StartFinalization::Immediate)?;
+    let started = start_admitted_with_finalization(
+        params,
+        verified_runtime,
+        StartFinalization::Immediate,
+        None,
+        None,
+        || Ok(()),
+    )?;
     Ok(StartedMachine {
         vm_id: started.vm_id,
         admitted: started.admitted,
@@ -224,17 +498,159 @@ pub fn start_cli_transient(
         params,
         verified_runtime,
         StartFinalization::CliTransient { writable_images },
+        None,
+        None,
+        || Ok(()),
     )
     .map(|started| started.vm_id)
+}
+
+/// Dispatch a one-use admitted filesystem child through the common gates.
+pub fn start_fs_quick_fork(
+    params: StartAdmittedParams<'_>,
+    verified_runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
+) -> Result<VmId> {
+    start_admitted_with_finalization(
+        params,
+        verified_runtime,
+        StartFinalization::FsQuickFork,
+        None,
+        None,
+        || Ok(()),
+    )
+    .map(|started| started.vm_id)
+}
+
+/// Outcome of a selected warm claim. A lost reservation never spent its
+/// authority, so the caller can cold-dispatch that same admission.
+pub enum WarmClaimDispatch {
+    Claimed(mvm_runtime::backend::OwnedWarmClaim),
+    ReservationLost(Box<AdmittedPlan>),
+}
+
+/// Dispatch a CLI's already-admitted transient as a separately admitted warm child.
+///
+/// The parent is a planless, verified boot substrate; the child receives this
+/// one-use admission. Pool selection is done before this call so a miss keeps
+/// the caller's authority available for the ordinary cold dispatch.
+pub fn claim_cli_transient(
+    backend: &AnyBackend,
+    admitted: AdmittedPlan,
+    config: VmStartConfig,
+    policy_bundle: Option<&mvm_core::policy::PolicyBundle>,
+    verified_runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
+    ctx: &mvm_runtime::workload_runner::ClaimContext<'_>,
+    handle: &StandbyHandle,
+) -> Result<WarmClaimDispatch> {
+    let mut admitted = admitted;
+    anyhow::ensure!(!admitted.dispatched, "CLI admission was already dispatched");
+    // A standby's scope was created before this launch was placed, so it holds
+    // no CPU set and a claimed child would run unconfined.
+    anyhow::ensure!(
+        admitted.allowed_cpus().is_none(),
+        "a launch placed on host cores cannot claim a warm standby"
+    );
+    anyhow::ensure!(
+        admitted.plan().image.name == config.name,
+        "warm claim identity differs from admitted plan"
+    );
+    anyhow::ensure!(
+        admitted.plan().runtime_identity.is_none() == verified_runtime.is_none(),
+        "CLI release admission and its launch-owned verification set differ"
+    );
+    if let Some(runtime) = verified_runtime {
+        runtime.verify_config(&config)?;
+        admitted
+            .plan()
+            .require_runtime_identity(runtime.identity())?;
+    } else {
+        verify_selected_runtime(&config)?;
+    }
+    let (mut prepared, built_runtime) = final_gates::run_post_admission_gates(
+        config.clone(),
+        &admitted,
+        backend.kind(),
+        policy_bundle,
+    )
+    .map_err(|(stage, error)| error.context(format!("warm admission gate refused ({stage})")))?;
+    anyhow::ensure!(
+        prepared.rootfs_path == config.rootfs_path,
+        "warm claim cannot replace the selected parent image"
+    );
+    registry_pack::verify_runtime_at_dispatch(built_runtime.as_ref(), &prepared, &admitted, None)?;
+    crate::mailbox_process::require_servable(
+        &prepared,
+        backend,
+        admitted.mailbox_posture().as_ref(),
+    )?;
+    anyhow::ensure!(
+        prepared.volumes.iter().all(|volume| volume.read_only),
+        "warm claim cannot transfer writable volume custody"
+    );
+    crate::seal_gate::persist_sealed_plan(&config.name, admitted.plan())?;
+    let audit = mvm_vmm::host::audit_substrate::compute_audit_substrate(
+        &config.name,
+        prepared.tenant_id.as_deref(),
+    )?;
+    let plan_json = prepared
+        .plan_json
+        .clone()
+        .context("warm claim missing admitted plan")?;
+    let tenant_id = prepared
+        .tenant_id
+        .clone()
+        .context("warm claim missing admitted tenant")?;
+    let rootfs_path = prepared.rootfs_path.clone();
+    let bundle_json = prepared.bundle_json.clone();
+    let audit_context = prepared.audit_context.clone();
+    let network_policy = prepared.network_policy.clone();
+    prepared.name = handle.id.clone();
+    let claim = StandbyClaim {
+        start_config: Some(prepared),
+        rootfs_path,
+        tenant_id,
+        audit_dir: audit
+            .audit_dir
+            .context("warm claim missing audit directory")?,
+        gateway_audit_socket: audit
+            .gateway_audit_socket
+            .context("warm claim missing gateway audit socket")?,
+        gateway_events_socket: audit.gateway_events_socket,
+        plan_json,
+        audit_context,
+        bundle_json,
+        network_policy,
+    };
+    // No plan JSON can create this authority: only admission owns this value.
+    // Spend it before the runner can fork or resume the child.
+    admitted.dispatched = true;
+    match backend.claim_standby_owned_via_runner(ctx, handle, &claim) {
+        Ok(owned) => Ok(WarmClaimDispatch::Claimed(owned)),
+        Err(StandbyError::ReservationLost) => {
+            admitted.dispatched = false;
+            Ok(WarmClaimDispatch::ReservationLost(Box::new(admitted)))
+        }
+        Err(error) => Err(match error {
+            StandbyError::StopUnconfirmed(_) => {
+                CliStartFailure::UncertainStop(anyhow::Error::new(error)).into()
+            }
+            other => anyhow::Error::new(other).context("admitted warm claim"),
+        }),
+    }
 }
 
 fn start_admitted_with_finalization(
     params: StartAdmittedParams<'_>,
     verified_runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
     finalization: StartFinalization,
+    mut actor_owner: Option<&mut Option<mvm_runtime::actor_teardown::ActorOwner>>,
+    bootstrap: Option<mvm_runtime::actor_teardown::ActorBootstrap>,
+    before_dispatch: impl FnOnce() -> Result<()>,
 ) -> Result<StartTailResult> {
     let cli_transient = matches!(finalization, StartFinalization::CliTransient { .. });
     let persistent = matches!(finalization, StartFinalization::Persistent { .. });
+    let fork = matches!(finalization, StartFinalization::FsQuickFork);
+    let entrypoint = matches!(finalization, StartFinalization::Entrypoint);
     let backend = params.backend;
     let mut admitted = params.admitted;
     anyhow::ensure!(
@@ -277,7 +693,11 @@ fn start_admitted_with_finalization(
                 .plan()
                 .require_runtime_identity(runtime.identity())
                 .map_err(|error| ("guest-runtime", anyhow::Error::from(error)))?;
-        } else if !persistent {
+        } else if !persistent
+            && !(entrypoint
+                && verified_runtime.is_none()
+                && admitted.plan().runtime_identity.is_some())
+        {
             verify_selected_runtime(&params.config).map_err(|error| ("guest-runtime", error))?;
         }
         let (config, built_runtime) = final_gates::run_post_admission_gates(
@@ -286,6 +706,16 @@ fn start_admitted_with_finalization(
             backend.kind(),
             params.policy_bundle,
         )?;
+        if entrypoint
+            && verified_runtime.is_none()
+            && built_runtime.is_none()
+            && admitted.plan().runtime_identity.is_some()
+        {
+            return Err((
+                "release-runtime",
+                anyhow::anyhow!("admitted runtime identity has no retained verification"),
+            ));
+        }
         if persistent {
             if verified_runtime.is_none()
                 && built_runtime.is_none()
@@ -317,6 +747,7 @@ fn start_admitted_with_finalization(
         Ok(prepared) => prepared,
         Err((stage, err)) => {
             if !cli_transient
+                && !fork
                 && let Some(emitter) = params.emitter
                 && let Err(e) = emitter.emit_failed(admitted.plan(), stage, &format!("{err:#}"))
             {
@@ -357,7 +788,7 @@ fn start_admitted_with_finalization(
     if let Err(err) =
         crate::mailbox_process::require_servable(&config, backend, mailbox_posture.as_ref())
     {
-        if persistent
+        if (persistent || entrypoint)
             && let Some(emitter) = params.emitter
             && let Err(e) =
                 emitter.emit_failed(admitted.plan(), "backend-start", &format!("{err:#}"))
@@ -366,9 +797,27 @@ fn start_admitted_with_finalization(
         }
         return Err(err);
     }
-    if persistent && super::persists_plan_before_start(backend.name()) {
+    // A unit admitted under a topology reads as sealed only through its
+    // persisted plan, so that write is part of the launch. It goes first: the
+    // bridge stash below replaces it with the signed envelope, which reads as
+    // the same plan.
+    if let Err(err) = crate::seal_gate::persist_sealed_plan(&vm_name, admitted.plan()) {
+        if (persistent || entrypoint)
+            && let Some(emitter) = params.emitter
+            && let Err(e) = emitter.emit_failed(admitted.plan(), "seal-plan", &format!("{err:#}"))
+        {
+            tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
+        }
+        return Err(if cli_transient {
+            CliStartFailure::Unrecorded(err).into()
+        } else {
+            err
+        });
+    }
+    if (persistent || fork || entrypoint) && super::persists_plan_before_start(backend.name()) {
         super::stash_plan_for_bridge(&config).inspect_err(|err| {
-            if let Some(emitter) = params.emitter
+            if !fork
+                && let Some(emitter) = params.emitter
                 && let Err(e) =
                     emitter.emit_failed(admitted.plan(), "bridge-plan", &format!("{err:#}"))
             {
@@ -386,8 +835,20 @@ fn start_admitted_with_finalization(
         }
         return Err(err);
     }
+    // Actor launches run one last caller gate after every shared admission
+    // check and before the budget marks dispatch.
+    before_dispatch()?;
     // Spent before the backend starts, so an admission that reached dispatch
     // can never authorize another launch, whatever the start's outcome.
+    if let Err(error) = admitted.mark_host_budget_dispatching(&config.name) {
+        if let Some(emitter) = params.emitter
+            && let Err(audit_error) =
+                emitter.emit_failed(admitted.plan(), "host-budget", &format!("{error:#}"))
+        {
+            tracing::warn!(error = %audit_error, "audit emit_failed failed (non-fatal)");
+        }
+        return Err(error.context("host-budget dispatch refused"));
+    }
     admitted.dispatched = true;
     if cli_transient
         && (mvm_runtime::catalog::descriptor(backend.kind()).is_workload
@@ -398,7 +859,25 @@ fn start_admitted_with_finalization(
     {
         return Err(CliStartFailure::Unrecorded(err).into());
     }
-    let start = if let StartFinalization::CliTransient { writable_images }
+    let start = if let Some(slot) = actor_owner.as_mut() {
+        backend
+            .start_owned_actor_with_bootstrap(&config, verified_runtime, bootstrap)
+            .map(|owner| {
+                let vm_id = owner.vm_id().clone();
+                **slot = Some(owner);
+                vm_id
+            })
+            .inspect_err(|error| {
+                if let Some(failure) =
+                    error.downcast_ref::<mvm_runtime::actor_teardown::ActorStartFailure>()
+                    && let Ok(Some(owner)) = failure.take_owner()
+                {
+                    **slot = Some(owner);
+                }
+                // An ownerless typed failure may still hold original boot/helper
+                // custody. Return it intact for the lifecycle coordinator to retain.
+            })
+    } else if let StartFinalization::CliTransient { writable_images }
     | StartFinalization::Persistent {
         writable_images, ..
     } = finalization
@@ -443,10 +922,48 @@ fn start_admitted_with_finalization(
     };
     match start {
         Ok(vm_id) => {
-            let enforced_grants = if cli_transient || persistent {
-                // The CLI finalizes on teardown; persistent starts finalize
-                // after authenticated readiness. Neither accepts here.
+            // A VM whose grants could not be applied is running without the
+            // bounds it was admitted under; the helper stops it rather than
+            // leaving a run whose only record says it was bounded.
+            let enforced_grants = if actor_owner.is_some() {
+                Some(apply_admitted_grants_with_rollback(
+                    backend,
+                    &vm_id,
+                    &admitted,
+                    params.emitter,
+                    || stop_actor(&mut actor_owner),
+                    FailureAuditPolicy::OwnedAfterConfirmedRollback,
+                )?)
+            } else if (cli_transient || fork) && admitted.allowed_cpus().is_some() {
+                // Neither path reads grants back later, so a launch placed on
+                // host cores is checked here: a scope that does not hold the
+                // admitted set stops the VM before the caller sees it start.
+                // Persistent starts reach the same check after readiness.
+                apply_admitted_grants_with_rollback(
+                    backend,
+                    &vm_id,
+                    &admitted,
+                    None,
+                    || backend.stop(&vm_id).map(|_| ()),
+                    FailureAuditPolicy::OwnedAfterConfirmedRollback,
+                )
+                .map_err(cli_rollback_error)?;
                 None
+            } else if cli_transient || persistent || fork {
+                // The CLI finalizes on teardown; persistent starts finalize
+                // after authenticated readiness. Fs-quick forks retain their
+                // previous launch-time audit without immediate grant acceptance.
+                None
+            } else if entrypoint {
+                Some(
+                    apply_entrypoint_grants_or_undo_launch(
+                        backend,
+                        &vm_id,
+                        &admitted,
+                        params.emitter,
+                    )
+                    .map_err(entrypoint_rollback_error)?,
+                )
             } else {
                 Some(apply_admitted_grants_or_undo_launch(
                     backend,
@@ -461,23 +978,51 @@ fn start_admitted_with_finalization(
             // budget, and an undercounted host is precisely the state the
             // budget exists to prevent — so this is fatal, and rolls the
             // launch back the same way an unapplied grant does.
-            if !cli_transient && !persistent {
+            if actor_owner.is_some() {
+                record_charge_with_owned_rollback(
+                    backend,
+                    &vm_id,
+                    &vm_name,
+                    &admitted,
+                    params.emitter,
+                    || stop_actor(&mut actor_owner),
+                )?;
+            } else if entrypoint {
+                record_entrypoint_charge_or_undo_launch(
+                    backend,
+                    &vm_id,
+                    &vm_name,
+                    &admitted,
+                    params.emitter,
+                )
+                .map_err(entrypoint_rollback_error)?;
+            } else if !cli_transient && !persistent && !fork {
                 record_charge_or_undo_launch(backend, &vm_id, &vm_name, &admitted, params.emitter)?;
             }
             if !cli_transient
                 && !persistent
+                && !fork
                 && let Some(emitter) = params.emitter
             {
                 if let Err(e) = emitter.emit_launched(admitted.plan(), &backend_name) {
+                    if actor_owner.is_some() {
+                        return Err(e);
+                    }
                     tracing::warn!(error = %e, "audit emit_launched failed (non-fatal)");
                 }
                 let record = launch_decision_record(admitted.plan(), &backend_name);
                 if let Err(e) = emitter.emit_decision_record(admitted.plan(), record) {
+                    if actor_owner.is_some() {
+                        return Err(e);
+                    }
                     tracing::warn!(error = %e, "audit emit_decision_record for launch failed (non-fatal)");
                 }
                 if let Some(enforced_grants) = &enforced_grants
                     && let Err(e) = emitter.emit_grants_enforced(admitted.plan(), enforced_grants)
                 {
+                    if actor_owner.is_some() {
+                        return Err(e);
+                    }
                     tracing::warn!(error = %e, "audit emit_grants_enforced failed (non-fatal)");
                 }
             }
@@ -499,42 +1044,86 @@ fn start_admitted_with_finalization(
                     backend,
                     vm_id: &vm_id,
                     admitted: &admitted,
-                    emitter: if cli_transient { None } else { params.emitter },
+                    emitter: if cli_transient || fork {
+                        None
+                    } else {
+                        params.emitter
+                    },
                     stage: "assurance-session",
                     reason: "the declared assurance campaign could not be opened",
                     err,
                 };
-                return Err(if cli_transient {
+                return Err(if cli_transient || fork {
                     cli_rollback_error(undo_cli_launch(undo))
+                } else if entrypoint {
+                    entrypoint_rollback_error(undo_cli_launch(undo))
                 } else {
-                    undo_launch(undo)
+                    undo_start(undo, &mut actor_owner)
                 });
             }
             // Last, so no earlier rollback leaves a mailbox process behind.
             // A grant that cannot be served is refused rather than booting a
             // guest whose mailbox port nobody answers.
-            if !persistent
-                && let Err(err) = crate::mailbox_process::spawn_for_launch(
-                    admitted.plan(),
-                    backend,
-                    &vm_name,
-                    mailbox_posture.as_ref(),
-                )
+            if !persistent {
+                let mailbox =
+                    if let Some(owner) = actor_owner.as_mut().and_then(|slot| slot.as_mut()) {
+                        let mut child = crate::mailbox_process::spawn_for_launch_owned(
+                            admitted.plan(),
+                            backend,
+                            &vm_name,
+                            mailbox_posture.as_ref(),
+                        )
+                        .context("actor mailbox helper spawn/readiness failed")?;
+                        let state_dir = mvm_core::config::vm_state_dir(&vm_name);
+                        owner.attach_helper(
+                            "mailbox",
+                            &mut child,
+                            &[
+                                state_dir.join(mvm_vmm::host::vm_helpers::MAILBOX_PID_FILE),
+                                mvm_core::config::vm_mailbox_secret_at(&state_dir),
+                            ],
+                        )
+                    } else {
+                        crate::mailbox_process::spawn_for_launch(
+                            admitted.plan(),
+                            backend,
+                            &vm_name,
+                            mailbox_posture.as_ref(),
+                        )
+                        .map(|_| ())
+                        .map_err(anyhow::Error::from)
+                    };
+                if let Err(err) = mailbox {
+                    let undo = UndoLaunch {
+                        backend,
+                        vm_id: &vm_id,
+                        admitted: &admitted,
+                        emitter: if cli_transient || fork {
+                            None
+                        } else {
+                            params.emitter
+                        },
+                        stage: "mailbox-process",
+                        reason: "the granted guest mailbox could not be served",
+                        err,
+                    };
+                    return Err(if cli_transient || fork {
+                        cli_rollback_error(undo_cli_launch(undo))
+                    } else if entrypoint {
+                        entrypoint_rollback_error(undo_cli_launch(undo))
+                    } else {
+                        undo_start(undo, &mut actor_owner)
+                    });
+                }
+            }
+            // Entrypoint callers previously persisted the plan after their
+            // successful boot, including QEMU (which has no bridge sidecar).
+            // Keep the lifecycle audit cache independent of bridge eligibility.
+            if entrypoint
+                && let Err(error) =
+                    crate::audit::plan_persist::write_plan(&vm_name, admitted.plan())
             {
-                let undo = UndoLaunch {
-                    backend,
-                    vm_id: &vm_id,
-                    admitted: &admitted,
-                    emitter: if cli_transient { None } else { params.emitter },
-                    stage: "mailbox-process",
-                    reason: "the granted guest mailbox could not be served",
-                    err: err.into(),
-                };
-                return Err(if cli_transient {
-                    cli_rollback_error(undo_cli_launch(undo))
-                } else {
-                    undo_launch(undo)
-                });
+                tracing::warn!(%error, "persisting entrypoint plan failed (non-fatal)");
             }
             Ok(StartTailResult {
                 vm_id,
@@ -544,7 +1133,47 @@ fn start_admitted_with_finalization(
             })
         }
         Err(err) => {
+            if let Some(proof) = err
+                .downcast_ref::<mvm_runtime::actor_teardown::ActorStartFailure>()
+                .and_then(|failure| failure.no_dispatch_proof())
+            {
+                let reconciled = params
+                    .emitter
+                    .context("runtime cancellation requires durable audit")
+                    .and_then(|emitter| {
+                        admitted.host_budget.record_runtime_no_dispatch(
+                            proof,
+                            &vm_name,
+                            admitted.plan(),
+                            emitter,
+                        )
+                    });
+                return match reconciled {
+                    Ok(()) => Err(err),
+                    Err(reconcile) => {
+                        Err(err
+                            .context(format!("runtime cancellation remains held: {reconcile:#}")))
+                    }
+                };
+            }
+            let (err, persistent_stop_uncertain) = if persistent {
+                classify_persistent_dispatch_error(err)
+            } else {
+                (err, false)
+            };
+            if persistent_stop_uncertain {
+                crate::audit::unsealed::record_unsealed_end(
+                    params.emitter.map(|emitter| (emitter, admitted.plan())),
+                    crate::audit::unsealed::UnsealedEnd::new(
+                        &vm_name,
+                        crate::audit::unsealed::UnsealedReason::StopFailed,
+                    )
+                    .error(format!("backend-start: {err:#}")),
+                );
+                return Err(CliStartFailure::UncertainStop(err).into());
+            }
             if !cli_transient
+                && !fork
                 && let Some(emitter) = params.emitter
                 && let Err(e) =
                     emitter.emit_failed(admitted.plan(), "backend-start", &format!("{err:#}"))
@@ -557,6 +1186,92 @@ fn start_admitted_with_finalization(
                 err
             })
         }
+    }
+}
+
+fn classify_persistent_dispatch_error(error: anyhow::Error) -> (anyhow::Error, bool) {
+    match mvm_runtime::backend::release_confirmed_start_failure(error) {
+        Ok(error) => (error, false),
+        Err(error) => (error, true),
+    }
+}
+
+/// Start through the ordinary gates while retaining original actor teardown custody.
+///
+/// The owner slot remains populated after a post-start error. Callers must retain
+/// it until cleanup is proved; an error never authorizes a capacity refund.
+pub fn start_admitted_owned_actor(
+    params: StartAdmittedParams<'_>,
+    owner: &mut Option<mvm_runtime::actor_teardown::ActorOwner>,
+    before_dispatch: impl FnOnce() -> Result<()>,
+) -> Result<StartedMachine> {
+    start_owned_admitted_impl(params, owner, None, before_dispatch)
+}
+
+/// Start an admitted controller with its original per-boot holder provisioned before activation.
+pub fn start_admitted_owned_actor_with_bootstrap(
+    params: StartAdmittedParams<'_>,
+    owner: &mut Option<mvm_runtime::actor_teardown::ActorOwner>,
+    bootstrap: mvm_runtime::actor_teardown::ActorBootstrap,
+    before_dispatch: impl FnOnce() -> Result<()>,
+) -> Result<StartedMachine> {
+    start_owned_admitted_impl(params, owner, Some(bootstrap), before_dispatch)
+}
+
+fn start_owned_admitted_impl(
+    params: StartAdmittedParams<'_>,
+    owner: &mut Option<mvm_runtime::actor_teardown::ActorOwner>,
+    bootstrap: Option<mvm_runtime::actor_teardown::ActorBootstrap>,
+    before_dispatch: impl FnOnce() -> Result<()>,
+) -> Result<StartedMachine> {
+    anyhow::ensure!(owner.is_none(), "actor owner slot is already occupied");
+    anyhow::ensure!(
+        params.emitter.is_some(),
+        "actor launch requires durable audit"
+    );
+    mvm_runtime::actor_teardown::supports_actor_backend(params.backend)?;
+    let verified =
+        mvm_runtime::runtime_evidence::verify_selected_release_runtime_set(&params.config)?;
+    let started = start_admitted_with_finalization(
+        params,
+        verified.as_ref(),
+        StartFinalization::Immediate,
+        Some(owner),
+        bootstrap,
+        before_dispatch,
+    )?;
+    Ok(StartedMachine {
+        vm_id: started.vm_id,
+        admitted: started.admitted,
+        enforced_grants: started
+            .enforced_grants
+            .expect("actor host start always checks enforced grants"),
+    })
+}
+
+fn stop_actor(
+    slot: &mut Option<&mut Option<mvm_runtime::actor_teardown::ActorOwner>>,
+) -> Result<()> {
+    let owner = slot
+        .as_mut()
+        .and_then(|slot| slot.as_mut())
+        .ok_or_else(|| anyhow::anyhow!("original actor owner missing"))?;
+    let _proof = owner.stop_and_reap()?;
+    Ok(())
+}
+
+fn undo_start(
+    undo: UndoLaunch<'_>,
+    slot: &mut Option<&mut Option<mvm_runtime::actor_teardown::ActorOwner>>,
+) -> anyhow::Error {
+    if slot.is_some() {
+        undo_launch_with(
+            undo,
+            || stop_actor(slot),
+            FailureAuditPolicy::OwnedAfterConfirmedRollback,
+        )
+    } else {
+        undo_launch(undo)
     }
 }
 
@@ -635,6 +1350,9 @@ pub(crate) fn admit_synthesized_with_verified_release(
         Ok(admitted) => admitted,
         Err(err) => {
             if let Some(emitter) = params.emitter
+                && err
+                    .downcast_ref::<super::topology_binding::TopologyRefusalAudited>()
+                    .is_none()
                 && let Err(e) =
                     emitter.emit_refused(&plan, "admit_plan_for_run", &format!("{err:#}"))
             {

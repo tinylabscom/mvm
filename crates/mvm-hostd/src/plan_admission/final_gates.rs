@@ -22,7 +22,31 @@ pub(super) fn run_post_admission_gates(
     (VmStartConfig, Option<PreparedBuiltPackRuntime>),
     (&'static str, anyhow::Error),
 > {
-    if let Err(error) = populate_audit_substrate(&mut config, admitted, policy_bundle) {
+    run_post_admission_gates_for_source(
+        &mut config,
+        admitted,
+        backend,
+        policy_bundle,
+        ImageSource::Ordinary,
+    )
+    .map(|runtime| (config, runtime))
+}
+
+pub(super) enum ImageSource {
+    Ordinary,
+    OwnedNative,
+}
+
+/// The same admitted checks apply to both ordinary and original-owner starts;
+/// only the final image custody differs for a cold native child.
+pub(super) fn run_post_admission_gates_for_source(
+    config: &mut VmStartConfig,
+    admitted: &AdmittedPlan,
+    backend: BackendKind,
+    policy_bundle: Option<&PolicyBundle>,
+    source: ImageSource,
+) -> std::result::Result<Option<PreparedBuiltPackRuntime>, (&'static str, anyhow::Error)> {
+    if let Err(error) = populate_audit_substrate(config, admitted, policy_bundle) {
         return Err(("audit-substrate", error));
     }
     if let Err(error) = enforce_admitted_shares(&config.volumes, admitted.plan()) {
@@ -44,12 +68,22 @@ pub(super) fn run_post_admission_gates(
     ) {
         return Err(("sdk-sidecar", error));
     }
-    if let Err(error) = attach_admitted_extensions(&mut config, admitted) {
+    if let Err(error) = attach_admitted_extensions(config, admitted) {
         return Err(("extension-attachment", error));
     }
-    let runtime = prepare_built_pack_start(admitted, &mut config, backend)
-        .map_err(|error| ("registry-pack-boot", error))?;
-    Ok((config, runtime))
+    let runtime = match source {
+        ImageSource::Ordinary => prepare_built_pack_start(admitted, config, backend),
+        ImageSource::OwnedNative => admitted.built_pack_boot_check().and_then(|check| {
+            check
+                .map(|check| check.freeze_native_boot(config, backend))
+                .transpose()
+                .map(Option::flatten)
+        }),
+    }
+    .map_err(|error| ("registry-pack-boot", error))?;
+    // Direct admitted callers need the same signed on-disk material as CLI boots.
+    super::stash_plan_for_bridge(config).map_err(|error| ("launch-substrate", error))?;
+    Ok(runtime)
 }
 
 pub(super) fn attach_admitted_extensions(

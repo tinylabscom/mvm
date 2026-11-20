@@ -365,6 +365,9 @@ struct SessionStep {
 fn capture_vm_full_for_running_vm(
     args: CaptureVmFullArgs<'_>,
 ) -> Result<mvm_core::checkpoint::CheckpointMeta> {
+    // Checkpoint, fork and replay pause the running unit: a sealed one must
+    // declare it.
+    mvm_client::checkpoint::authorize_capture(args.name)?;
     let runtime_overlay_version = runtime_contract_for_checkpoint(args.name)?;
     let control = args.backend.vm_full_control(args.name).ok_or_else(|| {
         anyhow::anyhow!(
@@ -693,6 +696,7 @@ fn restore(id: &str, json: bool) -> Result<()> {
     }
     let _activation_barrier =
         mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
+    mvm_client::policy_profiles::coordinator::recover_workload_ledger()?;
     if cfg!(target_os = "linux") {
         mvm_client::policy_profiles::coordinator::ensure_if_activated()?;
     }
@@ -1034,7 +1038,8 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
     }
     let verified_runtime = release
         .map(|release| super::up::verify_release_runtime_set(&start_config, release))
-        .transpose()?;
+        .transpose()?
+        .map(std::sync::Arc::new);
 
     let ledger = mvm_client::admission::InMemoryNonceLedger::new();
     let configured_images_dir = mvm_build::image_source::configured_images_dir();
@@ -1099,23 +1104,9 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         admission.policy_bundle.as_ref(),
     )?;
 
-    // Mint the child's verb-grant sidecar. The backend's cmdline builder
-    // reads it via verb_grant_cmdline_token at start time.
-    if super::up::persists_plan_before_start(&effective_hypervisor) {
-        mvm_client::admission::stash_plan_for_bridge(&start_config)?;
-    }
-
-    if let Err(error) = p.prepared.validate_admitted_plan(&admission.admitted) {
-        let error = anyhow::Error::new(error);
-        super::up::emit_failed(&admission, "fork-secret-policy", &error);
-        return Err(error);
-    }
     let backend = AnyBackend::from_hypervisor(&effective_hypervisor);
-    if let Err(e) = backend.start_with_verified_runtime(&start_config, verified_runtime.as_ref()) {
-        super::up::emit_failed(&admission, "backend-start", &e);
-        return Err(e);
-    }
-    super::up::emit_launched(&admission, &effective_hypervisor, true);
+    mvm_client::admission::FsQuickBootAdmission::new(admission, p.prepared, verified_runtime)?
+        .start(&backend, start_config)?;
 
     if p.emit_text {
         ui::success(&format!(
@@ -3369,5 +3360,39 @@ mod tests {
 
         let anchor = SignedChainAnchor::load().unwrap();
         verify_image_lineage(&store, &child, &anchor).unwrap();
+    }
+
+    /// Checkpoint, fork and replay all capture through
+    /// `capture_vm_full_for_running_vm`; a sealed unit that does not declare
+    /// `checkpoint` refuses there before its backend is touched.
+    #[test]
+    fn a_sealed_unit_without_checkpoint_refuses_a_vm_full_capture() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .workload("capture-sealed")
+            .build();
+        mvm_hostd::seal_gate::test_support::seal("capture-sealed", plan, Default::default())
+            .unwrap();
+        let store = CheckpointStore::open();
+        let err = capture_vm_full_for_running_vm(CaptureVmFullArgs {
+            name: "capture-sealed",
+            state_dir: home.path(),
+            store: &store,
+            backend: &AnyBackend::from_hypervisor("mock"),
+            id: CheckpointId::new("refused"),
+            tag: None,
+            created_unix: 0,
+            step: None,
+        })
+        .unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<mvm_hostd::seal_gate::SealRefusal>(),
+                Some(mvm_hostd::seal_gate::SealRefusal::NotDeclared { .. })
+            ),
+            "{err:#}"
+        );
     }
 }

@@ -42,6 +42,9 @@ pub mod reader;
 /// Bounded, versioned guest-reader frames on the existing mailbox port.
 pub mod reader_wire;
 
+/// Encrypted, boot-bound conversation operations on the existing mailbox port.
+pub mod conversation_wire;
+
 /// Overlay resolution and authenticated, bounded byte-transport seams.
 pub mod transport;
 

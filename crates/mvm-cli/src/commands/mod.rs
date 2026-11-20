@@ -1,3 +1,4 @@
+mod actor;
 mod agent_session;
 mod backend;
 mod bench;
@@ -134,6 +135,8 @@ pub(crate) fn default_run_profile() -> RunProfile {
 
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum Commands {
+    /// Launch explicitly delegated local workload actors
+    Actor(actor::Args),
     /// Beginner microVM workflows (run an OCI image and more)
     #[command(display_order = 1)]
     Machine(machine::Args),

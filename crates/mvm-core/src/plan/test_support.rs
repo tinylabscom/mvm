@@ -170,6 +170,7 @@ impl PlanFixture {
     pub fn build(self) -> ExecutionPlan {
         let now = Utc::now();
         ExecutionPlan {
+            workflow: None,
             grants: self.grants,
             environment: None,
             runtime_identity: None,
@@ -242,6 +243,7 @@ impl PlanFixture {
             stream_retention: self.stream_retention,
             action_budget: None,
             protected_paths: Default::default(),
+            topology: None,
             sdk_uses_sidecar: self.sdk_uses_sidecar,
         }
     }

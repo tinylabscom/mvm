@@ -6,6 +6,13 @@ Proposed implementation plan. The GitHub issue linked from this document is the
 authoritative work tracker; this file is the immutable design attachment for
 the work.
 
+The owning issue is [#5097](https://github.com/tinylabscom/mvm/issues/5097).
+[ADR-063](../adrs/063-disconnected-host-authority-and-retention.md) records the
+subsequent design decisions for bounded mission-local renewal, local restart
+versus relocation, volatile execution, observation retention, and
+UOR-ADDR/SpiralCore integration. It does not promote implementation or security
+claims; the historical design below remains unchanged.
+
 ## Summary
 
 Add a transport-independent host interface between every microVM and the

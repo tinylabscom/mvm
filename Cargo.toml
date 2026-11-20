@@ -123,10 +123,9 @@ resolver = "3"
 [workspace.package]
 version = "0.28.0-rc.11"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.96"
 license = "Apache-2.0"
 repository = "https://github.com/tinylabscom/mvm"
-homepage = "https://github.com/tinylabscom/mvm"
 authors = ["mvm contributors"]
 
 # Member crates inherit this policy via `lints.workspace = true`.
@@ -347,7 +346,6 @@ rust-version.workspace = true
 description = "Firecracker microVM development tool"
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 authors.workspace = true
 
 # Linux distribution packages, built by .github/workflows/distro-packages.yml
@@ -800,7 +798,7 @@ roots = ["mvm-contract", "runmvm-client"]
 # interpreter dependency, so it boots in any rootfs — the same reason the
 # universal initramfs agent is static. Both binaries are libc-only (no
 # TLS/ring/openssl), so the musl build is unencumbered.
-rust = "1.97.1"
+rust = "1.100.0"
 zig = "0.13.0"
 cargo-zigbuild = "0.23.0"
 

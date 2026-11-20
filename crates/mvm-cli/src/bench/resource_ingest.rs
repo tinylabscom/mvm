@@ -14,7 +14,10 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use super::cold_launch::{ColdLaunchReport, LaunchLane, SpanStats};
-use super::resource_report::{Figure, ResourceReport, Section, UnitCost, WakeupQuantity, Wakeups};
+use super::resource_report::{
+    Figure, MemoryQuantity, ResourceReport, Section, SourceRevision, UnitCost, WakeupQuantity,
+    Wakeups,
+};
 
 /// Launch mode the harness records in `metadata.json`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +25,26 @@ enum Mode {
     Cold,
     Warm,
     Standby,
+}
+
+/// What holds a standby, as the harness recorded in `metadata.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StandbyForm {
+    ResidentProcess,
+    OnDiskSnapshot,
+}
+
+fn standby_form_of(meta: &Value) -> Result<StandbyForm> {
+    match meta["configuration"]["standby_form"].as_str() {
+        Some("resident_process") => Ok(StandbyForm::ResidentProcess),
+        Some("on_disk_snapshot") => Ok(StandbyForm::OnDiskSnapshot),
+        Some(other) => bail!(
+            "metadata.json standby_form `{other}` is not resident_process or on_disk_snapshot"
+        ),
+        None => bail!(
+            "metadata.json records no standby_form; the run predates the field, so rerun the harness"
+        ),
+    }
 }
 
 struct Summary(BTreeMap<String, String>);
@@ -128,17 +151,43 @@ struct Wave {
     vm_state_bytes: u64,
 }
 
-fn read_wave(s: &Summary, wave: u32, standby: bool) -> Result<Wave> {
+/// The units a wave held and the extra disk they cost beyond the VM state dir.
+/// A resident standby is a VMM process; a snapshot standby has none, so it is
+/// counted from the pool and charged its snapshot bytes.
+fn wave_units(s: &Summary, wave: u32, form: Option<StandbyForm>) -> Result<(u64, u64)> {
     let key = |name: &str| format!("wave_{wave}_{name}");
-    let units = s.count(&key("vmm_processes"))?;
-    if units == 0 {
+    let processes = s.count(&key("vmm_processes"))?;
+    if form == Some(StandbyForm::OnDiskSnapshot) {
+        if processes != 0 {
+            bail!(
+                "wave {wave} observed {processes} VMM processes, but snapshot standbys hold none"
+            );
+        }
+        let units = s.count(&key("standby_count"))?;
+        if units != u64::from(wave) {
+            bail!(
+                "wave {wave} observed {units} snapshot standbys; the count must equal the wave size"
+            );
+        }
+        let snapshot_bytes = s
+            .count(&key("standby_snapshot_du_kib"))?
+            .saturating_mul(1024);
+        return Ok((units, snapshot_bytes));
+    }
+    if processes == 0 {
         bail!("wave {wave} observed no VMM process; refusing to divide by zero units");
     }
     // The process count is host-wide, so a stray VM from another session shows up
     // here as a count that is not the wave's declared size.
-    if units != u64::from(wave) {
-        bail!("wave {wave} observed {units} VMM processes; the count must equal the wave size");
+    if processes != u64::from(wave) {
+        bail!("wave {wave} observed {processes} VMM processes; the count must equal the wave size");
     }
+    Ok((processes, 0))
+}
+
+fn read_wave(s: &Summary, wave: u32, standby: Option<StandbyForm>) -> Result<Wave> {
+    let key = |name: &str| format!("wave_{wave}_{name}");
+    let (units, snapshot_bytes) = wave_units(s, wave, standby)?;
     if s.count(&key("launch_failures"))? != 0 {
         bail!("wave {wave} recorded launch failures");
     }
@@ -147,12 +196,41 @@ fn read_wave(s: &Summary, wave: u32, standby: bool) -> Result<Wave> {
     }
     Ok(Wave {
         units,
-        idle: idle_totals(s, wave, standby)?,
-        vm_state_bytes: s.count(&key("vm_state_du_kib"))?.saturating_mul(1024),
+        idle: idle_totals(s, wave, standby.is_some())?,
+        vm_state_bytes: s
+            .count(&key("vm_state_du_kib"))?
+            .saturating_mul(1024)
+            .saturating_add(snapshot_bytes),
     })
 }
 
-fn footprint(path: &Path) -> Result<std::result::Result<u64, String>> {
+/// The capture's quantity; a capture that names none predates Linux support and
+/// is a physical footprint.
+fn capture_quantity(json: &Value, path: &Path) -> Result<MemoryQuantity> {
+    match json["quantity"].as_str() {
+        None | Some("physical_footprint") => Ok(MemoryQuantity::PhysicalFootprint),
+        Some("proportional_set_size") => Ok(MemoryQuantity::ProportionalSetSize),
+        Some(other) => bail!("{} has unknown memory quantity `{other}`", path.display()),
+    }
+}
+
+fn bytes_key(quantity: MemoryQuantity) -> &'static str {
+    match quantity {
+        MemoryQuantity::PhysicalFootprint => "physical_footprint_bytes",
+        MemoryQuantity::ProportionalSetSize => "proportional_set_size_bytes",
+    }
+}
+
+/// A measured capture: the summed bytes and how many processes they cover.
+struct Capture {
+    bytes: u64,
+    processes: usize,
+}
+
+fn footprint(
+    path: &Path,
+    expected: MemoryQuantity,
+) -> Result<std::result::Result<Capture, String>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading {}; the harness always writes it", path.display()))?;
     let json: Value = serde_json::from_str(&text)
@@ -161,33 +239,50 @@ fn footprint(path: &Path) -> Result<std::result::Result<u64, String>> {
         Some("measured") => {}
         Some("unavailable") => {
             return Ok(Err(format!(
-                "{} has status `unavailable` on this host",
-                path.display()
+                "{} has status `unavailable` on this host ({})",
+                path.display(),
+                json["reason"].as_str().unwrap_or("no reason recorded")
             )));
         }
         other => bail!("{} has status {other:?}", path.display()),
+    }
+    let quantity = capture_quantity(&json, path)?;
+    if quantity != expected {
+        bail!(
+            "{} measured {}, but this host reports {}",
+            path.display(),
+            quantity.label(),
+            expected.label()
+        );
     }
     let processes = json["processes"]
         .as_array()
         .with_context(|| format!("{} is measured but has no processes array", path.display()))?;
     let mut total = 0u64;
     for process in processes {
-        total += process["physical_footprint_bytes"]
-            .as_u64()
-            .with_context(|| format!("{} has a process without a footprint", path.display()))?;
+        total += process[bytes_key(quantity)].as_u64().with_context(|| {
+            format!(
+                "{} has a process without a {}",
+                path.display(),
+                quantity.label()
+            )
+        })?;
     }
-    Ok(Ok(total))
+    Ok(Ok(Capture {
+        bytes: total,
+        processes: processes.len(),
+    }))
 }
 
 /// Per-unit physical footprint: what the wave added between its `before` and
 /// `settled` captures, divided by the units it launched.
-fn wave_memory(wave_dir: &Path, units: u64) -> Result<Figure<u64>> {
-    let before = footprint(&wave_dir.join("physical-memory-before.json"))?;
-    let settled = footprint(&wave_dir.join("physical-memory-settled.json"))?;
+fn wave_memory(wave_dir: &Path, units: u64, quantity: MemoryQuantity) -> Result<Figure<u64>> {
+    let before = footprint(&wave_dir.join("physical-memory-before.json"), quantity)?;
+    let settled = footprint(&wave_dir.join("physical-memory-settled.json"), quantity)?;
     match (before, settled) {
         (Ok(before), Ok(settled)) => {
             // The captures are host-wide, so a shrink is other processes' doing.
-            Ok(match settled.checked_sub(before) {
+            Ok(match settled.bytes.checked_sub(before.bytes) {
                 Some(added) => Figure::measured(added / units),
                 None => Figure::unmeasured(
                     "the host footprint shrank during the wave, so the wave's share is unknowable",
@@ -196,6 +291,43 @@ fn wave_memory(wave_dir: &Path, units: u64) -> Result<Figure<u64>> {
         }
         (Err(reason), _) | (_, Err(reason)) => Ok(Figure::unmeasured(reason)),
     }
+}
+
+/// Fixed host memory: the summed memory of the MVM host processes the
+/// zero-unit capture found. Runs recorded before wave 0 captured memory stay
+/// unmeasured, and so does a capture that matched no process: a sum over
+/// nothing is not a measured zero.
+fn baseline_memory(dir: &Path, quantity: MemoryQuantity) -> Result<Figure<u64>> {
+    let path = dir.join("wave-0/physical-memory-settled.json");
+    if !path.exists() {
+        return Ok(Figure::unmeasured("the run has no wave-0 memory capture"));
+    }
+    Ok(match footprint(&path, quantity)? {
+        Ok(Capture { processes: 0, .. }) => Figure::unmeasured(NO_RESIDENT_HOST_PROCESS),
+        Ok(capture) => Figure::measured(capture.bytes),
+        Err(reason) => Figure::unmeasured(reason),
+    })
+}
+
+const NO_RESIDENT_HOST_PROCESS: &str = "no resident host process at zero units";
+
+/// The source tree the run measured. Not a refusal when dirty: the report says
+/// so and the compare refuses it.
+fn source_of(meta: &Value) -> Result<SourceRevision> {
+    let commit = string_at(meta, &["source", "revision"])?.to_string();
+    let dirty = meta["source"]["dirty"]
+        .as_bool()
+        .context("metadata.json has no boolean `source.dirty`")?;
+    Ok(SourceRevision { commit, dirty })
+}
+
+/// Fixed host disk: blocks held by the run's isolated MVM home with zero units.
+fn baseline_disk(s: &Summary) -> Result<Figure<u64>> {
+    const KEY: &str = "wave_0_mvm_home_du_kib";
+    if s.get(KEY).is_none() {
+        return Ok(Figure::unmeasured("the run has no wave-0 storage capture"));
+    }
+    Ok(Figure::measured(s.count(KEY)?.saturating_mul(1024)))
 }
 
 fn unit_cost(
@@ -250,6 +382,32 @@ fn string_at<'a>(meta: &'a Value, path: &[&str]) -> Result<&'a str> {
         .with_context(|| format!("metadata.json has no `{}`", path.join(".")))
 }
 
+/// Host-process memory and CPU describe the profile that ran, and only the
+/// release profile is what users run.
+fn require_release_build(meta: &Value) -> Result<()> {
+    match meta["configuration"]["build_profile"].as_str() {
+        Some("release") => Ok(()),
+        Some(other) => bail!(
+            "the run measured a `{other}` build; only release-build density runs are reported"
+        ),
+        None => bail!(
+            "metadata.json records no build profile; the run predates the field, \
+             so rerun the harness, which builds and records a release profile"
+        ),
+    }
+}
+
+/// A wave the harness found starting on a busy host was sampled alongside
+/// someone else's processes.
+fn refuse_contaminated(s: &Summary, wave: u32) -> Result<()> {
+    match s.get(&format!("wave_{wave}_contaminated")) {
+        Some(reason) => {
+            bail!("wave {wave} started on a busy host ({reason}); rerun on a quiet host")
+        }
+        None => Ok(()),
+    }
+}
+
 fn mode_of(raw: &str) -> Result<Mode> {
     match raw {
         "cold" => Ok(Mode::Cold),
@@ -267,6 +425,13 @@ fn quantity_of(os: &str) -> Result<WakeupQuantity> {
     }
 }
 
+fn memory_quantity_of(os: &str) -> MemoryQuantity {
+    match os {
+        "Linux" => MemoryQuantity::ProportionalSetSize,
+        _ => MemoryQuantity::PhysicalFootprint,
+    }
+}
+
 fn architecture_of(raw: &str) -> &str {
     match raw {
         "arm64" => "aarch64",
@@ -275,19 +440,23 @@ fn architecture_of(raw: &str) -> &str {
     }
 }
 
+fn read_run_file(dir: &Path, name: &str) -> Result<String> {
+    std::fs::read_to_string(dir.join(name))
+        .with_context(|| format!("reading {}", dir.join(name).display()))
+}
+
+fn read_metadata(dir: &Path) -> Result<Value> {
+    serde_json::from_str(&read_run_file(dir, "metadata.json")?).context("parsing metadata.json")
+}
+
 /// Build one section from a density run directory.
 ///
 /// The largest recorded wave supplies the per-unit figures; every wave the
 /// run declared must be complete, so a run that stopped early is refused
 /// rather than reported from its surviving waves.
 pub fn from_density_dir(dir: &Path) -> Result<Section> {
-    let read = |name: &str| {
-        std::fs::read_to_string(dir.join(name))
-            .with_context(|| format!("reading {}", dir.join(name).display()))
-    };
-    let summary = Summary::parse(&read("summary.tsv")?)?;
-    let meta: Value =
-        serde_json::from_str(&read("metadata.json")?).context("parsing metadata.json")?;
+    let summary = Summary::parse(&read_run_file(dir, "summary.tsv")?)?;
+    let meta = read_metadata(dir)?;
 
     let backend = string_at(&meta, &["configuration", "backend"])?;
     let mode = mode_of(string_at(&meta, &["configuration", "launch_mode"])?)?;
@@ -297,6 +466,7 @@ pub fn from_density_dir(dir: &Path) -> Result<Section> {
     {
         bail!("the run bypassed the native-host guard; its figures are not attributable");
     }
+    require_release_build(&meta)?;
     let quantity = quantity_of(string_at(&meta, &["host", "os"])?)?;
     let architecture = architecture_of(string_at(&meta, &["host", "architecture"])?);
     let waves = string_at(&meta, &["configuration", "waves"])?
@@ -316,23 +486,40 @@ pub fn from_density_dir(dir: &Path) -> Result<Section> {
     if mode == Mode::Warm {
         bail!("warm-mode density runs are not ingested yet");
     }
-    let standby = mode == Mode::Standby;
+    let standby = match mode {
+        Mode::Standby => Some(standby_form_of(&meta)?),
+        _ => None,
+    };
+    let memory_quantity = memory_quantity_of(string_at(&meta, &["host", "os"])?);
     let mut section = Section::unmeasured(backend, architecture, quantity);
+    section.memory_quantity = memory_quantity;
 
     summary
         .count("wave_0_matching_processes")
         .context("the zero-unit baseline is missing")?;
     let baseline = idle_totals(&summary, 0, false).context("the zero-unit baseline is missing")?;
 
+    refuse_contaminated(&summary, 0)?;
     let mut chosen = None;
     for wave in waves {
+        refuse_contaminated(&summary, wave)?;
         let read = read_wave(&summary, wave, standby)?;
         if wave == largest {
             chosen = Some(read);
         }
     }
     let wave = chosen.context("the largest wave was not read")?;
-    let memory = wave_memory(&dir.join(format!("wave-{largest}")), wave.units)?;
+    let memory = if standby == Some(StandbyForm::OnDiskSnapshot) {
+        Figure::unmeasured(
+            "a snapshot standby holds no resident process; its guest RAM is in the snapshot file",
+        )
+    } else {
+        wave_memory(
+            &dir.join(format!("wave-{largest}")),
+            wave.units,
+            memory_quantity,
+        )?
+    };
 
     match &baseline {
         Idle::Measured(b) => {
@@ -346,16 +533,14 @@ pub fn from_density_dir(dir: &Path) -> Result<Section> {
                 Figure::unmeasured(format!("idle sampler: {m}"));
         }
     }
-    section.fixed_host_cost.memory_bytes =
-        Figure::unmeasured("the zero-unit wave records no memory capture");
-    section.fixed_host_cost.disk_bytes =
-        Figure::unmeasured("the zero-unit wave records no storage figure");
+    section.fixed_host_cost.memory_bytes = baseline_memory(dir, memory_quantity)?;
+    section.fixed_host_cost.disk_bytes = baseline_disk(&summary)?;
 
-    let cost = unit_cost(quantity, &baseline, &wave, memory, standby)?;
-    if standby {
-        section.by_standby.resident = cost;
-    } else {
-        section.by_residency.running = cost;
+    let cost = unit_cost(quantity, &baseline, &wave, memory, standby.is_some())?;
+    match standby {
+        Some(StandbyForm::ResidentProcess) => section.by_standby.resident = cost,
+        Some(StandbyForm::OnDiskSnapshot) => section.by_standby.warm = cost,
+        None => section.by_residency.running = cost,
     }
     Ok(section)
 }
@@ -420,9 +605,11 @@ pub fn assemble(density_dir: &Path, launch_reports: &[PathBuf]) -> Result<Resour
         })
         .collect::<Result<Vec<_>>>()?;
     fold_launch_reports(&mut section, &reports)?;
-    let mut report = ResourceReport::default();
-    report.sections.push(section);
-    Ok(report)
+    Ok(ResourceReport {
+        source: Some(source_of(&read_metadata(density_dir)?)?),
+        sections: vec![section],
+        ..ResourceReport::default()
+    })
 }
 
 #[cfg(test)]
@@ -438,9 +625,11 @@ mod tests {
     fn edited(edit: impl FnOnce(String) -> String) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
         let from = fixture();
+        std::fs::create_dir(tmp.path().join("wave-0")).unwrap();
         std::fs::create_dir(tmp.path().join("wave-2")).unwrap();
         for file in [
             "metadata.json",
+            "wave-0/physical-memory-settled.json",
             "wave-2/physical-memory-before.json",
             "wave-2/physical-memory-settled.json",
         ] {
@@ -468,11 +657,8 @@ mod tests {
         );
         assert_eq!(measured(&s.fixed_host_cost.idle_cpu_millicores), 10.0);
         assert_eq!(measured(&s.fixed_host_cost.wakeups.per_second), 5.0);
-        let reason = match &s.fixed_host_cost.memory_bytes {
-            Figure::Unmeasured { reason } => reason.clone(),
-            Figure::Measured { .. } => panic!("no zero-unit memory capture exists"),
-        };
-        assert!(reason.contains("zero-unit"));
+        assert_eq!(measured(&s.fixed_host_cost.memory_bytes), 7_000_000);
+        assert_eq!(measured(&s.fixed_host_cost.disk_bytes), 4096 * 1024);
 
         // Wave 2: (6 + 12) - 10 baseline = 8 millicores over 2 observed units.
         let run = &s.by_residency.running;
@@ -578,7 +764,11 @@ mod tests {
         std::fs::write(
             dir.path().join("metadata.json"),
             meta.replace("\"cold\"", "\"standby\"")
-                .replace("\"1 2\"", "\"2\""),
+                .replace("\"1 2\"", "\"2\"")
+                .replace(
+                    "\"build_profile\"",
+                    "\"standby_form\": \"resident_process\", \"build_profile\"",
+                ),
         )
         .unwrap();
         let s = from_density_dir(dir.path()).unwrap();
@@ -586,6 +776,72 @@ mod tests {
         assert_eq!(measured(&s.by_standby.resident.cpu_millicores), 4.0);
         assert_eq!(measured(&s.by_standby.resident.wakeups.per_second), 2.5);
         assert!(s.by_residency.running.cpu_millicores.value().is_none());
+    }
+
+    /// A firecracker-style run: two snapshot standbys, no VMM process.
+    fn snapshot_standby_run(summary: impl FnOnce(String) -> String) -> tempfile::TempDir {
+        let dir = edited(|s| {
+            let s = s
+                .replace("wave_2_vmm_processes\t2", "wave_2_vmm_processes\t0")
+                .replace(
+                    "wave_2_idle_window_seconds\t10.0",
+                    "wave_2_idle_sampler\tnot_applicable:no_resident_process",
+                );
+            summary(format!(
+                "{s}\nwave_2_standby_count\t2\nwave_2_standby_snapshot_du_kib\t512\n"
+            ))
+        });
+        let meta = std::fs::read_to_string(dir.path().join("metadata.json")).unwrap();
+        std::fs::write(
+            dir.path().join("metadata.json"),
+            meta.replace("\"cold\"", "\"standby\"")
+                .replace("\"1 2\"", "\"2\"")
+                .replace(
+                    "\"build_profile\"",
+                    "\"standby_form\": \"on_disk_snapshot\", \"build_profile\"",
+                ),
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn snapshot_standbys_report_in_their_own_class_with_snapshot_bytes() {
+        let dir = snapshot_standby_run(|s| s);
+        let s = from_density_dir(dir.path()).unwrap();
+        // (2048 KiB of VM state + 512 KiB of snapshots) over 2 standbys.
+        assert_eq!(measured(&s.by_standby.warm.disk_bytes), 2560 * 1024 / 2);
+        assert!(s.by_standby.warm.memory_bytes.value().is_none());
+        assert!(s.by_standby.warm.cpu_millicores.value().is_none());
+        assert!(s.by_standby.resident.disk_bytes.value().is_none());
+        assert!(s.by_residency.running.disk_bytes.value().is_none());
+    }
+
+    #[test]
+    fn a_snapshot_run_that_saw_a_process_or_too_few_standbys_is_refused() {
+        let dir = snapshot_standby_run(|s| {
+            s.replace("wave_2_vmm_processes\t0", "wave_2_vmm_processes\t1")
+        });
+        let err = format!("{:#}", from_density_dir(dir.path()).unwrap_err());
+        assert!(err.contains("hold none"), "{err}");
+        let dir = snapshot_standby_run(|s| {
+            s.replace("wave_2_standby_count\t2", "wave_2_standby_count\t1")
+        });
+        let err = format!("{:#}", from_density_dir(dir.path()).unwrap_err());
+        assert!(err.contains("snapshot standbys"), "{err}");
+    }
+
+    #[test]
+    fn a_standby_run_without_a_recorded_form_is_refused() {
+        let dir = snapshot_standby_run(|s| s);
+        let meta = std::fs::read_to_string(dir.path().join("metadata.json")).unwrap();
+        std::fs::write(
+            dir.path().join("metadata.json"),
+            meta.replace("\"standby_form\": \"on_disk_snapshot\", ", ""),
+        )
+        .unwrap();
+        let err = format!("{:#}", from_density_dir(dir.path()).unwrap_err());
+        assert!(err.contains("standby_form"), "{err}");
     }
 
     fn launch_report(lane: LaunchLane, samples: &[f64]) -> ColdLaunchReport {
@@ -623,6 +879,11 @@ mod tests {
         let unavailable = r#"{"status": "unavailable", "processes": []}"#;
         write_capture(&dir, "physical-memory-before.json", unavailable);
         write_capture(&dir, "physical-memory-settled.json", unavailable);
+        std::fs::write(
+            dir.path().join("wave-0/physical-memory-settled.json"),
+            unavailable,
+        )
+        .unwrap();
         let s = from_density_dir(dir.path()).unwrap();
         assert_eq!(s.backend, "firecracker");
         assert_eq!(
@@ -633,6 +894,56 @@ mod tests {
             Figure::Unmeasured { reason } => assert!(reason.contains("unavailable")),
             Figure::Measured { .. } => panic!("memory must stay unmeasured"),
         }
+    }
+
+    fn linux_run(wave_0: &str, before: &str, settled: &str) -> tempfile::TempDir {
+        let dir = with_meta(|m| {
+            m.replace("Darwin", "Linux")
+                .replace("arm64", "x86_64")
+                .replace("\"hvf\"", "\"firecracker\"")
+        });
+        std::fs::write(
+            dir.path().join("wave-0/physical-memory-settled.json"),
+            wave_0,
+        )
+        .unwrap();
+        write_capture(&dir, "physical-memory-before.json", before);
+        write_capture(&dir, "physical-memory-settled.json", settled);
+        dir
+    }
+
+    fn pss_capture(bytes: u64) -> String {
+        format!(
+            r#"{{"status": "measured", "quantity": "proportional_set_size", "processes": [{{"proportional_set_size_bytes": {bytes}}}]}}"#
+        )
+    }
+
+    #[test]
+    fn a_linux_run_reports_proportional_set_size_and_says_so() {
+        let dir = linux_run(&pss_capture(5000), &pss_capture(1000), &pss_capture(5000));
+        let s = from_density_dir(dir.path()).unwrap();
+        assert_eq!(s.memory_quantity, MemoryQuantity::ProportionalSetSize);
+        assert_eq!(s.fixed_host_cost.memory_bytes, Figure::measured(5000));
+        assert_eq!(s.by_residency.running.memory_bytes, Figure::measured(2000));
+        let md = crate::bench::resource_report::render_markdown(&ResourceReport {
+            sections: vec![s],
+            ..ResourceReport::default()
+        });
+        assert!(md.contains("proportional set size"));
+    }
+
+    #[test]
+    fn a_capture_of_the_other_quantity_is_refused() {
+        let footprint = r#"{"status": "measured", "processes": [{"physical_footprint_bytes": 1}]}"#;
+        let dir = linux_run(&pss_capture(5000), footprint, &pss_capture(5000));
+        assert!(error_of(&dir).contains("measured physical footprint"));
+    }
+
+    #[test]
+    fn a_macos_run_with_an_unlabelled_capture_is_a_physical_footprint() {
+        let s = from_density_dir(&fixture()).unwrap();
+        assert_eq!(s.memory_quantity, MemoryQuantity::PhysicalFootprint);
+        assert_eq!(s.fixed_host_cost.memory_bytes, Figure::measured(7_000_000));
     }
 
     #[test]
@@ -692,6 +1003,47 @@ mod tests {
         }
     }
 
+    fn reason_of<T>(f: &Figure<T>) -> &str {
+        match f {
+            Figure::Unmeasured { reason } => reason,
+            Figure::Measured { .. } => panic!("figure must stay unmeasured"),
+        }
+    }
+
+    #[test]
+    fn a_run_without_wave_0_captures_leaves_fixed_memory_and_disk_unmeasured() {
+        let dir = edited(|s| s.replace("wave_0_mvm_home_du_kib\t4096\n", ""));
+        std::fs::remove_file(dir.path().join("wave-0/physical-memory-settled.json")).unwrap();
+        let s = from_density_dir(dir.path()).unwrap();
+        assert_eq!(
+            reason_of(&s.fixed_host_cost.memory_bytes),
+            "the run has no wave-0 memory capture"
+        );
+        assert_eq!(
+            reason_of(&s.fixed_host_cost.disk_bytes),
+            "the run has no wave-0 storage capture"
+        );
+    }
+
+    #[test]
+    fn an_unavailable_wave_0_capture_carries_its_own_reason() {
+        let dir = edited(|s| s);
+        std::fs::write(
+            dir.path().join("wave-0/physical-memory-settled.json"),
+            r#"{"schema_version": 1, "status": "unavailable", "reason": "unsupported_platform"}"#,
+        )
+        .unwrap();
+        let s = from_density_dir(dir.path()).unwrap();
+        assert!(reason_of(&s.fixed_host_cost.memory_bytes).contains("unsupported_platform"));
+        assert_eq!(measured(&s.fixed_host_cost.disk_bytes), 4096 * 1024);
+    }
+
+    #[test]
+    fn an_unparseable_wave_0_disk_figure_is_an_error() {
+        let dir = edited(|s| s.replace("wave_0_mvm_home_du_kib\t4096", "wave_0_mvm_home_du_kib\t"));
+        assert!(error_of(&dir).contains("wave_0_mvm_home_du_kib"));
+    }
+
     #[test]
     fn a_missing_memory_capture_is_an_error() {
         let dir = edited(|s| s);
@@ -721,6 +1073,88 @@ mod tests {
         assert!(error_of(&dir).contains("bypassed"));
         let dir = with_meta(|m| m.replace("\"native_host_bypassed\": false, ", ""));
         assert!(from_density_dir(dir.path()).is_err());
+    }
+
+    #[test]
+    fn only_a_release_build_is_ingested() {
+        let dir = with_meta(|m| m.replace("\"release\"", "\"debug\""));
+        assert!(error_of(&dir).contains("measured a `debug` build"));
+        let dir = with_meta(|m| m.replace("\"release\"", "\"unknown:binary_override\""));
+        assert!(error_of(&dir).contains("unknown:binary_override"));
+        let dir = with_meta(|m| m.replace(", \"build_profile\": \"release\"", ""));
+        assert!(error_of(&dir).contains("predates the field"));
+    }
+
+    #[test]
+    fn a_contaminated_wave_is_refused_by_name() {
+        for wave in [0, 1, 2] {
+            let dir = edited(|s| format!("{s}\nwave_{wave}_contaminated\tbusy_host:cargo,rustc\n"));
+            let err = error_of(&dir);
+            assert!(
+                err.contains(&format!(
+                    "wave {wave} started on a busy host (busy_host:cargo,rustc)"
+                )),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_unit_capture_that_matched_nothing_is_unmeasured_not_zero() {
+        let empty =
+            r#"{"status": "measured", "quantity": "proportional_set_size", "processes": []}"#;
+        // An empty `before` is a real zero: nothing ran before the wave.
+        let dir = linux_run(empty, empty, &pss_capture(4000));
+        let s = from_density_dir(dir.path()).unwrap();
+        assert_eq!(
+            reason_of(&s.fixed_host_cost.memory_bytes),
+            NO_RESIDENT_HOST_PROCESS
+        );
+        assert_eq!(s.by_residency.running.memory_bytes, Figure::measured(2000));
+    }
+
+    #[test]
+    fn the_report_carries_the_recorded_source_commit_and_dirty_flag() {
+        let report = assemble(&fixture(), &[]).unwrap();
+        assert_eq!(
+            report.source,
+            Some(SourceRevision {
+                commit: "0123456789abcdef0123456789abcdef01234567".into(),
+                dirty: false,
+            })
+        );
+        let dir = with_meta(|m| m.replace("\"dirty\": false", "\"dirty\": true"));
+        let report = assemble(dir.path(), &[]).unwrap();
+        assert!(
+            report.source.unwrap().dirty,
+            "a dirty run is reported, not refused"
+        );
+        let dir = with_meta(|m| m.replace("\"dirty\": false", "\"dirty\": \"yes\""));
+        let err = format!("{:#}", assemble(dir.path(), &[]).unwrap_err());
+        assert!(err.contains("source.dirty"), "{err}");
+    }
+
+    /// The compare in xtask cannot link this crate, so it reads this file. The
+    /// test keeps it identical to what the serializer writes today.
+    #[test]
+    fn the_checked_in_resource_report_fixture_is_current() {
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/resource-report.json");
+        let current = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&assemble(&fixture(), &[]).unwrap()).unwrap()
+        );
+        if std::env::var_os("MVM_UPDATE_RESOURCE_REPORT_FIXTURE").is_some() {
+            std::fs::write(&path, &current).unwrap();
+        }
+        let recorded = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            recorded == current,
+            "{} is stale; regenerate it with\n  \
+             MVM_UPDATE_RESOURCE_REPORT_FIXTURE=1 cargo nextest run -p mvm-cli \
+             the_checked_in_resource_report_fixture_is_current",
+            path.display()
+        );
     }
 
     #[test]

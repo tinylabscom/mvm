@@ -2,6 +2,9 @@
 // Depends on mvm-core
 
 #![deny(unreachable_pub)]
+/// Workload-readable, boot-bound actor credential projection from the identity drive.
+#[cfg(unix)]
+pub mod actor_identity;
 /// Loopback DNS resolver (`mvm-addon-dns`).
 #[cfg(feature = "addons")]
 pub mod addon_dns;
@@ -33,6 +36,9 @@ pub mod console;
 /// Restores the `quiet` console loglevel once PID 1 has `/proc`, after a boot
 /// that lowered it to keep early-boot kernel errors off a slow serial console.
 pub mod console_loglevel;
+/// Exact public mailbox target projection through the existing identity drive.
+#[cfg(unix)]
+pub mod conversation_identity;
 /// Immediate kernel CRNG reseed through a helper process that holds the one
 /// capability the agent does not.
 pub mod crng_reseed;
@@ -92,6 +98,8 @@ pub mod guest_net;
 /// Shared in-guest vsock session helper for the addon/egress helper bins.
 #[cfg(feature = "addons")]
 pub mod guest_vsock_session;
+/// Encrypted, boot-bound workload actor lifecycle calls.
+pub mod host_actor;
 /// In-guest `host.audit.v1` typed methods: `emit` / `emit_batch` over the
 /// broker transport, letting a workload append to the chain-signed audit log.
 pub mod host_audit;
@@ -100,6 +108,9 @@ pub mod host_beacon;
 /// over the broker transport.
 pub mod host_cost;
 pub mod host_kv;
+/// Dedicated mailbox application calls through the existing guest-local handoff.
+#[cfg(unix)]
+pub mod host_mailbox;
 /// In-guest `host.time.v1` typed method: `now` host wall-clock query over the
 /// broker transport.
 pub mod host_time;

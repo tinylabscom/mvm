@@ -42,6 +42,15 @@ gap = "Per-binary stderr JSON subscriber without env filtering; no shared host c
 required_witness = "Host-local collection receives broker diagnostics with authoritative correlation labels."
 
 [[subscriber_init]]
+file = "crates/mvm-hostd/src/bin/mvm-mailbox.rs"
+anchor = "tracing_subscriber::fmt()"
+scope = "global"
+role = "host"
+owner = "Per-VM guest mailbox process"
+gap = "ERROR-only stderr diagnostics are discarded by ordinary launch; explicit live validation inherits stderr but does not certify durable collection."
+required_witness = "Host collection receives bounded mailbox refusal diagnostics correlated to the original VM."
+
+[[subscriber_init]]
 file = "crates/mvm-hostd/src/bin/mvm-host-agent.rs"
 anchor = "tracing_subscriber::fmt()"
 scope = "global"

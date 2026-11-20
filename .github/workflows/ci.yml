@@ -311,7 +311,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
 
       - uses: ./.github/actions/apt-deps
         with:
@@ -337,7 +337,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
           components: rustfmt, clippy
 
       - uses: ./.github/actions/apt-deps
@@ -376,6 +376,8 @@ jobs:
                      scripts/dev-run-guard.test.sh \
                      scripts/cargo-target-dir-guard.sh \
                      scripts/cargo-target-dir-guard.test.sh \
+                     scripts/prune-targets.sh \
+                     scripts/prune-targets.test.sh \
                      scripts/run-gcp-kvm-test.sh \
                      scripts/run-gcp-kvm-test-remote.sh \
                      scripts/run-gcp-kvm-test.test.sh \
@@ -484,7 +486,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
           components: clippy
 
       - uses: ./.github/actions/apt-deps
@@ -554,7 +556,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
 
       # Policy checks invoke xtask, and the stub/parity checks invoke the
       # pinned Python and TypeScript generators. They are independent of the
@@ -611,6 +613,9 @@ jobs:
       - name: Cargo target dir guard tests
         run: bash scripts/cargo-target-dir-guard.test.sh
 
+      - name: Prune targets tests
+        run: bash scripts/prune-targets.test.sh
+
       - name: Dev-run guard tests
         run: bash scripts/dev-run-guard.test.sh
 
@@ -660,8 +665,8 @@ jobs:
       - name: Embedded helper recipe contract
         if: github.event_name == 'pull_request' && needs.scope.outputs.code == 'true'
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustc +1.97.1 --edition=2024 -D warnings --test \
+          rustup toolchain install 1.100.0 --profile minimal
+          rustc +1.100.0 --edition=2024 -D warnings --test \
             crates/mvm-cli/tests/embed_recipe.rs \
             -o "$RUNNER_TEMP/embed-recipe-test"
           "$RUNNER_TEMP/embed-recipe-test"
@@ -855,7 +860,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
 
       # rust-toolchain.toml overrides the action's toolchain, so a target
       # installed through the action is not the one cargo builds with and
@@ -893,7 +898,7 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
 
       - name: Run supported Windows identity and producer tests
         shell: pwsh
@@ -924,7 +929,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
 
       - uses: ./.github/actions/apt-deps
         with:
@@ -1021,7 +1026,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
 
       - uses: ./.github/actions/apt-deps
         with:

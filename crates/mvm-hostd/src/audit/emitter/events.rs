@@ -427,7 +427,7 @@ pub mod grants_audit {
 
     use anyhow::Result;
     use mvm_contract::protocol::resource_controls::{
-        EnforcedCeiling, EnforcedGrants, EnforcedTier,
+        EnforcedCeiling, EnforcedGrants, EnforcedPlacement, EnforcedTier,
     };
     use mvm_core::plan::ExecutionPlan;
 
@@ -445,6 +445,14 @@ pub mod grants_audit {
     pub const LABEL_TASKS_TIER: &str = "grants_tasks_tier";
     /// Label: the task ceiling read back. Absent when declared.
     pub const LABEL_TASKS_MAX: &str = "grants_tasks_max";
+    /// Label: the mechanism holding the VMM's core placement. Absent when the
+    /// launch was placed nowhere.
+    pub const LABEL_CPUSET_TIER: &str = "grants_cpuset_tier";
+    /// Label: the CPU set admission placed the launch on, in the kernel list
+    /// format.
+    pub const LABEL_CPUSET_REQUESTED: &str = "grants_cpuset_requested";
+    /// Label: the scope's `cpuset.cpus.effective`, in the kernel list format.
+    pub const LABEL_CPUSET_EFFECTIVE: &str = "grants_cpuset_effective";
 
     /// Emitted when the kernel killed a workload's VMM for crossing its memory
     /// ceiling.
@@ -525,7 +533,27 @@ pub mod grants_audit {
             LABEL_TASKS_MAX,
             enforced.tasks,
         );
+        push_placement(&mut labels, &enforced.placement);
         labels
+    }
+
+    /// The placement labels, only for a launch admission placed. The request
+    /// is recorded here, unlike a CPU share's, because a launch whose
+    /// read-back differs from it was refused before this entry is written.
+    fn push_placement(labels: &mut Vec<(String, String)>, placement: &EnforcedPlacement) {
+        if placement.is_unset() {
+            return;
+        }
+        labels.push((
+            LABEL_CPUSET_TIER.to_string(),
+            placement.tier().label().to_string(),
+        ));
+        if let Some(requested) = &placement.requested {
+            labels.push((LABEL_CPUSET_REQUESTED.to_string(), requested.to_string()));
+        }
+        if let Some(effective) = &placement.effective {
+            labels.push((LABEL_CPUSET_EFFECTIVE.to_string(), effective.to_string()));
+        }
     }
 
     fn push_ceiling(
@@ -558,7 +586,9 @@ pub mod grants_audit {
                 wall_clock: EnforcedTier::Declared,
                 memory: EnforcedCeiling::enforced(EnforcedTier::Cgroup2MemoryMax, 805_306_368),
                 tasks: EnforcedCeiling::enforced(EnforcedTier::Cgroup2PidsMax, 1024),
+                placement: EnforcedPlacement::default(),
             });
+            assert_eq!(label(&labels, LABEL_CPUSET_TIER), None);
             assert_eq!(
                 label(&labels, LABEL_MEMORY_TIER),
                 Some("cgroup2:memory.max")
@@ -566,6 +596,23 @@ pub mod grants_audit {
             assert_eq!(label(&labels, LABEL_MEMORY_MAX_BYTES), Some("805306368"));
             assert_eq!(label(&labels, LABEL_TASKS_TIER), Some("cgroup2:pids.max"));
             assert_eq!(label(&labels, LABEL_TASKS_MAX), Some("1024"));
+        }
+
+        #[test]
+        fn a_placement_is_labelled_with_its_request_and_read_back() {
+            use mvm_contract::protocol::cpu_set::CpuSet;
+            let mut grants = EnforcedGrants::all_declared();
+            grants.placement = EnforcedPlacement {
+                requested: Some(CpuSet::parse("2-3").unwrap()),
+                effective: Some(CpuSet::parse("2,3").unwrap()),
+            };
+            let labels = enforced_grants_labels(&grants);
+            assert_eq!(
+                label(&labels, LABEL_CPUSET_TIER),
+                Some("cgroup2:cpuset.cpus.effective")
+            );
+            assert_eq!(label(&labels, LABEL_CPUSET_REQUESTED), Some("2-3"));
+            assert_eq!(label(&labels, LABEL_CPUSET_EFFECTIVE), Some("2-3"));
         }
 
         #[test]

@@ -16,6 +16,11 @@ fn main() -> Result<()> {
     // First statement in the process: a panic before this line would print
     // its payload unredacted.
     mvm_hostd::panic_hook::install("mailbox");
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_max_level(tracing::Level::ERROR)
+        .with_ansi(false)
+        .init();
     let raw = mvm_hostd::read_launch_config("mvm-mailbox")?;
     let config = parse(&raw).context("mvm-mailbox config parse failed")?;
     std::process::exit(serve(config));

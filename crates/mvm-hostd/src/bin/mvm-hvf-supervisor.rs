@@ -800,8 +800,10 @@ fn run() -> anyhow::Result<()> {
     let _ = std::fs::remove_file(mvm_vmm::host::hvf_supervisor::shutdown_timing_path(
         state_dir,
     ));
+    mvm_core::launch_trace::lap("shutdown_timing_remove");
     diagnostics.stage(StartupStage::StatusPublish);
     CaptureStatus::Starting.publish(state_dir)?;
+    mvm_core::launch_trace::lap("starting_status_publish");
     if let Some(path) = &cfg.pause_state {
         let _ = std::fs::remove_file(path);
     }
@@ -1016,6 +1018,7 @@ fn run() -> anyhow::Result<()> {
         admitted_plan.as_ref(),
         cfg.trusted_builder_egress || cfg.handoff_socket.is_some(),
     )?;
+    mvm_core::launch_trace::lap("capture_authority_select");
     diagnostics.stage(StartupStage::CaptureSetup);
     let (capture_owner, console_sink) =
         match mvm_hostd::stream::protected::CaptureOwner::start(CaptureParams {
@@ -1029,21 +1032,30 @@ fn run() -> anyhow::Result<()> {
                 anyhow::bail!("required protected console owner could not be provisioned");
             }
         };
+    mvm_core::launch_trace::lap("capture_owner_start");
     let capture_owner = mvm_hostd::supervisor::admission::protected_handoff::CaptureRoute::start(
         capture_owner,
         cfg.pid_file.clone(),
         &STOP,
         stop_control.authority(),
     )?;
+    mvm_core::launch_trace::lap("capture_route_start");
     let capture_control = cfg.handoff_socket.as_ref().map(|_| capture_owner.control());
     // Only a provisioned capture owner may announce this boot.
     diagnostics.stage(StartupStage::StatusPublish);
     CaptureStatus::Running.publish(state_dir)?;
+    mvm_core::launch_trace::lap("running_status_publish");
     diagnostics.stage(StartupStage::PidPublish);
     // The start time rides with the pid so a pid recycled after this process
     // dies cannot make a dead machine look alive.
     let record = mvm_vmm::host::network_endpoint_spawn::EndpointPid::of_child(std::process::id());
+    anyhow::ensure!(
+        record.started.is_some(),
+        "cannot establish original workload process identity"
+    );
+    mvm_core::launch_trace::lap("pid_identity");
     std::fs::write(&cfg.pid_file, record.render()).context("publish protected supervisor PID")?;
+    mvm_core::launch_trace::lap("pid_file_write");
     diagnostics.stage(StartupStage::PidPublished);
     drop(diagnostics);
     mvm_core::launch_trace::lap("capture_setup_and_pid_publish");

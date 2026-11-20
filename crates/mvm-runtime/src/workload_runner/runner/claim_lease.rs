@@ -102,6 +102,12 @@ impl<'a> WarmClaimLease<'a> {
         self.termination = ChildTermination::Confirmed;
     }
 
+    /// Preserve both the reservation and child state when a failed stop
+    /// cannot prove the child is gone. Neither may be reused or deleted.
+    pub(super) fn retain_uncertain_child(&mut self) {
+        self.committed = true;
+    }
+
     /// The parent can never be restored on this host: drop it from the pool
     /// rather than return it to rotation, where every later claim would fail the
     /// same way until its TTL. Removal waits until any paused child is confirmed

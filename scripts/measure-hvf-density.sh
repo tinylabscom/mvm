@@ -33,7 +33,12 @@ Useful overrides:
   MVM_HVF_DENSITY_OUT_DIR=/tmp/path          artifact directory outside the repo
   MVM_HVF_DENSITY_BACKEND=firecracker        Linux/KVM instead of macOS HVF
   MVM_HVF_DENSITY_MODE=cold|warm|standby     cold (default), sequential warm claims, or
-                                             N standbys held unclaimed and idle-sampled
+                                             N standbys held unclaimed and idle-sampled.
+                                             On firecracker a standby is an on-disk snapshot
+                                             with no process: it is counted from the pool, its
+                                             snapshot bytes are charged, and metadata.json
+                                             records standby_form. Needs a short data dir
+                                             (MVM_HVF_DENSITY_DATA_DIR) for the VM sockets.
   MVM_HVF_DENSITY_WAVES="1 5 10 25 50 100"  wave sizes to run
   MVM_HVF_DENSITY_IMAGE=alpine              OCI image reference
   MVM_HVF_DENSITY_GUEST_SLEEP_SECONDS=240   in-guest sleep duration
@@ -44,11 +49,16 @@ Useful overrides:
   MVM_HVF_DENSITY_MAILBOX=1                  grant one distinct mailbox per VM
   MVM_HVF_DENSITY_ACK_LARGE=1                explicitly permit waves over 100 VMs
   Large waves also require configured guest RAM to fit within 80% of host RAM.
-  Linux requires /dev/kvm and MVM's shipped Firecracker; unpinned overrides are refused.
+  Linux requires MVM's shipped Firecracker; unpinned overrides are refused.
+  Linux also requires, checked before anything is built:
+    a non-root user (mvmctl refuses to launch Firecracker as root),
+    read-write access to /dev/kvm (usually membership of the kvm group), and
+    a systemd user session bus (log in, or enable lingering for the user),
+    since each Firecracker launch runs in a transient systemd scope.
   MVM_HVF_DENSITY_WORKLOAD_KERNEL=/path     seed isolated cache with this kernel
   MVM_HVF_DENSITY_SEED_HOST_KERNEL=0        do not auto-seed from ~/.cache/mvm
   MVM_HVF_DENSITY_SKIP_PREPULL=1            skip image pull before waves
-  MVM_HVF_DENSITY_SKIP_BUILD=1              reuse existing binaries
+  MVM_HVF_DENSITY_SKIP_BUILD=1              reuse existing release binaries
   MVM_HVF_DENSITY_MVMCTL=/path/mvmctl       mvmctl binary override
   MVM_HVF_SUPERVISOR_PATH=/path/supervisor  supervisor binary override
   MVM_SUBSTITUTION_ENDPOINT_PATH=/path/bin  endpoint binary override
@@ -59,11 +69,18 @@ Useful overrides:
 Artifacts include command logs, VM names, launch failures, ps RSS snapshots,
 host memory snapshots, and cleanup results. All generated state is isolated under
 OUT_DIR unless an explicit override points elsewhere.
-metadata.json records source/host identity, binary hashes and measurement boundaries.
+metadata.json records source/host identity, the build profile, binary hashes and
+measurement boundaries. The harness builds and measures release binaries; a binary
+override records the profile as unknown, and bench report refuses it.
+The busy-host check repeats after the build and at the start of every wave; a wave
+that starts on a busy host is recorded as wave_N_contaminated in summary.tsv.
 It is not a successful-run receipt. RSS/idle samples include host-wide matching
 processes; receipt latency includes execution, not just boot or agent readiness.
-physical-memory-*.json records macOS per-process resident and physical-footprint
-bytes before, during and after each wave; unavailable/partial samples stay explicit.
+resource-report.json and resource-report.md are written at the end of a successful
+run by the harness's own mvmctl; a failure to produce them fails the run (exit 74).
+physical-memory-*.json records per-process resident bytes and a named quantity
+(macOS physical footprint, Linux proportional set size) before, during and after each wave; unavailable/partial samples stay explicit.
+wave-0 holds the zero-unit baseline: one settled memory and storage capture.
 USAGE
 }
 
@@ -89,6 +106,36 @@ if [[ "$#" -gt 0 ]]; then
   CUSTOM_WORKLOAD=1
 fi
 
+# The tests point this at a fixture file; a real run always opens /dev/kvm.
+KVM_DEVICE="${MVM_HVF_DENSITY_KVM_DEVICE:-/dev/kvm}"
+MEMINFO="${MVM_HVF_DENSITY_MEMINFO:-/proc/meminfo}"
+
+# The same conditions the Firecracker launch refuses on, checked before a
+# build that takes most of an hour on a cold host.
+firecracker_preflight() {
+  local user
+  user="$(id -un)"
+  if [[ "$(id -u)" -eq 0 ]]; then
+    echo "refusing: mvmctl will not launch Firecracker as root; rerun as a non-root user with read-write access to ${KVM_DEVICE}" >&2
+    return 73
+  fi
+  if [[ ! -r "${KVM_DEVICE}" || ! -w "${KVM_DEVICE}" ]]; then
+    echo "refusing: ${user} cannot open ${KVM_DEVICE} read-write; add the user to the kvm group (usermod -aG kvm ${user}) and log in again" >&2
+    return 73
+  fi
+  # Mirrors the launch's own probe: a session bus address, or the bus socket
+  # systemd places in the user's runtime directory.
+  if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]] &&
+    { [[ -z "${XDG_RUNTIME_DIR:-}" ]] || [[ ! -e "${XDG_RUNTIME_DIR}/bus" ]]; }; then
+    echo "refusing: no systemd user session bus, which the Firecracker launch scope needs; run from a login session, or enable lingering (loginctl enable-linger ${user}) and set XDG_RUNTIME_DIR=/run/user/\$(id -u)" >&2
+    return 73
+  fi
+}
+
+if [[ "${BACKEND}" == "firecracker" && "${MVM_HVF_DENSITY_ALLOW_UNSUPPORTED:-0}" != "1" ]]; then
+  firecracker_preflight || exit $?
+fi
+
 host_ok=0
 case "${BACKEND}" in
   hvf)
@@ -97,7 +144,7 @@ case "${BACKEND}" in
     fi
     ;;
   firecracker)
-    if [[ "$(uname -s)" == "Linux" && -r /dev/kvm && -w /dev/kvm ]]; then
+    if [[ "$(uname -s)" == "Linux" ]]; then
       host_ok=1
     fi
     ;;
@@ -177,7 +224,7 @@ fi
 if [[ "${BACKEND}" == "hvf" ]]; then
   host_bytes="$(sysctl -n hw.memsize 2>/dev/null)" || host_bytes=""
 else
-  host_kib="$(awk '$1 == "MemTotal:" { print $2; exit }' /proc/meminfo)" || host_kib=""
+  host_kib="$(awk '$1 == "MemTotal:" { print $2; exit }' "${MEMINFO}")" || host_kib=""
   host_bytes=$(( ${host_kib:-0} * 1024 ))
 fi
 if ! [[ "${host_bytes}" =~ ^[0-9]+$ ]] || [[ "${host_bytes}" -eq 0 ]]; then
@@ -211,6 +258,19 @@ if [[ "${CUSTOM_WORKLOAD}" == "0" ]] && awk \
   exit 70
 fi
 
+# A Firecracker standby is captured as a full-VM snapshot, which needs the VM's
+# sockets inside its state dir; the longest is the substitution readiness socket.
+# shortcut: a relative MVM_HVF_DENSITY_DATA_DIR is measured as written; give an absolute one.
+if [[ "${BACKEND}" == "firecracker" && "${MODE}" == "standby" ]]; then
+  longest_standby_socket="${DATA_DIR}/vms/standby-0123456789abcdef/substitution-session-ready.sock"
+  if [[ "${#longest_standby_socket}" -gt 103 ]]; then
+    echo "refusing: a Firecracker standby snapshot needs its sockets in the VM state dir, and this path exceeds the 103-byte Unix socket limit:" >&2
+    echo "  ${longest_standby_socket}" >&2
+    echo "set MVM_HVF_DENSITY_DATA_DIR to a shorter new directory, for example /srv/mvm/d" >&2
+    exit 65
+  fi
+fi
+
 if [[ -e "${DATA_DIR}" || -L "${DATA_DIR}" ]]; then
   echo "refusing: density data directory must be new, so cleanup cannot stop existing machines: ${DATA_DIR}" >&2
   exit 65
@@ -241,9 +301,15 @@ if [[ "${BACKEND}" == "hvf" ]]; then
 fi
 
 busy_host_processes="${OUT_DIR}/busy-host-processes.txt"
+# Prints build and MVM runtime processes, skipping the PIDs listed in the
+# optional file (this run's own resident daemons); succeeds when any remain.
 capture_busy_host_processes() {
-  ps axww -o pid=,ppid=,comm=,args= | awk '
+  ps axww -o pid=,ppid=,comm=,args= | awk -v skip="${1:-}" '
+    BEGIN {
+      if (skip != "") while ((getline pid < skip) > 0) owned[pid] = 1
+    }
     {
+      if ($1 in owned) next
       args = $0
       if (args ~ /measure-hvf-density.sh/) next
       if (args ~ /awk /) next
@@ -264,7 +330,8 @@ capture_busy_host_processes() {
   '
 }
 
-if [[ "${MVM_HVF_DENSITY_ALLOW_BUSY_HOST:-0}" != "1" ]]; then
+refuse_busy_host() {
+  [[ "${MVM_HVF_DENSITY_ALLOW_BUSY_HOST:-0}" == "1" ]] && return 0
   if capture_busy_host_processes >"${busy_host_processes}"; then
     echo "refusing: active build or MVM runtime processes would contaminate the density baseline" >&2
     echo "see ${busy_host_processes}" >&2
@@ -272,12 +339,49 @@ if [[ "${MVM_HVF_DENSITY_ALLOW_BUSY_HOST:-0}" != "1" ]]; then
     exit 72
   fi
   : >"${busy_host_processes}"
-fi
+}
+
+refuse_busy_host
+
+# This run's resident daemons, recorded once nothing but its own preparation
+# has run since the post-build check.
+resident_pids="${OUT_DIR}/resident-pids.txt"
+record_resident_pids() {
+  ps axww -o pid=,comm= | awk '
+    $2 ~ /(mvm-hvf-supervisor|firecracker|mvmctl|mvm-network-endpoint|mvm-mailbox|mvm-host-agent)/ { print $1 }
+  ' >"${resident_pids}"
+}
+
+# Samplers count host-wide processes, so a build or another session's VM that
+# appears mid-run would be charged to the wave. Marks the wave, never skips it.
+# shortcut: a resident daemon that restarts mid-run gets a new PID and marks
+# later waves contaminated; fails safe, upgrade to ownership by MVM_HOME if it bites.
+check_wave_host() {
+  local wave="$1"
+  local dir="$2"
+  [[ "${MVM_HVF_DENSITY_ALLOW_BUSY_HOST:-0}" == "1" ]] && return 0
+  local found="${dir}/busy-host-processes.txt"
+  if capture_busy_host_processes "${resident_pids}" >"${found}"; then
+    local programs
+    programs="$(awk '{ n = split($3, p, "/"); print p[n] }' "${found}" | sort -u | paste -sd, -)"
+    printf 'wave_%s_contaminated\tbusy_host:%s\n' "${wave}" "${programs}" >>"${SUMMARY}"
+    echo "warning: wave ${wave} started on a busy host (${programs}); see ${found}" >&2
+  fi
+}
 
 # Standby holds are warmed through the warm residency; "standby" is not a residency.
 RESIDENCY="${MODE}"
 if [[ "${MODE}" == "standby" ]]; then
   RESIDENCY="warm"
+fi
+# Firecracker captures a standby as an on-disk snapshot and releases the VMM
+# process; HVF keeps a resident supervisor per standby.
+STANDBY_FORM="not_applicable"
+if [[ "${MODE}" == "standby" ]]; then
+  STANDBY_FORM="resident_process"
+  if [[ "${BACKEND}" == "firecracker" ]]; then
+    STANDBY_FORM="on_disk_snapshot"
+  fi
 fi
 run_env=(
   env
@@ -322,21 +426,30 @@ cd "${ROOT}"
 
 seed_workload_kernel
 
+# Host-process memory and CPU describe the profile they ran, so measure the
+# one users run.
 if [[ "${SKIP_BUILD}" != "1" ]]; then
-  "${run_env[@]}" cargo build -p mvmctl --bin mvmctl
-  "${run_env[@]}" cargo build -p mvm-hostd --bin mvm-network-endpoint
+  "${run_env[@]}" cargo build --release -p mvmctl --bin mvmctl
+  "${run_env[@]}" cargo build --release -p mvm-hostd --bin mvm-network-endpoint
   if [[ "${BACKEND}" == "hvf" ]]; then
-    "${run_env[@]}" cargo build -p mvm-hostd --bin mvm-hvf-supervisor
+    "${run_env[@]}" cargo build --release -p mvm-hostd --bin mvm-hvf-supervisor
   fi
   if [[ "${MAILBOX}" == "1" ]]; then
-    "${run_env[@]}" cargo build -p mvm-hostd --bin mvm-mailbox
+    "${run_env[@]}" cargo build --release -p mvm-hostd --bin mvm-mailbox
   fi
 fi
 
-MVMCTL_BIN="${MVM_HVF_DENSITY_MVMCTL:-${TARGET_DIR}/debug/mvmctl}"
-SUPERVISOR_BIN="${MVM_HVF_SUPERVISOR_PATH:-${TARGET_DIR}/debug/mvm-hvf-supervisor}"
-ENDPOINT_BIN="${MVM_SUBSTITUTION_ENDPOINT_PATH:-${TARGET_DIR}/debug/mvm-network-endpoint}"
-MAILBOX_BIN="${MVM_HVF_DENSITY_MAILBOX_BIN:-${TARGET_DIR}/debug/mvm-mailbox}"
+BUILD_PROFILE="release"
+for override in MVM_HVF_DENSITY_MVMCTL MVM_HVF_SUPERVISOR_PATH \
+  MVM_SUBSTITUTION_ENDPOINT_PATH MVM_HVF_DENSITY_MAILBOX_BIN; do
+  if [[ -n "${!override:-}" ]]; then
+    BUILD_PROFILE="unknown:binary_override"
+  fi
+done
+MVMCTL_BIN="${MVM_HVF_DENSITY_MVMCTL:-${TARGET_DIR}/release/mvmctl}"
+SUPERVISOR_BIN="${MVM_HVF_SUPERVISOR_PATH:-${TARGET_DIR}/release/mvm-hvf-supervisor}"
+ENDPOINT_BIN="${MVM_SUBSTITUTION_ENDPOINT_PATH:-${TARGET_DIR}/release/mvm-network-endpoint}"
+MAILBOX_BIN="${MVM_HVF_DENSITY_MAILBOX_BIN:-${TARGET_DIR}/release/mvm-mailbox}"
 
 if [[ ! -x "${MVMCTL_BIN}" ]]; then
   echo "refusing: mvmctl not executable at ${MVMCTL_BIN}" >&2
@@ -398,6 +511,10 @@ cleanup_active_pids() {
 }
 trap cleanup_active_pids INT TERM EXIT
 
+# The build and prepull can take most of an hour; check again before any VM of
+# this run exists, so anything found now is someone else's.
+refuse_busy_host
+
 prime_name="${RUN_ID}-prime"
 if ! "${run_env[@]}" "MVM_RESIDENCY=cold" "${MVMCTL_BIN}" machine run \
   --name "${prime_name}" --hypervisor "${BACKEND}" --image "${IMAGE_REF}" \
@@ -413,6 +530,7 @@ if ! "${run_env[@]}" "${MVMCTL_BIN}" machine stop --all --yes \
   echo "refusing: first-use preparation left a machine; see ${OUT_DIR}/prime-*.stderr" >&2
   exit 71
 fi
+record_resident_pids
 
 capture_host_memory() {
   local phase="$1"
@@ -420,7 +538,7 @@ capture_host_memory() {
   if [[ "${BACKEND}" == "hvf" ]]; then
     vm_stat >"${dir}/host-memory-${phase}.txt"
   else
-    cp /proc/meminfo "${dir}/host-memory-${phase}.txt"
+    cp "${MEMINFO}" "${dir}/host-memory-${phase}.txt"
   fi
   python3 "${ROOT}/scripts/density_memory.py" "${dir}" "${phase}"
 }
@@ -479,6 +597,29 @@ capture_storage() {
   else
     printf '0\t%s\n' "${DATA_DIR}/vms" >"${dir}/vm-state-blocks-${phase}.txt"
   fi
+  if [[ -d "${DATA_DIR}/snapshots" ]]; then
+    du -sk "${DATA_DIR}/snapshots" >"${dir}/snapshot-blocks-${phase}.txt"
+  else
+    printf '0\t%s\n' "${DATA_DIR}/snapshots" >"${dir}/snapshot-blocks-${phase}.txt"
+  fi
+}
+
+# Snapshot bytes this wave added, so earlier waves' leftovers are not charged to it.
+snapshot_growth_kib() {
+  local dir="$1"
+  awk 'FNR == 1 { v[++n] = $1 } END { d = v[2] - v[1]; print (d > 0 ? d : 0) }' \
+    "${dir}/snapshot-blocks-before.txt" "${dir}/snapshot-blocks-settled.txt"
+}
+
+# Standbys the pool reports idle with no process behind them, which is how a
+# snapshot-held standby appears. Prints the count; fails when the query does.
+count_snapshot_standbys() {
+  local dir="$1"
+  "${run_env[@]}" "${MVMCTL_BIN}" pool status --json >"${dir}/pool-status-settled.json" \
+    2>"${dir}/pool-status.stderr" || return 1
+  python3 -c 'import json, sys
+print(sum(1 for e in json.load(open(sys.argv[1]))["standbys"] if e["state"] == "idle" and e["pid"] == 0))' \
+    "${dir}/pool-status-settled.json"
 }
 
 capture_matching_processes() {
@@ -591,6 +732,7 @@ cleanup_wave() {
   echo -e "image\t${IMAGE_REF}"
   echo -e "backend\t${BACKEND}"
   echo -e "launch_mode\t${MODE}"
+  echo -e "standby_form\t${STANDBY_FORM}"
   echo -e "waves\t${WAVES_TEXT}"
   echo -e "guest_sleep_seconds\t${GUEST_SLEEP_SECONDS}"
   echo -e "settle_seconds\t${SETTLE_SECONDS}"
@@ -605,6 +747,7 @@ cleanup_wave() {
   echo -e "mvmctl\t${MVMCTL_BIN}"
   echo -e "supervisor\t${SUPERVISOR_BIN}"
   echo -e "network_endpoint\t${ENDPOINT_BIN}"
+  echo -e "build_profile\t${BUILD_PROFILE}"
 } >"${SUMMARY}"
 
 python3 "${ROOT}/scripts/density_metadata.py" "${ROOT}" "${SUMMARY}" \
@@ -613,6 +756,7 @@ python3 "${ROOT}/scripts/density_metadata.py" "${ROOT}" "${SUMMARY}" \
 # Wave 0: the host with no unit launched, so fixed cost can be told from per-unit cost.
 zero_dir="${OUT_DIR}/wave-0"
 mkdir -p "${zero_dir}"
+check_wave_host 0 "${zero_dir}"
 sleep "${SETTLE_SECONDS}"
 capture_matching_processes "settled" "${zero_dir}"
 zero_owned="$(wc -l <"${zero_dir}/matching-settled.txt" | tr -d ' ')"
@@ -625,11 +769,19 @@ fi
   # The sampler counts every matching process on the host, other sessions' VMs included.
   printf 'wave_0_sampler_scope\thost_wide_matching_processes\n'
 } >>"${SUMMARY}"
+capture_host_memory "settled" "${zero_dir}"
+capture_storage "settled" "${zero_dir}"
+# The whole isolated MVM_HOME: images, kernels and caches. Taken only here, where
+# no unit is running to change the tree under du.
+du -sk "${DATA_DIR}" >"${zero_dir}/mvm-home-blocks-settled.txt"
+printf 'wave_0_mvm_home_du_kib\t%s\n' \
+  "$(awk 'NR == 1 { print $1 }' "${zero_dir}/mvm-home-blocks-settled.txt")" >>"${SUMMARY}"
 capture_idle "${zero_dir}" 0
 
 for wave in "${WAVES[@]}"; do
   wave_dir="${OUT_DIR}/wave-${wave}"
   mkdir -p "${wave_dir}"
+  check_wave_host "${wave}" "${wave_dir}"
   : >"${wave_dir}/launches.tsv"
   : >"${active_pids_file}"
   pids=()
@@ -719,7 +871,12 @@ for wave in "${WAVES[@]}"; do
   vmm_count="$(awk -F '\t' -v component="${vmm_component}" \
     '$1 == component { print $2; found = 1; exit }
       END { if (!found) print 0 }' "${wave_dir}/rss-settled.tsv")"
-  if [[ "${MODE}" == "standby" && "${vmm_count}" -gt 0 ]]; then
+  standby_count="${vmm_count}"
+  if [[ "${STANDBY_FORM}" == "on_disk_snapshot" ]]; then
+    # No process holds these, so the sampler has nothing to sample.
+    standby_count="$(count_snapshot_standbys "${wave_dir}")" || standby_count=0
+    printf 'wave_%s_idle_sampler\tnot_applicable:no_resident_process\n' "${wave}" >>"${SUMMARY}"
+  elif [[ "${MODE}" == "standby" && "${vmm_count}" -gt 0 ]]; then
     capture_idle "${wave_dir}" "${wave}" "${vmm_count}"
   else
     capture_idle "${wave_dir}" "${wave}"
@@ -737,6 +894,10 @@ for wave in "${WAVES[@]}"; do
     printf 'wave_%s_vm_state_du_kib\t%s\n' "${wave}" "${vm_state_kib}"
     printf 'wave_%s_fs_available_delta_kib\t%s\n' \
       "${wave}" "$((available_before - available_settled))"
+    if [[ "${STANDBY_FORM}" == "on_disk_snapshot" ]]; then
+      printf 'wave_%s_standby_count\t%s\n' "${wave}" "${standby_count}"
+      printf 'wave_%s_standby_snapshot_du_kib\t%s\n' "${wave}" "$(snapshot_growth_kib "${wave_dir}")"
+    fi
   } >>"${SUMMARY}"
 
   cleanup_ok=0
@@ -756,7 +917,7 @@ for wave in "${WAVES[@]}"; do
   echo -e "wave_${wave}_launch_failures\t${failures}" >>"${SUMMARY}"
   echo -e "wave_${wave}_cleanup_ok\t${cleanup_ok}" >>"${SUMMARY}"
   if [[ "${failures}" -ne 0 || "${cleanup_ok}" -ne 1 ||
-        ( "${MVM_HVF_DENSITY_ALLOW_UNSUPPORTED:-0}" != "1" && "${vmm_count}" -lt "${wave}" ) ]]; then
+        ( "${MVM_HVF_DENSITY_ALLOW_UNSUPPORTED:-0}" != "1" && "${standby_count}" -lt "${wave}" ) ]]; then
     echo "wave ${wave} failed; see ${wave_dir}" >&2
     exit 71
   fi
@@ -784,4 +945,13 @@ for wave in "${WAVES[@]}"; do
 done
 
 trap - INT TERM EXIT
+
+# Markdown goes to stdout and the JSON report to --out. A run whose figures
+# cannot be ingested has produced nothing a reader can use, so it fails.
+if ! "${run_env[@]}" "${MVMCTL_BIN}" bench report --density-dir "${OUT_DIR}" \
+  --out "${OUT_DIR}/resource-report.json" >"${OUT_DIR}/resource-report.md" \
+  2>"${OUT_DIR}/resource-report.stderr"; then
+  echo "refusing: resource report generation failed; see ${OUT_DIR}/resource-report.stderr" >&2
+  exit 74
+fi
 echo "HVF density measurement complete: ${OUT_DIR}"

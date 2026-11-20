@@ -1089,6 +1089,12 @@ pub enum StandbyError {
     SpawnFailed(String),
     #[error("claim standby: {0}")]
     ClaimFailed(String),
+    /// Another claimant reserved the selected parent before this claim began.
+    #[error("claim standby: parent is not in a claimable state")]
+    ReservationLost,
+    /// A forked child may still be running after the stop attempt failed.
+    #[error("claim standby: child stop unconfirmed: {0}")]
+    StopUnconfirmed(String),
     /// The standby was captured in a form this host cannot restore — taken by
     /// a different VMM version, for one. No retry can succeed, so the pool
     /// drops it rather than returning it to rotation.

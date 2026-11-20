@@ -34,7 +34,28 @@ pub struct OwnedEndpoint {
 }
 
 impl OwnedEndpoint {
-    fn new(child: Child) -> Self {
+    /// Adopt an original helper child, never a PID reconstructed from storage.
+    ///
+    /// The caller must provide exclusive reaping custody for the entire lifetime.
+    /// On failure the child remains with the caller.
+    pub fn adopt(child: &mut Option<Child>) -> Result<Self> {
+        require_child_custody()?;
+        let process = child.as_mut().context("original helper child missing")?;
+        anyhow::ensure!(
+            process.try_wait()?.is_none(),
+            "original helper exited before ownership capture"
+        );
+        let observer = ProcessExitObserver::for_owned_child(process)?;
+        anyhow::ensure!(
+            observer.wait_event(Instant::now())? == ProcessExitWait::TimedOut,
+            "original helper exited before observer capture"
+        );
+        let mut owner = Self::new(child.take().context("original helper child missing")?);
+        owner.observer = Some(observer);
+        Ok(owner)
+    }
+
+    pub(in crate::host) fn new(child: Child) -> Self {
         Self {
             child,
             observer: None,
@@ -55,6 +76,13 @@ impl OwnedEndpoint {
     /// The exact status collected by `Child::try_wait`, if already reaped.
     pub fn exit_status(&self) -> Option<ExitStatus> {
         self.status
+    }
+
+    /// Actual retained exit-observer descriptors, not an estimate of process open files.
+    pub fn retained_process_descriptor_count(&self) -> u64 {
+        self.observer
+            .as_ref()
+            .map_or(0, ProcessExitObserver::retained_descriptor_count)
     }
 
     fn collect(&mut self) -> Result<Option<ExitStatus>> {

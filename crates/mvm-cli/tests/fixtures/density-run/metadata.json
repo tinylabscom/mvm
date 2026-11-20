@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
+  "source": {"revision": "0123456789abcdef0123456789abcdef01234567", "dirty": false},
   "host": {"os": "Darwin", "architecture": "arm64", "memory_mib": 16384},
   "guards": {"native_host_bypassed": false, "busy_host_bypassed": false},
-  "configuration": {"backend": "hvf", "launch_mode": "cold", "waves": "1 2"}
+  "configuration": {"backend": "hvf", "launch_mode": "cold", "waves": "1 2", "build_profile": "release"}
 }

@@ -58,6 +58,10 @@ impl QuotaConfig {
                 got = millicores
             );
         }
+        if millicores == Self::MAX_MILLICORES {
+            // A full core has no hold interval, even at the longest period.
+            return Self::new(millicores, Self::MAX_PERIOD);
+        }
 
         let period_for_slice = 2_000_u32.div_ceil(millicores);
         let period_for_hold = 2_000_u32.div_ceil(Self::MAX_MILLICORES - millicores);
@@ -198,12 +202,32 @@ mod tests {
 
     #[test]
     fn a_share_no_period_can_express_is_refused_with_the_expressible_range() {
-        let err = QuotaConfig::for_share(19).unwrap_err().to_string();
-        assert!(err.contains("20"), "{err}");
-        assert!(err.contains("980"), "{err}");
-        let err = QuotaConfig::for_share(981).unwrap_err().to_string();
-        assert!(err.contains("20"), "{err}");
-        assert!(err.contains("980"), "{err}");
+        for millicores in [1, 19, 981, 999] {
+            let err = QuotaConfig::for_share(millicores).unwrap_err().to_string();
+            assert!(err.contains("20"), "{err}");
+            assert!(err.contains("980"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_full_core_share_is_refused_without_panicking() {
+        let err = QuotaConfig::for_share(1000).unwrap_err().to_string();
+        assert!(err.contains("hold"), "{err}");
+        assert!(QuotaConfig::new(1000, QuotaConfig::MAX_PERIOD).is_err());
+    }
+
+    #[test]
+    fn expressible_boundary_shares_preserve_the_minimum_run_and_hold() {
+        for millicores in [20, 21, 979, 980] {
+            let cfg = QuotaConfig::for_share(millicores).unwrap();
+            assert_eq!(cfg.millicores(), millicores);
+            assert!(cfg.slice() >= QuotaConfig::MIN_SLICE);
+            assert!(cfg.worst_case_stall() >= QuotaConfig::MIN_SLICE);
+            assert!(cfg.period() <= QuotaConfig::MAX_PERIOD);
+        }
+        for millicores in [0, 1001, u32::MAX] {
+            assert!(QuotaConfig::for_share(millicores).is_err());
+        }
     }
 
     #[test]

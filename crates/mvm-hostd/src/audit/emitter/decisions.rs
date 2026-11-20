@@ -77,6 +77,50 @@ impl AuditEmitter {
         )
     }
 
+    /// Emit `topology.admitted` or `topology.admission_refused` on `tenant`'s
+    /// chain. A topology is not a plan, so the entry carries the unbound plan
+    /// and image sentinels every other non-plan event uses, and the topology's
+    /// own identity travels in `labels`.
+    pub fn emit_topology_decision(
+        &self,
+        tenant: &mvm_core::plan::TenantId,
+        event: &str,
+        labels: impl IntoIterator<Item = (String, String)>,
+    ) -> Result<()> {
+        use crate::audit::audit_recorder::{
+            UNBOUND_IMAGE_NAME, UNBOUND_IMAGE_SHA256, UNBOUND_PLAN_ID,
+        };
+        self.emit_entry(&crate::audit::signer::PlanAuditEntry {
+            timestamp: Utc::now(),
+            tenant: tenant.clone(),
+            plan_id: mvm_core::plan::PlanId(UNBOUND_PLAN_ID.to_string()),
+            plan_version: 0,
+            bundle_id: None,
+            bundle_version: None,
+            image_name: UNBOUND_IMAGE_NAME.to_string(),
+            image_sha256: UNBOUND_IMAGE_SHA256.to_string(),
+            event: event.to_string(),
+            caller_commitment: None,
+            labels: labels.into_iter().collect(),
+        })
+    }
+
+    /// Emit `unit.mutation_refused`: a change to a sealed unit was refused
+    /// after admission. Bound to the unit's plan when it could be read, and
+    /// otherwise to `tenant` with the unbound sentinels.
+    pub fn emit_sealed_mutation_refused(
+        &self,
+        plan: Option<&ExecutionPlan>,
+        tenant: &mvm_core::plan::TenantId,
+        labels: impl IntoIterator<Item = (String, String)>,
+    ) -> Result<()> {
+        let event = crate::seal_gate::MUTATION_REFUSED_EVENT;
+        match plan {
+            Some(plan) => self.emit(plan, event, labels),
+            None => self.emit_topology_decision(tenant, event, labels),
+        }
+    }
+
     /// Emit `control_key.used` — fires when a `ControlKey` is used to
     /// authorize an orchestrator action. Carries the key id, role, and a
     /// short action label. No secret material is logged.

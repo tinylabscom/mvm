@@ -25,6 +25,13 @@
 
 #![deny(unreachable_pub)]
 
+pub mod actor_authority;
+pub mod actor_bootstrap;
+pub mod actor_controller;
+pub mod actor_holder;
+pub mod actor_lifecycle;
+pub mod actor_process;
+pub mod actor_reservations;
 pub mod admission_budget;
 pub mod admitted_campaign_runner;
 pub mod assurance_agent_adapter;
@@ -83,6 +90,8 @@ pub mod rate_limit;
 pub mod run;
 /// Resume orchestration for durable agent sessions: turn a parked session
 /// record back into an admitted `ExecutionPlan`.
+/// The one check every post-admission change to a running unit passes.
+pub mod seal_gate;
 pub mod session_resume;
 pub mod stream;
 pub mod supervisor;
@@ -91,6 +100,8 @@ pub mod supervisor;
 pub mod telemetry_collector;
 #[cfg(test)]
 mod test_fixtures;
+/// Host admission of a signed critical-systems topology generation.
+pub mod topology_admission;
 /// Keeps a per-VM endpoint alive for exactly as long as its VM, for machines
 /// that outlive the `mvmctl` that started them.
 pub mod vm_lifetime;

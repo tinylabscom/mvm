@@ -124,9 +124,11 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-core | `src/env_hygiene.rs` | 3 | factory | the sanctioned Command constructor: scrubs denied env, then everything above calls it | library: caller's process (CLI, daemon, embedder) | CHS | CH | `helper_command` env scrub; RAW_SITES (on_host) | required-host-primitive |
 | mvm-core | `src/host_storage_encryption.rs` | 4 | host probe | diskutil / findmnt / tune2fs / lsblk encryption-at-rest probes | library: caller's process (CLI, daemon, embedder) | CHS | - | `helper_command` env scrub | fixed-argv-utility |
 | mvm-core | `src/platform/platform.rs` | 1 | host probe | sw_vers and nix presence probe | library: caller's process (CLI, daemon, embedder) | CHS | CH | `helper_command` env scrub | fixed-argv-utility |
-| mvm-core | `src/spawn_scope.rs` | 4 | systemd-run | wrap a VMM spawn in a systemd transient scope; kill and systemctl show | library: caller's process (CLI, daemon, embedder) | CHS | C | `helper_command` env scrub | required-host-primitive |
+| mvm-core | `src/spawn_scope.rs` | 5 | systemd-run | wrap a VMM spawn in a systemd transient scope; kill and systemctl show | library: caller's process (CLI, daemon, embedder) | CHS | C | `helper_command` env scrub | required-host-primitive |
 | mvm-fs | `src/oci_to_rootfs/ext4.rs` | 1 | storage tool | mke2fs to materialize an OCI rootfs (Linux) | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | bounded-fixed-argv-utility |
 | mvm-fs | `src/oci_to_rootfs/verity.rs` | 1 | storage tool | veritysetup format of a rootfs (Linux) | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | bounded-fixed-argv-utility |
+| mvm-hostd | `src/actor_holder.rs` | 1 | helper bin | spawn the per-VM actor holder with its controller socket on fd 3 | host daemon role | CH | - | `helper_command` env scrub | required-host-primitive |
+| mvm-hostd | `src/actor_process.rs` | 1 | helper bin | spawn the per-VM actor controller through the verified host-helper resolver | host daemon role | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-hostd | `src/bin/mvm-host-agent.rs` | 2 | helper bin | re-exec self as a worker process | host daemon bin | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-hostd | `src/bin/mvm-hvf-supervisor.rs` | 3 | codesign / self re-exec | ad-hoc codesign of the binary, then re-exec self signed | per-VM supervisor bin | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-hostd | `src/bin/mvm-network-endpoint.rs` | 1 | helper bin | keeper re-execs the endpoint binary for a long-lived VM | per-VM endpoint bin | CH | - | `helper_command` env scrub | required-host-primitive |
@@ -147,7 +149,7 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-vmm | `src/host/network_endpoint_spawn/owned.rs` | 1 | helper bin | spawn an owned network endpoint | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub; check-single-network-path | required-host-primitive |
 | mvm-vmm | `src/host/shell/exec.rs` | 6 | shell script | run_in_vm / run_host: bash -c and direct program exec for every ShellEnvironment caller | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | open-review |
 
-Totals: 186 production sites in 96 files.
+Totals: 189 production sites in 98 files.
 
 | Crate | Sites |
 |---|--:|
@@ -159,9 +161,9 @@ Totals: 186 production sites in 96 files.
 | mvm-cli | 26 |
 | mvm-client | 2 |
 | mvm-conformance | 3 |
-| mvm-core | 14 |
+| mvm-core | 15 |
 | mvm-fs | 2 |
-| mvm-hostd | 10 |
+| mvm-hostd | 12 |
 | mvm-runtime | 11 |
 | mvm-setpriv | 1 |
 | mvm-vmm | 16 |
@@ -176,7 +178,7 @@ Totals: 186 production sites in 96 files.
 | fixed-argv-utility | 10 | 6 |
 | guest-side | 60 | 27 |
 | open-review | 12 | 3 |
-| required-host-primitive | 36 | 20 |
+| required-host-primitive | 39 | 22 |
 | test-only | 4 | 2 |
 
 Reviewed library-reachable sites (disposition, then why):
@@ -206,7 +208,7 @@ Still open-review, and the concrete missing piece:
 | `mvm-vmm/src/host/linux_env.rs` | `NativeEnv::{run, run_visible, run_capture}` run `bash -c <script>` for every `LinuxEnv` caller. Same gap as `shell/exec.rs`: callers are audited and tested, the wrapper is not constrained. |
 | `mvm-vmm/src/host/shell/exec.rs` | `run_in_vm*`/`run_on_vm*` hand a caller-built script to `bash -c` (host bash on native Linux and for custom VM names); `run_host` runs a caller-named program but has CLI callers only. Every library caller was read (see the shell-wrapper caller audit) and the unquoted ones fixed, but the seam itself still accepts any string, so nothing stops a new caller interpolating raw. Missing: a gate or typed command form that makes unquoted interpolation into these scripts unrepresentable, and a wall-clock bound (builds are long-running, so the bound has to be per caller). |
 
-By construct: `Command::new` 57, `helper_command` 118, `helper_command_with` 3, `openpty` 2, `raw:execve` 1, `raw:execvpe` 1, `raw:fork` 2, `scrub_command` 1, `wrap_checked` 1.
+By construct: `Command::new` 57, `helper_command` 121, `helper_command_with` 3, `openpty` 2, `raw:execve` 1, `raw:execvpe` 1, `raw:fork` 2, `scrub_command` 1, `wrap_checked` 1.
 <!-- inventory:end -->
 
 Linked and Traced are host-side facts about the crate and the call graph. A `guest` or `builder VM` row is crate-linked into the host closure (so `CHS`), but its binary only ever runs inside the microVM; the host never calls it. Read those rows by Authority.
@@ -230,12 +232,13 @@ About 220 constructor matches sit in `#[cfg(test)]` code, `*_tests.rs`/`tests.rs
 
 1. **`mvm-sdk`: no spawn, no traced path.** Zero direct sites; no spawning function is reachable by name from any `mvm-sdk` function. The crate links `mvm-core` (`helper_command`, `key_rotation`, `host_storage_encryption`, `spawn_scope`, `platform`) and `mvm-agentd`/`mvm-setpriv` (guest-only binaries), none of which SDK source calls. `check-no-cli-shellout` holds the source line.
 2. **`mvm-hostlib`: no direct site.** Everything it can start goes through `mvm-client`.
-3. **`mvm-client` has two direct production spawns**, both in files `check-no-cli-shellout` sanctions by exact path (`CLIENT_SPAWN_ALLOWED`, each with a reason): `image_cache/trust.rs` (`cosign verify` with fixed argv for production OCI policy) and `secret/source.rs` (the user's configured secret-source CLI, a password manager, env-readmit through `helper_command_with`). Any other non-test file in `mvm-client/src` or `mvm-hostlib/src` that builds a process fails that gate, whatever it runs; `#[cfg(test)]` items and test-only files are exempt. The gate reads spawn constructors in source, not what runs.
+3. **`mvm-client` has one direct production spawn**: `secret/source.rs`, the user's configured secret-source CLI (a password manager), env-readmit through `helper_command_with`. The gate allows it deliberately (`cli_only` forbids only `mvmctl`).
 4. **By design, `mvm-client`'s launch surface starts host helpers**: hypervisor supervisors (`mvm-libkrun-supervisor`, `mvm-hvf-supervisor`), QEMU, the per-VM network endpoint, GPU endpoint and broker helpers, a systemd transient scope (`spawn_scope`), and encrypted-volume tools. The static trace cannot show this chain (dynamic dispatch through `AnyBackend`/`VmBackend`), so the Traced column under-reports it. This is the intended embedder authority, not a gap.
 5. **`mvmctl` self re-exec is refused for an embedder at every site that reaches it from the library crates**: the `CliSpawn` variants cover `qemu_process`, `builder_egress_process`, `builder_vm_bootstrap`, `builder_vm_transport`, `health_probe`, `host_agent_sessions`, `host_binaries::source` (which gates `payload_build`) and the aux-binary resolver (Guard column).
-6. **Guest-runtime acquisition refuses a library embedder at its spawn entry points.** `mvm_client::launch::runtime_overlay::{prepare_oci_guest_runtime, acquire_runtime_overlay}` reach `mvm_build` code that spawns `cargo`, `rustup`, `rustc`, `zig` and `curl` through `helper_command`. `build_guest_binaries` and `zigbuild_tools` (`guest_agent_build.rs`) and `curl_download` (`runtime_overlay.rs`) call `refuse_toolchain_spawn`, which raises `CliSpawn::GuestRuntimeToolchain` for a library embedder. `rustup_tool` and `embed_toolchain`'s version and target probes are reached from `zigbuild_tools` and `ensure_rust_targets` after that refusal. No xtask gate pins the refusal at the three sites, so a new entry point that skips it is not caught structurally. Only `mvm-cli` (`bootstrap`, `image pull`, `build runtime-overlay`) calls the acquisition entry points today; `mvm-hostlib` does not, and the launch path (`acquire_runtime_overlay_for_launch`, `require_prepared_oci_guest_runtime`) reads prepared artifacts only.
+6. **Not guarded, and reachable by a public `mvm-client` API: guest-runtime acquisition.** `mvm_client::launch::runtime_overlay::{prepare_oci_guest_runtime, acquire_runtime_overlay}` reach `mvm_build::guest_runtime`/`guest_bins`/`guest_agent_build`/`embed_toolchain` and `runtime_overlay::curl_download`, which spawn `cargo`, `rustup`, `rustc`, `zig` and `curl` through `helper_command`. None of those files consults `refuse_cli_spawn`, and no xtask gate pins them. Only `mvm-cli` (`bootstrap`, `image pull`, `build runtime-overlay`) calls them today; `mvm-hostlib` does not, and the launch path (`acquire_runtime_overlay_for_launch`, `require_prepared_oci_guest_runtime`) reads prepared artifacts only. Follow-up: give this chain a refusal for a library embedder, or move the acquisition entry points out of `mvm-client`. Not changed here.
 7. **`helper_command` pins the environment, not the program.** `check-helper-env-hygiene` guarantees a scrubbed environment and that no raw constructor appears outside `RAW_SITES`; it does not constrain which program a `helper_command(<variable>)` runs. The variable-program sites are the supervisor/QEMU/endpoint/broker binaries, `interpreter`, `editor`, `opener`, `cosign`, `pip_audit`/`pnpm` and the secret-source binary; each takes a resolved path, but the choice is a code-review fact, not a gate.
-8. **`check-no-cli-shellout` reads the client by name, with a structural pass underneath.** The per-line rule rejects `Command::new`/`helper_command*` naming `mvmctl` and the `MVM_CLI_BIN` overrides; a `helper_command(path_variable)` that resolves to `mvmctl` does not show `mvmctl` beside its constructor. The structural pass (`cli_self_reach`) closes that by file: a library file below the CLI that both builds a process and resolves the CLI (`current_exe()`, `CLI_BIN`, a hidden `"__verb"` literal) must route through `refuse_cli_spawn`, `CliSpawn` or `resolve_verified_for`, and the files that do so today are pinned in a shrink-only list. A path variable that resolves to `mvmctl` by some other route is still invisible to both passes.
+8. **`check-no-cli-shellout` is name-based for the client.** It rejects `Command::new`/`helper_command*` naming `mvmctl` and the `MVM_CLI_BIN` overrides. A `helper_command(path_variable)` that resolves to `mvmctl` (as `builder_egress_process` does) passes it and relies on the `CliSpawn` refusal instead.
+
 ## Coverage and limits
 
 - Method: comment-stripped text scan of every `.rs` file under `crates/` and `src/` for the spawn API set, `#[cfg(test)]` ranges and test-only files removed; cross-checked against `check-helper-env-hygiene`'s independent `RAW_SITES` list (agreement noted above) and against a sweep of `.spawn()`/`.output()`/`.status()` on commands built elsewhere (the terminals above, plus thread and HTTP `.status()` false positives).

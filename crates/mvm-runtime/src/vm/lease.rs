@@ -28,8 +28,8 @@ pub struct AcquireSpec {
     pub want: StandbyCompat,
     /// Whether the caller permits a cold boot when warm capacity is unavailable.
     pub mode: WarmLaunchMode,
-    /// The admitted, signed workload to attach. `claim.start_config` doubles
-    /// as the cold-boot config used on a pool miss.
+    /// Non-workload lease payload. Workload-shaped claims are refused without
+    /// a typed host admission; `claim.start_config` is the cold fallback input.
     pub claim: StandbyClaim,
 }
 
@@ -71,7 +71,8 @@ pub struct WarmLease {
 impl WarmLease {
     /// Claim a compatible idle standby, or cold-boot when the mode permits it.
     ///
-    /// On a hit: reserve (`mark_claimed`, so a concurrent acquire can't
+    /// This generic service is not an admitted workload path. On a hit:
+    /// reserve (`mark_claimed`, so a concurrent acquire can't
     /// double-claim) → `claim_standby` → remove the pool entry (its control
     /// socket is one-shot). A failed claim is quarantined. Required warm mode
     /// returns a typed refusal; optional mode may then cold-boot.
@@ -81,6 +82,23 @@ impl WarmLease {
         spec: &AcquireSpec,
         replenish: Option<ReplenishFn>,
     ) -> Result<Self> {
+        // This service has no one-use host admission owner. Neither the
+        // parameterless claim_standby nor its direct cold fallback may dispatch
+        // a workload on the strength of a serialized plan alone.
+        if crate::catalog::descriptor(backend.kind()).is_workload
+            || !spec.claim.plan_json.trim().is_empty()
+            || !spec.claim.tenant_id.trim().is_empty()
+            || spec.claim.start_config.as_ref().is_some_and(|config| {
+                config.plan_json.is_some()
+                    || config.tenant_id.is_some()
+                    || config.audit_context.is_some()
+            })
+        {
+            return Err(WarmClaimRefusal::PreparationFailed {
+                reason: "warm lease workload claim requires a typed host admission".into(),
+            }
+            .into());
+        }
         if !matches!(spec.mode, WarmLaunchMode::Cold) {
             if !backend.supports_standby_pool() {
                 if spec.mode.requires_warm() {
@@ -247,11 +265,11 @@ mod tests {
                 ..Default::default()
             }),
             rootfs_path: "/tmp/stub.ext4".to_string(),
-            tenant_id: "local".to_string(),
+            tenant_id: String::new(),
             audit_dir: std::path::PathBuf::from("/tmp/audit"),
             gateway_audit_socket: std::path::PathBuf::from("/tmp/gw-audit.sock"),
             gateway_events_socket: None,
-            plan_json: "{}".to_string(),
+            plan_json: String::new(),
             audit_context: None,
             bundle_json: None,
             network_policy: NetworkPolicy::deny_all(),
@@ -266,6 +284,56 @@ mod tests {
             Ok(())
         });
         (rf, fired)
+    }
+
+    #[test]
+    fn workload_shaped_lease_neither_claims_nor_cold_boots_without_admission() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().expect("pool tempdir");
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let mock = Arc::new(MockBackend::new().with_standby());
+        let backend: Arc<dyn VmBackend> = mock.clone();
+        for mode in [
+            WarmLaunchMode::Required,
+            WarmLaunchMode::Optional,
+            WarmLaunchMode::Cold,
+        ] {
+            let mut workload = claim("workload");
+            workload.plan_json = "{}".into();
+            workload
+                .start_config
+                .as_mut()
+                .expect("start config")
+                .plan_json = Some("{}".into());
+            let spec = AcquireSpec {
+                want: compat(),
+                mode,
+                claim: workload,
+            };
+            let error = WarmLease::acquire(backend.clone(), &pool, &spec, None)
+                .err()
+                .expect("workload-shaped lease must refuse");
+            assert!(
+                error.to_string().contains("typed host admission"),
+                "unexpected refusal: {error:#}"
+            );
+            assert_eq!(mock.count(), 0, "refusal must not start the backend");
+        }
+        let mut tenant_claim = claim("tenant-vm");
+        tenant_claim.tenant_id = "tenant-a".into();
+        let spec = AcquireSpec {
+            want: compat(),
+            mode: WarmLaunchMode::Optional,
+            claim: tenant_claim,
+        };
+        let error = WarmLease::acquire(backend, &pool, &spec, None)
+            .err()
+            .expect("tenant-bound lease must refuse");
+        assert!(
+            error.to_string().contains("typed host admission"),
+            "{error:#}"
+        );
+        assert_eq!(mock.count(), 0, "tenant refusal must not start the backend");
     }
 
     #[test]

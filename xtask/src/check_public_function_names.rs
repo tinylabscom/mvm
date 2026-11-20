@@ -17,6 +17,18 @@ struct SiblingPair {
 // externally anchored and retained-key custody variants. Conflating their
 // names would hide the authority boundary at call sites.
 //
+// The actor launch entrypoints keep their `_with_*` siblings because each
+// variant names an additional custody boundary the base form does not hold:
+// the reservation store's `open_with_host_budget` re-attaches to a live
+// reservation only when the persisted budget matches the admitted one;
+// admission's `admit_plan_for_run_with_host_permit` admits against a host
+// hold the caller already acquired, never reserving the same launch twice;
+// the owned-actor starts' `_with_bootstrap` variants provision the per-boot
+// holder before activation instead of launching holderless; and the owned
+// broker's `spawn_broker_with_actor_routes` wires the admitted actor
+// conversation routes into the same single broker path. Conflating any of
+// these names would hide the extra authority or custody each variant pins.
+//
 // The launch/admission entrypoints keep their `_with_verified_*` siblings
 // because those variants thread the launch-verified runtime set through
 // admission and start: the retained audit evidence must match the runtime
@@ -24,7 +36,20 @@ struct SiblingPair {
 // verification boundary at call sites. The CLI admission owner keeps its
 // `new_for_rootfs_with_runtime` sibling for the same reason: cold dispatch
 // must retain the exact launch-owned verified set the admission ran against.
+//
+// The warm-claim path keeps its `try_warm_claim_with_admission` sibling
+// because that variant threads the CLI admission owner through the claim so
+// the unified dispatch admits exactly once; the bare name is the
+// admission-free convenience for callers that never carry one, and dropping
+// the distinction would let a caller silently claim outside the admission
+// it owes.
 const EXCEPTIONS: &[(&str, &str, &str, &str)] = &[
+    (
+        "crates/mvm-cli/src/commands/pool.rs",
+        "module",
+        "try_warm_claim",
+        "try_warm_claim_with_admission",
+    ),
     (
         "crates/mvm-client/src/admission/cli_dispatch.rs",
         "impl CliAdmission",
@@ -90,6 +115,36 @@ const EXCEPTIONS: &[(&str, &str, &str, &str)] = &[
         "module",
         "start_admitted",
         "start_admitted_with_verified_release",
+    ),
+    (
+        "crates/mvm-hostd/src/actor_reservations.rs",
+        "impl ActorReservations",
+        "open",
+        "open_with_host_budget",
+    ),
+    (
+        "crates/mvm-hostd/src/plan_admission/admit.rs",
+        "module",
+        "admit_plan_for_run",
+        "admit_plan_for_run_with_host_permit",
+    ),
+    (
+        "crates/mvm-hostd/src/plan_admission/start.rs",
+        "module",
+        "start_admitted_owned_actor",
+        "start_admitted_owned_actor_with_bootstrap",
+    ),
+    (
+        "crates/mvm-runtime/src/actor_teardown.rs",
+        "impl AnyBackend",
+        "start_owned_actor",
+        "start_owned_actor_with_bootstrap",
+    ),
+    (
+        "crates/mvm-vmm/src/host/broker_services_spawn.rs",
+        "module",
+        "spawn_broker",
+        "spawn_broker_with_actor_routes",
     ),
     (
         "crates/mvm-runtime/src/backend.rs",

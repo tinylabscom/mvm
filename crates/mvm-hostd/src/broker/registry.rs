@@ -92,6 +92,8 @@ struct CapabilityRegistration {
 /// for the subprocess lifetime; runtime registration is not supported
 /// (the static catalog is the contract).
 pub struct Registry {
+    pub(super) actor_endpoint: Option<std::path::PathBuf>,
+    pub(super) actor_connections: tokio::sync::Semaphore,
     handlers: HashMap<ServiceId, Arc<dyn ServiceHandler>>,
     capability_only_services: HashSet<ServiceId>,
     capabilities: HashMap<CapabilityId, CapabilityRegistration>,
@@ -102,8 +104,20 @@ pub struct Registry {
 }
 
 impl Registry {
+    /// Install an opaque actor route only after host registration validation.
+    pub fn bind_actor_endpoint(&mut self, endpoint: std::path::PathBuf) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.actor_endpoint.is_none() && endpoint.is_absolute(),
+            "invalid actor route"
+        );
+        self.actor_endpoint = Some(endpoint);
+        Ok(())
+    }
+
     pub fn new() -> Self {
         Self {
+            actor_endpoint: None,
+            actor_connections: tokio::sync::Semaphore::new(4),
             handlers: HashMap::new(),
             capability_only_services: HashSet::new(),
             capabilities: HashMap::new(),

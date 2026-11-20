@@ -19,7 +19,7 @@ use anyhow::{Context, Result, bail};
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::machine::persist as mp;
 
-use super::persistent::{PersistentImageStartParams, start_persistent_oci_machine};
+use super::persistent::PersistentImageStartParams;
 use crate::secret::SecretService;
 use crate::volume::LaunchPreparation;
 
@@ -253,6 +253,7 @@ pub fn start_machine_spec_in_lifecycle(
     lifecycle.require_name(&spec.name)?;
     let _activation_barrier =
         mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
+    crate::policy_profiles::coordinator::recover_workload_ledger()?;
     if cfg!(target_os = "linux")
         && crate::backend_kind_for(params.hypervisor) != mvm_core::vm_backend::BackendKind::Mock
     {
@@ -304,6 +305,9 @@ pub fn start_machine_spec_in_lifecycle(
         "machine {:?} still owns its runtime state",
         spec.name
     );
+    lifecycle
+        .require_cold_state()
+        .map_err(mvm_hostd::plan_admission::CliStartFailure::StateNotOwned)?;
     validate_registry_pack_source(spec)?;
     let network_policy = persisted_network_policy(spec)?;
     let (memory_mib, mem_initial_mib) =
@@ -376,10 +380,14 @@ pub fn start_machine_spec_in_lifecycle(
         backend: prepared_backend.unwrap_or_else(|| host.backend(params.hypervisor)),
     };
     let admitted = match &prepared {
-        Some(prepared) => {
-            super::persistent::start_prepared_persistent_oci_machine(start_params, prepared)?
+        Some(prepared) => super::persistent::start_prepared_persistent_oci_machine_in_lifecycle(
+            start_params,
+            prepared,
+            lifecycle,
+        )?,
+        None => {
+            super::persistent::start_persistent_oci_machine_in_lifecycle(start_params, lifecycle)?
         }
-        None => start_persistent_oci_machine(start_params)?,
     };
     Ok(MachineStart {
         resolved_digest: boot.digest,

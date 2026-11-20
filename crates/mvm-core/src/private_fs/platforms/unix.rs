@@ -138,9 +138,12 @@ pub fn sync_managed_directory_chain(root: &Path, directory: &Path) -> io::Result
 pub fn submit_managed_directory_chain(root: &Path, directory: &Path) -> io::Result<()> {
     let directories = open_managed_chain(root, directory)?;
     for (path, directory) in &directories {
-        directory
-            .sync_data()
-            .map_err(|error| io::Error::new(error.kind(), format!("{path:?}: {error}")))?;
+        // `sync_data` is `F_FULLFSYNC` on Apple, the same device flush as
+        // `sync_all`, so it would defeat the single covering flush below.
+        rustix::fs::fsync(directory).map_err(|errno| {
+            let error = io::Error::from(errno);
+            io::Error::new(error.kind(), format!("{path:?}: {error}"))
+        })?;
     }
     let Some((_, deepest)) = directories.first() else {
         return Ok(());

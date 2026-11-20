@@ -67,9 +67,9 @@ impl WarmLaunchService {
         }
     }
 
-    /// Handle a claim while retaining the admitted claim payload in the
-    /// trusted in-process caller. The serialized request carries only its
-    /// identity, mode, and host-path-free compatibility shape.
+    /// Handle a non-workload lease. This generic service has no one-use host
+    /// admission owner, so `WarmLease::acquire` refuses any workload-shaped
+    /// claim before selecting a parent or attempting cold fallback.
     pub fn claim(
         &self,
         request: WarmServiceRequest,
@@ -406,15 +406,53 @@ mod integration_tests {
                 ..Default::default()
             }),
             rootfs_path: "/tmp/rootfs.ext4".into(),
-            tenant_id: "tenant-a".into(),
+            tenant_id: String::new(),
             audit_dir: PathBuf::from("/tmp/audit"),
             gateway_audit_socket: PathBuf::from("/tmp/audit.sock"),
             gateway_events_socket: None,
-            plan_json: "{}".into(),
+            plan_json: String::new(),
             audit_context: None,
             bundle_json: None,
             network_policy: NetworkPolicy::deny_all(),
         }
+    }
+
+    #[test]
+    fn service_refuses_plan_bearing_claim_before_cold_fallback() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
+        let root = tempfile::tempdir().expect("pool tempdir");
+        let pool = SupervisorStandbyPool::at(root.path());
+        let mock = Arc::new(crate::MockBackend::new());
+        let backend: Arc<dyn VmBackend> = mock.clone();
+        let service = WarmLaunchService::new();
+        let mut workload = claim();
+        workload.plan_json = "{}".into();
+        let response = service
+            .claim(
+                WarmServiceRequest::Claim {
+                    request_id: "request-1".into(),
+                    lease_id: "lease-1".into(),
+                    mode: WarmLaunchMode::Optional,
+                    compatibility: compatibility(),
+                },
+                backend,
+                &pool,
+                workload,
+                None,
+            )
+            .expect("a refused claim is a typed service response");
+        assert!(
+            matches!(
+                response,
+                WarmServiceResponse::Refused {
+                    refusal: mvm_core::vm_backend::WarmClaimRefusal::PreparationFailed { .. },
+                    ..
+                }
+            ),
+            "a plan-bearing lease must be refused: {response:?}"
+        );
+        assert_eq!(mock.count(), 0, "the mock must not cold boot");
+        assert_eq!(service.active_leases().expect("lease registry"), 0);
     }
 
     #[test]

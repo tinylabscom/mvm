@@ -26,8 +26,9 @@ class DensityMetadataTests(unittest.TestCase):
     def test_unavailable_metadata_and_fixture_runs_cannot_claim_live_success(self, _probe):
         with tempfile.TemporaryDirectory() as directory:
             summary = dict.fromkeys((
-                "run_id", "image", "backend", "launch_mode", "waves", "memory",
+                "run_id", "image", "backend", "launch_mode", "standby_form", "waves", "memory",
                 "cpus", "settle_seconds", "idle_sample_seconds", "custom_workload",
+                "build_profile",
             ), "fixture")
             summary.update({
                 "backend": "hvf", "host_memory_mib": "8192", "cache_dir": directory,
@@ -47,6 +48,8 @@ class DensityMetadataTests(unittest.TestCase):
             self.assertIn("for availability", report["boundaries"]["physical_footprint"])
             self.assertEqual(report["artifacts"]["supervisor"]["status"], "unavailable")
             self.assertNotIn("must-not-appear", str(report))
+            self.assertEqual(report["configuration"]["build_profile"], "fixture")
+            self.assertEqual(report["configuration"]["standby_form"], "fixture")
             native = density_metadata.collect(Path(directory), summary, {})
             self.assertEqual(native["evidence"]["classification"], "native_requested")
             self.assertEqual(native["status"], "metadata_only")
@@ -57,6 +60,34 @@ class DensityMetadataTests(unittest.TestCase):
                     private = density_metadata.collect(Path(directory), summary, {})
                 self.assertEqual(private["source"]["dirty"], dirty)
                 self.assertNotIn("private-customer-file", str(private))
+
+    def test_linux_identity_reads_cpuinfo_and_os_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cpuinfo = Path(directory) / "cpuinfo"
+            cpuinfo.write_text(
+                "processor\t: 0\nmodel name\t: AMD EPYC 7502P 32-Core Processor\n"
+                "processor\t: 1\nmodel name\t: AMD EPYC 7502P 32-Core Processor\n"
+            )
+            self.assertEqual(
+                density_metadata.linux_cpu(cpuinfo), "AMD EPYC 7502P 32-Core Processor"
+            )
+            cpuinfo.write_text("processor\t: 0\nCPU implementer\t: 0x41\n")
+            self.assertIsNone(density_metadata.linux_cpu(cpuinfo))
+            self.assertIsNone(density_metadata.linux_cpu(Path(directory) / "missing"))
+
+            release = Path(directory) / "os-release"
+            release.write_text('NAME="Ubuntu"\nPRETTY_NAME="Ubuntu 24.04.1 LTS"\n')
+            self.assertEqual(
+                density_metadata.linux_os_build(release, "6.8.0-45-generic"),
+                "Ubuntu 24.04.1 LTS (6.8.0-45-generic)",
+            )
+            self.assertEqual(
+                density_metadata.linux_os_build(Path(directory) / "missing", "6.8.0"),
+                "6.8.0",
+            )
+            self.assertEqual(
+                density_metadata.linux_os_build(release, ""), "Ubuntu 24.04.1 LTS"
+            )
 
     @patch("density_metadata.subprocess.run", side_effect=FileNotFoundError)
     def test_missing_probe_is_not_an_empty_success(self, _run):

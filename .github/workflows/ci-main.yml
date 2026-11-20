@@ -43,7 +43,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
           components: clippy
 
       - uses: ./.github/actions/apt-deps
@@ -161,7 +161,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
 
       - uses: ./.github/actions/apt-deps
         with:
@@ -257,7 +257,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
 
       - uses: ./.github/actions/apt-deps
         with:
@@ -342,7 +342,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
 
       - uses: ./.github/actions/apt-deps
         with:
@@ -403,7 +403,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
 
       - uses: ./.github/actions/apt-deps
         with:
@@ -528,7 +528,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
 
       - uses: ./.github/actions/apt-deps
         with:
@@ -538,6 +538,11 @@ jobs:
         uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: nextest
+
+      # The hostd graph test resolves the macOS target offline, so it needs
+      # every platform's locked sources, not just this runner's.
+      - name: Fetch locked sources for cross-target graph tests
+        run: cargo fetch --locked
 
       - name: Run tests under the release profile
         # Every other lane runs in a debug profile: debug assertions on,
@@ -590,7 +595,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
           targets: ${{ matrix.target }}
 
       - uses: ./.github/actions/install-zigbuild
@@ -630,7 +635,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
           targets: wasm32-wasip1
 
       - uses: ./.github/actions/apt-deps
@@ -641,7 +646,7 @@ jobs:
 
       - name: Install pinned no_std toolchain and targets
         run: |
-          rustup toolchain install 1.97.1 --profile minimal \
+          rustup toolchain install 1.100.0 --profile minimal \
             --target wasm32-unknown-unknown,wasm32-wasip1,riscv32imac-unknown-none-elf
 
       - name: Run Linux, no_std, filesystem, and conformance coverage
@@ -724,7 +729,7 @@ jobs:
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: stable
+          toolchain: 1.100.0
 
       # The one lane that must keep a floating nightly, and not by oversight.
       # `crates/mvm-hostd/ebpf/rust-toolchain.toml` pins `channel = "nightly"`,
@@ -885,7 +890,7 @@ jobs:
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: stable
+          toolchain: 1.100.0
 
       - uses: ./.github/actions/apt-deps
         with:
@@ -1095,7 +1100,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
 
       - uses: ./.github/actions/apt-deps
         with:

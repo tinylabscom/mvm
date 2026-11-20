@@ -237,6 +237,67 @@ separate broker and signer key-custody boundary, keep durable local state,
 and recover after CLI exit. It is not a new cloud service or a dependency
 on `mvmd`.
 
+The coordinator's lifetime has two forms today, and only one is automatic.
+The launcher-spawned process above is detached: nothing owns or reaps it,
+which is not the service ownership the actor and mailbox commit ordering in
+[#5255](https://github.com/tinylabscom/mvm/issues/5255) requires. On Linux the
+same binary can instead run as a fixed systemd user unit,
+`mvm-policy-coordinator@<home>.service`, whose instance is the canonical MVM
+home in `systemd-escape --path` form. Started with `--managed-home` it serves
+only when its `MVM_HOME` names that home, an invocation ID is present and
+well-formed, and its own control group names that unit. The server does not
+check that the ID is the manager's for this unit; the client's comparison
+with the manager is the check that decides that; it binds its own socket, so a client's
+`SO_PEERCRED` is the service and not the manager.
+
+A client identifies that service without trusting what it says: it asks the
+user manager for the unit's main PID and invocation, requires the connected
+socket's kernel credentials to be that PID under its own UID before sending
+anything, requires the reply to restate the same user, home, unit and
+invocation, and asks the manager again afterwards so a restart or a reused
+PID fails. Every step is bounded, and an absent, stopped, unreachable or
+mismatched unit is a typed refusal — never a detached spawn. `mvmctl policy
+coordinator` is the consumer. On Linux the coordinator also refuses a connection
+from another UID by kernel credentials (the refusal is Linux-only), and it runs
+at most 256 handler threads, refusing extra connections.
+
+This is identification only. The report is not readiness, current authority
+or permission to commit; activation and reads still use the detached path and
+do not require a managed coordinator; `mvmctl` installs, enables and starts
+nothing; and no confinement between processes of one user is claimed. The
+real-socket tests supply the manager's answers, so they are component
+evidence, not a witness that a unit was provisioned and run on a host.
+
+Publishing a project's first generation is ordered so that a crash can never
+leave a reader authorizing from an unconfirmed index. The coordinator first
+durably writes a small bounded `pending.json` naming the project and its
+closure, then the activation marker, then the record, then the index, and only
+then removes `pending.json`. While `pending.json` exists, every reader and every
+activation refuses, even if the index already names the project. A failure
+after the obligation is written is reported as an unresolved outcome rather than
+a refusal, and the coordinator recovers at startup, before the next
+activation, and when a launch or restore finds the obligation and asks it to. Recovery only removes files: an index that names the project with
+the matching closure and a matching record is a committed publication and the
+obligation is dropped; an index that does not name the project means the
+publication never committed, so a matching record and the obligation are
+removed, and when no index exists at all the activation marker is removed as
+well, since only this publication can have written it, so a rolled-back first
+publication leaves a clean store; anything that does not match is left in place
+and keeps refusing.
+
+The coordinator is also the single writer of the per-workload containment
+ledger (quarantine flag and execution epoch). Quarantine and replace are commit
+requests to it, applied under its owner lock with the same obligation-first
+discipline as a generation: a durable `pending.json`, then the ledger, then the
+obligation removed. Readers do not ask the coordinator; they read the canonical
+ledger file directly and refuse while an obligation exists, after a brief bounded wait for one in flight. The first commit
+migrates the pre-coordinator `host-interface/workloads.json` by exchanging that
+path with a directory and then reading the archived original, so a binary older
+than this change fails closed on every read and write of that path afterwards.
+A launch that read the ledger before a quarantine commit can still start after
+it; the operator stops the machine after quarantining. Quarantine and replace
+now need the coordinator process and are refused when it cannot start.
+
 This coordinator is an implementation of [#5097](https://github.com/tinylabscom/mvm/issues/5097)'s
 local host-interface responsibilities, not a second authority alongside
 `HostInterface`. Local mode resolves and applies locally without central

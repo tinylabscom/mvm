@@ -45,6 +45,7 @@ use mvm_vmm::driver::traits::{
 mod cold_channel;
 mod failure_diagnostics;
 mod handoff_client;
+mod launch_policy;
 mod standby;
 mod stop_state;
 use cold_channel::{BootInputFiles, boot_with_custody, failed_owned_boot, require_cold_config};
@@ -55,6 +56,7 @@ use handoff_client::{
     HANDOFF_RESPONSE_GRACE, LIVE_HANDOFF_ATTEMPTS, handoff_response_deadline, read_handoff_response,
 };
 use handoff_client::{link_child_state, request_live_handoff};
+use launch_policy::{SupervisorLaunchPolicy, claim_hvf_launch, hvf_instance_absent};
 #[cfg(test)]
 use standby::wait_for_standby_agent;
 
@@ -436,96 +438,6 @@ fn bounded_supervisor_command(
         &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
             .with_cpu_grant(spec.cpu_grant),
     )
-}
-
-struct SupervisorLaunchPolicy {
-    validate_config: fn(&HvfSupervisorConfig) -> Result<()>,
-    configure_environment: fn(&mut std::process::Command),
-}
-
-impl SupervisorLaunchPolicy {
-    fn legacy() -> Self {
-        Self {
-            validate_config: |_| Ok(()),
-            configure_environment: |command| {
-                command.env_remove("MVM_HVF_LEGACY_CONFIG_REPLAY");
-            },
-        }
-    }
-
-    fn cold() -> Self {
-        Self {
-            validate_config: require_cold_config,
-            configure_environment: |command| {
-                // Bind projected boot arguments, not ambient debug overrides.
-                // Remove both from the actual child environment before scope
-                // binding seals the launch command.
-                command.env_remove("MVM_HVF_BOOTARGS");
-                command.env_remove("MVM_HVF_BOOTARGS_EXTRA");
-                command.env_remove("MVM_HVF_LEGACY_CONFIG_REPLAY");
-            },
-        }
-    }
-}
-
-fn claim_hvf_launch(state_dir: &Path) -> Result<std::fs::File> {
-    use std::os::fd::AsRawFd;
-    use std::os::unix::fs::OpenOptionsExt;
-    let launch_lock = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(state_dir.join("hvf-launch.lock"))?;
-    // SAFETY: the owned file holds this nonblocking launch lock until return.
-    if unsafe { libc::flock(launch_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        bail!("another HVF launch owns this instance name");
-    }
-    if any_path_exists(hvf_runtime_evidence(state_dir))? {
-        bail!("existing HVF runtime evidence requires confirmed cleanup before reuse");
-    }
-    Ok(launch_lock)
-}
-
-/// Files a supervisor launch, or its outcome, leaves under an instance's
-/// state directory.
-fn hvf_runtime_evidence(state_dir: &Path) -> impl Iterator<Item = PathBuf> {
-    [
-        stop_wire::INSTANCE_FILE,
-        stop_wire::SOCKET_FILE,
-        stop_wire::FINALIZED_FILE,
-        PID_FILE_NAME,
-        "supervisor.json",
-        "supervisor-status.json",
-        "workload.exit",
-    ]
-    .map(|name| state_dir.join(name))
-    .into_iter()
-    .chain([
-        mvm_core::config::vm_socket_dir_at(state_dir).join(stop_wire::SOCKET_FILE),
-        mvm_core::config::vm_hvf_agent_socket_at(state_dir),
-    ])
-}
-
-/// Whether no HVF launch was ever attempted under `state_dir`: no launch lock
-/// and no runtime evidence. A launch takes the lock before it spawns a
-/// supervisor, and cleanup removes the directory only after a confirmed exit.
-fn hvf_instance_absent(state_dir: &Path) -> Result<bool> {
-    let lock = std::iter::once(state_dir.join("hvf-launch.lock"));
-    Ok(!any_path_exists(
-        lock.chain(hvf_runtime_evidence(state_dir)),
-    )?)
-}
-
-fn any_path_exists(paths: impl IntoIterator<Item = PathBuf>) -> Result<bool> {
-    for path in paths {
-        match std::fs::symlink_metadata(&path) {
-            Ok(_) => return Ok(true),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error).context("inspect prior HVF runtime evidence"),
-        }
-    }
-    Ok(false)
 }
 
 fn boot_with_handoff(
@@ -1411,6 +1323,38 @@ impl RunningVm for HvfRunningVm {
         ))
     }
 
+    fn exit_observer(&self) -> Result<mvm_vmm::host::process_exit::ProcessExitObserver> {
+        self.owned
+            .as_ref()
+            .context("exit observation requires original native child custody")?
+            .exit_observer()
+    }
+
+    fn retained_process_descriptor_count(&self) -> Result<u64> {
+        Ok(self
+            .owned
+            .as_ref()
+            .context("descriptor observation requires original native child custody")?
+            .retained_process_descriptor_count())
+    }
+
+    fn open_owned_agent_bridge(
+        &self,
+        stream: &mut Option<std::os::unix::net::UnixStream>,
+    ) -> Result<()> {
+        self.owned
+            .as_ref()
+            .context("guest bridge requires original native child custody")?
+            .open_agent_bridge(&self.agent_socket, stream)
+    }
+
+    fn validate_owned_agent_bridge(&self, stream: &std::os::unix::net::UnixStream) -> Result<()> {
+        self.owned
+            .as_ref()
+            .context("guest bridge requires original native child custody")?
+            .validate_agent_bridge(stream)
+    }
+
     fn kill(&self) -> Result<()> {
         self.terminate_with_timing().map(|_| ())
     }
@@ -1460,13 +1404,9 @@ impl RunningVm for HvfRunningVm {
     }
 
     fn status(&self) -> Result<VmStatus> {
-        if let Some(owned) = &self.owned
-            && owned.try_exited()?
-        {
-            return Ok(VmStatus::Stopped);
-        }
-        let _ = ConnectedInstance::connect_instance(self.instance.clone())?;
-        Ok(VmStatus::Running)
+        observed_status(self.owned.as_ref().map(OwnedInstance::try_exited), || {
+            ConnectedInstance::connect_instance(self.instance.clone()).map(|_| ())
+        })
     }
 
     fn vsock_connect(&self, guest_port: u32) -> Result<Box<dyn DuplexStream>> {
@@ -1493,8 +1433,53 @@ impl RunningVm for HvfRunningVm {
     }
 }
 
+fn observed_status(
+    original_exited: Option<Result<bool>>,
+    attached_probe: impl FnOnce() -> Result<()>,
+) -> Result<VmStatus> {
+    if let Some(exited) = original_exited {
+        // Original custody must never be replaced by a fresh name-based probe.
+        return Ok(if exited? {
+            VmStatus::Stopped
+        } else {
+            VmStatus::Running
+        });
+    }
+    attached_probe()?;
+    Ok(VmStatus::Running)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn original_status_never_recaptures_a_named_owner() {
+        for (exited, expected) in [(false, VmStatus::Running), (true, VmStatus::Stopped)] {
+            let status = observed_status(Some(Ok(exited)), || {
+                panic!("original status must not resolve a replaced instance or PID file")
+            })
+            .unwrap();
+            assert_eq!(status, expected);
+        }
+    }
+
+    #[test]
+    fn unknown_original_status_cannot_be_replaced_by_a_live_attachment() {
+        let error = observed_status(
+            Some(Err(anyhow!("original exit proof unavailable"))),
+            || panic!("unknown original custody must not fall back to attachment"),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "original exit proof unavailable");
+    }
+
+    #[test]
+    fn attached_status_still_requires_its_authenticated_probe() {
+        assert_eq!(observed_status(None, || Ok(())).unwrap(), VmStatus::Running);
+        let error =
+            observed_status(None, || Err(anyhow!("HVF ownership generation changed"))).unwrap_err();
+        assert_eq!(error.to_string(), "HVF ownership generation changed");
+    }
+
     /// A workload that runs past the 300 s cap the file-polling backends use
     /// must still be waited for; the wait ends when the supervisor exits.
     #[test]
@@ -1523,27 +1508,6 @@ mod tests {
     }
 
     use super::*;
-
-    #[test]
-    fn cold_actual_child_command_removes_both_bootarg_overrides_before_sealing() {
-        let directory = tempfile::tempdir().unwrap();
-        let spec = spec_with(KernelImage::Path("/test-kernel".into()), vec![], vec![]);
-        let command = bounded_supervisor_command(
-            Path::new("/native-supervisor-not-executed"),
-            &spec,
-            directory.path(),
-            None,
-            &SupervisorLaunchPolicy::cold(),
-        );
-        for name in ["MVM_HVF_BOOTARGS", "MVM_HVF_BOOTARGS_EXTRA"] {
-            assert!(
-                command
-                    .as_command()
-                    .get_envs()
-                    .any(|(key, value)| key == name && value.is_none())
-            );
-        }
-    }
 
     #[test]
     fn capabilities_pin_every_explicit_backend_capability() {
@@ -2092,6 +2056,7 @@ mod tests {
             cmdline: String::new(),
             vcpus: 1,
             cpu_grant: None,
+            allowed_cpus: None,
             memory_mib: 256,
             mem_initial_mib: None,
             blocks,
@@ -2248,21 +2213,6 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.join(PID_FILE_NAME)).unwrap(),
             "4242"
-        );
-    }
-
-    #[test]
-    fn same_name_launch_is_exclusive_and_prior_outcome_is_not_absence_proof() {
-        let directory = tempfile::tempdir().unwrap();
-        let first = claim_hvf_launch(directory.path()).unwrap();
-        assert!(claim_hvf_launch(directory.path()).is_err());
-        drop(first);
-        drop(claim_hvf_launch(directory.path()).unwrap());
-        std::fs::write(directory.path().join("workload.exit"), "124").unwrap();
-        assert!(claim_hvf_launch(directory.path()).is_err());
-        assert_eq!(
-            std::fs::read_to_string(directory.path().join("workload.exit")).unwrap(),
-            "124"
         );
     }
 
@@ -3000,6 +2950,35 @@ mod tests {
     }
 
     #[test]
+    fn relay_config_keeps_workload_mailbox_on_host_dial_without_builder_authority() {
+        let mut spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![
+                egress_port("/run/egress.sock"),
+                VsockPort {
+                    service: GuestService::Mailbox,
+                    direction: VsockDirection::HostDials,
+                    host_uds: "/run/mailbox.sock".into(),
+                },
+            ],
+            vec![],
+        );
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert_eq!(
+            cfg.console_data_sockets,
+            vec![HostDialSocket {
+                guest_port: GuestService::Mailbox.port(),
+                host_socket: "/run/mailbox.sock".into(),
+            }]
+        );
+        assert!(cfg.builder_control_sockets.is_empty());
+        spec.vsock.pop();
+        let without_mailbox = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert!(without_mailbox.console_data_sockets.is_empty());
+        assert!(without_mailbox.builder_control_sockets.is_empty());
+    }
+
+    #[test]
     fn relay_config_copies_console_ports_into_console_data_sockets() {
         let spec = spec_with(
             KernelImage::Path("/img/Image".into()),
@@ -3095,40 +3074,6 @@ mod tests {
     }
 
     /// Same contract as every other driver: the bound rides on the spawn.
-    #[test]
-    fn a_granted_share_wraps_the_supervisor_spawn() {
-        let scratch = tempfile::tempdir().expect("scratch");
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path())
-            .expect("fake mechanism");
-
-        let mut spec = spec_with(KernelImage::Bundled, vec![], vec![]);
-        spec.cpu_grant = Some(mvm_contract::grants::CpuGrant::Share { millicores: 500 });
-        let cmd = bounded_supervisor_command(
-            Path::new("/usr/bin/mvm-hvf-supervisor"),
-            &spec,
-            scratch.path(),
-            None,
-            &SupervisorLaunchPolicy::legacy(),
-        );
-        let argv = mvm_core::spawn_scope::rendered_argv(cmd.as_command());
-
-        assert_eq!(
-            Path::new(&argv[0])
-                .file_name()
-                .and_then(|name| name.to_str()),
-            Some("systemd-run")
-        );
-        assert!(argv.contains(&"CPUQuota=50%".to_string()), "{argv:?}");
-        assert!(
-            argv.contains(&format!(
-                "MemoryMax={}M",
-                u64::from(spec.memory_mib) + mvm_core::spawn_scope::VMM_MEMORY_OVERHEAD_MIB
-            )),
-            "{argv:?}"
-        );
-        assert_eq!(argv.last().expect("payload"), "/usr/bin/mvm-hvf-supervisor");
-    }
 
     #[test]
     fn hvf_spec_carries_exactly_one_network_flow_and_no_l3() {

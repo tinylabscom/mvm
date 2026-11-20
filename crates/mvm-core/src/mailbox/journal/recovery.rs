@@ -49,6 +49,9 @@ impl MailboxJournal {
         let lock = FileLock::try_acquire(&root.join("journal"))
             .map_err(|e| std::io::Error::other(e.to_string()))?
             .ok_or(JournalError::Busy)?;
+        if super::fence::is_fenced(root)? {
+            return Err(JournalError::Fenced);
+        }
         let mut journal = Self {
             root: root.to_owned(),
             address,

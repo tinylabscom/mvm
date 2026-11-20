@@ -73,6 +73,9 @@ const LOCAL_JOURNAL_LIMITS: JournalLimits = JournalLimits {
 pub struct MailboxProcessConfig {
     pub grant: MailboxGrant,
     pub keys: DerivedMailboxKeys,
+    /// Actor-only purpose keys, derived by the trusted launcher, never the helper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<crate::mailbox_launch::actor_template::ActorEndpointMaterial>,
     /// Absolute host key directory from the launcher; helper environment is empty.
     pub keys_dir: PathBuf,
     pub socket: PathBuf,
@@ -139,6 +142,7 @@ fn serve_verified(config: MailboxProcessConfig) -> Result<()> {
     let MailboxProcessConfig {
         grant,
         keys,
+        actor,
         keys_dir,
         socket,
         route,
@@ -176,6 +180,30 @@ fn serve_verified(config: MailboxProcessConfig) -> Result<()> {
             "mailbox helper grant does not match its admitted plan",
         ));
     }
+    if let Some(material) = actor {
+        return serve_actor(
+            launcher,
+            &plan,
+            MailboxProcessConfig {
+                grant,
+                keys,
+                actor: None,
+                keys_dir,
+                socket,
+                route,
+                posture: Some(posture),
+                reader_boot,
+                vm_state_dir,
+            },
+            material,
+        );
+    }
+    if plan.workflow.is_some() {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            "actor mailbox handoff is missing",
+        ));
+    }
     if posture.variant() == Variant::Prod {
         return serve_local(
             launcher,
@@ -183,6 +211,7 @@ fn serve_verified(config: MailboxProcessConfig) -> Result<()> {
             MailboxProcessConfig {
                 grant,
                 keys,
+                actor: None,
                 keys_dir,
                 socket,
                 route,
@@ -216,6 +245,116 @@ fn serve_verified(config: MailboxProcessConfig) -> Result<()> {
     Ok(())
 }
 
+fn serve_actor(
+    launcher: libc::pid_t,
+    plan: &ExecutionPlan,
+    config: MailboxProcessConfig,
+    material: crate::mailbox_launch::actor_template::ActorEndpointMaterial,
+) -> Result<()> {
+    use crate::mailbox_service::actor_operations::{
+        ActorConversationEndpoint, ActorOperationConfig,
+    };
+    use mvm_core::mailbox::conversation_wire::ConversationBinding;
+
+    material.verify_plan(plan)?;
+    let posture = config
+        .posture
+        .as_ref()
+        .ok_or_else(|| Error::new(ErrorKind::PermissionDenied, "actor posture missing"))?;
+    if posture.variant() != Variant::Prod && posture.variant() != Variant::Dev {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            "unsupported actor mailbox posture",
+        ));
+    }
+    let boot = config
+        .reader_boot
+        .clone()
+        .ok_or_else(|| Error::new(ErrorKind::PermissionDenied, "actor reader boot missing"))?;
+    let binding = ConversationBinding {
+        reader: boot.clone(),
+        address: material.address,
+        policy_epoch: material.template.capability.policy_epoch,
+    };
+    let signer = material.authority_key();
+    let mut reader_send = material.template.capability.clone();
+    reader_send.operations =
+        mvm_contract::protocol::mailbox::CapabilityOperations::from_operations(&[
+            mvm_contract::protocol::mailbox::MailboxOperation::Send,
+        ]);
+    {
+        use sha2::{Digest, Sha256};
+        let body = serde_json::to_vec(&("mvm.actor.reader-send.v1", &reader_send))
+            .map_err(Error::other)?;
+        reader_send.capability_id =
+            mvm_contract::protocol::mailbox::CapabilityId::from_bytes(Sha256::digest(body).into());
+    }
+    let reader = reader::load_or_enroll(
+        &config.vm_state_dir,
+        &config.grant,
+        boot,
+        &reader_send,
+        &signer,
+    )?;
+    let directory = material.registry_directory.with_extension("state");
+    let max_storage_bytes = usize::try_from(material.max_storage_bytes).map_err(Error::other)?;
+    let owner = ActorConversationEndpoint::open(
+        ActorOperationConfig {
+            plan: plan.clone(),
+            binding: binding.clone(),
+            directory,
+            max_storage_bytes,
+            now_unix_ms: crate::mailbox_launch::actor_template::current_time_ms()?,
+        },
+        material,
+    )
+    .map_err(Error::other)?;
+    let (journal, anchor) = owner.control_journal().map_err(Error::other)?;
+    let (policy, mut sealer) = config.keys.trust();
+    let service = DurableMailboxService::bind_local(
+        &config.socket,
+        LAUNCH_LIMITS,
+        policy.with_grant(&config.grant)?,
+        signer,
+        journal,
+        anchor,
+    )?;
+    let remaining_ms = reader
+        .capability
+        .grant
+        .expires_at_unix_ms
+        .min(plan.valid_until.timestamp_millis())
+        .saturating_sub(crate::mailbox_launch::actor_template::current_time_ms()?);
+    let remaining = Duration::from_millis(u64::try_from(remaining_ms).unwrap_or(0));
+    let started = std::time::Instant::now();
+    let active = || started.elapsed() < remaining && keep_serving(launcher, &config.vm_state_dir);
+    service.install_guest_reader(reader)?;
+    service.install_conversation(binding, owner)?;
+    std::io::stdout().write_all(READY_MARKER)?;
+    while active() {
+        let result = service.serve_guest_while(&config.route, &mut sealer, active);
+        match result {
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::NotFound
+                        | ErrorKind::ConnectionRefused
+                        | ErrorKind::ConnectionReset
+                        | ErrorKind::ConnectionAborted
+                        | ErrorKind::BrokenPipe
+                        | ErrorKind::TimedOut
+                        | ErrorKind::Interrupted
+                ) =>
+            {
+                std::thread::sleep(POLL_INTERVAL.min(remaining.saturating_sub(started.elapsed())));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 fn serve_local(
     launcher: libc::pid_t,
     plan: &ExecutionPlan,
@@ -224,6 +363,7 @@ fn serve_local(
     let MailboxProcessConfig {
         grant,
         keys,
+        actor: _,
         keys_dir,
         socket,
         route,
@@ -358,6 +498,7 @@ pub fn build_config(
     Ok(MailboxProcessConfig {
         grant: *grant,
         keys,
+        actor: None,
         keys_dir: keys_dir.to_path_buf(),
         socket: mvm_core::config::vm_mailbox_socket_at(state_dir),
         route,
@@ -416,6 +557,8 @@ fn command(bin: &Path) -> Command {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0);
+    #[cfg(feature = "hvf-live-validation")]
+    cmd.stderr(Stdio::inherit());
     cmd
 }
 
@@ -486,6 +629,10 @@ pub fn require_servable(
                 )
             })?;
             posture.verify(&plan, &config.name)?;
+            crate::mailbox_launch::actor_template::verify_plan(
+                &mvm_core::config::mvm_keys_dir(),
+                &plan,
+            )?;
             if posture.variant() == Variant::Prod
                 && plan.mailbox.is_some_and(|grant| grant.retention.is_none())
             {
@@ -514,6 +661,15 @@ pub fn serve_started(
     serve_started_with(backend, id, config, posture, spawn_for_launch)
 }
 
+/// A mailbox launch refusal whose compensating VM stop could not be confirmed.
+#[derive(Debug, thiserror::Error)]
+#[error("{primary:#}; mailbox rollback remains unconfirmed: {stop:#}")]
+pub struct MailboxStopUnconfirmed {
+    #[source]
+    primary: anyhow::Error,
+    stop: anyhow::Error,
+}
+
 fn serve_started_with(
     backend: &AnyBackend,
     id: &VmId,
@@ -535,10 +691,12 @@ fn serve_started_with(
         Ok(())
     })();
     if let Err(error) = outcome {
+        let primary = error.context("the granted guest mailbox could not be served");
         if let Err(stop) = backend.stop(id) {
             tracing::warn!(vm = %id.0, error = %stop, "stopping a VM whose mailbox could not be served failed");
+            return Err(anyhow::Error::new(MailboxStopUnconfirmed { primary, stop }));
         }
-        return Err(error.context("the granted guest mailbox could not be served"));
+        return Err(primary);
     }
     Ok(())
 }
@@ -551,6 +709,16 @@ pub fn spawn_for_launch(
     vm_name: &str,
     posture: Option<&MailboxLaunchPosture>,
 ) -> Result<Option<u32>> {
+    Ok(spawn_for_launch_owned(plan, backend, vm_name, posture)?.map(|child| child.id()))
+}
+
+/// Retain the original mailbox process for a lifecycle owner that verifies exit.
+pub fn spawn_for_launch_owned(
+    plan: &ExecutionPlan,
+    backend: &AnyBackend,
+    vm_name: &str,
+    posture: Option<&MailboxLaunchPosture>,
+) -> Result<Option<std::process::Child>> {
     let Some(grant) = &plan.mailbox else {
         return Ok(None);
     };
@@ -561,6 +729,7 @@ pub fn spawn_for_launch(
         )
     })?;
     posture.verify(plan, vm_name).map_err(Error::other)?;
+    crate::mailbox_launch::actor_template::verify_plan(&mvm_core::config::mvm_keys_dir(), plan)?;
     if posture.variant() == Variant::Prod && grant.retention.is_none() {
         return Err(Error::new(
             ErrorKind::PermissionDenied,
@@ -582,8 +751,18 @@ pub fn spawn_for_launch(
         })?;
     let mut config = build_config(&mvm_core::config::mvm_keys_dir(), grant, &state_dir, route)?;
     let started = (|| {
+        if plan.workflow.is_some() {
+            config.actor =
+                crate::mailbox_launch::actor_template::endpoint_material(&config.keys_dir, plan)?;
+            if config.actor.is_none() {
+                return Err(Error::new(
+                    ErrorKind::PermissionDenied,
+                    "actor mailbox material is missing",
+                ));
+            }
+        }
         config.reader_boot = load_reader_boot_for_plan(&state_dir, plan)?;
-        if posture.variant() == Variant::Prod {
+        if config.actor.is_none() && posture.variant() == Variant::Prod {
             let binding = config.reader_boot.as_ref().ok_or_else(|| {
                 Error::new(
                     ErrorKind::PermissionDenied,
@@ -617,7 +796,10 @@ pub fn spawn_for_launch(
     started
 }
 
-fn spawn_serving(config: &MailboxProcessConfig, state_dir: &Path) -> Result<Option<u32>> {
+fn spawn_serving(
+    config: &MailboxProcessConfig,
+    state_dir: &Path,
+) -> Result<Option<std::process::Child>> {
     let bin = mvm_vmm::host::broker_services_spawn::resolve_subprocess_bin_to_spawn(&AuxBin::new(
         MAILBOX_BIN,
         MAILBOX_BIN_ENV,
@@ -650,7 +832,7 @@ fn spawn_serving(config: &MailboxProcessConfig, state_dir: &Path) -> Result<Opti
         let _ = child.wait();
         return Err(error);
     }
-    Ok(Some(child.id()))
+    Ok(Some(child))
 }
 
 #[cfg(test)]
@@ -1044,6 +1226,28 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn selector_invalid_started_plan_retains_uncertain_stop_custody() {
+        let backend = AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_failing_stop());
+        let mut config = VmStartConfig {
+            name: "invalid-plan-stop-uncertain".into(),
+            ..Default::default()
+        };
+        let id = backend.start(&config).expect("mock starts");
+        config.plan_json = Some("invalid".into());
+
+        let error = serve_started_with(&backend, &id, &config, None, |_, _, _, _| {
+            panic!("malformed plan cannot spawn a mailbox helper")
+        })
+        .expect_err("invalid plan refuses");
+
+        assert!(error.is::<MailboxStopUnconfirmed>(), "{error:#}");
+        assert!(matches!(
+            backend.status(&id),
+            Ok(mvm_core::vm_backend::VmStatus::Running)
+        ));
+    }
+
     fn posture_for(config: &VmStartConfig, variant: Variant) -> Option<MailboxLaunchPosture> {
         granted_plan(config)
             .unwrap()
@@ -1122,6 +1326,7 @@ mod tests {
             posture: Some(MailboxLaunchPosture::for_test(&plan, Variant::Dev).handoff(None)),
             reader_boot: None,
             vm_state_dir: state_path,
+            actor: None,
         };
         let socket = config.socket.clone();
         let serving = std::thread::spawn(move || serve(config));
@@ -1183,6 +1388,7 @@ mod tests {
             posture: Some(MailboxLaunchPosture::for_test(&plan, Variant::Dev).handoff(None)),
             reader_boot: None,
             vm_state_dir: state.path().to_path_buf(),
+            actor: None,
         };
         let helper = std::thread::spawn(move || serve(config));
         let ready = std::time::Instant::now() + Duration::from_secs(5);
@@ -1311,6 +1517,7 @@ mod tests {
         let restart_keys = keys.clone();
         let restart_binding = binding.clone();
         let wrong_keys = MailboxProcessConfig {
+            actor: None,
             keys: keys.clone(),
             keys_dir: home.path().join("missing-keys"),
             grant,
@@ -1326,6 +1533,7 @@ mod tests {
         );
         assert!(!socket.exists(), "failed custody cannot bind a listener");
         let config = MailboxProcessConfig {
+            actor: None,
             keys,
             keys_dir: keys_dir.clone(),
             grant,
@@ -1500,6 +1708,7 @@ mod tests {
             .set_nonblocking(true)
             .expect("bounded guest accept");
         let config = MailboxProcessConfig {
+            actor: None,
             keys: restart_keys,
             keys_dir: keys_dir.clone(),
             grant,
@@ -1678,6 +1887,7 @@ mod tests {
             posture: None,
             reader_boot: None,
             vm_state_dir: state.path().to_path_buf(),
+            actor: None,
         };
         assert_eq!(serve(config), 1);
         assert!(!dir.path().join("mailbox.sock").exists());
@@ -1711,6 +1921,7 @@ mod tests {
             posture: Some(MailboxLaunchPosture::for_test(&plan, Variant::Prod).handoff(None)),
             reader_boot: None,
             vm_state_dir,
+            actor: None,
         };
         let error = serve_verified(config).expect_err("no signed guest boot");
         assert_eq!(error.kind(), ErrorKind::PermissionDenied);

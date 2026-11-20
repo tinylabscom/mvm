@@ -283,7 +283,13 @@ impl ProtectedPreloadedParent {
         let anchor = ClaimTestAnchor::audited(&self.parent_meta);
         let claim = admitted_child_claim(
             &self.src.path().join("rootfs.ext4"),
-            signed_child_plan_json(&parent_digest),
+            signed_child_plan_json_named(
+                &parent_digest,
+                self.handle
+                    .preloaded_child_vm_name
+                    .as_deref()
+                    .expect("preloaded child identity"),
+            ),
         );
         let ctx = ClaimContext {
             pool: &self.pool,
@@ -1073,6 +1079,15 @@ fn saved_state_claim_marks_no_consumed_resident_parent() {
 /// the CLI mints it before handing the runner the claim.
 fn signed_child_plan_json(image_sha256: &str) -> String {
     signed_child_plan_json_with_verbs(image_sha256, None)
+}
+
+fn signed_child_plan_json_named(image_sha256: &str, name: &str) -> String {
+    let mut plan = mvm_core::plan::plan_from_admitted_json(&signed_child_plan_json(image_sha256))
+        .expect("signed child fixture");
+    plan.image.name = name.to_string();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+    serde_json::to_string(&mvm_core::plan::sign_plan(&plan, &key, "host:test"))
+        .expect("named signed child")
 }
 
 /// Record `policy` the way admission records a resolved network policy:
@@ -2672,7 +2687,7 @@ fn check_preloaded_refusal_cleanup(driver: MockDriver, retained: bool, with_over
 
     let claim = admitted_child_claim(
         &src.path().join("rootfs.ext4"),
-        signed_child_plan_json(&parent_digest),
+        signed_child_plan_json_named(&parent_digest, &child_name),
     );
     let runner = WorkloadRunner::new(
         driver.with_preloaded_standby(),

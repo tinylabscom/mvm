@@ -51,6 +51,7 @@ pub(in crate::commands) fn fork_vm_full_arm(
 ) -> Result<mvm_core::checkpoint::CheckpointMeta> {
     let _activation_barrier =
         mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
+    mvm_client::policy_profiles::coordinator::recover_workload_ledger()?;
     if cfg!(target_os = "linux") {
         mvm_client::policy_profiles::coordinator::ensure_if_activated()?;
     }
@@ -174,9 +175,7 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
     }
 
     let AdmittedForkChild {
-        admission,
-        child_plan_json,
-        child_tenant_id,
+        mut admission,
         retained_runtime,
     } = admit_forked_child(&AdmitForkedChildParams {
         store: p.store,
@@ -193,7 +192,8 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
     let parent_meta = p.store.read_meta(p.checkpoint)?;
     let anchor = SignedChainAnchor::load()
         .context("loading the signed audit chain to verify the fork parent")?;
-    let fork_result = mvm_client::checkpoint::fork_vm_full_verified(
+    let fork_result = mvm_client::checkpoint::dispatch_vm_full_fork(
+        &mut admission,
         p.store,
         ForkParams {
             checkpoint: p.checkpoint.clone(),
@@ -202,8 +202,9 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
             dest_dir: p.dest_dir,
             created_unix: p.now,
             parent_liveness: ForkParentLiveness::MayBeRunning,
-            child_plan_json: Some(child_plan_json),
-            child_tenant_id: Some(child_tenant_id),
+            // hostd derives both fields from the genuine admitted owner.
+            child_plan_json: None,
+            child_tenant_id: None,
         },
         &|child: &mvm_client::checkpoint::RestoredChild<'_>| {
             mvm_client::checkpoint::FcForkRestorer.restore_fork(
@@ -221,21 +222,26 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
         },
         &anchor,
         &retained_runtime,
+        &mvm_client::checkpoint::stop_vm,
     );
     if let Err(ref e) = fork_result {
-        crate::commands::vm::up::emit_failed(&admission, "fork-vm-full-fc", e);
+        audit_fork_failure(&admission, &p.child_vm_name, "fork-vm-full-fc", e);
     }
     let meta = fork_result
         .with_context(|| format!("forking FC vm_full checkpoint {:?}", p.checkpoint.as_str()))?;
 
-    bind_checkpoint_forked(
+    if let Err(error) = bind_checkpoint_forked(
         p.checkpoint,
         &meta,
         &p.child_vm_name,
         p.store,
         p.declared_secrets,
         &crate::commands::vm::tenant_resolution::resolve_tenant(None),
-    )?;
+    ) {
+        let error = stop_fc_child_after_restore_failure(&p.child_vm_name, error);
+        audit_fork_failure(&admission, &p.child_vm_name, "fork-lineage", &error);
+        return Err(error);
+    }
     crate::commands::vm::up::emit_launched(&admission, "firecracker", true);
 
     // Deliver the fresh generation token to every restored child. A grant is
@@ -255,11 +261,15 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
         parent_meta.meta_digest.as_str(),
         grant_env,
     ) {
-        return Err(stop_fc_child_after_restore_failure(&p.child_vm_name, error));
+        let error = stop_fc_child_after_restore_failure(&p.child_vm_name, error);
+        audit_fork_failure(&admission, &p.child_vm_name, "fork-post-restore", &error);
+        return Err(error);
     }
 
     if let Err(error) = record_fork_runtime_meta(&p.child_vm_name, &parent_meta) {
-        return Err(stop_fc_child_after_restore_failure(&p.child_vm_name, error));
+        let error = stop_fc_child_after_restore_failure(&p.child_vm_name, error);
+        audit_fork_failure(&admission, &p.child_vm_name, "fork-runtime-meta", &error);
+        return Err(error);
     }
 
     if p.json {
@@ -312,8 +322,6 @@ struct AdmitForkedChildParams<'a> {
 /// The admitted claim-8 envelope a vm_full fork boots its child under.
 struct AdmittedForkChild {
     admission: crate::commands::vm::up::AdmissionContext,
-    child_plan_json: String,
-    child_tenant_id: String,
     retained_runtime: mvm_client::checkpoint::VerifiedRetainedRuntime,
 }
 
@@ -443,7 +451,6 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
 
     let child_plan_json = serde_json::to_string(admission.admitted.signed())
         .context("serializing the admitted child plan")?;
-    let child_tenant_id = admission.admitted.plan().tenant.0.clone();
     // Admission just signed this plan; confirm it names this child and the
     // rootfs being restored before it can become the child's authority.
     verify_child_plan_binds_restore(admission.admitted.signed(), p.child_vm_name, &recorded_sha)?;
@@ -457,8 +464,6 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
 
     Ok(AdmittedForkChild {
         admission,
-        child_plan_json,
-        child_tenant_id,
         retained_runtime,
     })
 }
@@ -578,9 +583,7 @@ fn fork_vm_full_arm_hvf(
     p: ForkVmFullArmHvfParams<'_>,
 ) -> Result<mvm_core::checkpoint::CheckpointMeta> {
     let AdmittedForkChild {
-        admission,
-        child_plan_json,
-        child_tenant_id,
+        mut admission,
         retained_runtime,
     } = admit_forked_child(&AdmitForkedChildParams {
         store: p.store,
@@ -596,7 +599,8 @@ fn fork_vm_full_arm_hvf(
     // Verify the parent against the signed audit chain before cloning anything.
     let anchor = SignedChainAnchor::load()
         .context("loading the signed audit chain to verify the fork parent")?;
-    let fork_result = mvm_client::checkpoint::fork_vm_full_verified(
+    let fork_result = mvm_client::checkpoint::dispatch_vm_full_fork(
+        &mut admission,
         p.store,
         ForkParams {
             checkpoint: p.checkpoint.clone(),
@@ -605,27 +609,33 @@ fn fork_vm_full_arm_hvf(
             dest_dir: p.dest_dir,
             created_unix: p.now,
             parent_liveness: ForkParentLiveness::MayBeRunning,
-            child_plan_json: Some(child_plan_json),
-            child_tenant_id: Some(child_tenant_id),
+            // hostd derives both fields from the genuine admitted owner.
+            child_plan_json: None,
+            child_tenant_id: None,
         },
         &mvm_client::checkpoint::HvfForkRestorer,
         &anchor,
         &retained_runtime,
+        &stop_hvf_fork_child,
     );
     if let Err(ref e) = fork_result {
-        crate::commands::vm::up::emit_failed(&admission, "fork-vm-full-hvf", e);
+        audit_fork_failure(&admission, &p.child_vm_name, "fork-vm-full-hvf", e);
     }
     let meta = fork_result
         .with_context(|| format!("forking HVF vm_full checkpoint {:?}", p.checkpoint.as_str()))?;
 
-    bind_checkpoint_forked(
+    if let Err(error) = bind_checkpoint_forked(
         p.checkpoint,
         &meta,
         &p.child_vm_name,
         p.store,
         p.declared_secrets,
         &crate::commands::vm::tenant_resolution::resolve_tenant(None),
-    )?;
+    ) {
+        let error = stop_child_after_restore_failure(&p.child_vm_name, error);
+        audit_fork_failure(&admission, &p.child_vm_name, "fork-lineage", &error);
+        return Err(error);
+    }
     crate::commands::vm::up::emit_launched(&admission, "hvf", true);
 
     if let Err(error) = deliver_hvf_fork_post_restore(
@@ -633,11 +643,15 @@ fn fork_vm_full_arm_hvf(
         p.parent_meta.meta_digest.as_str(),
         read_grant_envelope_for(&p.child_vm_name),
     ) {
-        return Err(stop_child_after_restore_failure(&p.child_vm_name, error));
+        let error = stop_child_after_restore_failure(&p.child_vm_name, error);
+        audit_fork_failure(&admission, &p.child_vm_name, "fork-post-restore", &error);
+        return Err(error);
     }
 
     if let Err(error) = record_fork_runtime_meta(&p.child_vm_name, &p.parent_meta) {
-        return Err(stop_child_after_restore_failure(&p.child_vm_name, error));
+        let error = stop_child_after_restore_failure(&p.child_vm_name, error);
+        audit_fork_failure(&admission, &p.child_vm_name, "fork-runtime-meta", &error);
+        return Err(error);
     }
 
     if p.json {
@@ -660,23 +674,43 @@ fn fork_vm_full_arm_hvf(
     Ok(meta)
 }
 
-/// Stop a restored child when identity rotation or required runtime metadata
-/// fails, and report both the original failure and the outcome of the stop.
+fn audit_fork_failure(
+    admission: &crate::commands::vm::up::AdmissionContext,
+    name: &str,
+    stage: &str,
+    error: &anyhow::Error,
+) {
+    if error
+        .downcast_ref::<mvm_client::checkpoint::ForkStopUncertain>()
+        .is_some()
+    {
+        mvm_client::admission::record_uncertain_restore_stop(admission, name, error);
+    } else {
+        crate::commands::vm::up::emit_failed(admission, stage, error);
+    }
+}
+
+fn stop_hvf_fork_child(child_vm_name: &str) -> Result<()> {
+    let backend = mvm_client::AnyBackend::for_started_vm(child_vm_name)
+        .with_context(|| format!("no backend claims restored child '{child_vm_name}'"))?;
+    backend
+        .stop(&mvm_core::vm_backend::VmId(child_vm_name.to_string()))
+        .map(|_| ())
+}
+
+/// Stop a restored child when identity rotation, lineage binding or runtime
+/// metadata fails. An unconfirmed stop stays a typed unsealed outcome.
 fn stop_child_after_restore_failure(child_vm_name: &str, error: anyhow::Error) -> anyhow::Error {
-    match mvm_client::AnyBackend::for_started_vm(child_vm_name) {
-        Some(backend) => match backend.stop(&mvm_core::vm_backend::VmId(child_vm_name.to_string()))
-        {
-            Ok(_timing) => error.context(format!(
-                "stopped forked child '{child_vm_name}' after restore completion failure"
-            )),
-            Err(stop_error) => error.context(format!(
-                "restore completion failed for '{child_vm_name}' and stopping the child \
-                 also failed: {stop_error}"
-            )),
-        },
-        None => error.context(format!(
-            "restore completion failed for '{child_vm_name}' and no backend claims it"
+    match stop_hvf_fork_child(child_vm_name) {
+        Ok(()) => error.context(format!(
+            "stopped forked child '{child_vm_name}' after restore completion failure"
         )),
+        Err(stop) => mvm_client::checkpoint::ForkStopUncertain {
+            name: child_vm_name.to_string(),
+            primary: error,
+            stop,
+        }
+        .into(),
     }
 }
 
@@ -687,10 +721,12 @@ fn stop_fc_child_after_restore_failure(child_vm_name: &str, error: anyhow::Error
         Ok(()) => error.context(format!(
             "stopped forked child '{child_vm_name}' after restore completion failure"
         )),
-        Err(stop_error) => error.context(format!(
-            "restore completion failed for '{child_vm_name}' and stopping the child also \
-             failed: {stop_error}"
-        )),
+        Err(stop) => mvm_client::checkpoint::ForkStopUncertain {
+            name: child_vm_name.to_string(),
+            primary: error,
+            stop,
+        }
+        .into(),
     }
 }
 

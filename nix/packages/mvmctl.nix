@@ -12,7 +12,6 @@
   pkgs,
   lib,
   stdenv,
-  rustPlatform,
   pkg-config,
   cargo-zigbuild,
   curl,
@@ -34,6 +33,8 @@ assert withNativeLibkrun -> libkrunfw != null;
 assert withTpm2 -> tpm2-tss != null;
 
 let
+  rustPlatform = (import ./rust-platform.nix { inherit pkgs mvmSrc; }).rustPlatform;
+
   # The workspace manifest is the only place the release version is written.
   # It is read from the same `mvmSrc` the vendored dependencies read
   # `Cargo.lock` from, so this adds no new evaluation-time input.

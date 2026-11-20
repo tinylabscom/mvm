@@ -329,6 +329,20 @@ impl MachineLifecycleLock {
         })
     }
 
+    /// Refuse an occupied lifecycle gate rather than waiting for an active transition.
+    pub fn try_acquire(name: &str) -> Result<Option<Self>> {
+        mvm_core::naming::validate_vm_name(name)?;
+        Ok(try_lock_resume(name)?.map(|lock| Self {
+            name: name.to_owned(),
+            _lock: lock,
+        }))
+    }
+
+    /// The machine name protected by this guard.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// Refuse accidental use of one machine's guard for another machine.
     pub fn require_name(&self, name: &str) -> Result<()> {
         anyhow::ensure!(
@@ -336,6 +350,66 @@ impl MachineLifecycleLock {
             "lifecycle lock belongs to a different machine"
         );
         Ok(())
+    }
+
+    /// Refuse a cold launch over a reserved or previously claimed warm child.
+    pub fn require_cold_state(&self) -> Result<()> {
+        super::name_custody::NameCustody::require_cold_state(&self.name)
+    }
+
+    /// Admit only the selected parent's matching paused child, or an empty
+    /// name for an ordinary warm fork, while retaining this lifecycle gate.
+    pub fn require_warm_claim_state(
+        &self,
+        pool: &crate::standby_pool::SupervisorStandbyPool,
+        parent: &mvm_core::vm_backend::StandbyHandle,
+    ) -> Result<()> {
+        super::name_custody::NameCustody::require_warm_claim_state(&self.name, pool, parent)
+    }
+
+    /// Authenticate a committed child before ordinary persistent lifecycle actions.
+    pub fn require_persistent_lifecycle(&self) -> Result<()> {
+        super::name_custody::NameCustody::require_persistent_lifecycle(&self.name)
+    }
+
+    /// Permit a pending but authenticated child to be stopped, never declared ready.
+    pub fn require_stop_lifecycle(&self) -> Result<()> {
+        super::name_custody::NameCustody::require_stop_lifecycle(&self.name)
+    }
+
+    /// Refuse deletion of a pending child until stop has been confirmed.
+    pub fn require_removal_lifecycle(&self) -> Result<()> {
+        super::name_custody::NameCustody::require_removal_lifecycle(&self.name)
+    }
+
+    /// Whether this child has a committed warm marker; authenticate before acting.
+    pub fn has_committed_warm(&self) -> Result<bool> {
+        super::name_custody::NameCustody::has_committed_warm(&self.name)
+    }
+
+    /// Whether a warm claim is still pending.
+    pub fn has_pending_warm(&self) -> Result<bool> {
+        super::name_custody::NameCustody::has_pending_warm(&self.name)
+    }
+
+    /// Whether backend-confirmed stop has durable recovery authority.
+    pub fn has_confirmed_stop(&self) -> Result<bool> {
+        super::name_custody::NameCustody::has_confirmed_stop(&self.name)
+    }
+
+    /// Settle an authenticated pending marker after backend-confirmed stop.
+    pub fn settle_pending_after_stop(&self) -> Result<()> {
+        super::name_custody::NameCustody::settle_pending_after_stop(&self.name)
+    }
+
+    /// Persist confirmed-stop recovery authority before reaping runtime state.
+    pub fn mark_confirmed_stop(&self) -> Result<()> {
+        super::name_custody::NameCustody::mark_confirmed_stop(&self.name)
+    }
+
+    /// Clear stop recovery authority only after runtime state is gone.
+    pub fn clear_confirmed_stop(&self) -> Result<()> {
+        super::name_custody::NameCustody::clear_confirmed_stop(&self.name)
     }
 
     /// Reap stopped state without trying to acquire the already-held lock again.

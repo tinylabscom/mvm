@@ -200,6 +200,11 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
         self.console_streamer.stop(&id.0);
         let console_cleanup = console_started.elapsed();
         let stopped = kill_result?;
+        // The boot this record named has ended; a later boot of the same
+        // machine must not inherit its unit.
+        if let Err(e) = mvm_core::spawn_scope::clear_placement_owner(&state_dir) {
+            tracing::warn!(vm = %id.0, error = %e, "clearing the placement owner after stop");
+        }
         if crate::kernel_custody::has_retained_kernel(&lifecycle)? {
             #[cfg(unix)]
             {
@@ -373,6 +378,17 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
         release: Option<&mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime>,
     ) -> Result<VmId> {
+        self.start_retaining_vm(config, images, release)
+            .map(|vm| vm.id().clone())
+    }
+
+    /// Keep the original native owner instead of reducing a successful launch to its name.
+    pub(crate) fn start_retaining_vm(
+        &self,
+        config: &VmStartConfig,
+        images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
+        release: Option<&mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime>,
+    ) -> Result<Box<dyn RunningVm>> {
         let _activation_barrier =
             mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
         let state_dir = vm_state_dir(&config.name);
@@ -413,10 +429,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             network_policy: &config.network_policy,
             cmdline,
         };
-        match self.start_workload_custodied_with_release(&inputs, images, release) {
-            Ok(_vm) => Ok(VmId(config.name.clone())),
-            Err(e) => Err(e),
-        }
+        self.start_workload_custodied_with_release(&inputs, images, release)
     }
 
     pub(super) fn start_workload_custodied_with_release(
@@ -589,9 +602,12 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
                 .into_string()
                 .map_err(|_| anyhow::anyhow!("non-UTF8 VM state entry in {}", root.display()))?;
             let id = VmId(name.clone());
-            let status = self
-                .status(&id)
-                .with_context(|| format!("probing VM status for {name}"))?;
+            // A machine whose state cannot be probed is reported, never
+            // presumed stopped and never allowed to hide the others. Callers
+            // that need proof of quiescence refuse on a failed row.
+            let status = self.status(&id).unwrap_or_else(|error| VmStatus::Failed {
+                reason: format!("state unreadable: {error:#}"),
+            });
             vms.push(VmInfo {
                 id,
                 name,

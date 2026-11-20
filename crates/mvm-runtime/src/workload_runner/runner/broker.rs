@@ -3,6 +3,9 @@ use std::path::Path;
 
 use mvm_core::protocol::broker::ServiceId;
 
+#[cfg(test)]
+mod tests;
+
 /// The production broker registrar delegates to the resident host agent or
 /// the per-VM broker fork, preserving the admitted capability boundary.
 pub struct RealBrokerRegistrar;
@@ -118,27 +121,66 @@ impl BrokerGuard {
     }
 }
 
-pub(super) fn admitted_broker_bindings(
+pub(crate) fn admitted_broker_bindings(
     plan_json: Option<&str>,
 ) -> Result<(
     Vec<ServiceId>,
     Vec<mvm_contract::protocol::agent_capability::CapabilityBinding>,
 )> {
-    plan_json
+    let plan = plan_json
         .map(mvm_core::plan::plan_from_admitted_json)
         .transpose()
-        .context("parse admitted plan host services")
-        .map(|plan| {
-            plan.map_or_else(
-                || (Vec::new(), Vec::new()),
-                |plan| {
-                    let capabilities = plan
-                        .extensions
-                        .iter()
-                        .flat_map(|extension| extension.capabilities.iter().cloned())
-                        .collect();
-                    (plan.services, capabilities)
-                },
-            )
-        })
+        .context("parse admitted plan host services")?;
+    let Some(plan) = plan else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let capabilities = capabilities_for_plan(&plan)?;
+    Ok((plan.services, capabilities))
+}
+
+fn capabilities_for_plan(
+    plan: &mvm_core::plan::ExecutionPlan,
+) -> Result<Vec<mvm_contract::protocol::agent_capability::CapabilityBinding>> {
+    use mvm_contract::protocol::workload_actor::{
+        LifecycleOperation, WorkflowRole, capability_descriptor,
+    };
+    let mut capabilities: Vec<_> = plan
+        .extensions
+        .iter()
+        .flat_map(|extension| extension.capabilities.iter().cloned())
+        .collect();
+    anyhow::ensure!(
+        capabilities
+            .iter()
+            .all(|binding| binding.capability.service.as_str() != "host.actor.v1"),
+        "actor lifecycle bindings must come from the signed controller grant"
+    );
+    if !plan
+        .services
+        .iter()
+        .any(|service| service.as_str() == "host.actor.v1")
+    {
+        return Ok(capabilities);
+    }
+    let Some(workflow) = &plan.workflow else {
+        return Ok(capabilities);
+    };
+    workflow.validate()?;
+    if let WorkflowRole::Controller { grant } = &workflow.role {
+        anyhow::ensure!(
+            grant.controller.tenant == plan.tenant
+                && grant.controller.workload == plan.workload
+                && grant.controller.execution_epoch.get() == plan.execution_epoch,
+            "actor grant belongs to another admitted controller"
+        );
+        for operation in &grant.operations {
+            let verb = match operation {
+                LifecycleOperation::Launch => "launch_child",
+                LifecycleOperation::ObserveChild => "observe_child",
+                LifecycleOperation::ReleaseChild => "release_child",
+            };
+            capabilities.push(capability_descriptor(verb)?.binding());
+        }
+    }
+    Ok(capabilities)
 }

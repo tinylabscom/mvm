@@ -6,7 +6,6 @@ edition.workspace = true
 description = "Backend-agnostic VMM device model and hypervisor seam"
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 authors.workspace = true
 
 [package.metadata.mvm.architecture]

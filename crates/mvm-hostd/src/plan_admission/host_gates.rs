@@ -1,23 +1,5 @@
 use anyhow::Result;
-use mvm_contract::grants::Grants;
 use mvm_core::plan::ExecutionPlan;
-
-/// Refuse a boot that, on top of every live machine's admitted charge, would
-/// exceed the host's configured headroom.
-///
-/// Skipped entirely when no headroom is configured — not to save the
-/// directory walk, but so an unconfigured host cannot be refused by a probe
-/// whose result it would ignore anyway.
-pub(super) fn admit_within_host_budget(plan: &ExecutionPlan) -> Result<()> {
-    let budget = mvm_core::user_config::load(None).host_budget();
-    if !budget.is_configured() {
-        return Ok(());
-    }
-    let undeclared = Grants::default();
-    let grants = plan.grants.as_ref().unwrap_or(&undeclared);
-    let request = crate::admission_budget::charge_for(plan.resources.mem_mib, grants);
-    crate::admission_budget::admits(&budget, crate::admission_budget::committed(), request)
-}
 
 /// Run the host-interface preflight for this plan through the local adapter.
 ///
@@ -26,7 +8,7 @@ pub(super) fn admit_within_host_budget(plan: &ExecutionPlan) -> Result<()> {
 /// unchanged. A revoked or quarantined node, an expired or out-of-scope
 /// policy, an image outside a pinned list, an invalid volume grant or a
 /// required attestation the node cannot meet refuses the boot. Resources are
-/// covered by [`admit_within_host_budget`] and enforcement by the runtime
+/// covered by the durable host-budget reservation and enforcement by the runtime
 /// verification in `RunPosture`, both of which run just before this.
 pub(super) fn admit_host_interface(plan: &ExecutionPlan) -> Result<()> {
     use mvm_core::host_interface::{

@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::plan::topology::IsolationTier;
+use crate::protocol::cpu_set::CpuSet;
 use crate::protocol::vm_backend::BackendKind;
 
 /// How a backend bounds CPU, if it can.
@@ -55,18 +57,120 @@ pub enum WallClockControl {
     WasmEpoch,
 }
 
+/// How a backend keeps a unit's vCPUs on cores no other unit uses, if it can.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementControl {
+    /// Scheduling is left to the host; exclusive placement cannot be served.
+    #[default]
+    None,
+    /// An allowed-CPU set on the transient scope the VMM process is born into,
+    /// read back off the scope's `cpuset.cpus.effective`.
+    SpawnScopeCpuSet,
+}
+
+impl PlacementControl {
+    /// What `kind` offers on a host where the spawn scope can, or cannot,
+    /// carry an allowed-CPU set.
+    ///
+    /// Host-conditional rather than kind-conditional, which is why it is not a
+    /// field of [`ResourceControls::for_backend`]: the scope needs a systemd
+    /// user session with the cpuset controller delegated to it, and the kind
+    /// alone cannot say whether this host has that. Only Firecracker answers
+    /// with a mechanism. The other scoped VMMs run on the same scope, but no
+    /// admission path places them, and the in-house VMMs would need per-vCPU
+    /// thread affinity, which does not exist yet.
+    #[must_use]
+    pub const fn for_host(kind: BackendKind, scope_cpuset: bool) -> Self {
+        match kind {
+            // The probe behind `scope_cpuset` needs systemd and a cgroup v2
+            // hierarchy, so it answers true only on Linux.
+            BackendKind::Firecracker if scope_cpuset => Self::SpawnScopeCpuSet,
+            BackendKind::Firecracker
+            | BackendKind::Libkrun
+            | BackendKind::Qemu
+            | BackendKind::Hvf
+            | BackendKind::AppleContainer
+            | BackendKind::Wasm
+            | BackendKind::Mock
+            | BackendKind::WebLinux => Self::None,
+        }
+    }
+}
+
+/// How a backend keeps a failover standby, if it can.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StandbyControl {
+    /// No standby of any class is kept, so only a pair of class `None` can be
+    /// served.
+    #[default]
+    None,
+}
+
+/// How a backend holds a single-writer state cell, if it can.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateCellControl {
+    /// No host-held cell exists on this tier.
+    #[default]
+    None,
+}
+
+/// How a backend holds a unit's liveness deadline, if it can.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LivenessControl {
+    /// No host-held deadline exists, so a liveness period cannot be served.
+    #[default]
+    None,
+}
+
+/// Which cryptographic suites a backend's admission path implements.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuiteControl {
+    /// Only [`CryptoSuite::CLASSICAL`](crate::plan::topology::CryptoSuite::CLASSICAL).
+    #[default]
+    ClassicalOnly,
+}
+
 /// The controls one backend offers.
+///
+/// The fields after `wall_clock` answer the critical-profile requirements a
+/// topology can state. Each defaults to the answer that serves nothing, so an
+/// encoding from a peer that predates them decodes fail-closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceControls {
     pub cpu: CpuControl,
     pub wall_clock: WallClockControl,
+    #[serde(default)]
+    pub placement: PlacementControl,
+    #[serde(default)]
+    pub standby: StandbyControl,
+    #[serde(default)]
+    pub state_cells: StateCellControl,
+    #[serde(default)]
+    pub liveness: LivenessControl,
+    /// The strongest isolation tier the backend provides on every run, or
+    /// `None` where it provides none at all.
+    #[serde(default)]
+    pub isolation: Option<IsolationTier>,
+    #[serde(default)]
+    pub suite: SuiteControl,
 }
 
 impl ResourceControls {
     /// The controls each backend has. Exhaustive on purpose: a new
     /// `BackendKind` must answer this question rather than inherit a default
     /// that might silently claim or silently drop enforcement.
+    ///
+    /// No backend pins cores exclusively, keeps a standby, holds a state cell
+    /// or a liveness deadline, or implements a suite beyond the classical one,
+    /// so every arm answers `None` / `ClassicalOnly` for those. They are spelled
+    /// out per arm anyway: when one backend gains a mechanism, its arm changes
+    /// and no other does.
     #[must_use]
     pub const fn for_backend(kind: BackendKind) -> Self {
         match kind {
@@ -89,6 +193,14 @@ impl ResourceControls {
                     CpuControl::None
                 },
                 wall_clock: WallClockControl::SupervisorTimer,
+                // KVM on Linux, Hypervisor.framework on macOS: hardware
+                // virtualization either way.
+                placement: PlacementControl::None,
+                standby: StandbyControl::None,
+                state_cells: StateCellControl::None,
+                liveness: LivenessControl::None,
+                isolation: Some(IsolationTier::Vm),
+                suite: SuiteControl::ClassicalOnly,
             },
             // A cgroup can bound any Linux process — including one we never
             // forked — so on Linux these tiers carry a real CPU quota. Their
@@ -99,13 +211,38 @@ impl ResourceControls {
             // `SupervisorTimer` here would be the same overstatement the macOS
             // CPU arm below exists to avoid — a bound accepted at admission and
             // enforced by nothing.
-            BackendKind::Firecracker | BackendKind::Qemu => Self {
+            //
+            // The two part on isolation. Firecracker refuses to start without
+            // `/dev/kvm`. QEMU falls back to TCG software emulation when KVM is
+            // absent, which leaves only the host process boundary, and the
+            // kind alone cannot say which of the two a launch will get.
+            BackendKind::Firecracker => Self {
                 cpu: if cfg!(target_os = "linux") {
                     CpuControl::CgroupShare
                 } else {
                     CpuControl::None
                 },
                 wall_clock: WallClockControl::None,
+                placement: PlacementControl::None,
+                standby: StandbyControl::None,
+                state_cells: StateCellControl::None,
+                liveness: LivenessControl::None,
+                isolation: Some(IsolationTier::Vm),
+                suite: SuiteControl::ClassicalOnly,
+            },
+            BackendKind::Qemu => Self {
+                cpu: if cfg!(target_os = "linux") {
+                    CpuControl::CgroupShare
+                } else {
+                    CpuControl::None
+                },
+                wall_clock: WallClockControl::None,
+                placement: PlacementControl::None,
+                standby: StandbyControl::None,
+                state_cells: StateCellControl::None,
+                liveness: LivenessControl::None,
+                isolation: Some(IsolationTier::Task),
+                suite: SuiteControl::ClassicalOnly,
             },
             // macOS has no cgroup equivalent; thread QoS is priority, not quota.
             // `mvm-hvf-supervisor` is a per-VM process that outlives the
@@ -120,26 +257,66 @@ impl ResourceControls {
                     CpuControl::None
                 },
                 wall_clock: WallClockControl::SupervisorTimer,
+                placement: PlacementControl::None,
+                standby: StandbyControl::None,
+                state_cells: StateCellControl::None,
+                liveness: LivenessControl::None,
+                isolation: Some(IsolationTier::Vm),
+                suite: SuiteControl::ClassicalOnly,
             },
             // Fuel bounds instructions; epoch preempts a module parked in a
-            // host call, which fuel alone would never stop.
+            // host call, which fuel alone would never stop. The module runs
+            // inside our own process, confined by wasmtime's linear-memory
+            // bounds and nothing beneath them: memory protection without
+            // virtualization.
             BackendKind::Wasm => Self {
                 cpu: CpuControl::WasmFuel,
                 wall_clock: WallClockControl::WasmEpoch,
+                placement: PlacementControl::None,
+                standby: StandbyControl::None,
+                state_cells: StateCellControl::None,
+                liveness: LivenessControl::None,
+                isolation: Some(IsolationTier::Task),
+                suite: SuiteControl::ClassicalOnly,
             },
+            // Mock boots nothing, so it isolates nothing.
             BackendKind::Mock => Self {
                 cpu: CpuControl::None,
                 wall_clock: WallClockControl::None,
+                placement: PlacementControl::None,
+                standby: StandbyControl::None,
+                state_cells: StateCellControl::None,
+                liveness: LivenessControl::None,
+                isolation: None,
+                suite: SuiteControl::ClassicalOnly,
             },
             // Browser-hosted software emulation. CPU and wall-clock bounds are
             // declared in the plan but cannot be enforced by the host OS; the
             // browser runtime refuses rather than claiming an unenforceable
-            // control.
+            // control. The emulated guest is confined by the browser's process
+            // sandbox, not by hardware virtualization.
             BackendKind::WebLinux => Self {
                 cpu: CpuControl::None,
                 wall_clock: WallClockControl::None,
+                placement: PlacementControl::None,
+                standby: StandbyControl::None,
+                state_cells: StateCellControl::None,
+                liveness: LivenessControl::None,
+                isolation: Some(IsolationTier::Task),
+                suite: SuiteControl::ClassicalOnly,
             },
         }
+    }
+}
+
+impl ResourceControls {
+    /// [`Self::for_backend`] with the placement this host can serve, given
+    /// whether its spawn scope can carry an allowed-CPU set.
+    #[must_use]
+    pub const fn on_host(kind: BackendKind, scope_cpuset: bool) -> Self {
+        let mut controls = Self::for_backend(kind);
+        controls.placement = PlacementControl::for_host(kind, scope_cpuset);
+        controls
     }
 }
 
@@ -149,6 +326,12 @@ impl Default for ResourceControls {
         Self {
             cpu: CpuControl::None,
             wall_clock: WallClockControl::None,
+            placement: PlacementControl::None,
+            standby: StandbyControl::None,
+            state_cells: StateCellControl::None,
+            liveness: LivenessControl::None,
+            isolation: None,
+            suite: SuiteControl::ClassicalOnly,
         }
     }
 }
@@ -382,6 +565,9 @@ pub enum EnforcedTier {
     Cgroup2MemoryMax,
     /// cgroup v2 `pids.max` on the scope the VMM process was born into.
     Cgroup2PidsMax,
+    /// cgroup v2 `cpuset.cpus.effective` on the scope the VMM process was born
+    /// into.
+    Cgroup2CpusetEffective,
 }
 
 impl EnforcedTier {
@@ -403,6 +589,7 @@ impl EnforcedTier {
             Self::HvfVcpuQuota => "hvf:vcpu-quota",
             Self::Cgroup2MemoryMax => "cgroup2:memory.max",
             Self::Cgroup2PidsMax => "cgroup2:pids.max",
+            Self::Cgroup2CpusetEffective => "cgroup2:cpuset.cpus.effective",
         }
     }
 }
@@ -454,11 +641,49 @@ impl EnforcedCeiling {
     }
 }
 
+/// The CPU set a VMM's scope was confined to: the set admission asked for and
+/// the set read back off the scope.
+///
+/// Unlike a CPU tier, the request is recorded beside the read-back. A launch
+/// whose read-back differs from its request is refused before this is
+/// written, so a recorded pair always agrees; both are kept so a reader can
+/// see that without trusting the code that compared them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnforcedPlacement {
+    /// The set admission computed for this launch, or `None` when it asked for
+    /// no confinement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested: Option<CpuSet>,
+    /// The scope's `cpuset.cpus.effective`, or `None` when it was not read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective: Option<CpuSet>,
+}
+
+impl EnforcedPlacement {
+    /// Nothing asked for and nothing read.
+    #[must_use]
+    pub fn is_unset(&self) -> bool {
+        self.requested.is_none() && self.effective.is_none()
+    }
+
+    /// The mechanism holding the placement: the cpuset read-back when one
+    /// was read, otherwise a declaration.
+    #[must_use]
+    pub const fn tier(&self) -> EnforcedTier {
+        match self.effective {
+            Some(_) => EnforcedTier::Cgroup2CpusetEffective,
+            None => EnforcedTier::Declared,
+        }
+    }
+}
+
 /// What a backend achieved across every dimension for one VM.
 ///
 /// `memory` and `tasks` are not grants a plan asks for. They are the host's own
 /// ceilings on the VMM process, reported here because they bound the same
-/// workload and are read back off the same controls.
+/// workload and are read back off the same controls. `placement` is the core
+/// set the scope was confined to, present only when admission asked for one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnforcedGrants {
@@ -466,6 +691,8 @@ pub struct EnforcedGrants {
     pub wall_clock: EnforcedTier,
     pub memory: EnforcedCeiling,
     pub tasks: EnforcedCeiling,
+    #[serde(default, skip_serializing_if = "EnforcedPlacement::is_unset")]
+    pub placement: EnforcedPlacement,
 }
 
 impl EnforcedGrants {
@@ -478,6 +705,10 @@ impl EnforcedGrants {
             wall_clock,
             memory: EnforcedCeiling::declared(),
             tasks: EnforcedCeiling::declared(),
+            placement: EnforcedPlacement {
+                requested: None,
+                effective: None,
+            },
         }
     }
 
@@ -489,6 +720,10 @@ impl EnforcedGrants {
             wall_clock: EnforcedTier::Declared,
             memory: EnforcedCeiling::declared(),
             tasks: EnforcedCeiling::declared(),
+            placement: EnforcedPlacement {
+                requested: None,
+                effective: None,
+            },
         }
     }
 }
@@ -660,8 +895,10 @@ mod tests {
             wall_clock: EnforcedTier::Declared,
             memory: EnforcedCeiling::enforced(EnforcedTier::Cgroup2MemoryMax, 805_306_368),
             tasks: EnforcedCeiling::enforced(EnforcedTier::Cgroup2PidsMax, 1024),
+            placement: EnforcedPlacement::default(),
         };
         let json = serde_json::to_string(&grants).expect("serialize");
+        assert!(!json.contains("placement"), "{json}");
         assert!(json.contains(r#""memory":{"tier":"cgroup2_memory_max","limit":805306368}"#));
         assert!(json.contains(r#""tasks":{"tier":"cgroup2_pids_max","limit":1024}"#));
         let back: EnforcedGrants = serde_json::from_str(&json).expect("deserialize");
@@ -677,6 +914,27 @@ mod tests {
         assert_eq!(memory.limit(), Some(805_306_368));
         let tasks = EnforcedCeiling::enforced(EnforcedTier::Cgroup2PidsMax, 1024);
         assert_eq!(tasks.limit(), Some(1024));
+    }
+
+    #[test]
+    fn a_placement_round_trips_in_the_kernel_list_format() {
+        let mut grants = EnforcedGrants::all_declared();
+        grants.placement = EnforcedPlacement {
+            requested: Some(CpuSet::parse("2-3").unwrap()),
+            effective: Some(CpuSet::parse("2,3").unwrap()),
+        };
+        assert_eq!(
+            grants.placement.tier(),
+            EnforcedTier::Cgroup2CpusetEffective
+        );
+        let json = serde_json::to_string(&grants).expect("serialize");
+        assert!(
+            json.contains(r#""placement":{"requested":"2-3","effective":"2-3"}"#),
+            "{json}"
+        );
+        let back: EnforcedGrants = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, grants);
+        assert_eq!(EnforcedPlacement::default().tier(), EnforcedTier::Declared);
     }
 
     #[test]
@@ -965,10 +1223,57 @@ mod tests {
         let default = ResourceControls::default();
         assert_eq!(default.cpu, CpuControl::None);
         assert_eq!(default.wall_clock, WallClockControl::None);
+        assert_eq!(default.isolation, None);
         let json = serde_json::to_string(&default).expect("serialize");
         assert_eq!(
             serde_json::from_str::<ResourceControls>(&json).expect("deserialize"),
             default
         );
+    }
+
+    #[test]
+    fn a_controls_encoding_without_the_critical_fields_decodes_serving_nothing() {
+        let decoded: ResourceControls =
+            serde_json::from_str(r#"{"cpu":"wasm_fuel","wall_clock":"wasm_epoch"}"#)
+                .expect("deserialize");
+        assert_eq!(
+            decoded,
+            ResourceControls {
+                cpu: CpuControl::WasmFuel,
+                wall_clock: WallClockControl::WasmEpoch,
+                ..ResourceControls::default()
+            }
+        );
+    }
+
+    #[test]
+    fn no_backend_serves_a_critical_requirement_yet() {
+        for &kind in BackendKind::ALL {
+            let c = ResourceControls::for_backend(kind);
+            assert_eq!(c.placement, PlacementControl::None, "{kind:?}");
+            assert_eq!(c.standby, StandbyControl::None, "{kind:?}");
+            assert_eq!(c.state_cells, StateCellControl::None, "{kind:?}");
+            assert_eq!(c.liveness, LivenessControl::None, "{kind:?}");
+            assert_eq!(c.suite, SuiteControl::ClassicalOnly, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn microvm_tiers_provide_vm_isolation() {
+        use crate::plan::topology::IsolationTier;
+        let tier = |kind| ResourceControls::for_backend(kind).isolation;
+        for kind in [
+            BackendKind::Firecracker,
+            BackendKind::Libkrun,
+            BackendKind::Hvf,
+            BackendKind::AppleContainer,
+        ] {
+            assert_eq!(tier(kind), Some(IsolationTier::Vm), "{kind:?}");
+        }
+        // QEMU may run under TCG, so it cannot promise hardware virtualization.
+        for kind in [BackendKind::Qemu, BackendKind::Wasm, BackendKind::WebLinux] {
+            assert_eq!(tier(kind), Some(IsolationTier::Task), "{kind:?}");
+        }
+        assert_eq!(tier(BackendKind::Mock), None);
     }
 }

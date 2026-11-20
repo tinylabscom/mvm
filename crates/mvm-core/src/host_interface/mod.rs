@@ -11,8 +11,12 @@ pub mod activation_barrier;
 pub mod error;
 pub mod lease;
 pub mod local;
+pub mod offline;
 pub mod policy;
 pub mod preflight;
+pub mod recovery;
+#[cfg(test)]
+mod recovery_tests;
 pub mod state;
 pub mod store;
 #[cfg(test)]

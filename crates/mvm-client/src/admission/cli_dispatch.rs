@@ -2,6 +2,89 @@
 
 use super::{AdmissionContext, AuditContinuation, CliAdmission, PendingCliAdmission};
 
+/// A materialized filesystem child bound to its own fresh, one-use admission.
+/// This is not a transient run: its launch audit is written after backend
+/// start, while the fork does not add an immediate host budget charge.
+pub struct FsQuickBootAdmission(CliAdmission);
+
+impl FsQuickBootAdmission {
+    /// Bind the materialized child and refuse a plan that violates fork secret policy.
+    ///
+    /// The expected rootfs is derived from the fork artifact, not caller input.
+    /// # Errors
+    /// Refuses a child plan that widens or drops secrets against the fork policy.
+    pub fn new(
+        context: AdmissionContext,
+        child: &crate::checkpoint::fs_quick::MaterializedFsQuickFork,
+        verified_runtime: Option<std::sync::Arc<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>>,
+    ) -> anyhow::Result<Self> {
+        if let Err(error) = child.validate_admitted_plan(&context.admitted) {
+            let error = anyhow::Error::new(error);
+            super::emit_failed(&context, "fork-secret-policy", &error);
+            return Err(error);
+        }
+        let rootfs = child.destination().join("rootfs.ext4");
+        Ok(Self(CliAdmission::new_for_rootfs_with_runtime(
+            context,
+            &rootfs,
+            verified_runtime,
+        )))
+    }
+
+    /// Spend the admitted child through hostd, retaining the CLI's fork audit semantics.
+    pub fn start(
+        self,
+        backend: &mvm_runtime::AnyBackend,
+        config: mvm_core::vm_backend::VmStartConfig,
+    ) -> anyhow::Result<()> {
+        let owner = self.0;
+        if let Err(error) = owner.check_legacy_projection(&config) {
+            owner
+                .audit_continuation()
+                .emit_failed("backend-start", &error);
+            return Err(error);
+        }
+        let CliAdmission::Pending(pending) = owner else {
+            anyhow::bail!("filesystem fork admission already dispatched");
+        };
+        let PendingCliAdmission {
+            authority,
+            policy_bundle,
+            audit,
+            source_rootfs: _,
+            verified_runtime,
+        } = *pending;
+        let result = if authority.plan().runtime_identity.is_some() != verified_runtime.is_some() {
+            Err(anyhow::anyhow!(
+                "filesystem fork release admission and verification set differ"
+            ))
+        } else {
+            mvm_hostd::plan_admission::start_fs_quick_fork(
+                mvm_hostd::plan_admission::StartAdmittedParams {
+                    backend,
+                    admitted: authority,
+                    config,
+                    policy_bundle: policy_bundle.as_ref(),
+                    emitter: Some(&audit.emitter),
+                    assurance: None,
+                },
+                verified_runtime.as_deref(),
+            )
+            .map(|_| ())
+        };
+        match &result {
+            Ok(()) => audit.emit_fork_launched(backend.name()),
+            Err(error)
+                if matches!(
+                    cli_start_failure_kind(error),
+                    Some(CliStartFailureKind::UncertainStop)
+                ) => {}
+            Err(error) => audit.emit_failed("backend-start", error),
+        }
+        result
+    }
+}
+
 /// The failure class a hostd CLI cold dispatch already reached, for the
 /// command layer's custody and audit decisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10,6 +93,8 @@ pub enum CliStartFailureKind {
     Recorded,
     /// The refusal is unrecorded; the CLI audit owner owes a `plan.failed` entry.
     Unrecorded,
+    /// A caller supplied a lifecycle guard for another machine or non-cold state.
+    StateNotOwned,
     /// Rollback was not confirmed; a VM may still be live.
     UncertainStop,
 }
@@ -24,6 +109,9 @@ pub fn cli_start_failure_kind(error: &anyhow::Error) -> Option<CliStartFailureKi
         }
         Some(mvm_hostd::plan_admission::CliStartFailure::Unrecorded(_)) => {
             Some(CliStartFailureKind::Unrecorded)
+        }
+        Some(mvm_hostd::plan_admission::CliStartFailure::StateNotOwned(_)) => {
+            Some(CliStartFailureKind::StateNotOwned)
         }
         Some(mvm_hostd::plan_admission::CliStartFailure::UncertainStop(_)) => {
             Some(CliStartFailureKind::UncertainStop)
@@ -195,7 +283,69 @@ impl CliAdmission {
         (Self::Dispatched(Box::new(audit)), result)
     }
 
-    /// Retire the one-use authority after the unmigrated warm or cold path.
+    /// Spend the CLI's one-use admission on a selected, verified warm parent.
+    ///
+    /// The pool miss is resolved before calling this method, so the caller
+    /// retains the pending owner for the existing admitted cold path.
+    pub fn claim_warm(
+        self,
+        backend: &mvm_runtime::AnyBackend,
+        config: mvm_core::vm_backend::VmStartConfig,
+        ctx: &mvm_runtime::workload_runner::ClaimContext<'_>,
+        handle: &mvm_core::vm_backend::StandbyHandle,
+    ) -> (Self, anyhow::Result<crate::standby::OwnedWarmClaim>) {
+        if !matches!(&self, Self::Pending(pending) if pending.source_rootfs.is_some()) {
+            return (
+                self,
+                Err(anyhow::anyhow!(
+                    "CLI warm claim has no pending source binding"
+                )),
+            );
+        }
+        if let Err(error) = self.check_legacy_projection(&config) {
+            return (self, Err(error));
+        }
+        let Self::Pending(pending) = self else {
+            return (
+                self,
+                Err(anyhow::anyhow!("CLI admission was already dispatched")),
+            );
+        };
+        let PendingCliAdmission {
+            authority,
+            policy_bundle,
+            audit,
+            source_rootfs,
+            verified_runtime,
+        } = *pending;
+        let result = mvm_hostd::plan_admission::claim_cli_transient(
+            backend,
+            authority,
+            config,
+            policy_bundle.as_ref(),
+            verified_runtime.as_deref(),
+            ctx,
+            handle,
+        );
+        match result {
+            Ok(mvm_hostd::plan_admission::WarmClaimDispatch::Claimed(owned)) => {
+                (Self::Dispatched(Box::new(audit)), Ok(owned))
+            }
+            Ok(mvm_hostd::plan_admission::WarmClaimDispatch::ReservationLost(authority)) => (
+                Self::Pending(Box::new(PendingCliAdmission {
+                    authority: *authority,
+                    policy_bundle,
+                    audit,
+                    source_rootfs,
+                    verified_runtime,
+                })),
+                Err(mvm_core::vm_backend::StandbyError::ReservationLost.into()),
+            ),
+            Err(error) => (Self::Dispatched(Box::new(audit)), Err(error)),
+        }
+    }
+
+    /// Return the original audit continuation after a warm or cold dispatch.
     #[must_use]
     pub fn finish_legacy(self) -> AuditContinuation {
         match self {
@@ -209,6 +359,82 @@ impl CliAdmission {
 mod tests {
     use super::*;
 
+    #[cfg(all(unix, feature = "test-support"))]
+    #[test]
+    fn filesystem_fork_facade_spends_admission_once_and_audits_mock_launch() {
+        let _home = super::super::admit_plan_tests::isolated_home();
+        let keys = tempfile::tempdir().expect("keys");
+        let audit = tempfile::tempdir().expect("audit");
+        let rootfs_dir = tempfile::tempdir().expect("mock rootfs");
+        let rootfs = rootfs_dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"mock rootfs").expect("mock rootfs bytes");
+        let ledger = super::super::InMemoryNonceLedger::new();
+        let context = super::super::admit_plan_for_boot(super::super::AdmitPlanForBootParams {
+            vm_name: "fs-quick-facade-mock",
+            backend_name: "mock",
+            keys_dir: Some(keys.path()),
+            audit_dir: Some(audit.path()),
+            ..super::super::admit_plan_tests::pinning_params(&rootfs, &ledger)
+        })
+        .expect("fresh child admission");
+        let signed = serde_json::to_string(context.admitted.signed()).expect("signed plan");
+        let config = mvm_core::vm_backend::VmStartConfig {
+            name: "fs-quick-facade-mock".into(),
+            rootfs_path: rootfs.display().to_string(),
+            plan_json: Some(signed),
+            cpus: 2,
+            memory_mib: 512,
+            ..Default::default()
+        };
+        let source = FsQuickBootAdmission(CliAdmission::new_for_rootfs(
+            context,
+            std::path::Path::new(&config.rootfs_path),
+        ));
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        source
+            .start(&backend, config)
+            .expect("mock fork consumes its admission");
+        let chain =
+            std::fs::read_to_string(audit.path().join("local.jsonl")).expect("fork audit chain");
+        assert_eq!(chain.matches("plan.admitted").count(), 1, "{chain}");
+        assert_eq!(chain.matches("plan.launched").count(), 1, "{chain}");
+        assert_eq!(chain.matches("plan.failed").count(), 0, "{chain}");
+    }
+
+    #[cfg(all(unix, feature = "test-support"))]
+    #[test]
+    fn filesystem_fork_facade_refuses_substituted_child_rootfs() {
+        let _home = super::super::admit_plan_tests::isolated_home();
+        let keys = tempfile::tempdir().expect("keys");
+        let audit = tempfile::tempdir().expect("audit");
+        let context = super::super::admit_plan_tests::admitted_into(
+            keys.path(),
+            audit.path(),
+            "fs-quick-drift-mock",
+        );
+        let signed = serde_json::to_string(context.admitted.signed()).expect("signed plan");
+        let source = FsQuickBootAdmission(CliAdmission::new_for_rootfs(
+            context,
+            std::path::Path::new("/admitted/rootfs"),
+        ));
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let config = mvm_core::vm_backend::VmStartConfig {
+            name: "fs-quick-drift-mock".into(),
+            rootfs_path: "/substituted/rootfs".into(),
+            plan_json: Some(signed),
+            ..Default::default()
+        };
+        let error = source
+            .start(&backend, config)
+            .expect_err("rootfs substitution refuses before backend start");
+        assert!(error.to_string().contains("rootfs differs"), "{error:#}");
+        let chain =
+            std::fs::read_to_string(audit.path().join("local.jsonl")).expect("fork audit chain");
+        assert_eq!(chain.matches("plan.admitted").count(), 1, "{chain}");
+        assert_eq!(chain.matches("plan.failed").count(), 1, "{chain}");
+        assert_eq!(chain.matches("plan.launched").count(), 0, "{chain}");
+    }
+
     #[test]
     fn cli_start_failure_kind_preserves_host_outcomes() {
         let cases = [
@@ -219,6 +445,10 @@ mod tests {
             (
                 mvm_hostd::plan_admission::CliStartFailure::Unrecorded(anyhow::anyhow!("start")),
                 CliStartFailureKind::Unrecorded,
+            ),
+            (
+                mvm_hostd::plan_admission::CliStartFailure::StateNotOwned(anyhow::anyhow!("lock")),
+                CliStartFailureKind::StateNotOwned,
             ),
             (
                 mvm_hostd::plan_admission::CliStartFailure::UncertainStop(anyhow::anyhow!("stop")),

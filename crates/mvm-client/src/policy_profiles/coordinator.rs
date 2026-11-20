@@ -4,7 +4,30 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use mvm_hostd::policy_generation::coordinator::{Request, Response, call, socket_path};
+pub use mvm_hostd::policy_generation::managed::{ManagedCoordinator, ManagedRefusal};
 pub use mvm_hostd::policy_generation::{GENERATION_ASSET_PREFIX, ProjectPolicyCandidate};
+
+/// Report the coordinator a systemd user manager runs for this MVM home.
+///
+/// Unlike [`ensure`], this never spawns one: a unit that is absent, stopped
+/// or unverifiable is a refusal. The exchange with the coordinator is bounded
+/// per read and per write (five seconds each), not five seconds in total. A
+/// report is identity only — not readiness,
+/// current authority, or permission to commit.
+///
+/// # Errors
+///
+/// A [`ManagedRefusal`] naming what is missing or does not match.
+pub fn managed_status() -> Result<ManagedCoordinator, ManagedRefusal> {
+    let home = PathBuf::from(mvm_core::config::mvm_home());
+    let home = home.canonicalize().map_err(|error| {
+        ManagedRefusal::InvalidHome(format!(
+            "canonicalizing MVM home {}: {error}",
+            home.display()
+        ))
+    })?;
+    mvm_hostd::policy_generation::managed::managed_status(&home)
+}
 
 /// Connect to the resident owner, spawning its separate `mvm-hostd` process
 /// under a serialized spawn lock if no process is listening.
@@ -31,8 +54,38 @@ pub fn ensure() -> Result<PathBuf> {
 ///
 /// Activation state is incomplete, or the required coordinator is unavailable.
 pub fn ensure_if_activated() -> Result<()> {
+    recover_interrupted_publication()?;
     if mvm_hostd::policy_generation::has_active_generation()? {
         ensure()?;
+    }
+    Ok(())
+}
+
+/// Ask the coordinator to finish an interrupted workload ledger commit, on
+/// every host: readers refuse while one is unresolved, and a launch is often
+/// the first command to find it. Costs one `stat` when there is none.
+///
+/// # Errors
+///
+/// A commit is unresolved and the coordinator cannot be reached.
+pub fn recover_workload_ledger() -> Result<()> {
+    let home = PathBuf::from(mvm_core::config::mvm_home());
+    if mvm_core::host_interface::workload::has_unresolved_commit_at(&home)? {
+        call(&ensure()?, &Request::Recover)
+            .context("recovering an interrupted workload ledger commit")?;
+    }
+    Ok(())
+}
+
+/// Ask the coordinator to resolve an interrupted publication or workload
+/// ledger commit before the caller's own state check, which still refuses if
+/// recovery could not run.
+pub(crate) fn recover_interrupted_publication() -> Result<()> {
+    let home = PathBuf::from(mvm_core::config::mvm_home());
+    if mvm_hostd::policy_generation::has_unresolved_publication()?
+        || mvm_core::host_interface::workload::has_unresolved_commit_at(&home)?
+    {
+        call(&ensure()?, &Request::Recover)?;
     }
     Ok(())
 }
@@ -272,6 +325,7 @@ fn validate_spec_against_policy(
 /// The plan is absent after activation, corrupt, or pins a stale generation.
 pub fn restore_plan(vm_name: &str) -> Result<Option<mvm_core::plan::ExecutionPlan>> {
     let _barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
+    recover_interrupted_publication()?;
     let active = mvm_hostd::policy_generation::has_active_generation()?;
     let path = mvm_hostd::audit::plan_persist::plan_path(vm_name)?;
     let plan = match mvm_hostd::audit::plan_persist::read_plan(vm_name) {
@@ -355,7 +409,12 @@ fn request(mut request: Request) -> Result<Option<ProjectPolicyCandidate>> {
             Ok(candidate.map(|candidate| *candidate))
         }
         Response::Refused { message } => bail!("policy coordinator refused: {message}"),
-        Response::Ready => bail!("unexpected policy coordinator readiness response"),
+        Response::Unresolved { message } => bail!(
+            "the outcome of the policy activation is unknown and the coordinator refuses policy reads until it recovers: {message}"
+        ),
+        Response::Ready | Response::Status { .. } | Response::Workload { .. } => {
+            bail!("unexpected policy coordinator response to a project request")
+        }
     }
 }
 
@@ -439,7 +498,12 @@ mod unix {
             Response::Refused { message } => {
                 bail!("policy coordinator refused readiness: {message}")
             }
-            Response::Policy { .. } => bail!("policy coordinator returned a policy for a ping"),
+            Response::Policy { .. }
+            | Response::Status { .. }
+            | Response::Workload { .. }
+            | Response::Unresolved { .. } => {
+                bail!("policy coordinator answered a ping with something else")
+            }
         }
     }
 }
@@ -497,6 +561,39 @@ mod tests {
             project: root.path().join("missing"),
         };
         assert!(canonicalize_request(&mut missing).is_err());
+    }
+
+    #[test]
+    fn managed_status_refuses_without_spawning_a_detached_coordinator() {
+        let mut environment = TestEnv::new();
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().canonicalize().unwrap();
+        environment.isolate_mvm_home(&home);
+        // A helper that records being run, so a spawn attempt cannot go unseen.
+        let marker = home.join("helper-ran");
+        let helper = home.join("helper");
+        std::fs::write(
+            &helper,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        environment.set("MVM_POLICY_COORDINATOR_PATH", &helper);
+        // No unit for a scratch home exists on any host this runs on.
+        let refusal = managed_status().unwrap_err();
+        assert!(
+            !matches!(refusal, ManagedRefusal::InvalidHome(_)),
+            "{refusal}"
+        );
+        assert!(!socket_path(&home).exists());
+        assert!(!marker.exists(), "a detached coordinator was spawned");
+
+        environment.isolate_mvm_home(home.join("missing"));
+        assert!(matches!(
+            managed_status(),
+            Err(ManagedRefusal::InvalidHome(_))
+        ));
     }
 
     #[test]

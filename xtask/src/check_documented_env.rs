@@ -40,6 +40,10 @@ fn is_prose(rel: &str) -> bool {
         || rel == ALLOWLIST
 }
 
+fn is_generated_site(rel: &str) -> bool {
+    rel.starts_with("public/dist/") || rel.starts_with("public/.astro/")
+}
+
 /// The violations for one documented set against what the tree references.
 fn evaluate(
     documented: &BTreeMap<String, String>,
@@ -100,6 +104,9 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
+        if is_generated_site(&rel) {
+            return;
+        }
         let names = names_in(&re, text);
         if rel.starts_with(&format!("{DOCS_DIR}/")) {
             for n in names {
@@ -192,5 +199,14 @@ mod tests {
         assert!(is_prose("CLAUDE.md"));
         assert!(!is_prose("scripts/e2e.sh"));
         assert!(!is_prose("crates/x/src/lib.rs"));
+    }
+
+    #[test]
+    fn generated_site_cannot_turn_an_allowlist_entry_into_a_source_reference() {
+        assert!(is_generated_site(
+            "public/dist/reference/vsock-messages/index.html"
+        ));
+        assert!(is_generated_site("public/.astro/content-assets.mjs"));
+        assert!(!is_generated_site("public/src/lib/docs-index.ts"));
     }
 }

@@ -49,11 +49,11 @@ jobs:
           persist-credentials: false
       - name: Install pinned SBOM tooling without signing authority
         run: |
-          rustup toolchain install 1.97.1 --profile minimal --no-self-update
-          cargo +1.97.1 install cargo-cyclonedx --version '=0.5.10' --locked
+          rustup toolchain install 1.100.0 --profile minimal --no-self-update
+          cargo +1.100.0 install cargo-cyclonedx --version '=0.5.10' --locked
       - name: Generate SBOM
         run: |
-          cargo +1.97.1 cyclonedx --format json --all --override-filename sbom.cdx
+          cargo +1.100.0 cyclonedx --format json --all --override-filename sbom.cdx
           git diff --exit-code -- Cargo.lock
           test -s sbom.cdx.json
       - name: Record exact SBOM content
@@ -284,7 +284,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.100.0
           targets: ${{ matrix.build_target }}
 
       # The SDK host library is built against this arch's gnu target even on
@@ -400,6 +400,8 @@ jobs:
               --bin mvm-broker \
               --bin mvm-audit-signer \
               --bin mvm-mailbox \
+              --bin mvm-actor-holder \
+              --bin mvm-actor-controller \
               --bin mvm-gpu-endpoint
             # The in-process SDK host library: the language SDKs load it by
             # the platform file name, and the release ships it beside
@@ -423,6 +425,8 @@ jobs:
               --bin mvm-broker \
               --bin mvm-audit-signer \
               --bin mvm-mailbox \
+              --bin mvm-actor-holder \
+              --bin mvm-actor-controller \
               --bin mvm-gpu-endpoint
             cargo build --release --target "${BUILD_TARGET}" -p mvm-hostlib \
               --features mvm-client/release-channel
@@ -515,7 +519,7 @@ jobs:
           fi
           cargo run --package xtask -- report-compile-units \
             --build "mvmctl (release-min)=build --profile release-min --target ${BUILD_TARGET} --features ${MVMCTL_RELEASE_FEATURES}" \
-            --build "daemons (release)=build --release --target ${BUILD_TARGET} -p mvm-hostd -p mvm-gpu --bin mvm-host-agent --bin mvm-policy-coordinator --bin mvm-signer-helper --bin mvm-network-endpoint --bin mvm-broker --bin mvm-audit-signer --bin mvm-mailbox --bin mvm-gpu-endpoint" \
+            --build "daemons (release)=build --release --target ${BUILD_TARGET} -p mvm-hostd -p mvm-gpu --bin mvm-host-agent --bin mvm-policy-coordinator --bin mvm-signer-helper --bin mvm-network-endpoint --bin mvm-broker --bin mvm-audit-signer --bin mvm-mailbox --bin mvm-actor-holder --bin mvm-actor-controller --bin mvm-gpu-endpoint" \
             --build "mvm-hostlib (release)=build --release --target ${hostlib_target} -p mvm-hostlib --features mvm-client/release-channel" \
             "${hvf_build[@]}" \
             "${size_args[@]}" | tee -a "${GITHUB_STEP_SUMMARY}"
@@ -601,7 +605,7 @@ jobs:
           # Fail closed rather than copy-if-exists: a binary that failed to
           # build would otherwise be silently dropped from the tarball and
           # surface much later as a spawn failure on a user's machine.
-          REQUIRED_HOSTBINS="mvm-host-agent mvm-policy-coordinator mvm-signer-helper mvm-network-endpoint mvm-broker mvm-audit-signer mvm-mailbox mvm-gpu-endpoint"
+          REQUIRED_HOSTBINS="mvm-host-agent mvm-policy-coordinator mvm-signer-helper mvm-network-endpoint mvm-broker mvm-audit-signer mvm-mailbox mvm-actor-holder mvm-actor-controller mvm-gpu-endpoint"
           if [[ "${TARGET}" == *apple-darwin ]]; then
             REQUIRED_HOSTBINS="${REQUIRED_HOSTBINS} mvm-hvf-supervisor mvm-libkrun-supervisor"
           fi

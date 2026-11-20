@@ -68,7 +68,16 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use mvm_contract::grants::CpuGrant;
-use mvm_contract::protocol::resource_controls::{EnforcedCeiling, EnforcedGrants, EnforcedTier};
+use mvm_contract::protocol::cpu_set::CpuSet;
+use mvm_contract::protocol::resource_controls::{
+    EnforcedCeiling, EnforcedGrants, EnforcedPlacement, EnforcedTier,
+};
+
+mod cpuset;
+pub use cpuset::{
+    CpusetGap, PLACEMENT_OWNER_FILE, clear_placement_owner, cpuset_delegated_at, cpuset_gap,
+    isolated_cpus, online_cpus, read_cpu_list, recorded_cpus,
+};
 
 /// systemd expresses a CPU quota as a percentage of one core, so one percent is
 /// ten millicores.
@@ -302,11 +311,13 @@ pub const fn memory_max_bytes_for_guest(guest_memory_mib: u32) -> u64 {
 /// What one VMM spawn is to be bounded by.
 ///
 /// Guest memory is known at every spawn site and always bounded; the CPU grant
-/// is present only when the launch was admitted under one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// is present only when the launch was admitted under one, and the allowed-CPU
+/// set only when admission placed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnBounds {
     guest_memory_mib: u32,
     cpu_grant: Option<CpuGrant>,
+    allowed_cpus: Option<CpuSet>,
 }
 
 impl SpawnBounds {
@@ -316,6 +327,7 @@ impl SpawnBounds {
         Self {
             guest_memory_mib,
             cpu_grant: None,
+            allowed_cpus: None,
         }
     }
 
@@ -324,6 +336,20 @@ impl SpawnBounds {
     pub const fn with_cpu_grant(mut self, cpu_grant: Option<CpuGrant>) -> Self {
         self.cpu_grant = cpu_grant;
         self
+    }
+
+    /// Confine the scope to the CPU set admission placed this launch on, if
+    /// any.
+    #[must_use]
+    pub fn with_allowed_cpus(mut self, allowed_cpus: Option<CpuSet>) -> Self {
+        self.allowed_cpus = allowed_cpus;
+        self
+    }
+
+    /// The CPU set this spawn is to be confined to, if any.
+    #[must_use]
+    pub fn allowed_cpus(&self) -> Option<&CpuSet> {
+        self.allowed_cpus.as_ref()
     }
 
     /// Validate inputs for callers requiring the existing memory/task scope.
@@ -337,16 +363,20 @@ impl SpawnBounds {
         if let Some(CpuGrant::Share { millicores }) = self.cpu_grant {
             cpu_quota_percent(millicores)?;
         }
+        if self.allowed_cpus.as_ref().is_some_and(CpuSet::is_empty) {
+            bail!("an allowed-CPU set must name at least one CPU");
+        }
         Ok(())
     }
 }
 
 /// The limits a scope is created with, resolved from [`SpawnBounds`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ScopeLimits {
     cpu_quota_percent: Option<u32>,
     memory_max_mib: Option<u64>,
     tasks_max: u32,
+    allowed_cpus: Option<CpuSet>,
 }
 
 impl ScopeLimits {
@@ -356,6 +386,7 @@ impl ScopeLimits {
             cpu_quota_percent: bindable_quota_percent(machine_id, bounds.cpu_grant.as_ref()),
             memory_max_mib: memory_max_mib(machine_id, bounds.guest_memory_mib),
             tasks_max: VMM_TASKS_MAX,
+            allowed_cpus: bounds.allowed_cpus.clone(),
         }
     }
 
@@ -373,6 +404,9 @@ impl ScopeLimits {
             props.push("MemorySwapMax=0".to_string());
         }
         props.push(format!("TasksMax={}", self.tasks_max));
+        if let Some(cpus) = &self.allowed_cpus {
+            props.push(cpuset::allowed_cpus_property(cpus));
+        }
         // Stated rather than inherited from the manager's default, so a kill
         // ends the whole scope and the unit reports `oom-kill`, which is what
         // the exit report reads.
@@ -453,6 +487,11 @@ fn prepare_scope(
     state_dir: &Path,
     bounds: &SpawnBounds,
 ) -> Option<PreparedScope> {
+    // Cleared first, so a boot that ends up unscoped never inherits the
+    // previous boot's placement record.
+    if let Err(e) = cpuset::record_requested(state_dir, None) {
+        tracing::warn!("clearing the placement record for '{machine_id}': {e}");
+    }
     let launcher = match mechanism_launcher() {
         Ok(launcher) => launcher,
         Err(gap) => {
@@ -487,6 +526,12 @@ fn prepare_scope(
              {}: {e} — the achieved limits will read back as declared",
             state_dir.display()
         );
+    }
+    // Without the record the read-back never looks at the scope's cpuset, and
+    // a placed launch is then refused for reading back no set: the safe
+    // direction again.
+    if let Err(e) = cpuset::record_requested(state_dir, limits.allowed_cpus.as_ref()) {
+        tracing::warn!("recording the placement for '{machine_id}': {e}");
     }
     Some(PreparedScope {
         launcher,
@@ -883,11 +928,20 @@ pub fn enforced_grants_for_vm(state_dir: &Path) -> EnforcedGrants {
     } else {
         scope.cpu
     };
+    let placement = EnforcedPlacement {
+        requested: None,
+        effective: if cpuset::requested_for_vm(state_dir) {
+            ScopeProbe::default().effective_cpus_for_vm(state_dir)
+        } else {
+            None
+        },
+    };
     EnforcedGrants {
         cpu,
         wall_clock: EnforcedTier::Declared,
         memory: scope.memory,
         tasks: scope.tasks,
+        placement,
     }
 }
 
@@ -1068,8 +1122,44 @@ fn run_bounded(mut cmd: Command, timeout: Duration) -> Option<String> {
     Some(stdout)
 }
 
+/// Why a systemd user manager could not be asked about a unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserManagerGap {
+    /// `systemctl` is not on `PATH`.
+    SystemctlMissing,
+    /// No user session bus to reach the manager over.
+    NoUserSessionBus,
+    /// The query failed or outlived its deadline.
+    NoAnswer,
+}
+
+/// `systemctl --user show <unit>` for the named properties, as `Key=value`
+/// lines, bounded by the same deadline as a scope query.
+///
+/// A unit the manager has never heard of is not an error here: it answers
+/// with each property's default.
+///
+/// # Errors
+///
+/// The manager cannot be reached, or did not answer in time.
+pub fn show_user_unit(unit: &str, properties: &[&str]) -> Result<String, UserManagerGap> {
+    let systemctl = binary_on_path(SYSTEMCTL).ok_or(UserManagerGap::SystemctlMissing)?;
+    if !session_bus_present() {
+        return Err(UserManagerGap::NoUserSessionBus);
+    }
+    let mut cmd = crate::env_hygiene::helper_command(&systemctl);
+    cmd.args(["--user", "show"]);
+    for property in properties {
+        cmd.args(["-p", property]);
+    }
+    // After `--`, so a unit name can never be read as an option.
+    cmd.arg("--").arg(unit);
+    run_bounded(cmd, SCOPE_QUERY_TIMEOUT).ok_or(UserManagerGap::NoAnswer)
+}
+
 /// One property's value from `systemctl show` output.
-fn show_property<'a>(output: &'a str, key: &str) -> Option<&'a str> {
+#[must_use]
+pub fn show_property<'a>(output: &'a str, key: &str) -> Option<&'a str> {
     output
         .lines()
         .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
@@ -1326,6 +1416,7 @@ mod tests {
             cpu_quota_percent: cpu,
             memory_max_mib: memory,
             tasks_max: VMM_TASKS_MAX,
+            allowed_cpus: None,
         }
     }
 
@@ -1824,6 +1915,81 @@ mod tests {
                 memory: EnforcedCeiling::enforced(EnforcedTier::Cgroup2MemoryMax, 805_306_368),
                 tasks: EnforcedCeiling::enforced(EnforcedTier::Cgroup2PidsMax, 1024),
             }
+        );
+    }
+
+    #[test]
+    fn a_placed_scope_reads_back_its_effective_cpuset() {
+        let state = tempfile::tempdir().expect("state dir");
+        std::fs::write(state.path().join(SCOPE_UNIT_FILE), "mvm-placed.scope")
+            .expect("record a unit");
+        let cgroup_root = state.path().join("cgroup");
+        let control_group = "/user.slice/user-1000.slice/mvm-placed.scope";
+        let cgroup_dir = cgroup_root.join(control_group.trim_start_matches('/'));
+        std::fs::create_dir_all(&cgroup_dir).expect("create cgroup dir");
+        let systemctl = fake_systemctl(
+            state.path(),
+            &format!("echo 'ControlGroup={control_group}'"),
+        );
+        let probe = ScopeProbe::with_root_and_systemctl(cgroup_root, systemctl);
+        assert_eq!(probe.effective_cpus_for_vm(state.path()), None, "no file");
+        std::fs::write(cgroup_dir.join("cpuset.cpus.effective"), "2-3\n").expect("cpuset");
+        assert_eq!(
+            probe.effective_cpus_for_vm(state.path()),
+            Some(CpuSet::parse("2,3").unwrap())
+        );
+    }
+
+    #[test]
+    fn a_placed_spawn_carries_its_allowed_cpus_and_records_them() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut env = crate::util::test_env::TestEnv::new();
+        pretend_mechanism_present(&mut env, scratch.path()).expect("fake mechanism");
+
+        let cpus = CpuSet::parse("2-3,6").unwrap();
+        let bound = bind_spawn(
+            Command::new("/usr/bin/firecracker"),
+            "mvm-placed",
+            scratch.path(),
+            &SpawnBounds::for_guest_memory(512).with_allowed_cpus(Some(cpus.clone())),
+        );
+        let argv = rendered_argv(bound.as_command());
+        let tail = &argv[argv.len() - 6..];
+        assert_eq!(
+            tail,
+            [
+                "-p",
+                "AllowedCPUs=2-3,6",
+                "-p",
+                "OOMPolicy=stop",
+                "--",
+                "/usr/bin/firecracker"
+            ]
+        );
+        assert!(cpuset::requested_for_vm(scratch.path()));
+
+        // The next boot of the same machine without a placement clears it.
+        let _ = bind_spawn(
+            Command::new("/usr/bin/firecracker"),
+            "mvm-placed",
+            scratch.path(),
+            &SpawnBounds::for_guest_memory(512),
+        );
+        assert!(!cpuset::requested_for_vm(scratch.path()));
+    }
+
+    #[test]
+    fn an_empty_allowed_cpu_set_is_refused_before_any_spawn() {
+        let bounds = SpawnBounds::for_guest_memory(512).with_allowed_cpus(Some(CpuSet::default()));
+        assert!(bounds.validate_required_inputs().is_err());
+    }
+
+    #[test]
+    fn an_unplaced_vm_reports_no_placement() {
+        let state = tempfile::tempdir().expect("state dir");
+        assert_eq!(
+            enforced_grants_for_vm(state.path()).placement,
+            EnforcedPlacement::default()
         );
     }
 

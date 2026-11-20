@@ -392,9 +392,13 @@ fn test_attribute_offsets(src: &str) -> Vec<usize> {
     let mut at = 0usize;
     for line in src.split_inclusive('\n') {
         let trimmed = line.trim_start();
+        // `#[path = "..."]` names a module file; it is never a test marker,
+        // and its line carries no function body, so the body scan would
+        // swallow the next unrelated function.
         if trimmed.starts_with("#[")
             && trimmed.contains("test")
             && !trimmed.starts_with("#[cfg(test)")
+            && !trimmed.starts_with("#[path")
         {
             offsets.push(at + (line.len() - trimmed.len()));
         }
@@ -711,5 +715,11 @@ mod tests {
         assert_eq!(blocks[0].name, "a");
         assert_eq!(blocks[1].name, "b");
         assert!(blocks[1].line > blocks[0].line);
+    }
+
+    #[test]
+    fn path_module_attributes_are_not_test_markers() {
+        let src = "#[cfg(test)]\n#[path = \"prepare_tests.rs\"]\nmod tests;\n\npub(super) fn prepare() -> Result<()> {\n    call()\n}\n";
+        assert!(test_blocks(src).is_empty());
     }
 }

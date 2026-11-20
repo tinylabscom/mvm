@@ -144,7 +144,7 @@ class SupplyChainWorkflowTests(unittest.TestCase):
 
     def test_exact_tools_and_fail_closed_commands(self):
         for required in (
-            'RUSTUP_TOOLCHAIN: "1.97.1"',
+            'RUSTUP_TOOLCHAIN: "1.100.0"',
             "deny) package=cargo-deny; version=0.20.2 ;;",
             "audit) package=cargo-audit; version=0.23.0 ;;",
             '*) echo "checker must be deny or audit" >&2; exit 1 ;;',

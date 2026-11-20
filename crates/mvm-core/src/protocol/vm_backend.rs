@@ -191,6 +191,11 @@ pub struct VmStartConfig {
     /// backend has to wrap its own spawn for the per-VM process to be *born*
     /// bounded — see [`crate::spawn_scope`]. `None` is uncapped.
     pub cpu_grant: Option<mvm_contract::grants::CpuGrant>,
+    /// The host CPUs admission placed this launch on, if any: a unit's
+    /// exclusive cores, or the cores left over while another unit holds some
+    /// exclusively. Carried on the launch config for the same reason as
+    /// [`cpu_grant`](Self::cpu_grant): the spawn scope is born confined.
+    pub allowed_cpus: Option<mvm_contract::protocol::cpu_set::CpuSet>,
     /// Memory cap in MiB. The guest may not allocate beyond this. When
     /// [`mem_initial_mib`](Self::mem_initial_mib) is `None`, this is
     /// also the host-committed amount at boot (the historical mvm
@@ -245,6 +250,10 @@ pub struct VmStartConfig {
     /// Audit identity projected by the admitting host.
     /// Missing context never implies a builder identity.
     pub audit_context: Option<crate::audit_sink::AuditContext>,
+    /// Public mailbox target issued by the trusted VM-scoped provider before boot.
+    /// The runtime combines it with fresh reader credentials; it never derives
+    /// an address or policy epoch from a peer's handshake or global key store.
+    pub mailbox_conversation: Option<crate::mailbox::conversation_wire::ConversationTarget>,
     /// Optional caller registration from the trusted entrypoint admission path.
     /// This is not producer readiness and is not accepted by warm launches.
     pub caller_registration: Option<caller_registration::CallerRegistration>,

@@ -20,6 +20,8 @@ mod resume;
 mod rootfs;
 #[cfg(test)]
 mod rootfs_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod seal_gate_tests;
 mod state;
 
 pub use rootfs::materialize_image_rootfs;
@@ -49,6 +51,7 @@ use mvm_core::client::{
     MvmClient, MvmError, Result, TelemetryReadRequest, TelemetryReadResponse, TelemetryStatus,
 };
 use mvm_core::config::vm_state_dir;
+use mvm_hostd::seal_gate::Mutation;
 #[cfg(feature = "test-support")]
 use mvm_runtime::vm::instance_snapshot::CannedIO;
 use mvm_runtime::vm::instance_snapshot::{
@@ -700,14 +703,10 @@ pub(crate) async fn machine_lifecycle(
 /// cleanup; reaping here would delete that unconsumed exit before it is read.
 /// A persistent machine — the restored-checkpoint case this exists for —
 /// reports no exit through the stop path, so it always reaps.
-pub(crate) fn remove_stopped_runtime_state(name: &str) -> Result<()> {
-    remove_stopped_runtime_state_with_lock(name, None)
-}
-
-fn remove_stopped_runtime_state_with_lock(
+fn remove_stopped_runtime_state(
     name: &str,
-    lifecycle: Option<&mvm_runtime::vm::instance_snapshot::MachineLifecycleLock>,
-) -> Result<()> {
+    lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+) -> Result<bool> {
     let state_dir = vm_state_dir(name);
     let transient_exit_pending = !mvm_core::config::machine_spec_path(name).exists()
         && mvm_core::exit_capture::exit_file_path(&state_dir).exists();
@@ -716,26 +715,37 @@ fn remove_stopped_runtime_state_with_lock(
             machine = name,
             "transient exit not yet reported; leaving state dir for its own cleanup"
         );
-        return Ok(());
+        return Ok(false);
     }
-    let removed = match lifecycle {
-        Some(lifecycle) => lifecycle.reap_unowned_state().map_err(|e| format!("{e:#}")),
-        None => mvm_runtime::vm::reconcile::reap_unowned_state_dir(
-            &state_dir,
-            &mvm_core::config::instance_dir(name),
-        ),
-    }
-    .map_err(|e| {
-        backend_err(format!(
-            "machine {name:?} stopped, but removing its state dir {} failed: {e}",
-            state_dir.display()
-        ))
-    })?;
+    let removed = lifecycle
+        .reap_unowned_state()
+        .map_err(|e| format!("{e:#}"))
+        .map_err(|e| {
+            backend_err(format!(
+                "machine {name:?} stopped, but removing its state dir {} failed: {e}",
+                state_dir.display()
+            ))
+        })?;
     if !removed {
         tracing::debug!(
             machine = name,
             "state dir still owned after stop; left in place"
         );
+    }
+    Ok(removed)
+}
+
+/// Complete a confirmed partial-start abort under the existing lifecycle gate.
+/// If reaping fails, leave both stop evidence and registry ownership for retry.
+pub(crate) fn cleanup_confirmed_launch_abort(
+    name: &str,
+    lifecycle: &mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+) -> Result<()> {
+    lifecycle.require_name(name).map_err(backend_err)?;
+    lifecycle.mark_confirmed_stop().map_err(backend_err)?;
+    if remove_stopped_runtime_state(name, lifecycle)? {
+        deregister_from_name_registry(name);
+        lifecycle.clear_confirmed_stop().map_err(backend_err)?;
     }
     Ok(())
 }
@@ -781,7 +791,7 @@ impl LocalBackend {
                     id.0
                 ))
             })?;
-            remove_stopped_runtime_state_with_lock(&id.0, Some(lifecycle))?;
+            remove_stopped_runtime_state(&id.0, lifecycle)?;
         } else if expected.is_none()
             && let (Err(e), Some(plan)) = (&result, &stopped_session)
         {
@@ -807,6 +817,14 @@ pub(crate) fn backend_err(e: impl std::fmt::Display) -> MvmError {
     MvmError::Backend {
         reason: e.to_string(),
     }
+}
+
+/// Pass a change to machine `name` through the host's seal gate; a sealed
+/// unit's refusal is already audited and comes back as `Rejected`.
+fn authorize_change(name: &str, mutation: Mutation) -> Result<()> {
+    mvm_hostd::seal_gate::authorize(name, mutation).map_err(|e| MvmError::Rejected {
+        reason: format!("{e:#}"),
+    })
 }
 
 /// Record when `name` expires on its host name-registry entry, or clear it
@@ -1040,6 +1058,7 @@ impl MvmClient for LocalBackend {
 
     async fn pause_machine(&self, id: &MachineId, opts: PauseOpts) -> Result<PauseOutcome> {
         let name = &id.0;
+        authorize_change(name, Mutation::Pause)?;
         let backend = self.lifecycle_backend_for(name);
         // The same per-machine lock a resume holds: a pause racing a resume
         // would otherwise seal and mark paused a machine the resume then marks
@@ -1098,8 +1117,10 @@ impl MvmClient for LocalBackend {
     }
 
     async fn resume_machine(&self, id: &MachineId, opts: ResumeOpts) -> Result<ResumeOutcome> {
+        authorize_change(&id.0, Mutation::Resume)?;
         let _barrier = mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()
             .map_err(backend_err)?;
+        crate::policy_profiles::coordinator::recover_workload_ledger().map_err(backend_err)?;
         if cfg!(target_os = "linux") && self.backend.kind() != BackendKind::Mock {
             crate::policy_profiles::coordinator::ensure_if_activated().map_err(backend_err)?;
         }
@@ -1129,6 +1150,7 @@ impl MvmClient for LocalBackend {
     }
 
     async fn set_ttl(&self, id: &MachineId, expires_at: Option<String>) -> Result<()> {
+        authorize_change(&id.0, Mutation::Expiry)?;
         let detail = match &expires_at {
             Some(at) => format!("expires_at={at}"),
             None => "expires_at=cleared".to_string(),

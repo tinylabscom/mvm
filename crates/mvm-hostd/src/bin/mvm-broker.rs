@@ -85,6 +85,21 @@ fn main() -> Result<()> {
         registry
             .admit_capabilities(cfg.capability_bindings.clone())
             .context("load admitted extension capability bindings")?;
+        for proxy in &cfg.service_proxies {
+            proxy
+                .validate()
+                .map_err(|_| anyhow::anyhow!("invalid actor route binding"))?;
+            anyhow::ensure!(
+                proxy.service.as_str() == "host.actor.v1"
+                    && cfg.services_bindings.contains(&proxy.service)
+                    && proxy
+                        .capabilities
+                        .iter()
+                        .all(|descriptor| cfg.capability_bindings.contains(&descriptor.binding())),
+                "unadmitted or unsupported broker proxy"
+            );
+            registry.bind_actor_endpoint(std::path::PathBuf::from(&proxy.endpoint))?;
+        }
         register_handlers(&mut registry, &cfg);
         let registry = Arc::new(registry);
         info!(

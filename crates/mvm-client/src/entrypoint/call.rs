@@ -13,16 +13,11 @@
 //! [`OwnedTransientResult::projection`] exposes completed output. Keep the
 //! entire result on failure; observer housekeeping is not a completion proof.
 
-use std::cell::RefCell;
-
 use anyhow::{Context, Result};
 use mvm_core::session::{SessionId, SessionMode};
 
 use super::admission::EntrypointAdmission;
-use super::boot::{
-    AdmitInputs, SessionAuditSubstrate, SessionBoot, SessionVm, SessionVmName, boot_session_vm,
-    stop_session_vm, tear_down_session_vm,
-};
+use super::boot::{SessionBoot, SessionVm, SessionVmName, stop_session_vm};
 use super::dispatch::{
     CallObserver, CallOutcome, CallStdin, CallTerminal, EntrypointDispatch, authorize_stdin,
     dispatch,
@@ -540,6 +535,7 @@ pub fn boot_entrypoint_vm_owned(
     let _activation_barrier =
         mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
     let backend_name = vm.admission.backend_name().to_string();
+    crate::policy_profiles::coordinator::recover_workload_ledger()?;
     if cfg!(target_os = "linux")
         && crate::backend_kind_for(&backend_name) != mvm_core::vm_backend::BackendKind::Mock
     {
@@ -574,13 +570,27 @@ impl BootedEntrypoint {
             return Ok(());
         }
         let err = anyhow::anyhow!("guest agent did not become reachable within {timeout_secs}s");
-        let vm = self.vm.clone();
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            tear_down_session_vm(vm);
-        }));
-        emit_failed(&self.admission, "agent-wait", &err);
-        Err(err)
+        finish_failed_agent_wait(self, err, stop_session_vm(&self.vm))
     }
+}
+
+fn finish_failed_agent_wait(
+    booted: &BootedEntrypoint,
+    err: anyhow::Error,
+    stop: Result<()>,
+) -> Result<()> {
+    match stop {
+        Ok(()) => emit_failed(&booted.admission, "agent-wait", &err),
+        Err(stop) => {
+            record_unsealed_end(
+                Some((&booted.admission.emitter, booted.admission.admitted.plan())),
+                UnsealedEnd::new(&booted.vm.vm_name, UnsealedReason::StopFailed)
+                    .error(format!("{stop:#}")),
+            );
+            return Err(err.context(format!("original agent-wait stop is unconfirmed: {stop:#}")));
+        }
+    }
+    Err(err)
 }
 
 /// Boot `vm` under its admission, writing `plan.launched` when the backend
@@ -603,6 +613,7 @@ pub fn boot_entrypoint_vm(
         portable_boot_assets,
     } = vm;
     let backend_name = admission.backend_name().to_string();
+    crate::policy_profiles::coordinator::recover_workload_ledger()?;
     if cfg!(target_os = "linux")
         && crate::backend_kind_for(&backend_name) != mvm_core::vm_backend::BackendKind::Mock
     {
@@ -613,12 +624,6 @@ pub fn boot_entrypoint_vm(
         admission.committed_policy_asset(),
         &_activation_barrier,
     )?;
-    let admitted: RefCell<Option<AdmissionContext>> = RefCell::new(None);
-    let admit = |inputs: AdmitInputs<'_>| -> Result<Option<SessionAuditSubstrate>> {
-        let entry = admission.admit(inputs)?;
-        *admitted.borrow_mut() = Some(entry.context);
-        Ok(Some(entry.substrate))
-    };
     let boot = SessionBoot::builder(slot, vm_name)
         .cpus(cpus)
         .memory_mib(memory_mib)
@@ -626,27 +631,12 @@ pub fn boot_entrypoint_vm(
         .backend_name(&backend_name)
         .portable_boot_assets(portable_boot_assets)
         .build();
-    match boot_session_vm(boot, &admit, pair) {
-        Ok(vm) => {
-            let Some(context) = admitted.borrow_mut().take() else {
-                // The boot refuses an unadmitted plan, so this cannot happen;
-                // a VM with no plan to bind its narrative to is torn down
-                // rather than handed back.
-                tear_down_session_vm(vm);
-                anyhow::bail!("the entrypoint VM booted without an admitted plan");
-            };
-            emit_launched(&context, &backend_name, true);
-            Ok(BootedEntrypoint {
-                vm,
-                admission: context,
-            })
-        }
-        Err(e) => {
-            if let Some(context) = admitted.borrow_mut().take() {
-                emit_failed(&context, "backend-start", &e);
-            }
-            Err(e)
-        }
+    match super::boot::boot_session_vm_admitted(boot, &admission, pair) {
+        Ok((vm, context)) => Ok(BootedEntrypoint {
+            vm,
+            admission: context,
+        }),
+        Err(e) => Err(e),
     }
 }
 
@@ -1339,6 +1329,34 @@ mod tests {
             );
             self.stops.push((vm_name.to_string(), result.is_ok()));
         }
+    }
+
+    #[test]
+    fn agent_wait_with_uncertain_stop_does_not_record_a_terminal_failure() {
+        let _home = isolated();
+        let keys = tempfile::tempdir().expect("keys");
+        let audit = tempfile::tempdir().expect("audit");
+        let booted = BootedEntrypoint {
+            vm: SessionVm {
+                vm_name: "agent-stop-uncertain".into(),
+            },
+            admission: crate::admission::admit_plan_tests::admitted_into(
+                keys.path(),
+                audit.path(),
+                "agent-stop-uncertain",
+            ),
+        };
+        let error = finish_failed_agent_wait(
+            &booted,
+            anyhow::anyhow!("agent did not answer"),
+            Err(anyhow::anyhow!("backend stop unconfirmed")),
+        )
+        .expect_err("uncertain stop cannot seal a terminal failure");
+        assert!(format!("{error:#}").contains("stop is unconfirmed"));
+        let chain = std::fs::read_to_string(audit.path().join("local.jsonl"))
+            .expect("admitted audit chain");
+        assert!(!chain.contains("plan.failed"), "{chain}");
+        assert!(!chain.contains("session.sealed"), "{chain}");
     }
 
     #[test]

@@ -24,6 +24,7 @@
 
 #![deny(unreachable_pub)]
 
+pub mod actor_teardown;
 pub mod build_env;
 mod host_shell;
 mod legacy_bundle_runtime;

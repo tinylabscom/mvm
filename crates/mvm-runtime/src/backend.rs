@@ -25,6 +25,23 @@ use mvm_backends::driver::hvf::HvfDriver;
 use mvm_backends::driver::{LibkrunDriver, QemuDriver};
 use mvm_vmm::host::drive_file::DriveFile;
 
+/// Release a failed custodied start only when its native owner proves no live child remains.
+///
+/// `Ok` carries an ordinary refusal whose launch custody is safe to release.
+/// `Err` retains the typed native failure because stop remains uncertain.
+///
+/// # Errors
+///
+/// Returns the custody-bearing failure when the child may still be live.
+pub fn release_confirmed_start_failure(
+    error: anyhow::Error,
+) -> std::result::Result<anyhow::Error, anyhow::Error> {
+    match error.downcast::<mvm_backends::driver::hvf::ColdHvfBootFailure>() {
+        Ok(failure) => failure.into_released_error().map_err(anyhow::Error::new),
+        Err(error) => Ok(error),
+    }
+}
+
 /// A warm child whose lifecycle gate remains held until the caller takes custody.
 #[must_use]
 pub struct OwnedWarmClaim {
@@ -920,26 +937,6 @@ impl AnyBackend {
         self.inner().start(config)
     }
 
-    /// Whether this backend is migrated to the CLI admitted-cold host tail.
-    ///
-    /// This is migration scope, not a statement of isolation or runner support:
-    /// QEMU and AppleContainer still keep their existing CLI start behavior.
-    pub fn uses_cli_admitted_cold_dispatch(&self) -> bool {
-        if !cfg!(unix) {
-            return false;
-        }
-        matches!(self, Self::Firecracker(_) | Self::Libkrun(_) | Self::Hvf(_)) || {
-            #[cfg(feature = "test-support")]
-            {
-                matches!(self, Self::Mock(_))
-            }
-            #[cfg(not(feature = "test-support"))]
-            {
-                false
-            }
-        }
-    }
-
     /// Start with one launch-owned release verification when one was selected.
     pub fn start_with_verified_runtime(
         &self,
@@ -994,6 +991,9 @@ impl AnyBackend {
             }
             Self::Qemu(runner) => runner.start_custodied_verified_release(config, images, release),
             Self::Hvf(runner) => runner.start_custodied_verified_release(config, images, release),
+            Self::AppleContainer(backend) => {
+                backend.start_custodied_verified_release(config, images, release)
+            }
             #[cfg(feature = "test-support")]
             Self::Mock(backend) => {
                 // The hermetic writer has no real descriptors to inherit, but
@@ -1007,7 +1007,9 @@ impl AnyBackend {
                 drop(images);
                 Ok(id)
             }
-            _ => anyhow::bail!("backend does not support writable descriptor handoff"),
+            Self::Wasm(_) | Self::WebLinux(_) => {
+                anyhow::bail!("backend does not support writable descriptor handoff")
+            }
         }
     }
 
@@ -1238,7 +1240,7 @@ fn collect_checked(
     Ok(rows)
 }
 
-fn require_observed_quiescence(
+pub(crate) fn require_observed_quiescence(
     observed: &[VmInfo],
     registry: &crate::vm::name_registry::VmNameRegistry,
 ) -> Result<()> {
@@ -1362,6 +1364,34 @@ mod tests {
                 "{kind} has no activation step"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_native_cold_backends_refuse_writable_image_custody() {
+        let dir = tempfile::tempdir().expect("test directory");
+        let path = dir.path().join("writer.img");
+        let lock = dir.path().join("writer.lock");
+        std::fs::write(&path, b"test image").expect("test image");
+        for selector in ["wasm", "web-linux"] {
+            let image = mvm_core::util::writable_image::LockedWritableImage::open(&path, &lock)
+                .expect("writer lock");
+            let error = AnyBackend::from_hypervisor(selector)
+                .start_custodied_verified_release(
+                    &VmStartConfig::default(),
+                    vec![(path.clone(), image)],
+                    None,
+                )
+                .expect_err("a backend without native writer handoff must refuse");
+            assert!(
+                format!("{error:#}").contains("does not support writable descriptor handoff"),
+                "{selector}: {error:#}"
+            );
+        }
+        let error = AnyBackend::from_hypervisor("web-linux")
+            .start_custodied_verified_release(&VmStartConfig::default(), Vec::new(), None)
+            .expect_err("native web-linux stub cannot start");
+        assert!(error.to_string().contains("browser-only"), "{error:#}");
     }
 
     fn vm_named(name: &str, cpus: u32) -> VmInfo {
