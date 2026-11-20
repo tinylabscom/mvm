@@ -73,7 +73,10 @@ mod start_tests;
 mod test_support;
 mod warm_claim;
 
-pub use cold_hvf_channel::{ColdHvfChannel, NativeCompletion, OwnedRuntimeLaunch};
+pub use cold_hvf_channel::{
+    ColdHvfChannel, NativeCompletion, NativeCompletionEvidence, OriginalHvfOwnerBinding,
+    OwnedRuntimeLaunch,
+};
 
 struct PreparedWorkloadBoot {
     spec: mvm_vmm::driver::spec::VmmSpec,
