@@ -31,6 +31,25 @@ pub struct ConnectedInstance {
     root: VerifyingKey,
 }
 
+/// Non-wire proof that a fresh challenge bound this exact instance and
+/// connection to an armed process-exit observer.
+#[derive(Debug)]
+pub struct BoundStopAuthorization {
+    instance: HvfInstance,
+    connection_nonce: [u8; 32],
+}
+
+impl BoundStopAuthorization {
+    pub fn instance(&self) -> &HvfInstance {
+        &self.instance
+    }
+
+    #[must_use]
+    pub fn connection_nonce(&self) -> [u8; 32] {
+        self.connection_nonce
+    }
+}
+
 /// Produced only after both lifetime exit and authenticated finalization.
 pub struct ConfirmedExit {
     instance: HvfInstance,
@@ -55,6 +74,14 @@ impl ConfirmedExit {
 impl ConnectedInstance {
     pub fn instance(&self) -> &HvfInstance {
         &self.instance
+    }
+
+    #[must_use]
+    pub fn stop_authorization(&self) -> BoundStopAuthorization {
+        BoundStopAuthorization {
+            instance: self.instance.clone(),
+            connection_nonce: self.connection_nonce,
+        }
     }
     pub fn connect(vm: &str) -> Result<Self> {
         let instance = wire::read_instance(vm)?;
@@ -110,9 +137,7 @@ impl ConnectedInstance {
         })
     }
 
-    pub fn stop(mut self) -> Result<ConfirmedExit> {
-        let dispatch_start = Instant::now();
-        let deadline = dispatch_start + wire::CONNECTION_BUDGET;
+    pub fn stop(self) -> Result<ConfirmedExit> {
         let operation = HvfInstanceControl::StopHvfInstance {
             instance: self.instance.clone(),
             connection_nonce: self.connection_nonce,
@@ -120,7 +145,25 @@ impl ConnectedInstance {
         };
         let seed = zeroize::Zeroizing::new(self.signing.to_bytes());
         let request = broker_control::sign(ControlRequest::HvfInstanceV1(operation), &seed)?;
-        wire::write_frame(&mut self.stream, &request, deadline)?;
+        self.stop_signed(request)
+    }
+
+    /// Dispatch a stop signed by a separate closed key holder.
+    ///
+    /// The request is verified against this connection before any write.
+    pub fn stop_signed(mut self, request: SignedControl) -> Result<ConfirmedExit> {
+        let dispatch_start = Instant::now();
+        let deadline = dispatch_start + wire::CONNECTION_BUDGET;
+        let now_secs = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        write_verified_stop(
+            &mut self.stream,
+            &request,
+            &self.root,
+            &self.instance,
+            &self.connection_nonce,
+            now_secs,
+            deadline,
+        )?;
         let mut acknowledgment = [0];
         wire::read_exact(&mut self.stream, &mut acknowledgment, deadline)?;
         ensure!(acknowledgment == [1], "HVF stop was not acknowledged");
@@ -434,9 +477,29 @@ fn terminal_proof(
     Ok(proof)
 }
 
+fn write_verified_stop(
+    stream: &mut UnixStream,
+    request: &SignedControl,
+    root: &VerifyingKey,
+    instance: &HvfInstance,
+    connection_nonce: &[u8; 32],
+    now_secs: u64,
+    deadline: Instant,
+) -> Result<()> {
+    mvm_core::protocol::hvf_control::verify_stop(
+        request,
+        root,
+        instance,
+        connection_nonce,
+        now_secs,
+    )?;
+    wire::write_frame(stream, request, deadline)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read as _;
 
     #[test]
     fn bridge_peer_comparison_rejects_substitution() {
@@ -446,6 +509,59 @@ mod tests {
             u32::try_from(super::super::uds_peer::connected_peer_pid(&stream).unwrap()).unwrap();
         assert!(require_bridge_peer(&stream, peer).is_ok());
         assert!(require_bridge_peer(&stream, peer.checked_add(1).unwrap()).is_err());
+    }
+
+    #[test]
+    fn invalid_external_stop_signatures_write_no_request_bytes() {
+        let instance = HvfInstance {
+            vm_id: "vm".into(),
+            boot_nonce: [1; 32],
+        };
+        let connection_nonce = [2; 32];
+        let root = SigningKey::from_bytes(&[7; 32]).verifying_key();
+        let signed = |key: [u8; 32],
+                      instance: HvfInstance,
+                      connection_nonce: [u8; 32],
+                      issued_at_secs: u64| {
+            broker_control::sign(
+                ControlRequest::HvfInstanceV1(HvfInstanceControl::StopHvfInstance {
+                    instance,
+                    connection_nonce,
+                    issued_at_secs,
+                }),
+                &key,
+            )
+            .unwrap()
+        };
+        let mut wrong_instance = instance.clone();
+        wrong_instance.boot_nonce[0] ^= 1;
+        for request in [
+            signed([8; 32], instance.clone(), connection_nonce, 100),
+            signed([7; 32], wrong_instance, connection_nonce, 100),
+            signed([7; 32], instance.clone(), [3; 32], 100),
+            signed([7; 32], instance.clone(), connection_nonce, 69),
+            signed([7; 32], instance.clone(), connection_nonce, 101),
+        ] {
+            let (mut stream, mut peer) = UnixStream::pair().unwrap();
+            assert!(
+                write_verified_stop(
+                    &mut stream,
+                    &request,
+                    &root,
+                    &instance,
+                    &connection_nonce,
+                    100,
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .is_err()
+            );
+            peer.set_nonblocking(true).unwrap();
+            let mut byte = [0];
+            assert_eq!(
+                peer.read(&mut byte).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
     }
 
     #[test]
