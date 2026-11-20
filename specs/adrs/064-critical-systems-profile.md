@@ -1,10 +1,12 @@
 # ADR-064 — Critical-systems profile: sealed topology, core placement, standby pairs and host-held state cells
 
 Backing: preview
-Validation: none — this is a proposed design; no code implements it and no
-test exercises it.
+Validation: none — sections 1 to 3 and 9 are implemented and tested; the
+rest is a proposed design that no code implements.
 
-**Status:** Proposed
+**Status:** Accepted in part — 2026-11-19. Sections 1, 2, 3 and 9 are
+Accepted. Sections 4 to 8 and 10 to 13 remain Proposed, each until its
+evidence item at the end is met.
 **Date:** 2026-11-17
 **Owner:** `mvm` maintainers
 **Extends, if accepted:** ADR-062 (workload actors: epochs, residency,
@@ -520,11 +522,14 @@ establishment, then hybrid signatures on long-lived artifacts. This ADR adds:
 
 ## Evidence before acceptance
 
-Each item needs a test or CI lane named in the implementing issue:
+Each item needs a test or CI lane named in the implementing issue. A section
+is Accepted once its items are met; the first two and the resource report are,
+and the rest are open.
 
-- A plan whose topology digest is absent, differs, or omits the unit is
-  refused.
-- Each refused post-admission mutation in section 3 is refused and audited.
+- Met (#5722): a plan whose topology digest is absent, differs, or omits the
+  unit is refused.
+- Met (#5723): each refused post-admission mutation in section 3 is refused
+  and audited.
 - A unit admitted with exclusive cores runs only on them, and a second unit is
   refused those cores; a backend with no mechanism refuses the requirement.
 - A write to a cell from a fenced epoch, from a reader, from a standby epoch,
@@ -537,6 +542,8 @@ Each item needs a test or CI lane named in the implementing issue:
 - With every controller killed, the host applies the static restart policy.
 - A controller's request for a unit the topology does not name is refused.
 - An edge absent from the topology is refused.
-- The resource report reproduces within a stated tolerance on a second run,
-  on at least one x86_64 and one aarch64 Linux host.
+- Met for cold units (#5733): the resource report reproduces within a stated
+  tolerance on a second run, on at least one x86_64 and one aarch64 Linux
+  host. Launch latency (#5746), standby memory and CPU, and the fit check are
+  not yet in the report.
 - An idle unit under the profile produces no periodic host wakeups.
