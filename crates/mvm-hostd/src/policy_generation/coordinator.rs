@@ -14,14 +14,21 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
+use mvm_core::host_interface::workload::{WorkloadChange, WorkloadCommit};
+
 use super::managed::CoordinatorStatus;
 #[cfg(unix)]
 use super::managed::Lifetime;
 #[cfg(unix)]
 use super::store::PublicationUnresolved;
+#[cfg(unix)]
+use super::workload_store::{CommitUnresolved, WorkloadStore};
 use super::{GenerationStore, ProjectPolicyCandidate, prepare_initial};
 
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
+/// What a frame that does not decode is reported under; a coordinator too old
+/// to know a request answers `Refused` with this in the message.
+const FRAME_DECODE_CONTEXT: &str = "decoding policy coordinator frame";
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 #[cfg(any(test, target_os = "linux"))]
 const MAX_STATUS_BYTES: usize = 4 * 1024;
@@ -30,6 +37,10 @@ const MAX_STATUS_BYTES: usize = 4 * 1024;
 /// barrier, so the count needs a ceiling, and it stays well under the default
 /// soft file-descriptor limit of 1024.
 const MAX_CONNECTIONS: usize = 256;
+/// Handler slots waiting activations cannot take, so a workload commit is not
+/// refused for want of a connection slot by activations alone.
+const CONTAINMENT_RESERVE: usize = 32;
+const MAX_ACTIVATIONS: usize = MAX_CONNECTIONS - CONTAINMENT_RESERVE;
 
 /// A local request to the resident lifecycle owner.
 #[derive(Debug, Serialize, Deserialize)]
@@ -43,8 +54,11 @@ pub enum Request {
     Activate { project: PathBuf },
     /// Return a validated committed generation, if one exists.
     Read { project: PathBuf },
-    /// Resolve an interrupted publication if no activation is running now.
+    /// Resolve an interrupted publication if no activation is running now,
+    /// and an interrupted workload ledger commit.
     Recover,
+    /// Durably apply one change to the workload containment ledger.
+    CommitWorkload { change: WorkloadChange },
 }
 
 /// Response from the owner. An absent `Read` result is an ordinary,
@@ -59,10 +73,13 @@ pub enum Response {
     Policy {
         candidate: Option<Box<ProjectPolicyCandidate>>,
     },
+    Workload {
+        commit: WorkloadCommit,
+    },
     Refused {
         message: String,
     },
-    /// An activation's outcome is unknown; reads stay refused until the
+    /// An activation's or workload commit's outcome is unknown; reads stay refused until the
     /// coordinator recovers the interrupted publication.
     Unresolved {
         message: String,
@@ -75,6 +92,44 @@ pub enum Response {
 pub fn socket_path(home: &Path) -> PathBuf {
     let dir = mvm_core::config::policy_generations_dir_at(home);
     mvm_core::config::host_agent_socket_dir_in(&dir).join("control.sock")
+}
+
+/// The request frame was written but no usable reply came back, so the owner
+/// may or may not have acted on it.
+#[derive(Debug)]
+pub struct ReplyLost(String);
+
+impl std::fmt::Display for ReplyLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "no reply from the policy coordinator after the request was sent: {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for ReplyLost {}
+
+/// Take the lock that makes this process the one owner of the coordinator's
+/// stores for its home. Held for as long as the owner serves.
+pub(super) fn acquire_owner(home: &Path) -> Result<mvm_core::util::atomic_io::FileLock> {
+    let socket = socket_path(home);
+    let dir = socket
+        .parent()
+        .context("policy coordinator socket has no parent")?;
+    mvm_core::private_fs::create_owned_private_dir(dir)?;
+    mvm_core::util::atomic_io::FileLock::try_acquire(&dir.join("owner"))?
+        .context("policy coordinator is already running")
+}
+
+/// Everything a bound coordinator owns besides its socket.
+#[cfg(unix)]
+pub(in crate::policy_generation) struct Bound {
+    pub(in crate::policy_generation) listener: std::os::unix::net::UnixListener,
+    pub(in crate::policy_generation) generations: std::sync::Arc<GenerationStore>,
+    pub(in crate::policy_generation) workloads: std::sync::Arc<WorkloadStore>,
+    pub(in crate::policy_generation) owner: mvm_core::util::atomic_io::FileLock,
 }
 
 #[cfg(unix)]
@@ -95,6 +150,27 @@ mod unix {
     use super::*;
 
     static ACTIVATIONS: Mutex<()> = Mutex::new(());
+    /// Activations holding a handler thread, whether running or waiting.
+    static WAITING_ACTIVATIONS: AtomicUsize = AtomicUsize::new(0);
+
+    /// One activation's claim on the waiting count, released on drop.
+    struct ActivationClaim;
+
+    impl ActivationClaim {
+        fn take() -> Option<Self> {
+            if WAITING_ACTIVATIONS.fetch_add(1, Ordering::SeqCst) >= MAX_ACTIVATIONS {
+                WAITING_ACTIVATIONS.fetch_sub(1, Ordering::SeqCst);
+                return None;
+            }
+            Some(Self)
+        }
+    }
+
+    impl Drop for ActivationClaim {
+        fn drop(&mut self) {
+            WAITING_ACTIVATIONS.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
     #[cfg(any(test, target_os = "linux"))]
     const STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -108,7 +184,7 @@ mod unix {
         ensure!(length <= max, "policy coordinator frame exceeds its limit");
         let mut bytes = vec![0; length];
         stream.read_exact(&mut bytes)?;
-        serde_json::from_slice(&bytes).context("decoding policy coordinator frame")
+        serde_json::from_slice(&bytes).context(FRAME_DECODE_CONTEXT)
     }
 
     fn write_frame<T: Serialize>(stream: &mut UnixStream, value: &T, max: usize) -> Result<()> {
@@ -135,6 +211,7 @@ mod unix {
         stream.set_write_timeout(Some(Duration::from_secs(30)))?;
         write_frame(&mut stream, request, MAX_REQUEST_BYTES)?;
         read_frame(&mut stream, MAX_RESPONSE_BYTES)
+            .map_err(|error| anyhow::Error::new(ReplyLost(format!("{error:#}"))))
     }
 
     /// Ask the process on this connection who it is, within a short deadline
@@ -151,7 +228,10 @@ mod unix {
             Response::Refused { message } => {
                 anyhow::bail!("policy coordinator refused a status request: {message}")
             }
-            Response::Ready | Response::Policy { .. } | Response::Unresolved { .. } => {
+            Response::Ready
+            | Response::Policy { .. }
+            | Response::Workload { .. }
+            | Response::Unresolved { .. } => {
                 anyhow::bail!("policy coordinator answered a status request with something else")
             }
         }
@@ -182,6 +262,7 @@ mod unix {
     fn handle(
         request: Request,
         store: &GenerationStore,
+        workloads: &WorkloadStore,
         status: &CoordinatorStatus,
     ) -> Result<Response> {
         if let Request::Activate { project } | Request::Read { project } = &request {
@@ -201,12 +282,26 @@ mod unix {
             Request::Recover => {
                 // Never wait: the caller may hold the shared barrier an
                 // activation is waiting on.
+                let ledger = workloads.recover();
                 if let Ok(_one_activation) = ACTIVATIONS.try_lock() {
                     store.recover()?;
                 }
+                ledger?;
                 return Ok(Response::Ready);
             }
+            // The ledger changes no launch authorization the barrier guards,
+            // so it neither takes the barrier nor waits on an activation.
+            Request::CommitWorkload { change } => {
+                return Ok(Response::Workload {
+                    commit: workloads.commit(&change)?,
+                });
+            }
             Request::Activate { project } => {
+                let Some(_claim) = ActivationClaim::take() else {
+                    return Ok(Response::Refused {
+                        message: "too many activations are waiting".into(),
+                    });
+                };
                 ensure!(
                     cfg!(target_os = "linux"),
                     "committed project policy initially supports Firecracker on Linux only"
@@ -264,7 +359,9 @@ mod unix {
     /// reported as such rather than as an ordinary refusal.
     fn error_response(error: &anyhow::Error) -> Response {
         let message = format!("{error:#}");
-        if error.downcast_ref::<PublicationUnresolved>().is_some() {
+        if error.downcast_ref::<PublicationUnresolved>().is_some()
+            || error.downcast_ref::<CommitUnresolved>().is_some()
+        {
             Response::Unresolved { message }
         } else {
             Response::Refused { message }
@@ -279,33 +376,39 @@ mod unix {
         let dir = mvm_core::config::policy_generations_dir_at(home);
         mvm_core::private_fs::create_owned_private_dir(home)?;
         mvm_core::private_fs::create_owned_private_dir(&dir)?;
-        let (listener, store, _owner) = {
+        let Bound {
+            listener,
+            generations,
+            workloads,
+            owner: _owner,
+        } = {
             let _spawn_lock = mvm_core::util::atomic_io::FileLock::acquire(&dir.join("spawn"))?;
             bind(home)?
         };
         serve_on(
             &listener,
-            &store,
+            &generations,
+            &workloads,
             &CoordinatorStatus::of_this_process(home, lifetime),
         )
     }
 
     pub(super) fn serve(home: &Path, lifetime: Lifetime) -> Result<()> {
-        let (listener, store, _owner) = bind(home)?;
+        let Bound {
+            listener,
+            generations,
+            workloads,
+            owner: _owner,
+        } = bind(home)?;
         serve_on(
             &listener,
-            &store,
+            &generations,
+            &workloads,
             &CoordinatorStatus::of_this_process(home, lifetime),
         )
     }
 
-    pub(in crate::policy_generation) fn bind(
-        home: &Path,
-    ) -> Result<(
-        UnixListener,
-        Arc<GenerationStore>,
-        mvm_core::util::atomic_io::FileLock,
-    )> {
+    pub(in crate::policy_generation) fn bind(home: &Path) -> Result<Bound> {
         ensure!(
             home.is_absolute(),
             "policy coordinator home must be absolute"
@@ -316,14 +419,10 @@ mod unix {
         );
         let store = Arc::new(GenerationStore::open(home.to_path_buf())?);
         let socket = socket_path(home);
-        let dir = socket
-            .parent()
-            .context("policy coordinator socket has no parent")?;
-        mvm_core::private_fs::create_owned_private_dir(dir)?;
         // Held for the listener's lifetime: recovery is only safe for the one
         // process that owns the store, and the socket probe below can race.
-        let owner = mvm_core::util::atomic_io::FileLock::try_acquire(&dir.join("owner"))?
-            .context("policy coordinator is already running")?;
+        let owner = acquire_owner(home)?;
+        let workloads = Arc::new(WorkloadStore::open(home)?);
         if let Ok(meta) = std::fs::symlink_metadata(&socket) {
             mvm_core::private_fs::require_current_owner(&meta)?;
             ensure!(
@@ -346,7 +445,15 @@ mod unix {
         if let Err(error) = store.recover() {
             tracing::warn!(%error, "policy coordinator could not recover an interrupted publication");
         }
-        Ok((listener, store, owner))
+        if let Err(error) = workloads.recover() {
+            tracing::warn!(%error, "policy coordinator could not recover an interrupted workload ledger commit");
+        }
+        Ok(Bound {
+            listener,
+            generations: store,
+            workloads,
+            owner,
+        })
     }
 
     /// An in-flight slot, returned when dropped so a panicking handler
@@ -362,6 +469,7 @@ mod unix {
     pub(in crate::policy_generation) fn serve_on(
         listener: &UnixListener,
         store: &Arc<GenerationStore>,
+        workloads: &Arc<WorkloadStore>,
         status: &CoordinatorStatus,
     ) -> Result<()> {
         let in_flight = Arc::new(AtomicUsize::new(0));
@@ -390,6 +498,7 @@ mod unix {
                 continue;
             }
             let store = Arc::clone(store);
+            let workloads = Arc::clone(workloads);
             let status = status.clone();
             let slot = Slot(Arc::clone(&in_flight));
             // An activation can wait on a caller's shared launch guard.
@@ -399,7 +508,7 @@ mod unix {
             let spawned = std::thread::Builder::new().spawn(move || {
                 let _slot = slot;
                 let reply = match read_frame(&mut stream, MAX_REQUEST_BYTES)
-                    .and_then(|request| handle(request, &store, &status))
+                    .and_then(|request| handle(request, &store, &workloads, &status))
                 {
                     Ok(response) => response,
                     Err(error) => error_response(&error),
@@ -422,8 +531,10 @@ mod unix {
 
         #[test]
         fn relative_project_requests_are_refused_before_any_state_change() {
+            let _serial = MUTEX_TESTS.lock().unwrap();
             let home = tempfile::tempdir().unwrap();
             let store = GenerationStore::open(home.path().to_path_buf()).unwrap();
+            let workloads = WorkloadStore::open(home.path()).unwrap();
             for request in [
                 Request::Activate {
                     project: PathBuf::from("."),
@@ -433,7 +544,7 @@ mod unix {
                 },
             ] {
                 let status = CoordinatorStatus::of_this_process(home.path(), Lifetime::Detached);
-                let error = handle(request, &store, &status).unwrap_err();
+                let error = handle(request, &store, &workloads, &status).unwrap_err();
                 assert!(error.to_string().contains("must be absolute"), "{error}");
             }
             assert!(!store.has_active_generation().unwrap());
@@ -448,11 +559,16 @@ mod unix {
             let home = root.path().canonicalize().unwrap();
             environment.isolate_mvm_home(&home);
             let status = CoordinatorStatus::of_this_process(&home, Lifetime::Detached);
-            let (listener, store, owner) = bind(&home).unwrap();
+            let bound = bind(&home).unwrap();
             let served = status.clone();
             std::thread::spawn(move || {
-                let _owner = owner;
-                serve_on(&listener, &store, &served)
+                let _owner = bound.owner;
+                serve_on(
+                    &bound.listener,
+                    &bound.generations,
+                    &bound.workloads,
+                    &served,
+                )
             });
 
             let socket = socket_path(&home);
@@ -493,11 +609,12 @@ mod unix {
             let _serial = MUTEX_TESTS.lock().unwrap();
             let home = tempfile::tempdir().unwrap();
             let store = GenerationStore::open(home.path().to_path_buf()).unwrap();
+            let workloads = WorkloadStore::open(home.path()).unwrap();
             store
                 .write_obligation(&"a".repeat(64), &"b".repeat(64))
                 .unwrap();
             let status = CoordinatorStatus::of_this_process(home.path(), Lifetime::Detached);
-            let reply = handle(Request::Recover, &store, &status).unwrap();
+            let reply = handle(Request::Recover, &store, &workloads, &status).unwrap();
             assert!(matches!(reply, Response::Ready));
             assert!(!store.has_obligation().unwrap());
         }
@@ -509,6 +626,7 @@ mod unix {
             let project = home.path().join("project");
             std::fs::create_dir(&project).unwrap();
             let store = GenerationStore::open(home.path().join("state")).unwrap();
+            let workloads = WorkloadStore::open(&home.path().join("state")).unwrap();
             store
                 .write_obligation(&"a".repeat(64), &"b".repeat(64))
                 .unwrap();
@@ -521,13 +639,158 @@ mod unix {
                 let _ = release.recv();
             });
             acquired.recv().unwrap();
-            let error = handle(Request::Read { project }, &store, &status).unwrap_err();
+            let error = handle(Request::Read { project }, &store, &workloads, &status).unwrap_err();
             assert!(matches!(
                 error_response(&error),
                 Response::Unresolved { .. }
             ));
             held.send(()).unwrap();
             holder.join().unwrap();
+        }
+
+        struct Served {
+            _environment: mvm_core::util::test_env::TestEnv,
+            _root: tempfile::TempDir,
+            home: PathBuf,
+            socket: PathBuf,
+            workloads: Arc<WorkloadStore>,
+        }
+
+        fn serve_workloads() -> Served {
+            let mut environment = mvm_core::util::test_env::TestEnv::new();
+            let root = tempfile::tempdir().unwrap();
+            let home = root.path().canonicalize().unwrap();
+            environment.isolate_mvm_home(&home);
+            let status = CoordinatorStatus::of_this_process(&home, Lifetime::Detached);
+            let bound = bind(&home).unwrap();
+            let workloads = Arc::clone(&bound.workloads);
+            std::thread::spawn(move || {
+                let _owner = bound.owner;
+                serve_on(
+                    &bound.listener,
+                    &bound.generations,
+                    &bound.workloads,
+                    &status,
+                )
+            });
+            Served {
+                _environment: environment,
+                _root: root,
+                socket: socket_path(&home),
+                home,
+                workloads,
+            }
+        }
+
+        fn quarantine(name: &str) -> WorkloadChange {
+            WorkloadChange::Quarantine {
+                workload: name.into(),
+            }
+        }
+
+        #[test]
+        fn workload_commits_over_the_socket_reach_the_readers_ledger() {
+            use mvm_core::host_interface::{Denial, ExecutionEpoch, workload::WorkloadLedger};
+            let _serial = MUTEX_TESTS.lock().unwrap();
+            let served = serve_workloads();
+            let commit = commit_workload(&served.socket, &quarantine("suspect")).unwrap();
+            assert_eq!(commit.sequence, 1);
+            let ledger = WorkloadLedger::load_at(&served.home).unwrap();
+            assert_eq!(
+                ledger.authorize("suspect", ExecutionEpoch(1)),
+                Err(Denial::WorkloadQuarantined("suspect".into()))
+            );
+            assert!(ledger.authorize("other", ExecutionEpoch(1)).is_ok());
+
+            let replaced = commit_workload(
+                &served.socket,
+                &WorkloadChange::Replace {
+                    workload: "suspect".into(),
+                    from_epoch: ExecutionEpoch(1),
+                },
+            )
+            .unwrap();
+            assert_eq!(replaced.entry.epoch, ExecutionEpoch(2));
+            let ledger = WorkloadLedger::load_at(&served.home).unwrap();
+            assert!(ledger.authorize("suspect", ExecutionEpoch(2)).is_ok());
+            assert_eq!(
+                ledger.authorize("suspect", ExecutionEpoch(1)),
+                Err(Denial::StaleEpoch { got: 1, current: 2 })
+            );
+        }
+
+        #[test]
+        fn a_workload_commit_completes_while_another_activation_holds_the_activation_lock() {
+            let _serial = MUTEX_TESTS.lock().unwrap();
+            let served = serve_workloads();
+            let _activation = ACTIVATIONS.lock().unwrap();
+            let started = std::time::Instant::now();
+            commit_workload(&served.socket, &quarantine("suspect")).unwrap();
+            assert!(started.elapsed() < Duration::from_secs(5));
+        }
+
+        #[test]
+        fn an_unresolved_workload_commit_is_reported_and_recover_clears_it() {
+            use crate::policy_generation::workload_store::Step;
+            let _serial = MUTEX_TESTS.lock().unwrap();
+            let served = serve_workloads();
+            served.workloads.fail_after(Step::CommitObligation);
+            let error = commit_workload(&served.socket, &quarantine("suspect")).unwrap_err();
+            assert!(error.to_string().contains("unknown"), "{error:#}");
+            assert!(
+                mvm_core::host_interface::workload::WorkloadLedger::load_at(&served.home).is_err()
+            );
+            assert!(matches!(
+                call(&served.socket, &Request::Recover).unwrap(),
+                Response::Ready
+            ));
+            assert_eq!(
+                commit_workload(&served.socket, &quarantine("suspect"))
+                    .unwrap()
+                    .sequence,
+                1
+            );
+        }
+
+        #[test]
+        fn a_commit_unresolved_error_is_reported_as_unresolved() {
+            let unresolved = anyhow::Error::new(CommitUnresolved::new("x"));
+            assert!(matches!(
+                error_response(&unresolved),
+                Response::Unresolved { .. }
+            ));
+        }
+
+        #[test]
+        fn handle_refuses_an_activate_over_the_cap_and_still_commits_a_workload() {
+            let _serial = MUTEX_TESTS.lock().unwrap();
+            let home = tempfile::tempdir().unwrap();
+            let store = GenerationStore::open(home.path().to_path_buf()).unwrap();
+            let workloads = WorkloadStore::open(home.path()).unwrap();
+            let status = CoordinatorStatus::of_this_process(home.path(), Lifetime::Detached);
+            WAITING_ACTIVATIONS.store(MAX_ACTIVATIONS, Ordering::SeqCst);
+            let activate = handle(
+                Request::Activate {
+                    project: home.path().to_path_buf(),
+                },
+                &store,
+                &workloads,
+                &status,
+            );
+            let commit = handle(
+                Request::CommitWorkload {
+                    change: quarantine("suspect"),
+                },
+                &store,
+                &workloads,
+                &status,
+            );
+            WAITING_ACTIVATIONS.store(0, Ordering::SeqCst);
+            assert!(matches!(
+                activate.unwrap(),
+                Response::Refused { message } if message.contains("too many activations")
+            ));
+            assert!(matches!(commit.unwrap(), Response::Workload { .. }));
         }
 
         #[test]
@@ -684,5 +947,63 @@ pub fn call(socket: &Path, request: &Request) -> Result<Response> {
     {
         let _ = (socket, request);
         anyhow::bail!("policy coordinator is supported only on Linux and macOS")
+    }
+}
+
+/// Commit one workload ledger change through the coordinator at `socket`.
+///
+/// # Errors
+///
+/// The coordinator is unavailable or refuses the change. When the request was
+/// sent but no usable reply came back, or the coordinator reports the commit
+/// unresolved, the outcome is unknown: read the ledger back rather than
+/// assuming the change did not land.
+pub fn commit_workload(socket: &Path, change: &WorkloadChange) -> Result<WorkloadCommit> {
+    let request = Request::CommitWorkload {
+        change: change.clone(),
+    };
+    match call(socket, &request) {
+        Ok(Response::Workload { commit }) => Ok(commit),
+        Ok(Response::Refused { message }) if refused_by_older_coordinator(&message) => {
+            anyhow::bail!(
+                "the running policy coordinator is older than this binary and must be stopped before workload changes can be committed"
+            )
+        }
+        Ok(Response::Refused { message }) => {
+            anyhow::bail!("policy coordinator refused: {message}")
+        }
+        Ok(Response::Unresolved { message }) => anyhow::bail!(
+            "the outcome of the workload ledger commit is unknown and must be read back: {message}"
+        ),
+        Ok(Response::Ready | Response::Status { .. } | Response::Policy { .. }) => {
+            anyhow::bail!("unexpected policy coordinator response to a workload commit")
+        }
+        Err(error) if error.downcast_ref::<ReplyLost>().is_some() => anyhow::bail!(
+            "the outcome of the workload ledger commit is unknown and must be read back, not assumed uncommitted: {error:#}"
+        ),
+        Err(error) => Err(error.context("policy coordinator unavailable for a workload commit")),
+    }
+}
+
+/// An older coordinator cannot decode `commit_workload`, so it answers with
+/// its frame-decoding failure naming that request.
+fn refused_by_older_coordinator(message: &str) -> bool {
+    message.contains(FRAME_DECODE_CONTEXT) && message.contains("commit_workload")
+}
+
+#[cfg(test)]
+mod older_coordinator_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_frame_decoding_refusal_naming_the_request_reads_as_an_older_coordinator() {
+        let old = format!(
+            "{FRAME_DECODE_CONTEXT}: unknown variant `commit_workload`, expected one of `ping`"
+        );
+        assert!(refused_by_older_coordinator(&old));
+        assert!(!refused_by_older_coordinator("workload ledger is full"));
+        assert!(!refused_by_older_coordinator(&format!(
+            "{FRAME_DECODE_CONTEXT}: unknown variant `other`"
+        )));
     }
 }

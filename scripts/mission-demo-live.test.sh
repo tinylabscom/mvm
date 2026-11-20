@@ -50,10 +50,13 @@ cat > "${work}/mvmctl" <<'S'
 #            | queues-other | needs-bootstrap | wedge
 fake="${FAKE_STATE:?}"; mode="${FAKE_MODE:-ok}"; home="${MVM_HOME:?}"
 [ "${1:-}" = --builder ] && shift 2
-audit="${home}/audit/local.jsonl"; ledger="${home}/host-interface/workloads.json"
-mkdir -p "${home}/audit" "${home}/host-interface"
+audit="${home}/audit/local.jsonl"; ledger="${home}/policy-generations/workloads/ledger.json"
+mkdir -p "${home}/audit" "${home}/policy-generations/workloads"
 epoch_of() { sed -n "s/.*\"$1\": *{\"epoch\": *\([0-9]*\).*/\1/p" "${ledger}" 2>/dev/null | head -1; }
-set_ledger() { printf '{"%s": {"epoch": %s, "quarantined": %s}}\n' "$1" "$2" "$3" > "${ledger}"; }
+set_ledger() {
+  local n; n=$(sed -n 's/.*"sequence": *\([0-9]*\).*/\1/p' "${ledger}" 2>/dev/null | head -1)
+  printf '{"sequence":%s,"workloads":{"%s":{"epoch":%s,"quarantined":%s}}}\n' "$(( ${n:-0} + 1 ))" "$1" "$2" "$3" > "${ledger}"
+}
 case "${1:-} ${2:-}" in
   "--version "*) echo "mvmctl fake" ;;
   "image pull") ;;
@@ -76,7 +79,7 @@ case "${1:-} ${2:-}" in
       if [[ "${allargs}" == *" -d "* ]]; then echo "Error: the published OCI guest runtime is not prepared; run \`mvmctl bootstrap\` first" >&2; exit 1; fi
       touch "${fake}/prepared"; exit 0
     fi
-    if grep -q '"quarantined": true' "${ledger}" 2>/dev/null; then echo "Error: workload ${name} is quarantined" >&2; exit 1; fi
+    if grep -q '"quarantined": *true' "${ledger}" 2>/dev/null; then echo "Error: workload ${name} is quarantined" >&2; exit 1; fi
     [ "${mode}" != launch-failure ] || { echo "launch failed" >&2; exit 1; }
     if [ "${mode}" = replacement-launch-failure ] && [ "$(epoch_of "${name}")" = 2 ]; then echo "replacement launch failed" >&2; exit 1; fi
     mkdir -p "${home}/vms/${name}"; head -c 16 /dev/urandom | od -An -tx1 > "${home}/vms/${name}/mailbox-epoch.secret"

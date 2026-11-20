@@ -298,6 +298,69 @@ step functions, not through a real failing `fsync`, and the unresolved-error
 wrapping inside `publish_initial` has no test driven by a real failure.
 Migration exclusion and prepared-head signing custody are untouched.
 
+## Workload ledger store
+
+Covers `mvm-hostd/src/policy_generation/workload_store.rs`, the
+`CommitWorkload` request in `policy_generation/coordinator.rs`, the readers in
+`mvm-core/src/host_interface/workload.rs` and `mvm-hostd/src/containment.rs`,
+for [#5255](https://github.com/tinylabscom/mvm/issues/5255). The policy
+coordinator is the only writer of the containment ledger. Files, all under
+`policy-generations/workloads/`: `ledger.json` (sequence plus entries) and
+`pending.json` (the obligation, `Migrate` or `Commit{sequence, sha256}`).
+
+Commit order, under the store's lane and the coordinator owner lock: recover,
+migrate if the ledger is absent, apply the change, write `pending.json`
+durably, replace `ledger.json` durably, remove `pending.json`. A quarantine of
+an already quarantined workload returns the current commit without writing; a
+replace must name the workload's current epoch. Readers refuse while
+`pending.json` exists (checked before and after reading the ledger), on a
+malformed, oversize or non-regular ledger, and read the legacy file only when
+no canonical ledger exists. A reader that sees the obligation waits and
+re-reads, up to 100 rounds of 10 ms, before it refuses, so a commit in flight
+does not fail a launch. A stranded obligation is resolved by a `Recover`
+request: `quarantine`, `replace` and every launch, start, resume, restore and
+fork path send it, on every host and backend, when they see one
+(`recover_workload_ledger`, one `stat` otherwise). A reader reached some other
+way refuses until one of those runs.
+
+Interruptions: after the obligation and before the ledger rename, the ledger
+still has `sequence - 1` and recovery removes the obligation; after the rename,
+the ledger bytes match the recorded hash and recovery removes it; matching
+neither leaves the obligation, readers and further commits refuse, and the
+answer on the wire is `Unresolved`. Recovery runs at bind, on `Recover`, and
+before every commit.
+
+Migration: pre-validate the legacy file (size, strict parse, count and name
+bounds; a bad file changes nothing), write `Migrate`, create the archive
+directory, exchange it with `host-interface/workloads.json` so that path is a
+directory, write `MOVED` inside it, read the archived file, write `ledger.json`
+at sequence 0, remove the obligation. Any older binary's rename onto that path
+fails and its read fails. A resumed migration repeats from the obligation; a
+legacy write landing before the exchange is what the ledger starts from. The
+archive is never deleted or rewritten.
+
+Bounds: 16384 workloads, of which the last 1024 are reserved for quarantine
+(a replace cannot create an entry inside the reserve), names 1 to 256 bytes,
+4 MiB per ledger. The byte limit has the same reserve: a replace that creates a
+new entry is refused once the ledger would exceed 4 MiB minus 1024 worst-case
+escaped entries; a quarantine keeps the full limit.
+
+Ownership: the store holds an exclusive lock on a file inside the ledger
+directory for its life, so a second owner is refused however the home path is
+spelled (a symlink, a different spelling). The coordinator's own owner lock is
+separate and unchanged. A migrated ledger is never rebuilt: a fenced legacy
+path with no migration obligation and no canonical file is an error, because
+the archive predates every later commit. Waiting activations cannot take the
+last 32 handler slots, which keeps a quarantine from being refused at the
+connection limit by activations alone.
+
+Limits: a launch that read the ledger before a quarantine commit can still
+start after it, so the operator stops the machine after quarantining; mailbox
+destination commits are not ordered by this lane yet; quarantine and replace
+need the coordinator process and are refused when it cannot start. A failure
+after the obligation is exercised by stopping between the store's steps, not
+through a failing `fsync`.
+
 ## Compile-time AES-GCM boundary
 
 Reviewed `crates/mvm-crypto/src/aead.rs`,
