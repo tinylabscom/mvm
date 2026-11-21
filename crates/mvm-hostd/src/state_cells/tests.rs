@@ -578,13 +578,13 @@ fn a_topology_over_the_cell_count_or_byte_ceiling_is_refused_by_name() {
     );
 
     let mut large = topology(1, 16);
-    large.cells = (0..8)
-        .map(|n| named_cell(&format!("c{n}"), MAX_CELL_BYTES))
+    large.cells = (0..32)
+        .map(|n| named_cell(&format!("c{n:02}"), MAX_CELL_BYTES))
         .collect();
     assert_eq!(
         check_limits(&large),
         Err(ReservationLimit::TooManyBytes {
-            bytes: 8 * slots::file_len(MAX_CELL_BYTES)
+            bytes: 32 * slots::file_len(MAX_CELL_BYTES)
         })
     );
     assert_eq!(
