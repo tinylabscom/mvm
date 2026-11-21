@@ -36,9 +36,9 @@ const CONNECTION_LIMIT_MESSAGE: &str = "policy coordinator is at its connection 
 const WAITING_ACTIVATIONS_MESSAGE: &str = "too many activations are waiting";
 const WAITING_DESTINATIONS_MESSAGE: &str = "too many destination requests are waiting";
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
-#[cfg(any(test, target_os = "linux"))]
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
 const MAX_STATUS_BYTES: usize = 4 * 1024;
-#[cfg(any(target_os = "linux", all(test, unix)))]
+#[cfg(any(target_os = "linux", target_os = "macos", all(test, unix)))]
 pub(super) const STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Handler threads alive at once; a connection past this is refused. An
 /// activation can hold its thread for as long as a launch holds the shared
@@ -166,7 +166,7 @@ mod unix {
         time::Duration,
     };
 
-    #[cfg(any(test, target_os = "linux"))]
+    #[cfg(any(test, target_os = "linux", target_os = "macos"))]
     use std::time::Instant;
 
     use super::*;
@@ -314,7 +314,7 @@ mod unix {
 
     /// Ask the process on this connection who it is, within a short deadline
     /// and a small reply. The caller decides whether to believe it.
-    #[cfg(any(test, target_os = "linux"))]
+    #[cfg(any(test, target_os = "linux", target_os = "macos"))]
     pub(in crate::policy_generation) fn exchange_status(
         stream: UnixStream,
         deadline: Instant,
@@ -1363,6 +1363,20 @@ mod unix {
         }
 
         #[test]
+        fn malformed_and_truncated_status_replies_are_refused() {
+            for bytes in [b"\0\0\0\x01{".as_slice(), b"\0\0", b""] {
+                let (client, mut server) = UnixStream::pair().unwrap();
+                let answering = std::thread::spawn(move || {
+                    let request = read_frame::<Request>(&mut server, MAX_REQUEST_BYTES).unwrap();
+                    assert!(matches!(request, Request::Status));
+                    server.write_all(bytes).unwrap();
+                });
+                assert!(exchange_status(client, Instant::now() + STATUS_TIMEOUT).is_err());
+                answering.join().unwrap();
+            }
+        }
+
+        #[test]
         fn frame_length_is_checked_before_allocating_or_parsing() {
             let (mut sender, mut receiver) = UnixStream::pair().unwrap();
             sender
@@ -1437,13 +1451,10 @@ pub fn serve() -> Result<()> {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) use unix::exchange_status;
 #[cfg(all(test, unix))]
 pub(crate) use unix::serve_in_process;
-#[cfg(all(test, target_os = "linux"))]
-pub(super) use unix::{bind, serve_on};
-
 /// Send a bounded request to the local coordinator.
 ///
 /// # Errors

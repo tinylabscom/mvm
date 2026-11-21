@@ -204,12 +204,6 @@ landlock = { workspace = true }
 # a second CSPRNG (`rand` 0.10, `rand_core` 0.10, `chacha20`) and
 # `data-encoding` into a macOS `mvmctl` with no consumer at all.
 hickory-proto = { workspace = true }
-# Native read-only user-manager observation; no service or handover feature.
-zbus = { version = "6.4", default-features = false, features = ["tokio", "p2p"] }
-
-[target.'cfg(unix)'.dev-dependencies]
-# Hermetic socket-pair fixture server, never a production service.
-zbus = { version = "6.4", default-features = false, features = ["tokio", "p2p", "service"] }
 
 [dev-dependencies]
 keyring.workspace = true

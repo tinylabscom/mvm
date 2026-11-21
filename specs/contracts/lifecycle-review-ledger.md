@@ -14,6 +14,35 @@ separately, the files that were not read. Absence from the "read" column is not 
 soundness. "Read" is taken from the fixing PR descriptions and the review notes for the lane; the
 line ranges are as recorded there and were not re-derived when this file was written.
 
+## Direct coordinator process observation
+
+Reviewed the read-only `policy coordinator` route through client
+`process_status`, host observation, the bounded status exchange and connected
+socket peer helpers. Observation owns only its socket and drops it on every
+success or refusal. It neither launches a process nor initializes a home,
+keys, socket, spawn lock or durable store. Existing activation, pending
+obligations, publication recovery and resident ownership remain unchanged.
+
+Linux uses `SO_PEERCRED`; macOS reuses the connected-peer PID helper and adds
+`getpeereid` for the effective UID. The same connection supplies credentials
+before sending Status and carries the reply. Nonblocking connect and all
+status reads/writes share one absolute five-second IPC deadline. Unsupported
+platforms refuse. Canonicalization and OS scheduling stalls are not bounded.
+The reply must match protocol 1, peer PID/UID, requested canonical home and
+detached lifetime; a managed self-claim cannot establish service provenance.
+
+Focused tests cover a connected detached reply, replacement of the socket
+pathname without reconnecting, wrong home/protocol/PID/UID/lifetime,
+missing/stopped sockets without state creation, expired and trickled-frame
+deadlines, malformed/truncated/oversized replies and CLI startup bypass.
+This is diagnostic process observation, not readiness, current authority,
+commit permission, restart/reap supervision, reboot persistence or confinement
+from same-user processes. Socket delegation is not excluded by these checks.
+No service manager or live workload was exercised; this review does not
+extend backend security guarantees or change the broader same-host threat
+model. Legacy service startup validation and wire meanings remain, but
+native manager observation code and its D-Bus dependencies are removed.
+
 ## Conformance authenticated HVF cleanup
 
 Reviewed the conformance reaper, its scenario after-hook, interrupt handler,
@@ -374,7 +403,12 @@ extra-owner rejection rule. This does not identify the cause of a particular
 live EOF, nor prove guest application readiness. No guest execution or broad
 supervisor/lifecycle review is implied by this focused change.
 
-## Manager-owned policy coordinator identification
+## Superseded: manager-owned policy coordinator identification
+
+This records the former implementation, not the current command contract.
+The direct coordinator observation review above and ADR-111's 2026-11-21
+amendment supersede it. The native manager transport has been removed;
+`mvmctl policy coordinator` no longer queries or requires a service manager.
 
 Covers `mvm-hostd/src/policy_generation/managed.rs`, the `Status` request and
 connection handling in `policy_generation/coordinator.rs`, and the

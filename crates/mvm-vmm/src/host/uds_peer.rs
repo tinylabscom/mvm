@@ -10,6 +10,23 @@ use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 
+/// Obtain the effective peer UID from this connected socket on macOS.
+///
+/// # Errors
+///
+/// The kernel cannot return peer credentials for this socket.
+#[cfg(target_os = "macos")]
+pub fn connected_peer_uid(socket: &UnixStream) -> io::Result<u32> {
+    let mut uid = 0;
+    let mut gid = 0;
+    // SAFETY: both outputs are writable stack values, and the borrowed socket
+    // remains valid for this call.
+    if unsafe { libc::getpeereid(socket.as_raw_fd(), &mut uid, &mut gid) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(uid)
+}
+
 /// Obtain the peer PID directly from this connected socket.
 pub fn connected_peer_pid(socket: &UnixStream) -> io::Result<libc::pid_t> {
     #[cfg(target_os = "macos")]
