@@ -405,9 +405,9 @@ fn startup_preflight_refuses_collisions_aliases_linked_and_writable_without_clos
     let writable = std::fs::File::create(&path).unwrap();
     std::fs::remove_file(&path).unwrap();
     assert!(validate_startup_descriptors(&[writable.as_raw_fd()]).is_err());
-    let closed = alias.as_raw_fd();
-    drop(alias);
-    assert!(validate_startup_descriptors(&[closed]).is_err());
+    // A number a sibling test could have reopened after a close proves nothing; no process
+    // can hold i32::MAX (descriptor limits are far lower), so it is never open.
+    assert!(validate_startup_descriptors(&[i32::MAX]).is_err());
     // These are descriptor-policy negatives, never native or signed-open proof.
 }
 
