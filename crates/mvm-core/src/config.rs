@@ -1,6 +1,8 @@
 use sha2::Digest as _;
 
+mod critical;
 mod output_parent;
+pub use critical::{state_cells_dir_at, topologies_dir_at};
 pub use output_parent::{create_output_parent, create_private_dir_resolved};
 
 /// Default Firecracker version, overridable at build time via `MVM_FC_VERSION` env var.
@@ -320,11 +322,6 @@ pub fn policy_generations_dir() -> std::path::PathBuf {
 /// Durable committed project generations beneath an explicit MVM home.
 pub fn policy_generations_dir_at(home: impl AsRef<std::path::Path>) -> std::path::PathBuf {
     home.as_ref().join("policy-generations")
-}
-
-/// Admitted topology generations, one directory per tenant: `<mvm_home>/topologies`.
-pub fn topologies_dir_at(home: impl AsRef<std::path::Path>) -> std::path::PathBuf {
-    home.as_ref().join("topologies")
 }
 
 /// The user's authored policy files: `<mvm_home>/config/policy`.
