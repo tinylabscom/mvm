@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::{ParseTimestampError, UtcTimestamp};
 use thiserror::Error;
 
 use crate::plan::execution_plan::ExecutionPlan;
@@ -25,23 +25,31 @@ pub use mvm_contract::plan::validity::FreshnessClaims;
 pub enum PlanValidityError {
     #[error("plan not yet valid (valid_from={valid_from}, now={now})")]
     NotYetValid {
-        valid_from: DateTime<Utc>,
-        now: DateTime<Utc>,
+        valid_from: UtcTimestamp,
+        now: UtcTimestamp,
     },
     #[error("plan expired (valid_until={valid_until}, now={now})")]
     Expired {
-        valid_until: DateTime<Utc>,
-        now: DateTime<Utc>,
+        valid_until: UtcTimestamp,
+        now: UtcTimestamp,
     },
     #[error("plan validity window inverted (valid_from={valid_from} >= valid_until={valid_until})")]
     InvertedWindow {
-        valid_from: DateTime<Utc>,
-        valid_until: DateTime<Utc>,
+        valid_from: UtcTimestamp,
+        valid_until: UtcTimestamp,
     },
     #[error("plan nonce already seen for signer '{signer}'")]
     NonceReplay { signer: String },
     #[error("freshness block missing required field(s)")]
     MissingFreshness,
+    #[error("timestamp outside the representable years 0000..=9999")]
+    TimestampOutOfRange,
+}
+
+impl From<ParseTimestampError> for PlanValidityError {
+    fn from(_: ParseTimestampError) -> Self {
+        Self::TimestampOutOfRange
+    }
 }
 
 /// The freshness inputs the window + nonce checks need, decoupled
@@ -50,19 +58,21 @@ pub enum PlanValidityError {
 /// its own.
 pub trait Freshness {
     fn nonce(&self) -> &Nonce;
-    fn valid_from(&self) -> DateTime<Utc>;
-    fn valid_until(&self) -> DateTime<Utc>;
+    fn valid_from(&self) -> Result<UtcTimestamp, PlanValidityError>;
+    fn valid_until(&self) -> Result<UtcTimestamp, PlanValidityError>;
 }
 
 impl Freshness for ExecutionPlan {
     fn nonce(&self) -> &Nonce {
         &self.nonce
     }
-    fn valid_from(&self) -> DateTime<Utc> {
-        self.valid_from
+    // Temporary: the plan's window is still chrono-typed, so a window outside
+    // the representable years is refused here rather than clamped.
+    fn valid_from(&self) -> Result<UtcTimestamp, PlanValidityError> {
+        Ok(self.valid_from.try_into()?)
     }
-    fn valid_until(&self) -> DateTime<Utc> {
-        self.valid_until
+    fn valid_until(&self) -> Result<UtcTimestamp, PlanValidityError> {
+        Ok(self.valid_until.try_into()?)
     }
 }
 
@@ -85,8 +95,8 @@ pub fn checked(claims: &FreshnessClaims) -> Result<CheckedFreshness, PlanValidit
 /// [`check_window`] and [`NonceStore::check_and_insert`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedFreshness {
-    pub valid_from: DateTime<Utc>,
-    pub valid_until: DateTime<Utc>,
+    pub valid_from: UtcTimestamp,
+    pub valid_until: UtcTimestamp,
     pub nonce: Nonce,
 }
 
@@ -94,19 +104,19 @@ impl Freshness for CheckedFreshness {
     fn nonce(&self) -> &Nonce {
         &self.nonce
     }
-    fn valid_from(&self) -> DateTime<Utc> {
-        self.valid_from
+    fn valid_from(&self) -> Result<UtcTimestamp, PlanValidityError> {
+        Ok(self.valid_from)
     }
-    fn valid_until(&self) -> DateTime<Utc> {
-        self.valid_until
+    fn valid_until(&self) -> Result<UtcTimestamp, PlanValidityError> {
+        Ok(self.valid_until)
     }
 }
 
 /// Stateless check: does the item's window cover `now`, and is it
 /// well-formed? Inverted windows fail closed.
-pub fn check_window<F: Freshness>(item: &F, now: DateTime<Utc>) -> Result<(), PlanValidityError> {
-    let valid_from = item.valid_from();
-    let valid_until = item.valid_until();
+pub fn check_window<F: Freshness>(item: &F, now: UtcTimestamp) -> Result<(), PlanValidityError> {
+    let valid_from = item.valid_from()?;
+    let valid_until = item.valid_until()?;
     if valid_from >= valid_until {
         return Err(PlanValidityError::InvertedWindow {
             valid_from,
@@ -122,6 +132,16 @@ pub fn check_window<F: Freshness>(item: &F, now: DateTime<Utc>) -> Result<(), Pl
     Ok(())
 }
 
+/// [`check_window`] for a caller whose clock is still a chrono instant; one
+/// outside years 0000..=9999 is refused. Temporary, until the host clock moves
+/// to `UtcTimestamp`.
+pub fn check_window_chrono<F: Freshness>(
+    item: &F,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), PlanValidityError> {
+    check_window(item, now.try_into()?)
+}
+
 /// Per-signer nonce ledger. Bounded by `valid_until`: when a stored
 /// nonce passes its plan's `valid_until` it can be GC'd safely
 /// because `check_window` would reject the plan anyway.
@@ -133,7 +153,7 @@ pub fn check_window<F: Freshness>(item: &F, now: DateTime<Utc>) -> Result<(), Pl
 #[derive(Debug, Default)]
 pub struct NonceStore {
     /// Map: signer_id → seen nonces with their plan's `valid_until`.
-    seen: HashMap<String, HashMap<Nonce, DateTime<Utc>>>,
+    seen: HashMap<String, HashMap<Nonce, UtcTimestamp>>,
 }
 
 impl NonceStore {
@@ -155,14 +175,14 @@ impl NonceStore {
                 signer: signer.to_string(),
             });
         }
-        entry.insert(item.nonce().clone(), item.valid_until());
+        entry.insert(item.nonce().clone(), item.valid_until()?);
         Ok(())
     }
 
     /// Drop nonces whose `valid_until` is at or before `now`. The
     /// supervisor calls this on a timer; missing a sweep only inflates
     /// memory, never compromises safety.
-    pub fn gc(&mut self, now: DateTime<Utc>) {
+    pub fn gc(&mut self, now: UtcTimestamp) {
         for nonces in self.seen.values_mut() {
             nonces.retain(|_, valid_until| *valid_until > now);
         }
@@ -182,25 +202,33 @@ impl NonceStore {
 mod tests {
     use super::*;
     use crate::plan::test_support::PlanFixture;
-    use chrono::Duration;
+    use chrono::{DateTime, Duration, Utc};
+
+    const NOW: i64 = 1_784_205_296;
+
+    fn ts(secs: i64) -> UtcTimestamp {
+        UtcTimestamp::from_unix(secs, 0).unwrap()
+    }
+
+    fn at(dt: DateTime<Utc>) -> UtcTimestamp {
+        dt.try_into().unwrap()
+    }
 
     fn nonce(seed: u8) -> Nonce {
         Nonce::from_bytes([seed; 16])
+    }
+
+    fn window(from: i64, until: i64, seed: u8) -> CheckedFreshness {
+        checked(&FreshnessClaims::new(ts(from), ts(until), nonce(seed))).unwrap()
     }
 
     // The reusable freshness primitive rides the same window + nonce
     // ledger the plan path uses — one store, not a fork.
     #[test]
     fn checked_freshness_passes_window_and_records_once() {
-        let now = Utc::now();
-        let claims = FreshnessClaims::new(
-            now - Duration::seconds(1),
-            now + Duration::minutes(5),
-            nonce(1),
-        );
-        let fresh = checked(&claims).expect("full claims are valid");
+        let fresh = window(NOW - 1, NOW + 300, 1);
 
-        check_window(&fresh, now).expect("now is inside the window");
+        check_window(&fresh, ts(NOW)).expect("now is inside the window");
 
         let mut store = NonceStore::new();
         store
@@ -224,10 +252,9 @@ mod tests {
         assert_eq!(checked(&claims), Err(PlanValidityError::MissingFreshness));
 
         // A partially-populated block is equally invalid.
-        let now = Utc::now();
         let partial = FreshnessClaims {
-            valid_from: Some(now),
-            valid_until: Some(now + Duration::minutes(1)),
+            valid_from: Some(ts(NOW)),
+            valid_until: Some(ts(NOW + 60)),
             nonce: None,
         };
         assert_eq!(checked(&partial), Err(PlanValidityError::MissingFreshness));
@@ -235,29 +262,80 @@ mod tests {
 
     #[test]
     fn checked_freshness_rejects_stale_and_future_windows() {
-        let now = Utc::now();
-
-        let expired = checked(&FreshnessClaims::new(
-            now - Duration::minutes(10),
-            now - Duration::minutes(5),
-            nonce(2),
-        ))
-        .unwrap();
+        let expired = window(NOW - 600, NOW - 300, 2);
         assert!(matches!(
-            check_window(&expired, now),
+            check_window(&expired, ts(NOW)),
             Err(PlanValidityError::Expired { .. })
         ));
 
-        let not_yet = checked(&FreshnessClaims::new(
-            now + Duration::minutes(5),
-            now + Duration::minutes(10),
-            nonce(3),
-        ))
-        .unwrap();
+        let not_yet = window(NOW + 300, NOW + 600, 3);
         assert!(matches!(
-            check_window(&not_yet, now),
+            check_window(&not_yet, ts(NOW)),
             Err(PlanValidityError::NotYetValid { .. })
         ));
+    }
+
+    // The window rule as it stood on chrono, kept here as the oracle: the
+    // migrated check must agree at, and one nanosecond either side of, both
+    // edges, for whole-second and fractional edges alike.
+    #[test]
+    fn window_check_matches_the_chrono_rule_at_every_edge() {
+        let chrono_rule = |from: DateTime<Utc>, until: DateTime<Utc>, now: DateTime<Utc>| {
+            if from >= until {
+                "inverted"
+            } else if now < from {
+                "not_yet"
+            } else if now >= until {
+                "expired"
+            } else {
+                "ok"
+            }
+        };
+        let kind = |r: Result<(), PlanValidityError>| match r {
+            Ok(()) => "ok",
+            Err(PlanValidityError::InvertedWindow { .. }) => "inverted",
+            Err(PlanValidityError::NotYetValid { .. }) => "not_yet",
+            Err(PlanValidityError::Expired { .. }) => "expired",
+            Err(e) => panic!("unexpected {e}"),
+        };
+        let base = DateTime::from_timestamp(NOW, 0).unwrap();
+        for frac in [0, 1, 500_000_000, 999_999_999] {
+            let from = base + Duration::nanoseconds(frac);
+            for until in [
+                from + Duration::minutes(10),
+                from,
+                from - Duration::nanoseconds(1),
+            ] {
+                let item = CheckedFreshness {
+                    valid_from: at(from),
+                    valid_until: at(until),
+                    nonce: nonce(4),
+                };
+                for edge in [from, until] {
+                    for delta in [-1, 0, 1] {
+                        let now = edge + Duration::nanoseconds(delta);
+                        assert_eq!(
+                            kind(check_window(&item, at(now))),
+                            chrono_rule(from, until, now),
+                            "from={from} until={until} now={now}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gc_drops_at_and_after_valid_until_but_not_one_nanosecond_before() {
+        let item = window(NOW, NOW + 60, 5);
+        let until = ts(NOW + 60);
+        let just_before = UtcTimestamp::from_unix(NOW + 59, 999_999_999).unwrap();
+        for (now, kept) in [(just_before, 1), (until, 0)] {
+            let mut store = NonceStore::new();
+            store.check_and_insert("signer-a", &item).unwrap();
+            store.gc(now);
+            assert_eq!(store.len(), kept, "{now}");
+        }
     }
 
     // ExecutionPlan must keep working through the generalized helpers —
@@ -270,7 +348,7 @@ mod tests {
             .validity(now - Duration::seconds(1), now + Duration::minutes(5))
             .build();
 
-        check_window(&plan, now).expect("plan window covers now");
+        check_window(&plan, at(now)).expect("plan window covers now");
         let mut store = NonceStore::new();
         store
             .check_and_insert("host-signer", &plan)
@@ -278,6 +356,23 @@ mod tests {
         assert!(
             store.check_and_insert("host-signer", &plan).is_err(),
             "replayed plan refused"
+        );
+    }
+
+    // The plan's window is still chrono-typed; one outside years 0000..=9999
+    // is refused rather than clamped.
+    #[test]
+    fn a_plan_window_outside_the_representable_years_is_refused() {
+        let now = Utc::now();
+        let far = DateTime::<Utc>::MAX_UTC;
+        let plan = PlanFixture::new().validity(now, far).build();
+        assert_eq!(
+            check_window(&plan, at(now)),
+            Err(PlanValidityError::TimestampOutOfRange)
+        );
+        assert_eq!(
+            NonceStore::new().check_and_insert("s", &plan),
+            Err(PlanValidityError::TimestampOutOfRange)
         );
     }
 }

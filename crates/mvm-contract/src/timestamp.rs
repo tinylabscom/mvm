@@ -76,6 +76,18 @@ impl UtcTimestamp {
     }
 }
 
+#[cfg(feature = "protocol")]
+/// Temporary bridge for fields still typed `chrono::DateTime<Utc>` (the plan's
+/// validity pair, the host clock); it goes with chrono. Refuses, rather than
+/// clamps, an instant outside years 0000..=9999 or a leap-second nanosecond.
+impl TryFrom<chrono::DateTime<chrono::Utc>> for UtcTimestamp {
+    type Error = ParseTimestampError;
+
+    fn try_from(dt: chrono::DateTime<chrono::Utc>) -> Result<Self, Self::Error> {
+        Self::from_unix(dt.timestamp(), dt.timestamp_subsec_nanos()).ok_or(ParseTimestampError)
+    }
+}
+
 /// Hinnant's days-from-civil; `month` is 1..=12.
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let y = year - i64::from(month <= 2);

@@ -774,7 +774,7 @@ fn activation_checks_exact_registration_deadline_and_rejects_clock_rollback() {
         };
         if case == 1 {
             assert!(
-                mvm_core::plan::validity::check_window(admitted.plan(), activation).is_ok(),
+                mvm_core::plan::validity::check_window_chrono(admitted.plan(), activation).is_ok(),
                 "the signed plan alone still permits the final fractional second"
             );
         }

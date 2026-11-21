@@ -26,8 +26,8 @@ pub(super) use mvm_contract::protocol::resource_controls::EnforcedGrants;
 pub(super) use mvm_contract::provenance::DecisionCategory;
 pub(super) use mvm_core::plan::test_support::PlanFixture;
 pub(super) use mvm_core::plan::{
-    ExecutionPlan, PlanSeccompTier, SecretReleasePolicy, SynthesisInput, check_window, sign_plan,
-    synthesize_plan, verify_plan,
+    ExecutionPlan, PlanSeccompTier, SecretReleasePolicy, SynthesisInput, check_window_chrono,
+    sign_plan, synthesize_plan, verify_plan,
 };
 pub(super) use mvm_core::user_config::{MvmConfig, TrustedPlanSigner};
 pub(super) use mvm_core::util::test_env::TestEnv;

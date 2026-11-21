@@ -785,7 +785,7 @@ pub fn verify_cold_start(
             .map_err(|_| anyhow::anyhow!("caller launch plan signature rejected"))?;
     mvm_core::plan::content_id::verify_plan_id(&plan)
         .map_err(|_| anyhow::anyhow!("caller launch plan content rejected"))?;
-    mvm_core::plan::validity::check_window(&plan, chrono::Utc::now())
+    mvm_core::plan::validity::check_window_chrono(&plan, chrono::Utc::now())
         .map_err(|_| anyhow::anyhow!("caller launch plan validity rejected"))?;
     let proof = registration
         .verify_context(vm, &plan, now)
@@ -803,7 +803,7 @@ impl VerifiedCallerLaunch {
         let consumed_at = chrono::Utc::now();
         let consumed_secs =
             u64::try_from(consumed_at.timestamp()).context("caller launch clock is invalid")?;
-        mvm_core::plan::validity::check_window(&self.plan, consumed_at)
+        mvm_core::plan::validity::check_window_chrono(&self.plan, consumed_at)
             .map_err(|_| anyhow::anyhow!("caller launch expired before installation"))?;
         self.caller
             .proof
@@ -869,7 +869,7 @@ impl ConsumedCallerLaunch {
             now >= self.consumed_at,
             "caller activation clock moved backwards"
         );
-        mvm_core::plan::validity::check_window(&self.plan, now)
+        mvm_core::plan::validity::check_window_chrono(&self.plan, now)
             .map_err(|_| anyhow::anyhow!("caller launch expired during boot setup"))?;
         self.caller
             .proof
