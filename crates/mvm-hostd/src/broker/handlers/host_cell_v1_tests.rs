@@ -169,7 +169,12 @@ impl Host {
         self.call(
             Some((unit, n)),
             "write",
-            serde_json::json!({"cell": "setpoint", "version": version, "value": value}),
+            serde_json::to_value(CellWriteRequest {
+                cell: "setpoint".into(),
+                version,
+                value: value.to_vec(),
+            })
+            .unwrap(),
         )
         .await
     }
@@ -272,7 +277,7 @@ async fn a_registration_without_a_unit_and_epoch_is_refused() {
     for (verb, payload) in [
         (
             "write",
-            serde_json::json!({"cell": "setpoint", "version": 1, "value": [1]}),
+            serde_json::json!({"cell": "setpoint", "version": 1, "value": "AQ=="}),
         ),
         ("read", serde_json::json!({"cell": "setpoint"})),
         ("signal", serde_json::json!({})),
@@ -303,7 +308,7 @@ async fn oversized_and_malformed_requests_are_refused_before_the_store() {
     for (verb, payload) in [
         (
             "write",
-            serde_json::json!({"cell": "setpoint", "version": 1, "value": [], "epoch": 9}),
+            serde_json::json!({"cell": "setpoint", "version": 1, "value": "", "epoch": 9}),
         ),
         (
             "read",
@@ -372,7 +377,7 @@ async fn over_the_socket(
         Arc::new(registry),
         "vm".into(),
         TENANT.into(),
-        64 * 1024,
+        mvm_core::framing::DEFAULT_MAX_FRAME_BYTES,
     ));
     let mut stream = tokio::net::UnixStream::connect(socket).await.unwrap();
     crate::broker::server::write_frame(
@@ -387,9 +392,10 @@ async fn over_the_socket(
     )
     .await
     .unwrap();
-    let response = crate::broker::server::read_frame(&mut stream, 1024 * 1024)
-        .await
-        .unwrap();
+    let response =
+        crate::broker::server::read_frame(&mut stream, mvm_core::framing::DEFAULT_MAX_FRAME_BYTES)
+            .await
+            .unwrap();
     server.abort();
     response
 }
@@ -418,7 +424,7 @@ async fn over_the_broker_socket_only_a_bound_current_epoch_is_served() {
     let host = Host::admitted();
     let socket = host.home.path().join("b.sock");
     let bound = [ServiceId::parse(HOST_CELL_SERVICE).unwrap()];
-    let write = || serde_json::json!({"cell": "setpoint", "version": 1, "value": [7]});
+    let write = || serde_json::json!({"cell": "setpoint", "version": 1, "value": "Bw=="});
 
     let unbound = bound_registry(&host, "controller", 1, &[]);
     assert_eq!(
@@ -453,4 +459,38 @@ async fn over_the_broker_socket_only_a_bound_current_epoch_is_served() {
         refused_with(over_the_socket(&socket, stale, "signal", serde_json::json!({})).await),
         ServiceErrorCode::SessionRevoked
     );
+}
+
+/// The largest call and the largest answer the service can produce both fit
+/// the broker's default frame, so `MAX_CELL_BYTES` cannot outgrow the wire.
+#[test]
+fn a_full_cell_fits_one_broker_frame_both_ways() {
+    let cap = mvm_core::framing::DEFAULT_MAX_FRAME_BYTES;
+    let value = vec![0xff; MAX_CELL_BYTES as usize];
+    let call = ServiceCall {
+        service: ServiceId::parse(HOST_CELL_SERVICE).unwrap(),
+        verb: "write".into(),
+        correlation_id: CorrelationId::new("c".repeat(128)),
+        payload: serde_json::to_value(CellWriteRequest {
+            cell: "c".repeat(MAX_CELL_NAME_LEN),
+            version: u64::MAX,
+            value: value.clone(),
+        })
+        .unwrap(),
+        capability: None,
+    };
+    let response = ServiceResponse::Ok {
+        correlation_id: CorrelationId::new("brk-4294967295-ffffffffffffffff"),
+        payload: serde_json::to_value(CellReadResponse {
+            version: u64::MAX,
+            value,
+        })
+        .unwrap(),
+    };
+    for (what, len) in [
+        ("call", serde_json::to_vec(&call).unwrap().len()),
+        ("response", serde_json::to_vec(&response).unwrap().len()),
+    ] {
+        assert!(len <= cap, "a full-cell {what} is {len} bytes, over {cap}");
+    }
 }

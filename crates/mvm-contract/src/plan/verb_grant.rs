@@ -63,20 +63,20 @@ pub struct VerbGrant {
     pub sig: Vec<u8>,
 }
 
-/// Serializes the raw signature bytes as a base64 string rather than a JSON
-/// array of numbers.
-mod sig_base64 {
+/// Serializes raw bytes as a base64 string rather than a JSON array of
+/// numbers. Also used by the `host.cell.v1` payloads.
+pub(crate) mod sig_base64 {
     use alloc::string::String;
     use alloc::vec::Vec;
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as B64;
     use serde::{Deserialize as _, Deserializer, Serialize as _, Serializer};
 
-    pub(super) fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+    pub(crate) fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
         B64.encode(bytes).serialize(serializer)
     }
 
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Vec<u8>, D::Error> {
         let encoded = String::deserialize(deserializer)?;

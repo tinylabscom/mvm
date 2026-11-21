@@ -29,7 +29,9 @@ pub struct CellWriteRequest {
     pub cell: String,
     /// Must be greater than the stored version.
     pub version: u64,
-    /// The new value, at most the cell's declared size.
+    /// The new value, at most the cell's declared size, as base64.
+    #[serde(with = "crate::plan::verb_grant::sig_base64")]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub value: Vec<u8>,
 }
 
@@ -58,6 +60,9 @@ pub struct CellReadRequest {
 #[serde(deny_unknown_fields)]
 pub struct CellReadResponse {
     pub version: u64,
+    /// The committed value, as base64.
+    #[serde(with = "crate::plan::verb_grant::sig_base64")]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub value: Vec<u8>,
 }
 
@@ -67,7 +72,7 @@ mod tests {
 
     #[test]
     fn unknown_fields_are_refused() {
-        let write = serde_json::json!({"cell": "c", "version": 1, "value": [], "unit": "x"});
+        let write = serde_json::json!({"cell": "c", "version": 1, "value": "", "unit": "x"});
         assert!(serde_json::from_value::<CellWriteRequest>(write).is_err());
         let read = serde_json::json!({"cell": "c", "epoch": 3});
         assert!(serde_json::from_value::<CellReadRequest>(read).is_err());
@@ -83,5 +88,8 @@ mod tests {
         let back: CellWriteRequest =
             serde_json::from_value(serde_json::to_value(&write).unwrap()).unwrap();
         assert_eq!(back, write);
+        assert_eq!(serde_json::to_value(&write).unwrap()["value"], "AQID");
+        let numbers = serde_json::json!({"cell": "c", "version": 1, "value": [1, 2, 3]});
+        assert!(serde_json::from_value::<CellWriteRequest>(numbers).is_err());
     }
 }

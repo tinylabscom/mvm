@@ -44,8 +44,19 @@ use crate::audit::emitter::AuditEmitter;
 pub const STATE_CELL_REFUSED_EVENT: &str = "state_cell.refused";
 
 /// The largest cell this host reserves. A cell is a small piece of control
-/// state copied whole on every update, not a volume.
-pub const MAX_CELL_BYTES: u64 = 1024 * 1024;
+/// state copied whole on every update, not a volume, and its whole value has
+/// to cross the broker in one frame.
+pub const MAX_CELL_BYTES: u64 = 32 * 1024;
+
+/// What a broker frame carries besides a cell value: the call or response
+/// envelope, a cell name of the longest accepted length and the version.
+const BROKER_FRAME_HEADROOM: usize = 8 * 1024;
+
+// A full cell, base64-encoded as the service carries it, fits one broker frame.
+const _: () = assert!(
+    (MAX_CELL_BYTES as usize).div_ceil(3) * 4 + BROKER_FRAME_HEADROOM
+        <= mvm_core::framing::DEFAULT_MAX_FRAME_BYTES
+);
 
 /// The most cells one topology may declare.
 pub const MAX_CELLS_PER_TOPOLOGY: usize = 64;
@@ -53,7 +64,7 @@ pub const MAX_CELLS_PER_TOPOLOGY: usize = 64;
 /// The most disk one tenant's cells may take, both slots of every cell
 /// counted. The store keeps only the cells of the tenant's admitted
 /// generation, so this bounds the tenant's whole directory, lock files aside.
-pub const MAX_RESERVED_BYTES_PER_TENANT: u64 = 16 * 1024 * 1024;
+pub const MAX_RESERVED_BYTES_PER_TENANT: u64 = 2 * 1024 * 1024;
 
 /// A topology whose cells exceed what this host reserves.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -86,7 +97,7 @@ fn check_limits(topology: &Topology) -> Result<(), ReservationLimit> {
                 size,
             });
         }
-        // At most 64 cells of at most 1 MiB each: no overflow.
+        // At most 64 cells of at most MAX_CELL_BYTES each: no overflow.
         bytes += slots::file_len(size);
     }
     if bytes > MAX_RESERVED_BYTES_PER_TENANT {
