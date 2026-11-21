@@ -126,7 +126,7 @@ const ALLOWLIST: &[(&str, &[Below])] = &[
 
 pub(crate) fn run(workspace: &Path) -> Result<()> {
     let cli_root = workspace.join("crates/mvm-cli/src");
-    reject_warm_parent_assembly(&cli_root)?;
+    reject_warm_launch_assembly(&cli_root)?;
     let found = scan(&cli_root)?;
     let verdict = judge(&found, ALLOWLIST);
     if verdict.is_clean() {
@@ -140,11 +140,20 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
     bail!("check-thin-cli:\n{}", verdict.report());
 }
 
-/// Warm-parent boot/capture belongs to the client facade, never a CLI command.
-fn reject_warm_parent_assembly(root: &Path) -> Result<()> {
+/// Warm parent and admitted-child mechanics belong to client facades.
+fn reject_warm_launch_assembly(root: &Path) -> Result<()> {
     let forbidden = [
         "spawn_standby_via_runner_owned",
         "admit_standby_parent_plan",
+        "claim_cli_transient",
+        "claim_prepared_cli_cold",
+        "claim_prepared_warm",
+        "claim_standby",
+        "claim_standby_via_runner",
+        "claim_standby_owned_via_runner",
+        "ClaimContext",
+        "PendingCliAdmission",
+        "PreparedCliCold",
     ];
     let mut reaches = Vec::new();
     for_each_file(root, Some("rs"), &mut |path, src| {
@@ -169,7 +178,7 @@ fn reject_warm_parent_assembly(root: &Path) -> Result<()> {
         return Ok(());
     }
     bail!(
-        "check-thin-cli: warm-parent preparation bypasses mvm-client:\n  {}",
+        "check-thin-cli: warm launch assembly bypasses mvm-client:\n  {}",
         reaches.join("\n  ")
     )
 }
@@ -465,7 +474,7 @@ mod tests {
             "fn bypass() { backend.spawn_standby_via_runner_owned(&ctx, &spec); }\n",
         )
         .unwrap();
-        let error = reject_warm_parent_assembly(tmp.path()).unwrap_err();
+        let error = reject_warm_launch_assembly(tmp.path()).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -478,7 +487,50 @@ mod tests {
             "#[cfg(test)] fn fixture() { backend.spawn_standby_via_runner_owned(&ctx, &spec); }\n",
         )
         .unwrap();
-        reject_warm_parent_assembly(tmp.path()).unwrap();
+        reject_warm_launch_assembly(tmp.path()).unwrap();
+    }
+
+    #[test]
+    fn warm_child_authority_and_dispatch_are_client_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("pool.rs"),
+            "fn bypass(owner: PendingCliAdmission) { claim_cli_transient(owner); }\n",
+        )
+        .unwrap();
+        let error = reject_warm_launch_assembly(tmp.path()).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("pool.rs:1: PendingCliAdmission"),
+            "{message}"
+        );
+        assert!(
+            message.contains("pool.rs:1: claim_cli_transient"),
+            "{message}"
+        );
+
+        std::fs::write(
+            tmp.path().join("pool.rs"),
+            "fn select() { claim_selected_cli_warm(&slot, backend, pool, handle); }\n",
+        )
+        .unwrap();
+        reject_warm_launch_assembly(tmp.path()).unwrap();
+
+        std::fs::write(
+            tmp.path().join("pool.rs"),
+            "use mvm_client::ClaimContext;\n\
+             fn bypass(backend: &mvm_client::AnyBackend) {\n\
+                 backend.claim_standby_owned_via_runner(ctx, handle, claim);\n\
+             }\n",
+        )
+        .unwrap();
+        let error = reject_warm_launch_assembly(tmp.path()).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("pool.rs:1: ClaimContext"), "{message}");
+        assert!(
+            message.contains("pool.rs:3: claim_standby_owned_via_runner"),
+            "{message}"
+        );
     }
 
     #[test]

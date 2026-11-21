@@ -78,6 +78,12 @@ pub struct MockBackend {
     /// set, so a warm-pool caller's failure-counting path is exercisable
     /// against the same hermetic double the success path uses.
     fail_spawn_standby: bool,
+    /// Test knob: lose a selected standby reservation without spending launch authority.
+    lose_standby_reservation: bool,
+    /// Test knob: retain a possibly-running child after an unconfirmed stop.
+    uncertain_standby_stop: bool,
+    /// Test knob: let host admission carry release evidence through cold mock dispatch.
+    accept_verified_release: bool,
     /// Test knob: make `apply_grants` fail, the way a backend does when the
     /// control it reads back cannot be resolved for a VM it just started.
     fail_apply_grants: bool,
@@ -158,6 +164,28 @@ impl MockBackend {
     pub fn with_failing_spawn_standby(mut self) -> Self {
         self.fail_spawn_standby = true;
         self
+    }
+
+    /// Test builder: report that another claimant won the selected standby.
+    pub fn with_lost_standby_reservation(mut self) -> Self {
+        self.lose_standby_reservation = true;
+        self
+    }
+
+    /// Test builder: report an unconfirmed stop after the warm child may exist.
+    pub fn with_uncertain_standby_stop(mut self) -> Self {
+        self.uncertain_standby_stop = true;
+        self
+    }
+
+    /// Test builder: accept launch-scoped verified release evidence.
+    pub fn with_verified_release_runtime(mut self) -> Self {
+        self.accept_verified_release = true;
+        self
+    }
+
+    pub(crate) fn accepts_verified_release(&self) -> bool {
+        self.accept_verified_release
     }
 
     /// Test builder: make every `apply_grants` return an error.
@@ -384,6 +412,9 @@ impl VmBackend for MockBackend {
                 backend: "mock".to_string(),
             });
         }
+        if self.lose_standby_reservation {
+            return Err(StandbyError::ReservationLost);
+        }
         // A claimed standby becomes a running VM; record it under the
         // standby id so `count()` / `stop` behave like a normal boot.
         let mut state = self
@@ -403,6 +434,11 @@ impl VmBackend for MockBackend {
                 paused: false,
             },
         );
+        if self.uncertain_standby_stop {
+            return Err(StandbyError::StopUnconfirmed(
+                "injected mock warm child stop uncertainty".into(),
+            ));
+        }
         Ok(VmId(handle.id.clone()))
     }
 

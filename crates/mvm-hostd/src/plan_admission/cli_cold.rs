@@ -6,8 +6,8 @@ use mvm_core::vm_backend::{StandbyHandle, VmId, VmStartConfig};
 use mvm_runtime::AnyBackend;
 
 use super::start::{
-    LaunchAdmission, LaunchSource, PreparedLaunch, StartAdmittedParams, WarmClaimDispatch,
-    claim_cli_transient, prepare_launch, start_cli_transient,
+    CliStartFailure, LaunchAdmission, LaunchSource, PreparedLaunch, StartAdmittedParams,
+    WarmClaimDispatch, claim_cli_transient, prepare_launch, start_cli_transient,
 };
 
 /// Inputs for preparing one admitted CLI cold launch without starting a backend.
@@ -50,6 +50,15 @@ pub enum PreparedCliWarmClaim<C> {
     },
 }
 
+pub(super) fn map_cli_warm_claim_error(error: mvm_core::vm_backend::StandbyError) -> anyhow::Error {
+    match error {
+        mvm_core::vm_backend::StandbyError::StopUnconfirmed(_) => {
+            CliStartFailure::UncertainStop(anyhow::Error::new(error)).into()
+        }
+        other => anyhow::Error::new(other).context("admitted warm claim"),
+    }
+}
+
 impl<C> PreparedCliCold<C> {
     /// The exact signed plan retained by this capability.
     #[must_use]
@@ -73,6 +82,17 @@ impl<C> PreparedCliCold<C> {
     #[must_use]
     pub fn config(&self) -> &VmStartConfig {
         &self.prepared.config
+    }
+
+    /// Test-support identity for proving reservation loss restores runtime evidence.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn runtime_evidence_ptr(&self) -> Option<usize> {
+        self.prepared
+            .verified_runtime
+            .as_ref()
+            .map(|runtime| std::sync::Arc::as_ptr(runtime) as usize)
     }
 
     /// Compare the legacy identity projections without treating them as authority.
@@ -216,6 +236,12 @@ pub fn claim_prepared_cli_cold<C>(
     ctx: &mvm_runtime::workload_runner::ClaimContext<'_>,
     handle: &StandbyHandle,
 ) -> PreparedCliWarmClaim<C> {
+    if let Err(error) = prepared.config().wait_for_admission_durability() {
+        return PreparedCliWarmClaim::Refused {
+            error,
+            dispatched: abandon_prepared_cli_cold(prepared),
+        };
+    }
     let PreparedCliCold {
         prepared:
             PreparedLaunch {

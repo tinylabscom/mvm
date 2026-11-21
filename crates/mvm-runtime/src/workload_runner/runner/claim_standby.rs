@@ -497,7 +497,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             // of why it was refused.
             if let Err(error) = self.checked_force_stop(&child.0, "refused forked standby child") {
                 cleanup.retain_unknown_child();
-                return Err(StandbyError::ClaimFailed(format!(
+                return Err(StandbyError::StopUnconfirmed(format!(
                     "{refusal}; child stop unconfirmed: {error:#}; retaining child state and parent reservation"
                 )));
             }

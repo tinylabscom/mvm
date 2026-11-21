@@ -22,24 +22,20 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
 use mvm_client::AnyBackend;
+#[cfg(test)]
 use mvm_client::checkpoint::CheckpointStore;
 use mvm_client::claim::ClaimRefusal;
 use mvm_client::standby::{STANDBY_POOL_TTL, SupervisorStandbyPool};
-use mvm_client::{ChildGrantIssuer, ClaimContext};
+#[cfg(test)]
 use mvm_core::checkpoint::CheckpointId;
 use mvm_core::user_config::MvmConfig;
 #[cfg(test)]
 use mvm_core::vm_backend::{RuntimeSourceRootStrategy, StandbySpec};
-use mvm_core::vm_backend::{
-    StandbyCompat, StandbyError, StandbyHandle, VmStartConfig, WarmClaimRefusal, WarmLaunchMode,
-};
-use mvm_fs::snapshot_store::FsSnapshotStore;
+use mvm_core::vm_backend::{StandbyCompat, StandbyError, VmStartConfig, WarmClaimRefusal};
 #[cfg(test)]
 use sha2::{Digest, Sha256};
 
 use super::Cli;
-use super::vm::checkpoint::SignedChainAnchor;
-use mvm_client::admission::stash_plan_and_mint_verb_grant;
 #[cfg(test)]
 use mvm_contract::builder::BuilderError;
 
@@ -62,17 +58,6 @@ pub(crate) use warm::WarmResult;
 pub(in crate::commands) use warm_source::{WarmRequest, WarmSource};
 #[cfg(test)]
 use warm_source::{manifest_template_source, warm_if_eligible};
-
-struct HostChildGrantIssuer;
-
-impl ChildGrantIssuer for HostChildGrantIssuer {
-    fn issue(
-        &self,
-        config: &VmStartConfig,
-    ) -> Result<Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>> {
-        stash_plan_and_mint_verb_grant(config)
-    }
-}
 
 /// Lowercase-hex sha256 of a kernel image — part of the base-compat key.
 #[cfg(test)]
@@ -441,183 +426,6 @@ pub(crate) fn warm_to_target(
 // `machine run` orphaned it; the surviving standby primitives are unchanged).
 // Wired into `crate::exec::run_inner`.
 
-pub(crate) enum LaunchDecision {
-    /// A standby was claimed and is booting under this VmId.
-    Claimed(mvm_client::standby::OwnedWarmClaim),
-    /// No compatible warm standby — caller may cold-boot when its mode permits it.
-    ColdBoot,
-    /// The caller required warm service and must not cold-boot.
-    Refused(WarmClaimRefusal),
-}
-
-/// Try to claim an idle standby compatible with `want` under an explicit warm
-/// launch mode. A required warm launch returns a typed refusal for every
-/// capacity, compatibility, preparation, and backend claim failure; it never
-/// silently turns those failures into a cold boot.
-///
-/// `make_claim` prepares only after selection; `dispatch` spends the admission
-/// only after the parent checkpoint and claim context are available. A pool
-/// miss never invokes either callback.
-fn claim_with_mode<F, G, T>(
-    pool: &SupervisorStandbyPool,
-    backend: &AnyBackend,
-    want: &StandbyCompat,
-    mode: WarmLaunchMode,
-    make_claim: F,
-    dispatch: G,
-) -> Result<LaunchDecision>
-where
-    F: FnOnce(&StandbyHandle) -> Result<Option<T>>,
-    G: FnOnce(&ClaimContext<'_>, &StandbyHandle, T) -> Result<mvm_client::standby::OwnedWarmClaim>,
-{
-    if matches!(mode, WarmLaunchMode::Cold) {
-        return Ok(LaunchDecision::ColdBoot);
-    }
-    if !backend.capabilities().standby_pool {
-        if mode.requires_warm() {
-            return Ok(LaunchDecision::Refused(
-                WarmClaimRefusal::BackendUnsupported {
-                    backend: backend.name().to_string(),
-                },
-            ));
-        }
-        if !unsupported_standby_pool_is_fatal(residency_source()) {
-            return Ok(LaunchDecision::ColdBoot);
-        }
-        return Err(anyhow::Error::new(StandbyError::Unsupported {
-            backend: backend.name().to_string(),
-        })
-        .context("requested standby-pool recovery"));
-    }
-    // Select without reserving. The runner reserves this parent itself, in the
-    // same locked section it verifies it in, and refuses a parent that is
-    // already `Claimed` — so reserving here too made every warm claim fail with
-    // "parent is not in a claimable state". One reservation owner, and it is the
-    // one that also verifies.
-    //
-    // Two launchers can still both select the same idle parent; the runner's
-    // lock serializes them and the loser is refused into a cold boot, which is
-    // the same outcome reserving here bought, without deadlocking the winner.
-    let Some(handle) = pool.select_idle_compatible(want)? else {
-        return Ok(match mode {
-            WarmLaunchMode::Required => {
-                LaunchDecision::Refused(WarmClaimRefusal::NoCompatibleParent)
-            }
-            WarmLaunchMode::Optional | WarmLaunchMode::Cold => LaunchDecision::ColdBoot,
-        });
-    };
-    let claim = match make_claim(&handle) {
-        Ok(Some(claim)) => claim,
-        Ok(None) => {
-            return Ok(decision_for_mode(
-                mode,
-                WarmClaimRefusal::NoCompatibleParent,
-            ));
-        }
-        Err(e) => {
-            tracing::warn!(standby = %handle.id, error = %e, "build claim failed");
-            return Ok(decision_for_mode(
-                mode,
-                WarmClaimRefusal::PreparationFailed {
-                    reason: e.to_string(),
-                },
-            ));
-        }
-    };
-    // A claim verifies the parent's content and lineage against the checkpoint
-    // it was captured as, so an uncaptured parent is unusable by construction.
-    let parent_checkpoint = match parent_checkpoint_for(&handle) {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::warn!(standby = %handle.id, error = %e, "warm claim parent checkpoint unavailable");
-            let _ = pool.remove(&handle.id);
-            return Ok(decision_for_mode(
-                mode,
-                WarmClaimRefusal::ClaimRejected {
-                    reason: e.to_string(),
-                },
-            ));
-        }
-    };
-    let checkpoints = CheckpointStore::open();
-    let snapshots = FsSnapshotStore::new(mvm_core::config::snapshots_dir())?;
-    // A resident handoff's signed snapshot manifest is its publication
-    // witness. Every other claim checks the parent's creation entry in the
-    // signed audit chain, authenticated in place rather than by re-walking the
-    // whole history on every launch.
-    let resident_anchor;
-    let claim_anchor;
-    let anchor: &dyn mvm_client::checkpoint::CheckpointChainAnchor =
-        if backend.as_vm_backend().supports_resident_handoff() {
-            resident_anchor = SignedChainAnchor::empty();
-            &resident_anchor
-        } else {
-            claim_anchor = mvm_client::standby::PlanlessWarmParentAnchor::for_checkpoint(
-                &checkpoints,
-                &parent_checkpoint,
-            )?;
-            &claim_anchor
-        };
-    let registry_path = mvm_client::name_registry::registry_path();
-    let grant_issuer = HostChildGrantIssuer;
-    let ctx = ClaimContext {
-        pool,
-        checkpoints: &checkpoints,
-        snapshots: &snapshots,
-        anchor,
-        parent_checkpoint: &parent_checkpoint,
-        registry_path: &registry_path,
-        grant_issuer: Some(&grant_issuer),
-    };
-    match dispatch(&ctx, &handle, claim) {
-        Ok(owned) => {
-            // The standby has become the VM; drop its pool entry (the control UDS is
-            // one-shot). The VM now lives under its vms/<id> state dir.
-            let _ = pool.remove(&handle.id);
-            Ok(LaunchDecision::Claimed(owned))
-        }
-        Err(e) => {
-            tracing::warn!(standby = %handle.id, error = %format!("{e:#}"), "standby claim failed");
-            if mvm_client::admission::cli_start_failure_kind(&e)
-                == Some(mvm_client::admission::CliStartFailureKind::UncertainStop)
-            {
-                return Err(e);
-            }
-            // The runner owns the reservation lease. Healthy parents are
-            // released by its cleanup guard; parents that fail verification
-            // are quarantined there. The orchestration layer must not delete
-            // the record and strand healthy warm capacity.
-            Ok(decision_for_mode(
-                mode,
-                WarmClaimRefusal::ClaimRejected {
-                    reason: format!("{e:#}"),
-                },
-            ))
-        }
-    }
-}
-
-fn decision_for_mode(mode: WarmLaunchMode, refusal: WarmClaimRefusal) -> LaunchDecision {
-    if mode.requires_warm() {
-        LaunchDecision::Refused(refusal)
-    } else {
-        LaunchDecision::ColdBoot
-    }
-}
-
-/// Resolve the checkpoint a standby parent was captured as. A parent that never
-/// went through the spawn-and-capture path (or predates it) has no checkpoint to
-/// verify content and lineage against, so a claim against it must refuse rather
-/// than clone unverified content. Kept separate from [`claim_with_mode`] so the
-/// refusal is unit-testable without a pool or a VM.
-fn parent_checkpoint_for(handle: &StandbyHandle) -> Result<CheckpointId> {
-    handle
-        .parent_checkpoint
-        .as_deref()
-        .map(|id| CheckpointId::new(id.to_string()))
-        .with_context(|| format!("standby '{}' was never captured to a checkpoint", handle.id))
-}
-
 /// The base-compat key for one launch shape. The single builder both halves of
 /// the pool use: `warm_to_target` records what this returns on the standby it
 /// spawns, and `try_warm_claim` searches for what this returns. Anything that
@@ -730,10 +538,6 @@ pub(crate) fn try_warm_claim_with_admission(
         }
         return Ok(WarmClaimOutcome::Cold(reason));
     }
-    // A claimed standby was activated when it was prepared, so nothing on the
-    // claim path holds the workload behind the admission's sync. Wait for it
-    // before claiming.
-    cfg.wait_for_admission_durability()?;
     if !backend.capabilities().standby_pool {
         if unsupported_standby_pool_is_fatal(residency_source()) {
             return Err(anyhow::Error::new(StandbyError::Unsupported {
@@ -770,56 +574,51 @@ pub(crate) fn try_warm_claim_with_admission(
     // admission just populated, so this costs a read, not a re-hash.
     let want = compat_for_launch(cfg)?;
     let pool = SupervisorStandbyPool::open()?;
-    // Claim in the required mode so every way of not getting a standby comes
-    // back as a typed refusal; whether that refusal fails the launch or boots
-    // it cold is decided once, below.
-    let decision = claim_with_mode(
-        &pool,
-        backend,
-        &want,
-        WarmLaunchMode::Required,
-        |handle| {
-            // A persisted preloaded child cannot be renamed to this launch's
-            // signed identity. Refuse it before consuming the admission, so
-            // an optional launch retains its ordinary cold path.
-            Ok(handle
-                .preloaded_child_vm_name
-                .as_deref()
-                .is_none_or(|name| name == cfg.name)
-                .then_some(()))
-        },
-        |ctx, handle, ()| {
-            // A loser of an already-reserved parent has not dispatched
-            // anything. Keep the owner's one-use admission for cold fallback.
-            if !ctx
-                .pool
-                .load(&handle.id)
-                .map_err(|error| StandbyError::ClaimFailed(format!("reload standby: {error:#}")))?
-                .state
-                .is_claimable()
+    // Selection is the CLI's only warm-pool mechanism. The client facade owns
+    // retained-parent verification, claim context, authority transfer and
+    // dispatch; this adapter maps only Optional/Required policy.
+    let Some(handle) = pool.select_idle_compatible(&want)? else {
+        return outcome_for_refusal(WarmClaimRefusal::NoCompatibleParent, claim_required());
+    };
+    if handle
+        .preloaded_child_vm_name
+        .as_deref()
+        .is_some_and(|name| name != cfg.name)
+    {
+        return outcome_for_refusal(WarmClaimRefusal::NoCompatibleParent, claim_required());
+    }
+    map_client_claim_outcome(
+        mvm_client::standby::claim_selected_cli_warm(admission, backend, &pool, &handle),
+        claim_required(),
+    )
+}
+
+fn map_client_claim_outcome(
+    outcome: mvm_client::standby::CliWarmClaimOutcome,
+    required: bool,
+) -> Result<WarmClaimOutcome> {
+    match outcome {
+        mvm_client::standby::CliWarmClaimOutcome::Claimed(claim) => {
+            Ok(WarmClaimOutcome::Claimed(claim))
+        }
+        mvm_client::standby::CliWarmClaimOutcome::ReservationLost => outcome_for_refusal(
+            WarmClaimRefusal::ClaimRejected {
+                reason: ClaimRefusal::ParentNotClaimable.to_string(),
+            },
+            required,
+        ),
+        mvm_client::standby::CliWarmClaimOutcome::Refused(error) => {
+            if mvm_client::admission::cli_start_failure_kind(&error)
+                == Some(mvm_client::admission::CliStartFailureKind::UncertainStop)
             {
-                return Err(StandbyError::ClaimFailed(
-                    ClaimRefusal::ParentNotClaimable.to_string(),
-                )
-                .into());
+                return Err(error);
             }
-            let owner = admission.borrow_mut().take().ok_or_else(|| {
-                StandbyError::ClaimFailed("warm claim lost its CLI admission".into())
-            })?;
-            let (owner, result) = owner.claim_warm(backend, cfg.clone(), ctx, handle);
-            *admission.borrow_mut() = Some(owner);
-            result
-        },
-    )?;
-    match decision {
-        LaunchDecision::Claimed(id) => Ok(WarmClaimOutcome::Claimed(id)),
-        LaunchDecision::ColdBoot => Ok(WarmClaimOutcome::Cold(ColdStartReason::NoStandbyReady)),
-        LaunchDecision::Refused(refusal) => {
-            let spent = matches!(
-                admission.borrow().as_ref(),
-                Some(mvm_client::admission::CliAdmission::Dispatched(_))
-            );
-            outcome_for_refusal(refusal, claim_required() || spent)
+            outcome_for_refusal(
+                WarmClaimRefusal::ClaimRejected {
+                    reason: format!("{error:#}"),
+                },
+                true,
+            )
         }
     }
 }
@@ -1065,6 +864,41 @@ mod tests {
         let required = outcome_for_refusal(WarmClaimRefusal::NoCompatibleParent, true)
             .expect_err("a required claim that finds nothing fails");
         assert!(required.is::<WarmClaimRefusal>());
+    }
+
+    #[test]
+    fn client_reservation_loss_obeys_optional_and_required_policy() {
+        assert!(matches!(
+            map_client_claim_outcome(
+                mvm_client::standby::CliWarmClaimOutcome::ReservationLost,
+                false
+            )
+            .expect("optional reservation loss cold-boots"),
+            WarmClaimOutcome::Cold(ColdStartReason::NoStandbyReady)
+        ));
+        let required = map_client_claim_outcome(
+            mvm_client::standby::CliWarmClaimOutcome::ReservationLost,
+            true,
+        )
+        .expect_err("required reservation loss refuses");
+        assert!(required.is::<WarmClaimRefusal>(), "{required:#}");
+    }
+
+    #[test]
+    fn client_uncertain_stop_never_becomes_optional_cold_fallback() {
+        let uncertain: anyhow::Error = mvm_hostd::plan_admission::CliStartFailure::UncertainStop(
+            anyhow::anyhow!("child stop unconfirmed"),
+        )
+        .into();
+        let error = map_client_claim_outcome(
+            mvm_client::standby::CliWarmClaimOutcome::Refused(uncertain),
+            false,
+        )
+        .expect_err("uncertain custody cannot cold-fallback");
+        assert_eq!(
+            mvm_client::admission::cli_start_failure_kind(&error),
+            Some(mvm_client::admission::CliStartFailureKind::UncertainStop)
+        );
     }
 
     /// A launch of an installed bundle, as `resolve_launch` hands it to both
@@ -1864,35 +1698,6 @@ mod tests {
         }
     }
 
-    fn sample_handle_without_parent_checkpoint() -> StandbyHandle {
-        idle_handle("standby-no-checkpoint", "aa")
-    }
-
-    /// A parent that was never captured has no checkpoint to verify content and
-    /// lineage against, so a claim against it must refuse rather than clone
-    /// unverified content.
-    #[test]
-    fn claim_refuses_a_parent_without_a_checkpoint() {
-        let handle = sample_handle_without_parent_checkpoint();
-
-        let err = parent_checkpoint_for(&handle).unwrap_err();
-
-        assert!(
-            err.to_string().contains("never captured"),
-            "expected a refusal naming the uncaptured parent, got: {err}"
-        );
-    }
-
-    #[test]
-    fn claim_resolves_the_captured_parent_checkpoint() {
-        let mut handle = sample_handle_without_parent_checkpoint();
-        handle.parent_checkpoint = Some("standby-warm-parent".to_string());
-
-        let id = parent_checkpoint_for(&handle).unwrap();
-
-        assert_eq!(id.as_str(), "standby-warm-parent");
-    }
-
     // The following tests need a backend that actually reaches the spawn loop
     // (`capabilities().standby_pool == true`) — every real `AnyBackend` variant
     // selectable via the CLI reports `false` until a live run proves its spawn
@@ -2059,125 +1864,6 @@ mod tests {
         assert!(
             warm_eligible_launch(&warmed.start_config, 0),
             "the resolved warm shape must be one a shared parent can serve"
-        );
-    }
-
-    /// `claim_with_mode` must hand the runner a parent that is still claimable.
-    ///
-    /// The runner reserves the parent itself, in the same locked section it
-    /// verifies it in, and refuses one that is already `Claimed`. Reserving here
-    /// as well meant every warm claim on a runner-backed backend died with
-    /// "parent is not in a claimable state": the pool filled and never drained.
-    ///
-    /// Nothing caught it because the mock backend services a claim from its own
-    /// in-memory state and never runs the runner's reserve, so the two-layer
-    /// interaction only existed on a live host. This asserts the seam directly:
-    /// at the moment the claim is built the runner has not run, so the parent
-    /// must still be claimable on disk.
-    #[cfg(feature = "test-support")]
-    #[test]
-    fn a_pool_miss_never_touches_the_one_use_dispatch() {
-        let tmp = tempfile::tempdir().expect("pool tempdir");
-        let pool = SupervisorStandbyPool::at(tmp.path());
-        let backend = AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_standby());
-        let dispatched = std::cell::Cell::new(false);
-        let want = StandbyCompat {
-            template_id: None,
-            kernel_sha256: "kernel".into(),
-            vcpus: 1,
-            mem_mib: 128,
-            image_sha256: Some("image".into()),
-            root_strategy: RuntimeSourceRootStrategy::BlockExt4,
-            vsock_egress: false,
-        };
-        let decision = claim_with_mode(
-            &pool,
-            &backend,
-            &want,
-            WarmLaunchMode::Required,
-            |_| -> Result<Option<()>> { panic!("pool miss cannot prepare a claim") },
-            |_, _, ()| {
-                dispatched.set(true);
-                anyhow::bail!("pool miss cannot spend admission")
-            },
-        )
-        .expect("pool miss is a typed decision");
-        assert!(matches!(
-            decision,
-            LaunchDecision::Refused(WarmClaimRefusal::NoCompatibleParent)
-        ));
-        assert!(!dispatched.get(), "pool miss preserves the cold-path owner");
-    }
-
-    #[cfg(feature = "test-support")]
-    #[test]
-    fn a_claim_leaves_the_parent_claimable_for_the_runner_to_reserve() {
-        let _guard = mvm_runtime::vm::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        let tmp = tempfile::tempdir().unwrap();
-        env.isolate_mvm_home(tmp.path());
-        // The production store encrypts every capture under the host key.
-        env.set(
-            mvm_runtime::vm::instance_snapshot::SNAPSHOT_TENANT_KEY_ENV,
-            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
-        );
-        let pool = SupervisorStandbyPool::at(tmp.path().join("pool"));
-        let kernel = tmp.path().join("vmlinux");
-        std::fs::write(&kernel, b"warm-kernel").unwrap();
-        let rootfs = tmp.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"warm-rootfs").unwrap();
-        let key = tmp.path().join("host-signer.ed25519");
-        std::fs::write(&key, b"fake-key").unwrap();
-
-        let mut cfg = eligible_cfg();
-        cfg.kernel_path = Some(kernel.display().to_string());
-        cfg.rootfs_path = rootfs.display().to_string();
-
-        let backend = AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_standby());
-        assert_eq!(
-            warm_to_target(
-                &pool,
-                &WarmParams {
-                    backend: &backend,
-                    signer_id: "host:test",
-                    signing_key_path: &key,
-                    target: 1,
-                    launch: &cfg,
-                },
-            )
-            .unwrap()
-            .spawned,
-            1,
-            "the fixture must warm one parent, or this asserts nothing"
-        );
-
-        let want = compat_for_launch(&cfg).unwrap();
-        let observed: std::cell::Cell<Option<StandbyState>> = std::cell::Cell::new(None);
-        let decision = claim_with_mode(
-            &pool,
-            &backend,
-            &want,
-            WarmLaunchMode::Optional,
-            |handle| -> Result<Option<()>> {
-                observed.set(Some(pool.load(&handle.id).unwrap().state));
-                // Stop here: the reservation state is the whole subject of this test.
-                anyhow::bail!("halt after inspecting the reservation state")
-            },
-            |_, _, ()| anyhow::bail!("preparation already stopped this claim"),
-        )
-        .unwrap();
-
-        assert_eq!(
-            observed.get(),
-            Some(StandbyState::Idle),
-            "the parent must still be claimable when the runner is handed it; \
-             reserving it here is what made every warm claim refuse"
-        );
-        assert!(
-            matches!(decision, LaunchDecision::ColdBoot),
-            "a halted claim falls back to a cold boot"
         );
     }
 
