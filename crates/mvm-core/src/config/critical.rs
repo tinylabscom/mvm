@@ -11,3 +11,8 @@ pub fn topologies_dir_at(home: impl AsRef<Path>) -> PathBuf {
 pub fn state_cells_dir_at(home: impl AsRef<Path>) -> PathBuf {
     home.as_ref().join("state-cells")
 }
+
+/// Host-held liveness deadlines, one file per tenant: `<mvm_home>/liveness`.
+pub fn liveness_dir_at(home: impl AsRef<Path>) -> PathBuf {
+    home.as_ref().join("liveness")
+}

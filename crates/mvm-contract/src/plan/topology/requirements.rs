@@ -26,6 +26,17 @@ use crate::protocol::resource_controls::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MeasuredFailoverMs(pub NonZeroU32);
 
+/// The shortest liveness period the host's deadline store holds. Below it an
+/// expiry pass would be racing ordinary scheduling delay rather than a hang.
+pub const MIN_LIVENESS_PERIOD_MS: u32 = 100;
+
+/// The longest liveness period the host's deadline store holds. A unit silent
+/// for longer is a matter for its wall-clock bound, not a hang detector.
+pub const MAX_LIVENESS_PERIOD_MS: u32 = 60 * 60 * 1000;
+
+/// The most units of one topology the host holds a deadline for.
+pub const MAX_LIVENESS_UNITS: usize = 64;
+
 /// The first requirement a backend does not enforce, and who stated it.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum UnmetRequirement {
@@ -75,6 +86,20 @@ pub enum UnmetRequirement {
         unit: WorkloadId,
         period_ms: NonZeroU32,
     },
+    #[error(
+        "unit {} declares a {period_ms} ms liveness period; this host holds periods from \
+         {MIN_LIVENESS_PERIOD_MS} to {MAX_LIVENESS_PERIOD_MS} ms",
+        .unit.0
+    )]
+    LivenessPeriodOutOfRange {
+        unit: WorkloadId,
+        period_ms: NonZeroU32,
+    },
+    #[error(
+        "{count} units declare a liveness period and this host holds at most \
+         {MAX_LIVENESS_UNITS} deadlines per topology"
+    )]
+    TooManyLivenessUnits { count: usize },
     #[error("cell {cell} requires a host-held state cell, which this backend does not provide")]
     StateCell { cell: String },
     #[error(
@@ -100,6 +125,14 @@ pub fn check_requirements(
     measured: Option<MeasuredFailoverMs>,
 ) -> Result<(), UnmetRequirement> {
     check_suite(topology.suite, controls.suite)?;
+    let count = topology
+        .units
+        .iter()
+        .filter(|u| u.liveness_period_ms.is_some())
+        .count();
+    if controls.liveness == LivenessControl::HostDeadline && count > MAX_LIVENESS_UNITS {
+        return Err(UnmetRequirement::TooManyLivenessUnits { count });
+    }
     for unit in &topology.units {
         check_placement(unit, controls.placement)?;
         check_isolation(unit, controls.isolation)?;
@@ -168,6 +201,15 @@ fn check_liveness(unit: &Unit, control: LivenessControl) -> Result<(), UnmetRequ
             unit: unit.workload.clone(),
             period_ms,
         }),
+        (Some(period_ms), LivenessControl::HostDeadline)
+            if !(MIN_LIVENESS_PERIOD_MS..=MAX_LIVENESS_PERIOD_MS).contains(&period_ms.get()) =>
+        {
+            Err(UnmetRequirement::LivenessPeriodOutOfRange {
+                unit: unit.workload.clone(),
+                period_ms,
+            })
+        }
+        (Some(_), LivenessControl::HostDeadline) => Ok(()),
     }
 }
 

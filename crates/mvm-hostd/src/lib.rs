@@ -68,6 +68,8 @@ pub mod jailer;
 /// [`keyholder::SecretResolver`] trait + the single-host
 /// [`keyholder::LocalResolver`].
 pub mod keyholder;
+/// Host-held liveness deadlines of topology units.
+pub mod liveness;
 mod mailbox_commit;
 mod mailbox_custody;
 pub mod mailbox_launch;

@@ -127,6 +127,10 @@ pub enum LivenessControl {
     /// No host-held deadline exists, so a liveness period cannot be served.
     #[default]
     None,
+    /// The host's own deadline store, which the host-side liveness pass reads:
+    /// reset only by traffic the epoch gate accepts from the unit's current
+    /// epoch, and expired by fencing that epoch in the workload ledger.
+    HostDeadline,
 }
 
 /// Which cryptographic suites a backend's admission path implements.
@@ -169,9 +173,9 @@ impl ResourceControls {
     /// `BackendKind` must answer this question rather than inherit a default
     /// that might silently claim or silently drop enforcement.
     ///
-    /// No backend pins cores exclusively, keeps a standby, holds a liveness
-    /// deadline, or implements a suite beyond the classical one, so every arm
-    /// answers `None` / `ClassicalOnly` for those. They are spelled out per arm
+    /// No backend pins cores exclusively, keeps a standby, or implements a
+    /// suite beyond the classical one, so every arm answers `None` /
+    /// `ClassicalOnly` for those. They are spelled out per arm
     /// anyway: when one backend gains a mechanism, its arm changes and no
     /// other does.
     ///
@@ -180,6 +184,12 @@ impl ResourceControls {
     /// channel to the host, the only path a cell is reached by, and by the
     /// mock, whose store is the same host store. A wasm module has no such
     /// channel and a browser-hosted guest has no host store.
+    ///
+    /// The liveness deadline is held in the host's store too, but only the
+    /// mock offers it. A real tier would need the host to know it cannot
+    /// suspend, since every deadline would expire at once on resume, and a
+    /// measured shortest period that tier holds without false expiries under
+    /// load; until both exist a period is refused there.
     #[must_use]
     pub const fn for_backend(kind: BackendKind) -> Self {
         match kind {
@@ -295,7 +305,7 @@ impl ResourceControls {
                 placement: PlacementControl::None,
                 standby: StandbyControl::None,
                 state_cells: StateCellControl::HostStore,
-                liveness: LivenessControl::None,
+                liveness: LivenessControl::HostDeadline,
                 isolation: None,
                 suite: SuiteControl::ClassicalOnly,
             },
@@ -1256,14 +1266,30 @@ mod tests {
     }
 
     #[test]
-    fn no_backend_serves_placement_standby_or_liveness_yet() {
+    fn no_backend_serves_placement_or_standby_yet() {
         for &kind in BackendKind::ALL {
             let c = ResourceControls::for_backend(kind);
             assert_eq!(c.placement, PlacementControl::None, "{kind:?}");
             assert_eq!(c.standby, StandbyControl::None, "{kind:?}");
-            assert_eq!(c.liveness, LivenessControl::None, "{kind:?}");
             assert_eq!(c.suite, SuiteControl::ClassicalOnly, "{kind:?}");
         }
+    }
+
+    #[test]
+    fn only_the_mock_holds_a_liveness_deadline() {
+        for &kind in BackendKind::ALL {
+            let expected = match kind {
+                BackendKind::Mock => LivenessControl::HostDeadline,
+                _ => LivenessControl::None,
+            };
+            assert_eq!(
+                ResourceControls::for_backend(kind).liveness,
+                expected,
+                "{kind:?}"
+            );
+        }
+        let encoded = serde_json::to_value(LivenessControl::HostDeadline).unwrap();
+        assert_eq!(encoded, "host_deadline");
     }
 
     #[test]
