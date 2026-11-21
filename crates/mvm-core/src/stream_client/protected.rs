@@ -35,6 +35,9 @@ impl ProtectedRun {
     pub fn publish(&self, root: &Path) -> io::Result<()> {
         self.directory(root)?;
         let bytes = serde_json::to_vec(self).map_err(io::Error::other)?;
+        // Stays on the durable write: this file's presence is what stops a
+        // legacy capture from discarding protected generation history, so a
+        // copy lost to a host crash would leave that history deletable.
         crate::util::atomic_io::atomic_write(&root.join(RUN_FILENAME), &bytes)
             .map_err(io::Error::other)
     }

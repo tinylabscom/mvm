@@ -22,6 +22,15 @@ use crate::private_fs::{self, PRIVATE_FILE_MODE};
 /// behind the audit chain, the receipt store, and every other record mvm
 /// persists, so it is paid on the launch critical path.
 fn synced_temp_in(path: &Path, data: &[u8]) -> Result<tempfile::NamedTempFile> {
+    temp_in(path, data, |file| Ok(file.sync_data()?))
+}
+
+/// [`synced_temp_in`] with the per-file sync step chosen by the caller.
+fn temp_in(
+    path: &Path,
+    data: &[u8],
+    sync: impl FnOnce(&fs::File) -> Result<()>,
+) -> Result<tempfile::NamedTempFile> {
     let parent = path
         .parent()
         .with_context(|| format!("path has no parent: {}", path.display()))?;
@@ -34,7 +43,7 @@ fn synced_temp_in(path: &Path, data: &[u8]) -> Result<tempfile::NamedTempFile> {
     tmp.write_all(data)
         .with_context(|| format!("failed to write temp file for {}", path.display()))?;
     tmp.flush()?;
-    tmp.as_file().sync_data()?;
+    sync(tmp.as_file())?;
     Ok(tmp)
 }
 
@@ -50,7 +59,24 @@ fn synced_temp_in(path: &Path, data: &[u8]) -> Result<tempfile::NamedTempFile> {
 /// is unguaranteed either way. Making that stronger means adding a directory
 /// fsync, not keeping a more expensive file sync.
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
-    let mut tmp = synced_temp_in(path, data)?;
+    rename_into_place(synced_temp_in(path, data)?, path)
+}
+
+/// [`atomic_write`] for process-lifetime state that no host crash needs to
+/// find again: the temp file's data is submitted with [`submit_file_data`]
+/// (plain `fsync`, no device flush on macOS) before the rename, and nothing
+/// flushes afterwards.
+///
+/// A reader sees the old or the whole new content, as with [`atomic_write`].
+/// After a host crash the file may be old, new or absent. Do not use this for
+/// an audit record, a key, a ledger or anything else a crash must preserve;
+/// a caller that does want the bytes durable can follow it with one
+/// [`sync_dir`] or [`sync_file`] after submitting its other files.
+pub fn atomic_write_submitted(path: &Path, data: &[u8]) -> Result<()> {
+    rename_into_place(temp_in(path, data, submit_file_data)?, path)
+}
+
+fn rename_into_place(mut tmp: tempfile::NamedTempFile, path: &Path) -> Result<()> {
     // Use the same libc rename path as confined audit segment rotation, not
     // tempfile's raw renameat syscall. Cleanup still owns the temp on failure.
     fs::rename(tmp.path(), path)
@@ -184,7 +210,17 @@ fn is_rename_flag_unsupported(err: &std::io::Error) -> bool {
 /// automatically — it was never linked into the target directory under its
 /// final name.
 pub fn atomic_write_new(path: &Path, data: &[u8]) -> Result<()> {
-    let tmp = synced_temp_in(path, data)?;
+    persist_new(synced_temp_in(path, data)?, path)
+}
+
+/// [`atomic_write_new`] with the submit-only data write of
+/// [`atomic_write_submitted`]. A lost create race is the same error
+/// [`is_already_exists`] recognizes.
+pub fn atomic_write_new_submitted(path: &Path, data: &[u8]) -> Result<()> {
+    persist_new(temp_in(path, data, submit_file_data)?, path)
+}
+
+fn persist_new(tmp: tempfile::NamedTempFile, path: &Path) -> Result<()> {
     match persist_noclobber(tmp, path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -873,6 +909,48 @@ mod tests {
         assert!(FileLock::try_acquire(&path).unwrap().is_none());
         drop(held);
         assert!(FileLock::try_acquire(&path).unwrap().is_some());
+    }
+
+    #[test]
+    fn submitted_writes_store_content_replace_and_create_missing_parents() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("a/b/state.json");
+        atomic_write_submitted(&path, b"one").expect("write");
+        assert_eq!(fs::read(&path).expect("read"), b"one");
+        atomic_write_submitted(&path, b"two").expect("replace");
+        assert_eq!(fs::read(&path).expect("read"), b"two");
+        let fresh = dir.path().join("c/d/new.json");
+        atomic_write_new_submitted(&fresh, b"new").expect("create");
+        assert_eq!(fs::read(&fresh).expect("read"), b"new");
+        for parent in [path.parent().unwrap(), fresh.parent().unwrap()] {
+            assert_eq!(
+                fs::read_dir(parent).expect("dir").count(),
+                1,
+                "no temp left"
+            );
+        }
+    }
+
+    #[test]
+    fn atomic_write_new_submitted_loses_a_create_race_like_atomic_write_new() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("instance.json");
+        atomic_write_new_submitted(&path, b"original").expect("first");
+        let err = atomic_write_new_submitted(&path, b"loses").expect_err("refused");
+        assert!(is_already_exists(&err));
+        assert_eq!(fs::read(&path).expect("read"), b"original");
+        assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 1);
+    }
+
+    #[test]
+    fn submitted_writes_refuse_a_parent_that_is_a_file_without_claiming_a_race() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blocker = dir.path().join("blocker");
+        fs::write(&blocker, b"x").expect("seed");
+        let path = blocker.join("state.json");
+        atomic_write_submitted(&path, b"x").expect_err("refused");
+        let err = atomic_write_new_submitted(&path, b"x").expect_err("refused");
+        assert!(!is_already_exists(&err));
     }
 
     #[test]
