@@ -70,6 +70,7 @@ mod containment_recheck;
 mod display_grants;
 mod extension_packs;
 mod final_gates;
+mod fs_quick;
 mod grant_validation;
 mod host_gates;
 mod launch_substrate;
@@ -101,6 +102,7 @@ pub use cli_cold::{
     abandon_prepared_cli_cold, claim_prepared_cli_cold, prepare_cli_cold, start_prepared_cli_cold,
 };
 pub use extension_packs::{AdmittedExtension, ExtensionAdmissionContext};
+pub use fs_quick::{PreparedFilesystemFork, prepare_filesystem_fork};
 pub use launch_substrate::{
     persists_plan_before_start, populate_audit_substrate, stash_plan_and_mint_verb_grant,
     stash_plan_for_bridge, thread_cpu_grant, thread_tenant_id,

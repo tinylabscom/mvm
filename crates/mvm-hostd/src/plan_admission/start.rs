@@ -243,6 +243,9 @@ pub(crate) enum LaunchSource<'a> {
     Persistent {
         lifecycle: &'a MachineLifecycleLock,
     },
+    FilesystemFork {
+        backend_kind: mvm_core::vm_backend::BackendKind,
+    },
     CliCold {
         backend_kind: mvm_core::vm_backend::BackendKind,
     },
@@ -286,7 +289,8 @@ pub(crate) fn prepare_launch<A>(
                 .require_cold_state()
                 .map_err(CliStartFailure::StateNotOwned)?;
         }
-        LaunchSource::CliCold { backend_kind }
+        LaunchSource::FilesystemFork { backend_kind }
+        | LaunchSource::CliCold { backend_kind }
         | LaunchSource::Entrypoint { backend_kind }
         | LaunchSource::PortableEntrypoint { backend_kind } => {
             tracing::trace!(

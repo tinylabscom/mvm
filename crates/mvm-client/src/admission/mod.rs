@@ -348,7 +348,8 @@ pub enum CliAdmission {
     Dispatched(Box<AuditContinuation>),
 }
 
-pub use cli_dispatch::{FsQuickBootAdmission, prepare_cli_cold};
+pub(crate) use cli_dispatch::FsQuickBootAdmission;
+pub use cli_dispatch::prepare_cli_cold;
 
 impl CliAdmission {
     /// The host cores admission placed this launch on, while the authority is

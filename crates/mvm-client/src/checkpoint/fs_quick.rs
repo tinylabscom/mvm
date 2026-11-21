@@ -30,7 +30,7 @@ pub enum ForkPhase {
 }
 
 /// Attempted artifact locations, not proof that either artifact is complete.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ArtifactLocation {
     vm_directory: PathBuf,
     checkpoint_directory: PathBuf,
@@ -69,6 +69,16 @@ impl ForkError {
 
     pub fn artifact(&self) -> Option<&ArtifactLocation> {
         self.artifact.as_ref()
+    }
+
+    /// Preserve already-materialized locations when source selection fails
+    /// before the checkpoint facade receives the artifact.
+    pub fn retained_child(artifact: ArtifactLocation, source: anyhow::Error) -> Self {
+        Self {
+            phase: ForkPhase::ChildLaunch,
+            artifact: Some(artifact),
+            source,
+        }
     }
 }
 
@@ -339,6 +349,19 @@ pub struct MaterializedFsQuickFork {
     service: Option<SecretService>,
 }
 
+/// Parent-derived launch settings for a materialized filesystem fork.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FsQuickBootSettings {
+    /// Selected workload backend.
+    pub hypervisor: String,
+    /// Resolved kernel path for the fresh child boot.
+    pub kernel_path: PathBuf,
+    /// Effective child vCPU count after CLI overrides.
+    pub cpus: u32,
+    /// Effective child memory after CLI overrides.
+    pub memory_mib: u32,
+}
+
 impl MaterializedFsQuickFork {
     pub fn checkpoint(&self) -> &CheckpointMeta {
         &self.child
@@ -355,11 +378,161 @@ impl MaterializedFsQuickFork {
     pub fn destination(&self) -> &Path {
         &self.location.vm_directory
     }
+    pub fn location(&self) -> &ArtifactLocation {
+        &self.location
+    }
     pub fn child_tenant(&self) -> Option<&str> {
         self.child_tenant.as_deref()
     }
     pub fn bindings(&self) -> &[SecretBinding] {
         &self.effective
+    }
+
+    /// Prepare, admit, bind and dispatch this materialized child as a fresh cold boot.
+    ///
+    /// Runtime verification and signed admission are launch-scoped. The rootfs
+    /// is derived from this materialized artifact and cannot be substituted.
+    ///
+    /// # Errors
+    /// Returns a retained [`ForkError`] when attachment, verification, admission,
+    /// final gates or backend dispatch refuses.
+    pub fn boot(
+        self,
+        settings: FsQuickBootSettings,
+        pair: Option<&mut crate::launch::runtime_source::PairArtifactSource<'_>>,
+    ) -> std::result::Result<Self, ForkError> {
+        let result = self.boot_inner(&settings, pair);
+        match result {
+            Ok(()) => Ok(self),
+            Err(error) => Err(self.retained_error(error)),
+        }
+    }
+
+    fn boot_inner(
+        &self,
+        settings: &FsQuickBootSettings,
+        pair: Option<&mut crate::launch::runtime_source::PairArtifactSource<'_>>,
+    ) -> Result<()> {
+        use crate::admission::{
+            AdmitPlanForBootParams, InMemoryNonceLedger, InheritedBundle, admit_plan_for_boot,
+            admit_plan_for_boot_with_verified_runtime,
+        };
+        use crate::launch::runtime_source::{
+            attach_runtime_overlay_if_cached_version_verified,
+            attach_universal_initramfs_if_cached, attach_universal_initramfs_with_verified_release,
+        };
+
+        let rootfs = self.destination().join("rootfs.ext4");
+        let config = mvm_core::vm_backend::VmStartConfig {
+            name: self.child_name().to_string(),
+            rootfs_path: rootfs.to_string_lossy().into_owned(),
+            kernel_path: Some(settings.kernel_path.to_string_lossy().into_owned()),
+            cpus: settings.cpus,
+            memory_mib: settings.memory_mib,
+            ..Default::default()
+        };
+        let parent_bundle = InheritedBundle::from_parent_plan(self.parent_plan())?;
+        let parent_agent_verbs = self
+            .parent_plan()
+            .agent_verbs
+            .as_ref()
+            .map(|verbs| {
+                verbs
+                    .iter()
+                    .map(|verb| verb.as_str().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let tenant = self
+            .child_tenant()
+            .context("prepared boot tenant is missing")?;
+        let configured_images_dir = mvm_build::image_source::configured_images_dir();
+        let ledger = InMemoryNonceLedger::new();
+        let backend = mvm_runtime::AnyBackend::from_hypervisor(&settings.hypervisor);
+
+        let prepared = mvm_hostd::plan_admission::prepare_filesystem_fork(
+            config,
+            backend.kind(),
+            |config| {
+                let release = attach_runtime_overlay_if_cached_version_verified(
+                    config,
+                    &settings.hypervisor,
+                    self.parent_meta().runtime_overlay_version.as_deref(),
+                    pair,
+                )?;
+                if let Some(release) = &release {
+                    attach_universal_initramfs_with_verified_release(
+                        config,
+                        &settings.hypervisor,
+                        release,
+                    )?;
+                } else {
+                    attach_universal_initramfs_if_cached(config, &settings.hypervisor)?;
+                }
+                Ok(release)
+            },
+            |config, verified_runtime| {
+                let params = AdmitPlanForBootParams {
+                    bundle_sizing: Default::default(),
+                    mailbox: None,
+                    gpu: false,
+                    instructions: Default::default(),
+                    outputs: Vec::new(),
+                    network_mode: self.parent_plan().network_mode,
+                    tenant,
+                    vm_name: self.child_name(),
+                    backend_name: &settings.hypervisor,
+                    configured_images_dir: configured_images_dir.as_deref(),
+                    rootfs_path: &rootfs,
+                    kernel_path: Some(&settings.kernel_path),
+                    precomputed_image_sha256: None,
+                    boot_artifact_identity: None,
+                    runtime_config: Some(config),
+                    cpus: settings.cpus,
+                    mem_mib: u64::from(settings.memory_mib),
+                    seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+                    secret_release: crate::admission::secrets::release_for_bindings(
+                        self.bindings(),
+                    ),
+                    secrets: self.bindings().to_vec(),
+                    caller_commitment: None,
+                    ledger: &ledger,
+                    keys_dir: None,
+                    audit_dir: None,
+                    policy_dir: None,
+                    bundle_pin: parent_bundle.as_ref().map(InheritedBundle::pin),
+                    bundle_posture: None,
+                    deps_volume: None,
+                    shares: Vec::new(),
+                    assets: Vec::new(),
+                    redaction: mvm_core::policy::RedactionPolicy::default(),
+                    network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+                    agent_verb_override: parent_agent_verbs.clone(),
+                    restrict_agent_verbs: !parent_agent_verbs.is_empty()
+                        || crate::admission::agent_verbs::grant_eligible(false, false, false),
+                    services: Vec::new(),
+                    grants: None,
+                    backend_kind: None,
+                    entrypoint:
+                        crate::admission::entrypoint_resolve::ResolvedEntrypoint::unresolved(
+                            "a checkpoint fork boots the image the parent booted; this path resolves no entrypoint",
+                        ),
+                };
+                match verified_runtime {
+                    Some(runtime) => admit_plan_for_boot_with_verified_runtime(params, runtime),
+                    None => admit_plan_for_boot(params),
+                }
+            },
+        )?;
+        let (mut config, verified_runtime, admission) = prepared.into_parts();
+        populate_fork_rootfs_verity(&mut config, &rootfs)?;
+        crate::admission::populate_audit_substrate(
+            &mut config,
+            &admission.admitted,
+            admission.policy_bundle.as_ref(),
+        )?;
+        crate::admission::FsQuickBootAdmission::new(admission, self, verified_runtime)?
+            .start(&backend, config)
     }
 
     /// Require the real admitted owner before the adapter reaches its backend.
@@ -396,6 +569,30 @@ impl MaterializedFsQuickFork {
             source,
         }
     }
+}
+
+fn populate_fork_rootfs_verity(
+    start_config: &mut mvm_core::vm_backend::VmStartConfig,
+    rootfs: &Path,
+) -> Result<()> {
+    let rootfs_dir = rootfs.parent().unwrap_or(Path::new("."));
+    let verity = rootfs_dir.join("rootfs.verity");
+    let roothash = rootfs_dir.join("rootfs.roothash");
+    if verity.exists() && roothash.exists() {
+        start_config.verity_path = Some(
+            verity
+                .to_str()
+                .context("non-UTF8 fork verity path")?
+                .to_string(),
+        );
+        start_config.roothash = Some(
+            std::fs::read_to_string(&roothash)
+                .with_context(|| format!("reading fork roothash {}", roothash.display()))?
+                .trim()
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 // Private comparison seam for synthetic test data. The public checker accepts

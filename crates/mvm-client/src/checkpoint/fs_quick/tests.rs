@@ -112,6 +112,16 @@ impl Fixture {
             .materialize_and_publish()?)
     }
 
+    #[cfg(feature = "test-support")]
+    fn materialized_boot(&self) -> Result<MaterializedFsQuickFork> {
+        self.service.classify(&self.parent.id)?;
+        Ok(self
+            .service
+            .prepare_boot(self.request(&[], true))?
+            .for_tenant("local".into())?
+            .materialize_and_publish()?)
+    }
+
     fn assert_request_refused_unchanged(&self, allow_drop: bool, expected: &str) {
         let before = snapshot(self.home.path());
         let error = match self.invoke(allow_drop) {
@@ -132,6 +142,75 @@ fn preparation_error(result: std::result::Result<PreparedFsQuickFork<'_>, ForkEr
         Ok(_) => panic!("preparation unexpectedly succeeded"),
         Err(error) => error,
     }
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn boot_facade_preserves_materialized_rootfs_and_parent_resource_overrides() {
+    let fixture = Fixture::new(Vec::new());
+    let artifact = fixture.materialized_boot().expect("materialized child");
+    let rootfs = artifact.destination().join("rootfs.ext4");
+    let before = std::fs::read(&rootfs).expect("materialized rootfs");
+    let kernel = fixture.home.path().join("kernel");
+    write_private(&kernel, b"mock kernel");
+
+    let artifact = artifact
+        .boot(
+            FsQuickBootSettings {
+                hypervisor: "mock".into(),
+                kernel_path: kernel,
+                cpus: 7,
+                memory_mib: 777,
+            },
+            None,
+        )
+        .expect("boot materialized child through checkpoint facade");
+
+    assert_eq!(artifact.destination().join("rootfs.ext4"), rootfs);
+    assert_eq!(
+        std::fs::read(&rootfs).expect("rootfs after boot"),
+        before,
+        "source-equals-instance launch must not clobber the materialized child"
+    );
+    let admitted =
+        mvm_hostd::audit::plan_persist::read_plan("childvm").expect("persisted child plan");
+    assert_eq!(admitted.workload.0, "childvm");
+    assert_eq!(admitted.tenant.0, "local");
+    assert_eq!(admitted.resources.cpus, 7);
+    assert_eq!(admitted.resources.mem_mib, 777);
+    assert_eq!(
+        admitted.network_policy,
+        mvm_core::plan::PolicyRef("local-default".into())
+    );
+    assert_eq!(admitted.network_mode, fixture.plan.network_mode);
+    assert!(admitted.secrets.is_empty());
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn boot_facade_failure_retains_both_materialized_locations() {
+    let fixture = Fixture::new(Vec::new());
+    let artifact = fixture.materialized_boot().expect("materialized child");
+    let vm_directory = artifact.destination().to_path_buf();
+    let checkpoint_directory = artifact.location().checkpoint_directory().to_path_buf();
+    let error = match artifact.boot(
+        FsQuickBootSettings {
+            hypervisor: "mock".into(),
+            kernel_path: fixture.home.path().join("missing-kernel"),
+            cpus: 2,
+            memory_mib: 512,
+        },
+        None,
+    ) {
+        Ok(_) => panic!("missing kernel unexpectedly booted"),
+        Err(error) => error,
+    };
+    assert_eq!(error.phase(), ForkPhase::ChildLaunch);
+    let retained = error.artifact().expect("retained artifact locations");
+    assert_eq!(retained.vm_directory(), vm_directory);
+    assert_eq!(retained.checkpoint_directory(), checkpoint_directory);
+    assert!(vm_directory.join("rootfs.ext4").is_file());
+    assert!(checkpoint_directory.join("meta.json").is_file());
 }
 
 fn snapshot(root: &Path) -> BTreeMap<PathBuf, (u32, Vec<u8>)> {

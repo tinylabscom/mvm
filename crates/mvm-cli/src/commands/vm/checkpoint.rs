@@ -15,7 +15,6 @@ use clap::Args as ClapArgs;
 use serde::Serialize;
 
 use mvm_client::AnyBackend;
-use mvm_client::admission::InheritedBundle;
 use mvm_client::checkpoint::class_str;
 use mvm_client::checkpoint::{
     CaptureFsQuickParams, CaptureVmFullParams, CheckpointStore, capture_fs_quick, capture_vm_full,
@@ -898,23 +897,24 @@ fn fork_fs_quick_arm(p: ForkFsQuickArmParams<'_>) -> Result<()> {
         service.prepare_unbooted(request)?
     };
     let artifact = prepared.materialize_and_publish()?;
-    if p.boot {
+    let artifact = if p.boot {
         #[cfg(unix)]
         {
-            let instance_rootfs = artifact.destination().join("rootfs.ext4");
             boot_forked_child(BootForkedChildParams {
-                prepared: &artifact,
-                instance_rootfs: &instance_rootfs,
+                prepared: artifact,
                 hypervisor: p.hypervisor,
                 cpus_override: p.cpus_override,
                 memory_override: p.memory_override,
                 emit_text: !p.json,
-            })
-            .map_err(|error| artifact.retained_error(error))?;
+            })?
         }
         #[cfg(not(unix))]
-        bail!("authenticated fs_quick boots are unavailable on this platform");
-    }
+        {
+            bail!("authenticated fs_quick boots are unavailable on this platform");
+        }
+    } else {
+        artifact
+    };
     if p.json {
         crate::json_out::emit_json(&CheckpointForkJson {
             schema_version: 1,
@@ -946,167 +946,72 @@ fn fork_fs_quick_arm(p: ForkFsQuickArmParams<'_>) -> Result<()> {
 /// `clippy::too_many_arguments` workspace ceiling.
 #[cfg(unix)]
 struct BootForkedChildParams<'a> {
-    prepared: &'a mvm_client::checkpoint::fs_quick::MaterializedFsQuickFork,
-    /// Absolute path to the materialized child rootfs (the fork output).
-    /// Passed as-is to admission so `prepare_instance_rootfs`'s
-    /// source-equals-instance arm returns without clobbering it.
-    instance_rootfs: &'a std::path::Path,
+    prepared: mvm_client::checkpoint::fs_quick::MaterializedFsQuickFork,
     hypervisor: &'a str,
     cpus_override: Option<u32>,
     memory_override: Option<&'a str>,
     emit_text: bool,
 }
 
-/// Admit and boot a forked child VM after its rootfs has been materialized.
+/// Resolve parent-derived launch settings for a materialized child and delegate
+/// fresh verification, admission, binding and dispatch to the checkpoint facade.
 ///
 /// Resource resolution: flags win over the captured authenticated original plan.
-/// The rootfs is the already-materialized instance file (`prepare_instance_rootfs`
-/// returns early when source == instance, so nothing gets clobbered).
 #[cfg(unix)]
-fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
-    use mvm_client::AnyBackend;
+fn boot_forked_child(
+    p: BootForkedChildParams<'_>,
+) -> std::result::Result<
+    mvm_client::checkpoint::fs_quick::MaterializedFsQuickFork,
+    mvm_client::checkpoint::fs_quick::ForkError,
+> {
     use mvm_core::util::parse_human_size;
 
-    let effective_hypervisor = super::super::shared::resolve_effective_hypervisor(p.hypervisor);
-    AnyBackend::require_hypervisor_selectable(&effective_hypervisor)?;
-    let parent_plan = p.prepared.parent_plan();
-    let parent_agent_verbs = parent_plan
-        .agent_verbs
-        .as_ref()
-        .map(|verbs| {
-            verbs
-                .iter()
-                .map(|verb| verb.as_str().to_string())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let parent_meta = p.prepared.parent_meta();
-    let parent_bundle = InheritedBundle::from_parent_plan(parent_plan)?;
-    let child_vm_name = p.prepared.child_name();
-    let cpus = p.cpus_override.unwrap_or(parent_plan.resources.cpus);
-    let mem_mib = match p.memory_override {
-        Some(s) => parse_human_size(s).context("parsing --memory for --boot")?,
-        None => parent_plan.resources.mem_mib as u32,
-    } as u64;
+    let prepared = p.prepared;
+    let settings = (|| -> Result<_> {
+        let effective_hypervisor = super::super::shared::resolve_effective_hypervisor(p.hypervisor);
+        AnyBackend::require_hypervisor_selectable(&effective_hypervisor)?;
+        let parent_plan = prepared.parent_plan();
+        let cpus = p.cpus_override.unwrap_or(parent_plan.resources.cpus);
+        let mem_mib = match p.memory_override {
+            Some(s) => parse_human_size(s).context("parsing --memory for --boot")?,
+            None => parent_plan.resources.mem_mib as u32,
+        };
+        let instance_rootfs = prepared.destination().join("rootfs.ext4");
 
-    let tenant = p
-        .prepared
-        .child_tenant()
-        .context("prepared boot tenant is missing")?;
-
-    // The booted child needs a real kernel path; work-image boots ship none.
-    // Fall back to the cached builder-VM kernel when the placeholder is absent.
-    let vmlinux_placeholder = p
-        .instance_rootfs
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join("vmlinux");
-    let vmlinux_path = super::up::resolve_workload_kernel(
-        vmlinux_placeholder.to_str().unwrap_or(""),
-        &effective_hypervisor,
-    )?;
-
-    // Prepared before admission: the child's verb grant expires with the plan's
-    // validity window, which admission starts (see
-    // `mvm_client::launch::boot_order`).
-    let mut start_config = mvm_core::vm_backend::VmStartConfig {
-        name: child_vm_name.to_string(),
-        // Passing the instance path as rootfs_path so `prepare_instance_rootfs`
-        // hits the source-equals-instance no-op arm and leaves the fork intact.
-        rootfs_path: p.instance_rootfs.to_string_lossy().into_owned(),
-        kernel_path: Some(vmlinux_path.clone()),
-        cpus,
-        memory_mib: mem_mib as u32,
-        ..Default::default()
-    };
-    let release = crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
-        super::up::attach_runtime_overlay_if_cached_version_verified(
-            &mut start_config,
+        // The booted child needs a real kernel path; work-image boots ship none.
+        // Fall back to the cached builder-VM kernel when the placeholder is absent.
+        let vmlinux_placeholder = instance_rootfs
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("vmlinux");
+        let kernel_path = super::up::resolve_workload_kernel(
+            vmlinux_placeholder.to_str().unwrap_or(""),
             &effective_hypervisor,
-            parent_meta.runtime_overlay_version.as_deref(),
-            pair,
-        )
-    })?;
-    if let Some(release) = &release {
-        super::up::attach_universal_initramfs_with_verified_release(
-            &mut start_config,
-            &effective_hypervisor,
-            release,
         )?;
-    } else {
-        super::up::attach_universal_initramfs_if_cached(&mut start_config, &effective_hypervisor)?;
-    }
-    let verified_runtime = release
-        .map(|release| super::up::verify_release_runtime_set(&start_config, release))
-        .transpose()?
-        .map(std::sync::Arc::new);
-
-    let ledger = mvm_client::admission::InMemoryNonceLedger::new();
-    let configured_images_dir = mvm_build::image_source::configured_images_dir();
-    let params = super::up::AdmitPlanForBootParams {
-        bundle_sizing: Default::default(),
-        mailbox: None,
-        gpu: false,
-        instructions: Default::default(),
-        outputs: Vec::new(),
-        network_mode: parent_plan.network_mode,
-        tenant,
-        vm_name: child_vm_name,
-        backend_name: &effective_hypervisor,
-        configured_images_dir: configured_images_dir.as_deref(),
-        rootfs_path: p.instance_rootfs,
-        kernel_path: Some(std::path::Path::new(&vmlinux_path)),
-        precomputed_image_sha256: None,
-        boot_artifact_identity: None,
-        runtime_config: Some(&start_config),
-        cpus,
-        mem_mib,
-        seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-        secret_release: crate::commands::vm::managed_secrets::secret_release_for_bindings(
-            p.prepared.bindings(),
-        ),
-        secrets: p.prepared.bindings().to_vec(),
-        caller_commitment: None,
-        ledger: &ledger,
-        keys_dir: None,
-        audit_dir: None,
-        policy_dir: None,
-        bundle_pin: parent_bundle.as_ref().map(InheritedBundle::pin),
-        bundle_posture: None,
-        deps_volume: None,
-        shares: Vec::new(),
-        assets: Vec::new(),
-        redaction: mvm_core::policy::RedactionPolicy::default(),
-        network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-        agent_verb_override: parent_agent_verbs.clone(),
-        // A baked-entrypoint child qualifies for an attenuated grant. Forks are
-        // never interactive, never carry trailing argv, and are always
-        // prod-profile.
-        restrict_agent_verbs: !parent_agent_verbs.is_empty()
-            || super::agent_verbs::grant_eligible(false, false, false),
-        services: Vec::new(),
-        grants: None,
-        backend_kind: None,
-        entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
-            "a checkpoint fork boots the image the parent booted; this path resolves no entrypoint",
-        ),
-    };
-    let admission = match &verified_runtime {
-        Some(runtime) => super::up::admit_plan_for_boot_with_verified_runtime(params, runtime)?,
-        None => super::up::admit_plan_for_boot(params)?,
-    };
-
-    populate_fork_rootfs_verity(&mut start_config, p.instance_rootfs)?;
-
-    mvm_client::admission::populate_audit_substrate(
-        &mut start_config,
-        &admission.admitted,
-        admission.policy_bundle.as_ref(),
-    )?;
-
-    let backend = AnyBackend::from_hypervisor(&effective_hypervisor);
-    mvm_client::admission::FsQuickBootAdmission::new(admission, p.prepared, verified_runtime)?
-        .start(&backend, start_config)?;
+        Ok(mvm_client::checkpoint::fs_quick::FsQuickBootSettings {
+            hypervisor: effective_hypervisor.clone(),
+            kernel_path: kernel_path.into(),
+            cpus,
+            memory_mib: mem_mib,
+        })
+    })();
+    let settings = settings.map_err(|error| prepared.retained_error(error))?;
+    let child_vm_name = prepared.child_name().to_string();
+    let effective_hypervisor = settings.hypervisor.clone();
+    let retained_location = prepared.location().clone();
+    let prepared = crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
+        prepared.boot(settings, pair).map_err(anyhow::Error::new)
+    })
+    .map_err(|error| {
+        error
+            .downcast::<mvm_client::checkpoint::fs_quick::ForkError>()
+            .unwrap_or_else(|error| {
+                mvm_client::checkpoint::fs_quick::ForkError::retained_child(
+                    retained_location,
+                    error,
+                )
+            })
+    })?;
 
     if p.emit_text {
         ui::success(&format!(
@@ -1114,7 +1019,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
             child_vm_name, effective_hypervisor
         ));
     }
-    Ok(())
+    Ok(prepared)
 }
 
 /// Read the minted verb-grant sidecar for `vm_name` from its per-VM state dir.
@@ -1135,37 +1040,6 @@ fn grant_predecessor_from_vm_name(vm_name: &str) -> Option<(String, mvm_core::pl
         envelope.grant.session_id,
         mvm_core::plan::Nonce::from_hex(&envelope.plan_nonce_hex).ok()?,
     ))
-}
-
-/// Read the parent checkpoint's source VM plan and return (cpus, mem_mib).
-/// Returns (None, None) when the plan is absent — the caller falls back to
-/// global defaults. The parent checkpoint's `vm_name` field names the source VM.
-/// If the child rootfs directory carries dm-verity sidecars, populate the
-/// start config so the backend attaches the hash tree and emits the roothash
-/// on the kernel cmdline. Without this the child skips `mvm-verity-init` and
-/// cannot mount the runtime overlay, leading to a guest panic.
-fn populate_fork_rootfs_verity(
-    start_config: &mut mvm_core::vm_backend::VmStartConfig,
-    rootfs: &std::path::Path,
-) -> anyhow::Result<()> {
-    let rootfs_dir = rootfs.parent().unwrap_or(std::path::Path::new("."));
-    let verity = rootfs_dir.join("rootfs.verity");
-    let roothash = rootfs_dir.join("rootfs.roothash");
-    if verity.exists() && roothash.exists() {
-        start_config.verity_path = Some(
-            verity
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("rootfs.verity path is not UTF-8"))?
-                .to_string(),
-        );
-        start_config.roothash = Some(
-            std::fs::read_to_string(&roothash)
-                .with_context(|| format!("reading {}", roothash.display()))?
-                .trim()
-                .to_string(),
-        );
-    }
-    Ok(())
 }
 
 /// Read the parent checkpoint's source VM plan and return the agent-verb
@@ -2647,18 +2521,17 @@ mod tests {
 
     // ── boot path: no-clobber property ───────────────────────────────────
 
-    /// The boot arm passes the INSTANCE path (`vm_state_dir/rootfs.ext4`) as
-    /// the rootfs_path in the VmStartConfig. `prepare_instance_rootfs` returns
-    /// early when source == instance, so the forked rootfs is never replaced.
+    /// The adapter derives the instance path and the client facade uses it as
+    /// the only rootfs authority. The runtime no-clobber seam remains intact.
     #[test]
-    fn boot_arm_start_config_uses_instance_path() {
+    fn boot_adapter_preserves_materialized_instance_path() {
         let tmp = tempfile::tempdir().unwrap();
         let instance = tmp.path().join("childvm").join("rootfs.ext4");
         std::fs::create_dir_all(instance.parent().unwrap()).unwrap();
         std::fs::write(&instance, b"forked").unwrap();
 
-        // Build the VmStartConfig the same way boot_forked_child does, and assert
-        // rootfs_path equals the instance path (not some other source).
+        // The client facade builds this config from the same materialized path;
+        // no CLI argument can substitute another rootfs.
         let config = mvm_core::vm_backend::VmStartConfig {
             name: "childvm".into(),
             rootfs_path: instance.to_string_lossy().into_owned(),
