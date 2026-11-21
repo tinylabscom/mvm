@@ -790,6 +790,11 @@ fn teardown_transient_with(
     let state_dir = mvm_core::config::vm_state_dir(vm_name);
     let requested_state_dir = mvm_core::config::vm_state_dir(requested_vm_name);
     remove_transient_state_dirs(&state_dir, &requested_state_dir);
+    // Only the requested name: a claimed standby's evidence belongs to its pool.
+    if let Err(error) = mvm_runtime::runtime_evidence::remove_retired_vm_evidence(requested_vm_name)
+    {
+        tracing::warn!(machine = requested_vm_name, %error, "runtime evidence left in place");
+    }
     sub.finish(SubPhase::StateRemove);
     Ok(())
 }
