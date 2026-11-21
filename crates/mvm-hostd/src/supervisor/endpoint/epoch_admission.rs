@@ -9,9 +9,17 @@
 //!
 //! A decision taken when a flow opens is not taken again while it relays, so
 //! a serving workload endpoint also asks the ledger on a fixed interval
-//! ([`REVOCATION_CHECK_INTERVAL`]) from one thread. The first refusal is handed
-//! to the caller once, and the thread ends: the endpoint binary records it and
-//! exits, which closes every flow, the session and the listeners together.
+//! ([`REVOCATION_CHECK_INTERVAL`]) from one thread. The first definitive
+//! denial (stale, not yet promoted, quarantined) is handed to the caller once,
+//! and the thread ends: the endpoint binary records it and exits, which closes
+//! every flow, the session and the listeners together.
+//!
+//! An unreadable ledger is not a denial here. It says nothing about whether
+//! the unit was replaced, and exiting on it would end egress for good on
+//! every running workload after one bad read or a crashed commit, even once
+//! the store is repaired. The watch keeps asking until a read gives an answer;
+//! meanwhile flows already open keep relaying, and new ones are still refused
+//! by the per-decision check, which treats an unreadable ledger as a refusal.
 //!
 //! A builder endpoint runs under no plan and has no epoch to gate.
 
@@ -24,6 +32,7 @@ use mvm_contract::protocol::mailbox::ExecutionEpoch;
 use mvm_core::host_interface::{
     HostInterfaceError,
     epoch_gate::CommandGate,
+    error::Denial,
     workload::{canonical_dir_at, legacy_path_at},
 };
 use mvm_runtime::vmm::egress_gate::AdmissionCheck;
@@ -159,20 +168,40 @@ impl EndpointEpochGate {
         })
     }
 
-    /// `None` when `stop` fires or its sender is dropped first.
+    /// The first definitive denial; `None` when `stop` fires or its sender is
+    /// dropped first. An unreadable ledger is warned about once on entering
+    /// that state and once on leaving it, and the watch keeps asking.
     fn wait_for_refusal(
         &self,
         interval: Duration,
         stop: &mpsc::Receiver<()>,
     ) -> Option<HostInterfaceError> {
+        let mut ledger_unreadable = false;
         loop {
             match stop.recv_timeout(interval) {
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return None,
             }
-            if let Err(refusal) = self.admit() {
-                return Some(refusal);
+            let unreadable = match self.admit() {
+                Ok(()) => None,
+                Err(refusal) if is_definitive(&refusal) => return Some(refusal),
+                Err(error) => Some(error),
+            };
+            match (&unreadable, ledger_unreadable) {
+                (Some(error), false) => warn!(
+                    unit = %self.unit,
+                    epoch = self.epoch.get(),
+                    %error,
+                    "workload ledger unreadable; open flows keep relaying until a read decides"
+                ),
+                (None, true) => warn!(
+                    unit = %self.unit,
+                    epoch = self.epoch.get(),
+                    "workload ledger readable again and admits this epoch"
+                ),
+                _ => {}
             }
+            ledger_unreadable = unreadable.is_some();
         }
     }
 
@@ -208,6 +237,19 @@ impl EndpointEpochGate {
     }
 }
 
+/// Whether `refusal` is the ledger's answer about this epoch rather than a
+/// failure to read the ledger.
+fn is_definitive(refusal: &HostInterfaceError) -> bool {
+    matches!(
+        refusal,
+        HostInterfaceError::Denied(
+            Denial::StaleEpoch { .. }
+                | Denial::EpochNotPromoted { .. }
+                | Denial::WorkloadQuarantined(_)
+        )
+    )
+}
+
 /// The running epoch watch. Dropping it stops and joins the thread.
 #[derive(Debug)]
 pub struct RevocationWatch {
@@ -228,7 +270,7 @@ impl Drop for RevocationWatch {
 mod tests {
     use super::*;
     use crate::policy_generation::workload_store::OwnedWorkloadStore;
-    use mvm_core::host_interface::{error::Denial, workload::WorkloadChange};
+    use mvm_core::host_interface::workload::WorkloadChange;
     use mvm_core::policy::network_policy::NetworkPolicy;
     use mvm_runtime::vmm::egress_gate::{DenyReason, EgressVerdict};
 
@@ -446,39 +488,151 @@ mod tests {
         ));
     }
 
+    /// A watch that records its revocation through a real chain recorder, as
+    /// the endpoint binary does, and reports each time it did.
+    struct RecordedWatch {
+        _env: mvm_core::util::test_env::TestEnv,
+        home: tempfile::TempDir,
+        _runtime: tokio::runtime::Runtime,
+        watch: Option<RevocationWatch>,
+        recorded: mpsc::Receiver<()>,
+    }
+
+    impl RecordedWatch {
+        fn start() -> Self {
+            let (env, home) = crate::test_fixtures::isolated_mvm_home();
+            let keys = mvm_core::config::mvm_keys_dir();
+            std::fs::create_dir_all(&keys).unwrap();
+            std::fs::write(keys.join("host-signer.ed25519"), [7u8; 32]).unwrap();
+            let recorder = super::super::network_endpoint::build_audit_recorder("local")
+                .expect("signer key present");
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let handle = runtime.handle().clone();
+            let (done, recorded) = mpsc::channel();
+            let watch = gate_at(home.path(), 1)
+                .watch(TICK, move |gate, refusal| {
+                    gate.record_revocation(Some(&recorder), &handle, &refusal);
+                    done.send(()).unwrap();
+                })
+                .unwrap();
+            Self {
+                _env: env,
+                home,
+                _runtime: runtime,
+                watch: Some(watch),
+                recorded,
+            }
+        }
+
+        fn home(&self) -> &std::path::Path {
+            self.home.path()
+        }
+
+        /// About `ticks` checks pass with nothing recorded.
+        fn quiet_for(&self, ticks: u32) {
+            assert!(matches!(
+                self.recorded.recv_timeout(TICK * ticks),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ));
+        }
+
+        /// The watch has ended: no further report can arrive.
+        fn ended(&self) {
+            assert!(matches!(
+                self.recorded.recv_timeout(BOUND),
+                Err(mpsc::RecvTimeoutError::Disconnected)
+            ));
+        }
+
+        /// Stop the watch and return the revocation entries in the chain.
+        fn finish(mut self) -> Vec<String> {
+            drop(self.watch.take());
+            let chain =
+                std::fs::read_to_string(mvm_core::config::mvm_audit_dir().join("local.jsonl"))
+                    .unwrap_or_default();
+            chain
+                .lines()
+                .filter(|line| line.contains(REVOKED_EVENT))
+                .map(str::to_owned)
+                .collect()
+        }
+    }
+
+    /// Replace the ledger file by rename, as a commit does.
+    fn write_ledger(home: &std::path::Path, contents: &str) {
+        let dir = canonical_dir_at(home);
+        std::fs::create_dir_all(&dir).unwrap();
+        let staged = dir.join("ledger.json.staged");
+        std::fs::write(&staged, contents).unwrap();
+        std::fs::rename(staged, dir.join("ledger.json")).unwrap();
+    }
+
+    fn ledger_at_epoch(home: &std::path::Path, epoch: u64) {
+        write_ledger(
+            home,
+            &serde_json::json!({
+                "sequence": 1,
+                "workloads": { "unit": { "epoch": epoch, "quarantined": false } },
+            })
+            .to_string(),
+        );
+    }
+
+    fn unreadable_ledger(home: &std::path::Path) {
+        write_ledger(home, "{ not a ledger");
+        assert!(matches!(
+            gate_at(home, 1).admit(),
+            Err(HostInterfaceError::Denied(Denial::StateUnreadable(_)))
+        ));
+    }
+
     #[test]
     fn a_revocation_is_recorded_in_the_chain_exactly_once() {
-        let (_env, home) = crate::test_fixtures::isolated_mvm_home();
-        let keys = mvm_core::config::mvm_keys_dir();
-        std::fs::create_dir_all(&keys).unwrap();
-        std::fs::write(keys.join("host-signer.ed25519"), [7u8; 32]).unwrap();
-        let recorder = super::super::network_endpoint::build_audit_recorder("local")
-            .expect("signer key present");
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let handle = runtime.handle().clone();
-        let (done, finished) = mpsc::channel();
-        let watch = gate_at(home.path(), 1)
-            .watch(TICK, move |gate, refusal| {
-                gate.record_revocation(Some(&recorder), &handle, &refusal);
-                done.send(()).unwrap();
-            })
-            .unwrap();
-        replace(home.path());
-        finished.recv_timeout(BOUND).unwrap();
-        // Many more ticks' worth of a ledger that still refuses.
-        assert!(finished.recv_timeout(TICK * 20).is_err());
-        drop(watch);
-        let chain =
-            std::fs::read_to_string(mvm_core::config::mvm_audit_dir().join("local.jsonl")).unwrap();
-        let revoked: Vec<&str> = chain
-            .lines()
-            .filter(|line| line.contains(REVOKED_EVENT))
-            .collect();
-        assert_eq!(revoked.len(), 1, "{chain}");
-        assert!(revoked[0].contains("execution_not_admitted"), "{chain}");
+        let watched = RecordedWatch::start();
+        replace(watched.home());
+        watched.recorded.recv_timeout(BOUND).unwrap();
+        // The ledger still refuses, but the watch reported once and ended.
+        watched.ended();
+        let revoked = watched.finish();
+        assert_eq!(revoked.len(), 1, "{revoked:?}");
+        assert!(revoked[0].contains("execution_not_admitted"), "{revoked:?}");
+    }
+
+    #[test]
+    fn an_unreadable_ledger_neither_revokes_nor_records() {
+        let watched = RecordedWatch::start();
+        unreadable_ledger(watched.home());
+        watched.quiet_for(100);
+        assert!(watched.finish().is_empty());
+    }
+
+    #[test]
+    fn a_denial_after_an_unreadable_ledger_revokes_once() {
+        let watched = RecordedWatch::start();
+        unreadable_ledger(watched.home());
+        watched.quiet_for(20);
+        ledger_at_epoch(watched.home(), 2);
+        watched.recorded.recv_timeout(BOUND).unwrap();
+        watched.ended();
+        let revoked = watched.finish();
+        assert_eq!(revoked.len(), 1, "{revoked:?}");
+        assert!(revoked[0].contains("stale execution epoch"), "{revoked:?}");
+    }
+
+    #[test]
+    fn an_unreadable_ledger_that_recovers_admitting_the_epoch_carries_on() {
+        let watched = RecordedWatch::start();
+        unreadable_ledger(watched.home());
+        watched.quiet_for(20);
+        ledger_at_epoch(watched.home(), 1);
+        watched.quiet_for(50);
+        // Still watching: a replacement now is revoked.
+        ledger_at_epoch(watched.home(), 2);
+        watched.recorded.recv_timeout(BOUND).unwrap();
+        assert_eq!(watched.finish().len(), 1);
     }
 
     #[test]
