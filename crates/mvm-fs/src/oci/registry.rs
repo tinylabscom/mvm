@@ -524,7 +524,7 @@ impl RegistryClient {
         let mut response = response;
         let mut redirect_count = 0;
 
-        while is_preserving_redirect(response.status()) {
+        while is_blob_redirect(response.status()) {
             if redirect_policy == RedirectPolicy::Refuse {
                 break;
             }
@@ -669,8 +669,13 @@ enum RedirectPolicy {
     Blob,
 }
 
-fn is_preserving_redirect(status: mvm_http::StatusCode) -> bool {
-    matches!(status.as_u16(), 307 | 308)
+/// A redirect a blob GET follows. The only request that follows one is a
+/// GET, and the hop is always a credential-free GET, so RFC 9110's
+/// method-rewriting statuses (301, 302, 303) mean the same here as the
+/// method-preserving ones (307, 308). Registries use them: Google Artifact
+/// Registry answers blob GETs with 302.
+fn is_blob_redirect(status: mvm_http::StatusCode) -> bool {
+    matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308)
 }
 
 /// Accept a blob redirect to any origin — the blob is digest-verified and the

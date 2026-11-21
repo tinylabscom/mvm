@@ -304,6 +304,9 @@ async fn write_response(stream: &mut TcpStream, response: &TestResponse) -> std:
 fn reason_phrase(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        301 => "Moved Permanently",
+        302 => "Found",
+        303 => "See Other",
         307 => "Temporary Redirect",
         308 => "Permanent Redirect",
         400 => "Bad Request",
