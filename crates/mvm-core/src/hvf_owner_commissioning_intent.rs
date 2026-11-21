@@ -263,7 +263,7 @@ pub fn publish_test_hvf_owner_commissioning_intent(
 /// # Errors
 /// Refuses the same filesystem, size, schema, and semantic failures as the
 /// production loader.
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub fn load_test_hvf_owner_commissioning_intent(
     root: File,
@@ -571,7 +571,7 @@ fn intent_file_matches_policy(file: &File, uid: u32, gid: u32) -> io::Result<boo
 
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
-fn has_extended_acl(file: &File) -> io::Result<bool> {
+pub(super) fn has_extended_acl(file: &File) -> io::Result<bool> {
     use std::ffi::c_void;
     use std::os::fd::AsRawFd as _;
 
@@ -598,7 +598,7 @@ fn has_extended_acl(file: &File) -> io::Result<bool> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn has_extended_acl(_file: &File) -> io::Result<bool> {
+pub(super) fn has_extended_acl(_file: &File) -> io::Result<bool> {
     Ok(false)
 }
 

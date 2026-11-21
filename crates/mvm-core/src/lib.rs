@@ -72,6 +72,9 @@ pub mod hvf_owner_commissioning_intent;
 /// Strict protected commissioning record for the cold-HVF owner roles.
 #[cfg(any(target_os = "macos", all(unix, feature = "test-support")))]
 pub mod hvf_owner_deployment_receipt;
+/// Read-only descriptor validation of the protected authority state root.
+#[cfg(any(target_os = "macos", all(unix, feature = "test-support")))]
+pub mod hvf_owner_protected_authority_root;
 pub mod icmp_wire;
 /// Content-addressed image version-lineage nodes (the image analog of
 /// [`checkpoint`]). Provenance metadata, never authorization.

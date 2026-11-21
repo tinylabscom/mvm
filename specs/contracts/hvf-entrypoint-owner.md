@@ -301,6 +301,18 @@ exact mode and no extended ACL, bounds the read before allocation, and strictly
 decodes the original bytes. It exposes only validated public metadata and the
 domain-separated digest of canonical compact typed bytes. Missing, unsafe,
 oversized or corrupt state refuses without creation, repair or cleanup.
+The source-only authority-root validator takes that loaded intent and walks the
+fixed `/private/var/db/mvm/authority` path through read-only, directory-only,
+no-follow descriptors. It requires root-owned secure ancestry, an exact
+root-owned `0755` deployment directory, and an exact `0700`, no-extended-ACL
+authority directory owned by the intent's authority UID and GID. Its opaque
+result retains only the validated directory descriptor and exposes no
+descriptor, child-open or mutation API. Validation creates no lock and proves
+only that this namespace matched at observation time; it does not prove
+freshness, commissioning progress, authority or an atomic snapshot. Future
+mutation must obtain separately designed exclusion, then reload and revalidate
+the intent and root. The commissioning lock filename and lifecycle remain
+undecided.
 The v1 preflight checks only these fixed sibling conflict names; it does not
 claim to discover arbitrary state beneath a future authority-owned
 subdirectory. Trusted installation and state mutation must be serialized across
