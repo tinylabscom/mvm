@@ -647,6 +647,21 @@ mod tests {
         base
     }
 
+    /// Rewrites the binary and moves its mtime a second on, so the stamp
+    /// differs even where the filesystem's timestamps are coarser than the
+    /// time between two writes.
+    fn rewrite(dir: &tempfile::TempDir, bytes: &[u8]) {
+        let path = dir.path().join("firecracker");
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(before + std::time::Duration::from_secs(1))
+            .unwrap();
+    }
+
     fn memo_bytes(memo: &tempfile::TempDir) -> Vec<u8> {
         std::fs::read(memo.path().join(BINARY_MEMO_FILE)).unwrap()
     }
@@ -692,7 +707,7 @@ mod tests {
         let before = memo_bytes(&memo);
         let mut tampered = vec![0u8; BINARY.len()];
         tampered[..4].copy_from_slice(b"\x7fELF");
-        std::fs::write(dir.path().join("firecracker"), &tampered).unwrap();
+        rewrite(&dir, &tampered);
         let outcome = verify_memoed(&dir, &memo, BINARY, base + 10 * SEC);
         assert!(
             matches!(outcome, Err(ResolveError::DigestMismatch { .. })),
@@ -764,8 +779,7 @@ mod tests {
         assert!(verify_memoed(&dir, &memo, BINARY, base + 10 * SEC).unwrap());
         // Same bytes, new timestamps: the stamp no longer matches.
         let base = settled_memo(&dir, &memo);
-        let file = dir.path().join("firecracker");
-        std::fs::write(&file, BINARY).unwrap();
+        rewrite(&dir, BINARY);
         assert!(verify_memoed(&dir, &memo, BINARY, base + 10 * SEC).unwrap());
     }
 
