@@ -81,17 +81,22 @@ fn wire(tip: JournalTip) -> DestinationTip {
     }
 }
 
-/// After the journal is open, its anchor must have reached the tip the owner
-/// holds; a journal with no suffix to explain a commit the owner took fails.
+/// After the journal is open, its anchor must not be behind the tip the owner
+/// held at enrollment; a journal with no suffix to explain a commit the owner
+/// took fails. Opening may move the anchor past that tip by committing a
+/// record that was written but never ordered: each such step went through the
+/// owner, which accepts a head only on top of the tip it holds.
 ///
 /// # Errors
 ///
-/// [`JournalError::Rollback`] when the anchor is not at the enrolled tip.
+/// [`JournalError::Rollback`] when the anchor is behind the enrolled tip, or
+/// at its cursor under another head.
 pub(crate) fn require_reached(
     anchor: &FileJournalAnchor,
     enrolled: &DestinationTip,
 ) -> Result<(), JournalError> {
-    if wire(anchor.tip()) == *enrolled {
+    let local = wire(anchor.tip());
+    if local == *enrolled || local.cursor > enrolled.cursor {
         Ok(())
     } else {
         Err(JournalError::Rollback)
@@ -164,6 +169,7 @@ fn resolve(
 ///
 /// The owner refuses or cannot be reached, or its recorded tip is neither the
 /// anchor's nor one commit ahead of it.
+#[cfg(test)]
 pub(crate) fn coordinate(
     anchor: FileJournalAnchor,
     authority: Arc<dyn DestinationAuthority>,
