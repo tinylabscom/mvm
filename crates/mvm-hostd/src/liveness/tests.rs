@@ -265,7 +265,7 @@ fn a_missed_deadline_fences_the_epoch_for_every_gate_and_is_audited_once() {
     let (t, controller) = (tenant(), id("controller"));
     let cells = StateCells {
         host_signer_keys_dir: None,
-        emitter: &host.emitter,
+        audit: &host.emitter,
     };
     let err = cells
         .write(

@@ -26,6 +26,9 @@
 //!   binary logs a warn and `host.audit.v1` calls return `NotBound`.
 //! - `host.time.v1` — registered only when named by the exact admitted
 //!   service bindings; returns the host-authoritative wall clock.
+//! - `host.cell.v1` — registered when bound, when the config names a unit
+//!   and epoch, and when an audit signer is configured to record its
+//!   refusals on the tenant's chain.
 //!
 //! `host.cost.v1` and `broker.v1` remain unregistered.
 
@@ -136,7 +139,10 @@ fn main() -> Result<()> {
 /// leaves the registry without that handler; callers get
 /// `Err(NotBound)` for the missing service.
 fn register_handlers(registry: &mut Registry, cfg: &SubprocessConfig) {
-    let _bound = register_bound_handlers(registry, &cfg.services_bindings);
+    let refusals = cfg.audit_signer_uds_path.as_ref().map(|path| {
+        Arc::new(AuditClient::new(path.clone())) as Arc<dyn mvm_hostd::audit::refusal::RefusalAudit>
+    });
+    let _bound = register_bound_handlers(registry, &cfg.services_bindings, refusals);
     register_beacon(registry, cfg);
     let host_audit = mvm_core::protocol::broker::ServiceId::parse("host.audit.v1")
         .expect("host.audit.v1 is a valid ServiceId");

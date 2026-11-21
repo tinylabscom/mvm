@@ -18,6 +18,7 @@ use self::host_assurance_v1::HostAssuranceV1Handler;
 use self::host_kv_v1::HostKvV1Handler;
 use self::host_time_v1::HostTimeV1Handler;
 use super::registry::Registry;
+use crate::audit::refusal::RefusalAudit;
 
 /// Handles for stateful handlers the caller has to drive after registration.
 ///
@@ -33,8 +34,36 @@ pub struct BoundHandlers {
 /// Register stateless built-in handlers named by an admitted service binding.
 /// Services absent from `bindings` remain unregistered and therefore fail with
 /// `NotBound` at the registry gate.
-pub fn register_bound_handlers(registry: &mut Registry, bindings: &[ServiceId]) -> BoundHandlers {
+///
+/// `host.cell.v1` is registered only when it is bound, the registration
+/// carries a unit and epoch (the registry has an epoch gate), and the caller
+/// supplies `refusals`, the signer that records its refusals on the tenant's
+/// chain. Those are recorded at a bounded rate per registration
+/// ([`crate::audit::refusal::ThrottledRefusals`]).
+pub fn register_bound_handlers(
+    registry: &mut Registry,
+    bindings: &[ServiceId],
+    refusals: Option<Arc<dyn RefusalAudit>>,
+) -> BoundHandlers {
     let mut bound = BoundHandlers::default();
+
+    let host_cell = ServiceId::parse(mvm_core::protocol::host_cell::HOST_CELL_SERVICE)
+        .expect("host.cell.v1 is a valid ServiceId");
+    if bindings.contains(&host_cell)
+        && registry.epoch_gate.is_some()
+        && let Some(refusals) = refusals
+    {
+        let clock: Arc<dyn mvm_core::time::Clock> = Arc::new(mvm_core::time::SystemClock);
+        // Each registration counts its own refusals, so one guest's repeats
+        // cannot crowd out another's first entry.
+        let refusals = Arc::new(crate::audit::refusal::ThrottledRefusals::new(
+            refusals,
+            Arc::clone(&clock),
+        ));
+        registry.register(Arc::new(host_cell_v1::HostCellV1Handler::new(
+            refusals, clock,
+        )));
+    }
 
     let host_time = ServiceId::parse("host.time.v1").expect("host.time.v1 is a valid ServiceId");
     if bindings.contains(&host_time) {
@@ -66,26 +95,4 @@ pub fn register_bound_handlers(registry: &mut Registry, bindings: &[ServiceId]) 
     }
 
     bound
-}
-
-/// Register `host.cell.v1` when `bindings` names it, and report whether it
-/// did. It is not among the handlers [`register_bound_handlers`] registers:
-/// its refusals are signed onto the tenant's chain under the host key, which
-/// only a process holding that key can supply. A keyless broker process does
-/// not call this, so a plan that binds the service there gets `NotBound`.
-pub fn register_cell_handler(
-    registry: &mut Registry,
-    bindings: &[ServiceId],
-    emitter: Arc<crate::audit::emitter::AuditEmitter>,
-    clock: Arc<dyn mvm_core::time::Clock>,
-) -> bool {
-    let host_cell = ServiceId::parse(mvm_core::protocol::host_cell::HOST_CELL_SERVICE)
-        .expect("host.cell.v1 is a valid ServiceId");
-    if !bindings.contains(&host_cell) {
-        return false;
-    }
-    registry.register(Arc::new(host_cell_v1::HostCellV1Handler::new(
-        emitter, clock,
-    )));
-    true
 }

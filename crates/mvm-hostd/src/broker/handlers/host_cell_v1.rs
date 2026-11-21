@@ -28,14 +28,14 @@ use mvm_core::protocol::host_cell::{
 };
 use mvm_core::time::Clock;
 
-use crate::audit::emitter::AuditEmitter;
-use crate::liveness::{LivenessCaller, LivenessDeadlines, LivenessRefusal};
+use crate::audit::refusal::RefusalAudit;
+use crate::liveness::{LivenessCaller, LivenessRefusal, LivenessSignals};
 use crate::state_cells::{CellCaller, CellRefusal, MAX_CELL_BYTES, StateCells};
 
 /// Handler for the `host.cell.v1` service.
 pub struct HostCellV1Handler {
-    /// Signs refusals onto the tenant's chain, so it holds the host key.
-    emitter: Arc<AuditEmitter>,
+    /// Records refusals on the tenant's chain.
+    audit: Arc<dyn RefusalAudit>,
     clock: Arc<dyn Clock>,
 }
 
@@ -193,24 +193,24 @@ fn liveness_error(error: anyhow::Error) -> ServiceError {
 
 impl HostCellV1Handler {
     #[must_use]
-    pub fn new(emitter: Arc<AuditEmitter>, clock: Arc<dyn Clock>) -> Self {
-        Self { emitter, clock }
+    pub fn new(audit: Arc<dyn RefusalAudit>, clock: Arc<dyn Clock>) -> Self {
+        Self { audit, clock }
     }
 
     /// Run one call. Blocking: the store takes file locks and syncs.
     fn run(
-        emitter: &AuditEmitter,
+        audit: &dyn RefusalAudit,
         clock: &dyn Clock,
         caller: &Caller,
         op: Operation,
     ) -> ServiceDispatchResult {
         let cells = StateCells {
             host_signer_keys_dir: None,
-            emitter,
+            audit,
         };
-        let deadlines = LivenessDeadlines {
+        let deadlines = LivenessSignals {
             host_signer_keys_dir: None,
-            emitter,
+            audit,
             clock,
         };
         match op {
@@ -276,9 +276,9 @@ impl ServiceHandler for HostCellV1Handler {
         Box::pin(async move {
             let caller = Caller::from_ctx(ctx)?;
             let op = Operation::parse(verb, payload)?;
-            let emitter = Arc::clone(&self.emitter);
+            let audit = Arc::clone(&self.audit);
             let clock = Arc::clone(&self.clock);
-            tokio::task::spawn_blocking(move || Self::run(&emitter, &*clock, &caller, op))
+            tokio::task::spawn_blocking(move || Self::run(&*audit, &*clock, &caller, op))
                 .await
                 .map_err(|error| unavailable(&anyhow::Error::new(error)))?
         })

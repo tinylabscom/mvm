@@ -206,6 +206,7 @@ async fn both_routes_append_through_real_in_process_signers() {
             workload_id: "workload".into(),
             workload_chain_path: helper_log.to_str().unwrap().into(),
             chain_head_secondary_path: dir.path().join("helper.head").to_str().unwrap().into(),
+            unit: None,
         })),
         SignerHelperResponse::Registered { .. }
     ));
@@ -248,7 +249,15 @@ async fn both_routes_append_through_real_in_process_signers() {
         tokio::select! {
             () = clients => {},
             result = server::serve_on_listener(
-                direct_listener, Arc::new(Mutex::new(chain)), "workload".into(), 65_536,
+                direct_listener,
+                Arc::new(Mutex::new(chain)),
+                Arc::new(server::LifecycleScope {
+                    tenant_id: "tenant".into(),
+                    unit: None,
+                    key_path: None,
+                }),
+                "workload".into(),
+                65_536,
             ) => panic!("direct server stopped: {result:?}"),
             result = helper::serve_on_listener(
                 helper_listener, Arc::new(Mutex::new(signer)), 65_536,

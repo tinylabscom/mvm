@@ -14,9 +14,11 @@ use mvm_core::protocol::handler::CallEpoch;
 use mvm_core::util::test_env::TestEnv;
 
 use super::*;
+use crate::audit::emitter::AuditEmitter;
 use crate::audit::host_keypair::HostSigner;
 use crate::broker::epoch::tests::{gate_at, quarantine, replace};
 use crate::broker::registry::Registry;
+use crate::liveness::LivenessDeadlines;
 use crate::policy_generation::workload_store::OwnedWorkloadStore;
 use crate::topology_admission::{
     HostCpus, TopologyAdmissionRequest, admit_topology, sign_topology_as_host,
@@ -140,11 +142,21 @@ impl Host {
     }
 
     fn handler(&self) -> HostCellV1Handler {
-        HostCellV1Handler::new(Arc::clone(&self.emitter), self.clock.clone())
+        HostCellV1Handler::new(self.emitter.clone(), self.clock.clone())
     }
 
     async fn call(
         &self,
+        unit: Option<(&str, u64)>,
+        verb: &str,
+        payload: serde_json::Value,
+    ) -> ServiceDispatchResult {
+        self.call_on(&self.handler(), unit, verb, payload).await
+    }
+
+    async fn call_on(
+        &self,
+        handler: &HostCellV1Handler,
         unit: Option<(&str, u64)>,
         verb: &str,
         payload: serde_json::Value,
@@ -162,7 +174,7 @@ impl Host {
                 epoch: ExecutionEpoch::new(n).unwrap(),
             }),
         };
-        self.handler().dispatch(&ctx, verb, payload).await
+        handler.dispatch(&ctx, verb, payload).await
     }
 
     async fn write(&self, unit: &str, n: u64, version: u64, value: &[u8]) -> ServiceDispatchResult {
@@ -402,13 +414,12 @@ async fn over_the_socket(
 
 fn bound_registry(host: &Host, unit: &str, n: u64, bindings: &[ServiceId]) -> Registry {
     let mut registry = Registry::new();
-    crate::broker::handlers::register_cell_handler(
+    registry.bind_epoch_gate(Some(gate_at(host.home.path(), unit, n)));
+    crate::broker::handlers::register_bound_handlers(
         &mut registry,
         bindings,
-        Arc::clone(&host.emitter),
-        host.clock.clone(),
+        Some(host.emitter.clone()),
     );
-    registry.bind_epoch_gate(Some(gate_at(host.home.path(), unit, n)));
     registry
 }
 
@@ -493,4 +504,159 @@ fn a_full_cell_fits_one_broker_frame_both_ways() {
     ] {
         assert!(len <= cap, "a full-cell {what} is {len} bytes, over {cap}");
     }
+}
+
+/// Through the host-agent daemon's real registration: a helper-backed VM whose
+/// plan binds the service and whose registration names its unit and epoch.
+/// A refused write lands one `state_cell.refused` entry on the tenant chain,
+/// written by the signer helper beside the host's own entries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_write_through_the_daemon_lands_on_the_tenant_chain() {
+    use crate::audit_signer::helper::{SignerHelper, serve_on_listener as serve_helper};
+    use mvm_core::protocol::broker_control::{ControlRequest, RegisterVm};
+
+    let host = Host::admitted();
+    let audit = host.home.path().join("audit");
+    let key_path = mvm_core::config::mvm_keys_dir_at(host.home.path()).join("host-signer.ed25519");
+    let helper_sock = host.home.path().join("h.sock");
+    let helper = Arc::new(tokio::sync::Mutex::new(SignerHelper::new(
+        TENANT,
+        Some(key_path),
+    )));
+    let helper_task = tokio::spawn(serve_helper(
+        tokio::net::UnixListener::bind(&helper_sock).unwrap(),
+        helper,
+        65_536,
+    ));
+
+    let verifying = host._signer.signing.verifying_key();
+    let mut daemon = crate::broker::daemon::HostAgentDaemon::new(TENANT, verifying, 64 * 1024)
+        .with_signer_helper(&helper_sock);
+    let path = |name: &str| host.home.path().join(name).to_string_lossy().into_owned();
+    let registration = |vm: &str, unit: Option<&str>| RegisterVm {
+        vm_id: vm.into(),
+        workload_id: Some(format!("wl-{vm}")),
+        tenant_id: TENANT.into(),
+        broker_listen_socket: path(&format!("{vm}.sock")),
+        workload_chain_path: audit
+            .join(format!("{TENANT}.{vm}.workload.jsonl"))
+            .to_string_lossy()
+            .into_owned(),
+        workload_chain_head_path: Some(path(&format!("{vm}.head"))),
+        audit_signer_uds_path: None,
+        services_bindings: vec![ServiceId::parse(HOST_CELL_SERVICE).unwrap()],
+        capability_bindings: vec![],
+        assurance: None,
+        service_proxies: vec![],
+        workload: unit.map(str::to_string),
+        execution_epoch: unit.map(|_| ExecutionEpoch::FIRST),
+    };
+    daemon
+        .apply(&ControlRequest::Register(Box::new(registration(
+            "vm-r",
+            Some("reader"),
+        ))))
+        .unwrap();
+    daemon
+        .apply(&ControlRequest::Register(Box::new(registration(
+            "vm-u", None,
+        ))))
+        .unwrap();
+    let before = refusals(&host).len();
+
+    let call = |vm: &str| {
+        let socket = host.home.path().join(format!("{vm}.sock"));
+        async move {
+            let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+            crate::broker::server::write_frame(
+                &mut stream,
+                &ServiceCall {
+                    service: ServiceId::parse(HOST_CELL_SERVICE).unwrap(),
+                    verb: "write".into(),
+                    correlation_id: CorrelationId::new("guest"),
+                    payload: serde_json::json!({"cell": "setpoint", "version": 1, "value": "eA=="}),
+                    capability: None,
+                },
+            )
+            .await
+            .unwrap();
+            crate::broker::server::read_frame::<ServiceResponse>(
+                &mut stream,
+                mvm_core::framing::DEFAULT_MAX_FRAME_BYTES,
+            )
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(
+        refused_with(call("vm-r").await),
+        ServiceErrorCode::CapabilityDenied,
+        "a reader may not write"
+    );
+    assert_eq!(
+        refused_with(call("vm-u").await),
+        ServiceErrorCode::NotBound,
+        "a registration without a unit and epoch is not served"
+    );
+
+    let after = refusals(&host);
+    assert_eq!(after.len(), before + 1);
+    let entry = after.last().unwrap();
+    assert_eq!(entry["labels"]["unit"], "reader");
+    assert_eq!(entry["labels"]["operation"], "write");
+    let chain = audit.join(format!("{TENANT}.jsonl"));
+    assert!(crate::audit::audit_file::verify_audit_chain(&chain, &verifying).is_ok());
+    helper_task.abort();
+}
+
+fn refusals(host: &Host) -> Vec<serde_json::Value> {
+    let chain = host
+        .home
+        .path()
+        .join("audit")
+        .join(format!("{TENANT}.jsonl"));
+    std::fs::read_to_string(chain)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["entry"].clone())
+        .filter(|entry| entry["event"] == crate::state_cells::STATE_CELL_REFUSED_EVENT)
+        .collect()
+}
+
+/// The guest is refused every time; the chain gets the first refusal and then
+/// one per interval carrying the count it stood for.
+#[tokio::test]
+async fn repeated_refusals_are_all_answered_but_recorded_at_a_bounded_rate() {
+    use crate::audit::refusal::{REFUSAL_AUDIT_INTERVAL, ThrottledRefusals};
+    let host = Host::admitted();
+    let handler = HostCellV1Handler::new(
+        Arc::new(ThrottledRefusals::new(
+            host.emitter.clone(),
+            host.clock.clone(),
+        )),
+        host.clock.clone(),
+    );
+    let write = || serde_json::json!({"cell": "setpoint", "version": 1, "value": "eA=="});
+    for _ in 0..5 {
+        assert_eq!(
+            code(
+                host.call_on(&handler, Some(("reader", 1)), "write", write())
+                    .await
+            ),
+            ServiceErrorCode::CapabilityDenied
+        );
+    }
+    assert_eq!(refusals(&host).len(), 1);
+    host.clock
+        .advance_ms(REFUSAL_AUDIT_INTERVAL.num_milliseconds());
+    assert_eq!(
+        code(
+            host.call_on(&handler, Some(("reader", 1)), "write", write())
+                .await
+        ),
+        ServiceErrorCode::CapabilityDenied
+    );
+    let recorded = refusals(&host);
+    assert_eq!(recorded.len(), 2);
+    assert_eq!(recorded[1]["labels"]["suppressed"], "4");
 }

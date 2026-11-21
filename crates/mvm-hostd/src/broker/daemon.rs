@@ -28,8 +28,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use ed25519_dalek::VerifyingKey;
 use mvm_core::protocol::audit_signer::{
-    SignerHelperAppendEntry, SignerHelperDeregisterVm, SignerHelperRegisterVm, SignerHelperRequest,
-    SignerHelperResponse,
+    RegisteredUnit, SignerHelperAppendEntry, SignerHelperDeregisterVm, SignerHelperRegisterVm,
+    SignerHelperRequest, SignerHelperResponse,
 };
 use mvm_core::protocol::broker_control;
 use mvm_core::protocol::broker_control::{
@@ -503,7 +503,16 @@ impl HostAgentDaemon {
             .filter(|service| !proxy_services.contains(*service))
             .cloned()
             .collect();
-        let _bound = register_bound_handlers(&mut registry, &local_services);
+        let refusals: Option<Arc<dyn crate::audit::refusal::RefusalAudit>> =
+            match (&self.signer_helper_uds_path, &r.audit_signer_uds_path) {
+                (Some(helper), _) => Some(Arc::new(AuditClient::new_signer_helper(
+                    helper.clone(),
+                    r.vm_id.clone(),
+                ))),
+                (None, Some(signer)) => Some(Arc::new(AuditClient::new(signer.clone()))),
+                (None, None) => None,
+            };
+        let _bound = register_bound_handlers(&mut registry, &local_services, refusals);
         open_admitted_assurance_session(&_bound, r);
         for binding in &r.service_proxies {
             if binding.service.as_str() == "host.actor.v1" {
@@ -633,6 +642,12 @@ impl HostAgentDaemon {
                     .to_string_lossy()
                     .into_owned()
             }),
+            unit: r
+                .workload
+                .clone()
+                .filter(|unit| !unit.is_empty())
+                .zip(r.execution_epoch)
+                .map(|(unit, epoch)| RegisteredUnit { unit, epoch }),
         });
         match SignerHelperClient::new(path.clone()).send(&req)? {
             SignerHelperResponse::Registered { .. } => Ok(()),
