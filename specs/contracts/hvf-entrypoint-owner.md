@@ -679,21 +679,24 @@ with that user's install files. Stated plainly:
   same-UID race defense and must not be described as one. Host administration,
   root and a compromised kernel are out of scope.
 
-### macOS peer binding (approved, not implemented)
+### macOS peer binding (approved; verifier prerequisite implemented)
 
 Order on each recovery connection, each step refusing before any state change:
 
 1. Accept under the connection and frame caps; `getpeereid` with the peer uid
    equal to `geteuid()`; capture the peer audit token with `LOCAL_PEERTOKEN`.
-2. Check a SecCode requirement on that token: the code-directory hash
-   (`cdhash`) of the verified client of the same release.
+2. Resolve dynamic code through Security.framework's
+   `kSecGuestAttributeAudit` attribute and check the exact bounded designated
+   requirement source pinned by trusted commissioning. There is no path input,
+   Team-ID-only mode or UID-only success fallback.
 3. Issue the challenge. The signed `RecoveryChallenge` is unchanged (D5 is
    declined): the token stays owner-side, and the proof remains the existing
    recovery-possession proof of the enrolled controlling principal.
 4. Read the request and verify the proof against the retained enrollment,
    operation, incarnation and generation.
-5. Re-read the token and compare **(pid, pidversion)**, then re-run the SecCode
-   check, immediately before the mutation commit.
+5. Re-read the token through the connection-bound recapture operation, compare
+   **(pid, pidversion)**, then repeat dynamic lookup and the SecCode requirement
+   check immediately before the mutation commit.
 6. Only then consume the nonce and sequence and apply the request.
 
 A failure at any step returns a typed refusal, closes the connection, consumes
@@ -703,16 +706,21 @@ who is on the socket; the proof says who is allowed. The pid alone is not
 compared at step 5 because the probes showed that `exec` changes `pidversion`
 and leaves the pid and `LOCAL_PEERPID` unchanged.
 
-**Fallback.** If the Security.framework FFI for the SecCode check is rejected in
-review, or native test 4 fails on a supported macOS, the check is the uid plus
-`LOCAL_PEERTOKEN` only. It is labelled weaker: the peer's code identity is then
-unchecked.
+The source-only verifier prerequisite now exists under
+`mvm-hostd::caller_identity::macos_peer` when `native-caller-identity` is
+enabled. It returns a non-cloneable observation with private fields and a
+`revalidate()` operation. Native diagnostics are mapped to payload-free typed
+refusals. Other platforms refuse explicitly. This is not a receiver: it does
+not accept a socket, capture `LOCAL_PEERTOKEN` itself, issue a challenge,
+consume a nonce or sequence, commit a mutation, initialize state, hold a key,
+write a journal, start a VM or construct a factory.
 
 **Stops:** a different UID (refused at accept, independent of socket mode); an
 unrelated same-UID process without the enrolled key (proof) and without the
-client code identity (requirement); a socat-style relay (its own `cdhash`
-fails); a replayed proof on another connection (the per-connection nonce); a
-replaced client binary with a different `cdhash`.
+client code identity (requirement); a socat-style relay (its code does not
+satisfy the pinned designated requirement); a replayed proof on another
+connection (the per-connection nonce); a replaced client binary that does not
+satisfy the pinned designated requirement.
 
 **Does not stop:** a same-UID process that can debug or inject into the verified
 client, read the controlling key and run inside the real client, or replace
@@ -763,8 +771,8 @@ From the native probes recorded on
 | Owner excluded from installer re-signing | PROPOSED-APPROVED-NOT-IMPLEMENTED |
 | Retained bundle and archive digest, offline re-verification at spawn | PROPOSED-APPROVED-NOT-IMPLEMENTED |
 | Exact-commit clean-tree bundle or typed refusal; no unverified path | PROPOSED-APPROVED-NOT-IMPLEMENTED |
-| Peer binding: `getpeereid`, `LOCAL_PEERTOKEN`, SecCode, re-check at commit | PROPOSED-APPROVED-NOT-IMPLEMENTED |
-| Security.framework FFI (fallback: uid plus token, labelled weaker) | PROPOSED-APPROVED-NOT-IMPLEMENTED |
+| Peer binding: `getpeereid`, `LOCAL_PEERTOKEN`, SecCode, re-check at commit | VERIFIER-PREREQUISITE-IMPLEMENTED; receiver/capture/commit integration not implemented |
+| Security.framework dynamic lookup and exact designated-requirement check; no UID-only fallback | SOURCE-ONLY-IMPLEMENTED |
 | Recovery-possession proof unchanged (D5 declined) | Existing source-only proof; receiver not implemented |
 | Hardened runtime, environment allowlist, system libraries only | PROPOSED-APPROVED-NOT-IMPLEMENTED |
 | Post-exec self-hash handshake | PROPOSED-APPROVED-NOT-IMPLEMENTED |
