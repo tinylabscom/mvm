@@ -18,6 +18,7 @@ pub mod gpu;
 pub mod handler;
 pub mod host_audit;
 pub mod host_beacon;
+pub mod host_cell;
 pub mod host_cost;
 pub mod host_kv;
 pub mod host_signer;
