@@ -121,6 +121,8 @@ struct State {
 
 struct Shared {
     limits: MailboxLimits,
+    /// The receiving unit's gate, asked before each new acceptance or read.
+    unit_gate: Option<super::UnitGate>,
     state: Mutex<State>,
     signer: SigningKey,
     anchor: Box<dyn JournalAnchor>,
@@ -410,7 +412,7 @@ impl DurableMailboxService {
     fn bind_with(
         path: &Path,
         limits: MailboxLimits,
-        policy: MailboxPolicy,
+        mut policy: MailboxPolicy,
         signer: SigningKey,
         journal: MailboxJournal,
         anchor: Box<dyn JournalAnchor>,
@@ -433,6 +435,7 @@ impl DurableMailboxService {
         listener.set_nonblocking(true)?;
         let shared = Arc::new(Shared {
             limits,
+            unit_gate: policy.unit_gate.take(),
             state: Mutex::new(State { policy, journal }),
             signer,
             anchor,
@@ -606,7 +609,7 @@ fn verify_conversation_enrollment(
 ) -> Result<i64, Refusal> {
     let reader = shared.reader.get().ok_or(Refusal::NotAuthorized)?;
     let state = shared.state.lock().expect("mailbox journal lock poisoned");
-    let context = guest_context(&state.policy, reader)?;
+    let context = guest_context(shared, &state.policy, reader)?;
     if binding.policy_epoch != context.current_policy_epoch {
         return Err(Refusal::NotAuthorized);
     }
@@ -764,7 +767,7 @@ fn execute_with_wait(
             let reader = shared.reader.get().ok_or(Refusal::NotAuthorized)?;
             let context = {
                 let state = shared.state.lock().expect("mailbox journal lock poisoned");
-                guest_context(&state.policy, reader)?
+                guest_context(shared, &state.policy, reader)?
             };
             let now_unix_ms = context.now_unix_ms;
             let authority = CurrentBootAuthority::verify(
@@ -865,7 +868,7 @@ fn serve_reader(shared: &Shared, stream: &mut (impl Read + Write), body: &[u8]) 
             ReaderRequest::Receive => {
                 {
                     let mut state = shared.state.lock().expect("mailbox journal lock poisoned");
-                    let context = guest_context(&state.policy, reader)?;
+                    let context = guest_context(shared, &state.policy, reader)?;
                     verify_guest_reader_enrollment(
                         &reader.enrollment,
                         &reader.capability,
@@ -893,7 +896,7 @@ fn serve_reader(shared: &Shared, stream: &mut (impl Read + Write), body: &[u8]) 
                     return Err(Refusal::NotAuthorized);
                 };
                 let mut state = shared.state.lock().expect("mailbox journal lock poisoned");
-                let context = guest_context(&state.policy, reader)?;
+                let context = guest_context(shared, &state.policy, reader)?;
                 let scope = guest_scope(reader, &context);
                 let State { policy, journal } = &mut *state;
                 settle_expired(shared, journal, context.now_unix_ms).map_err(reader_refusal)?;
@@ -927,7 +930,7 @@ fn serve_reader(shared: &Shared, stream: &mut (impl Read + Write), body: &[u8]) 
             }
             ReaderRequest::Ack { signed } => {
                 let mut state = shared.state.lock().expect("mailbox journal lock poisoned");
-                let context = guest_context(&state.policy, reader)?;
+                let context = guest_context(shared, &state.policy, reader)?;
                 let scope = guest_scope(reader, &context);
                 let State { policy, journal } = &mut *state;
                 journal
@@ -956,10 +959,19 @@ fn serve_reader(shared: &Shared, stream: &mut (impl Read + Write), body: &[u8]) 
     let _ = write_response(stream, &response);
 }
 
+fn admit_unit(shared: &Shared) -> Result<(), Refusal> {
+    shared
+        .unit_gate
+        .as_ref()
+        .map_or(Ok(()), super::UnitGate::admit)
+}
+
 fn guest_context(
+    shared: &Shared,
     policy: &MailboxPolicy,
     reader: &GuestReaderAuthority,
 ) -> Result<OpenContext, Refusal> {
+    admit_unit(shared)?;
     // The reader acts at its plan's epoch; only the unit's current one, which
     // the policy took from the epoch gate at bind, may receive.
     if policy.context.expected_mailbox != reader.grant.mailbox
@@ -1327,6 +1339,9 @@ fn operate(
     if matches!(operation, AdmissionOperation::Recover) {
         return Ok(None);
     }
+    // After recovery, so a retry of a message already accepted still gets its
+    // receipt; only a new acceptance needs the unit to be current.
+    admit_unit(shared)?;
     settle_expired(shared, journal, now).map_err(reader_refusal)?;
     let accepted = match &shared.local_anchor {
         Some(anchor) => journal
@@ -1470,6 +1485,7 @@ mod reader_tests {
                 max_depth: 64,
                 max_frame_bytes: 64 * 1024,
             },
+            unit_gate: None,
             state: Mutex::new(State { policy, journal }),
             signer,
             anchor: Box::new(move |tip| commit.advance(tip)),

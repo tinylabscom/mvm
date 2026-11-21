@@ -355,6 +355,7 @@ impl Channel {
                 encryption_key: Key::from_bytes([23; 32]),
                 sender_key: sender_key.verifying_key(),
                 authority_key: authority_key.verifying_key(),
+                unit_gate: None,
             },
         )
         .unwrap();
@@ -861,6 +862,7 @@ fn plan_and_trust(channel: &Channel, granted: bool) -> (ExecutionPlan, MailboxPo
         encryption_key: Key::from_bytes([23; 32]),
         sender_key: channel.sender_key.verifying_key(),
         authority_key: SigningKey::from_bytes(&[99; 32]).verifying_key(),
+        unit_gate: None,
     };
     (plan, trust)
 }
@@ -1236,6 +1238,7 @@ fn local_file_anchor_cannot_issue_durable_acceptance() {
                 encryption_key: Key::from_bytes([23; 32]),
                 sender_key: channel.sender_key.verifying_key(),
                 authority_key: authority,
+                unit_gate: None,
             },
             signer.clone(),
             journal,
@@ -1350,6 +1353,7 @@ fn local_mailbox_service_returns_exact_signed_v2_receipt_after_restart() {
                 encryption_key: Key::from_bytes([23; 32]),
                 sender_key: channel.sender_key.verifying_key(),
                 authority_key: authority,
+                unit_gate: None,
             },
             signer.clone(),
             journal,
@@ -1506,6 +1510,7 @@ fn local_mailbox_service_returns_exact_signed_v2_receipt_after_restart() {
                 encryption_key: Key::from_bytes([23; 32]),
                 sender_key: channel.sender_key.verifying_key(),
                 authority_key: authority,
+                unit_gate: None,
             },
             signer,
             foreign_journal,
@@ -2151,6 +2156,7 @@ fn durable_mailbox_helper_process() {
             encryption_key: Key::from_bytes([23; 32]),
             sender_key: SigningKey::from_bytes(&[21; 32]).verifying_key(),
             authority_key: authority,
+            unit_gate: None,
         },
         signer,
         journal,

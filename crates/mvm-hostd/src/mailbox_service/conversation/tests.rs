@@ -234,6 +234,7 @@ impl Fixture {
                 encryption_key: Key::from_bytes(*self.payload_key.expose_bytes()),
                 sender_key: self.caller.verifying_key(),
                 authority_key: self.authority.verifying_key(),
+                unit_gate: None,
             },
             reply_capability: &self.reply,
             responder_key: &self.responder.verifying_key(),
