@@ -2662,6 +2662,9 @@ mod tests {
             "a wrapped negative pid_t could target an unrelated process group"
         );
 
+        // Another test may have emptied the process-wide PATH; taking the env lock keeps
+        // this spawn out of that window.
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let mut child = std::process::Command::new("sleep")
             .arg("60")
             .spawn()
