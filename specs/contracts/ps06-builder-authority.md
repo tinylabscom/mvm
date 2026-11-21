@@ -206,9 +206,23 @@ Proposed trusted setup sequence:
    Exact-child absence is only `Absent`, never freshness or permission.
    Non-`Ready` state is interrupted and readiness-refusing; `Ready` is terminal
    log observation only. No key, journal, receipt, completion or lock is read or
-   reconciled. These validators and loaders create nothing and prove neither
-   authority nor an atomic snapshot. Lock validation/acquisition, transition
-   methods, the log writer and every commissioning effect remain unimplemented;
+   reconciled by the state loader.
+   A separate source-only validator observes the fixed permanent
+   `owner-commissioning.lock` beneath the retained authority root. It opens the
+   child descriptor-relative, read-only, no-follow, nonblocking and
+   close-on-exec and requires a root-owned, root-group, single-link,
+   zero-length regular file with exact `0444` mode, no extended ACL and an
+   SDK/libc user-immutable or system-immutable flag. It never creates, repairs
+   or acquires the lock. It retains the descriptor privately and exposes only
+   the nonzero device/inode identity needed for a pure matching/mismatched
+   comparison with the state log binding. A second fixed-name observation can
+   detect replacement during validation but is not exclusion or an atomic
+   snapshot. Installer-only creation and lifetime of this permanent inode are a
+   future stable deployment contract, not proof supplied by validation.
+   These validators and loaders create nothing and prove neither authority,
+   freshness nor an atomic snapshot. Lock acquisition, stable installer
+   deployment, transition methods, the log writer and every commissioning
+   effect remain unimplemented;
    future mutation must acquire the separately designed exclusion and then
    reload and revalidate.
 2. A fixed initialization entry point runs as the authority UID, exclusively

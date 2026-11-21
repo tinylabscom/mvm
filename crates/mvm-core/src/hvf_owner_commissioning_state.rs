@@ -542,6 +542,10 @@ mod tests {
     use crate::hvf_owner_commissioning_intent::{
         LoadedHvfOwnerCommissioningIntent, load_test_hvf_owner_commissioning_intent,
     };
+    use crate::hvf_owner_commissioning_lock::{
+        COMMISSIONING_LOCK_NAME, CommissioningLockBinding,
+        validate_test_hvf_owner_commissioning_lock,
+    };
     use crate::hvf_owner_deployment_receipt::{OwnerComponentPinV1, cohort_digest};
     use crate::hvf_owner_protected_authority_root::{
         ProtectedAuthorityRoot, validate_test_protected_authority_root,
@@ -795,6 +799,60 @@ mod tests {
                 CommissioningReadiness::Interrupted
             };
             assert_eq!(state.readiness(), expected);
+        }
+    }
+
+    #[test]
+    fn compares_state_log_binding_with_validated_lock_identity() {
+        let fixture = Fixture::new();
+        let lock_path = fixture.authority_path().join(COMMISSIONING_LOCK_NAME);
+        fs::write(&lock_path, []).expect("create lock");
+        fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o444)).expect("set lock mode");
+        #[cfg(target_os = "macos")]
+        {
+            let status = std::process::Command::new("chflags")
+                .arg("uchg")
+                .arg(&lock_path)
+                .status()
+                .expect("run chflags");
+            assert!(status.success(), "chflags uchg must succeed");
+        }
+        let lock = validate_test_hvf_owner_commissioning_lock(
+            &fixture.authority,
+            fixture.installer_uid,
+            fixture.installer_gid,
+        )
+        .expect("validate lock");
+
+        let mut records = valid_records(&fixture.intent, CommissioningPhase::Prepared);
+        records[0].content.lock_device = lock.device();
+        records[0].content.lock_inode = lock.inode();
+        records[0].record_digest = record_digest(&records[0].content);
+        fixture.write_state(&encode_records(&records));
+        let state = retained(fixture.load().expect("load matching state"));
+        assert_eq!(
+            lock.compare_state_binding(&state),
+            CommissioningLockBinding::Matches
+        );
+
+        records[0].content.lock_inode = lock.inode().checked_add(1).expect("inode has room");
+        records[0].record_digest = record_digest(&records[0].content);
+        fixture.write_state(&encode_records(&records));
+        let state = retained(fixture.load().expect("load mismatched state"));
+        assert_eq!(
+            lock.compare_state_binding(&state),
+            CommissioningLockBinding::Mismatch
+        );
+
+        drop(lock);
+        #[cfg(target_os = "macos")]
+        {
+            let status = std::process::Command::new("chflags")
+                .arg("nouchg")
+                .arg(&lock_path)
+                .status()
+                .expect("clear immutable flag");
+            assert!(status.success(), "chflags nouchg must succeed");
         }
     }
 
