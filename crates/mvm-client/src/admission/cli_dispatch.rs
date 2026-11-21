@@ -376,17 +376,13 @@ impl CliAdmission {
     ///
     /// The pool miss is resolved before calling this method, so the caller
     /// retains the pending owner for the existing admitted cold path.
-    pub fn claim_warm(
+    pub(crate) fn claim_prepared_warm(
         self,
         backend: &mvm_runtime::AnyBackend,
-        config: mvm_core::vm_backend::VmStartConfig,
         ctx: &mvm_runtime::workload_runner::ClaimContext<'_>,
         handle: &mvm_core::vm_backend::StandbyHandle,
     ) -> (Self, anyhow::Result<crate::standby::OwnedWarmClaim>) {
         if let Self::PreparedCold(prepared) = self {
-            if let Err(error) = prepared.verify_projection(&config) {
-                return (Self::PreparedCold(prepared), Err(error));
-            }
             return match mvm_hostd::plan_admission::claim_prepared_cli_cold(
                 *prepared, backend, ctx, handle,
             ) {
@@ -404,55 +400,39 @@ impl CliAdmission {
                 ),
             };
         }
-        if !matches!(&self, Self::Pending(pending) if pending.source_rootfs.is_some()) {
-            return (
-                self,
-                Err(anyhow::anyhow!(
-                    "CLI warm claim has no pending source binding"
-                )),
-            );
+        let owner = self.spend_warm_refusal();
+        (
+            owner,
+            Err(anyhow::anyhow!(
+                "warm claim requires host-prepared CLI cold authority"
+            )),
+        )
+    }
+
+    pub(crate) fn spend_warm_refusal(self) -> Self {
+        match self {
+            Self::PreparedCold(prepared) => Self::Dispatched(Box::new(finish_prepared(
+                mvm_hostd::plan_admission::abandon_prepared_cli_cold(*prepared),
+            ))),
+            Self::Pending(pending) => Self::Dispatched(Box::new(pending.audit)),
+            Self::Dispatched(audit) => Self::Dispatched(audit),
         }
-        if let Err(error) = self.check_legacy_projection(&config) {
-            return (self, Err(error));
-        }
-        let Self::Pending(pending) = self else {
-            return (
-                self,
-                Err(anyhow::anyhow!("CLI admission was already dispatched")),
-            );
+    }
+
+    pub(crate) fn is_spent(&self) -> bool {
+        matches!(self, Self::Dispatched(_))
+    }
+
+    #[cfg(all(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub(crate) fn warm_test_identity(&self) -> Option<(usize, usize)> {
+        let Self::PreparedCold(prepared) = self else {
+            return None;
         };
-        let PendingCliAdmission {
-            authority,
-            policy_bundle,
-            audit,
-            source_rootfs,
-            verified_runtime,
-        } = *pending;
-        let result = mvm_hostd::plan_admission::claim_cli_transient(
-            backend,
-            authority,
-            config,
-            policy_bundle.as_ref(),
-            verified_runtime.as_deref(),
-            ctx,
-            handle,
-        );
-        match result {
-            Ok(mvm_hostd::plan_admission::WarmClaimDispatch::Claimed(owned)) => {
-                (Self::Dispatched(Box::new(audit)), Ok(owned))
-            }
-            Ok(mvm_hostd::plan_admission::WarmClaimDispatch::ReservationLost(authority)) => (
-                Self::Pending(Box::new(PendingCliAdmission {
-                    authority: *authority,
-                    policy_bundle,
-                    audit,
-                    source_rootfs,
-                    verified_runtime,
-                })),
-                Err(mvm_core::vm_backend::StandbyError::ReservationLost.into()),
-            ),
-            Err(error) => (Self::Dispatched(Box::new(audit)), Err(error)),
-        }
+        Some((
+            prepared.runtime_evidence_ptr()?,
+            std::sync::Arc::as_ptr(&prepared.continuation().host_budget) as usize,
+        ))
     }
 
     /// Return the original audit continuation after a warm or cold dispatch.

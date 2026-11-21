@@ -2375,7 +2375,7 @@ pub(crate) mod admit_plan_tests {
 
     #[cfg(feature = "test-support")]
     #[test]
-    fn cli_warm_dispatch_spends_the_actual_admission_not_a_json_projection() {
+    fn legacy_pending_cli_admission_cannot_enter_the_warm_claim_path() {
         let (_env, home) = isolated_home();
         let keys_dir = tempfile::tempdir().expect("keys dir");
         let audit_dir = tempfile::tempdir().expect("audit dir");
@@ -2388,20 +2388,6 @@ pub(crate) mod admit_plan_tests {
             ..pinning_params(&rootfs, &ledger)
         })
         .expect("admit warm child");
-        let plan_json = serde_json::to_string(context.admitted.signed()).expect("signed plan");
-        let bundle_json = context
-            .policy_bundle
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .expect("policy");
-        let config = mvm_core::vm_backend::VmStartConfig {
-            name: "warm-child".into(),
-            rootfs_path: rootfs.display().to_string(),
-            plan_json: Some(plan_json),
-            bundle_json,
-            ..Default::default()
-        };
         let owner = CliAdmission::new_for_rootfs(context, &rootfs);
         let pool = mvm_runtime::standby_pool::SupervisorStandbyPool::at(home.path().join("pool"));
         let checkpoints = mvm_runtime::checkpoint::CheckpointStore::at(home.path().join("checks"));
@@ -2439,14 +2425,14 @@ pub(crate) mod admit_plan_tests {
         let backend =
             mvm_runtime::AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_standby());
 
-        let mut substituted = config.clone();
-        substituted.plan_json = Some("{}".into());
-        let (owner, error) = owner.claim_warm(&backend, substituted, &claim_context, &handle);
-        assert!(error.is_err(), "a JSON substitution cannot spend admission");
-        assert!(matches!(owner, CliAdmission::Pending(_)));
-        let (owner, result) = owner.claim_warm(&backend, config, &claim_context, &handle);
-        let (claimed, _lifecycle) = result.expect("mock warm dispatch").into_parts();
-        assert_eq!(claimed, mvm_core::vm_backend::VmId(handle.id));
+        let (owner, result) = owner.claim_prepared_warm(&backend, &claim_context, &handle);
+        let error = result.expect_err("legacy pending admission cannot claim warm");
+        assert!(
+            error
+                .to_string()
+                .contains("requires host-prepared CLI cold authority"),
+            "{error:#}"
+        );
         assert!(matches!(owner, CliAdmission::Dispatched(_)));
     }
 
