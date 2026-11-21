@@ -60,7 +60,8 @@ use mvm_hostd::audit::{
 };
 use mvm_hostd::containment::{quarantine_workload, replace_workload};
 use mvm_hostd::mailbox_service::{
-    GuestSealer, MailboxLimits, MailboxPolicy, MailboxService, Refusal, send, serve_granted_guest,
+    GuestSealer, MailboxLimits, MailboxPolicy, MailboxService, Refusal, bound_epoch, send,
+    serve_granted_guest,
 };
 use mvm_hostd::policy_generation::workload_store::OwnedWorkloadStore;
 use mvm_hostd::supervisor::verify_audit_chain;
@@ -341,7 +342,9 @@ fn outbox_message() -> OutboxMessage {
 }
 
 impl Channel {
-    fn new(aircraft: &Node) -> Self {
+    /// The aircraft's service, bound to open under `current`, the sender's
+    /// epoch as its ledger records it.
+    fn new(aircraft: &Node, current: ExecutionEpoch) -> Self {
         let (sender_key, authority_key) = (
             SigningKey::from_bytes(&[21; 32]),
             SigningKey::from_bytes(&[22; 32]),
@@ -351,7 +354,7 @@ impl Channel {
             &socket,
             LIMITS,
             MailboxPolicy {
-                context: context(1),
+                context: context(current.get()),
                 encryption_key: Key::from_bytes([23; 32]),
                 sender_key: sender_key.verifying_key(),
                 authority_key: authority_key.verifying_key(),
@@ -369,17 +372,14 @@ impl Channel {
     }
 
     /// Ship seals at `sent_epoch` and sends over the socket; the aircraft
-    /// knows `current_epoch` and opens under a capability that grants
+    /// opens at the epoch it bound under a capability that grants
     /// `operations`. Returns what the aircraft's service queued.
     fn deliver(
         &mut self,
         sent_epoch: u64,
-        current_epoch: u64,
         id: u8,
         operations: &[MailboxOperation],
     ) -> Result<Vec<u8>, Refusal> {
-        self.service
-            .set_current_epoch(ExecutionEpoch::new(current_epoch).unwrap());
         let capability = sign_capability(grant(operations), &self.authority_key).unwrap();
         let envelope = seal_envelope(
             SealRequest {
@@ -410,7 +410,8 @@ fn contain_terminate_and_rebuild() {
         Node::new("ship", 2),
         Node::new("ground", 3),
     );
-    let mut channel = Channel::new(&aircraft);
+    let analyst_epoch = |ship: &Node| bound_epoch(ship.home.path(), "analyst").unwrap();
+    let mut channel = Channel::new(&aircraft, analyst_epoch(&ship));
     let send = [MailboxOperation::Send, MailboxOperation::Receive];
 
     // Act 1: each node launches its workloads under the preflight; the ship's
@@ -421,7 +422,7 @@ fn contain_terminate_and_rebuild() {
     ship.launch("analyst").expect("analyst launches");
     assert_eq!(
         channel
-            .deliver(1, 1, 1, &send)
+            .deliver(1, 1, &send)
             .expect("approved message opens"),
         b"hello"
     );
@@ -458,7 +459,7 @@ fn contain_terminate_and_rebuild() {
     // Act 3: the analyst is compromised (deterministically). It tries to send
     // without the Send grant, and to use a secret the lease does not allow.
     let denied = channel
-        .deliver(1, 1, 2, &[MailboxOperation::Receive])
+        .deliver(1, 2, &[MailboxOperation::Receive])
         .expect_err("a sender without the Send operation is refused");
     ship.record_denial("analyst", "mailbox", &format!("send refused: {denied}"));
     let secret = lease
@@ -466,7 +467,7 @@ fn contain_terminate_and_rebuild() {
         .expect_err("secrets are outside the lease");
     ship.record_denial("analyst", "secret", &secret.to_string());
     assert!(
-        channel.deliver(1, 1, 1, &send) == Err(refused(MailboxError::Replay)),
+        channel.deliver(1, 1, &send) == Err(refused(MailboxError::Replay)),
         "replaying an already-opened message is refused as a replay"
     );
 
@@ -503,12 +504,16 @@ fn contain_terminate_and_rebuild() {
     let epoch = replace_workload(&ship.workloads, &ship.emitter, &suspect).unwrap();
     assert_eq!(epoch.get(), 2);
     ship.launch("analyst").expect("the replacement launches");
+    // The aircraft binds again at the analyst's epoch as the ship's ledger now
+    // records it.
+    drop(channel);
+    let mut channel = Channel::new(&aircraft, analyst_epoch(&ship));
     assert!(
-        channel.deliver(1, 2, 3, &send) == Err(refused(MailboxError::StaleExecutionEpoch)),
+        channel.deliver(1, 3, &send) == Err(refused(MailboxError::StaleExecutionEpoch)),
         "a message from the replaced workload's epoch is rejected as a stale epoch"
     );
     assert!(
-        channel.deliver(2, 2, 4, &send).is_ok(),
+        channel.deliver(2, 4, &send).is_ok(),
         "the replacement's own epoch is accepted"
     );
 
@@ -563,7 +568,7 @@ fn contain_terminate_and_rebuild() {
 
 fn channel_with_one_node() -> (Node, Channel) {
     let aircraft = Node::new("aircraft", 1);
-    let channel = Channel::new(&aircraft);
+    let channel = Channel::new(&aircraft, ExecutionEpoch::FIRST);
     (aircraft, channel)
 }
 
@@ -2494,7 +2499,7 @@ fn route_to(
 #[test]
 fn two_nodes_deliver_over_a_loopback_tcp_peer_transport() {
     let (aircraft, ship) = (Node::new("aircraft", 1), Node::new("ship", 2));
-    let channel = Channel::new(&aircraft);
+    let channel = Channel::new(&aircraft, ExecutionEpoch::FIRST);
     let capability = sign_capability(grant(&[MailboxOperation::Send]), &channel.authority_key);
     let cancel = CancellationToken::default();
     let listener = TcpPeerListener::bind(
