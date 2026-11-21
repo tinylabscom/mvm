@@ -5,7 +5,7 @@ use std::path::Path;
 
 /// A cheap rejection filter, not proof that a file's bytes are unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct FileStamp {
+pub struct FileStamp {
     pub(crate) len: u64,
     /// Nanoseconds since the Unix epoch; epoch-ns fits an `i64` until 2262.
     pub(crate) mtime_ns: i64,
@@ -13,8 +13,13 @@ pub(crate) struct FileStamp {
     pub(crate) inode: Option<u64>,
 }
 
-pub(crate) fn file_stamp(path: &Path) -> Option<FileStamp> {
-    let metadata = std::fs::metadata(path).ok()?;
+pub fn file_stamp(path: &Path) -> Option<FileStamp> {
+    file_stamp_of(&std::fs::metadata(path).ok()?)
+}
+
+/// The stamp of metadata the caller already read, for a handle opened once
+/// and checked in place.
+pub fn file_stamp_of(metadata: &std::fs::Metadata) -> Option<FileStamp> {
     let ns_since_epoch = |time: std::io::Result<std::time::SystemTime>| {
         time.ok()?
             .duration_since(std::time::UNIX_EPOCH)
@@ -24,7 +29,7 @@ pub(crate) fn file_stamp(path: &Path) -> Option<FileStamp> {
     let mtime_ns = ns_since_epoch(metadata.modified())?;
     #[cfg(unix)]
     let (ctime_ns, inode) =
-        unix_stamp_ext(&metadata).map(|(ctime_ns, inode)| (ctime_ns, Some(inode)))?;
+        unix_stamp_ext(metadata).map(|(ctime_ns, inode)| (ctime_ns, Some(inode)))?;
     #[cfg(not(unix))]
     let (ctime_ns, inode) = (mtime_ns, None);
     Some(FileStamp {
@@ -58,7 +63,7 @@ fn unix_stamp_ext(metadata: &std::fs::Metadata) -> Option<(i64, u64)> {
 /// File timestamps and the clock read here must come from the same clock. A
 /// filesystem served by a host whose clock runs more than the margin behind
 /// this one can stamp a rewrite as older than the memo.
-pub(crate) fn stamp_is_settled(stamp: &FileStamp, recorded_ns: i64, observed_ns: i64) -> bool {
+pub fn stamp_is_settled(stamp: &FileStamp, recorded_ns: i64, observed_ns: i64) -> bool {
     let newest = stamp.mtime_ns.max(stamp.ctime_ns);
     recorded_ns <= observed_ns && recorded_ns.saturating_sub(newest) >= RACY_MARGIN_NS
 }
@@ -66,9 +71,9 @@ pub(crate) fn stamp_is_settled(stamp: &FileStamp, recorded_ns: i64, observed_ns:
 /// Wider than the coarsest timestamp granularity a supported filesystem
 /// offers (two seconds on FAT), so a settled stamp cannot share a tick with
 /// the write that preceded the memo.
-pub(crate) const RACY_MARGIN_NS: i64 = 2_000_000_000;
+pub const RACY_MARGIN_NS: i64 = 2_000_000_000;
 
-pub(crate) fn now_ns() -> i64 {
+pub fn now_ns() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
