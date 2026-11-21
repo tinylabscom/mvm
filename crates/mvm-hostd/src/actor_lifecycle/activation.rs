@@ -329,4 +329,48 @@ mod tests {
             .expect_err("the replaced epoch is fenced");
         assert!(err.to_string().contains("stale execution epoch"), "{err}");
     }
+
+    #[test]
+    fn the_gate_alone_decides_whether_the_activation_holds_its_unit() {
+        use mvm_core::host_interface::workload::WorkloadChange;
+        let home = tempfile::tempdir().unwrap();
+        let mut environment = mvm_core::util::test_env::TestEnv::new();
+        environment.isolate_mvm_home(home.path());
+        let backend = AnyBackend::from_hypervisor("mock");
+        let (machine, binding) = started(&backend, 1);
+        let mut active =
+            ParentActivation::activate(&machine, binding, &home.path().join("active")).unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        let check = |active: &ParentActivation| {
+            active
+                .check_current_record(LifecycleOperation::Launch, now)
+                .map_err(|err| err.to_string())
+        };
+        let store = crate::policy_generation::workload_store::OwnedWorkloadStore::open(home.path())
+            .unwrap();
+
+        // Another unit's replacement leaves this one current.
+        store
+            .commit(&WorkloadChange::Replace {
+                workload: "another-unit".to_owned(),
+                from_epoch: ExecutionEpoch::FIRST,
+            })
+            .unwrap();
+        check(&active).unwrap();
+
+        // A plan ahead of the durable record is not yet current.
+        active.plan.execution_epoch = 2;
+        let err = check(&active).unwrap_err();
+        assert!(err.contains("is not yet current"), "{err}");
+        active.plan.execution_epoch = 1;
+        check(&active).unwrap();
+
+        store
+            .commit(&WorkloadChange::Quarantine {
+                workload: machine.admitted.plan().workload.0.clone(),
+            })
+            .unwrap();
+        let err = check(&active).unwrap_err();
+        assert!(err.contains("is quarantined"), "{err}");
+    }
 }
