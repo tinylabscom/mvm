@@ -283,6 +283,19 @@ impl std::error::Error for ColdHvfBootFailure {
 }
 
 impl ColdHvfBootFailure {
+    /// Synthetic legacy-boundary value for custody-classification tests.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn test_fixture() -> Self {
+        Self {
+            error: Some(anyhow::anyhow!("synthetic native launch custody")),
+            custody: Some(Box::new(std::sync::Mutex::new(FailedLaunchCustody {
+                outcome: FailedLaunchOutcome::NeverLaunched,
+                supporting: Vec::new(),
+            }))),
+        }
+    }
+
     pub fn error(&self) -> &anyhow::Error {
         self.error
             .as_ref()

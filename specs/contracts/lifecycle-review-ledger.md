@@ -340,6 +340,39 @@ Firecracker or HVF restore, broaden ADR-001 claims, establish formal cold/warm
 performance, or migrate same-identity sealed resume, warm claim, operator trial
 or the final architecture gate.
 
+## Planless warm-parent preparation
+
+The warm-parent preparation slice under
+[#5520](https://github.com/tinylabscom/mvm/issues/5520) moves pool warming and
+detached refill behind one opaque `mvm-client` capability. The capability owns
+the resolved backend, boot shape, canonical `StandbyCompat`, release-runtime
+evidence and built-runtime custody. Its constructor refuses plan JSON, tenant,
+CPU grants and placement, secrets, services, mailbox, ports, caller
+registration and admission durability. The runner remains the owner of runtime
+lifecycle binding, runtime metadata-before-boot, parent boot, capture and
+backend-specific saved-state versus resident-HVF retention.
+
+A factory parent is host capacity, not a workload. No `AdmittedPlan` is minted
+for it and no workload audit chain is borrowed to publish it. After capture,
+the client signs the checkpoint metadata digest with the host snapshot
+identity; saved-state claim lookup authenticates that bounded source evidence.
+Legacy parents carrying only their authenticated audit-chain creation record
+remain claimable during the transition; fallback applies only when the new
+signature is absent, never when present evidence is malformed or fails
+verification.
+Capture/evidence failure discards the unpublished checkpoint, while individual
+spawn failures remain best-effort and ownership-uncertain native failures
+retain their guards. A failed stop while discarding an unpublished resident
+parent likewise returns an uncertain cleanup error retaining the refill lock
+and checkpoint instead of continuing or reporting cleanup. Multi-image warming
+classifies both native boot custody and cleanup custody, propagating either
+intact before attempting another source. Existing runner source and mock tests
+cover metadata before boot/capture,
+plan/tenant/grant/channel stripping, no NIC/workload channel, failed capture
+cleanup, stale-parent quarantine and refill counting.
+These are source and hermetic-mock witnesses only: they do not qualify a live
+HVF or Firecracker parent, a child claim, cloud/GCP, or cold/warm performance.
+
 ## Signed application HVF startup diagnostics
 
 Reviewed in [#5681](https://github.com/tinylabscom/mvm/pull/5681): standalone
