@@ -1525,7 +1525,7 @@ mod tests {
         use crate::broker::registry::Registry;
 
         let mut registry = Registry::new();
-        let bound = register_bound_handlers(&mut registry, &[]);
+        let bound = register_bound_handlers(&mut registry, &[], None);
         assert!(
             bound.assurance.is_none(),
             "an unbound plan must not get the assurance handler"
@@ -1533,7 +1533,7 @@ mod tests {
 
         let mut registry = Registry::new();
         let service = ServiceId::parse(HOST_ASSURANCE_SERVICE).expect("service id");
-        let bound = register_bound_handlers(&mut registry, &[service]);
+        let bound = register_bound_handlers(&mut registry, &[service], None);
         assert!(bound.assurance.is_some());
     }
 }

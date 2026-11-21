@@ -13,6 +13,7 @@ use mvm_core::time::Clock;
 use mvm_core::util::test_env::TestEnv;
 
 use super::*;
+use crate::audit::emitter::AuditEmitter;
 use crate::audit::host_keypair::HostSigner;
 use crate::topology_admission::{
     HostCpus, RefusalStage, TopologyAdmission, TopologyAdmissionRequest, TopologyRefused,
@@ -134,7 +135,7 @@ impl Host {
     fn cells(&self) -> StateCells<'_> {
         StateCells {
             host_signer_keys_dir: None,
-            emitter: &self.emitter,
+            audit: &self.emitter,
         }
     }
 
@@ -241,7 +242,7 @@ fn the_writer_writes_and_the_writer_and_readers_read_it_back_after_a_restart() {
     let emitter = AuditEmitter::with_dir(signer.signing, &host.home.path().join("audit")).unwrap();
     let restarted = StateCells {
         host_signer_keys_dir: None,
-        emitter: &emitter,
+        audit: &emitter,
     };
     for unit in [&controller, &reader] {
         assert_eq!(

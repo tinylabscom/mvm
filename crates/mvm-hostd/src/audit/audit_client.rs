@@ -14,8 +14,8 @@
 use std::path::{Path, PathBuf};
 
 use mvm_core::protocol::audit_signer::{
-    AppendEntryRequest, AppendEntryResponse, SignerHelperAppendEntry, SignerHelperRequest,
-    SignerHelperResponse,
+    AppendEntryRequest, AppendEntryResponse, SignerHelperAppendEntry,
+    SignerHelperAppendLifecycleEntry, SignerHelperRequest, SignerHelperResponse,
 };
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -160,6 +160,13 @@ fn helper_request_from_append(req: &AppendEntryRequest, vm_id: &str) -> SignerHe
             correlation_id: correlation_id.clone(),
             fields: fields.clone(),
         }),
+        AppendEntryRequest::AppendLifecycleEntry { request_id, entry } => {
+            SignerHelperRequest::AppendLifecycleEntry(SignerHelperAppendLifecycleEntry {
+                request_id: request_id.clone(),
+                vm_id: vm_id.to_string(),
+                entry: entry.clone(),
+            })
+        }
         AppendEntryRequest::Probe { request_id } => SignerHelperRequest::Probe {
             request_id: request_id.clone(),
         },
@@ -183,6 +190,9 @@ fn helper_response_to_append_response(
             sig_alg,
         }),
         SignerHelperResponse::Pong { request_id } => Ok(AppendEntryResponse::Pong { request_id }),
+        SignerHelperResponse::LifecycleAppended { request_id } => {
+            Ok(AppendEntryResponse::LifecycleAppended { request_id })
+        }
         SignerHelperResponse::Err {
             request_id,
             code,

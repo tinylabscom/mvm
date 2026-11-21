@@ -25,7 +25,7 @@ use tracing::{error, info};
 
 use mvm_hostd::audit_signer::chain::Chain;
 use mvm_hostd::audit_signer::config::{SubprocessConfig, parse as parse_config};
-use mvm_hostd::audit_signer::server::{default_max_frame_bytes, serve_on_listener};
+use mvm_hostd::audit_signer::server::{LifecycleScope, default_max_frame_bytes, serve_on_listener};
 
 fn main() -> Result<()> {
     // First statement in the process: a panic before this line would
@@ -81,9 +81,14 @@ fn main() -> Result<()> {
             uds_path = %cfg.uds_path.display(),
             "mvm-audit-signer listening (W1b.1 software-fallback chain key path; W8 replaces with HW enclave + at-rest AEAD)"
         );
+        let scope = Arc::new(LifecycleScope {
+            tenant_id: cfg.tenant_id,
+            key_path: cfg.software_chain_key_path,
+        });
         if let Err(e) = serve_on_listener(
             listener,
             chain,
+            scope,
             cfg.workload_id,
             default_max_frame_bytes(),
         )

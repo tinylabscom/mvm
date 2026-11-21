@@ -25,10 +25,19 @@ const DEFAULT_MAX_FRAME_BYTES: usize = 65_536;
 
 pub type SharedChain = Arc<Mutex<Chain>>;
 
+/// The one tenant this signer serves, and the key file its chain is signed
+/// with, for lifecycle entries on that tenant's chain.
+#[derive(Debug, Clone)]
+pub struct LifecycleScope {
+    pub tenant_id: String,
+    pub key_path: Option<std::path::PathBuf>,
+}
+
 /// Accept loop.
 pub async fn serve(
     listener: UnixListener,
     chain: SharedChain,
+    scope: Arc<LifecycleScope>,
     workload_id: String,
     max_frame_bytes: usize,
 ) -> Result<()> {
@@ -43,9 +52,12 @@ pub async fn serve(
             .await
             .context("mvm-audit-signer UDS accept failed")?;
         let chain = chain.clone();
+        let scope = Arc::clone(&scope);
         let workload_id = workload_id.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, chain, workload_id, max_frame_bytes).await {
+            if let Err(e) =
+                handle_connection(stream, chain, &scope, workload_id, max_frame_bytes).await
+            {
                 warn!(error = %e, "mvm-audit-signer connection terminated with error");
             }
         });
@@ -55,15 +67,17 @@ pub async fn serve(
 pub async fn serve_on_listener(
     listener: UnixListener,
     chain: SharedChain,
+    scope: Arc<LifecycleScope>,
     workload_id: String,
     max_frame_bytes: usize,
 ) -> Result<()> {
-    serve(listener, chain, workload_id, max_frame_bytes).await
+    serve(listener, chain, scope, workload_id, max_frame_bytes).await
 }
 
 async fn handle_connection(
     mut stream: UnixStream,
     chain: SharedChain,
+    scope: &LifecycleScope,
     workload_id: String,
     max_frame_bytes: usize,
 ) -> Result<()> {
@@ -74,7 +88,7 @@ async fn handle_connection(
         "mvm-audit-signer received request"
     );
 
-    let response = dispatch(req, &chain).await;
+    let response = dispatch(req, &chain, scope).await;
     write_frame(&mut stream, &response).await?;
     stream
         .shutdown()
@@ -83,7 +97,28 @@ async fn handle_connection(
     Ok(())
 }
 
-async fn dispatch(req: AppendEntryRequest, chain: &SharedChain) -> AppendEntryResponse {
+async fn dispatch(
+    req: AppendEntryRequest,
+    chain: &SharedChain,
+    scope: &LifecycleScope,
+) -> AppendEntryResponse {
+    if let AppendEntryRequest::AppendLifecycleEntry { request_id, entry } = &req {
+        let result = crate::audit_signer::lifecycle::append(
+            &scope.tenant_id,
+            scope.key_path.as_deref(),
+            entry,
+        );
+        return match result {
+            Ok(()) => AppendEntryResponse::LifecycleAppended {
+                request_id: request_id.clone(),
+            },
+            Err(code) => AppendEntryResponse::Err {
+                request_id: request_id.clone(),
+                code,
+                message: format_code_message(code),
+            },
+        };
+    }
     let mut chain = chain.lock().await;
     dispatch_on_chain(req, &mut chain)
 }
@@ -92,6 +127,12 @@ pub(crate) fn dispatch_on_chain(req: AppendEntryRequest, chain: &mut Chain) -> A
     let request_id = req.request_id().to_string();
     match req {
         AppendEntryRequest::Probe { request_id } => AppendEntryResponse::Pong { request_id },
+        // Served by `dispatch` without the workload chain.
+        AppendEntryRequest::AppendLifecycleEntry { request_id, .. } => AppendEntryResponse::Err {
+            request_id,
+            code: AuditSignerErrorCode::InvalidRequest,
+            message: format_code_message(AuditSignerErrorCode::InvalidRequest),
+        },
         AppendEntryRequest::AppendEntry {
             request_id: _,
             category,
@@ -221,7 +262,11 @@ mod tests {
         let task = tokio::spawn({
             let chain = chain.clone();
             async move {
-                let _ = serve_on_listener(listener, chain, "wl-test".into(), 65_536).await;
+                let scope = Arc::new(LifecycleScope {
+                    tenant_id: "t-001".into(),
+                    key_path: None,
+                });
+                let _ = serve_on_listener(listener, chain, scope, "wl-test".into(), 65_536).await;
             }
         });
         tokio::task::yield_now().await;

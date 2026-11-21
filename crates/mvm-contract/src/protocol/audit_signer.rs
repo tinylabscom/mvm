@@ -1,7 +1,10 @@
 //! Audit-signer subprocess wire protocol.
 //!
-//! `mvm-audit-signer` is the **sole writer** to `~/.mvm/audit/<tenant>.jsonl`
-//! and the **sole holder** of the audit chain-signing key. The supervisor
+//! `mvm-audit-signer` writes a VM's workload chain,
+//! `~/.mvm/audit/<tenant>.<vm>.workload.jsonl`, and holds the chain-signing
+//! key. It also appends the narrow lifecycle entries of
+//! [`super::lifecycle_audit`] to the tenant's chain, `<tenant>.jsonl`, under
+//! the lock every writer of that chain takes. The supervisor
 //! routes typed audit entries to it over a per-VM UDS; the subprocess
 //! JCS-canonicalizes the entry, signs it, computes the new `prev_hash`,
 //! persists `chain_head` to a secondary location, and appends to the
@@ -19,6 +22,7 @@ use alloc::string::String;
 use serde::{Deserialize, Serialize};
 
 use super::host_signer::{SignRequest, SignResponse};
+use super::lifecycle_audit::LifecycleEntry;
 
 // ============================================================================
 // AppendEntryRequest — supervisor → mvm-audit-signer
@@ -58,6 +62,13 @@ pub enum AppendEntryRequest {
         /// the category's schema and rejects out-of-spec values.
         fields: serde_json::Value,
     },
+    /// Append a refusal to the lifecycle chain of the tenant this signer
+    /// serves, `<tenant>.jsonl`, not to the VM's workload chain. Answered
+    /// with `LifecycleAppended`.
+    AppendLifecycleEntry {
+        request_id: String,
+        entry: LifecycleEntry,
+    },
     /// Health probe — used by the supervisor's admission ceremony
     /// to confirm the audit-signer is up before admitting the
     /// workload. Returns `Pong` on success.
@@ -68,6 +79,7 @@ impl AppendEntryRequest {
     pub fn request_id(&self) -> &str {
         match self {
             AppendEntryRequest::AppendEntry { request_id, .. }
+            | AppendEntryRequest::AppendLifecycleEntry { request_id, .. }
             | AppendEntryRequest::Probe { request_id } => request_id,
         }
     }
@@ -104,6 +116,10 @@ pub enum AppendEntryResponse {
     Pong {
         request_id: String,
     },
+    /// A lifecycle entry was appended to the tenant's chain.
+    LifecycleAppended {
+        request_id: String,
+    },
     Err {
         request_id: String,
         code: AuditSignerErrorCode,
@@ -116,6 +132,7 @@ impl AppendEntryResponse {
         match self {
             AppendEntryResponse::Ok { request_id, .. }
             | AppendEntryResponse::Pong { request_id }
+            | AppendEntryResponse::LifecycleAppended { request_id }
             | AppendEntryResponse::Err { request_id, .. } => request_id,
         }
     }
@@ -218,6 +235,18 @@ pub struct SignerHelperSignHost {
     pub request: SignRequest,
 }
 
+/// A lifecycle entry routed through the resident signer helper, from a
+/// registered VM's broker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignerHelperAppendLifecycleEntry {
+    /// Per-call request id, echoed back in the response.
+    pub request_id: String,
+    /// Server-derived VM identity; must be registered with the helper.
+    pub vm_id: String,
+    pub entry: LifecycleEntry,
+}
+
 /// Request accepted by a resident per-tenant signer helper.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "verb", rename_all = "snake_case", deny_unknown_fields)]
@@ -228,6 +257,8 @@ pub enum SignerHelperRequest {
     DeregisterVm(SignerHelperDeregisterVm),
     /// Append a signed entry to a registered VM's chain.
     AppendEntry(SignerHelperAppendEntry),
+    /// Append a refusal to the served tenant's lifecycle chain.
+    AppendLifecycleEntry(SignerHelperAppendLifecycleEntry),
     /// Sign a host admission envelope through the resident helper.
     SignHost(SignerHelperSignHost),
     /// Health probe.
@@ -240,6 +271,7 @@ impl SignerHelperRequest {
             SignerHelperRequest::RegisterVm(req) => &req.request_id,
             SignerHelperRequest::DeregisterVm(req) => &req.request_id,
             SignerHelperRequest::AppendEntry(req) => &req.request_id,
+            SignerHelperRequest::AppendLifecycleEntry(req) => &req.request_id,
             SignerHelperRequest::SignHost(req) => &req.request_id,
             SignerHelperRequest::Probe { request_id } => request_id,
         }
@@ -273,6 +305,8 @@ pub enum SignerHelperResponse {
     },
     /// Probe succeeded.
     Pong { request_id: String },
+    /// A lifecycle entry was appended to the tenant's chain.
+    LifecycleAppended { request_id: String },
     /// Request was refused.
     Err {
         request_id: String,
@@ -289,6 +323,7 @@ impl SignerHelperResponse {
             | SignerHelperResponse::Ok { request_id, .. }
             | SignerHelperResponse::HostSigned { request_id, .. }
             | SignerHelperResponse::Pong { request_id }
+            | SignerHelperResponse::LifecycleAppended { request_id }
             | SignerHelperResponse::Err { request_id, .. } => request_id,
         }
     }

@@ -296,10 +296,12 @@ impl HostAuditV1Handler {
             })?;
         match resp {
             AppendEntryResponse::Ok { chain_head, .. } => Ok(chain_head),
-            AppendEntryResponse::Pong { .. } => Err(ServiceError::new(
-                ServiceErrorCode::InternalError,
-                "audit-signer responded Pong to AppendEntry",
-            )),
+            AppendEntryResponse::Pong { .. } | AppendEntryResponse::LifecycleAppended { .. } => {
+                Err(ServiceError::new(
+                    ServiceErrorCode::InternalError,
+                    "audit-signer answered AppendEntry with another verb's response",
+                ))
+            }
             AppendEntryResponse::Err { code, .. } => Err(ServiceError::new(
                 ServiceErrorCode::InternalError,
                 format!("audit-signer rejected entry: {:?}", code),

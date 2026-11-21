@@ -26,6 +26,7 @@ pub mod host_time;
 pub mod hvf_control;
 pub mod hvf_owner;
 pub mod hvf_owner_lifecycle;
+pub mod lifecycle_audit;
 /// Capability-bound, transport-neutral mailbox identities and wire DTOs.
 pub mod mailbox;
 /// Bounded, flow-aware guest/host networking wire contract: framing,

@@ -87,6 +87,12 @@ Host services run behind exactly two long-lived roles per tenant:
   directly; it only accepts already-gated append requests from the
   host-agent over a local UDS, opens each registered VM's audit chain, and
   appends a JCS-canonical, hash-chained, Ed25519-signed entry per call.
+  It also appends one narrow kind of entry to the tenant's own lifecycle
+  chain, `<tenant>.jsonl`, for a registered VM: a refused state-cell
+  operation or a refused liveness signal, from a closed set of events and
+  label keys with bounded values, under the same lock every other writer
+  of that chain takes. The per-VM `mvm-audit-signer` accepts the same
+  request for its own tenant.
 
 Ten workloads for one tenant cost the same two roles as one — the
 untrusted-parser/key-holder split scales with tenant count, not VM count.

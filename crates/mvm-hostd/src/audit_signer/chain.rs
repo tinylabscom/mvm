@@ -39,6 +39,19 @@ pub struct OnDiskEntry {
     pub entry_hash: String,
 }
 
+/// Read the 32-byte chain-signing key at `path`.
+pub(crate) fn read_chain_key(path: &Path) -> Result<SigningKey> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("mvm-audit-signer chain key read failed: {}", path.display()))?;
+    let arr: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
+        anyhow::anyhow!(
+            "mvm-audit-signer chain key must be 32 bytes; got {}",
+            v.len()
+        )
+    })?;
+    Ok(SigningKey::from_bytes(&arr))
+}
+
 pub struct Chain {
     signing_key: SigningKey,
     pub_key_bytes: Vec<u8>,
@@ -70,18 +83,7 @@ impl Chain {
         software_chain_key_path: Option<&Path>,
     ) -> Result<Self> {
         let signing_key = match software_chain_key_path {
-            Some(p) => {
-                let bytes = std::fs::read(p).with_context(|| {
-                    format!("mvm-audit-signer chain key read failed: {}", p.display())
-                })?;
-                let arr: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
-                    anyhow::anyhow!(
-                        "mvm-audit-signer chain key must be 32 bytes; got {}",
-                        v.len()
-                    )
-                })?;
-                SigningKey::from_bytes(&arr)
-            }
+            Some(p) => read_chain_key(p)?,
             None => {
                 let mut __ed_seed = [0u8; 32];
                 rand::rng().fill_bytes(&mut __ed_seed);

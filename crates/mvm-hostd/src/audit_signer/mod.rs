@@ -1,7 +1,9 @@
 //! `mvm-audit-signer` — audit chain-signer subprocess.
 //!
-//! Sole writer to `~/.mvm/audit/<tenant>.jsonl`. Sole holder of the
-//! audit chain-signing key. The supervisor delegates **every** audit
+//! Sole writer to a VM's workload chain,
+//! `~/.mvm/audit/<tenant>.<vm>.workload.jsonl`, and holder of the
+//! chain-signing key. It also appends lifecycle refusals to the tenant's
+//! chain through [`lifecycle`]. The supervisor delegates **every** audit
 //! append to this subprocess over a per-VM UDS — the chain-signing
 //! key never enters the supervisor's, the broker's, the
 //! secrets-dispatcher's, or the host-signer's address space.
@@ -43,6 +45,7 @@ pub mod category;
 pub mod chain;
 pub mod config;
 pub mod helper;
+pub mod lifecycle;
 #[cfg(unix)]
 pub use mvm_core::signer_helper as helper_client;
 pub mod server;

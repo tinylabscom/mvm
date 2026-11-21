@@ -248,7 +248,11 @@ async fn both_routes_append_through_real_in_process_signers() {
         tokio::select! {
             () = clients => {},
             result = server::serve_on_listener(
-                direct_listener, Arc::new(Mutex::new(chain)), "workload".into(), 65_536,
+                direct_listener,
+                Arc::new(Mutex::new(chain)),
+                Arc::new(server::LifecycleScope { tenant_id: "tenant".into(), key_path: None }),
+                "workload".into(),
+                65_536,
             ) => panic!("direct server stopped: {result:?}"),
             result = helper::serve_on_listener(
                 helper_listener, Arc::new(Mutex::new(signer)), 65_536,

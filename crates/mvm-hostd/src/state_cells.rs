@@ -36,12 +36,13 @@ use mvm_core::atomic_io::{self, FileLock, NewFile, write_private_new};
 use mvm_core::host_interface::Denial;
 use mvm_core::host_interface::epoch_gate::CommandGate;
 use mvm_core::plan::{TenantId, WorkloadId};
+use mvm_core::protocol::lifecycle_audit::{LifecycleEvent, LifecycleLabel, LifecycleLabels};
 use sha2::{Digest as _, Sha256};
 
-use crate::audit::emitter::AuditEmitter;
+use crate::audit::refusal::RefusalAudit;
 
 /// Chain event for a refused cell operation.
-pub const STATE_CELL_REFUSED_EVENT: &str = "state_cell.refused";
+pub const STATE_CELL_REFUSED_EVENT: &str = LifecycleEvent::StateCellRefused.as_str();
 
 /// The largest cell this host reserves. A cell is a small piece of control
 /// state copied whole on every update, not a volume, and its whole value has
@@ -175,7 +176,8 @@ impl Operation {
 pub struct StateCells<'a> {
     /// Where the host signer lives; `None` for the default keys directory.
     pub host_signer_keys_dir: Option<&'a Path>,
-    pub emitter: &'a AuditEmitter,
+    /// Where refusals are recorded.
+    pub audit: &'a dyn RefusalAudit,
 }
 
 impl StateCells<'_> {
@@ -301,16 +303,16 @@ impl StateCells<'_> {
         if !refusal.is_authority() {
             return refusal.into();
         }
-        let audit = self.emitter.emit_topology_decision(
+        let audit = self.audit.record_refusal(
             caller.tenant,
-            STATE_CELL_REFUSED_EVENT,
-            [
-                ("operation".to_string(), op.as_str().to_string()),
-                ("cell".to_string(), caller.cell.to_string()),
-                ("unit".to_string(), caller.unit.0.clone()),
-                ("epoch".to_string(), caller.epoch.get().to_string()),
-                ("reason".to_string(), refusal.to_string()),
-            ],
+            LifecycleEvent::StateCellRefused,
+            LifecycleLabels::from([
+                (LifecycleLabel::Operation, op.as_str().to_string()),
+                (LifecycleLabel::Cell, caller.cell.to_string()),
+                (LifecycleLabel::Unit, caller.unit.0.clone()),
+                (LifecycleLabel::Epoch, caller.epoch.get().to_string()),
+                (LifecycleLabel::Reason, refusal.to_string()),
+            ]),
         );
         match audit {
             Ok(()) => refusal.into(),

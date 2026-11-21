@@ -3,6 +3,8 @@
 //! The helper owns a `vm_id -> Chain` map: `RegisterVm` opens a VM's workload
 //! chain, `AppendEntry` routes through the server-derived `vm_id`, and
 //! `DeregisterVm` drops the chain handle so the file is closed.
+//! `AppendLifecycleEntry` appends a refusal to the tenant's own chain for a
+//! registered VM's broker; see [`crate::audit_signer::lifecycle`].
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -10,8 +12,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use mvm_core::protocol::audit_signer::{
-    AuditSignerErrorCode, SignerHelperAppendEntry, SignerHelperDeregisterVm,
-    SignerHelperRegisterVm, SignerHelperRequest, SignerHelperResponse, SignerHelperSignHost,
+    AuditSignerErrorCode, SignerHelperAppendEntry, SignerHelperAppendLifecycleEntry,
+    SignerHelperDeregisterVm, SignerHelperRegisterVm, SignerHelperRequest, SignerHelperResponse,
+    SignerHelperSignHost,
 };
 use mvm_core::protocol::host_signer::{HostSignerErrorCode, SignRequest, SignResponse};
 use mvm_core::security::SIG_ALG_ED25519;
@@ -69,6 +72,7 @@ impl SignerHelper {
             SignerHelperRequest::RegisterVm(req) => self.register(req),
             SignerHelperRequest::DeregisterVm(req) => self.deregister(req),
             SignerHelperRequest::AppendEntry(req) => self.append(req),
+            SignerHelperRequest::AppendLifecycleEntry(req) => self.append_lifecycle(&req),
             SignerHelperRequest::SignHost(req) => self.sign_host(req),
             SignerHelperRequest::Probe { request_id } => SignerHelperResponse::Pong { request_id },
         }
@@ -200,6 +204,30 @@ impl SignerHelper {
                 entry_hash: new_head,
                 sig_alg: SIG_ALG_ED25519,
             },
+            Err(code) => SignerHelperResponse::Err {
+                request_id,
+                code,
+                message: format_code_message(code),
+            },
+        }
+    }
+
+    /// Append a refusal to this helper's tenant chain, for a registered VM's
+    /// broker. The VM must be registered, as for its own appends, and the
+    /// entry must name this helper's tenant.
+    fn append_lifecycle(&self, req: &SignerHelperAppendLifecycleEntry) -> SignerHelperResponse {
+        let request_id = req.request_id.clone();
+        let result = if self.chains.contains_key(&req.vm_id) {
+            crate::audit_signer::lifecycle::append(
+                &self.tenant_id,
+                self.software_chain_key_path.as_deref(),
+                &req.entry,
+            )
+        } else {
+            Err(AuditSignerErrorCode::NotReady)
+        };
+        match result {
+            Ok(()) => SignerHelperResponse::LifecycleAppended { request_id },
             Err(code) => SignerHelperResponse::Err {
                 request_id,
                 code,
