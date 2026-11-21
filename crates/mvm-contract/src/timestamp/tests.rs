@@ -240,3 +240,27 @@ fn whole_secs_since_truncates_toward_zero_like_chrono() {
         MAX_SECS - MIN_SECS
     );
 }
+
+#[cfg(feature = "protocol")]
+#[test]
+fn the_chrono_bridge_keeps_the_instant_and_refuses_what_it_cannot_hold() {
+    for (secs, nanos) in [
+        (0, 0),
+        (1_784_205_296, 123_456_789),
+        (MIN_SECS, 0),
+        (MAX_SECS, 999_999_999),
+    ] {
+        assert_eq!(
+            UtcTimestamp::try_from(chrono_at(secs, nanos)),
+            Ok(ours(secs, nanos))
+        );
+    }
+    // Year 10000 and year -1 (chrono's `+`/`-` prefixed range), and a leap second.
+    for dt in [
+        chrono_at(MAX_SECS + 1, 0),
+        chrono_at(MIN_SECS - 1, 0),
+        chrono_at(59, 1_500_000_000),
+    ] {
+        assert_eq!(UtcTimestamp::try_from(dt), Err(ParseTimestampError));
+    }
+}

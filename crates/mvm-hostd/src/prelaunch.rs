@@ -10,7 +10,9 @@
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use libkrun_sys::{SupervisorAttachConfig, SupervisorBaseConfig, SupervisorConfig};
-use mvm_core::plan::{NonceStore, SignedExecutionPlan, check_window, verify_plan, verify_plan_id};
+use mvm_core::plan::{
+    NonceStore, SignedExecutionPlan, check_window_chrono, verify_plan, verify_plan_id,
+};
 
 /// Why an attach was refused. Every variant means the caller must NOT
 /// `start_enter` — the standby exits non-zero.
@@ -79,7 +81,7 @@ pub fn verify_and_merge_attach(
     verify_plan_id(&plan).map_err(|e| AttachVerifyError::PlanVerify(e.to_string()))?;
 
     // G4 validity window + per-signer nonce-replay.
-    check_window(&plan, now).map_err(|e| AttachVerifyError::Validity(e.to_string()))?;
+    check_window_chrono(&plan, now).map_err(|e| AttachVerifyError::Validity(e.to_string()))?;
     nonce_store
         .check_and_insert(&signed.0.signer_id, &plan)
         .map_err(|e| AttachVerifyError::Validity(e.to_string()))?;
