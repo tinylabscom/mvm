@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 pub const MAX_LIFECYCLE_LABEL_BYTES: usize = 1024;
 
 /// The events a lifecycle entry may carry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LifecycleEvent {
     /// The cell store refused an operation for want of authority.
     #[serde(rename = "state_cell.refused")]
@@ -45,7 +45,10 @@ impl LifecycleEvent {
             Self::LivenessSignalRefused => {
                 matches!(
                     label,
-                    LifecycleLabel::Unit | LifecycleLabel::Epoch | LifecycleLabel::Reason
+                    LifecycleLabel::Unit
+                        | LifecycleLabel::Epoch
+                        | LifecycleLabel::Reason
+                        | LifecycleLabel::Suppressed
                 )
             }
         }
@@ -61,6 +64,9 @@ pub enum LifecycleLabel {
     Unit,
     Epoch,
     Reason,
+    /// How many refusals of the same kind went unrecorded since the last
+    /// entry of that kind.
+    Suppressed,
 }
 
 impl LifecycleLabel {
@@ -73,6 +79,7 @@ impl LifecycleLabel {
             Self::Unit => "unit",
             Self::Epoch => "epoch",
             Self::Reason => "reason",
+            Self::Suppressed => "suppressed",
         }
     }
 }

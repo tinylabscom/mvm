@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
+use mvm_contract::protocol::mailbox::ExecutionEpoch;
 use mvm_core::protocol::audit_signer::{
-    AppendEntryRequest, AppendEntryResponse, SignerHelperAppendLifecycleEntry,
+    AppendEntryRequest, AppendEntryResponse, RegisteredUnit, SignerHelperAppendLifecycleEntry,
     SignerHelperRegisterVm, SignerHelperRequest, SignerHelperResponse,
 };
 use mvm_core::protocol::lifecycle_audit::{
@@ -13,6 +14,14 @@ use crate::audit::audit_file::verify_audit_chain;
 use crate::audit_signer::helper::SignerHelper;
 
 const TENANT: &str = "acme";
+const UNIT: &str = "controller";
+
+fn registered() -> RegisteredUnit {
+    RegisteredUnit {
+        unit: UNIT.into(),
+        epoch: ExecutionEpoch::FIRST,
+    }
+}
 
 /// A host with its own `MVM_HOME` and host signer. One per test.
 struct Host {
@@ -50,23 +59,26 @@ impl Host {
 
     fn helper(&self) -> SignerHelper {
         let mut helper = SignerHelper::new(TENANT, Some(self.key_path.clone()));
+        self.register(&mut helper, "vm-1", Some(registered()));
+        helper
+    }
+
+    fn register(&self, helper: &mut SignerHelper, vm_id: &str, unit: Option<RegisteredUnit>) {
         let dir = self.home.path().join("audit");
+        let path = |name: String| dir.join(name).to_string_lossy().into_owned();
         let registered = helper.dispatch(SignerHelperRequest::RegisterVm(SignerHelperRegisterVm {
             request_id: "reg".into(),
-            vm_id: "vm-1".into(),
+            vm_id: vm_id.into(),
             tenant_id: TENANT.into(),
-            workload_id: "wl-1".into(),
-            workload_chain_path: dir
-                .join(format!("{TENANT}.vm-1.workload.jsonl"))
-                .to_string_lossy()
-                .into_owned(),
-            chain_head_secondary_path: dir.join("vm-1.head").to_string_lossy().into_owned(),
+            workload_id: format!("wl-{vm_id}"),
+            workload_chain_path: path(format!("{TENANT}.{vm_id}.workload.jsonl")),
+            chain_head_secondary_path: path(format!("{vm_id}.head")),
+            unit,
         }));
         assert!(matches!(
             registered,
             SignerHelperResponse::Registered { .. }
         ));
-        helper
     }
 
     fn entries(&self, tenant: &str) -> Vec<serde_json::Value> {
@@ -157,6 +169,12 @@ fn helper_and_emitter_writes_interleave_on_one_verifiable_tenant_chain() {
         ]
     );
     assert_eq!(host.entries(TENANT)[1]["labels"]["cell"], "setpoint");
+    assert_eq!(
+        host.entries(TENANT)[1]["labels"]["unit"],
+        UNIT,
+        "the registered unit"
+    );
+    assert_eq!(host.entries(TENANT)[1]["labels"]["epoch"], "1");
 }
 
 #[test]
@@ -221,7 +239,7 @@ fn an_event_or_label_outside_the_closed_set_does_not_parse() {
 fn a_signer_without_a_key_file_refuses() {
     let host = Host::new();
     assert_eq!(
-        append(TENANT, None, &refusal(TENANT, &[])),
+        append(TENANT, Some(&registered()), None, &refusal(TENANT, &[])),
         Err(AuditSignerErrorCode::NotReady)
     );
     assert!(!host.chain(TENANT).exists());
@@ -246,6 +264,7 @@ async fn the_per_vm_audit_signer_serves_its_own_tenant_only() {
         std::sync::Arc::new(tokio::sync::Mutex::new(chain)),
         std::sync::Arc::new(LifecycleScope {
             tenant_id: TENANT.into(),
+            unit: Some(registered()),
             key_path: Some(host.key_path.clone()),
         }),
         "wl-1".into(),
@@ -254,7 +273,7 @@ async fn the_per_vm_audit_signer_serves_its_own_tenant_only() {
     let client = crate::audit::audit_client::AuditClient::new(&socket);
     let send = |tenant: &str| AppendEntryRequest::AppendLifecycleEntry {
         request_id: "r".into(),
-        entry: refusal(tenant, &[(LifecycleLabel::Unit, "u")]),
+        entry: refusal(tenant, &[(LifecycleLabel::Unit, UNIT)]),
     };
     assert!(matches!(
         client.append(&send(TENANT)).await.unwrap(),
@@ -274,4 +293,78 @@ async fn the_per_vm_audit_signer_serves_its_own_tenant_only() {
         1
     );
     assert!(!host.chain("other").exists());
+}
+
+#[test]
+fn an_entry_naming_another_unit_or_epoch_is_refused() {
+    let host = Host::new();
+    let mut helper = host.helper();
+    for labels in [
+        [(LifecycleLabel::Unit, "reader")],
+        [(LifecycleLabel::Epoch, "2")],
+    ] {
+        assert_eq!(
+            refused_code(through_helper(
+                &mut helper,
+                "vm-1",
+                refusal(TENANT, &labels)
+            )),
+            AuditSignerErrorCode::InvalidRequest
+        );
+    }
+    assert!(matches!(
+        through_helper(
+            &mut helper,
+            "vm-1",
+            refusal(TENANT, &[(LifecycleLabel::Unit, UNIT)])
+        ),
+        SignerHelperResponse::LifecycleAppended { .. }
+    ));
+    let entries = host.entries(TENANT);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["labels"]["unit"], UNIT);
+}
+
+#[test]
+fn a_vm_registered_without_a_unit_cannot_append() {
+    let host = Host::new();
+    let mut helper = SignerHelper::new(TENANT, Some(host.key_path.clone()));
+    host.register(&mut helper, "vm-2", None);
+    assert_eq!(
+        refused_code(through_helper(&mut helper, "vm-2", refusal(TENANT, &[]))),
+        AuditSignerErrorCode::NotReady
+    );
+    assert!(host.entries(TENANT).is_empty());
+}
+
+/// The largest line one lifecycle entry can put on the chain, which bounds
+/// what a guest's refusals can cost per entry.
+#[test]
+fn a_full_entry_is_a_bounded_line() {
+    let host = Host::new();
+    let mut helper = host.helper();
+    let full = "x".repeat(MAX_LIFECYCLE_LABEL_BYTES);
+    let entry = LifecycleEntry {
+        tenant_id: TENANT.into(),
+        event: LifecycleEvent::StateCellRefused,
+        labels: [
+            LifecycleLabel::Operation,
+            LifecycleLabel::Cell,
+            LifecycleLabel::Reason,
+            LifecycleLabel::Suppressed,
+        ]
+        .into_iter()
+        .map(|label| (label, full.clone()))
+        .collect(),
+    };
+    assert!(matches!(
+        through_helper(&mut helper, "vm-1", entry),
+        SignerHelperResponse::LifecycleAppended { .. }
+    ));
+    let line = std::fs::read_to_string(host.chain(TENANT)).unwrap();
+    assert!(
+        line.len() <= 11 * 1024,
+        "a full entry is {} bytes",
+        line.len()
+    );
 }

@@ -38,7 +38,8 @@ pub struct BoundHandlers {
 /// `host.cell.v1` is registered only when it is bound, the registration
 /// carries a unit and epoch (the registry has an epoch gate), and the caller
 /// supplies `refusals`, the signer that records its refusals on the tenant's
-/// chain.
+/// chain. Those are recorded at a bounded rate per registration
+/// ([`crate::audit::refusal::ThrottledRefusals`]).
 pub fn register_bound_handlers(
     registry: &mut Registry,
     bindings: &[ServiceId],
@@ -52,9 +53,15 @@ pub fn register_bound_handlers(
         && registry.epoch_gate.is_some()
         && let Some(refusals) = refusals
     {
-        registry.register(Arc::new(host_cell_v1::HostCellV1Handler::new(
+        let clock: Arc<dyn mvm_core::time::Clock> = Arc::new(mvm_core::time::SystemClock);
+        // Each registration counts its own refusals, so one guest's repeats
+        // cannot crowd out another's first entry.
+        let refusals = Arc::new(crate::audit::refusal::ThrottledRefusals::new(
             refusals,
-            Arc::new(mvm_core::time::SystemClock),
+            Arc::clone(&clock),
+        ));
+        registry.register(Arc::new(host_cell_v1::HostCellV1Handler::new(
+            refusals, clock,
         )));
     }
 

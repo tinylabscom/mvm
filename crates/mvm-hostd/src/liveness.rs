@@ -462,9 +462,15 @@ impl LivenessSignals<'_> {
     }
 
     fn refuse(&self, caller: &LivenessCaller<'_>, refusal: LivenessRefusal) -> anyhow::Error {
+        let kind = match refusal {
+            LivenessRefusal::NoPeriod { .. } => "no_period",
+            LivenessRefusal::Epoch { .. } => "epoch",
+            LivenessRefusal::DeadlinePassed { .. } => "deadline_passed",
+        };
         let audit = self.audit.record_refusal(
             caller.tenant,
             LifecycleEvent::LivenessSignalRefused,
+            kind,
             LifecycleLabels::from([
                 (LifecycleLabel::Unit, caller.unit.0.clone()),
                 (LifecycleLabel::Epoch, caller.epoch.get().to_string()),

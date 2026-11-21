@@ -82,6 +82,7 @@ fn main() -> Result<()> {
             "mvm-audit-signer listening (W1b.1 software-fallback chain key path; W8 replaces with HW enclave + at-rest AEAD)"
         );
         let scope = Arc::new(LifecycleScope {
+            unit: cfg.registered_unit(),
             tenant_id: cfg.tenant_id,
             key_path: cfg.software_chain_key_path,
         });

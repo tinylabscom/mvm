@@ -28,8 +28,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use ed25519_dalek::VerifyingKey;
 use mvm_core::protocol::audit_signer::{
-    SignerHelperAppendEntry, SignerHelperDeregisterVm, SignerHelperRegisterVm, SignerHelperRequest,
-    SignerHelperResponse,
+    RegisteredUnit, SignerHelperAppendEntry, SignerHelperDeregisterVm, SignerHelperRegisterVm,
+    SignerHelperRequest, SignerHelperResponse,
 };
 use mvm_core::protocol::broker_control;
 use mvm_core::protocol::broker_control::{
@@ -642,6 +642,12 @@ impl HostAgentDaemon {
                     .to_string_lossy()
                     .into_owned()
             }),
+            unit: r
+                .workload
+                .clone()
+                .filter(|unit| !unit.is_empty())
+                .zip(r.execution_epoch)
+                .map(|(unit, epoch)| RegisteredUnit { unit, epoch }),
         });
         match SignerHelperClient::new(path.clone()).send(&req)? {
             SignerHelperResponse::Registered { .. } => Ok(()),

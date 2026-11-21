@@ -189,6 +189,20 @@ pub struct SignerHelperRegisterVm {
     pub workload_chain_path: String,
     /// Secondary persisted chain-head file for this VM.
     pub chain_head_secondary_path: String,
+    /// The unit and execution epoch the VM was admitted under, from its plan.
+    /// A lifecycle entry for this VM is recorded under them, whatever the
+    /// caller names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<RegisteredUnit>,
+}
+
+/// The unit and execution epoch a signer records a VM's lifecycle entries
+/// under.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisteredUnit {
+    pub unit: String,
+    pub epoch: super::mailbox::ExecutionEpoch,
 }
 
 /// Deregister a VM from the resident signer helper.
@@ -474,6 +488,7 @@ mod tests {
             workload_id: "wl-1".into(),
             workload_chain_path: "/audit/local.vm-1.workload.jsonl".to_string(),
             chain_head_secondary_path: "/audit/local.vm-1.head".to_string(),
+            unit: None,
         })
     }
 

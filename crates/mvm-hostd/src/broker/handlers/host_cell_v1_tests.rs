@@ -151,6 +151,16 @@ impl Host {
         verb: &str,
         payload: serde_json::Value,
     ) -> ServiceDispatchResult {
+        self.call_on(&self.handler(), unit, verb, payload).await
+    }
+
+    async fn call_on(
+        &self,
+        handler: &HostCellV1Handler,
+        unit: Option<(&str, u64)>,
+        verb: &str,
+        payload: serde_json::Value,
+    ) -> ServiceDispatchResult {
         let ctx = ServiceCallCtx {
             workload_id: "vm".into(),
             tenant_id: TENANT.into(),
@@ -164,7 +174,7 @@ impl Host {
                 epoch: ExecutionEpoch::new(n).unwrap(),
             }),
         };
-        self.handler().dispatch(&ctx, verb, payload).await
+        handler.dispatch(&ctx, verb, payload).await
     }
 
     async fn write(&self, unit: &str, n: u64, version: u64, value: &[u8]) -> ServiceDispatchResult {
@@ -611,4 +621,42 @@ fn refusals(host: &Host) -> Vec<serde_json::Value> {
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["entry"].clone())
         .filter(|entry| entry["event"] == crate::state_cells::STATE_CELL_REFUSED_EVENT)
         .collect()
+}
+
+/// The guest is refused every time; the chain gets the first refusal and then
+/// one per interval carrying the count it stood for.
+#[tokio::test]
+async fn repeated_refusals_are_all_answered_but_recorded_at_a_bounded_rate() {
+    use crate::audit::refusal::{REFUSAL_AUDIT_INTERVAL, ThrottledRefusals};
+    let host = Host::admitted();
+    let handler = HostCellV1Handler::new(
+        Arc::new(ThrottledRefusals::new(
+            host.emitter.clone(),
+            host.clock.clone(),
+        )),
+        host.clock.clone(),
+    );
+    let write = || serde_json::json!({"cell": "setpoint", "version": 1, "value": "eA=="});
+    for _ in 0..5 {
+        assert_eq!(
+            code(
+                host.call_on(&handler, Some(("reader", 1)), "write", write())
+                    .await
+            ),
+            ServiceErrorCode::CapabilityDenied
+        );
+    }
+    assert_eq!(refusals(&host).len(), 1);
+    host.clock
+        .advance_ms(REFUSAL_AUDIT_INTERVAL.num_milliseconds());
+    assert_eq!(
+        code(
+            host.call_on(&handler, Some(("reader", 1)), "write", write())
+                .await
+        ),
+        ServiceErrorCode::CapabilityDenied
+    );
+    let recorded = refusals(&host);
+    assert_eq!(recorded.len(), 2);
+    assert_eq!(recorded[1]["labels"]["suppressed"], "4");
 }

@@ -30,6 +30,9 @@ pub type SharedChain = Arc<Mutex<Chain>>;
 #[derive(Debug, Clone)]
 pub struct LifecycleScope {
     pub tenant_id: String,
+    /// The unit and epoch this VM was admitted under; `None` refuses every
+    /// lifecycle entry.
+    pub unit: Option<mvm_core::protocol::audit_signer::RegisteredUnit>,
     pub key_path: Option<std::path::PathBuf>,
 }
 
@@ -105,6 +108,7 @@ async fn dispatch(
     if let AppendEntryRequest::AppendLifecycleEntry { request_id, entry } = &req {
         let result = crate::audit_signer::lifecycle::append(
             &scope.tenant_id,
+            scope.unit.as_ref(),
             scope.key_path.as_deref(),
             entry,
         );
@@ -264,6 +268,7 @@ mod tests {
             async move {
                 let scope = Arc::new(LifecycleScope {
                     tenant_id: "t-001".into(),
+                    unit: None,
                     key_path: None,
                 });
                 let _ = serve_on_listener(listener, chain, scope, "wl-test".into(), 65_536).await;

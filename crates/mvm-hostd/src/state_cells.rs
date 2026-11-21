@@ -137,6 +137,18 @@ impl CellRefusal {
             Self::VersionNotIncreasing { .. } | Self::TooLarge { .. }
         )
     }
+
+    /// The refusal's variant, without its fields.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::UnknownCell { .. } => "unknown_cell",
+            Self::NotWriter { .. } => "not_writer",
+            Self::NotReader { .. } => "not_reader",
+            Self::Epoch { .. } => "epoch",
+            Self::VersionNotIncreasing { .. } => "version_not_increasing",
+            Self::TooLarge { .. } => "too_large",
+        }
+    }
 }
 
 /// A cell's committed value. Version 0 is the empty value a cell holds from
@@ -306,6 +318,7 @@ impl StateCells<'_> {
         let audit = self.audit.record_refusal(
             caller.tenant,
             LifecycleEvent::StateCellRefused,
+            refusal.kind(),
             LifecycleLabels::from([
                 (LifecycleLabel::Operation, op.as_str().to_string()),
                 (LifecycleLabel::Cell, caller.cell.to_string()),

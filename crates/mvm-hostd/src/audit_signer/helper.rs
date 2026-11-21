@@ -12,9 +12,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use mvm_core::protocol::audit_signer::{
-    AuditSignerErrorCode, SignerHelperAppendEntry, SignerHelperAppendLifecycleEntry,
-    SignerHelperDeregisterVm, SignerHelperRegisterVm, SignerHelperRequest, SignerHelperResponse,
-    SignerHelperSignHost,
+    AuditSignerErrorCode, RegisteredUnit, SignerHelperAppendEntry,
+    SignerHelperAppendLifecycleEntry, SignerHelperDeregisterVm, SignerHelperRegisterVm,
+    SignerHelperRequest, SignerHelperResponse, SignerHelperSignHost,
 };
 use mvm_core::protocol::host_signer::{HostSignerErrorCode, SignRequest, SignResponse};
 use mvm_core::security::SIG_ALG_ED25519;
@@ -35,6 +35,8 @@ pub type SharedSignerHelper = Arc<Mutex<SignerHelper>>;
 
 struct VmChain {
     workload_id: String,
+    /// What this VM's lifecycle entries are recorded under.
+    unit: Option<RegisteredUnit>,
     chain: Chain,
 }
 
@@ -93,6 +95,7 @@ impl SignerHelper {
                     req.vm_id.clone(),
                     VmChain {
                         workload_id: req.workload_id,
+                        unit: req.unit,
                         chain,
                     },
                 );
@@ -213,18 +216,19 @@ impl SignerHelper {
     }
 
     /// Append a refusal to this helper's tenant chain, for a registered VM's
-    /// broker. The VM must be registered, as for its own appends, and the
-    /// entry must name this helper's tenant.
+    /// broker. The VM must be registered, as for its own appends, the entry
+    /// must name this helper's tenant, and it is recorded under the unit and
+    /// epoch the VM was registered with.
     fn append_lifecycle(&self, req: &SignerHelperAppendLifecycleEntry) -> SignerHelperResponse {
         let request_id = req.request_id.clone();
-        let result = if self.chains.contains_key(&req.vm_id) {
-            crate::audit_signer::lifecycle::append(
+        let result = match self.chains.get(&req.vm_id) {
+            Some(vm) => crate::audit_signer::lifecycle::append(
                 &self.tenant_id,
+                vm.unit.as_ref(),
                 self.software_chain_key_path.as_deref(),
                 &req.entry,
-            )
-        } else {
-            Err(AuditSignerErrorCode::NotReady)
+            ),
+            None => Err(AuditSignerErrorCode::NotReady),
         };
         match result {
             Ok(()) => SignerHelperResponse::LifecycleAppended { request_id },
@@ -369,6 +373,7 @@ mod tests {
                 .join(format!("{tenant_id}.{vm_id}.head"))
                 .to_string_lossy()
                 .into_owned(),
+            unit: None,
         })
     }
 
