@@ -35,6 +35,7 @@ const LENGTH_PREFIX_BYTES: usize = size_of::<u32>();
 /// Trusted peer identity expected on one connected commissioning stream.
 pub struct CommissioningPeerConfig {
     expected_uid: u32,
+    #[cfg(target_os = "macos")]
     requirement: DesignatedRequirement,
 }
 
@@ -42,8 +43,11 @@ impl CommissioningPeerConfig {
     /// Binds an expected kernel peer UID to one exact designated requirement.
     #[must_use]
     pub const fn new(expected_uid: u32, requirement: DesignatedRequirement) -> Self {
+        #[cfg(not(target_os = "macos"))]
+        let _ = requirement;
         Self {
             expected_uid,
+            #[cfg(target_os = "macos")]
             requirement,
         }
     }
@@ -51,11 +55,11 @@ impl CommissioningPeerConfig {
 
 impl fmt::Debug for CommissioningPeerConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("CommissioningPeerConfig")
-            .field("expected_uid", &self.expected_uid)
-            .field("requirement", &"[REDACTED]")
-            .finish()
+        let mut debug = formatter.debug_struct("CommissioningPeerConfig");
+        debug.field("expected_uid", &self.expected_uid);
+        #[cfg(target_os = "macos")]
+        debug.field("requirement", &"[REDACTED]");
+        debug.finish()
     }
 }
 
@@ -341,6 +345,10 @@ mod unsupported_tests {
                 .expect("bounded requirement"),
         );
         assert_eq!(
+            format!("{config:?}"),
+            "CommissioningPeerConfig { expected_uid: 501 }"
+        );
+        assert_eq!(
             exchange_connected(stream, config, [1; 32]).expect_err("must refuse"),
             ConnectedBootstrapError::Unsupported
         );
@@ -418,6 +426,18 @@ mod native_tests {
 
     fn config() -> CommissioningPeerConfig {
         CommissioningPeerConfig::new(expected_uid(), self_designated_requirement())
+    }
+
+    #[test]
+    fn peer_config_debug_redacts_requirement() {
+        let config = config();
+        assert_eq!(
+            format!("{config:?}"),
+            format!(
+                "CommissioningPeerConfig {{ expected_uid: {}, requirement: \"[REDACTED]\" }}",
+                expected_uid()
+            )
+        );
     }
 
     fn begin() -> Request {
