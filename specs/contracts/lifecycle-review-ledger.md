@@ -694,10 +694,23 @@ record costs one durable write by the coordinator. A helper that is frozen
 holds no lane, and the commit it was about to make is refused after the
 quarantine, while a record it already wrote but did not commit is left in its
 journal until a reopen is refused. A development mailbox is not ordered by the
-ledger. Nothing restarts a mailbox helper that exits after an unknown outcome or
-a coordinator outage. When the per-VM helper sees its workload quarantined it
-stops serving, runs one bounded expiry-and-compaction pass whose commits are
-marked retention-only and accepted by the ledger, and exits. The mark is signed
+ledger. A production helper whose serving run ends only because a commit's
+outcome stayed unknown, after it had announced ready and while its VM is still
+live, drops everything and opens again from disk after a doubling wait of one to
+thirty seconds, through the same start as the first: re-enrolling with the
+coordinator reconciles a commit whose reply was lost. There is no attempt limit;
+the VM's life bounds it. A refusal, a quarantine, a failure before readiness, a
+journal error that is not an unknown outcome, and a helper that crashes or is
+killed are not restarted, and nothing in the helper restarts the coordinator
+itself; the next launch's `ensure` does. A record the helper appended that the
+coordinator never received is committed through the coordinator while the
+journal reopens, which moves the anchor past the tip enrolled just before it;
+that is accepted, while an anchor behind that tip, or at its cursor under
+another head, is still refused. A re-sent guest message then completes the
+record already written instead of adding a second copy. The guest sees
+connection errors for as long as the gap lasts. When the per-VM helper sees its
+workload quarantined it stops serving, runs one bounded expiry-and-compaction
+pass whose commits are marked retention-only and accepted by the ledger, and exits. The mark is signed
 by the destination key and trusted from the host helper; the ledger cannot check
 that a marked commit only expires or compacts. A test runs the whole
 helper loop against an in-process coordinator: a quarantine that lands while the

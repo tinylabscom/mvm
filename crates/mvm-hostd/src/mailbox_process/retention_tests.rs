@@ -24,6 +24,7 @@ use mvm_core::mailbox::{OpenContext, SealRequest, seal_envelope, sign_capability
 use std::sync::Arc;
 
 use super::*;
+use crate::mailbox_commit::coordinate;
 use crate::mailbox_service::{MailboxLimits, MailboxPolicy};
 use crate::policy_generation::coordinator;
 

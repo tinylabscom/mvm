@@ -43,7 +43,7 @@ use mvm_vmm::host::flowmux_identity::{MAILBOX_READER_BOOT_FILE, MailboxReaderBoo
 
 use crate::mailbox_commit::{
     ActorOrdering, Coordinated, CoordinatorSocket, Destination, JournalOrder, OrderingFlags,
-    coordinate, require_reached, stop_if_unordered,
+    coordinate_with, require_reached, stop_if_unordered,
 };
 use crate::mailbox_custody::RetainedMailboxKeys;
 use crate::mailbox_launch::{
@@ -55,6 +55,7 @@ use crate::plan_admission::{MailboxLaunchPosture, MailboxPostureHandoff};
 use crate::vm_lifetime::{endpoint_needed, launcher_is_alive};
 
 mod reader;
+mod restart;
 
 /// The helper binary this module spawns.
 pub const MAILBOX_BIN: &str = "mvm-mailbox";
@@ -73,7 +74,7 @@ const LOCAL_JOURNAL_LIMITS: JournalLimits = JournalLimits {
 
 /// What the process reads on stdin. `deny_unknown_fields`, so a field a newer
 /// launcher adds fails closed here.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MailboxProcessConfig {
     pub grant: MailboxGrant,
@@ -149,8 +150,43 @@ pub fn serve(config: MailboxProcessConfig) -> i32 {
 }
 
 fn serve_verified(config: MailboxProcessConfig) -> Result<()> {
-    // SAFETY: `getppid` is async-signal-safe and infallible.
+    serve_restarting(config, restart::Backoff::default())
+}
+
+/// Serve, reopening from disk when a run ends only because a commit's outcome
+/// stayed unknown. Every reopen repeats the whole start, checks included.
+fn serve_restarting(config: MailboxProcessConfig, backoff: restart::Backoff) -> Result<()> {
+    // SAFETY: `getppid` is async-signal-safe and infallible. Read once: after
+    // the launcher exits the helper is reparented and the id changes.
     let launcher = unsafe { libc::getppid() };
+    let vm_state_dir = config.vm_state_dir.clone();
+    let ready = restart::Readiness::default();
+    let keep = || keep_serving(launcher, &vm_state_dir);
+    let began = std::time::Instant::now();
+    restart::run_restarting(
+        || {
+            let flags = OrderingFlags::default();
+            serve_once(launcher, config.clone(), &ready, &flags)
+                .map_err(|error| restart::classify(error, &ready, &flags, keep()))
+        },
+        keep,
+        |wait| {
+            let end = std::time::Instant::now() + wait;
+            while std::time::Instant::now() < end && keep() {
+                std::thread::sleep(POLL_INTERVAL.min(wait));
+            }
+        },
+        || began.elapsed(),
+        backoff,
+    )
+}
+
+fn serve_once(
+    launcher: libc::pid_t,
+    config: MailboxProcessConfig,
+    ready: &restart::Readiness,
+    flags: &OrderingFlags,
+) -> Result<()> {
     let MailboxProcessConfig {
         grant,
         keys,
@@ -197,6 +233,8 @@ fn serve_verified(config: MailboxProcessConfig) -> Result<()> {
     if let Some(material) = actor {
         return serve_actor(
             launcher,
+            ready,
+            flags,
             &plan,
             MailboxProcessConfig {
                 grant,
@@ -223,6 +261,8 @@ fn serve_verified(config: MailboxProcessConfig) -> Result<()> {
     if posture.variant() == Variant::Prod {
         return serve_local(
             launcher,
+            ready,
+            flags,
             &plan,
             MailboxProcessConfig {
                 grant,
@@ -253,7 +293,7 @@ fn serve_verified(config: MailboxProcessConfig) -> Result<()> {
         LAUNCH_LIMITS,
         policy.with_grant(&grant)?.gated(gate),
     )?;
-    std::io::stdout().write_all(READY_MARKER)?;
+    ready.announce()?;
     let mut sealer = sealer;
     while keep_serving(launcher, &vm_state_dir) {
         if service
@@ -270,6 +310,8 @@ fn serve_verified(config: MailboxProcessConfig) -> Result<()> {
 
 fn serve_actor(
     launcher: libc::pid_t,
+    ready: &restart::Readiness,
+    flags: &OrderingFlags,
     plan: &ExecutionPlan,
     config: MailboxProcessConfig,
     material: crate::mailbox_launch::actor_template::ActorEndpointMaterial,
@@ -360,7 +402,7 @@ fn serve_actor(
                 workload: plan.workload.0.clone(),
                 epoch: ExecutionEpoch::new(plan.execution_epoch)
                     .map_err(|_| mvm_core::mailbox::frame::Refusal::Unavailable)?,
-                flags: OrderingFlags::default(),
+                flags: flags.clone(),
             });
             ordering = Some(std::sync::Arc::clone(&ledger));
             Ok(JournalOrder::Ledger(ledger))
@@ -396,7 +438,7 @@ fn serve_actor(
     };
     service.install_guest_reader(reader)?;
     service.install_conversation(binding, owner)?;
-    std::io::stdout().write_all(READY_MARKER)?;
+    ready.announce()?;
     while active() {
         let result = service.serve_guest_while(&config.route, &mut sealer, active);
         match result {
@@ -426,6 +468,8 @@ fn serve_actor(
 
 fn serve_local(
     launcher: libc::pid_t,
+    ready: &restart::Readiness,
+    flags: &OrderingFlags,
     plan: &ExecutionPlan,
     config: MailboxProcessConfig,
 ) -> Result<()> {
@@ -515,7 +559,7 @@ fn serve_local(
         unknown,
         retention: retention_flag,
         enrolled,
-    } = coordinate(
+    } = coordinate_with(
         FileJournalAnchor::open(&paths.anchor, address, retained.anchor_key())
             .map_err(Error::other)?,
         std::sync::Arc::new(CoordinatorSocket(coordinator)),
@@ -525,6 +569,7 @@ fn serve_local(
             epoch: ExecutionEpoch::new(plan.execution_epoch).map_err(Error::other)?,
             key: commit_key,
         },
+        flags.clone(),
     )
     .map_err(Error::other)?;
     let journal = MailboxJournal::open_local_with_custody(
@@ -554,7 +599,7 @@ fn serve_local(
         anchor,
     )?;
     service.install_guest_reader(reader)?;
-    std::io::stdout().write_all(READY_MARKER)?;
+    ready.announce()?;
     let still_ordered = || stop_if_unordered(&refused, &unknown).is_ok();
     let unit = plan.workload.0.as_str();
     while keep_serving(launcher, &vm_state_dir) && still_ordered() {
@@ -997,7 +1042,9 @@ mod retention_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mailbox_commit::coordinate;
     use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxId};
+    use std::sync::Arc;
 
     #[test]
     fn helper_readiness_requires_the_exact_marker_before_launch_succeeds() {
@@ -2001,17 +2048,26 @@ mod tests {
         after: u64,
     }
 
-    /// The guest's one message is sealed under a template that expires it
-    /// `expires_in_ms` after the keys are derived. With `overdue` the
-    /// quarantine lands once the message is past expiry, otherwise before. The
-    /// helper is parked on its next guest connection; closing that connection
-    /// wakes the loop after the quarantine.
-    fn run_loop_through_a_quarantine(overdue: bool) -> QuarantinedLoop {
-        use ed25519_dalek::SigningKey;
-        use mvm_contract::protocol::mailbox::PrincipalId;
-        use mvm_core::mailbox::frame::{OWN_MAILBOX_RECIPIENT, OutboxMessage};
+    /// A production helper's inputs with an in-process coordinator, before the
+    /// helper runs. `env` keeps the isolated MVM home in force.
+    struct ProductionLoop {
+        _env: mvm_core::util::test_env::TestEnv,
+        home: tempfile::TempDir,
+        _state: tempfile::TempDir,
+        state_path: PathBuf,
+        grant: MailboxGrant,
+        plan: ExecutionPlan,
+        config: MailboxProcessConfig,
+        listener: std::os::unix::net::UnixListener,
+        coordinator: PathBuf,
+        destination: String,
+    }
 
-        let expires_in_ms: i64 = if overdue { 3_000 } else { 60_000 };
+    /// The guest's messages are sealed under a template that expires them
+    /// `expires_in_ms` after the keys are derived.
+    fn production_loop(expires_in_ms: i64) -> ProductionLoop {
+        use ed25519_dalek::SigningKey;
+
         let home = tempfile::tempdir_in("/tmp").expect("isolated host home");
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(home.path());
@@ -2110,38 +2166,81 @@ mod tests {
             vm_state_dir: state.path().to_path_buf(),
             coordinator: Some(coordinator.clone()),
         };
+        ProductionLoop {
+            _env: env,
+            home,
+            state_path: state.path().to_path_buf(),
+            _state: state,
+            grant,
+            plan,
+            config,
+            listener,
+            coordinator,
+            destination: paths.destination,
+        }
+    }
+
+    /// One message the guest sends to its own mailbox, as the helper answers it.
+    fn guest_try_send(fixture: &ProductionLoop, text: &[u8]) -> std::result::Result<(), String> {
+        use mvm_contract::protocol::mailbox::PrincipalId;
+        use mvm_core::mailbox::frame::{OWN_MAILBOX_RECIPIENT, OutboxMessage};
+        let outbox = fixture.home.path().join("outbox");
+        let message = OutboxMessage::new(
+            PrincipalId::from_bytes(OWN_MAILBOX_RECIPIENT),
+            text.to_vec(),
+        );
+        mvm_agentd::mailbox_outbox::write_outbox(&outbox, &message).expect("outbox");
+        guest_forward(fixture)
+    }
+
+    /// Send what the guest's outbox still holds, as after an unanswered send.
+    fn guest_forward(fixture: &ProductionLoop) -> std::result::Result<(), String> {
+        let outbox = fixture.home.path().join("outbox");
+        let mut stream = accept_guest(&fixture.listener);
+        mvm_agentd::mailbox_outbox::forward_local_outbox(
+            &mut stream,
+            &outbox,
+            &ed25519_dalek::VerifyingKey::from_bytes(&fixture.grant.authority_key)
+                .expect("authority"),
+            fixture.grant.mailbox,
+            fixture.grant.epoch,
+        )
+        .map(|_| ())
+        .map_err(|error| format!("{error:?}"))
+    }
+
+    fn guest_sends(fixture: &ProductionLoop, text: &[u8]) {
+        guest_try_send(fixture, text).expect("accepted");
+    }
+
+    fn destination_cursor(fixture: &ProductionLoop) -> u64 {
+        let bytes = mvm_core::host_interface::workload::read_ledger_bytes_at(fixture.home.path())
+            .expect("ledger readable")
+            .expect("ledger exists");
+        serde_json::from_slice::<mvm_core::host_interface::workload::CanonicalLedger>(&bytes)
+            .expect("ledger parses")
+            .destinations[fixture.destination.as_str()]
+        .tip
+        .cursor
+    }
+
+    /// With `overdue` the quarantine lands once the guest's message is past
+    /// expiry, otherwise before. The helper is parked on its next guest
+    /// connection; closing that connection wakes the loop after the
+    /// quarantine.
+    fn run_loop_through_a_quarantine(overdue: bool) -> QuarantinedLoop {
+        let expires_in_ms: i64 = if overdue { 3_000 } else { 60_000 };
+        let fixture = production_loop(expires_in_ms);
+        let config = fixture.config.clone();
         let (stopped_tx, stopped_rx) = sync_channel(1);
         let helper = std::thread::spawn(move || {
             let outcome = serve_verified(config);
             let _ = stopped_tx.send(());
             outcome
         });
-        let outbox = home.path().join("outbox");
-        let message = OutboxMessage::new(
-            PrincipalId::from_bytes(OWN_MAILBOX_RECIPIENT),
-            b"expires soon".to_vec(),
-        );
-        mvm_agentd::mailbox_outbox::write_outbox(&outbox, &message).expect("outbox");
-        let mut stream = accept_guest(&listener);
-        mvm_agentd::mailbox_outbox::forward_local_outbox(
-            &mut stream,
-            &outbox,
-            &ed25519_dalek::VerifyingKey::from_bytes(&grant.authority_key).expect("authority"),
-            grant.mailbox,
-            grant.epoch,
-        )
-        .expect("accepted before it expires");
-        drop(stream);
-        let ledger_cursor = || {
-            let bytes = mvm_core::host_interface::workload::read_ledger_bytes_at(home.path())
-                .expect("ledger readable")
-                .expect("ledger exists");
-            serde_json::from_slice::<mvm_core::host_interface::workload::CanonicalLedger>(&bytes)
-                .expect("ledger parses")
-                .destinations[paths.destination.as_str()]
-            .tip
-            .cursor
-        };
+        guest_sends(&fixture, b"expires soon");
+        let expires = crate::mailbox_launch::actor_template::current_time_ms().expect("clock")
+            + expires_in_ms;
         // Past expiry, with the helper parked on its next guest connection.
         if overdue {
             let now = crate::mailbox_launch::actor_template::current_time_ms().expect("clock");
@@ -2149,10 +2248,10 @@ mod tests {
                 u64::try_from(expires - now).unwrap_or(0) + 500,
             ));
         }
-        let before = ledger_cursor();
-        let workload = plan.workload.0.clone();
+        let before = destination_cursor(&fixture);
+        let workload = fixture.plan.workload.0.clone();
         crate::policy_generation::coordinator::commit_workload(
-            &coordinator,
+            &fixture.coordinator,
             &mvm_core::host_interface::workload::WorkloadChange::Quarantine { workload },
         )
         .expect("quarantine");
@@ -2160,7 +2259,7 @@ mod tests {
             !helper.is_finished(),
             "the helper does not stop on a ledger change alone"
         );
-        drop(accept_guest(&listener));
+        drop(accept_guest(&fixture.listener));
         let stopped = stopped_rx.recv_timeout(Duration::from_secs(20));
         let outcome = if stopped.is_ok() {
             helper.join().expect("helper task")
@@ -2170,7 +2269,7 @@ mod tests {
         QuarantinedLoop {
             outcome: outcome.expect_err("a quarantined helper never ends cleanly"),
             before,
-            after: ledger_cursor(),
+            after: destination_cursor(&fixture),
         }
     }
 
@@ -2200,6 +2299,202 @@ mod tests {
             run.before,
             run.after
         );
+    }
+
+    struct Lossy {
+        /// While set, a destination commit is forwarded and its reply dropped.
+        lose: Arc<AtomicBool>,
+        /// Enrollment requests that reached the proxy, whether or not the
+        /// coordinator behind it could answer.
+        enrolls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    /// Sits between the helper and the in-process coordinator. While the
+    /// returned flag is set it forwards a destination commit and then drops the
+    /// connection, so the coordinator commits and the helper never hears.
+    fn lossy_coordinator(fixture: &mut ProductionLoop) -> Lossy {
+        use std::io::Read as _;
+        use std::os::unix::net::{UnixListener, UnixStream};
+
+        fn frame(stream: &mut UnixStream) -> Option<Vec<u8>> {
+            let mut length = [0u8; 4];
+            stream.read_exact(&mut length).ok()?;
+            let mut bytes = vec![0; u32::from_be_bytes(length) as usize];
+            stream.read_exact(&mut bytes).ok()?;
+            Some([length.to_vec(), bytes].concat())
+        }
+
+        let path = fixture.home.path().join("lossy-coordinator.sock");
+        let listener = UnixListener::bind(&path).expect("proxy socket");
+        let lose = Arc::new(AtomicBool::new(false));
+        let upstream = fixture.coordinator.clone();
+        let lose_replies = Arc::clone(&lose);
+        let enrolls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&enrolls);
+        std::thread::spawn(move || {
+            for mut client in listener.incoming().flatten() {
+                let (upstream, lose) = (upstream.clone(), Arc::clone(&lose_replies));
+                let counted = Arc::clone(&counted);
+                std::thread::spawn(move || {
+                    let Some(request) = frame(&mut client) else {
+                        return;
+                    };
+                    if request.windows(18).any(|w| w == b"enroll_destination") {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                    }
+                    let Ok(mut owner) = UnixStream::connect(&upstream) else {
+                        return;
+                    };
+                    if owner.write_all(&request).is_err() {
+                        return;
+                    }
+                    let Some(reply) = frame(&mut owner) else {
+                        return;
+                    };
+                    let commit = request.windows(18).any(|w| w == b"commit_destination");
+                    if !(commit && lose.load(Ordering::SeqCst)) {
+                        let _ = client.write_all(&reply);
+                    }
+                });
+            }
+        });
+        fixture.config.coordinator = Some(path);
+        Lossy { lose, enrolls }
+    }
+
+    type Helper = std::sync::mpsc::Receiver<Result<()>>;
+
+    /// The helper's whole restarting loop on a thread, with a short backoff.
+    fn run_restarting_helper(fixture: &ProductionLoop) -> Helper {
+        let config = fixture.config.clone();
+        let (done, helper) = sync_channel(1);
+        std::thread::spawn(move || {
+            let backoff = restart::Backoff {
+                floor: Duration::from_millis(50),
+                cap: Duration::from_millis(200),
+            };
+            let _ = done.send(serve_restarting(config, backoff));
+        });
+        helper
+    }
+
+    fn helper_ended(helper: &Helper, within: Duration) -> Option<Result<()>> {
+        helper.recv_timeout(within).ok()
+    }
+
+    /// Tear the VM down; the helper must then stop cleanly.
+    fn stop_helper(fixture: &ProductionLoop, helper: &Helper) {
+        std::fs::remove_dir_all(&fixture.state_path).expect("tear the VM down");
+        let ended = helper_ended(helper, Duration::from_secs(20)).expect("helper stops");
+        assert!(ended.is_ok(), "{ended:?}");
+    }
+
+    #[test]
+    fn a_commit_whose_reply_was_lost_is_reconciled_by_reopening() {
+        let mut fixture = production_loop(60_000);
+        let lose = lossy_coordinator(&mut fixture).lose;
+        let helper = run_restarting_helper(&fixture);
+        guest_sends(&fixture, b"one");
+        let before = destination_cursor(&fixture);
+        lose.store(true, Ordering::SeqCst);
+        guest_try_send(&fixture, b"two").expect_err("the commit's outcome is unknown");
+        lose.store(false, Ordering::SeqCst);
+        assert!(
+            destination_cursor(&fixture) > before,
+            "the coordinator did take the commit whose reply was lost"
+        );
+        assert!(helper_ended(&helper, Duration::from_millis(500)).is_none());
+        guest_forward(&fixture).expect("the unanswered message is accepted after the reopen");
+        guest_sends(&fixture, b"three");
+        assert!(destination_cursor(&fixture) > before);
+        stop_helper(&fixture, &helper);
+    }
+
+    #[test]
+    fn a_commit_the_coordinator_never_received_is_reconciled_by_reopening() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let mut fixture = production_loop(60_000);
+        let proxy = lossy_coordinator(&mut fixture);
+        let helper = run_restarting_helper(&fixture);
+        guest_sends(&fixture, b"one");
+        let before = destination_cursor(&fixture);
+        let socket = fixture.coordinator.clone();
+        let away = socket.with_extension("away");
+        std::fs::rename(&socket, &away).expect("coordinator unreachable");
+        guest_try_send(&fixture, b"two").expect_err("the commit's outcome is unknown");
+        assert_eq!(
+            destination_cursor(&fixture),
+            before,
+            "nothing was committed"
+        );
+        // A reopen that lands while the coordinator is away must fail and be
+        // retried, not end the helper.
+        let enrolls_while_away = proxy.enrolls.load(SeqCst);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while proxy.enrolls.load(SeqCst) <= enrolls_while_away {
+            assert!(std::time::Instant::now() < deadline, "no reopen attempt");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(helper_ended(&helper, Duration::from_millis(300)).is_none());
+        std::fs::rename(&away, &socket).expect("coordinator reachable again");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while destination_cursor(&fixture) == before {
+            assert!(std::time::Instant::now() < deadline, "no reconcile");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            destination_cursor(&fixture),
+            before + 1,
+            "reopening commits the one record that was written but not ordered"
+        );
+        assert!(helper_ended(&helper, Duration::from_millis(300)).is_none());
+        // A message costs `before` records (the journal starts at zero). The
+        // re-sent copy completes the one already written rather than adding a
+        // second message, so the total for "two" is the same as for "one".
+        guest_forward(&fixture).expect("the re-sent message is accepted");
+        assert_eq!(destination_cursor(&fixture), before * 2);
+        guest_sends(&fixture, b"three");
+        assert_eq!(destination_cursor(&fixture), before * 3);
+        stop_helper(&fixture, &helper);
+    }
+
+    #[test]
+    fn a_quarantine_during_the_outage_ends_the_helper_after_it_reopens() {
+        let fixture = production_loop(60_000);
+        let helper = run_restarting_helper(&fixture);
+        guest_sends(&fixture, b"one");
+        let socket = fixture.coordinator.clone();
+        let away = socket.with_extension("away");
+        std::fs::rename(&socket, &away).expect("coordinator unreachable");
+        guest_try_send(&fixture, b"two").expect_err("the commit's outcome is unknown");
+        std::fs::rename(&away, &socket).expect("coordinator reachable again");
+        crate::policy_generation::coordinator::commit_workload(
+            &fixture.coordinator,
+            &mvm_core::host_interface::workload::WorkloadChange::Quarantine {
+                workload: fixture.plan.workload.0.clone(),
+            },
+        )
+        .expect("quarantine");
+        // Reopened before the quarantine it parks on the guest and needs waking;
+        // reopened after, it refuses at once.
+        let ended = helper_ended(&helper, Duration::from_millis(1_500)).or_else(|| {
+            drop(accept_guest(&fixture.listener));
+            helper_ended(&helper, Duration::from_secs(20))
+        });
+        let error = ended
+            .expect("a quarantined helper stops rather than reopening for ever")
+            .expect_err("a quarantined helper never ends cleanly");
+        // The reopen is refused at the gate (a permission denial) or, when it
+        // gets as far as enrolling, by the ledger's refusal of the destination.
+        let refused_by_ledger = error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<JournalError>())
+            .is_some_and(|inner| matches!(inner, JournalError::WrongAuthority));
+        assert!(
+            error.kind() == ErrorKind::PermissionDenied || refused_by_ledger,
+            "{error:?}"
+        );
+        assert!(!restart::is_restartable(&error), "{error:?}");
     }
 
     #[test]

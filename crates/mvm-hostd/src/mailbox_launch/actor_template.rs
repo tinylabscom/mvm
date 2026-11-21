@@ -239,7 +239,7 @@ pub(crate) fn signed_capability(
 }
 
 /// Only this endpoint's private keys cross its launcher-to-helper pipe.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActorEndpointMaterial {
     workload: String,

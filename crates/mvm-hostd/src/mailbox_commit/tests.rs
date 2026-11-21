@@ -342,6 +342,15 @@ fn the_post_open_check_requires_the_anchor_to_have_reached_the_enrolled_tip() {
     assert!(require_reached(&anchor, &wire(JournalTip::genesis())).is_ok());
     anchor.advance(tip(1)).unwrap();
     assert!(require_reached(&anchor, &wire(tip(1))).is_ok());
+    // Reopening committed a record the owner had not seen at enrollment.
+    assert!(require_reached(&anchor, &wire(JournalTip::genesis())).is_ok());
+    // The same cursor under another head is a fork, not progress.
+    let mut other = wire(tip(1));
+    other.head = hex::encode([0xEE; 32]);
+    assert!(matches!(
+        require_reached(&anchor, &other),
+        Err(JournalError::Rollback)
+    ));
 }
 
 #[test]
