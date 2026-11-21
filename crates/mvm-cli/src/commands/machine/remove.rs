@@ -40,6 +40,13 @@ pub(super) fn remove_machine_spec(name: &str, yes: bool) -> Result<MachineRemove
     remove_machine_spec_in_lifecycle(name, &lifecycle)
 }
 
+/// Best effort: a kept or unremovable evidence dir never fails the removal.
+fn drop_runtime_evidence(name: &str) {
+    if let Err(error) = mvm_runtime::runtime_evidence::remove_retired_vm_evidence(name) {
+        tracing::warn!(machine = name, %error, "runtime evidence left in place");
+    }
+}
+
 pub(super) fn remove_machine_spec_in_lifecycle(
     name: &str,
     lifecycle: &MachineLifecycleLock,
@@ -54,6 +61,7 @@ pub(super) fn remove_machine_spec_in_lifecycle(
         "machine {name:?} still owns its runtime state"
     );
     lifecycle.remove_saved_state()?;
+    drop_runtime_evidence(name);
     fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
     Ok(MachineRemoveSummary {
         name: name.to_string(),
