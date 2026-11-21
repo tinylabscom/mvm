@@ -334,7 +334,8 @@ fn serve_actor(
         },
         material,
     )
-    .map_err(Error::other)?;
+    .map_err(Error::other)?
+    .gated(gate.clone());
     let ordering = if posture.variant() == Variant::Prod {
         let socket = config.coordinator.clone().ok_or_else(|| {
             Error::new(

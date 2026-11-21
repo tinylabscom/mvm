@@ -152,6 +152,9 @@ pub struct ActorConversationEndpoint {
     /// Orders every journal's commits through the workload ledger; absent for
     /// a development launch.
     ordering: Option<Arc<ActorOrdering>>,
+    /// Asked before each new peer acceptance; absent in unit tests that bind
+    /// no ledger.
+    unit_gate: Option<super::UnitGate>,
     _lock: FileLock,
 }
 
@@ -255,6 +258,7 @@ impl ActorConversationEndpoint {
             clock_origin_ms,
             poisoned: false,
             ordering: None,
+            unit_gate: None,
             _lock: lock,
         };
         if !existed {
@@ -269,6 +273,41 @@ impl ActorConversationEndpoint {
     pub(crate) fn with_ordering(mut self, ordering: Arc<ActorOrdering>) -> Self {
         self.ordering = Some(ordering);
         self
+    }
+
+    /// Ask the unit's epoch gate before accepting each peer frame, so a
+    /// replacement or quarantine committed after bind refuses the next one.
+    #[must_use]
+    pub(crate) fn gated(mut self, gate: super::UnitGate) -> Self {
+        self.unit_gate = Some(gate);
+        self
+    }
+
+    fn admit_unit(&self) -> Result<()> {
+        self.unit_gate
+            .as_ref()
+            .map_or(Ok(()), super::UnitGate::admit)
+    }
+
+    /// The receipt this endpoint already gave for exactly these bytes, if any.
+    fn accepted_receipt(
+        &self,
+        index: usize,
+        envelope: &MailboxEnvelope,
+        capability: &SignedMailboxCapability,
+    ) -> Result<Option<SignedDestinationReceipt>> {
+        if !self.state.records[index].initialized {
+            return Ok(None);
+        }
+        let (journal, anchor) = self.journal(index)?;
+        journal
+            .accepted_local_receipt(
+                envelope,
+                capability,
+                &self.material.authority_key(),
+                &anchor,
+            )
+            .map_err(storage)
     }
 
     /// The anchor to open a journal with, and the tip the ledger holds for it
@@ -948,12 +987,12 @@ impl ActorConversationEndpoint {
         {
             return Err(Refusal::NotAuthorized);
         }
-        let index = if let Some(index) = self
+        let existing = self
             .state
             .records
             .iter()
-            .position(|record| record.header.message_id == header.message_id)
-        {
+            .position(|record| record.header.message_id == header.message_id);
+        if let Some(index) = existing {
             let previous = &self.state.records[index];
             if previous.direction != Direction::Inbound
                 || previous.peer != peer.parent_address
@@ -962,6 +1001,14 @@ impl ActorConversationEndpoint {
             {
                 return Err(Refusal::NotAuthorized);
             }
+            if let Some(receipt) = self.accepted_receipt(index, &envelope, &peer.send_capability)? {
+                return Ok(receipt);
+            }
+        }
+        // After recovery, so a retry of a frame already accepted still gets
+        // its receipt; only a new acceptance needs the unit to be current.
+        self.admit_unit()?;
+        let index = if let Some(index) = existing {
             index
         } else {
             if self.state.records.iter().any(|record| {
@@ -1041,6 +1088,12 @@ impl ActorConversationEndpoint {
             {
                 return Err(Refusal::NotAuthorized);
             }
+            if let Some(receipt) =
+                self.accepted_receipt(index, &envelope, &record.reply_capability)?
+            {
+                return Ok(receipt);
+            }
+            self.admit_unit()?;
             let mut conversation = self.conversation(index, peer)?;
             return conversation
                 .accept_reply(
@@ -1457,6 +1510,91 @@ mod tests {
             bound_epoch(ledger.path(), &parent).unwrap(),
             ExecutionEpoch::new(2).unwrap()
         );
+    }
+
+    /// A second endpoint for the pair's child that asks the ledger under
+    /// `ledger` before each peer frame, as the mailbox process binds it.
+    fn gated_child(pair: &Pair, ledger: &std::path::Path) -> ActorConversationEndpoint {
+        let gate = super::super::UnitGate::bind(ledger, &pair.child_plan.workload.0).unwrap();
+        open(
+            pair.directory.path(),
+            "gated-child-state",
+            &pair.child_plan,
+            &pair.child_binding,
+        )
+        .gated(gate)
+    }
+
+    fn commit(
+        ledger: &std::path::Path,
+        change: mvm_core::host_interface::workload::WorkloadChange,
+    ) {
+        crate::policy_generation::workload_store::OwnedWorkloadStore::open(ledger)
+            .unwrap()
+            .commit(&change)
+            .unwrap();
+    }
+
+    fn replaced(unit: &str) -> mvm_core::host_interface::workload::WorkloadChange {
+        mvm_core::host_interface::workload::WorkloadChange::Replace {
+            workload: unit.to_owned(),
+            from_epoch: ExecutionEpoch::FIRST,
+        }
+    }
+
+    fn dispatch_one(pair: &mut Pair) -> ActorDispatch {
+        let child_address = pair.child_binding.address;
+        queue(&mut pair.parent, child_address, 40, b"call").unwrap();
+        pair.parent.pending_dispatches().unwrap().pop().unwrap()
+    }
+
+    #[test]
+    fn a_running_endpoint_refuses_a_peer_frame_once_its_unit_is_replaced() {
+        let mut pair = pair();
+        let ledger = tempfile::tempdir().unwrap();
+        let mut child = gated_child(&pair, ledger.path());
+        let dispatch = dispatch_one(&mut pair);
+        commit(ledger.path(), replaced(&pair.child_plan.workload.0));
+        let stale = mvm_core::host_interface::Denial::StaleEpoch { got: 1, current: 2 };
+        assert_eq!(
+            child.accept_peer(dispatch.frame.clone()),
+            Err(Refusal::Mailbox(stale.to_string()))
+        );
+        assert!(child.state.records.is_empty(), "nothing was recorded");
+        // The frame itself is good: an endpoint that asks no ledger takes it.
+        assert!(pair.child.accept_peer(dispatch.frame).is_ok());
+    }
+
+    #[test]
+    fn a_running_endpoint_refuses_a_peer_frame_once_its_unit_is_quarantined() {
+        let mut pair = pair();
+        let ledger = tempfile::tempdir().unwrap();
+        let mut child = gated_child(&pair, ledger.path());
+        let dispatch = dispatch_one(&mut pair);
+        let unit = pair.child_plan.workload.0.clone();
+        commit(
+            ledger.path(),
+            mvm_core::host_interface::workload::WorkloadChange::Quarantine {
+                workload: unit.clone(),
+            },
+        );
+        let quarantined = mvm_core::host_interface::Denial::WorkloadQuarantined(unit);
+        assert_eq!(
+            child.accept_peer(dispatch.frame),
+            Err(Refusal::Mailbox(quarantined.to_string()))
+        );
+    }
+
+    #[test]
+    fn a_retried_frame_accepted_before_the_replacement_still_gets_its_receipt() {
+        let mut pair = pair();
+        let ledger = tempfile::tempdir().unwrap();
+        let mut child = gated_child(&pair, ledger.path());
+        let dispatch = dispatch_one(&mut pair);
+        let accepted = child.accept_peer(dispatch.frame.clone()).unwrap();
+        commit(ledger.path(), replaced(&pair.child_plan.workload.0));
+        assert_eq!(child.accept_peer(dispatch.frame), Ok(accepted));
+        assert_eq!(child.state.records.len(), 1);
     }
 
     #[test]
