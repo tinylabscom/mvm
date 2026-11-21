@@ -40,15 +40,27 @@ fn refused_start(cfg: &EndpointConfig, home: &std::path::Path) -> std::process::
 /// Record `workload` at `epoch` in the workload ledger under `home`, the way
 /// the policy coordinator would have after advancing it.
 fn ledger_at(home: &std::path::Path, workload: &str, epoch: u64) {
+    ledger_entry(home, workload, epoch, false);
+}
+
+/// Replace the ledger by rename, as a commit does, so a reader never sees a
+/// half-written file.
+fn ledger_entry(home: &std::path::Path, workload: &str, epoch: u64, quarantined: bool) {
     let dir = mvm_core::host_interface::workload::canonical_dir_at(home);
     std::fs::create_dir_all(&dir).unwrap();
+    let staged = dir.join("ledger.json.staged");
     std::fs::write(
-        dir.join(mvm_core::host_interface::workload::LEDGER_FILE),
+        &staged,
         serde_json::json!({
             "sequence": 1,
-            "workloads": { workload: { "epoch": epoch, "quarantined": false } },
+            "workloads": { workload: { "epoch": epoch, "quarantined": quarantined } },
         })
         .to_string(),
+    )
+    .unwrap();
+    std::fs::rename(
+        staged,
+        dir.join(mvm_core::host_interface::workload::LEDGER_FILE),
     )
     .unwrap();
 }
@@ -186,4 +198,94 @@ fn twenty_fresh_endpoint_sessions_record_each_plan_bound_denial_before_response(
         drop(guest);
         drop(guard);
     }
+}
+
+/// Serve one authenticated session for `test` at epoch 1, then let `revoke`
+/// change the ledger. The session must end within the recheck bound, the
+/// process must exit for good, and the closure must be in the chain once.
+fn a_live_session_ends_once_the_ledger_stops_admitting(revoke: impl FnOnce(&std::path::Path)) {
+    use mvm_hostd::supervisor::endpoint::epoch_admission::{
+        REVOCATION_CHECK_INTERVAL, REVOKED_EVENT,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let _environment = audit_environment(dir.path());
+    let home = dir.path().join("mvm-home");
+    ledger_at(&home, "test", 1);
+    let socket = dir.path().join("network.sock");
+    let (mut cfg, guest_key) = flow_config(&socket);
+    let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+    plan.tenant = mvm_core::plan::TenantId("local".into());
+    plan.workload = mvm_core::plan::WorkloadId("test".into());
+    plan.execution_epoch = 1;
+    cfg.audit = Some(AuditContext::Workload {
+        plan: Box::new(plan),
+    });
+    let mut child = Command::new(BIN)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&cfg).unwrap())
+        .unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut guard = Kill(child);
+    let mut ready = String::new();
+    stdout.read_line(&mut ready).unwrap();
+    assert!(!ready.is_empty(), "endpoint did not become ready");
+    let mut guest = UnixStream::connect(&socket).unwrap();
+    let host = ed25519_dalek::SigningKey::from_bytes(&[7; 32]).verifying_key();
+    let (mut session, _) =
+        mvm_core::net::session::Session::guest(&mut guest, guest_key, &host).unwrap();
+    complete_flowmux_hello(&mut guest, &mut session);
+
+    let bound = REVOCATION_CHECK_INTERVAL + std::time::Duration::from_secs(4);
+    guest.set_read_timeout(Some(bound)).unwrap();
+    let revoked_at = std::time::Instant::now();
+    revoke(&home);
+    let mut byte = [0u8; 1];
+    let read = guest.read(&mut byte);
+    assert!(
+        matches!(read, Ok(0))
+            || read
+                .as_ref()
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::ConnectionReset),
+        "the session must end, got {read:?}"
+    );
+    assert!(revoked_at.elapsed() < bound, "{:?}", revoked_at.elapsed());
+    let status = guard.0.wait().unwrap();
+    assert_eq!(status.code(), Some(3), "{status:?}");
+    assert!(UnixStream::connect(&socket).is_err(), "no new sessions");
+
+    let journal = mvm_core::config::mvm_audit_dir().join("local.jsonl");
+    let audit_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]).verifying_key();
+    mvm_hostd::supervisor::audit::audit_file::verify_audit_chain(&journal, &audit_key).unwrap();
+    let entries = std::fs::read_to_string(&journal).unwrap();
+    let revoked: Vec<serde_json::Value> = entries
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|value| value["entry"]["event"] == REVOKED_EVENT)
+        .collect();
+    assert_eq!(revoked.len(), 1, "{entries}");
+    assert_eq!(revoked[0]["entry"]["labels"]["execution_epoch"], "1");
+    assert_eq!(
+        revoked[0]["entry"]["labels"]["reason"],
+        "execution_not_admitted"
+    );
+}
+
+#[test]
+fn a_live_session_ends_after_its_unit_is_replaced() {
+    a_live_session_ends_once_the_ledger_stops_admitting(|home| ledger_at(home, "test", 2));
+}
+
+#[test]
+fn a_live_session_ends_after_its_unit_is_quarantined() {
+    a_live_session_ends_once_the_ledger_stops_admitting(|home| {
+        ledger_entry(home, "test", 1, true);
+    });
 }
