@@ -120,10 +120,13 @@ fn only_firecracker_declares_the_scope_cpuset() {
 }
 
 #[test]
-fn a_liveness_period_is_refused_with_its_unit_on_every_backend() {
+fn a_liveness_period_is_refused_with_its_unit_where_no_deadline_is_held() {
     let mut topology = stating_nothing();
     topology.units[3].liveness_period_ms = Some(ms(100));
     for &kind in BackendKind::ALL {
+        if ResourceControls::for_backend(kind).liveness == LivenessControl::HostDeadline {
+            continue;
+        }
         assert_eq!(
             check_requirements(
                 &topology,
@@ -137,6 +140,63 @@ fn a_liveness_period_is_refused_with_its_unit_on_every_backend() {
             "{kind:?}"
         );
     }
+}
+
+fn host_deadline() -> ResourceControls {
+    ResourceControls {
+        liveness: LivenessControl::HostDeadline,
+        ..vm_backend()
+    }
+}
+
+#[test]
+fn a_liveness_period_within_the_host_range_passes_where_the_host_holds_the_deadline() {
+    for period in [MIN_LIVENESS_PERIOD_MS, 5_000, MAX_LIVENESS_PERIOD_MS] {
+        let mut topology = stating_nothing();
+        topology.units[3].liveness_period_ms = Some(ms(period));
+        assert_eq!(
+            check_requirements(&topology, host_deadline(), None),
+            Ok(()),
+            "{period}"
+        );
+    }
+}
+
+#[test]
+fn a_liveness_period_outside_the_host_range_is_refused_with_its_unit() {
+    for period in [1, MIN_LIVENESS_PERIOD_MS - 1, MAX_LIVENESS_PERIOD_MS + 1] {
+        let mut topology = stating_nothing();
+        topology.units[3].liveness_period_ms = Some(ms(period));
+        assert_eq!(
+            check_requirements(&topology, host_deadline(), None),
+            Err(UnmetRequirement::LivenessPeriodOutOfRange {
+                unit: id("w1-standby"),
+                period_ms: ms(period),
+            }),
+            "{period}"
+        );
+    }
+}
+
+#[test]
+fn more_liveness_units_than_the_host_holds_are_refused_by_count() {
+    let mut topology = stating_nothing();
+    let template = topology.units[0].clone();
+    topology.units = (0..=MAX_LIVENESS_UNITS)
+        .map(|i| Unit {
+            workload: id(&alloc::format!("u{i:03}")),
+            liveness_period_ms: Some(ms(1_000)),
+            ..template.clone()
+        })
+        .collect();
+    assert_eq!(
+        check_requirements(&topology, host_deadline(), None),
+        Err(UnmetRequirement::TooManyLivenessUnits {
+            count: MAX_LIVENESS_UNITS + 1
+        })
+    );
+    topology.units.pop();
+    assert_eq!(check_requirements(&topology, host_deadline(), None), Ok(()));
 }
 
 #[test]

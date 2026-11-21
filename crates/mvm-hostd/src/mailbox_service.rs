@@ -623,22 +623,6 @@ impl MailboxService {
         })
     }
 
-    /// The execution epoch this node currently accepts, for a service that
-    /// outlives a workload replacement (the scripted three-node demo). This
-    /// advances the epoch outside the workload ledger, so it exists only in
-    /// test builds: the per-VM mailbox process binds at its unit's ledger
-    /// epoch and asks the ledger again before each message ([`UnitGate`]).
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn set_current_epoch(&self, epoch: ExecutionEpoch) {
-        self.shared
-            .state
-            .lock()
-            .unwrap()
-            .policy
-            .context
-            .current_execution_epoch = epoch;
-    }
-
     /// Serve one connection the host dialed to the guest's mailbox port
     /// (the backend's `HostDialRoute`), the way the telemetry
     /// collector attaches. The guest sends plaintext; `sealer` seals it, then
@@ -1419,26 +1403,6 @@ mod tests {
     }
 
     #[test]
-    fn the_demo_epoch_setter_is_compiled_only_for_tests() {
-        let source = include_str!("mailbox_service.rs");
-        let declared = source.find("pub fn set_current_epoch").unwrap();
-        assert!(
-            source[..declared]
-                .trim_end()
-                .ends_with("#[cfg(any(test, feature = \"test-support\"))]"),
-            "the setter advances the epoch outside the ledger"
-        );
-        for production in [
-            include_str!("mailbox_process.rs"),
-            include_str!("mailbox_launch.rs"),
-            include_str!("bin/mvm-mailbox.rs"),
-        ] {
-            let body = production.split("#[cfg(test)]").next().unwrap();
-            assert!(!body.contains("set_current_epoch"));
-        }
-    }
-
-    #[test]
     fn an_old_epoch_envelope_is_refused_by_the_replacement_and_a_fresh_one_is_accepted() {
         let dir = tempfile::tempdir().unwrap();
         crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
@@ -1474,11 +1438,17 @@ mod tests {
         let (capability, envelope) = sealer.seal(greeting()).unwrap();
 
         let socket = dir.path().join("b.sock");
+        commit(
+            dir.path(),
+            mvm_core::host_interface::workload::WorkloadChange::Replace {
+                workload: "a".into(),
+                from_epoch: ExecutionEpoch::FIRST,
+            },
+        );
         let (policy, _) = derive_launch_keys(dir.path(), &grant_at(dir.path(), 1), &test_secret())
             .unwrap()
-            .trust(ExecutionEpoch::FIRST);
-        let service = MailboxService::bind(&socket, LAUNCH_LIMITS, policy).unwrap();
-        service.set_current_epoch(ExecutionEpoch::new(2).unwrap());
+            .trust(bound_epoch(dir.path(), "a").unwrap());
+        let _service = MailboxService::bind(&socket, LAUNCH_LIMITS, policy).unwrap();
         assert_eq!(
             send(&socket, &capability, &envelope),
             Err(Refusal::Mailbox(

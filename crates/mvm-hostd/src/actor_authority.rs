@@ -328,8 +328,7 @@ fn validate_mailbox(
             && cc.address.authorization_domain == pc.address.authorization_domain
             && cc.minimum_execution_epoch == c.epoch
             && cc.maximum_execution_epoch == c.epoch
-            && pc.minimum_execution_epoch <= p.epoch
-            && pc.maximum_execution_epoch >= p.epoch
+            && pc.admits_epoch(p.epoch)
             && cc.policy_epoch == pc.policy_epoch
             && cc.delegation_depth == 0
             && cc.not_before_unix_ms >= pc.not_before_unix_ms

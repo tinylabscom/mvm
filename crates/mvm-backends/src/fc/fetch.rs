@@ -143,6 +143,9 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(dir.join(MEMBER), BINARY).unwrap();
         let tarball = dir.join("fixture.tgz");
+        // Another test may have emptied the process-wide PATH; taking the env lock keeps
+        // this spawn out of that window.
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let status = std::process::Command::new("tar")
             .arg("-czf")
             .arg(&tarball)
