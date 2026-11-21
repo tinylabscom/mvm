@@ -8,7 +8,6 @@ mod kernel;
 
 pub(super) use mvm_client::admission::{
     AdmissionContext, AdmitPlanForBootParams, admit_plan_for_boot_syncing_beside_boot,
-    admit_plan_for_boot_with_verified_retained,
     admit_plan_for_boot_with_verified_runtime_syncing_beside_boot,
     attach_guest_boot_config_for_plan, emit_failed, emit_launched, guest_profile_for_boot,
 };

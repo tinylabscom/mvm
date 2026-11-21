@@ -11,14 +11,13 @@
 //! the child's own state dir before the child VMM starts.
 
 use anyhow::{Context, Result};
-use mvm_client::checkpoint::{CheckpointStore, ForkParams, ForkParentLiveness};
-use mvm_contract::protocol::vm_backend::BackendKind;
+use mvm_client::checkpoint::CheckpointStore;
 use mvm_core::checkpoint::{CheckpointId, VmFullOrigin, vm_full_origin};
 use mvm_core::config::vm_state_dir;
 
 use super::{
-    CheckpointForkJson, ForkIntent, SignedChainAnchor, bind_checkpoint_forked,
-    grant_predecessor_from_vm_name, now_unix, parent_agent_verb_override, read_grant_envelope_for,
+    CheckpointForkJson, ForkIntent, bind_checkpoint_forked, grant_predecessor_from_vm_name,
+    now_unix, read_grant_envelope_for,
 };
 use crate::ui;
 
@@ -174,56 +173,20 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
         );
     }
 
-    let AdmittedForkChild {
-        mut admission,
-        retained_runtime,
-    } = admit_forked_child(&AdmitForkedChildParams {
+    let prepared = prepare_forked_child(PrepareForkedChildParams {
         store: p.store,
         checkpoint: p.checkpoint,
-        parent_meta: &p.parent_meta,
         child_vm_name: &p.child_vm_name,
-        backend_kind: BackendKind::Firecracker,
+        child_id: p.child_id,
+        destination: p.dest_dir,
+        created_unix: p.now,
         declared_secrets: p.declared_secrets,
         allow_secret_drop: p.allow_secret_drop,
         intent: p.intent,
     })?;
-
-    // Verify the parent against the signed audit chain before cloning/restoring.
-    let parent_meta = p.store.read_meta(p.checkpoint)?;
-    let anchor = SignedChainAnchor::load()
-        .context("loading the signed audit chain to verify the fork parent")?;
-    let fork_result = mvm_client::checkpoint::dispatch_vm_full_fork(
-        &mut admission,
-        p.store,
-        ForkParams {
-            checkpoint: p.checkpoint.clone(),
-            child_id: p.child_id,
-            child_vm_name: p.child_vm_name.clone(),
-            dest_dir: p.dest_dir,
-            created_unix: p.now,
-            parent_liveness: ForkParentLiveness::MayBeRunning,
-            // hostd derives both fields from the genuine admitted owner.
-            child_plan_json: None,
-            child_tenant_id: None,
-        },
-        &|child: &mvm_client::checkpoint::RestoredChild<'_>| {
-            mvm_client::checkpoint::FcForkRestorer.restore_fork(
-                child.vm_name,
-                child.state_dir,
-                child.cpu_grant,
-                &mvm_backends::fc::ForkRuntimeEvidence {
-                    observation_sha256: &child.content.iter().find(|blob| blob.name == "runtime-artifacts.json")
-                        .context("Firecracker checkpoint has no authenticated runtime evidence; recapture it")?.sha256,
-                    anchors_sha256: &child.content.iter().find(|blob| blob.name == "device-anchors.json")
-                        .context("Firecracker checkpoint has no authenticated device anchors")?.sha256,
-                    reseeded_identity_sha256: child.reseeded_identity_sha256,
-                },
-            )
-        },
-        &anchor,
-        &retained_runtime,
-        &mvm_client::checkpoint::stop_vm,
-    );
+    let dispatched = prepared.dispatch();
+    let admission = dispatched.admission;
+    let fork_result = dispatched.result;
     if let Err(ref e) = fork_result {
         audit_fork_failure(&admission, &p.child_vm_name, "fork-vm-full-fc", e);
     }
@@ -258,7 +221,7 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
     }
     if let Err(error) = deliver_fc_fork_post_restore(
         &p.child_vm_name,
-        parent_meta.meta_digest.as_str(),
+        p.parent_meta.meta_digest.as_str(),
         grant_env,
     ) {
         let error = stop_fc_child_after_restore_failure(&p.child_vm_name, error);
@@ -266,7 +229,7 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
         return Err(error);
     }
 
-    if let Err(error) = record_fork_runtime_meta(&p.child_vm_name, &parent_meta) {
+    if let Err(error) = record_fork_runtime_meta(&p.child_vm_name, &p.parent_meta) {
         let error = stop_fc_child_after_restore_failure(&p.child_vm_name, error);
         audit_fork_failure(&admission, &p.child_vm_name, "fork-runtime-meta", &error);
         return Err(error);
@@ -292,265 +255,40 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
     Ok(meta)
 }
 
-/// Inputs for [`admit_forked_child`].
-struct AdmitForkedChildParams<'a> {
+/// CLI intent adapter for the client-owned full-VM fork pipeline.
+struct PrepareForkedChildParams<'a> {
     store: &'a CheckpointStore,
     checkpoint: &'a CheckpointId,
-    parent_meta: &'a mvm_core::checkpoint::CheckpointMeta,
     child_vm_name: &'a str,
-    /// The tier that will boot this child. Typed, not a label: the grant gate
-    /// measures against it, and a grant checked against a string is checked
-    /// against whatever the caller typed. The plan's `backend_name` is derived
-    /// from this, so the two cannot disagree.
-    backend_kind: BackendKind,
-    /// Secret bindings the caller declares for this child.
-    ///
-    /// Declared, never inherited: the parent's set is not consulted, so the
-    /// child's capability is readable from the child's own plan without
-    /// walking the lineage. An empty set is the default and reproduces the
-    /// prior behaviour exactly.
-    ///
-    /// Carries a name and a source reference only. The destination binding
-    /// (`auth_type` + `allowed_hosts`) is resolved by name against the
-    /// tenant's `BindingStore` at the substitution endpoint, so a name the
-    /// operator has not bound grants nothing.
+    child_id: CheckpointId,
+    destination: std::path::PathBuf,
+    created_unix: u64,
     declared_secrets: &'a [mvm_core::plan::SecretBinding],
     allow_secret_drop: bool,
     intent: ForkIntent,
 }
 
-/// The admitted claim-8 envelope a vm_full fork boots its child under.
-struct AdmittedForkChild {
-    admission: crate::commands::vm::up::AdmissionContext,
-    retained_runtime: mvm_client::checkpoint::VerifiedRetainedRuntime,
-}
-
-/// Admit a fresh claim-8 plan for a vm_full fork child, and mint its verb-grant
-/// sidecar so post-restore delivery can re-pin it.
-///
-/// The child's plan is its own, never the parent's: a distinct nonce, a distinct
-/// VM name, and `deny_all` networking. A restored guest resumes already past its
-/// own boot, so it must not inherit an egress capability from the state it came
-/// out of — the plan is what re-grants one, and this one grants none.
-///
-/// cpu/mem come from the host defaults rather than the parent plan on purpose:
-/// the real shape is baked into the saved machine state and enforced by the VMM
-/// at load time, so these values are claim-8 admission metadata only.
-fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChild> {
-    let anchor = SignedChainAnchor::load().context("loading fork runtime audit chain")?;
-    mvm_client::checkpoint::verify_lineage(p.store, p.checkpoint, &anchor)
-        .context("authenticating inherited runtime metadata before admission")?;
-    anyhow::ensure!(
-        p.parent_meta.compute_meta_digest() == p.store.read_meta(p.checkpoint)?.meta_digest,
-        "fork runtime metadata differs from the authenticated checkpoint"
-    );
-    let retained_runtime =
-        mvm_client::checkpoint::verify_checkpoint_runtime(p.store, p.parent_meta)?;
-    let generation_assets =
-        mvm_client::policy_profiles::coordinator::restore_plan(&p.parent_meta.vm_name)?
-            .into_iter()
-            .flat_map(|parent| parent.asset_identities)
-            .filter(|asset| {
-                asset
-                    .name
-                    .starts_with(mvm_client::policy_profiles::coordinator::GENERATION_ASSET_PREFIX)
-            })
-            .map(mvm_client::admission::AssetSpec::CommittedPolicy)
-            .collect();
-    let restrict_agent_verbs = fork_restrict_agent_verbs(p)?;
-    let user_cfg = mvm_core::user_config::load(None);
-    // A chunked checkpoint has no contiguous rootfs in its content directory.
-    // Keep the verified materialization alive through admission, which hashes
-    // these exact bytes against the authenticated materialized digest.
-    let scratch = tempfile::Builder::new()
-        .prefix(".fork-admit-")
-        .tempdir_in(p.store.root())
-        .context("creating fork admission materialization")?;
-    let (rootfs_blob, recorded_sha) =
-        fork_admission_rootfs(p.store, p.parent_meta, scratch.path())?;
-    let inherited_runtime =
-        inherited_runtime_config(p.parent_meta.runtime_launch_binding.as_ref(), &rootfs_blob);
-    let parent_agent_verbs = parent_agent_verb_override(p.checkpoint, p.store);
-    let parent_bundle =
-        mvm_client::admission::InheritedBundle::of_parent_vm(&p.parent_meta.vm_name)?;
-    let tenant = crate::commands::vm::tenant_resolution::resolve_tenant(None);
-    super::validate_fork_secret_policy(
-        p.checkpoint,
-        p.store,
-        &tenant,
-        p.declared_secrets,
-        p.allow_secret_drop,
-    )?;
-    let ledger = mvm_client::admission::InMemoryNonceLedger::new();
-    let admission = crate::commands::vm::up::admit_plan_for_boot_with_verified_retained(
-        crate::commands::vm::up::AdmitPlanForBootParams {
-            bundle_sizing: Default::default(),
-            mailbox: None,
-            gpu: false,
-            instructions: Default::default(),
-            outputs: Vec::new(),
-            network_mode: super::parent_network_mode(p.checkpoint, p.store),
-            tenant: &tenant,
-            vm_name: p.child_vm_name,
-            backend_name: p.backend_kind.as_str(),
-            configured_images_dir: mvm_build::image_source::configured_images_dir().as_deref(),
-            rootfs_path: &rootfs_blob,
-            // A fork resumes a saved VM state rather than booting a kernel of
-            // its own, so this admission has no kernel to name. Deliberately
-            // not the parent's: a child admitted under an environment it did
-            // not itself load would record a pin nothing here verified.
-            kernel_path: None,
-            precomputed_image_sha256: Some(recorded_sha.clone()),
-            boot_artifact_identity: None,
-            runtime_config: inherited_runtime.as_ref(),
-            cpus: user_cfg.default_cpus,
-            mem_mib: user_cfg.default_memory_mib as u64,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            // Derived from the set, never defaulted: `SecretReleasePolicy`
-            // defaults to `None` — "no secrets may be released" — so a child
-            // admitted with declared bindings under the default would carry a
-            // list nothing could ever release.
-            secret_release: crate::commands::vm::managed_secrets::secret_release_for_bindings(
-                p.declared_secrets,
-            ),
-            secrets: p.declared_secrets.to_vec(),
-            caller_commitment: None,
-            ledger: &ledger,
-            keys_dir: None,
-            audit_dir: None,
-            policy_dir: None,
-            bundle_pin: parent_bundle
-                .as_ref()
-                .map(mvm_client::admission::InheritedBundle::pin),
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            assets: generation_assets,
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: parent_agent_verbs.clone(),
-            restrict_agent_verbs,
-            services: Vec::new(),
-            // The child inherits the permission set the parent was captured
-            // under. Anything else is refused downstream, and declaring nothing
-            // is the widest ask rather than the narrowest — an absent CPU or
-            // wall-clock grant means unbounded.
-            grants: p.parent_meta.grants.clone(),
-            // The tier that will actually boot this child, typed rather than
-            // parsed from a label. `None` here made the gate take its
-            // fail-closed "no backend object, no answer" arm, and a fork child
-            // is admitted prod-profile, so that arm is a refusal: a parent
-            // carrying any cpu or wall-clock grant could not be forked at all.
-            backend_kind: Some(p.backend_kind),
-            entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
-                "a checkpoint fork boots the image the parent booted; this path resolves no entrypoint",
-            ),
-        },
-        &retained_runtime,
-    )?;
-
-    let child_plan_json = serde_json::to_string(admission.admitted.signed())
-        .context("serializing the admitted child plan")?;
-    // Admission just signed this plan; confirm it names this child and the
-    // rootfs being restored before it can become the child's authority.
-    verify_child_plan_binds_restore(admission.admitted.signed(), p.child_vm_name, &recorded_sha)?;
-
-    let mint_cfg = mvm_core::vm_backend::VmStartConfig {
-        name: p.child_vm_name.to_string(),
-        plan_json: Some(child_plan_json.clone()),
-        ..Default::default()
+fn prepare_forked_child(
+    p: PrepareForkedChildParams<'_>,
+) -> Result<mvm_client::checkpoint::vm_full::PreparedVmFullFork> {
+    let intent = match p.intent {
+        ForkIntent::Ordinary => mvm_client::checkpoint::vm_full::VmFullForkIntent::Ordinary,
+        ForkIntent::Replay => mvm_client::checkpoint::vm_full::VmFullForkIntent::Replay,
     };
-    mvm_client::admission::stash_plan_for_bridge(&mint_cfg)?;
-
-    Ok(AdmittedForkChild {
-        admission,
-        retained_runtime,
-    })
-}
-
-fn verify_child_plan_binds_restore(
-    signed: &mvm_core::plan::SignedExecutionPlan,
-    child_vm_name: &str,
-    image_sha256: &str,
-) -> Result<()> {
-    let trusted = mvm_client::host_keypair::load_or_init()
-        .context("loading the host signer to verify the child plan")?
-        .verifying_key();
-    mvm_core::plan::verify_restored_child_plan(
-        signed,
-        &trusted,
-        &mvm_core::plan::RestoredChildBinding {
-            vm_name: child_vm_name,
-            image: mvm_core::plan::ImageBinding::Pinned(image_sha256),
-            now: chrono::Utc::now(),
+    mvm_client::checkpoint::vm_full::prepare_vm_full_fork(
+        p.store,
+        mvm_client::checkpoint::vm_full::VmFullForkRequest {
+            checkpoint: p.checkpoint,
+            child_id: p.child_id,
+            child_name: p.child_vm_name.to_string(),
+            destination: p.destination,
+            created_unix: p.created_unix,
+            declared_secrets: p.declared_secrets,
+            allow_secret_drop: p.allow_secret_drop,
+            intent,
+            fallback_network_mode: crate::commands::machine::preflight_network(),
         },
     )
-    .context("the admitted child plan does not bind the restore")?;
-    Ok(())
-}
-
-fn inherited_runtime_config(
-    binding: Option<&mvm_core::protocol::runtime_release::RuntimeLaunchBinding>,
-    rootfs: &std::path::Path,
-) -> Option<mvm_core::vm_backend::VmStartConfig> {
-    binding.map(|binding| {
-        let mut config = mvm_core::vm_backend::VmStartConfig::default();
-        binding.apply_to_config(&mut config);
-        config.rootfs_path = rootfs.display().to_string();
-        config
-    })
-}
-
-fn fork_restrict_agent_verbs(p: &AdmitForkedChildParams<'_>) -> Result<bool> {
-    match p.intent {
-        ForkIntent::Ordinary => Ok(true),
-        ForkIntent::Replay => {
-            let anchor = SignedChainAnchor::load().context("loading replay source audit chain")?;
-            mvm_client::checkpoint::verify_lineage(p.store, p.checkpoint, &anchor)
-                .context("verifying replay source checkpoint lineage")?;
-            let recorded_plan_id = anchor
-                .checkpoint_plan_id(p.parent_meta)?
-                .context("replay source checkpoint has no signed plan identity")?;
-            let source = mvm_client::audit::chain::plan_persist::read_plan(&p.parent_meta.vm_name)
-                .context("reading replay source plan")?;
-            mvm_core::plan::verify_plan_id(&source)
-                .context("verifying replay source plan content id")?;
-            replay_source_permits_exec(&source, &recorded_plan_id)?;
-            Ok(false)
-        }
-    }
-}
-
-fn replay_source_permits_exec(
-    source: &mvm_core::plan::ExecutionPlan,
-    recorded_plan_id: &str,
-) -> Result<()> {
-    if source.plan_id.0 != recorded_plan_id {
-        anyhow::bail!("replay source plan differs from the signed checkpoint creation entry");
-    }
-    if source.agent_verbs.is_some() {
-        anyhow::bail!("replay source has an attenuated agent-verb grant; exec is not authorized");
-    }
-    Ok(())
-}
-
-fn fork_admission_rootfs(
-    store: &CheckpointStore,
-    parent: &mvm_core::checkpoint::CheckpointMeta,
-    scratch: &std::path::Path,
-) -> Result<(std::path::PathBuf, String)> {
-    let rootfs = mvm_client::checkpoint::materialized_source(
-        store,
-        parent,
-        mvm_core::checkpoint::ROOTFS_BLOB,
-        scratch,
-    )?;
-    let digest = mvm_client::checkpoint::materialized_blob_sha256(
-        store,
-        parent,
-        mvm_core::checkpoint::ROOTFS_BLOB,
-    )?;
-    Ok((rootfs, digest))
 }
 
 /// Inputs for [`fork_vm_full_arm_hvf`].
@@ -582,42 +320,20 @@ struct ForkVmFullArmHvfParams<'a> {
 fn fork_vm_full_arm_hvf(
     p: ForkVmFullArmHvfParams<'_>,
 ) -> Result<mvm_core::checkpoint::CheckpointMeta> {
-    let AdmittedForkChild {
-        mut admission,
-        retained_runtime,
-    } = admit_forked_child(&AdmitForkedChildParams {
+    let prepared = prepare_forked_child(PrepareForkedChildParams {
         store: p.store,
         checkpoint: p.checkpoint,
-        parent_meta: &p.parent_meta,
         child_vm_name: &p.child_vm_name,
-        backend_kind: BackendKind::Hvf,
+        child_id: p.child_id,
+        destination: p.dest_dir,
+        created_unix: p.now,
         declared_secrets: p.declared_secrets,
         allow_secret_drop: p.allow_secret_drop,
         intent: p.intent,
     })?;
-
-    // Verify the parent against the signed audit chain before cloning anything.
-    let anchor = SignedChainAnchor::load()
-        .context("loading the signed audit chain to verify the fork parent")?;
-    let fork_result = mvm_client::checkpoint::dispatch_vm_full_fork(
-        &mut admission,
-        p.store,
-        ForkParams {
-            checkpoint: p.checkpoint.clone(),
-            child_id: p.child_id,
-            child_vm_name: p.child_vm_name.clone(),
-            dest_dir: p.dest_dir,
-            created_unix: p.now,
-            parent_liveness: ForkParentLiveness::MayBeRunning,
-            // hostd derives both fields from the genuine admitted owner.
-            child_plan_json: None,
-            child_tenant_id: None,
-        },
-        &mvm_client::checkpoint::HvfForkRestorer,
-        &anchor,
-        &retained_runtime,
-        &stop_hvf_fork_child,
-    );
+    let dispatched = prepared.dispatch();
+    let admission = dispatched.admission;
+    let fork_result = dispatched.result;
     if let Err(ref e) = fork_result {
         audit_fork_failure(&admission, &p.child_vm_name, "fork-vm-full-hvf", e);
     }
@@ -630,7 +346,7 @@ fn fork_vm_full_arm_hvf(
         &p.child_vm_name,
         p.store,
         p.declared_secrets,
-        &crate::commands::vm::tenant_resolution::resolve_tenant(None),
+        &admission.admitted.plan().tenant.0,
     ) {
         let error = stop_child_after_restore_failure(&p.child_vm_name, error);
         audit_fork_failure(&admission, &p.child_vm_name, "fork-lineage", &error);
@@ -863,8 +579,105 @@ mod tests {
 
     use mvm_contract::ir::AuthType;
     use mvm_contract::plan::{SecretBinding, SecretSource};
+    use mvm_contract::protocol::vm_backend::BackendKind;
     use mvm_core::checkpoint::{CheckpointClass, CheckpointMeta, ROOTFS_BLOB};
     use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
+
+    struct TestAdmitted {
+        plan: mvm_core::plan::ExecutionPlan,
+    }
+
+    impl TestAdmitted {
+        fn plan(&self) -> &mvm_core::plan::ExecutionPlan {
+            &self.plan
+        }
+    }
+
+    struct TestAdmission {
+        admitted: TestAdmitted,
+    }
+
+    struct AdmittedForkChild {
+        admission: TestAdmission,
+    }
+
+    struct AdmitForkedChildParams<'a> {
+        store: &'a CheckpointStore,
+        checkpoint: &'a CheckpointId,
+        parent_meta: &'a CheckpointMeta,
+        child_vm_name: &'a str,
+        backend_kind: BackendKind,
+        declared_secrets: &'a [SecretBinding],
+        allow_secret_drop: bool,
+        intent: ForkIntent,
+    }
+
+    fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChild> {
+        let _ = (p.parent_meta, p.backend_kind);
+        let intent = match p.intent {
+            ForkIntent::Ordinary => mvm_client::checkpoint::vm_full::VmFullForkIntent::Ordinary,
+            ForkIntent::Replay => mvm_client::checkpoint::vm_full::VmFullForkIntent::Replay,
+        };
+        let prepared = mvm_client::checkpoint::vm_full::prepare_vm_full_fork(
+            p.store,
+            mvm_client::checkpoint::vm_full::VmFullForkRequest {
+                checkpoint: p.checkpoint,
+                child_id: CheckpointId::new(format!("test-{}", p.child_vm_name)),
+                child_name: p.child_vm_name.to_string(),
+                destination: p.store.root().join(format!("vm-{}", p.child_vm_name)),
+                created_unix: 2,
+                declared_secrets: p.declared_secrets,
+                allow_secret_drop: p.allow_secret_drop,
+                intent,
+                fallback_network_mode: mvm_contract::plan::NetworkMode::HostVsockProxy,
+            },
+        )?;
+        Ok(AdmittedForkChild {
+            admission: TestAdmission {
+                admitted: TestAdmitted {
+                    plan: prepared.admitted_plan().clone(),
+                },
+            },
+        })
+    }
+
+    fn inherited_runtime_config(
+        binding: Option<&mvm_core::protocol::runtime_release::RuntimeLaunchBinding>,
+        rootfs: &std::path::Path,
+    ) -> Option<mvm_core::vm_backend::VmStartConfig> {
+        binding.map(|binding| {
+            let mut config = mvm_core::vm_backend::VmStartConfig::default();
+            binding.apply_to_config(&mut config);
+            config.rootfs_path = rootfs.display().to_string();
+            config
+        })
+    }
+
+    fn replay_source_permits_exec(
+        source: &mvm_core::plan::ExecutionPlan,
+        recorded_plan_id: &str,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            source.plan_id.0 == recorded_plan_id,
+            "replay source plan differs from signed checkpoint creation"
+        );
+        anyhow::ensure!(
+            source.agent_verbs.is_none(),
+            "replay source has attenuated agent verbs"
+        );
+        Ok(())
+    }
+
+    fn fork_admission_rootfs(
+        store: &CheckpointStore,
+        parent: &CheckpointMeta,
+        scratch: &std::path::Path,
+    ) -> Result<(std::path::PathBuf, String)> {
+        let rootfs =
+            mvm_client::checkpoint::materialized_source(store, parent, ROOTFS_BLOB, scratch)?;
+        let digest = mvm_client::checkpoint::materialized_blob_sha256(store, parent, ROOTFS_BLOB)?;
+        Ok((rootfs, digest))
+    }
 
     #[test]
     fn inherited_legacy_runtime_uses_the_verified_materialized_rootfs() {
@@ -1227,23 +1040,6 @@ mod tests {
         assert!(admitted_child_secrets(&[], "child-bare").is_empty());
     }
 
-    /// The tier this test must use to mean anything: one that actually meters
-    /// CPU on the host running it.
-    ///
-    /// `ResourceControls::for_backend` answers per host, not per kind alone —
-    /// HVF reports `HvfVcpuQuota` only under `cfg!(target_os = "macos")`, and
-    /// `CpuControl::None` elsewhere, because there is no in-process vCPU
-    /// scheduler to enforce a share on Linux. Firecracker is the mirror image:
-    /// `CgroupShare` on Linux, nothing on macOS. Hardcoding either one makes
-    /// the test assert the opposite thing on the other platform — which is why
-    /// it passed locally on a Mac and failed in Linux CI, where the refusal it
-    /// was written to disprove is the correct answer.
-    const CPU_METERING_TIER: BackendKind = if cfg!(target_os = "macos") {
-        BackendKind::Hvf
-    } else {
-        BackendKind::Firecracker
-    };
-
     /// A parent that bounded its CPU can still be forked.
     ///
     /// The child inherits the parent's grants and is admitted prod-profile, so
@@ -1283,13 +1079,20 @@ mod tests {
             checkpoint: &CheckpointId::new(id),
             parent_meta: &parent_meta,
             child_vm_name: "child-cpu-bounded",
-            backend_kind: CPU_METERING_TIER,
+            backend_kind: BackendKind::Hvf,
             declared_secrets: &[],
             // Strict default: these cases do not exercise attenuation.
             allow_secret_drop: false,
             intent: ForkIntent::Ordinary,
-        })
-        .expect("a cpu-bounded parent is forkable on a tier that meters CPU");
+        });
+        if !cfg!(target_os = "macos") {
+            let error = admitted
+                .err()
+                .expect("HVF CPU metering is unavailable here");
+            assert!(format!("{error:#}").contains("hvf"));
+            return;
+        }
+        let admitted = admitted.expect("a cpu-bounded HVF parent is forkable on macOS");
 
         let plan = admitted.admission.admitted.plan();
         assert_eq!(

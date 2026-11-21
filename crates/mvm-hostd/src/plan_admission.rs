@@ -77,6 +77,7 @@ mod mailbox_posture;
 mod nonce_ledger;
 mod placement;
 mod registry_pack;
+#[path = "plan_admission/retained_vm_full.rs"]
 mod restore;
 mod rollback;
 mod shares;
@@ -110,7 +111,10 @@ pub use mailbox_posture::{MailboxLaunchPosture, MailboxPostureHandoff};
 pub use mvm_core::time::{Clock, SystemClock};
 pub use nonce_ledger::InMemoryNonceLedger;
 pub use registry_pack::{BuiltPackBootCheck, PreparedBuiltPackRuntime, prepare_built_pack_start};
-pub use restore::dispatch_vm_full_fork;
+pub use restore::{
+    RetainedVmFullFork, VerifiedVmFullForkSource, VmFullForkDispatch, VmFullForkRestorer,
+    verify_vm_full_fork_source,
+};
 pub use rollback::{
     UndoLaunchFailure, apply_admitted_grants_or_undo_launch,
     apply_persistent_grants_or_undo_launch, record_charge_or_undo_launch,
@@ -234,6 +238,18 @@ impl AdmittedPlan {
         self.placement
             .as_ref()
             .is_some_and(|placement| placement.exclusive)
+    }
+
+    /// Backend object identity measured during admission.
+    #[must_use]
+    pub fn backend_kind(&self) -> Option<BackendKind> {
+        self.backend
+    }
+
+    /// Whether this one-use admission has entered dispatch.
+    #[must_use]
+    pub fn was_dispatched(&self) -> bool {
+        self.dispatched
     }
 
     /// The signer whose key the plan verified under — this host's own signer

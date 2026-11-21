@@ -265,6 +265,45 @@ classification. They do not qualify a native Firecracker or HVF launch,
 strengthen ADR-001 claims, establish durable replay beyond the operation-local
 ledger, or satisfy the formal cold/warm performance requirements.
 
+## Full-VM fork retained-source capability
+
+The full-VM fork slice under
+[#5520](https://github.com/tinylabscom/mvm/issues/5520) authenticates checkpoint
+lineage, exact metadata, restored-rootfs identity and retained runtime into one
+non-serializable hostd source capability before fresh child admission. The
+`mvm-client` checkpoint facade accepts only fork intent, then derives parent
+metadata and authority, rootfs materialization, retained runtime config,
+generation assets, bundle, network mode, agent verbs, tenant, secret
+attenuation, grants, seccomp and backend identity. It admits once and binds the
+opaque `AdmittedPlan` to exact child name, image, backend and runtime identity
+before spending it. Caller-supplied tenant and plan JSON in `ForkParams` remain
+projections: hostd overwrites both from the admitted owner before any clone or
+restore.
+
+Firecracker and HVF production restorers are constructed inside the client
+facade from authenticated checkpoint origin; the CLI cannot bless an arbitrary
+callback with a backend enum tag. Hostd also compares admitted backend, source
+origin and typed restorer before invoking it, after spending admission.
+Firecracker keeps its runtime/device evidence and predecessor grant projection;
+HVF keeps native restore ownership and receives no predecessor projection. The
+lower checkpoint transaction still checks the child grant subset and tenant
+lineage, reseeds identity, restores paused, refuses a NIC before resume, commits
+child checkpoint metadata, and returns a typed uncertain-stop outcome when
+rollback cannot be confirmed.
+`plan.launched`, post-restore identity/grant delivery and runtime metadata
+persistence retain their existing source order.
+
+The fresh child uses the existing operation-local nonce ledger. That witnesses
+one-use admission within this invocation only; it is not durable replay evidence
+across a process crash. Fixture-backed facade tests exercise source
+authentication, altered metadata/runtime/rootfs refusal, exact fresh child
+projection, backend-mismatch spending without restorer invocation, and opaque
+plan/tenant delivery to the lower boundary. Existing checkpoint transaction
+tests cover no-NIC ordering and rollback classification. They do not qualify a live
+Firecracker or HVF restore, broaden ADR-001 claims, establish formal cold/warm
+performance, or migrate same-identity sealed resume, warm claim, operator trial
+or the final architecture gate.
+
 ## Signed application HVF startup diagnostics
 
 Reviewed in [#5681](https://github.com/tinylabscom/mvm/pull/5681): standalone
