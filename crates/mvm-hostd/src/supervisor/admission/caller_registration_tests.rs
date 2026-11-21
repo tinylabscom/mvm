@@ -12,6 +12,9 @@ fn readonly_data_fixture() -> (tempfile::TempDir, std::fs::File) {
     std::fs::write(&path, [17; 512]).unwrap();
     let file = std::fs::File::open(&path).unwrap();
     std::fs::remove_file(path).unwrap();
+    // Pin the unlinked inode for the process: once freed, another thread's file
+    // can reuse its fd and inode numbers and make a closed descriptor look open.
+    std::mem::forget(file.try_clone().unwrap());
     (dir, file)
 }
 
@@ -315,6 +318,9 @@ fn assert_startup_lock_failure_cleanup(restore: bool) {
         contender.try_lock().is_err(),
         "failed adoption must not unlock another description"
     );
+    // A flock belongs to the open description, which a child forked by another
+    // test thread shares until it execs; unlock explicitly so dropping suffices.
+    lock_owner.unlock().unwrap();
     drop(lock_owner);
     contender.try_lock().unwrap();
 }
