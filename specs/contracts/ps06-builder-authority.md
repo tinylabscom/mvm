@@ -2,8 +2,10 @@
 
 Status: **B implementation acceptance contract under review. Source now
 contains a create-only public commissioning-intent publisher and read-only
-deployment-receipt/journal seams. No installed provider, commissioned issuer,
-enabled owner factory or native qualification is claimed by this document.**
+deployment-receipt/journal seams, plus a bounded source-only bootstrap
+vocabulary and one-use in-memory peer-bound session. No bootstrap endpoint,
+installed provider, commissioned issuer, enabled owner factory or native
+qualification is claimed by this document.**
 
 The maintainer selected the B direction: protect authority and writable resources
 from an attacker-controlled, unconfined process under the developer's UID.
@@ -181,10 +183,14 @@ Proposed trusted setup sequence:
 
 Installation crash recovery is an explicit administrator setup action, not an
 API available to the requesting developer. No production key is generated,
-imported, retired or read here. The exact installer-to-initializer authentication
-and intent-consumption protocol, key creation, deployment-receipt/completion
-writers and journal initialization remain deferred and need implementation
-review before commissioning.
+imported, retired or read here. A strict 512-byte v1 JSON vocabulary and a
+30-second, one-use in-memory session now bind the exact intent digest and nonces
+to the existing live macOS peer verifier. Successful confirmation yields only a
+non-serializable permit retaining that peer; there is no listener, endpoint,
+durable state, key, receipt, journal, VM effect or positive factory. Channel
+creation and capture, intent consumption, key creation,
+deployment-receipt/completion writers and journal initialization remain
+deferred and need implementation review before commissioning.
 
 Legacy keys remain outside this provider's authority domain. Neither callers nor
 legacy `SignHost`/`SignPlan` endpoints can produce signatures under the new

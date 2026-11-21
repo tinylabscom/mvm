@@ -10,6 +10,8 @@ pub mod audit_signer;
 pub mod broker;
 pub mod broker_control;
 pub mod capability_negotiation;
+/// Bounded commissioning-bootstrap request and response vocabulary.
+pub mod commissioning_bootstrap;
 pub mod dns;
 pub mod extension_controller;
 pub mod extension_pack;
