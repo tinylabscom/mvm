@@ -709,8 +709,10 @@ the destination's tip advances. Records whose retention ends
 later, a helper whose ordinary maintenance commit raced the quarantine between
 that read and the commit, an already-exited helper,
 and actor journals are not covered, and their ciphertext can outlive its
-retention until the store is removed by hand. The ordering hook is
-attached by the one production opener; a future opener must attach it too. A
+retention until the store is removed by hand. An actor endpoint's
+opener takes the ordering choice as a required argument, so a new opener has to
+name it; nothing stops one from naming the unordered choice for a production
+launch. A
 connection that has been accepted but has sent no frame holds a connection slot
 until its read timeout.
 

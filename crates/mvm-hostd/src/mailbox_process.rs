@@ -42,8 +42,8 @@ use mvm_vmm::host::aux_bin::AuxBin;
 use mvm_vmm::host::flowmux_identity::{MAILBOX_READER_BOOT_FILE, MailboxReaderBootBinding};
 
 use crate::mailbox_commit::{
-    ActorOrdering, Coordinated, CoordinatorSocket, Destination, OrderingFlags, coordinate,
-    require_reached, stop_if_unordered,
+    ActorOrdering, Coordinated, CoordinatorSocket, Destination, JournalOrder, OrderingFlags,
+    coordinate, require_reached, stop_if_unordered,
 };
 use crate::mailbox_custody::RetainedMailboxKeys;
 use crate::mailbox_launch::{
@@ -323,18 +323,6 @@ fn serve_actor(
     )?;
     let directory = material.registry_directory.with_extension("state");
     let max_storage_bytes = usize::try_from(material.max_storage_bytes).map_err(Error::other)?;
-    let mut owner = ActorConversationEndpoint::open(
-        ActorOperationConfig {
-            plan: plan.clone(),
-            binding: binding.clone(),
-            directory: directory.clone(),
-            max_storage_bytes,
-            now_unix_ms: crate::mailbox_launch::actor_template::current_time_ms()?,
-            current_epoch,
-        },
-        material,
-    )
-    .map_err(Error::other)?;
     let ordering = if posture.variant() == Variant::Prod {
         let socket = config.coordinator.clone().ok_or_else(|| {
             Error::new(
@@ -355,11 +343,26 @@ fn serve_actor(
             epoch: ExecutionEpoch::new(plan.execution_epoch).map_err(Error::other)?,
             flags: OrderingFlags::default(),
         });
-        owner = owner.with_ordering(std::sync::Arc::clone(&ordering));
         Some(ordering)
     } else {
         None
     };
+    let owner = ActorConversationEndpoint::open(
+        ActorOperationConfig {
+            plan: plan.clone(),
+            binding: binding.clone(),
+            directory: directory.clone(),
+            max_storage_bytes,
+            now_unix_ms: crate::mailbox_launch::actor_template::current_time_ms()?,
+            current_epoch,
+        },
+        material,
+        match &ordering {
+            Some(ordering) => JournalOrder::Ledger(std::sync::Arc::clone(ordering)),
+            None => JournalOrder::Unordered,
+        },
+    )
+    .map_err(Error::other)?;
     let (journal, anchor) = owner.control_journal().map_err(Error::other)?;
     let (policy, mut sealer) = config.keys.trust(current_epoch);
     let service = DurableMailboxService::bind_local(
