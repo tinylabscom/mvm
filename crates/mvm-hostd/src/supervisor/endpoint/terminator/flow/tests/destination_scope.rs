@@ -188,6 +188,12 @@ struct Upstream {
     served: std::thread::JoinHandle<()>,
 }
 
+/// How long the upstream keeps its port bound waiting for the forward leg. The
+/// test body (CA minting, assembly) runs first and is slow in a debug build
+/// under load; a bound that lapsed earlier closed the port and the dial was
+/// refused. Far above that delay, so only a leg that never dials hits it.
+const ACCEPT_BOUND: Duration = Duration::from_secs(120);
+
 fn upstream(issuer: &VmEgressCa) -> Upstream {
     upstream_answering(issuer, |tls| {
         let _ = tls.write_all(
@@ -212,11 +218,7 @@ fn upstream_answering(
     let received = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&received);
     let served = std::thread::spawn(move || {
-        // No accept deadline: the listener must stay bound until the forward
-        // leg dials, however long the test body takes to get there under
-        // load. A deadline that lapsed first closed the port, and the dial
-        // was refused.
-        let Ok((socket, _)) = listener.accept() else {
+        let Some(socket) = accept_within(&listener, ACCEPT_BOUND) else {
             return;
         };
         let _ = socket.set_read_timeout(Some(Duration::from_secs(10)));
@@ -251,6 +253,28 @@ fn upstream_answering(
         addr,
         received,
         served,
+    }
+}
+
+/// Accept one connection, or give up after `limit` so a forward leg that
+/// never dials cannot hang the test.
+fn accept_within(listener: &TcpListener, limit: Duration) -> Option<std::net::TcpStream> {
+    listener.set_nonblocking(true).ok()?;
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match listener.accept() {
+            Ok((socket, _)) => {
+                socket.set_nonblocking(false).ok()?;
+                return Some(socket);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => return None,
+        }
     }
 }
 
