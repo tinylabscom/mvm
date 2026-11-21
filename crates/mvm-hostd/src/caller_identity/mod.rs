@@ -17,6 +17,8 @@ mod worker;
 pub use worker::{IdentityClient, PendingCredential};
 #[cfg(all(feature = "native-caller-identity", target_os = "macos"))]
 mod macos;
+#[cfg(feature = "native-caller-identity")]
+pub mod macos_peer;
 #[cfg(all(test, feature = "native-caller-identity", target_os = "macos"))]
 mod native_tests;
 #[cfg(all(test, feature = "native-caller-identity", target_os = "macos"))]
