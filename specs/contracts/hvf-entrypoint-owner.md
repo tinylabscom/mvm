@@ -302,6 +302,15 @@ preflight and publication. Exclusive create linearizes competing intent
 publishers only.
 These seams remain disconnected: no protected authority/runtime IPC, service,
 native operation or positive factory consumes them in production.
+The source-only commissioning-bootstrap vocabulary is versioned, strict and
+bounded to 512 encoded bytes. Its in-memory session owns the existing
+`VerifiedMacPeer`, binds one begin/challenge/confirm exchange to exact intent
+and nonce values for at most 30 monotonic seconds, revalidates under the same
+transition mutex, and can move the peer into one non-serializable permit.
+Expiry is terminal; mismatches and peer refusals issue no permit. This adds no
+endpoint, listener, binary, key, journal, receipt, durable state, VM effect or
+positive factory, and it preserves the verifier's refusal on platforms without
+the macOS primitive.
 The future initializer still owns intent authentication and consumption, key
 creation, deployment-receipt and completion publication, and journal
 initialization. This slice supplies none of those operations.
@@ -773,6 +782,7 @@ From the native probes recorded on
 | Exact-commit clean-tree bundle or typed refusal; no unverified path | PROPOSED-APPROVED-NOT-IMPLEMENTED |
 | Peer binding: `getpeereid`, `LOCAL_PEERTOKEN`, SecCode, re-check at commit | VERIFIER-PREREQUISITE-IMPLEMENTED; receiver/capture/commit integration not implemented |
 | Security.framework dynamic lookup and exact designated-requirement check; no UID-only fallback | SOURCE-ONLY-IMPLEMENTED |
+| Bounded commissioning-bootstrap vocabulary and one-use peer-bound permit session | SOURCE-ONLY-IMPLEMENTED; no endpoint, durable mutation or positive factory |
 | Recovery-possession proof unchanged (D5 declined) | Existing source-only proof; receiver not implemented |
 | Hardened runtime, environment allowlist, system libraries only | PROPOSED-APPROVED-NOT-IMPLEMENTED |
 | Post-exec self-hash handshake | PROPOSED-APPROVED-NOT-IMPLEMENTED |

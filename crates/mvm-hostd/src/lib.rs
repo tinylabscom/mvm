@@ -44,6 +44,9 @@ pub mod audit_signer;
 pub mod blocking;
 pub mod broker;
 pub mod caller_identity;
+/// One-use, peer-bound commissioning-bootstrap session.
+#[cfg(feature = "native-caller-identity")]
+pub mod commissioning_bootstrap_session;
 pub mod containment;
 /// Attended display input on a running machine, rebuilt from the host's own record of the run.
 pub mod display;
