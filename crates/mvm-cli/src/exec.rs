@@ -1112,6 +1112,18 @@ pub struct ResolvedLaunch {
     _built_runtime: Option<mvm_hostd::plan_admission::PreparedBuiltPackRuntime>,
 }
 
+impl ResolvedLaunch {
+    /// Consume a planless resolution into the opaque client warm-parent facade.
+    pub(crate) fn into_warm_parent(self) -> Result<mvm_client::standby::PreparedWarmParent> {
+        mvm_client::standby::PreparedWarmParent::from_resolved(
+            self.backend,
+            self.start_config,
+            self.verified_runtime,
+            self._built_runtime,
+        )
+    }
+}
+
 /// Resolve a launch's bootable [`VmStartConfig`] **without starting a VM**.
 ///
 /// Composes four steps:

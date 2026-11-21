@@ -2,7 +2,9 @@
 
 use anyhow::Result;
 
-use super::{MvmConfig, VmStartConfig, warm_eligible_launch};
+use super::MvmConfig;
+#[cfg(test)]
+use super::{VmStartConfig, warm_eligible_launch};
 use crate::commands::{build, bundle, shared, vm};
 
 /// The boot source a warm request names, matching its eventual launch.
@@ -102,6 +104,7 @@ impl WarmRequest {
 
 /// Refuse before provisioning keys, taking the spawn lock, or creating capacity
 /// that the launch path cannot claim.
+#[cfg(test)]
 pub(super) fn warm_if_eligible<T>(
     config: &VmStartConfig,
     late_volume_slots: u8,

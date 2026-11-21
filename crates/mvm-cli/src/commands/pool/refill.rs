@@ -16,11 +16,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use mvm_core::user_config::MvmConfig;
 
-use super::{
-    SupervisorStandbyPool, WarmParams, WarmRequest, compat_for_launch, resolve_warm_launch,
-    warm_to_target,
-};
-use mvm_client::host_keypair;
+use super::{SupervisorStandbyPool, WarmRequest, resolve_warm_launch};
 
 /// The launch shape a refill prepares a standby for: the arguments a
 /// `pool warm` of the same image and sizing would take.
@@ -166,8 +162,8 @@ fn refill_one(
     };
     let launch = resolve_warm_launch(&req)?;
     refill_phase(started, "launch_resolved");
-    let want = compat_for_launch(&launch.start_config)?;
-    let missing = target.saturating_sub(pool.idle_count_compatible(&want)? as u32);
+    let want = launch.compat();
+    let missing = target.saturating_sub(pool.idle_count_compatible(want)? as u32);
     if missing == 0 {
         return Ok(());
     }
@@ -186,18 +182,7 @@ fn refill_one(
         return Ok(());
     }
     refill_phase(started, "room_made");
-    let signer = host_keypair::load_or_init()?;
-    refill_phase(started, "signer_loaded");
-    let result = warm_to_target(
-        pool,
-        &WarmParams {
-            backend: &launch.backend,
-            signer_id: &host_keypair::host_signer_id(),
-            signing_key_path: &signer.secret_path,
-            target,
-            launch: &launch.start_config,
-        },
-    )?;
+    let result = launch.refill_to(pool, target)?;
     refill_phase(started, "warmed");
     mvm_core::audit_emit!(
         PoolWarm,
