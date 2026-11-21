@@ -1312,6 +1312,10 @@ mod tests {
             cfg: &HvfSupervisorConfig,
             inherited: &[RawFd],
         ) -> Result<std::process::Child> {
+            // Another test may have emptied the process-wide PATH; taking the env lock keeps
+            // this spawn out of that window.
+            let _env = mvm_core::util::test_env::TestEnv::new();
+
             self.spawned.set(self.spawned.get() + 1);
             assert_eq!(inherited.len(), 2, "RAM and frame are both handed over");
             let mut command = std::process::Command::new("/bin/sh");

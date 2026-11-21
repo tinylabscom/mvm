@@ -58,6 +58,9 @@ mod tests {
 
     #[test]
     fn kill_and_reap_leaves_no_zombie() {
+        // Another test may have emptied the process-wide PATH; taking the env lock keeps
+        // this spawn out of that window.
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let mut child = std::process::Command::new("sleep")
             .arg("300")
             .spawn()

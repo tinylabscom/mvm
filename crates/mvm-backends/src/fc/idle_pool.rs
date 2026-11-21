@@ -1158,6 +1158,9 @@ mod tests {
     /// A child standing in for a pool process: `sh -c 'sleep 30'` in its own
     /// session, its argv naming `entry` the way a reaper's does.
     fn session_child(entry: &Path) -> std::process::Child {
+        // Another test may have emptied the process-wide PATH; taking the env lock keeps
+        // this spawn out of that window.
+        let _env = mvm_core::util::test_env::TestEnv::new();
         std::process::Command::new("setsid")
             .args(["sh", "-c", "sleep 30", "mvm-fc-idle-reaper"])
             .arg(entry)
