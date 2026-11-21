@@ -109,6 +109,46 @@ jobs:
           uptime >> "$RESULTS_DIR/provenance.txt"
           exit "$status"
 
+      # Evidence only, never a gate: the lane above stops at its first sample
+      # over the ceiling and keeps only that sample, so this records twenty
+      # more launches with no ceiling to show how they are distributed.
+      - name: Survey twenty launches without a ceiling
+        if: always()
+        run: |
+          set -uo pipefail
+          for i in $(seq 1 20); do
+            MVM_LAUNCH_SAMPLE_JSON="$RESULTS_DIR/survey-${i}.json" \
+              target/release/mvmctl run --no-detect \
+                --image docker.io/library/alpine:latest --hypervisor hvf \
+                --no-build --fresh -- /bin/true > /dev/null 2>&1 || true
+            sleep 1
+          done
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY" "$RESULTS_DIR/survey-summary.txt"
+          import glob, json, os, statistics
+
+          rows = []
+          for path in sorted(glob.glob(os.path.join(os.environ["RESULTS_DIR"], "survey-[0-9]*.json"))):
+              try:
+                  doc = json.load(open(path))
+              except (OSError, ValueError):
+                  continue
+              sample = doc.get("sample", doc)
+              phases = sample.get("phases") or {}
+              if "startup_ms" in phases:
+                  hashed = (sample.get("work") or {}).get("artifact_bytes_hashed", 0)
+                  rows.append((phases["startup_ms"], hashed))
+          startups = sorted(row[0] for row in rows)
+          print("### Launch survey (no ceiling, evidence only)")
+          print(f"samples: {len(startups)} of 20")
+          if startups:
+              p95 = startups[min(len(startups) - 1, int(len(startups) * 0.95))]
+              print(f"min {startups[0]:.1f} ms, median {statistics.median(startups):.1f} ms, "
+                    f"p95 {p95:.1f} ms, max {startups[-1]:.1f} ms")
+              print(f"over 300 ms: {sum(1 for value in startups if value >= 300.0)}")
+              print(f"launches that hashed artifacts: {sum(1 for row in rows if row[1])}")
+              print("startup_ms, sorted: " + ", ".join(f"{value:.0f}" for value in startups))
+          PY
+
       # A report-level failure leaves report JSON; a sampled warm-up refusal
       # leaves separate invalid-sample JSON. A launch with no sample leaves
       # only the CLI transcript. Never call any failure a passing sample.
@@ -121,6 +161,8 @@ jobs:
             ${{ runner.temp }}/mvm-physical-cold-${{ github.run_id }}-${{ github.run_attempt }}/provenance.txt
             ${{ runner.temp }}/mvm-physical-cold-${{ github.run_id }}-${{ github.run_attempt }}/preflight.json
             ${{ runner.temp }}/mvm-physical-cold-${{ github.run_id }}-${{ github.run_attempt }}/preflight-1.json
+            ${{ runner.temp }}/mvm-physical-cold-${{ github.run_id }}-${{ github.run_attempt }}/survey-summary.txt
+            ${{ runner.temp }}/mvm-physical-cold-${{ github.run_id }}-${{ github.run_attempt }}/survey-*.json
             ${{ runner.temp }}/mvm-physical-cold-${{ github.run_id }}-${{ github.run_attempt }}/bench.json
             ${{ runner.temp }}/mvm-physical-cold-${{ github.run_id }}-${{ github.run_attempt }}/bench.log
           if-no-files-found: warn
