@@ -25,6 +25,17 @@ pub struct ProtectedAuthorityRoot {
 }
 
 impl ProtectedAuthorityRoot {
+    /// Open only the fixed commissioning-lock child for read-only validation.
+    pub(crate) fn open_commissioning_lock(&self) -> Result<File, rustix::io::Errno> {
+        rustix::fs::openat(
+            &self.directory,
+            "owner-commissioning.lock",
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map(File::from)
+    }
+
     /// Open only the fixed commissioning-state child for the read-only loader.
     pub(crate) fn open_commissioning_state(&self) -> Result<File, rustix::io::Errno> {
         rustix::fs::openat(

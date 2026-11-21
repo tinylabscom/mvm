@@ -69,6 +69,9 @@ pub mod host_storage_encryption;
 /// Create-only publication and read-only loading of the protected owner intent.
 #[cfg(any(target_os = "macos", all(unix, feature = "test-support")))]
 pub mod hvf_owner_commissioning_intent;
+/// Read-only validation of the permanent installer-provisioned commissioning lock inode.
+#[cfg(any(target_os = "macos", all(unix, feature = "test-support")))]
+pub mod hvf_owner_commissioning_lock;
 /// Strict read-only loading of the protected commissioning state log.
 #[cfg(any(target_os = "macos", all(unix, feature = "test-support")))]
 pub mod hvf_owner_commissioning_state;
