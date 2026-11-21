@@ -1,5 +1,6 @@
 //! Kernel handoff only: synthetic runtime members do not prove a release runtime.
 use super::*;
+#[cfg(target_os = "linux")]
 use mvm_core::canonical_linux::PreparedCanonicalLinux;
 use mvm_core::util::test_env::TestEnv;
 use std::sync::Arc;
