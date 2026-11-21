@@ -188,6 +188,12 @@ struct Upstream {
     served: std::thread::JoinHandle<()>,
 }
 
+/// How long the upstream keeps its port bound waiting for the forward leg. The
+/// test body (CA minting, assembly) runs first and is slow in a debug build
+/// under load; a bound that lapsed earlier closed the port and the dial was
+/// refused. Far above that delay, so only a leg that never dials hits it.
+const ACCEPT_BOUND: Duration = Duration::from_secs(120);
+
 fn upstream(issuer: &VmEgressCa) -> Upstream {
     upstream_answering(issuer, |tls| {
         let _ = tls.write_all(
@@ -212,7 +218,7 @@ fn upstream_answering(
     let received = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&received);
     let served = std::thread::spawn(move || {
-        let Some(socket) = accept_within(&listener, Duration::from_secs(15)) else {
+        let Some(socket) = accept_within(&listener, ACCEPT_BOUND) else {
             return;
         };
         let _ = socket.set_read_timeout(Some(Duration::from_secs(10)));
