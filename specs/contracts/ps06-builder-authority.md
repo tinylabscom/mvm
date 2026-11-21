@@ -2,11 +2,12 @@
 
 Status: **B implementation acceptance contract under review. Source now
 contains a create-only public commissioning-intent publisher and read-only
-deployment-receipt/journal seams, plus a bounded source-only bootstrap
-vocabulary, one-use in-memory peer-bound session and macOS-gated adapter for one
-already-connected Unix stream. No bind/listen surface, bootstrap endpoint,
-installed provider, commissioned issuer, enabled owner factory or native
-qualification is claimed by this document.**
+commissioning-intent loader, authority-root validator, deployment-receipt and
+journal seams, plus a bounded source-only bootstrap vocabulary, one-use
+in-memory peer-bound session and macOS-gated adapter for one already-connected
+Unix stream. No bind/listen surface, bootstrap endpoint, installed provider,
+commissioned issuer, enabled owner factory or native qualification is claimed
+by this document.**
 
 The maintainer selected the B direction: protect authority and writable resources
 from an attacker-controlled, unconfined process under the developer's UID.
@@ -180,8 +181,20 @@ Proposed trusted setup sequence:
    installer-provisioned exclusion and then reload and revalidate before any
    mutation. Hermetic descriptor-root tests cover this policy; no root-owned
    live deployment is exercised by this slice.
+   A separate source-only validator consumes the loaded intent and retains a
+   read-only descriptor for the fixed `/private/var/db/mvm/authority` directory
+   only after descriptor-relative no-follow validation. Root-owned ancestors
+   must be secure, `mvm` must be exact root-owned `0755` without an extended
+   ACL, and `authority` must be exact `0700` without special bits or an extended
+   ACL and owned by the intent's authority UID and GID. The opaque result offers
+   no descriptor, arbitrary-child or mutation surface. This creates no lock and
+   proves only the namespace policy at validation time, not freshness,
+   commissioning progress, authority or an atomic snapshot. Any future mutation
+   must obtain separately designed exclusion and then reload and revalidate.
+   The commissioning lock filename and lifecycle remain undecided.
 2. A fixed initialization entry point runs as the authority UID, exclusively
-   locks the authority namespace and creates the issuer only for that intent.
+   locks the authority namespace under that future design and creates the issuer
+   only for that intent.
    It exposes no secret and accepts no caller-selected key or key path.
 3. Over a private installer-created bootstrap channel, the installer obtains
    the public identity and records it with the deployment identity, role IDs
