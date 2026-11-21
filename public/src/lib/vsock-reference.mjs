@@ -77,6 +77,9 @@ export const families = {
     schema: "schema/broker-services-v0.json",
     sources: [
       ["crates/mvm-contract/src/protocol/host_beacon.rs", ["BeaconReport", "BeaconAck"]],
+      ["crates/mvm-contract/src/protocol/host_cell.rs", [
+        "CellWriteRequest", "CellWriteResponse", "CellReadRequest", "CellReadResponse",
+      ]],
       ["crates/mvm-contract/src/protocol/host_kv.rs", [
         "KvGetRequest", "KvGetResponse", "KvPutRequest", "KvPutResponse",
         "KvDeleteRequest", "KvDeleteResponse", "KvListRequest", "KvListResponse",
