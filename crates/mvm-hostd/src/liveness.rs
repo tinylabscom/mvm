@@ -144,6 +144,21 @@ impl LivenessDeadlines<'_> {
     /// gate refuses, or a deadline that has already passed; otherwise any
     /// failure to read the topology, the gate's record or the deadlines.
     pub fn signal(&self, caller: &LivenessCaller<'_>) -> Result<()> {
+        self.reset(caller, true)
+    }
+
+    /// Reset the caller's deadline after the host accepted a cell write from
+    /// it. The same as [`Self::signal`], except that a unit declaring no
+    /// period has no deadline to reset and is not refused.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::signal`], without [`LivenessRefusal::NoPeriod`].
+    pub fn reset_after_write(&self, caller: &LivenessCaller<'_>) -> Result<()> {
+        self.reset(caller, false)
+    }
+
+    fn reset(&self, caller: &LivenessCaller<'_>, explicit: bool) -> Result<()> {
         let home = mvm_core::config::mvm_home_strict().context("resolving the mvm home")?;
         let topology = crate::topology_admission::last_admitted_topology(
             &home,
@@ -155,6 +170,9 @@ impl LivenessDeadlines<'_> {
             .and_then(|t| t.units.iter().find(|u| u.workload == *caller.unit))
             .and_then(|u| u.liveness_period_ms);
         let Some(period) = period else {
+            if !explicit {
+                return Ok(());
+            }
             return Err(self.refuse(
                 caller,
                 LivenessRefusal::NoPeriod {
