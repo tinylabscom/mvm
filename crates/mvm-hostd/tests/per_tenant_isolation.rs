@@ -171,6 +171,8 @@ async fn start_tenant(id: &str) -> TenantHandle {
         capability_bindings: vec![],
         assurance: None,
         service_proxies: vec![],
+        workload: None,
+        execution_epoch: None,
     };
     register_vm(&control_socket, &key_bytes, reg).expect("register vm");
 

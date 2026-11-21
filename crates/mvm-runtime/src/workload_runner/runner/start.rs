@@ -304,7 +304,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         socks: &sockets::StandingSockets,
     ) -> Result<(BrokerGuard, Vec<ServiceId>)> {
         let state_dir = vm_state_dir(&config.name);
-        let (services, capability_bindings) =
+        let (services, capability_bindings, epoch) =
             admitted_broker_bindings(config.plan_json.as_deref())?;
         let guard = self.broker.register(&BrokerRegisterRequest {
             vm_name: &config.name,
@@ -314,6 +314,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             services: &services,
             capability_bindings: &capability_bindings,
             service_proxies: &config.service_proxies,
+            epoch: epoch.as_ref(),
         })?;
         Ok((guard, services))
     }

@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use mvm_core::policy::security::AgentProfile;
-use mvm_core::protocol::broker::{CorrelationId, ServiceCall, ServiceResponse};
+use mvm_core::protocol::broker::{CorrelationId, ServiceCall, ServiceErrorCode, ServiceResponse};
 use mvm_core::protocol::handler::ServiceCallCtx;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
@@ -92,6 +92,9 @@ async fn handle_connection(
     .await
     .context("broker preface deadline")??;
     if prefix == mvm_core::net::actor_session::ACTOR_ROUTE_PREFACE {
+        if epoch_refused(&registry, "host.actor.v1") {
+            anyhow::bail!("actor route refused: execution epoch not admitted");
+        }
         return forward_actor(stream, &registry).await;
     }
     let call: ServiceCall =
@@ -99,6 +102,19 @@ async fn handle_connection(
             .await?;
     if call.service.as_str() == "host.actor.v1" {
         anyhow::bail!("actor lifecycle requires an encrypted session");
+    }
+    if epoch_refused(&registry, call.service.as_str()) {
+        let response = ServiceResponse::Err {
+            correlation_id: mint_correlation_id(),
+            code: ServiceErrorCode::SessionRevoked,
+            message: "the workload's execution epoch is no longer admitted".into(),
+        };
+        write_frame(&mut stream, &response).await?;
+        stream
+            .shutdown()
+            .await
+            .context("mvm-broker UDS shutdown failed")?;
+        return Ok(());
     }
     // Reassign a server-authoritative correlation id at ingress: the
     // guest-supplied `call.correlation_id` is NEVER trusted — a workload could
@@ -126,6 +142,7 @@ async fn handle_connection(
         profile: AgentProfile::default(),
         composition_depth: 0,
         composition_width: 0,
+        epoch: registry.epoch_gate.as_ref().map(|gate| gate.call().clone()),
     };
 
     let cancellation = CancellationToken::new();
@@ -166,6 +183,26 @@ async fn handle_connection(
         .await
         .context("mvm-broker UDS shutdown failed")?;
     Ok(())
+}
+
+/// Whether the epoch gate refuses this call. A registration that named no
+/// unit and epoch has no gate and is never refused here. A refusal is logged
+/// with the unit, epoch and reason, like the broker's other refusals.
+fn epoch_refused(registry: &Registry, service: &str) -> bool {
+    let Some(gate) = registry.epoch_gate.as_ref() else {
+        return false;
+    };
+    let Err(error) = gate.admit() else {
+        return false;
+    };
+    warn!(
+        unit = %gate.call().unit,
+        epoch = gate.call().epoch.get(),
+        service,
+        reason = %error,
+        "mvm-broker refused a call: execution epoch not admitted"
+    );
+    true
 }
 
 async fn forward_actor(mut guest: UnixStream, registry: &Registry) -> Result<()> {
@@ -364,6 +401,154 @@ mod tests {
                 .to_string()
                 .contains("saturated")
         );
+    }
+
+    /// Answers with the epoch the call context carried.
+    struct EpochEchoHandler;
+
+    impl ServiceHandler for EpochEchoHandler {
+        fn id(&self) -> ServiceId {
+            ServiceId::parse("host.time.v1").expect("service id")
+        }
+
+        fn profiles(&self) -> &[AgentProfile] {
+            &[AgentProfile::Dev]
+        }
+
+        fn audit_durability(&self) -> mvm_core::protocol::broker::AuditDurability {
+            mvm_core::protocol::broker::AuditDurability::default_batched()
+        }
+
+        fn idempotency(&self) -> mvm_core::protocol::broker::Idempotency {
+            mvm_core::protocol::broker::Idempotency::MintFresh
+        }
+
+        fn call_timeout(&self) -> Duration {
+            Duration::from_millis(50)
+        }
+
+        fn dispatch<'a>(
+            &'a self,
+            ctx: &'a ServiceCallCtx,
+            _verb: &'a str,
+            _payload: serde_json::Value,
+        ) -> Pin<Box<dyn std::future::Future<Output = ServiceDispatchResult> + Send + 'a>> {
+            let epoch = ctx
+                .epoch
+                .as_ref()
+                .map(|call| serde_json::json!({"unit": call.unit, "epoch": call.epoch.get()}));
+            Box::pin(async move { Ok(epoch.unwrap_or(serde_json::Value::Null)) })
+        }
+    }
+
+    async fn call_gated(registry: &Arc<Registry>) -> ServiceResponse {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let task = tokio::spawn(handle_connection(
+            server,
+            Arc::clone(registry),
+            "vm-name".into(),
+            "tenant".into(),
+            4096,
+        ));
+        write_call(
+            &mut client,
+            &ServiceCall {
+                service: ServiceId::parse("host.time.v1").unwrap(),
+                verb: "now".into(),
+                correlation_id: CorrelationId::new("guest"),
+                payload: serde_json::json!({}),
+                capability: None,
+            },
+        )
+        .await
+        .unwrap();
+        let response = read_response(&mut client).await.unwrap();
+        task.await.unwrap().unwrap();
+        response
+    }
+
+    fn gated_registry(home: &std::path::Path, unit: &str, epoch: u64) -> Arc<Registry> {
+        let mut registry = Registry::new();
+        registry.register(Arc::new(EpochEchoHandler));
+        registry.bind_epoch_gate(Some(crate::broker::epoch::tests::gate_at(
+            home, unit, epoch,
+        )));
+        Arc::new(registry)
+    }
+
+    fn assert_revoked(response: ServiceResponse) {
+        match response {
+            ServiceResponse::Err { code, .. } => assert_eq!(code, ServiceErrorCode::SessionRevoked),
+            other => panic!("expected the epoch gate to refuse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_admitted_epoch_reaches_the_handler_in_the_call_context() {
+        let home = tempdir().unwrap();
+        match call_gated(&gated_registry(home.path(), "unit", 1)).await {
+            ServiceResponse::Ok { payload, .. } => {
+                assert_eq!(payload, serde_json::json!({"unit": "unit", "epoch": 1}));
+            }
+            other => panic!("expected the call to be admitted, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_call_after_the_unit_is_replaced_is_refused() {
+        let home = tempdir().unwrap();
+        let registry = gated_registry(home.path(), "unit", 1);
+        assert!(matches!(
+            call_gated(&registry).await,
+            ServiceResponse::Ok { .. }
+        ));
+        crate::broker::epoch::tests::replace(home.path(), "unit");
+        assert_revoked(call_gated(&registry).await);
+    }
+
+    #[tokio::test]
+    async fn a_call_at_an_epoch_not_yet_promoted_is_refused() {
+        let home = tempdir().unwrap();
+        assert_revoked(call_gated(&gated_registry(home.path(), "unit", 2)).await);
+    }
+
+    #[tokio::test]
+    async fn a_call_from_a_quarantined_unit_is_refused() {
+        let home = tempdir().unwrap();
+        let registry = gated_registry(home.path(), "unit", 1);
+        crate::broker::epoch::tests::quarantine(home.path(), "unit");
+        assert_revoked(call_gated(&registry).await);
+    }
+
+    #[tokio::test]
+    async fn an_ungated_registration_serves_without_an_epoch() {
+        let mut registry = Registry::new();
+        registry.register(Arc::new(EpochEchoHandler));
+        match call_gated(&Arc::new(registry)).await {
+            ServiceResponse::Ok { payload, .. } => assert_eq!(payload, serde_json::Value::Null),
+            other => panic!("expected the call to be served, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_actor_route_is_refused_for_a_stale_epoch() {
+        let home = tempdir().unwrap();
+        crate::broker::epoch::tests::replace(home.path(), "unit");
+        let registry = gated_registry(home.path(), "unit", 1);
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let task = tokio::spawn(handle_connection(
+            server,
+            registry,
+            "vm-name".into(),
+            "tenant".into(),
+            4096,
+        ));
+        client
+            .write_all(&mvm_core::net::actor_session::ACTOR_ROUTE_PREFACE)
+            .await
+            .unwrap();
+        let error = task.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("execution epoch"), "{error}");
     }
 
     struct TypedEchoHandler;

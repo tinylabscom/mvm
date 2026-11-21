@@ -96,6 +96,8 @@ mod tests {
             capability_bindings: vec![],
             assurance: None,
             service_proxies: vec![],
+            workload: None,
+            execution_epoch: None,
         }))
     }
 
@@ -236,6 +238,31 @@ mod tests {
             panic!("signed sample is a registration");
         };
         registration.service_proxies[0].endpoint = "/run/mvm/other.sock".to_string();
+        assert!(matches!(
+            verify(&signed, &key().verifying_key()),
+            Err(ControlError::SignatureInvalid)
+        ));
+    }
+
+    #[test]
+    fn the_workload_and_epoch_are_covered_by_the_host_signature() {
+        use mvm_contract::protocol::mailbox::ExecutionEpoch;
+
+        let mut request = sample_register();
+        let ControlRequest::Register(registration) = &mut request else {
+            panic!("sample is a registration");
+        };
+        registration.workload = Some("unit".into());
+        registration.execution_epoch = Some(ExecutionEpoch::new(2).unwrap());
+        let json = String::from_utf8(serde_jcs::to_vec(&request).unwrap()).unwrap();
+        assert!(json.contains(r#""execution_epoch":2"#), "{json}");
+        assert!(json.contains(r#""workload":"unit""#), "{json}");
+        let mut signed = sign(request, &key().to_bytes()).unwrap();
+        assert!(verify(&signed, &key().verifying_key()).is_ok());
+        let ControlRequest::Register(registration) = &mut signed.request else {
+            panic!("signed sample is a registration");
+        };
+        registration.execution_epoch = Some(ExecutionEpoch::new(3).unwrap());
         assert!(matches!(
             verify(&signed, &key().verifying_key()),
             Err(ControlError::SignatureInvalid)

@@ -1728,6 +1728,7 @@ mod tests {
             profile: AgentProfile::SealedProd,
             composition_depth: 0,
             composition_width: 0,
+            epoch: None,
         }
     }
 
