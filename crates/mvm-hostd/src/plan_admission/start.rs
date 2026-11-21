@@ -1,6 +1,10 @@
 //! The post-admission tail every admitted boot shares, and the one-call
 //! admit-and-boot entry point.
 
+mod portable_entrypoint;
+
+pub use portable_entrypoint::prepare_portable_entrypoint;
+
 use super::admit::admit_plan_for_run;
 use super::assurance_runtime::verify_selected_runtime;
 use super::rollback::{
@@ -248,6 +252,9 @@ pub(crate) enum LaunchSource<'a> {
     Entrypoint {
         backend_kind: mvm_core::vm_backend::BackendKind,
     },
+    PortableEntrypoint {
+        backend_kind: mvm_core::vm_backend::BackendKind,
+    },
 }
 
 pub(crate) struct PreparedLaunch<A> {
@@ -279,7 +286,9 @@ pub(crate) fn prepare_launch<A>(
                 .require_cold_state()
                 .map_err(CliStartFailure::StateNotOwned)?;
         }
-        LaunchSource::CliCold { backend_kind } | LaunchSource::Entrypoint { backend_kind } => {
+        LaunchSource::CliCold { backend_kind }
+        | LaunchSource::Entrypoint { backend_kind }
+        | LaunchSource::PortableEntrypoint { backend_kind } => {
             tracing::trace!(
                 backend = backend_kind.as_str(),
                 "preparing selected cold source"

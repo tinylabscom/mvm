@@ -736,6 +736,61 @@ enum BootAdmission {
     Owned(Box<super::admission::AdmittedEntrypoint>),
 }
 
+struct PreparedClientAdmission {
+    native_owned: bool,
+    context: crate::admission::AdmissionContext,
+}
+
+trait PortableEntrypointSource {
+    fn apply(
+        &self,
+        config: &mut VmStartConfig,
+    ) -> Result<crate::launch::runtime_source::ReleaseRuntime>;
+
+    fn verify_final(&self, config: &VmStartConfig) -> Result<()>;
+}
+
+impl PortableEntrypointSource for crate::portable_boot_assets::PreparedPortableBootAssets {
+    fn apply(
+        &self,
+        config: &mut VmStartConfig,
+    ) -> Result<crate::launch::runtime_source::ReleaseRuntime> {
+        self.apply_for_health(config)
+    }
+
+    fn verify_final(&self, config: &VmStartConfig) -> Result<()> {
+        self.verify_health_config(config)
+    }
+}
+
+fn prepare_portable_source<A>(
+    source: &impl PortableEntrypointSource,
+    config: VmStartConfig,
+    backend_kind: mvm_core::vm_backend::BackendKind,
+    admit: impl FnOnce(
+        &mut VmStartConfig,
+        &mvm_runtime::runtime_evidence::VerifiedRuntimeSet,
+    ) -> Result<A>,
+    apply_admission: impl FnOnce(&mut VmStartConfig, A) -> Result<PreparedClientAdmission>,
+) -> Result<mvm_hostd::plan_admission::PreparedEntrypoint<PreparedClientAdmission>> {
+    mvm_hostd::plan_admission::prepare_portable_entrypoint(
+        config,
+        backend_kind,
+        |config| source.apply(config),
+        admit,
+        apply_admission,
+        |config, verified_runtime, admission| {
+            let verified = (|| {
+                verified_runtime.verify_config(config)?;
+                source.verify_final(config)
+            })();
+            verified.inspect_err(|error| {
+                crate::admission::emit_failed(&admission.context, "guest-runtime", error);
+            })
+        },
+    )
+}
+
 enum SessionBootResult {
     Admitted(SessionVm, Box<crate::admission::AdmissionContext>),
     Owned(OwnedClientBoot),
@@ -747,19 +802,6 @@ fn require_native_owner(backend: mvm_core::vm_backend::BackendKind, has_owner: b
         "native session requires an owning host context; name-only return is unavailable before launch"
     );
     Ok(())
-}
-
-/// The launch-owned verified set for the runtime this session config selected.
-fn session_runtime_set(
-    config: &VmStartConfig,
-    release: Option<crate::launch::runtime_source::ReleaseRuntime>,
-) -> Result<Option<std::sync::Arc<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>>> {
-    crate::launch::runtime_source::paired_release_evidence(config, release)?
-        .map(|release| {
-            mvm_runtime::runtime_evidence::verify_release_runtime_set(config, release)
-                .map(std::sync::Arc::new)
-        })
-        .transpose()
 }
 
 fn require_portable_without_installed_bundle(
@@ -795,7 +837,7 @@ fn boot_session_core(
     let vm_name = vm_name.resolve();
     let (verity_path, roothash) = mvm_runtime::microvm::probe_verity_sidecar(&rootfs);
 
-    let mut start_config = VmStartConfig {
+    let start_config = VmStartConfig {
         name: vm_name.clone(),
         rootfs_path: rootfs.clone(),
         kernel_path: Some(vmlinux),
@@ -819,95 +861,84 @@ fn boot_session_core(
         ..Default::default()
     };
 
-    // Producer-owned portable closure preparation remains separate until its
-    // source migration. Ordinary and installed-bundle entrypoints use hostd's
-    // shared attachment, verification and admission boundary.
-    let (mut start_config, verified_runtime, admitted) = if let Some(assets) = portable_boot_assets
-    {
-        require_portable_without_installed_bundle(true, bundle_archive.as_deref())?;
-        let release = Some(assets.apply_for_health(&mut start_config)?);
-        let verified_runtime = session_runtime_set(&start_config, release)?;
-        let admitted = admit(AdmitInputs {
-            rootfs: std::path::Path::new(&rootfs),
-            kernel: start_config
-                .kernel_path
-                .as_deref()
-                .map(std::path::Path::new),
-            backend_kind: backend.kind(),
-            vm_name: &vm_name,
-            sdk_sidecar: None,
-            assets: &[],
-            volumes: &start_config.volumes,
-            bundle_archive: bundle_archive.as_deref(),
-            runtime_config: Some(&start_config),
-            verified_runtime: verified_runtime.as_deref(),
-            verified_runtime_owner: None,
-        })?;
-        (start_config, verified_runtime, admitted)
-    } else {
-        mvm_hostd::plan_admission::prepare_entrypoint(
-            start_config,
-            backend.kind(),
-            |config| {
-                let release = attach_runtime_overlay_if_cached_version_verified(
-                    config,
-                    backend.name(),
-                    None,
-                    pair,
-                )?;
-                if let Some(release) = &release {
-                    attach_universal_initramfs_with_verified_release(
+    let (start_config, verified_runtime, prepared_admission) =
+        if let Some(assets) = portable_boot_assets {
+            require_portable_without_installed_bundle(true, bundle_archive.as_deref())?;
+            prepare_portable_source(
+                assets,
+                start_config,
+                backend.kind(),
+                |config, verified_runtime| {
+                    admit(AdmitInputs {
+                        rootfs: std::path::Path::new(&rootfs),
+                        kernel: config.kernel_path.as_deref().map(std::path::Path::new),
+                        backend_kind: backend.kind(),
+                        vm_name: &vm_name,
+                        sdk_sidecar: None,
+                        assets: &[],
+                        volumes: &config.volumes,
+                        bundle_archive: None,
+                        runtime_config: Some(config),
+                        verified_runtime: Some(verified_runtime),
+                        verified_runtime_owner: None,
+                    })
+                },
+                |config, admission| Ok(apply_boot_admission(config, admission)),
+            )?
+            .into_parts()
+        } else {
+            let prepared = mvm_hostd::plan_admission::prepare_entrypoint(
+                start_config,
+                backend.kind(),
+                |config| {
+                    let release = attach_runtime_overlay_if_cached_version_verified(
                         config,
                         backend.name(),
-                        release,
+                        None,
+                        pair,
                     )?;
-                } else {
-                    attach_universal_initramfs_if_cached(config, backend.name())?;
-                }
-                crate::launch::runtime_source::paired_release_evidence(config, release)
-            },
-            |config, verified_runtime| {
-                admit(AdmitInputs {
-                    rootfs: std::path::Path::new(&rootfs),
-                    kernel: config.kernel_path.as_deref().map(std::path::Path::new),
-                    backend_kind: backend.kind(),
-                    vm_name: &vm_name,
-                    sdk_sidecar: None,
-                    assets: &[],
-                    volumes: &config.volumes,
-                    bundle_archive: bundle_archive.as_deref(),
-                    runtime_config: Some(config),
-                    verified_runtime,
-                    verified_runtime_owner: None,
-                })
-            },
-        )?
-        .into_parts()
-    };
-    let native_owned = matches!(&admitted, BootAdmission::Owned(_));
-    let (substrate, context) = match admitted {
-        BootAdmission::Admitted(admitted) | BootAdmission::Owned(admitted) => {
-            let admitted = *admitted;
-            (admitted.substrate, admitted.context)
-        }
-    };
+                    if let Some(release) = &release {
+                        attach_universal_initramfs_with_verified_release(
+                            config,
+                            backend.name(),
+                            release,
+                        )?;
+                    } else {
+                        attach_universal_initramfs_if_cached(config, backend.name())?;
+                    }
+                    crate::launch::runtime_source::paired_release_evidence(config, release)
+                },
+                |config, verified_runtime| {
+                    admit(AdmitInputs {
+                        rootfs: std::path::Path::new(&rootfs),
+                        kernel: config.kernel_path.as_deref().map(std::path::Path::new),
+                        backend_kind: backend.kind(),
+                        vm_name: &vm_name,
+                        sdk_sidecar: None,
+                        assets: &[],
+                        volumes: &config.volumes,
+                        bundle_archive: bundle_archive.as_deref(),
+                        runtime_config: Some(config),
+                        verified_runtime,
+                        verified_runtime_owner: None,
+                    })
+                },
+            )?;
+            let (mut config, verified_runtime, admission) = prepared.into_parts();
+            let admission = apply_boot_admission(&mut config, admission);
+            if let Some(runtime) = &verified_runtime {
+                runtime.verify_config(&config).inspect_err(|error| {
+                    crate::admission::emit_failed(&admission.context, "guest-runtime", error);
+                })?;
+            }
+            (config, verified_runtime, admission)
+        };
+    let PreparedClientAdmission {
+        native_owned,
+        context,
+    } = prepared_admission;
     require_native_owner(backend.kind(), native_owned).inspect_err(|error| {
         crate::admission::emit_failed(&context, "backend-start", error);
-    })?;
-    substrate.apply_to(&mut start_config);
-    // The admitted executor prepares or freezes the selected pack's original
-    // closure at dispatch, after all of its post-admission checks.
-    let prepared = (|| {
-        if let Some(runtime) = &verified_runtime {
-            runtime.verify_config(&start_config)?;
-        }
-        if let Some(assets) = portable_boot_assets {
-            assets.verify_health_config(&start_config)?;
-        }
-        Ok::<(), anyhow::Error>(())
-    })();
-    prepared.inspect_err(|error| {
-        crate::admission::emit_failed(&context, "guest-runtime", error);
     })?;
 
     tracing::info!(vm = %vm_name, slot, "booting session VM");
@@ -963,6 +994,21 @@ fn boot_session_core(
     ))
 }
 
+fn apply_boot_admission(
+    config: &mut VmStartConfig,
+    admission: BootAdmission,
+) -> PreparedClientAdmission {
+    let native_owned = matches!(&admission, BootAdmission::Owned(_));
+    let admitted = match admission {
+        BootAdmission::Admitted(admitted) | BootAdmission::Owned(admitted) => *admitted,
+    };
+    admitted.substrate.apply_to(config);
+    PreparedClientAdmission {
+        native_owned,
+        context: admitted.context,
+    }
+}
+
 fn audit_entrypoint_dispatch_failure(
     emitter: &mvm_hostd::audit::emitter::AuditEmitter,
     plan: &mvm_core::plan::ExecutionPlan,
@@ -1013,6 +1059,206 @@ mod caller_registration_live_hvf;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct PortableSourceFixture {
+        runtime: mvm_build::guest_runtime::evidence::VerifiedReleaseRuntimeFixture,
+        source_refusal: Option<&'static str>,
+        apply_count: std::cell::Cell<u32>,
+        final_count: std::cell::Cell<u32>,
+    }
+
+    impl PortableSourceFixture {
+        fn new(directory: &std::path::Path) -> Self {
+            Self {
+                runtime: mvm_build::guest_runtime::evidence::verified_release_runtime_fixture(
+                    directory,
+                    mvm_core::arch::GuestArch::host(),
+                    mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+                    mvm_runtime::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION,
+                ),
+                source_refusal: None,
+                apply_count: std::cell::Cell::new(0),
+                final_count: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    impl PortableEntrypointSource for PortableSourceFixture {
+        fn apply(
+            &self,
+            config: &mut VmStartConfig,
+        ) -> Result<crate::launch::runtime_source::ReleaseRuntime> {
+            self.apply_count.set(self.apply_count.get() + 1);
+            if let Some(error) = self.source_refusal {
+                anyhow::bail!("{error}");
+            }
+            let release = std::sync::Arc::clone(&self.runtime.release);
+            config.runtime_release_proof = Some(release.proof().clone());
+            config.runtime_overlay_path = Some(self.runtime.overlay.display().to_string());
+            config.runtime_overlay_verity_path =
+                Some(self.runtime.overlay_verity.display().to_string());
+            config.runtime_overlay_roothash = Some(self.runtime.overlay_roothash.clone());
+            config.runtime_overlay_version = Some(release.proof().version.clone());
+            config.initrd_path = Some(self.runtime.initramfs.display().to_string());
+            config.kernel_read_sha256 = Some("canonical-portable-kernel".into());
+            Ok(release)
+        }
+
+        fn verify_final(&self, config: &VmStartConfig) -> Result<()> {
+            self.final_count.set(self.final_count.get() + 1);
+            anyhow::ensure!(
+                config.runtime_overlay_version.as_deref()
+                    == Some(self.runtime.release.proof().version.as_str())
+                    && config.kernel_read_sha256.as_deref() == Some("canonical-portable-kernel"),
+                "portable final config substituted the retained release"
+            );
+            Ok(())
+        }
+    }
+
+    fn portable_test_admission(
+        config: &VmStartConfig,
+        runtime: &mvm_runtime::runtime_evidence::VerifiedRuntimeSet,
+        backend: &AnyBackend,
+        ledger: &mvm_hostd::plan_admission::InMemoryNonceLedger,
+        keys: &std::path::Path,
+        audit: &std::path::Path,
+    ) -> crate::admission::AdmissionContext {
+        let mut params = crate::admission::admit_plan_tests::pinning_params(
+            std::path::Path::new(&config.rootfs_path),
+            ledger,
+        );
+        params.vm_name = &config.name;
+        params.runtime_config = Some(config);
+        params.backend_name = backend.name();
+        params.backend_kind = Some(backend.kind());
+        params.keys_dir = Some(keys);
+        params.audit_dir = Some(audit);
+        crate::admission::admit_plan_for_boot_with_verified_runtime(params, runtime)
+            .expect("portable fixture admission")
+    }
+
+    #[test]
+    fn portable_client_capability_keeps_exact_admission_and_refuses_final_mutation() {
+        let home = tempfile::tempdir().expect("home");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let runtime_dir = tempfile::tempdir().expect("runtime");
+        let keys = tempfile::tempdir().expect("keys");
+        let audit = tempfile::tempdir().expect("audit");
+        let rootfs = home.path().join("portable-rootfs.ext4");
+        std::fs::write(&rootfs, b"portable rootfs").expect("rootfs");
+        let source = PortableSourceFixture::new(runtime_dir.path());
+        let backend = AnyBackend::from_hypervisor("mock");
+        let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::new();
+        let name = "portable-client-final-mutation";
+        let admitted_plan = std::cell::RefCell::new(None);
+
+        let error = match prepare_portable_source(
+            &source,
+            VmStartConfig {
+                name: name.into(),
+                rootfs_path: rootfs.display().to_string(),
+                ..Default::default()
+            },
+            backend.kind(),
+            |config, runtime| {
+                let context = portable_test_admission(
+                    config,
+                    runtime,
+                    &backend,
+                    &ledger,
+                    keys.path(),
+                    audit.path(),
+                );
+                admitted_plan.replace(Some(context.admitted.plan_id().clone()));
+                Ok(context)
+            },
+            |config, context| {
+                config.kernel_read_sha256 = Some("post-admission-substitution".into());
+                Ok(PreparedClientAdmission {
+                    native_owned: false,
+                    context,
+                })
+            },
+        ) {
+            Ok(_) => panic!("portable final mutation must refuse"),
+            Err(error) => error,
+        };
+
+        assert!(
+            format!("{error:#}").contains("portable final config substituted"),
+            "{error:#}"
+        );
+        assert_eq!(source.apply_count.get(), 1);
+        assert_eq!(source.final_count.get(), 1);
+        assert!(!matches!(
+            backend.status(&VmId(name.into())),
+            Ok(mvm_core::vm_backend::VmStatus::Running)
+        ));
+        let chain = std::fs::read_to_string(audit.path().join("local.jsonl"))
+            .expect("portable audit chain");
+        let plan_id = admitted_plan
+            .borrow()
+            .as_ref()
+            .expect("exact admission observed")
+            .0
+            .clone();
+        let failures: Vec<serde_json::Value> = chain
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("portable audit entry"))
+            .filter(|entry: &serde_json::Value| entry["entry"]["event"] == "plan.failed")
+            .collect();
+        assert_eq!(failures.len(), 1, "{chain}");
+        assert_eq!(failures[0]["entry"]["plan_id"], plan_id);
+        assert_eq!(
+            failures[0]["entry"]["labels"]["error_class"],
+            "guest-runtime"
+        );
+    }
+
+    #[test]
+    fn portable_client_source_integrity_refusal_precedes_admission_and_final_check() {
+        let home = tempfile::tempdir().expect("home");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let runtime_dir = tempfile::tempdir().expect("runtime");
+        let mut source = PortableSourceFixture::new(runtime_dir.path());
+        source.source_refusal = Some("portable source integrity refused");
+        let backend = AnyBackend::from_hypervisor("mock");
+        let admitted = std::cell::Cell::new(false);
+
+        let error = match prepare_portable_source(
+            &source,
+            VmStartConfig {
+                name: "portable-client-source-refusal".into(),
+                ..Default::default()
+            },
+            backend.kind(),
+            |_, _| -> Result<crate::admission::AdmissionContext> {
+                admitted.set(true);
+                anyhow::bail!("admission must not run")
+            },
+            |_, context| {
+                Ok(PreparedClientAdmission {
+                    native_owned: false,
+                    context,
+                })
+            },
+        ) {
+            Ok(_) => panic!("portable source integrity must refuse"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("source integrity refused"));
+        assert_eq!(source.apply_count.get(), 1);
+        assert_eq!(source.final_count.get(), 0);
+        assert!(!admitted.get(), "source refusal precedes admission");
+        assert!(!matches!(
+            backend.status(&VmId("portable-client-source-refusal".into())),
+            Ok(mvm_core::vm_backend::VmStatus::Running)
+        ));
+    }
 
     #[test]
     fn selector_original_admission_refuses_before_owned_images_and_native_preparation() {
@@ -1107,37 +1353,6 @@ mod tests {
     }
 
     #[test]
-    fn a_session_config_carrying_a_release_proof_must_carry_verified_evidence() {
-        let config = VmStartConfig {
-            runtime_release_proof: Some(mvm_core::protocol::runtime_release::RuntimeReleaseProof {
-                archive: "/mock/archive".into(),
-                checksum: "/mock/checksum".into(),
-                signature_bundle: "/mock/signature".into(),
-                archive_sha256: "a".repeat(64),
-                version: "selected-release".into(),
-                arch: mvm_core::arch::GuestArch::host(),
-            }),
-            runtime_overlay_version: Some("selected-release".into()),
-            ..Default::default()
-        };
-        let error = session_runtime_set(&config, None)
-            .expect_err("a selected release proof with no verified evidence is refused");
-        assert!(
-            format!("{error:#}").contains("requires verified launch evidence"),
-            "{error:#}"
-        );
-    }
-
-    #[test]
-    fn a_session_config_with_no_release_proof_carries_no_evidence() {
-        assert!(
-            session_runtime_set(&VmStartConfig::default(), None)
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[test]
     fn legacy_hvf_refuses_before_launch_but_owned_hvf_passes_gate() {
         use mvm_core::vm_backend::BackendKind;
         let launched = std::cell::Cell::new(false);
@@ -1150,9 +1365,23 @@ mod tests {
     #[test]
     fn portable_selection_cannot_override_an_installed_bundle() {
         let archive = std::path::Path::new("/installed/bundle.mvmpkg");
+        let applied = std::cell::Cell::new(false);
+        let admitted = std::cell::Cell::new(false);
+        let started = std::cell::Cell::new(false);
         let refused = require_portable_without_installed_bundle(true, Some(archive))
+            .map(|()| {
+                applied.set(true);
+                admitted.set(true);
+                started.set(true);
+            })
             .expect_err("portable producer selection must not displace bundle custody");
         assert!(refused.to_string().contains("installed bundle"));
+        assert!(
+            !applied.get(),
+            "bundle coexistence refusal must precede portable application"
+        );
+        assert!(!admitted.get(), "bundle coexistence cannot admit portable");
+        assert!(!started.get(), "bundle coexistence cannot start a backend");
         require_portable_without_installed_bundle(false, Some(archive))
             .expect("the installed bundle alone is a distinct selection");
         require_portable_without_installed_bundle(true, None)
