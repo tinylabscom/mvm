@@ -4,7 +4,8 @@
 //! on the host. An explicit liveness signal from the unit's current epoch, as
 //! the epoch gate decides it, resets the deadline to one period from now. A
 //! pass the host runs on a timer, [`LivenessDeadlines::expire`], fences every
-//! unit whose deadline has passed: it commits a replacement of the watched
+//! unit whose deadline has passed, and [`LivenessDeadlines::expire_unit`] does
+//! the same for one unit, for the host process that owns it: it commits a replacement of the watched
 //! epoch to the workload ledger, the record the gate reads, so every service
 //! that asks the gate refuses that epoch from then on, and writes
 //! `liveness.epoch_replaced` to the tenant's chain. Expiry fences and reports;
@@ -93,6 +94,18 @@ pub struct Expiry {
     pub current: ExecutionEpoch,
 }
 
+/// What a pass over one unit did, and when to look at it again.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct UnitPass {
+    /// The fence this pass committed, if the unit's deadline had passed.
+    pub expired: Option<Expiry>,
+    /// When the next pass is due: the unit's stored deadline, or one period
+    /// from now while no deadline is armed. `None` once the caller's epoch can
+    /// never act again (replaced or quarantined) or the admitted topology
+    /// declares no period for the unit, so there is nothing left to watch.
+    pub next: Option<DateTime<Utc>>,
+}
+
 /// What one expiry pass did.
 #[derive(Debug, Default)]
 pub struct ExpiryPass {
@@ -165,11 +178,10 @@ impl LivenessDeadlines<'_> {
             caller.tenant,
             self.host_signer_keys_dir,
         )?;
-        let period = topology
+        let Some(period) = topology
             .as_ref()
-            .and_then(|t| t.units.iter().find(|u| u.workload == *caller.unit))
-            .and_then(|u| u.liveness_period_ms);
-        let Some(period) = period else {
+            .and_then(|t| liveness_period(t, caller.unit))
+        else {
             if !explicit {
                 return Ok(());
             }
@@ -253,20 +265,76 @@ impl LivenessDeadlines<'_> {
                 continue;
             };
             let tenant = TenantId(tenant.to_string());
-            if let Err(e) = self.expire_tenant(&home, &tenant, authority, &mut pass.expired) {
+            if let Err(e) = self.expire_tenant(&home, &tenant, None, authority, &mut pass.expired) {
                 pass.failures.push((tenant, e));
             }
         }
         Ok(pass)
     }
 
+    /// Fence the caller's unit if its deadline has passed, under the same lock
+    /// and with the same exactly-once commit as [`Self::expire`], and say when
+    /// to pass again.
+    ///
+    /// # Errors
+    ///
+    /// Any failure to read the topology, the deadlines or the gate's record,
+    /// to commit the fence or to audit it; the next pass retries.
+    pub fn expire_unit(
+        &self,
+        caller: &LivenessCaller<'_>,
+        authority: &dyn WorkloadAuthority,
+    ) -> Result<UnitPass> {
+        let home = mvm_core::config::mvm_home_strict().context("resolving the mvm home")?;
+        let mut expired = Vec::new();
+        let (topology, deadlines) = self.expire_tenant(
+            &home,
+            caller.tenant,
+            Some(&caller.unit.0),
+            authority,
+            &mut expired,
+        )?;
+        let expired = expired.pop();
+        let Some(period) = topology
+            .as_ref()
+            .and_then(|t| liveness_period(t, caller.unit))
+        else {
+            return Ok(UnitPass {
+                expired,
+                next: None,
+            });
+        };
+        let gate = CommandGate::load_at(&home).context("loading the epoch gate's record")?;
+        // A standby epoch not yet promoted may still become current; any other
+        // refusal is final for the caller's epoch.
+        let ended = matches!(
+            gate.admit(&caller.unit.0, caller.epoch),
+            Err(denial) if !matches!(denial, Denial::EpochNotPromoted { .. })
+        );
+        let next = if ended {
+            None
+        } else {
+            match deadlines.get(&caller.unit.0) {
+                Some(d) => Some(d.deadline),
+                None => self
+                    .clock
+                    .now()
+                    .checked_add_signed(chrono::Duration::milliseconds(i64::from(period.get()))),
+            }
+        };
+        Ok(UnitPass { expired, next })
+    }
+
+    /// Expire `only` the named unit, or every unit, of `tenant`. Returns the
+    /// topology it read and the deadlines left after the pass.
     fn expire_tenant(
         &self,
         home: &Path,
         tenant: &TenantId,
+        only: Option<&str>,
         authority: &dyn WorkloadAuthority,
         expired: &mut Vec<Expiry>,
-    ) -> Result<()> {
+    ) -> Result<(Option<Topology>, Deadlines)> {
         let topology = crate::topology_admission::last_admitted_topology(
             home,
             tenant,
@@ -287,7 +355,7 @@ impl LivenessDeadlines<'_> {
         let gate = CommandGate::load_at(home).context("loading the epoch gate's record")?;
         let overdue: Vec<String> = deadlines
             .iter()
-            .filter(|(_, d)| d.has_passed(now))
+            .filter(|(unit, d)| only.is_none_or(|o| o == unit.as_str()) && d.has_passed(now))
             .map(|(unit, _)| unit.clone())
             .collect();
         for unit in overdue {
@@ -336,7 +404,7 @@ impl LivenessDeadlines<'_> {
             store(&path, &deadlines)?;
             expired.push(expiry);
         }
-        Ok(())
+        Ok((topology, deadlines))
     }
 
     fn audit_expiry(&self, expiry: &Expiry, watched: &Deadline) -> Result<()> {
@@ -370,6 +438,16 @@ impl LivenessDeadlines<'_> {
             )),
         }
     }
+}
+
+/// The liveness period `topology` declares for `unit`, if any.
+#[must_use]
+pub fn liveness_period(topology: &Topology, unit: &WorkloadId) -> Option<std::num::NonZeroU32> {
+    topology
+        .units
+        .iter()
+        .find(|u| u.workload == *unit)
+        .and_then(|u| u.liveness_period_ms)
 }
 
 /// Keep only deadlines of units `topology` still declares a period for, so

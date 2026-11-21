@@ -86,13 +86,21 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// `cargo <args> --unit-graph`, which the pinned nightly accepts and which
-/// compiles nothing.
-fn unit_graph(cargo_args: &str) -> Result<String> {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let out = Command::new(cargo)
+/// The `cargo <args> --unit-graph` command. `-Z unstable-options` is nightly
+/// only and the release toolchain is stable, so `RUSTC_BOOTSTRAP=1` lets the
+/// pinned stable cargo accept it; the graph compiles nothing.
+fn unit_graph_command(cargo: &str, cargo_args: &str) -> Command {
+    let mut command = Command::new(cargo);
+    command
         .args(cargo_args.split_whitespace())
         .args(["--unit-graph", "-Z", "unstable-options"])
+        .env("RUSTC_BOOTSTRAP", "1");
+    command
+}
+
+fn unit_graph(cargo_args: &str) -> Result<String> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let out = unit_graph_command(&cargo, cargo_args)
         .output()
         .context("spawn cargo")?;
     if !out.status.success() {
@@ -607,6 +615,29 @@ fn flag_values(args: &[String], flag: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unit_graph_command_opts_stable_cargo_into_unstable_options() {
+        let command = unit_graph_command("cargo", "build --release -p x");
+        let args: Vec<_> = command.get_args().map(|a| a.to_string_lossy()).collect();
+        assert_eq!(
+            args,
+            [
+                "build",
+                "--release",
+                "-p",
+                "x",
+                "--unit-graph",
+                "-Z",
+                "unstable-options"
+            ]
+        );
+        assert!(
+            command
+                .get_envs()
+                .any(|(k, v)| k == "RUSTC_BOOTSTRAP" && v == Some("1".as_ref()))
+        );
+    }
 
     fn unit(pkg: &str, kind: &str, mode: &str, opt: &str, panic: &str, features: &[&str]) -> Value {
         serde_json::json!({

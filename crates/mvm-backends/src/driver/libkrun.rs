@@ -765,6 +765,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vm = running_vm_at(dir.path());
         let ready = dir.path().join("ready");
+        // Another test may have emptied the process-wide PATH; taking the env lock keeps
+        // this spawn out of that window.
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let mut child = std::process::Command::new("sh")
             .arg("-c")
             .arg(format!(

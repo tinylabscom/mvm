@@ -84,6 +84,7 @@ pub mod stream;
 /// custody stay host-side.
 #[cfg(feature = "protocol")]
 pub mod substitution;
+pub mod timestamp;
 #[cfg(feature = "protocol")]
 pub mod verify;
 

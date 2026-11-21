@@ -1,6 +1,6 @@
 use std::num::{NonZeroU32, NonZeroU64};
 use std::os::unix::fs::PermissionsExt;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use chrono::{Duration, TimeZone};
 use mvm_contract::assurance::Sha256Digest;
@@ -106,7 +106,7 @@ struct Host {
     home: tempfile::TempDir,
     _signer: HostSigner,
     emitter: AuditEmitter,
-    clock: TestClock,
+    clock: Arc<TestClock>,
 }
 
 impl Host {
@@ -121,7 +121,7 @@ impl Host {
             home,
             _signer: signer,
             emitter,
-            clock: TestClock(Mutex::new(t0() + Duration::days(1))),
+            clock: Arc::new(TestClock(Mutex::new(t0() + Duration::days(1)))),
         }
     }
 
@@ -146,7 +146,7 @@ impl Host {
                 isolated: None,
                 live: Vec::new(),
             },
-            clock: &self.clock,
+            clock: self.clock.as_ref(),
             host_signer_keys_dir: Some(&keys),
             emitter: &self.emitter,
         })
@@ -156,7 +156,7 @@ impl Host {
         LivenessDeadlines {
             host_signer_keys_dir: None,
             emitter: &self.emitter,
-            clock: &self.clock,
+            clock: self.clock.as_ref(),
         }
     }
 
@@ -308,7 +308,7 @@ fn repeated_passes_and_a_restart_commit_the_expiry_once() {
     let restarted = LivenessDeadlines {
         host_signer_keys_dir: None,
         emitter: &emitter,
-        clock: &host.clock,
+        clock: host.clock.as_ref(),
     };
     let pass = restarted.expire(&host.store()).unwrap();
     assert!(pass.expired.is_empty() && pass.failures.is_empty());
@@ -327,7 +327,7 @@ fn a_restarted_host_keeps_a_running_deadline_rather_than_restarting_it() {
     let restarted = LivenessDeadlines {
         host_signer_keys_dir: None,
         emitter: &emitter,
-        clock: &host.clock,
+        clock: host.clock.as_ref(),
     };
     assert!(restarted.expire(&host.store()).unwrap().expired.is_empty());
     host.clock.advance_ms(i64::from(PERIOD_MS) / 2);
@@ -508,4 +508,195 @@ fn admission_refuses_a_period_no_backend_deadline_or_host_range_serves() {
         host.admit(&topology(1, PERIOD_MS), BackendKind::Mock),
         Ok(TopologyAdmission::Admitted(_))
     ));
+}
+
+mod owner {
+    use std::time::Duration as StdDuration;
+
+    use super::*;
+    use crate::supervisor::lifecycle::liveness_expiry::{LivenessWatch, arm_for_supervisor};
+    use crate::supervisor::lifecycle::wall_clock::SupervisorTimerInputs;
+
+    const PERIOD: StdDuration = StdDuration::from_millis(PERIOD_MS as u64);
+
+    /// One ledger owner shared by every racer, as the coordinator is.
+    #[derive(Clone)]
+    struct Shared(Arc<OwnedWorkloadStore>);
+
+    impl WorkloadAuthority for Shared {
+        fn ledger(&self) -> Result<WorkloadLedger> {
+            self.0.ledger()
+        }
+
+        fn commit(
+            &self,
+            change: &WorkloadChange,
+        ) -> Result<mvm_core::host_interface::workload::WorkloadCommit> {
+            self.0.as_ref().commit(change)
+        }
+    }
+
+    fn watch(host: &Host, epoch_n: u64) -> LivenessWatch {
+        watch_with(host, epoch_n, Box::new(host.store()))
+    }
+
+    fn watch_with(
+        host: &Host,
+        epoch_n: u64,
+        authority: Box<dyn WorkloadAuthority + Send + Sync>,
+    ) -> LivenessWatch {
+        let signer =
+            crate::audit::host_keypair::load_or_init_at(&keys_dir(host.home.path())).unwrap();
+        LivenessWatch {
+            tenant: tenant(),
+            unit: id("controller"),
+            epoch: epoch(epoch_n),
+            period: PERIOD,
+            host_signer_keys_dir: None,
+            emitter: Arc::new(
+                AuditEmitter::with_dir(signer.signing, &host.home.path().join("audit")).unwrap(),
+            ),
+            clock: host.clock.clone(),
+            authority,
+        }
+    }
+
+    /// Run `watch` with a wait that moves the test clock instead of sleeping,
+    /// for at most `waits` waits. Returns the pauses it asked for.
+    fn run(host: &Host, watch: &LivenessWatch, waits: usize) -> Vec<StdDuration> {
+        let mut pauses = Vec::new();
+        watch.run(|pause| {
+            pauses.push(pause);
+            host.clock
+                .advance_ms(i64::try_from(pause.as_millis()).unwrap());
+            pauses.len() < waits
+        });
+        pauses
+    }
+
+    #[test]
+    fn the_owner_sleeps_to_the_deadline_then_fences_once_and_stops() {
+        let host = Host::admitted();
+        host.signal("controller", 1).unwrap();
+        let pauses = run(&host, &watch(&host, 1), 5);
+        assert_eq!(pauses, vec![PERIOD], "one wake, at the deadline");
+        assert_eq!(host.current("controller"), epoch(2));
+        assert_eq!(host.events(LIVENESS_EPOCH_REPLACED_EVENT).len(), 1);
+        assert_eq!(host.current("reader"), epoch(1));
+    }
+
+    #[test]
+    fn a_signal_before_the_deadline_moves_the_wake_and_fences_nothing() {
+        let host = Host::admitted();
+        host.signal("controller", 1).unwrap();
+        let watch = watch(&host, 1);
+        let first = watch.pass().unwrap().unwrap();
+        host.clock.advance_ms(i64::from(PERIOD_MS) / 2);
+        host.signal("controller", 1).unwrap();
+        host.clock.advance_ms(i64::from(PERIOD_MS) / 2);
+        let second = watch.pass().unwrap().unwrap();
+        assert_eq!(
+            second - first,
+            Duration::milliseconds(i64::from(PERIOD_MS) / 2)
+        );
+        assert_eq!(host.current("controller"), epoch(1));
+        assert!(host.events(LIVENESS_EPOCH_REPLACED_EVENT).is_empty());
+    }
+
+    #[test]
+    fn an_unarmed_deadline_is_looked_at_again_a_period_on() {
+        let host = Host::admitted();
+        let watch = watch(&host, 1);
+        assert_eq!(
+            watch.pass().unwrap(),
+            Some(host.clock.now() + Duration::milliseconds(i64::from(PERIOD_MS)))
+        );
+        assert_eq!(host.current("controller"), epoch(1));
+    }
+
+    #[test]
+    fn a_restarted_owner_fences_an_overdue_stored_deadline_before_it_waits() {
+        let host = Host::admitted();
+        host.signal("controller", 1).unwrap();
+        host.clock.advance_ms(i64::from(PERIOD_MS) * 5);
+        assert!(run(&host, &watch(&host, 1), 5).is_empty());
+        assert_eq!(host.current("controller"), epoch(2));
+        assert_eq!(host.events(LIVENESS_EPOCH_REPLACED_EVENT).len(), 1);
+    }
+
+    #[test]
+    fn a_replaced_or_quarantined_epoch_is_not_watched() {
+        let host = Host::admitted();
+        host.signal("controller", 1).unwrap();
+        host.store()
+            .commit(&WorkloadChange::Quarantine {
+                workload: "controller".to_string(),
+            })
+            .unwrap();
+        assert_eq!(watch(&host, 1).pass().unwrap(), None);
+        assert!(host.events(LIVENESS_EPOCH_REPLACED_EVENT).is_empty());
+    }
+
+    #[test]
+    fn owners_and_the_host_walk_racing_commit_the_expiry_once() {
+        let host = Host::admitted();
+        host.signal("controller", 1).unwrap();
+        host.clock.advance_ms(i64::from(PERIOD_MS));
+        let store = Shared(Arc::new(host.store()));
+        let (a, b) = (
+            watch_with(&host, 1, Box::new(store.clone())),
+            watch_with(&host, 1, Box::new(store.clone())),
+        );
+        let expired = std::thread::scope(|s| {
+            let owners = [&a, &b].map(|w| {
+                s.spawn(move || {
+                    w.pass().unwrap();
+                })
+            });
+            let walk = s.spawn(|| {
+                let pass = host.deadlines().expire(&store).unwrap();
+                assert!(pass.failures.is_empty(), "{:?}", pass.failures);
+                pass.expired.len()
+            });
+            for owner in owners {
+                owner.join().unwrap();
+            }
+            walk.join().unwrap()
+        });
+        assert!(expired <= 1);
+        assert_eq!(host.current("controller"), epoch(2), "one replacement");
+        assert_eq!(host.events(LIVENESS_EPOCH_REPLACED_EVENT).len(), 1);
+    }
+
+    #[test]
+    fn a_supervisor_whose_unit_declares_no_period_arms_nothing() {
+        let host = Host::admitted();
+        let keys = keys_dir(host.home.path());
+        let key_path = keys.join("host-signer.ed25519");
+        let audit = host.home.path().join("audit");
+        let state = tempfile::tempdir().unwrap();
+        let pid = state.path().join("vm.pid");
+        let arm = |plan: &serde_json::Value| {
+            arm_for_supervisor(&SupervisorTimerInputs {
+                plan_json: Some(plan),
+                audit_dir: Some(&audit),
+                signing_key_path: Some(&key_path),
+                vm_state_dir: state.path(),
+                pid_file: &pid,
+            })
+            .unwrap()
+            .is_none()
+        };
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant(TENANT)
+            .workload("reader")
+            .build();
+        assert!(arm(&serde_json::to_value(&plan).unwrap()), "no topology");
+        plan.topology = Some(mvm_contract::plan::topology::TopologyBinding {
+            topology: Sha256Digest::from_bytes(&[1; 32]),
+            unit: id("reader"),
+        });
+        assert!(arm(&serde_json::to_value(&plan).unwrap()), "no period");
+        assert!(!host.path().exists(), "nothing was read or armed");
+    }
 }
