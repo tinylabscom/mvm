@@ -562,6 +562,11 @@ fn serve_local(
             std::thread::sleep(POLL_INTERVAL);
         }
         stop_if_unordered(&refused, &unknown)?;
+        // Read again: the wait on the guest can outlast a quarantine, and an
+        // unmarked expiry commit after one is refused and poisons the journal.
+        if workload_is_quarantined(&home, unit, current_epoch) {
+            return Err(run_retention_pass(&service, &retention_flag));
+        }
         match service.maintain_local() {
             Ok(()) | Err(JournalError::MaintenancePending) => {}
             Err(error) => return Err(Error::other(error)),
@@ -1977,6 +1982,215 @@ mod tests {
         assert!(
             paths.journal.is_dir(),
             "VM teardown cannot erase accepted history"
+        );
+    }
+
+    /// What the helper's whole loop did when its workload was quarantined while
+    /// it was parked waiting on the guest.
+    struct QuarantinedLoop {
+        outcome: Error,
+        before: u64,
+        after: u64,
+    }
+
+    /// The guest's one message is sealed under a template that expires it
+    /// `expires_in_ms` after the keys are derived. With `overdue` the
+    /// quarantine lands once the message is past expiry, otherwise before. The
+    /// helper is parked on its next guest connection; closing that connection
+    /// wakes the loop after the quarantine.
+    fn run_loop_through_a_quarantine(overdue: bool) -> QuarantinedLoop {
+        use ed25519_dalek::SigningKey;
+        use mvm_contract::protocol::mailbox::PrincipalId;
+        use mvm_core::mailbox::frame::{OWN_MAILBOX_RECIPIENT, OutboxMessage};
+
+        let expires_in_ms: i64 = if overdue { 3_000 } else { 60_000 };
+        let home = tempfile::tempdir_in("/tmp").expect("isolated host home");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let keys_dir = mvm_core::config::mvm_keys_dir();
+        crate::audit::host_keypair::load_or_init_at(&keys_dir).expect("host signer");
+        let state = tempfile::tempdir_in("/tmp").expect("VM state");
+        let mut grant = grant(&keys_dir);
+        grant.retention = Some(
+            mvm_contract::protocol::mailbox::MailboxRetentionPolicy::new(10_000)
+                .expect("signed retention"),
+        );
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.mailbox = Some(grant);
+        plan.image.name = state
+            .path()
+            .file_name()
+            .expect("VM name")
+            .to_string_lossy()
+            .into_owned();
+        plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
+        std::fs::write(
+            state.path().join("plan.json"),
+            serde_json::to_vec(&plan).expect("plan"),
+        )
+        .expect("admitted plan");
+        let binding = MailboxReaderBootBinding::mint(
+            &plan,
+            SigningKey::from_bytes(&[45; 32]).verifying_key(),
+            SigningKey::from_bytes(&[44; 32]).verifying_key().to_bytes(),
+        )
+        .expect("cold boot identity");
+        binding.persist(state.path()).expect("persist guest boot");
+        {
+            use base64::Engine as _;
+            mvm_vmm::host::flowmux_identity::InheritableIdentity {
+                session_id: "production-guest".into(),
+                guest_verifying_key_base64: base64::engine::general_purpose::STANDARD
+                    .encode(SigningKey::from_bytes(&[45; 32]).verifying_key().as_bytes()),
+            }
+            .persist(state.path())
+            .expect("persist pinned guest identity");
+        }
+        // An operator template that expires the guest's messages in seconds.
+        let default_keys =
+            derive_launch_keys(&keys_dir, &grant, &test_secret()).expect("default keys");
+        let (_, sealer) = default_keys.trust(grant.epoch);
+        let expires = crate::mailbox_launch::actor_template::current_time_ms().expect("clock")
+            + expires_in_ms;
+        let mut template = crate::mailbox_launch::MailboxTemplate {
+            capability: sealer.capability,
+            header: sealer.header,
+            routing: sealer.routing,
+        };
+        template.capability.expires_at_unix_ms = expires;
+        template.header.expires_at_unix_ms = expires;
+        template.routing.expires_at_unix_ms = expires;
+        std::fs::write(
+            keys_dir.join("mailbox-template.json"),
+            serde_json::to_vec(&template).expect("template"),
+        )
+        .expect("operator template");
+        let posture = MailboxLaunchPosture::for_test(&plan, Variant::Prod);
+        let keys =
+            derive_launch_keys(&keys_dir, &grant, &test_secret()).expect("derived mailbox keys");
+        let address = mvm_contract::protocol::mailbox::MailboxAddress {
+            mailbox: grant.mailbox,
+            ..keys.address()
+        };
+        let retained = RetainedMailboxKeys::provision_or_open(
+            &keys_dir,
+            &plan,
+            &plan.image.name,
+            &posture,
+            Some(binding.boot),
+            address,
+        )
+        .expect("signed custody");
+        let paths = retained.storage_paths(&keys_dir).expect("persistent paths");
+        let guest_port = home.path().join("guest-port.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&guest_port).expect("guest port");
+        listener
+            .set_nonblocking(true)
+            .expect("bounded guest accept");
+        let coordinator = crate::policy_generation::coordinator::serve_in_process(home.path())
+            .expect("coordinator for the destination");
+        let config = MailboxProcessConfig {
+            actor: None,
+            keys,
+            keys_dir: keys_dir.clone(),
+            home: home.path().to_path_buf(),
+            grant,
+            socket: home.path().join("mailbox.sock"),
+            route: HostDialRoute::PortSocket(guest_port),
+            posture: Some(posture.handoff(Some(binding.boot))),
+            reader_boot: Some(binding),
+            vm_state_dir: state.path().to_path_buf(),
+            coordinator: Some(coordinator.clone()),
+        };
+        let (stopped_tx, stopped_rx) = sync_channel(1);
+        let helper = std::thread::spawn(move || {
+            let outcome = serve_verified(config);
+            let _ = stopped_tx.send(());
+            outcome
+        });
+        let outbox = home.path().join("outbox");
+        let message = OutboxMessage::new(
+            PrincipalId::from_bytes(OWN_MAILBOX_RECIPIENT),
+            b"expires soon".to_vec(),
+        );
+        mvm_agentd::mailbox_outbox::write_outbox(&outbox, &message).expect("outbox");
+        let mut stream = accept_guest(&listener);
+        mvm_agentd::mailbox_outbox::forward_local_outbox(
+            &mut stream,
+            &outbox,
+            &ed25519_dalek::VerifyingKey::from_bytes(&grant.authority_key).expect("authority"),
+            grant.mailbox,
+            grant.epoch,
+        )
+        .expect("accepted before it expires");
+        drop(stream);
+        let ledger_cursor = || {
+            let bytes = mvm_core::host_interface::workload::read_ledger_bytes_at(home.path())
+                .expect("ledger readable")
+                .expect("ledger exists");
+            serde_json::from_slice::<mvm_core::host_interface::workload::CanonicalLedger>(&bytes)
+                .expect("ledger parses")
+                .destinations[paths.destination.as_str()]
+            .tip
+            .cursor
+        };
+        // Past expiry, with the helper parked on its next guest connection.
+        if overdue {
+            let now = crate::mailbox_launch::actor_template::current_time_ms().expect("clock");
+            std::thread::sleep(Duration::from_millis(
+                u64::try_from(expires - now).unwrap_or(0) + 500,
+            ));
+        }
+        let before = ledger_cursor();
+        let workload = plan.workload.0.clone();
+        crate::policy_generation::coordinator::commit_workload(
+            &coordinator,
+            &mvm_core::host_interface::workload::WorkloadChange::Quarantine { workload },
+        )
+        .expect("quarantine");
+        assert!(
+            !helper.is_finished(),
+            "the helper does not stop on a ledger change alone"
+        );
+        drop(accept_guest(&listener));
+        let stopped = stopped_rx.recv_timeout(Duration::from_secs(20));
+        let outcome = if stopped.is_ok() {
+            helper.join().expect("helper task")
+        } else {
+            panic!("the helper did not stop within the bound after the quarantine")
+        };
+        QuarantinedLoop {
+            outcome: outcome.expect_err("a quarantined helper never ends cleanly"),
+            before,
+            after: ledger_cursor(),
+        }
+    }
+
+    #[test]
+    fn a_quarantine_while_the_helper_serves_ends_it_with_the_retention_pass() {
+        let run = run_loop_through_a_quarantine(false);
+        assert_eq!(
+            run.outcome.kind(),
+            ErrorKind::PermissionDenied,
+            "{:?}",
+            run.outcome
+        );
+    }
+
+    #[test]
+    fn an_overdue_message_at_quarantine_is_expired_by_the_retention_pass() {
+        let run = run_loop_through_a_quarantine(true);
+        assert_eq!(
+            run.outcome.kind(),
+            ErrorKind::PermissionDenied,
+            "{:?}",
+            run.outcome
+        );
+        assert!(
+            run.after > run.before,
+            "the expiry reached the ledger after the quarantine: {} -> {}",
+            run.before,
+            run.after
         );
     }
 

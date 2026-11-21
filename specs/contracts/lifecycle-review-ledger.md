@@ -501,8 +501,13 @@ read. Only hostd's admitted start, warm claim and checkpoint fork read it a
 second time; a start that reaches the backend without an admitted plan in hand
 (`start_prepared` in `mvm-client`, the unadmitted branch of the transient exec
 path in `mvm-cli`) does not, so the operator still stops the machine after
-quarantining. The warm-claim and fork call sites have no test that reaches
-them; the shared check and the admitted start are tested; mailbox
+quarantining. The admitted start, the CLI warm-claim path and the checkpoint fork
+call site are each tested with a workload quarantined after admission: the
+child is stopped and the caller gets an error, not a claimed child, and a stop
+that fails is reported as uncertain. The warm claim is tested on the mock
+backend through `claim_warm` in `mvm-client`, and the fork with a Firecracker
+shaped checkpoint and a recording restorer; neither runs a real VMM. Only a
+quarantine is tested at those two sites, not a replacement. Mailbox
 destination commits are ordered by this lane only on the production local path
 (next section). Quarantine and replace need the coordinator process and are
 refused when it cannot start. A failure
@@ -601,8 +606,15 @@ a coordinator outage. When the per-VM helper sees its workload quarantined it
 stops serving, runs one bounded expiry-and-compaction pass whose commits are
 marked retention-only and accepted by the ledger, and exits. The mark is signed
 by the destination key and trusted from the host helper; the ledger cannot check
-that a marked commit only expires or compacts. Records whose retention ends
-later, a helper that was refused before it noticed, an already-exited helper,
+that a marked commit only expires or compacts. A test runs the whole
+helper loop against an in-process coordinator: a quarantine that lands while the
+helper is parked on the guest, with nothing due, ends it with the retention
+pass and a permission-denied exit. A second test quarantines with a message
+already past expiry: the helper reads the ledger again after its wait on the
+guest and before its ordinary maintenance, so the pass expires the message and
+the destination's tip advances. Records whose retention ends
+later, a helper whose ordinary maintenance commit raced the quarantine between
+that read and the commit, an already-exited helper,
 and actor journals are not covered, and their ciphertext can outlive its
 retention until the store is removed by hand. The ordering hook is
 attached by the one production opener; a future opener must attach it too. A
