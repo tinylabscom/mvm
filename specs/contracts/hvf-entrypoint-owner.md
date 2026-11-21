@@ -311,6 +311,22 @@ Expiry is terminal; mismatches and peer refusals issue no permit. This adds no
 endpoint, listener, binary, key, journal, receipt, durable state, VM effect or
 positive factory, and it preserves the verifier's refusal on platforms without
 the macOS primitive.
+The macOS-gated connected adapter accepts only an already-connected
+`UnixStream`, a trusted expected UID and exact designated requirement, and an
+independently selected nonzero intent digest. It checks `getpeereid`, captures
+the exact 32-byte `LOCAL_PEERTOKEN`, and gives `VerifiedMacPeer` an owned
+duplicate of that same connection for recapture. It then drives exactly one
+five-second-per-frame, 512-byte-capped begin/challenge/confirm/accepted exchange
+and returns the effect-free permit only after the accepted frame is written and
+the peer revalidates again. Oversize, truncation, binding, replay, timeout, peer
+and wire failures close/refuse without a permit. Extra bytes already buffered
+at transition checks refuse; the adapter never processes a second exchange,
+but does not claim that a nonblocking queue peek rejects bytes arriving later.
+The adapter still creates or discovers no socket, endpoint, service,
+deployment, key, intent, receipt, journal or VM action and is not a
+commissioning factory. Receipt of `Accepted` is not durable commissioning
+evidence; a future effectful consumer must revalidate again immediately before
+mutation.
 The future initializer still owns intent authentication and consumption, key
 creation, deployment-receipt and completion publication, and journal
 initialization. This slice supplies none of those operations.
@@ -715,13 +731,16 @@ who is on the socket; the proof says who is allowed. The pid alone is not
 compared at step 5 because the probes showed that `exec` changes `pidversion`
 and leaves the pid and `LOCAL_PEERPID` unchanged.
 
-The source-only verifier prerequisite now exists under
-`mvm-hostd::caller_identity::macos_peer` when `native-caller-identity` is
-enabled. It returns a non-cloneable observation with private fields and a
-`revalidate()` operation. Native diagnostics are mapped to payload-free typed
-refusals. Other platforms refuse explicitly. This is not a receiver: it does
-not accept a socket, capture `LOCAL_PEERTOKEN` itself, issue a challenge,
-consume a nonce or sequence, commit a mutation, initialize state, hold a key,
+The source-only verifier prerequisite exists under
+`mvm-hostd::caller_identity::macos_peer`, and the connected source-only adapter
+under `mvm-hostd::commissioning_bootstrap_connection`, when
+`native-caller-identity` is enabled. The verifier returns a non-cloneable
+observation with private fields and a `revalidate()` operation. The adapter
+accepts one already-connected `UnixStream`, obtains UID and token only from that
+connection, owns a duplicate for recapture, and drives one bounded exchange.
+Native diagnostics are mapped to payload-free typed refusals. Other platforms
+refuse explicitly. This is not a listener or deployed receiver: it does not
+bind or discover a socket, commit a mutation, initialize state, hold a key,
 write a journal, start a VM or construct a factory.
 
 **Stops:** a different UID (refused at accept, independent of socket mode); an
@@ -780,9 +799,9 @@ From the native probes recorded on
 | Owner excluded from installer re-signing | PROPOSED-APPROVED-NOT-IMPLEMENTED |
 | Retained bundle and archive digest, offline re-verification at spawn | PROPOSED-APPROVED-NOT-IMPLEMENTED |
 | Exact-commit clean-tree bundle or typed refusal; no unverified path | PROPOSED-APPROVED-NOT-IMPLEMENTED |
-| Peer binding: `getpeereid`, `LOCAL_PEERTOKEN`, SecCode, re-check at commit | VERIFIER-PREREQUISITE-IMPLEMENTED; receiver/capture/commit integration not implemented |
+| Peer binding: `getpeereid`, `LOCAL_PEERTOKEN`, SecCode, connection-owned re-check | SOURCE-ONLY-CONNECTED-ADAPTER-IMPLEMENTED; no bind/listen, deployment or mutation commit |
 | Security.framework dynamic lookup and exact designated-requirement check; no UID-only fallback | SOURCE-ONLY-IMPLEMENTED |
-| Bounded commissioning-bootstrap vocabulary and one-use peer-bound permit session | SOURCE-ONLY-IMPLEMENTED; no endpoint, durable mutation or positive factory |
+| Bounded commissioning-bootstrap vocabulary, one-use peer-bound permit session and one connected-stream exchange | SOURCE-ONLY-IMPLEMENTED; no endpoint creation, durable mutation or positive factory |
 | Recovery-possession proof unchanged (D5 declined) | Existing source-only proof; receiver not implemented |
 | Hardened runtime, environment allowlist, system libraries only | PROPOSED-APPROVED-NOT-IMPLEMENTED |
 | Post-exec self-hash handshake | PROPOSED-APPROVED-NOT-IMPLEMENTED |
