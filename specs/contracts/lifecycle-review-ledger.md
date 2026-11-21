@@ -597,9 +597,14 @@ holds no lane, and the commit it was about to make is refused after the
 quarantine, while a record it already wrote but did not commit is left in its
 journal until a reopen is refused. A development mailbox is not ordered by the
 ledger. Nothing restarts a mailbox helper that exits after an unknown outcome or
-a coordinator outage. After a quarantine a destination's journal is no longer
-compacted or expired, so retained ciphertext can outlive its retention until the
-workload is replaced and the store is removed by hand. The ordering hook is
+a coordinator outage. When the per-VM helper sees its workload quarantined it
+stops serving, runs one bounded expiry-and-compaction pass whose commits are
+marked retention-only and accepted by the ledger, and exits. The mark is signed
+by the destination key and trusted from the host helper; the ledger cannot check
+that a marked commit only expires or compacts. Records whose retention ends
+later, a helper that was refused before it noticed, an already-exited helper,
+and actor journals are not covered, and their ciphertext can outlive its
+retention until the store is removed by hand. The ordering hook is
 attached by the one production opener; a future opener must attach it too. A
 connection that has been accepted but has sent no frame holds a connection slot
 until its read timeout.

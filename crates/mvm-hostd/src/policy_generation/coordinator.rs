@@ -996,6 +996,7 @@ mod unix {
                     cursor: 1,
                     head: "1".repeat(64),
                 },
+                retention: false,
             }
             .sign(key)
             .unwrap()

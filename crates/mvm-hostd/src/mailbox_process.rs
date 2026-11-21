@@ -29,6 +29,7 @@ use std::io::{Error, ErrorKind, Result, Write as _};
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::time::Duration;
 
@@ -497,6 +498,7 @@ fn serve_local(
         anchor,
         refused,
         unknown,
+        retention: retention_flag,
         enrolled,
     } = coordinate(
         FileJournalAnchor::open(&paths.anchor, address, retained.anchor_key())
@@ -539,7 +541,11 @@ fn serve_local(
     service.install_guest_reader(reader)?;
     std::io::stdout().write_all(READY_MARKER)?;
     let still_ordered = || stop_if_unordered(&refused, &unknown).is_ok();
+    let unit = plan.workload.0.as_str();
     while keep_serving(launcher, &vm_state_dir) && still_ordered() {
+        if workload_is_quarantined(&home, unit, current_epoch) {
+            return Err(run_retention_pass(&service, &retention_flag));
+        }
         if service
             .serve_guest_while(&route, &mut sealer, || {
                 keep_serving(launcher, &vm_state_dir) && still_ordered()
@@ -555,6 +561,41 @@ fn serve_local(
         }
     }
     stop_if_unordered(&refused, &unknown)
+}
+
+/// Does the ledger name this helper's workload quarantined? Any other gate
+/// outcome, including an unreadable ledger, is not a quarantine.
+fn workload_is_quarantined(home: &Path, unit: &str, epoch: ExecutionEpoch) -> bool {
+    mvm_core::host_interface::epoch_gate::CommandGate::load_at(home).is_ok_and(|gate| {
+        matches!(
+            gate.admit(unit, epoch),
+            Err(mvm_core::host_interface::error::Denial::WorkloadQuarantined(_))
+        )
+    })
+}
+
+/// Rounds of maintenance the final pass runs before giving up.
+const RETENTION_ROUNDS: usize = 64;
+
+/// The one pass a helper makes once its workload is quarantined: expire and
+/// compact under commits the ledger accepts as retention-only, then report the
+/// quarantine as the reason to exit.
+fn run_retention_pass(service: &DurableMailboxService, retention: &AtomicBool) -> Error {
+    retention.store(true, Ordering::SeqCst);
+    for _ in 0..RETENTION_ROUNDS {
+        match service.maintain_local() {
+            Err(JournalError::MaintenancePending) => {}
+            Ok(()) => break,
+            Err(error) => {
+                tracing::warn!(%error, "the retention pass after a quarantine stopped early");
+                break;
+            }
+        }
+    }
+    Error::new(
+        ErrorKind::PermissionDenied,
+        "the workload is quarantined; the mailbox helper stopped after its retention pass",
+    )
 }
 
 fn vm_is_alive(state_dir: &Path) -> bool {
@@ -929,6 +970,9 @@ fn spawn_serving(
     }
     Ok(Some(child))
 }
+
+#[cfg(test)]
+mod retention_tests;
 
 #[cfg(test)]
 mod tests {

@@ -460,7 +460,11 @@ impl WorkloadStore {
             "prepared head diverges from the destination's committed tip",
         )?;
         let workload = canonical.workloads.entry(&entry.workload);
-        refuse_unless(!workload.quarantined, "workload is quarantined")?;
+        // A retention head is the one commit a quarantined destination still makes.
+        refuse_unless(
+            !workload.quarantined || head.retention,
+            "workload is quarantined",
+        )?;
         refuse_unless(
             workload.epoch == entry.epoch,
             &format!(
