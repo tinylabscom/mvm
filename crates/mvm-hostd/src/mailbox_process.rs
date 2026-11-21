@@ -50,7 +50,7 @@ use crate::mailbox_launch::{
     DerivedMailboxKeys, LAUNCH_LIMITS, derive_launch_keys, mint_epoch_secret, shred_epoch_secret,
 };
 use crate::mailbox_service::durable::DurableMailboxService;
-use crate::mailbox_service::{MailboxService, bound_epoch};
+use crate::mailbox_service::{MailboxService, UnitGate};
 use crate::plan_admission::{MailboxLaunchPosture, MailboxPostureHandoff};
 use crate::vm_lifetime::{endpoint_needed, launcher_is_alive};
 
@@ -245,9 +245,14 @@ fn serve_verified(config: MailboxProcessConfig) -> Result<()> {
             "invalid mailbox posture",
         ));
     }
-    let (policy, sealer) = keys.trust(bound_epoch(&home, &plan.workload.0)?);
+    let gate = UnitGate::bind(&home, &plan.workload.0)?;
+    let (policy, sealer) = keys.trust(gate.epoch());
     let sealer = sealer.with_grant(&grant)?;
-    let service = MailboxService::bind_live(&socket, LAUNCH_LIMITS, policy.with_grant(&grant)?)?;
+    let service = MailboxService::bind_live(
+        &socket,
+        LAUNCH_LIMITS,
+        policy.with_grant(&grant)?.gated(gate),
+    )?;
     std::io::stdout().write_all(READY_MARKER)?;
     let mut sealer = sealer;
     while keep_serving(launcher, &vm_state_dir) {
@@ -275,7 +280,8 @@ fn serve_actor(
     use mvm_core::mailbox::conversation_wire::ConversationBinding;
 
     material.verify_plan(plan)?;
-    let current_epoch = bound_epoch(&config.home, &plan.workload.0)?;
+    let gate = UnitGate::bind(&config.home, &plan.workload.0)?;
+    let current_epoch = gate.epoch();
     let posture = config
         .posture
         .as_ref()
@@ -359,7 +365,7 @@ fn serve_actor(
     let service = DurableMailboxService::bind_local(
         &config.socket,
         LAUNCH_LIMITS,
-        policy.with_grant(&config.grant)?,
+        policy.with_grant(&config.grant)?.gated(gate),
         signer,
         journal,
         anchor,
@@ -456,7 +462,8 @@ fn serve_local(
             "production mailbox has no signed retention",
         )
     })?;
-    let current_epoch = bound_epoch(&home, &plan.workload.0)?;
+    let gate = UnitGate::bind(&home, &plan.workload.0)?;
+    let current_epoch = gate.epoch();
     let address = mvm_contract::protocol::mailbox::MailboxAddress {
         mailbox: grant.mailbox,
         ..keys.address()
@@ -533,7 +540,7 @@ fn serve_local(
     let service = DurableMailboxService::bind_local(
         &socket,
         LAUNCH_LIMITS,
-        policy.with_grant(&grant)?,
+        policy.with_grant(&grant)?.gated(gate),
         signer,
         journal,
         anchor,

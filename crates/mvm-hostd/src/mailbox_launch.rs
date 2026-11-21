@@ -293,6 +293,7 @@ impl DerivedMailboxKeys {
             encryption_key: Key::from_bytes(self.encryption),
             sender_key: sender_key.verifying_key(),
             authority_key: authority_key.verifying_key(),
+            unit_gate: None,
         };
         let sealer = GuestSealer {
             encryption_key: Key::from_bytes(self.encryption),

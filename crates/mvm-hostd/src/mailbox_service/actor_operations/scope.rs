@@ -105,6 +105,7 @@ impl super::ActorConversationEndpoint {
             encryption_key: peer.call_key(),
             sender_key: key(peer.parent_sender_key)?,
             authority_key: key(peer.child_authority_key)?,
+            unit_gate: None,
         })
     }
 }

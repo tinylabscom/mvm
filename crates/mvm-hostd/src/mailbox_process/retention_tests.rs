@@ -164,9 +164,17 @@ struct Held {
     service: DurableMailboxService,
     retention: Arc<AtomicBool>,
     refused: Arc<AtomicBool>,
+    socket: PathBuf,
+    signer: SigningKey,
+    sender: SigningKey,
 }
 
 fn held_message() -> Held {
+    held_message_gated(false)
+}
+
+/// [`held_message`], with the service gated on workload `w` when `gated`.
+fn held_message_gated(gated: bool) -> Held {
     let home = tempfile::tempdir_in("/tmp").unwrap();
     let mut env = mvm_core::util::test_env::TestEnv::new();
     env.isolate_mvm_home(home.path());
@@ -218,42 +226,61 @@ fn held_message() -> Held {
             encryption_key: Key::from_bytes([23; 32]),
             sender_key: sender.verifying_key(),
             authority_key: signer.verifying_key(),
+            unit_gate: gated.then(|| UnitGate::bind(home.path(), "w").unwrap()),
         },
         signer.clone(),
         journal,
         anchor,
     )
     .unwrap();
-    let expires = now_ms() + EXPIRY_AFTER_MS;
-    let envelope = seal_envelope(
-        SealRequest {
-            routing: routing(expires),
-            header: header(expires),
-            plaintext: b"hello",
-        },
-        &Key::from_bytes([23; 32]),
-        &sender,
-    )
-    .unwrap();
-    let capability = sign_capability(send_grant(expires), &signer).unwrap();
-    let mut stream = UnixStream::connect(&socket).unwrap();
-    send_local_receipted_frame(
-        &mut stream,
-        &capability,
-        &envelope,
-        &header(expires),
-        &signer.verifying_key(),
-    )
-    .expect("accepted before it expires");
-    std::thread::sleep(Duration::from_millis(EXPIRY_AFTER_MS as u64 + 200));
-    Held {
+    let held = Held {
         _env: env,
         home,
         coordinator,
         service,
         retention,
         refused,
-    }
+        socket,
+        signer,
+        sender,
+    };
+    send_numbered(&held, 1, now_ms() + EXPIRY_AFTER_MS).expect("accepted before it expires");
+    std::thread::sleep(Duration::from_millis(EXPIRY_AFTER_MS as u64 + 200));
+    held
+}
+
+/// Send message `n` to the held service, expiring at `expires`.
+fn send_numbered(
+    held: &Held,
+    n: u8,
+    expires: i64,
+) -> std::result::Result<(), mvm_core::mailbox::frame::Refusal> {
+    let header = MailboxEnvelopeHeader {
+        message_id: MessageId::from_bytes([n; 32]),
+        nonce: ReplayNonce::from_bytes([n; 16]),
+        sequence: SequenceNumber::new(u64::from(n)).unwrap(),
+        ..header(expires)
+    };
+    let envelope = seal_envelope(
+        SealRequest {
+            routing: routing(expires),
+            header: header.clone(),
+            plaintext: b"hello",
+        },
+        &Key::from_bytes([23; 32]),
+        &held.sender,
+    )
+    .unwrap();
+    let capability = sign_capability(send_grant(expires), &held.signer).unwrap();
+    let mut stream = UnixStream::connect(&held.socket).unwrap();
+    send_local_receipted_frame(
+        &mut stream,
+        &capability,
+        &envelope,
+        &header,
+        &held.signer.verifying_key(),
+    )
+    .map(drop)
 }
 
 fn cursor(home: &Path) -> u64 {
@@ -315,4 +342,40 @@ fn only_a_quarantine_denial_triggers_the_pass() {
     quarantine(&held);
     assert!(workload_is_quarantined(held.home.path(), "w", epoch));
     assert!(!workload_is_quarantined(held.home.path(), "other", epoch));
+}
+
+#[test]
+fn a_gated_destination_refuses_a_new_message_once_its_workload_is_quarantined() {
+    let held = held_message_gated(true);
+    quarantine(&held);
+    assert_eq!(
+        send_numbered(&held, 2, now_ms() + 60_000),
+        Err(mvm_core::mailbox::frame::Refusal::Mailbox(
+            mvm_core::host_interface::Denial::WorkloadQuarantined("w".into()).to_string()
+        ))
+    );
+    assert!(
+        !held.refused.load(Ordering::SeqCst),
+        "refused by the gate before any commit reached the coordinator"
+    );
+}
+
+#[test]
+fn a_gated_destination_refuses_its_old_epoch_once_its_workload_is_replaced() {
+    let held = held_message_gated(true);
+    assert_eq!(send_numbered(&held, 2, now_ms() + 60_000), Ok(()));
+    coordinator::commit_workload(
+        &held.coordinator,
+        &WorkloadChange::Replace {
+            workload: "w".into(),
+            from_epoch: ExecutionEpoch::new(1).unwrap(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        send_numbered(&held, 3, now_ms() + 60_000),
+        Err(mvm_core::mailbox::frame::Refusal::Mailbox(
+            mvm_core::host_interface::Denial::StaleEpoch { got: 1, current: 2 }.to_string()
+        ))
+    );
 }
