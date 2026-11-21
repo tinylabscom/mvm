@@ -335,10 +335,27 @@ duplicate or unknown field, non-object, trailing form, missing final LF or
 partial record. Missing is `Absent` only when that exact child is absent and is
 not freshness or permission. Non-`Ready` retained logs are interrupted,
 readiness-refusing observations; `Ready` is only terminal log observation.
-The loader creates and changes nothing, validates or acquires no lock, performs
-no transition or recovery, and reads or reconciles no key, journal, receipt or
-completion artifact. The lock validator/acquisition and state writer remain
-unimplemented.
+The loader creates and changes nothing, acquires no lock, performs no transition
+or recovery, and reads or reconciles no key, journal, receipt or completion
+artifact.
+
+A separate source-only validator observes the permanent installer-provisioned
+`owner-commissioning.lock` child beneath the retained authority root. It opens
+only that fixed name descriptor-relative with read-only, no-follow, nonblocking
+and close-on-exec flags, and never creates or repairs it. The inode must be a
+root-owned, root-group, single-link, zero-length regular file with exact `0444`
+mode, no extended ACL, and either the SDK/libc user-immutable or
+system-immutable flag. Missing and unobservable flags refuse. The validator
+retains the descriptor and exposes only its nonzero device/inode identity; a
+second fixed-name observation detects replacement during validation but does
+not establish exclusion or an atomic namespace snapshot. A pure comparison can
+classify a retained state log's lock binding as matching or mismatched without
+granting mutation authority. The permanent inode's installer-only creation and
+lifetime are a future deployment contract; validation proves neither the
+installer transaction nor freshness.
+
+Lock acquisition, stable installer deployment, the state writer and all
+commissioning effects remain unimplemented.
 The v1 preflight checks only these fixed sibling conflict names; it does not
 claim to discover arbitrary state beneath a future authority-owned
 subdirectory. Trusted installation and state mutation must be serialized across
