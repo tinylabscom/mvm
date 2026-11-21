@@ -295,6 +295,12 @@ and directory synchronization. Existing intent, deployment receipt,
 commissioning completion, authority-ready, journal or lock artifacts refuse
 before creation. An error after exclusive creation is publication-unknown and
 the retained object is never repaired or overwritten by retry.
+The matching read-only loader walks that same fixed protected ancestry by
+no-follow descriptors, requires a root-owned single-link regular intent with
+exact mode and no extended ACL, bounds the read before allocation, and strictly
+decodes the original bytes. It exposes only validated public metadata and the
+domain-separated digest of canonical compact typed bytes. Missing, unsafe,
+oversized or corrupt state refuses without creation, repair or cleanup.
 The v1 preflight checks only these fixed sibling conflict names; it does not
 claim to discover arbitrary state beneath a future authority-owned
 subdirectory. Trusted installation and state mutation must be serialized across
@@ -329,7 +335,11 @@ evidence; a future effectful consumer must revalidate again immediately before
 mutation.
 The future initializer still owns intent authentication and consumption, key
 creation, deployment-receipt and completion publication, and journal
-initialization. This slice supplies none of those operations.
+initialization. It must acquire installer-provisioned exclusion and then reload
+and revalidate the intent before mutation; a loader result is not an atomic
+fresh-namespace snapshot or a capability. This slice supplies none of those
+operations. Root-owned live deployment remains untested in this source-only
+slice; hermetic descriptor-root tests witness its filesystem and schema policy.
 
 ## Recovery authorization
 
