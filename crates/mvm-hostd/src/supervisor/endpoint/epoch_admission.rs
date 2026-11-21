@@ -7,9 +7,17 @@
 //! at the old epoch, so a decision taken once at start would leave that VM
 //! reaching out under an epoch the ledger has already superseded.
 //!
+//! A decision taken when a flow opens is not taken again while it relays, so
+//! a serving workload endpoint also asks the ledger on a fixed interval
+//! ([`REVOCATION_CHECK_INTERVAL`]) from one thread. The first refusal is handed
+//! to the caller once, and the thread ends: the endpoint binary records it and
+//! exits, which closes every flow, the session and the listeners together.
+//!
 //! A builder endpoint runs under no plan and has no epoch to gate.
 
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use mvm_contract::protocol::mailbox::ExecutionEpoch;
@@ -22,6 +30,20 @@ use mvm_runtime::vmm::egress_gate::AdmissionCheck;
 use tracing::warn;
 
 use super::network_endpoint::EndpointConfig;
+use crate::supervisor::audit::audit_recorder::{EventCategory, Recorder};
+
+/// How often a serving workload endpoint asks the ledger again.
+///
+/// This is the bound on how long a flow opened before a replacement or a
+/// quarantine keeps relaying after the commit lands. Each tick is one wakeup
+/// and one read of a small ledger file per endpoint, so one second keeps the
+/// idle cost to a single wakeup per second per unit while leaving a revoked
+/// epoch at most about a second of egress it was already holding.
+pub const REVOCATION_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The chain entry recorded when a serving endpoint closes everything because
+/// its epoch stopped being admitted.
+pub const REVOKED_EVENT: &str = "host.flow.revoked";
 
 /// A workload endpoint's unit and epoch, and the mvm home whose workload
 /// ledger decides them.
@@ -98,6 +120,107 @@ impl EndpointEpochGate {
                 false
             }
         })
+    }
+}
+
+/// Watch `cfg`'s epoch while the endpoint serves. `None` for an endpoint with
+/// no plan to gate, which gets no thread.
+pub fn watch_config(
+    cfg: &EndpointConfig,
+    interval: Duration,
+    on_revoked: impl FnOnce(EndpointEpochGate, HostInterfaceError) + Send + 'static,
+) -> Result<Option<RevocationWatch>> {
+    EndpointEpochGate::for_config(cfg)?
+        .map(|gate| gate.watch(interval, on_revoked))
+        .transpose()
+}
+
+impl EndpointEpochGate {
+    /// Ask the ledger every `interval` on one thread, and hand the first
+    /// refusal to `on_revoked`, once. The thread blocks on its stop channel
+    /// between checks, so dropping the returned watch ends it at once.
+    pub fn watch(
+        self,
+        interval: Duration,
+        on_revoked: impl FnOnce(EndpointEpochGate, HostInterfaceError) + Send + 'static,
+    ) -> Result<RevocationWatch> {
+        let (stop, stopped) = mpsc::channel::<()>();
+        let thread = std::thread::Builder::new()
+            .name("mvm-epoch-watch".into())
+            .spawn(move || {
+                if let Some(refusal) = self.wait_for_refusal(interval, &stopped) {
+                    on_revoked(self, refusal);
+                }
+            })
+            .context("spawn the execution-epoch watch")?;
+        Ok(RevocationWatch {
+            stop: Some(stop),
+            thread: Some(thread),
+        })
+    }
+
+    /// `None` when `stop` fires or its sender is dropped first.
+    fn wait_for_refusal(
+        &self,
+        interval: Duration,
+        stop: &mpsc::Receiver<()>,
+    ) -> Option<HostInterfaceError> {
+        loop {
+            match stop.recv_timeout(interval) {
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+            }
+            if let Err(refusal) = self.admit() {
+                return Some(refusal);
+            }
+        }
+    }
+
+    /// Record that this endpoint is closing every flow and its session
+    /// because the ledger refused its epoch. Through a bound sink the entry
+    /// carries the plan; a failure is logged, and the caller closes anyway.
+    pub fn record_revocation(
+        &self,
+        recorder: Option<&Recorder>,
+        runtime: &tokio::runtime::Handle,
+        refusal: &HostInterfaceError,
+    ) {
+        warn!(
+            unit = %self.unit,
+            epoch = self.epoch.get(),
+            reason = %refusal,
+            "execution epoch no longer admitted; closing every flow and the session"
+        );
+        let Some(recorder) = recorder else {
+            warn!("no audit recorder; the revocation is not in the chain");
+            return;
+        };
+        let labels = [
+            ("class".to_string(), "session".to_string()),
+            ("reason".to_string(), "execution_not_admitted".to_string()),
+            ("detail".to_string(), refusal.to_string()),
+        ];
+        if let Err(error) =
+            runtime.block_on(recorder.record_unbound(EventCategory::Host, REVOKED_EVENT, labels))
+        {
+            warn!(%error, "recording the epoch revocation failed");
+        }
+    }
+}
+
+/// The running epoch watch. Dropping it stops and joins the thread.
+#[derive(Debug)]
+pub struct RevocationWatch {
+    stop: Option<mpsc::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for RevocationWatch {
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -248,6 +371,124 @@ mod tests {
                 epoch(3)
             ))
         );
+    }
+
+    const TICK: Duration = Duration::from_millis(2);
+    /// Far longer than any tick, so a slow test host cannot flake it; the
+    /// waits below return as soon as the watch reports.
+    const BOUND: Duration = Duration::from_secs(5);
+
+    /// Watch `gate` every [`TICK`], reporting each refusal handed over.
+    fn watching(gate: EndpointEpochGate) -> (RevocationWatch, mpsc::Receiver<HostInterfaceError>) {
+        let (revoked, refusals) = mpsc::channel();
+        let watch = gate
+            .watch(TICK, move |_, refusal| revoked.send(refusal).unwrap())
+            .unwrap();
+        (watch, refusals)
+    }
+
+    #[test]
+    fn a_replacement_while_serving_is_reported_once() {
+        let home = tempfile::tempdir().unwrap();
+        let (watch, refusals) = watching(gate_at(home.path(), 1));
+        replace(home.path());
+        assert_eq!(
+            denial(Err(refusals.recv_timeout(BOUND).unwrap())),
+            Denial::StaleEpoch { got: 1, current: 2 }
+        );
+        // The thread has ended: nothing else arrives and the sender is gone.
+        drop(watch);
+        assert!(matches!(
+            refusals.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn a_quarantine_while_serving_is_reported() {
+        let home = tempfile::tempdir().unwrap();
+        let (_watch, refusals) = watching(gate_at(home.path(), 1));
+        commit(
+            home.path(),
+            WorkloadChange::Quarantine {
+                workload: "unit".into(),
+            },
+        );
+        assert_eq!(
+            denial(Err(refusals.recv_timeout(BOUND).unwrap())),
+            Denial::WorkloadQuarantined("unit".into())
+        );
+    }
+
+    #[test]
+    fn an_admitted_epoch_is_left_alone_across_many_ticks() {
+        let home = tempfile::tempdir().unwrap();
+        let (_watch, refusals) = watching(gate_at(home.path(), 1));
+        // About a hundred ticks against a ledger that admits the epoch.
+        assert!(matches!(
+            refusals.recv_timeout(TICK * 100),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        // Still watching: a replacement now is reported.
+        replace(home.path());
+        assert!(refusals.recv_timeout(BOUND).is_ok());
+    }
+
+    #[test]
+    fn dropping_the_watch_stops_it_without_a_report() {
+        let home = tempfile::tempdir().unwrap();
+        let (watch, refusals) = watching(gate_at(home.path(), 1));
+        drop(watch);
+        replace(home.path());
+        assert!(matches!(
+            refusals.recv_timeout(TICK * 10),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn a_revocation_is_recorded_in_the_chain_exactly_once() {
+        let (_env, home) = crate::test_fixtures::isolated_mvm_home();
+        let keys = mvm_core::config::mvm_keys_dir();
+        std::fs::create_dir_all(&keys).unwrap();
+        std::fs::write(keys.join("host-signer.ed25519"), [7u8; 32]).unwrap();
+        let recorder = super::super::network_endpoint::build_audit_recorder("local")
+            .expect("signer key present");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let handle = runtime.handle().clone();
+        let (done, finished) = mpsc::channel();
+        let watch = gate_at(home.path(), 1)
+            .watch(TICK, move |gate, refusal| {
+                gate.record_revocation(Some(&recorder), &handle, &refusal);
+                done.send(()).unwrap();
+            })
+            .unwrap();
+        replace(home.path());
+        finished.recv_timeout(BOUND).unwrap();
+        // Many more ticks' worth of a ledger that still refuses.
+        assert!(finished.recv_timeout(TICK * 20).is_err());
+        drop(watch);
+        let chain =
+            std::fs::read_to_string(mvm_core::config::mvm_audit_dir().join("local.jsonl")).unwrap();
+        let revoked: Vec<&str> = chain
+            .lines()
+            .filter(|line| line.contains(REVOKED_EVENT))
+            .collect();
+        assert_eq!(revoked.len(), 1, "{chain}");
+        assert!(revoked[0].contains("execution_not_admitted"), "{chain}");
+    }
+
+    #[test]
+    fn a_builder_endpoint_starts_no_watch() {
+        let cfg = config(Some(mvm_core::audit_sink::AuditContext::Builder {
+            tenant: mvm_core::plan::TenantId("local".into()),
+            name: "builder".into(),
+        }));
+        let watch = watch_config(&cfg, TICK, |_, _| panic!("a builder has no epoch")).unwrap();
+        assert!(watch.is_none());
     }
 
     #[test]
