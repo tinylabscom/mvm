@@ -1658,6 +1658,7 @@ mod tests {
         assert!(kernel_identity(None).is_err());
     }
 
+    #[cfg(feature = "test-support")]
     fn idle_handle(id: &str, kernel: &str) -> StandbyHandle {
         StandbyHandle {
             id: id.into(),
