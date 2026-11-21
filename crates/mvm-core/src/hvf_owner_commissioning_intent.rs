@@ -1,7 +1,7 @@
-//! Create-only pre-key commissioning intent for the protected macOS HVF owner.
+//! Create-only publication and read-only loading of the protected macOS HVF owner intent.
 //!
-//! This module publishes public installation metadata only. It creates no key,
-//! receipt, journal, service, IPC endpoint, process, or VM.
+//! This module publishes and observes public installation metadata only. It
+//! creates no key, receipt, journal, service, IPC endpoint, process, or VM.
 //!
 //! The v1 conflict set covers the fixed sibling names listed below. It does not
 //! claim to discover arbitrary authority state beneath a future role-owned
@@ -9,7 +9,7 @@
 //! preflight and publication; `O_EXCL` linearizes only competing intent writers.
 
 use std::fs::File;
-use std::io::{self, Write as _};
+use std::io::{self, Read as _, Write as _};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
 use rustix::fs::{AtFlags, Mode, OFlags};
@@ -78,6 +78,55 @@ pub struct PublishedCommissioningIntent {
     digest: [u8; 32],
 }
 
+/// Validated immutable intent loaded from the protected filesystem.
+///
+/// This observation is not a commissioning capability. A future initializer
+/// must acquire installer-provisioned exclusion and reload and revalidate the
+/// intent before performing any mutation.
+#[derive(Debug)]
+pub struct LoadedHvfOwnerCommissioningIntent {
+    intent: HvfOwnerCommissioningIntentV1,
+    digest: [u8; 32],
+}
+
+impl LoadedHvfOwnerCommissioningIntent {
+    /// Stable deployment label selected by the installer.
+    #[must_use]
+    pub fn deployment_id(&self) -> &str {
+        &self.intent.deployment_id
+    }
+
+    /// Monotonic commissioning generation.
+    #[must_use]
+    pub fn deployment_epoch(&self) -> u64 {
+        self.intent.deployment_epoch
+    }
+
+    /// Protected authority role pin.
+    #[must_use]
+    pub fn authority_role(&self) -> &crate::hvf_owner_deployment_receipt::ProtectedRolePinV1 {
+        &self.intent.protected_roles.authority
+    }
+
+    /// Protected runtime role pin.
+    #[must_use]
+    pub fn runtime_role(&self) -> &crate::hvf_owner_deployment_receipt::ProtectedRolePinV1 {
+        &self.intent.protected_roles.runtime
+    }
+
+    /// Approved final owner component record.
+    #[must_use]
+    pub fn owner_component(&self) -> &crate::hvf_owner_deployment_receipt::OwnerComponentPinV1 {
+        &self.intent.approved_owner_code_cohort.owner_component
+    }
+
+    /// Domain-separated digest of canonical compact typed v1 bytes.
+    #[must_use]
+    pub fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+}
+
 impl PublishedCommissioningIntent {
     /// Domain-separated digest of the exact compact typed v1 bytes published.
     #[must_use]
@@ -104,6 +153,9 @@ pub enum HvfOwnerCommissioningIntentError {
     /// Input fields were outside the closed v1 semantics.
     #[error("protected HVF owner commissioning intent semantics are invalid")]
     Semantic,
+    /// The protected intent exceeded the fixed read bound.
+    #[error("protected HVF owner commissioning intent exceeds 64 KiB")]
+    TooLarge,
     /// Publication may have created bytes but durability could not be established.
     #[error("protected HVF owner commissioning intent publication outcome is unknown")]
     PublicationUnknown(#[source] io::Error),
@@ -134,6 +186,28 @@ pub fn publish_hvf_owner_commissioning_intent(
     publish_from_db_root(source, ProtectedRoot::new(db, 0, 0), PublishFault::None)
 }
 
+/// Load the fixed production intent through canonical no-follow descriptors.
+///
+/// This read-only observation does not establish a fresh-namespace snapshot.
+/// A future initializer must acquire installer-provisioned exclusion and reload
+/// and revalidate the intent before mutation.
+///
+/// # Errors
+/// Refuses non-macOS hosts and any missing, aliased, insecure, oversized,
+/// malformed, or semantically invalid intent or ancestor.
+#[cfg(target_os = "macos")]
+pub fn load_hvf_owner_commissioning_intent()
+-> Result<LoadedHvfOwnerCommissioningIntent, HvfOwnerCommissioningIntentError> {
+    let root = File::open("/").map_err(HvfOwnerCommissioningIntentError::Io)?;
+    require_directory(&root, 0, 0, DirectoryMode::SecureAncestor)?;
+    let private = open_directory(&root, "private")?;
+    require_directory(&private, 0, 0, DirectoryMode::SecureAncestor)?;
+    let var = open_directory(&private, "var")?;
+    require_directory(&var, 0, 0, DirectoryMode::SecureAncestor)?;
+    let db = open_directory(&var, "db")?;
+    load_from_db_root(ProtectedRoot::new(db, 0, 0))
+}
+
 /// Unsupported platforms cannot establish the macOS protected-root contract.
 ///
 /// # Errors
@@ -145,6 +219,19 @@ pub fn publish_hvf_owner_commissioning_intent(
     Err(HvfOwnerCommissioningIntentError::Io(io::Error::new(
         io::ErrorKind::Unsupported,
         "protected HVF owner commissioning requires macOS",
+    )))
+}
+
+/// Unsupported platforms cannot establish the macOS protected-root contract.
+///
+/// # Errors
+/// Always refuses without reading or creating state.
+#[cfg(not(target_os = "macos"))]
+pub fn load_hvf_owner_commissioning_intent()
+-> Result<LoadedHvfOwnerCommissioningIntent, HvfOwnerCommissioningIntentError> {
+    Err(HvfOwnerCommissioningIntentError::Io(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "protected HVF owner commissioning intent loading requires macOS",
     )))
 }
 
@@ -166,6 +253,24 @@ pub fn publish_test_hvf_owner_commissioning_intent(
         ProtectedRoot::new(root, expected_uid, expected_gid),
         PublishFault::None,
     )
+}
+
+/// Load through an injected `/private/var/db` descriptor for hermetic tests.
+///
+/// This capability is absent from production builds. All opens below `root`
+/// are descriptor-relative and no filesystem object is created or changed.
+///
+/// # Errors
+/// Refuses the same filesystem, size, schema, and semantic failures as the
+/// production loader.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn load_test_hvf_owner_commissioning_intent(
+    root: File,
+    expected_uid: u32,
+    expected_gid: u32,
+) -> Result<LoadedHvfOwnerCommissioningIntent, HvfOwnerCommissioningIntentError> {
+    load_from_db_root(ProtectedRoot::new(root, expected_uid, expected_gid))
 }
 
 struct ProtectedRoot {
@@ -235,14 +340,7 @@ fn publish_from_db_root(
 
     let mut publish = || -> io::Result<()> {
         intent.set_permissions(std::fs::Permissions::from_mode(0o644))?;
-        let metadata = intent.metadata()?;
-        if !metadata.is_file()
-            || metadata.uid() != root.expected_uid
-            || metadata.gid() != root.expected_gid
-            || metadata.nlink() != 1
-            || metadata.mode() & 0o7777 != 0o644
-            || has_extended_acl(&intent)?
-        {
+        if !intent_file_matches_policy(&intent, root.expected_uid, root.expected_gid)? {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "created commissioning intent failed filesystem policy",
@@ -262,6 +360,42 @@ fn publish_from_db_root(
     };
     publish().map_err(HvfOwnerCommissioningIntentError::PublicationUnknown)?;
     Ok(PublishedCommissioningIntent { digest })
+}
+
+fn load_from_db_root(
+    root: ProtectedRoot,
+) -> Result<LoadedHvfOwnerCommissioningIntent, HvfOwnerCommissioningIntentError> {
+    require_directory(
+        &root.directory,
+        root.expected_uid,
+        root.expected_gid,
+        DirectoryMode::SecureAncestor,
+    )?;
+    let deployment = open_directory(&root.directory, "mvm")?;
+    require_directory(
+        &deployment,
+        root.expected_uid,
+        root.expected_gid,
+        DirectoryMode::Deployment,
+    )?;
+    let intent_file = open_regular(&deployment, INTENT_NAME)?;
+    require_intent_file(&intent_file, root.expected_uid, root.expected_gid)?;
+    let metadata = intent_file
+        .metadata()
+        .map_err(HvfOwnerCommissioningIntentError::Io)?;
+    if metadata.len() > MAX_COMMISSIONING_INTENT_BYTES as u64 {
+        return Err(HvfOwnerCommissioningIntentError::TooLarge);
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    intent_file
+        .take(MAX_COMMISSIONING_INTENT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(HvfOwnerCommissioningIntentError::Io)?;
+    if bytes.len() > MAX_COMMISSIONING_INTENT_BYTES {
+        return Err(HvfOwnerCommissioningIntentError::TooLarge);
+    }
+    let (intent, _, digest) = validate_decode_and_encode(&bytes)?;
+    Ok(LoadedHvfOwnerCommissioningIntent { intent, digest })
 }
 
 fn fault_after_create(fault: PublishFault) -> bool {
@@ -294,6 +428,13 @@ fn validate_and_encode(
     if source.len() > MAX_COMMISSIONING_INTENT_BYTES {
         return Err(HvfOwnerCommissioningIntentError::Semantic);
     }
+    let (_, encoded, digest) = validate_decode_and_encode(source)?;
+    Ok((encoded, digest))
+}
+
+fn validate_decode_and_encode(
+    source: &[u8],
+) -> Result<(HvfOwnerCommissioningIntentV1, Vec<u8>, [u8; 32]), HvfOwnerCommissioningIntentError> {
     let value: serde_json::Value =
         serde_json::from_slice(source).map_err(HvfOwnerCommissioningIntentError::Json)?;
     let root = value
@@ -322,10 +463,15 @@ fn validate_and_encode(
     }
     let encoded = serde_json::to_vec(&intent)
         .expect("fixed commissioning intent schema serializes without failure");
+    let digest = commissioning_intent_digest(&encoded);
+    Ok((intent, encoded, digest))
+}
+
+fn commissioning_intent_digest(encoded: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(INTENT_DOMAIN);
-    hasher.update(&encoded);
-    Ok((encoded, hasher.finalize().into()))
+    hasher.update(encoded);
+    hasher.finalize().into()
 }
 
 fn require_object(
@@ -367,6 +513,17 @@ fn open_directory(parent: &File, name: &str) -> Result<File, HvfOwnerCommissioni
     .map_err(|error| HvfOwnerCommissioningIntentError::Io(error.into()))
 }
 
+fn open_regular(parent: &File, name: &str) -> Result<File, HvfOwnerCommissioningIntentError> {
+    rustix::fs::openat(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|error| HvfOwnerCommissioningIntentError::Io(error.into()))
+}
+
 fn require_directory(
     file: &File,
     uid: u32,
@@ -389,6 +546,27 @@ fn require_directory(
         return Err(HvfOwnerCommissioningIntentError::FilesystemPolicy);
     }
     Ok(())
+}
+
+fn require_intent_file(
+    file: &File,
+    uid: u32,
+    gid: u32,
+) -> Result<(), HvfOwnerCommissioningIntentError> {
+    if !intent_file_matches_policy(file, uid, gid).map_err(HvfOwnerCommissioningIntentError::Io)? {
+        return Err(HvfOwnerCommissioningIntentError::FilesystemPolicy);
+    }
+    Ok(())
+}
+
+fn intent_file_matches_policy(file: &File, uid: u32, gid: u32) -> io::Result<bool> {
+    let metadata = file.metadata()?;
+    Ok(metadata.is_file()
+        && metadata.uid() == uid
+        && metadata.gid() == gid
+        && metadata.nlink() == 1
+        && metadata.mode() & 0o7777 == 0o644
+        && !has_extended_acl(file)?)
 }
 
 #[cfg(target_os = "macos")]
@@ -498,6 +676,24 @@ mod tests {
         )
     }
 
+    fn load(
+        root: &tempfile::TempDir,
+        uid: u32,
+        gid: u32,
+    ) -> Result<LoadedHvfOwnerCommissioningIntent, HvfOwnerCommissioningIntentError> {
+        load_from_db_root(ProtectedRoot::new(
+            File::open(root.path()).expect("open root"),
+            uid,
+            gid,
+        ))
+    }
+
+    fn write_intent(root: &tempfile::TempDir, source: &[u8]) {
+        let path = root.path().join("mvm").join(INTENT_NAME);
+        fs::write(&path, source).expect("write intent");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o644)).expect("set intent mode");
+    }
+
     fn bytes() -> Vec<u8> {
         serde_json::to_vec(&intent()).expect("serialize intent")
     }
@@ -529,6 +725,31 @@ mod tests {
             fs::metadata(path).expect("intent metadata").mode() & 0o7777,
             0o644
         );
+    }
+
+    #[test]
+    fn publisher_loader_roundtrip_preserves_digest_and_public_metadata() {
+        let (root, uid, gid) = protected_tree();
+        let published = publish(&root, uid, gid, &bytes(), PublishFault::None)
+            .expect("publish commissioning intent");
+        let loaded = load(&root, uid, gid).expect("load commissioning intent");
+
+        assert_eq!(loaded.digest(), published.digest());
+        assert_eq!(loaded.deployment_id(), "production-1");
+        assert_eq!(loaded.deployment_epoch(), 7);
+        assert_eq!(loaded.authority_role().uid(), 501);
+        assert_eq!(loaded.runtime_role().gid(), 502);
+        assert_eq!(loaded.owner_component().version(), "0.28.0-rc.11");
+    }
+
+    #[test]
+    fn pretty_source_loads_with_digest_of_canonical_typed_bytes() {
+        let (root, uid, gid) = protected_tree();
+        let pretty = serde_json::to_vec_pretty(&intent()).expect("serialize pretty intent");
+        write_intent(&root, &pretty);
+
+        let loaded = load(&root, uid, gid).expect("load pretty commissioning intent");
+        assert_eq!(loaded.digest(), commissioning_intent_digest(&bytes()));
     }
 
     #[test]
@@ -779,6 +1000,196 @@ mod tests {
         let (root, uid, gid) = protected_tree();
         assert!(publish(&root, uid, gid, duplicate.as_bytes(), PublishFault::None).is_err());
         assert!(entries(&root).is_empty());
+    }
+
+    #[test]
+    fn loader_refuses_strict_schema_semantic_cohort_and_size_failures() {
+        let baseline = serde_json::to_value(intent()).expect("serialize intent");
+        let mutations: &[&dyn Fn(&mut serde_json::Value)] = &[
+            &|value| value["unknown"] = serde_json::json!(true),
+            &|value| value["schema_version"] = serde_json::json!(2),
+            &|value| {
+                value
+                    .as_object_mut()
+                    .expect("intent object")
+                    .remove("deployment_id");
+            },
+            &|value| value["deployment_epoch"] = serde_json::json!(0),
+            &|value| value["protected_roles"]["authority"]["uid"] = serde_json::json!(0),
+            &|value| {
+                value["protected_roles"]["runtime"]["uid"] =
+                    value["protected_roles"]["authority"]["uid"].clone();
+            },
+            &|value| {
+                value["approved_owner_code_cohort"]["owner_component"]["component"] =
+                    serde_json::json!("wrong-owner");
+            },
+            &|value| value["approved_owner_code_cohort"]["digest"][0] = serde_json::json!(99),
+        ];
+        for mutate in mutations {
+            let (root, uid, gid) = protected_tree();
+            let mut changed = baseline.clone();
+            mutate(&mut changed);
+            write_intent(
+                &root,
+                &serde_json::to_vec(&changed).expect("serialize changed intent"),
+            );
+            assert!(
+                load(&root, uid, gid).is_err(),
+                "invalid intent unexpectedly loaded: {changed}"
+            );
+        }
+
+        for invalid in [
+            serde_json::to_vec(&serde_json::json!([])).expect("serialize array"),
+            serde_json::to_vec(&serde_json::json!({"protected_roles": []}))
+                .expect("serialize nested array"),
+            b"{".to_vec(),
+        ] {
+            let (root, uid, gid) = protected_tree();
+            write_intent(&root, &invalid);
+            assert!(load(&root, uid, gid).is_err());
+        }
+
+        let baseline = serde_json::to_string(&baseline).expect("serialize baseline");
+        let duplicate = baseline.replacen(
+            "\"schema_version\":1",
+            "\"schema_version\":1,\"schema_version\":1",
+            1,
+        );
+        let (root, uid, gid) = protected_tree();
+        write_intent(&root, duplicate.as_bytes());
+        assert!(load(&root, uid, gid).is_err());
+
+        let (root, uid, gid) = protected_tree();
+        write_intent(&root, &vec![b'x'; MAX_COMMISSIONING_INTENT_BYTES + 1]);
+        assert!(matches!(
+            load(&root, uid, gid),
+            Err(HvfOwnerCommissioningIntentError::TooLarge)
+        ));
+    }
+
+    #[test]
+    fn loader_refuses_missing_aliases_and_unsafe_objects_without_mutation() {
+        let (root, uid, gid) = protected_tree();
+        let before = entries(&root);
+        assert!(load(&root, uid, gid).is_err());
+        assert_eq!(entries(&root), before, "missing load must not create state");
+
+        let (root, uid, gid) = protected_tree();
+        write_intent(&root, b"{corrupt");
+        let path = root.path().join("mvm").join(INTENT_NAME);
+        let before = fs::read(&path).expect("read corrupt intent");
+        assert!(load(&root, uid, gid).is_err());
+        assert_eq!(
+            fs::read(&path).expect("reread corrupt intent"),
+            before,
+            "corrupt load must not repair state"
+        );
+
+        let (root, uid, gid) = protected_tree();
+        let deployment = root.path().join("mvm");
+        fs::write(deployment.join("target"), bytes()).expect("write symlink target");
+        symlink("target", deployment.join(INTENT_NAME)).expect("create intent symlink");
+        assert!(load(&root, uid, gid).is_err());
+
+        let (root, uid, gid) = protected_tree();
+        write_intent(&root, &bytes());
+        let deployment = root.path().join("mvm");
+        fs::hard_link(
+            deployment.join(INTENT_NAME),
+            deployment.join("intent-hardlink"),
+        )
+        .expect("hard link intent");
+        assert!(load(&root, uid, gid).is_err());
+
+        let (root, uid, gid) = protected_tree();
+        let path = root.path().join("mvm").join(INTENT_NAME);
+        fs::create_dir(&path).expect("create directory in intent slot");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("set directory mode");
+        assert!(load(&root, uid, gid).is_err());
+
+        let (root, uid, gid) = protected_tree();
+        let path = root.path().join("mvm").join(INTENT_NAME);
+        let status = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo must create FIFO fixture");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("set FIFO mode");
+        assert!(load(&root, uid, gid).is_err());
+
+        let (root, uid, gid) = protected_tree();
+        write_intent(&root, &bytes());
+        let path = root.path().join("mvm").join(INTENT_NAME);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .expect("set wrong intent mode");
+        assert!(load(&root, uid, gid).is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("restore intent mode");
+        let file = File::open(&path).expect("open intent for policy check");
+        assert!(require_intent_file(&file, uid.wrapping_add(1), gid).is_err());
+        assert!(require_intent_file(&file, uid, gid.wrapping_add(1)).is_err());
+    }
+
+    #[test]
+    fn loader_refuses_unsafe_ancestor_and_deployment_alias() {
+        let (root, uid, gid) = protected_tree();
+        write_intent(&root, &bytes());
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o777)).expect("weaken root");
+        assert!(matches!(
+            load(&root, uid, gid),
+            Err(HvfOwnerCommissioningIntentError::FilesystemPolicy)
+        ));
+
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("restore root");
+        fs::set_permissions(root.path().join("mvm"), fs::Permissions::from_mode(0o750))
+            .expect("set wrong deployment mode");
+        assert!(matches!(
+            load(&root, uid, gid),
+            Err(HvfOwnerCommissioningIntentError::FilesystemPolicy)
+        ));
+
+        let root = tempfile::tempdir().expect("create aliased root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("set root mode");
+        fs::create_dir(root.path().join("target")).expect("create alias target");
+        symlink("target", root.path().join("mvm")).expect("create deployment alias");
+        let metadata = fs::metadata(root.path()).expect("root metadata");
+        assert!(load(&root, metadata.uid(), metadata.gid()).is_err());
+        assert!(
+            fs::read_dir(root.path().join("target"))
+                .expect("read alias target")
+                .next()
+                .is_none(),
+            "loader must not populate aliased deployment"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn loader_refuses_extended_acl_on_intent() {
+        let (root, uid, gid) = protected_tree();
+        write_intent(&root, &bytes());
+        let path = root.path().join("mvm").join(INTENT_NAME);
+        let status = std::process::Command::new("chmod")
+            .args(["+a", "everyone allow read"])
+            .arg(path)
+            .status()
+            .expect("run chmod ACL fixture");
+        assert!(status.success(), "chmod must install the ACL fixture");
+        assert!(matches!(
+            load(&root, uid, gid),
+            Err(HvfOwnerCommissioningIntentError::FilesystemPolicy)
+        ));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn production_loader_refuses_unsupported_platform() {
+        assert!(matches!(
+            load_hvf_owner_commissioning_intent(),
+            Err(HvfOwnerCommissioningIntentError::Io(error))
+                if error.kind() == io::ErrorKind::Unsupported
+        ));
     }
 
     #[test]
